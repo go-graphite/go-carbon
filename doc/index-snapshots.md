@@ -120,12 +120,61 @@ intake opens. A process crash during recovery can replay the retained legacy
 files; no newer live values have been persisted over that history.
 
 A missing, corrupt, incompatible or mismatched checkpoint uses ordinary ordered
-restore before reads open. Extra dump generations also force that fallback.
+restore. Extra dump generations also force that fallback. The shared-store
+fallback can open input and separately gated reads before persistence completes,
+as described below.
 Tagged input, noncanonical metric names (for example `a..b` or `a/b`), and other
 storage modes keep their existing startup path. There is no additional
 configuration switch. The accelerator becomes usable after a complete saved
 index and a subsequent graceful stop; it does not make an uncached first boot
 instantaneous or eliminate the process handoff gap.
+
+### Legacy shared-store restore at load-complete
+
+For untagged `pebble-chunk` storage with `[input-log] enabled = true`, without
+mirrored files or live migration, ordinary recovery admits every cache dump and
+input dump before opening live input. Incremental migration uses the same path
+while retaining its normal per-metric original-file/shared-store routing. If carbonserver is enabled, this path requires
+`trie-index = true`, `concurrent-index = true`, and `realtime-index > 0`.
+Inherited input sockets, active predecessor tails, and checkpoint capture retain
+their existing recovery paths.
+
+At load-complete the cache snapshots each metric's queued and in-flight point
+count. Per-metric persister locking preserves this older prefix through commit;
+a failed write requeues history ahead of newer live points. Writeout selects
+restored metrics before live-only metrics, with recovery batching delays disabled
+until every saved point is confirmed or deliberately rejected. Continuous live
+traffic does not extend this completion barrier. Live cache limits and quotas
+still apply, so overloaded intake can drop points under the normal admission
+policy.
+
+Before listeners open, incremental stores load their saved mixed index or build
+the ordinary original-file/shared-store index if no saved index is available.
+Other shared stores use their committed catalog. Recovery combines that index
+with the saved name
+snapshot, including uncreated and in-flight metrics, and applies quotas. The
+snapshot remains stable while persistence confirms points, preventing names
+from disappearing between catalog loading and cache traversal. The collector
+starts at its ordinary point after input receivers; the background drain never
+resets its interval counters. `cache.restoreOutstandingPoints` reports the
+remaining prefix.
+
+Read readiness is per metric and independent of input readiness. A render that
+includes an incomplete restored metric returns HTTP 503 or gRPC Unavailable;
+other metrics can already serve reads. This also excludes coarse archives:
+they do not universally overlay cached raw points. Complete-request checks
+prevent partial wildcard results from entering the response cache. Once the
+prefix is confirmed, that metric uses ordinary read behavior.
+
+Dump decoding or journal sync failures retain the failed source and abort startup
+before listeners open. The input log durably owns loaded points before source
+files retire, including when the process crashes with restore writes outstanding.
+
+This removes the final drain from intake downtime. Journal replay still precedes
+ordered dump loading and live admission; it is not moved behind live writes. It does not capture input
+during legacy dump loading, change on-disk formats, or add a new durability
+guarantee. Durable capture during loading still needs an ordered, crash-safe
+spool admitted after all older recovery sources and before live cache writes.
 
 For an opt-in offline test, `TestCapturedIndexSnapshot` reads the cache selected
 by `GO_CARBON_SNAPSHOT_FLC` and writes only into `GO_CARBON_SNAPSHOT_DIR`. It checks

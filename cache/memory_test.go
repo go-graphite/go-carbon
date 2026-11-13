@@ -172,7 +172,7 @@ func BenchmarkDeferredQueue(b *testing.B) {
 			}
 			b.StopTimer()
 			if scratch := c.queueScratch.Load(); scratch != nil {
-				b.ReportMetric(float64(cap(*scratch))*24/100000, "scratch-B/metric")
+				b.ReportMetric(float64(cap(*scratch))*32/100000, "scratch-B/metric")
 			}
 		})
 	}

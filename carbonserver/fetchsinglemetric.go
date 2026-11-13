@@ -107,6 +107,9 @@ func (r response) proto3() *protov3.FetchResponse {
 }
 
 func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpression string, fromTime, untilTime int32) (response, error) {
+	if listener.restorePending != nil && listener.restorePending(metric) {
+		return response{}, errRestorePending
+	}
 	// Encode the request fields only for messages that are logged: a With
 	// logger per fetched series is a measurable share of render allocations.
 	log := func(level zapcore.Level, msg string, fields ...zap.Field) {

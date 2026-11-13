@@ -74,6 +74,20 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		go func() {
 			next.RegisterReadHandoff()
 			next.beginRestart()
+			// Model a checkpoint manifest larger than 1 MiB without allocating
+			// hundreds of GiB of source data for checksum descriptors. Whitespace
+			// preserves every authenticated descriptor and the read-index ID.
+			manifestPath := filepath.Join(next.Config.Dump.Path, recovery.ManifestName)
+			raw, err := os.ReadFile(manifestPath)
+			if err != nil {
+				started <- err
+				return
+			}
+			raw = append([]byte(strings.Repeat(" ", (1<<20)+1)), raw...)
+			if err := os.WriteFile(manifestPath, raw, 0600); err != nil {
+				started <- err
+				return
+			}
 			if err := next.startStartupInput(); err != nil {
 				started <- err
 				return
@@ -157,6 +171,9 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
+	}
+	if next.pendingDone == nil || !strings.Contains(zapwriter.TestString(), "serving reads from pending checkpoint") {
+		t.Fatal("large manifest lost pending reads during input takeover", zapwriter.TestString())
 	}
 	// Restart the continuous queue again after the initial checkpoint may have
 	// retired. The third process must inherit input while older epoch files
@@ -462,6 +479,11 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 				}
 			}
 			app := startIncrementalApp(t, path)
+			// Intake may become ready before the recovered prefix is readable.
+			// Keep the crash oracle after that prefix is durably confirmed.
+			waitExpiration(t, func() bool {
+				return app.Cache.IsEmpty() && app.Cache.PendingOutstanding() == 0
+			})
 			want := map[string]map[int64]float64{}
 			for phase := range 2 {
 				for _, p := range predecessorPoints(stamp, phase) {
