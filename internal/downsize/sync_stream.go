@@ -388,7 +388,7 @@ func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, 
 				for _, n := range chunk {
 					if _, ok := info[n]; !ok {
 						r.Absent = append(r.Absent, n)
-					} else if syncShort(info[n]) {
+					} else if !s.o.includeShort && syncShort(info[n]) {
 						r.Short = append(r.Short, n)
 					}
 				}

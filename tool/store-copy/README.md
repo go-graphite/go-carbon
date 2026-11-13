@@ -399,3 +399,23 @@ without waiting for every source name to be checked. A batch `/info` 404 falls
 back to exact-name requests once; an absent name is skipped on that source and
 can be tried on a later source. Names absent everywhere are reported as residuals.
 Resume with the same batch and stream settings to reuse the copy wave journals.
+
+### Recover a recent gap in short-retention metrics
+
+Sync normally skips names whose archives all retain at most three days. For a
+recent gap, explicitly include those names so a two-day archive is compared and
+filled over the requested window too:
+
+```sh
+store-copy sync --from http://peer-a:4242 --from http://peer-b:4242 \
+  --to http://target:4242 --window incident:1794595620:1794597120 \
+  --include-short-retention --sample-every 0 --state ./incident-fill
+# Independent verification: use a new state directory with the same options.
+store-copy sync --from http://peer-a:4242 --from http://peer-b:4242 \
+  --to http://target:4242 --window incident:1794595620:1794597120 \
+  --include-short-retention --sample-every 0 --state ./incident-verify
+```
+
+Existing target points still win. The opt-in is part of the journal identity:
+use a fresh state directory when enabling it after a default run, so earlier
+skipped comparisons cannot be reused as verification.
