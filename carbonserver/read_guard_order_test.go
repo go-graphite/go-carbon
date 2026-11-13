@@ -112,20 +112,23 @@ func fillReadSlots(t *testing.T, db interface {
 	var held []func()
 	for i := 0; ; i++ {
 		got := make(chan func(), 1)
+		ctx, cancel := context.WithCancel(context.Background())
 		name := fmt.Sprintf("holder.%d.%d", len(held), i)
 		go func() {
-			_, release, err := db.AdmitRead(context.Background(), name)
-			if err != nil {
+			_, release, err := db.AdmitRead(ctx, name)
+			if err != nil && ctx.Err() == nil {
 				t.Error(err)
 			}
-			got <- release
+			got <- func() { release(); cancel() }
 		}()
 		select {
 		case release := <-got:
 			held = append(held, release)
 			continue
 		case <-time.After(200 * time.Millisecond):
-			go func() { (<-got)() }()
+			// Cancel and join the probe before store cleanup; it owns no slot.
+			cancel()
+			(<-got)()
 		}
 		return held
 	}
