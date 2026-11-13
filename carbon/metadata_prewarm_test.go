@@ -569,34 +569,63 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 	}
 }
 
+// A large cache alone no longer skips the checkpoint: half of max-size saves
+// (restarts with big caches need it most). The save still stops within 1/16
+// of max-size, where the cache would start dropping input.
 func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
-	_, cfg := sharedAppConfig(t)
-	cfg.Whisper.StoreMetadataCachePrewarm = true
-	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
-	checkpoint := true
-	cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
-	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
-	cfg.Cache.MaxSize = 2
-	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name     string
+		pending  int
+		canceled bool
+	}{{"half cache saves", 8, false}, {"near overflow stops", 15, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, cfg := sharedAppConfig(t)
+			cfg.Whisper.StoreMetadataCachePrewarm = true
+			cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
+			checkpoint := true
+			cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
+			cfg.Whisper.StoreMetadataCacheSize = 4 << 20
+			cfg.Cache.MaxSize = 16
+			db, err := store.Open(cfg.Whisper.StoreDir, store.Options{MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Create(context.Background(), store.MetricConfig{Name: "pressure", Retentions: []store.Retention{{Step: 1, Count: 100}}, AggregationMethod: store.Average}); err != nil {
+				t.Fatal(err)
+			}
+			core := cache.New()
+			defer core.Stop()
+			core.SetMaxSize(16)
+			for i := 1; i <= tc.pending; i++ {
+				core.Add(points.OnePoint("pressure", float64(i), int64(i)))
+			}
+			app := &App{Config: cfg, Cache: core, MetricStore: db}
+			app.prepareMetadataCheckpoint(zap.NewNop())
+			err = db.MetadataCheckpointError()
+			if tc.canceled != errors.Is(err, context.Canceled) || !tc.canceled && err != nil {
+				t.Fatalf("checkpoint error %v with %d of 16 pending points", err, tc.pending)
+			}
+			core.Add(points.OnePoint("pressure", 99, 99))
+			if core.Size() != int64(tc.pending+1) {
+				t.Fatal("intake stopped after checkpoint preparation")
+			}
+		})
 	}
-	defer db.Close()
-	if _, err := db.Create(context.Background(), store.MetricConfig{Name: "pressure", Retentions: []store.Retention{{Step: 1, Count: 100}}, AggregationMethod: store.Average}); err != nil {
-		t.Fatal(err)
-	}
+}
+
+func TestMetadataCheckpointInputAtRisk(t *testing.T) {
 	core := cache.New()
 	defer core.Stop()
-	core.SetMaxSize(2)
-	core.Add(points.OnePoint("pressure", 1, 1))
-	app := &App{Config: cfg, Cache: core, MetricStore: db}
-	app.prepareMetadataCheckpoint(zap.NewNop())
-	if err := db.MetadataCheckpointError(); !errors.Is(err, context.Canceled) {
-		t.Fatal("snapshot held pending points under pressure", err)
+	atRisk := metadataCheckpointInputAtRisk(core, 32, 0)
+	for i := 1; i <= 30; i++ {
+		core.Add(points.OnePoint("risk", float64(i), int64(i)))
+		if atRisk() != (i >= 30) {
+			t.Fatalf("at %d of 32 points: at risk %v, want only from 30 (32 - 32/16)", i, atRisk())
+		}
 	}
-	core.Add(points.OnePoint("pressure", 2, 2))
-	if core.Size() != 2 {
-		t.Fatal("intake stopped after snapshot cancellation")
+	if metadataCheckpointInputAtRisk(core, 0, 0)() {
+		t.Fatal("unlimited cache stopped the save")
 	}
 }
 

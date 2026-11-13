@@ -1012,15 +1012,17 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 	}
 }
 
-// Save while input and reads remain available; stop before pending points put
-// admission under pressure. Closing the store never retries a timed-out save.
+// Save while input and reads remain available, bounded by time. The cache
+// size alone does not skip the save: a restart with a large cache is when the
+// checkpoint helps most. It stops only as the cache nears the point where it
+// would drop input. Closing the store never retries a timed-out save.
 func (app *App) prepareMetadataCheckpoint(logger *zap.Logger) {
 	if app.MetricStore == nil || !metadataCheckpointEnabled(app.Config.Whisper) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), preStopFlushTimeout)
 	defer cancel()
-	full := metadataPrewarmFull(app.Cache, app.Config.Cache.MaxSize, app.Config.Cache.MaxBytes)
+	full := metadataCheckpointInputAtRisk(app.Cache, app.Config.Cache.MaxSize, app.Config.Cache.MaxBytes)
 	stopped := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
