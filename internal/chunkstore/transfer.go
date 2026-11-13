@@ -492,7 +492,7 @@ func (s *Store) ingestTransferStage(ctx context.Context, first uint64, stage *tr
 }
 
 func (s *Store) lockTransfer(names []string) func() {
-	unlock, _ := s.acquireTransfer(names, false)
+	unlock, _, _ := s.acquireTransfer(names, false, nil)
 	return unlock
 }
 
@@ -518,14 +518,35 @@ func (s *Store) transferBusy(names []string) bool {
 	return false
 }
 
-func (s *Store) acquireTransfer(names []string, try bool) (func(), int) {
+// transferEpochs captures each name's stripe mutation epoch. Capture before
+// opening the preparation view and pass the result to acquireTransfer.
+func (s *Store) transferEpochs(metas []Metadata) []uint64 {
+	epochs := make([]uint64, len(metas))
+	for i := range metas {
+		epochs[i] = s.mutationEpoch[s.metricStripe(metas[i].Name)].Load()
+	}
+	return epochs
+}
+
+// acquireTransfer locks the stripes of names. With epochs from transferEpochs,
+// unchanged[i] reports that no mutation of names[i]'s stripe started or ended
+// since the capture, so a view opened after it still holds names[i]'s current
+// metadata (see anchor repair). Compare before this transfer's own mutation
+// advances the epochs; a saturated epoch never compares unchanged.
+func (s *Store) acquireTransfer(names []string, try bool, epochs []uint64) (unlock func(), stripeCount int, unchanged []bool) {
 	stripes := s.transferStripes(names)
 	if try {
 		if !lockset.TryLock(s.metricMu[:], stripes) {
-			return nil, 0
+			return nil, 0, nil
 		}
 	} else {
 		lockset.Lock(s.metricMu[:], stripes)
+	}
+	if len(epochs) == len(names) {
+		unchanged = make([]bool, len(names))
+		for i, name := range names {
+			unchanged[i] = epochs[i] != math.MaxUint64 && epochs[i] == s.mutationEpoch[s.metricStripe(name)].Load()
+		}
 	}
 	for _, name := range names {
 		s.beginStateMutation(name)
@@ -543,7 +564,7 @@ func (s *Store) acquireTransfer(names []string, try bool) (func(), int) {
 		for i := len(stripes) - 1; i >= 0; i-- {
 			s.metricMu[stripes[i]].Unlock()
 		}
-	}, len(stripes)
+	}, len(stripes), unchanged
 }
 
 // ContinuationArchiveRestorer reconstructs independent authoritative archives.

@@ -248,6 +248,8 @@ type Store struct {
 	compactOnce           compactOnceState
 	manualCompaction      manualCompactionState
 	referenceFormat       atomic.Bool
+	// transferRereadMetadata disables the unchanged-epoch commit shortcut (tests).
+	transferRereadMetadata bool
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
 	fetchTimings        fetchTimingCounters

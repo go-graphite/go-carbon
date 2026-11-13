@@ -9,12 +9,14 @@ import (
 // owner-side stage from donor export and controller/RPC scheduling.
 type transferApplyCounters struct {
 	reserve, build, ingest, wait, hold, maxHold, prepare, retire, sync atomic.Uint64
-	splits                                                             atomic.Uint64
+	splits, epochValidated                                             atomic.Uint64
 	stripeHolds                                                        [17]atomic.Uint64
 }
 
 type TransferApplyStats struct {
-	SplitGroups                                                                                                                                   uint64
+	SplitGroups uint64
+	// EpochValidatedNames counts commits that skipped the catalog re-read.
+	EpochValidatedNames                                                                                                                           uint64
 	StripeHolds                                                                                                                                   [17]uint64
 	ReserveSeconds, BuildSeconds, IngestSeconds, LockWaitSeconds, LockHoldSeconds, MaxLockHoldSeconds, PrepareSeconds, RetireSeconds, SyncSeconds float64
 }
@@ -22,7 +24,7 @@ type TransferApplyStats struct {
 func (s *Store) TransferApplyStats() TransferApplyStats {
 	c := &s.transferApply
 	sec := func(v *atomic.Uint64) float64 { return time.Duration(v.Load()).Seconds() }
-	out := TransferApplyStats{ReserveSeconds: sec(&c.reserve), BuildSeconds: sec(&c.build), IngestSeconds: sec(&c.ingest), LockWaitSeconds: sec(&c.wait), LockHoldSeconds: sec(&c.hold), MaxLockHoldSeconds: sec(&c.maxHold), PrepareSeconds: sec(&c.prepare), RetireSeconds: sec(&c.retire), SyncSeconds: sec(&c.sync), SplitGroups: c.splits.Load()}
+	out := TransferApplyStats{ReserveSeconds: sec(&c.reserve), BuildSeconds: sec(&c.build), IngestSeconds: sec(&c.ingest), LockWaitSeconds: sec(&c.wait), LockHoldSeconds: sec(&c.hold), MaxLockHoldSeconds: sec(&c.maxHold), PrepareSeconds: sec(&c.prepare), RetireSeconds: sec(&c.retire), SyncSeconds: sec(&c.sync), SplitGroups: c.splits.Load(), EpochValidatedNames: c.epochValidated.Load()}
 	for i := range out.StripeHolds {
 		out.StripeHolds[i] = c.stripeHolds[i].Load()
 	}
