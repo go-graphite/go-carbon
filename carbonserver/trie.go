@@ -1457,6 +1457,19 @@ func (ti *trieIndex) countNodesMutable() (count, files, dirs, onec, onefc, onedc
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, uint32, error) {
+	if isExactMetricName(query) {
+		// Multi-fetch renders name every metric exactly: look the name up
+		// instead of compiling and running a glob matcher for it.
+		files, leafs, nodes, lookups, err := listener.CurrentFileIndex().trieIdx.queryExact(query, listener.maxMetricsGlobbed)
+		if err != nil {
+			return nil, nil, nil, lookups, err
+		}
+		for _, node := range nodes {
+			node.incrementReadHitsMetric()
+		}
+		return files, leafs, nodes, lookups, nil
+	}
+
 	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
