@@ -9,6 +9,12 @@ import (
 
 const TransferProofContentType = "application/vnd.go-carbon.transfer-proofs-v1"
 
+// TransferDebtGuardHeader with the value "off" asks buckyd to admit an
+// authorized import or pull above its transfer-max-compaction-debt cap.
+// Copies run without governor pauses by operator decision; write stalls and
+// the L0 stop-writes margin still answer 429.
+const TransferDebtGuardHeader = "X-Transfer-Debt-Guard"
+
 // EncodeTransferProofs preserves every receipt field, including nil counts.
 // The negotiated envelope avoids JSON round trips for sparse batch receipts.
 func EncodeTransferProofs(proofs []TransferProof) ([]byte, error) {

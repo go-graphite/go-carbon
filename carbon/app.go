@@ -553,6 +553,7 @@ func (app *App) ReloadConfig() error {
 
 	if app.Buckyd != nil {
 		app.Buckyd.SetTransferMaxCompactionDebt(app.Config.Buckyd.TransferMaxCompactionDebt)
+		app.Buckyd.SetMaxTransfers(app.Config.Buckyd.MaxTransfers)
 	}
 	return nil
 }

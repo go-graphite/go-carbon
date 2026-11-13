@@ -51,7 +51,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/v1/transfer/import" || r.URL.Path == "/v1/transfer/pull" {
 		stats := s.store.Stats()
-		if s.storagePressure(stats) {
+		if transferPressure(stats, s.store.TransferL0StopWrites(), s.TransferMaxCompactionDebt(), transferDebtGuardOff(r)) {
 			writeError(w, errors.New("target storage pressure; import paused"), 429)
 			return
 		}
@@ -70,7 +70,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			CPULimit               int
 			PendingDeleteBatches   bool
 			StagedCopyVerification bool
-		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true})
+		}{s.store.Stats(), s.MaxTransfers(), s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true})
 		return
 	}
 	if !s.acquireTransfer() {

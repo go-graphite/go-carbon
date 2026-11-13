@@ -92,6 +92,7 @@ type tuner struct {
 	backlog        backlogPolicy
 	collecting     bool
 	collectingDebt bool
+	debtGuardOff   bool
 	maxSpeed       *maxSpeedGovernor
 }
 
@@ -296,13 +297,13 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	if latency.Soft != "" && soft == "" {
 		soft = latency.Soft
 	}
-	if !t.collectingDebt && !t.collecting && h.debtBaseline == nil && hard == "" {
+	if !t.debtGuardOff && !t.collectingDebt && !t.collecting && h.debtBaseline == nil && hard == "" {
 		hard = "missing pre-copy compaction debt baseline; run --observe-only before copying"
 	}
 	if !t.collectingDebt && !t.collecting && h.latencyBaseline == nil && hard == "" {
 		hard = "missing pre-copy disk latency baseline; run --observe-only before copying"
 	}
-	if debt.Soft != "" && soft == "" {
+	if debt.Soft != "" && soft == "" && !t.debtGuardOff {
 		soft = debt.Soft
 	}
 	if hard == "" && h.previous != nil && sample.ForegroundMeasured && sample.Time > h.previous.Time {

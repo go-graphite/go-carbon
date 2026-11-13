@@ -117,31 +117,34 @@ type Service struct {
 	nativePullAdmission chan struct{}
 	nativeMu            sync.Mutex
 	nativeSources       map[string]*nativeSourceSession
-	config              Config
-	transferDebt        atomic.Int64
-	store               *chunkstore.Store
-	whisperIO           *whisperio.Adapter
-	secret              []byte
-	authPending         atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
-	server              *http.Server
-	listener            net.Listener
-	transfers           chan struct{}
-	maintenance         chan struct{}
-	transferPool        sync.Pool
-	mu                  sync.Mutex
-	handlers            sync.WaitGroup
-	serveErr            chan error
-	nodes               []Node
-	onChange            func()
-	flushTransfer       func(context.Context, []string) error
-	finiteCacheFence    chunkstore.FiniteCacheFence
-	pyroscope           *pyroscope.Profiler
-	pprofServer         *http.Server
-	pprofListener       net.Listener
-	pprofErr            chan error
-	stopped             bool
-	copyMu              sync.RWMutex
-	storeCopy           *storecopy.Manager
+
+	config       Config
+	transferDebt atomic.Int64
+	store        *chunkstore.Store
+	whisperIO    *whisperio.Adapter
+	secret       []byte
+	authPending  atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
+	server       *http.Server
+	listener     net.Listener
+	// transferActive counts admitted transfers against transferLimit, which
+	// SetMaxTransfers changes live (SIGHUP) without a restart.
+	transferActive, transferLimit atomic.Int64
+	maintenance                   chan struct{}
+	transferPool                  sync.Pool
+	mu                            sync.Mutex
+	handlers                      sync.WaitGroup
+	serveErr                      chan error
+	nodes                         []Node
+	onChange                      func()
+	flushTransfer                 func(context.Context, []string) error
+	finiteCacheFence              chunkstore.FiniteCacheFence
+	pyroscope                     *pyroscope.Profiler
+	pprofServer                   *http.Server
+	pprofListener                 net.Listener
+	pprofErr                      chan error
+	stopped                       bool
+	copyMu                        sync.RWMutex
+	storeCopy                     *storecopy.Manager
 }
 
 func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
@@ -164,9 +167,10 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, transfers: make(chan struct{}, config.MaxTransfers), maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
-	s.authPending.Store(waiting)
+	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
+	s.SetMaxTransfers(config.MaxTransfers)
+	s.authPending.Store(waiting)
 	return s, nil
 }
 
@@ -227,7 +231,7 @@ func normalizeConfig(config *Config) {
 		config.MaxBodyBytes = 160 << 20
 	}
 	if config.MaxTransfers <= 0 {
-		config.MaxTransfers = min(64, max(1, runtime.NumCPU()-max(2, runtime.NumCPU()/12)))
+		config.MaxTransfers = defaultMaxTransfers()
 	}
 	if config.MaxMaintenanceRequests == 0 {
 		config.MaxMaintenanceRequests = defaultMaintenanceRequests
@@ -407,11 +411,21 @@ func (s *Service) TransferMaxCompactionDebt() int64 {
 
 // storagePressure reports whether transfer writes and reads should back off.
 func (s *Service) storagePressure(stats chunkstore.Stats) bool {
-	if stats.WriteStallActive || stats.L0Sublevels >= s.store.TransferL0StopWrites()*3/4 {
+	return transferPressure(stats, s.store.TransferL0StopWrites(), s.TransferMaxCompactionDebt(), false)
+}
+
+// transferPressure answers whether transfer admission must 429. waiveDebt
+// (TransferDebtGuardHeader) skips only the compaction-debt cap: an active
+// write stall or L0 close to Pebble's stop-writes threshold always pauses.
+func transferPressure(stats chunkstore.Stats, l0StopWrites, debtLimit int64, waiveDebt bool) bool {
+	if stats.WriteStallActive || stats.L0Sublevels >= l0StopWrites*3/4 {
 		return true
 	}
-	limit := s.TransferMaxCompactionDebt()
-	return limit > 0 && stats.CompactionDebt > uint64(limit)
+	return !waiveDebt && debtLimit > 0 && stats.CompactionDebt > uint64(debtLimit)
+}
+
+func transferDebtGuardOff(r *http.Request) bool {
+	return r.Header.Get(chunkstore.TransferDebtGuardHeader) == "off"
 }
 
 func (s *Service) changed() {
@@ -782,13 +796,11 @@ func (s *Service) head(w http.ResponseWriter, r *http.Request, name string) {
 	w.WriteHeader(200)
 }
 func (s *Service) get(w http.ResponseWriter, r *http.Request, name string) {
-	select {
-	case s.transfers <- struct{}{}:
-		defer func() { <-s.transfers }()
-	default:
+	if !s.acquireTransfer() {
 		writeError(w, errors.New("too many concurrent transfers"), 429)
 		return
 	}
+	defer s.releaseTransfer()
 	snapshot, err := s.store.Snapshot(r.Context(), name)
 	if err != nil {
 		writeError(w, err, 404)
@@ -876,15 +888,35 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request, name string, r
 }
 
 func (s *Service) acquireTransfer() bool {
-	select {
-	case s.transfers <- struct{}{}:
-		return true
-	default:
-		return false
+	for {
+		active := s.transferActive.Load()
+		if active >= s.transferLimit.Load() {
+			return false
+		}
+		if s.transferActive.CompareAndSwap(active, active+1) {
+			return true
+		}
 	}
 }
 
-func (s *Service) releaseTransfer() { <-s.transfers }
+func (s *Service) releaseTransfer() { s.transferActive.Add(-1) }
+
+func defaultMaxTransfers() int {
+	return min(64, max(1, runtime.NumCPU()-max(2, runtime.NumCPU()/12)))
+}
+
+// SetMaxTransfers changes the concurrent transfer cap live; zero or negative
+// selects the CPU-derived default. Lowering it admits nothing new until the
+// active count drains below the new cap; running transfers are not cut.
+func (s *Service) SetMaxTransfers(limit int) {
+	if limit <= 0 {
+		limit = defaultMaxTransfers()
+	}
+	s.transferLimit.Store(int64(limit))
+}
+
+// MaxTransfers returns the effective live concurrent transfer cap.
+func (s *Service) MaxTransfers() int { return int(s.transferLimit.Load()) }
 
 func (s *Service) createTemp(pattern string) (*os.File, error) {
 	return whisperpath.Create(s.config.TmpDir, 0750, func() (*os.File, error) {

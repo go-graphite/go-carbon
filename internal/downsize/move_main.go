@@ -24,6 +24,10 @@ import (
 )
 
 type options struct {
+	// debtGuardOff drops the compaction-debt governor: the tuner's debt pause
+	// and baseline requirement, and (via chunkstore.TransferDebtGuardHeader) the
+	// target's transfer-max-compaction-debt 429. Hard limits stay.
+	debtGuardOff                                                                     bool
 	from, until                                                                      string
 	nativeWindow                                                                     *chunkstore.NativeWindow
 	engine                                                                           string
@@ -107,6 +111,7 @@ func MoveMain(args []string) error {
 	flags.BoolVar(&o.reconcile, "reconcile", false, "stage versions, gate on writer drain, reconcile and verify complete coverage while retaining sources")
 	flags.BoolVar(&o.delete, "delete", false, "delete retired source copies after verification; requires barrier")
 	flags.BoolVar(&o.auto, "auto", true, "adapt parallelism, batch size and deletion pacing to host headroom")
+	debtGuard := flags.Bool("debt-guard", true, "pause admission on compaction-debt ratio/growth and ask targets to apply transfer-max-compaction-debt; false keeps only hard limits (write stalls, L0 stop margin, memory)")
 	flags.BoolVar(&o.localLab, "local-lab", false, "loopback-only synthetic host telemetry for local tests")
 	flags.BoolVar(&o.blockReads, "block-reads", false, "renew expiring read-isolation leases on helper hosts")
 	flags.StringVar(&o.replica, "replica-url", "", "carbonserver or carbonapi origin serving the same cluster in another site")
@@ -130,6 +135,7 @@ func MoveMain(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	o.debtGuardOff = !*debtGuard
 	o.explicit = map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { o.explicit[f.Name] = true })
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -304,6 +310,7 @@ func run(ctx context.Context, o options) error {
 	}
 	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.read.CeilingMS)
 	m.tuner.backlog, m.tuner.read = o.backlog, o.read
+	m.tuner.debtGuardOff = o.debtGuardOff
 	journalID := p.PlanID + fmt.Sprintf(":delete=%t:mode=%s", o.delete, o.deleteMode)
 	if o.reconcile {
 		journalID += ":reconcile=true"
@@ -550,6 +557,9 @@ func (m *mover) requestOnceWatched(ctx context.Context, endpoint, path string, b
 	}
 	r.Header.Set("Content-Type", contentType)
 	r.Header.Set("Accept", chunkstore.TransferProofContentType)
+	if m.debtGuardOff {
+		r.Header.Set(chunkstore.TransferDebtGuardHeader, "off")
+	}
 	token := os.Getenv(m.tokenEnv)
 	if m.engine != "bulk" && m.tuner != nil {
 		var err error
