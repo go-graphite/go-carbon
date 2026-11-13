@@ -18,11 +18,13 @@ import (
 // engine, journal, worker and transfer primitives.
 func Main(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: resize plan|run|status|worker|config|compare|snapshot")
+		return errors.New("usage: resize copy|plan|run|status|worker|config|compare|snapshot")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch args[0] {
+	case "copy":
+		return PlanFreeCopyMain(ctx, args[1:])
 	case "run":
 		return MoveMain(args[1:])
 	case "capture-native":

@@ -9,6 +9,39 @@ Build with `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build ./tool/store-copy`
 The owning donor and receiver daemons must also contain the native engine.
 Existing metric commands keep their behavior unless `--engine bulk` is selected.
 
+## Plan-free copy (`copy`)
+
+`copy` discovers names and copies them. There is no plan directory, plan ID,
+segment or per-name estimate:
+
+```sh
+store-copy copy --from http://donor:4242 --to http://target:4242 \
+  [--names FILE | --prefix P] [--ring ring.json] --state copy.jsonl \
+  [--streams N] [--max-batch-bytes B] [--max-batch-names N]
+```
+
+- Names come from the source catalog (`/v1/transfer/list` pages, optionally
+  under `--prefix`) or from `--names` (byte-sorted unique, `LC_ALL=C sort -u`).
+- `--ring` takes a resize spec (its `new` ring) or a bare topology
+  (`{"hash":"jump_fnv1a","nodes":[{"id","node","endpoint"}]}`). Names whose
+  owner is not the `--to` endpoint are skipped.
+- Batches are cut by real exported bytes: the controller learns bytes per name
+  from each transfer's `X-Transfer-Bytes` and fills 75% of
+  `min(--max-batch-bytes, target max_body_bytes)`, up to `--max-batch-names`.
+  A 413 splits the batch in half. A single name may use the whole
+  `max_body_bytes`; a name above that is journaled as failed and skipped.
+- Streams default to `min(64, source MaxTransfers, target MaxTransfers)` from
+  the start; no slow-start ramp. 429/502/503/504 (target storage pressure,
+  write stalls, transfer slots) back off and retry without aborting.
+- `--state` is an append-only journal: a header with the copy identity (from,
+  to, prefix, names/ring file hashes), `done` rows with the first/last name of
+  each completed batch, and `failed` rows. Rerunning the same command skips done
+  ranges and retries failures. Target points win in the importer, so a batch
+  redone after a kill is harmless.
+- The command exits non-zero while any name failed or above `--max-failures`.
+- Only `--engine metric` is wired; `--engine bulk` and host-helper guards
+  (`--health-map`) still need the legacy `plan`/`run` pair.
+
 ## Resize / merge baseline
 
 After the campaign owner pauses the existing controller, retains its journal and
