@@ -232,8 +232,21 @@ type whisperConfig struct {
 // Readable count and byte forms are decoded by readableConfig before storage
 // in these numeric fields. Runtime and reload comparisons use resolved values.
 type cacheConfig struct {
-	MaxSize           uint64   `toml:"max-size"`
-	MaxBytes          uint64   `toml:"max-bytes"`
+	// MaxSize caps cached points. Left unset in the config file, it is derived
+	// from total memory: MemoryShare of RAM (or the cgroup limit) divided by
+	// the measured bytes per point. An explicit value, including 0 for no
+	// limit, overrides the derivation.
+	MaxSize  uint64 `toml:"max-size"`
+	MaxBytes uint64 `toml:"max-bytes"`
+	// MemoryShare is the fraction of total memory the automatic max-size
+	// gives the write cache's estimated bytes.
+	MemoryShare float64 `toml:"memory-share"`
+	// BytesPerPoint fixes the automatic max-size's bytes per point. Zero
+	// measures it from the cache, falling back to autoCacheBytesPerPoint
+	// while the cache holds too few points to measure.
+	BytesPerPoint float64 `toml:"bytes-per-point"`
+	// autoMaxSize is set when the config file leaves max-size unset.
+	autoMaxSize       bool
 	WriteStrategy     string   `toml:"write-strategy"`
 	BloomSize         uint64   `toml:"bloom-size"`
 	WriteoutScanYield bool     `toml:"writeout-scan-yield"`
@@ -512,6 +525,7 @@ func NewConfig() *Config {
 		},
 		Cache: cacheConfig{
 			MaxSize:           1000000,
+			MemoryShare:       defaultCacheMemoryShare,
 			WriteStrategy:     "max",
 			WriteoutScanYield: true,
 		},
@@ -657,6 +671,13 @@ func ReadConfig(filename string) (*Config, error) {
 	}
 	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {
 		return nil, err
+	}
+	cfg.Cache.autoMaxSize = !defined.IsDefined("cache", "max-size")
+	if share := cfg.Cache.MemoryShare; share <= 0 || share > 0.9 {
+		return nil, fmt.Errorf("[cache] memory-share must be above 0 and at most 0.9, got %v", share)
+	}
+	if cfg.Cache.BytesPerPoint < 0 {
+		return nil, fmt.Errorf("[cache] bytes-per-point must not be negative")
 	}
 	if err := cfg.validateNativeCombineBudget(availableMemory); err != nil {
 		return nil, err

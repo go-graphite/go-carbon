@@ -1012,38 +1012,20 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 	}
 }
 
-// Save while input and reads remain available; stop before pending points put
-// admission under pressure. Closing the store never retries a timed-out save.
+// metadataCheckpointSaveTimeout bounds the stop-time metadata checkpoint save.
+var metadataCheckpointSaveTimeout = 4 * time.Minute
+
+// Save while input and reads remain available. The save always runs, however
+// full the cache is: a successor without the checkpoint starts with a cold
+// metadata cache and persists slowly. Only the deadline bounds it, and a failure is
+// logged at ERROR and counted, because the successor pays for it.
+// Closing the store never retries a failed save.
 func (app *App) prepareMetadataCheckpoint(logger *zap.Logger) {
 	if app.MetricStore == nil || !metadataCheckpointEnabled(app.Config.Whisper) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), preStopFlushTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), metadataCheckpointSaveTimeout)
 	defer cancel()
-	full := metadataPrewarmFull(app.Cache, app.Config.Cache.MaxSize, app.Config.Cache.MaxBytes)
-	stopped := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if full() {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	if full() {
-		cancel()
-	}
 	started := time.Now()
 	options := store.PrewarmOptions{Workers: app.Config.Whisper.StoreMetadataCachePrewarmWorkers}
 	if app.restartBudget != nil && app.restartBudget.Cores() > 0 {
@@ -1056,7 +1038,19 @@ func (app *App) prepareMetadataCheckpoint(logger *zap.Logger) {
 		}
 	}
 	err := app.MetricStore.PrepareMetadataCheckpointWithOptions(ctx, options)
-	close(done)
-	<-stopped
-	logger.Info("metadata cache checkpoint prepared", zap.Duration("runtime", time.Since(started)), zap.Error(err))
+	fields := []zap.Field{zap.Duration("runtime", time.Since(started)), zap.Duration("deadline", metadataCheckpointSaveTimeout),
+		zap.Int64("cache_points", app.cachePoints()), zap.Bool("timeout", errors.Is(err, context.DeadlineExceeded)), zap.Error(err)}
+	if err != nil {
+		app.metadataCheckpointSaveFailures.Add(1)
+		logger.Error("metadata cache checkpoint save failed; the successor starts with a cold metadata cache", fields...)
+		return
+	}
+	logger.Info("metadata cache checkpoint prepared", fields...)
+}
+
+func (app *App) cachePoints() int64 {
+	if app.Cache == nil {
+		return 0
+	}
+	return app.Cache.Size()
 }

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/lomik/zapwriter"
-	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -569,34 +568,55 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 	}
 }
 
+// The stop-time save runs however full the cache is (misc-1202, 13 Nov 2026,
+// came up cold after a cancel at half of max-size); only its deadline stops
+// it, loudly.
 func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
-	_, cfg := sharedAppConfig(t)
-	cfg.Whisper.StoreMetadataCachePrewarm = true
-	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
-	checkpoint := true
-	cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
-	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
-	cfg.Cache.MaxSize = 2
-	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Create(context.Background(), store.MetricConfig{Name: "pressure", Retentions: []store.Retention{{Step: 1, Count: 100}}, AggregationMethod: store.Average}); err != nil {
-		t.Fatal(err)
-	}
-	core := cache.New()
-	defer core.Stop()
-	core.SetMaxSize(2)
-	core.Add(points.OnePoint("pressure", 1, 1))
-	app := &App{Config: cfg, Cache: core, MetricStore: db}
-	app.prepareMetadataCheckpoint(zap.NewNop())
-	if err := db.MetadataCheckpointError(); !errors.Is(err, context.Canceled) {
-		t.Fatal("snapshot held pending points under pressure", err)
-	}
-	core.Add(points.OnePoint("pressure", 2, 2))
-	if core.Size() != 2 {
-		t.Fatal("intake stopped after snapshot cancellation")
+	for _, tc := range []struct {
+		name     string
+		deadline time.Duration
+	}{{"full cache saves", 4 * time.Minute}, {"deadline overrun is loud", time.Nanosecond}} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, cfg := sharedAppConfig(t)
+			cfg.Whisper.StoreMetadataCachePrewarm = true
+			cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
+			checkpoint := true
+			cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
+			cfg.Whisper.StoreMetadataCacheSize = 4 << 20
+			cfg.Cache.MaxSize = 2
+			db, err := store.Open(cfg.Whisper.StoreDir, store.Options{MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Create(context.Background(), store.MetricConfig{Name: "pressure", Retentions: []store.Retention{{Step: 1, Count: 100}}, AggregationMethod: store.Average}); err != nil {
+				t.Fatal(err)
+			}
+			saved := metadataCheckpointSaveTimeout
+			metadataCheckpointSaveTimeout = tc.deadline
+			defer func() { metadataCheckpointSaveTimeout = saved }()
+			core := cache.New()
+			defer core.Stop()
+			core.SetMaxSize(2)
+			core.Add(points.OnePoint("pressure", 1, 1))
+			core.Add(points.OnePoint("pressure", 2, 2))
+			app := &App{Config: cfg, Cache: core, MetricStore: db}
+			defer zapwriter.Test()()
+			app.prepareMetadataCheckpoint(zapwriter.Logger("dump"))
+			failed := strings.Count(zapwriter.TestString(), "checkpoint save failed")
+			if tc.deadline > time.Second {
+				if err := db.MetadataCheckpointError(); err != nil || failed != 0 || app.metadataCheckpointSaveFailures.Load() != 0 {
+					t.Fatal("full cache canceled the checkpoint save", err, failed)
+				}
+				return
+			}
+			if err := db.MetadataCheckpointError(); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("deadline did not bound the save", err)
+			}
+			if failed != 1 || app.metadataCheckpointSaveFailures.Load() != 1 {
+				t.Fatal("deadline overrun was not loud", zapwriter.TestString())
+			}
+		})
 	}
 }
 
