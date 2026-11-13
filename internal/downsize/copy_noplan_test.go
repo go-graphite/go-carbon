@@ -32,6 +32,7 @@ type fakeCopy struct {
 	attempts int
 	inject   func(attempt int, names []string) int // HTTP status to return instead, 0 = serve
 	block    func(attempt int) bool                // hang until the request is cancelled
+	release  chan struct{}                         // closed before the servers shut down
 	batches  [][]string
 	imported map[string]int
 	maxBytes []int64
@@ -39,7 +40,7 @@ type fakeCopy struct {
 
 func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 	t.Helper()
-	f := &fakeCopy{catalog: catalog, sizes: map[string]int64{}, maxBody: 1 << 20, page: 300, imported: map[string]int{}}
+	f := &fakeCopy{catalog: catalog, sizes: map[string]int64{}, maxBody: 1 << 20, page: 300, imported: map[string]int{}, release: make(chan struct{})}
 	status := func(w http.ResponseWriter) {
 		_ = json.NewEncoder(w).Encode(copyStatus{MaxTransfers: 8, MaxBodyBytes: f.maxBody})
 	}
@@ -82,7 +83,12 @@ func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 			f.maxBytes = append(f.maxBytes, request.MaxBytes)
 			f.mu.Unlock()
 			if f.block != nil && f.block(attempt) {
-				<-r.Context().Done()
+				// The server notices a cancelled client only once the body
+				// hit EOF; release keeps Close from waiting on this handler.
+				select {
+				case <-r.Context().Done():
+				case <-f.release:
+				}
 				return
 			}
 			if f.inject != nil {
@@ -120,11 +126,12 @@ func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 		}
 	}))
 	t.Cleanup(dst.Close)
+	t.Cleanup(func() { close(f.release) }) // runs first (LIFO)
 	return f, src.URL, dst.URL
 }
 
 func copyTestOptions(t *testing.T, from, to string) copyOptions {
-	return copyOptions{from: from, to: to, state: filepath.Join(t.TempDir(), "copy.jsonl"), engine: "metric", tokenEnv: "NO_SUCH_TOKEN_ENV", streams: 4, maxBytes: 1 << 20, maxNames: 8192, maxFailures: 100, tick: time.Millisecond, maxBackoff: 5 * time.Millisecond, transportRetries: 3, transferIdle: time.Minute}
+	return copyOptions{froms: []string{from}, to: to, stallTimeout: time.Minute, state: filepath.Join(t.TempDir(), "copy.jsonl"), engine: "metric", tokenEnv: "NO_SUCH_TOKEN_ENV", streams: 4, maxBytes: 1 << 20, maxNames: 8192, maxFailures: 100, tick: time.Millisecond, maxBackoff: 5 * time.Millisecond, transportRetries: 3, transferIdle: time.Minute}
 }
 
 func copyNames(prefix string, n int) []string {
@@ -244,8 +251,11 @@ func TestPlanFreeCopySendsOversizedNameAloneAndSkipsImpossibleOne(t *testing.T) 
 	o := copyTestOptions(t, src, dst)
 	o.streams = 1
 	err := planFreeCopy(context.Background(), o)
-	if err == nil || !strings.Contains(err.Error(), "1 names failed") {
-		t.Fatal("want one journaled failure, got", err)
+	if err == nil || !strings.Contains(err.Error(), "1 names still skipped") {
+		t.Fatal("want one skipped name, got", err)
+	}
+	if list, _ := os.ReadFile(o.state + ".skipped"); !strings.Contains(string(list), "\tx.00015\t413\t") {
+		t.Fatalf("skipped list lacks x.00015: %q", list)
 	}
 	for _, name := range all {
 		want := 1

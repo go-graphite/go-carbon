@@ -46,6 +46,12 @@ class HostTests(unittest.TestCase):
             self.assertEqual(second['Time'],101.0)
             self.assertEqual(second['DiskWriteBytes'],512000)
             self.assertEqual(second['NICIngressBytes'],100000)
+            # A new process generation drops the old read histogram first.
+            h.histogram={'stale':1}; h.generation='999:1'
+            with mock.patch.object(host_module.Path,'read_text',read), mock.patch.object(host_module.time,'time',side_effect=lambda:clock[0]), mock.patch.object(host_module,'metrics',side_effect=lambda _: {'input_log_write_errors_total':0,'persister_pebble_write_failures_total':0,'input_log_unlogged_points_total':0,'persister_pebble_points_total':1}), mock.patch.object(host_module,'fetch_json',return_value=admin), mock.patch.object(host_module,'read_p99',return_value=(0,0)) as p99, mock.patch.object(host_module.os,'statvfs',return_value=volume):
+                clock[0]=102.0; h.sample()
+            self.assertIsNone(p99.call_args[0][0])
+            self.assertEqual(h.generation,'123:1')
 
     def test_foreground_counter_contract_and_missing_data(self):
         values = {'input_log_write_errors_total': 0.0,
@@ -180,8 +186,28 @@ class HostTests(unittest.TestCase):
         p99, count = host_module.read_p99(previous, current)
         self.assertAlmostEqual(p99, 9.9)
         self.assertEqual(count, 100)
+        # A restart/counter reset is a new baseline, not a helper 503.
+        self.assertEqual(host_module.read_p99(current, previous), (0, 0))
+        changed = dict(current)
+        del changed[prefix+'_bucket{le="0.01"}']
+        changed[prefix+'_bucket{le="0.02"}'] = 120
+        changed[prefix+'_count'] = 120
+        self.assertEqual(host_module.read_p99(current, changed), (0, 0))
+
+    def test_scrape_retries_missing_counters(self):
+        full = {'input_log_write_errors_total': 0, 'persister_pebble_write_failures_total': 0,
+                'input_log_unlogged_points_total': 0, 'persister_pebble_points_total{shard="1"}': 5}
+        partial = {k: v for k, v in full.items() if k != 'persister_pebble_write_failures_total'}
+        scrapes = iter((partial, partial, full))
+        with mock.patch.object(host_module.time, 'sleep') as sleep:
+            values = host_module.scrape_counters('m', 'persister_pebble_write_failures_total', fetch=lambda _: next(scrapes))
+        self.assertEqual(values, full)
+        self.assertEqual(sleep.call_count, 2)
+        # Still missing after every attempt: the caller fails closed as before.
+        with mock.patch.object(host_module.time, 'sleep'):
+            values = host_module.scrape_counters('m', 'persister_pebble_write_failures_total', fetch=lambda _: partial)
         with self.assertRaises(ValueError):
-            host_module.read_p99(current, previous)
+            host_module.foreground_counters(values, 'persister_pebble_write_failures_total')
 
 
 if __name__ == '__main__':

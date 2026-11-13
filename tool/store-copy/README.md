@@ -15,10 +15,49 @@ Existing metric commands keep their behavior unless `--engine bulk` is selected.
 segment or per-name estimate:
 
 ```sh
-store-copy copy --from http://donor:4242 --to http://target:4242 \
+store-copy copy --from http://donor:4242 [--from http://donor2:4242 ...] --to http://target:4242 \
   [--names FILE | --prefix P] [--ring ring.json] --state copy.jsonl \
-  [--streams N] [--max-batch-bytes B] [--max-batch-names N]
+  [--streams N] [--max-batch-bytes B] [--max-batch-names N] [--stall-timeout 30m]
 ```
+
+### Usage: one command
+
+One invocation copies a whole block and runs until it is done, hours if needed.
+Every retry, wait for a restarting host and resume happens inside the process:
+no wrapper loop, no relaunch.
+
+```sh
+export BUCKYD_TOKEN=...   # read+update JWT
+store-copy copy \
+  --from http://donor-a:4242 --from http://donor-b:4242 --from http://donor-c:4242 \
+  --to http://survivor:4242 --ring resize-spec.json \
+  --state /var/lib/carbon/copy/block-1.jsonl
+```
+
+- All donors feed one worker pool; `--ring` keeps only the names the survivor
+  owns. Journal rows carry their donor.
+- A donor or survivor restart is waited out: refused connections, transport
+  errors, 408/429/502/503/504, a target 500 caused by a refused source export,
+  and export 409/404/500 answers during a donor's restart window are retried
+  with backoff (`--retry-interval` to `--max-backoff`). The batch in flight is
+  re-pulled whole; existing target points win, so the redo is safe.
+- A host that does not answer means wait, without limit. The copy fails loudly
+  (`copy_stalled` ERROR, non-zero exit) only when every source and the target
+  answer their status endpoint and the calls still fail for `--stall-timeout`.
+- Killed or stopped: rerun the same command; the journal skips done ranges.
+- One `progress` line per `--progress-interval` (30s): done/total names (the
+  total is counted in the background), names/s and MB/s over the interval, ETA,
+  the current limiter (a host down and for how long, target 429 backpressure
+  with its compaction debt/L0/write stall, transient retries, busy transfer
+  streams, name discovery), retries and skipped names. `copy_done` ends the run
+  with the summary.
+- A name that keeps failing never stops the run: it is skipped (`name_skipped`),
+  retried once at the end (`retry_skipped`), and the names still failing are
+  listed in `<state>.skipped` (source, name, HTTP status, reason) and reported
+  by a non-zero exit. `--max-failures N` (default 0, off) aborts above N.
+- The watchdog fails the run (`copy_stalled`, non-zero exit) when no batch has
+  succeeded for `--stall-timeout` while every host answers and work is in
+  flight.
 
 - Names come from the source catalog (`/v1/transfer/list` pages, optionally
   under `--prefix`) or from `--names` (byte-sorted unique, `LC_ALL=C sort -u`).
@@ -30,15 +69,18 @@ store-copy copy --from http://donor:4242 --to http://target:4242 \
   `min(--max-batch-bytes, target max_body_bytes)`, up to `--max-batch-names`.
   A 413 splits the batch in half. A single name may use the whole
   `max_body_bytes`; a name above that is journaled as failed and skipped.
-- Streams default to `min(64, source MaxTransfers, target MaxTransfers)` from
-  the start; no slow-start ramp. 429/502/503/504 (target storage pressure,
+- Streams default to `min(64, sum of source MaxTransfers, target MaxTransfers)`
+  from the start; no slow-start ramp. 429/502/503/504 (target storage pressure,
   write stalls, transfer slots) back off and retry without aborting.
+- `--names` takes a single `--from`; with several donors use catalog discovery
+  (optionally `--prefix`). `--transport-retries` is deprecated and ignored.
 - `--state` is an append-only journal: a header with the copy identity (from,
   to, prefix, names/ring file hashes), `done` rows with the first/last name of
   each completed batch, and `failed` rows. Rerunning the same command skips done
   ranges and retries failures. Target points win in the importer, so a batch
   redone after a kill is harmless.
-- The command exits non-zero while any name failed or above `--max-failures`.
+- The command exits non-zero while any name is still skipped after the final
+  retry.
 - Only `--engine metric` is wired; `--engine bulk` and host-helper guards
   (`--health-map`) still need the legacy `plan`/`run` pair.
 
@@ -156,8 +198,12 @@ pre-copy observation window (read-isolated samples and samples with fewer than
 20 reads are skipped), not the single last reading. A 1.26 ms baseline therefore
 gives a 50 ms limit, not 2 ms. Later baselines (after read isolation, or before
 whole-store work) use the latest sample. The cache-backlog ceilings
-(`--backlog-hard-ratio`, the 90% host-memory estimate), write errors, process
-restarts and the other hard guards still abort the copy.
+(`--backlog-hard-ratio`, the 90% host-memory estimate), write errors and the
+other hard guards still abort the copy. A process restart or counter reset is
+not a guard: the host is re-baselined (`rebaseline` event), a host whose helper
+or status does not answer is parked (`host_unavailable`, then `host_back`), and
+transfers that fail transiently re-send the same batch. `--stall-timeout`
+(30m) fails the run only while both hosts of a transfer are up.
 
 Resuming an existing journal: the read-p99 thresholds and the backlog thresholds
 (`--backlog-soft-ratio`, `--backlog-hard-ratio`, `--backlog-growth-samples`,

@@ -233,20 +233,23 @@ func TestBacklogTunerDBSteadyGrowthRecoveryAndResume(t *testing.T) {
 }
 
 func TestBacklogRestartAndCounterReset(t *testing.T) {
+	// Restarts and counter resets re-baseline and continue (the copy rides
+	// through a go-carbon restart); durability and memory guards stay hard.
 	for _, tc := range []struct {
-		name   string
-		change func(*hostSample, *storageSample)
+		name       string
+		change     func(*hostSample, *storageSample)
+		rebaseline bool
 	}{
-		{"generation", func(s *hostSample, _ *storageSample) { s.Generation = "two" }},
-		{"committed-points", func(s *hostSample, _ *storageSample) { s.WritePoints-- }},
-		{"write-errors-reset", func(s *hostSample, _ *storageSample) { s.WriteErrors-- }},
-		{"unlogged-reset", func(s *hostSample, _ *storageSample) { s.Unlogged-- }},
-		{"write-errors-growth", func(s *hostSample, _ *storageSample) { s.WriteErrors++ }},
-		{"unlogged-growth", func(s *hostSample, _ *storageSample) { s.Unlogged++ }},
-		{"store-reset", func(_ *hostSample, s *storageSample) { s.WriteStalls-- }},
-		{"memory-reserve", func(s *hostSample, _ *storageSample) { s.AvailableBytes = 1 }},
-		{"rss-reserve", func(s *hostSample, _ *storageSample) { s.RSS = s.MemoryBytes }},
-		{"repeated-sample", func(s *hostSample, _ *storageSample) { s.Time -= .01 }},
+		{"generation", func(s *hostSample, _ *storageSample) { s.Generation = "two" }, true},
+		{"committed-points", func(s *hostSample, _ *storageSample) { s.WritePoints-- }, true},
+		{"write-errors-reset", func(s *hostSample, _ *storageSample) { s.WriteErrors-- }, true},
+		{"unlogged-reset", func(s *hostSample, _ *storageSample) { s.Unlogged-- }, true},
+		{"write-errors-growth", func(s *hostSample, _ *storageSample) { s.WriteErrors++ }, false},
+		{"unlogged-growth", func(s *hostSample, _ *storageSample) { s.Unlogged++ }, false},
+		{"store-reset", func(_ *hostSample, s *storageSample) { s.WriteStalls-- }, true},
+		{"memory-reserve", func(s *hostSample, _ *storageSample) { s.AvailableBytes = 1 }, false},
+		{"rss-reserve", func(s *hostSample, _ *storageSample) { s.RSS = s.MemoryBytes }, false},
+		{"repeated-sample", func(s *hostSample, _ *storageSample) { s.Time -= .01 }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tune := newTestTuner([]string{"a"}, capacity{8, 32, 1 << 20, 100}, true, 0, 100)
@@ -265,8 +268,18 @@ func TestBacklogRestartAndCounterReset(t *testing.T) {
 			}
 			sample.Time += .01
 			tc.change(&sample, &store)
-			if err := tune.observe("a", sample, store); err == nil {
-				t.Fatal("reset/durability/memory guard passed after controller restart")
+			err := tune.observe("a", sample, store)
+			if tc.rebaseline {
+				if err != nil {
+					t.Fatalf("restart/counter reset aborted instead of re-baselining: %v", err)
+				}
+				if h := tune.hosts["a"]; h.hard != "" || h.previous == nil || h.previous.Generation != sample.Generation {
+					t.Fatalf("not re-baselined: hard=%q", h.hard)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("durability/memory guard passed after controller restart")
 			}
 		})
 	}

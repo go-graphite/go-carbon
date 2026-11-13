@@ -205,7 +205,7 @@ func (m *mover) runCopyWorkers(ctx context.Context, report func(error)) error {
 						if m.tuner.maxSpeed != nil {
 							err = m.executeMaximumSpeed(ctx, task)
 						} else {
-							err = m.execute(ctx, task)
+							err = m.executeResilient(ctx, task)
 						}
 						if err != nil {
 							report(err)
@@ -235,17 +235,7 @@ func (m *mover) runCopyWorkers(ctx context.Context, report func(error)) error {
 // siblings continue without accepting a bad proof as a verified copy.
 func (m *mover) executeMaximumSpeed(ctx context.Context, t task) error {
 	for {
-		if t.NativeParent != "" {
-			m.stateMu.Lock()
-			parent, ok := m.journal.tasks[t.NativeParent]
-			if ok && parent.Native != nil && parent.Native.Pending != nil {
-				pending := parent.Native.Pending
-				if taskKey(*pending) == taskKey(t) {
-					t = *pending
-				}
-			}
-			m.stateMu.Unlock()
-		}
+		t = m.pendingNative(t)
 		err := m.execute(ctx, t)
 		if err == nil || ctx.Err() != nil {
 			return err
@@ -302,6 +292,88 @@ func (m *mover) executeMaximumSpeed(ctx context.Context, t task) error {
 		event("skipped_integrity", map[string]any{"record": record, "copy_verified": false})
 		return nil
 	}
+}
+
+// pendingNative returns the journal's durable pending child for a native
+// task, so a retry resumes the saved state instead of a stale copy.
+func (m *mover) pendingNative(t task) task {
+	if t.NativeParent == "" {
+		return t
+	}
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	parent, ok := m.journal.tasks[t.NativeParent]
+	if ok && parent.Native != nil && parent.Native.Pending != nil {
+		if pending := parent.Native.Pending; taskKey(*pending) == taskKey(t) {
+			return *pending
+		}
+	}
+	return t
+}
+
+var errCopyStalled = errors.New("copy stalled")
+
+const resilientMaxBackoff = 30 * time.Second
+
+// executeResilient retries a task through source/target restarts: transport
+// errors, refused connections, guard and gateway responses re-run the same
+// task (target points win, so a redo is safe) with capped backoff. The stall
+// clock runs only while both hosts are up per the tuner; a host that is down
+// is waited for without limit. Other errors return as before.
+func (m *mover) executeResilient(ctx context.Context, t task) error {
+	if m.delete {
+		// Source cleanup keeps its lost-acknowledgment interrupt semantics.
+		return m.execute(ctx, t)
+	}
+	delay := min(m.tick, 2*time.Second)
+	if delay <= 0 {
+		delay = 2 * time.Second
+	}
+	var since time.Time
+	for attempt := 1; ; attempt++ {
+		t = m.pendingNative(t)
+		err := m.execute(ctx, t)
+		if err == nil || ctx.Err() != nil {
+			if err == nil && attempt > 1 {
+				event("transfer_recovered", map[string]any{"source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End, "attempts": attempt})
+			}
+			return err
+		}
+		if !restartError(err) {
+			return err
+		}
+		up := m.tuner == nil || (m.tuner.hostUp(t.Source) && m.tuner.hostUp(t.Target))
+		switch {
+		case !up:
+			since = time.Time{}
+		case since.IsZero():
+			since = time.Now()
+		case m.stallTimeout > 0 && time.Since(since) >= m.stallTimeout:
+			event("copy_stalled", map[string]any{"level": "error", "source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End, "attempts": attempt, "stalled_seconds": time.Since(since).Seconds(), "stall_timeout": m.stallTimeout.String(), "error": err.Error()})
+			return fmt.Errorf("%w: %s -> %s: no progress for %s with both hosts up (--stall-timeout %s): %w", errCopyStalled, t.Source, t.Target, time.Since(since).Round(time.Second), m.stallTimeout, err)
+		}
+		event("transfer_retry", map[string]any{"source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End, "attempt": attempt, "hosts_up": up, "delay_seconds": delay.Seconds(), "error": err.Error()})
+		if err := sleepContext(ctx, delay); err != nil {
+			return err
+		}
+		delay = min(2*delay, resilientMaxBackoff)
+	}
+}
+
+// restartError reports transfer errors a source/target restart produces:
+// refused/reset connections and other network errors, cut responses, and
+// guard or gateway responses. A plain 500 and local I/O errors stay fatal.
+func restartError(err error) bool {
+	var api *apiError
+	if errors.As(err, &api) {
+		switch api.Status {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+		return false
+	}
+	retry, integrity := maximumSpeedErrorKind(err)
+	return retry && !integrity
 }
 
 func maximumSpeedErrorKind(err error) (retry, integrity bool) {
