@@ -632,9 +632,17 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
+	return c.updateReanchoring(ctx, kv, m, input, retention, clock, maintenance)
+}
+
+// updateAttempt leaves compressed writes on their existing path. Classic writes
+// are private until success: Whisper may have already written sibling archives
+// when a conflict requires recalculating offsets from a different slot zero.
+func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance, countInvalid bool, attempt **continuationOverlay) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	base := kv
 	var buffer *continuationPointBuffer
 	coalesce := coalescePointWrites && len(m.Retentions) > 1 && len(input) >= 2*(m.Retentions[1].Step/m.Retentions[0].Step)
 	if coalesce || !c.keepTailReads {
@@ -645,6 +653,15 @@ func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO,
 	timer.Enter(stagetime.Load)
 	fs := newContinuationFiles(kv, false).withClock(clock)
 	fs.reuseBlockKeys = c.ReuseBlockKeys
+	fs.guardClassicWrites = true
+	// Whisper replaces propagation errors with a recovered panic string.
+	// Keep the typed conflict on this private filesystem so coarse-archive
+	// collisions take the same repair path without changing vendored code.
+	defer func() {
+		if fs.classicConflict != nil {
+			err = fs.classicConflict
+		}
+	}()
 	fs.keepDuplicatePlanning = c.keepDuplicatePlanning
 	fs.timer = timer
 	if err := fs.prefetchNames(); err != nil {
@@ -657,6 +674,14 @@ func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO,
 		return err
 	}
 	defer w.Close()
+	if !w.IsCompressed() {
+		*attempt = newContinuationOverlay(base)
+		if buffer != nil {
+			buffer.ContinuationIO = *attempt
+		} else {
+			fs.kv, fs.prober = *attempt, nil
+		}
+	}
 	timer.Enter(stagetime.Decode)
 	points := make([]*whisper.TimeSeriesPoint, 0, len(input))
 	for _, point := range input {
@@ -665,7 +690,9 @@ func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO,
 		// persister requeues failed updates, so one such point would keep the
 		// metric's valid points from ever being written.
 		if point.Timestamp < 0 || point.Timestamp > math.MaxUint32 || point.Timestamp > int64(^uint(0)>>1) {
-			invalidContinuationPoints.Add(1)
+			if countInvalid {
+				invalidContinuationPoints.Add(1)
+			}
 			continue
 		}
 		points = append(points, &whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})

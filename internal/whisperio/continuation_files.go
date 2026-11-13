@@ -25,6 +25,10 @@ var continuationNames atomic.Uint64
 // Only headers and file identities stay in memory. Historical values live in
 // shared exact blocks; no raw Whisper body or per-metric OS file is retained.
 type continuationFiles struct {
+	// Ordinary updates must not overwrite a timestamp from a different ring
+	// position in an old, incorrectly anchored classic image.
+	guardClassicWrites    bool
+	classicConflict       *classicSlotConflict
 	keepDuplicatePlanning bool
 	sidecarDirty          bool
 	kv                    store.ContinuationIO

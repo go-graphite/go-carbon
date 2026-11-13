@@ -65,6 +65,7 @@ type migrationSnapshot struct {
 type storeStatsView struct {
 	coldPack                                                                store.ColdPackStats
 	thaws                                                                   whisperio.ThawStats
+	classicReanchors                                                        whisperio.ClassicReanchorStats
 	ingestTables, ingestEntries, ingestBytes, ingestL0Bytes, ingestOverlaps uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
@@ -258,6 +259,8 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_cold_pack_repacked_output_bytes_total", "Logical bytes after sealing previously thawed ranges.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.RepackedOutputBytes) }),
 		counter("store_cold_pack_thawed_points_total", "Points restored to ordinary groups by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Points) }),
 		counter("store_cold_pack_thawed_bytes_total", "Logical group keys and values read plus rewritten by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Bytes) }),
+		counter("store_classic_reanchored_archives_total", "Classic archives normalized by continuation updates, including unpublished transactions; investigate historical layout damage.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchors.ReanchoredArchives) }),
+		counter("store_classic_alias_drops_total", "Older distinct timestamps discarded when normalizing aliased classic ring slots, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchors.AliasDrops) }),
 		counter("store_cold_pack_read_bytes_total", "Snapshot bytes read by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ReadBytes) }),
 		counter("store_cold_pack_write_bytes_total", "WAL batch bytes published by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WriteBytes) }),
 		counter("store_cold_pack_errors_total", "Cold maintenance errors; inspect server logs.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Errors) }),
@@ -590,7 +593,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.store = true
 		s.storeSnapshotAge = db.TelemetryAge().Seconds()
 		s.sidecars = sidecars
-		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(),
+		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
