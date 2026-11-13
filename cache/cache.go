@@ -62,6 +62,7 @@ type Cache struct {
 	recoveryBlockedUntil atomic.Int64
 	recoveryRejections   atomic.Uint64
 	recoveryDrain        atomic.Bool
+	restoreOutstanding   atomic.Int64
 
 	writeoutEpoch   time.Time
 	writeoutStateMu sync.Mutex
@@ -128,6 +129,7 @@ type Shard struct {
 	notConfirmed     []*points.Points // linear search for value/slot
 	flightPeak       int              // maximum simultaneous in-flight batches since a capacity reset
 	recoverySources  map[*points.Points]recoverySourceRefs
+	restorePrefix    map[string]int64    // finite load-complete prefix, guarded by mu
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
 	adds             map[string]struct{} // map to maintain all the new metric names
 	// Only in-flight batches need a map; queued items hold their arrival.
@@ -305,6 +307,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("metrics", float64(c.Len()))
 	send("maxSize", float64(s.maxSize))
 	send("notConfirmed", float64(c.NotConfirmedLength()))
+	send("restoreOutstandingPoints", float64(c.RestoreOutstanding()))
 	// report elements in bloom filter
 	if filter := c.newMetricCf.Load(); filter != nil {
 		cfCount := filter.Cardinality()
@@ -400,7 +403,9 @@ func (c *Cache) Confirm(p *points.Points) {
 	shard := c.GetShard(p.Metric)
 
 	shard.mu.Lock()
-	removeNotConfirmed(shard, p)
+	if removeNotConfirmed(shard, p) {
+		c.confirmRestoreLocked(shard, p.Metric, len(p.Data))
+	}
 	delete(shard.firstArrival, p)
 	shard.log.untrack(p)
 	shard.releaseSource(p)
@@ -934,6 +939,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	exists = values != nil
 	if exists {
 		shard.writeout.add(values, -1)
+		c.confirmRestoreLocked(shard, key, values.count())
 		shard.items.removeHashed(hash, key)
 		values.firstArrival = time.Time{}
 		shard.log.untrackItem(values)

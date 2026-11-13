@@ -61,7 +61,7 @@ func (app *App) tryStartupInput() error {
 		return nil
 	}
 	var manifest recovery.Manifest
-	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
+	err = json.NewDecoder(f).Decode(&manifest)
 	_ = f.Close()
 	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
 		return nil

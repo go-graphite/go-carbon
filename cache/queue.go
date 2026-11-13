@@ -166,7 +166,7 @@ func (scan *queueScan) appendRegion(shard *Shard, now time.Time, s *cacheSetting
 		case TimestampOrder:
 			key = p.compact.firstTimestamp()
 		}
-		q = append(q, queueItem{p.Metric, key})
+		q = append(q, queueItem{metric: p.Metric, orderKey: key, restored: shard.restorePrefix[p.Metric] > 0})
 	}
 	if batch && current {
 		for region := scan.start >> queueRegionBits; region<<queueRegionBits < end; region++ {
@@ -206,6 +206,7 @@ func (scan *queueScan) appendRegion(shard *Shard, now time.Time, s *cacheSetting
 type queueItem struct {
 	metric   string
 	orderKey int64
+	restored bool
 }
 
 type queue []queueItem
@@ -336,36 +337,47 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	}
 
 	ch := make(chan string, l)
+	// Reserve writeout capacity for the finite restored prefix. New live names
+	// cannot displace it even with lexical/noop/maximum-length ordering.
 	if writeStrategy == Noop {
 		// Adjacent entries used to share one cache lock, concentrating the
 		// entire persister pool on it. Noop has no cross-metric ordering
 		// contract: alternate nonempty shards without another per-entry copy.
-		var active [shardCount]int
-		n := 0
-		for shard, bounds := range shardRanges {
-			if bounds.next < bounds.end {
-				active[n] = shard
-				n++
+		for _, restored := range []bool{true, false} {
+			ranges := shardRanges
+			var active [shardCount]int
+			n := 0
+			for shard, bounds := range ranges {
+				if bounds.next < bounds.end {
+					active[n] = shard
+					n++
+				}
 			}
-		}
-		for n > 0 {
-			for i := 0; i < n; {
-				bounds := &shardRanges[active[i]]
-				ch <- q[bounds.next].metric
-				bounds.next++
-				if bounds.next == bounds.end {
-					n--
-					active[i] = active[n]
-				} else {
-					i++
+			for n > 0 {
+				for i := 0; i < n; {
+					bounds := &ranges[active[i]]
+					if it := q[bounds.next]; it.restored == restored {
+						ch <- it.metric
+					}
+					bounds.next++
+					if bounds.next == bounds.end {
+						n--
+						active[i] = active[n]
+					} else {
+						i++
+					}
 				}
 			}
 		}
 		c.releaseQueue(scratch, q)
 		return ch, next, hasCold
 	}
-	for _, i := range q {
-		ch <- i.metric
+	for _, restored := range []bool{true, false} {
+		for _, it := range q {
+			if it.restored == restored {
+				ch <- it.metric
+			}
+		}
 	}
 
 	c.releaseQueue(scratch, q)
@@ -407,5 +419,5 @@ func (c *Cache) releaseQueue(scratch *queue, q queue) {
 	}
 	*scratch = q[:0]
 	c.queueScratch.Store(scratch)
-	c.queueScratchBytes.Store(int64(cap(q)) * 24)
+	c.queueScratchBytes.Store(int64(cap(q)) * 32)
 }

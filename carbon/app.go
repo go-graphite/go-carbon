@@ -111,10 +111,12 @@ type App struct {
 	heartbeatCollectorOnce sync.Once
 	// readRelease, when set, lets the next instance start while this one keeps
 	// serving reads after a dump stop (see SetReadHandoff).
-	readRelease   func()
-	pendingStop   chan struct{}
-	pendingDone   chan struct{}
-	readSuccessor string
+	readRelease     func()
+	pendingStop     chan struct{}
+	pendingDone     chan struct{}
+	legacyDrainStop chan struct{}
+	legacyDrainDone chan struct{}
+	readSuccessor   string
 	// successorResolver, if set, tells DumpStop the binary the service
 	// manager starts next when it differs from readSuccessor.
 	successorResolver func() string
@@ -935,8 +937,8 @@ func (app *App) Start() (err error) {
 			return err
 		}
 	}
-	// Live input cannot advance compressed block watermarks before old history
-	// drains. A validated checkpoint can serve reads throughout that drain.
+	// Live input follows admission of every older source. Legacy file storage
+	// retains its drain gate; shared storage tracks a finite per-metric prefix.
 	pendingReads := false
 	lap("carbonserver")
 	if restoreBeforeReceivers && !readsStarted {
@@ -954,7 +956,13 @@ func (app *App) Start() (err error) {
 	}
 	lap("input_log_replay")
 	if restoreBeforeReceivers && !readsStarted && !pendingReads {
-		app.restoreBeforeReceivers(core)
+		if app.loadCompleteIntakeCompatible() {
+			if err = app.restoreAtLoadComplete(core); err != nil {
+				return err
+			}
+		} else {
+			app.restoreBeforeReceivers(core)
+		}
 	}
 	lap("ordered_restore")
 	readsStarted = readsStarted || pendingReads
@@ -1516,8 +1524,8 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string) (err error) {
 	conf := app.Config
 	if cs := app.Carbonserver; cs != nil {
-		// Restore bypasses live quotas and notifications, just as before warmup.
-		// Start the filesystem scan only after restored files have been written.
+		// Restore bypasses live quotas and notifications. Enable live admission
+		// after the restored-name index and its quotas have been prepared.
 		if app.Config.Whisper.Quotas != nil {
 			core.SetThrottleWithHash(cs.ShouldThrottleMetricWithHash)
 		}

@@ -306,6 +306,11 @@ func newScanGate(limit time.Duration, onLimit func()) (gate chan struct{}, open 
 // stopPendingRecovery ends background recovery before a dump. Unclaimed saved
 // metrics are then written by DumpPoints and claimed ones are in cache.
 func (app *App) stopPendingRecovery() {
+	if app.legacyDrainStop != nil {
+		close(app.legacyDrainStop)
+		<-app.legacyDrainDone
+		app.legacyDrainStop, app.legacyDrainDone = nil, nil
+	}
 	if app.pendingStop != nil {
 		close(app.pendingStop)
 		<-app.pendingDone
