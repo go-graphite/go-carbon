@@ -48,6 +48,9 @@ func parseBudgetBytes(text string) (uint64, bool) {
 func (cfg *Config) resolveMemoryBudget(defined toml.MetaData, available func() (uint64, error), gomemlimit string) error {
 	text := strings.TrimSpace(cfg.Common.MemoryBudget)
 	if text == "" || text == "0" {
+		if gomemlimit == "" {
+			cfg.memoryLimit = defaultGoMemoryLimit(available)
+		}
 		return nil
 	}
 	var n uint64
@@ -85,8 +88,30 @@ func (cfg *Config) resolveMemoryBudget(defined toml.MetaData, available func() (
 	return nil
 }
 
+// defaultGoMemoryLimit is the Go soft memory limit without memory-budget or
+// GOMEMLIMIT: half of host RAM or the cgroup limit, whichever is smaller.
+// Native memory (Pebble block cache, memtables, native combine) sits outside
+// it, and the other half also leaves room for the page cache. Restart
+// recovery admits cached points against this limit, so a fixed GOMEMLIMIT
+// far below the host's RAM held its headroom at zero. Undetectable memory
+// keeps Go's default of no limit; GOMEMLIMIT=off also disables it.
+func defaultGoMemoryLimit(available func() (uint64, error)) int64 {
+	limit, err := available()
+	if err != nil || limit/2 < 64<<20 {
+		return 0
+	}
+	return int64(min(limit/2, math.MaxInt64))
+}
+
 func (cfg *Config) applyMemoryBudget() {
 	if cfg.memoryBudget == 0 {
+		if cfg.memoryLimit > 0 {
+			debug.SetMemoryLimit(cfg.memoryLimit)
+			zapwriter.Logger("config").Info("go memory limit defaulted to half of host memory",
+				zap.Int64("go_memory_limit", cfg.memoryLimit),
+				zap.String("go_memory_limit_source", "default"),
+			)
+		}
 		return
 	}
 	source := "GOMEMLIMIT"

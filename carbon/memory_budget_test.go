@@ -51,12 +51,13 @@ func TestMemoryBudget(t *testing.T) {
 			if tc.invalid {
 				return
 			}
-			if strings.HasSuffix(tc.budget, "%") != (calls == 1) {
+			disabled := tc.budget == "" || tc.budget == "0"
+			if (strings.HasSuffix(tc.budget, "%") || disabled && tc.gomemlimit == "") != (calls == 1) {
 				t.Fatalf("memory detection calls: %d", calls)
 			}
-			if tc.budget == "" || tc.budget == "0" {
-				if cfg.Whisper.StoreCacheSize != 256<<20 || cfg.Whisper.StoreMetadataCacheSize != 0 || cfg.Cache.MaxBytes != 0 || cfg.memoryLimit != 0 {
-					t.Fatal("defaults changed")
+			if disabled {
+				if cfg.Whisper.StoreCacheSize != 256<<20 || cfg.Whisper.StoreMetadataCacheSize != 0 || cfg.Cache.MaxBytes != 0 || cfg.memoryLimit != 100<<30 {
+					t.Fatalf("defaults changed: Go limit %d, want half of 200 GiB", cfg.memoryLimit)
 				}
 				return
 			}
@@ -143,6 +144,37 @@ func TestMemoryBudgetRuntime(t *testing.T) {
 	}
 	if debug.SetMemoryLimit(-1) != 751619276 {
 		t.Fatal("rejected reload changed runtime limit")
+	}
+}
+
+// Without memory-budget or GOMEMLIMIT the Go limit is half of host memory:
+// 1511 GiB hosts get about 755 GiB instead of a fixed pin far below RAM.
+func TestDefaultGoMemoryLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, budget, gomemlimit string
+		available                uint64
+		err                      error
+		want                     int64
+	}{
+		{name: "half of RAM", available: 1511 << 30, want: 1511 << 29},
+		{name: "small host", available: 8 << 30, want: 4 << 30},
+		{name: "zero budget", budget: "0", available: 200 << 30, want: 100 << 30},
+		{name: "GOMEMLIMIT wins", available: 1511 << 30, gomemlimit: "498GiB"},
+		{name: "GOMEMLIMIT off", available: 1511 << 30, gomemlimit: "off"},
+		{name: "undetectable", err: fmt.Errorf("no sysinfo")},
+		{name: "tiny", available: 64 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := NewConfig()
+			cfg.Common.MemoryBudget = tc.budget
+			available := func() (uint64, error) { return tc.available, tc.err }
+			if err := cfg.resolveMemoryBudget(toml.MetaData{}, available, tc.gomemlimit); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.memoryLimit != tc.want || cfg.memoryBudget != 0 {
+				t.Fatalf("Go limit %d budget %d, want %d and no budget", cfg.memoryLimit, cfg.memoryBudget, tc.want)
+			}
+		})
 	}
 }
 

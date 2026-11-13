@@ -1,7 +1,19 @@
 # Memory budget
 
 `[common] memory-budget` is an optional startup policy. The default, `""`, keeps
-the existing cache sizes and Go runtime limit. `"0"` also disables the policy.
+the existing cache sizes. `"0"` also disables the policy.
+
+Without `memory-budget` and without the `GOMEMLIMIT` environment variable, the Go
+runtime soft memory limit defaults to half of host memory (the smaller of RAM
+and the visible cgroup limit, detected as below). Restart recovery admits cached
+points against this limit (limit - Go memory in use - 5%), so a fixed
+`GOMEMLIMIT` far below RAM can hold recovery headroom at zero while the host has
+memory to spare. Native allocations (Pebble block cache, memtables, native
+combine) sit outside the Go limit; the other half of RAM holds them and the page
+cache. For example, a 1511 GiB host gets about 755 GiB; with about 150 GB of
+native memory the worst case is about 60% of RAM. `GOMEMLIMIT=off` restores Go's
+unlimited default; any other `GOMEMLIMIT` value wins. Detection failure (or an
+unsupported OS) leaves the Go default.
 Set it to a byte count with an optional `B`, `KiB`, `MiB`, `GiB` or `TiB`
 suffix (the suffixes `GOMEMLIMIT` accepts) or an integer percentage from 1% to
 100%. The resolved budget must be at least 64 MiB.
