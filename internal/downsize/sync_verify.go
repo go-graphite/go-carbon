@@ -216,9 +216,15 @@ func (s *syncer) fetch(ctx context.Context, store string, names []string, from, 
 	return got, err
 }
 
+// noDigest reports a store already known not to serve digests.
+func (s *syncer) noDigest(store string) bool {
+	v, ok := s.digests.Load(store)
+	return ok && !v.(bool)
+}
+
 // digest returns errSyncNoDigest once a store is known not to serve digests.
 func (s *syncer) digest(ctx context.Context, store string, names []string, w syncRange) (map[string][]syncDigest, error) {
-	if v, ok := s.digests.Load(store); ok && !v.(bool) {
+	if s.noDigest(store) {
 		return nil, errSyncNoDigest
 	}
 	got, err := s.b.Digest(ctx, store, names, w.From, w.Until)
@@ -239,14 +245,21 @@ func (s *syncer) digest(ctx context.Context, store string, names []string, w syn
 
 // checkWindow compares every name over one window: by digest where both
 // stores serve it, otherwise (and for digest mismatches) point by point at
-// the archive carbonserver serves for the window.
+// the archive carbonserver serves for the window. The target and every
+// source are digested concurrently: the calls are independent round trips,
+// so a window costs its slowest call (a cross-site replica) instead of the
+// sum of all of them.
 func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, w syncRange) error {
 	if s.isDown(s.o.to) {
 		return fmt.Errorf("target: %w", errSyncStoreDown)
 	}
-	var targetDigest map[string][]syncDigest
-	targetDigestErr := errSyncNoDigest
-	var targetPoints map[string]syncSeries
+	type sourceCheck struct {
+		source string
+		subset []string
+		digest map[string][]syncDigest
+		err    error
+	}
+	var checks []*sourceCheck
 	for src, source := range s.o.from {
 		subset := s.holders(src, names)
 		if len(subset) == 0 {
@@ -258,22 +271,46 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 			}
 			continue
 		}
-		detail := subset
-		if targetDigest == nil && targetDigestErr == errSyncNoDigest {
-			if targetDigest, targetDigestErr = s.digest(ctx, s.o.to, names, w); targetDigestErr != nil && !errors.Is(targetDigestErr, errSyncNoDigest) {
-				return fmt.Errorf("target digest: %w", targetDigestErr)
+		checks = append(checks, &sourceCheck{source: source, subset: subset})
+	}
+	if len(checks) == 0 {
+		return nil
+	}
+	targetDigest, targetErr := map[string][]syncDigest(nil), errSyncNoDigest
+	if !s.noDigest(s.o.to) {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			targetDigest, targetErr = s.digest(ctx, s.o.to, names, w)
+		}()
+		for _, c := range checks {
+			if s.noDigest(c.source) {
+				c.err = errSyncNoDigest
+				continue
 			}
-			if targetDigestErr != nil {
-				targetDigest, targetDigestErr = nil, nil // fall back below
-			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.digest, c.err = s.digest(ctx, c.source, c.subset, w)
+			}()
 		}
-		if targetDigest != nil {
-			sourceDigest, err := s.digest(ctx, source, subset, w)
-			switch {
+		wg.Wait()
+	}
+	if targetErr != nil && !errors.Is(targetErr, errSyncNoDigest) {
+		return fmt.Errorf("target digest: %w", targetErr)
+	}
+	byDigest := targetErr == nil // otherwise every source is read point by point
+	var targetPoints map[string]syncSeries
+	for _, c := range checks {
+		source, subset := c.source, c.subset
+		detail := subset
+		if byDigest {
+			switch err := c.err; {
 			case err == nil:
 				detail = detail[:0:0]
 				for _, n := range subset {
-					if mismatch, coarse := syncDigestMismatch(sourceDigest[n], targetDigest[n]); mismatch {
+					if mismatch, coarse := syncDigestMismatch(c.digest[n], targetDigest[n]); mismatch {
 						detail = append(detail, n)
 						for _, h := range coarse {
 							h.Name, h.Source, h.Window = n, source, w.Name
@@ -442,9 +479,9 @@ func (s *syncer) progressLine() {
 	elapsed := time.Since(started).Seconds()
 	fields := map[string]any{"phase": phase, "done": done, "total": total, "skipped": p.skipped.Load(),
 		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d", s.o.streams)}
-	if st, ok := s.b.(interface{ syncStats() (int64, int64) }); ok {
-		bytes, waits := st.syncStats()
-		fields["read_bytes"], fields["waits"] = bytes, waits
+	if st, ok := s.b.(interface{ syncStats() (int64, int64, int64) }); ok {
+		bytes, waits, busy := st.syncStats()
+		fields["read_bytes"], fields["waits"], fields["busy_retries"] = bytes, waits, busy
 		if elapsed > 0 {
 			fields["mb_per_second"] = float64(bytes) / 1e6 / time.Since(s.started).Seconds()
 		}
