@@ -67,6 +67,42 @@ intent; update the controller/status reader first. `completed_names` and
 `native_deferred_names` are the native-aware status counters. Counting entire
 `verified` ranges as completed is incorrect for mixed journals.
 
+### Range size, explicit name lists and idle transfers
+
+The daemon rejects native ranges above 4096 names (`chunkstore.NativeMaxRangeNames`).
+The controller sends every native plan stream as consecutive sub-ranges of at
+most 4096 names, so plans with larger segments (the old 100,000-name default,
+or `config --mode plan --segment-metrics 10000`) also work. Resume skips the
+sub-ranges that already completed. `store-copy plan --segment-metrics N` sets
+the names per plan stream segment and defaults to 4096.
+
+`store-copy plan --names FILE --source URL --target URL --out DIR --apply` plans an
+exact name list (one name per line, byte-sorted and unique: `LC_ALL=C sort -u`)
+from one buckyd origin to another. The result is the same plan, byte for byte,
+that `config --mode plan` writes for a one-member old ring, a one-member new ring
+and a `lines` inventory of that file. Use it for gap, deferred and missing-point
+fills with `run --engine metric`. `--estimated-bytes` (default 65536) is the
+estimate **per name** that the importer batches by.
+
+A spec input's `estimated_bytes` is also per name for `lines`, `buckyd` and
+`transfer` inventories, not the inventory total. Planning rejects values above
+64 MiB. With an inventory total there (1.2 GB per name in the 13 Nov user/vm
+deferred specs), the importer sent one name per transfer. `run` treats a
+committed per-name estimate above 128 MiB as unknown. It logs one
+`implausible_estimate` error event and batches those rows at 64 KiB per name.
+The target's HTTP 413 still splits any batch whose real export exceeds
+`--batch-bytes`.
+
+`run --transfer-idle-timeout` (default 2m, 0 disables) bounds each metric-engine
+pull, import and verify request. When no request or response bytes move for that
+long, the controller aborts the request and logs a `transfer_idle_timeout` event
+with `"level":"error"`. A batch of several names splits in half and retries. A
+single name gets 3 attempts, then the run aborts and keeps its journal. Verify is
+read-only and retries on its own. A native-deferred child is not retried: its
+bulk intent stays uncertain and fail-closed, as with any other lost response.
+Re-pulling a plain metric task is a target-wins union, so existing target points
+still win.
+
 ### Metric importer governor thresholds
 
 The metric importer pauses or halves admission when a target's read p99 rises

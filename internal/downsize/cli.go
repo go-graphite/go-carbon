@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/downsize/ringplan"
 )
 
@@ -42,14 +43,35 @@ func Main(args []string) error {
 		out := flags.String("out", "", "committed local plan directory")
 		apply := flags.Bool("apply", false, "write the committed plan; default only prints")
 		workers := flags.Int("workers", min(4, runtime.GOMAXPROCS(0)), "parallel inventory readers")
+		segment := flags.Int("segment-metrics", chunkstore.NativeMaxRangeNames, "names per plan stream segment; native ranges never exceed the receiver limit of 4096")
+		names := flags.String("names", "", "plan exactly this byte-sorted unique name list (LC_ALL=C sort -u) from --source to --target instead of --spec")
+		source := flags.String("source", "", "with --names: source buckyd origin, e.g. http://donor:4242")
+		target := flags.String("target", "", "with --names: target buckyd origin")
+		estimate := flags.Int64("estimated-bytes", ringplan.DefaultNamesEstimate, "with --names: estimated bytes PER NAME (not a total) that the importer batches by; at most 64 MiB")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
+		}
+		if *segment < 1 {
+			return errors.New("--segment-metrics must be positive")
+		}
+		if *names != "" || *source != "" || *target != "" {
+			if *spec != "" || *from != "" || *until != "" {
+				return errors.New("--names plans exclude --spec and time windows")
+			}
+			if *estimate < 1 {
+				return errors.New("--estimated-bytes must be positive")
+			}
+			manifest, err := ringplan.PlanNames(ctx, ringplan.NamesPlan{Names: *names, Source: *source, Target: *target, Out: *out, Apply: *apply, SegmentMetrics: *segment, EstimatedBytes: *estimate})
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(manifest)
 		}
 		window, err := parseNativeWindow(*from, *until)
 		if err != nil {
 			return err
 		}
-		manifest, err := ringplan.Resize(ctx, *spec, *out, *apply, *workers, window)
+		manifest, err := ringplan.ResizeSegmented(ctx, *spec, *out, *apply, *workers, *segment, window)
 		if err != nil {
 			return err
 		}
