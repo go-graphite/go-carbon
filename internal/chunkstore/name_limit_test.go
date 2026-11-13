@@ -12,8 +12,8 @@ import (
 // Creation refuses names longer than the intake limit, and the
 // explicit purge removes such names admitted before the limit was lowered.
 func TestMetricNameLimit(t *testing.T) {
-	if MaxMetricNameBytes != 4096 {
-		t.Fatalf("MaxMetricNameBytes = %d, want 4096", MaxMetricNameBytes)
+	if MaxMetricNameBytes != 8187 {
+		t.Fatalf("MaxMetricNameBytes = %d, want 8187", MaxMetricNameBytes)
 	}
 	s, _ := openTestStore(t, t.TempDir(), Options{fs: vfs.NewMem()})
 	defer closeTestStore(t, s)

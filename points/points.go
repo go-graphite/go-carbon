@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
+// MaxMetricNameBytes is the longest metric name accepted by the cache and
+// shared store. Discovery stores a virtual path ("/" + name + ".wsp") in an
+// 8192-byte field, so reserve its five framing bytes rather than rejecting
+// otherwise indexable names.
+const MaxMetricNameBytes = (8 << 10) - len("/.wsp")
+
 // Point value/time pair
-// MaxMetricNameBytes is the longest metric name go-carbon accepts. The cache
-// refuses longer names at intake and the shared store refuses to create them.
-// Names this long carry unbounded tag or URI values; the discovery index also
-// cannot hold names above about 8 KB, so such a series could be written but
-// never found.
-const MaxMetricNameBytes = 4096
 
 type Point struct {
 	Value     float64
