@@ -148,9 +148,9 @@ type Options struct {
 	// flushing them) when this changes; the directory must already exist.
 	WALDir string
 	// CacheShards sets the primary block cache shard count (exact stores).
-	// Zero chooses up to four per execution thread, with at least 4 MiB per
-	// shard for primary budgets below 1 GiB and 256 MiB for larger budgets
-	// (at least four shards). More shards reduce contention but can prevent
+	// Zero chooses up to four per execution thread, targeting 4 MiB per
+	// shard for primary budgets below 1 GiB and 256 MiB for larger budgets,
+	// with at least four shards. More shards reduce contention but can prevent
 	// large indexes from fitting in any individual shard.
 	CacheShards int
 	// TableCacheShards sets the table cache shard count; zero keeps Pebble's

@@ -154,7 +154,7 @@ store-l0-compaction-concurrency = 0
 # Requires restart.
 # store-wal-dir = ""
 # Primary block cache shards; zero chooses up to four per execution thread,
-# with at least four shards and a 4 MiB shard budget (256 MiB when the primary
+# with at least four shards and a target of 4 MiB per shard (256 MiB when the primary
 # cache is at least 1 GiB). More shards reduce lock contention but reject
 # blocks larger than one shard, including large SST indexes. Requires restart.
 # store-cache-shards = 0

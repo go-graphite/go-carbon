@@ -97,6 +97,8 @@ func BenchmarkRecoveryDrain(b *testing.B) {
 		{name: "baseline", cache: 64 << 10, fragment: restored},
 		{name: "oversharded", cache: 1 << 20, fragment: restored, shards: 64},
 		{name: "cache-fit", cache: 1 << 20, fragment: restored, shards: 4},
+		{name: "large-shards-old", cache: 16 << 20, fragment: restored, shards: 768},
+		{name: "large-shards-new", cache: 16 << 20, fragment: restored, shards: 356},
 		{name: "cache1MiB", cache: 1 << 20, fragment: restored},
 		{name: "cache8MiB", cache: 8 << 20, fragment: restored},
 		{name: "point-lookups", cache: 64 << 10, fragment: restored, lookups: true},
