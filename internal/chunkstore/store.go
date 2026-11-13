@@ -147,9 +147,11 @@ type Options struct {
 	// Empty keeps them in the store directory. Open moves existing logs (by
 	// flushing them) when this changes; the directory must already exist.
 	WALDir string
-	// CacheShards sets the block cache shard count (exact stores). Zero keeps
-	// four per execution thread. More shards cut lock contention between
-	// readers and the inserts that misses cause.
+	// CacheShards sets the primary block cache shard count (exact stores).
+	// Zero chooses up to four per execution thread, with at least 4 MiB per
+	// shard for primary budgets below 1 GiB and 256 MiB for larger budgets
+	// (at least four shards). More shards reduce contention but can prevent
+	// large indexes from fitting in any individual shard.
 	CacheShards int
 	// TableCacheShards sets the table cache shard count; zero keeps Pebble's
 	// one per execution thread.
@@ -727,9 +729,16 @@ func newExactBlockCaches(size int64, shards int) (*pebble.Cache, *pebble.Cache, 
 // Pebble's default jumps from four shards per execution thread to only four
 // shards when their individual budgets would be below 4 MiB. Choose the largest
 // affordable count instead, preserving small-cache overhead and total capacity.
+// Large caches need room for the 158 MiB top-level indexes produced by large
+// ingests: a block larger than a shard is rejected on every read. Reserve at
+// least 256 MiB per shard when the total budget can support four such shards.
 // Large range-deletion blocks keep their separate, less-partitioned cache.
 func exactBlockCacheShards(size int64, procs int) int {
-	return max(4, int(min(int64(4*max(1, procs)), size/(4<<20))))
+	minimumShard := int64(4 << 20)
+	if size >= 1<<30 {
+		minimumShard = 256 << 20
+	}
+	return max(4, int(min(int64(4*max(1, procs)), size/minimumShard)))
 }
 
 // ReadCacheEpoch identifies a process-local cache namespace. Ordinary ingestion
