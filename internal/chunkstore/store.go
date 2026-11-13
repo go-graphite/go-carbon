@@ -250,6 +250,8 @@ type Store struct {
 	referenceFormat       atomic.Bool
 	// transferRereadMetadata disables the unchanged-epoch commit shortcut (tests).
 	transferRereadMetadata bool
+	// transferSplitSingles restores the single-name split of contended groups (tests).
+	transferSplitSingles bool
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
 	fetchTimings        fetchTimingCounters
