@@ -25,12 +25,8 @@ func TestBuckydTransferDebtReload(t *testing.T) {
 		if err := app.ReloadConfig(); err != nil {
 			t.Fatal(err)
 		}
-		want := limit
-		if want == 0 {
-			want = 8 << 30
-		}
-		if service.TransferMaxCompactionDebt() != want {
-			t.Fatalf("live debt cap %d, want %d", service.TransferMaxCompactionDebt(), want)
+		if service.TransferMaxCompactionDebt() != limit {
+			t.Fatalf("live debt cap %d, want %d", service.TransferMaxCompactionDebt(), limit)
 		}
 		if app.Buckyd != service || app.MetricStore != db || app.Persister != writer {
 			t.Fatal("debt reload replaced a running component")
@@ -53,7 +49,7 @@ func TestBuckydTransferDebtReload(t *testing.T) {
 	if err := app.ReloadConfig(); err == nil {
 		t.Fatal("listener change accepted without restart")
 	}
-	if service.TransferMaxCompactionDebt() != 8<<30 || service.MaxTransfers() != 3 {
+	if service.TransferMaxCompactionDebt() != 0 || service.MaxTransfers() != 3 {
 		t.Fatal("rejected reload changed live debt or transfer cap")
 	}
 }

@@ -120,8 +120,11 @@ func TestBulkRequiresExplicitRootWildcard(t *testing.T) {
 
 func TestTransferDebtLimit(t *testing.T) {
 	s, _ := testService(t)
-	if s.TransferMaxCompactionDebt() != 8<<30 {
-		t.Fatalf("default debt limit %d", s.TransferMaxCompactionDebt())
+	if s.TransferMaxCompactionDebt() != 0 {
+		t.Fatalf("default debt limit %d, want 0 (no debt check)", s.TransferMaxCompactionDebt())
+	}
+	if s.storagePressure(chunkstore.Stats{CompactionDebt: 1 << 40}) {
+		t.Fatal("default config paused transfers on compaction debt alone")
 	}
 	for _, c := range []struct {
 		limit, debt int64
@@ -131,7 +134,7 @@ func TestTransferDebtLimit(t *testing.T) {
 		{8 << 30, 8<<30 + 1, true},
 		{24 << 30, 12 << 30, false},
 		{8 << 30, 12 << 30, true},
-		{0, 8<<30 + 1, true},
+		{0, 1 << 40, false},
 		{-1, 1 << 40, false},
 	} {
 		s.SetTransferMaxCompactionDebt(c.limit)
@@ -139,7 +142,7 @@ func TestTransferDebtLimit(t *testing.T) {
 			t.Errorf("limit %d debt %d: paused %v, want %v", c.limit, c.debt, got, c.paused)
 		}
 	}
-	if s.config.TransferMaxCompactionDebt != 8<<30 {
+	if s.config.TransferMaxCompactionDebt != 0 {
 		t.Fatal("live updates changed immutable startup config")
 	}
 	s.SetTransferMaxCompactionDebt(-1)

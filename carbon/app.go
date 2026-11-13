@@ -1828,7 +1828,7 @@ func (app *App) startBuckyd() (err error) {
 			service := app.Buckyd
 			app.PromRegisterer.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: "buckyd_transfer_max_compaction_debt_bytes",
-				Help: "Effective live transfer compaction debt cap in bytes; negative disables only the debt check.",
+				Help: "Effective live transfer compaction debt cap in bytes; zero or negative means no debt check.",
 			}, func() float64 { return float64(service.TransferMaxCompactionDebt()) }))
 			app.PromRegisterer.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: "buckyd_auth_secret_ready",
