@@ -23,6 +23,8 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// keepSnapshotReadAllocations retains the previous reader as a test oracle.
+	keepSnapshotReadAllocations bool
 	// RangeReadsEnabled prunes sealed groups using their existing time headers during
 	// Fetch. Skipped payloads are not decompressed or checked by the sealed CRC.
 	// Writes and verification retain complete decoding. Irregular timestamps
@@ -816,6 +818,7 @@ func (c *ContinuationCodec) Snapshot(ctx context.Context, kv store.ContinuationI
 			return store.Snapshot{}, err
 		}
 	}
+	fs.snapshotReads = !c.keepSnapshotReadAllocations
 	return continuationArchiveSnapshot(ctx, w, m)
 }
 
