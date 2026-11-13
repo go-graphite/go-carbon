@@ -567,6 +567,54 @@ func (s *Store) acquireTransfer(names []string, try bool, epochs []uint64) (unlo
 	}, len(stripes), unchanged
 }
 
+// acquireTransferFree locks, without waiting, every free stripe of names;
+// held[i] reports whether names[i]'s stripe is owned. When no stripe is free
+// it waits for all of them through lockset.Lock, so a round always progresses
+// without sleeping on a partial set. unchanged[i] is acquireTransfer's epoch
+// proof for an owned name.
+func (s *Store) acquireTransferFree(names []string, epochs []uint64) (unlock func(), held, unchanged []bool, stripeCount int) {
+	stripes := s.transferStripes(names)
+	owned := make([]uint64, 0, len(stripes))
+	for _, stripe := range stripes {
+		if s.metricMu[stripe].TryLock() {
+			owned = append(owned, stripe)
+		}
+	}
+	if len(owned) == 0 {
+		lockset.Lock(s.metricMu[:], stripes)
+		owned = append(owned, stripes...)
+	}
+	held = make([]bool, len(names))
+	unchanged = make([]bool, len(names))
+	for i, name := range names {
+		stripe := s.metricStripe(name)
+		_, held[i] = slices.BinarySearch(owned, stripe)
+		unchanged[i] = held[i] && epochs[i] != math.MaxUint64 && epochs[i] == s.mutationEpoch[stripe].Load()
+	}
+	for i, name := range names {
+		if held[i] {
+			s.beginStateMutation(name)
+		}
+	}
+	return func() {
+		for i, name := range names {
+			if !held[i] {
+				continue
+			}
+			ring := &s.metadataCache[s.metricStripe(name)]
+			for j := range ring.entries {
+				if ring.entries[j].Name == name {
+					ring.entries[j] = Metadata{}
+				}
+			}
+			s.endStateMutation(name)
+		}
+		for i := len(owned) - 1; i >= 0; i-- {
+			s.metricMu[owned[i]].Unlock()
+		}
+	}, held, unchanged, len(owned)
+}
+
 // ContinuationArchiveRestorer reconstructs independent authoritative archives.
 // Used only for overlapping transfers; the usual raw copy needs no codec work.
 type ContinuationArchiveRestorer interface {

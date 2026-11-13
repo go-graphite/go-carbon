@@ -11,6 +11,10 @@ import (
 // entry, the behaviour before the unchanged-epoch shortcut.
 func (s *Store) SetTransferRereadMetadataForTest(on bool) { s.transferRereadMetadata = on }
 
+// SetTransferSplitSinglesForTest restores the single-name publication of
+// contended groups, the behaviour before partitioned publication.
+func (s *Store) SetTransferSplitSinglesForTest(on bool) { s.transferSplitSingles = on }
+
 // FlushForTest flushes the memtable so reads probe sstable filter blocks.
 func (s *Store) FlushForTest() error { return s.db.Flush() }
 
