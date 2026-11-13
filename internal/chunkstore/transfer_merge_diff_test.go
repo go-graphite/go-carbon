@@ -282,7 +282,8 @@ func diffSnapshots(a, b store.Snapshot) string {
 }
 
 // TestTransferMergeAppendMatchesRestore is the gate for the append merge of
-// present continuation names. Random transfers (absent, present, overlapping,
+// present continuation names, and for the in-place merges of classic copies
+// (a classic source, or a compressed source meeting a classic target). Random transfers (absent, present, overlapping,
 // NaN, late, ring-aliased, stale names, written out of order; sources and
 // targets each compressed or classic) are imported into two
 // identically seeded targets: one with the append merge, one forced through
@@ -386,13 +387,15 @@ func TestTransferMergeAppendMatchesRestore(t *testing.T) {
 			}
 			compare("after")
 			kinds, formats := map[string]int{}, map[string]int{}
-			classicPresent := 0
+			classicPresent, classicTargetPresent := 0, 0
 			for _, c := range cases {
 				kinds[c.kind]++
 				if c.kind != "absent" {
 					formats[c.format()]++
 					if c.sourceClassic > 0 {
 						classicPresent++
+					} else if c.targetClassic > 0 {
+						classicTargetPresent++
 					}
 				}
 			}
@@ -420,8 +423,13 @@ func TestTransferMergeAppendMatchesRestore(t *testing.T) {
 			if int(appended) < kinds["present"]/4 {
 				t.Fatalf("only %d of %d present names appended", appended, kinds["present"])
 			}
-			if int(classic) < classicPresent/3 {
-				t.Fatalf("only %d of %d present names with a classic source merged in place", classic, classicPresent)
+			// A compressed source meeting a classic target is merged into a copy
+			// of the target in place, never refused for the layout alone.
+			if int(classic) < (classicPresent+classicTargetPresent)/3 {
+				t.Fatalf("only %d of %d present names with a classic source or target merged in place", classic, classicPresent+classicTargetPresent)
+			}
+			if n := causes[store.TransferMergeFallbackLayout+"/classic-target"]; n != 0 {
+				t.Fatalf("%d compressed sources refused for a classic target", n)
 			}
 		})
 	}

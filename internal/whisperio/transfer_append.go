@@ -24,7 +24,9 @@ import (
 // is the next step towards the per-name target.
 //
 // A classic (uncompressed) source is merged in place instead, whatever the
-// target's format: see mergeClassicArchives. classic reports that path.
+// target's format: see mergeClassicArchives. A compressed source meeting a
+// classic target is merged into a copy of the target: see
+// mergeIntoClassicTarget. classic reports either in-place path.
 func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, dst store.ContinuationIO, want, sourceSnapshot, targetSnapshot store.Snapshot, clock func() time.Time) (fallback string, classic bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -62,7 +64,19 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 	}
 	defer tw.Close()
 	if !tw.IsCompressed() {
-		return store.TransferMergeFallbackLayout + "/classic-target", false, nil
+		// The result is classic either way: merge the source into a copy of
+		// the target in place, under the same policy check as a classic source.
+		if store.AggregationMethod(tw.AggregationMethod()) != want.Metadata.AggregationMethod {
+			return store.TransferMergeFallbackLayout + "/target-aggregation", true, nil
+		}
+		if tw.XFilesFactor() != want.Metadata.XFilesFactor {
+			return store.TransferMergeFallbackLayout + "/target-xff", true, nil
+		}
+		if err := tw.Close(); err != nil {
+			return "", true, err
+		}
+		fallback, err := mergeIntoClassicTarget(ctx, source, target, dst, want, sourceSnapshot, targetSnapshot, clock)
+		return fallback, true, err
 	}
 	// Fold sidecars as Snapshot does, so stored points match want.
 	if err := w.MergeOutOfOrder(); err != nil {

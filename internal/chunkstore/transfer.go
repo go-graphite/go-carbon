@@ -625,7 +625,8 @@ type ContinuationArchiveRestorer interface {
 // ContinuationArchiveMerger merges a newer target copy into a staged source
 // without re-encoding the source's history: a compressed source gets the
 // target's newer points appended, a classic one has the slots that differ
-// from want written in place (classic). It writes to dst only when the merged
+// from want written in place, and a compressed source meeting a classic
+// target is written into a copy of the target in place (both classic). It writes to dst only when the merged
 // archives equal want and then returns ""; otherwise it returns one of
 // TransferMergeFallbackReasons and the caller uses RestoreArchives. want was
 // built from sourceSnapshot and targetSnapshot.
@@ -637,7 +638,7 @@ type ContinuationArchiveMerger interface {
 // appending (see ContinuationArchiveMerger).
 const (
 	// TransferMergeFallbackLayout: the archive layouts or aggregation
-	// differ, or a compressed source meets a classic target.
+	// differ.
 	TransferMergeFallbackLayout = "layout"
 	// TransferMergeFallbackClassic: a classic source the in-place merge
 	// cannot take: sidecar files, shared references, an empty slot zero with

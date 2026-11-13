@@ -28,6 +28,44 @@ import (
 // calls this only when the union normalized nothing, so source holds sorted,
 // unique, on-grid, non-NaN points.
 func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst store.ContinuationIO, want, source, target store.Snapshot, clock func() time.Time) (string, error) {
+	if fallback, err := mergeClassicSlots(ctx, overlay, want, source, target, clock); fallback != "" || err != nil {
+		return fallback, err
+	}
+	return "", overlay.applyTo(dst)
+}
+
+// mergeIntoClassicTarget merges a compressed staged source into a copy of
+// the classic target, the mirror of mergeClassicArchives: the target's file
+// is the base, and each source point that survives in want is written into
+// its slot. On success dst, which holds the staged source, is replaced by the
+// target's keys plus the merge's changes. Nothing is decoded or re-encoded
+// beyond the touched groups, and the same checks apply, against the target's
+// points instead of the source's.
+func mergeIntoClassicTarget(ctx context.Context, source, target, dst store.ContinuationIO, want, sourceSnapshot, targetSnapshot store.Snapshot, clock func() time.Time) (string, error) {
+	overlay := newContinuationOverlay(target)
+	if fallback, err := mergeClassicSlots(ctx, overlay, want, targetSnapshot, sourceSnapshot, clock); fallback != "" || err != nil {
+		return fallback, err
+	}
+	// mergeClassicSlots refused any overlay deletes, so the merged file is
+	// the target's keys with the overlay's values on top.
+	if err := source.Visit(nil, func(key, _ []byte) error { return dst.Delete(key) }); err != nil {
+		return "", err
+	}
+	if err := target.Visit(nil, func(key, value []byte) error {
+		if _, changed := overlay.values[string(key)]; changed {
+			return nil
+		}
+		return dst.Set(key, value)
+	}); err != nil {
+		return "", err
+	}
+	return "", overlay.applyTo(dst)
+}
+
+// mergeClassicSlots does the work of mergeClassicArchives on overlay, a
+// private copy of the classic file source was read from, and leaves the
+// changes there: "" means the overlay now holds want.
+func mergeClassicSlots(ctx context.Context, overlay *continuationOverlay, want, source, target store.Snapshot, clock func() time.Time) (string, error) {
 	fs := newContinuationFiles(overlay, false).withClock(clock)
 	if err := fs.prefetchNames(); err != nil {
 		return "", err
@@ -211,7 +249,7 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 	if len(overlay.deleted) != 0 {
 		return store.TransferMergeFallbackClassic + "/deletes", nil
 	}
-	return "", overlay.applyTo(dst)
+	return "", nil
 }
 
 // classicMergeMatches reports whether source minus removed plus added equals
