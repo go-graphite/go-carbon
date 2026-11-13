@@ -111,7 +111,7 @@ func MoveMain(args []string) error {
 	flags.BoolVar(&o.reconcile, "reconcile", false, "stage versions, gate on writer drain, reconcile and verify complete coverage while retaining sources")
 	flags.BoolVar(&o.delete, "delete", false, "delete retired source copies after verification; requires barrier")
 	flags.BoolVar(&o.auto, "auto", true, "adapt parallelism, batch size and deletion pacing to host headroom")
-	debtGuard := flags.Bool("debt-guard", true, "pause admission on compaction-debt ratio/growth and ask targets to apply transfer-max-compaction-debt; false keeps only hard limits (write stalls, L0 stop margin, memory)")
+	debtGuard := flags.Bool("debt-guard", false, "pause admission on compaction-debt ratio/growth and ask targets to apply a configured transfer-max-compaction-debt; off by default, which keeps only hard limits (write stalls, L0 stop margin, memory)")
 	flags.BoolVar(&o.localLab, "local-lab", false, "loopback-only synthetic host telemetry for local tests")
 	flags.BoolVar(&o.blockReads, "block-reads", false, "renew expiring read-isolation leases on helper hosts")
 	flags.StringVar(&o.replica, "replica-url", "", "carbonserver or carbonapi origin serving the same cluster in another site")

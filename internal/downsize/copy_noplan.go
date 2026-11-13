@@ -56,7 +56,7 @@ func PlanFreeCopyMain(ctx context.Context, args []string) error {
 	flags.StringVar(&o.state, "state", "", "append-only journal of completed name ranges; rerun the same command to resume")
 	flags.StringVar(&o.engine, "engine", "metric", "metric (importer). bulk is not wired to plan-free copy yet")
 	flags.StringVar(&o.tokenEnv, "token-env", "BUCKYD_TOKEN", "environment variable holding the buckyd JWT")
-	flags.BoolVar(&o.debtGuard, "debt-guard", true, "let the target pause imports on transfer-max-compaction-debt (429); false keeps only its hard limits (write stalls, L0 stop margin)")
+	flags.BoolVar(&o.debtGuard, "debt-guard", false, "let the target pause imports on a configured transfer-max-compaction-debt (429); off by default, which keeps only its hard limits (write stalls, L0 stop margin)")
 	flags.IntVar(&o.streams, "streams", 0, "parallel transfers; 0 uses min(64, source and target MaxTransfers)")
 	flags.Int64Var(&o.maxBytes, "max-batch-bytes", 64<<20, "batch byte cap (real exported bytes); capped by the target max_body_bytes. A single name may use the whole max_body_bytes")
 	flags.IntVar(&o.maxNames, "max-batch-names", 8192, "names per batch cap (at most 10000)")

@@ -52,10 +52,11 @@ type Config struct {
 	// MaintenanceWorkers is the number of names one maintenance request
 	// prepares concurrently; replies keep request order. Zero selects 8.
 	MaintenanceWorkers int `toml:"maintenance-workers"`
-	// TransferMaxCompactionDebt pauses transfer imports, pulls and deletes (429)
-	// while Pebble's compaction-debt estimate exceeds it. Zero selects 8 GiB;
-	// negative disables the debt check (write stalls and L0 still pause).
-	// Reloadable with SIGHUP.
+	// TransferMaxCompactionDebt, when positive, pauses transfer imports, pulls
+	// and deletes (429) while Pebble's compaction-debt estimate exceeds it.
+	// Zero (the default) or negative disables the debt check: compaction debt
+	// alone is not a throttle signal. Write stalls and L0 close to Pebble's
+	// stop-writes threshold always pause. Reloadable with SIGHUP.
 	TransferMaxCompactionDebt int64  `toml:"transfer-max-compaction-debt"`
 	JWTSecretFile             string `toml:"auth-jwt-secret-file"`
 	// WaitForJWTSecret keeps ingestion running when boot-time secret delivery
@@ -208,9 +209,6 @@ func validateConfig(config Config) error {
 func normalizeConfig(config *Config) {
 	if config.CopyMinFreeBytes == 0 {
 		config.CopyMinFreeBytes = 32 << 30
-	}
-	if config.TransferMaxCompactionDebt == 0 {
-		config.TransferMaxCompactionDebt = 8 << 30
 	}
 	if config.Hash == "" {
 		config.Hash = "carbon"
@@ -395,12 +393,10 @@ func (s *Service) SetStoreCopy(manager *storecopy.Manager) {
 func (s *Service) StoreCopyActive() bool { return s.storeCopy != nil && s.storeCopy.Active() }
 
 // SetTransferMaxCompactionDebt updates transfer admission without restarting the
-// service. Zero restores the default 8 GiB cap; negative disables only the debt
-// check. In-flight requests finish under their already admitted policy.
+// service. A positive limit caps admission on compaction debt; zero or negative
+// disables only the debt check. In-flight requests finish under their already
+// admitted policy.
 func (s *Service) SetTransferMaxCompactionDebt(limit int64) {
-	if limit == 0 {
-		limit = 8 << 30
-	}
 	s.transferDebt.Store(limit)
 }
 
