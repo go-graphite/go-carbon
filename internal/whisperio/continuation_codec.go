@@ -23,6 +23,8 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	keepPrependArchives bool // reference import path for differential tests
+
 	// RangeReadsEnabled prunes sealed groups using their existing time headers during
 	// Fetch. Skipped payloads are not decompressed or checked by the sealed CRC.
 	// Writes and verification retain complete decoding. Irregular timestamps
@@ -50,6 +52,8 @@ type ContinuationCodec struct {
 	// keepTailReads retains the previous read-per-propagation path as an
 	// oracle for tests and benchmarks.
 	keepTailReads bool
+	// keepClassicSnapshotReads retains the Whisper byte reader as a test oracle.
+	keepClassicSnapshotReads bool
 }
 
 // foldsImportedSidecars is disabled only by legacy-oracle tests.
@@ -811,6 +815,9 @@ func (c *ContinuationCodec) Snapshot(ctx context.Context, kv store.ContinuationI
 		return store.Snapshot{}, err
 	}
 	defer w.Close()
+	if !w.IsCompressed() && !c.keepClassicSnapshotReads && reflect.DeepEqual(w.StorageLayout(), fs.files["main.wsp"].layout) {
+		return classicContinuationSnapshot(ctx, fs, m)
+	}
 	if w.IsCompressed() {
 		if err := w.MergeOutOfOrder(); err != nil {
 			return store.Snapshot{}, err
