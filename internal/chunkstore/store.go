@@ -1589,10 +1589,11 @@ func (s *Store) Metadata(ctx context.Context, name string) (Metadata, error) {
 	if !s.catalogMembership.mayContain(name) {
 		return Metadata{}, ErrNotFound
 	}
-	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+	releaseSlot, err := s.acquireReadSlot(ctx)
+	if err != nil {
 		return Metadata{}, err
 	}
-	defer s.readSlots.Release(1)
+	defer releaseSlot()
 	// Like Fetch, read at one committed view without waiting for a writer's
 	// stripe. The epoch prevents a cached state newer than that view from
 	// being used, and prevents a concurrent mutation from accepting a fill.

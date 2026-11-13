@@ -40,12 +40,19 @@ type retentionInfo struct {
 
 func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, error) {
 	metricStore := listener.getMetricStore()
+	releaseGuard := func() {}
+	defer func() { releaseGuard() }()
 	if metricStore != nil {
+		ctx, releaseSlot := context.Background(), func() {}
 		if metricStore.IncrementalSource() != "" {
-			release := metricStore.OriginalReadGuard(metric)
-			defer release()
+			var err error
+			if ctx, releaseSlot, releaseGuard, err = guardedStoreRead(metricStore, metric); err != nil {
+				releaseGuard = func() {}
+				return metricInfo{}, err
+			}
 		}
-		metadata, err := metricStore.Metadata(context.Background(), metric)
+		metadata, err := metricStore.Metadata(ctx, metric)
+		releaseSlot()
 		if err == nil {
 			return metricInfoFromShared(metadata), nil
 		}
@@ -57,7 +64,16 @@ func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, 
 	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 	w, err := whisper.Open(path)
 	if err != nil && metricStore != nil && metricStore.IncrementalSource() != "" && errors.Is(err, os.ErrNotExist) {
-		metadata, retryErr := metricStore.Metadata(context.Background(), metric)
+		// As in fetchFromDisk: admit the retry before taking the guard again.
+		releaseGuard()
+		releaseGuard = func() {}
+		ctx, releaseSlot, guard, admitErr := guardedStoreRead(metricStore, metric)
+		if admitErr != nil {
+			return metricInfo{}, admitErr
+		}
+		releaseGuard = guard
+		metadata, retryErr := metricStore.Metadata(ctx, metric)
+		releaseSlot()
 		if retryErr == nil {
 			return metricInfoFromShared(metadata), nil
 		}

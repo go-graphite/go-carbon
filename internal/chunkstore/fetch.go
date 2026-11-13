@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -19,6 +21,53 @@ const (
 	maxConcurrentStoreReads = 32
 	maxConcurrentBlockLoads = 16
 )
+
+// readAdmission is a store read slot taken by AdmitRead and carried by its
+// context. Fetch and Metadata calls with that context use it instead of
+// waiting for another slot until the caller releases it.
+type readAdmission struct {
+	store    *Store
+	released atomic.Bool
+}
+
+type readAdmissionKey struct{}
+
+// AdmitRead takes a store read slot for name before the caller takes
+// OriginalReadGuard. A reader queued for a slot then holds no guard stripe, so
+// a read queue cannot stall persister writes (SharedWriteGuard) on the same
+// stripes: in one production stall 5,576 queued readers held stripes and
+// blocked 93 persister workers. Fetch and Metadata with the returned context
+// reuse the slot. The release function is idempotent and must always be
+// called; callers release as soon as the store reads are done. Names the
+// catalog rules out take no slot, because Fetch answers them without one.
+func (s *Store) AdmitRead(ctx context.Context, name string) (context.Context, func(), error) {
+	if !s.catalogMembership.mayContain(name) {
+		return ctx, func() {}, nil
+	}
+	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+		return ctx, func() {}, err
+	}
+	a := &readAdmission{store: s}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			a.released.Store(true)
+			s.readSlots.Release(1)
+		})
+	}
+	return context.WithValue(ctx, readAdmissionKey{}, a), release, nil
+}
+
+// acquireReadSlot uses a held admission from ctx, or waits for a slot.
+func (s *Store) acquireReadSlot(ctx context.Context) (func(), error) {
+	if a, ok := ctx.Value(readAdmissionKey{}).(*readAdmission); ok && a.store == s && !a.released.Load() {
+		return func() {}, nil
+	}
+	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	return func() { s.readSlots.Release(1) }, nil
+}
 
 // Now is the clock Fetch chooses archives and clamps ranges by.
 func (s *Store) Now() time.Time { return s.now() }
@@ -42,10 +91,11 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	if !s.catalogMembership.mayContain(name) {
 		return nil, ErrNotFound
 	}
-	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+	releaseSlot, err := s.acquireReadSlot(ctx)
+	if err != nil {
 		return nil, err
 	}
-	defer s.readSlots.Release(1)
+	defer releaseSlot()
 	// The metadata cache answers only for state committed before the view
 	// opens, judged by the epoch captured first (see stateCache).
 	cache := s.stateCache
@@ -67,7 +117,6 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	}()
 	var state *metricState
 	var m Metadata
-	var err error
 	if cache != nil {
 		state = cache.get(stripe, name, epoch)
 	}
