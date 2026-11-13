@@ -71,8 +71,8 @@ func TestCacheByteLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := c.EstimatedBytes()
-	c.SetMaxBytes(uint64(base + 4000))
-	name := strings.Repeat("long.metric.", 512)
+	c.SetMaxBytes(uint64(base + 2000))
+	name := strings.Repeat("long.metric.", 300)
 	c.AddPoint([]byte(name), 1, 100)
 	if !c.Has(name) || !c.WriteoutReady(name) {
 		t.Fatal("byte pressure did not bypass batching")

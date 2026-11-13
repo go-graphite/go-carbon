@@ -132,6 +132,12 @@ type continuationIO struct {
 	// Non-nil only for a new ID/generation whose publication still has a
 	// catalog conflict check. Its visible state is entirely in this batch.
 	pendingKeys map[string]struct{}
+	// fencedReader marks a reader (a snapshot) that the caller proves still
+	// holds every key of this generation when the batch commits: transfer
+	// publication re-checks the generation's revision under its writer
+	// stripes, and every changing write bumps it. DeletePrefix then
+	// point-deletes the reader's keys instead of writing a range tombstone.
+	fencedReader bool
 	// iter serves the io's metric-prefixed walks and probes through one
 	// iterator (see withIterator); iterBusy sends a read made from inside a
 	// Visit callback to a fresh lookup, since it would reposition iter.
@@ -308,6 +314,10 @@ func (io *continuationIO) ContinuationRevision() uint64 { return io.revision }
 // the caller deletes its metric-prefixed range. reader must observe the
 // generation's current descriptors.
 func (s *Store) dropContinuation(ctx context.Context, reader pebble.Reader, batch *pebble.Batch, m Metadata) error {
+	return s.dropContinuationIO(ctx, s.newContinuationIO(ctx, reader, batch, m))
+}
+
+func (s *Store) dropContinuationIO(ctx context.Context, io *continuationIO) error {
 	if !s.timeBuckets {
 		return nil
 	}
@@ -315,7 +325,7 @@ func (s *Store) dropContinuation(ctx context.Context, reader pebble.Reader, batc
 	if !ok {
 		return fmt.Errorf("%w: continuation codec cannot drop time-partitioned keys", ErrFormat)
 	}
-	return dropper.Drop(ctx, s.newContinuationIO(ctx, reader, batch, m))
+	return dropper.Drop(ctx, io)
 }
 
 func continuationPrefix(id, generation uint64) []byte {
@@ -544,7 +554,7 @@ func (io *continuationIO) DeletePrefix(prefix []byte) error {
 		return nil
 	}
 	continuationRangeDeletes.Add(1)
-	err := io.batch.DeleteRange(start, prefixEnd(start), nil)
+	err := deleteRange(io.batch, rangeDeleteContinuationPrefix, start, prefixEnd(start))
 	io.changed = io.changed || err == nil
 	return err
 }
@@ -567,10 +577,16 @@ var continuationRangeDeletes atomic.Uint64
 // batch's own writes; otherwise a key set earlier in the batch would survive.
 // Store callers serialize mutations for this metric generation through commit.
 func (io *continuationIO) visibleKeysUpTo(start []byte, limit int) ([][]byte, bool, error) {
-	if !io.readsOwnBatch() {
+	var reader pebble.Reader
+	switch {
+	case io.readsOwnBatch():
+		reader = io.batch
+	case io.fencedReader && io.reader != nil:
+		reader = io.reader
+	default:
 		return nil, false, nil
 	}
-	iter, err := io.batch.NewIter(&pebble.IterOptions{LowerBound: start, UpperBound: prefixEnd(start)})
+	iter, err := reader.NewIter(&pebble.IterOptions{LowerBound: start, UpperBound: prefixEnd(start)})
 	if err != nil {
 		return nil, false, err
 	}

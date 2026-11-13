@@ -97,6 +97,7 @@ type metricStruct struct {
 	FileScanTimeNS                       uint64
 	IndexBuildTimeNS                     uint64
 	MetricStoreIndexUpdateErrors         uint64
+	MetricStoreIndexUnindexableNames     uint64
 	MetricsFetched                       uint64
 	ThrottledCreates                     uint64
 	MaxCreatesPerSecond                  uint64
@@ -415,6 +416,7 @@ type prometheus struct {
 	metricStoreIndexRebuilds         prom.Counter
 	metricStoreIndexRebuildDurations prom.Histogram
 	metricStoreIndexUpdateErrors     prom.Counter
+	metricStoreIndexUnindexable      prom.Gauge
 
 	returnedMetrics prom.Counter
 	returnedMetric  func()
@@ -500,6 +502,10 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 			Name: "metric_store_index_update_errors_total",
 			Help: "Failed shared-store discovery index updates, excluding cancellation by shutdown.",
 		}),
+		metricStoreIndexUnindexable: prom.NewGauge(prom.GaugeOpts{
+			Name: "metric_store_index_unindexable_names",
+			Help: "Shared-store names the last full discovery index rebuild skipped because the index cannot hold them (path too long, NUL or trailing dot).",
+		}),
 	}
 
 	c.prometheus.request = func(endpoint string, code int) {
@@ -554,6 +560,7 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	reg.MustRegister(c.prometheus.metricStoreIndexRebuilds)
 	reg.MustRegister(c.prometheus.metricStoreIndexRebuildDurations)
 	reg.MustRegister(c.prometheus.metricStoreIndexUpdateErrors)
+	reg.MustRegister(c.prometheus.metricStoreIndexUnindexable)
 }
 
 type metricDetailsFlat struct {
@@ -1200,7 +1207,7 @@ func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metr
 func (listener *CarbonserverListener) storableMetricPath(metric string) (string, bool) {
 	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
 	if listener.getMetricStore() != nil {
-		return path, store.ValidateMetricName(metric) == nil
+		return path, store.ValidateMetricName(metric) == nil && metricStoreIndexableName(metric)
 	}
 	return path, strings.IndexByte(metric, ';') >= 0 || helper.WhisperPathFits(listener.whisperData+path)
 }
@@ -2296,6 +2303,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	senderRaw("lockFiles", &listener.metrics.LockFiles, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
 	sender("metric_store_index_update_errors", &listener.metrics.MetricStoreIndexUpdateErrors, send)
+	senderRaw("metric_store_index_unindexable_names", &listener.metrics.MetricStoreIndexUnindexableNames, send)
 	sender("file_scan_time_ns", &listener.metrics.FileScanTimeNS, send)
 
 	sender("query_cache_hit", &listener.metrics.QueryCacheHit, send)

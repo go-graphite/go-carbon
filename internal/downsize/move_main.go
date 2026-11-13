@@ -24,6 +24,10 @@ import (
 )
 
 type options struct {
+	// debtGuardOff drops the compaction-debt governor: the tuner's debt pause
+	// and baseline requirement, and (via chunkstore.TransferDebtGuardHeader) the
+	// target's transfer-max-compaction-debt 429. Hard limits stay.
+	debtGuardOff                                                                     bool
 	from, until                                                                      string
 	nativeWindow                                                                     *chunkstore.NativeWindow
 	engine                                                                           string
@@ -39,9 +43,14 @@ type options struct {
 	streams, batch, deleteRate                                                       int
 	maxBytes                                                                         int64
 	tick                                                                             time.Duration
+	transferIdle                                                                     time.Duration
 	observeOnly                                                                      time.Duration
-	mbps, p99                                                                        float64
+	mbps                                                                             float64
+	read                                                                             readPolicy
 	backlog                                                                          backlogPolicy
+	// explicit names the flags given on the command line; resumes override
+	// saved journal thresholds only with these. Nil counts every option as given.
+	explicit map[string]bool
 }
 type apiError struct {
 	Status  int
@@ -53,6 +62,7 @@ func (e *apiError) Error() string { return e.Message }
 type mover struct {
 	hostToken        hostTokenCache
 	absentProofSlots sync.Map
+	warnedEstimate   atomic.Bool
 	batchesSent      atomic.Int64
 	localSources     map[string]*chunkstore.TransferSource
 	localTargets     map[string]string
@@ -79,7 +89,7 @@ func event(kind string, fields map[string]any) {
 }
 func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
-	o := options{backlog: defaultBacklogPolicy()}
+	o := options{backlog: defaultBacklogPolicy(), read: defaultReadPolicy()}
 	flags.StringVar(&o.from, "from", "", "native copy window start, Unix seconds or RFC3339 (inclusive)")
 	flags.StringVar(&o.until, "until", "", "native copy window end, Unix seconds or RFC3339 (exclusive)")
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
@@ -101,6 +111,7 @@ func MoveMain(args []string) error {
 	flags.BoolVar(&o.reconcile, "reconcile", false, "stage versions, gate on writer drain, reconcile and verify complete coverage while retaining sources")
 	flags.BoolVar(&o.delete, "delete", false, "delete retired source copies after verification; requires barrier")
 	flags.BoolVar(&o.auto, "auto", true, "adapt parallelism, batch size and deletion pacing to host headroom")
+	debtGuard := flags.Bool("debt-guard", true, "pause admission on compaction-debt ratio/growth and ask targets to apply transfer-max-compaction-debt; false keeps only hard limits (write stalls, L0 stop margin, memory)")
 	flags.BoolVar(&o.localLab, "local-lab", false, "loopback-only synthetic host telemetry for local tests")
 	flags.BoolVar(&o.blockReads, "block-reads", false, "renew expiring read-isolation leases on helper hosts")
 	flags.StringVar(&o.replica, "replica-url", "", "carbonserver or carbonapi origin serving the same cluster in another site")
@@ -110,17 +121,23 @@ func MoveMain(args []string) error {
 	flags.IntVar(&o.deleteRate, "delete-rate", 65536, "maximum deleted metrics/s per source")
 	flags.Int64Var(&o.maxBytes, "batch-bytes", 64<<20, "maximum estimated bytes per transfer; server max_body_bytes still applies")
 	flags.DurationVar(&o.tick, "tick", 10*time.Second, "host guard and tuner tick")
+	flags.DurationVar(&o.transferIdle, "transfer-idle-timeout", defaultTransferIdle, "metric engine: abort a pull/import/verify after this long without request or response bytes and retry it (a multi-name batch splits in half, one name gets 3 attempts; a native-deferred child stays fail-closed); 0 disables")
 	flags.DurationVar(&o.observeOnly, "observe-only", 0, "run admission guards for this duration without starting transfer workers; also learn missing debt baselines with copying off")
 	flags.Float64Var(&o.mbps, "max-mbps", 0, "optional transfer MB/s ceiling per host direction; zero uses physical host guards without a fixed rate cap")
-	flags.Float64Var(&o.p99, "read-p99-ms", 100, "read p99 guard while reads are enabled")
-	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run")
-	flags.Float64Var(&o.backlog.SoftRatio, "backlog-soft-ratio", o.backlog.SoftRatio, "pause admission above this multiple of pre-copy maximum backlog")
-	flags.Float64Var(&o.backlog.HardRatio, "backlog-hard-ratio", o.backlog.HardRatio, "abort above this multiple of pre-copy maximum backlog")
-	flags.IntVar(&o.backlog.GrowthSamples, "backlog-growth-samples", o.backlog.GrowthSamples, "pause on consecutive rising samples beyond baseline maximum plus observed swing")
-	flags.Float64Var(&o.backlog.BytesPerPoint, "cache-bytes-per-point", o.backlog.BytesPerPoint, "estimated cache bytes/point for 90% host-memory safety ceiling (minimum 16)")
+	flags.Float64Var(&o.read.CeilingMS, "read-p99-ms", o.read.CeilingMS, "absolute read p99 ceiling (ms) while reads are enabled; 0 leaves only the relative limit; saved with run, a resume flag overrides")
+	flags.Float64Var(&o.read.FloorMS, "read-p99-floor-ms", o.read.FloorMS, "read p99 pause never below this (ms): limit = min(read-p99-ms, max(floor, ratio x pre-copy median p99)); saved with run, a resume flag overrides")
+	flags.Float64Var(&o.read.Ratio, "read-p99-ratio", o.read.Ratio, "read p99 pause above this multiple of the pre-copy median read p99 (>= 1); saved with run, a resume flag overrides")
+	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run and fixed on resume")
+	flags.Float64Var(&o.backlog.SoftRatio, "backlog-soft-ratio", o.backlog.SoftRatio, "pause admission above this multiple of pre-copy maximum backlog; saved with run, a resume flag overrides")
+	flags.Float64Var(&o.backlog.HardRatio, "backlog-hard-ratio", o.backlog.HardRatio, "abort above this multiple of pre-copy maximum backlog; saved with run, a resume flag overrides")
+	flags.IntVar(&o.backlog.GrowthSamples, "backlog-growth-samples", o.backlog.GrowthSamples, "pause on consecutive rising samples beyond baseline maximum plus observed swing; saved with run, a resume flag overrides")
+	flags.Float64Var(&o.backlog.BytesPerPoint, "cache-bytes-per-point", o.backlog.BytesPerPoint, "estimated cache bytes/point for 90% host-memory safety ceiling (minimum 16); saved with run, a resume flag overrides")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	o.debtGuardOff = !*debtGuard
+	o.explicit = map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { o.explicit[f.Name] = true })
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, o); err != nil {
@@ -157,6 +174,12 @@ func run(ctx context.Context, o options) error {
 	if err := o.backlog.validate(); err != nil {
 		return err
 	}
+	if o.read == (readPolicy{}) {
+		o.read = defaultReadPolicy()
+	}
+	if err := o.read.validate(); err != nil {
+		return err
+	}
 	if o.deleteMode == "" {
 		o.deleteMode = "auto"
 	}
@@ -166,7 +189,10 @@ func run(ctx context.Context, o options) error {
 	if o.streams == 0 {
 		o.streams = 64
 	}
-	if o.streams < 1 || o.streams > 64 || o.batch < 1 || o.batch > 10000 || o.maxBytes < 65536 || o.maxBytes > 160<<20 || o.deleteRate < 1 || o.tick < time.Second || o.tick > 20*time.Second || o.mbps < 0 || math.IsNaN(o.mbps) || math.IsInf(o.mbps, 0) || math.IsNaN(o.p99) || math.IsInf(o.p99, 0) || o.p99 < 0 {
+	if o.transferIdle < 0 {
+		return errors.New("negative transfer idle timeout")
+	}
+	if o.streams < 1 || o.streams > 64 || o.batch < 1 || o.batch > 10000 || o.maxBytes < 65536 || o.maxBytes > 160<<20 || o.deleteRate < 1 || o.tick < time.Second || o.tick > 20*time.Second || o.mbps < 0 || math.IsNaN(o.mbps) || math.IsInf(o.mbps, 0) {
 		return errors.New("invalid resource limit")
 	}
 	if o.reconcile && (o.delete || o.deleteMode == "batch") {
@@ -282,8 +308,9 @@ func run(ctx context.Context, o options) error {
 	if o.blockReads && o.localLab {
 		return errors.New("use the lab read workload toggle to benchmark isolation")
 	}
-	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.p99)
-	m.tuner.backlog = o.backlog
+	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.read.CeilingMS)
+	m.tuner.backlog, m.tuner.read = o.backlog, o.read
+	m.tuner.debtGuardOff = o.debtGuardOff
 	journalID := p.PlanID + fmt.Sprintf(":delete=%t:mode=%s", o.delete, o.deleteMode)
 	if o.reconcile {
 		journalID += ":reconcile=true"
@@ -480,6 +507,18 @@ func (m *mover) request(ctx context.Context, endpoint, path string, body any, ou
 	}
 }
 func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any, out any) (http.Header, error) {
+	if !m.idleBounded(path) {
+		return m.requestOnceWatched(ctx, endpoint, path, body, out, nil)
+	}
+	ctx, watch, stop := watchIdle(ctx, m.transferIdle)
+	defer stop()
+	headers, err := m.requestOnceWatched(ctx, endpoint, path, body, out, watch)
+	if err != nil && errors.Is(context.Cause(ctx), errTransferIdleCause) {
+		return nil, &transferIdleError{endpoint: endpoint, path: path, idle: m.transferIdle}
+	}
+	return headers, err
+}
+func (m *mover) requestOnceWatched(ctx context.Context, endpoint, path string, body any, out any, watch *idleWatch) (http.Header, error) {
 	if local := m.localTargets[endpoint]; local != "" && (path == "/v1/transfer/import" || path == "/v1/transfer/verify") {
 		endpoint = local
 	}
@@ -504,6 +543,9 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 			return nil, err
 		}
 		reader = bytes.NewReader(data)
+		if watch != nil {
+			reader = idleReader{reader, watch}
+		}
 	}
 	method := http.MethodGet
 	if body != nil {
@@ -515,6 +557,9 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 	}
 	r.Header.Set("Content-Type", contentType)
 	r.Header.Set("Accept", chunkstore.TransferProofContentType)
+	if m.debtGuardOff {
+		r.Header.Set(chunkstore.TransferDebtGuardHeader, "off")
+	}
 	token := os.Getenv(m.tokenEnv)
 	if m.engine != "bulk" && m.tuner != nil {
 		var err error
@@ -531,6 +576,12 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 		return nil, err
 	}
 	defer response.Body.Close()
+	if watch != nil {
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{idleReader{response.Body, watch}, response.Body}
+	}
 	if response.StatusCode == http.StatusUnauthorized && m.engine != "bulk" {
 		m.invalidateHostToken()
 	}
@@ -540,7 +591,7 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 			// can safely receive the identical proof again through JSON.
 			m.binaryProofs.Delete(endpoint)
 			_ = response.Body.Close()
-			return m.requestOnce(ctx, endpoint, path, body, out)
+			return m.requestOnceWatched(ctx, endpoint, path, body, out, watch)
 		}
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return nil, &apiError{response.StatusCode, fmt.Sprintf("%s %s: HTTP %d %s", endpoint, path, response.StatusCode, message)}
@@ -688,7 +739,7 @@ func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task, re
 			return nil
 		}
 		count, bytes := m.tuner.batch(r.sourceURL, r.targetURL)
-		estimatedSize := max(row.EstimatedBytes, int64(512+len(row.Metric)*2))
+		estimatedSize := max(m.recordEstimate(row), int64(512+len(row.Metric)*2))
 		if len(pending.Names) > 0 && (len(pending.Names) >= count || estimated+estimatedSize > bytes) {
 			if err := flush(); err != nil {
 				return err
@@ -754,6 +805,44 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 			}
 		}
 		headers, err := m.pull(ctx, t, names, byteBudget, &proofs)
+		var idle *transferIdleError
+		if errors.As(err, &idle) {
+			if t.NativeParent != "" {
+				// The durable bulk intent stays uncertain: never import twice.
+				idleEvent(t, "/v1/transfer/pull", "abort: native child intent is uncertain", t.idleAttempts+1, err)
+				return err
+			}
+			release()
+			release = func() {}
+			if len(t.Names) > 1 {
+				idleEvent(t, "/v1/transfer/pull", "split", t.idleAttempts+1, err)
+				middle := len(t.Names) / 2
+				left, right := t, t
+				left.End = t.Start + int64(middle)
+				left.Names = t.Names[:middle]
+				right.Start = left.End
+				right.Names = t.Names[middle:]
+				left.idleAttempts, right.idleAttempts = 0, 0
+				if len(t.NativeOrdinals) > 0 {
+					left.NativeOrdinals = t.NativeOrdinals[:middle]
+					right.NativeOrdinals = t.NativeOrdinals[middle:]
+				}
+				if err := m.executeBatch(ctx, left, batch); err != nil {
+					return err
+				}
+				return m.executeBatch(ctx, right, batch)
+			}
+			t.idleAttempts++
+			if t.idleAttempts >= transferIdleAttempts {
+				idleEvent(t, "/v1/transfer/pull", "abort", t.idleAttempts, err)
+				return err
+			}
+			idleEvent(t, "/v1/transfer/pull", "retry", t.idleAttempts, err)
+			if err := sleepContext(ctx, m.tick); err != nil {
+				return err
+			}
+			return m.executeBatch(ctx, t, batch)
+		}
 		if err != nil {
 			var api *apiError
 			if errors.As(err, &api) && t.NativeParent != "" && nativeDefinitivePullRejection(api) {
@@ -823,13 +912,13 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 		if err != nil {
 			return err
 		}
-		if _, err := m.request(ctx, t.Target, "/v1/transfer/verify", proofs, &map[string]int{}); err != nil {
+		if err := m.verify(ctx, t, proofs); err != nil {
 			return transferIntegrityError(err)
 		}
 		event("verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": t.Bytes, "seconds": time.Since(start).Seconds()})
 	} else {
 		// A resumed cleanup must still find its durable target generation.
-		if _, err := m.request(ctx, t.Target, "/v1/transfer/verify", t.Proofs, &map[string]int{}); err != nil {
+		if err := m.verify(ctx, t, t.Proofs); err != nil {
 			return transferIntegrityError(err)
 		}
 	}

@@ -58,6 +58,7 @@ type migrationSnapshot struct {
 	recoveryWindow, recoveryRemaining     int64
 	recoveryCeiling                       int64
 	recoveryRejections                    uint64
+	nameTooLongRejected                   uint64
 	recoveryBlocked                       bool
 	storeSnapshotAge                      float64
 }
@@ -66,7 +67,9 @@ type storeStatsView struct {
 	coldPack                                                                store.ColdPackStats
 	thaws                                                                   whisperio.ThawStats
 	classicReanchors                                                        whisperio.ClassicReanchorStats
+	classicReanchorPace                                                     whisperio.ClassicReanchorPaceStats
 	ingestTables, ingestEntries, ingestBytes, ingestL0Bytes, ingestOverlaps uint64
+	transferBatchCommits, transferBatchEntries, transferBatchBytes          uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
 	writeStalls                                                             uint64
@@ -168,6 +171,9 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_ingest_bytes_total", "Bytes of ingested conversion tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.ingestBytes) }),
 		counter("pebble_ingest_l0_bytes_total", "Ingested bytes placed in L0.", func(s *migrationSnapshot) float64 { return float64(s.stats.ingestL0Bytes) }),
 		counter("pebble_ingest_memtable_overlaps_total", "Ingested tables overlapping a memtable.", func(s *migrationSnapshot) float64 { return float64(s.stats.ingestOverlaps) }),
+		counter("pebble_transfer_batch_commits_total", "Imported transfers committed as one batch instead of ingested tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchCommits) }),
+		counter("pebble_transfer_batch_entries_total", "Metrics imported through batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchEntries) }),
+		counter("pebble_transfer_batch_bytes_total", "Bytes of batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchBytes) }),
 		counter("pebble_flush_bytes_total", "Bytes written by memtable flushes.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushBytes) }),
 		counter("pebble_compaction_write_bytes_total", "Bytes written by compactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionWriteBytes) }),
 		gauge("pebble_compaction_rate_bytes", "Compaction output budget in bytes per second; 0 disables pacing.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionRate) }),
@@ -260,6 +266,11 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_cold_pack_thawed_points_total", "Points restored to ordinary groups by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Points) }),
 		counter("store_cold_pack_thawed_bytes_total", "Logical group keys and values read plus rewritten by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Bytes) }),
 		counter("store_classic_reanchored_archives_total", "Classic archives normalized by continuation updates, including unpublished transactions; investigate historical layout damage.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchors.ReanchoredArchives) }),
+		counter("store_classic_reanchor_inline_total", "Metrics whose classic re-anchor the write path repaired within the budget (or after max-defer), including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Inline) }),
+		counter("store_classic_reanchor_deferred_total", "Writes refused because a classic re-anchor exceeded the per-second budget; their points stay cached for the sweep.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Deferred) }),
+		counter("store_classic_reanchor_swept_total", "Metrics repaired by the paced background re-anchor sweep, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Swept) }),
+		counter("store_classic_reanchor_aged_total", "Deferred metrics repaired inline because they waited longer than store-classic-reanchor-max-defer; a high rate means the budget is too low for the backlog.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Aged) }),
+		gauge("store_classic_reanchor_backlog", "Metrics waiting for a paced classic re-anchor; their points stay cached until repaired. Should fall to 0 after a restart backlog drains.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Backlog) }),
 		counter("store_classic_alias_drops_total", "Older distinct timestamps discarded when normalizing aliased classic ring slots, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchors.AliasDrops) }),
 		counter("store_cold_pack_read_bytes_total", "Snapshot bytes read by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ReadBytes) }),
 		counter("store_cold_pack_write_bytes_total", "WAL batch bytes published by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WriteBytes) }),
@@ -318,6 +329,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_ceiling_bytes", "Cache-owned byte ceiling derived from existing allocations and reserved memory headroom; configured max-bytes also applies.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryCeiling) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_remaining_bytes", "Unspent recovery memory reservation; abandoned checks expire at the next memory sample.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRemaining) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_blocked", "One while recovery admission was denied in the last ten seconds; feeds automatic writeout pressure immediately.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return b(s.recoveryBlocked) }},
+		metricSpec{desc: prometheus.NewDesc("receiver_name_too_long_rejected_points_total", "Points refused at cache intake because the metric name exceeds 4096 bytes.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.nameTooLongRejected) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_rejections_total", "Recovery admission checks denied by memory reservation or configured cache ceilings.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRejections) }},
 	)
 	return specs
@@ -343,6 +355,8 @@ var storeMigrationSidecarFoldsDesc = prometheus.NewDesc("store_migration_sidecar
 	[]string{"result"}, nil)
 
 var storeColdPackThawsDesc = prometheus.NewDesc("store_cold_pack_thaws_total", "Completed codec thaws in this process by writer path, including unpublished transactions.", []string{"reason"}, nil)
+
+var storeRangeDeletesDesc = prometheus.NewDesc("store_range_deletes_total", "Pebble range tombstones added to store batches in this process, by code path. Each committed one makes the next reader of the memtable re-fragment every range tombstone in it while other readers wait; a sustained rate stalls reads.", []string{"site"}, nil)
 
 // Persister stage timing: summed work per stage (stagetime), the update
 // duration histogram and the slowest update per scrape.
@@ -445,6 +459,7 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pebbleFetchStageCallsDesc
 	ch <- storeMigrationSidecarFoldsDesc
 	ch <- storeColdPackThawsDesc
+	ch <- storeRangeDeletesDesc
 	ch <- persisterStageSecondsDesc
 	ch <- persisterStageCallsDesc
 	ch <- persisterUpdateDesc
@@ -583,6 +598,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()
 		s.recoveryCeiling = cache.RecoveryByteCeiling()
 		s.recoveryBlocked = cache.RecoveryBlocked()
+		s.nameTooLongRejected = cache.NameTooLongRejectedPoints()
 	}
 	if db != nil {
 		st, sidecars, ok := db.TelemetryStats()
@@ -593,9 +609,10 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.store = true
 		s.storeSnapshotAge = db.TelemetryAge().Seconds()
 		s.sidecars = sidecars
-		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(),
+		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(), classicReanchorPace: c.app.reanchorPacer.Stats(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
+			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,
@@ -631,6 +648,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(persisterUpdateMaxDesc, prometheus.GaugeValue, stagetime.TakeUpdateMax().Seconds())
 	}
 	if s.store {
+		for _, site := range store.RangeDeleteCounts() {
+			ch <- prometheus.MustNewConstMetric(storeRangeDeletesDesc, prometheus.CounterValue, float64(site.Count), site.Site)
+		}
 		for _, thaw := range []struct {
 			reason string
 			count  uint64

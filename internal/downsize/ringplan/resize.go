@@ -51,6 +51,13 @@ func identity(m member, hash string) string {
 // identity-set replacement needs no metric inventory. Mixed changes inventory
 // with bounded catalog pages unless immutable input files were supplied.
 func Resize(ctx context.Context, path, out string, apply bool, workers int, windows ...*chunkstore.NativeWindow) (Manifest, error) {
+	return ResizeSegmented(ctx, path, out, apply, workers, chunkstore.NativeMaxRangeNames, windows...)
+}
+
+// ResizeSegmented is Resize with an explicit stream segment size (names per
+// durable plan segment). A segment above the native receiver limit is still
+// valid: the bulk controller sub-ranges it.
+func ResizeSegmented(ctx context.Context, path, out string, apply bool, workers, segment int, windows ...*chunkstore.NativeWindow) (Manifest, error) {
 	s, old, next, _, err := loadSpec(path)
 	if err != nil {
 		return manifest{}, err
@@ -97,7 +104,7 @@ func Resize(ctx context.Context, path, out string, apply bool, workers int, wind
 	}
 	sum := sha256.Sum256(append([]byte("resize-v1:"), blob...))
 	id := hex.EncodeToString(sum[:])
-	opt := options{Out: out, Apply: apply, Workers: workers, PerSourceWorkers: 1, allowEmpty: sameIdentities, SegmentMetrics: 100000, HTTPTimeout: 30 * time.Minute}
+	opt := options{Out: out, Apply: apply, Workers: workers, PerSourceWorkers: 1, allowEmpty: sameIdentities, SegmentMetrics: segment, HTTPTimeout: 30 * time.Minute}
 	opt.transform = func(m *manifest) error {
 		m.Format = "go-carbon-resize"
 		m.Whole = whole

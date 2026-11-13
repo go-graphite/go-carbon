@@ -4,14 +4,29 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
-// ErrNameTooLong rejects names beyond the bounded transfer format budget.
-// Pebble catalog keys do not have filesystem path or component limits.
+// ErrNameTooLong rejects names longer than MaxMetricNameBytes.
 var ErrNameTooLong = errors.New("metric name too long")
 
-// Keep individual names within the native range's existing 1 MiB name budget.
-const maxMetricNameBytes = 1 << 20
+// ErrReanchorDeferred refuses a write that needs a classic re-anchor beyond the
+// repair budget. Nothing was published; the caller keeps the points queued.
+var ErrReanchorDeferred = errors.New("classic re-anchor deferred")
+
+// MaxMetricNameBytes is the longest name the store creates, the same limit the
+// cache applies at intake. Pebble keys have no such limit, but discovery does:
+// the mapped carbonserver index rejects virtual paths ("/" + name + ".wsp")
+// above 8192 bytes, so this limit keeps every stored name findable.
+const MaxMetricNameBytes = points.MaxMetricNameBytes
+
+const maxMetricNameBytes = MaxMetricNameBytes
+
+// maxTransferNameBytes keeps the transfer wire formats' 1 MiB name budget. A
+// donor that still holds an older over-limit name then fails with
+// ErrNameTooLong from validation rather than a framing error.
+const maxTransferNameBytes = 1 << 20
 
 // ValidateMetricName checks the store's name byte budget, independent of paths.
 func ValidateMetricName(name string) error {

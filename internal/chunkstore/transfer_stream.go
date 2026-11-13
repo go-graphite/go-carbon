@@ -96,7 +96,7 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 	s.arena.free = s.arena.slab
 	s.metricStart, s.metricOverhead = s.bytes, 0
 	r := TransferMetric{}
-	r.Config.Name = string(s.blob(maxMetricNameBytes))
+	r.Config.Name = string(s.blob(maxTransferNameBytes))
 	r.Version.Name = r.Config.Name
 	r.Version.ID = s.u64()
 	r.Version.Generation = s.u64()

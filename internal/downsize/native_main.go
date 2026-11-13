@@ -16,6 +16,9 @@ import (
 	hashing "github.com/go-graphite/go-carbon/internal/downsize/buckyhash"
 )
 
+// nativeRangeNames caps every native range at the receiver limit; tests lower it.
+var nativeRangeNames = int64(chunkstore.NativeMaxRangeNames)
+
 type nativeController struct {
 	*mover
 	mu       sync.Mutex
@@ -350,7 +353,10 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 			cursor = completed[skip].End
 			continue
 		}
-		end := int64(len(names))
+		// The receiver rejects ranges above NativeMaxRangeNames, so a plan
+		// stream longer than that (old 100k-name segments) is sent as fixed
+		// sub-ranges from the cursor; resume skips the completed ones.
+		end := min(int64(len(names)), cursor+nativeRangeNames)
 		if skip < len(completed) {
 			end = min(end, completed[skip].Start)
 		}

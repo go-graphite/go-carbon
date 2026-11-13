@@ -18,6 +18,13 @@ import (
 )
 
 const formatName = "go-carbon-ring"
+
+// MaxRecordEstimate bounds a per-name byte estimate (the importer's default
+// --batch-bytes). DefaultNamesEstimate is the per-name estimate of plan --names.
+const (
+	MaxRecordEstimate    = 64 << 20
+	DefaultNamesEstimate = 64 << 10
+)
 const version = 1
 
 type member struct {
@@ -35,10 +42,12 @@ type topology struct {
 }
 
 type input struct {
-	Source         string `json:"source"`
-	Path           string `json:"path,omitempty"`
-	URL            string `json:"url,omitempty"`
-	Format         string `json:"format"`
+	Source string `json:"source"`
+	Path   string `json:"path,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Format string `json:"format"`
+	// EstimatedBytes is the per-name estimate for lines, buckyd and transfer
+	// inventories (tsv/jsonl carry their own per-line estimate).
 	EstimatedBytes int64  `json:"estimated_bytes"`
 	TokenEnv       string `json:"token_env,omitempty"`
 }
@@ -144,13 +153,23 @@ func validURL(raw string) error {
 }
 
 func loadSpec(path string) (specification, *ring, *ring, string, error) {
-	var s specification
 	f, err := os.Open(path)
 	if err != nil {
-		return s, nil, nil, "", err
+		return specification{}, nil, nil, "", err
 	}
 	defer f.Close()
-	d := json.NewDecoder(io.LimitReader(f, 8<<20))
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return specification{}, nil, nil, "", err
+	}
+	return parseSpec(f, base)
+}
+
+// parseSpec validates and normalizes a specification exactly as a spec file is,
+// so generated specifications (plan --names) get the same plan identity.
+func parseSpec(r io.Reader, base string) (specification, *ring, *ring, string, error) {
+	var s specification
+	d := json.NewDecoder(io.LimitReader(r, 8<<20))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&s); err != nil {
 		return s, nil, nil, "", err
@@ -182,10 +201,6 @@ func loadSpec(path string) (specification, *ring, *ring, string, error) {
 			return s, nil, nil, "", fmt.Errorf("member %s changed physical endpoint: assign replacement a new ID", m.ID)
 		}
 	}
-	base, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		return s, nil, nil, "", err
-	}
 	for i := range s.Inputs {
 		in := &s.Inputs[i]
 		if _, ok := oldIDs[in.Source]; !ok {
@@ -193,6 +208,12 @@ func loadSpec(path string) (specification, *ring, *ring, string, error) {
 		}
 		if in.EstimatedBytes < 0 {
 			return s, nil, nil, "", errors.New("negative estimated bytes")
+		}
+		// lines, buckyd and transfer inventories apply estimated_bytes to
+		// every name. An inventory total here sized each name at 1.2 GB on
+		// 13 Nov, so the importer sent one name per transfer.
+		if in.Format != "tsv" && in.Format != "jsonl" && in.EstimatedBytes > MaxRecordEstimate {
+			return s, nil, nil, "", fmt.Errorf("input %s: estimated_bytes=%d is the per-name estimate for %s inventories, not the inventory total; it must be at most %d (64 MiB); use about 65536 or omit it", in.Source, in.EstimatedBytes, in.Format, MaxRecordEstimate)
 		}
 		switch in.Format {
 		case "lines", "tsv", "jsonl":

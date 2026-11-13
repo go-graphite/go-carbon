@@ -327,8 +327,8 @@ func (s *Store) transferSnapshotCached(ctx context.Context, reader pebble.Reader
 	return snapshotFrom(reader, m.Name)
 }
 
-// ImportTransfer reserves disjoint IDs and ingests whole SSTs before catalog
-// publication. A target created meanwhile is merged under its writer lock.
+// ImportTransfer reserves disjoint IDs and stages their keys (one batch, or
+// whole SSTs for large transfers) before catalog publication. A target created meanwhile is merged under its writer lock.
 // Publication and merge use bounded stripe groups and a final WAL barrier.
 func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([]TransferProof, error) {
 	if len(records) == 0 || len(records) > MaxTransferMetrics {
@@ -399,36 +399,36 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		}
 	}
 	began = time.Now()
-	paths, err := s.writeTransferTables(ctx, first, records, metas)
-	s.transferApply.build.Add(uint64(time.Since(began)))
-	defer func() {
-		for _, p := range paths {
-			_ = s.fs.Remove(p)
+	stage := s.stageTransfer(first, records, metas)
+	if limit := s.transferBatchLimit(); len(stage.keys) > 0 && stage.bytes <= limit {
+		// Normal-size transfers commit as one NoSync batch: Pebble applies
+		// batches concurrently, while ingestion runs one SST set at a time.
+		// The final WAL barrier below makes the data durable together with
+		// the receipts published after it.
+		batch, err := s.writeTransferBatch(ctx, stage)
+		s.transferApply.build.Add(uint64(time.Since(began)))
+		if err != nil {
+			return nil, err
 		}
-	}()
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(paths) > 0 {
 		if needsFloatFormat {
 			if err := s.fenceFloatCodec(); err != nil {
-				return nil, err
+				return nil, errors.Join(err, batch.Close())
 			}
 		}
 		began = time.Now()
-		stats, err := s.db.IngestWithStats(paths)
+		err = errors.Join(ctx.Err(), batch.Commit(pebble.NoSync))
+		size := uint64(len(batch.Repr()))
+		err = errors.Join(err, batch.Close())
 		s.transferApply.ingest.Add(uint64(time.Since(began)))
 		if err != nil {
 			return nil, err
 		}
-		s.ingestStats.tables.Add(uint64(len(paths)))
-		s.ingestStats.entries.Add(uint64(len(records)))
-		s.ingestStats.bytes.Add(stats.Bytes)
-		s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
-		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
+		s.pendingSync.Store(true)
+		s.transferBatchStats.commits.Add(1)
+		s.transferBatchStats.entries.Add(uint64(len(records)))
+		s.transferBatchStats.bytes.Add(size)
+	} else if err := s.ingestTransferStage(ctx, first, stage, len(records), needsFloatFormat, began); err != nil {
+		return nil, err
 	}
 	proofs := make([]TransferProof, 0, len(records))
 	// Uncontended groups share one commit. A contended group falls back to
@@ -451,6 +451,44 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	s.transferApply.sync.Add(uint64(time.Since(began)))
 	s.invalidateReadCache()
 	return proofs, nil
+}
+
+// ingestTransferStage writes one SST per namespace/time bucket and ingests
+// them; used for transfers above transferBatchLimit.
+func (s *Store) ingestTransferStage(ctx context.Context, first uint64, stage *transferStage, entries int, needsFloatFormat bool, began time.Time) error {
+	paths, err := s.writeTransferTables(ctx, first, stage)
+	s.transferApply.build.Add(uint64(time.Since(began)))
+	defer func() {
+		for _, p := range paths {
+			_ = s.fs.Remove(p)
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	if needsFloatFormat {
+		if err := s.fenceFloatCodec(); err != nil {
+			return err
+		}
+	}
+	began = time.Now()
+	stats, err := s.db.IngestWithStats(paths)
+	s.transferApply.ingest.Add(uint64(time.Since(began)))
+	if err != nil {
+		return err
+	}
+	s.ingestStats.tables.Add(uint64(len(paths)))
+	s.ingestStats.entries.Add(uint64(entries))
+	s.ingestStats.bytes.Add(stats.Bytes)
+	s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
+	s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
+	return nil
 }
 
 func (s *Store) lockTransfer(names []string) func() {
@@ -760,10 +798,20 @@ func (s *Store) retireTransferFrom(ctx context.Context, b *pebble.Batch, reader 
 	if m.Continuation {
 		// The indexed batch observes its own writes, so the continuation IO uses
 		// point deletes. Per-metric ranges here would fragment every live read.
-		if err := s.dropContinuation(ctx, reader, b, m); err != nil {
+		// A snapshot reader is fenced by the commit's revision check (see
+		// commitPreparedTransfer), so its keys are point-deleted too: a merged
+		// import used to leave one range tombstone per time bucket plus one per
+		// metric, and every new memtable tombstone makes the next iterator of
+		// any reader re-fragment all of them while the others wait (network
+		// survivor imports queued 20-45 ms per name there).
+		fenced := reader != pebble.Reader(b)
+		drop := s.newContinuationIO(ctx, reader, b, m)
+		drop.fencedReader = fenced
+		if err := s.dropContinuationIO(ctx, drop); err != nil {
 			return err
 		}
 		kv := s.newContinuationIO(ctx, reader, b, m)
+		kv.fencedReader = fenced
 		return kv.DeletePrefix(nil)
 	}
 	prefix := chunkPrefix(m.ID, 0)[:9]
@@ -1385,10 +1433,10 @@ func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (i
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := b.DeleteRange([]byte{'a'}, []byte{'b'}, nil); err != nil {
+	if err := deleteRange(b, rangeDeleteStoreClear, []byte{'a'}, []byte{'b'}); err != nil {
 		return 0, err
 	}
-	if err := b.DeleteRange([]byte{'c'}, []byte{'y'}, nil); err != nil {
+	if err := deleteRange(b, rangeDeleteStoreClear, []byte{'c'}, []byte{'y'}); err != nil {
 		return 0, err
 	}
 	if err := b.Set(sidecarReadyKey, []byte{1}, nil); err != nil {

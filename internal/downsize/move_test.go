@@ -24,6 +24,11 @@ import (
 
 func fixturePlan(t *testing.T, source, target string, names []string) string {
 	t.Helper()
+	return fixturePlanEstimated(t, source, target, names, 1024)
+}
+
+func fixturePlanEstimated(t *testing.T, source, target string, names []string, estimate int64) string {
+	t.Helper()
 	root := t.TempDir()
 	id := fmt.Sprintf("%x", sha256.Sum256([]byte(root)))
 	var data bytes.Buffer
@@ -34,17 +39,17 @@ func fixturePlan(t *testing.T, source, target string, names []string) string {
 		}
 	}
 	for _, name := range names {
-		if err := e.Encode(planRow{Type: "move", Metric: name, EstimatedBytes: 1024}); err != nil {
+		if err := e.Encode(planRow{Type: "move", Metric: name, EstimatedBytes: estimate}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := e.Encode(planRow{Type: "end", Metrics: int64(len(names)), EstimatedBytes: int64(len(names) * 1024)}); err != nil {
+	if err := e.Encode(planRow{Type: "end", Metrics: int64(len(names)), EstimatedBytes: int64(len(names)) * estimate}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "moves.jsonl"), data.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := manifest{Format: "go-carbon-ring", Version: 1, PlanID: id, Spec: specification{Version: 1, Cluster: "local", Site: "test", Old: topology{Replicas: 1, Nodes: []member{{ID: "old", Endpoint: source}}}, New: topology{Replicas: 1, Nodes: []member{{ID: "new", Endpoint: target}}}}, Streams: []route{{Path: "moves.jsonl", Source: "old", Destination: "new", Metrics: int64(len(names)), EstimatedBytes: int64(len(names) * 1024), SHA256: fmt.Sprintf("%x", sha256.Sum256(data.Bytes()))}}}
+	p := manifest{Format: "go-carbon-ring", Version: 1, PlanID: id, Spec: specification{Version: 1, Cluster: "local", Site: "test", Old: topology{Replicas: 1, Nodes: []member{{ID: "old", Endpoint: source}}}, New: topology{Replicas: 1, Nodes: []member{{ID: "new", Endpoint: target}}}}, Streams: []route{{Path: "moves.jsonl", Source: "old", Destination: "new", Metrics: int64(len(names)), EstimatedBytes: int64(len(names)) * estimate, SHA256: fmt.Sprintf("%x", sha256.Sum256(data.Bytes()))}}}
 	encoded, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +68,7 @@ func fixturePlan(t *testing.T, source, target string, names []string) string {
 	return root
 }
 func testOptions(root string) options {
-	return options{plan: root, state: filepath.Join(root, "state"), barrier: filepath.Join(root, "barrier.json"), apply: true, delete: true, deleteMode: "batch", localLab: true, streams: 2, batch: 8, deleteRate: 100000, maxBytes: 1 << 20, tick: time.Second, p99: 100}
+	return options{plan: root, state: filepath.Join(root, "state"), barrier: filepath.Join(root, "barrier.json"), apply: true, delete: true, deleteMode: "batch", localLab: true, streams: 2, batch: 8, deleteRate: 100000, maxBytes: 1 << 20, tick: time.Second, read: defaultReadPolicy()}
 }
 
 var testMetricNow = time.Now().Unix() / 10 * 10
@@ -657,7 +662,8 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	tune.captureReadBaselines()
-	sample.ReadP99MS = 50
+	// Baseline 2 ms: the 50 ms floor, not 1.5x baseline, sets the pause limit.
+	sample.ReadP99MS = 60
 	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)

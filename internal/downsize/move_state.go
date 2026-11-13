@@ -29,6 +29,9 @@ type task struct {
 	Proofs           []chunkstore.TransferProof `json:",omitempty"`
 	Phase            string
 	Bytes            int64
+	// idleAttempts counts idle-timeout retries of one in-memory batch; it is
+	// not journaled, so a resume starts a fresh bounded retry budget.
+	idleAttempts int
 }
 type integritySkip struct {
 	Source, Target, Stream string

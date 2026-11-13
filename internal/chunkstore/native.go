@@ -577,7 +577,7 @@ func (s *Store) cleanupNativeIntent(identity string) error {
 		if len(span.Lower) == 0 || bytes.Compare(span.Lower, span.Upper) >= 0 {
 			return ErrFormat
 		}
-		if err := b.DeleteRange(span.Lower, span.Upper, nil); err != nil {
+		if err := deleteRange(b, rangeDeleteNativeIntent, span.Lower, span.Upper); err != nil {
 			return err
 		}
 	}
@@ -637,7 +637,7 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 		_, err := walk.lookup(&walk.catalog, catalogLower, catalogUpper, catalogKey(m.Name))
 		if err == nil || errors.Is(err, ErrNotFound) && s.pendingTransfer(m.Name) {
 			for _, span := range tables.unusedSpans(m) {
-				if err := b.DeleteRange(span.Lower, span.Upper, nil); err != nil {
+				if err := deleteRange(b, rangeDeleteNativePublish, span.Lower, span.Upper); err != nil {
 					return err
 				}
 			}

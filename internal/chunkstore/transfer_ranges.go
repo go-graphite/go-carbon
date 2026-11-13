@@ -29,7 +29,7 @@ func (r *transferRanges) apply(b *pebble.Batch) error {
 	}
 	r.spans = merged
 	for _, span := range merged {
-		if err := b.DeleteRange(span.start, span.end, nil); err != nil {
+		if err := deleteRange(b, rangeDeleteTransferRanges, span.start, span.end); err != nil {
 			return err
 		}
 	}

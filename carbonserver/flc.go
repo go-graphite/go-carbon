@@ -49,6 +49,13 @@ const (
 	// note: there is no v1 magic string as it wasn't designed in the first place.
 	version2MagicString = "\x7fflc02"
 
+	// flcv2MaxPathLen bounds one v2 path so a corrupt length cannot cause a
+	// panic or OOM. Linux paths are limited to 4k; twice that leaves headroom.
+	//
+	// * https://man7.org/linux/man-pages/man3/realpath.3.html#NOTES
+	// * https://www.ibm.com/docs/en/spectrum-protect/8.1.9?topic=parameters-file-specification-syntax
+	flcv2MaxPathLen = 4096 * 2
+
 	flcv2StatFieldSize      = 8
 	flcv2StatFieldCount     = 4
 	flcv2EntrySeparatorSize = 1
@@ -342,15 +349,8 @@ func (flc *fileListCacheV2) readRecord(entry *FLCEntry) ([]byte, error) {
 	}
 	pathLength := binary.BigEndian.Uint64(flc.pathLength[:])
 
-	// filepath on linux has a 4k limit, but we are timing it 2 here just to
-	// be flexible and avoid bugs or corruptions to causes panics or oom in
-	// go-carbon
-	//
-	// * https://man7.org/linux/man-pages/man3/realpath.3.html#NOTES
-	// * https://www.ibm.com/docs/en/spectrum-protect/8.1.9?topic=parameters-file-specification-syntax
-	const maxPathLen = 4096 * 2
-	if pathLength > maxPathLen {
-		return nil, fmt.Errorf("flcv2: illegal file path length %d (max: %d)", pathLength, maxPathLen)
+	if pathLength > flcv2MaxPathLen {
+		return nil, fmt.Errorf("flcv2: illegal file path length %d (max: %d)", pathLength, flcv2MaxPathLen)
 	}
 	plen := int(pathLength)
 

@@ -220,7 +220,7 @@ func replacementHandoff(t *testing.T, mixed bool) {
 	if len(planned.Whole) != 1 || (!mixed && len(planned.Streams) != 0) || (mixed && len(planned.Streams) == 0) {
 		t.Fatal("replacement should not inventory metrics", planned)
 	}
-	o := options{plan: planPath, state: filepath.Join(root, "state.jsonl"), apply: true, localLab: true, streams: 2, batch: 32, maxBytes: 1 << 20, deleteRate: 1000, tick: time.Second, mbps: 1000, p99: 100, controlTokenEnv: "RESIZE_TEST_CONTROL"}
+	o := options{plan: planPath, state: filepath.Join(root, "state.jsonl"), apply: true, localLab: true, streams: 2, batch: 32, maxBytes: 1 << 20, deleteRate: 1000, tick: time.Second, mbps: 1000, read: defaultReadPolicy(), controlTokenEnv: "RESIZE_TEST_CONTROL"}
 	if err := run(ctx, o); err == nil || errors.Is(err, errInputFence) {
 		t.Fatal("lost begin response must stop before worker", err)
 	}

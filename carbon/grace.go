@@ -108,6 +108,7 @@ func (app *App) DumpStop() (err error) {
 	// Once input is diverted to xlog, pending writes are no longer visible to
 	// expiration's cache check. Finish cleanup before entering the dump phase.
 	app.stopExpiration()
+	app.stopReanchorSweep()
 	_ = app.Cache.SetWriteoutBatching(0, 0)
 
 	// Keep persistence and reads running while the index worker finishes. In

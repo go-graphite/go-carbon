@@ -294,10 +294,12 @@ func Status(plan, state string, out io.Writer) error {
 	defer file.Close()
 	decoder := json.NewDecoder(file)
 	latest := map[string]task{}
+	var admission *admissionState
 	for {
 		var row struct {
-			Plan string
-			Task task
+			Plan      string
+			Task      task
+			Admission *admissionState
 		}
 		err := decoder.Decode(&row)
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -311,6 +313,9 @@ func Status(plan, state string, out io.Writer) error {
 		}
 		if row.Task.End > row.Task.Start {
 			latest[taskKey(row.Task)] = row.Task
+		}
+		if row.Admission != nil {
+			admission = row.Admission
 		}
 	}
 	var done, deferred, pending int64
@@ -335,5 +340,12 @@ func Status(plan, state string, out io.Writer) error {
 			}
 		}
 	}
-	return json.NewEncoder(out).Encode(map[string]any{"plan_id": manifest.PlanID, "tasks": latest, "completed_names": done, "native_deferred_names": deferred, "pending_names": pending})
+	result := map[string]any{"plan_id": manifest.PlanID, "tasks": latest, "completed_names": done, "native_deferred_names": deferred, "pending_names": pending}
+	if admission != nil {
+		// Saved governor thresholds and every resume override, loudly.
+		result["backlog_policy"] = admission.Policy
+		result["read_p99_policy"] = admission.Read
+		result["policy_overrides"] = admission.Overrides
+	}
+	return json.NewEncoder(out).Encode(result)
 }

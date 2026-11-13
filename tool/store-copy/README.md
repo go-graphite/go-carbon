@@ -9,6 +9,39 @@ Build with `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build ./tool/store-copy`
 The owning donor and receiver daemons must also contain the native engine.
 Existing metric commands keep their behavior unless `--engine bulk` is selected.
 
+## Plan-free copy (`copy`)
+
+`copy` discovers names and copies them. There is no plan directory, plan ID,
+segment or per-name estimate:
+
+```sh
+store-copy copy --from http://donor:4242 --to http://target:4242 \
+  [--names FILE | --prefix P] [--ring ring.json] --state copy.jsonl \
+  [--streams N] [--max-batch-bytes B] [--max-batch-names N]
+```
+
+- Names come from the source catalog (`/v1/transfer/list` pages, optionally
+  under `--prefix`) or from `--names` (byte-sorted unique, `LC_ALL=C sort -u`).
+- `--ring` takes a resize spec (its `new` ring) or a bare topology
+  (`{"hash":"jump_fnv1a","nodes":[{"id","node","endpoint"}]}`). Names whose
+  owner is not the `--to` endpoint are skipped.
+- Batches are cut by real exported bytes: the controller learns bytes per name
+  from each transfer's `X-Transfer-Bytes` and fills 75% of
+  `min(--max-batch-bytes, target max_body_bytes)`, up to `--max-batch-names`.
+  A 413 splits the batch in half. A single name may use the whole
+  `max_body_bytes`; a name above that is journaled as failed and skipped.
+- Streams default to `min(64, source MaxTransfers, target MaxTransfers)` from
+  the start; no slow-start ramp. 429/502/503/504 (target storage pressure,
+  write stalls, transfer slots) back off and retry without aborting.
+- `--state` is an append-only journal: a header with the copy identity (from,
+  to, prefix, names/ring file hashes), `done` rows with the first/last name of
+  each completed batch, and `failed` rows. Rerunning the same command skips done
+  ranges and retries failures. Target points win in the importer, so a batch
+  redone after a kill is harmless.
+- The command exits non-zero while any name failed or above `--max-failures`.
+- Only `--engine metric` is wired; `--engine bulk` and host-helper guards
+  (`--health-map`) still need the legacy `plan`/`run` pair.
+
 ## Resize / merge baseline
 
 After the campaign owner pauses the existing controller, retains its journal and
@@ -66,6 +99,83 @@ controller must not resume a mixed journal: it fails on the empty-proof native
 intent; update the controller/status reader first. `completed_names` and
 `native_deferred_names` are the native-aware status counters. Counting entire
 `verified` ranges as completed is incorrect for mixed journals.
+
+### Range size, explicit name lists and idle transfers
+
+The daemon rejects native ranges above 4096 names (`chunkstore.NativeMaxRangeNames`).
+The controller sends every native plan stream as consecutive sub-ranges of at
+most 4096 names, so plans with larger segments (the old 100,000-name default,
+or `config --mode plan --segment-metrics 10000`) also work. Resume skips the
+sub-ranges that already completed. `store-copy plan --segment-metrics N` sets
+the names per plan stream segment and defaults to 4096.
+
+`store-copy plan --names FILE --source URL --target URL --out DIR --apply` plans an
+exact name list (one name per line, byte-sorted and unique: `LC_ALL=C sort -u`)
+from one buckyd origin to another. The result is the same plan, byte for byte,
+that `config --mode plan` writes for a one-member old ring, a one-member new ring
+and a `lines` inventory of that file. Use it for gap, deferred and missing-point
+fills with `run --engine metric`. `--estimated-bytes` (default 65536) is the
+estimate **per name** that the importer batches by.
+
+A spec input's `estimated_bytes` is also per name for `lines`, `buckyd` and
+`transfer` inventories, not the inventory total. Planning rejects values above
+64 MiB. With an inventory total there (1.2 GB per name in the 13 Nov user/vm
+deferred specs), the importer sent one name per transfer. `run` treats a
+committed per-name estimate above 128 MiB as unknown. It logs one
+`implausible_estimate` error event and batches those rows at 64 KiB per name.
+The target's HTTP 413 still splits any batch whose real export exceeds
+`--batch-bytes`.
+
+`run --transfer-idle-timeout` (default 2m, 0 disables) bounds each metric-engine
+pull, import and verify request. When no request or response bytes move for that
+long, the controller aborts the request and logs a `transfer_idle_timeout` event
+with `"level":"error"`. A batch of several names splits in half and retries. A
+single name gets 3 attempts, then the run aborts and keeps its journal. Verify is
+read-only and retries on its own. A native-deferred child is not retried: its
+bulk intent stays uncertain and fail-closed, as with any other lost response.
+Re-pulling a plain metric task is a target-wins union, so existing target points
+still win.
+
+### Metric importer governor thresholds
+
+The metric importer pauses or halves admission when a target's read p99 rises
+above:
+
+```
+limit = min(--read-p99-ms, max(--read-p99-floor-ms, --read-p99-ratio × baseline))
+```
+
+| Flag | Default | Meaning |
+| --- | ---: | --- |
+| `--read-p99-ms` | 100 | Absolute ceiling (ms); 0 leaves only the relative limit |
+| `--read-p99-floor-ms` | 50 | The limit is never below this (ms) |
+| `--read-p99-ratio` | 1.5 | Multiple of the pre-copy read p99 baseline (>= 1) |
+
+The baseline is the median of the valid read-p99 samples taken during the
+pre-copy observation window (read-isolated samples and samples with fewer than
+20 reads are skipped), not the single last reading. A 1.26 ms baseline therefore
+gives a 50 ms limit, not 2 ms. Later baselines (after read isolation, or before
+whole-store work) use the latest sample. The cache-backlog ceilings
+(`--backlog-hard-ratio`, the 90% host-memory estimate), write errors, process
+restarts and the other hard guards still abort the copy.
+
+Resuming an existing journal: the read-p99 thresholds and the backlog thresholds
+(`--backlog-soft-ratio`, `--backlog-hard-ratio`, `--backlog-growth-samples`,
+`--cache-bytes-per-point`) are saved in the journal. A resume without these flags
+keeps the saved values. A resume that passes one of them overrides the saved
+value, raising or lowering it, without a new journal or re-copy. Each override
+is printed as a `policy_override` event and a `WARNING` line on stderr, saved in
+the journal before any transfer is admitted, and listed with the effective
+policy under `backlog_policy`, `read_p99_policy` and `policy_overrides` in
+`store-copy status`. `--backlog-baseline-window` is fixed: it describes how the
+saved baseline was learned. Journals written before the read policy was saved
+adopt this run's read flags (default floor 50 ms) and record the replaced 2 ms
+floor as an override.
+
+```sh
+store-copy run --engine metric --plan SAME_PLAN --state SAME_STATE \
+  --health-map SAME_HEALTH_MAP --apply --read-p99-floor-ms 80 --backlog-soft-ratio 4
+```
 
 Phase 1 is copy-only. Retirement and a writer-drained final delta reconciliation
 still require the campaign's separate existing approval. Overlap combining is

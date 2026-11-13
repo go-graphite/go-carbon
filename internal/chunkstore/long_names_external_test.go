@@ -21,7 +21,7 @@ func TestLongNamesNativeRoundTrip(t *testing.T) {
 				source := nativeMemoryStore(t, mode.continuation, mode.buckets)
 				target := nativeMemoryStore(t, mode.continuation, mode.buckets)
 				var names []string
-				for _, size := range []int{300, 4096} {
+				for _, size := range []int{300, 4000} {
 					name := "long." + strings.Repeat("x", size) + ".value"
 					names = append(names, name)
 					putTransferPoints(t, source, name, []store.Point{{Timestamp: 999800, Value: 42}, {Timestamp: 999820, Value: 7}})

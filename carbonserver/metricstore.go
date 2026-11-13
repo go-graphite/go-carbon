@@ -25,6 +25,15 @@ func (listener *CarbonserverListener) usesSharedCatalogCachePolicy() bool {
 
 const metricStoreCatalogPageSize = 4096
 
+// reportMetricStoreIndexUnindexable publishes how many catalog names the last
+// complete catalog pass skipped, so a skipped name is visible without the log.
+func (listener *CarbonserverListener) reportMetricStoreIndexUnindexable(skipped int) {
+	atomic.StoreUint64(&listener.metrics.MetricStoreIndexUnindexableNames, uint64(skipped))
+	if listener.prometheus.enabled {
+		listener.prometheus.metricStoreIndexUnindexable.Set(float64(skipped))
+	}
+}
+
 func (listener *CarbonserverListener) reportMetricStoreIndexUpdateError(err error) {
 	// PauseIndexUpdates is terminal and closes the index builder's exit channel.
 	// Deadlines and I/O errors remain failures even during this planned stop.
@@ -273,6 +282,14 @@ func (listener *CarbonserverListener) addMetricStoreCatalogEntry(metadata store.
 
 func metricStoreVirtualPath(name string) string {
 	return "/" + strings.ReplaceAll(name, ".", "/") + ".wsp"
+}
+
+// metricStoreIndexableName reports whether a name's virtual path fits the
+// file-list cache and snapshot formats used by the mapped discovery index. The
+// store accepts names up to 1 MiB with any bytes. One such name must not fail
+// every rebuild, which freezes discovery for all new names on the host.
+func metricStoreIndexableName(name string) bool {
+	return len(name)+len("/.wsp") <= flcv2MaxPathLen && strings.IndexByte(name, 0) < 0 && !strings.HasSuffix(name, ".")
 }
 
 func metricStoreTrigramPaths(metricPath string) []string {
