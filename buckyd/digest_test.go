@@ -20,7 +20,9 @@ func TestTransferDigest(t *testing.T) {
 	secret := []byte("digest-secret")
 	service.secret = secret
 	ctx := context.Background()
-	retentions := []chunkstore.Retention{{Step: 10, Count: 12}}
+	// The store clock is 10000: the 10 s archive covers [9880, 10000), the
+	// 60 s archive reaches back to 4000.
+	retentions := []chunkstore.Retention{{Step: 10, Count: 12}, {Step: 60, Count: 100}}
 	base := []chunkstore.Point{{Timestamp: 9900, Value: 1}, {Timestamp: 9910, Value: 2}, {Timestamp: 9920, Value: 3}, {Timestamp: 9930, Value: 4}}
 	write := func(name string, points []chunkstore.Point) {
 		t.Helper()
@@ -36,6 +38,8 @@ func TestTransferDigest(t *testing.T) {
 	differ := append([]chunkstore.Point(nil), base...)
 	differ[2].Value = 3.5
 	write("digest.c", differ)
+	old := []chunkstore.Point{{Timestamp: 9000, Value: 7}, {Timestamp: 9060, Value: 8}, {Timestamp: 9120, Value: 9}}
+	write("digest.old", old)
 
 	root := token(t, secret, []string{"*"}, []string{"*"})
 	invoke := func(body any, jwt string) *httptest.ResponseRecorder {
@@ -63,7 +67,7 @@ func TestTransferDigest(t *testing.T) {
 		return out
 	}
 
-	all := digest(DigestRequest{Names: []string{"digest.a", "digest.missing", "digest.b", "digest.c"}})
+	all := digest(DigestRequest{Names: []string{"digest.a", "digest.missing", "digest.b", "digest.c"}, From: 9900, Until: 9950})
 	if len(all) != 4 || all[0].Name != "digest.a" || all[1].Name != "digest.missing" || all[2].Name != "digest.b" || all[3].Name != "digest.c" {
 		t.Fatalf("order %+v", all)
 	}
@@ -80,7 +84,7 @@ func TestTransferDigest(t *testing.T) {
 	if c[0].Count != a[0].Count || c[0].Hash == a[0].Hash {
 		t.Fatalf("one differing point must change the hash: %+v vs %+v", c[0], a[0])
 	}
-	if again := digest(DigestRequest{Names: []string{"digest.a"}}); again[0].Archives[0] != a[0] {
+	if again := digest(DigestRequest{Names: []string{"digest.a"}, From: 9900, Until: 9950}); again[0].Archives[0] != a[0] {
 		t.Fatal("digest not stable")
 	}
 
@@ -100,24 +104,42 @@ func TestTransferDigest(t *testing.T) {
 	if window[1].Archives[0].Hash == want {
 		t.Fatal("window over the differing point must differ")
 	}
-	empty := digest(DigestRequest{Names: []string{"digest.a"}, From: 1, Until: 2})
+	empty := digest(DigestRequest{Names: []string{"digest.a"}, From: 9960, Until: 9990})
 	nothing := sha256.Sum256(nil)
-	if got := empty[0].Archives[0]; got.Count != 0 || got.Hash != hex.EncodeToString(nothing[:8]) {
+	if got := empty[0].Archives; len(got) != 1 || got[0].Step != 10 || got[0].Count != 0 || got[0].Hash != hex.EncodeToString(nothing[:8]) {
 		t.Fatalf("empty window %+v", got)
 	}
 
+	// A window older than the first archive is served by the coarser one,
+	// exactly like a render of the same range.
+	coarse := digest(DigestRequest{Names: []string{"digest.old", "digest.a"}, From: 9000, Until: 9180})
+	if got := coarse[0].Archives; len(got) != 1 || got[0].Step != 60 || got[0].Points != 100 || got[0].Count != 3 {
+		t.Fatalf("coarse window %+v", coarse[0])
+	}
+	if got := coarse[1].Archives; len(got) != 1 || got[0].Step != 60 || got[0].Count != 0 {
+		t.Fatalf("coarse window without points %+v", coarse[1])
+	}
+	// A window wholly outside the retention reads nothing: found, no archive.
+	if gone := digest(DigestRequest{Names: []string{"digest.a"}, From: 1, Until: 2}); !gone[0].Found || len(gone[0].Archives) != 0 {
+		t.Fatalf("window outside retention %+v", gone[0])
+	}
+
 	for _, bad := range []any{
-		DigestRequest{},
-		DigestRequest{Names: []string{"digest.a", "digest.a"}},
-		DigestRequest{Names: []string{""}},
+		DigestRequest{From: 9900, Until: 9950},
+		DigestRequest{Names: []string{"digest.a", "digest.a"}, From: 9900, Until: 9950},
+		DigestRequest{Names: []string{""}, From: 9900, Until: 9950},
+		DigestRequest{Names: []string{"digest.a"}},
+		DigestRequest{Names: []string{"digest.a"}, Until: 9950},
+		DigestRequest{Names: []string{"digest.a"}, From: 9900},
 		DigestRequest{Names: []string{"digest.a"}, From: 20, Until: 10},
+		DigestRequest{Names: []string{"digest.a"}, From: 20, Until: 20},
 		map[string]any{"Names": []string{"digest.a"}, "Extra": 1},
 	} {
 		if response := invoke(bad, root); response.Code != 400 {
 			t.Fatalf("bad request %+v: %d %s", bad, response.Code, response.Body.String())
 		}
 	}
-	if response := invoke(DigestRequest{Names: []string{"digest.a"}}, token(t, secret, []string{"digest.*"}, []string{"*"})); response.Code != 403 {
+	if response := invoke(DigestRequest{Names: []string{"digest.a"}, From: 9900, Until: 9950}, token(t, secret, []string{"digest.*"}, []string{"*"})); response.Code != 403 {
 		t.Fatal("scoped token accepted", response.Code)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/v1/transfer/digest", nil)
