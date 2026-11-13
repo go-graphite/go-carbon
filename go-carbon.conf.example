@@ -457,6 +457,18 @@ store-encoding = "legacy"
 # Changing a positive rate reloads on SIGHUP; enabling or disabling requires a
 # restart, so pause a running relayout with a tiny rate such as 1.
 # store-time-buckets-relayout-rate = 0
+# Classic re-anchor pacing (store-incremental-migration). A restart repairs
+# damaged classic archives on each metric's first write, so the whole one-off
+# backlog lands in the warm-up. Above this many metric repairs per second the
+# write is deferred: nothing is published, its points stay in the cache, and a
+# background sweep repairs it after the warm-up within the same budget. 0 repairs
+# everything inline (the unpaced behaviour). 50/s covers the steady-state tail
+# (16-50/s), so only restart backlogs are deferred. Requires a restart.
+# store-classic-reanchor-max-per-second = 50
+# A deferred metric whose repair has waited this long is repaired inline on its
+# next write regardless of the budget, which bounds the extra cached points. Keep
+# it above the warm-up (~25 min) so the backlog moves past it.
+# store-classic-reanchor-max-defer = "30m"
 # Parallel ID ranges, 1-32. Requires a restart; the rate above is the total
 # across all workers. Each worker buffers up to about 64 MiB of group values.
 # store-time-buckets-relayout-workers = 1

@@ -24,6 +24,7 @@ func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 	app.resolveSuccessor()
 	logger := zapwriter.Logger("dump")
 	app.stopExpiration()
+	app.stopReanchorSweep()
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil

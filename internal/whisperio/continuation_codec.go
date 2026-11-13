@@ -40,6 +40,9 @@ type ContinuationCodec struct {
 	// and folds existing and fallback sidecars before committing. In-place
 	// failures use the ordinary full rewrite in the same atomic store batch.
 	DirectLateWrites bool
+	// Reanchor paces classic re-anchor repairs; nil repairs every damaged
+	// archive inline on the write that finds it.
+	Reanchor *ClassicReanchorPacer
 	// keepImportedSidecars reproduces legacy imports in oracle tests.
 	keepImportedSidecars bool
 	// keepDuplicatePlanning retains the reference path for differential tests.

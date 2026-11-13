@@ -249,12 +249,19 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 			}
 			err = update()
 		}
-		p.writeStats.shared.observe(len(values.Data), time.Since(start), err)
+		if !errors.Is(err, store.ErrReanchorDeferred) {
+			p.writeStats.shared.observe(len(values.Data), time.Since(start), err)
+		}
 	}
 	timer.Leave()
 	if err != nil {
 		p.mirrorFailed(metric)
-		p.logger.Error("write shared metric", zap.String("metric", metric), zap.Error(err))
+		if errors.Is(err, store.ErrReanchorDeferred) {
+			// Paced repair: the points stay cached until the sweep or the
+			// max-defer age lets the write through.
+		} else {
+			p.logger.Error("write shared metric", zap.String("metric", metric), zap.Error(err))
+		}
 		if p.requeue != nil {
 			p.requeue(values)
 		}

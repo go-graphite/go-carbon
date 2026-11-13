@@ -106,7 +106,9 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			for _, batch := range values {
 				p.requeue(batch)
 			}
-			fallback = errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrFormat)
+			// A deferred re-anchor fails the whole batch; retry one by one so
+			// only that metric's points stay cached.
+			fallback = errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrFormat) || errors.Is(err, store.ErrReanchorDeferred)
 			if !fallback {
 				p.logger.Error("write shared batch", zap.Error(err))
 			}

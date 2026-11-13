@@ -36,6 +36,24 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 	base := kv
 	var repairs *continuationOverlay
 	var repaired map[int]uint64
+	// A metric already known to be damaged skips the attempt that would only
+	// rediscover the conflict: defer it outright, or repair it first.
+	known, granted := c.Reanchor.known(ctx, m.Name)
+	if !granted {
+		return store.ErrReanchorDeferred
+	}
+	for _, archive := range known {
+		if repairs == nil {
+			repairs = newContinuationOverlay(kv)
+			base = repairs
+			repaired = make(map[int]uint64)
+		}
+		drops, err := reanchorClassicArchive(ctx, repairs, archive)
+		if err != nil {
+			return err
+		}
+		repaired[archive] = drops
+	}
 	for {
 		var attempt *continuationOverlay
 		err := c.updateAttempt(ctx, base, m, input, retention, clock, maintenance, repairs == nil, &attempt)
@@ -48,6 +66,9 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 			}
 			if err != nil {
 				return err
+			}
+			if len(repaired) != 0 {
+				c.Reanchor.repaired(ctx, m.Name)
 			}
 			for archive, drops := range repaired {
 				classicReanchorCounters.archives.Add(1)
@@ -65,6 +86,9 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 			return fmt.Errorf("classic archive %d still conflicts after re-anchor: %w", conflict.archive, store.ErrFormat)
 		}
 		if repairs == nil {
+			if !c.Reanchor.admit(ctx, m.Name, conflict.archive) {
+				return store.ErrReanchorDeferred
+			}
 			repairs = newContinuationOverlay(kv)
 			base = repairs
 			repaired = make(map[int]uint64)

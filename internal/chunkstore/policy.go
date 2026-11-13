@@ -10,6 +10,10 @@ import (
 // Pebble catalog keys do not have filesystem path or component limits.
 var ErrNameTooLong = errors.New("metric name too long")
 
+// ErrReanchorDeferred refuses a write that needs a classic re-anchor beyond the
+// repair budget. Nothing was published; the caller keeps the points queued.
+var ErrReanchorDeferred = errors.New("classic re-anchor deferred")
+
 // Keep individual names within the native range's existing 1 MiB name budget.
 const maxMetricNameBytes = 1 << 20
 

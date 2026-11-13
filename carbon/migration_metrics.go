@@ -66,6 +66,7 @@ type storeStatsView struct {
 	coldPack                                                                store.ColdPackStats
 	thaws                                                                   whisperio.ThawStats
 	classicReanchors                                                        whisperio.ClassicReanchorStats
+	classicReanchorPace                                                     whisperio.ClassicReanchorPaceStats
 	ingestTables, ingestEntries, ingestBytes, ingestL0Bytes, ingestOverlaps uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
@@ -260,6 +261,11 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_cold_pack_thawed_points_total", "Points restored to ordinary groups by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Points) }),
 		counter("store_cold_pack_thawed_bytes_total", "Logical group keys and values read plus rewritten by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Bytes) }),
 		counter("store_classic_reanchored_archives_total", "Classic archives normalized by continuation updates, including unpublished transactions; investigate historical layout damage.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchors.ReanchoredArchives) }),
+		counter("store_classic_reanchor_inline_total", "Metrics whose classic re-anchor the write path repaired within the budget (or after max-defer), including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Inline) }),
+		counter("store_classic_reanchor_deferred_total", "Writes refused because a classic re-anchor exceeded the per-second budget; their points stay cached for the sweep.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Deferred) }),
+		counter("store_classic_reanchor_swept_total", "Metrics repaired by the paced background re-anchor sweep, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Swept) }),
+		counter("store_classic_reanchor_aged_total", "Deferred metrics repaired inline because they waited longer than store-classic-reanchor-max-defer; a high rate means the budget is too low for the backlog.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Aged) }),
+		gauge("store_classic_reanchor_backlog", "Metrics waiting for a paced classic re-anchor; their points stay cached until repaired. Should fall to 0 after a restart backlog drains.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchorPace.Backlog) }),
 		counter("store_classic_alias_drops_total", "Older distinct timestamps discarded when normalizing aliased classic ring slots, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.classicReanchors.AliasDrops) }),
 		counter("store_cold_pack_read_bytes_total", "Snapshot bytes read by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ReadBytes) }),
 		counter("store_cold_pack_write_bytes_total", "WAL batch bytes published by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WriteBytes) }),
@@ -593,7 +599,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.store = true
 		s.storeSnapshotAge = db.TelemetryAge().Seconds()
 		s.sidecars = sidecars
-		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(),
+		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(), classicReanchorPace: c.app.reanchorPacer.Stats(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,

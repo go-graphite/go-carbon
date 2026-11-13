@@ -109,6 +109,11 @@ type whisperConfig struct {
 	StoreNativeCombineWorkers    int       `toml:"store-native-combine-workers"`
 	StoreNativeCombineMemory     int64     `toml:"store-native-combine-memory"`
 	StoreTimeBucketsRelayoutRate int64     `toml:"store-time-buckets-relayout-rate"`
+	// StoreClassicReanchorRate bounds classic re-anchor repairs per second
+	// (0 = unlimited, the unpaced behaviour); StoreClassicReanchorMaxDefer
+	// bounds how long a deferred metric's points stay cached.
+	StoreClassicReanchorRate     float64   `toml:"store-classic-reanchor-max-per-second"`
+	StoreClassicReanchorMaxDefer *Duration `toml:"store-classic-reanchor-max-defer"`
 
 	StoreTimeBucketsRelayoutWorkers      int   `toml:"store-time-buckets-relayout-workers"`
 	StoreTimeBucketsRelayoutMinFree      int64 `toml:"store-time-buckets-relayout-min-free-bytes"`
@@ -455,29 +460,31 @@ func NewConfig() *Config {
 			StoreTimeBucketsRelayoutMaxDebt:      32 << 30,
 			StoreTimeBucketsRelayoutReclaimBytes: 32 << 30,
 
-			MaxUpdatesPerSecondAutoMin:  1,
-			StoreRestartCPUHeadroom:     restartcpu.DefaultHeadroom,
-			StorageBackend:              "files",
-			StoreCacheSize:              256 << 20,
-			StoreMemTableSize:           64 << 20,
-			StoreSyncInterval:           &Duration{time.Second},
-			StoreCompactionHeadroom:     2,
-			StoreCompactionDebtBypass:   true,
-			StoreCompactionWarmup:       &Duration{Duration: time.Hour},
-			StoreUpdateBatchSize:        1,
-			StoreMigrationIngestLinger:  &Duration{Duration: time.Second},
-			StoreEncoding:               "legacy",
-			StoreMigrationBytesInFlight: 256 << 20,
-			StoreMigrationMinFreeBytes:  8 << 30,
-			DataDir:                     "/var/lib/graphite/whisper/",
-			SchemasFilename:             "/etc/go-carbon/storage-schemas.conf",
-			AggregationFilename:         "",
-			Enabled:                     true,
-			Workers:                     1,
-			Sparse:                      false,
-			PhysicalSizeFactor:          0.75,
-			FLock:                       false,
-			HashFilenames:               true,
+			MaxUpdatesPerSecondAutoMin:   1,
+			StoreRestartCPUHeadroom:      restartcpu.DefaultHeadroom,
+			StorageBackend:               "files",
+			StoreCacheSize:               256 << 20,
+			StoreMemTableSize:            64 << 20,
+			StoreSyncInterval:            &Duration{time.Second},
+			StoreCompactionHeadroom:      2,
+			StoreCompactionDebtBypass:    true,
+			StoreCompactionWarmup:        &Duration{Duration: time.Hour},
+			StoreClassicReanchorRate:     50,
+			StoreClassicReanchorMaxDefer: &Duration{Duration: 30 * time.Minute},
+			StoreUpdateBatchSize:         1,
+			StoreMigrationIngestLinger:   &Duration{Duration: time.Second},
+			StoreEncoding:                "legacy",
+			StoreMigrationBytesInFlight:  256 << 20,
+			StoreMigrationMinFreeBytes:   8 << 30,
+			DataDir:                      "/var/lib/graphite/whisper/",
+			SchemasFilename:              "/etc/go-carbon/storage-schemas.conf",
+			AggregationFilename:          "",
+			Enabled:                      true,
+			Workers:                      1,
+			Sparse:                       false,
+			PhysicalSizeFactor:           0.75,
+			FLock:                        false,
+			HashFilenames:                true,
 
 			StoreExpiration:              &Duration{0},
 			StoreExpirationCheckInterval: &Duration{time.Hour},

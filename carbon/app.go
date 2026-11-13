@@ -152,6 +152,8 @@ type App struct {
 	capacityReadLatency     hostcapacity.Latency
 	restartBudgetStop       context.CancelFunc
 	storeMaintenance        *storeMaintenanceGate
+	reanchorPacer           *whisperio.ClassicReanchorPacer
+	reanchorSweep           *reanchorSweep
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	readPolicyConfig    atomic.Pointer[Config]
@@ -585,6 +587,7 @@ func (app *App) stopReadListeners() <-chan struct{} {
 	logger := zapwriter.Logger("app")
 	readsStopped := make(chan struct{})
 	app.stopExpiration()
+	app.stopReanchorSweep()
 	if app.quotaReloader != nil {
 		app.quotaReloader.close()
 		app.quotaReloader = nil
@@ -749,7 +752,13 @@ func (app *App) newPersister() (*persister.Whisper, error) {
 	p.SetRequeue(app.Cache.Requeue)
 	p.SetBacklogged(app.Cache.Backlogged)
 	p.SetRecovering(app.Cache.Recovering)
-	p.SetWriteoutReady(app.Cache.WriteoutReady)
+	ready := app.Cache.WriteoutReady
+	if pacer := app.reanchorPacer; pacer != nil {
+		// Leave a metric waiting for a paced re-anchor in the cache instead of
+		// retrying a write that can only defer again.
+		ready = func(metric string) bool { return !pacer.Holding(metric) && app.Cache.WriteoutReady(metric) }
+	}
+	p.SetWriteoutReady(ready)
 	if app.MetricStore != nil {
 		p.SetMetricStore(app.MetricStore)
 		if app.Config.Whisper.StoreIncrementalMigration {
@@ -1016,6 +1025,7 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 	}
 	app.applyRuntimeProfiling()
 	app.startExpiration()
+	app.startReanchorSweep()
 	app.Collector = NewCollector(app)
 	if app.Carbonserver != nil {
 		app.quotaReloader = startQuotaReloader(app.Config, app.Carbonserver)
@@ -1097,7 +1107,12 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		var continuation store.ContinuationCodec
 		if conf.Whisper.StoreIncrementalMigration {
 			incrementalSource = conf.Whisper.DataDir
-			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites, RangeReadsEnabled: func() bool { return app.readPolicyConfig.Load().Whisper.StoreRangeReads }}
+			maxDefer := 30 * time.Minute
+			if d := conf.Whisper.StoreClassicReanchorMaxDefer; d != nil {
+				maxDefer = d.Value()
+			}
+			app.reanchorPacer = whisperio.NewClassicReanchorPacer(conf.Whisper.StoreClassicReanchorRate, maxDefer)
+			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites, RangeReadsEnabled: func() bool { return app.readPolicyConfig.Load().Whisper.StoreRangeReads }, Reanchor: app.reanchorPacer}
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
