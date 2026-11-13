@@ -55,6 +55,7 @@ type capacity struct {
 }
 type hostLimit struct {
 	readBaseline float64
+	readSamples  []float64
 	deleteAt     time.Time
 	capacity
 	active                    int
@@ -85,7 +86,9 @@ type tuner struct {
 	changed        chan struct{}
 	hosts          map[string]*hostLimit
 	maximum        capacity
-	mbps, readP99  float64
+	mbps           float64
+	read           readPolicy
+	overrides      []policyOverride
 	backlog        backlogPolicy
 	collecting     bool
 	collectingDebt bool
@@ -93,7 +96,9 @@ type tuner struct {
 }
 
 func newTuner(hosts []string, maximum capacity, auto bool, mbps, p99 float64) *tuner {
-	t := &tuner{changed: make(chan struct{}), hosts: map[string]*hostLimit{}, maximum: maximum, mbps: mbps, readP99: p99, backlog: defaultBacklogPolicy()}
+	read := defaultReadPolicy()
+	read.CeilingMS = p99
+	t := &tuner{changed: make(chan struct{}), hosts: map[string]*hostLimit{}, maximum: maximum, mbps: mbps, read: read, backlog: defaultBacklogPolicy()}
 	for _, h := range hosts {
 		c := maximum
 		if auto {
@@ -282,14 +287,10 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	if t.maxSpeed != nil {
 		return t.observeMaxSpeedLocked(host, sample, store)
 	}
-	readLimit := t.readP99
-	if h.readBaseline > 0 {
-		relative := max(2, h.readBaseline*1.5)
-		if readLimit <= 0 || relative < readLimit {
-			readLimit = relative
-		}
+	hard, soft := guard(sample, store, h.previous, h.storePrevious, t.read.limit(h.readBaseline))
+	if (t.collecting || t.collectingDebt) && validReadSample(sample) {
+		h.readSamples = append(h.readSamples, sample.ReadP99MS)
 	}
-	hard, soft := guard(sample, store, h.previous, h.storePrevious, readLimit)
 	debt := h.observeDebt(sample, store, t.backlog.GrowthSamples, t.collectingDebt || t.collecting)
 	latency := h.observeLatency(sample, t.collectingDebt || t.collecting)
 	if latency.Soft != "" && soft == "" {
@@ -455,11 +456,22 @@ func (t *tuner) captureReadBaselines() {
 		if h.previous != nil {
 			h.backgroundCPU = h.previous.CPUCores
 		}
-		if h.previous != nil && h.previous.ReadSamples >= 20 && h.previous.ReadP99MS > 0 {
-			h.readBaseline = h.previous.ReadP99MS
-			event("read_baseline", map[string]any{"host": host, "p99_ms": h.readBaseline, "limit_ms": max(2, h.readBaseline*1.5)})
+		// The median of the observation window's samples, not one reading at
+		// its end; later captures (read isolation, whole-store) use the latest.
+		samples, source := h.readSamples, "observation median"
+		h.readSamples = nil
+		if len(samples) == 0 && h.previous != nil && h.previous.ReadSamples >= 20 && h.previous.ReadP99MS > 0 {
+			samples, source = []float64{h.previous.ReadP99MS}, "latest sample"
+		}
+		if len(samples) > 0 {
+			h.readBaseline = medianFloat(samples)
+			event("read_baseline", map[string]any{"host": host, "p99_ms": h.readBaseline, "samples": len(samples), "source": source, "limit_ms": t.read.limit(h.readBaseline), "policy": t.read})
 		}
 	}
+}
+
+func validReadSample(s hostSample) bool {
+	return !s.ReadsBlocked && s.ReadSamples >= 20 && s.ReadP99MS > 0 && !math.IsInf(s.ReadP99MS, 0)
 }
 
 func cpuReserve(cores int) float64 {

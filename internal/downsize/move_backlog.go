@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// backlogPolicy is saved with the run: resuming cannot relax the envelope or
-// learn a new baseline from work that the controller already admitted.
+// backlogPolicy is saved with the run: resuming cannot learn a new baseline
+// from work that the controller already admitted. Explicit threshold flags on a
+// resume override the saved values and are recorded (see resumePolicy).
 type backlogPolicy struct {
 	Window        time.Duration `json:"baseline_window"`
 	SoftRatio     float64       `json:"soft_ratio"`
@@ -66,6 +67,8 @@ type hostAdmission struct {
 
 type admissionState struct {
 	Policy    backlogPolicy
+	Read      *readPolicy      `json:",omitempty"`
+	Overrides []policyOverride `json:",omitempty"`
 	Synthetic bool
 	Hosts     map[string]hostAdmission
 }
@@ -118,7 +121,8 @@ func beyondBacklogSwing(current int64, b *backlogBaseline) bool {
 func (t *tuner) snapshotAdmission(synthetic bool) *admissionState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	state := &admissionState{Policy: t.backlog, Synthetic: synthetic, Hosts: map[string]hostAdmission{}}
+	read := t.read
+	state := &admissionState{Policy: t.backlog, Read: &read, Overrides: slices.Clone(t.overrides), Synthetic: synthetic, Hosts: map[string]hostAdmission{}}
 	for host, h := range t.hosts {
 		var previous hostSample
 		var store storageSample
@@ -143,9 +147,10 @@ func (t *tuner) snapshotAdmission(synthetic bool) *admissionState {
 func (t *tuner) restoreAdmission(state *admissionState, synthetic bool) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if state.Policy != t.backlog || state.Synthetic != synthetic || len(state.Hosts) != len(t.hosts) {
+	if state.Policy != t.backlog || state.Read != nil && *state.Read != t.read || state.Synthetic != synthetic || len(state.Hosts) != len(t.hosts) {
 		return errors.New("saved backlog policy/hosts differ; resume with the original flags and plan")
 	}
+	t.overrides = slices.Clone(state.Overrides)
 	for host, h := range t.hosts {
 		saved, ok := state.Hosts[host]
 		if !ok || !saved.Baseline.valid(t.backlog.Window, synthetic) || saved.Growth < 0 {
@@ -164,7 +169,7 @@ func (t *tuner) restoreAdmission(state *admissionState, synthetic bool) error {
 		h.latencyBaseline, h.latencyHigh = saved.LatencyBaseline, saved.LatencyHigh
 		// A resumed controller earns admission again from fresh healthy samples.
 		h.Streams, h.healthy = 0, 0
-		event("backlog_baseline_restored", map[string]any{"host": host, "baseline": h.baseline, "policy": t.backlog, "rising_samples": h.growth})
+		event("backlog_baseline_restored", map[string]any{"host": host, "baseline": h.baseline, "policy": t.backlog, "rising_samples": h.growth, "read_baseline_ms": h.readBaseline, "read_limit_ms": t.read.limit(h.readBaseline)})
 		if h.debtBaseline != nil {
 			event("debt_baseline_restored", map[string]any{"host": host, "baseline": h.debtBaseline, "high_samples": h.debtHigh, "rising_samples": h.debtGrowth})
 		}
@@ -237,11 +242,24 @@ func (m *mover) saveAdmission() error {
 
 func (m *mover) prepareAdmission(ctx context.Context, hosts []string) error {
 	if m.journal.admission != nil {
+		saved, changes, err := resumePolicy(*m.journal.admission, m.tuner.backlog, m.tuner.read, m.explicit, time.Now())
+		if err != nil {
+			return err
+		}
+		m.tuner.backlog, m.tuner.read = saved.Policy, *saved.Read
 		// Legacy journals may learn only the new debt envelope, and only during
 		// an explicit observation with all transfer workers disabled.
 		m.tuner.collectingDebt = m.observeOnly > 0
-		if err := m.tuner.restoreAdmission(m.journal.admission, m.localLab); err != nil {
+		if err := m.tuner.restoreAdmission(&saved, m.localLab); err != nil {
 			return err
+		}
+		event("admission_policy", map[string]any{"backlog": saved.Policy, "read": saved.Read, "overrides": saved.Overrides, "resumed": true})
+		if len(changes) > 0 {
+			reportOverrides(changes)
+			// Persist the override before any transfer is admitted under it.
+			if err := m.saveAdmission(); err != nil {
+				return err
+			}
 		}
 		missingDebt := false
 		for _, h := range m.tuner.hosts {

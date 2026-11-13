@@ -63,7 +63,7 @@ func fixturePlan(t *testing.T, source, target string, names []string) string {
 	return root
 }
 func testOptions(root string) options {
-	return options{plan: root, state: filepath.Join(root, "state"), barrier: filepath.Join(root, "barrier.json"), apply: true, delete: true, deleteMode: "batch", localLab: true, streams: 2, batch: 8, deleteRate: 100000, maxBytes: 1 << 20, tick: time.Second, p99: 100}
+	return options{plan: root, state: filepath.Join(root, "state"), barrier: filepath.Join(root, "barrier.json"), apply: true, delete: true, deleteMode: "batch", localLab: true, streams: 2, batch: 8, deleteRate: 100000, maxBytes: 1 << 20, tick: time.Second, read: defaultReadPolicy()}
 }
 
 var testMetricNow = time.Now().Unix() / 10 * 10
@@ -657,7 +657,8 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	tune.captureReadBaselines()
-	sample.ReadP99MS = 50
+	// Baseline 2 ms: the 50 ms floor, not 1.5x baseline, sets the pause limit.
+	sample.ReadP99MS = 60
 	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)

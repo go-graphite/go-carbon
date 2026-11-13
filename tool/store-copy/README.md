@@ -67,6 +67,47 @@ intent; update the controller/status reader first. `completed_names` and
 `native_deferred_names` are the native-aware status counters. Counting entire
 `verified` ranges as completed is incorrect for mixed journals.
 
+### Metric importer governor thresholds
+
+The metric importer pauses or halves admission when a target's read p99 rises
+above:
+
+```
+limit = min(--read-p99-ms, max(--read-p99-floor-ms, --read-p99-ratio × baseline))
+```
+
+| Flag | Default | Meaning |
+| --- | ---: | --- |
+| `--read-p99-ms` | 100 | Absolute ceiling (ms); 0 leaves only the relative limit |
+| `--read-p99-floor-ms` | 50 | The limit is never below this (ms) |
+| `--read-p99-ratio` | 1.5 | Multiple of the pre-copy read p99 baseline (>= 1) |
+
+The baseline is the median of the valid read-p99 samples taken during the
+pre-copy observation window (read-isolated samples and samples with fewer than
+20 reads are skipped), not the single last reading. A 1.26 ms baseline therefore
+gives a 50 ms limit, not 2 ms. Later baselines (after read isolation, or before
+whole-store work) use the latest sample. The cache-backlog ceilings
+(`--backlog-hard-ratio`, the 90% host-memory estimate), write errors, process
+restarts and the other hard guards still abort the copy.
+
+Resuming an existing journal: the read-p99 thresholds and the backlog thresholds
+(`--backlog-soft-ratio`, `--backlog-hard-ratio`, `--backlog-growth-samples`,
+`--cache-bytes-per-point`) are saved in the journal. A resume without these flags
+keeps the saved values. A resume that passes one of them overrides the saved
+value, raising or lowering it, without a new journal or re-copy. Each override
+is printed as a `policy_override` event and a `WARNING` line on stderr, saved in
+the journal before any transfer is admitted, and listed with the effective
+policy under `backlog_policy`, `read_p99_policy` and `policy_overrides` in
+`store-copy status`. `--backlog-baseline-window` is fixed: it describes how the
+saved baseline was learned. Journals written before the read policy was saved
+adopt this run's read flags (default floor 50 ms) and record the replaced 2 ms
+floor as an override.
+
+```sh
+store-copy run --engine metric --plan SAME_PLAN --state SAME_STATE \
+  --health-map SAME_HEALTH_MAP --apply --read-p99-floor-ms 80 --backlog-soft-ratio 4
+```
+
 Phase 1 is copy-only. Retirement and a writer-drained final delta reconciliation
 still require the campaign's separate existing approval. Overlap combining is
 currently the reviewed importer and retains its existing admission policy;

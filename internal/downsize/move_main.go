@@ -40,8 +40,12 @@ type options struct {
 	maxBytes                                                                         int64
 	tick                                                                             time.Duration
 	observeOnly                                                                      time.Duration
-	mbps, p99                                                                        float64
+	mbps                                                                             float64
+	read                                                                             readPolicy
 	backlog                                                                          backlogPolicy
+	// explicit names the flags given on the command line; resumes override
+	// saved journal thresholds only with these. Nil counts every option as given.
+	explicit map[string]bool
 }
 type apiError struct {
 	Status  int
@@ -79,7 +83,7 @@ func event(kind string, fields map[string]any) {
 }
 func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
-	o := options{backlog: defaultBacklogPolicy()}
+	o := options{backlog: defaultBacklogPolicy(), read: defaultReadPolicy()}
 	flags.StringVar(&o.from, "from", "", "native copy window start, Unix seconds or RFC3339 (inclusive)")
 	flags.StringVar(&o.until, "until", "", "native copy window end, Unix seconds or RFC3339 (exclusive)")
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
@@ -112,15 +116,19 @@ func MoveMain(args []string) error {
 	flags.DurationVar(&o.tick, "tick", 10*time.Second, "host guard and tuner tick")
 	flags.DurationVar(&o.observeOnly, "observe-only", 0, "run admission guards for this duration without starting transfer workers; also learn missing debt baselines with copying off")
 	flags.Float64Var(&o.mbps, "max-mbps", 0, "optional transfer MB/s ceiling per host direction; zero uses physical host guards without a fixed rate cap")
-	flags.Float64Var(&o.p99, "read-p99-ms", 100, "read p99 guard while reads are enabled")
-	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run")
-	flags.Float64Var(&o.backlog.SoftRatio, "backlog-soft-ratio", o.backlog.SoftRatio, "pause admission above this multiple of pre-copy maximum backlog")
-	flags.Float64Var(&o.backlog.HardRatio, "backlog-hard-ratio", o.backlog.HardRatio, "abort above this multiple of pre-copy maximum backlog")
-	flags.IntVar(&o.backlog.GrowthSamples, "backlog-growth-samples", o.backlog.GrowthSamples, "pause on consecutive rising samples beyond baseline maximum plus observed swing")
-	flags.Float64Var(&o.backlog.BytesPerPoint, "cache-bytes-per-point", o.backlog.BytesPerPoint, "estimated cache bytes/point for 90% host-memory safety ceiling (minimum 16)")
+	flags.Float64Var(&o.read.CeilingMS, "read-p99-ms", o.read.CeilingMS, "absolute read p99 ceiling (ms) while reads are enabled; 0 leaves only the relative limit; saved with run, a resume flag overrides")
+	flags.Float64Var(&o.read.FloorMS, "read-p99-floor-ms", o.read.FloorMS, "read p99 pause never below this (ms): limit = min(read-p99-ms, max(floor, ratio x pre-copy median p99)); saved with run, a resume flag overrides")
+	flags.Float64Var(&o.read.Ratio, "read-p99-ratio", o.read.Ratio, "read p99 pause above this multiple of the pre-copy median read p99 (>= 1); saved with run, a resume flag overrides")
+	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run and fixed on resume")
+	flags.Float64Var(&o.backlog.SoftRatio, "backlog-soft-ratio", o.backlog.SoftRatio, "pause admission above this multiple of pre-copy maximum backlog; saved with run, a resume flag overrides")
+	flags.Float64Var(&o.backlog.HardRatio, "backlog-hard-ratio", o.backlog.HardRatio, "abort above this multiple of pre-copy maximum backlog; saved with run, a resume flag overrides")
+	flags.IntVar(&o.backlog.GrowthSamples, "backlog-growth-samples", o.backlog.GrowthSamples, "pause on consecutive rising samples beyond baseline maximum plus observed swing; saved with run, a resume flag overrides")
+	flags.Float64Var(&o.backlog.BytesPerPoint, "cache-bytes-per-point", o.backlog.BytesPerPoint, "estimated cache bytes/point for 90% host-memory safety ceiling (minimum 16); saved with run, a resume flag overrides")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	o.explicit = map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { o.explicit[f.Name] = true })
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, o); err != nil {
@@ -157,6 +165,12 @@ func run(ctx context.Context, o options) error {
 	if err := o.backlog.validate(); err != nil {
 		return err
 	}
+	if o.read == (readPolicy{}) {
+		o.read = defaultReadPolicy()
+	}
+	if err := o.read.validate(); err != nil {
+		return err
+	}
 	if o.deleteMode == "" {
 		o.deleteMode = "auto"
 	}
@@ -166,7 +180,7 @@ func run(ctx context.Context, o options) error {
 	if o.streams == 0 {
 		o.streams = 64
 	}
-	if o.streams < 1 || o.streams > 64 || o.batch < 1 || o.batch > 10000 || o.maxBytes < 65536 || o.maxBytes > 160<<20 || o.deleteRate < 1 || o.tick < time.Second || o.tick > 20*time.Second || o.mbps < 0 || math.IsNaN(o.mbps) || math.IsInf(o.mbps, 0) || math.IsNaN(o.p99) || math.IsInf(o.p99, 0) || o.p99 < 0 {
+	if o.streams < 1 || o.streams > 64 || o.batch < 1 || o.batch > 10000 || o.maxBytes < 65536 || o.maxBytes > 160<<20 || o.deleteRate < 1 || o.tick < time.Second || o.tick > 20*time.Second || o.mbps < 0 || math.IsNaN(o.mbps) || math.IsInf(o.mbps, 0) {
 		return errors.New("invalid resource limit")
 	}
 	if o.reconcile && (o.delete || o.deleteMode == "batch") {
@@ -282,8 +296,8 @@ func run(ctx context.Context, o options) error {
 	if o.blockReads && o.localLab {
 		return errors.New("use the lab read workload toggle to benchmark isolation")
 	}
-	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.p99)
-	m.tuner.backlog = o.backlog
+	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.read.CeilingMS)
+	m.tuner.backlog, m.tuner.read = o.backlog, o.read
 	journalID := p.PlanID + fmt.Sprintf(":delete=%t:mode=%s", o.delete, o.deleteMode)
 	if o.reconcile {
 		journalID += ":reconcile=true"
