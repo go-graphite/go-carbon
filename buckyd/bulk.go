@@ -21,7 +21,7 @@ import (
 // Bulk requests use root namespace authorization once per batch. A scoped
 // token cannot turn a batch endpoint into an escape from its metric scope.
 func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
-	op := map[string]string{"/v1/transfer/export": "read", "/v1/transfer/import": "update", "/v1/transfer/pull": "update", "/v1/transfer/verify": "read", "/v1/transfer/delete": "delete", "/v1/transfer/stage-delete": "delete", "/v1/transfer/stage-copy": "update", "/v1/transfer/pending-delete": "read", "/v1/transfer/check-staged": "read", "/v1/transfer/retire": "delete", "/v1/transfer/status": "read", "/v1/transfer/list": "read"}[r.URL.Path]
+	op := map[string]string{"/v1/transfer/export": "read", "/v1/transfer/import": "update", "/v1/transfer/pull": "update", "/v1/transfer/verify": "read", "/v1/transfer/delete": "delete", "/v1/transfer/stage-delete": "delete", "/v1/transfer/stage-copy": "update", "/v1/transfer/pending-delete": "read", "/v1/transfer/check-staged": "read", "/v1/transfer/retire": "delete", "/v1/transfer/status": "read", "/v1/transfer/list": "read", "/v1/transfer/digest": "read"}[r.URL.Path]
 	if op == "" {
 		http.NotFound(w, r)
 		return
@@ -206,6 +206,21 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = out.Flush()
+	case "/v1/transfer/digest":
+		var request DigestRequest
+		if !decode(&request) {
+			return
+		}
+		if err := request.validate(); err != nil {
+			writeError(w, err, 400)
+			return
+		}
+		results, err := s.digest(r.Context(), request)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(results)
 	case "/v1/transfer/pull":
 		var request struct {
 			Source   string
