@@ -340,3 +340,46 @@ func TestRealtimeCursorSurvivesSplitsAndPrune(t *testing.T) {
 		}
 	}
 }
+
+func TestRealtimeOverlayMergeAcceptsConcurrentNames(t *testing.T) {
+	l := NewCarbonserverListener(nil)
+	l.SetWhisperData(t.TempDir())
+	l.SetTrieIndex(true)
+	l.SetConcurrentIndex(true)
+	l.SetRealtimeIndex(1)
+	old, next := newTrie(".wsp", 0, nil), newTrie(".wsp", 0, nil)
+	l.UpdateFileIndex(&fileIndex{trieIdx: old})
+	l.insertRealtimeMetric(old, "before.merge")
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var once sync.Once
+	l.cacheGet = func(string) []points.Point { once.Do(func() { close(entered); <-release }); return nil }
+	go func() {
+		l.metricStoreIndexMu.Lock()
+		err := l.mergeRealtimeOverlayLocked(old, next)
+		if err == nil {
+			l.UpdateFileIndex(&fileIndex{trieIdx: next})
+		}
+		l.metricStoreIndexMu.Unlock()
+		done <- err
+	}()
+	<-entered
+	inserted := make(chan bool, 1)
+	go func() { inserted <- l.IndexNewMetric("during.merge") }()
+	select {
+	case ok := <-inserted:
+		if !ok || !l.MetricExists("during.merge") {
+			t.Error("arrival not findable during merge")
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-done
+		t.Fatal("overlay copy blocked insertion")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !l.MetricExists("before.merge") || !l.MetricExists("during.merge") {
+		t.Fatal("index swap lost an overlay name")
+	}
+}

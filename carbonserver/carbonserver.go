@@ -358,16 +358,17 @@ type CarbonserverListener struct {
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
 	// Serializes index writers; readers use atomic trie links and publication.
-	metricStoreIndexMu sync.Mutex
-	realtimeScan       *fileListUpdate
-	realtimeNext       *trieIndex
-	realtimePath       []byte
-	metricStoreIndex   *store.Store
-	metricStoreCursor  uint64
-	checkpointMu       sync.Mutex
-	checkpointIndex    *fileIndex
-	sharedRequestMu    sync.RWMutex
-	sharedStoreStopped bool
+	metricStoreRefreshMu sync.Mutex // serialize rebuilds while their I/O releases the writer lock
+	metricStoreIndexMu   sync.Mutex
+	realtimeScan         *fileListUpdate
+	realtimeNext         *trieIndex
+	realtimePath         []byte
+	metricStoreIndex     *store.Store
+	metricStoreCursor    uint64
+	checkpointMu         sync.Mutex
+	checkpointIndex      *fileIndex
+	sharedRequestMu      sync.RWMutex
+	sharedStoreStopped   bool
 
 	// Prefixes requested from /metrics/namespace-hashes/, prewarmed per snapshot.
 	namespaceHashPrefixes sync.Map

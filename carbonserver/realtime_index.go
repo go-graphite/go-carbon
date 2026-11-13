@@ -201,3 +201,27 @@ func (l *CarbonserverListener) insertRealtimeCanonical(ti *trieIndex, metric str
 	node, err := insertMutablePath(ti, path, 0, 0, 0, 0)
 	return node, err, true
 }
+
+// mergeRealtimeOverlayLocked returns with the writer lock held. Dual writes
+// retain arrivals while the old overlay is streamed, one bounded insertion at a
+// time. No list or journal proportional to the overlay is retained.
+func (l *CarbonserverListener) mergeRealtimeOverlayLocked(old, next *trieIndex) error {
+	next.throughputs = old.throughputs
+	l.realtimeNext = next
+	l.metricStoreIndexMu.Unlock()
+	err := old.walkMutableMetrics(func(name []byte, node *trieNode) error {
+		metric := string(name)
+		// The cache callback can take its shard lock, so call it before taking the
+		// writer lock; ingestion holds cache shard locks when checking discovery.
+		cached := l.cacheGet != nil && len(l.cacheGet(metric)) != 0
+		if !node.pending.Load() && !cached {
+			return nil
+		}
+		l.metricStoreIndexMu.Lock()
+		defer l.metricStoreIndexMu.Unlock()
+		return next.copyOverlayMetric(metric, node)
+	})
+	l.metricStoreIndexMu.Lock()
+	l.realtimeNext = nil
+	return err
+}

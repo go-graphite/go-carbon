@@ -726,9 +726,11 @@ func (u *fileListUpdate) replaceSnapshot() {
 
 func (ti *trieIndex) copyOverlayMetric(name string, node *trieNode) error {
 	path := "/" + strings.ReplaceAll(name, ".", "/") + ti.fileExt
-	found, err := ti.snapshot.containsMetric(name, ti.fileExt)
-	if err != nil || found {
-		return err
+	if ti.snapshot != nil {
+		found, err := ti.snapshot.containsMetric(name, ti.fileExt)
+		if err != nil || found {
+			return err
+		}
 	}
 	var m fileMeta
 	if node != nil {
