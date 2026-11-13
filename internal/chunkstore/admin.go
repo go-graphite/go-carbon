@@ -61,6 +61,11 @@ func EachPage(ctx context.Context, list PageLister, prefix string, limit int, fn
 // CatalogHighWatermark bounds the IDs present at this instant. Catalog IDs are
 // monotonic, so metrics created later cannot inherit a baseline's eligibility.
 func (s *Store) CatalogHighWatermark(ctx context.Context) (uint64, error) {
+	ctx, finish, err := s.beginRead(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer finish()
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -103,6 +108,11 @@ func (s *Store) ListCatalogPage(ctx context.Context, prefix, after string, limit
 }
 
 func (s *Store) listPage(ctx context.Context, prefix, after string, limit int, revisions bool) ([]Metadata, error) {
+	ctx, finish, err := s.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	if err := s.fileOwnershipError(); err != nil {
 		return nil, err
 	}
@@ -363,6 +373,11 @@ func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadat
 }
 
 func (s *Store) Snapshot(ctx context.Context, name string) (Snapshot, error) {
+	ctx, finish, err := s.beginRead(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer finish()
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return Snapshot{}, err
 	}

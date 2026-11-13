@@ -34,6 +34,9 @@ type findResponse struct {
 }
 
 func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *http.Request) {
+	if listener.rejectClosedStore(wr) {
+		return
+	}
 	phasecpu.Set(phasecpu.Find)
 	defer phasecpu.Set(phasecpu.Other)
 	// URL: /metrics/find/?local=1&format=pickle&query=the.metric.path.with.glob
@@ -111,6 +114,9 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	}
 
 	response, fromCache, err := listener.findResponse(ctx, logger.zap(), t0, formatCode, format, query)
+	if listener.rejectClosedStore(wr) {
+		return
+	}
 
 	if err != nil || response == nil {
 		var code int
@@ -452,7 +458,15 @@ func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Cont
 	return expandedGlobsCasted, isCacheHit, err
 }
 
-func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.GlobRequest) (*protov2.GlobResponse, error) {
+func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.GlobRequest) (result *protov2.GlobResponse, rpcErr error) {
+	if err := listener.metricStoreReadError(); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	defer func() {
+		if err := listener.metricStoreReadError(); err != nil {
+			result, rpcErr = nil, status.Error(codes.Unavailable, err.Error())
+		}
+	}()
 	phasecpu.Set(phasecpu.Find)
 	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()
