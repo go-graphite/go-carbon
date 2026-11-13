@@ -170,6 +170,8 @@ func TestIncrementalIntakeRejectsBrokenDump(t *testing.T) {
 	path, cfg, stamp := legacyIntakeFixture(t, 4, 10)
 	cfg.Whisper.StoreIncrementalMigration = true
 	cfg.Whisper.StoreDir = t.TempDir()
+	cfg.Whisper.FLock = true
+	cfg.Carbonserver.FileListCache = filepath.Join(t.TempDir(), "files.flc")
 	// A compact source truncated after a complete record must be retained and prevent
 	// live listeners from opening, even after earlier generations were loaded.
 	broken := filepath.Join(cfg.Dump.Path, "cache-compact.99.9999999999999999999")
