@@ -27,7 +27,7 @@ func TestRecentSteadyHistoryAndShutdown(t *testing.T) {
 		}
 		b := Start(context.Background(), path, 0, DefaultHeadroom)
 		if age == time.Minute {
-			if math.Abs(b.Cores()-12.6) > 1e-9 || b.SteadyRate() != 14000 {
+			if math.Abs(b.Cores()-12*DefaultHeadroom) > 1e-9 || b.SteadyRate() != 14000 {
 				t.Fatal(b.Cores(), b.SteadyRate())
 			}
 		} else if b.Cores() != fallbackCores() || b.SteadyRate() != 0 {
