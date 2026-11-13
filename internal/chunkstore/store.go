@@ -24,6 +24,7 @@ import (
 )
 
 var (
+	ErrClosed         = errors.New("chunk store is closing")
 	ErrNotFound       = errors.New("metric not found")
 	ErrExists         = errors.New("metric already exists")
 	ErrFormat         = errors.New("unsupported chunk store format")
@@ -217,6 +218,11 @@ func (o Options) WithFS(fs vfs.FS) Options {
 
 type Store struct {
 	readSlots             *fifo.Semaphore
+	readMu                sync.Mutex // serializes read registration with cancellation
+	readCount             int
+	readDone              chan struct{} // closed after cancellation and the last view closes
+	readCtx               context.Context
+	readCancel            context.CancelFunc
 	nativeCounters        nativeCounters
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
@@ -473,6 +479,8 @@ func Open(dir string, options Options) (*Store, error) {
 		options.MemTableSize = 64 << 20
 	}
 	s := &Store{readSlots: fifo.NewSemaphore(maxConcurrentStoreReads), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s.readCtx, s.readCancel = context.WithCancel(context.Background())
+	s.readDone = make(chan struct{})
 	s.maintenanceWait = options.MaintenanceWait
 	s.maintenanceCtx, s.maintenanceStop = context.WithCancel(context.Background())
 	// Flush pacing starts once the store is open: WAL recovery and WAL moves
@@ -1095,6 +1103,14 @@ func (s *Store) CloseForExit() error { return s.close(true) }
 func (s *Store) Close() error { return s.close(false) }
 
 func (s *Store) close(forExit bool) error {
+	// Cancel admission before joining readers. Held admission slots are not
+	// active views and must never keep Close waiting for their owners.
+	s.readMu.Lock()
+	s.readCancel()
+	if s.readCount == 0 {
+		close(s.readDone)
+	}
+	s.readMu.Unlock()
 	// Refuse new owner operations and cancel every admitted caller before any
 	// joins. Cancellation reaches each span's admission check synchronously.
 	s.explicitMaintenance.cancel()
@@ -1141,6 +1157,9 @@ func (s *Store) close(forExit bool) error {
 			s.checkpoint.saveErr = errors.New("store changed after metadata checkpoint")
 		}
 	}
+	// All admitted reads release their views before Pebble closes. New calls
+	// reject readCtx cancellation under the registration lock.
+	<-s.readDone
 	// Writers must be stopped before Close. Pebble flushes and syncs the WAL
 	// on close, including mutations made after the final periodic sync.
 	var err error
@@ -1603,6 +1622,11 @@ func (s *Store) Create(ctx context.Context, config MetricConfig) (Metadata, erro
 }
 
 func (s *Store) Metadata(ctx context.Context, name string) (Metadata, error) {
+	ctx, finish, err := s.beginRead(ctx)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer finish()
 	if err := s.fileOwnershipError(); err != nil {
 		return Metadata{}, err
 	}

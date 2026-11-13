@@ -163,6 +163,9 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 }
 
 func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req *http.Request) {
+	if listener.rejectClosedStore(wr) {
+		return
+	}
 	phasecpu.Set(phasecpu.Render)
 	defer phasecpu.Set(phasecpu.Other)
 	// URL: /render/?target=the.metric.Name&format=pickle&from=1396008021&until=1396022421
@@ -242,6 +245,9 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	response, fromCache, err := listener.fetchWithCache(ctx, logger.zap(), format, targets, tle)
 	tle.FetchSize = response.memoryUsed
+	if listener.rejectClosedStore(wr) {
+		return
+	}
 	tle.MetricsFetched = response.metricsFetched
 	tle.ValuesFetched = response.valuesFetched
 
@@ -699,6 +705,14 @@ func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_Rende
 
 // Render implements Render rpc of CarbonV2 gRPC service
 func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream grpcv2.CarbonV2_RenderServer) (rpcErr error) {
+	if err := listener.metricStoreReadError(); err != nil {
+		return status.Error(codes.Unavailable, err.Error())
+	}
+	defer func() {
+		if err := listener.metricStoreReadError(); err != nil {
+			rpcErr = status.Error(codes.Unavailable, err.Error())
+		}
+	}()
 	phasecpu.Set(phasecpu.Render)
 	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()

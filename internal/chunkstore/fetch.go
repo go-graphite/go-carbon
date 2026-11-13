@@ -41,16 +41,28 @@ type readAdmissionKey struct{}
 // called; callers release as soon as the store reads are done. Names the
 // catalog rules out take no slot, because Fetch answers them without one.
 func (s *Store) AdmitRead(ctx context.Context, name string) (context.Context, func(), error) {
+	ctx, cancel, err := s.readContext(ctx)
+	if err != nil {
+		return ctx, func() {}, err
+	}
+
 	if !s.catalogMembership.mayContain(name) {
-		return ctx, func() {}, nil
+		return ctx, cancel, nil
 	}
 	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+		cancel()
+		return ctx, func() {}, err
+	}
+	if err := errors.Join(s.ReadError(), ctx.Err()); err != nil {
+		s.readSlots.Release(1)
+		cancel()
 		return ctx, func() {}, err
 	}
 	a := &readAdmission{store: s}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
+			cancel()
 			a.released.Store(true)
 			s.readSlots.Release(1)
 		})
@@ -60,10 +72,20 @@ func (s *Store) AdmitRead(ctx context.Context, name string) (context.Context, fu
 
 // acquireReadSlot uses a held admission from ctx, or waits for a slot.
 func (s *Store) acquireReadSlot(ctx context.Context) (func(), error) {
+	if err := s.ReadError(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if a, ok := ctx.Value(readAdmissionKey{}).(*readAdmission); ok && a.store == s && !a.released.Load() {
 		return func() {}, nil
 	}
 	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	if err := errors.Join(s.ReadError(), ctx.Err()); err != nil {
+		s.readSlots.Release(1)
 		return nil, err
 	}
 	return func() { s.readSlots.Release(1) }, nil
@@ -77,6 +99,11 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 }
 
 func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix) (*Series, error) {
+	ctx, finish, err := s.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	if err := s.fileOwnershipError(); err != nil {
 		return nil, err
 	}

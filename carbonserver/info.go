@@ -111,6 +111,9 @@ func metricInfoFromShared(metadata store.Metadata) metricInfo {
 }
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
+	if listener.rejectClosedStore(wr) {
+		return
+	}
 	phasecpu.Set(phasecpu.Info)
 	defer phasecpu.Set(phasecpu.Other)
 	// URL: /info/?target=the.metric.Name&format=json
@@ -180,6 +183,9 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	var retentionsV2 []*protov2.Retention
 	for i, metric := range metrics {
 		info, err := listener.getMetricInfo(metric)
+		if listener.rejectClosedStore(wr) {
+			return
+		}
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.NotFound, 1)
 			accessLogger.Error("info served",
@@ -276,7 +282,15 @@ func titleizeAggrMethod(aggr string) string {
 	return strings.ToUpper(aggr[:1]) + aggr[1:]
 }
 
-func (listener *CarbonserverListener) Info(ctx context.Context, req *protov2.InfoRequest) (*protov2.InfoResponse, error) {
+func (listener *CarbonserverListener) Info(ctx context.Context, req *protov2.InfoRequest) (result *protov2.InfoResponse, rpcErr error) {
+	if err := listener.metricStoreReadError(); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	defer func() {
+		if err := listener.metricStoreReadError(); err != nil {
+			result, rpcErr = nil, status.Error(codes.Unavailable, err.Error())
+		}
+	}()
 	phasecpu.Set(phasecpu.Info)
 	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()
