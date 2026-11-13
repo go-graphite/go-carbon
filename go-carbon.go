@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -36,6 +37,31 @@ import (
 const Version = "0.19.1"
 
 var BuildVersion = "(development version)"
+
+// buildRevision identifies the source embedded by the Go toolchain. Builds
+// without VCS metadata keep an empty revision rather than guessing from a tag.
+func buildRevision(info *debug.BuildInfo) string {
+	if info == nil {
+		return ""
+	}
+	var revision string
+	var modified bool
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if revision != "" && modified {
+		revision += "-dirty"
+	}
+	return revision
+}
 
 func httpServe(addr string) (func(), error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
@@ -247,12 +273,14 @@ func main() {
 	}
 
 	if cfg.Prometheus.Enabled {
+		info, _ := debug.ReadBuildInfo()
 		buildInfo := prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "go_carbon_build_info",
-			Help: "Go-carbon release, binary build, and Go toolchain versions.",
+			Help: "Go-carbon release, binary build, source revision, and Go toolchain versions.",
 			ConstLabels: prometheus.Labels{
 				"version":       Version,
 				"build_version": BuildVersion,
+				"revision":      buildRevision(info),
 				"go_version":    runtime.Version(),
 			},
 		})
