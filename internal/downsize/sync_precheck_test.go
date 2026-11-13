@@ -6,10 +6,41 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
+
+func TestSyncPrecheckLeavesInvalidNamesForCopyFailure(t *testing.T) {
+	j, err := openSyncJournal(filepath.Join(t.TempDir(), "sync.jsonl"), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	invalid := strings.Repeat("x", chunkstore.MaxMetricNameBytes+1)
+	calls := 0
+	b := &precheckBackend{fakeSync: newFakeSync()}
+	b.info = func(_ context.Context, _ string, names []string) (map[string][]syncArchive, error) {
+		calls++
+		if !reflect.DeepEqual(names, []string{"a"}) {
+			t.Fatal("unimportable names reached metadata precheck")
+		}
+		return map[string][]syncArchive{"a": syncTestSchema}, nil
+	}
+	s := &syncer{o: syncOptions{from: []string{syncD1}, batch: 1, streams: 1}, b: b, j: j}
+	for range 2 {
+		keep, short, absent, err := s.dropShort(context.Background(), 0, []string{"a", invalid})
+		if err != nil || !reflect.DeepEqual(keep, []string{"a", invalid}) || len(short)+len(absent) != 0 {
+			t.Fatalf("keep=%d short=%d absent=%d err=%v", len(keep), len(short), len(absent), err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("metadata calls=%d; resume checkpoint not reused", calls)
+	}
+}
 
 type precheckBackend struct {
 	*fakeSync
