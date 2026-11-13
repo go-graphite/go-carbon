@@ -17,10 +17,11 @@ import (
 // which this package rewrites only through its store io. These are file names
 // (continuationNameKey), manifests (continuationManifestKey), paged header
 // pages (continuationHeaderPrefix plus a 2-byte page) and the file identity
-// sequence. Block descriptors and point groups are not state.
+// sequence, plus the digest cache revision fence. Block descriptors, digest
+// bucket sums and point groups are not state.
 func (c *ContinuationCodec) StateKey(suffix []byte) bool {
 	switch {
-	case bytes.HasPrefix(suffix, continuationNamesPrefix), bytes.Equal(suffix, continuationSequenceKey):
+	case bytes.HasPrefix(suffix, continuationNamesPrefix), bytes.Equal(suffix, continuationSequenceKey), bytes.Equal(suffix, sumRevisionKey):
 		return true
 	case len(suffix) == continuationFileKeyLen && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'h':
 		return true
@@ -55,6 +56,11 @@ const continuationFileKeyLen = 10
 // store.Store.PrewarmMetadata).
 func (c *ContinuationCodec) LoadState(ctx context.Context, kv store.ContinuationIO, m store.Metadata, clock func() time.Time) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Cache the absent fence too: names that have never requested a digest
+	// must not pay an extra storage lookup on their first prewarmed update.
+	if _, err := kv.Get(sumRevisionKey); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 	fs := newContinuationFiles(kv, true).withClock(clock)

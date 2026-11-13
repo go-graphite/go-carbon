@@ -120,7 +120,10 @@ func TestTransferEpochCommitConcurrentMatchesReread(t *testing.T) {
 			}()
 		}
 		for i, name := range names {
-			if i%3 != 0 {
+			// Write only initially present names on both targets. For absent
+			// names, Metadata racing the import could skip a write on just one
+			// target, so the two snapshots would have different input histories.
+			if i%6 != 0 {
 				continue
 			}
 			wg.Add(1)

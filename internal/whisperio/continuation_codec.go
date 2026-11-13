@@ -25,6 +25,9 @@ import (
 type ContinuationCodec struct {
 	// keepSnapshotReadAllocations retains the previous reader as a test oracle.
 	keepSnapshotReadAllocations bool
+	// DigestSettle is the minimum age of a complete cached digest bucket.
+	// Zero defaults to one hour. Late writes still invalidate old buckets.
+	DigestSettle time.Duration
 	// RangeReadsEnabled prunes sealed groups using their existing time headers during
 	// Fetch. Skipped payloads are not decompressed or checked by the sealed CRC.
 	// Writes and verification retain complete decoding. Irregular timestamps
@@ -639,7 +642,7 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
-	return c.updateReanchoring(ctx, kv, m, input, retention, clock, maintenance)
+	return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
 }
 
 // updateAttempt leaves compressed writes on their existing path. Classic writes

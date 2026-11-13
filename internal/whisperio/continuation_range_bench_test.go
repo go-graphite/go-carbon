@@ -16,6 +16,14 @@ import (
 // Production-shaped archive selection and native block creation, followed by
 // the real v9 cold packer. Values are deterministic, not a production capture.
 func rangeFetchFixture(tb testing.TB) (*store.Store, *ContinuationCodec, int) {
+	return rangeFetchFixtureValues(tb, nil)
+}
+
+func rangeFetchFixtureValues(tb testing.TB, valueAt func(int) float64) (*store.Store, *ContinuationCodec, int) {
+	return rangeFetchFixtureSchema(tb, valueAt, false)
+}
+
+func rangeFetchFixtureSchema(tb testing.TB, valueAt func(int) float64, longRetentions bool) (*store.Store, *ContinuationCodec, int) {
 	tb.Helper()
 	ctx := context.Background()
 	const now = 1793664000
@@ -31,15 +39,23 @@ func rangeFetchFixture(tb testing.TB) (*store.Store, *ContinuationCodec, int) {
 	tb.Cleanup(func() { db.Close() })
 	db.StopBackground()
 	cfg := store.MetricConfig{Name: "range.metric", Retentions: []store.Retention{{Step: 1, Count: 2 * 86400}, {Step: 60, Count: 28 * 1440}, {Step: 3600, Count: 2 * 8760}}, AggregationMethod: store.Average, XFilesFactor: .5}
+	histories := []struct{ step, age, recent int }{{3600, 700 * 86400, 28 * 86400}, {60, 28 * 86400, 2 * 86400}, {1, 2*86400 - 60, 60}}
+	if longRetentions {
+		cfg.Retentions = []store.Retention{{Step: 60, Count: 30 * 1440}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}}
+		histories = []struct{ step, age, recent int }{{86400, 3650 * 86400, 365 * 86400}, {3600, 365 * 86400, 30 * 86400}, {60, 30 * 86400, 60}}
+	}
 	if _, err := db.Create(ctx, cfg); err != nil {
 		tb.Fatal(err)
 	}
 	// Fill old archives directly, then fine points; all native headers and
 	// rollups are produced by the existing writer rather than handmade metadata.
-	for _, history := range []struct{ step, age, recent int }{{3600, 700 * 86400, 28 * 86400}, {60, 28 * 86400, 2 * 86400}, {1, 2*86400 - 60, 60}} {
+	for _, history := range histories {
 		input := make([]store.Point, 0, (history.age-history.recent)/history.step)
 		for ts := now - history.age; ts < now-history.recent; ts += history.step {
 			value := 1000 + math.Sin(float64(ts)/7919)*23 + float64(ts%97)/100
+			if valueAt != nil {
+				value = valueAt(ts)
+			}
 			input = append(input, store.Point{Timestamp: int64(ts), Value: value})
 		}
 		if err := db.UpdateMany(ctx, cfg.Name, input); err != nil {
