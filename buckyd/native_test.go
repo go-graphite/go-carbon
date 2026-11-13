@@ -23,7 +23,7 @@ func newNativeTestService(t *testing.T) (*Service, *chunkstore.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{TmpDir: t.TempDir(), MaxTransfers: 1, MaxBodyBytes: 1024, TransferSources: []string{"127.0.0.1"}}, db)
+	s, err := New(Config{TmpDir: t.TempDir(), MaxTransfers: 1, MaxBodyBytes: 1024}, db)
 	if err != nil {
 		t.Fatal(err)
 	}

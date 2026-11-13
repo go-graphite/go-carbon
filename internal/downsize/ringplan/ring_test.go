@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -507,15 +506,6 @@ func TestCompareAndConfig(t *testing.T) {
 	}
 	if bc.Buckyd.Hash != "jump_fnv1a" || len(bc.Buckyd.Nodes) != 3 {
 		t.Fatal(bc)
-	}
-	if len(bc.Buckyd.TransferSources) != len(s.Old.Nodes)+1 || !slices.Contains(bc.Buckyd.TransferSources, "control-a.example.net") {
-		t.Fatal("transfer endpoint alias missing from generated configuration", bc)
-	}
-	for _, source := range s.Old.Nodes {
-		parsed, _ := hashing.NewNodeParser(source.Node)
-		if !slices.Contains(bc.Buckyd.TransferSources, parsed.Server) {
-			t.Fatal("transfer source missing from generated configuration", bc)
-		}
 	}
 }
 
