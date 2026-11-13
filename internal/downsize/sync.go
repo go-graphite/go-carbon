@@ -120,7 +120,7 @@ func SyncMain(ctx context.Context, args []string) error {
 	flags.StringVar(&o.prefix, "prefix", "", "sync only names with this prefix (scope a run or a proof)")
 	flags.StringVar(&o.ring, "ring", "", "optional ring file; source names the target does not own are skipped")
 	flags.StringVar(&o.state, "state", "", "state directory (journal, name lists, copy journals); rerun the same command to resume")
-	flags.IntVar(&o.streams, "streams", 8, "parallel verify batches")
+	flags.IntVar(&o.streams, "streams", 8, "parallel retention precheck and verify batches")
 	flags.IntVar(&o.batch, "verify-batch", 500, "names per verify multi-fetch")
 	flags.IntVar(&o.maxRounds, "max-rounds", 4, "verify/fill rounds")
 	flags.DurationVar(&o.settle, "settle", 10*time.Minute, "ignore the newest points: replicas may still be writing them")
@@ -221,6 +221,7 @@ type syncRow struct {
 	Failed    []string   `json:"failed,omitempty"`
 	Forbidden bool       `json:"forbidden,omitempty"`
 	Holes     []syncHole `json:"holes,omitempty"`
+	Absent    []string   `json:"absent,omitempty"`
 	Unindexed []string   `json:"unindexed,omitempty"`
 	Short     []string   `json:"short,omitempty"`
 	Skipped   []syncSkip `json:"skipped,omitempty"`
@@ -457,7 +458,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		s.forbid[source] = true
 		event("sync_source_forbidden", map[string]any{"level": "error", "source": source, "target": s.o.to, "hint": "the target transfer-sources allowlist does not list this source; continuing with the others"})
 	}
-	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short}); err != nil {
+	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short}); err != nil {
 		return res, err
 	}
 	return res, nil
