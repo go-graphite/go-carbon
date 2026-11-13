@@ -567,6 +567,9 @@ const (
 	// TransferMergeFallbackLayout: a copy is not compressed, or the archive
 	// layouts or aggregation differ.
 	TransferMergeFallbackLayout = "layout"
+	// TransferMergeFallbackNaN: a copy holds NaN (or off-grid) points that
+	// the union drops; an append would keep them in the source's blocks.
+	TransferMergeFallbackNaN = "nan"
 	// TransferMergeFallbackOverlap: a target point is at or before the
 	// source's newest block point.
 	TransferMergeFallbackOverlap = "overlap"
@@ -582,7 +585,7 @@ const (
 )
 
 // TransferMergeFallbackReasons lists every fallback reason, in stats order.
-var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, TransferMergeFallbackOverlap, TransferMergeFallbackOrder, TransferMergeFallbackVerify, TransferMergeFallbackDisabled, TransferMergeFallbackOther}
+var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, TransferMergeFallbackNaN, TransferMergeFallbackOverlap, TransferMergeFallbackOrder, TransferMergeFallbackVerify, TransferMergeFallbackDisabled, TransferMergeFallbackOther}
 
 type transferMergeStats struct {
 	appended  atomic.Uint64
@@ -692,18 +695,24 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			}
 			want := source
 			want.Archives = make([]Archive, len(source.Archives))
+			normalized := false
 			for j, a := range source.Archives {
-				points, _, _, err := nativeArchiveUnion(a, target.Archives[j])
+				points, _, changed, err := nativeArchiveUnion(a, target.Archives[j])
 				if err != nil {
 					return nil, err
 				}
+				normalized = normalized || changed
 				points = retainTransferSlots(points, a.Retention)
 				want.Archives[j] = Archive{a.Retention, points}
 			}
 			appended := false
 			if m.Continuation && old.Continuation {
 				fallback := TransferMergeFallbackDisabled
-				if merger, ok := s.continuation.(ContinuationArchiveMerger); ok && !s.transferMergeAppendOff {
+				if merger, ok := s.continuation.(ContinuationArchiveMerger); normalized && ok && !s.transferMergeAppendOff {
+					// The union dropped points the appended copy would keep, so
+					// the merger's verify would fail after doing all its work.
+					fallback = TransferMergeFallbackNaN
+				} else if ok && !s.transferMergeAppendOff {
 					kv := s.newContinuationIO(ctx, b, b, m)
 					fallback, err = merger.MergeArchives(ctx, transferRecordIO(r), transferRecordIO(raw), kv, want, target, s.now)
 					if err != nil {

@@ -43,6 +43,12 @@ func openMergeBenchStore(tb testing.TB, root string, clock func() time.Time) *st
 // newMergeBenchFixture writes names whose history ends at the input handoff
 // (now-6h, overlap=false) or at now (overlap=true) and exports them.
 func newMergeBenchFixture(tb testing.TB, names int, overlap bool) mergeBenchFixture {
+	return newMergeBenchFixtureWith(tb, names, overlap, 0, 0)
+}
+
+// newMergeBenchFixtureWith drops a gaps fraction of the 1-minute points and
+// stores a nan fraction as NaN.
+func newMergeBenchFixtureWith(tb testing.TB, names int, overlap bool, gaps, nan float64) mergeBenchFixture {
 	tb.Helper()
 	ctx := context.Background()
 	now := time.Unix(1763000000, 0)
@@ -71,7 +77,14 @@ func newMergeBenchFixture(tb testing.TB, names int, overlap bool) mergeBenchFixt
 				continue
 			}
 			level = math.Max(0, level+1000*r.NormFloat64())
-			points = append(points, store.Point{Timestamp: ts, Value: math.Round(level)})
+			if gaps > 0 && r.Float64() < gaps {
+				continue
+			}
+			value := math.Round(level)
+			if nan > 0 && r.Float64() < nan {
+				value = math.NaN()
+			}
+			points = append(points, store.Point{Timestamp: ts, Value: value})
 		}
 		if err := source.UpdateMany(ctx, base[i], points); err != nil {
 			tb.Fatal(err)
@@ -121,11 +134,22 @@ func (f mergeBenchFixture) seedTarget(tb testing.TB, target *store.Store, record
 func BenchmarkTransferImportPresent(b *testing.B) {
 	const names = 32
 	for _, mode := range []struct {
-		name             string
-		present, overlap bool
-	}{{"absent", false, false}, {"present", true, false}, {"overlap", true, true}} {
+		name                      string
+		present, overlap, remerge bool
+		gaps, nan                 float64
+	}{
+		{name: "absent"},
+		{name: "present", present: true},
+		{name: "overlap", present: true, overlap: true},
+		// 5% of 1-minute points missing.
+		{name: "present-gaps", present: true, gaps: 0.05},
+		// 0.1% of points stored as NaN, which the union drops.
+		{name: "present-nan", present: true, nan: 0.001},
+		// The target copy was merged before, so it is classic, not compressed.
+		{name: "remerge", present: true, remerge: true},
+	} {
 		b.Run(mode.name, func(b *testing.B) {
-			fixture := newMergeBenchFixture(b, names, mode.overlap)
+			fixture := newMergeBenchFixtureWith(b, names, mode.overlap, mode.gaps, mode.nan)
 			now := fixture.now
 			target := openMergeBenchStore(b, filepath.Join(b.TempDir(), "target"), func() time.Time { return now })
 			ctx := context.Background()
@@ -136,6 +160,12 @@ func BenchmarkTransferImportPresent(b *testing.B) {
 				records := fixture.clone(fmt.Sprintf("r%06d", i))
 				if mode.present {
 					fixture.seedTarget(b, target, records)
+				}
+				if mode.remerge {
+					first := fixture.clone(fmt.Sprintf("r%06d", i))
+					if _, err := target.ImportTransfer(ctx, first); err != nil {
+						b.Fatal(err)
+					}
 				}
 				b.StartTimer()
 				if _, err := target.ImportTransfer(ctx, records); err != nil {

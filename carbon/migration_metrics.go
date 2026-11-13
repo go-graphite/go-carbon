@@ -344,7 +344,7 @@ var (
 	relayoutPauseReasonDesc          = prometheus.NewDesc("store_relayout_pause_reason", "1 for the current relayout pause reason, otherwise 0.", []string{"reason"}, nil)
 	pebbleCompactionsDesc            = prometheus.NewDesc("pebble_compactions_total", "Completed Pebble compactions by kind; multi_level is a subset of default.", []string{"kind"}, nil)
 	pebbleCompactionBypassesDesc     = prometheus.NewDesc("pebble_compaction_pacer_bypasses_total", "Compaction pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
-	pebbleTransferMergeFallbacksDesc = prometheus.NewDesc("pebble_transfer_merge_fallback_total", "Imported names already on this store merged by a full rewrite instead of appending, by reason (layout, overlap, order, verify, disabled, other).", []string{"reason"}, nil)
+	pebbleTransferMergeFallbacksDesc = prometheus.NewDesc("pebble_transfer_merge_fallback_total", "Imported names already on this store merged by a full rewrite instead of appending, by reason (layout, nan, overlap, order, verify, disabled, other).", []string{"reason"}, nil)
 	pebbleFlushBypassesDesc          = prometheus.NewDesc("pebble_flush_pacer_bypasses_total", "Flush pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
 	pebbleFSOpsDesc                  = prometheus.NewDesc("pebble_fs_ops_total", "Store filesystem operations by operation and file kind. Table writes cover flushes and compactions; table reads cover compactions and point reads, which Pebble does not tell apart.", []string{"op", "kind"}, nil)
 	pebbleFSBytesDesc                = prometheus.NewDesc("pebble_fs_bytes_total", "Store filesystem bytes read and written by file kind.", []string{"op", "kind"}, nil)
