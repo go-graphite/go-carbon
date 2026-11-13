@@ -452,3 +452,5 @@ full-history work already covers the windows, while new selections and native
 receipts have separate journal records. Switching to `--full-history` requires
 a fresh state directory. Keep `--verify-batch`, the windows and the settle
 cutoff unchanged when resuming a partially completed window transfer.
+
+A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection fails explicitly rather than recording it as empty. Only complete selection checkpoints are reused.

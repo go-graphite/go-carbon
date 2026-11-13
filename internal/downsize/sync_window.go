@@ -118,11 +118,11 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
 				return fmt.Errorf("window selection differs from catalog batch %d", group)
 			}
-			if r, ok := completed[k]; ok {
+			if r, ok := completed[k]; ok && r.SelectionComplete {
 				s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)
 				continue
 			}
-			if r, ok := selections[k]; ok {
+			if r, ok := selections[k]; ok && r.SelectionComplete {
 				selected = r.Selected
 			} else {
 				relevant := map[string]bool{}
@@ -151,7 +151,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 						selected = append(selected, n)
 					}
 				}
-				if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected}); err != nil {
+				if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, SelectionComplete: true}); err != nil {
 					return err
 				}
 			}
@@ -198,7 +198,7 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 		data, _ := json.Marshal([]any{source, target, names, w.From, w.Until})
 		hash := sha256.Sum256(data)
 		id := hex.EncodeToString(hash[:])
-		j, err := openJournal(fmt.Sprintf("%s.window-%d", journalPath, wi), id)
+		j, err := openJournal(fmt.Sprintf("%s.window-%d-%s", journalPath, wi, id[:16]), id)
 		if err != nil {
 			return syncCopyResult{}, err
 		}
@@ -321,6 +321,9 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 					return fmt.Errorf("window export name mismatch")
 				}
 				delete(expected, record.Config.Name)
+				if len(record.Config.Retentions) == 0 {
+					return fmt.Errorf("source window selection unresolved for %q: missing metadata or pending snapshot", record.Config.Name)
+				}
 				if record.NativeSkip != nil {
 					return fmt.Errorf("window export skipped %s: %s", record.Config.Name, record.NativeSkip.Reason)
 				}

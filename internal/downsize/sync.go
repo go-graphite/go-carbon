@@ -215,28 +215,29 @@ type syncHole struct {
 }
 
 type syncRow struct {
-	Selected  []string   `json:"selected,omitempty"`
-	Kind      string     `json:"kind"`
-	Identity  string     `json:"identity,omitempty"`
-	Phase     string     `json:"phase,omitempty"`
-	Round     int        `json:"round,omitempty"`
-	Source    string     `json:"source,omitempty"`
-	First     string     `json:"first,omitempty"`
-	Last      string     `json:"last,omitempty"`
-	Names     int        `json:"names,omitempty"`
-	Copied    int        `json:"copied,omitempty"`
-	Failed    []string   `json:"failed,omitempty"`
-	Forbidden bool       `json:"forbidden,omitempty"`
-	Holes     []syncHole `json:"holes,omitempty"`
-	Absent    []string   `json:"absent,omitempty"`
-	Unindexed []string   `json:"unindexed,omitempty"`
-	Short     []string   `json:"short,omitempty"`
-	Skipped   []syncSkip `json:"skipped,omitempty"`
-	Missing   int        `json:"missing,omitempty"`
-	OnTarget  int        `json:"on_target,omitempty"`
-	Both      int        `json:"both,omitempty"`
-	NotOwned  int        `json:"not_owned,omitempty"`
-	Time      string     `json:"time"`
+	Selected          []string   `json:"selected,omitempty"`
+	SelectionComplete bool       `json:"selection_complete,omitempty"`
+	Kind              string     `json:"kind"`
+	Identity          string     `json:"identity,omitempty"`
+	Phase             string     `json:"phase,omitempty"`
+	Round             int        `json:"round,omitempty"`
+	Source            string     `json:"source,omitempty"`
+	First             string     `json:"first,omitempty"`
+	Last              string     `json:"last,omitempty"`
+	Names             int        `json:"names,omitempty"`
+	Copied            int        `json:"copied,omitempty"`
+	Failed            []string   `json:"failed,omitempty"`
+	Forbidden         bool       `json:"forbidden,omitempty"`
+	Holes             []syncHole `json:"holes,omitempty"`
+	Absent            []string   `json:"absent,omitempty"`
+	Unindexed         []string   `json:"unindexed,omitempty"`
+	Short             []string   `json:"short,omitempty"`
+	Skipped           []syncSkip `json:"skipped,omitempty"`
+	Missing           int        `json:"missing,omitempty"`
+	OnTarget          int        `json:"on_target,omitempty"`
+	Both              int        `json:"both,omitempty"`
+	NotOwned          int        `json:"not_owned,omitempty"`
+	Time              string     `json:"time"`
 }
 
 type syncJournal struct {
@@ -487,7 +488,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	if s.windowOnly() {
 		selected = names
 	}
-	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected}); err != nil {
+	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, SelectionComplete: s.windowOnly()}); err != nil {
 		return res, err
 	}
 	return res, nil

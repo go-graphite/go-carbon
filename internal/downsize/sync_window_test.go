@@ -204,3 +204,15 @@ func TestSyncWindowPresenceIncludesCoarseOnlyPoints(t *testing.T) {
 		t.Fatal(outside, err)
 	}
 }
+
+func TestSyncWindowPresenceRejectsPendingSnapshot(t *testing.T) {
+	source := nativeControllerStore(t)
+	addPoints(t, source, "pending", 42)
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { return map[string]struct{}{"pending": {}}, nil })
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	backend := newSyncLiveBackend(syncLiveOptions{})
+	if _, err := backend.WindowPresence(context.Background(), donor.URL, []string{"pending"}, syncRange{From: testMetricNow - 10, Until: testMetricNow}); err == nil {
+		t.Fatal("pending snapshot was treated as empty coverage")
+	}
+}
