@@ -13,11 +13,27 @@ import (
 )
 
 type fakePaceClock struct {
-	mu sync.Mutex
-	t  time.Time
+	mu   sync.Mutex
+	t    time.Time
+	step time.Duration // added after each now(), so a polling reader sees time pass
 }
 
-func (c *fakePaceClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *fakePaceClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t := c.t
+	c.t = c.t.Add(c.step)
+	return t
+}
+
+// peek reads the clock without advancing it.
+func (c *fakePaceClock) peek() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+
+func (c *fakePaceClock) setStep(d time.Duration) {
+	c.mu.Lock()
+	c.step = d
+	c.mu.Unlock()
+}
 func (c *fakePaceClock) add(d time.Duration) {
 	c.mu.Lock()
 	c.t = c.t.Add(d)
@@ -154,40 +170,48 @@ func TestClassicReanchorPacerBudget(t *testing.T) {
 	}
 }
 
-// The sweep drains the backlog oldest first, within the shared budget.
+// The sweep drains the backlog oldest first, within the shared budget. The
+// pacer reads a simulated clock: it stands still while the backlog fills, so
+// no token refills however slowly the runner admits, and then advances half a
+// token per read, so the sweep waits for budget before every repair.
 func TestClassicReanchorSweepDrains(t *testing.T) {
-	pacer := newClassicReanchorPacer(2000, time.Hour, time.Now)
+	const rate, n = 2000.0, 200
+	clock := &fakePaceClock{t: time.Unix(1_000_000, 0)}
+	pacer := newClassicReanchorPacer(rate, time.Hour, clock.now)
 	pacer.tokens = 0
 	ctx := context.Background()
-	const n = 200
 	for i := 0; i < n; i++ {
 		if pacer.admit(ctx, fmt.Sprintf("m%03d", i), 0) {
 			t.Fatal("admitted with an empty bucket")
 		}
 	}
-	var mu sync.Mutex
+	start := clock.now()
+	clock.setStep(time.Duration(float64(time.Second) / rate / 2))
 	var order []string
+	var elapsed time.Duration
+	drained := make(chan struct{})
 	sweepCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	done := make(chan struct{})
-	start := time.Now()
 	go func() {
 		defer close(done)
 		pacer.Sweep(sweepCtx, nil, func(ctx context.Context, name string) error {
 			if !classicReanchorGranted(ctx) {
 				t.Error("sweep repair without grant")
 			}
-			mu.Lock()
 			order = append(order, name)
-			mu.Unlock()
 			pacer.repaired(ctx, name)
+			if len(order) == n {
+				elapsed = clock.peek().Sub(start)
+				close(drained)
+			}
 			return nil
 		})
 	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for pacer.Stats().Backlog != 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-drained:
+	case <-done:
 	}
-	elapsed := time.Since(start)
 	cancel()
 	<-done
 	st := pacer.Stats()
@@ -199,9 +223,9 @@ func TestClassicReanchorSweepDrains(t *testing.T) {
 			t.Fatalf("sweep order %d: %s", i, name)
 		}
 	}
-	// 200 repairs at 2000/s from an empty bucket take at least ~100 ms.
-	if elapsed < 80*time.Millisecond {
-		t.Fatalf("sweep finished in %v, faster than the budget", elapsed)
+	// n repairs from an empty bucket need n tokens: n/rate of clock time.
+	if budget := time.Duration(n / rate * float64(time.Second)); elapsed < budget {
+		t.Fatalf("sweep drained in %v of clock time, faster than the %v budget", elapsed, budget)
 	}
 }
 
