@@ -236,3 +236,22 @@ func TestSyncLiveCopyFinalSkipsAreNotEngineAborts(t *testing.T) {
 		t.Fatalf("calls=%d result=%+v err=%v", calls, res, err)
 	}
 }
+
+func TestSyncIOTimings(t *testing.T) {
+	b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Second})
+	if err := b.wait(context.Background(), "fetch", "source", func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.wait(context.Background(), "digest", "target", func() error { return &syncHTTPError{status: 404} }); err == nil {
+		t.Fatal(err)
+	}
+	got := b.syncTimings()
+	if len(got) != 2 || got[0].Operation != "digest" || got[0].Store != "target" || got[1].Operation != "fetch" || got[1].Store != "source" {
+		t.Fatalf("timings %+v", got)
+	}
+	for _, g := range got {
+		if g.Calls != 1 || g.Seconds <= 0 {
+			t.Fatalf("timing %+v", g)
+		}
+	}
+}
