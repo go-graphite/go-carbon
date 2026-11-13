@@ -479,6 +479,11 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 				}
 			}
 			app := startIncrementalApp(t, path)
+			// Intake may become ready before the recovered prefix is readable.
+			// Keep the crash oracle after that prefix is durably confirmed.
+			waitExpiration(t, func() bool {
+				return app.Cache.IsEmpty() && app.Cache.PendingOutstanding() == 0
+			})
 			want := map[string]map[int64]float64{}
 			for phase := range 2 {
 				for _, p := range predecessorPoints(stamp, phase) {
