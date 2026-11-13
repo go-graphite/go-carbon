@@ -760,10 +760,20 @@ func (s *Store) retireTransferFrom(ctx context.Context, b *pebble.Batch, reader 
 	if m.Continuation {
 		// The indexed batch observes its own writes, so the continuation IO uses
 		// point deletes. Per-metric ranges here would fragment every live read.
-		if err := s.dropContinuation(ctx, reader, b, m); err != nil {
+		// A snapshot reader is fenced by the commit's revision check (see
+		// commitPreparedTransfer), so its keys are point-deleted too: a merged
+		// import used to leave one range tombstone per time bucket plus one per
+		// metric, and every new memtable tombstone makes the next iterator of
+		// any reader re-fragment all of them while the others wait (network
+		// survivor imports queued 20-45 ms per name there).
+		fenced := reader != pebble.Reader(b)
+		drop := s.newContinuationIO(ctx, reader, b, m)
+		drop.fencedReader = fenced
+		if err := s.dropContinuationIO(ctx, drop); err != nil {
 			return err
 		}
 		kv := s.newContinuationIO(ctx, reader, b, m)
+		kv.fencedReader = fenced
 		return kv.DeletePrefix(nil)
 	}
 	prefix := chunkPrefix(m.ID, 0)[:9]
