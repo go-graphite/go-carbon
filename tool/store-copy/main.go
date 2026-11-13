@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	if err := downsize.Main(os.Args[1:]); err != nil {
+	if err := downsize.MainWithMetrics(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

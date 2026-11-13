@@ -100,6 +100,8 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	Done       int64             `json:"done"`
+	Total      int64             `json:"total"`
 	Phase      string            `json:"phase"`
 	Round      int               `json:"round"`
 	Cursors    map[string]string `json:"cursors"`
@@ -157,6 +159,11 @@ func startProgressFile(ctx context.Context, path string, snapshot func() progres
 			p.Error = runErr.Error()
 		}
 		p.Rate = float64(p.Discovered+p.Verified+p.Filled+p.Copied-base) / time.Since(started).Seconds()
+		outputMu.Lock()
+		if progressObserver != nil {
+			progressObserver(path, p)
+		}
+		outputMu.Unlock()
 		if err := atomicStateJSON(path, p); err != nil {
 			mu.Lock()
 			if writeErr == nil {
