@@ -79,6 +79,17 @@ func (l *shardLog) recordPoints(ref *inputlog.StreamRef, data []points.Point) {
 	l.dropped += uint64(len(data) - n)
 }
 
+// relogFits reports whether a batch of n points can be recorded again whole.
+// Relog releases the batch's older copy, so recording part of it would leave
+// the dropped points marked logged with no copy in the log. A batch over half
+// the buffer could wait forever behind live input, so it goes in whole while
+// at most half is used, the restore admission limit. The buffer then holds at
+// most half plus one such batch, points the cache holds anyway.
+func (l *shardLog) relogFits(n int) bool {
+	used := l.entries.Len()
+	return used+n <= maxShardLogEntries || (n > maxShardRestoredLogEntries && used <= maxShardRestoredLogEntries)
+}
+
 // track starts tracking a new item at the current generation.
 func (l *shardLog) track(p *points.Points) {
 	if l.first == nil {
@@ -178,7 +189,9 @@ func (l *shardLog) lowWater() uint64 {
 
 // relog records old queued and in-flight batches again at the current
 // generation, so the log can recycle their old segments. The first eligible
-// batch may exceed budget, preserving the previous progress guarantee.
+// batch may exceed budget, preserving the previous progress guarantee. A
+// batch the shard buffer cannot take whole keeps its old generation, and so
+// its old segments, until a later cycle records it.
 func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 	if l.first == nil || l.lowWater() >= gen {
 		return 0
@@ -191,7 +204,13 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		if n > 0 && n+it.count() > budget {
 			return n
 		}
-		l.recordPoints(&it.StreamRef, it.compact.appendDecoded(nil))
+		if !l.relogFits(it.count()) {
+			if l.entries.Len() >= maxShardLogEntries {
+				return n
+			}
+			continue
+		}
+		l.entries.AppendPoints(&it.StreamRef, it.compact.appendDecoded(nil))
 		n += it.count()
 		l.release(it.logFirst)
 		it.logFirst = l.gen
@@ -205,7 +224,13 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		if n > 0 && n+len(p.Data) > budget {
 			break
 		}
-		l.recordPoints(inputlog.NewStreamRef(p.Metric), p.Data)
+		if !l.relogFits(len(p.Data)) {
+			if l.entries.Len() >= maxShardLogEntries {
+				break
+			}
+			continue
+		}
+		l.entries.AppendPoints(inputlog.NewStreamRef(p.Metric), p.Data)
 		n += len(p.Data)
 		l.release(first)
 		l.first[p] = l.gen

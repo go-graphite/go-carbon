@@ -37,6 +37,10 @@ func startInputLog(t testing.TB, dir string, c *Cache, opts inputlog.Options) (*
 	return l, stats
 }
 
+// manualCycles is a SyncInterval no fake-time test reaches: cycles run on
+// Sync only, so their generations line up with the test's rounds.
+const manualCycles = 10000 * time.Hour
+
 func syncLog(t testing.TB, l *inputlog.Log) {
 	t.Helper()
 	if err := l.Sync(); err != nil {
@@ -187,93 +191,186 @@ func TestInputLogRequeueKeepsSegments(t *testing.T) {
 // A point that stays unpersisted past MaxAge is recorded again, so it no
 // longer pins the segments behind it.
 func TestInputLogRelogsStragglers(t *testing.T) {
-	dir := t.TempDir()
-	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Hour}
-	c := New()
-	c.SetMaxSize(0)
-	l, _ := startInputLog(t, dir, c, opts)
-	c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
-	stuck, _ := c.PopNotConfirmed("stuck.metric") // in flight forever
-	for round := range 12 {
-		var names []string
-		for i := range 2000 {
-			name := fmt.Sprintf("other.metric.%04d", i)
-			names = append(names, name)
-			c.AddPoint([]byte(name), float64(round), int64(round))
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: manualCycles, MaxAge: 3 * time.Hour}
+		c := New()
+		c.SetMaxSize(0)
+		l, _ := startInputLog(t, dir, c, opts)
+		c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
+		stuck, _ := c.PopNotConfirmed("stuck.metric") // in flight forever
+		for round := range 12 {
+			var names []string
+			for i := range 2000 {
+				name := fmt.Sprintf("other.metric.%04d", i)
+				names = append(names, name)
+				c.AddPoint([]byte(name), float64(round), int64(round))
+			}
+			syncLog(t, l)
+			persist(c, names)
+			time.Sleep(time.Hour) // fake time: MaxAge is wall-clock
 		}
-		syncLog(t, l)
-		persist(c, names)
-	}
-	if low := c.LogLowWater(); low < 5 {
-		t.Fatalf("low-water %d still pinned by the straggler", low)
-	}
-	if live := liveSegments(t, dir); live > 6 {
-		t.Fatalf("%d live segments", live)
-	}
-	var relogged float64
-	l.Stat(func(metric string, value float64) {
-		if metric == "relogged" {
-			relogged = value
+		if low := c.LogLowWater(); low < 5 {
+			t.Fatalf("low-water %d still pinned by the straggler", low)
+		}
+		if live := liveSegments(t, dir); live > 6 {
+			t.Fatalf("%d live segments", live)
+		}
+		var relogged float64
+		l.Stat(func(metric string, value float64) {
+			if metric == "relogged" {
+				relogged = value
+			}
+		})
+		if relogged < 2 {
+			t.Fatalf("relogged %v points", relogged)
+		}
+		l.Kill()
+
+		restarted := New()
+		restarted.SetMaxSize(0)
+		l, _ = startInputLog(t, dir, restarted, opts)
+		defer l.Close()
+		if got := restarted.Get("stuck.metric"); !slices.Equal(got, stuck.Data) {
+			t.Fatalf("straggler replayed as %v, want %v", got, stuck.Data)
 		}
 	})
-	if relogged < 2 {
-		t.Fatalf("relogged %v points", relogged)
-	}
-	l.Kill()
-
-	restarted := New()
-	restarted.SetMaxSize(0)
-	l, _ = startInputLog(t, dir, restarted, opts)
-	defer l.Close()
-	if got := restarted.Get("stuck.metric"); !slices.Equal(got, stuck.Data) {
-		t.Fatalf("straggler replayed as %v, want %v", got, stuck.Data)
-	}
 }
 
 // A straggler that stays queued is re-logged from its compact points, not
 // from Data, which a queued item does not hold.
 func TestInputLogRelogsQueuedStragglers(t *testing.T) {
-	dir := t.TempDir()
-	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Hour}
-	c := New()
-	c.SetMaxSize(0)
-	l, _ := startInputLog(t, dir, c, opts)
-	c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
-	want := c.Get("stuck.metric") // queued forever, held compact
-	for round := range 12 {
-		var names []string
-		for i := range 2000 {
-			name := fmt.Sprintf("other.metric.%04d", i)
-			names = append(names, name)
-			c.AddPoint([]byte(name), float64(round), int64(round))
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: manualCycles, MaxAge: 3 * time.Hour}
+		c := New()
+		c.SetMaxSize(0)
+		l, _ := startInputLog(t, dir, c, opts)
+		c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
+		want := c.Get("stuck.metric") // queued forever, held compact
+		for round := range 12 {
+			var names []string
+			for i := range 2000 {
+				name := fmt.Sprintf("other.metric.%04d", i)
+				names = append(names, name)
+				c.AddPoint([]byte(name), float64(round), int64(round))
+			}
+			syncLog(t, l)
+			persist(c, names)
+			time.Sleep(time.Hour) // fake time: MaxAge is wall-clock
 		}
-		syncLog(t, l)
-		persist(c, names)
-	}
-	if low := c.LogLowWater(); low < 5 {
-		t.Fatalf("low-water %d still pinned by the straggler", low)
-	}
-	if live := liveSegments(t, dir); live > 6 {
-		t.Fatalf("%d live segments", live)
-	}
-	var relogged float64
-	l.Stat(func(metric string, value float64) {
-		if metric == "relogged" {
-			relogged = value
+		if low := c.LogLowWater(); low < 5 {
+			t.Fatalf("low-water %d still pinned by the straggler", low)
+		}
+		if live := liveSegments(t, dir); live > 6 {
+			t.Fatalf("%d live segments", live)
+		}
+		var relogged float64
+		l.Stat(func(metric string, value float64) {
+			if metric == "relogged" {
+				relogged = value
+			}
+		})
+		if relogged < 2 {
+			t.Fatalf("relogged %v points", relogged)
+		}
+		l.Kill()
+
+		restarted := New()
+		restarted.SetMaxSize(0)
+		l, _ = startInputLog(t, dir, restarted, opts)
+		defer l.Close()
+		if got := restarted.Get("stuck.metric"); !slices.Equal(got, want) {
+			t.Fatalf("straggler replayed as %v, want %v", got, want)
 		}
 	})
-	if relogged < 2 {
-		t.Fatalf("relogged %v points", relogged)
-	}
-	l.Kill()
+}
 
-	restarted := New()
-	restarted.SetMaxSize(0)
-	l, _ = startInputLog(t, dir, restarted, opts)
-	defer l.Close()
-	if got := restarted.Get("stuck.metric"); !slices.Equal(got, want) {
-		t.Fatalf("straggler replayed as %v, want %v", got, want)
-	}
+// Relog releases a straggler's old segments, so it must not run while the
+// shard buffer is too full to take the straggler's points: they would count
+// as logged with no copy left, and a crash would lose them. The straggler
+// stays pinned until a cycle has room, then is recorded whole.
+func TestInputLogRelogWithFullBufferKeepsStraggler(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		const name = "stuck.metric"
+		c := New()
+		c.SetMaxSize(0)
+		filler := ""
+		for i := 0; filler == ""; i++ {
+			if candidate := fmt.Sprintf("filler.metric.%d", i); c.GetShard(candidate) == c.GetShard(name) {
+				filler = candidate
+			}
+		}
+		others := []string{filler}
+		for i := range 200 {
+			others = append(others, fmt.Sprintf("other.metric.%04d", i))
+		}
+		var fill atomic.Bool
+		var filled int64
+		opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: manualCycles, MaxAge: 3 * time.Hour,
+			// Runs on the log goroutine after the shards are taken and before
+			// relog: live input fills the straggler's shard buffer exactly.
+			ObserveCycle: func(time.Duration) {
+				if fill.Load() {
+					for range maxShardLogEntries {
+						c.AddPoint([]byte(filler), 1, filled)
+						filled++
+					}
+				}
+			}}
+		l, _ := startInputLog(t, dir, c, opts)
+		c.Add(points.OnePoint(name, 1, 100).Add(2, 200))
+		stuck, _ := c.PopNotConfirmed(name) // in flight forever
+		round := func() {
+			for i, other := range others[1:] {
+				c.AddPoint([]byte(other), 1, int64(i))
+			}
+			syncLog(t, l)
+			persist(c, others)
+			time.Sleep(time.Hour)
+		}
+		fill.Store(true)
+		for range 8 {
+			round()
+		}
+		if n := c.LogDropped(); n != 0 {
+			t.Fatalf("relog dropped %d points into a full buffer", n)
+		}
+		if low := c.LogLowWater(); low != 0 {
+			t.Fatalf("low-water %d: the unrecorded straggler released its segments", low)
+		}
+		l.Kill()
+		restarted := New()
+		restarted.SetMaxSize(0)
+		l, _ = startInputLog(t, dir, restarted, opts)
+		if got := restarted.Get(name); !slices.Equal(got, stuck.Data) {
+			t.Fatalf("straggler replayed as %v, want %v", got, stuck.Data)
+		}
+
+		// With room in the buffer the straggler, now queued, is recorded
+		// whole and stops pinning the log.
+		fill.Store(false)
+		c = restarted
+		persist(c, others)
+		for range 6 {
+			round()
+		}
+		if low := c.LogLowWater(); low < 3 {
+			t.Fatalf("low-water %d still pinned by the straggler", low)
+		}
+		if n := c.LogDropped(); n != 0 {
+			t.Fatalf("relog dropped %d points", n)
+		}
+		l.Kill()
+		final := New()
+		final.SetMaxSize(0)
+		l, _ = startInputLog(t, dir, final, opts)
+		defer l.Close()
+		if got := final.Get(name); !slices.Equal(got, stuck.Data) {
+			t.Fatalf("relogged straggler replayed as %v, want %v", got, stuck.Data)
+		}
+	})
 }
 
 // Recovered points have their own durable source: they are tracked, so the

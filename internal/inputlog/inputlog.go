@@ -101,9 +101,10 @@ type Options struct {
 	// segment defines the names it uses once, so it should hold at least a
 	// minute of input.
 	SegmentSize int64
-	// MaxAge re-records points still unpersisted after this long, so a write
-	// that keeps failing cannot pin old segments forever. The log holds at
-	// most about MaxAge+TruncateLag of input.
+	// MaxAge re-records points still unpersisted after this long by the wall
+	// clock, however often cycles run, so a write that keeps failing cannot
+	// pin old segments forever. The log holds at most about MaxAge+TruncateLag
+	// of input.
 	MaxAge time.Duration
 	// TruncateLag delays reuse of a segment after its points are confirmed:
 	// a confirmed point may still be in the page cache or an unsynced store
@@ -132,6 +133,10 @@ const (
 	maxSpares = 4
 	// relogBudget bounds the points one cycle re-records.
 	relogBudget = 1 << 21
+	// maxAgeSteps is how many generation start times one MaxAge keeps: relog
+	// fires at most MaxAge/maxAgeSteps plus one cycle late, however fast
+	// cycles run.
+	maxAgeSteps = 64
 )
 
 var ErrClosed = errors.New("input log closed")
@@ -161,6 +166,13 @@ type tick struct {
 type sample struct {
 	at  time.Time
 	low uint64
+}
+
+// genStart is a time by which every shard had started generation gen, so
+// every point first recorded before gen is older than at.
+type genStart struct {
+	at  time.Time
+	gen uint64
 }
 
 // partitionBuffer holds one partition's stream state and its encoded frames
@@ -205,7 +217,8 @@ type Log struct {
 	spares       []string
 	ticks        []tick // first frame of every cycle that wrote, oldest first
 	lowWaters    []sample
-	durable      uint64 // low-water old enough for TruncateLag
+	starts       []genStart // MaxAge/maxAgeSteps apart, oldest first
+	durable      uint64     // low-water old enough for TruncateLag
 	spare        [][]Entry
 	batchSource  BatchSource
 	spareBatches []Batch
@@ -910,9 +923,9 @@ func (l *Log) truncate() (relog time.Duration) {
 		l.free(l.live[0])
 		l.live = l.live[1:]
 	}
-	if age := max(uint64(l.opts.MaxAge/l.opts.SyncInterval), 2); l.gen > age && low < l.gen-age {
+	if cut := l.relogCut(now); low < cut {
 		at := time.Now()
-		n := int64(l.src.RelogBefore(l.gen-age, relogBudget))
+		n := int64(l.src.RelogBefore(cut, relogBudget))
 		relog = time.Since(at)
 		l.stat.relogged.Add(n)
 		l.total.relogged.Add(n)
@@ -922,6 +935,25 @@ func (l *Log) truncate() (relog time.Duration) {
 	l.stat.spareSegments.Store(int64(len(l.spares)))
 	l.stat.pinned.Store(int64(l.gen - min(low, l.gen)))
 	return relog
+}
+
+// relogCut returns the generation before which every point was first
+// recorded more than MaxAge ago, by the wall clock. Cycles run early under
+// restore pressure, so a count of generations would shrink MaxAge with the
+// cycle rate. Encode switched every shard to l.gen before truncate, so now is
+// a start time of l.gen. As before, the two newest generations never qualify.
+func (l *Log) relogCut(now time.Time) uint64 {
+	if n := len(l.starts); n == 0 || now.Sub(l.starts[n-1].at) >= l.opts.MaxAge/maxAgeSteps {
+		l.starts = append(l.starts, genStart{at: now, gen: l.gen})
+	}
+	deadline := now.Add(-l.opts.MaxAge)
+	for len(l.starts) > 1 && !l.starts[1].at.After(deadline) {
+		l.starts = l.starts[1:]
+	}
+	if l.starts[0].at.After(deadline) {
+		return 0
+	}
+	return min(l.starts[0].gen, l.gen-min(l.gen, 2))
 }
 
 // free keeps a segment for reuse, or removes it beyond maxSpares. Its old

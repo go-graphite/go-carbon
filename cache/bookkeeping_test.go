@@ -206,6 +206,65 @@ func TestBookkeepingRelogBudget(t *testing.T) {
 	}
 }
 
+// A relogged batch replaces its older copy, so it is recorded whole or not
+// at all: one the shard buffer cannot take keeps its old generation.
+func TestBookkeepingRelogRecordsWholeBatches(t *testing.T) {
+	var m itemMap
+	l := shardLog{first: map[*points.Points]uint64{}, items: map[uint64]int32{}}
+	queued := newItem("relog.queued", 0)
+	var want []points.Point
+	for j := range 10 {
+		queued.compact.append(float64(j), int64(j))
+		want = append(want, points.Point{Value: float64(j), Timestamp: int64(j)})
+	}
+	m.setHashed(0, queued)
+	l.trackItem(queued)
+	flight := &points.Points{Metric: "relog.flight", Data: slices.Clone(want)}
+	l.track(flight)
+	l.gen = 8
+	// Live input leaves room for less than either batch.
+	live := inputlog.NewStreamRef("relog.live")
+	l.recordPoints(live, make([]points.Point, maxShardLogEntries-5))
+	if got := l.relog(4, math.MaxInt, &m); got != 0 {
+		t.Fatalf("relogged %d points into a full buffer", got)
+	}
+	if queued.logFirst != 0 || l.first[flight] != 0 || l.lowWater() != 0 || l.dropped != 0 || l.entries.Len() != maxShardLogEntries-5 {
+		t.Fatalf("unrecorded batches released their generation: queued=%d flight=%d low=%d dropped=%d",
+			queued.logFirst, l.first[flight], l.lowWater(), l.dropped)
+	}
+	l.entries.Reset()
+	if got := l.relog(4, math.MaxInt, &m); got != 20 || queued.logFirst != 8 || l.first[flight] != 8 || l.lowWater() != 8 {
+		t.Fatalf("relog with room recorded %d points, low-water %d", got, l.lowWater())
+	}
+	got := map[string][]points.Point{}
+	for _, e := range l.entries.Entries(nil) {
+		got[e.Metric()] = append(got[e.Metric()], points.Point{Value: e.Value, Timestamp: e.Timestamp})
+	}
+	if len(got) != 2 || !slices.Equal(got[queued.Metric], want) || !slices.Equal(got[flight.Metric], want) || l.dropped != 0 {
+		t.Fatalf("relogged points differ: %v", got)
+	}
+
+	// A batch larger than the whole buffer still makes progress: it goes in
+	// whole while live input uses at most half the buffer.
+	big := &points.Points{Metric: "relog.big", Data: make([]points.Point, maxShardLogEntries+3)}
+	for i := range big.Data {
+		big.Data[i] = points.Point{Value: float64(i), Timestamp: int64(i)}
+	}
+	l.track(big)
+	l.gen = 16
+	l.entries.Reset()
+	l.recordPoints(live, make([]points.Point, maxShardRestoredLogEntries+1))
+	if got := l.relog(12, math.MaxInt, &m); got != 20 || l.first[big] != 8 || l.lowWater() != 8 {
+		t.Fatalf("oversized batch relogged over a half-full buffer: %d", got)
+	}
+	l.entries.Reset()
+	l.recordPoints(live, make([]points.Point, maxShardRestoredLogEntries))
+	if got := l.relog(12, math.MaxInt, &m); got != len(big.Data) || l.first[big] != 16 || l.lowWater() != 16 ||
+		l.dropped != 0 || l.entries.Len() != maxShardRestoredLogEntries+len(big.Data) {
+		t.Fatalf("oversized batch: relogged %d, entries %d, dropped %d", got, l.entries.Len(), l.dropped)
+	}
+}
+
 func TestBookkeepingConcurrentReadersAndDrainer(t *testing.T) {
 	c := New()
 	c.SetMaxSize(0)
