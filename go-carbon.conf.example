@@ -138,7 +138,11 @@ store-l0-compaction-concurrency = 0
 # Point reads then skip tables that cannot hold the key instead of searching
 # every level. Tables gain filters as compactions rewrite them. Requires
 # restart; zero writes no filters.
-# store-bloom-filter-bits = 0
+# store-bloom-filter-bits = 10
+# Bytes Pebble writes to a table before it syncs it in the background. Pebble's
+# 512 KiB default issues many small syncs behind a large dirty-page backlog on
+# write-heavy stores. Requires restart; zero uses Pebble's default.
+# store-bytes-per-sync = 67108864
 # Keep Pebble's write-ahead logs in another directory, usually on another
 # device, so WAL writes do not share the store device's write budget. The
 # directory must already exist (a missing mount fails startup instead of
@@ -196,7 +200,7 @@ store-range-reads = false
 # (30-50 % fewer metadata cache bytes per metric in benchmarks, for a decode on
 # each cache read). SIGHUP applies it to states sealed afterwards; cached
 # states keep their form until rewritten.
-# store-metadata-cache-pack = false
+# store-metadata-cache-pack = true
 # At start, load committed metadata in the background without waiting before
 # input/handoff. Restored checkpoint metrics get first claim on the budget,
 # else the restored cache/input-log metrics. A bounded
@@ -223,7 +227,7 @@ store-range-reads = false
 # a full-second window, separately from the 20ms CPU-admission checks.
 # Restart allowance is max(cpu-cores, store-restart-cpu-headroom times the
 # steady host-local CPU EWMA, valid for 24 hours).
-# Headroom defaults to 1.05 (valid range 1.0..4.0) and also applies to the
+# Headroom defaults to 1.5 (valid range 1.0..4.0) and also applies to the
 # legacy median; increasing it lets catch-up use more CPU above steady load.
 # cpu-cores is a minimum and the fallback when history is missing, invalid or stale;
 # headroom does not multiply it. 0 derives a finite fallback below.
@@ -340,7 +344,7 @@ store-range-reads = false
 # store-metadata-cache-checkpoint = true
 # store-metadata-cache-checkpoint-lazy = false
 # store-metadata-cache-warm-first = true
-# store-restart-cpu-headroom = 1.05 # startup-only; SIGHUP does not change the allowance
+# store-restart-cpu-headroom = 1.5 # startup-only; SIGHUP does not change the allowance
 # store-metadata-cache-prewarm-cpu-cores = 0 # startup CPU floor, including with fresh history
 # store-metadata-cache-prewarm-workers = 0
 # store-metadata-cache-prewarm-rate = 0

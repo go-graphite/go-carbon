@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const DefaultHeadroom = 1.05
+const DefaultHeadroom = 1.5
 
 type sample struct {
 	At    time.Time

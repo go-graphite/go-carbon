@@ -27,7 +27,7 @@ func TestRestartCPUHeadroomConfig(t *testing.T) {
 		want    float64
 		invalid bool
 	}{
-		{"", 1.05, false},
+		{"", 1.5, false},
 		{"1.0", 1, false},
 		{"1.5", 1.5, false},
 		{"4.0", 4, false},
