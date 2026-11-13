@@ -12,8 +12,11 @@ import (
 
 func (app *App) loadCompleteIntakeCompatible() bool {
 	c := app.Config
+	// Incremental migration keeps the ordinary persister's per-metric route
+	// and writer fence. Recovery is fully admitted before live points append;
+	// the mixed read index is prepared separately before listeners open.
 	return app.MetricStore != nil && app.inputClaim == nil && app.inheritedInput == nil && app.startupInput == nil && !c.Tags.Enabled && !c.Whisper.StoreMirrorFiles &&
-		!c.Whisper.StoreIncrementalMigration && !c.Whisper.StoreLiveMigration &&
+		!c.Whisper.StoreLiveMigration &&
 		(app.Carbonserver == nil || c.Carbonserver.TrieIndex && c.Carbonserver.ConcurrentIndex && c.Carbonserver.RealtimeIndex > 0)
 }
 

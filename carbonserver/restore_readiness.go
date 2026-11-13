@@ -36,6 +36,14 @@ func (l *CarbonserverListener) PrepareRestoreIndex(names iter.Seq[string]) error
 		return err
 	}
 	index := l.CurrentFileIndex()
+	if (index == nil || index.trieIdx == nil) && l.metricStoreFileIndex {
+		// Mixed storage discovers unconverted originals from the file tree.
+		// Warmup only reads a saved index; if it is absent, build the ordinary
+		// mixed index before admitting input rather than replacing it with a
+		// catalog that omits originals. Listen has not started any refresher.
+		l.updateFileList(l.whisperData, nil, nil)
+		index = l.CurrentFileIndex()
+	}
 	if index == nil || index.trieIdx == nil {
 		return errors.New("restore intake requires a ready trie index")
 	}
