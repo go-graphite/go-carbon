@@ -214,6 +214,14 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 					}
 					t = j.tasks[taskKey(t)]
 				}
+				// Native exports deliberately omit incomplete trailing coarse
+				// buckets. Never count such an in-window omission as success.
+				for _, skip := range t.Native.Receipt.WindowSkipped {
+					if skip.Timestamp >= w.From && skip.Timestamp < w.Until && skip.Ordinal >= 0 && skip.Ordinal < end-start {
+						failed[names[start+skip.Ordinal]] = true
+						event("sync_window_boundary_skip", map[string]any{"level": "warn", "metric": names[start+skip.Ordinal], "timestamp": skip.Timestamp, "reason": skip.Reason})
+					}
+				}
 				for i, n := range names[start:end] {
 					if t.Native == nil || !t.Native.done(i) {
 						failed[n] = true

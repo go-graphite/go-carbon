@@ -24,6 +24,8 @@ func TestSyncWindowMissingSelectionAndResume(t *testing.T) {
 	put(syncD1, "new", map[int64]float64{w.From: math.Copysign(0, -1), w.Until: 17})
 	put(syncD1, "outside", map[int64]float64{w.From - 60: 10, w.Until: 20})
 	put(syncD1, "overlap", map[int64]float64{w.From: 1, w.From + 60: 2, w.Until: 3})
+	put(syncD1, "later", map[int64]float64{w.From - 60: 1})
+	put(syncD2, "later", map[int64]float64{w.From: 9})
 	put(syncD2, "new", map[int64]float64{w.From: 99, w.From + 60: math.SmallestNonzeroFloat64})
 	put(syncT, "overlap", map[int64]float64{w.From: 42, w.From - 60: 7})
 	o := syncOptions{to: syncT, from: []string{syncD1, syncD2}, state: t.TempDir(), batch: 2, streams: 2, maxRounds: 3, windows: syncRanges{w}, sampleEvery: 1, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
@@ -31,6 +33,9 @@ func TestSyncWindowMissingSelectionAndResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := f.store(syncT)
+	if dst.points["later"][60][w.From] != 9 {
+		t.Fatal("outside-only first source hid later source")
+	}
 	if _, ok := dst.archives["outside"]; ok {
 		t.Fatal("created outside-only metric")
 	}
@@ -58,6 +63,11 @@ func TestSyncWindowMissingSelectionAndResume(t *testing.T) {
 	if len(f.copies) != before {
 		t.Fatal("resume repeated copies")
 	}
+	o.batch = 3
+	if err := runSync(context.Background(), o, f); err == nil {
+		t.Fatal("changed batch reused window selections")
+	}
+	o.batch = 2
 	o.fullHistory = true
 	if err := runSync(context.Background(), o, f); err == nil {
 		t.Fatal("full-history reused window journal")
@@ -142,5 +152,27 @@ func TestSyncWindowRequiresSourceDigest(t *testing.T) {
 	}
 	if len(f.copies) != 0 {
 		t.Fatal("copied full history after missing digest")
+	}
+}
+
+func TestSyncWindowIncompleteCoarseBoundaryIsResidual(t *testing.T) {
+	ctx := context.Background()
+	source, target := nativeControllerStore(t), nativeControllerStore(t)
+	base := testMetricNow/60*60 - 120
+	snap := store.Snapshot{Metadata: store.Metadata{MetricConfig: store.MetricConfig{Name: "boundary", AggregationMethod: store.Sum, Retentions: []store.Retention{{Step: 10, Count: 128}, {Step: 60, Count: 128}}}}, Archives: []store.Archive{
+		{Retention: store.Retention{Step: 10, Count: 128}, Points: []store.Point{{Timestamp: base, Value: 1}, {Timestamp: base + 10, Value: 2}}},
+		{Retention: store.Retention{Step: 60, Count: 128}, Points: []store.Point{{Timestamp: base, Value: 3}}},
+	}}
+	if _, err := source.CreateFromSnapshot(ctx, snap); err != nil {
+		t.Fatal(err)
+	}
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	survivor := httptest.NewServer(nativeControllerService(t, target))
+	defer survivor.Close()
+	backend := newSyncLiveBackend(syncLiveOptions{})
+	res, err := backend.CopyWindow(ctx, donor.URL, survivor.URL, []string{"boundary"}, filepath.Join(t.TempDir(), "copy.jsonl"), syncRanges{{Name: "gap", From: base, Until: base + 20}})
+	if err != nil || res.Copied != 0 || len(res.Failed) != 1 {
+		t.Fatal("incomplete coarse bucket reported as success", res, err)
 	}
 }

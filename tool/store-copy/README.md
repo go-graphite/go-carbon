@@ -432,7 +432,9 @@ exporter and target-wins combiner. Hole fills use the same window restriction.
 The catalog still has to be scanned, but full-history metadata and transfers
 are avoided. Sources must support digests and native time windows, and the
 target must support native window combine; missing support fails explicitly.
-No full-history transfer fallback is used.
+No full-history transfer fallback is used. Incomplete trailing coarse buckets
+omitted by the native window exporter are reported as failed names/residuals,
+so a partial boundary copy cannot be reported as complete.
 
 ```sh
 store-copy sync --from http://source:4242 --to http://target:4242 \
