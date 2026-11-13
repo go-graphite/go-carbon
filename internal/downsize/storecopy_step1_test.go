@@ -188,7 +188,7 @@ func TestPlanNamesMatchesConfigPlanForSameList(t *testing.T) {
 	}
 }
 
-func idleFixture(t *testing.T, names []string, hang func(request []string) bool) (*store.Store, *store.Store, string, *sync.Map) {
+func idleFixture(t *testing.T, names []string, hang func(request []string) bool) (*store.Store, string, *sync.Map) {
 	t.Helper()
 	source, target := localStore(t), localStore(t)
 	for i, name := range names {
@@ -225,7 +225,7 @@ func idleFixture(t *testing.T, names []string, hang func(request []string) bool)
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(dst.Close)
-	return source, target, fixturePlan(t, src.URL, dst.URL, names), &pulls
+	return target, fixturePlan(t, src.URL, dst.URL, names), &pulls
 }
 
 func pullCount(pulls *sync.Map, name string) int64 {
@@ -248,7 +248,7 @@ func TestTransferIdleTimeoutRetriesSingleNameAndSplitsBatches(t *testing.T) {
 	ctx := context.Background()
 	names := []string{"idle.00", "idle.01", "idle.02", "idle.03", "idle.04", "idle.05"}
 	var hungSingle, hungBatch atomic.Bool
-	_, target, root, pulls := idleFixture(t, names, func(request []string) bool {
+	target, root, pulls := idleFixture(t, names, func(request []string) bool {
 		if len(request) > 1 {
 			return !hungBatch.Swap(true)
 		}
@@ -302,7 +302,7 @@ func TestTransferIdleTimeoutAbortsLoudlyAndKeepsJournal(t *testing.T) {
 	names := []string{"stuck.00", "stuck.01", "stuck.02", "stuck.03"}
 	var stuck atomic.Bool
 	stuck.Store(true)
-	_, target, root, pulls := idleFixture(t, names, func(request []string) bool {
+	target, root, pulls := idleFixture(t, names, func(request []string) bool {
 		return request[0] == "stuck.02" && stuck.Load()
 	})
 	o := idleOptions(root)

@@ -199,9 +199,17 @@ func setOverlayProbes(tb testing.TB, on bool) {
 // referenced store, retiring aliases through fresh lookups (the oracle) and
 // through the overlay's shared-iterator probes. Every key and value each
 // metric persists, and every point it serves, must be identical.
+//
+// The race pass skips it: pebble's race build records a stack trace on every
+// table iterator it opens, and the oracle's fresh lookups open one in every
+// level per probe, so the run takes minutes and checks nothing more. The
+// differential is sequential; the plain pass runs it in full.
 func TestOverlayProbeDifferential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a multi-level store")
+	}
+	if raceDetector {
+		t.Skip("pebble's race build captures a stack per table iterator; the plain pass runs this oracle")
 	}
 	for _, buckets := range []bool{false, true} {
 		t.Run(fmt.Sprintf("buckets=%v", buckets), func(t *testing.T) {

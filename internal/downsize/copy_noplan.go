@@ -422,7 +422,9 @@ func (c *planFreeCopier) send(ctx context.Context, names []string) error {
 		failed := c.stats.failed.Add(1)
 		event("name_failed", map[string]any{"level": "error", "metric": names[0], "status": status, "error": err.Error(), "failed": failed})
 		if failed > int64(c.o.maxFailures) {
-			return fmt.Errorf("%d names failed, above --max-failures %d (last %s: %v)", failed, c.o.maxFailures, names[0], err)
+			// The cause is text, not wrapped: run() drops causes that are
+			// context.Canceled, which would hide this stop.
+			return fmt.Errorf("%d names failed, above --max-failures %d (last %s: %s)", failed, c.o.maxFailures, names[0], err.Error())
 		}
 		return nil
 	}
