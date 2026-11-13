@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"slices"
+	"sync/atomic"
 
 	"strings"
 	"time"
@@ -621,6 +622,61 @@ type ContinuationArchiveRestorer interface {
 	RestoreArchives(context.Context, ContinuationIO, Snapshot, func() time.Time) error
 }
 
+// ContinuationArchiveMerger appends a newer target copy to a staged source
+// without re-encoding the source's history. It writes to dst only when the
+// merged archives equal want and then returns ""; otherwise it returns one of
+// TransferMergeFallbackReasons and the caller uses RestoreArchives.
+type ContinuationArchiveMerger interface {
+	MergeArchives(ctx context.Context, source, target, dst ContinuationIO, want, targetSnapshot Snapshot, clock func() time.Time) (string, error)
+}
+
+// Why a present continuation name was merged by RestoreArchives instead of
+// appending (see ContinuationArchiveMerger).
+const (
+	// TransferMergeFallbackLayout: a copy is not compressed, or the archive
+	// layouts or aggregation differ.
+	TransferMergeFallbackLayout = "layout"
+	// TransferMergeFallbackNaN: a copy holds NaN (or off-grid) points that
+	// the union drops; an append would keep them in the source's blocks.
+	TransferMergeFallbackNaN = "nan"
+	// TransferMergeFallbackOverlap: a target point is at or before the
+	// source's newest block point.
+	TransferMergeFallbackOverlap = "overlap"
+	// TransferMergeFallbackOrder: the union's tail is not appendable in order.
+	TransferMergeFallbackOrder = "order"
+	// TransferMergeFallbackVerify: the appended copy read back differently
+	// from the expected union.
+	TransferMergeFallbackVerify = "verify"
+	// TransferMergeFallbackDisabled: appending is switched off.
+	TransferMergeFallbackDisabled = "disabled"
+	// TransferMergeFallbackOther: any reason not listed above.
+	TransferMergeFallbackOther = "other"
+)
+
+// TransferMergeFallbackReasons lists every fallback reason, in stats order.
+var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, TransferMergeFallbackNaN, TransferMergeFallbackOverlap, TransferMergeFallbackOrder, TransferMergeFallbackVerify, TransferMergeFallbackDisabled, TransferMergeFallbackOther}
+
+type transferMergeStats struct {
+	appended  atomic.Uint64
+	fallbacks [len(TransferMergeFallbackReasons)]atomic.Uint64
+}
+
+func (t *transferMergeStats) fallback(reason string) {
+	i := slices.Index(TransferMergeFallbackReasons[:], reason)
+	if i < 0 {
+		i = len(TransferMergeFallbackReasons) - 1
+	}
+	t.fallbacks[i].Add(1)
+}
+
+func (t *transferMergeStats) snapshot() (uint64, map[string]uint64) {
+	fallbacks := make(map[string]uint64, len(TransferMergeFallbackReasons))
+	for i, reason := range TransferMergeFallbackReasons {
+		fallbacks[reason] = t.fallbacks[i].Load()
+	}
+	return t.appended.Load(), fallbacks
+}
+
 // prepareTransfer preserves the reviewed archive/slot operations, but reads
 // the target from one immutable view. Only private reserved IDs are read through
 // the indexed batch. The caller validates every target revision before commit.
@@ -694,8 +750,8 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			// walk. Codec point/block reads then use the private record, avoiding
 			// repeated live LSM/cache lookups for every archive block.
 			var target Snapshot
+			var raw TransferMetric
 			if old.Continuation {
-				var raw TransferMetric
 				raw, err = s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
 				if err == nil {
 					target, err = s.continuation.Snapshot(ctx, transferRecordIO(raw), old, s.now)
@@ -708,15 +764,38 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			}
 			want := source
 			want.Archives = make([]Archive, len(source.Archives))
+			normalized := false
 			for j, a := range source.Archives {
-				points, _, _, err := nativeArchiveUnion(a, target.Archives[j])
+				points, _, changed, err := nativeArchiveUnion(a, target.Archives[j])
 				if err != nil {
 					return nil, err
 				}
+				normalized = normalized || changed
 				points = retainTransferSlots(points, a.Retention)
 				want.Archives[j] = Archive{a.Retention, points}
 			}
-			if m.Continuation {
+			appended := false
+			if m.Continuation && old.Continuation {
+				fallback := TransferMergeFallbackDisabled
+				if merger, ok := s.continuation.(ContinuationArchiveMerger); normalized && ok && !s.transferMergeAppendOff {
+					// The union dropped points the appended copy would keep, so
+					// the merger's verify would fail after doing all its work.
+					fallback = TransferMergeFallbackNaN
+				} else if ok && !s.transferMergeAppendOff {
+					kv := s.newContinuationIO(ctx, b, b, m)
+					fallback, err = merger.MergeArchives(ctx, transferRecordIO(r), transferRecordIO(raw), kv, want, target, s.now)
+					if err != nil {
+						return nil, err
+					}
+				}
+				if appended = fallback == ""; appended {
+					s.transferMergeStats.appended.Add(1)
+				} else {
+					s.transferMergeStats.fallback(fallback)
+				}
+			}
+			// An appended copy was verified against want by the merger.
+			if !appended && m.Continuation {
 				restorer, ok := s.continuation.(ContinuationArchiveRestorer)
 				if !ok {
 					return nil, ErrFormat
@@ -740,7 +819,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				if err := EqualSnapshots(want, got); err != nil {
 					return nil, fmt.Errorf("merge %s: %w", m.Name, err)
 				}
-			} else {
+			} else if !appended {
 				chunks, err := encodeSnapshotChunksWith(m.Retentions, want.Archives, s.encodeChunk)
 				if err != nil {
 					return nil, err

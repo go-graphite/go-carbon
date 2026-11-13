@@ -1064,7 +1064,7 @@ func readArchivePointsInRange(w *Whisper, index, from, until int) ([]dataPoint, 
 			offset = archive.Offset()
 		}
 	}
-	sort.Slice(points, func(i, j int) bool { return points[i].interval < points[j].interval })
+	sortDataPointsByInterval(points)
 	return points, nil
 }
 
