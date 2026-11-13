@@ -321,9 +321,11 @@ func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
 	if tune.hosts["a"].Streams != 0 {
 		t.Fatal("backlog did not pause copy at a healthy committed rate")
 	}
+	// A committed-counter reset is a restart: re-baseline, never a hard stop.
 	sample.WritePoints--
-	if err := tune.observe("a", sample, storageSample{}); err == nil {
-		t.Fatal("committed foreground counter reset accepted")
+	sample.Time += .1
+	if err := tune.observe("a", sample, storageSample{}); err != nil {
+		t.Fatal("committed foreground counter reset aborted the copy:", err)
 	}
 }
 func TestJournalLockTruncationAndCompaction(t *testing.T) {

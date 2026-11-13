@@ -52,6 +52,7 @@ const (
 	// on fast copies, whose batches stay below 16 MiB anyway.
 	copyDefaultBatchBytes = 16 << 20
 	copyHeaderTimeoutMin  = 90 * time.Second
+	copySettleAttempts    = 4
 )
 
 // copyHeaderTimeout keeps the response header deadline behind the transfer
@@ -366,7 +367,7 @@ func (c *planFreeCopier) run(ctx context.Context, sources []copySource, owner fu
 		go func() {
 			defer wg.Done()
 			for batch := range batches {
-				if err := c.send(ctx, batch.source, batch.names); err != nil {
+				if err := c.send(ctx, batch.source, batch.names, false); err != nil {
 					cancel(err)
 				}
 			}
@@ -450,14 +451,15 @@ func (c *planFreeCopier) produce(ctx context.Context, source copySource, owner f
 // send copies one contiguous batch. Too large (413), idle, absent (404) and
 // other definitive rejections split a multi-name batch in half; a single name
 // that still fails is journaled as a failure and skipped, so nothing stalls.
-func (c *planFreeCopier) send(ctx context.Context, source string, names []string) error {
+func (c *planFreeCopier) send(ctx context.Context, source string, names []string, settled bool) error {
 	budget := c.sizer.budget
 	if len(names) == 1 {
 		budget = c.serverMax
 	}
 	t := task{Stream: "copy", Source: source, Target: c.o.to, Names: names}
 	hosts := []string{source, c.o.to}
-	idleAttempts := 0
+	idleAttempts, settleAttempts := 0, 0
+	settleDelay := c.o.tick
 	for {
 		start := time.Now()
 		var proofs []chunkstore.TransferProof
@@ -511,16 +513,30 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 			event("batch_repull", map[string]any{"first": names[0], "last": names[len(names)-1], "names": len(names), "error": err.Error()})
 			continue
 		}
+		// A donor in its restart window can answer export with 409/404/500
+		// while its status endpoint already answers. Before an original
+		// batch is split or a name journaled as failed, re-pull it whole a
+		// few times with backoff (about 30s with the defaults). Split
+		// children skip this, so one bad name costs one settle round.
+		if !settled && idle == nil && (api == nil || api.Status != http.StatusRequestEntityTooLarge) && settleAttempts < copySettleAttempts {
+			settleAttempts++
+			event("batch_settle_retry", map[string]any{"source": source, "first": names[0], "last": names[len(names)-1], "names": len(names), "attempt": settleAttempts, "delay_seconds": settleDelay.Seconds(), "error": err.Error()})
+			if err := sleepContext(ctx, settleDelay); err != nil {
+				return err
+			}
+			settleDelay = min(2*settleDelay, c.o.maxBackoff)
+			continue
+		}
 		if len(names) > 1 {
 			if api != nil && api.Status == http.StatusRequestEntityTooLarge {
 				c.sizer.tooLarge(len(names))
 			}
 			event("split", map[string]any{"first": names[0], "last": names[len(names)-1], "names": len(names), "error": err.Error()})
 			middle := len(names) / 2
-			if err := c.send(ctx, source, names[:middle]); err != nil {
+			if err := c.send(ctx, source, names[:middle], true); err != nil {
 				return err
 			}
-			return c.send(ctx, source, names[middle:])
+			return c.send(ctx, source, names[middle:], true)
 		}
 		if idle != nil {
 			idleAttempts++

@@ -277,3 +277,35 @@ func TestOriginListRepeatsAndSplits(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// A donor in its restart window answers export with 409 while every status
+// endpoint is up (seen on a production donor restart: the previous binary
+// split down to per-name failures and aborted above --max-failures). The
+// copy re-pulls the whole batch until the window closes; nothing fails.
+func TestPlanFreeCopySettlesThroughSourceRestartConflicts(t *testing.T) {
+	f, froms, dst := newRestartFixture(t, copyNames("a.", 400))
+	until := time.Now().Add(150 * time.Millisecond)
+	var conflicts atomic.Int64
+	f.pullCode = func() int {
+		if time.Now().Before(until) {
+			conflicts.Add(1)
+			return http.StatusConflict
+		}
+		return 0
+	}
+	o := copyTestOptions(t, froms[0], dst.url())
+	o.maxNames, o.maxFailures = 50, 0
+	o.tick, o.maxBackoff = 20*time.Millisecond, 100*time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := planFreeCopy(ctx, o); err != nil {
+		t.Fatalf("copy failed through a source restart window: %v", err)
+	}
+	if conflicts.Load() == 0 {
+		t.Fatal("restart window not exercised")
+	}
+	journal, _ := os.ReadFile(o.state)
+	if strings.Contains(string(journal), `"kind":"failed"`) {
+		t.Fatalf("restart window journaled failures:\n%s", journal)
+	}
+}

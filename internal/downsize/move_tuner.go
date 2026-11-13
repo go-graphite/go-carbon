@@ -80,6 +80,10 @@ type hostLimit struct {
 	hard                      string
 	maxSpeed                  *maxSpeedHostState
 	foregroundReady           bool
+	// downSince marks a host whose telemetry or status is unreachable (a
+	// go-carbon restart); admission is parked, never failed, until it is back.
+	downSince   time.Time
+	downStreams int
 }
 type tuner struct {
 	mu             sync.Mutex
@@ -225,19 +229,15 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 	if sample.Threads >= 8000 || sample.AvailableBytes < sample.MemoryBytes/20 || sample.RSS > sample.MemoryBytes*9/10 {
 		return "hard memory/thread reserve", ""
 	}
+	// A restart or counter reset is re-baselined by the caller (previous and
+	// old arrive nil), never a hard stop: the copy waits and continues.
 	if previous != nil {
-		if sample.Generation != previous.Generation || sample.WriteErrors < previous.WriteErrors || sample.Unlogged < previous.Unlogged || sample.WritePoints < previous.WritePoints || sample.ForegroundMeasured != previous.ForegroundMeasured {
-			return "host restart/counter reset", ""
-		}
 		if sample.WriteErrors > previous.WriteErrors || sample.Unlogged > previous.Unlogged {
 			return "write errors or unlogged input points", ""
 		}
 		if sample.Time <= previous.Time {
 			return "non-advancing host telemetry", ""
 		}
-	}
-	if old != nil && store.WriteStalls < old.WriteStalls {
-		return "store restart/counter reset", ""
 	}
 	stopL0 := store.L0StopWrites
 	if stopL0 <= 0 {
@@ -288,7 +288,16 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	if t.maxSpeed != nil {
 		return t.observeMaxSpeedLocked(host, sample, store)
 	}
+	if !h.downSince.IsZero() {
+		event("host_back", map[string]any{"host": host, "down_seconds": time.Since(h.downSince).Seconds(), "streams": max(1, h.downStreams/2)})
+		h.Streams = max(1, h.downStreams/2)
+		h.downSince, h.downStreams = time.Time{}, 0
+	}
+	rebaselined := h.rebaseline(host, sample, store)
 	hard, soft := guard(sample, store, h.previous, h.storePrevious, t.read.limit(h.readBaseline))
+	if rebaselined != "" && soft == "" {
+		soft = "host restart: re-baselined"
+	}
 	if (t.collecting || t.collectingDebt) && validReadSample(sample) {
 		h.readSamples = append(h.readSamples, sample.ReadP99MS)
 	}
@@ -407,6 +416,74 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	t.changed = make(chan struct{})
 	return nil
 }
+
+// counterReset reports why sample cannot be compared with previous: a new
+// process generation or a cumulative counter that went backwards.
+func counterReset(sample, previous hostSample) string {
+	switch {
+	case sample.Generation != previous.Generation:
+		return "process generation changed"
+	case sample.WriteErrors < previous.WriteErrors || sample.Unlogged < previous.Unlogged || sample.WritePoints < previous.WritePoints:
+		return "host counter reset"
+	case sample.ForegroundMeasured != previous.ForegroundMeasured:
+		return "foreground measurement changed"
+	}
+	return ""
+}
+
+// rebaseline drops the previous samples a restart made incomparable (also a
+// pre-restart Previous restored from the journal), so this tick's delta
+// guards, write rate and debt growth start fresh instead of aborting.
+func (h *hostLimit) rebaseline(host string, sample hostSample, store storageSample) string {
+	reason := ""
+	fields := map[string]any{"host": host, "new_generation": sample.Generation}
+	if h.previous != nil {
+		if why := counterReset(sample, *h.previous); why != "" {
+			reason = why
+			fields["old_generation"] = h.previous.Generation
+			h.previous = nil
+		}
+	}
+	if h.storePrevious != nil && store.WriteStalls < h.storePrevious.WriteStalls {
+		if reason == "" {
+			reason = "store counter reset"
+		}
+		fields["old_write_stalls"], fields["write_stalls"] = h.storePrevious.WriteStalls, store.WriteStalls
+		h.storePrevious = nil
+	}
+	if reason != "" {
+		fields["reason"] = reason
+		event("rebaseline", fields)
+	}
+	return reason
+}
+
+// hostUnavailable parks admission for a host whose telemetry or status is
+// unreachable (restart in progress). It never fails: the copy waits.
+func (t *tuner) hostUnavailable(host string, cause error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	h := t.hosts[host]
+	if h == nil {
+		return
+	}
+	if h.downSince.IsZero() {
+		h.downSince, h.downStreams = time.Now(), h.Streams
+	}
+	h.Streams, h.healthy = 0, 0
+	event("host_unavailable", map[string]any{"level": "warn", "host": host, "down_seconds": time.Since(h.downSince).Seconds(), "error": cause.Error()})
+	close(t.changed)
+	t.changed = make(chan struct{})
+}
+
+// hostUp reports whether the tuner currently sees host as reachable.
+func (t *tuner) hostUp(host string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	h := t.hosts[host]
+	return h == nil || h.downSince.IsZero()
+}
+
 func sleepContext(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()

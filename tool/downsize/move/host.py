@@ -41,6 +41,22 @@ def total(values, name, required=True):
     return sum(found)
 
 
+FOREGROUND_COUNTERS = ('input_log_write_errors_total', 'input_log_unlogged_points_total', 'persister_pebble_points_total')
+
+
+def scrape_counters(url, write_error_metric, attempts=3, pause=0.5, fetch=None):
+    # go-carbon skips some collectors in a scrape while lifecycle/migration
+    # state is busy (migration_metrics_skipped_total); re-scrape before failing.
+    fetch = fetch or metrics
+    required = FOREGROUND_COUNTERS + (write_error_metric,)
+    for attempt in range(attempts):
+        values = fetch(url)
+        present = {k.split('{', 1)[0] for k in values}
+        if all(name in present for name in required) or attempt == attempts - 1:
+            return values
+        time.sleep(pause)
+
+
 def foreground_counters(values, write_error_metric, offline=False):
     # Go's uint64 decoder requires integer JSON tokens, including for zero.
     return {'WriteErrors': 0 if offline else int(total(values, 'input_log_write_errors_total') + total(values, write_error_metric)),
@@ -55,13 +71,13 @@ def read_p99(previous, current):
     name = 'http_request_duration_seconds_exp'
     count = total(current, name + '_count') - total(previous, name + '_count')
     if count < 0:
-        raise ValueError('read histogram reset')
+        return 0, 0  # restart/counter reset: this scrape is the new baseline
     buckets = {}
     for key, value in current.items():
         if key.split('{', 1)[0] != name + '_bucket':
             continue
         if key not in previous or value < previous[key]:
-            raise ValueError('read histogram changed/reset')
+            return 0, 0  # histogram changed/reset: new baseline
         bound = float(re.search(r'\ble="([^"]+)"', key).group(1))
         buckets[bound] = buckets.get(bound, 0) + value - previous[key]
     lower = old = 0
@@ -115,6 +131,7 @@ class Host:
         self.args = args
         self.previous = None
         self.histogram = None
+        self.generation = None
         self.lock = threading.RLock()
         self.lease = None
         self.tag = 'ds-move-' + args.cluster
@@ -149,7 +166,10 @@ class Host:
             # divide a full counter interval by the tiny response-time gap.
             now = time.time()
             offline = getattr(self.args, 'offline', False)
-            values = {} if offline else metrics(self.args.metrics_url)
+            if generation != getattr(self, 'generation', None):
+                self.histogram = None  # a new process restarts every counter
+                self.generation = generation
+            values = {} if offline else scrape_counters(self.args.metrics_url, self.args.write_error_metric)
             admin = {} if offline else fetch_json(self.args.admin_url + '/admin/info?scopes=storage,cache')
             phase = 'shared' if offline else admin['storage']['migration']['phase']
             cached = 0 if offline else int(admin['cache']['size'])

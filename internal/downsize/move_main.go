@@ -44,6 +44,7 @@ type options struct {
 	maxBytes                                                                         int64
 	tick                                                                             time.Duration
 	transferIdle                                                                     time.Duration
+	stallTimeout                                                                     time.Duration
 	observeOnly                                                                      time.Duration
 	mbps                                                                             float64
 	read                                                                             readPolicy
@@ -121,6 +122,7 @@ func MoveMain(args []string) error {
 	flags.IntVar(&o.deleteRate, "delete-rate", 65536, "maximum deleted metrics/s per source")
 	flags.Int64Var(&o.maxBytes, "batch-bytes", 64<<20, "maximum estimated bytes per transfer; server max_body_bytes still applies")
 	flags.DurationVar(&o.tick, "tick", 10*time.Second, "host guard and tuner tick")
+	flags.DurationVar(&o.stallTimeout, "stall-timeout", 30*time.Minute, "abort with an error when a transfer keeps failing transiently this long while its source and target are both up; a host that is down (restart) is waited for without limit")
 	flags.DurationVar(&o.transferIdle, "transfer-idle-timeout", defaultTransferIdle, "metric engine: abort a pull/import/verify after this long without request or response bytes and retry it (a multi-name batch splits in half, one name gets 3 attempts; a native-deferred child stays fail-closed); 0 disables")
 	flags.DurationVar(&o.observeOnly, "observe-only", 0, "run admission guards for this duration without starting transfer workers; also learn missing debt baselines with copying off")
 	flags.Float64Var(&o.mbps, "max-mbps", 0, "optional transfer MB/s ceiling per host direction; zero uses physical host guards without a fixed rate cap")
@@ -1004,13 +1006,19 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 func (m *mover) poll(ctx context.Context, hosts []string) error {
 	for _, h := range hosts {
 		if err := m.pollHost(ctx, h); err != nil {
-			if m.tuner.maxSpeed == nil {
-				return err
-			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			m.tuner.maxSpeedUnavailable(h, err)
+			if m.tuner.maxSpeed != nil {
+				m.tuner.maxSpeedUnavailable(h, err)
+				continue
+			}
+			if !transientHostError(err) {
+				return err
+			}
+			// A restarting host (refused status, helper 503 or missing
+			// counters) parks its admission until it answers again.
+			m.tuner.hostUnavailable(h, err)
 		}
 	}
 	if !m.tuner.collecting && !m.tuner.collectingDebt {
@@ -1018,6 +1026,23 @@ func (m *mover) poll(ctx context.Context, hosts []string) error {
 	}
 	return nil
 }
+
+// transientHostError reports poll failures a go-carbon restart produces:
+// helper errors (503 read-histogram reset, missing counters), gateway or
+// guard responses and transport errors. Guard decisions are not transient.
+func transientHostError(err error) bool {
+	if errors.Is(err, errGuards) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var api *apiError
+	if errors.As(err, &api) {
+		return api.Status == http.StatusRequestTimeout || api.Status == http.StatusTooManyRequests || api.Status >= 500
+	}
+	var network net.Error
+	var operation *net.OpError
+	return errors.As(err, &network) || errors.As(err, &operation)
+}
+
 func (m *mover) pollHost(ctx context.Context, h string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
