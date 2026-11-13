@@ -129,6 +129,8 @@ func SyncMain(ctx context.Context, args []string) error {
 	flags.DurationVar(&o.progress, "progress-interval", 30*time.Second, "progress line interval")
 	flags.IntVar(&live.carbonPort, "carbonserver-port", 8080, "carbonserver port on every store (reads for verify)")
 	flags.IntVar(&live.copyStreams, "copy-streams", 0, "parallel copy transfers; 0 uses the copy default")
+	flags.Int64Var(&live.copyBytes, "max-batch-bytes", copyDefaultBatchBytes, "copy/fill batch byte cap (real exported bytes)")
+	flags.DurationVar(&live.copyIdle, "transfer-idle-timeout", defaultTransferIdle, "copy/fill idle transfer timeout")
 	flags.StringVar(&live.tokenEnv, "token-env", "BUCKYD_TOKEN", "environment variable holding the buckyd JWT")
 	flags.DurationVar(&live.hostWait, "host-wait", 30*time.Minute, "wait this long for a restarting store before failing")
 	flags.IntVar(&live.copyAttempts, "copy-attempts", 6, "copy engine runs per name list (each rerun resumes its journal)")
@@ -137,6 +139,9 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	if live.copyBytes < 65536 || live.copyIdle <= 0 {
+		return errors.New("invalid max-batch-bytes or transfer-idle-timeout")
 	}
 	o.from = from
 	if err := o.normalize(); err != nil {

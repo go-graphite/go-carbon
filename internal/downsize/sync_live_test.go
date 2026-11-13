@@ -99,7 +99,7 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 			return err
 		}
 		defer j.close()
-		_ = j.failed("a", http.StatusForbidden, "source is neither a ring node nor a configured transfer source")
+		_ = j.failed("http://s:4242", "a", http.StatusForbidden, "source is neither a ring node nor a configured transfer source")
 		return &apiError{Status: 0, Message: "1 names failed"}
 	}
 	res, err := b.Copy(context.Background(), "http://s:4242", "http://t:4242", []string{"a", "b"}, journal)
@@ -116,7 +116,7 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 			return err
 		}
 		defer j.close()
-		return j.done("a", "a", 1, 10, time.Millisecond)
+		return j.done("http://s:4242", "a", "a", 1, 10, time.Millisecond)
 	}
 	_ = os.Remove(journal)
 	res, err = b.Copy(context.Background(), "http://s:4242", "http://t:4242", []string{"a", "b"}, journal)
@@ -125,5 +125,76 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 	}
 	if res.Forbidden || res.Copied != 1 || len(res.Failed) != 1 || res.Failed[0] != "b" {
 		t.Fatalf("res %+v", res)
+	}
+}
+
+// A long-name page can be truncated by the shared decoder byte budget even
+// when the server returns HTTP 200. Retry the cursor and remember the cap.
+func TestSyncListTruncatedPage(t *testing.T) {
+	var limits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limits = append(limits, r.URL.Query().Get("limit"))
+		if r.URL.Query().Get("after") != "cursor" {
+			t.Errorf("cursor changed: %s", r.URL.RawQuery)
+		}
+		if r.URL.Query().Get("limit") == "10000" {
+			_, _ = io.WriteString(w, `["truncated`)
+			return
+		}
+		_, _ = io.WriteString(w, `["next"]`)
+	}))
+	defer srv.Close()
+	b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Second})
+	for range 2 {
+		names, err := b.List(context.Background(), srv.URL, "", "cursor", 10000)
+		if err != nil || len(names) != 1 || names[0] != "next" {
+			t.Fatalf("names=%v err=%v", names, err)
+		}
+	}
+	if len(limits) != 3 || limits[0] != "10000" || limits[1] != "5000" || limits[2] != "5000" {
+		t.Fatalf("limits=%v", limits)
+	}
+}
+
+func TestSyncCopyTransferControls(t *testing.T) {
+	b := newSyncLiveBackend(syncLiveOptions{copyBytes: 16 << 20, copyIdle: 80 * time.Second})
+	dir := t.TempDir()
+	journal := filepath.Join(dir, "fill-r1-s0.jsonl")
+	if err := os.WriteFile(filepath.Join(dir, "fill-r1-s0.names"), []byte("a\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	b.o.copyAttempts = 1
+	b.copy = func(_ context.Context, o copyOptions) error {
+		calls++
+		if o.maxBytes != 16<<20 || o.transferIdle != 80*time.Second {
+			t.Fatalf("controls not forwarded: %+v", o)
+		}
+		j, err := openCopyJournal(o.state, o.names)
+		if err != nil {
+			return err
+		}
+		defer j.close()
+		return j.done("http://s:4242", "a", "a", 1, 10, time.Millisecond)
+	}
+	res, err := b.Copy(context.Background(), "http://s:4242", "http://t:4242", []string{"a"}, journal)
+	if err != nil || res.Copied != 1 || calls != 2 {
+		t.Fatalf("res=%+v calls=%d err=%v", res, calls, err)
+	}
+}
+
+// Exercise the real engine so new required engine options cannot silently
+// turn every sync probe and fill into validation retries.
+func TestSyncCopyRealEngine(t *testing.T) {
+	_, src, dst := newFakeCopy(t, []string{"a", "b"})
+	b := newSyncLiveBackend(syncLiveOptions{copyBytes: 16 << 20, copyIdle: 80 * time.Second, copyAttempts: 1, copyStreams: 1})
+	dir := t.TempDir()
+	journal := filepath.Join(dir, "fill-r1-s0.jsonl")
+	if err := os.WriteFile(filepath.Join(dir, "fill-r1-s0.names"), []byte("a\nb\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := b.Copy(context.Background(), src, dst, []string{"a", "b"}, journal)
+	if err != nil || res.Copied != 2 || len(res.Failed) != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
 	}
 }
