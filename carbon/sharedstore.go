@@ -486,3 +486,16 @@ func (app *App) configureTransferCache() {
 		return app.Persister.FlushForTransfer(ctx, pending)
 	})
 }
+
+// storeCompactionWorkers resolves store-compaction-workers. Zero selects one
+// worker per six CPUs, from 4 to 64. Pebble starts compactions beyond the
+// first only while L0 sublevels or compaction debt call for them, so this is
+// the ceiling for catching up after bulk imports, not a constant load. A fixed
+// single worker (Pebble's default) let debt run to hundreds of GB on mostly
+// idle hosts.
+func storeCompactionWorkers(configured, cpus int) int {
+	if configured > 0 {
+		return configured
+	}
+	return min(64, max(4, cpus/6))
+}
