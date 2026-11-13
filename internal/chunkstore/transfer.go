@@ -728,12 +728,16 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				return nil, err
 			}
 		}
+		var source Snapshot
+		sourceDecoded := false
 		if r.PointDigest != "" && !r.Continuation {
-			snapshot, err := s.transferSnapshot(ctx, b, m)
+			var err error
+			source, err = s.transferSnapshot(ctx, b, m)
 			if err != nil {
 				return nil, err
 			}
-			digest, counts := snapshotDigest(snapshot)
+			digest, counts := snapshotDigest(source)
+			sourceDecoded = true
 			if digest != r.PointDigest || !slices.Equal(counts, r.Counts) {
 				return nil, fmt.Errorf("source point verification %s failed", m.Name)
 			}
@@ -745,10 +749,9 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			if err := s.checkFileOwnership(old); err != nil {
 				return nil, err
 			}
-			var source Snapshot
 			if m.Continuation {
 				source, err = s.continuation.Snapshot(ctx, transferRecordIO(r), m, s.now)
-			} else {
+			} else if !sourceDecoded {
 				source, err = s.transferSnapshot(ctx, b, m)
 			}
 			if err != nil {

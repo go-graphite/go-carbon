@@ -732,7 +732,13 @@ func (f *continuationFile) ReadAt(data []byte, offset int64) (int, error) {
 			position, written = position+count, written+count
 		} else {
 			groupIndex := (position - a.Offset) / (128 * 12)
-			group, err := f.classicGroup(archive, a, groupIndex, false)
+			var group *store.PointBlock
+			var err error
+			if f.fs.snapshotReads {
+				group, err = f.classicSnapshotGroup(archive, a, groupIndex)
+			} else {
+				group, err = f.classicGroup(archive, a, groupIndex, false)
+			}
 			if err != nil {
 				return written, err
 			}
