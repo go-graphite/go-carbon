@@ -38,8 +38,8 @@ func TestRestoreWorkersJoinBeforeRetiringFile(t *testing.T) {
 			mu.Unlock()
 			return nil
 		})
-		writer := core.NewRestoreWriter(16)
-		go func() { app := &App{}; app.restoreFromDir(root, writer.Add, writer.Flush); writer.Close(); close(done) }()
+		core.SetRecoveryDrain(true)
+		go func() { app := &App{Cache: core}; app.Restore(core.AddRestoredBeforeInput, root, 0); close(done) }()
 		<-entered
 		synctest.Wait()
 		for _, name := range []string{cacheFile, inputFile} {

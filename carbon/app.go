@@ -1495,9 +1495,7 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
-	writer := core.NewRestoreWriter(min(runtime.GOMAXPROCS(0), 16))
-	app.restore(writer.Add, conf.Dump.Path, conf.Dump.RestorePerSecond, writer.Flush)
-	writer.Close()
+	app.Restore(core.AddRestoredBeforeInput, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	restoreLoaded := time.Now()
 	// The persister already writes what is loaded; prewarm the rest.
 	app.startMetadataPrewarmWithCheckpointGate("restored dump", core.MetricNames(), nil)

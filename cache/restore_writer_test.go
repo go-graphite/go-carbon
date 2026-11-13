@@ -102,7 +102,7 @@ func TestRestoreWriterDifferential(t *testing.T) {
 							c.AddRestoredBeforeInput(p)
 						}
 					}
-					w := fast.newRestoreWriter(workers, func(p *points.Points) { consume(fast, p) })
+					w := fast.NewRestoreWriter(workers, func(p *points.Points) { consume(fast, p) })
 					for _, p := range records {
 						a, b := *p, *p
 						consume(old, &a)
@@ -245,7 +245,7 @@ func BenchmarkRestoreWriterContended(b *testing.B) {
 			}
 			var w *RestoreWriter
 			if workers > 0 {
-				w = c.NewRestoreWriter(workers)
+				w = c.NewRestoreWriter(workers, c.AddRestoredBeforeInput)
 			}
 			b.SetBytes(int64(len(data) * 16))
 			b.ReportAllocs()
@@ -280,7 +280,7 @@ func TestRestoreWriterJournalPressure(t *testing.T) {
 			data[i] = points.Point{Value: float64(i), Timestamp: int64(i)}
 		}
 		c.AddRestoredBeforeInput(&points.Points{Metric: "pressure", Data: data})
-		w := c.NewRestoreWriter(4)
+		w := c.NewRestoreWriter(4, c.AddRestoredBeforeInput)
 		w.Add(points.OnePoint("pressure", math.Copysign(0, -1), -1))
 		synctest.Wait()
 		shard := c.GetShard("pressure")
@@ -331,7 +331,7 @@ func TestRestoreWriterConcurrentWriteout(t *testing.T) {
 			}
 		})
 	}
-	w := c.NewRestoreWriter(16)
+	w := c.NewRestoreWriter(16, c.AddRestoredBeforeInput)
 	for i := range 16000 {
 		n := i % names
 		p := points.OnePoint(fmt.Sprintf("concurrent.%d", n), math.Float64frombits(uint64(i)*0x9e3779b97f4a7c15), int64(i/3-i%7))

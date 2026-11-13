@@ -1002,7 +1002,13 @@ FilesLoop:
 
 // Restore from dump.path
 func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
-	app.restore(storeFunc, path, rps, nil)
+	var flush func()
+	if app.Cache != nil && app.Cache.RecoveryDraining() {
+		writer := app.Cache.NewRestoreWriter(min(runtime.GOMAXPROCS(0), 16), storeFunc)
+		defer writer.Close()
+		storeFunc, flush = writer.Add, writer.Flush
+	}
+	app.restore(storeFunc, path, rps, flush)
 }
 
 func (app *App) restore(storeFunc func(*points.Points), path string, rps int, flush func()) {

@@ -25,11 +25,12 @@ type RestoreWriter struct {
 	pendingPoints int
 }
 
-func (c *Cache) NewRestoreWriter(workers int) *RestoreWriter {
-	return c.newRestoreWriter(workers, c.AddRestoredBeforeInput)
-}
+// RecoveryDraining reports whether startup is draining a finite history prefix.
+func (c *Cache) RecoveryDraining() bool { return c.recoveryDrain.Load() }
 
-func (c *Cache) newRestoreWriter(workers int, consume func(*points.Points)) *RestoreWriter {
+// NewRestoreWriter invokes consume concurrently, keeping one consumer per cache
+// shard. The callback must accept owned records and be safe across shards.
+func (c *Cache) NewRestoreWriter(workers int, consume func(*points.Points)) *RestoreWriter {
 	w := &RestoreWriter{cache: c, queues: make([]chan *points.Points, min(max(workers, 1), shardCount))}
 	w.space = sync.NewCond(&w.mu)
 	for i := range w.queues {
