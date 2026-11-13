@@ -3,6 +3,7 @@ package carbonserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -253,6 +254,10 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
+		if errors.Is(err, errRestorePending) {
+			http.Error(wr, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "failed to read data"),
@@ -330,6 +335,17 @@ func legacyRenderCacheKey(targets map[timeRange][]target, format string) string 
 }
 
 func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target, tle *traceLogEntries) (fetchResponse, bool, error) {
+	// Reject the complete request before query-cache lookup/population. A
+	// partial response must not outlive the recovering metric's read gate.
+	if listener.restorePending != nil {
+		for _, group := range targets {
+			for _, target := range group {
+				if listener.restorePending(target.Name) {
+					return fetchResponse{}, false, errRestorePending
+				}
+			}
+		}
+	}
 	logger = logger.WithLazy(
 		zap.String("function", "fetchWithCache"),
 	)
@@ -500,6 +516,9 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		return fetchResponse{nil, contentType, 0, 0, 0, nil, false}, err
 	}
 	metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
+	if err := listener.checkRestoreGlobs(metricGlobMap); err != nil {
+		return fetchResponse{}, err
+	}
 	// Collect directly: a buffered channel and goroutine per request cost more
 	// than the typical single-series fetch they would overlap with.
 	prepareT0 := time.Now()
@@ -791,6 +810,9 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 			}
 		}
 		metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
+		if err := listener.checkRestoreGlobs(metricGlobMap); err != nil {
+			return nil, status.Error(codes.Unavailable, err.Error())
+		}
 		tle.MetricGlobMapLength = len(metricGlobMap)
 		filesCount := countFilesInExpandedGlobs(expandedGlobs)
 		prepareChan := make(chan response, getStreamingChannelSize(filesCount))

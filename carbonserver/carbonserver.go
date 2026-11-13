@@ -278,6 +278,7 @@ type CarbonserverListener struct {
 	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
+	restorePending    func(string) bool
 	readTimeout       time.Duration
 	idleTimeout       time.Duration
 	writeTimeout      time.Duration

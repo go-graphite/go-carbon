@@ -1282,13 +1282,14 @@ enabled = false
 path = "/var/lib/graphite/dump/"
 # Restore speed. 0 - unlimited
 #
-# With whisper compressed = true the dump is restored before the receivers start
-# listening, so replayed points cannot fall behind a block watermark that live
-# traffic has already advanced. A non-zero limit therefore delays startup by
-# roughly (dumped points / restore-per-second) seconds plus the time needed to
-# persist them, during which nothing is accepted: keep it high enough that a
-# restart finishes inside whatever grace period your health check or supervisor
-# allows.
+# Compressed history must be loaded before live input. On an untagged, shared
+# Pebble store without mirroring or migration, input can open at load-complete
+# while older points persist, provided carbonserver uses concurrent/realtime trie
+# indexing (or is disabled). Restored metrics have writeout priority; reads of a
+# metric return temporary unavailability until its restored prefix is confirmed.
+# Other modes retain the full persistence gate. A non-zero limit therefore adds
+# at least (dumped points / restore-per-second) seconds to startup; size the
+# supervisor grace period accordingly. See doc/index-snapshots.md.
 restore-per-second = 0
 # Run as a small parent process that exits as soon as a USR2 dump stop has
 # written its durable files and closed every listener, instead of waiting for
