@@ -990,6 +990,24 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
 	hash := xxh3.HashString(key)
 	shard := c.data[hash&(shardCount-1)]
+	// During legacy restore, large batches must not decode while excluding
+	// arrivals to every other metric in their shard. Published compact words
+	// are immutable, including the snapshot's private tail.
+	var prepared *item
+	var decoded []points.Point
+	if c.recoveryDrain.Load() {
+		shard.mu.RLock()
+		prepared = shard.items.getHashed(hash, key)
+		var snapshot compactPoints
+		if prepared != nil {
+			snapshot = prepared.compact
+		}
+		shard.mu.RUnlock()
+		if snapshot.n > 0 {
+			decoded = snapshot.appendDecoded(nil)
+		}
+	}
+
 	shard.mu.Lock()
 	values := shard.items.getHashed(hash, key)
 	exists = values != nil
@@ -1002,7 +1020,20 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 		c.addSizeLocked(shard, -int64(values.count()), s.sizeSlack)
 		// Tracking follows the batch while a replacement item may be queued.
 		// Get reads in-flight Data under this lock.
-		p = values.decode()
+		if values == prepared && values.count() == len(decoded) {
+			// Appends only increase count; failed-write requeues replace the item.
+			// Revalidate both under mu before publishing the prepared batch.
+			p = values.pending
+			if p == nil {
+				p = &points.Points{Metric: values.Metric}
+			}
+			p.Data = decoded
+			values.compact = compactPoints{}
+		} else {
+			// A hot metric changed during decode. Keep the ordinary atomic pop
+			// rather than retrying forever behind continuous input.
+			p = values.decode()
+		}
 		shard.log.pop(values, p)
 		if !values.firstArrival.IsZero() {
 			if shard.firstArrival == nil {

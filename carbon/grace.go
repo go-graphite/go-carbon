@@ -904,6 +904,10 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 
 // RestoreFromDir cache and input dumps from disk to memory
 func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
+	app.restoreFromDir(dumpDir, storeFunc, nil)
+}
+
+func (app *App) restoreFromDir(dumpDir string, storeFunc func(*points.Points), flush func()) {
 	startTime := time.Now()
 
 	logger := zapwriter.Logger("restore").With(zap.String("dir", dumpDir))
@@ -979,6 +983,9 @@ FilesLoop:
 			restoredBytes += info.Size()
 		}
 		app.RestoreFromFile(filename, storeFunc)
+		if flush != nil {
+			flush()
+		}
 
 		// The input log recorded the restored points; they must be durable
 		// there before their only other copy goes.
@@ -995,6 +1002,10 @@ FilesLoop:
 
 // Restore from dump.path
 func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
+	app.restore(storeFunc, path, rps, nil)
+}
+
+func (app *App) restore(storeFunc func(*points.Points), path string, rps int, flush func()) {
 	if rps > 0 {
 		ticker := helper.NewThrottleTicker(rps)
 		defer ticker.Stop()
@@ -1006,9 +1017,9 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 			storeFunc(p)
 		}
 
-		app.RestoreFromDir(path, throttledStoreFunc)
+		app.restoreFromDir(path, throttledStoreFunc, flush)
 	} else {
-		app.RestoreFromDir(path, storeFunc)
+		app.restoreFromDir(path, storeFunc, flush)
 	}
 }
 
