@@ -145,3 +145,45 @@ func BenchmarkTransferImportPresent(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkTransferImportPresentStreams imports present (disjoint) names over
+// 16, 32 and 64 concurrent transfers and reports names/s. Each stream imports
+// its own fresh names, seeded live on the target first.
+func BenchmarkTransferImportPresentStreams(b *testing.B) {
+	const names = 32
+	fixture := newMergeBenchFixture(b, names, false)
+	now := fixture.now
+	target := openMergeBenchStore(b, filepath.Join(b.TempDir(), "target"), func() time.Time { return now })
+	ctx := context.Background()
+	round := 0
+	for _, streams := range []int{16, 32, 64} {
+		b.Run(fmt.Sprintf("streams=%d", streams), func(b *testing.B) {
+			var total time.Duration
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				batches := make([][]store.TransferMetric, streams)
+				for s := range batches {
+					round++
+					batches[s] = fixture.clone(fmt.Sprintf("s%06d", round))
+					fixture.seedTarget(b, target, batches[s])
+				}
+				b.StartTimer()
+				start := time.Now()
+				errs := make(chan error, streams)
+				for _, records := range batches {
+					go func(records []store.TransferMetric) {
+						_, err := target.ImportTransfer(ctx, records)
+						errs <- err
+					}(records)
+				}
+				for range batches {
+					if err := <-errs; err != nil {
+						b.Fatal(err)
+					}
+				}
+				total += time.Since(start)
+			}
+			b.ReportMetric(float64(b.N*streams*names)/total.Seconds(), "names/s")
+		})
+	}
+}
