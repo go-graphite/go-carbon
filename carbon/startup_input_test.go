@@ -33,6 +33,14 @@ import (
 // Delay all storage/index work after the real input-only offer. More than the
 // default RAM read-ahead budget must still drain durably on each connection.
 func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
+	testStartupInputDrainsBeforeCheckpoint(t, false)
+}
+
+func TestStartupInputLargeManifestLegacyRestart(t *testing.T) {
+	testStartupInputDrainsBeforeCheckpoint(t, true)
+}
+
+func testStartupInputDrainsBeforeCheckpoint(t *testing.T, large bool) {
 	if isolatedTestProcessSerial(t) {
 		return
 	}
@@ -46,13 +54,47 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format, cfg.Dump.StoreInputHandoff = true, short, "compact", true
 	cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 	cfg.Common.MaxCPU = 4
+	if large {
+		cfg.Dump.Format = "legacy"
+		cfg.Cache.MaxSize = 4_000_000
+		if err := os.WriteFile(cfg.Whisper.SchemasFilename, []byte("[all]\npattern = .*\nretentions = 1s:3h\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	writeSharedConfig(t, path, cfg)
 	old := startIncrementalApp(t, path)
 	if !old.Carbonserver.HasMappedIndex() {
 		old.Stop()
 		old = startIncrementalApp(t, path)
 	}
+	if large {
+		old.Lock()
+		old.Persister.Stop()
+		old.Persister = nil
+		old.Unlock()
+		stamp := time.Now().Unix() - 8192
+		for metric := range 256 {
+			batch := &points.Points{Metric: fmt.Sprintf("restore.large.%d", metric), Data: make([]points.Point, 8192)}
+			for i := range batch.Data {
+				batch.Data[i] = points.Point{Timestamp: stamp + int64(i), Value: float64(i) + .125}
+			}
+			old.Cache.Add(batch)
+		}
+		t.Logf("legacy restart points=%d", old.Cache.Size())
+	}
 	address := old.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
+	var inherited net.Conn
+	if large {
+		inherited, err = net.Dial("tcp", address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer inherited.Close()
+		if _, err := fmt.Fprintf(inherited, "socket.inherited -1 %d\n", time.Now().Unix()-1); err != nil {
+			t.Fatal(err)
+		}
+		awaitCapture(t, func() bool { return len(old.Cache.Get("socket.inherited")) == 1 })
+	}
 	next := New(path)
 	if err := next.ParseConfig(); err != nil {
 		t.Fatal(err)
@@ -72,6 +114,22 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	started := make(chan error, 1)
 	old.SetReadHandoff(storeHandoffSuccessor(t, true), func() {
 		go func() {
+			if large {
+				// Expand the valid JSON document without a 150+ GB dump just to
+				// produce thousands of real checksum chunks. All descriptors,
+				// root identity, index and point-source bytes remain untouched.
+				file := filepath.Join(short, recovery.ManifestName)
+				raw, err := os.ReadFile(file)
+				if err == nil {
+					raw = append([]byte(strings.Repeat(" ", (1<<20)+1)), raw...)
+					err = os.WriteFile(file, raw, 0600)
+				}
+				if err != nil {
+					started <- err
+					return
+				}
+				t.Logf("checkpoint manifest bytes=%d", len(raw))
+			}
 			next.RegisterReadHandoff()
 			next.beginRestart()
 			if err := next.startStartupInput(); err != nil {
@@ -101,6 +159,14 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	const clients, records = 2, 100000
 	stamp := time.Now().Unix() - 5
+	wantCaptured, wantMetrics := clients*records, clients
+	if inherited != nil {
+		if _, err := fmt.Fprintf(inherited, "socket.inherited 0 %d\n", stamp); err != nil {
+			t.Fatal(err)
+		}
+		wantCaptured++
+		wantMetrics++
+	}
 	var writers sync.WaitGroup
 	for client := range clients {
 		writers.Go(func() {
@@ -125,7 +191,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	writers.Wait()
 	deadline := time.Now().Add(5 * time.Second)
-	for spool.points.Load() < clients*records {
+	for spool.points.Load() < int64(wantCaptured) {
 		if time.Now().After(deadline) {
 			t.Fatal("input did not drain before checkpoint", spool.points.Load())
 		}
@@ -143,7 +209,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(counts) != clients {
+	if len(counts) != wantMetrics {
 		t.Fatal(counts)
 	}
 	release()
@@ -157,6 +223,24 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
+	}
+	if large {
+		if !strings.Contains(zapwriter.TestString(), "serving reads from pending checkpoint") {
+			t.Fatal("large manifest lost validated pending reads", zapwriter.TestString())
+		}
+		deadline = time.Now().Add(30 * time.Second)
+		for next.Cache.HasPendingRecovery() || !next.Cache.IsEmpty() {
+			if time.Now().After(deadline) {
+				t.Fatal("large legacy checkpoint did not drain", zapwriter.TestString())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		snap, err := next.MetricStore.Snapshot(context.Background(), "restore.large.0")
+		if err != nil || len(snap.Archives) == 0 || len(snap.Archives[0].Points) != 8192 {
+			t.Fatalf("restored legacy archive: err=%v snapshot=%+v", err, snap)
+		}
+		t.Logf("large legacy checkpoint restored; inherited TCP captured %d points", spool.points.Load())
+		return
 	}
 	// Restart the continuous queue again after the initial checkpoint may have
 	// retired. The third process must inherit input while older epoch files

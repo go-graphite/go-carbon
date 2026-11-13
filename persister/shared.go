@@ -286,7 +286,7 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 	}
 	// Periodic-sync stores can confirm updates before the next WAL sync.
 	// Confirmed points are then subject to the configured crash-loss window.
-	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
+	p.recordCommittedPoints(len(values.Data))
 	p.recordUpdate()
 	if p.confirm != nil {
 		if confirmGuard != nil {

@@ -39,6 +39,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 - Experimental [shared compressed storage and embedded buckyd](doc/shared-storage.md)
 - Run as daemon
 - Optional dump/restore restart on `USR2` signal (config `dump` section): stop persister, start write new data to file, dump cache to file, stop all (and restore from files after next start)
+  - [Restore progress gauges](doc/restore-progress.md) remain available on the diagnostic `/metrics` endpoint while compressed legacy restoration blocks receivers.
 - Reload some config options without restart (HUP signal):
   - `whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`
   - `graph-prefix`, `metric-interval`, `metric-endpoint`, `max-cpu` from `common` section

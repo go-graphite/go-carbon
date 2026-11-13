@@ -78,7 +78,7 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 				} else {
 					p.confirm(batch)
 				}
-				atomic.AddUint32(&p.committedPoints, uint32(len(batch.Data)))
+				p.recordCommittedPoints(len(batch.Data))
 				atomic.AddUint32(&p.updateOperations, 1)
 				pending++
 			}

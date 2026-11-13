@@ -96,7 +96,7 @@ type Whisper struct {
 	nameTooLongLogged   atomic.Int64
 	nameTooLongTotal    atomic.Uint64
 	updateOperations    uint32 // counter
-	committedPoints     uint32 // counter
+	committedPoints     uint32 // interval counter
 	oooDiscardedPoints  uint32 // counter
 	oooDiverted         uint32 // counter
 	oooCompactions      uint32 // counter
@@ -111,6 +111,9 @@ type Whisper struct {
 	autoUpdate          autoUpdateRate
 	updateTicker        *helper.ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
+
+	committedPointsTotal atomic.Uint64 // never reset by Stat
+
 	// converting names metrics whose original is being imported. Their
 	// writeouts are deferred instead of holding a store stripe for the import.
 	converting sync.Map
@@ -787,7 +790,7 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 		return
 	}
 
-	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
+	p.recordCommittedPoints(len(values.Data))
 	p.recordUpdate()
 	if p.confirm != nil {
 		defer p.confirm(values)
@@ -913,6 +916,15 @@ LOOP:
 			doneCb()
 		}
 	}
+}
+
+// CommittedPoints returns successful point writes since this persister started.
+// It follows the store's configured sync policy and is never reset by Stat.
+func (p *Whisper) CommittedPoints() uint64 { return p.committedPointsTotal.Load() }
+
+func (p *Whisper) recordCommittedPoints(count int) {
+	atomic.AddUint32(&p.committedPoints, uint32(count))
+	p.committedPointsTotal.Add(uint64(count))
 }
 
 // Stat callback

@@ -95,6 +95,7 @@ type App struct {
 	PromRegisterer         prometheus.Registerer
 	PromRegistry           *prometheus.Registry
 	configUnknownKeys      prometheus.Gauge
+	restoreProgress        atomic.Pointer[restoreProgress]
 	mallocCollector        *malloc.Collector
 	mallocTrimmer          *malloc.Trimmer
 	mallocTrimEvery        time.Duration
@@ -427,7 +428,7 @@ func (app *App) ParseConfig() error {
 			Name: "config_unknown_keys",
 			Help: "Unknown TOML keys in the currently loaded configuration.",
 		})
-		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics(), runtimeWaitCollector{})
+		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics(), runtimeWaitCollector{}, restoreCollector{app: app})
 	}
 	app.configUnknownKeys.Set(float64(len(app.Config.unknownKeys)))
 
@@ -893,6 +894,7 @@ func (app *App) Start() (err error) {
 	app.applyRuntimeProfiling()
 	app.applyMallocTrim()
 	app.beginRestart()
+	app.restoreProgress.Store(nil)
 	app.inputTailOffsets = nil
 	app.startupCapturedPoints = 0
 	app.startupCaptureState.Store(app.startupInput)
@@ -1489,18 +1491,25 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 		zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
 	)
 	restoreStart := time.Now()
+	progress := &restoreProgress{core: core, committed: app.Persister.CommittedPoints, started: restoreStart}
+	app.restoreProgress.Store(progress)
 	// Build the saved index alongside both dump loading and disk drain. Neither
 	// read nor input listeners open until restored history has been persisted.
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
-	app.Restore(core.AddRestoredBeforeInput, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	app.Restore(func(p *points.Points) {
+		core.AddRestoredBeforeInput(p)
+		progress.loaded.Add(uint64(len(p.Data)))
+	}, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	restoreLoaded := time.Now()
+	progress.loadComplete(restoreLoaded)
 	// The persister already writes what is loaded; prewarm the rest.
 	app.startMetadataPrewarmWithCheckpointGate("restored dump", core.MetricNames(), nil)
 	for !core.IsEmpty() {
 		time.Sleep(10 * time.Millisecond)
 	}
+	progress.finish(time.Now())
 	// The collector has not started yet. Separate the accumulated restore
 	// counters from live interval statistics instead of reporting minutes of
 	// creates/updates as the first single collection interval.
