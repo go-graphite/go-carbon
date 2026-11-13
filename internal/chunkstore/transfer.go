@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"slices"
+	"sync/atomic"
 
 	"strings"
 	"time"
@@ -552,6 +553,13 @@ type ContinuationArchiveRestorer interface {
 	RestoreArchives(context.Context, ContinuationIO, Snapshot, func() time.Time) error
 }
 
+// ContinuationArchiveMerger appends a newer target copy to a staged source
+// without re-encoding the source's history. It writes to dst only when the
+// merged archives equal want; false asks the caller to use RestoreArchives.
+type ContinuationArchiveMerger interface {
+	MergeArchives(ctx context.Context, source, target, dst ContinuationIO, want, targetSnapshot Snapshot, clock func() time.Time) (bool, error)
+}
+
 // prepareTransfer preserves the reviewed archive/slot operations, but reads
 // the target from one immutable view. Only private reserved IDs are read through
 // the indexed batch. The caller validates every target revision before commit.
@@ -625,8 +633,8 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			// walk. Codec point/block reads then use the private record, avoiding
 			// repeated live LSM/cache lookups for every archive block.
 			var target Snapshot
+			var raw TransferMetric
 			if old.Continuation {
-				var raw TransferMetric
 				raw, err = s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
 				if err == nil {
 					target, err = s.continuation.Snapshot(ctx, transferRecordIO(raw), old, s.now)
@@ -647,7 +655,17 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				points = retainTransferSlots(points, a.Retention)
 				want.Archives[j] = Archive{a.Retention, points}
 			}
-			if m.Continuation {
+			appended := false
+			if merger, ok := s.continuation.(ContinuationArchiveMerger); ok && m.Continuation && old.Continuation {
+				kv := s.newContinuationIO(ctx, b, b, m)
+				appended, err = merger.MergeArchives(ctx, transferRecordIO(r), transferRecordIO(raw), kv, want, target, s.now)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if appended {
+				transferMergeAppended.Add(1)
+			} else if m.Continuation {
 				restorer, ok := s.continuation.(ContinuationArchiveRestorer)
 				if !ok {
 					return nil, ErrFormat
@@ -1497,3 +1515,7 @@ func (s *Store) SetTransferPending(pending func(string) bool, anyPending ...func
 func (s *Store) pendingTransfer(name string) bool {
 	return s.transferPending != nil && s.transferPending(name)
 }
+
+// transferMergeAppended counts merged names written by appending to the
+// staged source instead of RestoreArchives (WIP: not yet exported as a stat).
+var transferMergeAppended atomic.Int64
