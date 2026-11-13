@@ -105,7 +105,7 @@ func (s *syncer) sampled(name string) bool {
 	if len(s.o.windows) == 0 {
 		return true // no windows: every name over its full history
 	}
-	return s.o.sampleEvery > 0 && crc32.ChecksumIEEE([]byte(name))%uint32(s.o.sampleEvery) == 0
+	return !s.windowOnly() && s.o.sampleEvery > 0 && crc32.ChecksumIEEE([]byte(name))%uint32(s.o.sampleEvery) == 0
 }
 
 func (s *syncer) isDown(store string) bool {

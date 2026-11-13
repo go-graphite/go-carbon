@@ -399,6 +399,7 @@ func TestSyncWindowsByDigest(t *testing.T) {
 
 func TestSyncWindowsWithoutDigestEndpoint(t *testing.T) {
 	f, o, holes := threeSources(t)
+	o.fullHistory = true // compatibility path for sources without window digests
 	o.windows, o.sampleEvery = windowsAround(holes), 0
 	f.noDigest[syncT], f.noDigest[syncD2] = true, true // older builds: point reads
 	if err := runSync(context.Background(), o, f); err != nil {
@@ -567,4 +568,36 @@ func TestSyncWindowConcurrentDetailParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The fake models the transport boundary, keeping the full-history path intact.
+func (f *fakeSync) CopyWindow(ctx context.Context, source, target string, names []string, journal string, windows syncRanges) (syncCopyResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.forbidden[source] {
+		return syncCopyResult{Forbidden: true}, nil
+	}
+	f.copies = append(f.copies, source+" "+strings.Join(names, ","))
+	src, dst := f.store(source), f.store(target)
+	for _, n := range names {
+		if _, ok := dst.archives[n]; !ok {
+			dst.archives[n] = src.archives[n]
+			dst.points[n] = map[int64]map[int64]float64{}
+		}
+		for step, pts := range src.points[n] {
+			if dst.points[n][step] == nil {
+				dst.points[n][step] = map[int64]float64{}
+			}
+			for ts, v := range pts {
+				for _, w := range windows {
+					if ts >= w.From && ts < w.Until {
+						if _, ok := dst.points[n][step][ts]; !ok {
+							dst.points[n][step][ts] = v
+						}
+					}
+				}
+			}
+		}
+	}
+	return syncCopyResult{Copied: len(names)}, nil
 }

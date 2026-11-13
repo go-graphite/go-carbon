@@ -422,3 +422,31 @@ store-copy sync --from http://peer-a:4242 --from http://peer-b:4242 \
 Existing target points still win. The opt-in is part of the journal identity:
 use a fresh state directory when enabling it after a default run, so earlier
 skipped comparisons cannot be reused as verification.
+
+### Window-only sync copies
+
+With `sync --window`, missing names are selected by source archive digests over
+those windows. Names with no window points are skipped; selected names are
+copied immediately in bounded batches through the existing native window
+exporter and target-wins combiner. Hole fills use the same window restriction.
+The catalog still has to be scanned, but full-history metadata and transfers
+are avoided. Sources must support digests and native time windows, and the
+target must support native window combine; missing support fails explicitly.
+No full-history transfer fallback is used.
+
+```sh
+store-copy sync --from http://source:4242 --to http://target:4242 \
+  --state ./gap-state --window incident:1794592020:1794592680 --sample-every 0
+```
+
+Existing target values and points outside the windows remain unchanged. The
+usual `--settle` cutoff and short-retention policy still apply. Full-history
+sampling is disabled in window-only mode. To request the previous full-history
+missing-name copies, fills and `--sample-every` behavior, add `--full-history`.
+Without `--window`, behavior is unchanged.
+
+An existing window sync journal can resume in window-only mode: completed
+full-history work already covers the windows, while new selections and native
+receipts have separate journal records. Switching to `--full-history` requires
+a fresh state directory. Keep `--verify-batch`, the windows and the settle
+cutoff unchanged when resuming a partially completed window transfer.

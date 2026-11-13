@@ -95,6 +95,7 @@ type syncOptions struct {
 	windows      syncRanges
 	sampleEvery  int
 	includeShort bool
+	fullHistory  bool
 	progress     time.Duration
 	now          func() time.Time
 }
@@ -126,7 +127,8 @@ func SyncMain(ctx context.Context, args []string) error {
 	flags.IntVar(&o.maxRounds, "max-rounds", 4, "verify/fill rounds")
 	flags.DurationVar(&o.settle, "settle", 10*time.Minute, "ignore the newest points: replicas may still be writing them")
 	flags.Var(&o.windows, "window", "hole-prone range [name:]from:until in Unix seconds (restart/cutover/copy windows); repeat or space-separate. Every name is checked over every window")
-	flags.IntVar(&o.sampleEvery, "sample-every", 64, "with --window: also check 1 in N names over full history, every archive (1 = all, 0 = none). Without --window every name is checked over full history")
+	flags.IntVar(&o.sampleEvery, "sample-every", 64, "with --window --full-history: also check 1 in N names over full history, every archive (1 = all, 0 = none). Without --window every name is checked over full history")
+	flags.BoolVar(&o.fullHistory, "full-history", false, "with --window, copy full histories and enable full-history sampling instead of copying only window points")
 	flags.BoolVar(&o.includeShort, "include-short-retention", false, "also compare and fill names whose archives all retain at most 3 days")
 	flags.DurationVar(&o.progress, "progress-interval", 30*time.Second, "progress line interval")
 	flags.IntVar(&live.carbonPort, "carbonserver-port", 8080, "carbonserver port on every store (reads for verify)")
@@ -213,6 +215,7 @@ type syncHole struct {
 }
 
 type syncRow struct {
+	Selected  []string   `json:"selected,omitempty"`
 	Kind      string     `json:"kind"`
 	Identity  string     `json:"identity,omitempty"`
 	Phase     string     `json:"phase,omitempty"`
@@ -363,6 +366,9 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	identityFields := map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "windows": o.windows.String(), "sample_every": o.sampleEvery}
 	// Keep old default journals resumable, but never reuse skipped comparisons
 	// when a recovery opts into short-retention names.
+	if o.fullHistory {
+		identityFields["full_history"] = true
+	}
 	if o.includeShort {
 		identityFields["include_short_retention"] = true
 	}
@@ -460,7 +466,16 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		return syncCopyResult{}, err
 	}
 	event("sync_copy", map[string]any{"phase": phase, "round": round, "source": source, "names": len(names), "journal": journal})
-	res, err := s.b.Copy(ctx, source, s.o.to, names, journal)
+	var res syncCopyResult
+	if s.windowOnly() {
+		backend, ok := s.b.(syncWindowBackend)
+		if !ok {
+			return res, errors.New("backend does not support window-only copy")
+		}
+		res, err = backend.CopyWindow(ctx, source, s.o.to, names, journal, s.copyWindows())
+	} else {
+		res, err = s.b.Copy(ctx, source, s.o.to, names, journal)
+	}
 	if err != nil {
 		return res, err
 	}
@@ -468,7 +483,11 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		s.forbid[source] = true
 		event("sync_source_forbidden", map[string]any{"level": "error", "source": source, "target": s.o.to, "hint": "the target transfer-sources allowlist does not list this source; continuing with the others"})
 	}
-	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short}); err != nil {
+	var selected []string
+	if s.windowOnly() {
+		selected = names
+	}
+	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected}); err != nil {
 		return res, err
 	}
 	return res, nil
