@@ -275,6 +275,14 @@ func metricStoreVirtualPath(name string) string {
 	return "/" + strings.ReplaceAll(name, ".", "/") + ".wsp"
 }
 
+// metricStoreIndexableName reports whether a name's virtual path fits the
+// file-list cache and snapshot formats used by the mapped discovery index. The
+// store accepts names up to 1 MiB with any bytes. One such name must not fail
+// every rebuild, which freezes discovery for all new names on the host.
+func metricStoreIndexableName(name string) bool {
+	return len(name)+len("/.wsp") <= flcv2MaxPathLen && strings.IndexByte(name, 0) < 0 && !strings.HasSuffix(name, ".")
+}
+
 func metricStoreTrigramPaths(metricPath string) []string {
 	parts := strings.Split(strings.TrimPrefix(metricPath, "/"), "/")
 	paths := make([]string, 0, len(parts))

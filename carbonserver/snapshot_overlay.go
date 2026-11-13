@@ -353,7 +353,7 @@ func (l *CarbonserverListener) PendingMetricStorableBytes(name []byte) bool {
 // ordinary path check for aliases and platform-specific path spellings.
 func (l *CarbonserverListener) pendingMetricStorable(name string) bool {
 	if l.getMetricStore() != nil {
-		return store.ValidateMetricName(name) == nil
+		return store.ValidateMetricName(name) == nil && metricStoreIndexableName(name)
 	}
 	if strings.IndexByte(name, ';') >= 0 {
 		return true

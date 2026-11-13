@@ -1200,7 +1200,7 @@ func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metr
 func (listener *CarbonserverListener) storableMetricPath(metric string) (string, bool) {
 	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
 	if listener.getMetricStore() != nil {
-		return path, store.ValidateMetricName(metric) == nil
+		return path, store.ValidateMetricName(metric) == nil && metricStoreIndexableName(metric)
 	}
 	return path, strings.IndexByte(metric, ';') >= 0 || helper.WhisperPathFits(listener.whisperData+path)
 }

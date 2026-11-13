@@ -165,6 +165,7 @@ func (u *fileListUpdate) incrementalCatalogRuns(db *store.Store, directory strin
 	var entries []incrementalSortEntry
 	var paths []string
 	used := 0
+	skipped, longest, sample := 0, 0, ""
 	flush := func() error {
 		if len(entries) == 0 {
 			return nil
@@ -198,6 +199,14 @@ func (u *fileListUpdate) incrementalCatalogRuns(db *store.Store, directory strin
 			u.refreshQuotaAndRealtimeMetrics(ticker)
 		}
 		for _, metadata := range page {
+			if !metricStoreIndexableName(metadata.Name) {
+				skipped++
+				if len(metadata.Name) > longest {
+					longest = len(metadata.Name)
+					sample = metadata.Name[:min(len(metadata.Name), 200)]
+				}
+				continue
+			}
 			path := metricStoreVirtualPath(metadata.Name)
 			logical, points := metricStoreLogicalSize(metadata)
 			key, err := encodeSnapshotPath(nil, path)
@@ -216,6 +225,14 @@ func (u *fileListUpdate) incrementalCatalogRuns(db *store.Store, directory strin
 	})
 	if err == nil {
 		err = flush()
+	}
+	if skipped != 0 {
+		u.logger.Warn("shared metric-store names not representable in the discovery index",
+			zap.Int("skipped", skipped),
+			zap.Int("longest_name", longest),
+			zap.Int("max_path", flcv2MaxPathLen),
+			zap.String("sample_prefix", sample),
+		)
 	}
 	return paths, err
 }
