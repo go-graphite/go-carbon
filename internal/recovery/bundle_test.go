@@ -109,7 +109,7 @@ func TestBundleRoundtripAndRetiredReader(t *testing.T) {
 }
 
 func TestBundleRejectsCorruptStaleOrPartialState(t *testing.T) {
-	for _, scenario := range []string{"extra input", "extra cache", "wrong root", "replaced root", "version", "unsafe path", "truncated cache", "changed wal", "truncated index", "oversized manifest"} {
+	for _, scenario := range []string{"extra input", "extra cache", "wrong root", "replaced root", "version", "unsafe path", "truncated cache", "changed wal", "truncated index", "corrupt manifest"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir, root := bundleFixture(t)
 			alter := func(name string, data []byte) {
@@ -163,8 +163,8 @@ func TestBundleRejectsCorruptStaleOrPartialState(t *testing.T) {
 				alter("input.123.1234.bin", raw)
 			case "truncated index":
 				alter(".pending-index-1234.bin", nil)
-			case "oversized manifest":
-				alter(manifestName, make([]byte, maxManifestSize+1))
+			case "corrupt manifest":
+				alter(manifestName, make([]byte, 2<<20))
 			}
 			if b, err := OpenBundle(dir, root); err == nil {
 				_ = b.Close()
@@ -174,7 +174,7 @@ func TestBundleRejectsCorruptStaleOrPartialState(t *testing.T) {
 	}
 }
 
-func TestLargeManifestRoundtripAndPublishLimit(t *testing.T) {
+func TestLargeManifestRoundtrip(t *testing.T) {
 	dir, root := bundleFixture(t)
 	raw, err := os.ReadFile(filepath.Join(dir, manifestName))
 	if err != nil {
@@ -185,29 +185,58 @@ func TestLargeManifestRoundtripAndPublishLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Exercise the complete publisher/reader boundary beyond the former 16 KiB
-	// limit without constructing several GiB of source data just for digests.
-	id := strings.Repeat("x", 32<<10)
-	if err = Publish(dir, root, m.Cache, m.WAL, m.Index, id); err != nil {
+	// and 1 MiB limits without constructing several GiB of source data just
+	// for digests.
+	for _, size := range []int{32 << 10, 2 << 20} {
+		id := strings.Repeat("x", size)
+		if err = Publish(dir, root, m.Cache, m.WAL, m.Index, id); err != nil {
+			t.Fatal(err)
+		}
+		b, err := OpenBundle(dir, root)
+		if err != nil {
+			t.Fatal(size, err)
+		}
+		if b.ReadIndexID() != id || b.Points() != 4 {
+			t.Fatal("large manifest lost identity or data", size)
+		}
+		if err = b.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestManifestOfLargeCheckpoint publishes the digests of a 200 GB cache dump,
+// over 1 MiB of JSON, and reads them back unchanged.
+func TestManifestOfLargeCheckpoint(t *testing.T) {
+	dir, root := t.TempDir(), t.TempDir()
+	describe := func(name string, chunks int) File {
+		f := File{Name: name, Size: int64(chunks) * checksumChunkSize, ChunkSize: checksumChunkSize, Chunks: make([][32]byte, chunks)}
+		for i := range f.Chunks {
+			for j := range f.Chunks[i] {
+				f.Chunks[i][j] = byte(i*31 + j*7 + 0x80)
+			}
+		}
+		return f
+	}
+	cache := describe(BlocksPrefix+"123.1234.bin", 12000)
+	wal := describe(CompactInputPrefix+"123.1234.bin", 150)
+	index := describe(".pending-index-1234.bin", 80)
+	if err := Publish(dir, root, cache, wal, index, "id"); err != nil {
 		t.Fatal(err)
 	}
-	b, err := OpenBundle(dir, root)
+	info, err := os.Stat(filepath.Join(dir, manifestName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
-	if b.ReadIndexID() != id || b.Points() != 4 {
-		t.Fatal("large manifest lost identity or data")
+	if info.Size() <= 1<<20 {
+		t.Fatalf("manifest is %d bytes; the test needs more than 1 MiB", info.Size())
 	}
-	before, err := os.ReadFile(filepath.Join(dir, manifestName))
+	m, err := loadManifest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = Publish(dir, root, m.Cache, m.WAL, m.Index, strings.Repeat("x", maxManifestSize)); err == nil {
-		t.Fatal("published a manifest the reader cannot accept")
-	}
-	after, err := os.ReadFile(filepath.Join(dir, manifestName))
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("failed publication replaced the usable manifest", err)
+	if m.Version != 4 || m.ReadIndexID != "id" || !reflect.DeepEqual(m.Cache, cache) || !reflect.DeepEqual(m.WAL, wal) || !reflect.DeepEqual(m.Index, index) {
+		t.Fatal("large manifest changed in a round trip")
 	}
 }
 

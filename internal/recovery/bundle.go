@@ -21,12 +21,11 @@ import (
 // ManifestName names a published checkpoint's manifest in its directory.
 const ManifestName = manifestName
 
-const (
-	manifestName = ".pending-points.json"
-	// Chunk digests grow with checkpoint size. Bound metadata independently of
-	// source bytes while allowing large production dumps to use the fast path.
-	maxManifestSize = 1 << 20
-)
+// manifestName holds one SHA-256 per 16 MiB chunk of every checkpoint file,
+// so the manifest grows with the cache (about 1.2 MiB for a 174 GB dump). It
+// has no size limit: a fixed one turns a large cache into a restart without a
+// checkpoint, which stops input until the whole dump is restored.
+const manifestName = ".pending-points.json"
 
 type File struct {
 	Name      string
@@ -176,9 +175,6 @@ func Publish(dir, root string, cache, wal, index File, readIndexID string) error
 	if err != nil {
 		return err
 	}
-	if len(data) > maxManifestSize {
-		return fmt.Errorf("recovery manifest oversized")
-	}
 	file, err := os.CreateTemp(dir, ".pending-manifest-*")
 	if err != nil {
 		return err
@@ -260,25 +256,26 @@ func mapFile(dir string, file File) (mmap.MMap, error) {
 	return data, nil
 }
 
-func OpenBundle(dir, root string) (_ *Bundle, err error) {
-	f, err := os.Open(filepath.Join(dir, manifestName))
-	if err != nil {
-		return nil, err
-	}
-	raw, readErr := io.ReadAll(io.LimitReader(f, maxManifestSize+1))
-	closeErr := f.Close()
-	if err = errors.Join(readErr, closeErr); err != nil {
-		return nil, err
-	}
-	if len(raw) > maxManifestSize {
-		return nil, fmt.Errorf("recovery manifest oversized")
-	}
+// loadManifest reads and validates dir's manifest, whatever its size.
+func loadManifest(dir string) (Manifest, error) {
 	var manifest Manifest
+	raw, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil {
+		return manifest, err
+	}
 	if err = json.Unmarshal(raw, &manifest); err != nil {
-		return nil, err
+		return manifest, err
 	}
 	if !validManifest(&manifest) {
-		return nil, fmt.Errorf("unsupported recovery manifest")
+		return manifest, fmt.Errorf("unsupported recovery manifest")
+	}
+	return manifest, nil
+}
+
+func OpenBundle(dir, root string) (_ *Bundle, err error) {
+	manifest, err := loadManifest(dir)
+	if err != nil {
+		return nil, err
 	}
 	root, device, inode, err := rootIdentity(root)
 	if err != nil {
