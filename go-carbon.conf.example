@@ -1391,13 +1391,18 @@ sync-interval = "1s"
 # so it should hold much more than that: at least a minute of input. Larger
 # segments record names less often: with 29M active metrics at 1M points/s,
 # 1 GiB segments wrote 8.8 MB/s and 4 GiB segments 2.2 MB/s. The log keeps
-# up to about six segments preallocated, so budget about 6 x segment-size of
-# disk (24 GiB at the default); lower it on small disks.
+# up to four spare segments besides the live segments. Live segments remain
+# until every point they protect has persisted or been fully relogged; there
+# is no hard disk-size cap. Budget for backlog and lower segment-size on small disks.
 segment-size = 4294967296
 # Points still unpersisted after max-age (a write that keeps failing, or a
 # persister that is far behind) are recorded again at the head of the log,
-# so they no longer keep older segments. Bounds the log to about max-age of
-# input. "0s" (default) uses twice cache.writeout-max-delay, at least 30m.
+# so they no longer keep older segments. Age is elapsed wall-clock time,
+# independent of forced syncs or restore pressure. "0s" (default) uses twice
+# cache.writeout-max-delay, at least 1h. Restored/history batches are never
+# relogged, and relogging pauses during recovery drain. They keep their source
+# segments until persisted. Oversized batches also retain their old segments
+# if a complete copy cannot fit staging. This is not a hard disk or replay cap.
 # It must exceed cache.writeout-max-delay, or points waiting for their
 # writeout are logged twice, and be at least two sync intervals.
 max-age = "0s"

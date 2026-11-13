@@ -33,12 +33,18 @@ func (c *Cache) LogPressure() <-chan struct{} { return c.logPressure }
 type shardLog struct {
 	entries        inputlog.Batch
 	gen            uint64
-	first          map[*points.Points]uint64
+	first          map[*points.Points]logFlight
 	items          map[uint64]int32 // tracked items per first generation
 	generationPeak int              // high-water number of simultaneously retained generations
 	oldest         uint64           // no tracked item is older
 	dropped        uint64
 	waitDrained    chan struct{}
+}
+
+// logFlight preserves history provenance when a queued item is popped.
+type logFlight struct {
+	gen     uint64
+	history bool
 }
 
 // stagingBytes includes capacity slack in every staging column.
@@ -85,7 +91,7 @@ func (l *shardLog) track(p *points.Points) {
 		return
 	}
 	if _, tracked := l.first[p]; !tracked {
-		l.first[p] = l.gen
+		l.first[p] = logFlight{gen: l.gen}
 		l.items[l.gen]++
 		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
@@ -93,9 +99,9 @@ func (l *shardLog) track(p *points.Points) {
 
 // untrack is called once p's points are persisted, or dropped for good.
 func (l *shardLog) untrack(p *points.Points) {
-	if gen, tracked := l.first[p]; tracked {
+	if first, tracked := l.first[p]; tracked {
 		delete(l.first, p)
-		l.release(gen)
+		l.release(first.gen)
 	}
 }
 
@@ -131,7 +137,7 @@ func (l *shardLog) untrackItem(it *item) {
 // successor with the same name has a different Points identity/generation.
 func (l *shardLog) pop(it *item, p *points.Points) {
 	if l.first != nil && it.has(itemLogTracked) {
-		l.first[p] = it.logFirst
+		l.first[p] = logFlight{gen: it.logFirst, history: it.has(itemLogHistory)}
 		it.setFlag(itemLogTracked, false)
 	}
 }
@@ -151,6 +157,7 @@ func (l *shardLog) mergeGeneration(into *item, gen uint64) {
 // mergeItem and mergeFlight transfer the oldest generation to a replacement
 // queued item, removing each old identity exactly once.
 func (l *shardLog) mergeItem(into, from *item) {
+	into.setFlag(itemLogHistory, into.has(itemLogHistory) || from.has(itemLogHistory))
 	if l.first != nil && from.has(itemLogTracked) {
 		gen := from.logFirst
 		l.untrackItem(from)
@@ -159,9 +166,10 @@ func (l *shardLog) mergeItem(into, from *item) {
 }
 
 func (l *shardLog) mergeFlight(into *item, from *points.Points) {
-	if gen, tracked := l.first[from]; tracked {
+	if first, tracked := l.first[from]; tracked {
+		into.setFlag(itemLogHistory, into.has(itemLogHistory) || first.history)
 		l.untrack(from)
-		l.mergeGeneration(into, gen)
+		l.mergeGeneration(into, first.gen)
 	}
 }
 
@@ -177,19 +185,25 @@ func (l *shardLog) lowWater() uint64 {
 }
 
 // relog records old queued and in-flight batches again at the current
-// generation, so the log can recycle their old segments. The first eligible
-// batch may exceed budget, preserving the previous progress guarantee.
+// generation, so the log can recycle their old segments. History retains its
+// original source until persistence. The first eligible batch may exceed budget
+// but must fit staging completely before its old generation can be released.
 func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 	if l.first == nil || l.lowWater() >= gen {
 		return 0
 	}
 	n := 0
 	for _, it := range queued.all {
-		if !it.has(itemLogTracked) || it.logFirst >= gen {
+		if !it.has(itemLogTracked) || it.has(itemLogHistory) || it.logFirst >= gen {
 			continue
 		}
 		if n > 0 && n+it.count() > budget {
 			return n
+		}
+		// Relog is all-or-nothing: a partial copy must not release the old
+		// generation. Oversized items keep pinning it until persistence.
+		if it.count() > maxShardLogEntries-l.entries.Len() {
+			continue
 		}
 		l.recordPoints(&it.StreamRef, it.compact.appendDecoded(nil))
 		n += it.count()
@@ -199,16 +213,19 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
 	for p, first := range l.first {
-		if first >= gen {
+		if first.history || first.gen >= gen {
 			continue
 		}
 		if n > 0 && n+len(p.Data) > budget {
 			break
 		}
+		if len(p.Data) > maxShardLogEntries-l.entries.Len() {
+			continue
+		}
 		l.recordPoints(inputlog.NewStreamRef(p.Metric), p.Data)
 		n += len(p.Data)
-		l.release(first)
-		l.first[p] = l.gen
+		l.release(first.gen)
+		l.first[p] = logFlight{gen: l.gen}
 		l.items[l.gen]++
 		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
@@ -233,7 +250,7 @@ func (c *Cache) enableInputLog(adopt bool) {
 	for _, shard := range c.data {
 		shard.mu.Lock()
 		if shard.log.first == nil {
-			shard.log = shardLog{first: make(map[*points.Points]uint64), items: make(map[uint64]int32)}
+			shard.log = shardLog{first: make(map[*points.Points]logFlight), items: make(map[uint64]int32)}
 			if adopt {
 				for _, values := range shard.items.all {
 					values.setFlag(itemLogTracked, false)
@@ -316,6 +333,9 @@ func (c *Cache) LogLowWater() uint64 {
 
 // RelogBefore implements inputlog.Source.
 func (c *Cache) RelogBefore(gen uint64, budget int) int {
+	if c.recoveryDrain.Load() {
+		return 0
+	}
 	n := 0
 	for _, shard := range c.data {
 		if n >= budget {

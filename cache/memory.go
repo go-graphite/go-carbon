@@ -35,7 +35,7 @@ func (s *Shard) memoryBytes() int64 {
 		int64(cap(s.claimData))*int64(unsafe.Sizeof(points.Point{})) +
 		int64(cap(s.claimEncoded)) +
 		s.log.stagingBytes() +
-		int64(len(s.log.first)+len(s.log.items)+len(s.adds))*48 + int64(len(s.firstArrival))*64 + int64(len(s.recoverySources))*96
+		int64(len(s.log.first))*64 + int64(len(s.log.items)+len(s.adds))*48 + int64(len(s.firstArrival))*64 + int64(len(s.recoverySources))*96
 }
 
 func byteSlackFor(limit int64) int64 {

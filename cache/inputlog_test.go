@@ -187,93 +187,99 @@ func TestInputLogRequeueKeepsSegments(t *testing.T) {
 // A point that stays unpersisted past MaxAge is recorded again, so it no
 // longer pins the segments behind it.
 func TestInputLogRelogsStragglers(t *testing.T) {
-	dir := t.TempDir()
-	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Hour}
-	c := New()
-	c.SetMaxSize(0)
-	l, _ := startInputLog(t, dir, c, opts)
-	c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
-	stuck, _ := c.PopNotConfirmed("stuck.metric") // in flight forever
-	for round := range 12 {
-		var names []string
-		for i := range 2000 {
-			name := fmt.Sprintf("other.metric.%04d", i)
-			names = append(names, name)
-			c.AddPoint([]byte(name), float64(round), int64(round))
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Second}
+		c := New()
+		c.SetMaxSize(0)
+		l, _ := startInputLog(t, dir, c, opts)
+		c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
+		stuck, _ := c.PopNotConfirmed("stuck.metric") // in flight forever
+		for round := range 12 {
+			var names []string
+			for i := range 2000 {
+				name := fmt.Sprintf("other.metric.%04d", i)
+				names = append(names, name)
+				c.AddPoint([]byte(name), float64(round), int64(round))
+			}
+			time.Sleep(time.Second) // elapsed age, independent of forced cycles
+			syncLog(t, l)
+			persist(c, names)
 		}
-		syncLog(t, l)
-		persist(c, names)
-	}
-	if low := c.LogLowWater(); low < 5 {
-		t.Fatalf("low-water %d still pinned by the straggler", low)
-	}
-	if live := liveSegments(t, dir); live > 6 {
-		t.Fatalf("%d live segments", live)
-	}
-	var relogged float64
-	l.Stat(func(metric string, value float64) {
-		if metric == "relogged" {
-			relogged = value
+		if low := c.LogLowWater(); low < 5 {
+			t.Fatalf("low-water %d still pinned by the straggler", low)
+		}
+		if live := liveSegments(t, dir); live > 6 {
+			t.Fatalf("%d live segments", live)
+		}
+		var relogged float64
+		l.Stat(func(metric string, value float64) {
+			if metric == "relogged" {
+				relogged = value
+			}
+		})
+		if relogged < 2 {
+			t.Fatalf("relogged %v points", relogged)
+		}
+		l.Kill()
+
+		restarted := New()
+		restarted.SetMaxSize(0)
+		l, _ = startInputLog(t, dir, restarted, opts)
+		defer l.Close()
+		if got := restarted.Get("stuck.metric"); !slices.Equal(got, stuck.Data) {
+			t.Fatalf("straggler replayed as %v, want %v", got, stuck.Data)
 		}
 	})
-	if relogged < 2 {
-		t.Fatalf("relogged %v points", relogged)
-	}
-	l.Kill()
-
-	restarted := New()
-	restarted.SetMaxSize(0)
-	l, _ = startInputLog(t, dir, restarted, opts)
-	defer l.Close()
-	if got := restarted.Get("stuck.metric"); !slices.Equal(got, stuck.Data) {
-		t.Fatalf("straggler replayed as %v, want %v", got, stuck.Data)
-	}
 }
 
 // A straggler that stays queued is re-logged from its compact points, not
 // from Data, which a queued item does not hold.
 func TestInputLogRelogsQueuedStragglers(t *testing.T) {
-	dir := t.TempDir()
-	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Hour}
-	c := New()
-	c.SetMaxSize(0)
-	l, _ := startInputLog(t, dir, c, opts)
-	c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
-	want := c.Get("stuck.metric") // queued forever, held compact
-	for round := range 12 {
-		var names []string
-		for i := range 2000 {
-			name := fmt.Sprintf("other.metric.%04d", i)
-			names = append(names, name)
-			c.AddPoint([]byte(name), float64(round), int64(round))
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Second}
+		c := New()
+		c.SetMaxSize(0)
+		l, _ := startInputLog(t, dir, c, opts)
+		c.Add(points.OnePoint("stuck.metric", 1, 100).Add(2, 200))
+		want := c.Get("stuck.metric") // queued forever, held compact
+		for round := range 12 {
+			var names []string
+			for i := range 2000 {
+				name := fmt.Sprintf("other.metric.%04d", i)
+				names = append(names, name)
+				c.AddPoint([]byte(name), float64(round), int64(round))
+			}
+			time.Sleep(time.Second) // elapsed age, independent of forced cycles
+			syncLog(t, l)
+			persist(c, names)
 		}
-		syncLog(t, l)
-		persist(c, names)
-	}
-	if low := c.LogLowWater(); low < 5 {
-		t.Fatalf("low-water %d still pinned by the straggler", low)
-	}
-	if live := liveSegments(t, dir); live > 6 {
-		t.Fatalf("%d live segments", live)
-	}
-	var relogged float64
-	l.Stat(func(metric string, value float64) {
-		if metric == "relogged" {
-			relogged = value
+		if low := c.LogLowWater(); low < 5 {
+			t.Fatalf("low-water %d still pinned by the straggler", low)
+		}
+		if live := liveSegments(t, dir); live > 6 {
+			t.Fatalf("%d live segments", live)
+		}
+		var relogged float64
+		l.Stat(func(metric string, value float64) {
+			if metric == "relogged" {
+				relogged = value
+			}
+		})
+		if relogged < 2 {
+			t.Fatalf("relogged %v points", relogged)
+		}
+		l.Kill()
+
+		restarted := New()
+		restarted.SetMaxSize(0)
+		l, _ = startInputLog(t, dir, restarted, opts)
+		defer l.Close()
+		if got := restarted.Get("stuck.metric"); !slices.Equal(got, want) {
+			t.Fatalf("straggler replayed as %v, want %v", got, want)
 		}
 	})
-	if relogged < 2 {
-		t.Fatalf("relogged %v points", relogged)
-	}
-	l.Kill()
-
-	restarted := New()
-	restarted.SetMaxSize(0)
-	l, _ = startInputLog(t, dir, restarted, opts)
-	defer l.Close()
-	if got := restarted.Get("stuck.metric"); !slices.Equal(got, want) {
-		t.Fatalf("straggler replayed as %v, want %v", got, want)
-	}
 }
 
 // Recovered points have their own durable source: they are tracked, so the
