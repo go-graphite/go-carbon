@@ -9,12 +9,16 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	"iter"
+	"math"
 	"slices"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 const checkpointFile = "metadata-cache-v1"
@@ -43,6 +47,131 @@ type metadataCheckpoint struct {
 	clean      [16]byte
 	sequence   uint64
 	saveErr    error
+	// mutationEpochs and stateEpochs hold every stripe's epochs at the save
+	// fence. A stripe whose epoch moved by close had a mutation begin or end
+	// after the fence, so its saved records may be stale.
+	mutationEpochs, stateEpochs []uint64
+	// dirty marks, at load, the stripes the close-time fence excluded.
+	dirty []uint64
+}
+
+// checkpointFenceFile completes a checkpoint whose store kept changing after
+// the save fence: reads stay up during the stop, and some writers (deletes,
+// maintenance tails, cold-pack and transfer bookkeeping) still commit then.
+// It names the final sequence at close and the stripes mutated since the
+// fence; the loader skips only those stripes instead of the whole file.
+const checkpointFenceFile = checkpointFile + ".fence"
+const checkpointFenceMagic = "GCFENCE1"
+
+// magic, identity, clean, base and final sequence, dirty stripe bitmap, crc.
+const checkpointFenceSize = 8 + 16 + 16 + 8 + 8 + metricStripes/8 + 4
+
+func (c *metadataCheckpoint) dirtyStripe(stripe uint64) bool {
+	return c.dirty != nil && c.dirty[stripe/64]&(1<<(stripe%64)) != 0
+}
+
+// readFence accepts the fence for header only when it completes this very
+// save: same identity and clean stamp, the header's sequence as its base and
+// the store's current sequence as its final one.
+func (c *metadataCheckpoint) readFence(s *Store, header []byte) bool {
+	f, err := s.fs.Open(s.fs.PathJoin(s.dir, checkpointFenceFile))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var fence [checkpointFenceSize]byte
+	if _, err := io.ReadFull(f, fence[:]); err != nil {
+		return false
+	}
+	body := fence[:checkpointFenceSize-4]
+	if string(fence[:8]) != checkpointFenceMagic || binary.LittleEndian.Uint32(fence[checkpointFenceSize-4:]) != crc32.ChecksumIEEE(body) ||
+		!bytes.Equal(fence[8:24], c.identity[:]) || !bytes.Equal(fence[24:40], c.clean[:]) ||
+		binary.LittleEndian.Uint64(fence[40:48]) != binary.LittleEndian.Uint64(header[40:48]) ||
+		binary.LittleEndian.Uint64(fence[48:56]) != c.sequence {
+		return false
+	}
+	c.dirty = make([]uint64, metricStripes/64)
+	for i := range c.dirty {
+		c.dirty[i] = binary.LittleEndian.Uint64(fence[56+8*i:])
+	}
+	return true
+}
+
+// captureFence records every stripe's epochs before the save reads the
+// cache. A mutation that ended before its stripe was captured installed or
+// invalidated its state first, so the snapshot reflects it; any other
+// mutation moves an epoch after the capture.
+func (s *Store) captureFence() {
+	c := &s.checkpoint
+	c.mutationEpochs = make([]uint64, metricStripes)
+	for i := range c.mutationEpochs {
+		c.mutationEpochs[i] = s.mutationEpoch[i].Load()
+	}
+	if s.stateCache != nil {
+		c.stateEpochs = make([]uint64, metricStripes)
+		for i := range c.stateEpochs {
+			c.stateEpochs[i] = s.stateCache.shards[i].epoch.Load()
+		}
+	}
+}
+
+// finishMetadataCheckpoint runs in close once every writer has stopped. If
+// the store changed after the save fence, it publishes the fence that lets
+// the next open trust the unchanged stripes. Never call it with writers
+// running: the final sequence must be the one the next open observes.
+func (s *Store) finishMetadataCheckpoint() error {
+	c := &s.checkpoint
+	final := s.db.VisibleSequence()
+	var bitmap [metricStripes / 64]uint64
+	dirty := 0
+	for i := range metricStripes {
+		e := s.mutationEpoch[i].Load()
+		changed := e == math.MaxUint64 || e != c.mutationEpochs[i]
+		if c.stateEpochs != nil && s.stateCache.shards[i].epoch.Load() != c.stateEpochs[i] {
+			changed = true
+		}
+		if changed {
+			bitmap[i/64] |= 1 << (i % 64)
+			dirty++
+		}
+	}
+	if final == c.sequence && dirty == 0 {
+		return nil
+	}
+	var fence [checkpointFenceSize]byte
+	copy(fence[:8], checkpointFenceMagic)
+	copy(fence[8:24], c.identity[:])
+	copy(fence[24:40], c.clean[:])
+	binary.LittleEndian.PutUint64(fence[40:48], c.sequence)
+	binary.LittleEndian.PutUint64(fence[48:56], final)
+	for i, word := range bitmap {
+		binary.LittleEndian.PutUint64(fence[56+8*i:], word)
+	}
+	binary.LittleEndian.PutUint32(fence[checkpointFenceSize-4:], crc32.ChecksumIEEE(fence[:checkpointFenceSize-4]))
+	path := s.fs.PathJoin(s.dir, checkpointFenceFile)
+	tmp := path + ".tmp"
+	f, err := s.fs.Create(tmp)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(fence[:])
+	if err == nil {
+		err = f.Sync()
+	}
+	err = errors.Join(err, f.Close())
+	if err == nil {
+		err = s.fs.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = s.fs.Remove(tmp)
+		return err
+	}
+	if err := syncStoreDirectory(s.fs, s.dir); err != nil {
+		return err
+	}
+	zapwriter.Logger("storage").Info("metadata checkpoint fenced after writes during the stop",
+		zap.Uint64("sequence_delta", final-c.sequence), zap.Int("dirty_stripes", dirty), zap.Int("stripes", metricStripes))
+	return nil
 }
 
 // MetadataCheckpointStats describes the advisory checkpoint, not durable data.
@@ -50,9 +179,12 @@ type MetadataCheckpointStats struct {
 	Entries, Bytes, ReadBytes, Validated int64
 	// Fenced records need no revision read: the v2 clean fence and the
 	// mutation filter establish that their saved state is still current.
-	Fenced   int64
-	Duration time.Duration
-	Valid    bool
+	Fenced int64
+	// SkippedDirty counts records in stripes mutated after the save fence;
+	// they stay cache misses and refill from the store.
+	SkippedDirty int64
+	Duration     time.Duration
+	Valid        bool
 }
 
 // openMetadataCheckpoint consumes the clean stamp before any store writer can
@@ -95,6 +227,11 @@ func (s *Store) openMetadataCheckpoint() error {
 		f.Close()
 		c.fenced = string(header[:8]) == checkpointMagic
 		c.valid = readErr == nil && c.matches(header[:])
+		if !c.valid && readErr == nil && c.fenced && c.matchesExceptSequence(header[:]) {
+			// The store changed after the save fence; a fence written at
+			// close names the final sequence and the stripes to skip.
+			c.valid = c.readFence(s, header[:])
+		}
 		c.openHeader = header
 	}
 	if err := s.db.Delete(checkpointCleanKey, pebble.Sync); err != nil {
@@ -114,9 +251,13 @@ func (s *Store) openMetadataCheckpoint() error {
 }
 
 func (c *metadataCheckpoint) matches(header []byte) bool {
+	return c.matchesExceptSequence(header) && binary.LittleEndian.Uint64(header[40:48]) == c.sequence
+}
+
+func (c *metadataCheckpoint) matchesExceptSequence(header []byte) bool {
 	return (string(header[:8]) == checkpointMagic || string(header[:8]) == checkpointLegacyMagic) &&
 		bytes.Equal(header[8:24], c.identity[:]) && bytes.Equal(header[24:40], c.clean[:]) && c.clean != [16]byte{} &&
-		binary.LittleEndian.Uint64(header[40:48]) == c.sequence && binary.LittleEndian.Uint32(header[48:]) == crc32.ChecksumIEEE(header[:48])
+		binary.LittleEndian.Uint32(header[48:]) == crc32.ChecksumIEEE(header[:48])
 }
 
 // LoadMetadataCheckpoint streams raw slab records after caller readiness. It
@@ -406,6 +547,12 @@ func (s *Store) saveMetadataCheckpoint(ctx context.Context, options PrewarmOptio
 	if err := s.db.Set(checkpointCleanKey, c.clean[:], pebble.Sync); err != nil {
 		return err
 	}
+	// A fence from an earlier save can never match the new clean stamp;
+	// remove it so only this save's close can publish one.
+	if err := s.fs.Remove(s.fs.PathJoin(s.dir, checkpointFenceFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	s.captureFence()
 	c.sequence = s.db.VisibleSequence()
 	path := s.fs.PathJoin(s.dir, checkpointFile)
 	tmp := path + ".tmp"
@@ -446,9 +593,8 @@ func (s *Store) saveMetadataCheckpoint(ctx context.Context, options PrewarmOptio
 	if err != nil {
 		return err
 	}
-	if s.db.VisibleSequence() != c.sequence {
-		return errors.New("store changed during metadata checkpoint")
-	}
+	// Writes during the save no longer fail it: close fences the stripes
+	// they mutated (see finishMetadataCheckpoint).
 	if err := s.fs.Rename(tmp, path); err != nil {
 		return err
 	}
