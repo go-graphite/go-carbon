@@ -229,6 +229,8 @@ type whisperConfig struct {
 	StoreMetadataCachePrewarmWaitCap *Duration `toml:"store-metadata-cache-prewarm-wait-cap"`
 }
 
+// Readable count and byte forms are decoded by readableConfig before storage
+// in these numeric fields. Runtime and reload comparisons use resolved values.
 type cacheConfig struct {
 	MaxSize           uint64   `toml:"max-size"`
 	MaxBytes          uint64   `toml:"max-bytes"`
@@ -639,7 +641,7 @@ func ReadConfig(filename string) (*Config, error) {
 		// @TODO: fix for config starts with [logging]
 		body = strings.ReplaceAll(body, "\n[logging]\n", "\n[[logging]]\n")
 
-		if defined, err = toml.Decode(body, cfg); err != nil {
+		if defined, err = toml.Decode(body, readableConfig(cfg)); err != nil {
 			return nil, err
 		}
 		cfg.unknownKeys = unknownConfigKeys(defined)

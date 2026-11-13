@@ -674,6 +674,11 @@ remove-empty-file = false
 # out-of-order-compact-retention-margin = "1m"
 
 [cache]
+# Counts accept integers or quoted K/M/G/T suffixes (decimal powers of 1000).
+# For example, max-size = "120G" means 120000000000 points, not bytes.
+# Byte settings (max-bytes and whisper store byte limits/rates) also accept
+# KiB/MiB/GiB (powers of 1024): max-bytes = "2GiB" means 2147483648 bytes.
+# Suffixes are case-sensitive; fractions and unknown suffixes are errors.
 # Bound queue lock visits to 256 slots and yield CPU to live TCP handlers
 # between visits during restart ordering.
 # Candidate-buffer growth never holds a shard lock. Disable for whole-shard
@@ -681,7 +686,7 @@ remove-empty-file = false
 # SIGHUP applies to the next queue rebuild. Persistence and quotas are unchanged.
 writeout-scan-yield = true
 # Limit of in-memory stored points (not metrics)
-max-size = 1000000
+max-size = "1M"
 # Optional additional byte budget, using cache_estimated_bytes (0 disables).
 # Includes metric names, compact buffer capacity and input-log tracking. This is
 # an estimate, not an RSS limit; leave room for Go GC, Pebble and native memory.
