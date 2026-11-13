@@ -665,8 +665,8 @@ const (
 var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, TransferMergeFallbackClassic, TransferMergeFallbackNaN, TransferMergeFallbackOverlap, TransferMergeFallbackOrder, TransferMergeFallbackVerify, TransferMergeFallbackDisabled, TransferMergeFallbackOther}
 
 type transferMergeStats struct {
-	appended, classic atomic.Uint64
-	fallbacks         [len(TransferMergeFallbackReasons)]atomic.Uint64
+	appended, classic, prepended atomic.Uint64
+	fallbacks                    [len(TransferMergeFallbackReasons)]atomic.Uint64
 }
 
 func (t *transferMergeStats) fallback(reason string) {
@@ -683,6 +683,12 @@ func (t *transferMergeStats) snapshot() (appended, classic uint64, fallbacks map
 		fallbacks[reason] = t.fallbacks[i].Load()
 	}
 	return t.appended.Load(), t.classic.Load(), fallbacks
+}
+
+// ContinuationArchivePrepender preserves an immutable newer target without a
+// target snapshot or full restore. A declined call must leave dst unchanged.
+type ContinuationArchivePrepender interface {
+	PrependArchives(context.Context, ContinuationIO, ContinuationIO, ContinuationIO, Snapshot, Metadata, func() time.Time) (string, []int, bool, error)
 }
 
 // prepareTransfer preserves the reviewed archive/slot operations, but reads
@@ -761,6 +767,23 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			var raw TransferMetric
 			if old.Continuation {
 				raw, err = s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
+				if err == nil && !s.transferMergeAppendOff {
+					if prepender, ok := s.continuation.(ContinuationArchivePrepender); ok {
+						kv := s.newContinuationIO(ctx, b, b, m)
+						var handled bool
+						p.Digest, p.Counts, handled, err = prepender.PrependArchives(ctx, transferRecordIO(r), transferRecordIO(raw), kv, source, old, s.now)
+						if err != nil {
+							return nil, err
+						}
+						if handled {
+							s.transferMergeStats.prepended.Add(1)
+							if err := s.retireTransferFrom(ctx, b, view, old); err != nil {
+								return nil, err
+							}
+							goto mergedReady
+						}
+					}
+				}
 				if err == nil {
 					target, err = s.continuation.Snapshot(ctx, transferRecordIO(raw), old, s.now)
 				}
@@ -855,6 +878,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				return nil, err
 			}
 		}
+	mergedReady:
 		var summary SidecarSummary
 		if merged {
 			summary, err = s.transferSidecarSummary(ctx, b, m)

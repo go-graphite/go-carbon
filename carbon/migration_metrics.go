@@ -72,6 +72,7 @@ type storeStatsView struct {
 	transferBatchCommits, transferBatchEntries, transferBatchBytes          uint64
 	transferMergeAppended                                                   uint64
 	transferMergeAppendedClassic                                            uint64
+	transferMergePrepended                                                  uint64
 	transferMergeFallbacks                                                  map[string]uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
@@ -177,6 +178,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_transfer_batch_commits_total", "Imported transfers committed as one batch instead of ingested tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchCommits) }),
 		counter("pebble_transfer_batch_entries_total", "Metrics imported through batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchEntries) }),
 		counter("pebble_transfer_batch_bytes_total", "Bytes of batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchBytes) }),
+		counter("pebble_transfer_merge_prepended_total", "Imported names merged by placing older history into a newer classic target while retaining its untouched encoded groups.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergePrepended) }),
 		counter("pebble_transfer_merge_appended_total", "Imported names already on this store merged by appending its newer points to the copy, without re-encoding the copy's history.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppended) }),
 		counter("pebble_transfer_merge_appended_classic_total", "Of pebble_transfer_merge_appended_total, names whose copy is classic (uncompressed) and was merged by writing only the ring slots that differ.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppendedClassic) }),
 		counter("pebble_flush_bytes_total", "Bytes written by memtable flushes.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushBytes) }),
@@ -620,7 +622,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,
-			transferMergeAppended: st.TransferMergeAppended, transferMergeAppendedClassic: st.TransferMergeAppendedClassic, transferMergeFallbacks: st.TransferMergeFallbacks,
+			transferMergePrepended: st.TransferMergePrepended, transferMergeAppended: st.TransferMergeAppended, transferMergeAppendedClassic: st.TransferMergeAppendedClassic, transferMergeFallbacks: st.TransferMergeFallbacks,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,
