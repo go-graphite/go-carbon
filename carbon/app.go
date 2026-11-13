@@ -23,6 +23,7 @@ import (
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/heartbeat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -135,7 +136,7 @@ type App struct {
 	// handoff completes. These fields retain the early read/input takeover
 	// until ordinary startup can attach the now-open store and persister.
 	storeHandoffReady        bool
-	storeHandoffMetrics      chan string
+	storeHandoffMetrics      *helper.MetricQueue
 	storeHandoffInputStarted bool
 	inheritedInput           *handoff.Input
 	storeInfoMu              sync.RWMutex
@@ -927,10 +928,10 @@ func (app *App) Start() (err error) {
 	lap("persister")
 	restoreBeforeReceivers := conf.Dump.Enabled && conf.Whisper.Enabled &&
 		(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed())
-	newMetricsChan := app.storeHandoffMetrics
+	newMetricsQueue := app.storeHandoffMetrics
 	readsStarted := app.storeHandoffReady
 	if !readsStarted {
-		newMetricsChan, err = app.configureCarbonserver(core)
+		newMetricsQueue, err = app.configureCarbonserver(core)
 		if err != nil {
 			return err
 		}
@@ -940,7 +941,7 @@ func (app *App) Start() (err error) {
 	pendingReads := false
 	lap("carbonserver")
 	if restoreBeforeReceivers && !readsStarted {
-		if pendingReads, err = app.restoreWithPendingReads(core, newMetricsChan); err != nil {
+		if pendingReads, err = app.restoreWithPendingReads(core, newMetricsQueue); err != nil {
 			return err
 		}
 	}
@@ -959,7 +960,7 @@ func (app *App) Start() (err error) {
 	lap("ordered_restore")
 	readsStarted = readsStarted || pendingReads
 	if !readsStarted {
-		if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
+		if err = app.listenCarbonserver(core, newMetricsQueue); err != nil {
 			return err
 		}
 	}
@@ -1237,7 +1238,7 @@ func (app *App) startAPI(core *cache.Cache) (err error) {
 	return nil
 }
 
-func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan string, err error) {
+func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsQueue *helper.MetricQueue, err error) {
 	conf := app.Config
 	if !conf.Carbonserver.Enabled {
 		return nil, nil
@@ -1349,7 +1350,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 		return nil, err
 	}
 
-	newMetricsChan = app.configureCarbonserverCache(core, carbonserver)
+	newMetricsQueue = app.configureCarbonserverCache(core, carbonserver)
 
 	if conf.Prometheus.Enabled {
 		carbonserver.InitPrometheus(app.PromRegisterer)
@@ -1387,7 +1388,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	}
 
 	app.Carbonserver = carbonserver
-	return newMetricsChan, nil
+	return newMetricsQueue, nil
 }
 
 func (app *App) carbonserverRateLimiters() (map[string]*carbonserver.ApiPerPathRatelimiter, []*carbonserver.GlobQueryRateLimiter, error) {
@@ -1453,7 +1454,7 @@ func (app *App) configureCarbonserverQuotas(listener *carbonserver.CarbonserverL
 	return nil
 }
 
-func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonserver.CarbonserverListener) (newMetricsChan chan string) {
+func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonserver.CarbonserverListener) (newMetricsQueue *helper.MetricQueue) {
 	conf := app.Config
 	var setConfigRetriever bool
 	if conf.Carbonserver.CacheScan {
@@ -1463,7 +1464,7 @@ func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonse
 	}
 
 	if conf.Carbonserver.RealtimeIndex > 0 {
-		newMetricsChan = listener.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
+		newMetricsQueue = listener.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
 
 		setConfigRetriever = true
 	}
@@ -1475,7 +1476,7 @@ func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonse
 		listener.SetConfigRetriever(retriever)
 	}
 
-	return newMetricsChan
+	return newMetricsQueue
 }
 
 func (app *App) restoreBeforeReceivers(core *cache.Cache) {
@@ -1513,7 +1514,7 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	)
 }
 
-func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string) (err error) {
+func (app *App) listenCarbonserver(core *cache.Cache, newMetricsQueue *helper.MetricQueue) (err error) {
 	conf := app.Config
 	if cs := app.Carbonserver; cs != nil {
 		// Restore bypasses live quotas and notifications, just as before warmup.
@@ -1524,7 +1525,7 @@ func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string
 		if conf.Carbonserver.CacheScan {
 			core.InitCacheScanAdds()
 		}
-		core.SetNewMetricsChan(newMetricsChan)
+		core.SetNewMetricsQueue(newMetricsQueue)
 		core.SetMetricExists(cs.MetricExists)
 		if err = cs.Listen(conf.Carbonserver.Listen); err != nil {
 			return

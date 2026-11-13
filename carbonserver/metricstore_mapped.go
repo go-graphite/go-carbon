@@ -44,22 +44,16 @@ func (l *CarbonserverListener) updateMappedMetricStoreIndex(db *store.Store, pre
 	}
 	if rebuild {
 		defer l.observeMetricStoreIndexRebuild()()
+		// Catalogue sorting and snapshot I/O must not stop live notifications.
+		l.metricStoreIndexMu.Unlock()
 		next, err := l.loadMappedMetricStoreCatalog(db)
+		l.metricStoreIndexMu.Lock()
 		if err != nil {
 			return err
 		}
 		if previous != nil && previous.trieIdx != nil {
-			next.trieIdx.throughputs = previous.trieIdx.throughputs
-			if l.cacheGet != nil {
-				old := previous.trieIdx
-				names, nodes, _, _, _ := old.allMetricsNodeMutable(old.root, '.', "", int(^uint(0)>>1), false)
-				for i, name := range names {
-					if len(l.cacheGet(name)) != 0 {
-						if err := next.trieIdx.copyOverlayMetric(name, nodes[i]); err != nil {
-							return errors.Join(err, next.trieIdx.snapshot.close())
-						}
-					}
-				}
+			if err := l.mergeRealtimeOverlayLocked(previous.trieIdx, next.trieIdx); err != nil {
+				return errors.Join(err, next.trieIdx.snapshot.close())
 			}
 		}
 		if previous != nil && l.internalStatsDir != "" {

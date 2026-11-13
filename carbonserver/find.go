@@ -183,7 +183,7 @@ func (listener *CarbonserverListener) findResponse(ctx context.Context, logger *
 	key := strings.Join(query, ",") + "&" + format
 	result, fromCache, err := getWithCache(logger, listener.findCache, key, listener.discoveryCacheTTL(query), findResponseSize, func() (interface{}, error) {
 		return listener.findMetrics(ctx, logger, t0, formatCode, query)
-	})
+	}, listener.discoveryVersion(query))
 	if err != nil {
 		return nil, fromCache, err
 	}
@@ -430,7 +430,7 @@ func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Cont
 		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, listener.discoveryCacheTTL(queries), globsSize,
 			func() (interface{}, error) {
 				return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
-			})
+			}, listener.discoveryVersion(queries))
 	} else {
 		expandedGlobs, err = listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
 	}
@@ -520,7 +520,7 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 				lookups = expandedGlobs[0].Lookups
 				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 				return finalRes, nil
-			})
+			}, listener.discoveryVersion([]string{query}))
 		if err != nil {
 			return nil, err
 		}

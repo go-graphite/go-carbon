@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/go-graphite/go-carbon/helper"
 )
 
 const defaultDiscoveryCacheTTL int32 = 300
@@ -58,4 +60,36 @@ func (listener *CarbonserverListener) discoveryCacheTTL(queries []string) int32 
 		}
 	}
 	return longestTTL
+}
+
+// Fixed hash buckets avoid an unbounded namespace invalidation map. Collisions
+// only refresh an unrelated cache entry; they never hide a newly indexed name.
+func discoveryBucket(name string) int {
+	if end := strings.IndexByte(name, '.'); end >= 0 {
+		name = name[:end]
+	}
+	if strings.ContainsAny(name, "*?[]{}\\/") {
+		return 0
+	}
+	return int(helper.HashString(name)%256) + 1
+}
+
+func (listener *CarbonserverListener) markDiscoveryChange(metric string) {
+	now := time.Now().Unix()
+	listener.discoveryChanges[0].Store(now)
+	listener.discoveryChanges[discoveryBucket(metric)].Store(now)
+}
+
+// Coalesce invalidations within a second. The extra epoch at the next second
+// expires results computed earlier in the last arrival's second even if no
+// more names arrive. Stable namespaces retain their normal cache TTL/hit rate.
+func (listener *CarbonserverListener) discoveryVersion(queries []string) int64 {
+	var changed int64
+	for _, query := range queries {
+		changed = max(changed, listener.discoveryChanges[discoveryBucket(query)].Load())
+	}
+	if changed != 0 && time.Now().Unix() > changed {
+		changed++
+	}
+	return changed
 }

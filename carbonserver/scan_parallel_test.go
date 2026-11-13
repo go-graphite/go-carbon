@@ -335,8 +335,8 @@ func TestParallelScanMatchesSequential(t *testing.T) {
 						}
 						// Names reported by the cache scan, found on disk or not yet written.
 						cached := map[string]struct{}{"/" + filepath.ToSlash(metrics[0]): {}, "/ns00/pending/metric.wsp": {}}
-						l.newMetricsChan <- "ns00.realtime.only"
-						l.newMetricsChan <- strings.TrimSuffix(strings.ReplaceAll(metrics[1], "/", "."), ".wsp")
+						l.newMetricsQueue.Add("ns00.realtime.only")
+						l.newMetricsQueue.Add(strings.TrimSuffix(strings.ReplaceAll(metrics[1], "/", "."), ".wsp"))
 						// A metric the realtime index saw before its file appeared.
 						if _, err := l.CurrentFileIndex().trieIdx.insert("/ns00/new0/n000.wsp", 0, 0, 0, 12345); err != nil {
 							t.Fatal(err)

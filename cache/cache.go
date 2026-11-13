@@ -98,6 +98,7 @@ type Cache struct {
 	}
 
 	newMetricsChan   chan string
+	newMetricsQueue  *helper.MetricQueue
 	newMetricCf      atomic.Pointer[indexFilter]
 	filterGeneration atomic.Uint64
 	metricExists     func(string) bool
@@ -272,6 +273,10 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 
 // SetBloomSize of bloom filter
 func (c *Cache) SetBloomSize(bloomSize uint64) {
+	if c.newMetricsQueue != nil {
+		c.newMetricCf.Store(nil)
+		return
+	}
 	if bloomSize > 0 {
 		filter := blobloom.NewSyncOptimized(blobloom.Config{
 			Capacity: bloomSize, // Expected number of keys.
@@ -290,6 +295,16 @@ func (c *Cache) SetTagsEnabled(value bool) {
 
 func (c *Cache) SetNewMetricsChan(ch chan string) { c.newMetricsChan = ch }
 
+// SetNewMetricsQueue enables lossless, coalesced realtime notifications. Configure before input.
+func (c *Cache) SetNewMetricsQueue(q *helper.MetricQueue) {
+	c.newMetricsQueue = q
+	if q != nil {
+		c.newMetricCf.Store(nil)
+	}
+}
+
+func (c *Cache) RealtimeIndexPending() int { return c.newMetricsQueue.Len() }
+
 // SetMetricExists avoids notifying the realtime index about metrics it already
 // contains. Configure this callback before starting ingestion.
 func (c *Cache) SetMetricExists(exists func(string) bool) { c.metricExists = exists }
@@ -298,6 +313,9 @@ func (*Cache) Stop() {}
 
 // Collect cache metrics
 func (c *Cache) Stat(send helper.StatCallback) {
+	if c.newMetricsQueue != nil {
+		send("realtimeIndexPending", float64(c.newMetricsQueue.Len()))
+	}
 	send("streamSeriesIndexBytes", float64(c.StreamSeriesIndexBytes()))
 	s := c.settings.Load().(*cacheSettings)
 
@@ -826,7 +844,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 		// if no bloom filter - just add metric to new channel
 		// if missed in cache, as it was before
-		if c.newMetricsChan != nil && c.newMetricCf.Load() == nil {
+		if c.newMetricsQueue == nil && c.newMetricsChan != nil && c.newMetricCf.Load() == nil {
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
 	}
@@ -883,7 +901,14 @@ func (c *Cache) overflows(s *cacheSettings, count int) bool {
 // holds under values.Metric. immediate makes the item eligible at once, as for
 // restored points that must not wait.
 func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count int, exists, immediate bool) {
-	if filter := c.newMetricCf.Load(); c.newMetricsChan != nil && filter != nil && values.indexGeneration != filter.generation {
+	if c.newMetricsQueue != nil {
+		if values.indexGeneration == 0 {
+			if c.metricExists == nil || !c.metricExists(values.Metric) {
+				c.newMetricsQueue.Add(values.Metric)
+			}
+			values.indexGeneration = 1
+		}
+	} else if filter := c.newMetricCf.Load(); c.newMetricsChan != nil && filter != nil && values.indexGeneration != filter.generation {
 		hash := helper.HashString(values.Metric)
 		if filter.Has(hash) {
 			values.indexGeneration = filter.generation
