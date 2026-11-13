@@ -34,8 +34,13 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 	}
 	// A classic snapshot ignores sidecars, but RestoreArchives drops them and
 	// later reads would not; only a lone main file merges in place.
-	if len(fs.names) != 1 || fs.names[filepath.Base(fs.main())] == 0 {
-		return store.TransferMergeFallbackClassic, nil
+	switch {
+	case fs.names == nil:
+		return store.TransferMergeFallbackClassic + "/namespace", nil
+	case fs.names[filepath.Base(fs.main())] == 0:
+		return store.TransferMergeFallbackClassic + "/no-main", nil
+	case len(fs.names) != 1:
+		return store.TransferMergeFallbackClassic + "/sidecar", nil
 	}
 	file, err := fs.OpenFile(fs.main(), os.O_RDWR, 0600)
 	if err != nil {
@@ -44,11 +49,14 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 	defer file.Close()
 	f := file.(*continuationFile)
 	layout := f.data.layout
-	if layout.Compressed || f.data.references {
-		return store.TransferMergeFallbackClassic, nil
+	if layout.Compressed {
+		return store.TransferMergeFallbackClassic + "/compressed", nil
+	}
+	if f.data.references {
+		return store.TransferMergeFallbackClassic + "/references", nil
 	}
 	if len(layout.Archives) != len(want.Archives) {
-		return store.TransferMergeFallbackLayout, nil
+		return store.TransferMergeFallbackLayout + "/classic-archives", nil
 	}
 	type group struct {
 		archive, index int
@@ -65,7 +73,7 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 		la := layout.Archives[ai]
 		step, count := int64(archive.Retention.Step), archive.Retention.Count
 		if la.Step != archive.Retention.Step || la.Count != count || step <= 0 || count <= 0 {
-			return store.TransferMergeFallbackLayout, nil
+			return store.TransferMergeFallbackLayout + "/classic-retention", nil
 		}
 		load := func(index int) (*group, error) {
 			if g := touched[[2]int{ai, index}]; g != nil {
@@ -90,8 +98,10 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 		var base int64
 		if first.block.Present[0]&1 != 0 && f.data.pages[uint32(la.Offset/4096)] {
 			base = first.block.Points[0].Timestamp
-		} else if first.block.Present[0]&1 != 0 || len(source.Archives[ai].Points) != 0 {
-			return store.TransferMergeFallbackClassic, nil
+		} else if first.block.Present[0]&1 != 0 {
+			return store.TransferMergeFallbackClassic + "/slot0-page", nil
+		} else if len(source.Archives[ai].Points) != 0 {
+			return store.TransferMergeFallbackClassic + "/slot0-empty", nil
 		}
 		points := want.Archives[ai].Points
 		var removed, added []store.Point
@@ -107,8 +117,11 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 			if base == 0 {
 				base = p.Timestamp // an empty archive anchors on its oldest point, as RestoreArchives does
 			}
-			if base <= 0 || base%step != 0 || p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%step != 0 {
-				return store.TransferMergeFallbackClassic, nil
+			if base <= 0 || base%step != 0 {
+				return store.TransferMergeFallbackClassic + "/base-grid", nil
+			}
+			if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%step != 0 {
+				return store.TransferMergeFallbackClassic + "/point-grid", nil
 			}
 			slot := int(((p.Timestamp-base)/step%int64(count) + int64(count)) % int64(count))
 			g, err := load(slot / 128)
@@ -137,7 +150,7 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 		}
 		slices.SortFunc(removed, func(a, b store.Point) int { return cmp.Compare(a.Timestamp, b.Timestamp) })
 		if !classicMergeMatches(source.Archives[ai].Points, removed, added, points) {
-			return store.TransferMergeFallbackVerify, nil
+			return store.TransferMergeFallbackVerify + "/classic", nil
 		}
 	}
 	// Allocating a page makes every slot on it readable. The snapshot could
@@ -165,7 +178,7 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 					}
 					bit := uint64(1) << uint(i%64)
 					if block.Present[i/64]&bit != 0 && written[i/64]&bit == 0 {
-						return store.TransferMergeFallbackClassic, nil
+						return store.TransferMergeFallbackClassic + "/pages", nil
 					}
 				}
 			}
@@ -192,8 +205,11 @@ func mergeClassicArchives(ctx context.Context, overlay *continuationOverlay, dst
 	if err := fs.flush(); err != nil {
 		return "", err
 	}
-	if len(overlay.deleted) != 0 || len(overlay.prefixes) != 0 {
-		return store.TransferMergeFallbackClassic, nil
+	if len(overlay.prefixes) != 0 {
+		return store.TransferMergeFallbackClassic + "/prefix-deletes", nil
+	}
+	if len(overlay.deleted) != 0 {
+		return store.TransferMergeFallbackClassic + "/deletes", nil
 	}
 	return "", overlay.applyTo(dst)
 }

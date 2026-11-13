@@ -405,7 +405,13 @@ func TestTransferMergeAppendMatchesRestore(t *testing.T) {
 					fallbacks[reason] = d
 				}
 			}
-			t.Logf("kinds %v; present formats (source/target) %v; new path appended %d (classic %d) fallbacks %v; differences %d", kinds, formats, appended, classic, fallbacks, diffs)
+			causes := map[string]uint64{}
+			for cause, c := range ns.TransferMergeFallbackCauses {
+				if d := c.Count - ns0.TransferMergeFallbackCauses[cause].Count; d != 0 {
+					causes[cause] = d
+				}
+			}
+			t.Logf("kinds %v; present formats (source/target) %v; new path appended %d (classic %d) fallbacks %v causes %v; differences %d", kinds, formats, appended, classic, fallbacks, causes, diffs)
 			if os.TransferMergeAppended != os0.TransferMergeAppended || fallbacks[store.TransferMergeFallbackDisabled] != 0 {
 				t.Fatalf("path switch leaked: old appended %d, new disabled %d", os.TransferMergeAppended-os0.TransferMergeAppended, fallbacks[store.TransferMergeFallbackDisabled])
 			}

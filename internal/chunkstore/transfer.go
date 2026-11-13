@@ -14,9 +14,9 @@ import (
 	"io"
 	"math"
 	"slices"
-	"sync/atomic"
-
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/lockset"
@@ -667,14 +667,51 @@ var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, Tran
 type transferMergeStats struct {
 	appended, classic atomic.Uint64
 	fallbacks         [len(TransferMergeFallbackReasons)]atomic.Uint64
+	// causes counts fallbacks by their full "reason/cause" string, with the
+	// latest name seen for each. The set of causes is a few constants.
+	causesMu sync.Mutex
+	causes   map[string]*TransferMergeFallbackCause
 }
 
-func (t *transferMergeStats) fallback(reason string) {
-	i := slices.Index(TransferMergeFallbackReasons[:], reason)
+// TransferMergeFallbackCause counts the fallbacks of one "reason/cause" and
+// keeps the latest name that took it, for offline inspection.
+type TransferMergeFallbackCause struct {
+	Count  uint64
+	Sample string
+}
+
+// fallback counts reason, which may carry a "/cause" detail: the reason
+// alone is counted in TransferMergeFallbackReasons order, and the full
+// string by cause.
+func (t *transferMergeStats) fallback(reason, name string) {
+	top, _, _ := strings.Cut(reason, "/")
+	i := slices.Index(TransferMergeFallbackReasons[:], top)
 	if i < 0 {
 		i = len(TransferMergeFallbackReasons) - 1
 	}
 	t.fallbacks[i].Add(1)
+	t.causesMu.Lock()
+	defer t.causesMu.Unlock()
+	if t.causes == nil {
+		t.causes = make(map[string]*TransferMergeFallbackCause)
+	}
+	c := t.causes[reason]
+	if c == nil {
+		c = &TransferMergeFallbackCause{}
+		t.causes[reason] = c
+	}
+	c.Count++
+	c.Sample = name
+}
+
+func (t *transferMergeStats) causeSnapshot() map[string]TransferMergeFallbackCause {
+	t.causesMu.Lock()
+	defer t.causesMu.Unlock()
+	out := make(map[string]TransferMergeFallbackCause, len(t.causes))
+	for k, c := range t.causes {
+		out[k] = *c
+	}
+	return out
 }
 
 func (t *transferMergeStats) snapshot() (appended, classic uint64, fallbacks map[string]uint64) {
@@ -802,7 +839,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 						s.transferMergeStats.classic.Add(1)
 					}
 				} else {
-					s.transferMergeStats.fallback(fallback)
+					s.transferMergeStats.fallback(fallback, m.Name)
 				}
 			}
 			// An appended copy was verified against want by the merger.

@@ -73,6 +73,7 @@ type storeStatsView struct {
 	transferMergeAppended                                                   uint64
 	transferMergeAppendedClassic                                            uint64
 	transferMergeFallbacks                                                  map[string]uint64
+	transferMergeCauses                                                     map[string]store.TransferMergeFallbackCause
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
 	writeStalls                                                             uint64
@@ -347,6 +348,8 @@ var (
 	pebbleCompactionsDesc            = prometheus.NewDesc("pebble_compactions_total", "Completed Pebble compactions by kind; multi_level is a subset of default.", []string{"kind"}, nil)
 	pebbleCompactionBypassesDesc     = prometheus.NewDesc("pebble_compaction_pacer_bypasses_total", "Compaction pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
 	pebbleTransferMergeFallbacksDesc = prometheus.NewDesc("pebble_transfer_merge_fallback_total", "Imported names already on this store merged by a full rewrite instead of appending, by reason (layout, classic, nan, overlap, order, verify, disabled, other).", []string{"reason"}, nil)
+	pebbleTransferMergeCausesDesc    = prometheus.NewDesc("pebble_transfer_merge_fallback_cause_total", "pebble_transfer_merge_fallback_total split by the condition that refused the append merge (cause \"\" when the reason has no detail).", []string{"reason", "cause"}, nil)
+	pebbleTransferMergeSampleDesc    = prometheus.NewDesc("pebble_transfer_merge_fallback_cause_sample", "1 for the latest name that fell back with this reason and cause, for offline inspection.", []string{"reason", "cause", "name"}, nil)
 	pebbleFlushBypassesDesc          = prometheus.NewDesc("pebble_flush_pacer_bypasses_total", "Flush pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
 	pebbleFSOpsDesc                  = prometheus.NewDesc("pebble_fs_ops_total", "Store filesystem operations by operation and file kind. Table writes cover flushes and compactions; table reads cover compactions and point reads, which Pebble does not tell apart.", []string{"op", "kind"}, nil)
 	pebbleFSBytesDesc                = prometheus.NewDesc("pebble_fs_bytes_total", "Store filesystem bytes read and written by file kind.", []string{"op", "kind"}, nil)
@@ -459,6 +462,8 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pebbleCompactionsDesc
 	ch <- pebbleCompactionBypassesDesc
 	ch <- pebbleTransferMergeFallbacksDesc
+	ch <- pebbleTransferMergeCausesDesc
+	ch <- pebbleTransferMergeSampleDesc
 	ch <- pebbleFlushBypassesDesc
 	ch <- pebbleFSOpsDesc
 	ch <- pebbleFSBytesDesc
@@ -620,7 +625,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,
-			transferMergeAppended: st.TransferMergeAppended, transferMergeAppendedClassic: st.TransferMergeAppendedClassic, transferMergeFallbacks: st.TransferMergeFallbacks,
+			transferMergeAppended: st.TransferMergeAppended, transferMergeAppendedClassic: st.TransferMergeAppendedClassic, transferMergeFallbacks: st.TransferMergeFallbacks, transferMergeCauses: st.TransferMergeFallbackCauses,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,
@@ -685,6 +690,11 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		for reason, count := range s.stats.transferMergeFallbacks {
 			ch <- prometheus.MustNewConstMetric(pebbleTransferMergeFallbacksDesc, prometheus.CounterValue, float64(count), reason)
+		}
+		for key, c := range s.stats.transferMergeCauses {
+			reason, cause, _ := strings.Cut(key, "/")
+			ch <- prometheus.MustNewConstMetric(pebbleTransferMergeCausesDesc, prometheus.CounterValue, float64(c.Count), reason, cause)
+			ch <- prometheus.MustNewConstMetric(pebbleTransferMergeSampleDesc, prometheus.GaugeValue, 1, reason, cause, c.Sample)
 		}
 		for reason, count := range s.stats.flushPacerBypasses {
 			ch <- prometheus.MustNewConstMetric(pebbleFlushBypassesDesc, prometheus.CounterValue, float64(count), reason)

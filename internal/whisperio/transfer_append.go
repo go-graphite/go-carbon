@@ -16,7 +16,8 @@ import (
 // target's buffers produce, then installs the target's buffers. The result
 // is built on a private overlay and read back. Only when every archive equals
 // want are the changed keys written to dst and "" returned; otherwise it
-// returns a store.TransferMergeFallback* reason and the caller uses
+// returns a store.TransferMergeFallback* reason, optionally followed by
+// "/<cause>" naming the refusing condition, and the caller uses
 // RestoreArchives.
 //
 // WIP: the read-back is a full decode; a ranged verify of the appended blocks
@@ -37,13 +38,16 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 	}
 	defer w.Close()
 	if len(want.Archives) != len(targetSnapshot.Archives) || len(want.Archives) != len(sourceSnapshot.Archives) {
-		return store.TransferMergeFallbackLayout, false, nil
+		return store.TransferMergeFallbackLayout + "/archives", false, nil
 	}
 	if !w.IsCompressed() {
 		// RestoreArchives writes the policy from want's metadata; an in-place
 		// merge keeps the source header, so both must agree.
-		if store.AggregationMethod(w.AggregationMethod()) != want.Metadata.AggregationMethod || w.XFilesFactor() != want.Metadata.XFilesFactor {
-			return store.TransferMergeFallbackLayout, true, nil
+		if store.AggregationMethod(w.AggregationMethod()) != want.Metadata.AggregationMethod {
+			return store.TransferMergeFallbackLayout + "/classic-aggregation", true, nil
+		}
+		if w.XFilesFactor() != want.Metadata.XFilesFactor {
+			return store.TransferMergeFallbackLayout + "/classic-xff", true, nil
 		}
 		if err := w.Close(); err != nil {
 			return "", true, err
@@ -58,7 +62,7 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 	}
 	defer tw.Close()
 	if !tw.IsCompressed() {
-		return store.TransferMergeFallbackLayout, false, nil
+		return store.TransferMergeFallbackLayout + "/classic-target", false, nil
 	}
 	// Fold sidecars as Snapshot does, so stored points match want.
 	if err := w.MergeOutOfOrder(); err != nil {
@@ -73,7 +77,7 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 	for i := range want.Archives {
 		from, err := w.ArchiveBlockWatermark(i)
 		if err != nil {
-			return store.TransferMergeFallbackLayout, false, nil
+			return store.TransferMergeFallbackLayout + "/source-watermark", false, nil
 		}
 		if points := targetSnapshot.Archives[i].Points; len(points) > 0 && points[0].Timestamp <= int64(from) {
 			return store.TransferMergeFallbackOverlap, false, nil
@@ -84,7 +88,7 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 		from := froms[i]
 		until, err := tw.ArchiveBlockWatermark(i)
 		if err != nil {
-			return store.TransferMergeFallbackLayout, false, nil
+			return store.TransferMergeFallbackLayout + "/target-watermark", false, nil
 		}
 		virtual := targetSnapshot.Archives[i].Points
 		virtual = virtual[sort.Search(len(virtual), func(k int) bool { return virtual[k].Timestamp > int64(until) }):]
@@ -107,7 +111,7 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 		}
 	}
 	if err := w.ReplaceBuffers(tw); err != nil {
-		return store.TransferMergeFallbackLayout, false, nil
+		return store.TransferMergeFallbackLayout + "/buffers", false, nil
 	}
 	if err := w.Close(); err != nil {
 		return "", false, err
