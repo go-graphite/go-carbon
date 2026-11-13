@@ -46,8 +46,8 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 			}
 		}
 		for p, g := range sh.log.first {
-			got[p] = g
-			counts[g]++
+			got[p] = g.gen
+			counts[g.gen]++
 		}
 		if !reflect.DeepEqual(got, want) || len(counts) != len(sh.log.items) {
 			t.Fatalf("generation ownership differs: got %v want %v counts %v", got, want, sh.log.items)
@@ -184,7 +184,7 @@ func TestBookkeepingLogDrainLimitsAndLoss(t *testing.T) {
 
 func TestBookkeepingRelogBudget(t *testing.T) {
 	var m itemMap
-	l := shardLog{first: map[*points.Points]uint64{}, items: map[uint64]int32{}}
+	l := shardLog{first: map[*points.Points]logFlight{}, items: map[uint64]int32{}}
 	// Exact collisions fix the iteration order without depending on name hashes.
 	for i, n := range []int{7, 3, 2} {
 		it := newItem(fmt.Sprintf("budget.%d", i), 0)

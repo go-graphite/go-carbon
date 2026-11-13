@@ -21,7 +21,7 @@ type item struct {
 	// spread is the metric's share of the writeout spread (see
 	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
 	spread uint16
-	// flags holds sparse-spread, startup-window and queued log ownership bits.
+	// flags holds sparse-spread, startup-window, log ownership and history bits.
 	// Sparse means this metric last wrote at least writeout-max-delay before
 	// this item; startup holds its first batching window to the chosen phase.
 	flags uint8
@@ -37,6 +37,7 @@ const (
 	itemSparse uint8 = 1 << iota
 	itemStartup
 	itemLogTracked
+	itemLogHistory // contains restored/history points; never relog this batch
 )
 
 func (it *item) has(flag uint8) bool { return it.flags&flag != 0 }

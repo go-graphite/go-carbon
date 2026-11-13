@@ -40,7 +40,7 @@ func newInputLogConfig() inputLogConfig {
 }
 
 // minAutoMaxAge is the shortest max-age chosen by default.
-const minAutoMaxAge = 30 * time.Minute
+const minAutoMaxAge = time.Hour
 
 // inputLogMaxAge returns max-age, by default twice cache.writeout-max-delay
 // and at least minAutoMaxAge: points of a sparse metric wait up to that delay

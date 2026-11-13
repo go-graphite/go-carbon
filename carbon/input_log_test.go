@@ -304,14 +304,14 @@ func TestInputLogConfigValidation(t *testing.T) {
 	// By default max-age follows the writeout delay with a margin.
 	cfg := NewConfig()
 	cfg.InputLog.Enabled = true
-	if age := inputLogMaxAge(cfg); age != 30*time.Minute {
+	if age := inputLogMaxAge(cfg); age != time.Hour {
 		t.Fatalf("max-age without batching %v", age)
 	}
 	batching(cfg)
 	if err := validateInputLogConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if age := inputLogMaxAge(cfg); age != 32*time.Minute {
+	if age := inputLogMaxAge(cfg); age != time.Hour {
 		t.Fatalf("max-age with a 960s writeout delay %v", age)
 	}
 }
@@ -323,13 +323,13 @@ func TestInputLogWriteoutDelayReload(t *testing.T) {
 	delay := func(d time.Duration) func(*Config) {
 		return func(cfg *Config) {
 			cfg.InputLog.SyncInterval = Duration{time.Second}
-			cfg.InputLog.MaxAge = Duration{} // default: 32m for 960s
+			cfg.InputLog.MaxAge = Duration{} // default: 1h for 960s
 			cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = 960, Duration{d}
 		}
 	}
 	app := startApp(t, inputLogTestConfig(t, root, delay(960*time.Second)))
 	defer app.Stop()
-	inputLogTestConfig(t, root, delay(32*time.Minute))
+	inputLogTestConfig(t, root, delay(time.Hour))
 	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "max-age") {
 		t.Fatalf("reload raising the writeout delay to max-age: %v", err)
 	}

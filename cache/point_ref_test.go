@@ -27,7 +27,7 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 		// Stream generations are hints, not cache data. Compare fields by
 		// reference so the input log's atomic state is never copied.
 		semantic := func(it *item) []any {
-			return []any{it.Metric, it.pending, &it.compact, &it.StreamRef, it.spread, it.has(itemSparse), it.has(itemStartup), it.slot, it.firstArrival, it.throttleState(), it.indexGeneration, it.logFirst, it.has(itemLogTracked)}
+			return []any{it.Metric, it.pending, &it.compact, &it.StreamRef, it.spread, it.has(itemSparse), it.has(itemStartup), it.slot, it.firstArrival, it.throttleState(), it.indexGeneration, it.logFirst, it.has(itemLogTracked), it.has(itemLogHistory)}
 		}
 		am, bm := map[string][]any{}, map[string][]any{}
 		for name, it := range a.items.all {
@@ -73,7 +73,7 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 				}
 			}
 			for p, gen := range sh.log.first {
-				out[p.Metric] = append(out[p.Metric], gen)
+				out[p.Metric] = append(out[p.Metric], gen.gen)
 			}
 			for _, gens := range out {
 				slices.Sort(gens)

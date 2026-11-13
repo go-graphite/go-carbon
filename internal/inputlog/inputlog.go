@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,7 +104,10 @@ type Options struct {
 	SegmentSize int64
 	// MaxAge re-records points still unpersisted after this long, so a write
 	// that keeps failing cannot pin old segments forever. The log holds at
-	// most about MaxAge+TruncateLag of input.
+	// most about MaxAge+TruncateLag of ordinary input when relog keeps up.
+	// History, oversized batches, and recovery drains retain their original
+	// generations until persisted; MaxAge is not a hard disk-space limit.
+	// Zero selects one hour.
 	MaxAge time.Duration
 	// TruncateLag delays reuse of a segment after its points are confirmed:
 	// a confirmed point may still be in the page cache or an unsynced store
@@ -322,7 +326,7 @@ func Open(dir string, opts Options) (*Log, error) {
 		opts.SegmentSize = 4 << 30
 	}
 	if opts.MaxAge <= 0 {
-		opts.MaxAge = 30 * time.Minute
+		opts.MaxAge = time.Hour
 	}
 	if opts.Workers <= 0 {
 		opts.Workers = min(max(runtime.GOMAXPROCS(0)/4, 1), 8)
@@ -910,9 +914,15 @@ func (l *Log) truncate() (relog time.Duration) {
 		l.free(l.live[0])
 		l.live = l.live[1:]
 	}
-	if age := max(uint64(l.opts.MaxAge/l.opts.SyncInterval), 2); l.gen > age && low < l.gen-age {
+	// Forced syncs and restore pressure may advance generations much faster
+	// than SyncInterval. Use commit times (including their monotonic clock),
+	// not a duration divided by the nominal cycle period.
+	expired := sort.Search(len(l.ticks), func(i int) bool {
+		return now.Sub(l.ticks[i].at) < l.opts.MaxAge
+	})
+	if expired > 0 && low <= l.ticks[expired-1].gen {
 		at := time.Now()
-		n := int64(l.src.RelogBefore(l.gen-age, relogBudget))
+		n := int64(l.src.RelogBefore(l.ticks[expired-1].gen+1, relogBudget))
 		relog = time.Since(at)
 		l.stat.relogged.Add(n)
 		l.total.relogged.Add(n)

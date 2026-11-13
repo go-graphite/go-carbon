@@ -469,6 +469,9 @@ func (c *Cache) Requeue(p *points.Points) {
 	values.firstArrival = first
 	shard.log.mergeFlight(values, p)
 	refs, independent := shard.recoverySources[values.pending]
+	if independent {
+		values.setFlag(itemLogHistory, true)
+	}
 	if !independent || refs.needsJournal() {
 		shard.log.trackItem(values)
 	}
@@ -831,6 +834,11 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 	metadataChanged := shard.setItemThrottle(values, throttleState)
+	// Keep restored/history points at their original source until persisted.
+	// A mixed batch inherits this protection, including failed-write requeues.
+	if restored || recovered {
+		values.setFlag(itemLogHistory, true)
+	}
 	if source != nil {
 		shard.trackSource(shard.itemIdentity(values), source)
 		metadataChanged = true
@@ -1095,7 +1103,7 @@ func (s *Shard) releaseDrainedTracking() {
 		s.firstArrival = nil
 	}
 	if s.log.first != nil && len(s.log.first) == 0 {
-		s.log.first = make(map[*points.Points]uint64)
+		s.log.first = make(map[*points.Points]logFlight)
 	}
 	s.flightPeak = 0
 }

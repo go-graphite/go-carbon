@@ -364,6 +364,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	// one is written at once: the first scan waits for it.
 	deferred := s.writeoutRestoreSpread && s.batching() && !r.isNewSlot(slot)
 	r.trackAs(shard.itemIdentity(values), deferred)
+	values.setFlag(itemLogHistory, true)
 	shard.log.trackItem(values)
 	r.claim(slot)
 	c.syncMemoryLocked(shard)

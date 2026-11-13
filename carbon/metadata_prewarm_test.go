@@ -399,7 +399,8 @@ func TestMetadataPrewarmInputLogSafety(t *testing.T) {
 	cfg.InputLog.MaxAge = Duration{}
 	cfg.Cache.WriteoutMaxDelay = Duration{960 * time.Second}
 	cfg.Whisper.StoreMetadataCachePrewarmWaitCap = &Duration{30 * time.Minute}
-	if got := metadataPrewarmLimit(cfg); got != 480*time.Second {
+	// Auto age has a one-hour floor: 3/4 hour minus the 16m writeout window.
+	if got := metadataPrewarmLimit(cfg); got != 29*time.Minute {
 		t.Fatal(got)
 	}
 	cfg.Cache.WriteoutMaxDelay = Duration{1800 * time.Second}
