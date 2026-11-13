@@ -162,10 +162,13 @@ func BenchmarkTransferImportPresent(b *testing.B) {
 					fixture.seedTarget(b, target, records)
 				}
 				if mode.remerge {
+					// RestoreArchives stores the first merge classic.
+					target.SetTransferMergeAppendForTest(false)
 					first := fixture.clone(fmt.Sprintf("r%06d", i))
 					if _, err := target.ImportTransfer(ctx, first); err != nil {
 						b.Fatal(err)
 					}
+					target.SetTransferMergeAppendForTest(true)
 				}
 				b.StartTimer()
 				if _, err := target.ImportTransfer(ctx, records); err != nil {
