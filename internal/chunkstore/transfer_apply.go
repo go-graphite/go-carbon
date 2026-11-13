@@ -15,6 +15,9 @@ type preparedTransfer struct {
 	expected, metas []Metadata
 	proofs          []TransferProof
 	sidecars        []SidecarRecord
+	// epochs are the metas' stripe epochs captured before the preparation
+	// view opened; commit skips the catalog re-read of unchanged stripes.
+	epochs []uint64
 }
 
 // Recompute after a concurrent target mutation; never merge a moving view or
@@ -37,9 +40,13 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			return nil, err
 		}
 		began := time.Now()
+		epochs := s.transferEpochs(metas)
 		view := s.db.NewSnapshot()
 		prepared, err := s.prepareTransfer(ctx, records, metas, view)
 		_ = view.Close()
+		if prepared != nil {
+			prepared.epochs = epochs
+		}
 		s.transferApply.prepare.Add(uint64(time.Since(began)))
 		if err != nil {
 			return nil, err
@@ -82,7 +89,7 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 		absent = absent || p.expected[i].ID == 0
 	}
 	wait := time.Now()
-	unlock, stripes := s.acquireTransfer(names, len(names) > 1)
+	unlock, stripes, unchanged := s.acquireTransfer(names, len(names) > 1, p.epochs)
 	if unlock == nil {
 		return false, errTransferSplit
 	}
@@ -99,7 +106,15 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return false, err
 	}
+	// Each catalog/revision re-read probes every LSM level's filter block under
+	// these stripes. Under concurrent copies those probes queue on one hot
+	// block-cache shard, stretch stripe holds and split batches. An unchanged
+	// epoch already proves the view's metadata current, so skip the re-read.
 	for i, name := range names {
+		if !s.transferRereadMetadata && unchanged != nil && unchanged[i] {
+			s.transferApply.epochValidated.Add(1)
+			continue
+		}
 		current, err := metadataFrom(s.db, name)
 		switch {
 		case errors.Is(err, ErrNotFound):
