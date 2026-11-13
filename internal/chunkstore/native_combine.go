@@ -238,7 +238,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 		return receipt, err
 	}
 	prefix := nativeCombinePiecePrefix(identity)
-	if err := b.DeleteRange(prefix, prefixEnd(prefix), nil); err != nil {
+	if err := deleteRange(b, rangeDeleteNativeCombineImport, prefix, prefixEnd(prefix)); err != nil {
 		return receipt, err
 	}
 	if err := b.Commit(pebble.NoSync); err != nil {
@@ -736,14 +736,14 @@ func nativeCombineCleanup(b *pebble.Batch, intent nativeCombineIntent, pieces []
 		lower := span.Lower
 		for _, prefix := range keep {
 			if bytes.Compare(lower, prefix) < 0 {
-				if err := b.DeleteRange(lower, prefix, nil); err != nil {
+				if err := deleteRange(b, rangeDeleteNativeCombineCleanup, lower, prefix); err != nil {
 					return err
 				}
 			}
 			lower = prefixEnd(prefix)
 		}
 		if bytes.Compare(lower, span.Upper) < 0 {
-			if err := b.DeleteRange(lower, span.Upper, nil); err != nil {
+			if err := deleteRange(b, rangeDeleteNativeCombineCleanup, lower, span.Upper); err != nil {
 				return err
 			}
 		}

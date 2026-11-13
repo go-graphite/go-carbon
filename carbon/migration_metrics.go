@@ -352,6 +352,8 @@ var storeMigrationSidecarFoldsDesc = prometheus.NewDesc("store_migration_sidecar
 
 var storeColdPackThawsDesc = prometheus.NewDesc("store_cold_pack_thaws_total", "Completed codec thaws in this process by writer path, including unpublished transactions.", []string{"reason"}, nil)
 
+var storeRangeDeletesDesc = prometheus.NewDesc("store_range_deletes_total", "Pebble range tombstones added to store batches in this process, by code path. Each committed one makes the next reader of the memtable re-fragment every range tombstone in it while other readers wait; a sustained rate stalls reads.", []string{"site"}, nil)
+
 // Persister stage timing: summed work per stage (stagetime), the update
 // duration histogram and the slowest update per scrape.
 var (
@@ -453,6 +455,7 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pebbleFetchStageCallsDesc
 	ch <- storeMigrationSidecarFoldsDesc
 	ch <- storeColdPackThawsDesc
+	ch <- storeRangeDeletesDesc
 	ch <- persisterStageSecondsDesc
 	ch <- persisterStageCallsDesc
 	ch <- persisterUpdateDesc
@@ -640,6 +643,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(persisterUpdateMaxDesc, prometheus.GaugeValue, stagetime.TakeUpdateMax().Seconds())
 	}
 	if s.store {
+		for _, site := range store.RangeDeleteCounts() {
+			ch <- prometheus.MustNewConstMetric(storeRangeDeletesDesc, prometheus.CounterValue, float64(site.Count), site.Site)
+		}
 		for _, thaw := range []struct {
 			reason string
 			count  uint64

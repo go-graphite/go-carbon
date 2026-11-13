@@ -1395,10 +1395,10 @@ func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (i
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := b.DeleteRange([]byte{'a'}, []byte{'b'}, nil); err != nil {
+	if err := deleteRange(b, rangeDeleteStoreClear, []byte{'a'}, []byte{'b'}); err != nil {
 		return 0, err
 	}
-	if err := b.DeleteRange([]byte{'c'}, []byte{'y'}, nil); err != nil {
+	if err := deleteRange(b, rangeDeleteStoreClear, []byte{'c'}, []byte{'y'}); err != nil {
 		return 0, err
 	}
 	if err := b.Set(sidecarReadyKey, []byte{1}, nil); err != nil {

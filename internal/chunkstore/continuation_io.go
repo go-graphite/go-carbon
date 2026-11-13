@@ -554,7 +554,7 @@ func (io *continuationIO) DeletePrefix(prefix []byte) error {
 		return nil
 	}
 	continuationRangeDeletes.Add(1)
-	err := io.batch.DeleteRange(start, prefixEnd(start), nil)
+	err := deleteRange(io.batch, rangeDeleteContinuationPrefix, start, prefixEnd(start))
 	io.changed = io.changed || err == nil
 	return err
 }

@@ -339,7 +339,17 @@ func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadat
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
-	if err := s.appendMetricDelete(ctx, b, m); err != nil {
+	// Point deletes of the existing keys, as expiration writes them: a range
+	// tombstone per delete makes every reader of the memtable re-fragment all
+	// of its tombstones under one lock (bulk buckyd deletes at ~33/s lifted
+	// render p99 to ~1 s). The metric lock excludes writers, so a view taken
+	// now observes every key of every generation of this ID.
+	view := s.db.NewReadView()
+	defer view.Close()
+	reader := transferReader{reader: view}
+	defer reader.close()
+	s.canonicalRun(m.ID).Clear(m.ID)
+	if err := s.appendExpirationDelete(ctx, b, &reader, m); err != nil {
 		return err
 	}
 	if err := s.commitSidecars(b, name, &SidecarSummary{}, s.commit); err != nil {
@@ -348,35 +358,6 @@ func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadat
 	s.catalogChanged(name)
 	if s.incrementalSource == "" || m.FileMigration != FileUnowned {
 		s.invalidateReadCache()
-	}
-	return nil
-}
-
-// appendMetricDelete is shared by administrative and expiration deletes. The
-// caller holds the metric mutation lock until the batch has committed.
-func (s *Store) appendMetricDelete(ctx context.Context, b *pebble.Batch, m Metadata) error {
-	name := m.Name
-	if err := b.Delete(catalogKey(name), nil); err != nil {
-		return err
-	}
-	if err := b.Delete(revisionKey(m), nil); err != nil {
-		return err
-	}
-	s.canonicalRun(m.ID).Clear(m.ID)
-	metricChunks := chunkPrefix(m.ID, 0)[:9] // every generation of this ID
-	if err := b.DeleteRange(metricChunks, prefixEnd(metricChunks), nil); err != nil {
-		return err
-	}
-	if m.Continuation {
-		// The metric lock excludes writers, so the database observes the
-		// current generation's descriptors.
-		if err := s.dropContinuation(ctx, s.db, b, m); err != nil {
-			return err
-		}
-		state := continuationPrefix(m.ID, 0)[:9]
-		if err := b.DeleteRange(state, prefixEnd(state), nil); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -517,12 +498,12 @@ func (s *Store) commitReplacement(m Metadata, chunks []map[int][]byte, old *Meta
 				return Metadata{}, err
 			}
 			state := continuationPrefix(old.ID, old.Generation)
-			if err := b.DeleteRange(state, prefixEnd(state), nil); err != nil {
+			if err := deleteRange(b, rangeDeleteReplaceState, state, prefixEnd(state)); err != nil {
 				return Metadata{}, err
 			}
 		}
 		oldChunks := chunkPrefix(old.ID, old.Generation)
-		if err := b.DeleteRange(oldChunks, prefixEnd(oldChunks), nil); err != nil {
+		if err := deleteRange(b, rangeDeleteReplaceChunks, oldChunks, prefixEnd(oldChunks)); err != nil {
 			return Metadata{}, err
 		}
 		if err := b.Delete(revisionKey(*old), nil); err != nil {

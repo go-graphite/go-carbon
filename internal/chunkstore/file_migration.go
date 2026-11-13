@@ -146,7 +146,7 @@ func (s *Store) StageFileSnapshot(ctx context.Context, snapshot Snapshot) (Metad
 	defer batch.Close()
 	if oldErr == nil {
 		prefix := chunkPrefix(old.ID, old.Generation)
-		if err := batch.DeleteRange(prefix, prefixEnd(prefix), nil); err != nil {
+		if err := deleteRange(batch, rangeDeleteFileMigration, prefix, prefixEnd(prefix)); err != nil {
 			return Metadata{}, err
 		}
 		if old.Continuation {
