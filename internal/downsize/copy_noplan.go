@@ -43,7 +43,26 @@ const (
 	copyInitialBytesPerName = 16 << 10
 	copyFill                = 0.75
 	copyListPage            = 10000
+	// A pull answers only after the target exported and imported the whole
+	// batch. Busy targets import about 2-3 s per MiB, so a 64 MiB batch ran
+	// 2-3 min and every pull past the header deadline was discarded and redone
+	// at full size. 16 MiB batches finish in under 80 s there and cost nothing
+	// on fast copies, whose batches stay below 16 MiB anyway.
+	copyDefaultBatchBytes = 16 << 20
+	copyHeaderTimeoutMin  = 90 * time.Second
 )
+
+// copyHeaderTimeout keeps the response header deadline behind the transfer
+// idle bound. Pull and verify send no bytes until the target finishes the
+// batch, so a header deadline shorter than the idle bound turned slow batches
+// into transport errors that retried at full size (and aborted the run after
+// --transport-retries) instead of idle timeouts that split the batch.
+func copyHeaderTimeout(idle time.Duration) time.Duration {
+	if idle <= 0 {
+		return copyHeaderTimeoutMin
+	}
+	return max(copyHeaderTimeoutMin, idle+30*time.Second)
+}
 
 func PlanFreeCopyMain(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("store-copy copy", flag.ContinueOnError)
@@ -58,7 +77,7 @@ func PlanFreeCopyMain(ctx context.Context, args []string) error {
 	flags.StringVar(&o.tokenEnv, "token-env", "BUCKYD_TOKEN", "environment variable holding the buckyd JWT")
 	flags.BoolVar(&o.debtGuard, "debt-guard", false, "let the target pause imports on a configured transfer-max-compaction-debt (429); off by default, which keeps only its hard limits (write stalls, L0 stop margin)")
 	flags.IntVar(&o.streams, "streams", 0, "parallel transfers; 0 uses the smaller of the source and target max_transfers (each stream holds one transfer slot on both)")
-	flags.Int64Var(&o.maxBytes, "max-batch-bytes", 64<<20, "batch byte cap (real exported bytes); capped by the target max_body_bytes. A single name may use the whole max_body_bytes")
+	flags.Int64Var(&o.maxBytes, "max-batch-bytes", copyDefaultBatchBytes, "batch byte cap (real exported bytes); capped by the target max_body_bytes. A single name may use the whole max_body_bytes. Larger batches take longer per pull on a busy target")
 	flags.IntVar(&o.maxNames, "max-batch-names", 8192, "names per batch cap (at most 10000)")
 	flags.IntVar(&o.maxFailures, "max-failures", 1000, "abort after this many per-name failures (they are journaled and retried by a rerun)")
 	flags.DurationVar(&o.tick, "retry-interval", 2*time.Second, "first backoff after a transient guard response (429/502/503/504) or transport error")
@@ -151,7 +170,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		return err
 	}
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: o.tick, transferIdle: o.transferIdle, debtGuardOff: !o.debtGuard},
-		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: 90 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: copyHeaderTimeout(o.transferIdle)}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	var source, target copyStatus
 	if _, err := m.request(ctx, o.from, "/v1/transfer/status", nil, &source); err != nil {
 		return fmt.Errorf("source status: %w", err)
