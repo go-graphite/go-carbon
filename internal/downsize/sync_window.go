@@ -1,13 +1,17 @@
 package downsize
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
+	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -31,7 +35,7 @@ func (s *syncer) copyWindows() syncRanges {
 	return out
 }
 
-// Scan the existing catalog in bounded batches. Digests establish actual source
+// Scan the existing catalog in bounded batches. Window exports establish actual
 // coverage in every archive; retention metadata alone cannot prove relevance.
 // Copy each batch immediately, rather than waiting for the complete catalog.
 // This separate phase leaves old full-history copy/precheck rows reusable.
@@ -123,9 +127,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			} else {
 				relevant := map[string]bool{}
 				for _, w := range s.copyWindows() {
-					digests, err := s.digest(ctx, source, subset, w)
+					digests, err := s.windowPresence(ctx, source, subset, w)
 					if err != nil {
-						return fmt.Errorf("window missing digest on %s: %w (window-only sync requires source digests)", source, err)
+						return fmt.Errorf("window missing selection on %s: %w", source, err)
 					}
 					for _, n := range subset {
 						var archives []syncArchive
@@ -133,6 +137,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 						for _, d := range digests[n] {
 							archives = append(archives, syncArchive{Step: d.Step, Points: d.Points})
 							count += d.Count
+							if d.Hash == "window-incomplete" {
+								count++
+							}
 						}
 						if count > 0 && (s.o.includeShort || !syncShort(archives)) {
 							relevant[n] = true
@@ -187,6 +194,7 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 	}
 	failed := map[string]bool{}
 	for wi, w := range windows {
+		before, beforeErr := b.Digest(ctx, target, names, w.From, w.Until)
 		data, _ := json.Marshal([]any{source, target, names, w.From, w.Until})
 		hash := sha256.Sum256(data)
 		id := hex.EncodeToString(hash[:])
@@ -233,6 +241,111 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 		if err != nil {
 			return syncCopyResult{}, err
 		}
+		after, afterErr := b.Digest(ctx, target, names, w.From, w.Until)
+		count := func(d map[string][]syncDigest) int64 {
+			var n int64
+			for _, archives := range d {
+				for _, a := range archives {
+					n += a.Count
+				}
+			}
+			return n
+		}
+		if beforeErr == nil && afterErr == nil {
+			event("sync_window_points", map[string]any{"scope": "serving_archive", "source": source, "names": len(names), "window": w.Name, "before": count(before), "after": count(after), "added": count(after) - count(before)})
+		}
 	}
 	return syncCopyResult{Copied: len(names) - len(failed), Failed: sortedKeys(failed)}, nil
+}
+
+// WindowPresence uses the already deployed window exporter rather than the
+// serving-archive fetch/digest APIs: coarse archives are independently authoritative.
+func (s *syncer) windowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
+	if b, ok := s.b.(interface {
+		WindowPresence(context.Context, string, []string, syncRange) (map[string][]syncDigest, error)
+	}); ok {
+		return b.WindowPresence(ctx, source, names, w)
+	}
+	return s.digest(ctx, source, names, w)
+}
+
+func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
+	c := &nativeController{mover: b.m, sessions: map[string]*nativeRemoteSession{}}
+	defer c.release()
+	id, err := c.session(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]syncDigest{}
+	for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
+		subset := names[start:min(start+chunkstore.NativeMaxRangeNames, len(names))]
+		body, _ := json.Marshal(struct {
+			Session string
+			Names   []string
+			Window  *chunkstore.NativeWindow
+		}{id, subset, &chunkstore.NativeWindow{From: w.From, Until: w.Until}})
+		err := func() error {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, source+"/v1/native/export", bytes.NewReader(body))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if token := os.Getenv(b.o.tokenEnv); token != "" {
+				req.Header.Set("X-Buckyd-Authorization", token)
+			}
+			response, err := b.client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				return fmt.Errorf("window export HTTP %d", response.StatusCode)
+			}
+			stream, err := chunkstore.NewTransferStream(response.Body)
+			if err != nil {
+				return err
+			}
+			if stream.Window == nil || stream.Window.From != w.From || stream.Window.Until != w.Until || stream.Count != len(subset) {
+				return fmt.Errorf("window export scope mismatch")
+			}
+			for i := 0; i < stream.Count; i++ {
+				record, err := stream.Next()
+				if err != nil {
+					return err
+				}
+				if record.Config.Name != subset[i] {
+					return fmt.Errorf("window export name mismatch")
+				}
+				if record.NativeSkip != nil {
+					return fmt.Errorf("window export skipped %s: %s", record.Config.Name, record.NativeSkip.Reason)
+				}
+				snap, err := chunkstore.TransferSnapshot(ctx, record, &whisperio.ContinuationCodec{}, time.Now)
+				if err != nil {
+					return err
+				}
+				for ai, a := range snap.Archives {
+					count := int64(len(a.Points))
+					hash := ""
+					// Include omitted in-window boundary buckets in selection, so the copy
+					// reports them as residuals instead of silently skipping the metric.
+					for _, skip := range record.WindowSkipped {
+						if skip.Archive == ai && skip.Timestamp >= w.From && skip.Timestamp < w.Until {
+							hash = "window-incomplete"
+						}
+					}
+					out[record.Config.Name] = append(out[record.Config.Name], syncDigest{Step: int64(a.Retention.Step), Points: int64(a.Retention.Count), Count: count, Hash: hash})
+				}
+			}
+			_, _, err = stream.Finish()
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(io.Discard, response.Body)
+			return err
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

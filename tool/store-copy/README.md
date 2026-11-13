@@ -425,12 +425,12 @@ skipped comparisons cannot be reused as verification.
 
 ### Window-only sync copies
 
-With `sync --window`, missing names are selected by source archive digests over
+With `sync --window`, missing names are selected by source native exports over
 those windows. Names with no window points are skipped; selected names are
 copied immediately in bounded batches through the existing native window
 exporter and target-wins combiner. Hole fills use the same window restriction.
 The catalog still has to be scanned, but full-history metadata and transfers
-are avoided. Sources must support digests and native time windows, and the
+are avoided. Sources must support native time windows, and the
 target must support native window combine; missing support fails explicitly.
 No full-history transfer fallback is used. Incomplete trailing coarse buckets
 omitted by the native window exporter are reported as failed names/residuals,

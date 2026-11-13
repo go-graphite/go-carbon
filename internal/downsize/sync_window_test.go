@@ -96,6 +96,10 @@ func TestSyncWindowNativeDifferential(t *testing.T) {
 	}
 	backend := newSyncLiveBackend(syncLiveOptions{})
 	w := syncRange{Name: "gap", From: testMetricNow - 10, Until: testMetricNow}
+	presence, err := backend.WindowPresence(ctx, donor.URL, []string{"new", "overlap"}, w)
+	if err != nil || presence["new"][0].Count == 0 {
+		t.Fatal(presence, err)
+	}
 	path := filepath.Join(t.TempDir(), "copy.jsonl")
 	for range 2 {
 		res, err := backend.CopyWindow(ctx, donor.URL, survivor.URL, []string{"new", "overlap"}, path, syncRanges{w})
@@ -174,5 +178,29 @@ func TestSyncWindowIncompleteCoarseBoundaryIsResidual(t *testing.T) {
 	res, err := backend.CopyWindow(ctx, donor.URL, survivor.URL, []string{"boundary"}, filepath.Join(t.TempDir(), "copy.jsonl"), syncRanges{{Name: "gap", From: base, Until: base + 20}})
 	if err != nil || res.Copied != 0 || len(res.Failed) != 1 {
 		t.Fatal("incomplete coarse bucket reported as success", res, err)
+	}
+}
+
+func TestSyncWindowPresenceIncludesCoarseOnlyPoints(t *testing.T) {
+	ctx := context.Background()
+	source := nativeControllerStore(t)
+	base := testMetricNow/60*60 - 120
+	snap := store.Snapshot{Metadata: store.Metadata{MetricConfig: store.MetricConfig{Name: "coarse", AggregationMethod: store.Sum, Retentions: []store.Retention{{Step: 10, Count: 128}, {Step: 60, Count: 128}}}}, Archives: []store.Archive{
+		{Retention: store.Retention{Step: 10, Count: 128}},
+		{Retention: store.Retention{Step: 60, Count: 128}, Points: []store.Point{{Timestamp: base, Value: 42}}},
+	}}
+	if _, err := source.CreateFromSnapshot(ctx, snap); err != nil {
+		t.Fatal(err)
+	}
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	backend := newSyncLiveBackend(syncLiveOptions{})
+	got, err := backend.WindowPresence(ctx, donor.URL, []string{"coarse"}, syncRange{From: base, Until: base + 60})
+	if err != nil || len(got["coarse"]) != 2 || got["coarse"][0].Count != 0 || got["coarse"][1].Count != 1 {
+		t.Fatal(got, err)
+	}
+	outside, err := backend.WindowPresence(ctx, donor.URL, []string{"coarse"}, syncRange{From: base - 120, Until: base - 60})
+	if err != nil || outside["coarse"][1].Count != 0 {
+		t.Fatal(outside, err)
 	}
 }
