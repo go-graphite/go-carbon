@@ -28,3 +28,23 @@ func TestCacheRefusesNamesOverLimit(t *testing.T) {
 		t.Fatalf("name at the limit: size=%d rejected=%d", c.Size(), c.NameTooLongRejectedPoints())
 	}
 }
+
+// Names that fit discovery must survive both live intake and dump restore.
+func TestCacheKeepsIndexableLongNames(t *testing.T) {
+	for _, n := range []int{4097, 5038, 5042, 8187} {
+		for _, restored := range []bool{false, true} {
+			c := New()
+			name := strings.Repeat("a", n)
+			p := points.OnePoint(name, 42, 100)
+			if restored {
+				c.AddRestored(p)
+			} else {
+				c.Add(p)
+			}
+			got := c.Get(name)
+			if len(got) != 1 || got[0] != p.Data[0] || c.NameTooLongRejectedPoints() != 0 {
+				t.Fatalf("bytes=%d restored=%v: got=%v rejected=%d", n, restored, got, c.NameTooLongRejectedPoints())
+			}
+		}
+	}
+}
