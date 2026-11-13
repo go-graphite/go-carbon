@@ -45,6 +45,19 @@ store-copy copy \
   (`copy_stalled` ERROR, non-zero exit) only when every source and the target
   answer their status endpoint and the calls still fail for `--stall-timeout`.
 - Killed or stopped: rerun the same command; the journal skips done ranges.
+- One `progress` line per `--progress-interval` (30s): done/total names (the
+  total is counted in the background), names/s and MB/s over the interval, ETA,
+  the current limiter (a host down and for how long, target 429 backpressure
+  with its compaction debt/L0/write stall, transient retries, busy transfer
+  streams, name discovery), retries and skipped names. `copy_done` ends the run
+  with the summary.
+- A name that keeps failing never stops the run: it is skipped (`name_skipped`),
+  retried once at the end (`retry_skipped`), and the names still failing are
+  listed in `<state>.skipped` (source, name, HTTP status, reason) and reported
+  by a non-zero exit. `--max-failures N` (default 0, off) aborts above N.
+- The watchdog fails the run (`copy_stalled`, non-zero exit) when no batch has
+  succeeded for `--stall-timeout` while every host answers and work is in
+  flight.
 
 - Names come from the source catalog (`/v1/transfer/list` pages, optionally
   under `--prefix`) or from `--names` (byte-sorted unique, `LC_ALL=C sort -u`).
@@ -66,7 +79,8 @@ store-copy copy \
   each completed batch, and `failed` rows. Rerunning the same command skips done
   ranges and retries failures. Target points win in the importer, so a batch
   redone after a kill is harmless.
-- The command exits non-zero while any name failed or above `--max-failures`.
+- The command exits non-zero while any name is still skipped after the final
+  retry.
 - Only `--engine metric` is wired; `--engine bulk` and host-helper guards
   (`--health-map`) still need the legacy `plan`/`run` pair.
 

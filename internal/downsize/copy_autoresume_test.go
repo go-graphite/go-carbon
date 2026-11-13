@@ -200,7 +200,8 @@ func TestPlanFreeCopyRidesThroughSourceAndTargetRestarts(t *testing.T) {
 	o.froms = froms
 	o.maxNames = 100
 	o.tick, o.maxBackoff = 10*time.Millisecond, 50*time.Millisecond
-	o.stallTimeout = 200 * time.Millisecond // shorter than each outage: down hosts mean wait
+	o.stallTimeout = 200 * time.Millisecond    // shorter than each outage: down hosts mean wait
+	o.progressInterval = 20 * time.Millisecond // the watchdog runs through both outages
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := planFreeCopy(ctx, o); err != nil {
@@ -307,5 +308,130 @@ func TestPlanFreeCopySettlesThroughSourceRestartConflicts(t *testing.T) {
 	journal, _ := os.ReadFile(o.state)
 	if strings.Contains(string(journal), `"kind":"failed"`) {
 		t.Fatalf("restart window journaled failures:\n%s", journal)
+	}
+}
+
+func captureCopyEvents(t *testing.T, run func() error) ([]map[string]any, error) {
+	t.Helper()
+	path := t.TempDir() + "/events.jsonl"
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputMu.Lock()
+	stdout := os.Stdout
+	os.Stdout = out
+	outputMu.Unlock()
+	runErr := run()
+	outputMu.Lock()
+	os.Stdout = stdout
+	outputMu.Unlock()
+	out.Close()
+	data, _ := os.ReadFile(path)
+	var events []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var e map[string]any
+		if json.Unmarshal([]byte(line), &e) == nil {
+			events = append(events, e)
+		}
+	}
+	return events, runErr
+}
+
+// One metric that keeps failing never stops the run: it is skipped, retried
+// once at the end, listed and reported by the exit error; progress lines
+// carry done/total, rates, ETA and the limiter all along.
+func TestPlanFreeCopyPrintsProgressAndSkipsBadName(t *testing.T) {
+	all := copyNames("a.", 300)
+	f, src, dst := newFakeCopy(t, all)
+	f.inject = func(_ int, names []string) int {
+		time.Sleep(2 * time.Millisecond)
+		for _, name := range names {
+			if name == "a.00042" {
+				return http.StatusBadRequest
+			}
+		}
+		return 0
+	}
+	o := copyTestOptions(t, src, dst)
+	o.streams, o.maxFailures = 2, 0
+	o.progressInterval = 10 * time.Millisecond
+	events, err := captureCopyEvents(t, func() error { return planFreeCopy(context.Background(), o) })
+	if err == nil || !strings.Contains(err.Error(), "1 names still skipped") {
+		t.Fatalf("want one still-skipped name, got %v", err)
+	}
+	for _, name := range all {
+		if f.imported[name] == 0 && name != "a.00042" {
+			t.Fatalf("%s not copied: one bad name stopped the run", name)
+		}
+	}
+	list, _ := os.ReadFile(o.state + ".skipped")
+	if !strings.Contains(string(list), "\ta.00042\t400\t") {
+		t.Fatalf("skipped list: %q", list)
+	}
+	var progress, retried, done map[string]any
+	for _, e := range events {
+		switch e["event"] {
+		case "progress":
+			if progress == nil || e["total"] != nil {
+				progress = e
+			}
+		case "retry_skipped":
+			retried = e
+		case "copy_done":
+			done = e
+		}
+	}
+	if progress == nil || progress["line"] == nil || progress["limiter"] == nil || progress["eta"] == nil || progress["total"] == nil {
+		t.Fatalf("progress line missing fields: %v", progress)
+	}
+	if retried == nil || retried["names"] != float64(1) {
+		t.Fatalf("skipped name not retried at the end: %v", retried)
+	}
+	if done == nil || done["skipped"] != float64(1) || done["skipped_file"] == nil {
+		t.Fatalf("summary does not report the skipped name: %v", done)
+	}
+}
+
+// A name that fails during the main pass but recovers is copied by the
+// end-of-run retry, and the run exits cleanly.
+func TestPlanFreeCopyRetriesSkippedNameAtEnd(t *testing.T) {
+	all := copyNames("a.", 100)
+	f, src, dst := newFakeCopy(t, all)
+	var singles atomic.Int64
+	f.inject = func(_ int, names []string) int {
+		for _, name := range names {
+			if name == "a.00007" {
+				if len(names) > 1 || singles.Add(1) == 1 {
+					return http.StatusBadRequest
+				}
+			}
+		}
+		return 0
+	}
+	o := copyTestOptions(t, src, dst)
+	o.streams = 1
+	if err := planFreeCopy(context.Background(), o); err != nil {
+		t.Fatalf("recovered name still reported: %v", err)
+	}
+	if f.imported["a.00007"] != 1 {
+		t.Fatalf("a.00007 imported %d times", f.imported["a.00007"])
+	}
+	if _, err := os.Stat(o.state + ".skipped"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stale skipped list left behind")
+	}
+}
+
+// Transfers hang while every host answers: the watchdog fails loudly after
+// --stall-timeout instead of waiting forever.
+func TestPlanFreeCopyWatchdogFailsWhenStuckWithHostsUp(t *testing.T) {
+	f, src, dst := newFakeCopy(t, copyNames("a.", 20))
+	f.block = func(int) bool { return true }
+	o := copyTestOptions(t, src, dst)
+	o.progressInterval, o.stallTimeout = 10*time.Millisecond, 150*time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := planFreeCopy(ctx, o); !errors.Is(err, errCopyStall) {
+		t.Fatalf("want stall error, got %v", err)
 	}
 }

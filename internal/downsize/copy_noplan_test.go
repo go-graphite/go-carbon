@@ -244,8 +244,11 @@ func TestPlanFreeCopySendsOversizedNameAloneAndSkipsImpossibleOne(t *testing.T) 
 	o := copyTestOptions(t, src, dst)
 	o.streams = 1
 	err := planFreeCopy(context.Background(), o)
-	if err == nil || !strings.Contains(err.Error(), "1 names failed") {
-		t.Fatal("want one journaled failure, got", err)
+	if err == nil || !strings.Contains(err.Error(), "1 names still skipped") {
+		t.Fatal("want one skipped name, got", err)
+	}
+	if list, _ := os.ReadFile(o.state + ".skipped"); !strings.Contains(string(list), "\tx.00015\t413\t") {
+		t.Fatalf("skipped list lacks x.00015: %q", list)
 	}
 	for _, name := range all {
 		want := 1

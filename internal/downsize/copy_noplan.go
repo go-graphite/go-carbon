@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -37,6 +36,7 @@ type copyOptions struct {
 	streams, maxNames, maxFailures                   int
 	maxBytes                                         int64
 	tick, transferIdle, maxBackoff, stallTimeout     time.Duration
+	progressInterval                                 time.Duration
 	transportRetries                                 int
 	debtGuard                                        bool
 }
@@ -96,10 +96,11 @@ func PlanFreeCopyMain(ctx context.Context, args []string) error {
 	flags.IntVar(&o.streams, "streams", 0, "parallel transfers; 0 uses the smaller of the source and target max_transfers (each stream holds one transfer slot on both)")
 	flags.Int64Var(&o.maxBytes, "max-batch-bytes", copyDefaultBatchBytes, "batch byte cap (real exported bytes); capped by the target max_body_bytes. A single name may use the whole max_body_bytes. Larger batches take longer per pull on a busy target")
 	flags.IntVar(&o.maxNames, "max-batch-names", 8192, "names per batch cap (at most 10000)")
-	flags.IntVar(&o.maxFailures, "max-failures", 1000, "abort after this many per-name failures (they are journaled and retried by a rerun)")
+	flags.IntVar(&o.maxFailures, "max-failures", 0, "0 (default): a name that keeps failing is skipped, retried once at the end and reported (exit non-zero), never stopping the run; N>0 aborts above N skipped names")
 	flags.DurationVar(&o.tick, "retry-interval", 2*time.Second, "first backoff after a transient guard response (429/502/503/504) or transport error")
 	flags.DurationVar(&o.maxBackoff, "max-backoff", 30*time.Second, "backoff ceiling for transient retries")
 	flags.IntVar(&o.transportRetries, "transport-retries", 0, "deprecated and ignored: transport errors, refused connections and 502/503/504 retry until --stall-timeout")
+	flags.DurationVar(&o.progressInterval, "progress-interval", 30*time.Second, "print one progress line (done/total, names/s, MB/s, ETA, limiter, retries, waits, skipped) per interval")
 	flags.DurationVar(&o.stallTimeout, "stall-timeout", 30*time.Minute, "abort with an error once a source or target has been unreachable (or answered only transient errors) this long without progress")
 	flags.DurationVar(&o.transferIdle, "transfer-idle-timeout", defaultTransferIdle, "abort a pull/verify after this long without bytes; a multi-name batch splits, one name gets 3 attempts")
 	if err := flags.Parse(args); err != nil {
@@ -139,8 +140,11 @@ type copyStats struct {
 }
 
 type planFreeCopier struct {
+	*hostWaiter
 	o         copyOptions
-	m         *mover
+	progress  *copyProgress
+	skipMu    sync.Mutex
+	skipped   []copySkip
 	journal   *copyJournal
 	sizer     *batchSizer
 	serverMax int64
@@ -209,7 +213,8 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	}
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: o.tick, transferIdle: o.transferIdle, debtGuardOff: !o.debtGuard},
 		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: copyHeaderTimeout(o.transferIdle)}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	c := &planFreeCopier{o: o, m: m, started: time.Now(), multi: len(o.froms) > 1}
+	progress := newCopyProgress()
+	c := &planFreeCopier{hostWaiter: &hostWaiter{m: m, tick: o.tick, maxBackoff: o.maxBackoff, stallTimeout: o.stallTimeout, progress: progress}, progress: progress, o: o, started: time.Now(), multi: len(o.froms) > 1}
 	var target copyStatus
 	sourceTransfers := 0
 	for _, from := range o.froms {
@@ -247,13 +252,32 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		defer closeNames()
 		sources = append(sources, copySource{origin: from, next: next})
 	}
+	ctx, stall := context.WithCancelCause(ctx)
+	defer stall(nil)
+	var background sync.WaitGroup
+	reportCtx, stopReport := context.WithCancel(ctx)
+	background.Add(2)
+	go func() { defer background.Done(); c.report(reportCtx, stall) }()
+	go func() { defer background.Done(); c.countTotal(reportCtx, owner) }()
 	err = c.run(ctx, sources, owner)
-	c.summary(err)
+	if err == nil {
+		err = c.retrySkipped(ctx)
+	}
+	stopReport()
+	background.Wait()
+	if cause := context.Cause(ctx); cause != nil && errors.Is(cause, errCopyStall) {
+		err = cause
+	}
+	skippedFile, werr := c.writeSkipped()
+	if err == nil {
+		err = werr
+	}
+	c.summary(err, skippedFile)
 	if err != nil {
 		return err
 	}
-	if n := c.stats.failed.Load(); n > 0 {
-		return fmt.Errorf("%d names failed (journaled); rerun the same command to retry them", n)
+	if n := c.skippedCount(); n > 0 {
+		return fmt.Errorf("%d names still skipped after a final retry (listed in %s); rerun the same command to retry them", n, skippedFile)
 	}
 	return nil
 }
@@ -367,7 +391,10 @@ func (c *planFreeCopier) run(ctx context.Context, sources []copySource, owner fu
 		go func() {
 			defer wg.Done()
 			for batch := range batches {
-				if err := c.send(ctx, batch.source, batch.names, false); err != nil {
+				c.progress.inFlight.Add(1)
+				err := c.send(ctx, batch.source, batch.names, false)
+				c.progress.inFlight.Add(-1)
+				if err != nil {
 					cancel(err)
 				}
 			}
@@ -483,6 +510,7 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 				return err
 			}
 			c.stats.copied.Add(int64(len(names)))
+			c.progress.success()
 			c.stats.bytes.Add(bytes)
 			batches := c.stats.batches.Add(1)
 			event("batch", map[string]any{"source": source, "first": names[0], "last": names[len(names)-1], "names": len(names), "bytes": bytes, "seconds": time.Since(start).Seconds(), "batches": batches, "next_batch_names": c.sizer.names()})
@@ -552,12 +580,11 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 		if err := c.journal.failed(c.rowSource(source), names[0], status, err.Error()); err != nil {
 			return err
 		}
-		failed := c.stats.failed.Add(1)
-		event("name_failed", map[string]any{"level": "error", "source": source, "metric": names[0], "status": status, "error": err.Error(), "failed": failed})
-		if failed > int64(c.o.maxFailures) {
-			// The cause is text, not wrapped: run() drops causes that are
-			// context.Canceled, which would hide this stop.
-			return fmt.Errorf("%d names failed, above --max-failures %d (last %s: %s)", failed, c.o.maxFailures, names[0], err.Error())
+		c.stats.failed.Add(1)
+		failed := c.skip(copySkip{Source: source, Name: names[0], Status: status, Reason: err.Error()})
+		event("name_skipped", map[string]any{"level": "warn", "source": source, "metric": names[0], "status": status, "error": err.Error(), "skipped": failed})
+		if c.o.maxFailures > 0 && failed > c.o.maxFailures {
+			return fmt.Errorf("%d names skipped, above --max-failures %d (last %s: %v)", failed, c.o.maxFailures, names[0], err)
 		}
 		return nil
 	}
@@ -577,134 +604,6 @@ func (c *planFreeCopier) checkProofs(names []string, proofs []chunkstore.Transfe
 	return nil
 }
 
-var errCopyStall = errors.New("copy stalled")
-
-// retryTransient retries guard responses (429 left by request, 502/503/504),
-// refused/reset connections and other transport errors with capped
-// exponential backoff for as long as a source or target restart takes. Only
-// --stall-timeout without a successful call ends it, loudly. Definitive API
-// errors and idle timeouts return at once.
-func (c *planFreeCopier) retryTransient(ctx context.Context, path string, hosts []string, call func() error) error {
-	delay := c.o.tick
-	var since, first time.Time
-	for attempt := 1; ; attempt++ {
-		err := call()
-		if err == nil || ctx.Err() != nil {
-			if err == nil && !first.IsZero() {
-				event("guard_recovered", map[string]any{"path": path, "attempts": attempt, "retry_seconds": time.Since(first).Seconds()})
-			}
-			return err
-		}
-		if !transientCopyError(err) {
-			return err
-		}
-		now := time.Now()
-		if first.IsZero() {
-			first = now
-		}
-		// A host that does not answer its status endpoint is restarting:
-		// wait for it without limit. The stall clock runs only while every
-		// host involved answers and the call still fails.
-		down := !c.hostsUp(ctx, hosts)
-		if since.IsZero() || down {
-			since = now
-		}
-		if stuck := time.Since(since); !down && stuck >= c.o.stallTimeout {
-			event("copy_stalled", map[string]any{"level": "error", "path": path, "hosts": hosts, "attempts": attempt, "stuck_seconds": stuck.Seconds(), "stall_timeout": c.o.stallTimeout.String(), "error": err.Error()})
-			return fmt.Errorf("%w: %s: no progress for %s with every host up (--stall-timeout %s): %w", errCopyStall, path, stuck.Round(time.Second), c.o.stallTimeout, err)
-		}
-		event("guard_retry", map[string]any{"path": path, "attempt": attempt, "delay_seconds": delay.Seconds(), "host_down": down, "retry_seconds": time.Since(first).Seconds(), "error": err.Error()})
-		if err := sleepContext(ctx, delay); err != nil {
-			return err
-		}
-		delay = min(2*delay, c.o.maxBackoff)
-	}
-}
-
-// restartCause matches a target 500 whose cause is the source export
-// transport (refused, reset or cut while the source restarts), as the target
-// buckyd reports it.
-var restartCause = []string{"connection refused", "connection reset", "broken pipe", "unexpected EOF", ": EOF", "i/o timeout", "no route to host", "server closed idle connection", "timeout awaiting response headers"}
-
-// transientCopyError reports errors a host restart produces: guard and
-// gateway responses, a target 500 caused by a source transport error, and any
-// non-API (transport, decode of a cut response) error.
-func transientCopyError(err error) bool {
-	var api *apiError
-	var idle *transferIdleError
-	var dns *net.DNSError
-	switch {
-	case errors.As(err, &idle), errors.Is(err, errCopyProof), errors.Is(err, errCopyStall):
-		return false
-	case errors.As(err, &dns) && dns.IsNotFound:
-		// A misspelt origin fails at once instead of waiting forever.
-		return false
-	case errors.As(err, &api):
-		switch api.Status {
-		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusRequestTimeout:
-			return true
-		case http.StatusInternalServerError:
-			for _, cause := range restartCause {
-				if strings.Contains(api.Message, cause) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return true
-}
-
-func (c *planFreeCopier) status(ctx context.Context, endpoint string, out *copyStatus) error {
-	return c.retryTransient(ctx, endpoint+"/v1/transfer/status", []string{endpoint}, func() error {
-		*out = copyStatus{}
-		_, err := c.m.request(ctx, endpoint, "/v1/transfer/status", nil, out)
-		return err
-	})
-}
-
-// awaitHosts probes both hosts once after a definitive-looking batch error.
-// When either does not answer, it waits (bounded by --stall-timeout) until
-// both do and reports true so the caller re-pulls the batch unchanged.
-func (c *planFreeCopier) awaitHosts(ctx context.Context, hosts []string, cause error) (bool, error) {
-	waited := false
-	for _, endpoint := range hosts {
-		var probe copyStatus
-		if err := c.probe(ctx, endpoint); err == nil {
-			continue
-		} else if ctx.Err() != nil {
-			return false, ctx.Err()
-		} else if !transientCopyError(err) {
-			continue
-		} else {
-			event("host_down", map[string]any{"level": "warn", "host": endpoint, "error": err.Error(), "batch_error": cause.Error()})
-		}
-		if err := c.status(ctx, endpoint, &probe); err != nil {
-			return false, err
-		}
-		waited = true
-	}
-	return waited, nil
-}
-
-// probe asks one host for its status once, bounded to 10 s.
-func (c *planFreeCopier) probe(ctx context.Context, endpoint string) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	var status copyStatus
-	_, err := c.m.requestOnce(ctx, endpoint, "/v1/transfer/status", nil, &status)
-	return err
-}
-
-func (c *planFreeCopier) hostsUp(ctx context.Context, hosts []string) bool {
-	for _, endpoint := range hosts {
-		if c.probe(ctx, endpoint) != nil {
-			return false
-		}
-	}
-	return true
-}
-
 // rowSource tags journal rows with their donor when one run covers several.
 func (c *planFreeCopier) rowSource(source string) string {
 	if c.multi {
@@ -713,9 +612,21 @@ func (c *planFreeCopier) rowSource(source string) string {
 	return ""
 }
 
-func (c *planFreeCopier) summary(err error) {
+func (c *planFreeCopier) summary(err error, skippedFile string) {
 	seconds := time.Since(c.started).Seconds()
-	fields := map[string]any{"discovered": c.stats.discovered.Load(), "resumed_skipped": c.stats.resumed.Load(), "not_owned": c.stats.notOwned.Load(), "copied": c.stats.copied.Load(), "failed": c.stats.failed.Load(), "batches": c.stats.batches.Load(), "bytes": c.stats.bytes.Load(), "seconds": seconds}
+	skipped := c.skippedCount()
+	fields := map[string]any{"discovered": c.stats.discovered.Load(), "resumed_skipped": c.stats.resumed.Load(), "not_owned": c.stats.notOwned.Load(), "copied": c.stats.copied.Load(), "skip_events": c.stats.failed.Load(), "skipped": skipped, "batches": c.stats.batches.Load(), "bytes": c.stats.bytes.Load(), "seconds": seconds, "retries": c.progress.retries.Load(), "target_429s": c.m.backpressure.Load()}
+	if skippedFile != "" {
+		fields["skipped_file"] = skippedFile
+		c.skipMu.Lock()
+		var sample []string
+		for _, s := range c.skipped[:min(20, len(c.skipped))] {
+			sample = append(sample, s.Name)
+		}
+		c.skipMu.Unlock()
+		fields["skipped_sample"] = sample
+	}
+	fields["line"] = fmt.Sprintf("done: %d copied, %d skipped, %d already done, %d not owned, %.1f MB in %s", c.stats.copied.Load(), skipped, c.stats.resumed.Load(), c.stats.notOwned.Load(), float64(c.stats.bytes.Load())/1e6, time.Since(c.started).Round(time.Second))
 	if seconds > 0 {
 		fields["names_per_second"] = float64(c.stats.copied.Load()) / seconds
 		fields["mb_per_second"] = float64(c.stats.bytes.Load()) / seconds / 1e6

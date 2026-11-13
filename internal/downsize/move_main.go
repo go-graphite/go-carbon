@@ -65,6 +65,7 @@ type mover struct {
 	absentProofSlots sync.Map
 	warnedEstimate   atomic.Bool
 	batchesSent      atomic.Int64
+	backpressure     atomic.Int64 // 429 responses seen by request
 	localSources     map[string]*chunkstore.TransferSource
 	localTargets     map[string]string
 	binaryProofs     sync.Map
@@ -496,6 +497,7 @@ func (m *mover) request(ctx context.Context, endpoint, path string, body any, ou
 		if maximumSpeed {
 			backoffHost = maximumSpeedBackpressureHost(endpoint, path, body, api)
 		}
+		m.backpressure.Add(1)
 		event("backpressure", map[string]any{"host": backoffHost, "via_endpoint": endpoint, "path": path, "attempt": attempt + 1})
 		if m.tuner != nil {
 			m.tuner.backoff(backoffHost)
