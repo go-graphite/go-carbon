@@ -32,6 +32,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/golang/snappy"
 	"github.com/grafana/pyroscope-go"
+	"github.com/lomik/zapwriter"
 )
 
 const authHeader = "X-Buckyd-Authorization"
@@ -65,8 +66,8 @@ type Config struct {
 	Hash             string   `toml:"hash"`
 	Replicas         int      `toml:"replicas"`
 	Nodes            []string `toml:"nodes"`
-	// TransferSources lists hosts, besides the ring nodes, that /v1/transfer/pull
-	// may fetch from, e.g. the members of another ring during a resize.
+	// TransferSources is deprecated and ignored: /v1/transfer/pull accepts any
+	// source host. The key still parses so existing configs load.
 	TransferSources []string `toml:"transfer-sources"`
 	ReadMTime       bool     `toml:"mtime"`
 	Sparse          bool     `toml:"sparse"`
@@ -152,6 +153,9 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 		return nil, err
 	}
 	normalizeConfig(&config)
+	if len(config.TransferSources) > 0 {
+		zapwriter.Logger("buckyd").Warn("transfer-sources is deprecated and ignored; /v1/transfer/pull accepts any source")
+	}
 	nodes, err := parseNodes(config.Nodes)
 	if err != nil {
 		return nil, err

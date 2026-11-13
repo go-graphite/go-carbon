@@ -128,7 +128,6 @@ func start(root, node string, nodes []string, continuation bool, cacheMB, memtab
 	cfg.Buckyd.Bind = address()
 	cfg.Buckyd.Node = node
 	cfg.Buckyd.Nodes = nodes
-	cfg.Buckyd.TransferSources = []string{"127.0.0.1"}
 	cfg.Buckyd.Hash = "jump_fnv1a"
 	cfg.Buckyd.Replicas = 1
 	cfg.Buckyd.MaxTransfers = 32

@@ -30,7 +30,7 @@ func nativeControllerStore(t *testing.T) *store.Store {
 }
 func nativeControllerService(t *testing.T, s *store.Store) http.Handler {
 	t.Helper()
-	service, err := buckyd.New(buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 2, MaxBodyBytes: 1 << 20, TransferSources: []string{"127.0.0.1"}}, s)
+	service, err := buckyd.New(buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 2, MaxBodyBytes: 1 << 20}, s)
 	if err != nil {
 		t.Fatal(err)
 	}

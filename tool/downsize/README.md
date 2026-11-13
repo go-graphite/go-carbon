@@ -366,9 +366,8 @@ Batch proof responses negotiate a compact binary encoding. Verification falls
 back to JSON if a peer does not advertise support or is downgraded after
 negotiation. The proof contents and durable verification rules are unchanged.
 
-Generated `transfer-sources` lists include old-ring node names and their explicit
-HTTP endpoint hostnames, including management aliases. Apply these drafts before
-metric pulls so the source token is sent only to configured old-ring origins.
+Buckyd accepts any graphite-store host as a pull source (callers authenticate
+with the buckyd JWT); there is no `transfer-sources` allowlist to configure.
 
 For disjoint host groups, independent cluster controllers can run concurrently.
 Within one cluster use one controller for all donors: its per-host budgets must

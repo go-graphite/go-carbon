@@ -49,10 +49,7 @@ func TestBulkPullVerifyDeleteAndAuthorization(t *testing.T) {
 			t.Fatal("scoped/update-only token accepted", response.Code)
 		}
 	}
-	if response := invoke("/v1/transfer/pull", request, root); response.Code != 403 {
-		t.Fatal("pull from an unlisted source accepted", response.Code)
-	}
-	destination.config.TransferSources = []string{"127.0.0.1"}
+	// No transfer-sources allowlist: any source is accepted with a valid token.
 	response := invoke("/v1/transfer/pull", request, root)
 	if response.Code != 200 {
 		t.Fatalf("pull %d %s", response.Code, response.Body.String())
