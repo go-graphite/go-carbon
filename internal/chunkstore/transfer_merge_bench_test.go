@@ -97,11 +97,40 @@ func newMergeBenchFixtureWith(tb testing.TB, names int, overlap bool, gaps, nan 
 	return mergeBenchFixture{now: now, handoff: handoff, source: exported}
 }
 
+// classic stores the fixture's records classic, as converted and once-merged
+// copies are: it imports them into a scratch store where the names exist but
+// are empty, with the append merge off (RestoreArchives), and exports them.
+func (f mergeBenchFixture) classic(tb testing.TB) mergeBenchFixture {
+	tb.Helper()
+	ctx := context.Background()
+	now := f.now
+	scratch := openMergeBenchStore(tb, filepath.Join(tb.TempDir(), "classic"), func() time.Time { return now })
+	scratch.SetTransferMergeAppendForTest(false)
+	names := make([]string, len(f.source))
+	for i, r := range f.source {
+		names[i] = r.Config.Name
+		if _, err := scratch.Create(ctx, mergeBenchConfig(names[i])); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	if _, err := scratch.ImportTransfer(ctx, f.clone("")); err != nil {
+		tb.Fatal(err)
+	}
+	exported, err := scratch.ExportTransfer(ctx, names)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	f.source = exported
+	return f
+}
+
 // clone renames the exported records so each round imports fresh names.
 func (f mergeBenchFixture) clone(prefix string) []store.TransferMetric {
 	out := make([]store.TransferMetric, len(f.source))
 	for i, r := range f.source {
-		r.Config.Name = prefix + "." + r.Config.Name
+		if prefix != "" {
+			r.Config.Name = prefix + "." + r.Config.Name
+		}
 		r.Version.Name = r.Config.Name
 		r.Keys = slices.Clone(r.Keys)
 		out[i] = r
@@ -134,9 +163,9 @@ func (f mergeBenchFixture) seedTarget(tb testing.TB, target *store.Store, record
 func BenchmarkTransferImportPresent(b *testing.B) {
 	const names = 32
 	for _, mode := range []struct {
-		name                      string
-		present, overlap, remerge bool
-		gaps, nan                 float64
+		name                               string
+		present, overlap, remerge, classic bool
+		gaps, nan                          float64
 	}{
 		{name: "absent"},
 		{name: "present", present: true},
@@ -147,9 +176,14 @@ func BenchmarkTransferImportPresent(b *testing.B) {
 		{name: "present-nan", present: true, nan: 0.001},
 		// The target copy was merged before, so it is classic, not compressed.
 		{name: "remerge", present: true, remerge: true},
+		// The copy is classic too, as converted copies are: both sides classic.
+		{name: "remerge-classic", present: true, remerge: true, classic: true},
 	} {
 		b.Run(mode.name, func(b *testing.B) {
 			fixture := newMergeBenchFixtureWith(b, names, mode.overlap, mode.gaps, mode.nan)
+			if mode.classic {
+				fixture = fixture.classic(b)
+			}
 			now := fixture.now
 			target := openMergeBenchStore(b, filepath.Join(b.TempDir(), "target"), func() time.Time { return now })
 			ctx := context.Background()
