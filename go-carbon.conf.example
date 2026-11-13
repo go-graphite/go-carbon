@@ -13,6 +13,8 @@
 # native block cache, memtables and mappings. Explicit TOML cache keys, including
 # zero, and the GOMEMLIMIT environment variable win; remove cache keys to derive
 # them. This is an approximate envelope, not an RSS cap. See doc/memory-budget.md.
+# Without memory-budget and GOMEMLIMIT, the Go memory limit defaults to half of
+# host RAM or the cgroup limit; GOMEMLIMIT=off keeps Go's unlimited default.
 # memory-budget = "48%"
 # Opt-in estimated CPU by subsystem: default 1s sample every 60s when enabled.
 # Duration must be positive and at most 1/60 of the interval (duty below 2%
@@ -69,7 +71,8 @@ store-memtable-size = 67108864
 # an increase. For example, 8 workers need at least 8589934592 bytes (8 GiB).
 store-native-combine-workers = 2
 store-native-combine-memory = 2147483648
-# Background compaction budget. Zero preserves Pebble's default of one worker.
+# Background compaction budget. Zero selects CPUs/6 workers, from 4 to 64
+# (32 on 192 CPUs); Pebble runs more than one only while L0 or debt needs it.
 # L0 concurrency adds a compactor for each multiple of this sublevel count,
 # capped by the worker budget; zero preserves Pebble's default of ten.
 # Tune against sustained queue/debt growth. The worker budget reloads on SIGHUP

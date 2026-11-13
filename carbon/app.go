@@ -462,7 +462,7 @@ func (app *App) ReloadConfig() error {
 	if app.MetricStore != nil {
 		// Compaction concurrency and pacing trade background store work
 		// against foreground flushes, so they are tuned on a live host.
-		if err = app.MetricStore.SetCompactionWorkers(max(1, app.Config.Whisper.StoreCompactionWorkers)); err != nil {
+		if err = app.MetricStore.SetCompactionWorkers(storeCompactionWorkers(app.Config.Whisper.StoreCompactionWorkers, runtime.NumCPU())); err != nil {
 			return err
 		}
 		if err = app.MetricStore.SetCompactionRate(app.Config.Whisper.StoreCompactionRate); err != nil {
@@ -1136,7 +1136,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			IngestParallel:            conf.Whisper.StoreMigrationIngestParallel,
 			CacheSize:                 conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
-			CompactionWorkers:           conf.Whisper.StoreCompactionWorkers,
+			CompactionWorkers:           storeCompactionWorkers(conf.Whisper.StoreCompactionWorkers, runtime.NumCPU()),
 			CompactionRate:              conf.Whisper.StoreCompactionRate,
 			CompactionHeadroom:          conf.Whisper.StoreCompactionHeadroom,
 			CompactionKeepPacingOnDebt:  !conf.Whisper.StoreCompactionDebtBypass,
