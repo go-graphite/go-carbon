@@ -129,7 +129,7 @@ func BenchmarkTransferImportPresent(b *testing.B) {
 			now := fixture.now
 			target := openMergeBenchStore(b, filepath.Join(b.TempDir(), "target"), func() time.Time { return now })
 			ctx := context.Background()
-			appendedBefore := store.TransferMergeAppended()
+			appendedBefore := target.Stats().TransferMergeAppended
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
@@ -143,7 +143,7 @@ func BenchmarkTransferImportPresent(b *testing.B) {
 				}
 			}
 			b.ReportMetric(float64(b.Elapsed().Microseconds())/1e3/float64(b.N*names), "ms/name")
-			b.ReportMetric(float64(store.TransferMergeAppended()-appendedBefore)/float64(b.N*names), "appended/name")
+			b.ReportMetric(float64(target.Stats().TransferMergeAppended-appendedBefore)/float64(b.N*names), "appended/name")
 		})
 	}
 }
