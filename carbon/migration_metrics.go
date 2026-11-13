@@ -55,6 +55,7 @@ type migrationSnapshot struct {
 	cacheMetrics                          int32
 	cacheBytes                            int64
 	cachePointBytes                       int64
+	realtimeIndexPending                  int
 	recoveryWindow, recoveryRemaining     int64
 	recoveryCeiling                       int64
 	recoveryRejections                    uint64
@@ -324,6 +325,8 @@ var migrationMetricSpecs = func() []metricSpec {
 			value: func(s *migrationSnapshot) float64 { return float64(s.workingReserved) }},
 		metricSpec{desc: prometheus.NewDesc("cache_points", "Points held in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePoints) }},
+		metricSpec{desc: prometheus.NewDesc("cache_realtime_index_pending", "Distinct names waiting for realtime index insertion, including the current batch.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 { return float64(s.realtimeIndexPending) }},
 		metricSpec{desc: prometheus.NewDesc("cache_metrics", "Metrics with points in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheMetrics) }},
 		metricSpec{desc: prometheus.NewDesc("cache_estimated_bytes", "Estimated owned write-cache memory: names, items, buffer capacities, indexes, in-flight points, input-log tracking and queue scratch. Excludes mapped recovery files and the input-log encoder.", nil, nil), kind: prometheus.GaugeValue, cache: true,
@@ -600,6 +603,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	if cache != nil {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
+		s.realtimeIndexPending = cache.RealtimeIndexPending()
 		s.cacheBytes = cache.EstimatedBytes()
 		s.cachePointBytes = cache.PointBytes()
 		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()

@@ -17,7 +17,7 @@ import (
 )
 
 // The mutable trie contains only metrics absent from the immutable generation.
-// Its sole writer is the existing index updater; queries retain the generation
+// Writers serialize with metricStoreIndexMu; queries retain the generation
 // they started with until completion.
 func (ti *trieIndex) insert(path string, logical, physical, points, firstSeen int64) (*trieNode, error) {
 	if ti.snapshot != nil && strings.HasSuffix(path, ti.fileExt) {
@@ -673,40 +673,53 @@ func (u *fileListUpdate) replaceSnapshot() {
 		u.logger.Warn("failed to load replacement index snapshot", zap.Error(err))
 		return
 	}
-	old := u.trieIdx
 	next := newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
-	next.snapshot, next.throughputs = snapshot, old.throughputs
+	next.snapshot = snapshot
+	u.listener.metricStoreIndexMu.Lock()
+	old := u.trieIdx
+	next.throughputs = old.throughputs
 	pending := u.snapshotNotifications
-	if pending == nil {
-		pending = make(map[string]*trieNode)
+	// Start dual writes before releasing the lock. Captured entries are copied
+	// one at a time so a large overlay cannot stop realtime ingestion for the
+	// duration of its transfer. No journal of arrivals during the copy is needed.
+	u.trieIdx = next
+	u.listener.realtimeNext = next
+	u.listener.metricStoreIndexMu.Unlock()
+	copyMetric := func(name string, node *trieNode) error {
+		u.listener.metricStoreIndexMu.Lock()
+		defer u.listener.metricStoreIndexMu.Unlock()
+		return next.copyOverlayMetric(name, node)
 	}
+	var copyErr error
 	if old.snapshot != nil {
-		names, nodes, _, _, _ := old.allMetricsNodeMutable(old.root, '.', "", int(^uint(0)>>1), false)
-		for i, name := range names {
-			pending[name] = nodes[i]
-		}
+		copyErr = old.walkMutableMetrics(func(name []byte, node *trieNode) error { return copyMetric(string(name), node) })
 	}
-	// On the first conversion, the generation-pruned trie contains exactly the
-	// scanned files, notifications processed during that scan, and remaining
-	// cache-scan names. The first group is already in the snapshot: avoid a
-	// second traversal of every old heap node just to discover the small delta.
-	for path := range u.cacheMetricNames {
-		if strings.HasSuffix(path, ".wsp") {
-			name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".wsp"), "/", ".")
-			if _, ok := pending[name]; !ok {
-				pending[name] = nil
+	if copyErr == nil {
+		for name, node := range pending {
+			if copyErr = copyMetric(name, node); copyErr != nil {
+				break
 			}
 		}
 	}
-	for name, node := range pending {
-		if err := next.copyOverlayMetric(name, node); err != nil {
-			_ = snapshot.close()
-			u.logger.Warn("failed to transfer snapshot overlay", zap.Error(err))
-			return
+	if copyErr == nil {
+		for path := range u.cacheMetricNames {
+			if strings.HasSuffix(path, ".wsp") {
+				name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".wsp"), "/", ".")
+				if copyErr = copyMetric(name, nil); copyErr != nil {
+					break
+				}
+			}
 		}
 	}
-	u.listener.drainRealtimeMetrics(next)
-	u.trieIdx = next
+	if copyErr != nil {
+		u.listener.metricStoreIndexMu.Lock()
+		u.trieIdx, u.listener.realtimeNext = old, nil
+		u.listener.metricStoreIndexMu.Unlock()
+		_ = snapshot.close()
+		u.logger.Warn("failed to transfer snapshot overlay", zap.Error(copyErr))
+		return
+	}
+	u.drainRealtimeMetrics()
 	u.listener.prewarmNamespaceHashes(snapshot)
 	u.metricsKnown = snapshot.manifest.Records + uint64(next.getFileCount())
 }
@@ -725,7 +738,10 @@ func (ti *trieIndex) copyOverlayMetric(name string, node *trieNode) error {
 		m.dataPoints = atomic.LoadInt64(&source.dataPoints)
 		m.firstSeenAt = atomic.LoadInt64(&source.firstSeenAt)
 	}
-	_, err = ti.insertMutable(path, m.logicalSize, m.physicalSize, m.dataPoints, m.firstSeenAt)
+	inserted, err := ti.insertMutable(path, m.logicalSize, m.physicalSize, m.dataPoints, m.firstSeenAt)
+	if inserted != nil && (node == nil || node.pending.Load()) {
+		inserted.pending.Store(true)
+	}
 	return err
 }
 
@@ -743,14 +759,33 @@ func (ti *trieIndex) mutableDirectory(name string) *trieNode {
 }
 
 func (u *fileListUpdate) drainRealtimeMetrics() {
-	for remaining := len(u.listener.newMetricsChan); remaining > 0; remaining-- {
-		metric := <-u.listener.newMetricsChan
-		node := u.listener.insertRealtimeMetric(u.trieIdx, metric)
-		if node != nil && u.snapshotWriter != nil {
-			if u.snapshotNotifications == nil {
-				u.snapshotNotifications = make(map[string]*trieNode)
+	for remaining := u.listener.newMetricsQueue.Len(); remaining > 0; {
+		u.listener.metricStoreIndexMu.Lock()
+		batch := u.listener.newMetricsQueue.Take(min(4096, remaining))
+		for _, metric := range batch {
+			if current := u.listener.CurrentFileIndex(); current != nil && current.trieIdx != nil && current.trieIdx != u.trieIdx {
+				u.listener.insertRealtimeMetric(current.trieIdx, metric)
 			}
-			u.snapshotNotifications[metric] = node
+			node := u.listener.insertRealtimeMetric(u.trieIdx, metric)
+			u.rememberRealtimeMetric(metric, node)
 		}
+		u.listener.newMetricsQueue.Ack(batch)
+		u.listener.metricStoreIndexMu.Unlock()
+		if len(batch) == 0 {
+			return
+		}
+		remaining -= len(batch)
+	}
+}
+
+// The first heap-to-snapshot conversion must carry names which have no file yet.
+// Subsequent conversions copy the existing mutable overlay instead.
+func (u *fileListUpdate) rememberRealtimeMetric(metric string, node *trieNode) {
+	if node != nil && u.trieIdx.snapshot == nil && u.fileIndex != nil &&
+		u.listener.fileListCache != "" && u.listener.fileListCacheVersion == FLCVersion2 {
+		if u.snapshotNotifications == nil {
+			u.snapshotNotifications = make(map[string]*trieNode)
+		}
+		u.snapshotNotifications[metric] = node
 	}
 }

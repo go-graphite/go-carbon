@@ -230,7 +230,7 @@ func TestMetricStoreMappedNotificationsDuringRefresh(t *testing.T) {
 	for i := range 32 {
 		name := fmt.Sprintf("notified.metric%02d", i)
 		c.Add(points.OnePoint(name, 1, 1700000000))
-		l.newMetricsChan <- name
+		l.newMetricsQueue.Add(name)
 		if _, err := db.Create(ctx, store.MetricConfig{Name: name, Retentions: []store.Retention{{Step: 1, Count: 60}}, AggregationMethod: store.Average}); err != nil {
 			t.Fatal(err)
 		}
