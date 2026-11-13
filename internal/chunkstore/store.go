@@ -1518,14 +1518,19 @@ func (s *Store) Create(ctx context.Context, config MetricConfig) (Metadata, erro
 	}
 	unlock := s.lockMetricMutation(config.Name)
 	defer unlock()
+	// Every catalog publisher holds this name's mutation stripe. A complete
+	// membership filter proves absence; otherwise keep the potentially cold
+	// LSM read outside the global ID-allocation/commit lock.
+	if s.catalogMembership.mayContain(config.Name) {
+		if _, closer, err := s.db.Get(catalogKey(config.Name)); err == nil {
+			closer.Close()
+			return Metadata{}, ErrExists
+		} else if !errors.Is(err, pebble.ErrNotFound) {
+			return Metadata{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, closer, err := s.db.Get(catalogKey(config.Name)); err == nil {
-		closer.Close()
-		return Metadata{}, ErrExists
-	} else if !errors.Is(err, pebble.ErrNotFound) {
-		return Metadata{}, err
-	}
 	id := uint64(1)
 	if v, closer, err := s.db.Get(sequenceKey()); err == nil {
 		if len(v) != 8 {
