@@ -83,6 +83,11 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 // reanchorClassicArchive normalizes exactly one main-file archive. The caller
 // owns a private overlay inside the store's indexed batch; no intermediate
 // layout can become visible, even if retrying the ordinary write fails.
+//
+// Any timestamp present in the repaired ring may sit in slot zero, so the
+// repair picks the anchor that leaves the most points where they already are,
+// and writes only the groups whose points change. The surviving points are the
+// ones the original min-anchored repair kept; only their rotation differs.
 func reanchorClassicArchive(ctx context.Context, kv store.ContinuationIO, ai int) (uint64, error) {
 	fs := newContinuationFiles(kv, false)
 	file, err := fs.OpenFile(fs.main(), os.O_RDWR, 0600)
@@ -95,14 +100,20 @@ func reanchorClassicArchive(ctx context.Context, kv store.ContinuationIO, ai int
 		return 0, store.ErrFormat
 	}
 	a := f.data.layout.Archives[ai]
+	step, count := int64(a.Step), int64(a.Count)
+	groups := (a.Count + 127) / 128
 	prefix := continuationBlockPrefix(f.data.id, 'p', ai, 0)
-	type locatedPoint struct {
-		point store.Point
-		slot  int
+	old := make([]store.PointBlock, groups)
+	had := make([]bool, groups)
+	var stray []int // Empty groups past the archive end, deleted as before.
+	// A fresh repair overlay holds nothing under this archive yet: read the
+	// batch directly instead of cloning and sorting every block in the overlay.
+	src, direct := kv, false
+	if o, ok := kv.(*continuationOverlay); ok && o.untouched(prefix) {
+		src, direct = o.base, true
 	}
-	var points []locatedPoint
-	var oldGroups []int
-	err = kv.Visit(prefix, func(key, value []byte) error {
+	var scratch store.PointBlock
+	err = src.Visit(prefix, func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -110,82 +121,165 @@ func reanchorClassicArchive(ctx context.Context, kv store.ContinuationIO, ai int
 			return store.ErrFormat
 		}
 		index := int(binary.BigEndian.Uint32(key[len(prefix):]))
-		var block store.PointBlock
-		if err := store.DecodePointBlock(value, &block); err != nil {
+		block := &scratch
+		if index < groups {
+			block = &old[index]
+		}
+		if err := store.DecodePointBlock(value, block); err != nil {
 			return err
 		}
-		oldGroups = append(oldGroups, index)
-		for i, p := range block.Points {
+		for i := range block.Points {
 			if block.Present[i/64]&(uint64(1)<<uint(i%64)) == 0 {
 				continue
 			}
-			if index*128+i >= a.Count || p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(a.Step) != 0 {
+			p := block.Points[i]
+			if index*128+i >= a.Count || p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%step != 0 {
 				return fmt.Errorf("invalid classic point in archive %d: %w", ai, store.ErrFormat)
 			}
-			points = append(points, locatedPoint{p, index*128 + i})
+		}
+		if index < groups {
+			had[index] = true
+		} else {
+			stray = append(stray, index)
 		}
 		return nil
 	})
+	if direct && errors.Is(err, store.ErrNotFound) {
+		err = nil
+	}
 	if err != nil {
 		return 0, err
 	}
+	present := func(slot int) bool {
+		return old[slot/128].Present[slot%128/64]&(uint64(1)<<uint(slot%64)) != 0
+	}
 	oldBase := int64(0)
-	for _, p := range points {
-		if p.slot == 0 {
-			oldBase = p.point.Timestamp
-			break
-		}
+	if present(0) {
+		oldBase = old[0].Points[0].Timestamp
 	}
 	// Congruence is independent of the chosen base. A ring cannot represent
 	// two distinct timestamps in one congruence class; retain the newer one.
 	// For duplicate timestamps prefer the copy visible at the existing anchor.
-	winners := make(map[int64]locatedPoint, len(points))
+	// winner holds slot+1 of each congruence class's survivor, 0 for none.
+	winner := make([]int32, a.Count)
 	var drops uint64
-	for _, p := range points {
-		absolute := p.point.Timestamp / int64(a.Step) % int64(a.Count)
-		previous, exists := winners[absolute]
-		if exists && previous.point.Timestamp != p.point.Timestamp {
+	for slot := 0; slot < a.Count; slot++ {
+		if !present(slot) {
+			continue
+		}
+		ts := old[slot/128].Points[slot%128].Timestamp
+		absolute := ts / step % count
+		previous := int(winner[absolute]) - 1
+		if previous < 0 {
+			winner[absolute] = int32(slot + 1)
+			continue
+		}
+		prev := old[previous/128].Points[previous%128].Timestamp
+		if prev != ts {
 			drops++
 		}
-		visible := oldBase != 0 && int(((p.point.Timestamp-oldBase)/int64(a.Step)%int64(a.Count)+int64(a.Count))%int64(a.Count)) == p.slot
-		if !exists || p.point.Timestamp > previous.point.Timestamp || p.point.Timestamp == previous.point.Timestamp && visible {
-			winners[absolute] = p
+		visible := oldBase != 0 && int(((ts-oldBase)/step%count+count)%count) == slot
+		if ts > prev || ts == prev && visible {
+			winner[absolute] = int32(slot + 1)
 		}
 	}
-	base := int64(math.MaxInt64)
-	for _, p := range winners {
-		base = min(base, p.point.Timestamp)
-	}
-	fresh := make(map[int]*store.PointBlock)
-	for _, p := range winners {
-		slot := int((p.point.Timestamp - base) / int64(a.Step) % int64(a.Count))
-		block := fresh[slot/128]
-		if block == nil {
-			block = &store.PointBlock{}
-			fresh[slot/128] = block
+	// A survivor in class c anchors the ring at c: every survivor whose
+	// current slot already equals (class - c) mod count stays in place. Pick
+	// the anchor class that keeps the most survivors still, preferring the
+	// original min-timestamp anchor on ties.
+	stays := make([]int32, a.Count)
+	minClass, minTs := -1, int64(math.MaxInt64)
+	for class, w := range winner {
+		if w == 0 {
+			continue
 		}
-		block.Present[slot%128/64] |= uint64(1) << uint(slot%64)
-		block.Points[slot%128] = p.point // Preserve IEEE bits, including NaN payloads.
-		f.allocateClassicPages(a.Offset+slot*12, a.Offset+slot*12+12)
+		slot := int(w) - 1
+		ts := old[slot/128].Points[slot%128].Timestamp
+		stays[((int64(class)-int64(slot))%count+count)%count]++
+		if ts < minTs {
+			minClass, minTs = class, ts
+		}
+	}
+	anchor := minClass
+	for class, w := range winner {
+		if w != 0 && anchor >= 0 && stays[class] > stays[anchor] {
+			anchor = class
+		}
+	}
+	fresh := make([]store.PointBlock, groups)
+	filled := make([]bool, groups)
+	if anchor >= 0 {
+		runStart, runEnd := -1, -1
+		for i := 0; i < a.Count; i++ {
+			// Visit the new slots in order so page allocation coalesces runs.
+			class := (anchor + i) % a.Count
+			w := int(winner[class]) - 1
+			if w < 0 {
+				continue
+			}
+			p := old[w/128].Points[w%128]
+			slot := i
+			block := &fresh[slot/128]
+			filled[slot/128] = true
+			block.Present[slot%128/64] |= uint64(1) << uint(slot%64)
+			block.Points[slot%128] = p // Preserve IEEE bits, including NaN payloads.
+			if slot != runEnd {
+				if runStart >= 0 {
+					f.allocateClassicPages(a.Offset+runStart*12, a.Offset+runEnd*12)
+				}
+				runStart = slot
+			}
+			runEnd = slot + 1
+		}
+		if runStart >= 0 {
+			f.allocateClassicPages(a.Offset+runStart*12, a.Offset+runEnd*12)
+		}
 	}
 	// The optional seek certificate covered the old phase. Invalidate it;
 	// ordinary reads safely fall back without touching sibling archive data.
 	f.data.windowIndex = nil
 	f.data.windowLoaded, f.data.windowDirty = true, true
-	for _, index := range oldGroups {
-		if fresh[index] == nil {
-			if err := kv.Delete(continuationBodyKey(f.data.id, 'p', ai, 0, index)); err != nil {
+	for _, index := range stray {
+		if err := kv.Delete(continuationBodyKey(f.data.id, 'p', ai, 0, index)); err != nil {
+			return 0, err
+		}
+	}
+	for index := range fresh {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		key := continuationBodyKey(f.data.id, 'p', ai, 0, index)
+		switch {
+		case !filled[index]:
+			if had[index] {
+				if err := kv.Delete(key); err != nil {
+					return 0, err
+				}
+			}
+		case had[index] && !f.data.references && samePointBlock(&old[index], &fresh[index]):
+			// Unchanged: keep the stored bytes, saving the encode and the write.
+		default:
+			if err := f.setPointBlock(key, &fresh[index]); err != nil {
 				return 0, err
 			}
 		}
 	}
-	for index, block := range fresh {
-		if err := ctx.Err(); err != nil {
-			return 0, err
+	return drops, fs.flush()
+}
+
+// samePointBlock reports whether two groups hold the same present slots with
+// bit-identical timestamps and values; absent slots' contents are ignored.
+func samePointBlock(a, b *store.PointBlock) bool {
+	if a.Present != b.Present {
+		return false
+	}
+	for i := range a.Points {
+		if a.Present[i/64]&(uint64(1)<<uint(i%64)) == 0 {
+			continue
 		}
-		if err := f.setPointBlock(continuationBodyKey(f.data.id, 'p', ai, 0, index), block); err != nil {
-			return 0, err
+		if a.Points[i].Timestamp != b.Points[i].Timestamp || math.Float64bits(a.Points[i].Value) != math.Float64bits(b.Points[i].Value) {
+			return false
 		}
 	}
-	return drops, fs.flush()
+	return true
 }

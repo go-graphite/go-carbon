@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"sort"
+	"strings"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
@@ -153,4 +154,25 @@ func (emptyContinuationIO) Delete([]byte) error       { return nil }
 func (emptyContinuationIO) DeletePrefix([]byte) error { return nil }
 func (emptyContinuationIO) Visit([]byte, func([]byte, []byte) error) error {
 	return nil
+}
+
+// untouched reports whether the overlay holds no change at or under prefix, so
+// a Visit of prefix would read exactly what the base holds.
+func (o *continuationOverlay) untouched(prefix []byte) bool {
+	for _, p := range o.prefixes {
+		if bytes.HasPrefix(prefix, p) || bytes.HasPrefix(p, prefix) {
+			return false
+		}
+	}
+	for k := range o.values {
+		if strings.HasPrefix(k, string(prefix)) {
+			return false
+		}
+	}
+	for k := range o.deleted {
+		if strings.HasPrefix(k, string(prefix)) {
+			return false
+		}
+	}
+	return true
 }
