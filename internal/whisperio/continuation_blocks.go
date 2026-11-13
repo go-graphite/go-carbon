@@ -113,6 +113,35 @@ func (f *continuationFile) classicGroup(archive int, a whisper.StorageArchiveLay
 	return f.pointBlock(continuationBodyKey(f.data.id, 'p', archive, 0, groupIndex))
 }
 
+// readClassicGroup borrows scratch until the next group read. Sequential file
+// reads consume each group immediately, so they need no separately allocated
+// PointBlock per group. Update-local caches and references keep their existing
+// ownership rules through classicGroup.
+func (f *continuationFile) readClassicGroup(archive int, a whisper.StorageArchiveLayout, groupIndex int, scratch *store.PointBlock) (*store.PointBlock, error) {
+	_, buffered := f.fs.kv.(*continuationPointBuffer)
+	if buffered || f.data.references || skipUnallocatedGroups && !f.classicGroupAllocated(a, groupIndex) {
+		return f.classicGroup(archive, a, groupIndex, false)
+	}
+	read := f.fs.kv.Get
+	if f.sidecar {
+		read = f.fs.probe
+	}
+	start := f.fs.timer.Nested(stagetime.TailRead)
+	value, err := read(continuationBodyKey(f.data.id, 'p', archive, 0, groupIndex))
+	f.fs.timer.Unnest(stagetime.TailRead, start)
+	if errors.Is(err, store.ErrNotFound) {
+		*scratch = store.PointBlock{}
+		return scratch, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := store.DecodePointBlock(value, scratch); err != nil {
+		return nil, err
+	}
+	return scratch, nil
+}
+
 func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) error {
 	if err := f.trackClassicWindow(key, block); err != nil {
 		return err
@@ -705,6 +734,7 @@ func (f *continuationFile) ReadAt(data []byte, offset int64) (int, error) {
 	}
 	position, written := int(offset), 0
 	var points []whisper.TimeSeriesPoint
+	var classicScratch *store.PointBlock
 	for int64(position) < end {
 		if position < len(f.data.header) {
 			count := min(int(end)-position, len(f.data.header)-position)
@@ -732,7 +762,10 @@ func (f *continuationFile) ReadAt(data []byte, offset int64) (int, error) {
 			position, written = position+count, written+count
 		} else {
 			groupIndex := (position - a.Offset) / (128 * 12)
-			group, err := f.classicGroup(archive, a, groupIndex, false)
+			if classicScratch == nil {
+				classicScratch = new(store.PointBlock)
+			}
+			group, err := f.readClassicGroup(archive, a, groupIndex, classicScratch)
 			if err != nil {
 				return written, err
 			}
