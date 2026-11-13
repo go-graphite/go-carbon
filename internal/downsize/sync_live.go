@@ -307,7 +307,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 	}
 	return copyOptions{froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
 		streams: b.o.copyStreams, maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
-		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transportRetries: 10, transferIdle: idle}
+		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute}
 }
 
 // Copy runs the copy engine over a name list. A one-name probe first detects

@@ -182,3 +182,19 @@ func TestSyncCopyTransferControls(t *testing.T) {
 		t.Fatalf("res=%+v calls=%d err=%v", res, calls, err)
 	}
 }
+
+// Exercise the real engine so new required engine options cannot silently
+// turn every sync probe and fill into validation retries.
+func TestSyncCopyRealEngine(t *testing.T) {
+	_, src, dst := newFakeCopy(t, []string{"a", "b"})
+	b := newSyncLiveBackend(syncLiveOptions{copyBytes: 16 << 20, copyIdle: 80 * time.Second, copyAttempts: 1, copyStreams: 1})
+	dir := t.TempDir()
+	journal := filepath.Join(dir, "fill-r1-s0.jsonl")
+	if err := os.WriteFile(filepath.Join(dir, "fill-r1-s0.names"), []byte("a\nb\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := b.Copy(context.Background(), src, dst, []string{"a", "b"}, journal)
+	if err != nil || res.Copied != 2 || len(res.Failed) != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
