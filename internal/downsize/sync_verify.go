@@ -248,16 +248,21 @@ func (s *syncer) digest(ctx context.Context, store string, names []string, w syn
 // the archive carbonserver serves for the window. The target and every
 // source are digested concurrently: the calls are independent round trips,
 // so a window costs its slowest call (a cross-site replica) instead of the
-// sum of all of them.
+// sum of all of them. Point reads for mismatches and older stores use the
+// same fan-out, with results consumed in source order.
 func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, w syncRange) error {
 	if s.isDown(s.o.to) {
 		return fmt.Errorf("target: %w", errSyncStoreDown)
 	}
 	type sourceCheck struct {
-		source string
-		subset []string
-		digest map[string][]syncDigest
-		err    error
+		source   string
+		subset   []string
+		digest   map[string][]syncDigest
+		err      error
+		detail   []string
+		points   map[string]syncSeries
+		fetchErr error
+		coarse   []syncHole
 	}
 	var checks []*sourceCheck
 	for src, source := range s.o.from {
@@ -301,7 +306,6 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 		return fmt.Errorf("target digest: %w", targetErr)
 	}
 	byDigest := targetErr == nil // otherwise every source is read point by point
-	var targetPoints map[string]syncSeries
 	for _, c := range checks {
 		source, subset := c.source, c.subset
 		detail := subset
@@ -315,7 +319,7 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 						for _, h := range coarse {
 							h.Name, h.Source, h.Window = n, source, w.Name
 							h.First, h.Last = w.From, w.Until-1
-							row.Holes = append(row.Holes, h)
+							c.coarse = append(c.coarse, h)
 						}
 					}
 				}
@@ -330,17 +334,41 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 				return fmt.Errorf("source %s digest: %w", source, err)
 			}
 		}
-		if len(detail) == 0 {
+		c.detail = detail
+	}
+	needPoints := false
+	for _, c := range checks {
+		needPoints = needPoints || len(c.detail) > 0
+	}
+	if !needPoints {
+		return nil
+	}
+	var targetPoints map[string]syncSeries
+	var targetFetchErr error
+	var reads sync.WaitGroup
+	reads.Add(1)
+	go func() {
+		defer reads.Done()
+		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, names, w.From, w.Until)
+	}()
+	for _, c := range checks {
+		if len(c.detail) == 0 {
 			continue
 		}
-		s.prog.reads.Add(int64(len(detail)))
-		if targetPoints == nil {
-			var err error
-			if targetPoints, err = s.fetch(ctx, s.o.to, names, w.From, w.Until); err != nil {
-				return fmt.Errorf("target fetch: %w", err)
-			}
-		}
-		got, err := s.fetch(ctx, source, detail, w.From, w.Until)
+		s.prog.reads.Add(int64(len(c.detail)))
+		reads.Add(1)
+		go func() {
+			defer reads.Done()
+			c.points, c.fetchErr = s.fetch(ctx, c.source, c.detail, w.From, w.Until)
+		}()
+	}
+	reads.Wait()
+	if targetFetchErr != nil {
+		return fmt.Errorf("target fetch: %w", targetFetchErr)
+	}
+	for _, c := range checks {
+		source, detail, got, err := c.source, c.detail, c.points, c.fetchErr
+		row.Holes = append(row.Holes, c.coarse...)
 		if errors.Is(err, errSyncStoreDown) {
 			for _, n := range detail {
 				row.Skipped = append(row.Skipped, syncSkip{n, "source down: " + source})
@@ -479,6 +507,9 @@ func (s *syncer) progressLine() {
 	elapsed := time.Since(started).Seconds()
 	fields := map[string]any{"phase": phase, "done": done, "total": total, "skipped": p.skipped.Load(),
 		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d", s.o.streams)}
+	if st, ok := s.b.(interface{ syncTimings() []syncIOTiming }); ok {
+		fields["io_timings"] = st.syncTimings()
+	}
 	if st, ok := s.b.(interface{ syncStats() (int64, int64, int64) }); ok {
 		bytes, waits, busy := st.syncStats()
 		fields["read_bytes"], fields["waits"], fields["busy_retries"] = bytes, waits, busy

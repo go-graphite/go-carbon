@@ -150,7 +150,9 @@ func SyncMain(ctx context.Context, args []string) error {
 		return err
 	}
 	backend := newSyncLiveBackend(live)
+
 	err := runSync(ctx, o, backend)
+	event("sync_io", map[string]any{"timings": backend.syncTimings()})
 	if errors.Is(err, ErrSyncResidual) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitSyncResidual)

@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +45,42 @@ type syncLiveBackend struct {
 	bytes     atomic.Int64 // response bytes read for verification
 	waits     atomic.Int64 // retries while a store was unavailable
 	busy      atomic.Int64 // retries after 429 (all transfer slots taken)
+	timings   sync.Map     // phase + store -> *syncIOTime
+}
+
+// syncIOTime reports cumulative request time, including retries. Concurrent
+// calls overlap, so these seconds measure work, not elapsed phase time.
+type syncIOTime struct {
+	calls atomic.Int64
+	nanos atomic.Int64
+}
+type syncIOTiming struct {
+	Operation string  `json:"operation"`
+	Store     string  `json:"store"`
+	Calls     int64   `json:"calls"`
+	Seconds   float64 `json:"seconds"`
+}
+
+func (b *syncLiveBackend) recordTime(operation, store string) func() {
+	started := time.Now()
+	v, _ := b.timings.LoadOrStore([2]string{operation, store}, &syncIOTime{})
+	t := v.(*syncIOTime)
+	return func() { t.nanos.Add(int64(time.Since(started))); t.calls.Add(1) }
+}
+func (b *syncLiveBackend) syncTimings() []syncIOTiming {
+	var out []syncIOTiming
+	b.timings.Range(func(key, value any) bool {
+		k, v := key.([2]string), value.(*syncIOTime)
+		out = append(out, syncIOTiming{k[0], k[1], v.calls.Load(), float64(v.nanos.Load()) / float64(time.Second)})
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Operation != out[j].Operation {
+			return out[i].Operation < out[j].Operation
+		}
+		return out[i].Store < out[j].Store
+	})
+	return out
 }
 
 func (b *syncLiveBackend) syncStats() (int64, int64, int64) {
@@ -85,6 +123,7 @@ func (e *syncHTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.sta
 // waited out inside the tool. A 429 is retried after syncBusyDelay; other
 // failures back off from 2 s to 30 s.
 func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call func() error) error {
+	defer b.recordTime(what, store)()
 	delay := 2 * time.Second
 	var since time.Time
 	busy := 0
@@ -317,6 +356,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 // aborts (a store restarting) are rerun from its journal up to
 // --copy-attempts; names still failing are reported, not fatal.
 func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names []string, journal string) (syncCopyResult, error) {
+	defer b.recordTime("copy", source)()
 	namesPath := journal[:len(journal)-len(".jsonl")] + ".names"
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {

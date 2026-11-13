@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -489,6 +490,80 @@ func TestSyncShortRetentionRecovery(t *testing.T) {
 				if len(f.copies) != 0 {
 					t.Fatalf("fresh verification copied again: %v", f.copies)
 				}
+			}
+		})
+	}
+}
+
+// Every detail request must be in flight before any is allowed to finish.
+// This catches serial fallback reads without depending on benchmark timing.
+type rendezvousSync struct {
+	*fakeSync
+	entered atomic.Int64
+	ready   chan struct{}
+	want    int64
+}
+
+func (b *rendezvousSync) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
+	if b.entered.Add(1) == b.want {
+		close(b.ready)
+	}
+	select {
+	case <-b.ready:
+		return b.fakeSync.Fetch(ctx, store, names, from, until)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestSyncWindowConcurrentDetailParity(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fallback), func(t *testing.T) {
+			f, o, holes := threeSources(t)
+			f.noDigest[syncD2] = fallback
+			f.noDigest[syncP] = fallback
+			names := []string{"b.holes", "c.peerhole"}
+			w := syncRange{"test", holes[0] - 600, holes[0] + 600}
+			schemas := map[string][]syncArchive{}
+			var want []syncHole
+			for _, n := range names {
+				schemas[n] = syncTestSchema
+			}
+			target, _ := f.Fetch(context.Background(), syncT, names, w.From, w.Until)
+			for _, source := range []string{syncD2, syncP} {
+				got, _ := f.Fetch(context.Background(), source, names, w.From, w.Until)
+				if !fallback {
+					sd, _ := f.Digest(context.Background(), source, names, w.From, w.Until)
+					td, _ := f.Digest(context.Background(), syncT, names, w.From, w.Until)
+					for _, n := range names {
+						_, coarse := syncDigestMismatch(sd[n], td[n])
+						for _, h := range coarse {
+							h.Name, h.Source, h.Window = n, source, w.Name
+							h.First, h.Last = w.From, w.Until-1
+							want = append(want, h)
+						}
+					}
+				}
+				for _, n := range names {
+					if h, ok := syncCompare(n, source, got[n], target[n], 60, w.From, w.Until); ok {
+						h.Window = w.Name
+						want = append(want, h)
+					}
+				}
+			}
+			backend := &rendezvousSync{fakeSync: f, ready: make(chan struct{}), want: 3}
+			s := &syncer{o: o, b: backend}
+			for _, n := range names {
+				s.masks.Store(n, uint64(6))
+			}
+			var row syncRow
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := s.checkWindow(ctx, &row, names, schemas, w); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(row.Holes, want) {
+				t.Fatalf("holes %+v, want %+v", row.Holes, want)
 			}
 		})
 	}
