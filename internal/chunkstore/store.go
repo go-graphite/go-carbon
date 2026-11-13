@@ -1248,10 +1248,11 @@ type Stats struct {
 	// imported names, and batch bytes.
 	TransferBatchCommits, TransferBatchEntries, TransferBatchBytes uint64
 	// Present continuation names merged by appending the target's newer
-	// points to the staged source, and those merged by RestoreArchives,
-	// by reason (TransferMergeFallbackReasons).
-	TransferMergeAppended  uint64
-	TransferMergeFallbacks map[string]uint64
+	// points to the staged source (of which classic sources merged in place),
+	// and those merged by RestoreArchives, by reason
+	// (TransferMergeFallbackReasons).
+	TransferMergeAppended, TransferMergeAppendedClassic uint64
+	TransferMergeFallbacks                              map[string]uint64
 	// Per LSM level: bytes compactions wrote into it, bytes the compactions
 	// into it read (inputs from the level above plus its own overlapping
 	// tables), and its current size.
@@ -1342,7 +1343,7 @@ func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold 
 	stats.IngestTables, stats.IngestEntries, stats.IngestBytes = s.ingestStats.tables.Load(), s.ingestStats.entries.Load(), s.ingestStats.bytes.Load()
 	stats.IngestL0Bytes, stats.IngestMemtableOverlaps = s.ingestStats.l0Bytes.Load(), s.ingestStats.memtableOverlaps.Load()
 	stats.TransferBatchCommits, stats.TransferBatchEntries, stats.TransferBatchBytes = s.transferBatchStats.commits.Load(), s.transferBatchStats.entries.Load(), s.transferBatchStats.bytes.Load()
-	stats.TransferMergeAppended, stats.TransferMergeFallbacks = s.transferMergeStats.snapshot()
+	stats.TransferMergeAppended, stats.TransferMergeAppendedClassic, stats.TransferMergeFallbacks = s.transferMergeStats.snapshot()
 	stats.ContinuationRangeDeletes = continuationRangeDeletes.Load()
 	stats.CompactionKinds = CompactionKinds{Default: uint64(m.Compact.DefaultCount), DeleteOnly: uint64(m.Compact.DeleteOnlyCount), ElisionOnly: uint64(m.Compact.ElisionOnlyCount),
 		Move: uint64(m.Compact.MoveCount), Read: uint64(m.Compact.ReadCount), Rewrite: uint64(m.Compact.RewriteCount), MultiLevel: uint64(m.Compact.MultiLevelCount)}

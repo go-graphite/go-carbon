@@ -622,20 +622,27 @@ type ContinuationArchiveRestorer interface {
 	RestoreArchives(context.Context, ContinuationIO, Snapshot, func() time.Time) error
 }
 
-// ContinuationArchiveMerger appends a newer target copy to a staged source
-// without re-encoding the source's history. It writes to dst only when the
-// merged archives equal want and then returns ""; otherwise it returns one of
-// TransferMergeFallbackReasons and the caller uses RestoreArchives.
+// ContinuationArchiveMerger merges a newer target copy into a staged source
+// without re-encoding the source's history: a compressed source gets the
+// target's newer points appended, a classic one has the slots that differ
+// from want written in place (classic). It writes to dst only when the merged
+// archives equal want and then returns ""; otherwise it returns one of
+// TransferMergeFallbackReasons and the caller uses RestoreArchives. want was
+// built from sourceSnapshot and targetSnapshot.
 type ContinuationArchiveMerger interface {
-	MergeArchives(ctx context.Context, source, target, dst ContinuationIO, want, targetSnapshot Snapshot, clock func() time.Time) (string, error)
+	MergeArchives(ctx context.Context, source, target, dst ContinuationIO, want, sourceSnapshot, targetSnapshot Snapshot, clock func() time.Time) (fallback string, classic bool, err error)
 }
 
 // Why a present continuation name was merged by RestoreArchives instead of
 // appending (see ContinuationArchiveMerger).
 const (
-	// TransferMergeFallbackLayout: a copy is not compressed, or the archive
-	// layouts or aggregation differ.
+	// TransferMergeFallbackLayout: the archive layouts or aggregation
+	// differ, or a compressed source meets a classic target.
 	TransferMergeFallbackLayout = "layout"
+	// TransferMergeFallbackClassic: a classic source the in-place merge
+	// cannot take: sidecar files, shared references, an empty slot zero with
+	// points, off-grid slots, or a write that would expose unallocated slots.
+	TransferMergeFallbackClassic = "classic"
 	// TransferMergeFallbackNaN: a copy holds NaN (or off-grid) points that
 	// the union drops; an append would keep them in the source's blocks.
 	TransferMergeFallbackNaN = "nan"
@@ -644,8 +651,9 @@ const (
 	TransferMergeFallbackOverlap = "overlap"
 	// TransferMergeFallbackOrder: the union's tail is not appendable in order.
 	TransferMergeFallbackOrder = "order"
-	// TransferMergeFallbackVerify: the appended copy read back differently
-	// from the expected union.
+	// TransferMergeFallbackVerify: the merged copy (read back, or for a
+	// classic source computed from the written slots) differs from the
+	// expected union.
 	TransferMergeFallbackVerify = "verify"
 	// TransferMergeFallbackDisabled: appending is switched off.
 	TransferMergeFallbackDisabled = "disabled"
@@ -654,11 +662,11 @@ const (
 )
 
 // TransferMergeFallbackReasons lists every fallback reason, in stats order.
-var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, TransferMergeFallbackNaN, TransferMergeFallbackOverlap, TransferMergeFallbackOrder, TransferMergeFallbackVerify, TransferMergeFallbackDisabled, TransferMergeFallbackOther}
+var TransferMergeFallbackReasons = [...]string{TransferMergeFallbackLayout, TransferMergeFallbackClassic, TransferMergeFallbackNaN, TransferMergeFallbackOverlap, TransferMergeFallbackOrder, TransferMergeFallbackVerify, TransferMergeFallbackDisabled, TransferMergeFallbackOther}
 
 type transferMergeStats struct {
-	appended  atomic.Uint64
-	fallbacks [len(TransferMergeFallbackReasons)]atomic.Uint64
+	appended, classic atomic.Uint64
+	fallbacks         [len(TransferMergeFallbackReasons)]atomic.Uint64
 }
 
 func (t *transferMergeStats) fallback(reason string) {
@@ -669,12 +677,12 @@ func (t *transferMergeStats) fallback(reason string) {
 	t.fallbacks[i].Add(1)
 }
 
-func (t *transferMergeStats) snapshot() (uint64, map[string]uint64) {
-	fallbacks := make(map[string]uint64, len(TransferMergeFallbackReasons))
+func (t *transferMergeStats) snapshot() (appended, classic uint64, fallbacks map[string]uint64) {
+	fallbacks = make(map[string]uint64, len(TransferMergeFallbackReasons))
 	for i, reason := range TransferMergeFallbackReasons {
 		fallbacks[reason] = t.fallbacks[i].Load()
 	}
-	return t.appended.Load(), fallbacks
+	return t.appended.Load(), t.classic.Load(), fallbacks
 }
 
 // prepareTransfer preserves the reviewed archive/slot operations, but reads
@@ -776,20 +784,23 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			}
 			appended := false
 			if m.Continuation && old.Continuation {
-				fallback := TransferMergeFallbackDisabled
+				fallback, classic := TransferMergeFallbackDisabled, false
 				if merger, ok := s.continuation.(ContinuationArchiveMerger); normalized && ok && !s.transferMergeAppendOff {
 					// The union dropped points the appended copy would keep, so
 					// the merger's verify would fail after doing all its work.
 					fallback = TransferMergeFallbackNaN
 				} else if ok && !s.transferMergeAppendOff {
 					kv := s.newContinuationIO(ctx, b, b, m)
-					fallback, err = merger.MergeArchives(ctx, transferRecordIO(r), transferRecordIO(raw), kv, want, target, s.now)
+					fallback, classic, err = merger.MergeArchives(ctx, transferRecordIO(r), transferRecordIO(raw), kv, want, source, target, s.now)
 					if err != nil {
 						return nil, err
 					}
 				}
 				if appended = fallback == ""; appended {
 					s.transferMergeStats.appended.Add(1)
+					if classic {
+						s.transferMergeStats.classic.Add(1)
+					}
 				} else {
 					s.transferMergeStats.fallback(fallback)
 				}

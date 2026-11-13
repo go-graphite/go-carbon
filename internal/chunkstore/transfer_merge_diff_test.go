@@ -26,6 +26,36 @@ type mergeDiffCase struct {
 	source [][]store.Point // UpdateMany calls, in order
 	target [][]store.Point
 	after  [][]store.Point
+	// The first sourceClassic (targetClassic) calls are stored classic by a
+	// RestoreArchives import, as converted and once-merged copies are; the
+	// rest is written live on top. 0 keeps the copy compressed.
+	sourceClassic, targetClassic int
+	// The source is written with the clock at its newest point, as the donor
+	// wrote it, so its rings hold slots the target's newer points displace.
+	// A non-zero targetEarlyAt writes target[0] at that earlier clock: stale
+	// target slots that newer source points displace.
+	sourceAt, targetEarlyAt int64
+}
+
+// at returns the clock for writing call i of the source or the target.
+func (c mergeDiffCase) at(target bool, i int, now int64) int64 {
+	switch {
+	case !target:
+		return c.sourceAt
+	case i == 0 && c.targetEarlyAt != 0:
+		return c.targetEarlyAt
+	}
+	return now
+}
+
+func (c mergeDiffCase) format() string {
+	f := func(n int) string {
+		if n > 0 {
+			return "classic"
+		}
+		return "compressed"
+	}
+	return f(c.sourceClassic) + "/" + f(c.targetClassic)
 }
 
 const mergeDiffMinute = 60
@@ -76,7 +106,7 @@ func mergeDiffCalls(r *rand.Rand, points []store.Point, ordered bool) [][]store.
 	return calls
 }
 
-var mergeDiffKinds = []string{"absent", "present", "present", "present", "overlap", "late", "aliased"}
+var mergeDiffKinds = []string{"absent", "present", "present", "present", "overlap", "late", "aliased", "stale"}
 
 func newMergeDiffCase(r *rand.Rand, name string, now int64) mergeDiffCase {
 	kind := mergeDiffKinds[r.Intn(len(mergeDiffKinds))]
@@ -98,11 +128,28 @@ func newMergeDiffCase(r *rand.Rand, name string, now int64) mergeDiffCase {
 		sourceEnd = handoff + (now-handoff)*int64(1+r.Intn(9))/10
 	}
 	c.source = mergeDiffCalls(r, mergeDiffPoints(r, handoff-span, sourceEnd, now, nan), r.Intn(3) > 0)
+	c.sourceAt = sourceEnd
+	classic := func(calls [][]store.Point) int {
+		if len(calls) == 0 || r.Intn(3) == 0 {
+			return 0
+		}
+		// Usually all calls, sometimes leaving live writes on top.
+		return len(calls) - r.Intn(min(len(calls), 3))
+	}
+	c.sourceClassic = classic(c.source)
 	if kind == "absent" {
 		return c
 	}
 	live := mergeDiffPoints(r, handoff, now, now, nan)
 	c.target = mergeDiffCalls(r, live, r.Intn(3) > 0)
+	if kind == "stale" {
+		// The name lived on the target before: a burst written two days
+		// before the handoff, never overwritten since.
+		at := handoff - 2*86400
+		at -= at % mergeDiffMinute
+		c.target = append([][]store.Point{mergeDiffPoints(r, at-6*3600, at, at, nan)}, c.target...)
+		c.targetEarlyAt = at
+	}
 	if kind == "late" {
 		// Late input reaches the target after its newest point, inside and
 		// before the source's range.
@@ -113,6 +160,7 @@ func newMergeDiffCase(r *rand.Rand, name string, now int64) mergeDiffCase {
 		}
 		c.target = append(c.target, late)
 	}
+	c.targetClassic = classic(c.target)
 	return c
 }
 
@@ -150,6 +198,65 @@ func writeMergeDiff(t *testing.T, s *store.Store, config store.MetricConfig, cal
 	}
 }
 
+// storeMergeDiffClassic writes each case's first n calls (n from pick) to a
+// scratch store and imports them into every dst, where the name exists but is
+// empty, with the append merge off: RestoreArchives stores them classic. The
+// remaining calls are written live on top.
+func storeMergeDiffClassic(t *testing.T, cases []mergeDiffCase, list []string, now func() time.Time, pick func(mergeDiffCase) ([][]store.Point, int), set func(c mergeDiffCase, call int), dsts ...*store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	scratch := openMergeDiffStore(t, now)
+	var names []string
+	for i, c := range cases {
+		calls, n := pick(c)
+		if n == 0 {
+			continue
+		}
+		writeMergeDiffAt(t, scratch, c.config, calls[:n], func(i int) { set(c, i) })
+		names = append(names, list[i])
+		for _, dst := range dsts {
+			if _, err := dst.Create(ctx, c.config); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(names) > 0 {
+		records, err := scratch.ExportTransfer(ctx, names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, dst := range dsts {
+			batch := slices.Clone(records)
+			for i := range batch {
+				batch[i].Keys = slices.Clone(batch[i].Keys)
+			}
+			dst.SetTransferMergeAppendForTest(false)
+			if _, err := dst.ImportTransfer(ctx, batch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, c := range cases {
+		calls, n := pick(c)
+		if n == 0 {
+			continue
+		}
+		for _, dst := range dsts {
+			writeMergeDiffAt(t, dst, c.config, calls[n:], func(i int) { set(c, n+i) })
+		}
+	}
+}
+
+// writeMergeDiffAt writes calls like writeMergeDiff, calling set(i) before
+// call i to move the clock.
+func writeMergeDiffAt(t *testing.T, s *store.Store, config store.MetricConfig, calls [][]store.Point, set func(i int)) {
+	t.Helper()
+	for i := range calls {
+		set(i)
+		writeMergeDiff(t, s, config, calls[i:i+1])
+	}
+}
+
 // diffSnapshots reports the first bit difference between two snapshots.
 func diffSnapshots(a, b store.Snapshot) string {
 	if len(a.Archives) != len(b.Archives) {
@@ -176,7 +283,8 @@ func diffSnapshots(a, b store.Snapshot) string {
 
 // TestTransferMergeAppendMatchesRestore is the gate for the append merge of
 // present continuation names. Random transfers (absent, present, overlapping,
-// NaN, late, ring-aliased names, written out of order) are imported into two
+// NaN, late, ring-aliased, stale names, written out of order; sources and
+// targets each compressed or classic) are imported into two
 // identically seeded targets: one with the append merge, one forced through
 // RestoreArchives. Receipts, snapshots and snapshots after one more hour of
 // live input must match bit for bit, name by name.
@@ -209,12 +317,22 @@ func TestTransferMergeAppendMatchesRestore(t *testing.T) {
 				list[i] = fmt.Sprintf("merge.diff.r%d.n%03d", round, i)
 				cases[i] = newMergeDiffCase(r, list[i], base)
 				cases[i].after = mergeDiffAfter(r, base)
-				writeMergeDiff(t, source, cases[i].config, cases[i].source)
-				if cases[i].target != nil {
-					writeMergeDiff(t, oldPath, cases[i].config, cases[i].target)
-					writeMergeDiff(t, newPath, cases[i].config, cases[i].target)
+				c := cases[i]
+				if c.sourceClassic == 0 {
+					writeMergeDiffAt(t, source, c.config, c.source, func(k int) { clock.Store(c.at(false, k, base)) })
+				}
+				if c.target != nil && c.targetClassic == 0 {
+					writeMergeDiffAt(t, oldPath, c.config, c.target, func(k int) { clock.Store(c.at(true, k, base)) })
+					writeMergeDiffAt(t, newPath, c.config, c.target, func(k int) { clock.Store(c.at(true, k, base)) })
 				}
 			}
+			storeMergeDiffClassic(t, cases, list, now, func(c mergeDiffCase) ([][]store.Point, int) { return c.source, c.sourceClassic },
+				func(c mergeDiffCase, k int) { clock.Store(c.at(false, k, base)) }, source)
+			storeMergeDiffClassic(t, cases, list, now, func(c mergeDiffCase) ([][]store.Point, int) { return c.target, c.targetClassic },
+				func(c mergeDiffCase, k int) { clock.Store(c.at(true, k, base)) }, oldPath, newPath)
+			clock.Store(base)
+			newPath.SetTransferMergeAppendForTest(true)
+			ns0, os0 := newPath.Stats(), oldPath.Stats()
 			records, err := source.ExportTransfer(ctx, list)
 			if err != nil {
 				t.Fatal(err)
@@ -249,7 +367,7 @@ func TestTransferMergeAppendMatchesRestore(t *testing.T) {
 					}
 					if d := diffSnapshots(a, b); d != "" {
 						diffs++
-						t.Errorf("%s %s (%s, %s, xff %v): %s", phase, name, cases[i].kind, cases[i].config.AggregationMethod, cases[i].config.XFilesFactor, d)
+						t.Errorf("%s %s (%s, %s, %s, xff %v): %s", phase, name, cases[i].kind, cases[i].format(), cases[i].config.AggregationMethod, cases[i].config.XFilesFactor, d)
 					}
 				}
 			}
@@ -267,19 +385,37 @@ func TestTransferMergeAppendMatchesRestore(t *testing.T) {
 				writeMergeDiff(t, newPath, cases[i].config, cases[i].after)
 			}
 			compare("after")
-			kinds := map[string]int{}
+			kinds, formats := map[string]int{}, map[string]int{}
+			classicPresent := 0
 			for _, c := range cases {
 				kinds[c.kind]++
+				if c.kind != "absent" {
+					formats[c.format()]++
+					if c.sourceClassic > 0 {
+						classicPresent++
+					}
+				}
 			}
+			// Count only the gate import, not the classic seeding imports.
 			ns, os := newPath.Stats(), oldPath.Stats()
-			t.Logf("kinds %v; new path appended %d fallbacks %v; old path appended %d fallbacks %v; differences %d", kinds, ns.TransferMergeAppended, ns.TransferMergeFallbacks, os.TransferMergeAppended, os.TransferMergeFallbacks, diffs)
-			if os.TransferMergeAppended != 0 || ns.TransferMergeFallbacks[store.TransferMergeFallbackDisabled] != 0 {
-				t.Fatalf("path switch leaked: old appended %d, new disabled %d", os.TransferMergeAppended, ns.TransferMergeFallbacks[store.TransferMergeFallbackDisabled])
+			appended, classic := ns.TransferMergeAppended-ns0.TransferMergeAppended, ns.TransferMergeAppendedClassic-ns0.TransferMergeAppendedClassic
+			fallbacks := map[string]uint64{}
+			for reason, n := range ns.TransferMergeFallbacks {
+				if d := n - ns0.TransferMergeFallbacks[reason]; d != 0 {
+					fallbacks[reason] = d
+				}
 			}
-			// The disjoint present names must take the append path, or the
-			// comparison above proves nothing.
-			if int(ns.TransferMergeAppended) < kinds["present"]/4 {
-				t.Fatalf("only %d of %d present names appended", ns.TransferMergeAppended, kinds["present"])
+			t.Logf("kinds %v; present formats (source/target) %v; new path appended %d (classic %d) fallbacks %v; differences %d", kinds, formats, appended, classic, fallbacks, diffs)
+			if os.TransferMergeAppended != os0.TransferMergeAppended || fallbacks[store.TransferMergeFallbackDisabled] != 0 {
+				t.Fatalf("path switch leaked: old appended %d, new disabled %d", os.TransferMergeAppended-os0.TransferMergeAppended, fallbacks[store.TransferMergeFallbackDisabled])
+			}
+			// The disjoint present names must take the append path, and classic
+			// sources the in-place path, or the comparison above proves nothing.
+			if int(appended) < kinds["present"]/4 {
+				t.Fatalf("only %d of %d present names appended", appended, kinds["present"])
+			}
+			if int(classic) < classicPresent/3 {
+				t.Fatalf("only %d of %d present names with a classic source merged in place", classic, classicPresent)
 			}
 		})
 	}

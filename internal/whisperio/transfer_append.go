@@ -21,33 +21,51 @@ import (
 //
 // WIP: the read-back is a full decode; a ranged verify of the appended blocks
 // is the next step towards the per-name target.
-func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, dst store.ContinuationIO, want, targetSnapshot store.Snapshot, clock func() time.Time) (string, error) {
+//
+// A classic (uncompressed) source is merged in place instead, whatever the
+// target's format: see mergeClassicArchives. classic reports that path.
+func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, dst store.ContinuationIO, want, sourceSnapshot, targetSnapshot store.Snapshot, clock func() time.Time) (fallback string, classic bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	epoch := func() time.Time { return time.Unix(0, 0) }
 	overlay := newContinuationOverlay(source)
 	fs := newContinuationFiles(overlay, false).withClock(clock)
 	w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, epoch))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer w.Close()
+	if len(want.Archives) != len(targetSnapshot.Archives) || len(want.Archives) != len(sourceSnapshot.Archives) {
+		return store.TransferMergeFallbackLayout, false, nil
+	}
+	if !w.IsCompressed() {
+		// RestoreArchives writes the policy from want's metadata; an in-place
+		// merge keeps the source header, so both must agree.
+		if store.AggregationMethod(w.AggregationMethod()) != want.Metadata.AggregationMethod || w.XFilesFactor() != want.Metadata.XFilesFactor {
+			return store.TransferMergeFallbackLayout, true, nil
+		}
+		if err := w.Close(); err != nil {
+			return "", true, err
+		}
+		fallback, err := mergeClassicArchives(ctx, overlay, dst, want, sourceSnapshot, targetSnapshot, clock)
+		return fallback, true, err
+	}
 	tfs := newContinuationFiles(newContinuationOverlay(target), false).withClock(clock)
 	tw, err := whisper.OpenWithOptions(tfs.main(), continuationOptions(tfs, epoch))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer tw.Close()
-	if !w.IsCompressed() || !tw.IsCompressed() || len(want.Archives) != len(targetSnapshot.Archives) {
-		return store.TransferMergeFallbackLayout, nil
+	if !tw.IsCompressed() {
+		return store.TransferMergeFallbackLayout, false, nil
 	}
 	// Fold sidecars as Snapshot does, so stored points match want.
 	if err := w.MergeOutOfOrder(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := tw.MergeOutOfOrder(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	// A target point at or below the source's blocks overlaps them and can
 	// never be appended; fall back before doing any work.
@@ -55,10 +73,10 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 	for i := range want.Archives {
 		from, err := w.ArchiveBlockWatermark(i)
 		if err != nil {
-			return store.TransferMergeFallbackLayout, nil
+			return store.TransferMergeFallbackLayout, false, nil
 		}
 		if points := targetSnapshot.Archives[i].Points; len(points) > 0 && points[0].Timestamp <= int64(from) {
-			return store.TransferMergeFallbackOverlap, nil
+			return store.TransferMergeFallbackOverlap, false, nil
 		}
 		froms[i] = from
 	}
@@ -66,7 +84,7 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 		from := froms[i]
 		until, err := tw.ArchiveBlockWatermark(i)
 		if err != nil {
-			return store.TransferMergeFallbackLayout, nil
+			return store.TransferMergeFallbackLayout, false, nil
 		}
 		virtual := targetSnapshot.Archives[i].Points
 		virtual = virtual[sort.Search(len(virtual), func(k int) bool { return virtual[k].Timestamp > int64(until) }):]
@@ -83,34 +101,34 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 		}
 		if err := w.AppendArchivePoints(i, tail); err != nil {
 			if errors.Is(err, whisper.ErrArchiveAppendOrder) {
-				return store.TransferMergeFallbackOrder, nil
+				return store.TransferMergeFallbackOrder, false, nil
 			}
-			return "", err
+			return "", false, err
 		}
 	}
 	if err := w.ReplaceBuffers(tw); err != nil {
-		return store.TransferMergeFallbackLayout, nil
+		return store.TransferMergeFallbackLayout, false, nil
 	}
 	if err := w.Close(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := fs.flush(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	rfs := newContinuationFiles(overlay, false).withClock(clock)
 	r, err := whisper.OpenWithOptions(rfs.main(), continuationOptions(rfs, epoch))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer r.Close()
 	got, err := continuationArchiveSnapshot(ctx, r, want.Metadata)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if store.EqualSnapshots(want, got) != nil {
-		return store.TransferMergeFallbackVerify, nil
+		return store.TransferMergeFallbackVerify, false, nil
 	}
-	return "", overlay.applyTo(dst)
+	return "", false, overlay.applyTo(dst)
 }
 
 // applyTo writes the overlay's changes to dst: prefix deletes first, then
