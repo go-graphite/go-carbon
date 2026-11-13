@@ -69,6 +69,7 @@ type storeStatsView struct {
 	classicReanchors                                                        whisperio.ClassicReanchorStats
 	classicReanchorPace                                                     whisperio.ClassicReanchorPaceStats
 	ingestTables, ingestEntries, ingestBytes, ingestL0Bytes, ingestOverlaps uint64
+	transferBatchCommits, transferBatchEntries, transferBatchBytes          uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
 	writeStalls                                                             uint64
@@ -170,6 +171,9 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_ingest_bytes_total", "Bytes of ingested conversion tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.ingestBytes) }),
 		counter("pebble_ingest_l0_bytes_total", "Ingested bytes placed in L0.", func(s *migrationSnapshot) float64 { return float64(s.stats.ingestL0Bytes) }),
 		counter("pebble_ingest_memtable_overlaps_total", "Ingested tables overlapping a memtable.", func(s *migrationSnapshot) float64 { return float64(s.stats.ingestOverlaps) }),
+		counter("pebble_transfer_batch_commits_total", "Imported transfers committed as one batch instead of ingested tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchCommits) }),
+		counter("pebble_transfer_batch_entries_total", "Metrics imported through batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchEntries) }),
+		counter("pebble_transfer_batch_bytes_total", "Bytes of batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchBytes) }),
 		counter("pebble_flush_bytes_total", "Bytes written by memtable flushes.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushBytes) }),
 		counter("pebble_compaction_write_bytes_total", "Bytes written by compactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionWriteBytes) }),
 		gauge("pebble_compaction_rate_bytes", "Compaction output budget in bytes per second; 0 disables pacing.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionRate) }),
@@ -608,6 +612,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(), classicReanchorPace: c.app.reanchorPacer.Stats(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
+			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,

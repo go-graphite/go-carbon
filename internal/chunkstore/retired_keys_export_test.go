@@ -38,3 +38,10 @@ func (s *Store) SeedMemtableRangeTombstonesForTest(n int) error {
 	}
 	return b.Commit(nil)
 }
+
+// SetTransferBatchBytesForTest overrides the batch/ingest threshold of
+// ImportTransfer: 0 restores the default, negative always ingests SSTs.
+func (s *Store) SetTransferBatchBytesForTest(n int) { s.transferBatchBytes = n }
+
+// PebbleMetricsForTest renders the Pebble LSM metrics (levels, files, sizes).
+func (s *Store) PebbleMetricsForTest() string { return s.db.Metrics().String() }
