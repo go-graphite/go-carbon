@@ -30,6 +30,7 @@ var errCopyStall = errors.New("copy stalled")
 func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []string, call func() error) error {
 	delay := w.tick
 	var since, first time.Time
+	wasDown := false
 	for attempt := 1; ; attempt++ {
 		err := call()
 		if err == nil || ctx.Err() != nil {
@@ -59,9 +60,12 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 			w.progress.up(hosts...)
 		}
 		w.progress.retried()
-		if since.IsZero() || down {
+		// The stall clock starts at the first failure seen with every host
+		// up: a call refused just before the host came back is not a stall.
+		if since.IsZero() || down || wasDown {
 			since = now
 		}
+		wasDown = down
 		if stuck := time.Since(since); !down && stuck >= w.stallTimeout {
 			event("copy_stalled", map[string]any{"level": "error", "path": path, "hosts": hosts, "attempts": attempt, "stuck_seconds": stuck.Seconds(), "stall_timeout": w.stallTimeout.String(), "error": err.Error()})
 			return fmt.Errorf("%w: %s: no progress for %s with every host up (--stall-timeout %s): %w", errCopyStall, path, stuck.Round(time.Second), w.stallTimeout, err)

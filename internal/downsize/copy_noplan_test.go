@@ -32,6 +32,7 @@ type fakeCopy struct {
 	attempts int
 	inject   func(attempt int, names []string) int // HTTP status to return instead, 0 = serve
 	block    func(attempt int) bool                // hang until the request is cancelled
+	release  chan struct{}                         // closed before the servers shut down
 	batches  [][]string
 	imported map[string]int
 	maxBytes []int64
@@ -39,7 +40,7 @@ type fakeCopy struct {
 
 func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 	t.Helper()
-	f := &fakeCopy{catalog: catalog, sizes: map[string]int64{}, maxBody: 1 << 20, page: 300, imported: map[string]int{}}
+	f := &fakeCopy{catalog: catalog, sizes: map[string]int64{}, maxBody: 1 << 20, page: 300, imported: map[string]int{}, release: make(chan struct{})}
 	status := func(w http.ResponseWriter) {
 		_ = json.NewEncoder(w).Encode(copyStatus{MaxTransfers: 8, MaxBodyBytes: f.maxBody})
 	}
@@ -82,7 +83,12 @@ func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 			f.maxBytes = append(f.maxBytes, request.MaxBytes)
 			f.mu.Unlock()
 			if f.block != nil && f.block(attempt) {
-				<-r.Context().Done()
+				// The server notices a cancelled client only once the body
+				// hit EOF; release keeps Close from waiting on this handler.
+				select {
+				case <-r.Context().Done():
+				case <-f.release:
+				}
 				return
 			}
 			if f.inject != nil {
@@ -120,6 +126,7 @@ func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 		}
 	}))
 	t.Cleanup(dst.Close)
+	t.Cleanup(func() { close(f.release) }) // runs first (LIFO)
 	return f, src.URL, dst.URL
 }
 
