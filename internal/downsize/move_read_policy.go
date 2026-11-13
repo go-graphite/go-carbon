@@ -78,21 +78,21 @@ func resumePolicy(saved admissionState, backlog backlogPolicy, read readPolicy, 
 	given := func(flag string) bool { return explicit == nil || explicit[flag] }
 	at := now.UTC().Format(time.RFC3339)
 	var changes []policyOverride
-	pick := func(flag string, old, requested float64, note string) float64 {
+	pick := func(flag string, old, requested float64) float64 {
 		if !given(flag) || old == requested {
 			return old
 		}
-		changes = append(changes, policyOverride{At: at, Flag: flag, From: old, To: requested, Note: note})
+		changes = append(changes, policyOverride{At: at, Flag: flag, From: old, To: requested})
 		return requested
 	}
 	if given("backlog-baseline-window") && backlog.Window != saved.Policy.Window {
 		return saved, nil, fmt.Errorf("--backlog-baseline-window %s differs from the journal's learned baseline window %s; omit it or pass the saved value", backlog.Window, saved.Policy.Window)
 	}
 	p := saved.Policy
-	p.SoftRatio = pick("backlog-soft-ratio", p.SoftRatio, backlog.SoftRatio, "")
-	p.HardRatio = pick("backlog-hard-ratio", p.HardRatio, backlog.HardRatio, "")
-	p.GrowthSamples = int(pick("backlog-growth-samples", float64(p.GrowthSamples), float64(backlog.GrowthSamples), ""))
-	p.BytesPerPoint = pick("cache-bytes-per-point", p.BytesPerPoint, backlog.BytesPerPoint, "")
+	p.SoftRatio = pick("backlog-soft-ratio", p.SoftRatio, backlog.SoftRatio)
+	p.HardRatio = pick("backlog-hard-ratio", p.HardRatio, backlog.HardRatio)
+	p.GrowthSamples = int(pick("backlog-growth-samples", float64(p.GrowthSamples), float64(backlog.GrowthSamples)))
+	p.BytesPerPoint = pick("cache-bytes-per-point", p.BytesPerPoint, backlog.BytesPerPoint)
 	if err := p.validate(); err != nil {
 		return saved, nil, fmt.Errorf("resume policy override: %w", err)
 	}
@@ -111,9 +111,9 @@ func resumePolicy(saved admissionState, backlog backlogPolicy, read readPolicy, 
 		r = read
 	} else {
 		r = *saved.Read
-		r.CeilingMS = pick("read-p99-ms", r.CeilingMS, read.CeilingMS, "")
-		r.FloorMS = pick("read-p99-floor-ms", r.FloorMS, read.FloorMS, "")
-		r.Ratio = pick("read-p99-ratio", r.Ratio, read.Ratio, "")
+		r.CeilingMS = pick("read-p99-ms", r.CeilingMS, read.CeilingMS)
+		r.FloorMS = pick("read-p99-floor-ms", r.FloorMS, read.FloorMS)
+		r.Ratio = pick("read-p99-ratio", r.Ratio, read.Ratio)
 	}
 	if err := r.validate(); err != nil {
 		return saved, nil, fmt.Errorf("resume policy override: %w", err)
