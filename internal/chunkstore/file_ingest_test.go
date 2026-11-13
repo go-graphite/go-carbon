@@ -90,7 +90,8 @@ func TestCreateNamesBeyondWhisperLimits(t *testing.T) {
 		strings.Repeat(long(200)+".", 20)[:3999]: nil,
 		strings.Repeat(long(200)+".", 21)[:4001]: nil,
 		"tagged.metric;job=" + long(1000):        nil,
-		"a." + long(4096) + ".value":             nil,
+		"a." + long(4000) + ".value":             nil,
+		long(maxMetricNameBytes):                 nil,
 		long(maxMetricNameBytes + 1):             ErrNameTooLong,
 	} {
 		if _, err := s.Create(context.Background(), config(name)); !errors.Is(err, want) {

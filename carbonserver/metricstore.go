@@ -25,6 +25,15 @@ func (listener *CarbonserverListener) usesSharedCatalogCachePolicy() bool {
 
 const metricStoreCatalogPageSize = 4096
 
+// reportMetricStoreIndexUnindexable publishes how many catalog names the last
+// complete catalog pass skipped, so a skipped name is visible without the log.
+func (listener *CarbonserverListener) reportMetricStoreIndexUnindexable(skipped int) {
+	atomic.StoreUint64(&listener.metrics.MetricStoreIndexUnindexableNames, uint64(skipped))
+	if listener.prometheus.enabled {
+		listener.prometheus.metricStoreIndexUnindexable.Set(float64(skipped))
+	}
+}
+
 func (listener *CarbonserverListener) reportMetricStoreIndexUpdateError(err error) {
 	// PauseIndexUpdates is terminal and closes the index builder's exit channel.
 	// Deadlines and I/O errors remain failures even during this planned stop.

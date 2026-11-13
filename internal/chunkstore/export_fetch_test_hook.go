@@ -1,6 +1,9 @@
 package chunkstore
 
-import "sync/atomic"
+import (
+	"context"
+	"sync/atomic"
+)
 
 // SetFetchSharedIteratorForTest switches the shared fetch iterator for tests
 // and benchmarks in other packages and returns a function restoring it.
@@ -86,4 +89,31 @@ func (s *Store) ForgetMetadataCacheForTest() {
 // metadata cache shard.
 func (s *Store) SameMetricStripeForTest(a, b string) bool {
 	return s.metricStripe(a) == s.metricStripe(b)
+}
+
+// PlantCatalogNameForTest records name in the catalog without the creation
+// name check, like a name admitted before MaxMetricNameBytes was lowered.
+func (s *Store) PlantCatalogNameForTest(ctx context.Context, name string, config MetricConfig) error {
+	config.Name = "plant.for.test"
+	m, err := s.Create(ctx, config)
+	if err != nil {
+		return err
+	}
+	m.Name, m.ID = name, m.ID+1<<32
+	value, err := s.encodeCatalog(m)
+	if err != nil {
+		return err
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	if err := b.Set(catalogKey(name), value, nil); err != nil {
+		return err
+	}
+	if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
+		return err
+	}
+	if err := b.Commit(nil); err != nil {
+		return err
+	}
+	return s.Delete(ctx, "plant.for.test")
 }

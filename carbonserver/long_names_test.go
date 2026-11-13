@@ -23,7 +23,7 @@ func TestLongNamesReadFindAndGlob(t *testing.T) {
 			}
 			defer db.Close()
 			var names []string
-			for _, size := range []int{300, 4096} {
+			for _, size := range []int{300, 4000} {
 				name := "long." + strings.Repeat("x", size) + ".value"
 				names = append(names, name)
 				if _, err := db.Create(context.Background(), store.MetricConfig{Name: name, AggregationMethod: store.Sum, Retentions: []store.Retention{{Step: 1, Count: 120}}}); err != nil {

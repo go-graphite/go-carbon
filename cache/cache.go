@@ -86,12 +86,13 @@ type Cache struct {
 	stat struct {
 		size                int64 // published part of the size, changing via atomic; see Shard.sizeDelta
 		bytes               atomic.Int64
-		queueBuildCnt       uint32 // number of times writeout queue was built
-		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
-		queueWriteoutTime   uint32 // in milliseconds
-		overflowCnt         uint32 // drop packages if cache full
-		queryCnt            uint32 // number of queries
-		tagsNormalizeErrors uint32 // tags normalize errors count
+		queueBuildCnt       uint32        // number of times writeout queue was built
+		queueBuildTimeMs    uint32        // time spent building writeout queue in milliseconds
+		queueWriteoutTime   uint32        // in milliseconds
+		overflowCnt         uint32        // drop packages if cache full
+		queryCnt            uint32        // number of queries
+		tagsNormalizeErrors uint32        // tags normalize errors count
+		nameTooLong         atomic.Uint64 // points refused because the name exceeds points.MaxMetricNameBytes
 
 		droppedRealtimeIndex uint32 // new metrics failed to be indexed in realtime
 	}
@@ -316,6 +317,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("tagsNormalizeErrors", &c.stat.tagsNormalizeErrors, send)
+	send("nameTooLongRejectedPoints", float64(c.stat.nameTooLong.Load()))
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
 
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
@@ -714,6 +716,13 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 
 func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) <-chan struct{} {
 	s := c.settings.Load().(*cacheSettings)
+
+	// Every new name reaches the cache here: the fast paths only append to
+	// names already cached, so a refused name never takes cache memory.
+	if len(p.Metric) > points.MaxMetricNameBytes {
+		c.rejectNameTooLong(p)
+		return nil
+	}
 
 	if s.xlog != nil {
 		s.xlog(p)

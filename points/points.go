@@ -11,6 +11,13 @@ import (
 )
 
 // Point value/time pair
+// MaxMetricNameBytes is the longest metric name go-carbon accepts. The cache
+// refuses longer names at intake and the shared store refuses to create them.
+// Names this long carry unbounded tag or URI values; the discovery index also
+// cannot hold names above about 8 KB, so such a series could be written but
+// never found.
+const MaxMetricNameBytes = 4096
+
 type Point struct {
 	Value     float64
 	Timestamp int64

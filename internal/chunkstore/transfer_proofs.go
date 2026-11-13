@@ -17,7 +17,7 @@ func EncodeTransferProofs(proofs []TransferProof) ([]byte, error) {
 	}
 	size := 44
 	for _, p := range proofs {
-		if len(p.Source.Name) > maxMetricNameBytes || len(p.Target.Name) > maxMetricNameBytes || len(p.Digest) > 256 || len(p.Counts) > 65536 {
+		if len(p.Source.Name) > maxTransferNameBytes || len(p.Target.Name) > maxTransferNameBytes || len(p.Digest) > 256 || len(p.Counts) > 65536 {
 			return nil, ErrTransferLimit
 		}
 		size += 76 + len(p.Source.Name) + len(p.Target.Name) + len(p.Digest) + 8*len(p.Counts)
@@ -80,7 +80,7 @@ func ReadTransferProofs(r io.Reader) ([]TransferProof, error) {
 	}
 	proofs := make([]TransferProof, n)
 	version := func() TransferVersion {
-		return TransferVersion{string(d.blob(maxMetricNameBytes)), d.u64(), d.u64(), d.u64()}
+		return TransferVersion{string(d.blob(maxTransferNameBytes)), d.u64(), d.u64(), d.u64()}
 	}
 	for i := range proofs {
 		p := &proofs[i]

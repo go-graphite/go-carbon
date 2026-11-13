@@ -226,6 +226,9 @@ func (u *fileListUpdate) incrementalCatalogRuns(db *store.Store, directory strin
 	if err == nil {
 		err = flush()
 	}
+	if err == nil {
+		u.listener.reportMetricStoreIndexUnindexable(skipped)
+	}
 	if skipped != 0 {
 		u.logger.Warn("shared metric-store names not representable in the discovery index",
 			zap.Int("skipped", skipped),

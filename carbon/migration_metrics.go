@@ -58,6 +58,7 @@ type migrationSnapshot struct {
 	recoveryWindow, recoveryRemaining     int64
 	recoveryCeiling                       int64
 	recoveryRejections                    uint64
+	nameTooLongRejected                   uint64
 	recoveryBlocked                       bool
 	storeSnapshotAge                      float64
 }
@@ -324,6 +325,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_ceiling_bytes", "Cache-owned byte ceiling derived from existing allocations and reserved memory headroom; configured max-bytes also applies.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryCeiling) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_remaining_bytes", "Unspent recovery memory reservation; abandoned checks expire at the next memory sample.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRemaining) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_blocked", "One while recovery admission was denied in the last ten seconds; feeds automatic writeout pressure immediately.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return b(s.recoveryBlocked) }},
+		metricSpec{desc: prometheus.NewDesc("receiver_name_too_long_rejected_points_total", "Points refused at cache intake because the metric name exceeds 4096 bytes.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.nameTooLongRejected) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_rejections_total", "Recovery admission checks denied by memory reservation or configured cache ceilings.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRejections) }},
 	)
 	return specs
@@ -589,6 +591,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()
 		s.recoveryCeiling = cache.RecoveryByteCeiling()
 		s.recoveryBlocked = cache.RecoveryBlocked()
+		s.nameTooLongRejected = cache.NameTooLongRejectedPoints()
 	}
 	if db != nil {
 		st, sidecars, ok := db.TelemetryStats()

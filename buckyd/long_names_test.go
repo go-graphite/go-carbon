@@ -19,7 +19,7 @@ func TestLongNamesNativeHTTPRoundTrip(t *testing.T) {
 	destination, target := newNativeTestService(t)
 	ctx := context.Background()
 	var names []string
-	for _, size := range []int{300, 4096} {
+	for _, size := range []int{300, 4000} {
 		name := "long." + strings.Repeat("x", size) + ".value"
 		names = append(names, name)
 		if _, err := donor.Create(ctx, chunkstore.MetricConfig{Name: name, AggregationMethod: chunkstore.Sum, Retentions: []chunkstore.Retention{{Step: 1, Count: 120}}}); err != nil {
