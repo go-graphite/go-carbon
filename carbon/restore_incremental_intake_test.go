@@ -40,6 +40,7 @@ func TestLegacyRestoreIncrementalIntake(t *testing.T) {
 	// A legacy dump may be restored into a fresh continuation destination.
 	cfg.Whisper.StoreDir = t.TempDir()
 	cfg.Whisper.FLock = true
+	cfg.Whisper.StoreMigrationMinFreeBytes = 0
 	cfg.Carbonserver.FileListCache = filepath.Join(t.TempDir(), "files.flc")
 	cfg.Whisper.MaxUpdatesPerSecond = 20
 	cfg.Whisper.StoreMigrationControlFile = filepath.Join(t.TempDir(), "control.json")

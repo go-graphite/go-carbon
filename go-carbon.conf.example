@@ -1285,7 +1285,8 @@ path = "/var/lib/graphite/dump/"
 # Restore speed. 0 - unlimited
 #
 # Compressed history must be loaded before live input. On an untagged, shared
-# Pebble store without mirroring or migration, input can open at load-complete
+# Pebble store with input-log enabled, without mirroring or live migration,
+# input can open at load-complete (including during incremental migration)
 # while older points persist, provided carbonserver uses concurrent/realtime trie
 # indexing (or is disabled). Restored metrics have writeout priority; reads of a
 # metric return temporary unavailability until its restored prefix is confirmed.

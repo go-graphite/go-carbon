@@ -86,3 +86,30 @@ func TestRestoreIndexIncludesUncreatedNamesInQuotas(t *testing.T) {
 		t.Fatal("restored name missing from live quota accounting")
 	}
 }
+
+// A saved mixed index predates a newly persisted restored metric. That metric
+// has left the cache prefix, so only the catalog can close the discovery gap.
+func TestRestoreMixedIndexUnionsCommittedCatalog(t *testing.T) {
+	db, err := store.Open(t.TempDir(), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	l := newMetricStoreTestListener(t, cache.New(), db, true)
+	l.SetConcurrentIndex(true)
+	l.SetMetricStoreFileIndex(true)
+	if _, err := l.CurrentFileIndex().trieIdx.insert("/original/only.wsp", 10, 10, 10, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Create(context.Background(), store.MetricConfig{Name: "restored.already.persisted", Retentions: []store.Retention{{Step: 1, Count: 3600}}, AggregationMethod: store.Average}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.PrepareRestoreIndex(slices.Values([]string{"restored.still.pending"})); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"original.only", "restored.already.persisted", "restored.still.pending"} {
+		if !l.MetricExists(name) {
+			t.Fatal("mixed discovery omitted", name)
+		}
+	}
+}

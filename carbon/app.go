@@ -962,7 +962,9 @@ func (app *App) Start() (err error) {
 				return err
 			}
 		} else {
-			app.restoreBeforeReceivers(core)
+			if err = app.restoreBeforeReceivers(core); err != nil {
+				return err
+			}
 		}
 	}
 	lap("ordered_restore")
@@ -1487,7 +1489,7 @@ func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonse
 	return newMetricsQueue
 }
 
-func (app *App) restoreBeforeReceivers(core *cache.Cache) {
+func (app *App) restoreBeforeReceivers(core *cache.Cache) error {
 	conf := app.Config
 	core.SetRecoveryDrain(true)
 	defer core.SetRecoveryDrain(false)
@@ -1503,7 +1505,9 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
-	app.Restore(core.AddRestoredBeforeInput, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	if err := app.Restore(core.AddRestoredBeforeInput, conf.Dump.Path, conf.Dump.RestorePerSecond); err != nil {
+		return err
+	}
 	restoreLoaded := time.Now()
 	// The persister already writes what is loaded; prewarm the rest.
 	app.startMetadataPrewarmWithCheckpointGate("restored dump", core.MetricNames(), nil)
@@ -1520,6 +1524,7 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 		zap.Duration("drain_seconds", time.Since(restoreLoaded)),
 		zap.Any("persister_stats", restoreStats),
 	)
+	return nil
 }
 
 func (app *App) listenCarbonserver(core *cache.Cache, newMetricsQueue *helper.MetricQueue) (err error) {

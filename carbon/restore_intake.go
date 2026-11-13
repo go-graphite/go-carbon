@@ -1,11 +1,13 @@
 package carbon
 
 import (
+	"maps"
 	"os"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/recovery"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
 )
@@ -15,7 +17,8 @@ func (app *App) loadCompleteIntakeCompatible() bool {
 	// Incremental migration keeps the ordinary persister's per-metric route
 	// and writer fence. Recovery is fully admitted before live points append;
 	// the mixed read index is prepared separately before listeners open.
-	return app.MetricStore != nil && app.inputClaim == nil && app.inheritedInput == nil && app.startupInput == nil && !c.Tags.Enabled && !c.Whisper.StoreMirrorFiles &&
+	// The journal owns unconfirmed dump points once source files retire.
+	return c.InputLog.Enabled && app.MetricStore != nil && app.inputClaim == nil && app.inheritedInput == nil && app.startupInput == nil && !c.Tags.Enabled && !c.Whisper.StoreMirrorFiles &&
 		!c.Whisper.StoreLiveMigration &&
 		(app.Carbonserver == nil || c.Carbonserver.TrieIndex && c.Carbonserver.ConcurrentIndex && c.Carbonserver.RealtimeIndex > 0)
 }
@@ -29,7 +32,17 @@ func (app *App) restoreAtLoadComplete(core *cache.Cache) error {
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
-	app.Restore(core.AddRestoredBeforeInput, app.Config.Dump.Path, app.Config.Dump.RestorePerSecond)
+	// Keep loaded names even if persistence confirms them before the finite
+	// prefix snapshot: a saved mixed index can predate their original files.
+	loadedNames := make(map[string]struct{})
+	add := func(p *points.Points) {
+		loadedNames[p.Metric] = struct{}{}
+		core.AddRestoredBeforeInput(p)
+	}
+	if err := app.Restore(add, app.Config.Dump.Path, app.Config.Dump.RestorePerSecond); err != nil {
+		core.SetRecoveryDrain(false)
+		return err
+	}
 	// An active predecessor may still own a tail. Its socket takeover and tail
 	// retirement retain the existing drain-first lifecycle; do not snapshot a
 	// prefix while an older source can still grow.
@@ -39,12 +52,15 @@ func (app *App) restoreAtLoadComplete(core *cache.Cache) error {
 	}
 	for _, entry := range entries {
 		if recovery.IsTail(entry.Name()) {
-			app.restoreBeforeReceivers(core)
+			err := app.restoreBeforeReceivers(core)
 			core.SetRecoveryDrain(false)
-			return nil
+			return err
 		}
 	}
-	names := core.TrackRestorePrefix()
+	for name := range core.TrackRestorePrefix() {
+		loadedNames[name] = struct{}{}
+	}
+	names := maps.Keys(loadedNames)
 	app.startMetadataPrewarmWithCheckpointGate("restored dump", names, nil)
 	if cs := app.Carbonserver; cs != nil {
 		cs.WaitForWarmup()

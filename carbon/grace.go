@@ -903,7 +903,7 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 }
 
 // RestoreFromDir cache and input dumps from disk to memory
-func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
+func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) error {
 	startTime := time.Now()
 
 	logger := zapwriter.Logger("restore").With(zap.String("dir", dumpDir))
@@ -917,7 +917,10 @@ func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
 	files, err := os.ReadDir(dumpDir)
 	if err != nil {
 		logger.Error("readdir failed", zap.Error(err))
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 
 	// read files and lazy sorting
@@ -957,7 +960,7 @@ FilesLoop:
 
 	if len(list) == 0 {
 		logger.Info("nothing for restore")
-		return
+		return nil
 	}
 
 	sort.Strings(list)
@@ -978,23 +981,28 @@ FilesLoop:
 		if info, err := os.Stat(filename); err == nil {
 			restoredBytes += info.Size()
 		}
-		app.RestoreFromFile(filename, storeFunc)
+		if err := app.RestoreFromFile(filename, storeFunc); err != nil {
+			logger.Error("restore failed; keeping source file", zap.String("filename", filename), zap.Error(err))
+			return fmt.Errorf("restore %s: %w", filename, err)
+		}
 
 		// The input log recorded the restored points; they must be durable
 		// there before their only other copy goes.
 		if err = app.syncInputLog(); err != nil {
 			logger.Error("input log sync failed; keeping restored file", zap.String("filename", filename), zap.Error(err))
-			continue
+			return err
 		}
 		err = os.Remove(filename)
 		if err != nil {
 			logger.Error("remove failed", zap.String("filename", filename), zap.Error(err))
+			return err
 		}
 	}
+	return nil
 }
 
 // Restore from dump.path
-func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
+func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) error {
 	if rps > 0 {
 		ticker := helper.NewThrottleTicker(rps)
 		defer ticker.Stop()
@@ -1006,9 +1014,9 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 			storeFunc(p)
 		}
 
-		app.RestoreFromDir(path, throttledStoreFunc)
+		return app.RestoreFromDir(path, throttledStoreFunc)
 	} else {
-		app.RestoreFromDir(path, storeFunc)
+		return app.RestoreFromDir(path, storeFunc)
 	}
 }
 

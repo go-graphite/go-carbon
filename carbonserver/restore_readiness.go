@@ -1,8 +1,11 @@
 package carbonserver
 
 import (
+	"context"
 	"errors"
 	"iter"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 var errRestorePending = errors.New("metric restored history is still being persisted")
@@ -46,6 +49,30 @@ func (l *CarbonserverListener) PrepareRestoreIndex(names iter.Seq[string]) error
 	}
 	if index == nil || index.trieIdx == nil {
 		return errors.New("restore intake requires a ready trie index")
+	}
+	// Mixed warmup can load a saved file index while restored names are
+	// already being committed to the shared store. Those names may leave the
+	// finite cache prefix before it is snapshotted. Union the committed catalog
+	// into the mixed trie; a catalog-only replacement would hide originals.
+	if db := l.getMetricStore(); l.metricStoreFileIndex && db != nil {
+		if err := store.EachPage(context.Background(), db.ListCatalogPage, "", metricStoreCatalogPageSize, func(page []store.Metadata) error {
+			for _, m := range page {
+				if l.MetricExists(m.Name) {
+					continue
+				}
+				path, ok := l.storableMetricPath(m.Name)
+				if !ok {
+					continue
+				}
+				logical, points := metricStoreLogicalSize(m)
+				if _, err := index.trieIdx.insert(path, logical, 0, points, 0); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 	for name := range names {
 		if l.MetricExists(name) {

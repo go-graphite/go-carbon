@@ -31,6 +31,8 @@ func legacyIntakeFixture(t *testing.T, metrics, perMetric int) (string, *Config,
 	cfg.Whisper.StoreCacheSize, cfg.Whisper.StoreMemTableSize = 1<<20, 1<<20
 	cfg.Whisper.Workers = 4
 	cfg.Dump.Format = "legacy"
+	cfg.InputLog.Enabled, cfg.InputLog.Path = true, t.TempDir()
+	cfg.InputLog.SegmentSize = 16 << 20
 	cfg.Cache.MaxSize = 0
 	cfg.Buckyd.Enabled = false
 	first := New(path)

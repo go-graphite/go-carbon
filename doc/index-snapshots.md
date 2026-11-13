@@ -131,9 +131,10 @@ instantaneous or eliminate the process handoff gap.
 
 ### Legacy shared-store restore at load-complete
 
-For untagged `pebble-chunk` storage without mirrored files, incremental migration,
-or live migration, ordinary recovery admits every cache dump and input dump
-before opening live input. If carbonserver is enabled, this path requires
+For untagged `pebble-chunk` storage with `[input-log] enabled = true`, without
+mirrored files or live migration, ordinary recovery admits every cache dump and
+input dump before opening live input. Incremental migration uses the same path
+while retaining its normal per-metric original-file/shared-store routing. If carbonserver is enabled, this path requires
 `trie-index = true`, `concurrent-index = true`, and `realtime-index > 0`.
 Inherited input sockets, active predecessor tails, and checkpoint capture retain
 their existing recovery paths.
@@ -147,7 +148,10 @@ traffic does not extend this completion barrier. Live cache limits and quotas
 still apply, so overloaded intake can drop points under the normal admission
 policy.
 
-Before listeners open, recovery combines the store catalog with the saved name
+Before listeners open, incremental stores load their saved mixed index or build
+the ordinary original-file/shared-store index if no saved index is available.
+Other shared stores use their committed catalog. Recovery combines that index
+with the saved name
 snapshot, including uncreated and in-flight metrics, and applies quotas. The
 snapshot remains stable while persistence confirms points, preventing names
 from disappearing between catalog loading and cache traversal. The collector
@@ -162,7 +166,12 @@ they do not universally overlay cached raw points. Complete-request checks
 prevent partial wildcard results from entering the response cache. Once the
 prefix is confirmed, that metric uses ordinary read behavior.
 
-This removes the final drain from intake downtime. It does not capture input
+Dump decoding or journal sync failures retain the failed source and abort startup
+before listeners open. The input log durably owns loaded points before source
+files retire, including when the process crashes with restore writes outstanding.
+
+This removes the final drain from intake downtime. Journal replay still precedes
+ordered dump loading and live admission; it is not moved behind live writes. It does not capture input
 during legacy dump loading, change on-disk formats, or add a new durability
 guarantee. Durable capture during loading still needs an ordered, crash-safe
 spool admitted after all older recovery sources and before live cache writes.
