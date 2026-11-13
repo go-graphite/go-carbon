@@ -152,6 +152,11 @@ func (f *fakeSync) Digest(_ context.Context, store string, names []string, from,
 	s := f.store(store)
 	out := map[string][]syncDigest{}
 	for _, n := range names {
+		// The production digest reads the same series as Fetch, so a corrupt
+		// name must fail both paths rather than yielding an apparently equal hash.
+		if n == f.poison {
+			return nil, errors.New("digest: corrupt series " + n)
+		}
 		schema, ok := s.archives[n]
 		if !ok {
 			continue

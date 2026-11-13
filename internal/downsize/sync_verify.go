@@ -336,12 +336,20 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 		}
 		c.detail = detail
 	}
-	needPoints := false
+	needed := map[string]bool{}
 	for _, c := range checks {
-		needPoints = needPoints || len(c.detail) > 0
+		for _, n := range c.detail {
+			needed[n] = true
+		}
 	}
-	if !needPoints {
+	if len(needed) == 0 {
 		return nil
+	}
+	var targetDetail []string
+	for _, n := range names {
+		if needed[n] {
+			targetDetail = append(targetDetail, n)
+		}
 	}
 	var targetPoints map[string]syncSeries
 	var targetFetchErr error
@@ -349,7 +357,7 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 	reads.Add(1)
 	go func() {
 		defer reads.Done()
-		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, names, w.From, w.Until)
+		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, targetDetail, w.From, w.Until)
 	}()
 	for _, c := range checks {
 		if len(c.detail) == 0 {
@@ -442,39 +450,116 @@ func (s *syncer) checkFull(ctx context.Context, row *syncRow, names []string, sc
 			if from >= until {
 				continue
 			}
-			target, err := s.fetch(ctx, s.o.to, group, from, until)
-			if err != nil {
-				return fmt.Errorf("target fetch: %w", err)
+			if err := s.checkFullArchive(ctx, row, group, a.Step, from, until); err != nil {
+				return err
 			}
-			for src, source := range s.o.from {
-				subset := s.holders(src, group)
-				if len(subset) == 0 {
-					continue
-				}
-				if s.isDown(source) {
-					for _, n := range subset {
-						row.Skipped = append(row.Skipped, syncSkip{n, "source down: " + source})
+		}
+	}
+	return nil
+}
+
+// checkFullArchive uses exactly the same serving-archive window and hole
+// comparison as full point reads. Equal count+hash at the expected step proves
+// there are no holes; every other result takes the original point comparison.
+// Requests to independent stores overlap, but holes retain source/name order.
+func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
+	type check struct {
+		store   string
+		names   []string
+		digests map[string][]syncDigest
+		err     error
+		detail  []string
+		points  map[string]syncSeries
+	}
+	target := &check{store: s.o.to, names: names}
+	checks := []*check{target}
+	for src, source := range s.o.from {
+		subset := s.holders(src, names)
+		if len(subset) == 0 {
+			continue
+		}
+		if s.isDown(source) {
+			for _, n := range subset {
+				row.Skipped = append(row.Skipped, syncSkip{n, "source down: " + source})
+			}
+			continue
+		}
+		checks = append(checks, &check{store: source, names: subset})
+	}
+	var wg sync.WaitGroup
+	w := syncRange{Name: "full", From: from, Until: until}
+	for _, c := range checks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.digests, c.err = s.digest(ctx, c.store, c.names, w)
+		}()
+	}
+	wg.Wait()
+	// Digest failures fall back to the original read path. In particular an
+	// unavailable endpoint must never turn an unchecked name into a match.
+	needed := map[string]bool{}
+	for _, c := range checks[1:] {
+		for _, n := range c.names {
+			match := false
+			if target.err == nil && c.err == nil {
+				for _, sd := range c.digests[n] {
+					if sd.Step != step {
+						continue
 					}
-					continue
-				}
-				got, err := s.fetch(ctx, source, subset, from, until)
-				if errors.Is(err, errSyncStoreDown) {
-					continue
-				}
-				if err != nil {
-					return fmt.Errorf("source %s fetch: %w", source, err)
-				}
-				s.prog.reads.Add(int64(len(subset)))
-				for _, n := range subset {
-					sv, ok := got[n]
-					if !ok || sv.Step != a.Step {
-						continue // not served at this step: retention differs
-					}
-					if h, ok := syncCompare(n, source, sv, target[n], a.Step, from, until); ok {
-						h.Window = "full"
-						row.Holes = append(row.Holes, h)
+					for _, td := range target.digests[n] {
+						if td.Step == step && sd.Count == td.Count && sd.Hash == td.Hash {
+							match = true
+						}
 					}
 				}
+			}
+			if match {
+				s.prog.digests.Add(1)
+			} else {
+				c.detail = append(c.detail, n)
+				needed[n] = true
+			}
+		}
+	}
+	for _, n := range names {
+		if needed[n] {
+			target.detail = append(target.detail, n)
+		}
+	}
+	for _, c := range checks {
+		if len(c.detail) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.points, c.err = s.fetch(ctx, c.store, c.detail, from, until)
+		}()
+	}
+	wg.Wait()
+	if len(target.detail) > 0 && target.err != nil {
+		return fmt.Errorf("target fetch: %w", target.err)
+	}
+	for _, c := range checks[1:] {
+		if len(c.detail) == 0 {
+			continue
+		}
+		if errors.Is(c.err, errSyncStoreDown) {
+			continue
+		}
+		if c.err != nil {
+			return fmt.Errorf("source %s fetch: %w", c.store, c.err)
+		}
+		s.prog.reads.Add(int64(len(c.detail)))
+		for _, n := range c.detail {
+			sv, ok := c.points[n]
+			if !ok || sv.Step != step {
+				continue
+			}
+			if h, ok := syncCompare(n, c.store, sv, target.points[n], step, from, until); ok {
+				h.Window = "full"
+				row.Holes = append(row.Holes, h)
 			}
 		}
 	}
