@@ -36,13 +36,24 @@ func TestBuckydTransferDebtReload(t *testing.T) {
 			t.Fatal("debt reload replaced a running component")
 		}
 	}
+	// max_transfers applies live too (a SIGHUP may raise 16 -> 64).
+	for _, limit := range []int{16, 64, 3} {
+		cfg.Buckyd.MaxTransfers = limit
+		writeSharedConfig(t, path, cfg)
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+		if service.MaxTransfers() != limit || app.Buckyd != service {
+			t.Fatalf("live transfer cap %d, want %d", service.MaxTransfers(), limit)
+		}
+	}
 	cfg.Buckyd.TransferMaxCompactionDebt = 24 << 30
 	cfg.Buckyd.Bind = "127.0.0.1:4243"
 	writeSharedConfig(t, path, cfg)
 	if err := app.ReloadConfig(); err == nil {
 		t.Fatal("listener change accepted without restart")
 	}
-	if service.TransferMaxCompactionDebt() != 8<<30 {
-		t.Fatal("rejected reload changed live debt cap")
+	if service.TransferMaxCompactionDebt() != 8<<30 || service.MaxTransfers() != 3 {
+		t.Fatal("rejected reload changed live debt or transfer cap")
 	}
 }
