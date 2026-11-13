@@ -1,7 +1,9 @@
 package downsize
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,6 +256,103 @@ func TestSyncIOTimings(t *testing.T) {
 	for _, g := range got {
 		if g.Calls != 1 || g.Seconds <= 0 {
 			t.Fatalf("timing %+v", g)
+		}
+	}
+}
+
+// Oversized metadata requests retry at the same cursor, and future calls to
+// that store reuse the cap. A different store retains its own request size.
+func TestSyncInfoAdaptiveBatch(t *testing.T) {
+	for _, failure := range []error{io.EOF, io.ErrUnexpectedEOF, context.DeadlineExceeded} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			var requests [][]string
+			b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Second, carbonPort: 8080})
+			b.client.Transport = syncInfoRoundTrip(func(r *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(r.Body)
+				var req protov3.MultiGlobRequest
+				if err := req.UnmarshalVT(body); err != nil {
+					t.Fatal(err)
+				}
+				requests = append(requests, append([]string(nil), req.Metrics...))
+				if r.URL.Hostname() == "slow" && len(req.Metrics) > 2 {
+					return nil, failure
+				}
+				var reply protov3.MultiMetricsInfoResponse
+				for _, name := range req.Metrics {
+					if name == "absent" {
+						return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("Metric not found")), Header: make(http.Header)}, nil
+					}
+					reply.Metrics = append(reply.Metrics, &protov3.MetricsInfoResponse{Name: name, Retentions: []*protov3.Retention{{SecondsPerPoint: 60, NumberOfPoints: 10000}}})
+				}
+				data, _ := reply.MarshalVT()
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+			})
+			names := []string{"a", "b", "c", "d", "e", "f", "g"}
+			for range 2 {
+				got, err := b.Info(context.Background(), "http://slow:4242", names)
+				if err != nil || len(got) != len(names) {
+					t.Fatalf("info=%v err=%v", got, err)
+				}
+				for _, name := range names {
+					if len(got[name]) != 1 {
+						t.Fatalf("lost %q", name)
+					}
+				}
+			}
+			// 7 -> 3 -> 1 (floor-halving), then retain 1 for all future calls.
+			if !reflect.DeepEqual(requests[0], names) || !reflect.DeepEqual(requests[1], names[:3]) || !reflect.DeepEqual(requests[2], names[:1]) {
+				t.Fatalf("cursor moved: %v", requests)
+			}
+			for _, req := range requests[2:] {
+				if len(req) != 1 {
+					t.Fatalf("forgot cap: %v", requests)
+				}
+			}
+			if _, err := b.Info(context.Background(), "http://healthy:4242", names); err != nil {
+				t.Fatal(err)
+			}
+			if len(requests[len(requests)-1]) != 7 {
+				t.Fatal("cap leaked to other store")
+			}
+			got, err := b.Info(context.Background(), "http://slow:4242", []string{"a", "absent", "b"})
+			if err != nil || len(got) != 2 || got["a"] == nil || got["b"] == nil {
+				t.Fatalf("absence changed: %v %v", got, err)
+			}
+		})
+	}
+}
+
+type syncInfoRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f syncInfoRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestSyncInfoAdaptiveSingleAndCancel(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		b := newSyncLiveBackend(syncLiveOptions{hostWait: -time.Second, carbonPort: 8080})
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		b.client.Transport = syncInfoRoundTrip(func(*http.Request) (*http.Response, error) {
+			calls++
+			if canceled {
+				cancel()
+			}
+			return nil, io.EOF
+		})
+		names := []string{"a"}
+		if canceled {
+			names = []string{"a", "b", "c"}
+		}
+		got, err := b.Info(ctx, "http://source:4242", names)
+		cancel()
+		if err == nil || len(got) != 0 || calls != 1 {
+			t.Fatalf("got=%v err=%v calls=%d", got, err, calls)
+		}
+		if !canceled && !errors.Is(err, errSyncStoreDown) {
+			t.Fatalf("lost host wait error: %v", err)
+		}
+		limit, _ := b.infoLimits.Load("http://source:4242")
+		if limit.(*atomic.Int64).Load() != 0 {
+			t.Fatal("reduced single-name request")
 		}
 	}
 }

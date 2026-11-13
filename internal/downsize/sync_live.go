@@ -37,15 +37,16 @@ type syncLiveOptions struct {
 }
 
 type syncLiveBackend struct {
-	o         syncLiveOptions
-	m         *mover
-	client    *http.Client
-	copy      func(context.Context, copyOptions) error
-	listLimit atomic.Int64 // learned catalog page cap after a truncated JSON response
-	bytes     atomic.Int64 // response bytes read for verification
-	waits     atomic.Int64 // retries while a store was unavailable
-	busy      atomic.Int64 // retries after 429 (all transfer slots taken)
-	timings   sync.Map     // phase + store -> *syncIOTime
+	o          syncLiveOptions
+	m          *mover
+	client     *http.Client
+	copy       func(context.Context, copyOptions) error
+	listLimit  atomic.Int64 // learned catalog page cap after a truncated JSON response
+	infoLimits sync.Map     // store -> *atomic.Int64, learned metadata request cap
+	bytes      atomic.Int64 // response bytes read for verification
+	waits      atomic.Int64 // retries while a store was unavailable
+	busy       atomic.Int64 // retries after 429 (all transfer slots taken)
+	timings    sync.Map     // phase + store -> *syncIOTime
 }
 
 // syncIOTime reports cumulative request time, including retries. Concurrent
@@ -259,46 +260,74 @@ func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string
 	if err != nil {
 		return nil, err
 	}
+	value, _ := b.infoLimits.LoadOrStore(store, &atomic.Int64{})
+	cap := value.(*atomic.Int64)
 	out := map[string][]syncArchive{}
 	var walk func([]string) error
 	walk = func(names []string) error {
-		body, err := (&protov3.MultiGlobRequest{Metrics: names}).MarshalVT()
-		if err != nil {
-			return err
-		}
-		var data []byte
-		err = b.wait(ctx, "info", store, func() error {
-			data, err = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
-			return err
-		})
-		var httpErr *syncHTTPError
-		if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
-			if len(names) > 1 {
-				for _, name := range names {
-					if err := walk([]string{name}); err != nil {
+		for cursor := 0; cursor < len(names); {
+			count := len(names) - cursor
+			if learned := cap.Load(); learned > 0 {
+				count = min(count, int(learned))
+			}
+			var data []byte
+			err := b.wait(ctx, "info", store, func() error {
+				for {
+					body, err := (&protov3.MultiGlobRequest{Metrics: names[cursor : cursor+count]}).MarshalVT()
+					if err != nil {
 						return err
 					}
+					data, err = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
+					if ctx.Err() != nil || count <= 1 || !syncInfoTooLarge(err) {
+						return err
+					}
+					// A slow batch can outlive the server's write deadline. Retry
+					// this cursor with fewer names, retaining every unprocessed name.
+					count /= 2
+					for old := cap.Load(); old == 0 || int64(count) < old; old = cap.Load() {
+						if cap.CompareAndSwap(old, int64(count)) {
+							break
+						}
+					}
+					event("sync_info_batch_reduced", map[string]any{"store": store, "limit": count, "error": err.Error()})
+				}
+			})
+			var httpErr *syncHTTPError
+			if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
+				if count > 1 {
+					for _, name := range names[cursor : cursor+count] {
+						if err := walk([]string{name}); err != nil {
+							return err
+						}
+					}
+				}
+			} else {
+				if err != nil {
+					return err
+				}
+				var resp protov3.MultiMetricsInfoResponse
+				if err := resp.UnmarshalVT(data); err != nil {
+					return fmt.Errorf("decode info from %s: %w", base, err)
+				}
+				for _, m := range resp.Metrics {
+					archives := make([]syncArchive, 0, len(m.Retentions))
+					for _, r := range m.Retentions {
+						archives = append(archives, syncArchive{Step: r.SecondsPerPoint, Points: r.NumberOfPoints})
+					}
+					out[m.Name] = archives
 				}
 			}
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		var resp protov3.MultiMetricsInfoResponse
-		if err := resp.UnmarshalVT(data); err != nil {
-			return fmt.Errorf("decode info from %s: %w", base, err)
-		}
-		for _, m := range resp.Metrics {
-			archives := make([]syncArchive, 0, len(m.Retentions))
-			for _, r := range m.Retentions {
-				archives = append(archives, syncArchive{Step: r.SecondsPerPoint, Points: r.NumberOfPoints})
-			}
-			out[m.Name] = archives
+			cursor += count
 		}
 		return nil
 	}
 	return out, walk(names)
+}
+
+func syncInfoTooLarge(err error) bool {
+	var timeout net.Error
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		(errors.As(err, &timeout) && timeout.Timeout())
 }
 
 func (b *syncLiveBackend) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {

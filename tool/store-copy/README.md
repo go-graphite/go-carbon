@@ -399,6 +399,9 @@ without waiting for every source name to be checked. A batch `/info` 404 falls
 back to exact-name requests once; an absent name is skipped on that source and
 can be tried on a later source. Names absent everywhere are reported as residuals.
 Resume with the same batch and stream settings to reuse the copy wave journals.
+If a metadata request ends in EOF or a timeout, the client halves its name
+batch and retries the same cursor. It remembers the smaller cap per source
+for the rest of the run; single-name failures still use `--host-wait`.
 
 ### Recover a recent gap in short-retention metrics
 
