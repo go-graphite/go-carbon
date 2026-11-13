@@ -75,9 +75,10 @@ func TestPrependArchivesDifferential(t *testing.T) {
 						if ok || len(dst) > 0 {
 							t.Fatal("expected unchanged fallback")
 						}
-						return
-					}
-					if !ok {
+						if kind == "nan" {
+							return
+						}
+					} else if !ok {
 						t.Fatal("fast path declined")
 					}
 					// Real imports using fast/old codecs supply the independent finite-slot oracle.
@@ -103,6 +104,10 @@ func TestPrependArchivesDifferential(t *testing.T) {
 						}
 						snapshots = append(snapshots, snap)
 						db.Close()
+					}
+					requireSnapshotPointBits(t, snapshots[0], snapshots[1])
+					if !ok {
+						return
 					}
 					got, err := c.Snapshot(context.Background(), dst, ts.Metadata, classicTestClock)
 					if err != nil {
@@ -244,7 +249,6 @@ func TestPrependArchivesLayouts(t *testing.T) {
 						if len(dst) != 1 || dst["sentinel"][0] != 1 {
 							t.Fatal("fallback mutated destination")
 						}
-						return
 					}
 					targetSnap, err := c.Snapshot(context.Background(), target, m, classicTestClock)
 					if err != nil {
@@ -274,6 +278,9 @@ func TestPrependArchivesLayouts(t *testing.T) {
 						} else {
 							requireSnapshotPointBits(t, want, snap)
 						}
+					}
+					if !ok {
+						return
 					}
 					got, err := c.Snapshot(context.Background(), dst, m, classicTestClock)
 					if err != nil {
