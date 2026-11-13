@@ -128,32 +128,15 @@ func (whisper *Whisper) archivePoints(index int, includeRollups bool) ([]TimeSer
 		if err != nil {
 			return nil, fmt.Errorf("read compressed archive %d: %w", index, err)
 		}
-		byTime := make(map[int]float64, len(points))
-		for _, point := range points {
-			if point.interval > 0 {
-				byTime[point.interval] = point.value
-			}
-		}
+		var side []TimeSeriesPoint
 		if sidecar, err := whisper.oooSidecar(false); err != nil {
 			return nil, err
 		} else if sidecar != nil {
-			sidePoints, err := sidecar.ArchivePoints(index)
-			if err != nil {
+			if side, err = sidecar.ArchivePoints(index); err != nil {
 				return nil, err
 			}
-			for _, point := range sidePoints {
-				if _, ok := byTime[point.Time]; !ok {
-					byTime[point.Time] = point.Value
-				}
-			}
 		}
-		result := make([]TimeSeriesPoint, 0, len(byTime))
-		for timestamp, value := range byTime {
-			result = append(result, TimeSeriesPoint{Time: timestamp, Value: value})
-		}
-		// byTime already resolved duplicate timestamps. Typed swaps avoid the
-		// reflection cost of sorting every complete archive during migration.
-		slices.SortFunc(result, func(a, b TimeSeriesPoint) int { return cmp.Compare(a.Time, b.Time) })
+		result := mergeOrderedArchivePoints(points, side)
 		return result, nil
 	}
 	// Reuse the bounded, extent-aware classic reader. Virtual sidecars can
@@ -190,4 +173,52 @@ func (whisper *Whisper) ReplaceArchivePoints(index int, points []TimeSeriesPoint
 		pointPointers[i] = &points[i]
 	}
 	return whisper.archiveUpdateManyDataPoints(archive, alignPoints(archive, pointPointers), false)
+}
+
+// mergeOrderedArchivePoints returns stored compressed points and sidecar
+// points as one series ordered by timestamp. It resolves duplicates exactly as
+// a timestamp map would: among stored points the last one read wins, stored
+// points win over sidecar points, and among sidecar points the first one wins.
+// Stored points with a non-positive interval are empty slots and are skipped.
+// Blocks are normally read in time order, so the sorts only run on input that
+// is out of order; a stable sort keeps the read order of equal timestamps.
+func mergeOrderedArchivePoints(stored []dataPoint, side []TimeSeriesPoint) []TimeSeriesPoint {
+	byInterval := func(a, b dataPoint) int { return cmp.Compare(a.interval, b.interval) }
+	if !slices.IsSortedFunc(stored, byInterval) {
+		stored = slices.Clone(stored)
+		slices.SortStableFunc(stored, byInterval)
+	}
+	byTime := func(a, b TimeSeriesPoint) int { return cmp.Compare(a.Time, b.Time) }
+	if !slices.IsSortedFunc(side, byTime) {
+		side = slices.Clone(side)
+		slices.SortStableFunc(side, byTime)
+	}
+	result := make([]TimeSeriesPoint, 0, len(stored)+len(side))
+	j := 0
+	for i := 0; i < len(stored); i++ {
+		point := stored[i]
+		if point.interval <= 0 {
+			continue
+		}
+		// The last of equal stored timestamps wins.
+		for i+1 < len(stored) && stored[i+1].interval == point.interval {
+			i++
+			point = stored[i]
+		}
+		for ; j < len(side) && side[j].Time < point.interval; j++ {
+			if n := len(result); n == 0 || result[n-1].Time != side[j].Time {
+				result = append(result, side[j])
+			}
+		}
+		// A stored point hides sidecar points with its timestamp.
+		for ; j < len(side) && side[j].Time == point.interval; j++ {
+		}
+		result = append(result, TimeSeriesPoint{Time: point.interval, Value: point.value})
+	}
+	for ; j < len(side); j++ {
+		if n := len(result); n == 0 || result[n-1].Time != side[j].Time {
+			result = append(result, side[j])
+		}
+	}
+	return result
 }
