@@ -44,6 +44,16 @@ func (s *pausedReadHandoffStore) UpdateManyMaintained(ctx context.Context, name 
 	return s.update(func() error { return s.Store.UpdateManyMaintained(ctx, name, input, maintenance) })
 }
 
+// Override retryable writes too: embedding Store otherwise promotes these
+// methods and lets the persister bypass the held-commit test boundary.
+func (s *pausedReadHandoffStore) TryUpdateMany(ctx context.Context, name string, input []store.Point) error {
+	return s.update(func() error { return s.Store.TryUpdateMany(ctx, name, input) })
+}
+
+func (s *pausedReadHandoffStore) TryUpdateManyMaintained(ctx context.Context, name string, input []store.Point, maintenance store.ContinuationMaintenance) error {
+	return s.update(func() error { return s.Store.TryUpdateManyMaintained(ctx, name, input, maintenance) })
+}
+
 // A slow commit must not prevent reads of accepted in-flight points. Compare
 // the actual public-read implementation against its pre-write result, including
 // an incoming correction after PopNotConfirmed and the failed-write requeue.

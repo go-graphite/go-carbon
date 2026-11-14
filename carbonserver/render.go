@@ -206,6 +206,10 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	}
 
 	tgs := getTargetNames(targets)
+	if listener.renderNeedsIndex(tgs) {
+		http.Error(wr, "Service unavailable (index not ready)", http.StatusServiceUnavailable)
+		return
+	}
 	accessLogger.with(zap.Strings("targets", tgs))
 
 	logger := newRequestLogger(ctx, listener.logger,
@@ -741,6 +745,9 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 
 	targets := getProtoV2Targets(req)
 	tgs := getTargetNames(targets)
+	if listener.renderNeedsIndex(tgs) {
+		return status.Error(codes.Unavailable, "Service unavailable (index not ready)")
+	}
 	accessLogger = accessLogger.With(
 		zap.String("format", format.String()),
 		zap.Strings("targets", tgs),

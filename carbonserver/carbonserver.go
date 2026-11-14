@@ -2611,7 +2611,7 @@ func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.
 			zap.String("peer", req.RemoteAddr),
 		))
 
-		if listener.shouldBlockForIndex() {
+		if listener.shouldBlockForIndex() && !(listener.canRenderWithoutIndex() && req.URL.Path == "/render/") {
 			accessLogger.Error("request denied",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "index not ready"),
@@ -3132,7 +3132,7 @@ func (listener *CarbonserverListener) UnaryServerRatelimitHandler() grpc.UnarySe
 			ctx = newCtx
 		}
 
-		if err := listener.grpcServerRatelimitHandler(ctx, ratelimiter, payload, t0); err != nil {
+		if err := listener.grpcServerRatelimitHandler(ctx, ratelimiter, payload, t0, false); err != nil {
 			return nil, err
 		}
 		return handler(ctx, req)
@@ -3158,14 +3158,14 @@ func (listener *CarbonserverListener) StreamServerRatelimitHandler() grpc.Stream
 		}
 
 		ctx := wss.Context()
-		if err := listener.grpcServerRatelimitHandler(ctx, ratelimiter, wss.Payload(), t0); err != nil {
+		if err := listener.grpcServerRatelimitHandler(ctx, ratelimiter, wss.Payload(), t0, fullMethodName == "/carbonapi_v2_grpc.CarbonV2/Render"); err != nil {
 			return err
 		}
 		return handler(srv, ss)
 	}
 }
 
-func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Context, ratelimiter *ApiPerPathRatelimiter, payload string, t0 time.Time) error {
+func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Context, ratelimiter *ApiPerPathRatelimiter, payload string, t0 time.Time, nativeRender bool) error {
 	var reqPeer string
 	if p, ok := peer.FromContext(ctx); ok {
 		reqPeer = p.Addr.String()
@@ -3176,7 +3176,7 @@ func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Con
 		zap.String("peer", reqPeer),
 	))
 
-	if listener.shouldBlockForIndex() {
+	if listener.shouldBlockForIndex() && !(nativeRender && listener.canRenderWithoutIndex()) {
 		accessLogger.Error("request denied",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "index not ready"),
