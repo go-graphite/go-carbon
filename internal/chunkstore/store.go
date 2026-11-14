@@ -361,13 +361,15 @@ type Store struct {
 	mirrorBlind              atomic.Uint64
 	canonicalRuns            [64]IDSet
 	ingestStats              struct{ tables, entries, bytes, l0Bytes, memtableOverlaps atomic.Uint64 }
-	transferBatchStats       struct{ commits, entries, bytes atomic.Uint64 }
-	transferMergeStats       transferMergeStats
+	// transferCommitMu serializes byte-bounded import WAL commits. Live writers
+	// never acquire it; imports avoid SST target-level selection entirely.
+	transferCommitMu   sync.Mutex
+	transferBatchStats struct{ commits, entries, bytes atomic.Uint64 }
+	transferMergeStats transferMergeStats
 	// transferMergeAppendOff merges every present continuation name with
 	// RestoreArchives (differential tests).
 	transferMergeAppendOff bool
-	// transferBatchBytes enables batch staging only in tests/benchmarks.
-	// The default (zero), and negative values, always ingest private SSTs.
+	// transferBatchBytes can reduce the import WAL byte cap in tests/benchmarks.
 	transferBatchBytes int
 	// backgroundStopped is set once StopBackground completed.
 	backgroundStopped atomic.Bool

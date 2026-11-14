@@ -195,7 +195,7 @@ func TestTransferImportConcurrencyBench(t *testing.T) {
 		for _, mode := range []struct {
 			name  string
 			limit int
-		}{{"ingest", -1}, {"batch", 0}} {
+		}{{"small-wal", 16 << 10}, {"default-wal", 0}} {
 			target.SetTransferBatchBytesForTest(mode.limit)
 			stop := make(chan struct{})
 			var latencies []time.Duration

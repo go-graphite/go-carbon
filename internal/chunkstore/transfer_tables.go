@@ -105,13 +105,13 @@ func (s *Store) stageTransfer(first uint64, records []TransferMetric, metas []Me
 	return &transferStage{keys: keys, bytes: size, capture: capture, verify: verify}
 }
 
-// transferBatchLimit is a test/benchmark override. Private imported data must
-// bypass the foreground WAL and memtables, even for small transfers: sustained
-// copies can otherwise fill the shared flush queue and stall live writes.
-// SST bounds are split by namespace/time bucket and contain only reserved IDs,
-// so staging does not overlap live keys or force their memtables to flush.
+// transferBatchLimit lets tests reduce the WAL batch bound. Production and
+// oversized overrides always retain the byte cap used by publication.
 func (s *Store) transferBatchLimit() int {
-	return max(0, s.transferBatchBytes)
+	if s.transferBatchBytes > 0 {
+		return min(transferPublicationBytes, s.transferBatchBytes)
+	}
+	return transferPublicationBytes
 }
 
 // writeTransferBatch stages the keys in one batch and verifies an
@@ -157,17 +157,27 @@ func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage 
 	return stage.verify(ctx)
 }
 
+// A single validated key/value may exceed this payload target and is kept
+// intact. Table boundaries never change the stored key/value bytes.
+const transferTableBytes = 8 << 20
+
 func (s *Store) writeTransferTables(ctx context.Context, first uint64, stage *transferStage) (paths []string, err error) {
 	keys := stage.keys
 	// Keep each namespace/time bucket in a separate table, so its bounds cover
 	// only the reserved IDs and cannot overlap unrelated foreground writes.
 	for len(keys) > 0 {
 		n := 1
+		size := len(keys[0].Key) + len(keys[0].Value) + 16
 		prefix := keys[0].Key[:1]
 		if prefix[0] == continuationBucketKeyPrefix {
 			prefix = keys[0].Key[:5]
 		}
 		for n < len(keys) && bytes.HasPrefix(keys[n].Key, prefix) {
+			next := len(keys[n].Key) + len(keys[n].Value) + 16
+			if size+next > transferTableBytes {
+				break
+			}
+			size += next
 			n++
 		}
 		path := s.fs.PathJoin(s.dir, fmt.Sprintf("transfer-%020d-%d.sst", first, len(paths)))
@@ -256,4 +266,55 @@ func (s *Store) verifyTransferTable(ctx context.Context, path string, keys []Rel
 		return errors.New("unexpected staged transfer key")
 	}
 	return it.Error()
+}
+
+// stageTransferWAL avoids SST target-level selection under Pebble's DB mutex.
+// Only reserved, unpublished IDs are written here. Import commits share the
+// publication mutex, released after each byte-bounded batch; live writers do
+// not acquire it. Verification and the final visibility/sync protocol remain
+// identical to table staging. A single validated record stays indivisible.
+func (s *Store) stageTransferWAL(ctx context.Context, stage *transferStage, entries int) error {
+	b := s.db.NewBatch()
+	defer b.Close()
+	start := 0
+	flush := func(end int) error {
+		if b.Empty() {
+			return ctx.Err()
+		}
+		part := &transferStage{keys: stage.keys[start:end], capture: stage.capture, verify: func(context.Context) error { return nil }}
+		if err := s.verifyTransferBatch(ctx, b, part); err != nil {
+			return err
+		}
+		size := uint64(len(b.Repr()))
+		if err := s.commitTransferBatch(ctx, b); err != nil {
+			return err
+		}
+		s.pendingSync.Store(true)
+		s.transferBatchStats.commits.Add(1)
+		s.transferBatchStats.bytes.Add(size)
+		b.Reset()
+		start = end
+		return nil
+	}
+	for i, kv := range stage.keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !b.Empty() && len(b.Repr())+len(kv.Key)+len(kv.Value)+16 > s.transferBatchLimit() {
+			if err := flush(i); err != nil {
+				return err
+			}
+		}
+		if err := b.Set(kv.Key, kv.Value, nil); err != nil {
+			return err
+		}
+	}
+	if err := flush(len(stage.keys)); err != nil {
+		return err
+	}
+	if err := stage.verify(ctx); err != nil {
+		return err
+	}
+	s.transferBatchStats.entries.Add(uint64(entries))
+	return ctx.Err()
 }
