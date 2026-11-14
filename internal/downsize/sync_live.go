@@ -42,19 +42,20 @@ type syncLiveOptions struct {
 }
 
 type syncLiveBackend struct {
-	o             syncLiveOptions
-	m             *mover
-	client        *http.Client
-	copy          func(context.Context, copyOptions) error
-	listLimit     atomic.Int64 // learned catalog page cap after a truncated JSON response
-	infoLimits    sync.Map     // store -> *atomic.Int64, learned metadata request cap
-	bytes         atomic.Int64 // response bytes read for verification
-	waits         atomic.Int64 // retries while a store was unavailable
-	busy          atomic.Int64 // retries after 429 (all transfer slots taken)
-	timings       sync.Map     // phase + store -> *syncIOTime
-	windowMu      sync.RWMutex
-	windowSources *nativeController // scoped to the missing-window scan
-	windowPinned  time.Time
+	o                    syncLiveOptions
+	m                    *mover
+	client               *http.Client
+	copy                 func(context.Context, copyOptions) error
+	listLimit            atomic.Int64 // learned catalog page cap after a truncated JSON response
+	infoLimits           sync.Map     // store -> *atomic.Int64, learned metadata request cap
+	bytes                atomic.Int64 // response bytes read for verification
+	waits                atomic.Int64 // retries while a store was unavailable
+	busy                 atomic.Int64 // retries after 429 (all transfer slots taken)
+	timings              sync.Map     // phase + store -> *syncIOTime
+	windowSelectionSlots sync.Map     // source -> chan struct{}; keep selection ahead of pulls bounded
+	windowMu             sync.RWMutex
+	windowSources        *nativeController // scoped to the missing-window scan
+	windowPinned         time.Time
 }
 
 // syncIOTime reports cumulative request time, including retries. Concurrent

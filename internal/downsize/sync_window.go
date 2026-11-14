@@ -451,6 +451,17 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 		return map[string][]syncDigest{}, nil
 	}
 	defer b.recordTime("window_selection", source)()
+	// One selection per donor leaves at most one selection ahead of a copy
+	// pull on older servers with serial export admission. Disjoint groups and
+	// different donors still overlap; queued groups retain no source pin.
+	v, _ := b.windowSelectionSlots.LoadOrStore(source, make(chan struct{}, 1))
+	slot := v.(chan struct{})
+	select {
+	case slot <- struct{}{}:
+		defer func() { <-slot }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	w := windows[0]
 	for _, next := range windows[1:] {
 		w.From = min(w.From, next.From)
