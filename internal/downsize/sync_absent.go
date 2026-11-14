@@ -154,6 +154,9 @@ func (s *syncer) resolveAbsent(ctx context.Context, row *syncRow, names []string
 				s.masks.Store(n, bits|1<<uint(i-1))
 			}
 		}
+		if !positive && uncertain {
+			row.Skipped = append(row.Skipped, syncSkip{n, "schema_metadata_unavailable"})
+		}
 		if !positive && !uncertain {
 			row.Resolved = append(row.Resolved, syncSkip{n, "absent_all_sources"})
 		}
