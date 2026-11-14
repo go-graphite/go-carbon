@@ -586,7 +586,6 @@ are installed. Run `storectl maintain ACTION --help` for action flags.
 | `storectl maintain convert` | Import complete Whisper archives with identity-bound resume and verification; see [conversion](../../doc/shared-exact-blocks.md#bulk-conversion). |
 | `storectl maintain prune-empty-dirs` | Remove empty original directories while checking daemon readiness; see [pruning](../../internal/storemaint/prune/README.md). |
 | `storectl maintain reclaim-orphans` | Inspect orphaned staged imports offline; `-apply` publishes reclaimed ownership. |
-| `storectl maintain configs` | Compare old/new schemas and aggregations against a file-list cache; see the [example](../../README.md#useful-toolscommands). |
 
 Offline actions retain the store's exclusive-open and source-binding checks.
 Stop the daemon before cold-pack, conversion into its store, or orphan reclaim.
