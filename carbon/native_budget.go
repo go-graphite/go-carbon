@@ -48,5 +48,5 @@ func (cfg *Config) nativeExportConcurrency(available func() (uint64, error)) int
 		return 1
 	}
 	memorySlots := (ram/4 - uint64(cfg.Whisper.StoreNativeCombineMemory)) / uint64(store.NativeExportMemoryPerStream)
-	return min(store.AutoNativeExportConcurrency(), int(max(uint64(1), min(uint64(8), memorySlots))))
+	return min(store.AutoNativeExportConcurrency(), int(max(uint64(1), min(uint64(store.MaxNativeExportConcurrency), memorySlots))))
 }

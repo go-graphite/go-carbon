@@ -114,7 +114,7 @@ func TestNativeExportMemoryAndRestart(t *testing.T) {
 		ram                uint64
 		detectErr, invalid bool
 	}{
-		{1, 0, true, false}, {2, 144 << 30, false, false}, {2, (144 << 30) - 1, false, true}, {2, 0, true, true}, {0, 1 << 40, false, false}, {9, 1 << 40, false, true}, {8, 1 << 40, false, false},
+		{1, 0, true, false}, {2, 144 << 30, false, false}, {2, (144 << 30) - 1, false, true}, {2, 0, true, true}, {0, 1 << 40, false, false}, {17, 2 << 40, false, true}, {8, 1 << 40, false, false}, {16, 1096 << 30, false, false}, {16, (1096 << 30) - 1, false, true},
 	} {
 		cfg := NewConfig()
 		cfg.Whisper.StoreNativeExportConcurrency = tc.exports
@@ -150,7 +150,7 @@ func TestAutomaticNativeExportBudget(t *testing.T) {
 	for _, tc := range []struct {
 		ram  uint64
 		want int
-	}{{0, 1}, {64 << 30, 1}, {144 << 30, min(2, store.AutoNativeExportConcurrency())}, {1 << 40, store.AutoNativeExportConcurrency()}} {
+	}{{0, 1}, {64 << 30, 1}, {144 << 30, min(2, store.AutoNativeExportConcurrency())}, {1 << 40, min(14, store.AutoNativeExportConcurrency())}, {2 << 40, store.AutoNativeExportConcurrency()}} {
 		if got := cfg.nativeExportConcurrency(func() (uint64, error) { return tc.ram, nil }); got != tc.want {
 			t.Fatalf("RAM %d: %d != %d", tc.ram, got, tc.want)
 		}

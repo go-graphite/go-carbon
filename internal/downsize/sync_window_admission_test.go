@@ -19,7 +19,7 @@ import (
 // Exercise real checksum-validated exporters with concurrent selection and compare
 // every digest and copied point bit with the serial client.
 func TestSyncWindowSelectionCapacityDifferential(t *testing.T) {
-	for _, advertised := range []int{0, 1, 2, 8, 1000} {
+	for _, advertised := range []int{0, 1, 2, 8, 16, 1000} {
 		t.Run(fmt.Sprint(advertised), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -32,7 +32,7 @@ func TestSyncWindowSelectionCapacityDifferential(t *testing.T) {
 			windows := syncRanges{{From: testMetricNow - 20, Until: testMetricNow}}
 			handler := nativeControllerService(t, source)
 			gate := make(chan struct{})
-			entered := make(chan struct{}, 16)
+			entered := make(chan struct{}, 32)
 			var closeGate sync.Once
 			defer closeGate.Do(func() { close(gate) })
 			donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +54,7 @@ func TestSyncWindowSelectionCapacityDifferential(t *testing.T) {
 			b := newSyncLiveBackend(syncLiveOptions{})
 			finish := b.beginWindowCopy()
 			defer finish()
-			count := max(1, min(8, advertised)-1)
+			count := max(1, min(store.MaxNativeExportConcurrency, advertised)-1)
 			results := make(chan map[string][]syncDigest, count+1)
 			errs := make(chan error, count+1)
 			for range count + 1 {

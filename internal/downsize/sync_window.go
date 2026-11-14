@@ -611,7 +611,7 @@ func (b *syncLiveBackend) windowPresenceRangesOnce(ctx context.Context, source s
 		if _, err := b.m.requestOnce(ctx, source, "/v1/native/capabilities", nil, &capability); err != nil {
 			return nil, err
 		}
-		limit := max(1, min(8, capability.NativeExportConcurrency)-1)
+		limit := max(1, min(chunkstore.MaxNativeExportConcurrency, capability.NativeExportConcurrency)-1)
 		event("sync_window_selection_capacity", map[string]any{"source": source, "exports": capability.NativeExportConcurrency, "selections": limit})
 		return make(chan struct{}, limit), nil
 	}))

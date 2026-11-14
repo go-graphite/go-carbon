@@ -58,7 +58,7 @@ type Options struct {
 	// estimated scratch allowance, including results waiting for SST consumers.
 	// Each worker receives total/imports/workers (at least 1 GiB). Zero selects
 	// 1 import / 2 workers / 2 GiB. Changes require reopening.
-	NativeExportConcurrency int // 0..8; zero selects CPUs/8 (1..8); requires reopening
+	NativeExportConcurrency int // 0..16; zero selects CPUs/8 (1..16); requires reopening
 	NativeImportConcurrency int
 	NativeCombineWorkers    int
 	NativeCombineMemory     int64
