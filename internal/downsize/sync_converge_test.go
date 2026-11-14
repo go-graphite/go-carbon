@@ -255,3 +255,61 @@ func TestSyncConvergeExplicitNamesCheckUnlistedPeersEveryRound(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// A failed fill must remain in the next verification set and be retried even
+// when no other name makes progress. Permanent failures stay bounded and loud.
+type failingFillSync struct {
+	*fakeSync
+	failures int
+	calls    int
+}
+
+func (f *failingFillSync) Copy(ctx context.Context, source, target string, names []string, journal string) (syncCopyResult, error) {
+	f.calls++
+	if f.calls <= f.failures {
+		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
+	}
+	return f.fakeSync.Copy(ctx, source, target, names, journal)
+}
+func TestSyncConvergeRetriesFailedFill(t *testing.T) {
+	for _, failures := range []int{1, 2, 100} {
+		t.Run(fmt.Sprint(failures), func(t *testing.T) {
+			f := &failingFillSync{fakeSync: newFakeSync(), failures: failures}
+			o := convergeOptions(t)
+			schema := []syncArchive{{60, 10000}}
+			f.put(syncT, "hole", schema)
+			f.put(syncP, "hole", schema)
+			ts := int64(syncTestNow - 6000)
+			want := math.Float64frombits(0x8000000000000000)
+			f.store(syncP).points["hole"][60][ts] = want
+			delete(f.store(syncT).points["hole"][60], ts)
+			err := runSync(context.Background(), o, f)
+			journal, _ := os.ReadFile(filepath.Join(o.state, "sync.jsonl"))
+			if !strings.Contains(string(journal), `"failed":["hole"]`) {
+				t.Fatal("lost failed-fill journal evidence", string(journal))
+			}
+			if failures < 3 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if f.calls != failures+1 {
+					t.Fatalf("calls %d, want %d", f.calls, failures+1)
+				}
+				if got := f.store(syncT).points["hole"][60][ts]; math.Float64bits(got) != math.Float64bits(want) {
+					t.Fatal("changed recovered point bits")
+				}
+			} else {
+				if err == nil {
+					t.Fatal("permanent failed fill succeeded")
+				}
+				if f.calls != 3 {
+					t.Fatalf("calls %d, want 3", f.calls)
+				}
+				residual, _ := os.ReadFile(filepath.Join(o.state, "residual.json"))
+				if !strings.Contains(string(residual), `"copy_failed"`) || !strings.Contains(string(residual), `"hole"`) {
+					t.Fatal("lost residual", string(residual))
+				}
+			}
+		})
+	}
+}
