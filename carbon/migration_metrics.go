@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
@@ -60,6 +61,7 @@ type migrationSnapshot struct {
 	recoveryCeiling                       int64
 	recoveryRejections                    uint64
 	nameTooLongRejected                   uint64
+	admission                             cache.AdmissionStats
 	recoveryBlocked                       bool
 	storeSnapshotAge                      float64
 }
@@ -337,6 +339,10 @@ var migrationMetricSpecs = func() []metricSpec {
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_ceiling_bytes", "Cache-owned byte ceiling derived from existing allocations and reserved memory headroom; configured max-bytes also applies.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryCeiling) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_remaining_bytes", "Unspent recovery memory reservation; abandoned checks expire at the next memory sample.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRemaining) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_blocked", "One while recovery admission was denied in the last ten seconds; feeds automatic writeout pressure immediately.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return b(s.recoveryBlocked) }},
+		metricSpec{desc: prometheus.NewDesc("cache_throttled_points_total", "Points rejected by the cache throttle hook, including throughput, usage and creation limits.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.admission.Throttled) }},
+		metricSpec{desc: prometheus.NewDesc("cache_overflow_dropped_points_total", "Points rejected because the write cache exceeds its point or byte limit.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.admission.Overflow) }},
+		metricSpec{desc: prometheus.NewDesc("cache_invalid_tag_rejected_points_total", "Points rejected because metric tag normalization failed.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.admission.InvalidTags) }},
+		metricSpec{desc: prometheus.NewDesc("cache_xlog_write_failed_points_total", "Points in failed cache diversion writes; a prefix may have reached the diversion destination.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.admission.XlogWriteFailed) }},
 		metricSpec{desc: prometheus.NewDesc("receiver_name_too_long_rejected_points_total", "Points refused at cache intake because the metric name exceeds 4096 bytes.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.nameTooLongRejected) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_rejections_total", "Recovery admission checks denied by memory reservation or configured cache ceilings.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRejections) }},
 	)
@@ -610,6 +616,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.recoveryCeiling = cache.RecoveryByteCeiling()
 		s.recoveryBlocked = cache.RecoveryBlocked()
 		s.nameTooLongRejected = cache.NameTooLongRejectedPoints()
+		s.admission = cache.AdmissionStats()
 	}
 	if db != nil {
 		st, sidecars, ok := db.TelemetryStats()
