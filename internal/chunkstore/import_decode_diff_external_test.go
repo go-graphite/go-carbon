@@ -14,6 +14,14 @@ import (
 // Golden digests are produced by the pre-buffer-reuse import reader. Compare
 // float bits, archive order and proof bytes rather than floating-point equality.
 func TestImportDecodeCurrentReaderDifferential(t *testing.T) {
+	testImportRetirementDifferential(t, false)
+}
+
+func TestImportRetirementMatchesLockedOracle(t *testing.T) {
+	testImportRetirementDifferential(t, true)
+}
+
+func testImportRetirementDifferential(t *testing.T, locked bool) {
 	for _, mode := range []struct {
 		name                  string
 		continuation, buckets bool
@@ -24,6 +32,7 @@ func TestImportDecodeCurrentReaderDifferential(t *testing.T) {
 			ctx := context.Background()
 			source := transferStore(t, mode.continuation, mode.buckets)
 			target := transferStore(t, mode.continuation, mode.buckets)
+			target.SetTransferRetireLockedForTest(locked)
 			names := make([]string, 12)
 			specials := []uint64{0, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000001234}
 			for i := range names {
