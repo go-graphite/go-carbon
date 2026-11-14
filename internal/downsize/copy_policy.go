@@ -25,7 +25,7 @@ func (m *mover) copyPolicyConflict(ctx context.Context, t task, name string, bud
 		endpoint string
 		out      *[]store.TransferMetric
 	}{{t.Source, &source}, {t.Target, &target}} {
-		_, err := m.request(ctx, side.endpoint, "/v1/transfer/export?wire=2&max_bytes="+strconv.FormatInt(budget, 10), []string{name}, side.out)
+		_, err := m.request(ctx, side.endpoint, "/v1/transfer/export?wire=2&store_format=12&max_bytes="+strconv.FormatInt(budget, 10), []string{name}, side.out)
 		if err != nil {
 			return nil, err
 		}

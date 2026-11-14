@@ -2,6 +2,7 @@ package downsize
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -41,7 +42,14 @@ func TestCopyPolicyConflictPreservesArchivesAndTargetPolicy(t *testing.T) {
 			if err := target.UpdateMany(ctx, cfg.Name, []store.Point{{Timestamp: 1000070, Value: 99}}); err != nil {
 				t.Fatal(err)
 			}
-			donor := httptest.NewServer(nativeControllerService(t, source))
+			donorHandler := nativeControllerService(t, source)
+			donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/transfer/export" && r.URL.Query().Get("store_format") != "12" {
+					http.Error(w, "export requires peer store format 12", 409)
+					return
+				}
+				donorHandler.ServeHTTP(w, r)
+			}))
 			defer donor.Close()
 			destination := httptest.NewServer(nativeControllerService(t, target))
 			defer destination.Close()
