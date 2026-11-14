@@ -418,6 +418,31 @@ func (c *Cache) PendingUrgentOutstanding() uint64 {
 	return 0
 }
 
+// PendingRecoveryStats separates unread checkpoint names from cache batches
+// awaiting persistence. Urgent excludes batches allowed to wait for spread.
+// The scrape never waits for a confirmation or cache shard lock.
+type PendingRecoveryStats struct {
+	Unclaimed, Confirmations, Urgent uint64
+}
+
+func (c *Cache) PendingRecoveryStats() (s PendingRecoveryStats, ok bool) {
+	r := c.pending.Load()
+	if r == nil {
+		return s, true
+	}
+	s.Unclaimed = r.remaining.Load()
+	for i := range r.writes {
+		w := &r.writes[i]
+		if !w.mu.TryLock() {
+			return PendingRecoveryStats{}, false
+		}
+		s.Confirmations += uint64(len(w.unpersisted))
+		s.Urgent += uint64(len(w.unpersisted) - len(w.deferred))
+		w.mu.Unlock()
+	}
+	return s, true
+}
+
 // dumpPending writes saved metrics that were never claimed. Callers must have
 // diverted input and stopped RecoverPending, so no claim can race the dump.
 func (c *Cache) dumpPending(write func(*points.Points) error) error {

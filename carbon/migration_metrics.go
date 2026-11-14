@@ -54,6 +54,8 @@ type migrationSnapshot struct {
 	workingReserved                       int64
 	cache                                 bool
 	cachePoints                           int64
+	pendingRecovery                       cache.PendingRecoveryStats
+	pendingRecoveryFailures               uint64
 	cacheMetrics                          int32
 	cacheBytes                            int64
 	cachePointBytes                       int64
@@ -147,6 +149,8 @@ var migrationMetricSpecs = func() []metricSpec {
 		return 0
 	}
 	specs := []metricSpec{
+		counter("pending_checkpoint_failures_total", "Pending checkpoint load, sync or retirement failures; recovery sources remain retained.", func(s *migrationSnapshot) float64 { return float64(s.pendingRecoveryFailures) }),
+
 		gauge("store_metrics_snapshot_age_seconds", "Age of the background Pebble/cache observation; grows if storage I/O stalls the sampler. Application counters remain live.", func(s *migrationSnapshot) float64 { return s.storeSnapshotAge }),
 		gauge("store_ooo_sidecars", "Sidecars currently present; complete when store_ooo_inventory_ready is 1.", func(s *migrationSnapshot) float64 { return float64(s.sidecars.Count) }),
 		gauge("store_ooo_sidecar_points", "Physical sidecar records, including expired slots.", func(s *migrationSnapshot) float64 { return float64(s.sidecars.Points) }),
@@ -337,6 +341,9 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_metadata_cache_prewarm_failed_total", "Metrics the start's prewarm could not read.", func(s *migrationSnapshot) float64 { return float64(s.stats.stateCache.PrewarmFailed) }),
 		metricSpec{desc: prometheus.NewDesc("store_migration_working_bytes_reserved", "Conversion working bytes currently reserved.", nil, nil), kind: prometheus.GaugeValue, migration: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.workingReserved) }},
+		metricSpec{desc: prometheus.NewDesc("cache_pending_checkpoint_unclaimed_metrics", "Saved metric names not yet loaded into cache.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.pendingRecovery.Unclaimed) }},
+		metricSpec{desc: prometheus.NewDesc("cache_pending_checkpoint_confirmations", "Claimed checkpoint batches awaiting persistence confirmation before source retirement.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.pendingRecovery.Confirmations) }},
+		metricSpec{desc: prometheus.NewDesc("cache_pending_checkpoint_urgent_confirmations", "Claimed checkpoint batches awaiting persistence confirmation before the first scan may open.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.pendingRecovery.Urgent) }},
 		metricSpec{desc: prometheus.NewDesc("cache_points", "Points held in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePoints) }},
 		metricSpec{desc: prometheus.NewDesc("cache_realtime_index_pending", "Distinct names waiting for realtime index insertion, including the current batch.", nil, nil), kind: prometheus.GaugeValue, cache: true,
@@ -630,7 +637,13 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.committedPoints = p.CommittedPoints()
 		s.writeDroppedPoints = p.WriteDroppedPoints()
 	}
+	s.pendingRecoveryFailures = c.app.pendingRecoveryFailures.Load()
 	if cache != nil {
+		var ok bool
+		if s.pendingRecovery, ok = cache.PendingRecoveryStats(); !ok {
+			c.skipped.Add(1)
+			return
+		}
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
 		s.realtimeIndexPending = cache.RealtimeIndexPending()
 		s.cacheBytes = cache.EstimatedBytes()
