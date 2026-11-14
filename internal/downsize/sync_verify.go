@@ -572,11 +572,64 @@ func (s *syncer) fullDigest(ctx context.Context, store string, names []string, s
 	return got, false, err
 }
 
+type fullArchiveDigest struct {
+	legacy    map[string][]syncDigest
+	legacyErr error
+	digests   map[string][]syncDigest
+	sum       bool
+	err       error
+}
+
+func (s *syncer) fullArchiveDigests(ctx context.Context, names []string, step, from, until int64) map[string]fullArchiveDigest {
+	// Digest responses contain only fingerprints. Batch them by names, while
+	// materialized fallback reads below retain their independent byte budget.
+	stores := append([]string{s.o.to}, s.o.from...)
+	results := make([]fullArchiveDigest, len(stores))
+	var wg sync.WaitGroup
+	for i, store := range stores {
+		subset := names
+		if i > 0 {
+			subset = s.holders(i-1, names)
+			if s.isDown(store) {
+				continue
+			}
+		} else if legacy, known := s.digests.Load("sum-v1:" + store); known && !legacy.(bool) {
+			continue // the bounded local target read also supplies its legacy SHA
+		}
+		if len(subset) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i].digests, results[i].sum, results[i].err = s.fullDigest(ctx, store, subset, step, syncRange{Name: "full", From: from, Until: until})
+		}()
+	}
+	wg.Wait()
+	// Older holders speak the serving-archive SHA protocol. Compare them with
+	// the target's SHA for this exact window before materializing any points;
+	// fingerprints from different algorithms must never be compared directly.
+	if results[0].sum && results[0].err == nil {
+		for _, d := range results[1:] {
+			if !d.sum && d.err == nil && len(d.digests) > 0 {
+				results[0].legacy, results[0].legacyErr = s.digest(ctx, s.o.to, names, syncRange{Name: "full", From: from, Until: until})
+				break
+			}
+		}
+	}
+	out := make(map[string]fullArchiveDigest, len(stores))
+	for i, store := range stores {
+		out[store] = results[i]
+	}
+	return out
+}
+
 // checkFullArchive uses exactly the same serving-archive window and hole
 // comparison as full point reads. Equal count+hash at the expected step proves
 // there are no holes; every other result takes the original point comparison.
 // Requests to independent stores overlap, but holes retain source/name order.
 func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
+	digests := s.fullArchiveDigests(ctx, names, step, from, until)
 	// A verification worker can retain a decoded response for the target and
 	// every holder. Bound the names by the archive's point count, rather than
 	// treating a 500-name week and a 500-name year as the same amount of work.
@@ -586,12 +639,12 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 	const budget = int64(64 << 20)
 	batch := fullVerifyBatchNames(len(names), len(s.o.from)+1, step, from, until, budget)
 	if batch >= len(names) {
-		return s.checkFullArchiveBatch(ctx, row, names, step, from, until)
+		return s.checkFullArchiveBatch(ctx, row, names, step, from, until, digests)
 	}
 	var result syncRow
 	for start := 0; start < len(names); start += batch {
 		end := min(start+batch, len(names))
-		if err := s.checkFullArchiveBatch(ctx, &result, names[start:end], step, from, until); err != nil {
+		if err := s.checkFullArchiveBatch(ctx, &result, names[start:end], step, from, until, digests); err != nil {
 			return err
 		}
 	}
@@ -627,7 +680,7 @@ func fullVerifyBatchNames(names, stores int, step, from, until, budget int64) in
 	return int(min(int64(names), max(int64(1), limit)))
 }
 
-func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
+func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names []string, step, from, until int64, digests map[string]fullArchiveDigest) error {
 	type check struct {
 		store   string
 		names   []string
@@ -657,16 +710,9 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 	var wg sync.WaitGroup
 	w := syncRange{Name: "full", From: from, Until: until}
 	for _, c := range checks {
-		if c == target && localTarget {
-			continue
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.digests, c.sum, c.err = s.fullDigest(ctx, c.store, c.names, step, w)
-		}()
+		d := digests[c.store]
+		c.digests, c.sum, c.err = d.digests, d.sum, d.err
 	}
-	wg.Wait()
 	if localTarget {
 		// The legacy endpoint performs the same expensive target read as Fetch.
 		// Read it once locally, reusing its points if any source hash differs.
@@ -692,6 +738,8 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 				targetNames = append(targetNames, n)
 			}
 		}
+		// The local read supersedes any endpoint negotiation failure.
+		target.err = nil
 		target.points = map[string]syncSeries{}
 		target.digests = map[string][]syncDigest{}
 		if len(targetNames) > 0 {
@@ -714,6 +762,20 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 		SumDigest(context.Context, string, []string, int64, int64, int64) (map[string][]syncDigest, error)
 	}); sums && target.sum && target.err == nil {
 		for _, c := range checks[1:] {
+			if !c.sum && c.err == nil && digests[s.o.to].legacyErr == nil {
+				keep := make([]string, 0, len(c.names))
+				for _, n := range c.names {
+					if fullArchiveSHAMatch(c.digests[n], digests[s.o.to].legacy[n], step, from, until) {
+						s.prog.digests.Add(1)
+					} else {
+						keep = append(keep, n)
+					}
+				}
+				c.names = keep
+			}
+			if len(c.names) == 0 {
+				continue
+			}
 			if c.sum && !errors.Is(c.err, errSyncNoDigest) {
 				continue
 			}
@@ -808,6 +870,25 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 		}
 	}
 	return nil
+}
+
+// fullArchiveSHAMatch compares only fingerprints of the requested serving
+// archive. A missing digest or a different archive never establishes coverage.
+func fullArchiveSHAMatch(source, target []syncDigest, step, from, until int64) bool {
+	for _, sd := range source {
+		if sd.Step != step {
+			continue
+		}
+		if sd.Count == 0 && ((sd.From == 0 && sd.Until == 0) || (sd.From == from && sd.Until == until)) {
+			return true
+		}
+		for _, td := range target {
+			if td.Step == step && sd.Points == td.Points && sd.From == td.From && sd.Until == td.Until && sd.Count == td.Count && sd.Hash == td.Hash {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // syncSumCovered accepts only the exact archive window negotiated above.

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,7 +113,7 @@ func TestSyncFullSumDifferential2048Names(t *testing.T) {
 	}
 }
 
-func TestSyncSumMixedHolderSkipsTargetRead(t *testing.T) {
+func TestSyncSumMixedHolderSkipsPointReads(t *testing.T) {
 	f, o, _ := threeSources(t)
 	b := &sumSyncFixture{fakeSync: f, old: map[string]bool{syncD1: true}}
 	s := &syncer{o: o, b: b}
@@ -122,8 +123,8 @@ func TestSyncSumMixedHolderSkipsTargetRead(t *testing.T) {
 	if err := s.checkFullArchive(context.Background(), &row, []string{"a.clean"}, 60, syncTestNow-86400, syncTestNow-3600); err != nil {
 		t.Fatal(err)
 	}
-	if len(row.Holes) != 0 || f.fetches.Load()-before != 1 {
-		t.Fatalf("wanted one legacy read only: row=%+v reads=%d", row, f.fetches.Load()-before)
+	if len(row.Holes) != 0 || f.fetches.Load()-before != 0 {
+		t.Fatalf("matching mixed-protocol digests caused point reads: row=%+v reads=%d", row, f.fetches.Load()-before)
 	}
 }
 
@@ -278,5 +279,80 @@ func TestSyncLegacyTargetReadOnceAfterNegotiation(t *testing.T) {
 	}
 	if b.calls != 1 {
 		t.Fatalf("target SHA calls=%d want1", b.calls)
+	}
+}
+
+func TestSyncFullTargetWithoutDigestEndpoints(t *testing.T) {
+	f, o, _ := threeSources(t)
+	f.noDigest[syncT] = true
+	b := &sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true}}
+	s := &syncer{o: o, b: b}
+	names := []string{"a.clean", "b.holes", "c.peerhole"}
+	schemas := map[string][]syncArchive{}
+	for _, n := range names {
+		s.masks.Store(n, uint64(7))
+		schemas[n] = syncTestSchema
+	}
+	var want, got syncRow
+	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("digest-unavailable target changed holes: got %+v want %+v", got, want)
+	}
+}
+
+// The serving SHA fixture computes the wire fingerprint independently of the
+// additive sum fixture. Count only Fetch calls made by the controller itself.
+type countedMixedFull struct {
+	*servingSHA
+	detail atomic.Int64
+}
+
+func (f *countedMixedFull) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
+	f.detail.Add(int64(len(names)))
+	return f.fakeSync.Fetch(ctx, store, names, from, until)
+}
+func TestSyncMixedSHADigestBeforePointReads(t *testing.T) {
+	for _, holes := range []bool{false, true} {
+		t.Run(fmt.Sprint(holes), func(t *testing.T) {
+			f, o, _ := threeSources(t)
+			names := []string{"a.clean", "b.holes", "c.peerhole"}
+			for _, store := range append([]string{syncT}, o.from...) {
+				for _, n := range names {
+					f.put(store, n, syncTestSchema)
+				}
+			}
+			if holes {
+				delete(f.store(syncT).points["b.holes"][60], syncTestNow-86400)
+			}
+			b := &countedMixedFull{servingSHA: &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncD1: true, syncD2: true, syncP: true}}}}
+			s := &syncer{o: o, b: b}
+			schemas := map[string][]syncArchive{}
+			for _, n := range names {
+				s.masks.Store(n, uint64(7))
+				schemas[n] = syncTestSchema
+			}
+			var want, got syncRow
+			if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+				t.Fatal(err)
+			}
+			b.detail.Store(0)
+			if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("mixed SHA changed ordered verdict: got %+v want %+v", got, want)
+			}
+			if !holes && b.detail.Load() != 0 {
+				t.Fatalf("matching SHA fetched %d names", b.detail.Load())
+			}
+			if holes && (b.detail.Load() == 0 || len(got.Holes) == 0) {
+				t.Fatal("SHA mismatch did not read points and retain holes")
+			}
+		})
 	}
 }

@@ -10,7 +10,19 @@ import (
 
 type boundedFullSync struct {
 	*fakeSync
-	largest atomic.Int64
+	largest       atomic.Int64
+	digestLargest atomic.Int64
+	digestCalls   atomic.Int64
+}
+
+func (b *boundedFullSync) Digest(ctx context.Context, source string, names []string, from, until int64) (map[string][]syncDigest, error) {
+	b.digestCalls.Add(1)
+	for old := b.digestLargest.Load(); int64(len(names)) > old; old = b.digestLargest.Load() {
+		if b.digestLargest.CompareAndSwap(old, int64(len(names))) {
+			break
+		}
+	}
+	return b.fakeSync.Digest(ctx, source, names, from, until)
 }
 
 func (b *boundedFullSync) Fetch(ctx context.Context, source string, names []string, from, until int64) (map[string]syncSeries, error) {
@@ -56,6 +68,12 @@ func TestSyncFullHistoryMemoryBudgetParity(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ordered hole verdict changed: got %d, want %d", len(got.Holes), len(want.Holes))
+	}
+	if calls := b.digestCalls.Load(); calls != 4 {
+		t.Fatalf("got %d digest RPCs, want one per store (4)", calls)
+	}
+	if largest := b.digestLargest.Load(); largest != 500 {
+		t.Fatalf("digest batch has %d names, want 500 independent of point budget", largest)
 	}
 	if largest := b.largest.Load(); largest == 0 || largest > 64 {
 		t.Fatalf("week-long fallback retained %d names in one peer response; want <=64", largest)
