@@ -46,12 +46,14 @@ const (
 )
 
 type Options struct {
-	// NativeCombineWorkers and NativeCombineMemory bound one admitted import's
-	// preparation workers and aggregate estimated scratch, including results
-	// waiting for the SST consumer. Zero selects 2 workers / 2 GiB. Each worker
-	// receives total/workers (at least 1 GiB). Changes require reopening.
-	NativeCombineWorkers int
-	NativeCombineMemory  int64
+	// NativeImportConcurrency bounds admitted imports (1..8). NativeCombineWorkers
+	// bounds workers per import (1..32). NativeCombineMemory is the store-wide
+	// estimated scratch allowance, including results waiting for SST consumers.
+	// Each worker receives total/imports/workers (at least 1 GiB). Zero selects
+	// 1 import / 2 workers / 2 GiB. Changes require reopening.
+	NativeImportConcurrency int
+	NativeCombineWorkers    int
+	NativeCombineMemory     int64
 	// MaintenanceWait defers optional scans/rewrites until restart warming and
 	// pacing end. The caller supplies a bounded, cancellation-aware lifetime
 	// gate. Nil keeps offline tools' immediate maintenance behavior.
@@ -238,6 +240,7 @@ type Store struct {
 	maintenanceCtx        context.Context
 	maintenanceStop       context.CancelFunc
 
+	nativeImportConcurrency   int
 	nativeCombineWorkers      int
 	nativeCombineWorkerMemory int64
 
@@ -371,13 +374,16 @@ var storeComparer = func() *pebble.Comparer {
 // Open accepts only a new directory or an explicitly identified chunk store.
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
+	if options.NativeImportConcurrency == 0 {
+		options.NativeImportConcurrency = DefaultNativeImportConcurrency
+	}
 	if options.NativeCombineWorkers == 0 {
 		options.NativeCombineWorkers = DefaultNativeCombineWorkers
 	}
 	if options.NativeCombineMemory == 0 {
 		options.NativeCombineMemory = DefaultNativeCombineMemory
 	}
-	if err := ValidateNativeCombineBudget(options.NativeCombineWorkers, options.NativeCombineMemory); err != nil {
+	if err := ValidateNativeImportBudget(options.NativeImportConcurrency, options.NativeCombineWorkers, options.NativeCombineMemory); err != nil {
 		return nil, err
 	}
 	if options.RelayoutWorkers < 0 || options.RelayoutWorkers > 32 {
@@ -491,8 +497,9 @@ func Open(dir string, options Options) (*Store, error) {
 	s.compactionControl.setDebtBypass(!options.CompactionKeepPacingOnDebt)
 	s.compactionControl.setWarmup(warmup)
 	s.continuation = options.Continuation
+	s.nativeImportConcurrency = options.NativeImportConcurrency
 	s.nativeCombineWorkers = options.NativeCombineWorkers
-	s.nativeCombineWorkerMemory = options.NativeCombineMemory / int64(options.NativeCombineWorkers)
+	s.nativeCombineWorkerMemory = options.NativeCombineMemory / int64(options.NativeImportConcurrency) / int64(options.NativeCombineWorkers)
 	s.fetchSharedIterator = options.FetchSharedIterator
 	stateKeys, _ := options.Continuation.(ContinuationStateKeys)
 	if size := options.MetadataCacheSize; size > 0 {

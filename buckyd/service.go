@@ -113,14 +113,13 @@ type ACL struct {
 
 type Service struct {
 	nativeRejectedRequests atomic.Uint64
-
-	nativePullOnce      sync.Once
-	nativePullAdmission chan struct{}
-	nativeMu            sync.Mutex
-	nativeSources       map[string]*nativeSourceSession
-	nativeCreating      map[string]time.Time
-	nativeClosing       map[string]*nativeSourceSession
-	nativeSourceStopped bool
+	nativePullOnce         sync.Once
+	nativePullAdmission    chan struct{}
+	nativeMu               sync.Mutex
+	nativeSources          map[string]*nativeSourceSession
+	nativeCreating         map[string]time.Time
+	nativeClosing          map[string]*nativeSourceSession
+	nativeSourceStopped    bool
 
 	config       Config
 	transferDebt atomic.Int64
