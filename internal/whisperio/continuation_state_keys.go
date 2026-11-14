@@ -79,15 +79,26 @@ var (
 	_ store.ContinuationStateLoader = (*ContinuationCodec)(nil)
 )
 
-// StateSlot keeps only the most recently used block descriptor and point
-// group per file/archive. Including the full key in the slot's value makes a
-// rotation or a change of time bucket miss instead of reusing the old tail.
+// StateSlot keeps the most recently used block descriptor and point group per
+// file/archive. Classic archives also keep group zero separately: it supplies
+// the circular archive's base interval and must not displace its current group.
+// Including the full key in the slot's value makes a rotation or a change of
+// time bucket miss instead of reusing the old tail. These optional slots share
+// the existing metadata cache budget and are refused before evicting metadata.
 func (c *ContinuationCodec) StateSlot(key []byte) []byte {
 	if len(key) > 5 && key[0] == 'T' {
 		key = key[5:]
 	}
 	if len(key) != 16 && len(key) != 20 || key[0] != 'f' {
 		return nil
+	}
+	if key[9] == 'p' && len(key) == 20 {
+		slot := make([]byte, 14)
+		copy(slot[1:], key[:12])
+		if !bytes.Equal(key[16:], []byte{0, 0, 0, 0}) {
+			slot[13] = 1
+		}
+		return slot
 	}
 	if key[9] != 'b' && key[9] != 'c' {
 		return nil

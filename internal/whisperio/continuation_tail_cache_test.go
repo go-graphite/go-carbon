@@ -230,7 +230,8 @@ func newTailReadFixture(t testing.TB, keep bool) *tailReadFixture {
 	return f
 }
 
-func (f *tailReadFixture) update(t testing.TB, i, batch int) {
+func (f *tailReadFixture) update(t testing.TB, i int) {
+	const batch = 564
 	t.Helper()
 	// A sub-resolution emitter, as on the persister: six-second input into
 	// a minutely archive. Count input points, including overwritten slots.
@@ -259,10 +260,18 @@ func (f *tailReadFixture) update(t testing.TB, i, batch int) {
 
 func TestContinuationTailReadStoreParity(t *testing.T) {
 	plain, cached := newTailReadFixture(t, true), newTailReadFixture(t, false)
+	tailReadStoreParity(t, plain, cached)
+}
+
+func tailReadStoreParity(t *testing.T, plain, cached *tailReadFixture) [2]uint64 {
+	t.Helper()
+	var reads [2]uint64
 	ctx := context.Background()
 	for i := range 64 {
-		for _, f := range []*tailReadFixture{plain, cached} {
-			f.update(t, i, 564)
+		for side, f := range []*tailReadFixture{plain, cached} {
+			count := store.CountStoreReadsForTest()
+			f.update(t, i)
+			reads[side] += count()
 			if i == 31 {
 				if err := errors.Join(f.db.Flush(), f.db.Compact(), f.db.Close()); err != nil {
 					t.Fatal(err)
@@ -316,6 +325,7 @@ func TestContinuationTailReadStoreParity(t *testing.T) {
 			}
 		}
 	}
+	return reads
 }
 
 func BenchmarkContinuationTailReadReuse(b *testing.B) {
@@ -324,7 +334,7 @@ func BenchmarkContinuationTailReadReuse(b *testing.B) {
 			f := newTailReadFixture(b, keep)
 			const batch = 564
 			for i := range 32 {
-				f.update(b, i, batch)
+				f.update(b, i)
 			}
 			if err := f.db.Flush(); err != nil {
 				b.Fatal(err)
@@ -336,7 +346,7 @@ func BenchmarkContinuationTailReadReuse(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := range b.N {
-				f.update(b, i+32, batch)
+				f.update(b, i+32)
 			}
 			b.StopTimer()
 			syscall.Getrusage(syscall.RUSAGE_SELF, &after)
