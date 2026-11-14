@@ -328,13 +328,11 @@ func (s *syncer) unionSource() syncNameSource {
 				}
 			}
 			for scanner.Scan() {
-				name, mask, onTarget, err := parseUnionLine(scanner.Text())
+				name, mask, _, err := parseUnionLine(scanner.Text())
 				if err != nil {
 					return "", 0, err
 				}
-				if mask != 0 || onTarget {
-					return name, mask, nil
-				}
+				return name, mask, nil
 			}
 			if err := scanner.Err(); err != nil {
 				return "", 0, err
