@@ -25,6 +25,9 @@ var continuationNames atomic.Uint64
 // Only headers and file identities stay in memory. Historical values live in
 // shared exact blocks; no raw Whisper body or per-metric OS file is retained.
 type continuationFiles struct {
+	// snapshotReads is enabled only after private OOO folding has finished.
+	// Archive materialization then performs no writes.
+	snapshotReads bool
 	// Ordinary updates must not overwrite a timestamp from a different ring
 	// position in an old, incorrectly anchored classic image.
 	guardClassicWrites    bool
@@ -122,12 +125,13 @@ func (d *continuationFileData) writeHeader(offset int, data []byte) {
 }
 
 type continuationFile struct {
-	fs       *continuationFiles
-	data     *continuationFileData
-	name     string
-	position int64
-	readOnly bool
-	closed   bool
+	snapshotGroup *classicSnapshotGroup
+	fs            *continuationFiles
+	data          *continuationFileData
+	name          string
+	position      int64
+	readOnly      bool
+	closed        bool
 	// sidecar marks the OOO sidecar, whose point groups are probed (see
 	// pointBlock).
 	sidecar bool
