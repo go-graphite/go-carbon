@@ -18,6 +18,9 @@ type continuationPointBuffer struct {
 	// blocks, these must not be written by flush.
 	reads                    map[string]*store.PointBlock
 	cacheReads, writeThrough bool
+	// Classic updates are private attempts, discarded in full on any error.
+	// Their dirty groups can be edited again without a per-point copy.
+	editDirty bool
 }
 
 var coalescePointWrites = true
@@ -106,10 +109,14 @@ func (b *continuationPointBuffer) set(key []byte, block *store.PointBlock) error
 	return nil
 }
 
-// point borrows read-only blocks for this update. Writers get an owned copy so
-// a patch cannot change cached state before set succeeds.
+// point borrows read-only blocks until the next mutation. Writers copy clean
+// cached state once. Private classic attempts may reuse already dirty blocks: an
+// error discards their whole overlay, including sibling archive writes.
 func (b *continuationPointBuffer) point(key []byte, mutable bool) *store.PointBlock {
 	block := b.blocks[string(key)]
+	if block != nil && mutable && b.editDirty {
+		return block
+	}
 	if block == nil {
 		block = b.reads[string(key)]
 	}

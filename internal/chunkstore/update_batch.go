@@ -51,26 +51,41 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	lockset.Lock(s.metricMu[:], stripes)
-	for name := range names {
-		if s.importPendingLocked(name) != nil {
-			for i := len(stripes) - 1; i >= 0; i-- {
-				s.metricMu[stripes[i]].Unlock()
+	for {
+		lockset.Lock(s.metricMu[:], stripes)
+		var pending pendingMutation
+		for name := range names {
+			if pending = s.importPublishing[s.metricStripe(name)][name]; pending.done != nil {
+				break
 			}
+		}
+		if pending.done == nil {
+			break
+		}
+		for i := len(stripes) - 1; i >= 0; i-- {
+			s.metricMu[stripes[i]].Unlock()
+		}
+		if !pending.update {
 			return ErrImportPending
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pending.done:
 		}
 	}
 	for name := range names {
 		s.beginStateMutation(name)
 	}
-	defer func() {
+	unlock := func() {
 		for name := range names {
 			s.finishStateMutation(name)
 		}
 		for i := len(stripes) - 1; i >= 0; i-- {
 			s.metricMu[stripes[i]].Unlock()
 		}
-	}()
+	}
+	defer func() { unlock() }()
 	type prepared struct {
 		meta    Metadata
 		state   *metricState
@@ -83,31 +98,44 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	defer batch.Close()
 	defer func() {
 		for _, p := range states {
-			p.batch.Close()
+			if p.batch != nil {
+				p.batch.Close()
+			}
 		}
 	}()
+	// Capture each committed state while holding the stripes. An exact-name
+	// reservation then excludes competing mutations without retaining any
+	// stripe across block reads, codec work, or WAL publication.
+	reserved := make([]string, 0, len(names))
+	for name := range names {
+		p := prepared{}
+		p.state, p.meta = s.lockedState(name)
+		states[name] = p
+		reserved = append(reserved, name)
+	}
+	unlock = s.releaseUpdateStripes(reserved, unlock)
+	for name, p := range states {
+		var err error
+		if p.meta.ID == 0 {
+			p.meta, err = metadataFrom(s.db, name)
+		}
+		if err != nil {
+			return fmt.Errorf("prepare update %s: %w", name, err)
+		}
+		if err := s.checkFileOwnership(p.meta); err != nil {
+			return err
+		}
+		if !p.meta.Continuation || s.continuation == nil {
+			return ErrFormat
+		}
+		p.batch = s.db.NewIndexedBatch()
+		states[name] = p
+	}
 	changed := false
 	for _, update := range updates {
 		timer.Enter(stagetime.Route)
-		p, ok := states[update.Name]
-		if !ok {
-			var err error
-			p.state, p.meta = s.lockedState(update.Name)
-			if p.state == nil {
-				p.meta, err = s.metadataLockedOrAbsent(update.Name)
-			}
-			if err != nil {
-				return fmt.Errorf("prepare update %s: %w", update.Name, err)
-			}
-			if err := s.checkFileOwnership(p.meta); err != nil {
-				return err
-			}
-			if !p.meta.Continuation || s.continuation == nil {
-				return ErrFormat
-			}
-			p.batch = s.db.NewIndexedBatch()
-			states[update.Name] = p
-		} else if p.view != nil {
+		p := states[update.Name]
+		if p.view != nil {
 			p.state = p.view.final(p.meta)
 		}
 		m, view, sidecar, wrote, err := s.prepareContinuationUpdate(ctx, p.batch, p.meta, p.state, true, update.Points, -1, maintenance)

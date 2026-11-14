@@ -13,17 +13,29 @@ var ErrImportPending = errors.New("metric import publication pending")
 // importPendingLocked is protected by name's metric stripe. Reservations are
 // per name: unrelated names hashing to the same stripe continue normally.
 func (s *Store) importPendingLocked(name string) chan struct{} {
-	return s.importPublishing[s.metricStripe(name)][name]
+	return s.importPublishing[s.metricStripe(name)][name].done
 }
 
-// releaseImportStripes exchanges the held mutexes for exact-name reservations.
+type pendingMutation struct {
+	done   chan struct{}
+	update bool // ordinary writes wait; imports ask foreground writers to retry
+}
+
+// releaseImportStripes exchanges held mutexes for exact-name reservations.
 // The original mutation remains pending, keeping reader caches fenced. Every
 // mutator checks reservations under the stripe before reading its target. Live
-// TryUpdateMany and UpdateBatch return ErrImportPending; ordinary synchronous
-// operations wait without owning stripes.
-// Thus no mutation can overtake publication, and no mutex spans Pebble commit.
-// The returned cleanup reacquires only the original stripes and ends mutations.
+// TryUpdateMany and UpdateBatch return ErrImportPending for imports and wait
+// without stripes for another ordinary update. No mutation overtakes publication.
+// The returned cleanup reacquires the original stripes and invokes unlock.
 func (s *Store) releaseImportStripes(names []string, held []bool, unlock func()) func() {
+	return s.releaseMutationStripes(names, held, unlock, false)
+}
+
+func (s *Store) releaseUpdateStripes(names []string, unlock func()) func() {
+	return s.releaseMutationStripes(names, nil, unlock, true)
+}
+
+func (s *Store) releaseMutationStripes(names []string, held []bool, unlock func(), update bool) func() {
 	owned := make([]string, 0, len(names))
 	done := make(chan struct{})
 	for i, name := range names {
@@ -32,9 +44,9 @@ func (s *Store) releaseImportStripes(names []string, held []bool, unlock func())
 		}
 		stripe := s.metricStripe(name)
 		if s.importPublishing[stripe] == nil {
-			s.importPublishing[stripe] = make(map[string]chan struct{})
+			s.importPublishing[stripe] = make(map[string]pendingMutation)
 		}
-		s.importPublishing[stripe][name] = done
+		s.importPublishing[stripe][name] = pendingMutation{done: done, update: update}
 		owned = append(owned, name)
 	}
 	stripes := s.transferStripes(owned)

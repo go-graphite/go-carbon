@@ -322,11 +322,11 @@ type Store struct {
 	syncStop                       chan struct{}
 	syncDone                       chan struct{}
 	// mu serializes metric ID allocation from the catalog sequence. Mutations
-	// of one metric hold its metricMu stripe or an import publication reservation;
+	// of one metric hold its metricMu stripe or an exact-name publication reservation;
 	// readers use consistent read views.
 	mu               sync.Mutex
 	metricMu         [metricStripes]sync.Mutex
-	importPublishing [metricStripes]map[string]chan struct{}
+	importPublishing [metricStripes]map[string]pendingMutation
 	finitePatchMu    sync.Mutex
 	// mutationEpoch advances at both ends of every mutation, even without a
 	// metadata cache. Optimistic maintenance can validate its immutable view

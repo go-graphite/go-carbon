@@ -86,3 +86,40 @@ func BenchmarkContinuationPointBlockAccess(b *testing.B) {
 		})
 	}
 }
+
+func TestClassicDirtyBlockOwnership(t *testing.T) {
+	kv := &appendTailKV{data: map[string][]byte{}}
+	b := &continuationPointBuffer{ContinuationIO: kv, cacheReads: true, editDirty: true}
+	key := []byte("owned")
+	clean := &store.PointBlock{Present: [2]uint64{1}}
+	clean.Points[0] = store.Point{Timestamp: 1, Value: math.Copysign(0, -1)}
+	b.remember(key, clean)
+	dirty := b.point(key, true)
+	if dirty == b.reads[string(key)] {
+		t.Fatal("clean state was not copied")
+	}
+	dirty.Points[0].Value = 42
+	if err := b.set(key, dirty); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 1000 {
+		next := b.point(key, true)
+		if next != dirty {
+			t.Fatal("private dirty block copied again")
+		}
+		next.Points[0].Value = float64(i)
+		if err := b.set(key, next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(kv.data) != 0 || math.Float64bits(clean.Points[0].Value) != 1<<63 {
+		t.Fatal("uncommitted bytes escaped update")
+	}
+	if err := b.flush(nil); err != nil {
+		t.Fatal(err)
+	}
+	var got store.PointBlock
+	if err := store.DecodePointBlock(kv.data[string(key)], &got); err != nil || got.Points[0].Value != 999 {
+		t.Fatalf("final dirty value lost: %v %v", got.Points[0], err)
+	}
+}

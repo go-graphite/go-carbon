@@ -127,8 +127,8 @@ func (s *Store) newStateView(base *metricState, m Metadata) *stateView {
 	return &stateView{keys: c.keys, base: base, meta: m}
 }
 
-// installState records, for the mutation of m.Name holding its stripe, the
-// state it committed: m as its metadata and the continuation keys of v (nil
+// installState records, for the mutation owning m.Name (stripe or exact-name
+// reservation), the state it committed: m as its metadata and the keys of v (nil
 // for none known). Call it only after a successful commit, or when the
 // mutation committed nothing.
 func (s *Store) installState(v *stateView, m Metadata) {

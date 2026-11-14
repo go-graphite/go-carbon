@@ -3,12 +3,10 @@ package persister
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/lockset"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"github.com/go-graphite/go-carbon/points"
 	"go.uber.org/zap"
@@ -52,19 +50,8 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 	ctx, timer := stagetime.Start(context.Background())
 	defer timer.Finish()
 	timer.Enter(stagetime.LockWait)
-	stripes := make([]uint64, 0, len(metrics))
-	for _, metric := range metrics {
-		stripes = append(stripes, storeMutexIndex(metric))
-	}
-	slices.Sort(stripes)
-	stripes = slices.Compact(stripes)
-	lockset.Lock(p.storeMutex[:], stripes)
-	unlock := func() {
-		for i := len(stripes) - 1; i >= 0; i-- {
-			p.storeMutex[stripes[i]].Unlock()
-		}
-	}
-	// Release all group stripes before a missing/native metric uses the ordinary
+	unlock := p.lockStoreMetrics(metrics)
+	// Release all name reservations before a missing/native metric uses the ordinary
 	// create/update route. Requeue retains the input log's original batch identity.
 	fallback := false
 	func() {

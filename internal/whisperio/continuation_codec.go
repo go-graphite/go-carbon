@@ -692,6 +692,7 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	if !w.IsCompressed() {
 		*attempt = newContinuationOverlay(base)
 		if buffer != nil {
+			buffer.editDirty = true
 			buffer.ContinuationIO = *attempt
 		} else {
 			fs.kv, fs.prober = *attempt, *attempt
