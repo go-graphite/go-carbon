@@ -2,6 +2,9 @@ package cache
 
 import (
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/points"
@@ -112,5 +115,87 @@ func TestPointsBalanceClaimsPendingHistoryOnce(t *testing.T) {
 	s := c.AdmissionStats()
 	if s.Received != 3 || s.Recovered != 5 || c.Size() != 8 {
 		t.Fatal(s, c.Size())
+	}
+}
+
+func TestAdmissionStatsConcurrentPointOracle(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	var want, recovered atomic.Uint64
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	var scrape sync.WaitGroup
+	scrape.Add(1)
+	go func() {
+		defer scrape.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				c.AdmissionStats()
+			}
+		}
+	}()
+	for w := 0; w < 64; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			name := fmt.Sprintf("oracle.%d", w)
+			nb := []byte(name)
+			for i := 0; i < 128; i++ {
+				n := i%17 + 1
+				data := make([]points.Point, n)
+				for j := range data {
+					data[j] = points.Point{Value: float64(j), Timestamp: int64(i)}
+				}
+				if i%3 == 2 {
+					c.AddRecovered(&points.Points{Metric: name, Data: data})
+					recovered.Add(uint64(n))
+				} else if i%2 == 0 {
+					c.AddPoints(nb, data)
+				} else {
+					c.Add(&points.Points{Metric: name, Data: data})
+				}
+				if i%3 != 2 {
+					want.Add(uint64(n))
+				}
+				if i%8 == 7 {
+					batch, ok := c.PopNotConfirmed(name)
+					if !ok {
+						t.Error("missing batch")
+						return
+					}
+					c.Confirm(batch)
+				}
+			}
+			if batch, ok := c.PopNotConfirmed(name); ok {
+				c.Confirm(batch)
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(done)
+	scrape.Wait()
+	if got := c.AdmissionStats(); got.Received != want.Load() || got.Recovered != recovered.Load() || got.InFlight != 0 || c.Size() != 0 {
+		t.Fatalf("got %+v size=%d want received=%d", got, c.Size(), want.Load())
+	}
+}
+
+func TestAdmissionStatsBusyShardPublication(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	for i := 0; i < 65; i++ {
+		c.AddPoint([]byte("publication"), float64(i), int64(i))
+	}
+	sh := c.GetShard("publication")
+	sh.mu.Lock()
+	got := c.AdmissionStats()
+	sh.mu.Unlock()
+	if got.Received != 64 {
+		t.Fatalf("busy publication %d want 64", got.Received)
+	}
+	if got := c.AdmissionStats().Received; got != 65 {
+		t.Fatalf("partial publication %d want 65", got)
 	}
 }

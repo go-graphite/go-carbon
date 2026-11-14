@@ -451,7 +451,7 @@ func TestStoreRetriesFailedOutOfOrderWrite(t *testing.T) {
 	cache.add(metric, int64(base+1), 7)
 	p.store(metric)
 
-	if got := p.committedPoints; got != 2 {
+	if got := p.CommittedPoints(); got != 2 {
 		t.Errorf("committedPoints = %d; want 2", got)
 	}
 	if got := cache.confirmedPoints(); got != 2 {

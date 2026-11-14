@@ -43,6 +43,15 @@ names retain the established receiver/persister prefixes. Legacy Graphite
 Their Prometheus counters reset on component recreation, so rate calculations
 must handle resets and balance windows should exclude process/config epochs.
 
+Accepted live receipt reuses the cache's existing accepted-point count. It is
+published once per 64 points per shard; collection flushes any partial batch
+when it can take the shard read lock without waiting. A busy shard can therefore
+report up to 63 fewer completed accepted points until its next publication or
+successful collection. Counts are exact once shards are available, including
+after intake stops; batching does not discard points or change terminal fates.
+The legacy persister interval count is derived from the same cumulative
+commitment total, so collecting either metric does not reset that total.
+
 No-schema or no-aggregation input remains queued or is requeued; it is not a
 terminal filter. There is no blacklist/short-retention filter in normal cache
 intake: copy-tool selection happens outside this boundary. Protocol validation

@@ -65,5 +65,20 @@ func (p *Whisper) NameTooLongDroppedPoints() uint64 { return p.nameTooLongTotal.
 // CommittedPoints counts successful input batches once, regardless of backend.
 func (p *Whisper) CommittedPoints() uint64 { return p.committedPointsTotal.Load() }
 
+// committedPointsDelta derives legacy interval statistics from the cumulative
+// counter. The watermark only advances, including across concurrent collectors.
+func (p *Whisper) committedPointsDelta() uint64 {
+	for {
+		before := p.committedPointsReported.Load()
+		now := p.CommittedPoints()
+		if now <= before {
+			return 0
+		}
+		if p.committedPointsReported.CompareAndSwap(before, now) {
+			return now - before
+		}
+	}
+}
+
 // WriteDroppedPoints counts points permanently discarded after a file error.
 func (p *Whisper) WriteDroppedPoints() uint64 { return p.writeDroppedPoints.Load() }

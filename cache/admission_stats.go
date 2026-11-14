@@ -19,12 +19,21 @@ func (c *Cache) AdmissionStats() AdmissionStats {
 	s := AdmissionStats{
 		Received: c.stat.receivedPoints.Load(), Recovered: c.stat.recoveredPoints.Load(),
 		XlogDiverted: c.stat.xlogDivertedPoints.Load(),
-		Throttled:    c.stat.throttledPoints.Load(), Overflow: c.stat.overflowPoints.Load(),
-		InvalidTags: c.stat.invalidTagPoints.Load(), XlogWriteFailed: c.stat.xlogFailedPoints.Load(),
+		InvalidTags:  c.stat.invalidTagPoints.Load(), XlogWriteFailed: c.stat.xlogFailedPoints.Load(),
 	}
 	for _, shard := range c.data {
-		s.Received += shard.receivedPoints.Load()
+		// Flush partial publication when the shard is available. A busy shard
+		// contributes its last published total, at most 63 accepted points old.
+		// Publish while still read-locked so concurrent scrapes cannot regress it.
+		if shard.mu.TryRLock() {
+			shard.livePointsPublished.Store(shard.livePoints)
+			shard.mu.RUnlock()
+		}
+		s.Received += shard.livePointsPublished.Load() + shard.receivedPoints.Load()
+		s.Recovered += shard.recoveredPoints.Load()
 		s.InFlight += shard.inFlightPoints.Load()
+		s.Throttled += shard.throttledPoints.Load()
+		s.Overflow += shard.overflowPoints.Load()
 	}
 	return s
 }
@@ -52,4 +61,13 @@ func (c *Cache) admissionStat(send helper.StatCallback) {
 	send("xlog_write_failed_points_total", float64(s.XlogWriteFailed))
 	send("xlog_diverted_points_total", float64(s.XlogDiverted))
 	send("name_too_long_rejected_points_total", float64(c.NameTooLongRejectedPoints()))
+}
+
+// recordUnshardedInput covers refusals/diversions before shard resolution.
+func (c *Cache) recordUnshardedInput(p *points.Points, recovered bool) {
+	if recovered {
+		c.stat.recoveredPoints.Add(uint64(len(p.Data)))
+	} else {
+		c.stat.receivedPoints.Add(uint64(len(p.Data)))
+	}
 }

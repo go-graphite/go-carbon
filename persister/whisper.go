@@ -81,38 +81,38 @@ type Whisper struct {
 	incrementalPriority      atomic.Pointer[func(string)]
 	// incrementalComplete routes writes to the store without an ownership
 	// check once the migration has left no originals.
-	incrementalComplete  atomic.Bool
-	mirrorImportMissing  bool
-	mirrorFiles          bool
-	mirrorState          *MirrorState
-	tagsEnabled          bool
-	taggedFn             func(string, bool)
-	schemas              WhisperSchemas
-	aggregation          *WhisperAggregation
-	workersCount         int
-	rootPath             string
-	created              uint32 // counter
-	nameTooLong          uint32 // counter: points dropped for metric names the store refuses
-	nameTooLongLogged    atomic.Int64
-	nameTooLongTotal     atomic.Uint64
-	updateOperations     uint32 // counter
-	committedPointsTotal atomic.Uint64
-	writeDroppedPoints   atomic.Uint64
-	committedPoints      uint32 // counter
-	oooDiscardedPoints   uint32 // counter
-	oooDiverted          uint32 // counter
-	oooCompactions       uint32 // counter
-	oooCompactErrors     uint32 // counter
-	extended             uint32 // counter
-	sparse               bool
-	flock                bool
-	compressed           bool
-	hashFilenames        bool
-	removeEmptyFile      bool
-	maxUpdatesPerSecond  int
-	autoUpdate           autoUpdateRate
-	updateTicker         *helper.ThrottleTicker
-	storeMutex           [storeMutexCount]sync.Mutex
+	incrementalComplete     atomic.Bool
+	mirrorImportMissing     bool
+	mirrorFiles             bool
+	mirrorState             *MirrorState
+	tagsEnabled             bool
+	taggedFn                func(string, bool)
+	schemas                 WhisperSchemas
+	aggregation             *WhisperAggregation
+	workersCount            int
+	rootPath                string
+	created                 uint32 // counter
+	nameTooLong             uint32 // counter: points dropped for metric names the store refuses
+	nameTooLongLogged       atomic.Int64
+	nameTooLongTotal        atomic.Uint64
+	updateOperations        uint32 // counter
+	committedPointsTotal    atomic.Uint64
+	committedPointsReported atomic.Uint64
+	writeDroppedPoints      atomic.Uint64
+	oooDiscardedPoints      uint32 // counter
+	oooDiverted             uint32 // counter
+	oooCompactions          uint32 // counter
+	oooCompactErrors        uint32 // counter
+	extended                uint32 // counter
+	sparse                  bool
+	flock                   bool
+	compressed              bool
+	hashFilenames           bool
+	removeEmptyFile         bool
+	maxUpdatesPerSecond     int
+	autoUpdate              autoUpdateRate
+	updateTicker            *helper.ThrottleTicker
+	storeMutex              [storeMutexCount]sync.Mutex
 	// converting names metrics whose original is being imported. Their
 	// writeouts are deferred instead of holding a store stripe for the import.
 	converting sync.Map
@@ -790,8 +790,6 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 
 		return
 	}
-
-	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
 	p.committedPointsTotal.Add(uint64(len(values.Data)))
 	p.recordUpdate()
 	if p.confirm != nil {
@@ -924,9 +922,8 @@ LOOP:
 func (p *Whisper) Stat(send helper.StatCallback) {
 	settings := p.settings()
 	updateOperations := atomic.LoadUint32(&p.updateOperations)
-	committedPoints := atomic.LoadUint32(&p.committedPoints)
+	committedPoints := p.committedPointsDelta()
 	atomic.AddUint32(&p.updateOperations, -updateOperations)
-	atomic.AddUint32(&p.committedPoints, -committedPoints)
 
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
