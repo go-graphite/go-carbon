@@ -215,43 +215,56 @@ type syncHole struct {
 }
 
 type syncRow struct {
-	Selected          []string   `json:"selected,omitempty"`
-	SelectionComplete bool       `json:"selection_complete,omitempty"`
-	Kind              string     `json:"kind"`
-	Identity          string     `json:"identity,omitempty"`
-	Phase             string     `json:"phase,omitempty"`
-	Round             int        `json:"round,omitempty"`
-	Source            string     `json:"source,omitempty"`
-	First             string     `json:"first,omitempty"`
-	Last              string     `json:"last,omitempty"`
-	Names             int        `json:"names,omitempty"`
-	Copied            int        `json:"copied,omitempty"`
-	Failed            []string   `json:"failed,omitempty"`
-	Forbidden         bool       `json:"forbidden,omitempty"`
-	Holes             []syncHole `json:"holes,omitempty"`
-	Absent            []string   `json:"absent,omitempty"`
-	Unindexed         []string   `json:"unindexed,omitempty"`
-	Short             []string   `json:"short,omitempty"`
-	Skipped           []syncSkip `json:"skipped,omitempty"`
-	Missing           int        `json:"missing,omitempty"`
-	OnTarget          int        `json:"on_target,omitempty"`
-	Both              int        `json:"both,omitempty"`
-	NotOwned          int        `json:"not_owned,omitempty"`
-	Time              string     `json:"time"`
+	Discovery         *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
+	Selected          []string                 `json:"selected,omitempty"`
+	SelectionComplete bool                     `json:"selection_complete,omitempty"`
+	Kind              string                   `json:"kind"`
+	Identity          string                   `json:"identity,omitempty"`
+	Phase             string                   `json:"phase,omitempty"`
+	Round             int                      `json:"round,omitempty"`
+	Source            string                   `json:"source,omitempty"`
+	First             string                   `json:"first,omitempty"`
+	Last              string                   `json:"last,omitempty"`
+	Names             int                      `json:"names,omitempty"`
+	Copied            int                      `json:"copied,omitempty"`
+	Failed            []string                 `json:"failed,omitempty"`
+	Forbidden         bool                     `json:"forbidden,omitempty"`
+	Holes             []syncHole               `json:"holes,omitempty"`
+	Absent            []string                 `json:"absent,omitempty"`
+	Unindexed         []string                 `json:"unindexed,omitempty"`
+	Short             []string                 `json:"short,omitempty"`
+	Skipped           []syncSkip               `json:"skipped,omitempty"`
+	Missing           int                      `json:"missing,omitempty"`
+	OnTarget          int                      `json:"on_target,omitempty"`
+	Both              int                      `json:"both,omitempty"`
+	NotOwned          int                      `json:"not_owned,omitempty"`
+	Time              string                   `json:"time"`
 }
 
 type syncJournal struct {
-	mu   sync.Mutex
-	file *os.File
-	rows []syncRow
+	lock     *os.File
+	mu       sync.Mutex
+	file     *os.File
+	rows     []syncRow
+	progress progressSnapshot
 }
 
 func openSyncJournal(path, identity string) (*syncJournal, error) {
+	lock, err := lockResumeState(path)
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			lock.Close()
+		}
+	}()
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	j := &syncJournal{file: f}
+	j := &syncJournal{file: f, lock: lock}
 	reader := bufio.NewReaderSize(f, 1<<20)
 	var good int64
 	for {
@@ -274,6 +287,7 @@ func openSyncJournal(path, identity string) (*syncJournal, error) {
 			return nil, fmt.Errorf("journal %s belongs to another sync (%s); use a new --state", path, row.Identity)
 		}
 		j.rows = append(j.rows, row)
+		j.progress.apply(row)
 	}
 	if err := f.Truncate(good); err != nil {
 		f.Close()
@@ -289,6 +303,7 @@ func openSyncJournal(path, identity string) (*syncJournal, error) {
 			return nil, err
 		}
 	}
+	opened = true
 	return j, nil
 }
 
@@ -304,6 +319,7 @@ func (j *syncJournal) append(row syncRow) error {
 		return err
 	}
 	j.rows = append(j.rows, row)
+	j.progress.apply(row)
 	return j.file.Sync()
 }
 
@@ -319,7 +335,7 @@ func (j *syncJournal) find(match func(syncRow) bool) []syncRow {
 	return out
 }
 
-func (j *syncJournal) close() { _ = j.file.Close() }
+func (j *syncJournal) close() { _ = j.file.Close(); _ = j.lock.Close() }
 
 type syncPhase struct {
 	names   int
@@ -393,10 +409,32 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		s.forbid[r.Source] = true
 	}
 	event("sync_start", map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "state": o.state, "streams": o.streams, "verify_batch": o.batch, "max_rounds": o.maxRounds, "windows": o.windows.String(), "sample_every": o.sampleEvery, "resumed_rows": len(j.rows) - 1})
+	ctx, cancelFile := context.WithCancelCause(ctx)
+	defer cancelFile(nil)
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	go s.progressLoop(progressCtx, o.progress)
+	stopFile := startProgressFile(progressCtx, filepath.Join(o.state, "progress.json"), func() progressSnapshot {
+		j.mu.Lock()
+		snap := j.progress
+		snap.Cursors = cloneCursors(snap.Cursors)
+		j.mu.Unlock()
+		s.prog.mu.Lock()
+		snap.Phase = s.prog.phase
+		s.prog.mu.Unlock()
+		return snap
+	}, cancelFile)
 	err = s.run(ctx)
+	if cause := context.Cause(ctx); cause != nil && err != nil {
+		err = cause
+	}
 	stopProgress()
+	progressErr := err
+	if progressErr == nil && len(s.sum.residual) > 0 {
+		progressErr = ErrSyncResidual
+	}
+	if perr := stopFile(progressErr); perr != nil {
+		err = errors.Join(err, perr)
+	}
 	s.summary(err)
 	if err != nil {
 		return err
@@ -462,6 +500,7 @@ func (s *syncer) namesFile(kind string, round int, source int, names []string) (
 // target refuses (403: not in transfer-sources) is marked forbidden.
 func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, names []string, short ...string) (syncCopyResult, error) {
 	source := s.o.from[src]
+	s.prog.begin(phase, len(names))
 	journal, err := s.namesFile(phase, round, src, names)
 	if err != nil {
 		return syncCopyResult{}, err

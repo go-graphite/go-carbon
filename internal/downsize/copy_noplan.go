@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -140,6 +139,10 @@ type copyStats struct {
 }
 
 type planFreeCopier struct {
+	catalogMu         sync.Mutex
+	catalogs          map[string]*copyCatalog
+	catalogProgressMu sync.Mutex
+	catalogProgress   map[string]catalogCheckpoint
 	*hostWaiter
 	o         copyOptions
 	progress  *copyProgress
@@ -241,6 +244,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	}
 	defer journal.close()
 	c.o, c.journal, c.serverMax = o, journal, target.MaxBodyBytes
+	defer c.closeCatalogs()
 	c.sizer = &batchSizer{budget: min(o.maxBytes, target.MaxBodyBytes), maxNames: o.maxNames, perName: copyInitialBytesPerName}
 	event("copy_start", map[string]any{"from": o.froms, "to": o.to, "names": o.names, "prefix": o.prefix, "ring": o.ring, "state": o.state, "streams": o.streams, "batch_bytes": c.sizer.budget, "max_body_bytes": target.MaxBodyBytes, "max_batch_names": o.maxNames, "resumed_ranges": len(journal.ranges), "source_max_transfers": sourceTransfers, "target_max_transfers": target.MaxTransfers, "stall_timeout": o.stallTimeout.String()})
 	sources := make([]copySource, 0, len(o.froms))
@@ -256,6 +260,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	defer stall(nil)
 	var background sync.WaitGroup
 	reportCtx, stopReport := context.WithCancel(ctx)
+	stopFile := startProgressFile(reportCtx, o.state+".progress.json", c.progressSnapshot, stall)
 	background.Add(2)
 	go func() { defer background.Done(); c.report(reportCtx, stall) }()
 	go func() { defer background.Done(); c.countTotal(reportCtx, owner) }()
@@ -265,6 +270,13 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	}
 	stopReport()
 	background.Wait()
+	progressErr := err
+	if progressErr == nil && c.skippedCount() > 0 {
+		progressErr = &copySkippedError{count: c.skippedCount()}
+	}
+	if perr := stopFile(progressErr); perr != nil {
+		err = errors.Join(err, perr)
+	}
 	if cause := context.Cause(ctx); cause != nil && errors.Is(cause, errCopyStall) {
 		err = cause
 	}
@@ -346,39 +358,7 @@ func (c *planFreeCopier) nameSource(ctx context.Context, from string) (func() (s
 			return "", io.EOF
 		}, func() { _ = f.Close() }, nil
 	}
-	var page []string
-	var after string
-	done := false
-	return func() (string, error) {
-		for len(page) == 0 {
-			if done {
-				return "", io.EOF
-			}
-			query := url.Values{"after": {after}, "limit": {strconv.Itoa(copyListPage)}}
-			if c.o.prefix != "" {
-				query.Set("prefix", c.o.prefix)
-			}
-			var next []string
-			if err := c.retryTransient(ctx, from+"/v1/transfer/list", []string{from}, func() error {
-				next = nil
-				_, err := c.m.request(ctx, from, "/v1/transfer/list?"+query.Encode(), nil, &next)
-				return err
-			}); err != nil {
-				return "", fmt.Errorf("source catalog: %w", err)
-			}
-			if len(next) > copyListPage {
-				return "", errors.New("oversize source catalog page")
-			}
-			done = len(next) == 0
-			page = next
-			if len(next) > 0 {
-				after = next[len(next)-1]
-			}
-		}
-		name := page[0]
-		page = page[1:]
-		return name, nil
-	}, func() {}, nil
+	return c.catalogSource(ctx, from)
 }
 
 type copySource struct {
@@ -735,9 +715,11 @@ func (s *batchSizer) tooLarge(names int) {
 // copyJournal is append-only JSON lines: one header with the copy identity,
 // then done ranges (first/last name in source order) and per-name failures.
 type copyJournal struct {
-	mu     sync.Mutex
-	file   *os.File
-	ranges []copyRange
+	lock           *os.File
+	mu             sync.Mutex
+	file           *os.File
+	ranges         []copyRange
+	completedNames int64
 }
 
 type copyRange struct{ Source, First, Last string }
@@ -758,11 +740,21 @@ type copyRow struct {
 }
 
 func openCopyJournal(path, identity string) (*copyJournal, error) {
+	lock, err := lockResumeState(path)
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			lock.Close()
+		}
+	}()
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	j := &copyJournal{file: f}
+	j := &copyJournal{file: f, lock: lock}
 	reader := bufio.NewReaderSize(f, 1<<20)
 	var good int64
 	header := false
@@ -791,6 +783,7 @@ func openCopyJournal(path, identity string) (*copyJournal, error) {
 			header = true
 		case "done":
 			j.ranges = append(j.ranges, copyRange{row.Source, row.First, row.Last})
+			j.completedNames += int64(row.Names)
 		}
 	}
 	if err := f.Truncate(good); err != nil {
@@ -811,6 +804,7 @@ func openCopyJournal(path, identity string) (*copyJournal, error) {
 			return nil, err
 		}
 	}
+	opened = true
 	return j, nil
 }
 
@@ -837,7 +831,15 @@ func (j *copyJournal) appendRows(rows []copyRow) error {
 	if _, err := j.file.Write(data); err != nil {
 		return err
 	}
-	return j.file.Sync()
+	if err := j.file.Sync(); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.Kind == "done" {
+			j.completedNames += int64(row.Names)
+		}
+	}
+	return nil
 }
 
 func (j *copyJournal) done(source, first, last string, names int, bytes int64, took time.Duration) error {
@@ -848,7 +850,7 @@ func (j *copyJournal) failed(source, name string, status int, message string) er
 	return j.append(copyRow{Kind: "failed", Source: source, Name: name, Status: status, Error: message})
 }
 
-func (j *copyJournal) close() { _ = j.file.Close() }
+func (j *copyJournal) close() { _ = j.file.Close(); _ = j.lock.Close() }
 
 // cover returns a predicate for names arriving in increasing byte order: true
 // when the name lies inside a completed range. Failed names are never inside

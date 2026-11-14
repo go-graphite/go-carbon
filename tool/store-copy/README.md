@@ -454,3 +454,33 @@ a fresh state directory. Keep `--verify-batch`, the windows and the settle
 cutoff unchanged when resuming a partially completed window transfer.
 
 A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. The residual is retained in the selection journal and restored on resume; it prevents a successful exit even if serving-archive verification finds no holes. It is never treated as empty history. Only complete selection checkpoints are reused.
+
+### Durable discovery and progress snapshots
+
+Rerun the same command with the same `--state` after SIGINT, a deadline, or a
+crash. Sync appends its union and missing-name files in bounded chunks, fsyncs
+both, and journals their byte offsets and each source's last consumed name.
+Recovery discards only bytes after that checkpoint and continues each source
+with `after=<saved name>`. Prefetched pages never advance the saved cursor.
+Completed verify, retention-check, and fill batches keep their existing journals.
+Existing state directories remain valid; earlier completed listings are reused.
+Old interrupted listings without checkpoints require one fresh discovery.
+
+Plan-free `copy` also saves each source's catalogue in fsynced pages beside its
+state journal. On resume, saved names are replayed through completed transfer
+ranges before listing the remaining pages. This keeps discovered but not yet
+copied names pending. The copier and background name counter share this log,
+so counting does not relist the source. Keep these sidecar files with the journal.
+Only one process may use a state at a time.
+
+Watch `STATE/progress.json` for `sync`, or `STATE.progress.json` for `copy`
+(where copy's `STATE` is a journal filename). The file is atomically replaced
+at startup, every three seconds, and on exit. It includes `phase`, `round`,
+`cursors` keyed by source origin, `names_discovered`, `names_verified`,
+`names_copied`, `names_filled`, `holes`, `names_per_second`, `last_update`,
+`status`, and an optional `error`. Counts come from durable journals: discovery
+counts the union for sync and source catalogue entries for copy; verification
+and hole observations accumulate across rounds. `holes` counts observed missing
+points, including observations repeated in later rounds. The rate counts newly
+checkpointed work per second since this invocation started. Journals remain
+the source of truth; the snapshot is for monitoring. No tokens enter these files.
