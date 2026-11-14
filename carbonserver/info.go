@@ -46,7 +46,7 @@ func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, 
 		ctx, releaseSlot := context.Background(), func() {}
 		if metricStore.IncrementalSource() != "" {
 			var err error
-			if ctx, releaseSlot, releaseGuard, err = guardedStoreRead(metricStore, metric); err != nil {
+			if ctx, releaseSlot, releaseGuard, err = guardedStoreRead(context.Background(), metricStore, metric); err != nil {
 				releaseGuard = func() {}
 				return metricInfo{}, err
 			}
@@ -67,7 +67,7 @@ func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, 
 		// As in fetchFromDisk: admit the retry before taking the guard again.
 		releaseGuard()
 		releaseGuard = func() {}
-		ctx, releaseSlot, guard, admitErr := guardedStoreRead(metricStore, metric)
+		ctx, releaseSlot, guard, admitErr := guardedStoreRead(context.Background(), metricStore, metric)
 		if admitErr != nil {
 			return metricInfo{}, admitErr
 		}

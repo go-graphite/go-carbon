@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"testing"
 
@@ -13,7 +14,7 @@ func TestCarbonserverContentionBudget(t *testing.T) {
 		t.Skip("set GO_CARBON_CONTENTION=1")
 	}
 	l, names, _ := fetchWorkersFixture(t, 16)
-	want, err := l.fetchSingleMetric(names[0], "alias", 1789999872, 1790000000)
+	want, err := l.fetchSingleMetric(context.Background(), names[0], "alias", 1789999872, 1790000000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +24,7 @@ func TestCarbonserverContentionBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	contentiontest.Run(t, 256, 32, 48, func(w, i int) {
-		got, err := l.fetchSingleMetric(names[w%len(names)], "alias", 1789999872, 1790000000)
+		got, err := l.fetchSingleMetric(context.Background(), names[w%len(names)], "alias", 1789999872, 1790000000)
 		if err != nil {
 			t.Error(err)
 			return

@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -218,7 +219,7 @@ func generalFetchSingleMetricRemove(testData *FetchTest) {
 }
 
 func generalFetchSingleMetricHelper(testData *FetchTest, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
-	data, err := carbonserver.fetchSingleMetric(testData.name, "", int32(testData.from), int32(testData.until))
+	data, err := carbonserver.fetchSingleMetric(context.Background(), testData.name, "", int32(testData.from), int32(testData.until))
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +255,7 @@ func TestFetchDataReadBytesMetricIncrement(t *testing.T) {
 		defer generalFetchSingleMetricRemove(test) // remove metrics later
 		var trieNodes []*trieNode
 		trieNodes = append(trieNodes, newFileNode(0, 0, 0, 0, 0)) // readBytes update will go here
-		metrics, err := carbonserver.fetchData(test.name, "", []string{test.name}, []bool{true}, trieNodes, int32(test.from), int32(test.until))
+		metrics, err := carbonserver.fetchData(context.Background(), test.name, "", []string{test.name}, []bool{true}, trieNodes, int32(test.from), int32(test.until))
 		if err != nil {
 			t.Fatal(err)
 		}

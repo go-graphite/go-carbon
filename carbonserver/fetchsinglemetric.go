@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"context"
 	"errors"
 	"math"
 	"os"
@@ -106,7 +107,7 @@ func (r response) proto3() *protov3.FetchResponse {
 	}
 }
 
-func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpression string, fromTime, untilTime int32) (response, error) {
+func (listener *CarbonserverListener) fetchSingleMetric(ctx context.Context, metric string, pathExpression string, fromTime, untilTime int32) (response, error) {
 	// Encode the request fields only for messages that are logged: a With
 	// logger per fetched series is a measurable share of render allocations.
 	log := func(level zapcore.Level, msg string, fields ...zap.Field) {
@@ -118,7 +119,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 			}, fields...)...)
 		}
 	}
-	m, err := listener.fetchFromDisk(metric, fromTime, untilTime)
+	m, err := listener.fetchFromDisk(ctx, metric, fromTime, untilTime)
 	switch {
 	case err == nil:
 		// Should never happen, because we have a check for proper archive now

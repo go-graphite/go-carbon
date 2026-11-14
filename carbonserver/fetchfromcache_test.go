@@ -133,7 +133,7 @@ func TestCacheOnlyStepFollowsArchive(t *testing.T) {
 		for _, tc := range cacheOnlyRanges {
 			for _, edge := range []struct{ from, until int }{{0, 0}, {13, -7}} {
 				from, until := now-tc.span+edge.from, now+edge.until
-				r, err := l.fetchSingleMetric(cacheOnlyMetric, "", int32(from), int32(until))
+				r, err := l.fetchSingleMetric(context.Background(), cacheOnlyMetric, "", int32(from), int32(until))
 				if err != nil {
 					t.Fatal(tc.name, err)
 				}
@@ -149,7 +149,7 @@ func TestCacheOnlyStepFollowsArchive(t *testing.T) {
 		}
 		// Ranges a stored series cannot answer are refused the same way.
 		for _, tc := range []struct{ from, until int }{{now + 10, now + 20}, {now - 11*365*86400, now - 10*365*86400 - 10}} {
-			if _, err := l.fetchSingleMetric(cacheOnlyMetric, "", int32(tc.from), int32(tc.until)); err == nil || err.Error() != "time range not found" {
+			if _, err := l.fetchSingleMetric(context.Background(), cacheOnlyMetric, "", int32(tc.from), int32(tc.until)); err == nil || err.Error() != "time range not found" {
 				t.Fatalf("range %+v: err=%v, want time range not found", tc, err)
 			}
 		}
@@ -215,7 +215,7 @@ func TestCacheOnlyAggregation(t *testing.T) {
 			label := fmt.Sprintf("%s xff=%v", tc.method, tc.xff)
 			at := func(span int, ts int) (float64, response) {
 				t.Helper()
-				r, err := l.fetchSingleMetric(cacheOnlyMetric, "", int32(now-span), int32(now))
+				r, err := l.fetchSingleMetric(context.Background(), cacheOnlyMetric, "", int32(now-span), int32(now))
 				if err != nil {
 					t.Fatal(label, err)
 				}
@@ -309,7 +309,7 @@ func TestCacheOnlyMixedStoredAndCacheUnchanged(t *testing.T) {
 		l := newCacheOnlyListener(t, dir, cached, whisper.Average, 0.5)
 		for _, tc := range cacheOnlyRanges {
 			from := now - tc.span
-			got, err := l.fetchSingleMetric(cacheOnlyMetric, "", int32(from), int32(now))
+			got, err := l.fetchSingleMetric(context.Background(), cacheOnlyMetric, "", int32(from), int32(now))
 			if err != nil {
 				t.Fatal(tc.name, err)
 			}
@@ -415,11 +415,11 @@ func TestCacheOnlyMatchesStoredWhisper(t *testing.T) {
 						}
 						stored := newCacheOnlyListener(t, dir, nil, method, xff)
 						for _, req := range cacheOnlyRequests(now) {
-							want, err := stored.fetchSingleMetric(cacheOnlyMetric, "", int32(req.from), int32(req.until))
+							want, err := stored.fetchSingleMetric(context.Background(), cacheOnlyMetric, "", int32(req.from), int32(req.until))
 							if err != nil {
 								t.Fatal(label, err)
 							}
-							got, err := cacheOnly.fetchSingleMetric(cacheOnlyMetric, "", int32(req.from), int32(req.until))
+							got, err := cacheOnly.fetchSingleMetric(context.Background(), cacheOnlyMetric, "", int32(req.from), int32(req.until))
 							if err != nil {
 								t.Fatal(label, err)
 							}
@@ -486,7 +486,7 @@ func TestCacheOnlyMatchesSharedStore(t *testing.T) {
 					cache = cached
 					var cacheOnly []response
 					for _, req := range cacheOnlyRequests(now) {
-						r, err := l.fetchSingleMetric(name, "", int32(req.from), int32(req.until))
+						r, err := l.fetchSingleMetric(context.Background(), name, "", int32(req.from), int32(req.until))
 						if err != nil {
 							t.Fatal(label, err)
 						}
@@ -501,7 +501,7 @@ func TestCacheOnlyMatchesSharedStore(t *testing.T) {
 						t.Fatal(err)
 					}
 					for i, req := range cacheOnlyRequests(now) {
-						want, err := l.fetchSingleMetric(name, "", int32(req.from), int32(req.until))
+						want, err := l.fetchSingleMetric(context.Background(), name, "", int32(req.from), int32(req.until))
 						if err != nil {
 							t.Fatal(label, err)
 						}
