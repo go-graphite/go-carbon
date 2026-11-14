@@ -56,7 +56,7 @@ func (c *ContinuationCodec) sumSettle() time.Duration {
 // Complete buckets older than settle (at least one archive step) are lazily
 // cached. Partial retention edges, open buckets and sparse histories are
 // decoded. The sum is probabilistic, not a cryptographic integrity proof.
-func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.ContinuationIO, m store.Metadata, from, until int, clock func() time.Time) ([]store.SumArchive, error) {
+func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.ContinuationIO, m store.Metadata, from, until int, clock func() time.Time, steps ...int) ([]store.SumArchive, error) {
 	fs := newContinuationFiles(kv, true).withClock(clock)
 	fs.rangeReads = true
 	w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
@@ -71,8 +71,11 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 	}
 	cache, writable := kv.(sumCacheWriter)
 	filled := false
-	out := make([]store.SumArchive, len(m.Retentions))
+	out := make([]store.SumArchive, 0, len(m.Retentions))
 	for ai, r := range m.Retentions {
+		if len(steps) > 0 && steps[0] > 0 && r.Step != steps[0] {
+			continue
+		}
 		lo, hi := store.DigestBounds(r, now, from, until)
 		var total store.PointSum
 		span := r.Step * sumBucketSlots
@@ -113,7 +116,7 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 			total.Merge(d)
 			start = end
 		}
-		out[ai] = store.SumArchive{Archive: ai, Step: r.Step, Points: r.Count, From: lo, Until: hi, Sum: fmt.Sprintf("%016x", total.Sum), Count: total.Count}
+		out = append(out, store.SumArchive{Archive: ai, Step: r.Step, Points: r.Count, From: lo, Until: hi, Sum: fmt.Sprintf("%016x", total.Sum), Count: total.Count})
 	}
 	if writable && filled {
 		cache.CacheDigest(sumRevisionKey, binary.BigEndian.AppendUint64(nil, m.Revision))

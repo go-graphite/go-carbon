@@ -223,6 +223,7 @@ func (b *syncLiveBackend) post(ctx context.Context, url string, body []byte) ([]
 // syncDigestWire mirrors buckyd's /v1/transfer/digest response.
 type syncDigestWire struct {
 	Name     string
+	Mode     string
 	Found    bool
 	Archives []syncDigest
 }
@@ -249,6 +250,43 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 	}
 	out := make(map[string][]syncDigest, len(reply))
 	for _, r := range reply {
+		if r.Found {
+			out[r.Name] = r.Archives
+		}
+	}
+	return out, nil
+}
+
+// SumDigest requires an explicit mode echo: older endpoints can ignore Mode
+// and return SHA digests with a superficially identical wire shape.
+func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []string, step, from, until int64) (map[string][]syncDigest, error) {
+	request := struct {
+		Names       []string
+		Mode        string
+		Step        int64
+		From, Until int64
+	}{names, "sum-v1", step, from, until}
+	var reply []syncDigestWire
+	err := b.wait(ctx, "digest", store, func() error {
+		reply = nil
+		_, err := b.m.requestOnce(ctx, store, "/v1/transfer/digest", request, &reply)
+		return err
+	})
+	var api *apiError
+	if errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusMethodNotAllowed || api.Status == http.StatusBadRequest) {
+		return nil, errSyncNoDigest
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) != len(names) {
+		return nil, errSyncNoDigest
+	}
+	out := make(map[string][]syncDigest, len(reply))
+	for i, r := range reply {
+		if r.Mode != "sum-v1" || r.Name != names[i] {
+			return nil, errSyncNoDigest
+		}
 		if r.Found {
 			out[r.Name] = r.Archives
 		}

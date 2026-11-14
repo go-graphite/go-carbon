@@ -164,3 +164,26 @@ these warm single-name timings do not predict fleet throughput.
   in existing seal/cold-pack work, and measure invalidation/write overhead.
 - Capture a representative many-name history/churn workload and validate on an
   idle native host before promoting the prototype from Draft.
+
+
+## Sync integration
+
+Full-history verification negotiates `sum-v1` automatically on each holder. Each
+request specifies the archive `Step` and an explicit settled `[From,Until)`
+window, using the same bounds as the point comparison. Omitting Step continues
+to return all archives. The response echoes Mode even for missing names; clients
+reject a missing or different mode, since older servers can ignore request fields.
+
+Equal archive identity, clipped bounds, count and sum skip point reads. A mismatch
+retains the directional finite-point comparison: existing target values win, so a
+value difference alone is not a hole. Holders without sum support are read through
+carbonserver. When the target supports sums, a locally accumulated sum of an older
+holder's points can avoid a matching target read. Digest capabilities are cached
+separately from the existing SHA window endpoint.
+
+The 2048-name differential fixture compares complete ordered hole verdicts with
+the original full-history reader across new, mixed and old-target fleets. It
+includes holes in multiple archives, absent names, target-only values, signed zero,
+NaN, infinity and subnormal values. Wire tests reject old mode responses; mismatched
+archive bounds fall back to point comparison. Dense buckets retain their implicit
+8192 count; sparse buckets still decode, with no additional on-disk count format.

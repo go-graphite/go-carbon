@@ -169,7 +169,7 @@ func TestTransferSumDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got[0].Found || len(got[0].Archives) != 2 || got[1].Found {
+	if !got[0].Found || len(got[0].Archives) != 2 || got[1].Found || got[0].Mode != "sum-v1" || got[1].Mode != "sum-v1" {
 		t.Fatalf("%+v", got)
 	}
 	var expected chunkstore.PointSum
@@ -198,6 +198,12 @@ func TestTransferSumDigest(t *testing.T) {
 	if len(wire) != len(got) || len(wire[0].Archives) != 2 || wire[0].Archives[0] != got[0].Archives[0] {
 		t.Fatalf("sum HTTP mismatch: %+v", wire)
 	}
+	r.Step = 60
+	selected, err := service.digest(ctx, r)
+	if err != nil || len(selected[0].Archives) != 1 || selected[0].Archives[0] != got[0].Archives[1] {
+		t.Fatalf("selected archive: %+v, %v", selected, err)
+	}
+
 	r.Mode = "unknown"
 	if r.validate() == nil {
 		t.Fatal("unknown mode accepted")

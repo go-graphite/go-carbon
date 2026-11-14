@@ -49,7 +49,7 @@ type SumArchive struct {
 }
 
 type ContinuationSumDigester interface {
-	SumDigest(context.Context, ContinuationIO, Metadata, int, int, func() time.Time) ([]SumArchive, error)
+	SumDigest(context.Context, ContinuationIO, Metadata, int, int, func() time.Time, ...int) ([]SumArchive, error)
 }
 
 // digestCacheIO collects disposable cache writes separately from source state.
@@ -69,7 +69,7 @@ func (io *digestCacheIO) CacheDigest(key, value []byte) {
 
 // SumDigest reads all archives, unlike Fetch's age-selected serving archive.
 // Zero bounds request full retained history. No source points are changed.
-func (s *Store) SumDigest(ctx context.Context, name string, from, until int) ([]SumArchive, error) {
+func (s *Store) SumDigest(ctx context.Context, name string, from, until int, steps ...int) ([]SumArchive, error) {
 	ctx, finish, err := s.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -93,7 +93,7 @@ func (s *Store) SumDigest(ctx context.Context, name string, from, until int) ([]
 		return nil, err
 	}
 	if !m.Continuation {
-		return s.sumOrdinary(ctx, view, m, from, until)
+		return s.sumOrdinary(ctx, view, m, from, until, steps...)
 	}
 	codec, ok := s.continuation.(ContinuationSumDigester)
 	if !ok {
@@ -102,7 +102,7 @@ func (s *Store) SumDigest(ctx context.Context, name string, from, until int) ([]
 	io := &digestCacheIO{continuationIO: s.newContinuationIO(ctx, view, nil, m), pending: make(map[string][]byte)}
 	defer io.Close()
 	at := s.now()
-	result, err := codec.SumDigest(ctx, io, m, from, until, func() time.Time { return at })
+	result, err := codec.SumDigest(ctx, io, m, from, until, func() time.Time { return at }, steps...)
 	if err != nil {
 		return nil, err
 	}
@@ -150,10 +150,13 @@ func DigestBounds(r Retention, now, from, until int) (int, int) {
 	ceil := func(v int) int { return (v + r.Step - 1) / r.Step * r.Step }
 	return ceil(from), ceil(until)
 }
-func (s *Store) sumOrdinary(ctx context.Context, view pebble.Reader, m Metadata, from, until int) ([]SumArchive, error) {
-	out := make([]SumArchive, len(m.Retentions))
+func (s *Store) sumOrdinary(ctx context.Context, view pebble.Reader, m Metadata, from, until int, steps ...int) ([]SumArchive, error) {
+	out := make([]SumArchive, 0, len(m.Retentions))
 	now := int(s.now().Unix())
 	for ai, r := range m.Retentions {
+		if len(steps) > 0 && steps[0] > 0 && r.Step != steps[0] {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -168,7 +171,7 @@ func (s *Store) sumOrdinary(ctx context.Context, view pebble.Reader, m Metadata,
 				d.Add(int64(lo+i*r.Step), v)
 			}
 		}
-		out[ai] = SumArchive{ai, r.Step, r.Count, lo, hi, fmt.Sprintf("%016x", d.Sum), d.Count}
+		out = append(out, SumArchive{ai, r.Step, r.Count, lo, hi, fmt.Sprintf("%016x", d.Sum), d.Count})
 	}
 	return out, nil
 }

@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// Frozen pre-optimisation full-history path: the fixture compares complete
-// ordered hole verdicts against this point-by-point oracle.
+// Point-only full-history path: the fixture compares complete ordered
+// verdicts against the current policy, including schema mismatch residuals.
 func (s *syncer) checkFullReference(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, now int64) error {
 	groups := map[string][]string{}
 	keyed := map[string][]syncArchive{}
@@ -60,6 +60,9 @@ func (s *syncer) checkFullReference(ctx context.Context, row *syncRow, names []s
 				for _, n := range subset {
 					sv, ok := got[n]
 					if !ok || sv.Step != a.Step {
+						if ok {
+							row.Skipped = append(row.Skipped, syncSkip{n, "schema_step_mismatch"})
+						}
 						continue // not served at this step: retention differs
 					}
 					if h, ok := syncCompare(n, source, sv, target[n], a.Step, from, until); ok {

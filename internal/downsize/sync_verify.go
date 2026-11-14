@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 // Verification cost model. Holes come from restarts, cutovers and copy
@@ -68,10 +70,11 @@ func (r *syncRanges) Set(v string) error {
 
 // syncDigest is one archive's digest over a window (the buckyd wire shape).
 type syncDigest struct {
-	Step   int64
-	Points int64
-	Count  int64
-	Hash   string
+	Step        int64
+	Points      int64
+	Count       int64
+	Hash        string
+	From, Until int64
 }
 
 var (
@@ -538,6 +541,27 @@ func (s *syncer) checkFull(ctx context.Context, row *syncRow, names []string, sc
 	return nil
 }
 
+// fullDigest negotiates cached sums independently of the legacy SHA endpoint.
+func (s *syncer) fullDigest(ctx context.Context, store string, names []string, step int64, w syncRange) (map[string][]syncDigest, error) {
+	b, ok := s.b.(interface {
+		SumDigest(context.Context, string, []string, int64, int64, int64) (map[string][]syncDigest, error)
+	})
+	if !ok {
+		return s.digest(ctx, store, names, w)
+	}
+	key := "sum-v1:" + store
+	if v, ok := s.digests.Load(key); ok && !v.(bool) {
+		return nil, errSyncNoDigest
+	}
+	got, err := b.SumDigest(ctx, store, names, step, w.From, w.Until)
+	if errors.Is(err, errSyncNoDigest) {
+		if _, loaded := s.digests.LoadOrStore(key, false); !loaded {
+			event("sync_full_digest_unavailable", map[string]any{"store": store, "fallback": "carbonserver multi-fetch"})
+		}
+	}
+	return got, err
+}
+
 // checkFullArchive uses exactly the same serving-archive window and hole
 // comparison as full point reads. Equal count+hash at the expected step proves
 // there are no holes; every other result takes the original point comparison.
@@ -572,12 +596,32 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.digests, c.err = s.digest(ctx, c.store, c.names, w)
+			c.digests, c.err = s.fullDigest(ctx, c.store, c.names, step, w)
 		}()
 	}
 	wg.Wait()
 	// Digest failures fall back to the original read path. In particular an
 	// unavailable endpoint must never turn an unchecked name into a match.
+	// On a mixed fleet, read an older holder once and compare its canonical
+	// finite-point sum locally. A matching target digest avoids its point read.
+	// Any uncertainty retains the original directional hole comparison.
+	if _, sums := s.b.(interface {
+		SumDigest(context.Context, string, []string, int64, int64, int64) (map[string][]syncDigest, error)
+	}); sums && target.err == nil {
+		for _, c := range checks[1:] {
+			if !errors.Is(c.err, errSyncNoDigest) {
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.points, c.err = s.fetch(ctx, c.store, c.names, from, until)
+				s.prog.reads.Add(int64(len(c.names)))
+			}()
+		}
+		wg.Wait()
+	}
+
 	needed := map[string]bool{}
 	for _, c := range checks[1:] {
 		for _, n := range c.names {
@@ -588,12 +632,16 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 						continue
 					}
 					for _, td := range target.digests[n] {
-						if td.Step == step && sd.Count == td.Count && sd.Hash == td.Hash {
+						if td.Step == step && sd.Points == td.Points && sd.From == td.From && sd.Until == td.Until && sd.Count == td.Count && sd.Hash == td.Hash {
 							match = true
 						}
 					}
 				}
 			}
+			if !match && c.points != nil && c.err == nil {
+				match = syncSumCovered(c.points[n], target.digests[n], step, from, until)
+			}
+
 			if match {
 				s.prog.digests.Add(1)
 			} else {
@@ -608,13 +656,16 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		}
 	}
 	for _, c := range checks {
-		if len(c.detail) == 0 {
+		if len(c.detail) == 0 || c.points != nil {
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			c.points, c.err = s.fetch(ctx, c.store, c.detail, from, until)
+			if c != target {
+				s.prog.reads.Add(int64(len(c.detail)))
+			}
 		}()
 	}
 	wg.Wait()
@@ -631,7 +682,6 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		if c.err != nil {
 			return fmt.Errorf("source %s fetch: %w", c.store, c.err)
 		}
-		s.prog.reads.Add(int64(len(c.detail)))
 		for _, n := range c.detail {
 			sv, ok := c.points[n]
 			if !ok || sv.Step != step {
@@ -647,6 +697,26 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		}
 	}
 	return nil
+}
+
+// syncSumCovered accepts only the exact archive window negotiated above.
+func syncSumCovered(source syncSeries, target []syncDigest, step, from, until int64) bool {
+	if source.Step != step {
+		return false
+	}
+	var sum chunkstore.PointSum
+	for i, v := range source.Values {
+		ts := source.Start + int64(i)*source.Step
+		if ts >= from && ts < until {
+			sum.Add(ts, v)
+		}
+	}
+	for _, d := range target {
+		if d.Step == step && d.From == from && d.Until == until && d.Count == int64(sum.Count) && d.Hash == fmt.Sprintf("%016x", sum.Sum) {
+			return true
+		}
+	}
+	return false
 }
 
 // progressLoop prints one progress line per interval until ctx ends.

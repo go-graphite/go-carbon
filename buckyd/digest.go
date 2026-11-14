@@ -19,6 +19,7 @@ type DigestRequest struct {
 	Names []string
 	// Mode sum-v1 returns every archive; zero bounds request full history.
 	Mode  string `json:",omitempty"`
+	Step  int    `json:",omitempty"`
 	From  int64
 	Until int64
 }
@@ -44,6 +45,7 @@ type DigestArchive struct {
 // empty when the window lies wholly outside the name's retention.
 type DigestResult struct {
 	Name     string
+	Mode     string `json:",omitempty"`
 	Found    bool
 	Archives []DigestArchive `json:",omitempty"`
 }
@@ -83,8 +85,9 @@ func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, 
 			return nil, err
 		}
 		out[i].Name = name
+		out[i].Mode = r.Mode
 		if r.Mode == "sum-v1" {
-			archives, err := s.store.SumDigest(ctx, name, int(r.From), int(r.Until))
+			archives, err := s.store.SumDigest(ctx, name, int(r.From), int(r.Until), r.Step)
 			if errors.Is(err, chunkstore.ErrNotFound) {
 				continue
 			}
