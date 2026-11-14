@@ -199,3 +199,24 @@ func TestSyncConvergeChecksEveryArchive(t *testing.T) {
 		t.Fatal("empty coarse archive hid finite fine points", string(data))
 	}
 }
+
+func TestSyncConvergeNoCatalogHolders(t *testing.T) {
+	o := convergeOptions(t)
+	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("absent\t0\t0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	s := &syncer{o: o, b: newFakeSync(), j: j, forbid: map[string]bool{}}
+	s.sum.phases = map[string]*syncPhase{}
+	if err := s.verifyAndFill(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rows := j.find(func(r syncRow) bool { return len(r.Resolved) > 0 })
+	if len(rows) != 1 || rows[0].Resolved[0].Reason != "absent_all_sources" || len(s.sum.residual) != 0 {
+		t.Fatal("unproven empty scope", rows, s.sum.residual)
+	}
+}
