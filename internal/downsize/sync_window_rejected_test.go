@@ -133,10 +133,18 @@ func TestSyncWindowRejectedBatchDoesNotSplitTransportFailure(t *testing.T) {
 	}))
 	defer dst.Close()
 	backend := newSyncLiveBackend(syncLiveOptions{})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := backend.CopyWindow(ctx, donor.URL, dst.URL, []string{"one", "two"}, filepath.Join(t.TempDir(), "copy"), syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
-	if !errors.Is(err, context.DeadlineExceeded) || pulls.Load() != 1 {
+	done := make(chan error, 1)
+	go func() {
+		_, err := backend.CopyWindow(ctx, donor.URL, dst.URL, []string{"one", "two"}, filepath.Join(t.TempDir(), "copy"), syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
+		done <- err
+	}()
+	for backend.waiting.Load() == 0 && ctx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) || pulls.Load() != 1 {
 		t.Fatal("ambiguous acknowledgement was split", err, pulls.Load())
 	}
 }
