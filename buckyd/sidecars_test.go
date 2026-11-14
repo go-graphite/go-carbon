@@ -1,8 +1,9 @@
-package carbonserver
+package buckyd
 
 import (
 	"context"
 	"encoding/json"
+	"github.com/golang-jwt/jwt/v5"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,15 +14,12 @@ import (
 )
 
 func TestSidecarsAdmin(t *testing.T) {
-	listener := NewCarbonserverListener(nil)
+	var service *Service
 	call := func(method, path string) *httptest.ResponseRecorder {
 		t.Helper()
 		w := httptest.NewRecorder()
-		listener.sidecarsHandler(w, httptest.NewRequest(method, path, http.NoBody))
+		service.sidecars(w, httptest.NewRequest(method, path, http.NoBody))
 		return w
-	}
-	if r := call(http.MethodGet, "/"); r.Code != 503 {
-		t.Fatal(r.Code)
 	}
 	now := time.Unix(1792432631, 0)
 	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, Continuation: &whisperio.ContinuationCodec{}, Now: func() time.Time { return now }, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour})
@@ -29,7 +27,10 @@ func TestSidecarsAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	listener.SetMetricStore(db)
+	service, err = New(Config{TmpDir: t.TempDir()}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if _, err := db.Create(ctx, store.MetricConfig{Name: "metric", Retentions: []store.Retention{{Step: 1, Count: 60}}, AggregationMethod: store.Average}); err != nil {
 		t.Fatal(err)
@@ -65,11 +66,53 @@ func TestSidecarsAdmin(t *testing.T) {
 	if r := call(http.MethodPost, "/?action=fold"); r.Code != 200 || db.Sidecars().Count != 0 {
 		t.Fatal("fold failed", r.Body.String())
 	}
-	listener.sharedRequestMu.Lock()
-	listener.sharedStoreStopped = true
-	listener.sharedRequestMu.Unlock()
-	if r := call(http.MethodPost, "/?action=fold"); r.Code != 503 {
-		t.Fatal("accepted admin request during shutdown")
-	}
+}
 
+func TestSidecarsAuthAndAdmission(t *testing.T) {
+	db := anchorStore(t)
+	s, err := New(Config{TmpDir: t.TempDir()}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.secret = []byte("sidecar-test-secret")
+	token := func(namespaces, ops []string) string {
+		t.Helper()
+		v, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"exp": time.Now().Add(time.Hour).Unix(), "namespaces": namespaces, "ops": ops}).SignedString(s.secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for _, tt := range []struct {
+		method, path string
+		ns, ops      []string
+		want         int
+	}{
+		{"GET", "", []string{"*"}, []string{"read"}, 200},
+		{"GET", "", []string{"**"}, []string{"read"}, 403},
+		{"POST", "?action=scan&dry-run=true", []string{"*"}, []string{"read"}, 200},
+		{"POST", "?action=scan", []string{"*"}, []string{"read"}, 403},
+		{"POST", "?action=fold", []string{"*"}, []string{"read"}, 403},
+		{"POST", "?action=scan", []string{"*"}, []string{"update"}, 200},
+		{"POST", "?action=scan&limit=10001", []string{"*"}, []string{"update"}, 400},
+		{"DELETE", "", []string{"*"}, []string{"update"}, 405},
+	} {
+		req := httptest.NewRequest(tt.method, "/v1/maintenance/sidecars"+tt.path, http.NoBody)
+		req.Header.Set("X-Buckyd-Authorization", token(tt.ns, tt.ops))
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != tt.want {
+			t.Fatalf("%+v: %d %s", tt, w.Code, w.Body)
+		}
+	}
+	for i := 0; i < cap(s.maintenance); i++ {
+		s.maintenance <- struct{}{}
+	}
+	req := httptest.NewRequest("POST", "/v1/maintenance/sidecars?action=scan&dry-run=true", http.NoBody)
+	req.Header.Set("X-Buckyd-Authorization", token([]string{"*"}, []string{"read"}))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != 429 {
+		t.Fatal(w.Code, w.Body)
+	}
 }

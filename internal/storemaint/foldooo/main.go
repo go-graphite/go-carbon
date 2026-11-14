@@ -1,6 +1,6 @@
-// store-ooo-fold scans or folds sidecars through the running daemon, sharing
+// Package foldooo scans or folds sidecars through the running daemon, sharing
 // its per-metric locks and atomic store batches. It never opens Pebble itself.
-package main
+package foldooo
 
 import (
 	"context"
@@ -8,18 +8,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/storemaint/remote"
 )
 
 type checkpoint struct {
@@ -34,38 +34,32 @@ type options struct {
 	rate                 float64
 }
 
-func main() {
+func Main(args []string) error {
+	fs := flag.NewFlagSet("storectl maintain fold-ooo", flag.ContinueOnError)
+	secret := fs.String("secret-file", "", "buckyd auth secret file")
 	var o options
-	flag.StringVar(&o.endpoint, "url", "http://127.0.0.1:8080", "carbonserver URL")
-	flag.StringVar(&o.checkpoint, "checkpoint", "", "resumable checkpoint file")
-	flag.BoolVar(&o.dry, "dry-run", false, "only count, without changing the store or checkpoint")
-	flag.BoolVar(&o.scan, "scan", false, "only scan and report sidecars")
-	flag.IntVar(&o.limit, "batch", 1000, "metrics per request (1..10000)")
-	flag.Float64Var(&o.rate, "rate", 0, "folds per second; 0 runs as fast as possible")
-	flag.Parse()
+	fs.StringVar(&o.endpoint, "url", "http://127.0.0.1:4242", "buckyd URL")
+	fs.StringVar(&o.checkpoint, "checkpoint", "", "resumable checkpoint file")
+	fs.BoolVar(&o.dry, "dry-run", false, "only count, without changing the store or checkpoint")
+	fs.BoolVar(&o.scan, "scan", false, "only scan and report sidecars")
+	fs.IntVar(&o.limit, "batch", 1000, "metrics per request (1..10000)")
+	fs.Float64Var(&o.rate, "rate", 0, "folds per second; 0 runs as fast as possible")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected positional arguments")
+	}
+	client, err := remote.New(o.endpoint, *secret, !o.dry)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, &http.Client{}, o)
-	stop()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "store-ooo-fold:", err)
-		os.Exit(1)
-	}
+	defer stop()
+	return run(ctx, client, o)
 }
-func request(ctx context.Context, client *http.Client, endpoint string, q url.Values, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/admin/store/sidecars?"+q.Encode(), http.NoBody)
-	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s: %s: %s", q.Get("action"), resp.Status, strings.TrimSpace(string(body)))
-	}
-	return json.NewDecoder(resp.Body).Decode(result)
+func request(ctx context.Context, client *remote.Client, endpoint string, q url.Values, result any) error {
+	return client.DoContext(ctx, http.MethodPost, "/v1/maintenance/sidecars?"+q.Encode(), nil, result)
 }
 func saveCheckpoint(path string, c checkpoint) error {
 	if path == "" {
@@ -75,12 +69,43 @@ func saveCheckpoint(path string, c checkpoint) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path+".tmp", value, 0600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), ".fold-ooo-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(path+".tmp", path)
+	defer os.Remove(f.Name())
+	if _, err = f.Write(value); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
-func run(ctx context.Context, client *http.Client, o options) error {
+func run(ctx context.Context, client *remote.Client, o options) error {
+	if o.checkpoint != "" && !o.dry && !o.scan {
+		lock, err := os.OpenFile(o.checkpoint+".lock", os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			return err
+		}
+	}
 	if o.limit < 1 || o.limit > 10000 || o.rate < 0 || math.IsNaN(o.rate) || math.IsInf(o.rate, 0) {
 		return errors.New("invalid batch or rate")
 	}
@@ -105,21 +130,8 @@ func run(ctx context.Context, client *http.Client, o options) error {
 		}
 	}
 	if !o.dry && !o.scan && c.Phase == "scan" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(o.endpoint, "/")+"/admin/store/sidecars", http.NoBody)
-		if err != nil {
-			return err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return err
-		}
 		var inventory store.SidecarInventory
-		err = json.NewDecoder(resp.Body).Decode(&inventory)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("inventory: %s", resp.Status)
-		}
-		if err != nil {
+		if err := client.DoContext(ctx, http.MethodGet, "/v1/maintenance/sidecars", nil, &inventory); err != nil {
 			return err
 		}
 		if inventory.Ready {
@@ -135,6 +147,9 @@ func run(ctx context.Context, client *http.Client, o options) error {
 		var page store.SidecarPage
 		if err := request(ctx, client, o.endpoint, q, &page); err != nil {
 			return err
+		}
+		if !page.Done && page.After <= c.After {
+			return errors.New("sidecar scan cursor did not advance")
 		}
 		total += len(page.Sidecars)
 		for _, s := range page.Sidecars {
@@ -165,6 +180,9 @@ func run(ctx context.Context, client *http.Client, o options) error {
 		var page store.SidecarFoldPage
 		if err := request(ctx, client, o.endpoint, q, &page); err != nil {
 			return err
+		}
+		if !page.Done && page.After <= c.After {
+			return errors.New("sidecar fold cursor did not advance")
 		}
 		value, _ := json.Marshal(page)
 		fmt.Println(string(value))

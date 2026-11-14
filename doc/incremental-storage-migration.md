@@ -155,7 +155,7 @@ space separately. Diagnostic reflinks retain old extents and must be cleaned up.
 With `store-ooo-direct-writes = true`, the final check waits in phase `sidecars`
 until the sidecar inventory is ready, logging its progress every ten seconds.
 An empty source tree does not prove that a legacy store has no sidecars. Complete
-an applied scan through `POST /admin/store/sidecars?action=scan&limit=1000`,
+an applied scan through `POST /v1/maintenance/sidecars?action=scan&limit=1000`,
 passing each returned `after` value to the next request until `done` is true.
 The scan must start without `after`; a dry run cannot establish readiness.
 Migration then resumes automatically. Remaining sidecars still fail the check;

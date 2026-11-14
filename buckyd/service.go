@@ -541,6 +541,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/native/", s.native)
 	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
 	mux.HandleFunc("/v1/maintenance/archive-anchors", s.archiveAnchors)
+	mux.HandleFunc("/v1/maintenance/sidecars", s.sidecars)
 	mux.HandleFunc("/v1/maintenance/finite-point", s.finitePoint)
 	mux.HandleFunc("/v1/maintenance/missing-only", s.missingOnly)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
