@@ -522,7 +522,32 @@ func (m *mover) request(ctx context.Context, endpoint, path string, body any, ou
 		}
 	}
 }
+
+// Native pulls use requestOnce directly because their journal makes retries safe.
+// Readiness-lock rejection happens before import work starts.
 func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any, out any) (http.Header, error) {
+	if !strings.HasPrefix(path, "/v1/native/") {
+		return m.requestAttempt(ctx, endpoint, path, body, out)
+	}
+	timeout := m.stallTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		headers, err := m.requestAttempt(ctx, endpoint, path, body, out)
+		var api *apiError
+		if !strings.HasPrefix(path, "/v1/native/") || !errors.As(err, &api) || api.Status != http.StatusInternalServerError || !strings.HasSuffix(strings.TrimSpace(api.Message), "HTTP 500 application lifecycle is busy; retry native copy") {
+			return headers, err
+		}
+		if err := sleepContext(ctx, 100*time.Millisecond); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (m *mover) requestAttempt(ctx context.Context, endpoint, path string, body any, out any) (http.Header, error) {
 	if !m.idleBounded(path) {
 		return m.requestOnceWatched(ctx, endpoint, path, body, out, nil)
 	}
