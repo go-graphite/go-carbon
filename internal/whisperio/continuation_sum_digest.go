@@ -97,13 +97,21 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 					return nil, err
 				}
 			}
-			series, err := w.FetchArchiveWindow(whisper.ArchiveWindow{Archive: ai, From: start, Until: end})
+			var d store.PointSum
+			if !w.IsCompressed() {
+				err = visitClassicWindow(ctx, w.StorageFile().(*continuationFile), ai, start, end, func(ts int, v float64) { d.Add(int64(ts), v) })
+			}
+			if w.IsCompressed() || errors.Is(err, errClassicUnalignedBase) {
+				var series *whisper.TimeSeries
+				series, err = w.FetchArchiveWindow(whisper.ArchiveWindow{Archive: ai, From: start, Until: end})
+				if err == nil {
+					for i, v := range series.Values() {
+						d.Add(int64(series.FromTime()+i*r.Step), v)
+					}
+				}
+			}
 			if err != nil {
 				return nil, err
-			}
-			var d store.PointSum
-			for i, v := range series.Values() {
-				d.Add(int64(series.FromTime()+i*r.Step), v)
 			}
 			if writable {
 				if !filled && !current {
