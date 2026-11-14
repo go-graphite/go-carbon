@@ -82,6 +82,7 @@ type whisperConfig struct {
 	StoreCompactionDebtBypass    bool      `toml:"store-compaction-debt-bypass"`
 	StoreFlushRate               int64     `toml:"store-flush-rate"`
 	StoreBlockLoadConcurrency    int       `toml:"store-block-load-concurrency"`
+	StoreReadConcurrency         int       `toml:"store-read-concurrency"`
 	StoreCompactionWorkers       int       `toml:"store-compaction-workers"`
 	StoreL0CompactionConcurrency int       `toml:"store-l0-compaction-concurrency"`
 	StoreL0CompactionThreshold   int       `toml:"store-l0-compaction-threshold"`

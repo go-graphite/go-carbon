@@ -94,6 +94,11 @@ store-compaction-workers = 0
 # 0 keeps 16; range 0..1024. Reloadable; lowering lets active loads finish.
 # Increase only when profiles show admission waits and the device has headroom.
 store-block-load-concurrency = 0
+# Foreground store reads (render, metadata, digest and history fetch) share this
+# budget. 0 keeps 32; range 0..1024. SIGHUP resizes without interrupting reads.
+# Each admitted read can pin uncached SST buffers: raising this increases memory
+# pressure. Tune using store_read_capacity/store_reads_in_progress/store_reads_queued.
+store-read-concurrency = 0
 # Aggregate compaction SST output bytes per second: 0 off (default), positive
 # fixed budget, -1 automatic. Reloads on SIGHUP, including waiting writes.
 # Auto learns unpaced for the warm-up (default one hour), then targets headroom
