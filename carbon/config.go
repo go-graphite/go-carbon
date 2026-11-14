@@ -106,6 +106,7 @@ type whisperConfig struct {
 	StoreColdPackInterval        *Duration `toml:"store-cold-pack-interval"`
 	StoreColdPackMaxDebt         uint64    `toml:"store-cold-pack-max-compaction-debt"`
 	StoreTimeBuckets             bool      `toml:"store-time-buckets"`
+	StoreNativeExportConcurrency int       `toml:"store-native-export-concurrency"`
 	StoreNativeImportConcurrency int       `toml:"store-native-import-concurrency"`
 	StoreNativeCombineWorkers    int       `toml:"store-native-combine-workers"`
 	StoreNativeCombineMemory     int64     `toml:"store-native-combine-memory"`
@@ -456,6 +457,7 @@ func NewConfig() *Config {
 			},
 		},
 		Whisper: whisperConfig{
+			StoreNativeExportConcurrency:         store.DefaultNativeExportConcurrency,
 			StoreNativeImportConcurrency:         store.DefaultNativeImportConcurrency,
 			StoreNativeCombineWorkers:            store.DefaultNativeCombineWorkers,
 			StoreNativeCombineMemory:             store.DefaultNativeCombineMemory,

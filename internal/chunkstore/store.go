@@ -51,6 +51,7 @@ type Options struct {
 	// estimated scratch allowance, including results waiting for SST consumers.
 	// Each worker receives total/imports/workers (at least 1 GiB). Zero selects
 	// 1 import / 2 workers / 2 GiB. Changes require reopening.
+	NativeExportConcurrency int // 1..8; zero selects one; requires reopening
 	NativeImportConcurrency int
 	NativeCombineWorkers    int
 	NativeCombineMemory     int64
@@ -240,6 +241,7 @@ type Store struct {
 	maintenanceCtx        context.Context
 	maintenanceStop       context.CancelFunc
 
+	nativeExportConcurrency   int
 	nativeImportConcurrency   int
 	nativeCombineWorkers      int
 	nativeCombineWorkerMemory int64
@@ -374,6 +376,12 @@ var storeComparer = func() *pebble.Comparer {
 // Open accepts only a new directory or an explicitly identified chunk store.
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
+	if options.NativeExportConcurrency == 0 {
+		options.NativeExportConcurrency = DefaultNativeExportConcurrency
+	}
+	if err := ValidateNativeExportConcurrency(options.NativeExportConcurrency); err != nil {
+		return nil, err
+	}
 	if options.NativeImportConcurrency == 0 {
 		options.NativeImportConcurrency = DefaultNativeImportConcurrency
 	}
@@ -497,6 +505,7 @@ func Open(dir string, options Options) (*Store, error) {
 	s.compactionControl.setDebtBypass(!options.CompactionKeepPacingOnDebt)
 	s.compactionControl.setWarmup(warmup)
 	s.continuation = options.Continuation
+	s.nativeExportConcurrency = options.NativeExportConcurrency
 	s.nativeImportConcurrency = options.NativeImportConcurrency
 	s.nativeCombineWorkers = options.NativeCombineWorkers
 	s.nativeCombineWorkerMemory = options.NativeCombineMemory / int64(options.NativeImportConcurrency) / int64(options.NativeCombineWorkers)

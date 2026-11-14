@@ -27,9 +27,31 @@ const (
 
 const (
 	DefaultNativeImportConcurrency = 1
-	DefaultNativeCombineWorkers    = 2
-	DefaultNativeCombineMemory     = nativeCombineMemory
+	DefaultNativeExportConcurrency = 1
+	// Conservative planning charge for decoded points, source/output buffers,
+	// range metadata and iterators at the existing per-name limits. This is
+	// additional to import scratch and the store/cache baseline, not an RSS cap.
+	NativeExportMemoryPerStream int64 = 17 << 30
+	DefaultNativeCombineWorkers       = 2
+	DefaultNativeCombineMemory        = nativeCombineMemory
 )
+
+// ValidateNativeExportConcurrency bounds independent export scratch allocations.
+func ValidateNativeExportConcurrency(exports int) error {
+	if exports < 1 || exports > 8 {
+		return fmt.Errorf("native export concurrency must be 1..8")
+	}
+	return nil
+}
+
+// NativeExportConcurrency is fixed at Open. Waiting exporters are admitted
+// before allocating range metadata, iterators or materialized history.
+func (s *Store) NativeExportConcurrency() int {
+	if s.nativeExportConcurrency == 0 {
+		return DefaultNativeExportConcurrency
+	}
+	return s.nativeExportConcurrency
+}
 
 // ValidateNativeImportBudget partitions one store-wide scratch allowance across
 // all admitted imports. Increasing admission must not multiply that allowance.
@@ -88,7 +110,7 @@ func (s *Store) initNativeContext() {
 	s.nativeContextOnce.Do(func() {
 		s.nativeContext, s.nativeCancel = context.WithCancel(context.Background())
 		s.nativeAdmission = make(chan struct{}, s.NativeImportConcurrency())
-		s.nativeExportAdmission = make(chan struct{}, 1)
+		s.nativeExportAdmission = make(chan struct{}, s.NativeExportConcurrency())
 	})
 }
 

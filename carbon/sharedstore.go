@@ -357,6 +357,7 @@ func storageSettingsChanged(old, next *Config) bool {
 		return false
 	}
 	return sharedStorePath(old) != sharedStorePath(next) ||
+		old.Whisper.StoreNativeExportConcurrency != next.Whisper.StoreNativeExportConcurrency ||
 		old.Whisper.StoreNativeImportConcurrency != next.Whisper.StoreNativeImportConcurrency ||
 		old.Whisper.StoreNativeCombineWorkers != next.Whisper.StoreNativeCombineWorkers ||
 		old.Whisper.StoreNativeCombineMemory != next.Whisper.StoreNativeCombineMemory ||
