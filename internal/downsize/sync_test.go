@@ -551,7 +551,13 @@ func TestSyncWindowConcurrentDetailParity(t *testing.T) {
 					}
 				}
 			}
-			backend := &rendezvousSync{fakeSync: f, ready: make(chan struct{}), want: 3}
+			// Legacy sources are read concurrently before deciding whether the
+			// target needs a detail read. Digest mismatches fan out together.
+			wantReads := int64(3)
+			if fallback {
+				wantReads = 2
+			}
+			backend := &rendezvousSync{fakeSync: f, ready: make(chan struct{}), want: wantReads}
 			s := &syncer{o: o, b: backend}
 			for _, n := range names {
 				s.masks.Store(n, uint64(6))

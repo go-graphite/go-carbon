@@ -2,6 +2,9 @@ package downsize
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -186,7 +189,7 @@ func TestSyncWindowSubsetDifferential(t *testing.T) {
 				if fallback == "source" {
 					f.noDigest[syncD1] = true
 				}
-				s := &syncer{o: o, b: f}
+				s := &syncer{o: o, b: windowWireSync{f}}
 				for _, n := range names {
 					s.masks.Store(n, uint64(7))
 				}
@@ -239,5 +242,96 @@ func TestSyncWindowSubsetReads(t *testing.T) {
 	}
 	if !reflect.DeepEqual(b.targetNames, []string{"b.holes"}) {
 		t.Fatalf("target reads: %v", b.targetNames)
+	}
+}
+
+// Production digest wire shape, independently encoded from the fake store's
+// points so the differential oracle also exercises successful legacy matches.
+type windowWireSync struct{ *fakeSync }
+
+func (b windowWireSync) Digest(ctx context.Context, store string, names []string, from, until int64) (map[string][]syncDigest, error) {
+	if b.noDigest[store] {
+		return nil, errSyncNoDigest
+	}
+	series, err := b.fakeSync.Fetch(ctx, store, names, from, until)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]syncDigest{}
+	for n, v := range series {
+		var raw []byte
+		var count int64
+		for i, value := range v.Values {
+			ts := v.Start + int64(i)*v.Step
+			if ts < from || ts >= until || math.IsNaN(value) || math.IsInf(value, 0) {
+				continue
+			}
+			raw = binary.BigEndian.AppendUint64(raw, uint64(ts))
+			raw = binary.BigEndian.AppendUint64(raw, math.Float64bits(value))
+			count++
+		}
+		sum := sha256.Sum256(raw)
+		out[n] = []syncDigest{{Step: v.Step, Count: count, Hash: hex.EncodeToString(sum[:8])}}
+	}
+	return out, nil
+}
+
+func TestSyncWindowLegacyReads(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		f, o, holes := threeSources(t)
+		o.from = []string{syncD1}
+		f.noDigest[syncD1] = true
+		if empty {
+			f.store(syncD1).points["a.clean"][60] = nil
+		}
+		b := &windowSubsetSync{fakeSync: f}
+		// Keep recording reads, but use the production digest wire encoding.
+		backend := legacyWindowSync{windowWireSync{f}, b}
+		s := &syncer{o: o, b: backend}
+		s.masks.Store("a.clean", uint64(1))
+		var want, got syncRow
+		w := syncRange{"test", holes[0] - 600, holes[0] + 600}
+		if err := s.checkWindowReference(context.Background(), &want, []string{"a.clean"}, nil, w); err != nil {
+			t.Fatal(err)
+		}
+		b.targetNames = nil
+		if err := s.checkWindow(context.Background(), &got, []string{"a.clean"}, nil, w); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("empty=%v got %+v want %+v", empty, got, want)
+		}
+		if len(b.targetNames) != 0 {
+			t.Fatalf("empty=%v matching target was read: %v", empty, b.targetNames)
+		}
+	}
+}
+
+type legacyWindowSync struct {
+	windowWireSync
+	record *windowSubsetSync
+}
+
+func (b legacyWindowSync) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
+	return b.record.Fetch(ctx, store, names, from, until)
+}
+
+func TestSyncWindowCoveredWire(t *testing.T) {
+	source := syncSeries{Start: 60, Step: 60, Values: []float64{123, 0, math.Copysign(0, -1), math.SmallestNonzeroFloat64, math.MaxFloat64, math.NaN(), math.Inf(1), math.Inf(-1), 456}}
+	w := syncRange{"wire", 120, 540}
+	target := []syncDigest{{Step: 60, Count: 4, Hash: "13a8319ea3e369b3"}}
+	if !syncWindowCovered(source, target, w) {
+		t.Fatal("wire digest did not match")
+	}
+	for _, mutate := range []func([]syncDigest){func(d []syncDigest) { d[0].Step = 300 }, func(d []syncDigest) { d[0].Count++ }, func(d []syncDigest) { d[0].Hash = "different" }} {
+		d := append([]syncDigest(nil), target...)
+		mutate(d)
+		if syncWindowCovered(source, d, w) {
+			t.Fatal("accepted mismatching digest")
+		}
+	}
+	source.Values[2] = 0
+	if syncWindowCovered(source, target, w) {
+		t.Fatal("lost signed-zero bit distinction")
 	}
 }
