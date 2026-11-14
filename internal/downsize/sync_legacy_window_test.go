@@ -18,7 +18,7 @@ func TestSyncWindowReusesLegacyMissingReceipts(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer j.close()
-			if err := os.WriteFile(filepath.Join(dir, "missing.tsv"), []byte("a\t1\nb\t2\n"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "missing.tsv"), []byte("a\t1\nb\t"+map[string]string{"missing": "2", "missing-batch": "1"}[phase]+"\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err := j.append(syncRow{Kind: "copied", Phase: phase, Source: syncD1, Round: 1, Names: 1, First: "a", Last: "a", Copied: 1}); err != nil {
@@ -27,8 +27,9 @@ func TestSyncWindowReusesLegacyMissingReceipts(t *testing.T) {
 			f := newFakeSync()
 			f.put(syncD1, "a", syncTestSchema)
 			f.put(syncD2, "b", syncTestSchema)
+			f.put(syncD1, "b", syncTestSchema)
 			makeSyncer := func() *syncer {
-				return &syncer{o: syncOptions{to: syncT, from: []string{syncD1, syncD2}, state: dir, streams: 1, batch: 1, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }, windows: syncRanges{{Name: "gap", From: syncTestNow - 600, Until: syncTestNow}}}, b: f, j: j, copied: map[string]bool{}, failedCp: map[string]bool{}, forbid: map[string]bool{}, sum: syncSummary{phases: map[string]*syncPhase{}}}
+				return &syncer{o: syncOptions{to: syncT, from: []string{syncD1, syncD2}, state: dir, streams: 2, batch: 1, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }, windows: syncRanges{{Name: "gap", From: syncTestNow - 600, Until: syncTestNow}}}, b: f, j: j, copied: map[string]bool{}, failedCp: map[string]bool{}, forbid: map[string]bool{}, sum: syncSummary{phases: map[string]*syncPhase{}}}
 			}
 			s := makeSyncer()
 			if err := s.copyMissing(context.Background()); err != nil {
@@ -37,7 +38,11 @@ func TestSyncWindowReusesLegacyMissingReceipts(t *testing.T) {
 			if !s.copied["a"] || !s.copied["b"] {
 				t.Fatalf("lost receipts: %v", s.copied)
 			}
-			want := []string{syncD2 + " b"}
+			source := syncD2
+			if phase == "missing-batch" {
+				source = syncD1
+			}
+			want := []string{source + " b"}
 			if !reflect.DeepEqual(f.copies, want) {
 				t.Fatalf("repeated completed import: %v", f.copies)
 			}
