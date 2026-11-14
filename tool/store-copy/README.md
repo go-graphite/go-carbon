@@ -62,7 +62,7 @@ receipts. Windows are half-open `[FROM, UNTIL)` in Unix seconds. Keep their orde
 
 - Full-history copy/fill is enabled by default, including runs with windows. Every
   selected window is verified for every name; additional full histories are sampled
-  (`--sample-every 64`, 1=all, 0=none). Set `--no-full-history` with windows to
+  (`--sample-every 1` by default, 1=all, 0=none). Set `--no-full-history` with windows to
   restrict all writes to those windows using the native target-wins combiner.
   `--full-history` remains an accepted compatibility spelling.
 - `--no-copy` makes verification read-only: missing coverage stays residual.

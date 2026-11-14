@@ -54,7 +54,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.IntVar(&c.sync.batch, "verify-batch", 500, "names per verification batch")
 	flags.IntVar(&c.sync.maxRounds, "max-rounds", 4, "verify/fill rounds")
 	flags.DurationVar(&c.sync.settle, "settle", 10*time.Minute, "ignore the newest points while replicas are writing")
-	flags.IntVar(&c.sync.sampleEvery, "sample-every", 64, "only with --window --full-history: check 1 in N full histories (1 all, 0 none)")
+	flags.IntVar(&c.sync.sampleEvery, "sample-every", 1, "only with --window and full history enabled: check 1 in N full histories (1 all, 0 none)")
 	flags.BoolVar(&c.sync.fullHistory, "full-history", true, "compatibility flag: full-history copy/fill is enabled by default; use --no-full-history for window-only work")
 	noFullHistory := flags.Bool("no-full-history", false, "with --window: restrict all copying/filling to the selected windows")
 	flags.BoolVar(&c.sync.noCopy, "no-copy", false, "verify without writing missing names or filling holes; residuals remain nonzero")
@@ -79,6 +79,11 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	c.explicit = map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { c.explicit[f.Name] = true })
+	// Sampling is inactive outside full-history window verification. Retain its
+	// historical identity value there so unchanged old journals still resume.
+	if !c.explicit["sample-every"] && (len(c.sync.windows) == 0 || !c.sync.fullHistory) {
+		c.sync.sampleEvery = 64
+	}
 	if c.phase != "all" && c.phase != "copy" {
 		return c, errors.New("--phase must be all or copy")
 	}

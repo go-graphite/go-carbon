@@ -344,7 +344,7 @@ func TestSyncOptOuts(t *testing.T) {
 		t.Fatalf("optouts: %+v", c)
 	}
 	defaults, err := parseSyncCommand(syncCLIArgs(t, "--window", "100:200"))
-	if err != nil || !defaults.sync.fullHistory {
+	if err != nil || !defaults.sync.fullHistory || defaults.sync.sampleEvery != 1 {
 		t.Fatalf("default history: %+v %v", defaults.sync, err)
 	}
 	if _, err := parseSyncCommand(syncCLIArgs(t, "--no-full-history")); err == nil {
