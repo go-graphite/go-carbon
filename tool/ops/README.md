@@ -229,7 +229,7 @@ inode/free-space measurements before and after pruning. Check migration reclaim
 queue/rate columns with the migration report. Freed filesystem bytes may reach
 an SSD only after discard; see the [storage operations guide](../../doc/pebble-storage/operations.md).
 
-For removal use the compiled `tool/store-prune-empty-dirs` tool from U28. It pins
+For removal use the compiled `storectl maintain prune-empty-dirs` tool from U28. It pins
 roots and enforces ownership, locking and no-follow rules. This read-only wrapper
 does not replace its mutation safeguards or turn an absence of sampled files into
 permission to remove a live data tree.

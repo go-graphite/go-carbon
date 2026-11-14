@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -41,8 +43,15 @@ func main() {
 		fmt.Println("storectl", version())
 		return
 	}
-	if err := downsize.MainWithMetrics(os.Args[1:]); err != nil {
+	if err := run(os.Args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func run(args []string) error {
+	if len(args) > 0 && args[0] == "maintain" {
+		return maintain(args[1:])
+	}
+	return downsize.MainWithMetrics(args)
 }

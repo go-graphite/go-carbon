@@ -43,11 +43,11 @@ in use. Late writes and corrections update the same shared chunks and propagate 
 
 ## Bulk conversion
 
-Build with `go build -mod=vendor -o store-convert ./tool/store-convert`.
+Build the operator binary with `make storectl`.
 For an immutable source tree:
 
 ```sh
-./store-convert -source /data/frozen-whisper -source-quiesced \
+./storectl maintain convert -source /data/frozen-whisper -source-quiesced \
   -source-id host-and-snapshot-id -destination /data/exact-store \
   -workers 2 -cpu 2
 ```

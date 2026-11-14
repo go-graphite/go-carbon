@@ -271,8 +271,8 @@ To return to an older upstream build, stop the server, preserve its normal
 backup/input-log recovery procedure, and use an exclusively opened offline store:
 
 ```sh
-go build -o cold-pack ./tool/cold-pack
-./cold-pack -store /var/lib/carbon/store -source /var/lib/carbon/whisper \
+make storectl
+./storectl maintain cold-pack -store /var/lib/carbon/store -source /var/lib/carbon/whisper \
   -mode unpack -downgrade
 ```
 
@@ -350,7 +350,7 @@ physical mutation paths, atomic failed plans, crash/restart, concurrent ingestio
 corrections/rollups, revision conflicts, paging, pacing, reload and transfer fences.
 Use `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor GOMAXPROCS=4` and a per-package
 `-timeout=150s`; race checks can use two processors. The optional
-`TestColdPackCorpus` in `tool/cold-pack/bench_test.go` operates on private clones
+`TestColdPackCorpus` in `internal/storemaint/coldpack/bench_test.go` operates on private clones
 of settled ordinary corpus stores and writes a JSON receipt. Set
 `COLD_PACK_BENCH_DIR`, `COLD_PACK_BENCH_RESULT`, `COLD_PACK_BENCH_CLOCK` and
 `COLD_PACK_BENCH_MODE`. It includes a full archive oracle, a twenty-series native
