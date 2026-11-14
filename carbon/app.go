@@ -89,6 +89,8 @@ type App struct {
 	migrationCollectorOnce sync.Once
 	liveStoreMigration     atomic.Pointer[liveStoreMigration]
 	incrementalMigration   atomic.Pointer[incrementalStoreMigration]
+	legacyWhisperDisabled  atomic.Bool
+	completionConfig       *Config
 	sharedStoreReads       atomic.Bool
 	Buckyd                 *buckyd.Service
 	Tags                   *tags.Tags
@@ -254,6 +256,7 @@ func (app *App) configure() error {
 	// running under an obsolete rule. ReloadConfig restarts it below.
 	app.stopExpiration()
 	app.Config = cfg
+	app.completionConfig = cfg
 	if app.configUnknownKeys != nil {
 		app.configUnknownKeys.Set(float64(len(cfg.unknownKeys)))
 	}
@@ -270,6 +273,7 @@ func loadConfig(filename string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.incrementalMigrationComplete = completedIncrementalMigration(cfg)
 	if err := validateStorageConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -770,6 +774,9 @@ func (app *App) newPersister() (*persister.Whisper, error) {
 	p.SetWriteoutReady(ready)
 	if app.MetricStore != nil {
 		p.SetMetricStore(app.MetricStore)
+		if app.legacyWhisperDisabled.Load() {
+			p.SetIncrementalMigrationComplete()
+		}
 		if app.Config.Whisper.StoreIncrementalMigration {
 			if err := p.SetIncrementalMigration(app.MetricStore, sharedStorePath(app.Config)); err != nil {
 				return nil, err
@@ -880,6 +887,13 @@ func (app *App) Start() (err error) {
 	}()
 
 	conf := app.Config
+	// ParseConfig already took this snapshot. Embedded callers may supply or
+	// clone Config directly; snapshot their receipt before source validation.
+	if app.completionConfig != conf {
+		conf.incrementalMigrationComplete = completedIncrementalMigration(conf)
+	}
+	app.completionConfig = nil
+	conf.incrementalMigrationComplete = conf.incrementalMigrationComplete || app.legacyWhisperDisabled.Load()
 	if err = validateRuntimeProfiling(conf); err != nil {
 		return err
 	}
@@ -1114,6 +1128,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		if err := checkStoreStartup(conf); err != nil {
 			return nil, err
 		}
+		app.legacyWhisperDisabled.Store(conf.incrementalMigrationComplete)
 		incrementalSource := ""
 		var continuation store.ContinuationCodec
 		if conf.Whisper.StoreIncrementalMigration {
@@ -1142,7 +1157,8 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			RelayoutMaxCompactionDebt: uint64(conf.Whisper.StoreTimeBucketsRelayoutMaxDebt),
 			ExactBlocks:               conf.Whisper.StoreEncoding == "exact",
 			IncrementalSource:         incrementalSource,
-			IngestFileStages:          conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
+			IncrementalSourceComplete: app.legacyWhisperDisabled.Load(),
+			IngestFileStages:          conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest && !app.legacyWhisperDisabled.Load(),
 			IngestLinger:              conf.Whisper.StoreMigrationIngestLinger.Value(),
 			IngestGroupBytes:          conf.Whisper.StoreMigrationIngestGroup,
 			IngestParallel:            conf.Whisper.StoreMigrationIngestParallel,
@@ -1281,7 +1297,8 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsQueue *helpe
 	if !conf.Whisper.StoreLiveMigration || app.sharedStoreReads.Load() {
 		carbonserver.SetMetricStore(app.MetricStore)
 	}
-	carbonserver.SetMetricStoreFileIndex(conf.Whisper.StoreMirrorFiles || conf.Whisper.StoreIncrementalMigration && !completedIncrementalMigration(conf))
+	carbonserver.SetMetricStoreFileIndex(conf.Whisper.StoreMirrorFiles || conf.Whisper.StoreIncrementalMigration && !app.legacyWhisperDisabled.Load())
+	carbonserver.SetLegacyWhisperDisabled(app.legacyWhisperDisabled.Load())
 	if conf.Whisper.StoreIncrementalMigration {
 		carbonserver.SetIncrementalIndexScratch(filepath.Join(sharedStorePath(conf), ".incremental-index"))
 	}

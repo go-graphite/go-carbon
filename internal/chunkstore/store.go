@@ -201,6 +201,9 @@ type Options struct {
 	// IncrementalSource enables verified per-metric ownership and reclamation.
 	// It must identify the original canonical directory for every restart.
 	IncrementalSource string
+	// IncrementalSourceComplete is set only from a durable zero-skipped completion receipt.
+	// Ownership encoding remains enabled; the retired source is never accessed.
+	IncrementalSourceComplete bool
 	// IngestFileStages writes fresh file conversions as ingested tables
 	// instead of memtable batches. It requires IncrementalSource and Continuation.
 	IngestFileStages bool
@@ -497,7 +500,7 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.sourceIdentity == nil {
 		options.sourceIdentity = readIncrementalIdentity
 	}
-	if _, err := checkIncrementalMarker(fs, dir, options.IncrementalSource, options.sourceIdentity); err != nil {
+	if _, err := checkIncrementalMarkerForMode(fs, dir, options.IncrementalSource, options.sourceIdentity, options.IncrementalSourceComplete); err != nil {
 		return nil, err
 	}
 	// An existing v6 store becomes v7 only once Pebble holds its lock and has
@@ -681,7 +684,7 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	s.startSnapshotRelease()
 	s.startWALSyncer()
-	if err := s.configureIncrementalSource(fs, dir, options.IncrementalSource, options.sourceIdentity); err != nil {
+	if err := s.configureIncrementalSourceForMode(fs, dir, options.IncrementalSource, options.sourceIdentity, options.IncrementalSourceComplete); err != nil {
 		return nil, s.openFailure(db, err)
 	}
 	if err := s.loadSidecars(); err != nil {
@@ -1792,3 +1795,6 @@ func metadataFrom(reader pebble.Reader, name string) (Metadata, error) {
 	}
 	return m, nil
 }
+
+// Directory is the shared database filesystem, independent of any retired migration source.
+func (s *Store) Directory() string { return s.dir }

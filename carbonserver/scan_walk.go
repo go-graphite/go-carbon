@@ -532,6 +532,13 @@ func (w *scanWalker) walkError(err error) {
 }
 
 func (w *scanWalker) metric(depth int, e *scanDirent, siblings []scanDirent, isDir bool) {
+	if w.scan.u.listener.legacyWhisperDisabled.Load() {
+		if !isDir {
+			w.scan.u.listener.unexpectedWhisperFile(string(w.path))
+		}
+		w.r.cancelled = true
+		return
+	}
 	if err := w.statAt(depth, e.name, false, &w.st); err != nil {
 		w.walkError(err)
 		return

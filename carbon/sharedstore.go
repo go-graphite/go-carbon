@@ -199,7 +199,7 @@ func validateStorageConfig(cfg *Config) error {
 		return errors.New("cold pack requires exact incremental time-bucketed storage")
 	}
 
-	if archive := cfg.Whisper.StoreMigrationArchiveDir; archive != "" {
+	if archive := cfg.Whisper.StoreMigrationArchiveDir; archive != "" && !cfg.incrementalMigrationComplete {
 		if !cfg.Whisper.StoreIncrementalMigration {
 			return errors.New("store-migration-archive-dir requires incremental migration")
 		}
@@ -216,8 +216,10 @@ func validateStorageConfig(cfg *Config) error {
 		if cfg.Whisper.StoreMigrationWorkers < 0 || cfg.Whisper.StoreMigrationWorkers > maxStoreMigrationWorkers || cfg.Whisper.StoreMigrationBytesInFlight <= 0 || cfg.Whisper.StoreMigrationMinFreeBytes < 0 {
 			return fmt.Errorf("incremental migration requires 0..%d workers, positive bytes-in-flight and nonnegative free-space reserve", maxStoreMigrationWorkers)
 		}
-		if err := validateMirrorPaths(cfg.Whisper.DataDir, cfg.Whisper.StoreDir); err != nil {
-			return err
+		if !cfg.incrementalMigrationComplete {
+			if err := validateMirrorPaths(cfg.Whisper.DataDir, cfg.Whisper.StoreDir); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -513,6 +513,9 @@ func (s *parallelScan) abortOutput() {
 }
 
 func (s *parallelScan) stopped() bool {
+	if s.u.listener.legacyWhisperDisabled.Load() {
+		return true
+	}
 	// Single-channel checks avoid selectgo locking both shared channels on
 	// every file. Both channels only close, so either closure stops the scan.
 	select {

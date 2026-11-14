@@ -495,3 +495,49 @@ func TestIncrementalMarkerRechecksLegacyUnderLock(t *testing.T) {
 		t.Fatalf("changed legacy marker: %q %v", got, err)
 	}
 }
+
+func TestCompletedIncrementalMarkerNeverChecksSource(t *testing.T) {
+	fs := vfs.NewMem()
+	if err := fs.MkdirAll("/legacy", 0750); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{fs: fs, ExactBlocks: true, IncrementalSource: "/legacy", sourceIdentity: markerIdentity("dev:inode", "birth:one")}
+	db, err := Open("/store", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestStore(t, db)
+	if err = fs.RemoveAll("/legacy"); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	opts.IncrementalSourceComplete = true
+	opts.sourceIdentity = func(vfs.FS, string) (incrementalIdentity, error) {
+		calls++
+		return incrementalIdentity{}, errors.New("source unavailable")
+	}
+	db, err = Open("/store", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatal("completed store checked source identity")
+	}
+	if db.IncrementalSource() != "/legacy" {
+		t.Fatal("lost ownership encoding")
+	}
+	closeTestStore(t, db)
+	opts.IncrementalSource = "/different"
+	if db, err = Open("/store", opts); !errors.Is(err, ErrFormat) {
+		if db != nil {
+			closeTestStore(t, db)
+		}
+		t.Fatalf("accepted changed source binding: %v", err)
+	}
+	opts.IncrementalSource = "/legacy"
+	opts.IncrementalSourceComplete = false
+	if db, err = Open("/store", opts); err == nil {
+		closeTestStore(t, db)
+		t.Fatal("incomplete migration ignored unavailable source")
+	}
+}

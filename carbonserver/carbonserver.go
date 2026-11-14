@@ -94,6 +94,7 @@ type metricStruct struct {
 	OOOFiles                             uint64
 	OOOPhysicalBytes                     uint64
 	LockFiles                            uint64
+	UnexpectedWhisperFiles               uint64
 	FileScanTimeNS                       uint64
 	IndexBuildTimeNS                     uint64
 	RealtimeIndexDropped                 uint64
@@ -383,6 +384,8 @@ type CarbonserverListener struct {
 	metricStoreMu         sync.RWMutex
 	metricStore           *store.Store
 	metricStoreFileIndex  bool
+	legacyWhisperDisabled atomic.Bool
+	legacyWhisperMu       sync.RWMutex
 	incrementalIndexDir   string
 
 	prometheus prometheus
@@ -433,6 +436,7 @@ type prometheus struct {
 	metricStoreIndexRebuilds         prom.Counter
 	metricStoreIndexRebuildDurations prom.Histogram
 	metricStoreIndexUpdateErrors     prom.Counter
+	unexpectedWhisperFiles           prom.Counter
 	metricStoreIndexUnindexable      prom.Gauge
 
 	returnedMetrics prom.Counter
@@ -519,6 +523,9 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 			Name: "metric_store_index_update_errors_total",
 			Help: "Failed shared-store discovery index updates, excluding cancellation by shutdown.",
 		}),
+		unexpectedWhisperFiles: prom.NewCounter(prom.CounterOpts{
+			Name: "unexpected_whisper_files_total", Help: "Whisper source files discovered after terminal source completion; these files are refused.",
+		}),
 		metricStoreIndexUnindexable: prom.NewGauge(prom.GaugeOpts{
 			Name: "metric_store_index_unindexable_names",
 			Help: "Shared-store names the last full discovery index rebuild skipped because the index cannot hold them (path too long, NUL or trailing dot).",
@@ -577,6 +584,7 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	reg.MustRegister(c.prometheus.metricStoreIndexRebuilds)
 	reg.MustRegister(c.prometheus.metricStoreIndexRebuildDurations)
 	reg.MustRegister(c.prometheus.metricStoreIndexUpdateErrors)
+	reg.MustRegister(c.prometheus.unexpectedWhisperFiles)
 	reg.MustRegister(c.prometheus.metricStoreIndexUnindexable)
 }
 
@@ -1464,6 +1472,8 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 }
 
 func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error, func(string) error) error) (readFromCache bool) {
+	listener.legacyWhisperMu.RLock()
+	defer listener.legacyWhisperMu.RUnlock()
 	metricStore := listener.getMetricIndexStore()
 	if metricStore != nil && !(cacheOnly && prepare != nil) {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
@@ -1531,14 +1541,14 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 		overlayRead.Go(func() {
 			overlay, overlayBase, overlayErr = pending.readSnapshotOverlay(u.listener.fileListCache)
 		})
-		snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData)
+		snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.storageFilesystemPath())
 		overlayRead.Wait()
 		if err != nil {
 			// This one-time bootstrap uses the existing saved catalogue. Waiting
 			// for a filesystem scan can starve behind repeated quota traversals
 			// of a very large legacy trie before the first accelerator exists.
 			u.logger.Info("building compact index from saved file list")
-			snapshot, err = buildSnapshotFromCache(u.listener.fileListCache, u.listener.whisperData, u.listener.exitChan)
+			snapshot, err = buildSnapshotFromCache(u.listener.fileListCache, u.listener.storageFilesystemPath(), u.listener.exitChan)
 		}
 		if err == nil {
 			u.trieIdx = pending
@@ -1625,6 +1635,10 @@ func (u *fileListUpdate) resetTrie() {
 }
 
 func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
+	if u.listener.legacyWhisperDisabled.Load() {
+		u.scanCancelled = true
+		return false
+	}
 	if u.incrementalSpool != nil {
 		return u.scanFilesSequential(dir, quotaAndUsageStatTicker)
 	}
@@ -1671,7 +1685,7 @@ func (u *fileListUpdate) newFileListCacheWriter() FileListCache {
 	// Build restart snapshots only while a complete read index is already live.
 	// A first scan without a usable cache must not wait for snapshot construction.
 	if u.fileIndex != nil && u.listener.trieIndex && u.listener.concurrentIndex && flc.GetVersion() == FLCVersion2 {
-		if writer, err := newIndexSnapshotWriter(u.listener.fileListCache, u.listener.whisperData); err != nil {
+		if writer, err := newIndexSnapshotWriter(u.listener.fileListCache, u.listener.storageFilesystemPath()); err != nil {
 			u.logger.Warn("failed to prepare index snapshot", zap.Error(err))
 		} else {
 			u.snapshotWriter = writer
@@ -1721,6 +1735,14 @@ func (u *fileListUpdate) logWhisperDataDir(dir string) {
 }
 
 func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, quotaAndUsageStatTicker <-chan time.Time) error {
+	if u.listener.legacyWhisperDisabled.Load() {
+		if info != nil && !info.IsDir() {
+			u.listener.unexpectedWhisperFile(path)
+		}
+		u.scanCancelled = true
+		return filepath.SkipAll
+	}
+
 	if u.incrementalSpoolErr != nil {
 		return u.incrementalSpoolErr
 	}
@@ -1767,6 +1789,9 @@ func (u *fileListUpdate) cancelled() bool {
 }
 
 func (u *fileListUpdate) stopped() bool {
+	if u.listener.legacyWhisperDisabled.Load() && !u.catalogRecovery {
+		return true
+	}
 	if !u.catalogRecovery && u.listener.getMetricIndexStore() != nil {
 		return true
 	}
@@ -1922,7 +1947,7 @@ func (u *fileListUpdate) pruneRealtimeMetrics() {
 					keep = err == nil
 				}
 			}
-			if !keep && node.pending.Load() {
+			if !keep && node.pending.Load() && !u.listener.legacyWhisperDisabled.Load() {
 				// Persistence may have removed the cache item after the walk listed
 				// this directory. Verify only unconfirmed realtime leaves, not every
 				// stored metric, and retain them on an I/O failure.
@@ -1986,7 +2011,7 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 	u.listener.UpdateFileIndex(index)
 	u.listener.realtimeNext = nil
 	// File-list caches omit sidecars, and incomplete scans can undercount them.
-	if !u.readFromCache && !u.scanFailed {
+	if !u.readFromCache && !u.scanFailed && !u.listener.legacyWhisperDisabled.Load() {
 		atomic.StoreUint64(&u.listener.metrics.OOOFiles, u.oooFiles)
 		atomic.StoreUint64(&u.listener.metrics.OOOPhysicalBytes, u.oooPhysicalBytes)
 		atomic.StoreUint64(&u.listener.metrics.LockFiles, u.lockFiles)
@@ -1996,6 +2021,9 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 }
 
 func (u *fileListUpdate) fileSystemSpace(dir string) (uint64, uint64, bool) {
+	if u.listener.legacyWhisperDisabled.Load() || u.listener.getMetricIndexStore() != nil {
+		dir = u.listener.storageFilesystemPath()
+	}
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		u.logger.Info("error getting FS Stats", zap.String("dir", dir), zap.Error(err))
@@ -2154,7 +2182,7 @@ func (listener *CarbonserverListener) expandGlobFiles(globs []string, useGlob bo
 	fidx := listener.CurrentFileIndex()
 	fallbackToFS := !listener.trigramIndex || fidx == nil || len(fidx.files) == 0
 	files := listener.matchGlobIndex(fidx, globs, useGlob)
-	if useGlob || fallbackToFS {
+	if (useGlob || fallbackToFS) && listener.getMetricIndexStore() == nil && !listener.legacyWhisperDisabled.Load() {
 		files = append(files, listener.matchGlobFilesystem(globs)...)
 	}
 	return files
@@ -2190,6 +2218,11 @@ func matchGlobDocuments(fidx *fileIndex, glob string, docs map[trigram.DocID]str
 }
 
 func (listener *CarbonserverListener) matchGlobFilesystem(globs []string) []string {
+	listener.legacyWhisperMu.RLock()
+	defer listener.legacyWhisperMu.RUnlock()
+	if listener.legacyWhisperDisabled.Load() {
+		return nil
+	}
 	var files []string
 	for _, glob := range globs {
 		if matched, err := filepath.Glob(listener.whisperData + "/" + glob); err == nil {
@@ -2200,8 +2233,10 @@ func (listener *CarbonserverListener) matchGlobFilesystem(globs []string) []stri
 }
 
 func (listener *CarbonserverListener) normalizeGlobFiles(files []string) ([]string, []bool) {
+	listener.legacyWhisperMu.RLock()
+	defer listener.legacyWhisperMu.RUnlock()
 	leafs := make([]bool, len(files))
-	virtual := listener.getMetricIndexStore() != nil
+	virtual := listener.getMetricIndexStore() != nil || listener.legacyWhisperDisabled.Load()
 	for i, path := range files {
 		var info os.FileInfo
 		if !virtual {
@@ -2359,6 +2394,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	senderRaw("oooFiles", &listener.metrics.OOOFiles, send)
 	senderRaw("oooPhysicalBytes", &listener.metrics.OOOPhysicalBytes, send)
 	senderRaw("lockFiles", &listener.metrics.LockFiles, send)
+	sender("unexpectedWhisperFiles", &listener.metrics.UnexpectedWhisperFiles, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
 	sender("realtime_index_dropped", &listener.metrics.RealtimeIndexDropped, send)
 	sender("metric_store_index_update_errors", &listener.metrics.MetricStoreIndexUpdateErrors, send)

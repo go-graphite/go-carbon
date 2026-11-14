@@ -727,3 +727,25 @@ func TestIncrementalConversionDefersWritesThroughPublication(t *testing.T) {
 		t.Fatal("write arriving during conversion was lost")
 	}
 }
+
+func TestCompletedIncrementalMigrationRejectsSourceWork(t *testing.T) {
+	p, _, db, _ := incrementalPersisterFixture(t)
+	defer db.Close()
+	p.SetIncrementalMigrationComplete()
+	if _, err := p.ConversionWorkingBytes(context.Background(), "metric"); err == nil {
+		t.Fatal("completed source was probed")
+	}
+	if _, err := p.ConvertFile(context.Background(), "metric"); err == nil {
+		t.Fatal("completed source was converted")
+	}
+	if _, err := os.Stat(filepath.Join(p.rootPath, "metric.wsp")); err != nil {
+		t.Fatalf("completed source was cleaned up: %v", err)
+	}
+	if shared, w, _, err := p.incrementalWriteRoute("metric"); !shared || w != nil || err != nil {
+		t.Fatalf("completed write route: %v %v %v", shared, w, err)
+	}
+	p.SetDeferredReclaim(time.Second)
+	if p.reclaimer() != nil {
+		t.Fatal("completed store started original reclaimer")
+	}
+}

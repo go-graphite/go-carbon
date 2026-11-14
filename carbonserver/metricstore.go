@@ -157,7 +157,7 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 	}
 
 	var freeSpace, totalSpace uint64
-	if err := metricStoreFilesystemStats(listener.whisperData, &freeSpace, &totalSpace); err != nil {
+	if err := metricStoreFilesystemStats(listener.storageFilesystemPath(), &freeSpace, &totalSpace); err != nil {
 		listener.logger.Debug("failed to read shared metric-store filesystem stats", zap.Error(err))
 	}
 	nfidx := &fileIndex{
@@ -234,7 +234,7 @@ func (listener *CarbonserverListener) observeMetricStoreIndexRebuild() func() {
 
 func (listener *CarbonserverListener) refreshMetricStoreSpace(previous *fileIndex) {
 	var free, total uint64
-	if err := metricStoreFilesystemStats(listener.whisperData, &free, &total); err == nil && (free != previous.freeSpace || total != previous.totalSpace) {
+	if err := metricStoreFilesystemStats(listener.storageFilesystemPath(), &free, &total); err == nil && (free != previous.freeSpace || total != previous.totalSpace) {
 		// Readers retain their index; only the small space-stat wrapper changes.
 		next := *previous
 		next.freeSpace, next.totalSpace = free, total

@@ -56,11 +56,16 @@ func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, 
 		if err == nil {
 			return metricInfoFromShared(metadata), nil
 		}
-		if metricStore.IncrementalSource() == "" || !errors.Is(err, store.ErrNotFound) {
+		if listener.legacyWhisperDisabled.Load() || metricStore.IncrementalSource() == "" || !errors.Is(err, store.ErrNotFound) {
 			return metricInfo{}, err
 		}
 	}
 
+	listener.legacyWhisperMu.RLock()
+	defer listener.legacyWhisperMu.RUnlock()
+	if listener.legacyWhisperDisabled.Load() {
+		return metricInfo{}, store.ErrNotFound
+	}
 	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 	w, err := whisper.Open(path)
 	if err != nil && metricStore != nil && metricStore.IncrementalSource() != "" && errors.Is(err, os.ErrNotExist) {

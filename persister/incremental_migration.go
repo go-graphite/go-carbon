@@ -53,11 +53,23 @@ func (p *Whisper) SetIncrementalMigrationPriority(hint func(string)) {
 // up ownership first, which on a converted host only repeated the store's own
 // lookup. A stale staged import of a removed original is still discarded
 // before a metric of its name is created (see createSharedMetric).
-func (p *Whisper) SetIncrementalMigrationComplete() { p.incrementalComplete.Store(true) }
+func (p *Whisper) SetIncrementalMigrationComplete() {
+	p.incrementalComplete.Store(true)
+	// A writer may already have selected an original under its stripe. Drain
+	// those writes before publishing completion; subsequent routes use the store.
+	for i := range p.storeMutex {
+		p.storeMutex[i].Lock()
+		p.storeMutex[i].Unlock()
+	}
+}
 
 func (p *Whisper) SetIncrementalMigration(db IncrementalMetricStore, scratch string) error {
 	if db == nil || db.IncrementalSource() != p.rootPath || p.mirrorFiles || p.tagsEnabled || scratch == "" {
 		return errors.New("incremental migration requires its original directory, private scratch and no rollback mirror or tagged paths")
+	}
+	if p.incrementalComplete.Load() {
+		p.incrementalStore = db
+		return nil
 	}
 	scratch = filepath.Join(scratch, ".incremental-capture")
 	// OOO snapshots create and remove a private directory per conversion.
@@ -202,6 +214,9 @@ func originalPaths(path string) []string {
 // ConversionWorkingBytes reserves capture, decode, verification and encoding
 // workspace without reading the source history twice.
 func (p *Whisper) ConversionWorkingBytes(ctx context.Context, metric string) (int64, error) {
+	if p.incrementalComplete.Load() {
+		return 0, errors.New("original source conversion is complete")
+	}
 	path, err := p.incrementalPath(metric)
 	if err != nil {
 		return 0, err
@@ -217,8 +232,8 @@ func (p *Whisper) ConvertFile(ctx context.Context, metric string) (FileConversio
 // boundary leaves its real durable state for a subsequent process to recover.
 func (p *Whisper) convertFile(ctx context.Context, metric string, fault func(string) error) (FileConversion, error) {
 	var result FileConversion
-	if p.incrementalStore == nil {
-		return result, errors.New("incremental migration is disabled")
+	if p.incrementalStore == nil || p.incrementalComplete.Load() {
+		return result, errors.New("incremental migration is disabled or complete")
 	}
 	slot := p.conversionSlots()
 	if err := slot.acquire(ctx); err != nil {

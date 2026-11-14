@@ -22,6 +22,9 @@ type originalArchiveIdentity struct {
 // The policy is separate from writer state: active sources disappear after
 // durable ownership, while an optional archive retains their original inodes.
 func (p *Whisper) SetIncrementalMigrationArchive(path string) error {
+	if p.incrementalComplete.Load() {
+		return nil
+	}
 	if p.incrementalStore == nil {
 		return errors.New("original archive requires incremental migration")
 	}

@@ -72,13 +72,18 @@ func (listener *CarbonserverListener) fetchFromDisk(ctx context.Context, metric 
 		}
 		releaseGuard = guard
 		result, err := listener.fetchFromMetricStore(ctx, releaseSlot, metricStore, metric, fromTime, untilTime)
-		if metricStore.IncrementalSource() == "" || !errors.Is(err, store.ErrNotFound) {
+		if listener.legacyWhisperDisabled.Load() || metricStore.IncrementalSource() == "" || !errors.Is(err, store.ErrNotFound) {
 			return result, err
 		}
 	}
 	var step int32
 
 	// We need to obtain the metadata from whisper file anyway.
+	listener.legacyWhisperMu.RLock()
+	defer listener.legacyWhisperMu.RUnlock()
+	if listener.legacyWhisperDisabled.Load() {
+		return nil, store.ErrNotFound
+	}
 	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
 		FLock: listener.flock, FlockType: syscall.LOCK_SH,

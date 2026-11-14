@@ -668,7 +668,7 @@ func (ti *trieIndex) getQuotaTree(w io.Writer) {
 // throughout that scan. Copy it before the swap, excluding metrics now in the
 // snapshot, and preserve the throughput window across generations.
 func (u *fileListUpdate) replaceSnapshot() {
-	snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData)
+	snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.storageFilesystemPath())
 	if err != nil {
 		u.logger.Warn("failed to load replacement index snapshot", zap.Error(err))
 		return

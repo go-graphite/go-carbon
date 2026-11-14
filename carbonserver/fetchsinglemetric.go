@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/points"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -153,9 +154,9 @@ func (listener *CarbonserverListener) fetchSingleMetric(ctx context.Context, met
 		}
 
 		return resp, nil
-	case errors.Is(err, os.ErrNotExist) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
+	case (errors.Is(err, os.ErrNotExist) || errors.Is(err, store.ErrNotFound)) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
 		// No stored series (no Whisper file, or not in the shared store,
-		// which wraps os.ErrNotExist): answer from the cache as the series
+		// including a completed incremental store): answer from cache as the series
 		// created from it would.
 		resp := response{
 			Name:             metric,

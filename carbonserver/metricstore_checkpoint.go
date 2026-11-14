@@ -53,7 +53,7 @@ func (l *CarbonserverListener) emptyMetricStoreSnapshot() (*indexSnapshot, error
 	if err := cache.Close(); err != nil {
 		return nil, err
 	}
-	writer, err := newIndexSnapshotWriter(l.fileListCache, l.whisperData)
+	writer, err := newIndexSnapshotWriter(l.fileListCache, l.storageFilesystemPath())
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (l *CarbonserverListener) emptyMetricStoreSnapshot() (*indexSnapshot, error
 	if err := writer.finish(); err != nil {
 		return nil, err
 	}
-	return openIndexSnapshot(l.fileListCache, l.whisperData)
+	return openIndexSnapshot(l.fileListCache, l.storageFilesystemPath())
 }
 
 func (l *CarbonserverListener) readCheckpointIndex() *fileIndex {
