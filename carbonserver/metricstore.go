@@ -78,6 +78,8 @@ func (listener *CarbonserverListener) UsesSharedCatalogIndex() bool {
 // filesystem index. It deliberately does not consult the file-list cache: the
 // store catalog is authoritative across carbonserver restarts.
 func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.Store) error {
+	listener.metricStoreRefreshMu.Lock()
+	defer listener.metricStoreRefreshMu.Unlock()
 	phasecpu.Set(phasecpu.Index)
 	defer phasecpu.Set(phasecpu.Other)
 	listener.metricStoreIndexMu.Lock()
@@ -140,7 +142,9 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		}
 	}
 	defer listener.observeMetricStoreIndexRebuild()()
+	listener.metricStoreIndexMu.Unlock()
 	files, details, trieIdx, metricsKnown, err := listener.loadMetricStoreCatalog(metricStore)
+	listener.metricStoreIndexMu.Lock()
 	if err != nil {
 		return err
 	}
@@ -166,6 +170,11 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		nfidx.trieIdx = trieIdx
 		count, files, dirs := trieIdx.builder.nodes, int(trieIdx.getFileCount()), trieIdx.builder.dirs
 		trieIdx.builder = nil
+		if previous != nil && previous.trieIdx != nil {
+			if err := listener.mergeRealtimeOverlayLocked(previous.trieIdx, trieIdx); err != nil {
+				return err
+			}
+		}
 		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
 		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
 		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))

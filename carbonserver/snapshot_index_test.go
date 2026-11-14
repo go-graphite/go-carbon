@@ -271,7 +271,7 @@ func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
 	listener.SetQuotas([]*Quota{{Pattern: "/", Metrics: 1}})
 	listener.SetEstimateSize(func(string) (int64, int64, int64) { return 1, 2, 3 })
 	ch := listener.SetRealtimeIndex(10)
-	ch <- "a.pending"
+	ch.Add("a.pending")
 	if !listener.updateFileList(root, nil, nil) {
 		t.Fatal("snapshot not used for startup")
 	}

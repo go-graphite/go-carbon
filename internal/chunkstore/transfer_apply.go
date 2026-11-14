@@ -41,7 +41,10 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		}
 		began := time.Now()
 		epochs := s.transferEpochs(metas)
-		view := s.db.NewSnapshot()
+		view, err := s.newTransferView()
+		if err != nil {
+			return nil, err
+		}
 		prepared, err := s.prepareTransfer(ctx, records, metas, view)
 		_ = view.Close()
 		if prepared != nil {
@@ -145,8 +148,10 @@ func (s *Store) prepareTransferParts(ctx context.Context, records []TransferMetr
 	for j, i := range stale {
 		epochs[j] = s.mutationEpoch[s.metricStripe(metas[i].Name)].Load()
 	}
-	view := s.db.NewSnapshot()
-	var err error
+	view, err := s.newTransferView()
+	if err != nil {
+		return err
+	}
 	for j, i := range stale {
 		var p *preparedTransfer
 		if p, err = s.prepareTransfer(ctx, records[i:i+1], metas[i:i+1], view); err != nil {

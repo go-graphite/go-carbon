@@ -58,7 +58,7 @@ func TestInitialFileListCachePublishesNotificationsAndQuotas(t *testing.T) {
 	listener.SetEstimateSize(func(string) (int64, int64, int64) { return 1024, 1024, 60 })
 	listener.SetQuotas([]*Quota{{Pattern: "/", Metrics: 2}})
 	ch := listener.SetRealtimeIndex(10)
-	ch <- "namespace.pending"
+	ch.Add("namespace.pending")
 	ticks := make(chan time.Time, 1)
 	ticks <- time.Now()
 	if !listener.updateFileList(dir, nil, ticks) {

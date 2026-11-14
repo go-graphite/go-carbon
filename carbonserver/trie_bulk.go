@@ -56,6 +56,9 @@ func bulkDirectoryMatch[P string | []byte](b *trieBulkBuilder, path P) int {
 func bulkDirectoryStart[P string | []byte](ti *trieIndex, path P) (int, *trieNode) {
 	b := ti.builder
 	if b == nil {
+		b = ti.insertCursor
+	}
+	if b == nil {
 		return 0, ti.root
 	}
 	if b.generation != ti.root.gen {
@@ -74,7 +77,11 @@ func bulkDirectoryStart[P string | []byte](ti *trieIndex, path P) (int, *trieNod
 }
 
 func rememberBulkDirectory[P string | []byte](ti *trieIndex, path P, end int, node *trieNode) {
-	if b := ti.builder; b != nil {
+	b := ti.builder
+	if b == nil {
+		b = ti.insertCursor
+	}
+	if b != nil {
 		for i := len(b.prefix); i < end; i++ {
 			b.prefix = append(b.prefix, path[i])
 		}

@@ -234,3 +234,33 @@ func classicMergeMatches(source, removed, added, want []store.Point) bool {
 	}
 	return drop() && i == len(source) && j == len(removed) && k == len(added)
 }
+
+// mergeIntoClassicTarget uses the same slot proof as a classic source merge,
+// with the existing target as its base. No history ordering restriction is
+// needed: the caller's union determines both timestamp and finite-slot winners.
+func mergeIntoClassicTarget(ctx context.Context, incoming, target, dst store.ContinuationIO, want, sourceSnapshot, targetSnapshot store.Snapshot, clock func() time.Time) (string, bool, error) {
+	base := newContinuationOverlay(target)
+	merged := newContinuationOverlay(target)
+	reason, err := mergeClassicArchives(ctx, base, merged, want, targetSnapshot, sourceSnapshot, clock)
+	if err != nil || reason != "" {
+		return reason, true, err
+	}
+	// dst initially contains the incoming compressed image, with unrelated
+	// file identities and keys. Replace it only after every archive passes.
+	var keys [][]byte
+	if err := incoming.Visit(nil, func(k, _ []byte) error { keys = append(keys, slices.Clone(k)); return nil }); err != nil {
+		return "", true, err
+	}
+	for _, k := range keys {
+		if err := dst.Delete(k); err != nil {
+			return "", true, err
+		}
+	}
+	err = merged.Visit(nil, func(k, v []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return dst.Set(k, v)
+	})
+	return "", true, err
+}
