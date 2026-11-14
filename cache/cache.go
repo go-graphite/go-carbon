@@ -805,6 +805,10 @@ func (c *Cache) addWaiting(p *points.Points, restored, recovered bool, series *s
 }
 
 func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) (wait <-chan struct{}) {
+	return c.addWithRestoreHashed(p, restored, recovered, immediate, series, source, nil)
+}
+
+func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource, metric *RecoveryMetric) (wait <-chan struct{}) {
 	s := c.settings.Load().(*cacheSettings)
 
 	// Every new name reaches the cache here: the fast paths only append to
@@ -833,7 +837,12 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 
 	// Get map shard.
-	hash := xxh3.HashString(p.Metric)
+	var hash uint64
+	if metric != nil && metric.name == p.Metric {
+		hash = metric.hash
+	} else {
+		hash = xxh3.HashString(p.Metric)
+	}
 	shard := c.data[hash&(shardCount-1)]
 	shard.mu.Lock()
 	accepted := false
