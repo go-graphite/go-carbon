@@ -26,6 +26,7 @@ func scanWriteoutStateAt(c *Cache, now time.Time) WriteoutState {
 	for _, shard := range c.data {
 		shard.mu.RLock()
 		state.Metrics += int64(shard.items.len())
+		state.LivePoints += shard.livePoints
 		for _, it := range shard.items.all {
 			state.Points += int64(it.count())
 			if !now.Before(writeoutDeadline(it, s)) {

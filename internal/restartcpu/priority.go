@@ -202,7 +202,7 @@ func (b *Budget) stateLocked(active bool) State {
 var (
 	grantDesc              = prometheus.NewDesc("restart_cpu_granted_cores", "CPU admission grant by consumer; finite shared allowance while warming, +Inf after pacing ends.", []string{"consumer"}, nil)
 	countDesc              = prometheus.NewDesc("restart_cpu_grants_total", "Admitted work windows or writeout jobs by consumer, not CPU consumption.", []string{"consumer"}, nil)
-	floorDesc              = prometheus.NewDesc("restart_cpu_writeout_floor_updates_per_second", "Minimum restart writeout rate: predecessor throughput or queued metrics divided by max delay, whichever is greater.", nil, nil)
+	floorDesc              = prometheus.NewDesc("restart_cpu_writeout_floor_updates_per_second", "Minimum restart writeout rate: greatest of predecessor throughput, queued metrics divided by max delay, and observed live-input demand.", nil, nil)
 	rateDesc               = prometheus.NewDesc("restart_cpu_writeout_updates_per_second", "Confirmed writeout updates per second during restart.", nil, nil)
 	processDesc            = prometheus.NewDesc("restart_cpu_process_cores", "Whole-process user plus system CPU cores, five-second EWMA updated once per second; admission uses raw CPU deltas.", nil, nil)
 	allowanceDesc          = prometheus.NewDesc("restart_cpu_allowance_cores", "Whole-process restart CPU allowance.", nil, nil)

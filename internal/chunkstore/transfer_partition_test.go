@@ -16,7 +16,7 @@ import (
 // writes landing between preparation and commit.
 func TestTransferPartitionedSplitMatchesSingles(t *testing.T) {
 	ctx := context.Background()
-	run := func(singles bool) (*Store, [][2][]byte, TransferApplyStats, int) {
+	run := func(singles bool) ([][2][]byte, TransferApplyStats, int) {
 		source, now := openTestStore(t, t.TempDir(), Options{fs: vfs.NewMem(), ExactBlocks: true, SyncInterval: time.Hour})
 		target, _ := openTestStore(t, t.TempDir(), Options{fs: vfs.NewMem(), ExactBlocks: true, SyncInterval: time.Hour})
 		t.Cleanup(func() { closeTestStore(t, source); closeTestStore(t, target) })
@@ -61,10 +61,10 @@ func TestTransferPartitionedSplitMatchesSingles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return target, raw, target.TransferApplyStats(), calls
+		return raw, target.TransferApplyStats(), calls
 	}
-	_, want, singleStats, singleCalls := run(true)
-	_, got, partStats, partCalls := run(false)
+	want, singleStats, singleCalls := run(true)
+	got, partStats, partCalls := run(false)
 	if len(got) != len(want) {
 		t.Fatalf("%d keys, want %d", len(got), len(want))
 	}

@@ -118,6 +118,8 @@ type indexFilter struct {
 
 // A "thread" safe string to anything map.
 type Shard struct {
+	livePoints uint64 // accepted live points, protected by mu; excludes restoration
+
 	streamGeneration uint64
 	streamSeries     []seriesSlot
 	streamSeriesUsed int
@@ -675,6 +677,7 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		shard.items.pointBytes += int64(cap(values.compact.buf) - capacity)
 		c.syncMemoryLocked(shard)
 	}
+	shard.livePoints++
 	c.addedLocked(shard, s, values, 1, true, false)
 }
 
@@ -881,6 +884,9 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	if !exists || metadataChanged || cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
 		shard.items.pointBytes += int64(cap(values.compact.buf) - capacity)
 		c.syncMemoryLocked(shard)
+	}
+	if !restored && !recovered {
+		shard.livePoints += uint64(count)
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
 	if series != nil && !exists && hash == series.hash && p.Metric == series.name {

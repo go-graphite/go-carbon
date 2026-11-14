@@ -133,6 +133,8 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 }
 
 type autoUpdateRate struct {
+	liveDemand              restartLiveDemand
+	liveRate                atomic.Uint64 // float64 bits, shared with restart CPU observer
 	snapshot                cache.WriteoutState
 	mu                      sync.Mutex
 	controller              autoUpdateController
@@ -204,6 +206,7 @@ func (p *Whisper) autoUpdateState(state func() cache.WriteoutState) cache.Writeo
 // Caller holds autoUpdate.mu. Also used before publishing a new rate mode.
 func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
 	a := &p.autoUpdate
+	p.sampleRestartLiveDemandLocked(time.Now(), s)
 	a.snapshot = s
 	a.draining.Store(s.Draining)
 	a.ordinary = a.controller.step(time.Now(), s, a.floor, a.ceiling)

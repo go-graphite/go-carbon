@@ -39,7 +39,7 @@ func (p *Whisper) mandatoryRestartRate() float64 {
 	if p.restartBudget == nil || !p.restartBudget.Active() {
 		return 0
 	}
-	floor := p.restartBudget.SteadyRate()
+	floor := max(p.restartBudget.SteadyRate(), p.restartLiveRate())
 	if p.restartFloor != nil {
 		floor = max(floor, p.restartFloor())
 	}
@@ -64,9 +64,9 @@ func (p *Whisper) setRestartRate() {
 		return
 	}
 	rateLimit := float64(settings.maxUpdatesPerSecond)
-	floor := 0.
+	floor := p.restartLiveRate()
 	if p.restartFloor != nil {
-		floor = p.restartFloor()
+		floor = max(floor, p.restartFloor())
 	}
 	if p.restartBudget != nil && p.restartBudget.SteadyRate() > 0 {
 		rateLimit = 3 * max(floor, p.restartBudget.SteadyRate())
@@ -134,6 +134,7 @@ func (p *Whisper) startRestartWriteout() {
 	p.restartRateMu.Lock()
 	p.restartStopping, p.restartRate = false, 0
 	p.restartRateMu.Unlock()
+	p.sampleRestartLiveDemand()
 	p.setRestartRate()
 	p.Go(func(exit chan bool) {
 		for _, ready := range []<-chan struct{}{p.startupReady, p.startupGate} {
@@ -161,6 +162,7 @@ func (p *Whisper) startRestartWriteout() {
 					p.stopRestartTicker()
 					return
 				}
+				p.sampleRestartLiveDemand()
 				written := budget.Updates()
 				p.observeRestartWriteout(float64(written-previous) / at.Sub(last).Seconds())
 				last, previous = at, written
@@ -188,7 +190,7 @@ func (p *Whisper) restartPaced() bool {
 // persister reload cannot repeat an error or clear its counter.
 func (p *Whisper) observeRestartWriteout(rate float64) {
 	budget := p.restartBudget
-	floor := budget.SteadyRate()
+	floor := max(budget.SteadyRate(), p.restartLiveRate())
 	if p.restartFloor != nil {
 		floor = max(floor, p.restartFloor())
 	}
