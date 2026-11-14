@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -34,7 +35,20 @@ func (s *syncer) copyWindows() syncRanges {
 			out = append(out, w)
 		}
 	}
-	return out
+	// Copy the union once. Verification still checks each requested window.
+	// Nested/overlapping windows otherwise export and transfer the same history
+	// repeatedly, which serializes on native source/target admission.
+	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
+	var merged syncRanges
+	for _, w := range out {
+		if len(merged) > 0 && w.From <= merged[len(merged)-1].Until {
+			last := &merged[len(merged)-1]
+			last.Until = max(last.Until, w.Until)
+			continue
+		}
+		merged = append(merged, w)
+	}
+	return merged
 }
 
 // Scan the existing catalog in bounded batches. Window exports establish actual

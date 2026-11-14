@@ -385,3 +385,70 @@ func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
 		t.Fatal("pin was not rotated", pins.Load())
 	}
 }
+
+func TestSyncCopyWindowsUnion(t *testing.T) {
+	s := &syncer{o: syncOptions{now: func() time.Time { return time.Unix(1000, 0) }, settle: 100 * time.Second,
+		windows: syncRanges{{Name: "nested", From: 200, Until: 300}, {Name: "gap", From: 700, Until: 1100}, {Name: "broad", From: 100, Until: 400}, {Name: "overlap", From: 350, Until: 500}, {Name: "adjacent", From: 500, Until: 600}, {Name: "future", From: 950, Until: 1000}}}}
+	original := append(syncRanges(nil), s.o.windows...)
+	got := s.copyWindows()
+	want := syncRanges{{Name: "broad", From: 100, Until: 600}, {Name: "gap", From: 700, Until: 900}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal(got, want)
+	}
+	if !reflect.DeepEqual(s.o.windows, original) {
+		t.Fatal("verification windows mutated")
+	}
+}
+
+func TestSyncCopyWindowsUnionNativeDifferential(t *testing.T) {
+	ctx := context.Background()
+	source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
+	for _, n := range []string{"new", "overlap"} {
+		addPoints(t, source, n, math.Copysign(0, -1))
+	}
+	for _, dst := range []*store.Store{target, oracle} {
+		addPoints(t, dst, "overlap", 42)
+	}
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	actual := httptest.NewServer(nativeControllerService(t, target))
+	defer actual.Close()
+	reference := httptest.NewServer(nativeControllerService(t, oracle))
+	defer reference.Close()
+	original := syncRanges{{Name: "broad", From: testMetricNow - 20, Until: testMetricNow}, {Name: "nested", From: testMetricNow - 10, Until: testMetricNow}}
+	s := &syncer{o: syncOptions{windows: original, now: func() time.Time { return time.Unix(testMetricNow+100, 0) }}}
+	names := []string{"new", "overlap"}
+	for mode, windows := range []syncRanges{original, s.copyWindows()} {
+		endpoint := reference.URL
+		if mode == 1 {
+			endpoint = actual.URL
+		}
+		b := newSyncLiveBackend(syncLiveOptions{})
+		path := filepath.Join(t.TempDir(), "copy.jsonl")
+		for range 2 { // A second run must reuse the same native receipts.
+			result, err := b.CopyWindow(ctx, donor.URL, endpoint, names, path, windows)
+			if err != nil || result.Copied != len(names) {
+				t.Fatal(result, err)
+			}
+		}
+	}
+	for _, name := range names {
+		a, ea := target.Snapshot(ctx, name)
+		b, eb := oracle.Snapshot(ctx, name)
+		if ea != nil || eb != nil || !reflect.DeepEqual(a.Metadata.MetricConfig, b.Metadata.MetricConfig) || len(a.Archives) != len(b.Archives) {
+			t.Fatal(name, ea, eb)
+		}
+		for i, archive := range a.Archives {
+			other := b.Archives[i]
+			if archive.Retention != other.Retention || len(archive.Points) != len(other.Points) {
+				t.Fatal("archive differs", name)
+			}
+			for j, p := range archive.Points {
+				q := other.Points[j]
+				if p.Timestamp != q.Timestamp || math.Float64bits(p.Value) != math.Float64bits(q.Value) {
+					t.Fatal("point bits differ", name)
+				}
+			}
+		}
+	}
+}
