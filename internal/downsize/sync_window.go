@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -119,20 +120,56 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		}
 		group++
 		started := time.Now()
+		subsets := make([][]string, len(s.o.from))
 		for src, source := range s.o.from {
 			if s.forbid[source] {
 				continue
 			}
-			var subset []string
 			for i, n := range names {
 				if masks[i]&(1<<uint(src)) != 0 {
 					if err := chunkstore.ValidateMetricName(n); err == nil {
-						subset = append(subset, n)
+						subsets[src] = append(subsets[src], n)
 					} else if !s.failedCp[n] {
 						s.applyCopy([]string{n}, nil, 0, []string{n}, false)
 					}
 				}
 			}
+		}
+		type selectionResult struct {
+			digests map[string][]syncDigest
+			err     error
+		}
+		results := make([]selectionResult, len(s.o.from))
+		var workers sync.WaitGroup
+		// Only the live combined selector promises concurrent source access.
+		// State, journals and copies stay in original source order.
+		live, parallel := s.b.(interface {
+			WindowPresenceRanges(context.Context, string, []string, syncRanges) (map[string][]syncDigest, error)
+		})
+		if parallel {
+			slots := make(chan struct{}, max(1, s.o.streams))
+			for src, source := range s.o.from {
+				k := key{group, source}
+				if len(subsets[src]) == 0 || completed[k].SelectionComplete || selections[k].SelectionComplete {
+					continue
+				}
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					select {
+					case slots <- struct{}{}:
+						defer func() { <-slots }()
+					case <-ctx.Done():
+						results[src].err = ctx.Err()
+						return
+					}
+					results[src].digests, results[src].err = live.WindowPresenceRanges(ctx, source, subsets[src], s.copyWindows())
+				}()
+			}
+			workers.Wait()
+		}
+		for src, source := range s.o.from {
+			subset := subsets[src]
 			if len(subset) == 0 {
 				continue
 			}
@@ -153,8 +190,18 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			} else {
 				relevant := map[string]bool{}
 				unresolved := map[string]bool{}
-				for _, w := range s.copyWindows() {
-					digests, err := s.windowPresence(ctx, source, subset, w)
+				selectionWindows := s.copyWindows()
+				if parallel {
+					selectionWindows = selectionWindows[:min(1, len(selectionWindows))]
+				}
+				for _, w := range selectionWindows {
+					var digests map[string][]syncDigest
+					var err error
+					if parallel {
+						digests, err = results[src].digests, results[src].err
+					} else {
+						digests, err = s.windowPresence(ctx, source, subset, w)
+					}
 					if err != nil {
 						return fmt.Errorf("window missing selection on %s: %w", source, err)
 					}
@@ -312,6 +359,31 @@ func (s *syncer) windowPresence(ctx context.Context, source string, names []stri
 }
 
 func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
+	return b.WindowPresenceRanges(ctx, source, names, syncRanges{w})
+}
+
+// WindowPresenceRanges selects the union with one envelope export. Points in
+// gaps are ignored. Precise copy windows still own boundary skips and receipts;
+// an envelope may conservatively select a trailing coarse bucket for that copy.
+func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source string, names []string, windows syncRanges) (map[string][]syncDigest, error) {
+	if len(windows) == 0 {
+		return map[string][]syncDigest{}, nil
+	}
+	defer b.recordTime("window_selection", source)()
+	w := windows[0]
+	for _, next := range windows[1:] {
+		w.From = min(w.From, next.From)
+		w.Until = max(w.Until, next.Until)
+	}
+	contains := func(ts int64) bool {
+		for _, exact := range windows {
+			if ts >= exact.From && ts < exact.Until {
+				return true
+			}
+		}
+		return false
+	}
+
 	c, release, err := b.windowController(ctx, b.m, source)
 	if err != nil {
 		return nil, err
@@ -391,12 +463,17 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 					return err
 				}
 				for ai, a := range snap.Archives {
-					count := int64(len(a.Points))
+					count := int64(0)
+					for _, point := range a.Points {
+						if contains(point.Timestamp) {
+							count++
+						}
+					}
 					hash := ""
 					// Include omitted in-window boundary buckets in selection, so the copy
 					// reports them as residuals instead of silently skipping the metric.
 					for _, skip := range record.WindowSkipped {
-						if skip.Archive == ai && skip.Timestamp >= w.From && skip.Timestamp < w.Until {
+						if skip.Archive == ai && contains(skip.Timestamp) {
 							hash = "window-incomplete"
 						}
 					}
@@ -425,6 +502,25 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 				}
 				return fmt.Errorf("window export HTTP 413 for a single name")
 			}
+			// A truncated stream identifies complete record boundaries, but
+			// its results are untrusted until the checksum arrives. Re-export
+			// that prefix as one request rather than decoding it at every level
+			// of a binary split. Both partitions must still validate completely.
+			if truncated && len(attempt) > 0 && len(attempt) < len(subset) {
+				var complete, remainder []string
+				for _, name := range subset {
+					if _, ok := attempt[name]; ok {
+						complete = append(complete, name)
+					} else {
+						remainder = append(remainder, name)
+					}
+				}
+				event("sync_window_export_split", map[string]any{"source": source, "complete_records": len(complete), "remaining_names": len(remainder), "checksum_validated": false})
+				if err := readSubset(complete); err != nil {
+					return err
+				}
+				return readSubset(remainder)
+			}
 			// Split only the transport request. The source pin, logical catalog
 			// group, window and durable copy identities remain unchanged.
 			mid := len(subset) / 2
@@ -449,15 +545,20 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 	return out, nil
 }
 
-// The missing-window loop is serial. Keep its source pins across journal batches
-// so capturing the global pending-name set is amortized, without changing batch
-// identities or native range limits. Bound snapshot age to limit retained files
-// and conservative revision exclusions. Existing pending/revision fences remain
-// authoritative; no omitted name becomes proof of empty history.
+// Reuse source pins across groups. Rotation waits for borrowed controllers, so
+// concurrent donor selections cannot close each other's snapshots. The bounded
+// lifetime amortizes a global pending-name snapshot without retaining it for the
+// complete catalog scan; revision and pending fences remain authoritative.
+const syncWindowPinAge = 15 * time.Minute
+
 func (b *syncLiveBackend) beginWindowCopy() func() {
+	b.windowMu.Lock()
 	b.windowSources = &nativeController{mover: b.m, sessions: map[string]*nativeRemoteSession{}}
 	b.windowPinned = time.Now()
+	b.windowMu.Unlock()
 	return func() {
+		b.windowMu.Lock()
+		defer b.windowMu.Unlock()
 		b.windowSources.release()
 		b.windowSources = nil
 	}
@@ -465,21 +566,35 @@ func (b *syncLiveBackend) beginWindowCopy() func() {
 
 func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source string) (*nativeController, func(), error) {
 	c := &nativeController{mover: m, sessions: map[string]*nativeRemoteSession{}}
+	b.windowMu.RLock()
 	if b.windowSources == nil {
+		b.windowMu.RUnlock()
 		return c, c.release, nil
 	}
-	if time.Since(b.windowPinned) >= 5*time.Minute {
-		b.windowSources.release()
-		b.windowPinned = time.Now()
+	if time.Since(b.windowPinned) >= syncWindowPinAge {
+		b.windowMu.RUnlock()
+		b.windowMu.Lock()
+		if b.windowSources != nil && time.Since(b.windowPinned) >= syncWindowPinAge {
+			b.windowSources.release()
+			b.windowPinned = time.Now()
+		}
+		b.windowMu.Unlock()
+		b.windowMu.RLock()
 	}
-	_, err := b.windowSources.session(ctx, source)
+	shared := b.windowSources
+	if shared == nil {
+		b.windowMu.RUnlock()
+		return c, c.release, nil
+	}
+	done := b.recordTime("window_pin", source)
+	_, err := shared.session(ctx, source)
+	done()
 	if err != nil {
+		b.windowMu.RUnlock()
 		return nil, nil, err
 	}
-	// Borrow the initialized session, including its readiness state. Rebuilding
-	// it from the ID loses the boundary validation performed by session.
-	b.windowSources.mu.Lock()
-	c.sessions[source] = b.windowSources.sessions[source]
-	b.windowSources.mu.Unlock()
-	return c, func() {}, nil
+	shared.mu.Lock()
+	c.sessions[source] = shared.sessions[source]
+	shared.mu.Unlock()
+	return c, b.windowMu.RUnlock, nil
 }

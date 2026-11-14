@@ -382,7 +382,7 @@ func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(true)
-	backend.windowPinned = time.Now().Add(-6 * time.Minute)
+	backend.windowPinned = time.Now().Add(-syncWindowPinAge - time.Minute)
 	check(false)
 	if pins.Load() != 2 {
 		t.Fatal("pin was not rotated", pins.Load())
