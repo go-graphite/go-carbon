@@ -590,3 +590,13 @@ Offline actions retain the store's exclusive-open and source-binding checks.
 Stop the daemon before cold-pack, conversion into its store, or orphan reclaim.
 Pruning checks the running local daemon and retains its health and filesystem
 guards. Existing maintenance checkpoints and receipts retain their data format.
+
+## Input journal inventory
+
+`storectl inventory inputlog -manifest snapshot.json -output candidates.jsonl.gz`
+reads an immutable, exact-length input journal prefix. It verifies the full
+captured SHA256 and every payload CRC, then writes sorted candidate names for
+the manifest's timestamp windows. It never opens a running journal or writes
+metric data. See the [manifest and limits](../../internal/inputlog/inventory/README.md).
+The candidate list alone does not authorize filling; use `storectl sync` with
+the appropriate acknowledged source and gap windows for recovery.

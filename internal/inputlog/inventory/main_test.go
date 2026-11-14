@@ -1,16 +1,20 @@
-package main
+package inventory
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -124,5 +128,63 @@ func TestInventoryEmitsNothingForUnverifiedEvidence(t *testing.T) {
 				t.Fatalf("unverified inventory emitted: err=%v bytes=%d", err, output.Len())
 			}
 		})
+	}
+}
+
+func TestCommandPublishesOnlyVerifiedNewOutput(t *testing.T) {
+	m := commandFixture(t)
+	dir := t.TempDir()
+	manifestPath, output := filepath.Join(dir, "manifest.json"), filepath.Join(dir, "candidates.gz")
+	writeManifest := func() {
+		t.Helper()
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifestPath, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	goodHash := m.SHA256
+	m.SHA256 = strings.Repeat("0", 64)
+	writeManifest()
+	args := []string{"-manifest", manifestPath, "-output", output}
+	if err := Main(args); err == nil {
+		t.Fatal("accepted wrong hash")
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("left unverified output: %v", err)
+	}
+	m.SHA256 = goodHash
+	writeManifest()
+	if err := Main(args); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := gzip.NewReader(bytes.NewReader(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed.Close()
+	var want bytes.Buffer
+	if err := inventory(context.Background(), m, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, want.Bytes()) {
+		t.Fatalf("command output differs: %s", raw)
+	}
+	if err := Main(args); err == nil {
+		t.Fatal("overwrote existing output")
+	}
+	after, _ := os.ReadFile(output)
+	if !bytes.Equal(before, after) {
+		t.Fatal("existing output changed")
 	}
 }

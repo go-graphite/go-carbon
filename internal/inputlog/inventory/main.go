@@ -1,7 +1,7 @@
 // inputlog-inventory reads an owner-copied journal prefix. Its output identifies
 // recovery candidates, never authorizes a store write or substitutes journal
 // values for the source store's committed archive values.
-package main
+package inventory
 
 import (
 	"compress/gzip"
@@ -132,11 +132,14 @@ func inventory(ctx context.Context, m manifest, output io.Writer) error {
 	return nil
 }
 
-func run() error {
-	manifestPath := flag.String("manifest", "", "owner-copied snapshot and raw metric timestamp windows")
-	outputPath := flag.String("output", "", "new gzip JSONL candidate file; removed on any failure")
-	flag.Parse()
-	if *manifestPath == "" || *outputPath == "" || flag.NArg() != 0 {
+func Main(args []string) error {
+	flags := flag.NewFlagSet("storectl inventory inputlog", flag.ContinueOnError)
+	manifestPath := flags.String("manifest", "", "owner-copied snapshot and raw metric timestamp windows")
+	outputPath := flags.String("output", "", "new gzip JSONL candidate file; removed on any failure")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || *outputPath == "" || flags.NArg() != 0 {
 		return errors.New("-manifest and -output are required")
 	}
 	raw, err := os.ReadFile(*manifestPath)
@@ -175,11 +178,4 @@ func run() error {
 	}
 	success = true
 	return nil
-}
-
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
 }
