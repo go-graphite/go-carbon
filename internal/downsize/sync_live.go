@@ -450,6 +450,8 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 	return o
 }
 
+type syncCopyProgressKey struct{}
+
 // Copy runs the copy engine over a name list. A one-name probe first detects
 // a target that refuses the source (403: not in its transfer-sources), so a
 // refused source costs one request instead of a split per name. Engine
@@ -479,7 +481,9 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 	}
 	var err error
 	for attempt := 1; attempt <= b.o.copyAttempts; attempt++ {
-		err = b.copy(ctx, b.copyOptions(source, target, namesPath, journal, len(names)))
+		o := b.copyOptions(source, target, namesPath, journal, len(names))
+		o.onCommitted, _ = ctx.Value(syncCopyProgressKey{}).(func(int))
+		err = b.copy(ctx, o)
 		if err == nil || ctx.Err() != nil {
 			break
 		}

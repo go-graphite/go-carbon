@@ -381,12 +381,15 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		j.mu.Unlock()
 		s.prog.mu.Lock()
 		snap.Phase = s.prog.phase
-		snap.Done = s.prog.done.Load()
+		snap.Done = s.prog.done.Load() + s.prog.copyActive
 		snap.Total = int64(s.prog.total)
 		snap.rateSet = true
 		snap.Rate = 0
 		if elapsed := time.Since(s.prog.started).Seconds(); elapsed > 0 {
 			snap.Rate = float64(max(0, snap.Done-s.prog.replayed.Load())) / elapsed
+			if s.prog.copyObserved {
+				snap.Rate = float64(s.prog.copyFresh) / elapsed
+			}
 		}
 		s.prog.mu.Unlock()
 		snap.Effective = o.policy
@@ -572,6 +575,9 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		}
 		res, err = backend.CopyWindow(ctx, source, s.o.to, names, journal, s.copyWindows())
 	} else {
+		if phase == "fill" {
+			ctx = context.WithValue(ctx, syncCopyProgressKey{}, s.prog.copyCommitted)
+		}
 		res, err = s.b.Copy(ctx, source, s.o.to, names, journal)
 	}
 	if err != nil {
@@ -727,7 +733,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 				}
 			}
 			s.sum.Filled += len(names) - len(res.Failed)
-			s.prog.done.Add(int64(len(names)))
+			s.prog.finishCopy(len(names))
 		}
 		s.endPhase("fill", work)
 		set = set[:0]
