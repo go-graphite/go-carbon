@@ -1,6 +1,6 @@
 # Offline input journal recovery inventory
 
-`inputlog-inventory` enumerates candidate metric names from an owner-copied,
+`storectl inventory inputlog` enumerates candidate metric names from an owner-copied,
 exact-length input journal prefix. It reuses the normal frame/stream decoder,
 verifies every payload CRC and the complete captured SHA256, and includes frames
 before the current replay watermark. It opens the copied file read-only and never
@@ -10,7 +10,7 @@ For a concrete bounded example, first capture an immutable exact-length journal
 prefix and record its SHA256, then use the manifest beside this README:
 
 ```sh
-inputlog-inventory -manifest example.json -output received-candidates.jsonl.gz
+storectl inventory inputlog -manifest example.json -output received-candidates.jsonl.gz
 ```
 
 The gzip JSONL starts with the verified snapshot identity, counts and limitations,
@@ -29,7 +29,7 @@ This inventory is a candidate list, not fill authority or a completed recovery
 proof. Raw point timestamps do not establish receive times. Records outside the
 copied prefix or selected timestamp windows remain uncovered. Before filling,
 bind each candidate to its positively acknowledged diversion epoch and read the
-source store's committed archives. Use the existing guarded MissingOnly path;
+source store's committed archives. Use `storectl sync` to fill gaps without replacing target values;
 never replay journal values directly or replace occupied finite/Inf cells. Keep
 the captured prefix until the inventory is verified, then delete the owned copy
-and transient decoder binary after exporting the required audit evidence.
+ after exporting the required audit evidence.

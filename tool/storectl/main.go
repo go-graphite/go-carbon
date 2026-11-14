@@ -50,8 +50,13 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && args[0] == "maintain" {
-		return maintain(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "maintain":
+			return maintain(args[1:])
+		case "inventory":
+			return inventoryMain(args[1:])
+		}
 	}
 	return downsize.MainWithMetrics(args)
 }
