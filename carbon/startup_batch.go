@@ -3,6 +3,7 @@ package carbon
 import (
 	"bytes"
 	"fmt"
+
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -73,8 +74,11 @@ func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
 	})
 }
 func (b *captureBatch) applyGroup(i int, source *cache.RecoverySource, sink *startupSink, live bool) {
+	b.applyRange(i, 0, len(b.groups[i].data), source, sink, live)
+}
+func (b *captureBatch) applyRange(i, start, end int, source *cache.RecoverySource, sink *startupSink, live bool) {
 	g := &b.groups[i]
-	b.point.Metric, b.point.Data = g.name, g.data
+	b.point.Metric, b.point.Data = g.name, g.data[start:end]
 	if sink.groupedAdd != nil {
 		sink.groupedAdd(g.metric, &b.point, source, live)
 	} else {

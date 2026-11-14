@@ -5,6 +5,7 @@ package carbon
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"syscall"
 	"testing"
@@ -30,6 +31,12 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 	defer dec.Close()
 	raw, n, err := recovery.DecodeCaptureFrame(dec, frame, nil)
 	if err != nil {
+		b.Fatal(err)
+	}
+	original := make(map[string][]points.Point)
+	if err := points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
+		original[string(name)] = append(original[string(name)], data...)
+	}); err != nil {
 		b.Fatal(err)
 	}
 	const frames = 256
@@ -89,6 +96,21 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 			b.ReportMetric(used*1e6/total, "cpu-s/Mpt")
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/total, "ns/pt")
 			b.ReportMetric(float64(n*frames), "points/op")
+			if core.Size() != int64(200000+b.N*n*frames) {
+				b.Fatal("replay point count", core.Size())
+			}
+			for name, want := range original {
+				got := core.Get(name)
+				if len(got) != len(want)*frames*b.N {
+					b.Fatal("real fixture missing/duplicate points")
+				}
+				for i, p := range got {
+					w := want[i%len(want)]
+					if p.Timestamp != w.Timestamp || math.Float64bits(p.Value) != math.Float64bits(w.Value) {
+						b.Fatal("real fixture point order/bits changed")
+					}
+				}
+			}
 		})
 	}
 }

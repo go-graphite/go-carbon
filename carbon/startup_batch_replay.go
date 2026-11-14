@@ -20,7 +20,11 @@ func (s *startupInput) replayCaptureBatches(reader io.Reader, source *cache.Reco
 	var end int64
 	applied := 0
 	limit := min(8<<20, max(64<<10, s.policy.readBuffer*2))
-	raw = make([]byte, 0, limit)
+	maxFrames := 32
+	if policy, ok := sink.admission.(interface{ RecoveryBatchingEnabled() bool }); ok && !policy.RecoveryBatchingEnabled() {
+		maxFrames = 1
+	}
+
 	flush := func() error {
 		if count == 0 {
 			return nil
@@ -34,22 +38,37 @@ func (s *startupInput) replayCaptureBatches(reader io.Reader, source *cache.Reco
 		reserved := sink.admission.HasRecoveryCapacityBatch(count, groups.cost)
 		for i := range groups.used {
 			g := &groups.groups[i]
-			// Pricing and lookup were fused once per metric. Admission is per group
-			// so a large window never requires more headroom than a metric update.
+			if reserved {
+				if err := s.waitCapture(); err != nil {
+					return err
+				}
+				groups.applyGroup(i, source, sink, false)
+				continue
+			}
+			// A grouped record can exceed a hard count/byte ceiling even though each
+			// original frame fit. Split only when admission refuses, retaining FIFO.
 			cost := g.metric.OverheadBytes()
 			if sink.groupedAdd == nil {
 				cost = sink.admission.RecoveryMetricBytes([]byte(g.name))
 			}
-			for !reserved && !sink.admission.HasRecoveryCapacityBatch(len(g.data), cost) {
+			for start := 0; start < len(g.data); {
+				count := len(g.data) - start
+				for !sink.admission.HasRecoveryCapacityBatch(count, cost) {
+					if err := s.waitCapture(); err != nil {
+						return err
+					}
+					if count > 1 {
+						count = max(1, count/2)
+						continue
+					}
+					time.Sleep(time.Millisecond)
+				}
 				if err := s.waitCapture(); err != nil {
 					return err
 				}
-				time.Sleep(time.Millisecond)
+				groups.applyRange(i, start, start+count, source, sink, false)
+				start += count
 			}
-			if err := s.waitCapture(); err != nil {
-				return err
-			}
-			groups.applyGroup(i, source, sink, false)
 		}
 		advance(end, count)
 		applied += count
@@ -60,16 +79,23 @@ func (s *startupInput) replayCaptureBatches(reader io.Reader, source *cache.Reco
 	_, err := recovery.ReadCaptureFramesPipeline(reader, s.policy.readBuffer,
 		func(_ []byte, _ int, stop <-chan struct{}) (int64, error) { return 0, s.waitCaptureUntil(stop) },
 		func(frame []byte, n int, offset, _ int64) error {
-			if frames > 0 && (len(raw)+len(frame) > limit || frames >= 32) {
+			if frames > 0 && (len(raw)+len(frame) > limit || frames >= maxFrames) {
 				if err := flush(); err != nil {
 					return err
 				}
+			}
+			if raw == nil {
+				capacity := max(limit, len(frame))
+				if maxFrames == 1 {
+					capacity = len(frame)
+				}
+				raw = make([]byte, 0, capacity)
 			}
 			raw = append(raw, frame...)
 			count += n
 			frames++
 			end = offset
-			if len(raw) >= limit || frames >= 32 {
+			if len(raw) >= limit || frames >= maxFrames {
 				return flush()
 			}
 			return nil

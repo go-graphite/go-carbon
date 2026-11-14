@@ -40,3 +40,8 @@ func (c *Cache) AddRecoveryMetric(m RecoveryMetric, p *points.Points, source *Re
 	p.Metric = m.name
 	c.addWithRestoreHashed(p, !live, true, false, nil, source, &m)
 }
+
+// RecoveryBatchingEnabled reports whether byte-reserved admission is installed.
+// The legacy half-cache predicate admits any first frame even above its count
+// limit; retain frame boundaries there rather than growing that exception.
+func (c *Cache) RecoveryBatchingEnabled() bool { return c.recoveryAdmission.Load() != nil }

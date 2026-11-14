@@ -7,12 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -51,6 +53,7 @@ func TestCaptureBatchStoredDifferential(t *testing.T) {
 	}
 	fast, ref := cache.New(), cache.New()
 	fast.SetMaxSize(0)
+	fast.SetRecoveryMemory(func() (uint64, bool) { return 1 << 30, true })
 	ref.SetMaxSize(0)
 	var fastStream, refStream cache.RecoveryStream
 	for _, epoch := range epochs {
@@ -240,5 +243,94 @@ func TestCaptureBatchCrashMidFrameStoredDifferential(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestCaptureBatchSplitsAtHardAdmissionLimit(t *testing.T) {
+	core := cache.New()
+	core.SetMaxSize(4)
+	core.SetRecoveryMemory(func() (uint64, bool) { return 1 << 30, true })
+	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	defer enc.Close()
+	var wire []byte
+	for i := range 32 {
+		p := points.OnePoint("bounded.group", float64(i), int64(i))
+		wire = append(wire, recovery.EncodeCaptureFrame(enc, p.AppendBinary(nil), nil, 1)...)
+	}
+	var stream cache.RecoveryStream
+	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, groupedAdd: core.AddRecoveryMetric}
+	owner := batchReplayOwner()
+	done := make(chan error, 1)
+	go func() {
+		_, err := owner.replayCaptureBatches(bytes.NewReader(wire), stream.Next(), sink, func(int64, int) {})
+		done <- err
+	}()
+	var got []points.Point
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		if p, ok := core.PopNotConfirmed("bounded.group"); ok {
+			got = append(got, p.Data...)
+			core.Confirm(p)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p, ok := core.PopNotConfirmed("bounded.group"); ok {
+				got = append(got, p.Data...)
+				core.Confirm(p)
+			}
+			if len(got) != 32 {
+				t.Fatal("lost split points", len(got))
+			}
+			for i, p := range got {
+				if p.Timestamp != int64(i) || p.Value != float64(i) {
+					t.Fatal("split changed FIFO", i, p)
+				}
+			}
+			return
+		case <-deadline.C:
+			close(owner.replayStop)
+			<-done
+			t.Fatal("group larger than hard limit deadlocked")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestCaptureAppendWritesMultiPointRecords(t *testing.T) {
+	policy := chooseStartupPolicy(1, 1<<30, 1<<30)
+	s, err := openStartupInputWithPolicy(filepath.Join(t.TempDir(), "input.1.2.tail.bin"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	done := make(chan error, 64)
+	for i := range 64 {
+		s.shards[0].SubmitCapture(points.OnePoint("coalesced.metric", float64(i), int64(i%7)).AppendBinary(nil), 1, done)
+	}
+	for range 64 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.close(); err != nil {
+		t.Fatal(err)
+	}
+	total, largest := 0, 0
+	_, err = recovery.ReadCaptureFile(s.shards[0].path+".000000000000.tail.bin", func(p *points.Points) {
+		largest = max(largest, len(p.Data))
+		for _, pt := range p.Data {
+			if pt.Value != float64(total) || pt.Timestamp != int64(total%7) {
+				t.Error("capture grouping changed point bits/order")
+			}
+			total++
+		}
+	})
+	if err != nil || total != 64 || largest <= 1 {
+		t.Fatal("capture did not coalesce", total, largest, err)
 	}
 }
