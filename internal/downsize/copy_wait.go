@@ -101,6 +101,11 @@ func transientCopyError(err error) bool {
 		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusRequestTimeout:
 			return true
 		case http.StatusInternalServerError:
+			// Native readiness takes the application lifecycle lock. Other
+			// concurrent imports can hold it briefly without a host restart.
+			if strings.HasSuffix(strings.TrimSpace(api.Message), "HTTP 500 application lifecycle is busy; retry native copy") {
+				return true
+			}
 			for _, cause := range restartCause {
 				if strings.Contains(api.Message, cause) {
 					return true
