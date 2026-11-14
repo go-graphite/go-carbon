@@ -580,7 +580,7 @@ func (s *syncer) progressLine() {
 	done := p.done.Load()
 	elapsed := time.Since(started).Seconds()
 	fields := map[string]any{"phase": phase, "done": done, "total": total, "skipped": p.skipped.Load(),
-		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d", s.o.streams)}
+		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d verify_streams=%d", s.o.streams, s.o.verifyConcurrency())}
 	if st, ok := s.b.(interface{ syncTimings() []syncIOTiming }); ok {
 		fields["io_timings"] = st.syncTimings()
 	}
