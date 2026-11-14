@@ -100,6 +100,7 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	rateSet    bool                 // controller supplied Rate from its live phase counters
 	Done       int64                `json:"done"`
 	Total      int64                `json:"total"`
 	Effective  *effectiveSyncPolicy `json:"effective,omitempty"`
@@ -159,7 +160,9 @@ func startProgressFile(ctx context.Context, path string, snapshot func() progres
 		if runErr != nil {
 			p.Error = runErr.Error()
 		}
-		p.Rate = float64(p.Discovered+p.Verified+p.Filled+p.Copied-base) / time.Since(started).Seconds()
+		if !p.rateSet {
+			p.Rate = float64(p.Discovered+p.Verified+p.Filled+p.Copied-base) / time.Since(started).Seconds()
+		}
 		outputMu.Lock()
 		if progressObserver != nil {
 			progressObserver(path, p)

@@ -102,14 +102,14 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	}
 	type result struct {
 		group, names int
+		replayed     bool
 		child        *syncer
 		started      time.Time
 		err          error
 	}
 	results := make(chan result, workers)
-	// Stop dispatching on cancellation, but drain issued groups. Cancelling a
-	// pull does not cancel the server's import, and would lose its durable ack.
-	workCtx := context.WithoutCancel(ctx)
+	// Read-only selections remain cancellable. Issued pulls drain separately
+	// because cancelling a pull can lose the server's durable acknowledgement.
 	var firstErr error
 	collect := func() {
 		r := <-results
@@ -130,6 +130,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		s.sum.CopyFailed += r.child.sum.CopyFailed
 		s.sum.residual = append(s.sum.residual, r.child.sum.residual...)
 		if r.err == nil {
+			if r.replayed {
+				s.prog.replayed.Add(int64(r.names))
+			}
 			scanned += r.names
 			s.prog.done.Store(int64(scanned))
 			event("sync_window_missing", map[string]any{"group": r.group, "names": r.names, "scanned": scanned, "copied": s.sum.Copied, "seconds": time.Since(r.started).Seconds(), "groups_in_flight": active, "group_workers": workers})
@@ -174,11 +177,12 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		for source, forbidden := range s.forbid {
 			child.forbid[source] = forbidden
 		}
+		replayed := s.windowGroupReplayed(group, masks, selections, completed)
 		active++
 		go func(group int) {
 			started := time.Now()
-			err := child.copyWindowGroup(workCtx, group, names, masks, selections, completed)
-			results <- result{group, len(names), child, started, err}
+			err := child.copyWindowGroup(ctx, group, names, masks, selections, completed)
+			results <- result{group, len(names), replayed, child, started, err}
 		}(group)
 	}
 	for active > 0 {
@@ -192,6 +196,30 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	}
 	s.endPhase("copy", scanned)
 	return nil
+}
+
+// Replayed groups advance the durable cursor, but did no work in this run.
+func (s *syncer) windowGroupReplayed(group int, masks []uint64, selections, completed map[syncWindowSelectionKey]syncRow) bool {
+	for src, source := range s.o.from {
+		if s.forbid[source] {
+			continue
+		}
+		present := false
+		for _, mask := range masks {
+			present = present || mask&(1<<uint(src)) != 0
+		}
+		if !present {
+			continue
+		}
+		k := syncWindowSelectionKey{group, source}
+		if completed[k].SelectionComplete {
+			continue
+		}
+		if r := selections[k]; !r.SelectionComplete || len(r.Selected) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // A catalog group contains disjoint names. Its private apply state is merged by
@@ -320,8 +348,11 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 		if len(selected) == 0 {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		copyStarted := time.Now()
-		res, err := s.copyFrom(ctx, "window-missing", group, src, selected)
+		res, err := s.copyFrom(context.WithoutCancel(ctx), "window-missing", group, src, selected)
 		event("sync_window_group_copy", map[string]any{"group": group, "source": source, "names": len(selected), "seconds": time.Since(copyStarted).Seconds()})
 		if err != nil {
 			return err
