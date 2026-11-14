@@ -332,3 +332,33 @@ control. The differential unit oracle covers live and expired sidecars across
 all six aggregation methods and three XFF values, including implicit rewrites,
 exact complete archives, shared compaction and reopen. These controls do not
 substitute for an actual sustained full-application mirrored queue replay.
+
+### Recover visible file archives into a running store
+
+A legacy compressed file can have readable archive values while obsolete
+physical block metadata prevents exact writer-continuation migration. To recover
+that visible history explicitly, use a verified immutable copy of the source:
+
+```sh
+storectl maintain convert -source /data/immutable-whisper -source-quiesced \
+  -destination /data/private-scratch -target http://127.0.0.1:4242 \
+  -secret-file /run/secrets/store-jwt
+```
+
+This mode reads every archive including buffered rollups, builds a verified
+classic continuation in private scratch, and uses the existing native transfer
+API. Existing target timestamps win, including writes racing publication.
+It then verifies the durable transfer receipt and reads every archive back,
+comparing every source and pre-existing target timestamp and Float64 bit pattern.
+A mismatch fails the command and retains the originals; a successful import is
+safe to retry. Concurrent target changes can conservatively fail readback even
+when the atomic import succeeded. The target must have matching retention and
+aggregation policies and accept continuation transfers.
+
+This is an explicit recovery of the visible archive view, not preservation of
+obsolete compressed blocks or encoder state. Normal incremental conversion
+continues preserving the complete writer continuation and rejecting damaged
+physical blocks. This mode never deletes originals or marks their incremental
+migration complete. Keep verified backups before separately retiring sources.
+The source and scratch directories must be disjoint. Live source capture,
+manifests and reconciliation are unsupported in this recovery mode.

@@ -42,6 +42,8 @@ type converter struct {
 func Main(args []string) error {
 	flags := flag.NewFlagSet("storectl maintain convert", flag.ContinueOnError)
 	source := flags.String("source", "", "source Whisper tree")
+	target := flags.String("target", "", "import visible archives into a running continuation store using target-wins native transfers; originals retained")
+	secretFile := flags.String("secret-file", "", "target JWT secret file (required with -target)")
 	destination := flags.String("destination", "", "dedicated exact-block store directory")
 	sourceID := flags.String("source-id", "", "immutable dataset identity; must match on resume")
 	copyRoot := flags.String("copy", "", "dedicated tree retaining coherent copies of the original files")
@@ -69,6 +71,28 @@ func Main(args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if *target != "" {
+		if *source == "" || *destination == "" || *secretFile == "" || !*quiesced || *live || *reconcile || *refresh || *manifest != "" || !*verify {
+			return errors.New("target requires source, destination scratch, secret-file, source-quiesced and verification; live/reconcile/refresh/manifest are unsupported")
+		}
+		sourcePath, err := physicalPath(*source)
+		if err != nil {
+			return err
+		}
+		destinationPath, err := physicalPath(*destination)
+		if err != nil {
+			return err
+		}
+		if within(sourcePath, destinationPath) || within(destinationPath, sourcePath) {
+			return errors.New("source and destination scratch must be disjoint")
+		}
+		if err := os.MkdirAll(destinationPath, 0700); err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return convertRemote(ctx, sourcePath, *target, *secretFile, destinationPath)
 	}
 	if *source == "" || *destination == "" || *sourceID == "" || *workers < 1 || *workers > *maxWorkers || *maxWorkers < 1 || *maxWorkers > 256 || *cpu < 1 || *cpu > *maxCPU || *maxCPU < 1 || *live && *copyRoot == "" || *live == *quiesced {
 		return errors.New("source, destination, source-id and positive worker/CPU budgets are required; select source-live with -copy, or source-quiesced")
