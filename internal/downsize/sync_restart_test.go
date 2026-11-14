@@ -181,7 +181,7 @@ type restartingSyncBackend struct {
 func (b *restartingSyncBackend) Digest(ctx context.Context, host string, names []string, from, until int64) (out map[string][]syncDigest, err error) {
 	err = b.retry.wait(ctx, "verify", host, func() error {
 		if b.verifyCalls.Add(1) == 2 {
-			return &apiError{500, "application lifecycle is busy; retry native copy"}, &apiError{500, "store recovery has not finished"}
+			return &apiError{500, "store recovery has not finished"}
 		}
 		var e error
 		out, e = b.fakeSync.Digest(ctx, host, names, from, until)
