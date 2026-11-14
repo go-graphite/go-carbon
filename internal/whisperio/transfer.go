@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sync"
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -30,16 +31,8 @@ func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.Contin
 		if r != snapshot.Metadata.Retentions[ai] || r.Step <= 0 || r.Count <= 0 {
 			return fmt.Errorf("restore archive %d invalid retention", ai)
 		}
-		seen := make(map[int64]bool, len(archive.Points))
-		for _, p := range archive.Points {
-			if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(r.Step) != 0 {
-				return fmt.Errorf("restore archive %d timestamp %d is not on its grid", ai, p.Timestamp)
-			}
-			slot := p.Timestamp / int64(r.Step) % int64(r.Count)
-			if seen[slot] {
-				return fmt.Errorf("restore archive %d has aliased ring slots", ai)
-			}
-			seen[slot] = true
+		if err := validateRestoreSlots(ai, archive); err != nil {
+			return err
 		}
 	}
 	fs := newContinuationFiles(kv, false).withClock(clock)
@@ -107,4 +100,28 @@ func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.Contin
 		return err
 	}
 	return fs.flush()
+}
+
+var restoreSlotPool = sync.Pool{New: func() any { return make(map[int64]bool) }}
+
+func validateRestoreSlots(ai int, archive store.Archive) error {
+	r := archive.Retention
+	seen := restoreSlotPool.Get().(map[int64]bool)
+	defer func() {
+		if len(seen) <= 1<<18 {
+			clear(seen)
+			restoreSlotPool.Put(seen)
+		}
+	}()
+	for _, p := range archive.Points {
+		if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(r.Step) != 0 {
+			return fmt.Errorf("restore archive %d timestamp %d is not on its grid", ai, p.Timestamp)
+		}
+		slot := p.Timestamp / int64(r.Step) % int64(r.Count)
+		if seen[slot] {
+			return fmt.Errorf("restore archive %d has aliased ring slots", ai)
+		}
+		seen[slot] = true
+	}
+	return nil
 }

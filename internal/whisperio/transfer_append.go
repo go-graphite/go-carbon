@@ -3,6 +3,7 @@ package whisperio
 import (
 	"context"
 	"errors"
+	"math"
 	"sort"
 	"time"
 
@@ -18,9 +19,6 @@ import (
 // want are the changed keys written to dst and "" returned; otherwise it
 // returns a store.TransferMergeFallback* reason and the caller uses
 // RestoreArchives.
-//
-// WIP: the read-back is a full decode; a ranged verify of the appended blocks
-// is the next step towards the per-name target.
 //
 // A classic (uncompressed) source is merged in place instead, whatever the
 // target's format: see mergeClassicArchives. A classic target can instead
@@ -131,14 +129,40 @@ func (c *ContinuationCodec) MergeArchives(ctx context.Context, source, target, d
 		return "", false, err
 	}
 	defer r.Close()
-	got, err := continuationArchiveSnapshot(ctx, r, want.Metadata)
+	rfs.snapshotReads = !c.keepSnapshotReadAllocations
+	match, err := continuationArchivesMatch(ctx, r, want)
 	if err != nil {
 		return "", false, err
 	}
-	if store.EqualSnapshots(want, got) != nil {
+	if !match {
 		return store.TransferMergeFallbackVerify, false, nil
 	}
 	return "", false, overlay.applyTo(dst)
+}
+
+// Verify each independently authoritative archive as it is decoded. The
+// decoder's arrays need not be copied into a second, whole-metric snapshot.
+// Every stored timestamp and float bit is still checked before publication.
+func continuationArchivesMatch(ctx context.Context, w *whisper.Whisper, want store.Snapshot) (bool, error) {
+	for i, archive := range want.Archives {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		points, err := w.ArchivePointsWithRollups(i)
+		if err != nil {
+			return false, err
+		}
+		if len(points) != len(archive.Points) {
+			return false, nil
+		}
+		for j, p := range points {
+			q := archive.Points[j]
+			if int64(p.Time) != q.Timestamp || math.Float64bits(p.Value) != math.Float64bits(q.Value) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
 }
 
 // applyTo writes the overlay's changes to dst: prefix deletes first, then

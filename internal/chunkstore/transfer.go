@@ -699,6 +699,10 @@ func (t *transferMergeStats) snapshot() (appended, classic uint64, fallbacks map
 // the target from one immutable view. Only private reserved IDs are read through
 // the indexed batch. The caller validates every target revision before commit.
 func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, metas []Metadata, view pebble.Reader) (prepared *preparedTransfer, err error) {
+	var leases transferSnapshotLeases
+	defer leases.close()
+	unionScratch := transferUnionPool.Get().(*transferUnionScratch)
+	defer unionScratch.release()
 	b := s.db.NewIndexedBatch()
 	defer func() {
 		if prepared == nil {
@@ -712,6 +716,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 	var sidecars []SidecarRecord
 	expected := make([]Metadata, len(records))
 	for i, r := range records {
+		leases.close()
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -760,7 +765,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				return nil, err
 			}
 			if m.Continuation {
-				source, err = s.continuation.Snapshot(ctx, transferRecordIO(r), m, s.now)
+				source, err = leases.snapshot(ctx, s.continuation, transferRecordIO(r), m, s.now)
 			} else if !sourceDecoded {
 				source, err = s.transferSnapshot(ctx, b, m)
 			}
@@ -775,7 +780,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			if old.Continuation {
 				raw, err = s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
 				if err == nil {
-					target, err = s.continuation.Snapshot(ctx, transferRecordIO(raw), old, s.now)
+					target, err = leases.snapshot(ctx, s.continuation, transferRecordIO(raw), old, s.now)
 				}
 			} else {
 				target, err = s.transferSnapshot(ctx, view, old)
@@ -787,10 +792,11 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			want.Archives = make([]Archive, len(source.Archives))
 			normalized := false
 			for j, a := range source.Archives {
-				points, _, changed, err := nativeArchiveUnion(a, target.Archives[j])
+				points, _, changed, err := nativeArchiveUnionInto(a, target.Archives[j], unionScratch.buffer(j), false)
 				if err != nil {
 					return nil, err
 				}
+				unionScratch.archives[j] = points
 				normalized = normalized || changed
 				points = retainTransferSlots(points, a.Retention)
 				want.Archives[j] = Archive{a.Retention, points}
@@ -836,7 +842,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				if err := restorer.RestoreArchives(ctx, kv, want, s.now); err != nil {
 					return nil, err
 				}
-				got, err := s.continuationSnapshot(ctx, b, m)
+				got, err := leases.snapshot(ctx, s.continuation, s.newContinuationIO(ctx, b, nil, m), m, s.now)
 				if err != nil {
 					return nil, err
 				}
@@ -920,7 +926,8 @@ func retainTransferSlots(points []Point, retention Retention) []Point {
 	}
 	// Allocate only for slots actually present in the validated transfer; the
 	// archive capacity comes from the sender and must not size an allocation.
-	seen := make(map[int64]struct{})
+	seen := borrowTransferSlots()
+	defer releaseTransferSlots(seen)
 	start := len(points)
 	for i := len(points) - 1; i >= 0; i-- {
 		slot := points[i].Timestamp / int64(retention.Step) % int64(retention.Count)

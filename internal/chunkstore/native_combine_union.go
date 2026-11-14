@@ -9,6 +9,10 @@ import (
 // Normalization therefore preserves order, allowing the exact fillArchive
 // result without its whole-archive hash table and reflection-based sort.
 func nativeArchiveUnion(source, target Archive) ([]Point, bool, bool, error) {
+	return nativeArchiveUnionInto(source, target, nil, true)
+}
+
+func nativeArchiveUnionInto(source, target Archive, out []Point, classify bool) ([]Point, bool, bool, error) {
 	a, changedA, err := nativeNormalizeArchive(source.Points, source.Retention.Step)
 	if err != nil {
 		return nil, false, false, err
@@ -17,14 +21,17 @@ func nativeArchiveUnion(source, target Archive) ([]Point, bool, bool, error) {
 	if err != nil {
 		return nil, false, false, err
 	}
-	intersects := nativeSlotsIntersect(a, b, source.Retention)
+	intersects := classify && nativeSlotsIntersect(a, b, source.Retention)
 	if len(a) == 0 {
-		return b, intersects, changedA || changedB, nil
+		return append(out[:0], b...), intersects, changedA || changedB, nil
 	}
 	if len(b) == 0 {
-		return a, intersects, changedA || changedB, nil
+		return append(out[:0], a...), intersects, changedA || changedB, nil
 	}
-	out := make([]Point, 0, len(a)+len(b))
+	out = out[:0]
+	if cap(out) < len(a)+len(b) {
+		out = make([]Point, 0, len(a)+len(b))
+	}
 	i, j := 0, 0
 	for i < len(a) && j < len(b) {
 		switch {
@@ -88,7 +95,8 @@ func nativeSlotsIntersect(a, b []Point, r Retention) bool {
 			a, b = b, a
 		}
 		// Grow from validated points rather than sender-controlled archive capacity.
-		slots := make(map[int64]struct{})
+		slots := borrowTransferSlots()
+		defer releaseTransferSlots(slots)
 		for _, p := range a {
 			slots[p.Timestamp/step%count] = struct{}{}
 		}

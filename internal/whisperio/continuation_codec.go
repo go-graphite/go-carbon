@@ -812,6 +812,10 @@ func (c *ContinuationCodec) Fetch(ctx context.Context, kv store.ContinuationIO, 
 }
 
 func (c *ContinuationCodec) Snapshot(ctx context.Context, kv store.ContinuationIO, m store.Metadata, clock func() time.Time) (store.Snapshot, error) {
+	return c.snapshot(ctx, kv, m, clock, nil)
+}
+
+func (c *ContinuationCodec) snapshot(ctx context.Context, kv store.ContinuationIO, m store.Metadata, clock func() time.Time, scratch *snapshotScratch) (store.Snapshot, error) {
 	// A private overlay permits canonical OOO folding for the transfer API.
 	// Ordinary Fetch never folds or mutates its database snapshot.
 	overlay := newContinuationOverlay(kv)
@@ -822,7 +826,7 @@ func (c *ContinuationCodec) Snapshot(ctx context.Context, kv store.ContinuationI
 	}
 	defer w.Close()
 	if !w.IsCompressed() && !c.keepClassicSnapshotReads && reflect.DeepEqual(w.StorageLayout(), fs.files["main.wsp"].layout) {
-		return classicContinuationSnapshot(ctx, fs, m)
+		return classicContinuationSnapshot(ctx, fs, m, scratch)
 	}
 	if w.IsCompressed() {
 		if err := w.MergeOutOfOrder(); err != nil {
@@ -830,10 +834,18 @@ func (c *ContinuationCodec) Snapshot(ctx context.Context, kv store.ContinuationI
 		}
 	}
 	fs.snapshotReads = !c.keepSnapshotReadAllocations
-	return continuationArchiveSnapshot(ctx, w, m)
+	if scratch != nil {
+		fs.snapshotBlock = scratch.block
+		defer func() { scratch.block = fs.snapshotBlock }()
+	}
+	return continuationArchiveSnapshotInto(ctx, w, m, scratch)
 }
 
 func continuationArchiveSnapshot(ctx context.Context, w *whisper.Whisper, m store.Metadata) (store.Snapshot, error) {
+	return continuationArchiveSnapshotInto(ctx, w, m, nil)
+}
+
+func continuationArchiveSnapshotInto(ctx context.Context, w *whisper.Whisper, m store.Metadata, scratch *snapshotScratch) (store.Snapshot, error) {
 	result := store.Snapshot{Metadata: m, Archives: make([]store.Archive, len(m.Retentions))}
 	for i, r := range m.Retentions {
 		if err := ctx.Err(); err != nil {
@@ -843,7 +855,8 @@ func continuationArchiveSnapshot(ctx context.Context, w *whisper.Whisper, m stor
 		if err != nil {
 			return store.Snapshot{}, err
 		}
-		result.Archives[i] = store.Archive{Retention: r, Points: make([]store.Point, len(points))}
+		result.Archives[i] = store.Archive{Retention: r, Points: scratch.buffer(i, len(points))}
+		scratch.keep(i, result.Archives[i].Points)
 		for j, p := range points {
 			result.Archives[i].Points[j] = store.Point{Timestamp: int64(p.Time), Value: p.Value}
 		}

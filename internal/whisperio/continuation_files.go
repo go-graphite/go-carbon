@@ -28,6 +28,11 @@ type continuationFiles struct {
 	// snapshotReads is enabled only after private OOO folding has finished.
 	// Archive materialization then performs no writes.
 	snapshotReads bool
+	// storedPoints copies a physical block's values before requesting another
+	// block. Only immutable archive snapshots may borrow this decode buffer.
+	snapshotBlock    []whisper.TimeSeriesPoint
+	snapshotBlockKey verifiedBlockKey
+	snapshotBlockOK  bool
 	// Ordinary updates must not overwrite a timestamp from a different ring
 	// position in an old, incorrectly anchored classic image.
 	guardClassicWrites    bool

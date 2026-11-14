@@ -12,7 +12,7 @@ import (
 // classicContinuationSnapshot reads physical classic slots directly. The byte
 // reader otherwise serializes these same groups to Whisper records, decodes
 // them, then copies the points twice before producing a store snapshot.
-func classicContinuationSnapshot(ctx context.Context, fs *continuationFiles, m store.Metadata) (store.Snapshot, error) {
+func classicContinuationSnapshot(ctx context.Context, fs *continuationFiles, m store.Metadata, buffers *snapshotScratch) (store.Snapshot, error) {
 	d, err := fs.load("main.wsp")
 	if err != nil {
 		return store.Snapshot{}, err
@@ -28,7 +28,7 @@ func classicContinuationSnapshot(ctx context.Context, fs *continuationFiles, m s
 			return store.Snapshot{}, fmt.Errorf("archive index %d out of range", i)
 		}
 		a := d.layout.Archives[i]
-		points := make([]store.Point, 0)
+		points := buffers.buffer(i, 0)
 		for group := 0; group*128 < a.Count; group++ {
 			if err := ctx.Err(); err != nil {
 				return store.Snapshot{}, err
@@ -64,6 +64,7 @@ func classicContinuationSnapshot(ctx context.Context, fs *continuationFiles, m s
 				}
 			}
 		}
+		buffers.keep(i, points)
 		sortClassicSnapshotPoints(points)
 		result.Archives[i] = store.Archive{Retention: r, Points: points}
 	}
