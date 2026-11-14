@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -19,7 +18,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/downsize/ringplan"
 )
 
-// store-copy sync brings one target store to complete history from every
+// storectl sync brings one target store to complete history from every
 // replica that may hold its names, in one resumable invocation:
 //
 //  1. discover: union of the source catalogs (/v1/transfer/list) that the
@@ -84,84 +83,25 @@ type syncBackend interface {
 }
 
 type syncOptions struct {
-	verifyStreams int
-	to            string
-	from          []string
-	ring, state   string
-	prefix        string
-	streams       int
-	batch         int
-	maxRounds     int
-	settle        time.Duration
-	windows       syncRanges
-	sampleEvery   int
-	includeShort  bool
-	fullHistory   bool
-	progress      time.Duration
-	now           func() time.Time
-}
-
-type syncOrigins []string
-
-func (o *syncOrigins) String() string { return strings.Join(*o, ",") }
-func (o *syncOrigins) Set(v string) error {
-	for _, s := range strings.Split(v, ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			*o = append(*o, s)
-		}
-	}
-	return nil
-}
-
-func SyncMain(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("store-copy sync", flag.ContinueOnError)
-	var o syncOptions
-	var from syncOrigins
-	var live syncLiveOptions
-	flags.StringVar(&o.to, "to", "", "target buckyd origin, e.g. http://10.0.0.1:4242 (use the IPs listed in transfer-sources)")
-	flags.Var(&from, "from", "source buckyd origin; repeat or comma-separate: same-AZ donors first, then peer-DC replicas")
-	flags.StringVar(&o.prefix, "prefix", "", "sync only names with this prefix (scope a run or a proof)")
-	flags.StringVar(&o.ring, "ring", "", "optional ring file; source names the target does not own are skipped")
-	flags.StringVar(&o.state, "state", "", "state directory (journal, name lists, copy journals); rerun the same command to resume")
-	flags.IntVar(&o.streams, "streams", 8, "parallel retention precheck and verify batches")
-	flags.IntVar(&o.verifyStreams, "verify-streams", 0, "parallel verify batches; 0 uses --streams (keep --streams unchanged when resuming copy journals)")
-	flags.IntVar(&o.batch, "verify-batch", 500, "names per verify multi-fetch")
-	flags.IntVar(&o.maxRounds, "max-rounds", 4, "verify/fill rounds")
-	flags.DurationVar(&o.settle, "settle", 10*time.Minute, "ignore the newest points: replicas may still be writing them")
-	flags.Var(&o.windows, "window", "hole-prone range [name:]from:until in Unix seconds (restart/cutover/copy windows); repeat or space-separate. Every name is checked over every window")
-	flags.IntVar(&o.sampleEvery, "sample-every", 64, "with --window --full-history: also check 1 in N names over full history, every archive (1 = all, 0 = none). Without --window every name is checked over full history")
-	flags.BoolVar(&o.fullHistory, "full-history", false, "with --window, copy full histories and enable full-history sampling instead of copying only window points")
-	flags.BoolVar(&o.includeShort, "include-short-retention", false, "also compare and fill names whose archives all retain at most 3 days")
-	flags.DurationVar(&o.progress, "progress-interval", 30*time.Second, "progress line interval")
-	flags.IntVar(&live.carbonPort, "carbonserver-port", 8080, "carbonserver port on every store (reads for verify)")
-	flags.IntVar(&live.copyStreams, "copy-streams", 0, "parallel copy transfers; 0 uses the copy default")
-	flags.Int64Var(&live.copyBytes, "max-batch-bytes", copyDefaultBatchBytes, "copy/fill batch byte cap (real exported bytes)")
-	flags.DurationVar(&live.copyIdle, "transfer-idle-timeout", defaultTransferIdle, "copy/fill idle transfer timeout")
-	flags.StringVar(&live.tokenEnv, "token-env", "BUCKYD_TOKEN", "environment variable holding the buckyd JWT")
-	flags.DurationVar(&live.hostWait, "host-wait", 30*time.Minute, "wait this long for a restarting store before failing")
-	flags.IntVar(&live.copyAttempts, "copy-attempts", 6, "copy engine runs per name list (each rerun resumes its journal)")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %v", flags.Args())
-	}
-	if live.copyBytes < 65536 || live.copyIdle <= 0 {
-		return errors.New("invalid max-batch-bytes or transfer-idle-timeout")
-	}
-	o.from = from
-	if err := o.normalize(); err != nil {
-		return err
-	}
-	backend := newSyncLiveBackend(live)
-
-	err := runSync(ctx, o, backend)
-	event("sync_io", map[string]any{"timings": backend.syncTimings()})
-	if errors.Is(err, ErrSyncResidual) {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(exitSyncResidual)
-	}
-	return err
+	noCopy, noVerify bool
+	verifyStreams    int
+	policy           *effectiveSyncPolicy
+	namesHash        string
+	namesFile        string
+	to               string
+	from             []string
+	ring, state      string
+	prefix           string
+	streams          int
+	batch            int
+	maxRounds        int
+	settle           time.Duration
+	windows          syncRanges
+	sampleEvery      int
+	includeShort     bool
+	fullHistory      bool
+	progress         time.Duration
+	now              func() time.Time
 }
 
 func (o *syncOptions) normalize() error {
@@ -170,18 +110,18 @@ func (o *syncOptions) normalize() error {
 		return fmt.Errorf("--to: %w", err)
 	}
 	if len(o.from) == 0 {
-		return errors.New("at least one --from source required")
+		return errors.New("at least one --source URL required (--from is a compatibility alias)")
 	}
 	if len(o.from) > 63 {
-		return errors.New("at most 63 --from sources")
+		return errors.New("at most 63 --source URLs")
 	}
 	seen := map[string]bool{o.to: true}
 	for i, f := range o.from {
 		if o.from[i], err = origin(f); err != nil {
-			return fmt.Errorf("--from: %w", err)
+			return fmt.Errorf("--source: %w", err)
 		}
 		if seen[o.from[i]] {
-			return fmt.Errorf("--from %s repeats the target or another source", o.from[i])
+			return fmt.Errorf("--source %s repeats the target or another source", o.from[i])
 		}
 		seen[o.from[i]] = true
 	}
@@ -383,9 +323,12 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		return err
 	}
 	identityFields := map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "windows": o.windows.String(), "sample_every": o.sampleEvery}
+	if o.namesHash != "" {
+		identityFields["names_sha256"] = o.namesHash
+	}
 	// Keep old default journals resumable, but never reuse skipped comparisons
 	// when a recovery opts into short-retention names.
-	if o.fullHistory {
+	if o.fullHistory && len(o.windows) > 0 {
 		identityFields["full_history"] = true
 	}
 	if o.includeShort {
@@ -410,7 +353,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	for _, r := range j.find(func(r syncRow) bool { return r.Kind == "copied" && r.Forbidden }) {
 		s.forbid[r.Source] = true
 	}
-	event("sync_start", map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "state": o.state, "streams": o.streams, "verify_batch": o.batch, "max_rounds": o.maxRounds, "windows": o.windows.String(), "sample_every": o.sampleEvery, "resumed_rows": len(j.rows) - 1})
+	event("sync_start", map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "state": o.state, "streams": o.streams, "verify_batch": o.batch, "max_rounds": o.maxRounds, "windows": o.windows.String(), "sample_every": o.sampleEvery, "resumed_rows": len(j.rows) - 1, "effective": o.policy})
 	ctx, cancelFile := context.WithCancelCause(ctx)
 	defer cancelFile(nil)
 	progressCtx, stopProgress := context.WithCancel(ctx)
@@ -425,6 +368,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		snap.Done = s.prog.done.Load()
 		snap.Total = int64(s.prog.total)
 		s.prog.mu.Unlock()
+		snap.Effective = o.policy
 		return snap
 	}, cancelFile)
 	err = s.run(ctx)
@@ -473,13 +417,23 @@ func (s *syncer) run(ctx context.Context) error {
 	if err := s.discover(ctx); err != nil {
 		return fmt.Errorf("discover: %w", err)
 	}
-	if err := s.copyMissing(ctx); err != nil {
-		return fmt.Errorf("copy missing: %w", err)
+	if !s.o.noCopy {
+		if err := s.copyMissing(ctx); err != nil {
+			return fmt.Errorf("copy missing: %w", err)
+		}
+	}
+	if s.o.noVerify {
+		event("phase_skipped", map[string]any{"phase": "verify", "readiness": false})
+		return nil
 	}
 	if err := s.retryWindowSelections(ctx); err != nil {
 		return fmt.Errorf("retry window selections: %w", err)
 	}
-	return s.verifyAndFill(ctx)
+	err := s.verifyAndFill(ctx)
+	if s.o.noCopy && s.sum.Missing > 0 {
+		return errors.Join(err, fmt.Errorf("%w: --no-copy leaves %d names from discovery unimported; use a fresh state for an independent audit", ErrSyncResidual, s.sum.Missing))
+	}
+	return err
 }
 
 func (s *syncer) namesFile(kind string, round int, source int, names []string) (string, error) {

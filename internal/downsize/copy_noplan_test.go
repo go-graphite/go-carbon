@@ -131,7 +131,7 @@ func newFakeCopy(t *testing.T, catalog []string) (*fakeCopy, string, string) {
 }
 
 func copyTestOptions(t *testing.T, from, to string) copyOptions {
-	return copyOptions{froms: []string{from}, to: to, stallTimeout: time.Minute, state: filepath.Join(t.TempDir(), "copy.jsonl"), engine: "metric", tokenEnv: "NO_SUCH_TOKEN_ENV", streams: 4, maxBytes: 1 << 20, maxNames: 8192, maxFailures: 100, tick: time.Millisecond, maxBackoff: 5 * time.Millisecond, transportRetries: 3, transferIdle: time.Minute}
+	return copyOptions{froms: []string{from}, to: to, stallTimeout: time.Minute, state: filepath.Join(t.TempDir(), "copy.jsonl"), engine: "metric", tokenEnv: "NO_SUCH_TOKEN_ENV", streams: 4, maxBytes: 1 << 20, maxNames: 8192, maxFailures: 100, tick: time.Millisecond, maxBackoff: 5 * time.Millisecond, transferIdle: time.Minute}
 }
 
 func copyNames(prefix string, n int) []string {

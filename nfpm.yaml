@@ -45,3 +45,10 @@ contents:
   - src: "out/${NAME}-linux-${ARCH}"
     dst: /usr/bin/${NAME}
     expand: true
+
+  - src: "out/storectl-linux-${ARCH}"
+    dst: /usr/bin/storectl
+    expand: true
+  - src: "out/store-copy-linux-${ARCH}"
+    dst: /usr/bin/store-copy
+    expand: true

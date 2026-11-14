@@ -200,6 +200,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 // native intents/receipts are kept beside the ordinary sync journal; no metric
 // fallback is permitted because that API would silently import full history.
 func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges) (syncCopyResult, error) {
+	if b.o.noCopy {
+		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
+	}
 	for _, host := range []string{source, target} {
 		var cap struct{ NativeTimeWindow, NativeExactCombine, NativeDeferredCombine bool }
 		if _, err := b.m.requestOnce(ctx, host, "/v1/native/capabilities", nil, &cap); err != nil {

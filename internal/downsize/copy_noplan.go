@@ -36,8 +36,8 @@ type copyOptions struct {
 	maxBytes                                         int64
 	tick, transferIdle, maxBackoff, stallTimeout     time.Duration
 	progressInterval                                 time.Duration
-	transportRetries                                 int
 	debtGuard                                        bool
+	policy                                           *effectiveSyncPolicy
 }
 
 const (
@@ -58,7 +58,7 @@ const (
 // idle bound. Pull and verify send no bytes until the target finishes the
 // batch, so a header deadline shorter than the idle bound turned slow batches
 // into transport errors that retried at full size (and aborted the run after
-// --transport-retries) instead of idle timeouts that split the batch.
+// a separate retry bound) instead of idle timeouts that split the batch.
 func copyHeaderTimeout(idle time.Duration) time.Duration {
 	if idle <= 0 {
 		return copyHeaderTimeoutMin
@@ -80,12 +80,17 @@ func (l *originList) Set(value string) error {
 	return nil
 }
 
+// PlanFreeCopyMain is the compatibility spelling of the canonical sync command.
 func PlanFreeCopyMain(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("store-copy copy", flag.ContinueOnError)
-	var o copyOptions
-	flags.Var((*originList)(&o.froms), "from", "source buckyd origin, e.g. http://donor:4242; repeat (or comma-separate) to copy every donor of a block into --to in one run")
+	event("command_alias", map[string]any{"argv": append([]string{"storectl", "sync"}, args...)})
+	return SyncMain(ctx, args)
+}
+
+func registerCopyFlags(flags *flag.FlagSet, o *copyOptions) {
+	flags.Var((*originList)(&o.froms), "source", "source buckyd origin, e.g. http://donor:4242; repeat (or comma-separate) to copy every donor of a block into --to in one run")
+	flags.Var((*originList)(&o.froms), "from", "compatibility alias for --source (URL)")
 	flags.StringVar(&o.to, "to", "", "target buckyd origin; the target pulls from --from")
-	flags.StringVar(&o.names, "names", "", "byte-sorted unique name list (LC_ALL=C sort -u); default discovers the source catalog")
+	flags.StringVar(&o.names, "names", "", "UTF-8 text file, one metric name per line, byte-sorted unique (LC_ALL=C sort -u); not JSON; default discovers catalogs")
 	flags.StringVar(&o.prefix, "prefix", "", "discover only source names with this prefix")
 	flags.StringVar(&o.ring, "ring", "", "optional ring file (resize spec: its new ring; or a bare topology); names the target does not own are skipped")
 	flags.StringVar(&o.state, "state", "", "append-only journal of completed name ranges; rerun the same command to resume")
@@ -98,17 +103,9 @@ func PlanFreeCopyMain(ctx context.Context, args []string) error {
 	flags.IntVar(&o.maxFailures, "max-failures", 0, "0 (default): a name that keeps failing is skipped, retried once at the end and reported (exit non-zero), never stopping the run; N>0 aborts above N skipped names")
 	flags.DurationVar(&o.tick, "retry-interval", 2*time.Second, "first backoff after a transient guard response (429/502/503/504) or transport error")
 	flags.DurationVar(&o.maxBackoff, "max-backoff", 30*time.Second, "backoff ceiling for transient retries")
-	flags.IntVar(&o.transportRetries, "transport-retries", 0, "deprecated and ignored: transport errors, refused connections and 502/503/504 retry until --stall-timeout")
 	flags.DurationVar(&o.progressInterval, "progress-interval", 30*time.Second, "print one progress line (done/total, names/s, MB/s, ETA, limiter, retries, waits, skipped) per interval")
 	flags.DurationVar(&o.stallTimeout, "stall-timeout", 30*time.Minute, "abort with an error once a source or target has been unreachable (or answered only transient errors) this long without progress")
 	flags.DurationVar(&o.transferIdle, "transfer-idle-timeout", defaultTransferIdle, "abort a pull/verify after this long without bytes; a multi-name batch splits, one name gets 3 attempts")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %v", flags.Args())
-	}
-	return planFreeCopy(ctx, o)
 }
 
 // defaultCopyStreams fills every transfer slot both ends advertise: each
@@ -198,11 +195,8 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	if o.maxBytes < 65536 {
 		return errors.New("--max-batch-bytes must be at least 65536 (source export minimum)")
 	}
-	if o.streams < 0 || o.maxFailures < 0 || o.transportRetries < 0 || o.tick <= 0 || o.maxBackoff < o.tick || o.stallTimeout <= 0 {
-		return errors.New("invalid streams/max-failures/transport-retries/retry-interval/max-backoff/stall-timeout")
-	}
-	if o.transportRetries > 0 {
-		event("deprecated_flag", map[string]any{"flag": "--transport-retries", "value": o.transportRetries, "note": "ignored; transient errors retry until --stall-timeout"})
+	if o.streams < 0 || o.maxFailures < 0 || o.tick <= 0 || o.maxBackoff < o.tick || o.stallTimeout <= 0 {
+		return errors.New("invalid streams/max-failures/retry-interval/max-backoff/stall-timeout")
 	}
 	var owner func(string) bool
 	if o.ring != "" {
@@ -246,7 +240,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	c.o, c.journal, c.serverMax = o, journal, target.MaxBodyBytes
 	defer c.closeCatalogs()
 	c.sizer = &batchSizer{budget: min(o.maxBytes, target.MaxBodyBytes), maxNames: o.maxNames, perName: copyInitialBytesPerName}
-	event("copy_start", map[string]any{"from": o.froms, "to": o.to, "names": o.names, "prefix": o.prefix, "ring": o.ring, "state": o.state, "streams": o.streams, "batch_bytes": c.sizer.budget, "max_body_bytes": target.MaxBodyBytes, "max_batch_names": o.maxNames, "resumed_ranges": len(journal.ranges), "source_max_transfers": sourceTransfers, "target_max_transfers": target.MaxTransfers, "stall_timeout": o.stallTimeout.String()})
+	event("copy_start", map[string]any{"from": o.froms, "to": o.to, "names": o.names, "prefix": o.prefix, "ring": o.ring, "state": o.state, "streams": o.streams, "batch_bytes": c.sizer.budget, "max_body_bytes": target.MaxBodyBytes, "max_batch_names": o.maxNames, "resumed_ranges": len(journal.ranges), "source_max_transfers": sourceTransfers, "target_max_transfers": target.MaxTransfers, "stall_timeout": o.stallTimeout.String(), "effective": o.policy})
 	sources := make([]copySource, 0, len(o.froms))
 	for _, from := range o.froms {
 		next, closeNames, err := c.nameSource(ctx, from)

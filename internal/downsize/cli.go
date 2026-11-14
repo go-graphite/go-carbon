@@ -18,7 +18,7 @@ import (
 // engine, journal, worker and transfer primitives.
 func Main(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: resize copy|sync|plan|run|status|worker|config|compare|snapshot")
+		return errors.New("usage: storectl sync [flags] (copy is an alias); compatibility: plan|run|status|worker|config|compare|snapshot")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -105,6 +105,6 @@ func Main(args []string) error {
 		}
 		return serveWorker(ctx, o)
 	default:
-		return errors.New("unknown resize command")
+		return errors.New("unknown storectl command; use storectl sync --help")
 	}
 }
