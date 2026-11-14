@@ -238,6 +238,12 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	if oldest {
 		writeStrategy = TimestampOrder
 	}
+	if c.recoveryDrain.Load() {
+		// A finite restored prefix has no cross-metric age requirement. Visit
+		// nearby catalog keys together; per-metric order remains unchanged.
+		writeStrategy = MetricNameOrder
+		oldest = false
+	}
 
 	if !prevBuild.IsZero() {
 		// @TODO: may be max (with atomic cas)

@@ -461,6 +461,11 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 					t.Fatalf("child: %v\n%s", err, out)
 				}
 			}
+			// Only the successor enables capture; leave predecessor crash hooks
+			// on their ordinary dump path.
+			cfg.Dump.StoreInputHandoff = true
+			cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
+			writeSharedConfig(t, path, cfg)
 			app := startIncrementalApp(t, path)
 			want := map[string]map[int64]float64{}
 			for phase := range 2 {

@@ -97,6 +97,7 @@ type startupSink struct {
 	drain       func(bool)
 }
 type startupInput struct {
+	journalOnly                                                         bool         // No checkpoint/legacy dump; the continuous journal precedes capture.
 	diskWritten                                                         atomic.Int64 // Physical appends only; opening older sources consumes no new disk.
 	diskSample                                                          atomic.Pointer[startupDiskSample]
 	overBudget                                                          atomic.Bool

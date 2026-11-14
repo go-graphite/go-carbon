@@ -57,15 +57,41 @@ func (app *App) tryStartupInput() error {
 	// Only the name is needed here; full checksum/root/index validation remains
 	// on the ordinary startup path, before a point can enter the cache.
 	f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
-	if err != nil {
-		return nil
-	}
 	var manifest recovery.Manifest
-	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
-	_ = f.Close()
-	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
+	missingCheckpoint := errors.Is(err, os.ErrNotExist)
+	if !missingCheckpoint {
+		if err != nil {
+			return nil
+		}
+		err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
+		_ = f.Close()
+		if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
+			return nil
+		}
+		// A previously retired checkpoint can leave its manifest behind.
+		// Only a fully absent pair can use journal-only recovery. A partial
+		// checkpoint retains the ordinary validation/recovery path.
+		if manifest.Cache.Name != "" && filepath.Base(manifest.Cache.Name) == manifest.Cache.Name {
+			_, cacheErr := os.Stat(filepath.Join(c.Dump.Path, manifest.Cache.Name))
+			_, walErr := os.Stat(filepath.Join(c.Dump.Path, manifest.WAL.Name))
+			missingCheckpoint = errors.Is(cacheErr, os.ErrNotExist) && errors.Is(walErr, os.ErrNotExist)
+		}
+	}
+	journalOnly := false
+	if missingCheckpoint && c.InputLog.Enabled && app.handoffClaim == nil {
+		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
+		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.tail.bin*"))
+		journalOnly = len(logs) > 0 || len(tails) > 0
+	}
+	if journalOnly {
+		// Reuse a stable capture namespace without manufacturing or changing
+		// a checkpoint. Ordinary journal validation remains authoritative.
+		manifest = recovery.Manifest{}
+		manifest.WAL.Name = "input.journal-recovery.bin"
+	} else if missingCheckpoint {
 		return nil
 	}
+
 	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {
 		return err
@@ -90,7 +116,7 @@ func (app *App) tryStartupInput() error {
 			orphanedCapture = info.Size() > 0 || isStartupDirectFence(name)
 		}
 	}
-	if app.handoffClaim == nil && !orphanedCapture {
+	if app.handoffClaim == nil && !orphanedCapture && !journalOnly {
 		return nil
 	}
 	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
@@ -152,6 +178,7 @@ func (app *App) tryStartupInput() error {
 		_ = spool.close()
 		return err
 	}
+	spool.journalOnly = journalOnly
 	spool.receiver = r
 	spool.startMonitor(spool.policy.spoolBytes)
 	app.startupCaptureState.Store(spool)

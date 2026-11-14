@@ -924,6 +924,7 @@ func (app *App) Start() (err error) {
 	if err != nil {
 		return err
 	}
+
 	app.startHeartbeat(core)
 	lap("storage")
 	if err = app.startAPI(core); err != nil {
@@ -964,6 +965,7 @@ func (app *App) Start() (err error) {
 	if restoreBeforeReceivers && !readsStarted && !pendingReads {
 		app.restoreBeforeReceivers(core)
 	}
+
 	lap("ordered_restore")
 	readsStarted = readsStarted || pendingReads
 	if !readsStarted {
@@ -1145,6 +1147,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			IngestGroupBytes:          conf.Whisper.StoreMigrationIngestGroup,
 			IngestParallel:            conf.Whisper.StoreMigrationIngestParallel,
 			CacheSize:                 conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
+
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
 			BlockLoadConcurrency:        conf.Whisper.StoreBlockLoadConcurrency,
 			ReadConcurrency:             conf.Whisper.StoreReadConcurrency,
@@ -1510,8 +1513,13 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	restoreLoaded := time.Now()
 	// The persister already writes what is loaded; prewarm the rest.
 	app.startMetadataPrewarmWithCheckpointGate("restored dump", core.MetricNames(), nil)
-	for !core.IsEmpty() {
-		time.Sleep(10 * time.Millisecond)
+	// Journal-only capture keeps newer input in a separate durable spool.
+	// Its per-metric recovery sources retain journal-before-capture order;
+	// persistence need not close the read/copy listeners for hours.
+	if app.startupInput == nil || !app.startupInput.journalOnly {
+		for !core.IsEmpty() {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	// The collector has not started yet. Separate the accumulated restore
 	// counters from live interval statistics instead of reporting minutes of
