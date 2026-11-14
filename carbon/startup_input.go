@@ -64,7 +64,7 @@ func (app *App) tryStartupInput() error {
 		// Only existing journals (or a retained capture from this path) need
 		// the journal-only recovery namespace.
 		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
-		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.bin.tail.bin*"))
+		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.tail.bin*"))
 		journalOnly = len(logs) > 0 || len(tails) > 0
 	}
 	if journalOnly {
