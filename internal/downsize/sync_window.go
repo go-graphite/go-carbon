@@ -421,10 +421,13 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 		b.windowSources.release()
 		b.windowPinned = time.Now()
 	}
-	id, err := b.windowSources.session(ctx, source)
+	_, err := b.windowSources.session(ctx, source)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.sessions[source] = &nativeRemoteSession{id: id}
+	// Keep the complete session handle, including any readiness state.
+	b.windowSources.mu.Lock()
+	c.sessions[source] = b.windowSources.sessions[source]
+	b.windowSources.mu.Unlock()
 	return c, func() {}, nil
 }
