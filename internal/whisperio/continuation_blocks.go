@@ -46,7 +46,10 @@ func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.Po
 	}
 	var block store.PointBlock
 	read := f.fs.kv.Get
-	if f.sidecar {
+	// Immutable history reads benefit from reusing open tables even for the
+	// main file. Writers keep fresh main-file lookups, which stop at the
+	// newest version instead of walking older versions in lower levels.
+	if f.sidecar || f.fs.readOnly {
 		read = f.fs.probe
 	}
 	start := f.fs.timer.Nested(stagetime.TailRead)

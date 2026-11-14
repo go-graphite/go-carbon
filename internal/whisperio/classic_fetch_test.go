@@ -83,7 +83,7 @@ func TestClassicFetchBitExact(t *testing.T) {
 			}
 			want, wantErr := w.Fetch(window[0], window[1])
 			w.Close()
-			got, gotErr := (&ContinuationCodec{}).Fetch(context.Background(), kv, m, window[0], window[1], clock)
+			got, gotErr := (&ContinuationCodec{}).Fetch(context.Background(), &snapshotProbeIO{mapContinuationIO: kv}, m, window[0], window[1], clock)
 			if (wantErr == nil) != (gotErr == nil) || (want == nil) != (got == nil) {
 				t.Fatalf("cycle %d window %v: %v/%v vs %v/%v", cycle, window, got, gotErr, want, wantErr)
 			}
@@ -101,7 +101,7 @@ func TestClassicFetchBitExact(t *testing.T) {
 		}
 		for _, window := range [][2]int{{0, 0}, {1, 900}, {751, 998}, {0, 60}} {
 			want, _ := sumOracle(t, kv, m, 1000, window[0], window[1])
-			got, err := (&ContinuationCodec{}).SumDigest(context.Background(), kv, m, window[0], window[1], clock)
+			got, err := (&ContinuationCodec{}).SumDigest(context.Background(), &snapshotProbeIO{mapContinuationIO: kv}, m, window[0], window[1], clock)
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Fatalf("cycle %d digest %v: %+v/%v vs %+v", cycle, window, got, err, want)
 			}
