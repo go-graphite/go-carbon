@@ -257,3 +257,48 @@ func TestSyncWindowRetryRetainsFailedBoundary(t *testing.T) {
 		}
 	}
 }
+
+type failedWindowRetryBackend struct {
+	*fakeSync
+	fail bool
+}
+
+func (b *failedWindowRetryBackend) WindowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
+	if b.fail && names[0] == "bad" {
+		return nil, fmt.Errorf("source window not readable")
+	}
+	return b.Digest(ctx, source, names, w.From, w.Until)
+}
+func TestSyncWindowRetrySelectionErrorKeepsResidualAndContinues(t *testing.T) {
+	ctx := context.Background()
+	b := &failedWindowRetryBackend{newFakeSync(), true}
+	w := syncRange{From: syncTestNow - 600, Until: syncTestNow - 120}
+	path := t.TempDir()
+	j, err := openSyncJournal(filepath.Join(path, "sync.jsonl"), "errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	s := &syncer{o: syncOptions{to: syncT, from: []string{syncD1}, state: path, windows: syncRanges{w}, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}, b: b, j: j, forbid: map[string]bool{}}
+	for i, n := range []string{"bad", "good"} {
+		b.store(syncD1).archives[n] = []syncArchive{{Step: 60, Points: 1000}}
+		b.store(syncD1).points[n] = map[int64]map[int64]float64{60: {w.From: 42}}
+		if err := j.append(syncRow{Kind: "window-selected", Round: i + 1, Source: syncD1, Skipped: []syncSkip{{n, syncWindowSelectionReason}}, SelectionComplete: true}); err != nil {
+			t.Fatal(err)
+		}
+		s.addResidual(syncHole{Name: n, Source: syncD1}, syncWindowSelectionReason)
+	}
+	if err := s.retryWindowSelections(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.sum.residual) != 1 || s.sum.residual[0].Name != "bad" {
+		t.Fatal("bad source error was cleared or healthy peer stalled", s.sum.residual)
+	}
+	b.fail = false
+	if err := s.retryWindowSelections(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.sum.residual) != 0 {
+		t.Fatal("recovered source stayed residual", s.sum.residual)
+	}
+}

@@ -81,10 +81,16 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			continue
 		}
 		relevant, unknown := map[string]bool{}, map[string]bool{}
+		selectionFailed := false
 		for _, w := range s.copyWindows() {
 			digests, err := s.windowPresence(ctx, r.Source, names, w)
 			if err != nil {
-				return fmt.Errorf("window retry selection on %s: %w", r.Source, err)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				event("sync_window_retry_failed", map[string]any{"level": "warn", "source": r.Source, "group": r.Round, "names": len(names), "stage": "selection", "error": err.Error(), "retained": true})
+				selectionFailed = true
+				break
 			}
 			for _, n := range names {
 				var archives []syncArchive
@@ -107,6 +113,11 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 				}
 			}
 		}
+		if selectionFailed {
+			remaining += len(names)
+			s.prog.done.Store(int64(attempted))
+			continue
+		}
 		var selected, done []string
 		for _, n := range names {
 			if unknown[n] {
@@ -127,13 +138,16 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			phase := "window-retry-" + hex.EncodeToString(hash[:16])
 			result, err := s.copyFrom(ctx, phase, r.Round, src, selected)
 			if err != nil {
-				return err
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				event("sync_window_retry_failed", map[string]any{"level": "warn", "source": r.Source, "group": r.Round, "names": len(selected), "stage": "copy", "error": err.Error(), "retained": true})
 			}
 			failed := map[string]bool{}
 			for _, n := range result.Failed {
 				failed[n] = true
 			}
-			if !result.Forbidden {
+			if err == nil && !result.Forbidden {
 				for _, n := range selected {
 					if !failed[n] {
 						done = append(done, n)
