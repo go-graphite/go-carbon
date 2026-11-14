@@ -453,6 +453,9 @@ feed:
 }
 
 func (s *syncer) copyMissing(ctx context.Context) error {
+	if s.windowOnly() {
+		return s.copyMissingWindow(ctx)
+	}
 	missing, err := s.readMissing()
 	if err != nil {
 		return err

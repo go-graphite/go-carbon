@@ -186,6 +186,18 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 
 func nativeClassicPointKey(key []byte) bool { return len(key) == 20 && key[0] == 'f' && key[9] == 'p' }
 
+// TransferSnapshot decodes a streamed record with the same archive semantics as
+// native combine. The returned snapshot must be consumed before the stream advances.
+func TransferSnapshot(ctx context.Context, record TransferMetric, codec ContinuationCodec, now func() time.Time) (Snapshot, error) {
+	if now == nil {
+		now = time.Now
+	}
+	if record.Continuation && codec == nil {
+		return Snapshot{}, ErrFormat
+	}
+	return (&Store{continuation: codec, now: now}).nativeRecordSnapshot(ctx, record)
+}
+
 func (s *Store) nativeRecordSnapshot(ctx context.Context, record TransferMetric) (Snapshot, error) {
 	m := Metadata{MetricConfig: record.Config, ID: record.Version.ID, Generation: record.Version.Generation, Continuation: record.Continuation}
 	if record.Continuation {
