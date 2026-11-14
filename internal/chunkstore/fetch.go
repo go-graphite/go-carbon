@@ -49,7 +49,7 @@ func (s *Store) AdmitRead(ctx context.Context, name string) (context.Context, fu
 	if !s.catalogMembership.mayContain(name) {
 		return ctx, cancel, nil
 	}
-	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+	if err := s.waitReadSlot(ctx); err != nil {
 		cancel()
 		return ctx, func() {}, err
 	}
@@ -70,6 +70,16 @@ func (s *Store) AdmitRead(ctx context.Context, name string) (context.Context, fu
 	return context.WithValue(ctx, readAdmissionKey{}, a), release, nil
 }
 
+// waitReadSlot tracks acquisitions queued behind the foreground read budget.
+func (s *Store) waitReadSlot(ctx context.Context) error {
+	if s.readSlots.TryAcquire(1) {
+		return nil
+	}
+	s.readQueued.Add(1)
+	defer s.readQueued.Add(-1)
+	return s.readSlots.Acquire(ctx, 1)
+}
+
 // acquireReadSlot uses a held admission from ctx, or waits for a slot.
 func (s *Store) acquireReadSlot(ctx context.Context) (func(), error) {
 	if err := s.ReadError(); err != nil {
@@ -81,7 +91,7 @@ func (s *Store) acquireReadSlot(ctx context.Context) (func(), error) {
 	if a, ok := ctx.Value(readAdmissionKey{}).(*readAdmission); ok && a.store == s && !a.released.Load() {
 		return func() {}, nil
 	}
-	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+	if err := s.waitReadSlot(ctx); err != nil {
 		return nil, err
 	}
 	if err := errors.Join(s.ReadError(), ctx.Err()); err != nil {

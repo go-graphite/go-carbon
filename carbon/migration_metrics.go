@@ -69,6 +69,7 @@ type migrationSnapshot struct {
 
 type storeStatsView struct {
 	blockLoadCapacity, blockLoadsInProgress, blockLoadWaits                 int64
+	readCapacity, readsInProgress, readsQueued                              int64
 	coldPack                                                                store.ColdPackStats
 	thaws                                                                   whisperio.ThawStats
 	classicReanchors                                                        whisperio.ClassicReanchorStats
@@ -209,6 +210,9 @@ var migrationMetricSpecs = func() []metricSpec {
 		gauge("pebble_memtable_bytes", "Memtable bytes, including queued memtables.", func(s *migrationSnapshot) float64 { return float64(s.stats.memTableBytes) }),
 		gauge("pebble_l0_files", "L0 tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.l0Files) }),
 		gauge("pebble_l0_sublevels", "L0 sublevels.", func(s *migrationSnapshot) float64 { return float64(s.stats.l0Sublevels) }),
+		gauge("store_read_capacity", "Concurrent foreground store read budget.", func(s *migrationSnapshot) float64 { return float64(s.stats.readCapacity) }),
+		gauge("store_reads_in_progress", "Foreground store reads holding admission slots.", func(s *migrationSnapshot) float64 { return float64(s.stats.readsInProgress) }),
+		gauge("store_reads_queued", "Foreground store reads waiting for admission.", func(s *migrationSnapshot) float64 { return float64(s.stats.readsQueued) }),
 		gauge("pebble_block_load_capacity", "Concurrent uncached SST block load budget.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockLoadCapacity) }),
 		gauge("pebble_block_loads_in_progress", "Uncached SST block loads holding admission slots.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockLoadsInProgress) }),
 		counter("pebble_block_load_waits_total", "Uncached SST block loads that queued for admission.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockLoadWaits) }),
@@ -647,6 +651,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,
 			transferMergeAppended: st.TransferMergeAppended, transferMergeAppendedClassic: st.TransferMergeAppendedClassic, transferMergeFallbacks: st.TransferMergeFallbacks,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
+			readCapacity: st.ReadCapacity, readsInProgress: st.ReadsInProgress, readsQueued: st.ReadsQueued,
 			blockLoadCapacity: st.BlockLoadCapacity, blockLoadsInProgress: st.BlockLoadsInProgress, blockLoadWaits: st.BlockLoadWaits,
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,

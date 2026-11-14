@@ -50,6 +50,8 @@ type Options struct {
 	// foreground readers, persisters and compactions. Zero selects 16.
 	// The limit can be changed without reopening with SetBlockLoadConcurrency.
 	BlockLoadConcurrency int
+	// ReadConcurrency bounds foreground reads; zero keeps 32. Reloadable.
+	ReadConcurrency int
 
 	// NativeImportConcurrency bounds admitted imports (1..8). NativeCombineWorkers
 	// bounds workers per import (1..32). NativeCombineMemory is the store-wide
@@ -226,6 +228,7 @@ func (o Options) WithFS(fs vfs.FS) Options {
 
 type Store struct {
 	readSlots             *fifo.Semaphore
+	readQueued            atomic.Int64
 	blockLoadSlots        *fifo.Semaphore
 	readMu                sync.Mutex // serializes read registration with cancellation
 	readCount             int
@@ -422,6 +425,9 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.Continuation != nil && !options.ExactBlocks {
 		return nil, errors.New("CWhisper continuation requires exact point blocks")
 	}
+	if options.ReadConcurrency < 0 || options.ReadConcurrency > 1024 {
+		return nil, errors.New("read concurrency must be 0..1024")
+	}
 	if options.BlockLoadConcurrency < 0 || options.BlockLoadConcurrency > 1024 {
 		return nil, errors.New("block load concurrency must be 0..1024")
 	}
@@ -504,7 +510,7 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.MemTableSize == 0 {
 		options.MemTableSize = 64 << 20
 	}
-	s := &Store{readSlots: fifo.NewSemaphore(maxConcurrentStoreReads), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s := &Store{readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
 	s.readCtx, s.readCancel = context.WithCancel(context.Background())
 	s.readDone = make(chan struct{})
 	s.maintenanceWait = options.MaintenanceWait
@@ -1253,6 +1259,7 @@ type CompactionKinds struct {
 
 type Stats struct {
 	BlockLoadCapacity, BlockLoadsInProgress, BlockLoadWaits int64
+	ReadCapacity, ReadsInProgress, ReadsQueued              int64
 
 	ColdPack                                                                                           ColdPackStats
 	TransferExport                                                                                     TransferExportStats
@@ -1356,7 +1363,9 @@ func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold 
 		levelCompacted[i], levelRead[i], levelBytes[i], levelScores[i] = level.BytesCompacted, level.BytesRead, level.Size, level.Score
 	}
 	loads := s.blockLoadSlots.Stats()
+	reads := s.readSlots.Stats()
 	stats := Stats{ColdPack: cold,
+		ReadCapacity: reads.Capacity, ReadsInProgress: reads.Outstanding, ReadsQueued: s.readQueued.Load(),
 		BlockLoadCapacity: loads.Capacity, BlockLoadsInProgress: loads.Outstanding, BlockLoadWaits: loads.NumHadToWait,
 		MirrorCanonicalBatches: s.mirrorCanonical.Load(), MirrorBlindBatches: s.mirrorBlind.Load(),
 		DiskBytes: uint64(m.DiskSpaceUsage()), WALBytes: m.WAL.Size, MemTableBytes: m.MemTable.Size,
@@ -1469,6 +1478,23 @@ func (s *Store) SetFlushRate(rate int64) error {
 		rate = 0
 	}
 	s.compactionControl.setFlushMode(rate)
+	return nil
+}
+
+func readConcurrency(limit int) int64 {
+	if limit == 0 {
+		return maxConcurrentStoreReads
+	}
+	return int64(limit)
+}
+
+// SetReadConcurrency resizes the existing foreground gate. Active reads retain
+// their slots on shrink; queued readers resume when capacity becomes available.
+func (s *Store) SetReadConcurrency(limit int) error {
+	if limit < 0 || limit > 1024 {
+		return errors.New("read concurrency must be 0..1024")
+	}
+	s.readSlots.UpdateCapacity(readConcurrency(limit))
 	return nil
 }
 

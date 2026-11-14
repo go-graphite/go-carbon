@@ -461,6 +461,9 @@ func (app *App) ReloadConfig() error {
 	}
 
 	if app.MetricStore != nil {
+		if err = app.MetricStore.SetReadConcurrency(app.Config.Whisper.StoreReadConcurrency); err != nil {
+			return err
+		}
 		if err = app.MetricStore.SetBlockLoadConcurrency(app.Config.Whisper.StoreBlockLoadConcurrency); err != nil {
 			return err
 		}
@@ -1143,6 +1146,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			CacheSize:                 conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
 			BlockLoadConcurrency:        conf.Whisper.StoreBlockLoadConcurrency,
+			ReadConcurrency:             conf.Whisper.StoreReadConcurrency,
 			CompactionWorkers:           storeCompactionWorkers(conf.Whisper.StoreCompactionWorkers, runtime.NumCPU()),
 			CompactionRate:              conf.Whisper.StoreCompactionRate,
 			CompactionHeadroom:          conf.Whisper.StoreCompactionHeadroom,
