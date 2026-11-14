@@ -42,9 +42,6 @@ func (s *syncer) copyWindows() syncRanges {
 // Copy each batch immediately, rather than waiting for the complete catalog.
 // This separate phase leaves old full-history copy/precheck rows reusable.
 func (s *syncer) copyMissingWindow(ctx context.Context) error {
-	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
-		defer b.beginWindowCopy()()
-	}
 	f, scan, err := openLines(s.missingPath())
 	if err != nil {
 		return err
@@ -59,6 +56,16 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		if err := s.j.append(syncRow{Kind: "window-policy", Identity: string(policy)}); err != nil {
 			return err
 		}
+	}
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-resolved" }) {
+		s.sum.Copied += r.Copied
+	}
+	if err := s.retryWindowSelections(ctx); err != nil {
+		return err
+	}
+	resolved := s.resolvedWindowSelections()
+	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
+		defer b.beginWindowCopy()()
 	}
 	s.phase("copy")
 	s.prog.begin("window missing", s.sum.Missing)
@@ -126,7 +133,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			}
 			if r, ok := selections[k]; ok && r.SelectionComplete {
 				for _, skip := range r.Skipped {
-					s.addResidual(syncHole{Name: skip.Name, Source: source}, skip.Reason)
+					if !resolved[syncWindowSelectionKey{group, source}][skip.Name] {
+						s.addResidual(syncHole{Name: skip.Name, Source: source}, skip.Reason)
+					}
 				}
 			}
 			if r, ok := completed[k]; ok && r.SelectionComplete {
@@ -163,7 +172,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 				}
 				for _, n := range subset {
 					if unresolved[n] {
-						reason := "source window selection unresolved: missing metadata or pending snapshot"
+						reason := syncWindowSelectionReason
 						skipped = append(skipped, syncSkip{n, reason})
 						s.addResidual(syncHole{Name: n, Source: source}, reason)
 						event("sync_window_selection_skipped", map[string]any{"level": "warn", "source": source, "metric": n, "reason": reason})

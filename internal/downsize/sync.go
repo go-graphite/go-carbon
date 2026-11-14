@@ -472,6 +472,9 @@ func (s *syncer) run(ctx context.Context) error {
 	if err := s.copyMissing(ctx); err != nil {
 		return fmt.Errorf("copy missing: %w", err)
 	}
+	if err := s.retryWindowSelections(ctx); err != nil {
+		return fmt.Errorf("retry window selections: %w", err)
+	}
 	return s.verifyAndFill(ctx)
 }
 
