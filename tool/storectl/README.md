@@ -45,7 +45,7 @@ go directly to transfer after batched source retention checks; coverage comparis
 runs after transfer, when both stores hold the name.
 
 ```sh
-export BUCKYD_TOKEN=...  # read+update JWT, supplied by the operator
+# sync signs and refreshes JWTs from --jwt-secret (the default path is used here)
 storectl sync \
   --source http://donor-a:4242 --source http://donor-b:4242 \
   --to http://target:4242 --state ./block-state --streams 0 \
@@ -55,10 +55,10 @@ storectl sync \
 ```
 
 All three gap windows are selected, copied, verified and filled in this invocation;
-no separate gap commands or shell receipt chain is needed. Repeating this exact
-command resumes the durable discovery cursor, verification batches and native
-receipts. Windows are half-open `[FROM, UNTIL)` in Unix seconds. Keep their order,
-`--verify-batch` and `--settle` unchanged on resume.
+no separate gap commands or shell receipt chain is needed.
+`storectl sync --resume ./block-state` restores the saved configuration and
+continues the durable discovery cursor, verification batches and native receipts.
+Windows are half-open `[FROM, UNTIL)` in Unix seconds.
 
 - Full-history copy/fill is enabled by default, including runs with windows. Every
   selected window is verified for every name; additional full histories are sampled
@@ -122,6 +122,29 @@ window dispatch into older branches together; use `--no-full-history` to retain
 an existing window-only journal, and `--full-history` (or no scope flag) for an
 existing full-history journal. Scope is bound to the journal identity, so an
 incompatible resume fails rather than silently widening old work.
+
+### Resume without reconstructing a command
+
+`sync` saves its effective flags and local ring/names/block inputs in the state
+folder, alongside its durable journal and progress JSON. Resume it with:
+
+```sh
+storectl sync --resume /var/lib/carbon/sync-state
+storectl sync --resume /var/lib/carbon/sync-state --streams 8 --rate 100000000
+```
+
+Only `--streams` and `--rate` (aggregate copied bytes/s, paced between completed
+batches; zero means unlimited) may override a saved run. Scope, phase opt-outs,
+read-back settings and authentication configuration remain frozen. Use a new
+state directory to change them. An old state without `config.json` needs its
+original flags once alongside `--resume`; the tool checks the journal identity
+and saves the configuration for subsequent resumes.
+
+Sync signs its own buckyd JWT using `--jwt-secret`, defaulting to
+`/etc/go-carbon/buckyd_api_jwt_secret`. The shared signer renews its four-hour
+token hourly at request time, including after idle phases. It rereads the secret
+file on renewal. Only the secret path is saved; tokens and signing keys remain in
+memory. A token-minting wrapper or `BUCKYD_TOKEN` is unnecessary for sync.
 
 ## Resize / merge baseline
 
@@ -420,7 +443,7 @@ heavy synthetic fixture, not production disk/NIC throughput. Run with
 
 Sync also accepts `--max-batch-bytes` and `--transfer-idle-timeout` and
 forwards them to every missing-name and hole-fill transfer, including probes
-and retries. For example, resume a busy target with smaller batches:
+and retries. Configure these limits when starting a new run:
 
 ```sh
 storectl sync --source http://source:4242 --to http://target:4242 \
@@ -493,18 +516,16 @@ sampling is disabled in window-only mode. To request the previous full-history
 missing-name copies, fills and `--sample-every` behavior, add `--full-history`.
 Without `--window`, behavior is unchanged.
 
-An existing window sync journal can resume in window-only mode: completed
-full-history work already covers the windows, while new selections and native
-receipts have separate journal records. Switching to `--full-history` requires
-a fresh state directory. Keep `--verify-batch`, the windows and the settle
-cutoff unchanged when resuming a partially completed window transfer.
+The saved configuration fixes the full-history/window-only scope, windows,
+verification batches and settle cutoff. Changing that configuration requires a
+fresh state directory; `--resume` only allows stream-count and rate overrides.
 
 A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. Skipped selections are retried on fresh native pins when resuming and again after the missing-name scan. Only a complete window selection, followed by a successful window-only copy when points exist, writes a durable resolution. Original selection and native copy intents stay unchanged. Unresolved source coverage still prevents a successful exit even if another replica or serving-archive verification finds no holes; it is never treated as empty history.
 
 ### Durable discovery and progress snapshots
 
-Rerun the same command with the same `--state` after SIGINT, a deadline, or a
-crash. Sync appends its union and missing-name files in bounded chunks, fsyncs
+Run `storectl sync --resume <state-dir>` after SIGINT, a deadline, or a crash.
+Sync appends its union and missing-name files in bounded chunks, fsyncs
 both, and journals their byte offsets and each source's last consumed name.
 Recovery discards only bytes after that checkpoint and continues each source
 with `after=<saved name>`. Prefetched pages never advance the saved cursor.

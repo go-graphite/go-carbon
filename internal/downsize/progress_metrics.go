@@ -2,6 +2,7 @@ package downsize
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -81,7 +82,7 @@ func progressMetricIdentity(host string, args []string) (prefix, state string) {
 			break
 		}
 		key, value, equals := strings.Cut(args[i], "=")
-		if key != "--state" && key != "-state" {
+		if key != "--state" && key != "-state" && key != "--resume" && key != "-resume" {
 			continue
 		}
 		if !equals && i+1 < len(args) {
@@ -89,6 +90,14 @@ func progressMetricIdentity(host string, args []string) (prefix, state string) {
 			value = args[i]
 		}
 		state = value
+		if key == "--resume" || key == "-resume" {
+			if data, err := os.ReadFile(filepath.Join(value, "config.json")); err == nil {
+				var saved savedSyncConfig
+				if json.Unmarshal(data, &saved) == nil && saved.CopyState != "" {
+					state = saved.CopyState
+				}
+			}
+		}
 	}
 	if state == "" {
 		return "", ""

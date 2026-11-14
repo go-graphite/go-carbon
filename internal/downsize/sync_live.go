@@ -27,6 +27,9 @@ import (
 // multi-fetch, and copies through the plan-free copy engine (planFreeCopy),
 // which owns batching, retries and its own resume journal.
 type syncLiveOptions struct {
+	auth         *hostTokenCache
+	authOrigins  []string
+	rate         *syncRateLimit
 	noCopy       bool
 	copyTemplate *copyOptions
 	carbonPort   int
@@ -105,7 +108,10 @@ func syncBusyDelay(busy int) time.Duration {
 func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: 2 * time.Second, transferIdle: defaultTransferIdle},
 		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 2 * time.Minute}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	return &syncLiveBackend{o: o, m: m, client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64}}, copy: planFreeCopy}
+	b := &syncLiveBackend{o: o, m: m, client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64}}, copy: planFreeCopy}
+	withSyncJWT(b.m.client, o.auth, o.authOrigins...)
+	withSyncJWT(b.client, o.auth, o.authOrigins...)
+	return b
 }
 
 // carbon maps a buckyd origin to the same host's carbonserver.
@@ -418,7 +424,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 	if idle == 0 {
 		idle = defaultTransferIdle
 	}
-	o := copyOptions{froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
+	o := copyOptions{auth: b.o.auth, rate: b.o.rate, froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
 		streams: b.o.copyStreams, maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
 		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute}
 	if b.o.copyTemplate != nil {

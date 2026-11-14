@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,12 +42,19 @@ type syncCommand struct {
 	live          syncLiveOptions
 	legacyJournal bool
 	explicit      map[string]bool
+	resuming      bool
+	config        savedSyncConfig
+	jwtSecret     string
+	rate          int64
 }
 
 func parseSyncCommand(args []string) (syncCommand, error) {
 	var c syncCommand
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
+	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
+	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only --streams and --rate may override it")
+	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
 	flags.Lookup("state").Usage = "state directory; existing copy journal FILE resumes first, with sync state in FILE.sync"
 	flags.Lookup("streams").Usage = "total per-host transfer budget; 0 uses source/target advertised capacity; serial verify and copy phases share this budget"
 	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
@@ -69,20 +78,23 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if flags.NArg() != 0 {
 		return c, fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
+	c.explicit = map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { c.explicit[f.Name] = true })
+	if err := c.restoreConfig(flags, *resume); err != nil {
+		return c, err
+	}
 	if *noFullHistory {
 		c.sync.fullHistory = false
 	}
 	if *noFullHistory && len(c.sync.windows) == 0 {
 		return c, errors.New("--no-full-history requires at least one --window")
 	}
-	c.explicit = map[string]bool{}
-	flags.Visit(func(f *flag.Flag) { c.explicit[f.Name] = true })
 	// Sampling is inactive outside full-history window verification. Retain its
 	// historical identity value there so unchanged old journals still resume.
 	if !c.explicit["sample-every"] && (len(c.sync.windows) == 0 || !c.sync.fullHistory) {
 		c.sync.sampleEvery = 64
 	}
-	if c.copy.streams < 0 || c.live.copyStreams < 0 || c.copy.maxBytes < 65536 || c.copy.transferIdle <= 0 || c.copy.maxNames < 1 || c.copy.maxNames > chunkstore.MaxTransferMetrics || c.copy.maxFailures < 0 || c.copy.tick <= 0 || c.copy.maxBackoff < c.copy.tick || c.copy.stallTimeout <= 0 || c.copy.progressInterval <= 0 || c.live.hostWait <= 0 || c.live.copyAttempts < 1 {
+	if c.rate < 0 || c.copy.streams < 0 || c.live.copyStreams < 0 || c.copy.maxBytes < 65536 || c.copy.transferIdle <= 0 || c.copy.maxNames < 1 || c.copy.maxNames > chunkstore.MaxTransferMetrics || c.copy.maxFailures < 0 || c.copy.tick <= 0 || c.copy.maxBackoff < c.copy.tick || c.copy.stallTimeout <= 0 || c.copy.progressInterval <= 0 || c.live.hostWait <= 0 || c.live.copyAttempts < 1 {
 		return c, errors.New("invalid streams, batch limits, retry settings or timeouts")
 	}
 	if c.copy.engine != "metric" {
@@ -139,6 +151,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	c.live.noCopy = c.sync.noCopy
 	c.live.tokenEnv, c.live.copyBytes, c.live.copyIdle = c.copy.tokenEnv, c.copy.maxBytes, c.copy.transferIdle
+	c.captureConfig(flags)
 	return c, nil
 }
 
@@ -206,6 +219,26 @@ func SyncMain(ctx context.Context, args []string) error {
 	if c.explicit["verify-streams"] {
 		event("deprecated_flag", map[string]any{"level": "warn", "flag": "--verify-streams", "reason": "use only --streams; phases share one budget"})
 	}
+	if err := os.MkdirAll(c.sync.state, 0700); err != nil {
+		return err
+	}
+	owner, err := lockResumeState(filepath.Join(c.sync.state, "command"))
+	if err != nil {
+		return err
+	}
+	defer owner.Close()
+	if err := c.saveConfig(); err != nil {
+		return err
+	}
+	// The same cache serves discovery, native exports, verification and copy.
+	auth := &hostTokenCache{readSecret: func() ([]byte, error) { return os.ReadFile(c.jwtSecret) }}
+	if _, err := auth.get(c.jwtSecret); err != nil {
+		return fmt.Errorf("--jwt-secret %s: %w", c.jwtSecret, err)
+	}
+	c.copy.auth, c.live.auth = auth, auth
+	c.live.authOrigins = append(append([]string(nil), c.sync.from...), c.sync.to)
+	limiter := &syncRateLimit{bytesPerSecond: c.rate}
+	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
 	streams := c.copy.streams
 	var sourceCapacity int
@@ -241,6 +274,11 @@ func SyncMain(ctx context.Context, args []string) error {
 	c.sync.policy = c.policy(streams)
 	if c.sync.policy.CopyBatchBytes > 0 && target.MaxBodyBytes > 0 {
 		c.sync.policy.CopyBatchBytes = min(c.sync.policy.CopyBatchBytes, target.MaxBodyBytes)
+	}
+	c.config.Flags["streams"] = strconv.Itoa(streams)
+	c.resuming = true
+	if err := c.saveConfig(); err != nil {
+		return err
 	}
 	c.copy.policy = c.sync.policy
 	c.live.copyTemplate = &c.copy

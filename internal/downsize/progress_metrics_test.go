@@ -205,9 +205,9 @@ func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
 			}
 		}
 	}
-	args := []string{"sync", "--from", src, "--to", dst, "--state", state, "--no-verify", "--streams", "1"}
+	args := []string{"sync", "--from", src, "--to", dst, "--state", state, "--jwt-secret", syncTestJWTSecret(t), "--no-verify", "--streams", "1"}
 	first := invoke(args)
-	args[len(args)-1] = "2"
+	args = []string{"sync", "--resume", state + ".sync", "--streams", "2"}
 	second := invoke(args)
 	if len(first) != 1 || !reflect.DeepEqual(first, second) {
 		t.Fatalf("resume split metric identity:\n%v\n%v", first, second)
@@ -223,6 +223,7 @@ func TestProgressMetricsStateIdentityAndParentTransition(t *testing.T) {
 	for _, args := range [][]string{
 		{"sync", "--state=" + filepath.Join(filepath.Dir(state), ".", "state")},
 		{"sync", "-state", state, "--streams", "128"},
+		{"sync", "--resume", state, "--streams", "128"},
 		{"sync", "--state=discard", "--state=" + state},
 	} {
 		if got, _ := progressMetricIdentity("runner", args); got != prefix {

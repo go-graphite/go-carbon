@@ -310,6 +310,9 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 						return err
 					}
 					t = j.tasks[taskKey(t)]
+					if err := b.o.rate.wait(ctx, t.Bytes); err != nil {
+						return err
+					}
 				}
 				// Native exports deliberately omit incomplete trailing coarse
 				// buckets. Never count such an in-window omission as success.

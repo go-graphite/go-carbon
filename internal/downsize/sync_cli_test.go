@@ -216,7 +216,7 @@ func TestSyncInactiveSamplingWarns(t *testing.T) {
 		os.Stdout = w
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		runErr := SyncMain(ctx, syncCLIArgs(t, append(extra, "--streams", "1")...))
+		runErr := SyncMain(ctx, syncCLIArgs(t, append(extra, "--streams", "1", "--jwt-secret", syncTestJWTSecret(t))...))
 		os.Stdout = old
 		_ = w.Close()
 		var events []map[string]any
@@ -269,7 +269,7 @@ func TestSyncEndToEndAndLegacyTransition(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			args := []string{"--source", source.URL, "--to", target.URL, "--state", state}
+			args := []string{"--source", source.URL, "--to", target.URL, "--state", state, "--jwt-secret", syncTestJWTSecret(t)}
 			if err := Main(append([]string{"sync"}, args...)); err != nil {
 				t.Fatal(err)
 			}
