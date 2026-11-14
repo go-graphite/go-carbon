@@ -487,6 +487,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	}
 	shard.moveSource(p, values.identity())
 	values.firstArrival = first
+	values.Arrival.Store(arrivalNanos(first))
 	shard.log.mergeFlight(values, p)
 	refs, independent := shard.recoverySources[values.pending]
 	if !independent || refs.needsJournal() {
@@ -851,6 +852,17 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
 	}
+	if restored && p.FirstArrival != 0 && !immediate && (values.firstArrival.IsZero() || p.FirstArrival < values.firstArrival.UnixNano()) {
+		if exists {
+			shard.writeout.add(values, -1)
+		}
+		values.firstArrival = time.Unix(0, p.FirstArrival)
+		values.setFlag(itemStartup, false)
+		if exists {
+			shard.writeout.add(values, 1)
+		}
+	}
+	values.Arrival.Store(arrivalNanos(values.firstArrival))
 	metadataChanged := shard.setItemThrottle(values, throttleState)
 	if source != nil {
 		shard.trackSource(shard.itemIdentity(values), source)
@@ -888,7 +900,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	if !restored && !recovered {
 		shard.livePoints += uint64(count)
 	}
-	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
+	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore && (p.FirstArrival == 0 || immediate))
 	if series != nil && !exists && hash == series.hash && p.Metric == series.name {
 		shard.bindStreamHint(series.hint, values, slot)
 	}

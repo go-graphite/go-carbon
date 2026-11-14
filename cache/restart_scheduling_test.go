@@ -186,7 +186,7 @@ func TestWarmFirstQueueRestartsAfterCancelledAdmission(t *testing.T) {
 	}
 }
 
-func TestWarmFirstQueueKeepsFullyWarmSnapshot(t *testing.T) {
+func TestWarmFirstQueuePlansWarmOverlap(t *testing.T) {
 	c := New()
 	defer c.Stop()
 	c.SetRestartOrder(func() bool { return true })
@@ -201,7 +201,7 @@ func TestWarmFirstQueueKeepsFullyWarmSnapshot(t *testing.T) {
 	q.RLock()
 	refreshAt := q.refreshAt
 	q.RUnlock()
-	if !refreshAt.IsZero() {
-		t.Fatal("fully warm work was forced to rescan before draining")
+	if refreshAt.IsZero() {
+		t.Fatal("fully warm work cannot overlap its next plan")
 	}
 }

@@ -66,7 +66,7 @@ func (c *Cache) SetWriteoutStartupSpread(on bool) {
 func (c *Cache) spreadStartup(values *item, s *cacheSettings, now time.Time, held bool) {
 	if !s.writeoutPhase.IsZero() {
 		// Retain real arrival age; the stable phase supplies the first window too.
-		values.setFlag(itemStartup, held)
+		values.setFlag(itemStartup, false)
 		return
 	}
 	if clock := s.startupWriteout; clock != nil {
@@ -123,7 +123,9 @@ func (c *Cache) SetWriteoutRestoreSpread(on bool) {
 // spread fraction.
 func (s *cacheSettings) restoreArrival(values *item, now time.Time) time.Time {
 	if !s.writeoutPhase.IsZero() {
-		return now
+		// Legacy dumps have no arrival age. Do not create another full delay
+		// on upgrade: normal writer admission bounds their immediate drain.
+		return time.Time{}
 	}
 	at := time.Duration(float64(s.writeoutMaxDelay) * float64(values.spread) / (1 << 16))
 	return now.Add(at - s.delayFor(values))
@@ -337,7 +339,9 @@ func (c *Cache) SetWriteoutPacing(on bool) {
 		return
 	}
 	if on {
-		s.writeoutPhase = time.Now()
+		// Wall-clock epoch survives process restarts; the metric hash supplies
+		// its phase independently of the time this cache was constructed.
+		s.writeoutPhase = time.Unix(0, 0)
 	} else {
 		s.writeoutPhase = time.Time{}
 	}
@@ -368,7 +372,7 @@ func writeoutDeadline(values *item, s *cacheSettings) time.Time {
 func writeoutDeadlineClock(values *item, s *cacheSettings) time.Time {
 	first := values.firstArrival
 	if s.batching() && !s.writeoutPhase.IsZero() && !first.IsZero() {
-		if !values.has(itemStartup) && values.count() >= s.minPointsFor(values) {
+		if values.count() >= s.minPointsFor(values) {
 			return time.Time{}
 		}
 		return s.phaseDeadline(values)

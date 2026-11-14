@@ -36,7 +36,7 @@ func (c *Cache) ResumeStartupWriteout(at time.Time) {
 // Capture admission before release together with its clock, even if release
 // races with assigning the item's first window.
 func (s *cacheSettings) writeoutTime(now time.Time) (time.Time, bool) {
-	if clock := s.startupWriteout; clock != nil {
+	if clock := s.startupWriteout; clock != nil && s.writeoutPhase.IsZero() {
 		if released := clock.released.Load(); released != nil {
 			return now.Add(-released.Sub(clock.at)), false
 		}
@@ -46,7 +46,7 @@ func (s *cacheSettings) writeoutTime(now time.Time) (time.Time, bool) {
 }
 
 func (s *cacheSettings) writeoutWall(at time.Time) time.Time {
-	if clock := s.startupWriteout; clock != nil && !at.IsZero() {
+	if clock := s.startupWriteout; clock != nil && s.writeoutPhase.IsZero() && !at.IsZero() {
 		if released := clock.released.Load(); released != nil {
 			return at.Add(released.Sub(clock.at))
 		}

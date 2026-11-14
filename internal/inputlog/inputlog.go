@@ -54,8 +54,9 @@ type Entry struct {
 // instead of looking the name up for every point. Only the log writes the
 // id, once per item and stream; the cache only reads it.
 type StreamRef struct {
-	Metric string
-	state  atomic.Uint64 // stream epoch << 32 | id
+	Metric  string
+	Arrival atomic.Int64  // cache residence origin, Unix nanoseconds
+	state   atomic.Uint64 // stream epoch << 32 | id
 }
 
 // NewStreamRef returns a reference to metric with no stream id.
@@ -700,6 +701,7 @@ func (l *Log) encodePartition(p int, gen, seq uint64, w *workerBuffer) int {
 func (l *Log) compress(part *partitionBuffer, p int, raw []byte, rows int) {
 	start := len(part.out)
 	part.out = l.enc.EncodeAll(raw, part.out)
+	part.out = appendArrivalFrame(part.out, part.enc.frameAges)
 	payload := part.out[start:]
 	part.frames = append(part.frames, frameMeta{start: start, h: frameHeader{
 		codec: codecStream, partition: uint16(p), length: uint32(len(payload)), rawLength: uint32(len(raw)),
