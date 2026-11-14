@@ -21,7 +21,6 @@ func TestTransferPartitionedSplitMatchesSingles(t *testing.T) {
 		target, _ := openTestStore(t, t.TempDir(), Options{fs: vfs.NewMem(), ExactBlocks: true, SyncInterval: time.Hour})
 		t.Cleanup(func() { closeTestStore(t, source); closeTestStore(t, target) })
 		target.transferSplitSingles = singles
-		target.transferRetireLocked = singles
 		base := int64(now - now%60)
 		names := make([]string, 8)
 		for i := range names {

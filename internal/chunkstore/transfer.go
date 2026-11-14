@@ -704,10 +704,8 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 	unionScratch := transferUnionPool.Get().(*transferUnionScratch)
 	defer unionScratch.release()
 	b := s.db.NewIndexedBatch()
-	retire := s.db.NewBatch()
 	defer func() {
 		if prepared == nil {
-			_ = retire.Close()
 			_ = b.Close()
 		}
 	}()
@@ -872,14 +870,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				}
 			}
 			p.Digest, p.Counts = snapshotDigest(want)
-			// These point deletes address only the replaced, never-reused ID.
-			// Keep them out of the stripe-held publication commit. A failed
-			// validation discards them with this preparation.
-			cleanup := retire
-			if s.transferRetireLocked {
-				cleanup = b
-			}
-			if err := s.retireTransferFrom(ctx, cleanup, view, old); err != nil {
+			if err := s.retireTransferFrom(ctx, b, view, old); err != nil {
 				return nil, err
 			}
 		}
@@ -921,7 +912,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			return nil, err
 		}
 	}
-	return &preparedTransfer{batch: b, retire: retire, expected: expected, metas: metas, proofs: proofs, sidecars: sidecars}, nil
+	return &preparedTransfer{batch: b, expected: expected, metas: metas, proofs: proofs, sidecars: sidecars}, nil
 }
 
 // retainTransferSlots applies the same finite archive capacity as an ordinary

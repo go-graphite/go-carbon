@@ -45,7 +45,3 @@ func (s *Store) SetTransferBatchBytesForTest(n int) { s.transferBatchBytes = n }
 
 // PebbleMetricsForTest renders the Pebble LSM metrics (levels, files, sizes).
 func (s *Store) PebbleMetricsForTest() string { return s.db.Metrics().String() }
-
-// SetTransferRetireLockedForTest selects the former publication/retirement
-// transaction as a differential oracle.
-func (s *Store) SetTransferRetireLockedForTest(locked bool) { s.transferRetireLocked = locked }
