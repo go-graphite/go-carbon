@@ -24,6 +24,14 @@ type preparedTransfer struct {
 // fall back to decoding under writer stripes. The reserved source ID stays
 // immutable until the successful publication of this group.
 func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, metas []Metadata) ([]TransferProof, error) {
+	// Prepare independently from the outset. A group prepared as one indexed
+	// batch cannot retain its unchanged names when one stripe is busy or one
+	// target changes: splitting then decodes and merges the whole group again.
+	// Partitioned publication still commits the free names together, and only
+	// rebuilds a name after its own target revision changes.
+	if len(records) > 1 && !s.transferPrepareGroup && !s.transferSplitSingles {
+		return s.publishTransferPartitioned(ctx, records, metas)
+	}
 	// Busy stripes usually stay busy on a draining survivor. Avoid preparing a
 	// large batch only to discard it on the same contention after decoding.
 	if len(records) > 1 {

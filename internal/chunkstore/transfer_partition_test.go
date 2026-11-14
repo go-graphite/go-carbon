@@ -74,11 +74,11 @@ func TestTransferPartitionedSplitMatchesSingles(t *testing.T) {
 		}
 	}
 	// Singles: group + 8 names + one retry of names[0]. Partitioned: group,
-	// one round for all 8 names, one retry of names[0] alone.
+	// one round for all 8 names, two retries of names[0] alone.
 	if singleCalls != 10 || partCalls != 3 {
 		t.Fatalf("preparation rounds singles=%d partitioned=%d", singleCalls, partCalls)
 	}
-	if singleStats.StripeHolds[1] < 8 || partStats.StripeHolds[1] != 1 {
+	if singleStats.StripeHolds[1] < 8 || partStats.StripeHolds[1] != 2 {
 		t.Fatalf("commits singles=%v partitioned=%v", singleStats.StripeHolds, partStats.StripeHolds)
 	}
 }

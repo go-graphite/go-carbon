@@ -15,6 +15,9 @@ func (s *Store) SetTransferRereadMetadataForTest(on bool) { s.transferRereadMeta
 // contended groups, the behaviour before partitioned publication.
 func (s *Store) SetTransferSplitSinglesForTest(on bool) { s.transferSplitSingles = on }
 
+// SetTransferPrepareGroupForTest restores preparation before partitioning.
+func (s *Store) SetTransferPrepareGroupForTest(on bool) { s.transferPrepareGroup = on }
+
 // FlushForTest flushes the memtable so reads probe sstable filter blocks.
 func (s *Store) FlushForTest() error { return s.db.Flush() }
 

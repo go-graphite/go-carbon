@@ -258,6 +258,8 @@ type Store struct {
 	transferRereadMetadata bool
 	// transferSplitSingles restores the single-name split of contended groups (tests).
 	transferSplitSingles bool
+	// transferPrepareGroup restores all-or-nothing group preparation (tests).
+	transferPrepareGroup bool
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
 	fetchTimings        fetchTimingCounters
