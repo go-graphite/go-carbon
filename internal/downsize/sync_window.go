@@ -320,6 +320,7 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 	}
 	out := map[string][]syncDigest{}
 	tooLarge := errors.New("window selection request too large")
+	conflict := errors.New("window selection conflict")
 	var readSubset func([]string) error
 	readSubset = func(subset []string) error {
 		body, _ := json.Marshal(struct {
@@ -346,7 +347,11 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 				return tooLarge
 			}
 			if response.StatusCode != http.StatusOK {
-				return fmt.Errorf("window export HTTP %d", response.StatusCode)
+				message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+				if response.StatusCode == http.StatusConflict {
+					return fmt.Errorf("%w: %s", conflict, message)
+				}
+				return fmt.Errorf("window export HTTP %d: %s", response.StatusCode, message)
 			}
 			stream, err := chunkstore.NewTransferStream(response.Body)
 			if err != nil {
@@ -406,12 +411,12 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 			return ctx.Err()
 		}
 		truncated := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		if errors.Is(err, tooLarge) || truncated {
+		if errors.Is(err, tooLarge) || errors.Is(err, conflict) || truncated {
 			if len(subset) <= 1 {
-				if truncated {
+				if truncated || errors.Is(err, conflict) {
 					// A failed stream cannot prove empty history. Isolate the
 					// name as unresolved so other metrics keep moving.
-					event("sync_window_export_unresolved", map[string]any{"level": "warn", "source": source, "metric": subset[0], "reason": "truncated native window export"})
+					event("sync_window_export_unresolved", map[string]any{"level": "warn", "source": source, "metric": subset[0], "reason": err.Error()})
 					out[subset[0]] = []syncDigest{{Hash: syncWindowUnresolved}}
 					return nil
 				}
