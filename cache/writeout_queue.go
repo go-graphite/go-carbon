@@ -17,9 +17,9 @@ type WriteoutQueue struct {
 	// p := cache.Pop(q.Metric)
 	queue chan string
 	// Retain one finite plan across refreshes so a busy warm prefix cannot
-	// indefinitely discard its cold tail. Consumers alternate both plans.
+	// indefinitely discard its tail, including name-ordered recovery drains.
+	// Consumers alternate both plans.
 	retained         chan string
-	hasCold          bool
 	turn             atomic.Uint64
 	refreshAt        time.Time
 	refreshRemaining int
@@ -140,7 +140,7 @@ func (q *WriteoutQueue) update() {
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
 	started := time.Now()
-	queue, next, hasCold := q.cache.makeQueuePlan(started)
+	queue, next, _ := q.cache.makeQueuePlan(started)
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
 		next = notBefore
@@ -149,12 +149,11 @@ func (q *WriteoutQueue) update() {
 	q.Lock()
 	if len(q.retained) == 0 {
 		q.retained = nil
-		if q.hasCold {
+		if q.queue != nil {
 			q.retained = q.queue
 		}
 	}
 	q.queue = queue
-	q.hasCold = hasCold
 	q.refreshAt = time.Time{}
 	q.refreshRemaining = 0
 	if queue != nil {
