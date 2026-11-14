@@ -304,20 +304,21 @@ type syncResidual struct {
 }
 
 type syncer struct {
-	o        syncOptions
-	b        syncBackend
-	j        *syncJournal
-	copied   map[string]bool // missing names copied in this sync
-	masks    sync.Map        // name -> source mask, for names being verified
-	owner    func(string) bool
-	forbid   map[string]bool
-	sum      syncSummary
-	started  time.Time
-	failedCp map[string]bool // names whose copy failed
-	both     int             // names on the target and on a source
-	down     sync.Map        // store -> reason: unavailable for --host-wait
-	digests  sync.Map        // store -> bool: serves /v1/transfer/digest
-	prog     syncProgress
+	legacyCopyReceipts bool // keep the selection and transport of old window campaigns
+	o                  syncOptions
+	b                  syncBackend
+	j                  *syncJournal
+	copied             map[string]bool // missing names copied in this sync
+	masks              sync.Map        // name -> source mask, for names being verified
+	owner              func(string) bool
+	forbid             map[string]bool
+	sum                syncSummary
+	started            time.Time
+	failedCp           map[string]bool // names whose copy failed
+	both               int             // names on the target and on a source
+	down               sync.Map        // store -> reason: unavailable for --host-wait
+	digests            sync.Map        // store -> bool: serves /v1/transfer/digest
+	prog               syncProgress
 }
 
 func syncIdentity(o syncOptions) (string, error) {
@@ -479,7 +480,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	}
 	event("sync_copy", map[string]any{"phase": phase, "round": round, "source": source, "names": len(names), "journal": journal})
 	var res syncCopyResult
-	if s.windowOnly() {
+	if s.windowOnly() && !s.legacyCopyReceipts {
 		backend, ok := s.b.(syncWindowBackend)
 		if !ok {
 			return res, errors.New("backend does not support window-only copy")
@@ -496,7 +497,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		event("sync_source_forbidden", map[string]any{"level": "error", "source": source, "target": s.o.to, "hint": "the target transfer-sources allowlist does not list this source; continuing with the others"})
 	}
 	var selected []string
-	if s.windowOnly() {
+	if s.windowOnly() && !s.legacyCopyReceipts {
 		selected = names
 	}
 	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, SelectionComplete: s.windowOnly()}); err != nil {

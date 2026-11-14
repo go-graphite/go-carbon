@@ -328,8 +328,12 @@ func openLines(path string) (*os.File, *bufio.Scanner, error) {
 func (s *syncer) unionSource() syncNameSource {
 	var f *os.File
 	var scanner *bufio.Scanner
+	total := s.sum.Discovered
+	if s.legacyCopyReceipts {
+		total = s.both + len(s.copied)
+	}
 	return syncNameSource{
-		total: s.sum.Discovered,
+		total: total,
 		next: func() (string, uint64, error) {
 			if f == nil {
 				var err error
@@ -338,9 +342,12 @@ func (s *syncer) unionSource() syncNameSource {
 				}
 			}
 			for scanner.Scan() {
-				name, mask, _, err := parseUnionLine(scanner.Text())
+				name, mask, onTarget, err := parseUnionLine(scanner.Text())
 				if err != nil {
 					return "", 0, err
+				}
+				if s.legacyCopyReceipts && (mask == 0 || (!onTarget && !s.copied[name])) {
+					continue
 				}
 				return name, mask, nil
 			}
@@ -551,6 +558,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 	legacy := len(s.j.find(func(r syncRow) bool {
 		return r.Kind == "copied" && (r.Phase == "missing" || r.Phase == "missing-batch")
 	})) > 0
+	s.legacyCopyReceipts = s.windowOnly() && legacy
 	if s.windowOnly() && !legacy {
 		return s.copyMissingWindow(ctx)
 	}
