@@ -67,7 +67,7 @@ func TestJournalOnlyCaptureBeforeStorage(t *testing.T) {
 // A retired manifest is retained as evidence; neither complete nor partial
 // checkpoint files may be bypassed, and no manifest is rewritten.
 func TestJournalCaptureRetiredManifest(t *testing.T) {
-	for _, kind := range []string{"retired", "partial", "present"} {
+	for _, kind := range []string{"retired", "partial", "present", "retained_capture", "direct_fence"} {
 		t.Run(kind, func(t *testing.T) {
 			app := New("")
 			cfg := NewConfig()
@@ -90,13 +90,27 @@ func TestJournalCaptureRetiredManifest(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(cfg.InputLog.Path, "0000000000000001.log"), nil, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if kind != "retired" {
+			if kind == "partial" || kind == "present" {
 				if err := os.WriteFile(filepath.Join(cfg.Dump.Path, manifest.Cache.Name), nil, 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if kind == "present" {
 				if err := os.WriteFile(filepath.Join(cfg.Dump.Path, manifest.WAL.Name), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			retained := kind == "retained_capture" || kind == "direct_fence"
+			if retained {
+				tail := recovery.TailName(manifest.WAL.Name) + ".capture-epoch-00000000000000000001"
+				data := []byte{1}
+				if kind == "direct_fence" {
+					tail += startupDirectSuffix
+					data = nil
+				} else {
+					tail += ".000000.000000000000.tail.bin"
+				}
+				if err := os.WriteFile(filepath.Join(cfg.Dump.Path, tail), data, 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -108,8 +122,11 @@ func TestJournalCaptureRetiredManifest(t *testing.T) {
 				defer app.startupInput.close()
 				defer app.startupInput.receiver.Stop()
 			}
-			if captured != (kind == "retired") {
+			if captured != (kind == "retired" || retained) {
 				t.Fatalf("capture=%v for %s checkpoint", captured, kind)
+			}
+			if captured && app.startupInput.journalOnly != !retained {
+				t.Fatalf("journalOnly=%v for %s checkpoint", app.startupInput.journalOnly, kind)
 			}
 			after, err := os.ReadFile(path)
 			if err != nil || !bytes.Equal(raw, after) {

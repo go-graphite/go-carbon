@@ -78,6 +78,21 @@ func (app *App) tryStartupInput() error {
 			missingCheckpoint = errors.Is(cacheErr, os.ErrNotExist) && errors.Is(walErr, os.ErrNotExist)
 		}
 	}
+	entries, scanErr := os.ReadDir(c.Dump.Path)
+	if missingCheckpoint && manifest.WAL.Name != "" {
+		// Retiring the checkpoint pair does not retire its input generation.
+		// Retained tails/direct fences and a live handoff still use this WAL's
+		// namespace to preserve the history/capture/journal ordering boundary.
+		if app.handoffClaim != nil {
+			missingCheckpoint = false
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && recovery.IsGenerationTail(entry.Name(), manifest.WAL.Name) {
+				missingCheckpoint = false
+				break
+			}
+		}
+	}
 	journalOnly := false
 	if missingCheckpoint && c.InputLog.Enabled && app.handoffClaim == nil {
 		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
@@ -92,14 +107,13 @@ func (app *App) tryStartupInput() error {
 	} else if missingCheckpoint {
 		return nil
 	}
+	if scanErr != nil {
+		return scanErr
+	}
 
 	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {
 		return err
-	}
-	entries, scanErr := os.ReadDir(c.Dump.Path)
-	if scanErr != nil {
-		return scanErr
 	}
 	orphanedCapture := false
 	for _, entry := range entries {
