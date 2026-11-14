@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/lockset"
-
 	"github.com/cockroachdb/pebble"
 )
 
@@ -520,7 +518,7 @@ func (s *Store) transferStripes(names []string) []uint64 {
 // A hint only: publication rechecks the complete set after preparation.
 func (s *Store) transferBusy(names []string) bool {
 	stripes := s.transferStripes(names)
-	if !lockset.TryLock(s.metricMu[:], stripes) {
+	if !s.lockImportFreeNames(names, true) {
 		return true
 	}
 	for i := len(stripes) - 1; i >= 0; i-- {
@@ -546,12 +544,8 @@ func (s *Store) transferEpochs(metas []Metadata) []uint64 {
 // advances the epochs; a saturated epoch never compares unchanged.
 func (s *Store) acquireTransfer(names []string, try bool, epochs []uint64) (unlock func(), stripeCount int, unchanged []bool) {
 	stripes := s.transferStripes(names)
-	if try {
-		if !lockset.TryLock(s.metricMu[:], stripes) {
-			return nil, 0, nil
-		}
-	} else {
-		lockset.Lock(s.metricMu[:], stripes)
+	if !s.lockImportFreeNames(names, try) {
+		return nil, 0, nil
 	}
 	if len(epochs) == len(names) {
 		unchanged = make([]bool, len(names))
@@ -587,12 +581,24 @@ func (s *Store) acquireTransferFree(names []string, epochs []uint64) (unlock fun
 	stripes := s.transferStripes(names)
 	owned := make([]uint64, 0, len(stripes))
 	for _, stripe := range stripes {
-		if s.metricMu[stripe].TryLock() {
+		if !s.metricMu[stripe].TryLock() {
+			continue
+		}
+		usable := false
+		for _, name := range names {
+			if s.metricStripe(name) == stripe && s.importPendingLocked(name) == nil {
+				usable = true
+				break
+			}
+		}
+		if usable {
 			owned = append(owned, stripe)
+		} else {
+			s.metricMu[stripe].Unlock()
 		}
 	}
 	if len(owned) == 0 {
-		lockset.Lock(s.metricMu[:], stripes)
+		s.lockImportFreeNames(names, false)
 		owned = append(owned, stripes...)
 	}
 	held = make([]bool, len(names))
@@ -600,6 +606,7 @@ func (s *Store) acquireTransferFree(names []string, epochs []uint64) (unlock fun
 	for i, name := range names {
 		stripe := s.metricStripe(name)
 		_, held[i] = slices.BinarySearch(owned, stripe)
+		held[i] = held[i] && s.importPendingLocked(name) == nil
 		unchanged[i] = held[i] && epochs[i] != math.MaxUint64 && epochs[i] == s.mutationEpoch[stripe].Load()
 	}
 	for i, name := range names {
@@ -1526,8 +1533,29 @@ func (s *Store) VerifyStagedTransfer(ctx context.Context, operation string) (int
 }
 
 func (s *Store) lockTransferWriters() func() {
+	for {
+		var pending chan struct{}
+		for i := range s.metricMu {
+			s.metricMu[i].Lock()
+		}
+		for i := range s.importPublishing {
+			for _, done := range s.importPublishing[i] {
+				pending = done
+				break
+			}
+			if pending != nil {
+				break
+			}
+		}
+		if pending == nil {
+			break
+		}
+		for i := len(s.metricMu) - 1; i >= 0; i-- {
+			s.metricMu[i].Unlock()
+		}
+		<-pending
+	}
 	for i := range s.metricMu {
-		s.metricMu[i].Lock()
 		s.advanceMutationEpoch(uint64(i))
 	}
 	return func() {

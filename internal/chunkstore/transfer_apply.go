@@ -181,22 +181,16 @@ const (
 func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransfer, pending []int) ([]partOutcome, error) {
 	names := make([]string, len(pending))
 	epochs := make([]uint64, len(pending))
-	absent := false
 	for j, i := range pending {
 		names[j] = parts[i].metas[0].Name
 		epochs[j] = parts[i].epochs[0]
-		absent = absent || parts[i].expected[0].ID == 0
 	}
 	wait := time.Now()
 	unlock, held, unchanged, stripes := s.acquireTransferFree(names, epochs)
 	s.transferApply.stripeHolds[min(stripes, len(s.transferApply.stripeHolds)-1)].Add(1)
 	locked := time.Now()
 	s.transferApply.wait.Add(uint64(locked.Sub(wait)))
-	defer func() { unlock(); s.transferApply.recordHold(time.Since(locked)) }()
-	if absent {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-	}
+	defer func() { unlock() }()
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return nil, err
 	}
@@ -224,6 +218,11 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 	}
 	if batch.Empty() && len(sidecars) == 0 {
 		return out, nil
+	}
+	s.transferApply.recordHold(time.Since(locked))
+	unlock = s.releaseImportStripes(names, held, unlock)
+	if s.transferCommitTestHook != nil {
+		s.transferCommitTestHook()
 	}
 	if err := s.commitSidecarRecords(batch, sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
 		return nil, err
@@ -274,10 +273,8 @@ func (s *Store) publishTransferSingles(ctx context.Context, records []TransferMe
 
 func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer) (bool, error) {
 	names := make([]string, len(p.metas))
-	absent := false
 	for i, m := range p.metas {
 		names[i] = m.Name
-		absent = absent || p.expected[i].ID == 0
 	}
 	wait := time.Now()
 	unlock, stripes, unchanged := s.acquireTransfer(names, len(names) > 1, p.epochs)
@@ -287,13 +284,7 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 	s.transferApply.stripeHolds[stripes].Add(1)
 	locked := time.Now()
 	s.transferApply.wait.Add(uint64(locked.Sub(wait)))
-	defer func() { unlock(); s.transferApply.recordHold(time.Since(locked)) }()
-	// Normal Create and phase1 native publication serialize absence with mu.
-	// Acquire it in the same stripe -> creation order as ordinary Create.
-	if absent {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-	}
+	defer func() { unlock() }()
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return false, err
 	}
@@ -323,6 +314,11 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 			}
 			return false, nil
 		}
+	}
+	s.transferApply.recordHold(time.Since(locked))
+	unlock = s.releaseImportStripes(names, nil, unlock)
+	if s.transferCommitTestHook != nil {
+		s.transferCommitTestHook()
 	}
 	if err := s.commitSidecarRecords(p.batch, p.sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
 		return false, err

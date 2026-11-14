@@ -18,6 +18,7 @@ type MetricUpdate struct {
 
 // UpdateBatch commits several metric updates atomically, under the same sync
 // policy as UpdateMany. No caller may acknowledge any input until it returns.
+// ErrImportPending leaves the whole input untouched for later retry.
 // Each metric keeps a small private index; combining their representations
 // avoids making every codec read and write search a group-sized index.
 // Acquire the complete stripe set without sleeping on an incomplete set;
@@ -51,6 +52,14 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
 	lockset.Lock(s.metricMu[:], stripes)
+	for name := range names {
+		if s.importPendingLocked(name) != nil {
+			for i := len(stripes) - 1; i >= 0; i-- {
+				s.metricMu[stripes[i]].Unlock()
+			}
+			return ErrImportPending
+		}
+	}
 	for name := range names {
 		s.beginStateMutation(name)
 	}

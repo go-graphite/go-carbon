@@ -98,8 +98,10 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		}
 		err := p.metricStore.(batchMetricStore).UpdateBatch(ctx, updates, maintenance)
 		timer.Leave()
-		for _, batch := range values {
-			p.writeStats.shared.observe(len(batch.Data), time.Since(start), err)
+		if !errors.Is(err, store.ErrImportPending) {
+			for _, batch := range values {
+				p.writeStats.shared.observe(len(batch.Data), time.Since(start), err)
+			}
 		}
 		if err != nil {
 			for _, batch := range values {
@@ -107,7 +109,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			}
 			// A deferred re-anchor fails the whole batch; retry one by one so
 			// only that metric's points stay cached.
-			fallback = errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrFormat) || errors.Is(err, store.ErrReanchorDeferred)
+			fallback = errors.Is(err, store.ErrImportPending) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrFormat) || errors.Is(err, store.ErrReanchorDeferred)
 			if !fallback {
 				p.logger.Error("write shared batch", zap.Error(err))
 			}

@@ -51,6 +51,10 @@ func (s *Store) tryLockMetricMutation(name string) (unlock func(), ok bool) {
 	if !mu.TryLock() {
 		return nil, false
 	}
+	if s.importPendingLocked(name) != nil {
+		mu.Unlock()
+		return nil, false
+	}
 	s.beginStateMutation(name)
 	return s.mutationUnlock(name, mu.Unlock), true
 }

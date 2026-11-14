@@ -228,6 +228,17 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 	} else {
 		start := time.Now()
 		update := func() error {
+			if metadata.Continuation && settings.outOfOrder.enabled {
+				if retry, ok := p.metricStore.(interface {
+					TryUpdateManyMaintained(context.Context, string, []store.Point, store.ContinuationMaintenance) error
+				}); ok {
+					return retry.TryUpdateManyMaintained(ctx, metric, values.Data, p.sharedMaintenance())
+				}
+			} else if retry, ok := p.metricStore.(interface {
+				TryUpdateMany(context.Context, string, []store.Point) error
+			}); ok {
+				return retry.TryUpdateMany(ctx, metric, values.Data)
+			}
 			if maintained, ok := p.metricStore.(interface {
 				UpdateManyMaintained(context.Context, string, []store.Point, store.ContinuationMaintenance) error
 			}); ok && metadata.Continuation && settings.outOfOrder.enabled {
@@ -249,16 +260,16 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 			}
 			err = update()
 		}
-		if !errors.Is(err, store.ErrReanchorDeferred) {
+		if !errors.Is(err, store.ErrImportPending) && !errors.Is(err, store.ErrReanchorDeferred) {
 			p.writeStats.shared.observe(len(values.Data), time.Since(start), err)
 		}
 	}
 	timer.Leave()
 	if err != nil {
 		p.mirrorFailed(metric)
-		if errors.Is(err, store.ErrReanchorDeferred) {
-			// Paced repair: the points stay cached until the sweep or the
-			// max-defer age lets the write through.
+		if errors.Is(err, store.ErrImportPending) || errors.Is(err, store.ErrReanchorDeferred) {
+			// Import publication or paced repair: keep the original input
+			// cached so this worker can immediately serve another name.
 		} else {
 			p.logger.Error("write shared metric", zap.String("metric", metric), zap.Error(err))
 		}

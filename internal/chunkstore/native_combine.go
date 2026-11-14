@@ -614,13 +614,14 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 	unlock := s.lockTransfer([]string{p.Meta.Name})
 	locked := time.Now()
 	s.nativeCounters.combineWait.Add(uint64(locked.Sub(wait)))
-	defer func() { unlock(); s.nativeCounters.recordCombineHold(time.Since(locked)) }()
-	// Create and phase1 publication share this lock. Keep their create-if-
-	// absent boundary intact when an absent candidate becomes present.
-	if p.Old.ID == 0 {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-	}
+	held := time.Duration(0)
+	defer func() {
+		if held == 0 {
+			held = time.Since(locked)
+		}
+		unlock()
+		s.nativeCounters.recordCombineHold(held)
+	}()
 	old, err := metadataFrom(s.db, p.Meta.Name)
 	switch {
 	case errors.Is(err, ErrNotFound):
@@ -645,6 +646,9 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 		if err != nil {
 			return false, err
 		}
+		held = time.Since(locked)
+		unlock()
+		unlock = func() {}
 		if err := s.db.Set(nativeCombinePieceKey(identity, p.Position), data, pebble.NoSync); err != nil {
 			s.nativeWriteFailed(err)
 			return false, err
@@ -676,6 +680,11 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 	}
 	if err := b.Set(nativeCombinePieceKey(identity, p.Position), data, nil); err != nil {
 		return false, err
+	}
+	held = time.Since(locked)
+	unlock = s.releaseImportStripes([]string{p.Meta.Name}, nil, unlock)
+	if s.transferCommitTestHook != nil {
+		s.transferCommitTestHook()
 	}
 	if err := s.commitSidecarRecords(b, []SidecarRecord{{Name: p.Meta.Name, SidecarSummary: p.Summary}}, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
 		s.nativeWriteFailed(err)
