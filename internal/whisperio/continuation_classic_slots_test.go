@@ -60,7 +60,7 @@ func TestClassicTailSlotsStoreParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range []*tailReadFixture{plain, cached} {
-		f.update(t, 64, 564)
+		f.update(t, 64)
 		if err := f.db.Delete(ctx, f.names[0]); err != nil {
 			t.Fatal(err)
 		}
@@ -111,13 +111,13 @@ func BenchmarkClassicTailSlots(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			f := classicSlotFixture(b, slots)
 			for i := range 32 {
-				f.update(b, i, 564)
+				f.update(b, i)
 			}
 			count := store.CountStoreReadsForTest()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := range b.N {
-				f.update(b, i+32, 564)
+				f.update(b, i+32)
 			}
 			b.StopTimer()
 			b.ReportMetric(float64(count())/float64(b.N), "LSM-reads/update")
