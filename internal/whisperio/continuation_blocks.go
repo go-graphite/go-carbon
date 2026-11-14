@@ -288,32 +288,6 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 // the full block when pruning is disabled or unavailable; Whisper clips it.
 // Only Fetch enables pruning; writer planning and verification keep full reads.
 func (f *continuationFile) ReadStorageBlockRange(block whisper.ContinuationBlock, from, until int) ([]whisper.TimeSeriesPoint, error) {
-	if window := f.fs.exportWindow; window != nil && from == 1 && until == int(^uint(0)>>1) {
-		lo := window.From / f.fs.exportStep * f.fs.exportStep
-		hi := (window.Until + f.fs.exportStep - 1) / f.fs.exportStep * f.fs.exportStep
-		a := f.data.layout.Archives[block.Archive]
-		newer := lo + int64(a.Step)*int64(a.Count)
-		// Newer owners must remain visible even outside the requested range:
-		// they can mask a requested circular slot or reject an expired window.
-		if int64(block.Last) < lo || int64(block.First) >= hi && int64(block.Last) < newer {
-			return nil, nil
-		}
-		end := hi - 1
-		if int64(block.Last) >= newer {
-			end = max(end, int64(block.Last))
-		}
-		points, err := f.readStorageBlock(block, nil, int(lo), int(end), true)
-		if err != nil {
-			return nil, err
-		}
-		kept := points[:0]
-		for _, point := range points {
-			if int64(point.Time) >= lo && int64(point.Time) < hi || int64(point.Time) >= newer {
-				kept = append(kept, point)
-			}
-		}
-		return kept, nil
-	}
 	if f.fs.snapshotReads && !f.fs.rangeReads {
 		// Whisper's storedPoints immediately copies these values to its archive
 		// array. Reuse the last complete block when coarse rollup reads ask for

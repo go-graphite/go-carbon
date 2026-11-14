@@ -17,12 +17,6 @@ func (c *ContinuationCodec) NativeWindowSnapshot(ctx context.Context, kv store.C
 	if snap, skips, handled, err := c.seekNativeWindow(ctx, kv, m, clock, window); handled || err != nil {
 		return snap, skips, err
 	}
-	if snapshot, handled, err := c.boundedWindowSnapshot(ctx, kv, m, clock, window); handled || err != nil {
-		if err != nil {
-			return store.Snapshot{}, nil, err
-		}
-		return store.SelectNativeWindow(snapshot, window, clock().Unix())
-	}
 	fragments, ok, err := c.nativeFragments(ctx, kv, m, clock, 0, window)
 	if err != nil {
 		return store.Snapshot{}, nil, err
