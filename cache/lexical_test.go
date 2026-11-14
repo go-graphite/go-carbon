@@ -52,3 +52,31 @@ func TestLexicalQueueRetainsEligibilityAndPerMetricPointOrder(t *testing.T) {
 	q, _ = c.makeQueueAt(deadline)
 	requireMetric(t, q, "deferred")
 }
+
+func TestRecoveryDrainUsesLexicalWithoutChangingPointBits(t *testing.T) {
+	c := New()
+	defer c.Stop()
+	c.SetRestartOrder(func() bool { return true })
+	values := []float64{math.Float64frombits(0x7ff8000000000042), math.Copysign(0, -1), math.Inf(1), math.SmallestNonzeroFloat64}
+	for _, name := range []string{"z.old", "a.new"} {
+		for i, v := range values {
+			c.Add(points.OnePoint(name, v, int64(i)))
+		}
+	}
+	c.SetRecoveryDrain(true)
+	q := c.makeQueue()
+	for _, name := range []string{"a.new", "z.old"} {
+		requireMetric(t, q, name)
+		p, ok := c.PopNotConfirmed(name)
+		if !ok {
+			t.Fatal("lost metric")
+		}
+		for i, v := range values {
+			if p.Data[i].Timestamp != int64(i) || math.Float64bits(p.Data[i].Value) != math.Float64bits(v) {
+				t.Fatal("reordered point or changed bits")
+			}
+		}
+		c.Confirm(p)
+	}
+	c.SetRecoveryDrain(false)
+}

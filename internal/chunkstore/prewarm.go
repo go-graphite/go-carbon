@@ -346,6 +346,8 @@ var (
 	continuationUpper = prefixEnd(continuationLower)
 )
 
+// Ordered seeks keep each level's index/data handles pinned across the batch
+// instead of re-reading bloom filters for independent prefix lookups.
 // prewarmBatch loads the states of names through one read view: the catalog
 // in name order, then each metric's revision and continuation state in ID
 // order, sharing an iterator for each range across the batch.
@@ -380,7 +382,7 @@ func (s *Store) prewarmBatch(ctx context.Context, cache *stateCache, loader Cont
 			key := catalogKey(item.name)
 			countStoreRead()
 			r.ReadBytes += int64(len(key))
-			if !it.SeekPrefixGE(key) || !bytes.Equal(it.Key(), key) {
+			if !it.SeekGE(key) || !bytes.Equal(it.Key(), key) {
 				if it.Error() != nil {
 					r.Failed++
 				} else {
@@ -431,7 +433,7 @@ func (s *Store) prewarmItems(ctx context.Context, cache *stateCache, loader Cont
 		key := revisionKey(m)
 		countStoreRead()
 		r.ReadBytes += int64(len(key))
-		if !revisions.SeekPrefixGE(key) || !bytes.Equal(revisions.Key(), key) {
+		if !revisions.SeekGE(key) || !bytes.Equal(revisions.Key(), key) {
 			r.Failed++
 			continue
 		}

@@ -57,14 +57,30 @@ func (app *App) tryStartupInput() error {
 	// Only the name is needed here; full checksum/root/index validation remains
 	// on the ordinary startup path, before a point can enter the cache.
 	f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
-	if err != nil {
-		return nil
-	}
 	var manifest recovery.Manifest
-	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
-	_ = f.Close()
-	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
-		return nil
+	journalOnly := false
+	if errors.Is(err, os.ErrNotExist) && c.InputLog.Enabled && app.handoffClaim == nil {
+		// An empty/new installation retains the ordinary checkpoint path.
+		// Only existing journals (or a retained capture from this path) need
+		// the journal-only recovery namespace.
+		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
+		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.bin.tail.bin*"))
+		journalOnly = len(logs) > 0 || len(tails) > 0
+	}
+	if journalOnly {
+		// A journal-only crash has no checkpoint generation to hand over. Use
+		// a stable capture namespace, including across repeated crashes. Never
+		// manufacture a checkpoint or accept unrelated legacy dump generations.
+		manifest.WAL.Name = "input.journal-recovery.bin"
+	} else {
+		if err != nil {
+			return nil
+		}
+		err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
+		_ = f.Close()
+		if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
+			return nil
+		}
 	}
 	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {
@@ -90,7 +106,7 @@ func (app *App) tryStartupInput() error {
 			orphanedCapture = info.Size() > 0 || isStartupDirectFence(name)
 		}
 	}
-	if app.handoffClaim == nil && !orphanedCapture {
+	if app.handoffClaim == nil && !orphanedCapture && !journalOnly {
 		return nil
 	}
 	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
@@ -152,6 +168,7 @@ func (app *App) tryStartupInput() error {
 		_ = spool.close()
 		return err
 	}
+	spool.journalOnly = journalOnly
 	spool.receiver = r
 	spool.startMonitor(spool.policy.spoolBytes)
 	app.startupCaptureState.Store(spool)

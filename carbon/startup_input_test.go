@@ -412,6 +412,8 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
 			cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format = true, t.TempDir(), "legacy"
+			cfg.Dump.StoreInputHandoff = true
+			cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 			cfg.Whisper.OutOfOrder = true
 			cfg.Cache.MaxSize = 0
 			// A crash without a checkpoint discovers log-only names through the

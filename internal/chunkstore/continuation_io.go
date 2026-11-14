@@ -432,9 +432,18 @@ func (io *continuationIO) readStore(key []byte, probe bool) ([]byte, error) {
 	countStoreRead()
 	// The comparer's Split is the whole key, so a prefix seek is a point
 	// lookup: it consults each table's bloom filter as a fresh lookup does,
-	// where SeekGE reads index and data blocks in every level.
+	// where independent SeekGE calls read index/data blocks in every level.
+	// A borrowed batch iterator instead reuses its positioned level handles.
 	full := io.key(key)
-	if iter.SeekPrefixGE(full) && bytes.Equal(iter.Key(), full) {
+	var found bool
+	if io.iterBorrowed {
+		// Prewarm owns a bounded, ID-sorted batch. Keep its level iterators
+		// and decoded indexes positioned instead of doing a fresh bloom probe.
+		found = iter.SeekGE(full)
+	} else {
+		found = iter.SeekPrefixGE(full)
+	}
+	if found && bytes.Equal(iter.Key(), full) {
 		return append([]byte(nil), iter.Value()...), nil
 	}
 	if err := iter.Error(); err != nil {
