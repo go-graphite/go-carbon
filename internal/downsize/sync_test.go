@@ -315,6 +315,7 @@ func TestSyncResumesAfterRestart(t *testing.T) {
 	}
 	f.failAfter = 0
 	f.fetches.Store(0)
+	o.verifyStreams = 8 // Raising verification concurrency preserves copy receipts.
 	if err := runSync(context.Background(), o, f); err != nil {
 		t.Fatal(err)
 	}
@@ -606,4 +607,31 @@ func (f *fakeSync) CopyWindow(ctx context.Context, source, target string, names 
 		}
 	}
 	return syncCopyResult{Copied: len(names)}, nil
+}
+
+func TestSyncVerifyConcurrencyBitExact(t *testing.T) {
+	var want map[string]uint64
+	for _, workers := range []int{0, 8} {
+		f, o, holes := threeSources(t)
+		o.verifyStreams = workers
+		for i, v := range []float64{0, math.Copysign(0, -1), math.SmallestNonzeroFloat64, math.MaxFloat64} {
+			f.store(syncT).points["a.clean"][60][holes[0]+int64(i)*60] = v
+		}
+		if err := runSync(context.Background(), o, f); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]uint64{}
+		for name, steps := range f.store(syncT).points {
+			for step, points := range steps {
+				for timestamp, value := range points {
+					got[fmt.Sprintf("%s/%d/%d", name, step, timestamp)] = math.Float64bits(value)
+				}
+			}
+		}
+		if want == nil {
+			want = got
+		} else if !reflect.DeepEqual(got, want) {
+			t.Fatal("verification worker count changed target point bits")
+		}
+	}
 }

@@ -484,3 +484,13 @@ and hole observations accumulate across rounds. `holes` counts observed missing
 points, including observations repeated in later rounds. The rate counts newly
 checkpointed work per second since this invocation started. Journals remain
 the source of truth; the snapshot is for monitoring. No tokens enter these files.
+
+Resume verification with more parallel reads while keeping copy batch receipts stable:
+
+```sh
+store-copy sync --from http://source:4242 --to http://target:4242 \
+  --state ./sync-state --streams 16 --verify-streams 128
+```
+
+Keep the original `--streams` and `--verify-batch` when resuming. `--verify-streams`
+changes verification workers only; zero keeps the original shared worker count.

@@ -84,20 +84,21 @@ type syncBackend interface {
 }
 
 type syncOptions struct {
-	to           string
-	from         []string
-	ring, state  string
-	prefix       string
-	streams      int
-	batch        int
-	maxRounds    int
-	settle       time.Duration
-	windows      syncRanges
-	sampleEvery  int
-	includeShort bool
-	fullHistory  bool
-	progress     time.Duration
-	now          func() time.Time
+	verifyStreams int
+	to            string
+	from          []string
+	ring, state   string
+	prefix        string
+	streams       int
+	batch         int
+	maxRounds     int
+	settle        time.Duration
+	windows       syncRanges
+	sampleEvery   int
+	includeShort  bool
+	fullHistory   bool
+	progress      time.Duration
+	now           func() time.Time
 }
 
 type syncOrigins []string
@@ -123,6 +124,7 @@ func SyncMain(ctx context.Context, args []string) error {
 	flags.StringVar(&o.ring, "ring", "", "optional ring file; source names the target does not own are skipped")
 	flags.StringVar(&o.state, "state", "", "state directory (journal, name lists, copy journals); rerun the same command to resume")
 	flags.IntVar(&o.streams, "streams", 8, "parallel retention precheck and verify batches")
+	flags.IntVar(&o.verifyStreams, "verify-streams", 0, "parallel verify batches; 0 uses --streams (keep --streams unchanged when resuming copy journals)")
 	flags.IntVar(&o.batch, "verify-batch", 500, "names per verify multi-fetch")
 	flags.IntVar(&o.maxRounds, "max-rounds", 4, "verify/fill rounds")
 	flags.DurationVar(&o.settle, "settle", 10*time.Minute, "ignore the newest points: replicas may still be writing them")
@@ -186,7 +188,7 @@ func (o *syncOptions) normalize() error {
 	if o.state == "" {
 		return errors.New("--state directory required (rerun the same command with it to resume)")
 	}
-	if o.streams < 1 || o.batch < 1 || o.maxRounds < 1 || o.settle < 0 || o.sampleEvery < 0 {
+	if o.verifyStreams < 0 || o.streams < 1 || o.batch < 1 || o.maxRounds < 1 || o.settle < 0 || o.sampleEvery < 0 {
 		return errors.New("invalid --streams/--verify-batch/--max-rounds/--settle")
 	}
 	if o.now == nil {
@@ -743,7 +745,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	defer cancel(nil)
 	var wg sync.WaitGroup
 	verified := 0
-	for range s.o.streams {
+	for range s.o.verifyConcurrency() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -910,4 +912,11 @@ func (s *syncer) summary(err error) {
 		_ = json.NewEncoder(f).Encode(s.sum.residual)
 		_ = f.Close()
 	}
+}
+
+func (o syncOptions) verifyConcurrency() int {
+	if o.verifyStreams > 0 {
+		return o.verifyStreams
+	}
+	return o.streams
 }
