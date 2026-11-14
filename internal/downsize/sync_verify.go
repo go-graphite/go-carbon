@@ -336,12 +336,20 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 		}
 		c.detail = detail
 	}
-	needPoints := false
+	needed := map[string]bool{}
 	for _, c := range checks {
-		needPoints = needPoints || len(c.detail) > 0
+		for _, n := range c.detail {
+			needed[n] = true
+		}
 	}
-	if !needPoints {
+	if len(needed) == 0 {
 		return nil
+	}
+	var targetDetail []string
+	for _, n := range names {
+		if needed[n] {
+			targetDetail = append(targetDetail, n)
+		}
 	}
 	var targetPoints map[string]syncSeries
 	var targetFetchErr error
@@ -349,7 +357,7 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 	reads.Add(1)
 	go func() {
 		defer reads.Done()
-		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, names, w.From, w.Until)
+		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, targetDetail, w.From, w.Until)
 	}()
 	for _, c := range checks {
 		if len(c.detail) == 0 {
