@@ -8,13 +8,14 @@ import (
 	"github.com/go-graphite/go-carbon/internal/storemaint/configs"
 	"github.com/go-graphite/go-carbon/internal/storemaint/convert"
 	"github.com/go-graphite/go-carbon/internal/storemaint/foldooo"
+	"github.com/go-graphite/go-carbon/internal/storemaint/migration"
 	"github.com/go-graphite/go-carbon/internal/storemaint/prune"
 	"github.com/go-graphite/go-carbon/internal/storemaint/reclaim"
 	"os"
 )
 
 func maintain(args []string) error {
-	const usage = "usage: storectl maintain fold-ooo|anchors|cold-pack|convert|prune-empty-dirs|reclaim-orphans|configs [flags]"
+	const usage = "usage: storectl maintain migration|fold-ooo|anchors|cold-pack|convert|prune-empty-dirs|reclaim-orphans|configs [flags]"
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -24,6 +25,8 @@ func maintain(args []string) error {
 		return flag.ErrHelp
 	case "fold-ooo":
 		return foldooo.Main(args[1:])
+	case "migration":
+		return migration.Main(args[1:])
 	case "anchors":
 		return anchors.Main(args[1:])
 	case "cold-pack":

@@ -614,3 +614,7 @@ immutable SST classes and ordinary eligibility; see [limits and interpretation](
 `storectl maintain fold-ooo -secret-file /path/to/secret -dry-run` inspects
 sidecars through authenticated buckyd maintenance. Omit `-dry-run` and supply
 `-checkpoint cursor.json` to fold with resumable progress. See [sidecar maintenance](../../doc/store-ooo-fold.md).
+
+`storectl maintain migration rebind -proof FILE` preserves reboot-stable
+source/store bindings for systemd ExecStartPre. Use `record` once and `inspect`
+for a read-only qualification. See [installation and safety contract](../../internal/storemaint/migration/README.md).
