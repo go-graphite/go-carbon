@@ -272,6 +272,7 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	q, scratch := c.takeQueue(n, batch)
 	index := int32(0)
 	var next time.Time
+	yieldAt := time.Now().Add(2 * time.Millisecond)
 	var shardRanges [shardCount]struct{ next, end int32 }
 
 	for i := 0; i < shardCount; i++ {
@@ -289,10 +290,12 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 			if !more {
 				break
 			}
-			// Hand runnable receivers the CPU as well as the lock. In particular,
-			// reacquiring an uncontended mutex need not schedule a waiting handler.
-			if oldest {
+			// Keep shard lock visits short, but bound explicit scheduler yields
+			// by time rather than table size. Yielding every 256 slots can
+			// strand the entire persister pool behind millions of runnable receivers.
+			if oldest && time.Now().After(yieldAt) {
 				runtime.Gosched()
+				yieldAt = time.Now().Add(2 * time.Millisecond)
 			}
 		}
 		index = int32(len(q))

@@ -140,8 +140,7 @@ func (q *WriteoutQueue) update() {
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
 	started := time.Now()
-	queue, next, hasCold := q.cache.makeQueuePlan(started)
-	buildTime := time.Since(started)
+	queue, next, _ := q.cache.makeQueuePlan(started)
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
 		next = notBefore
@@ -159,15 +158,12 @@ func (q *WriteoutQueue) update() {
 	q.refreshAt = time.Time{}
 	q.refreshRemaining = 0
 	if queue != nil {
-		// Start the next plan while half of this plan can still feed workers.
-		// Debounce against the measured scan cost; arrivals in an empty cache
-		// still use the existing deadline wake-up.
-		q.refreshAt = time.Now().Add(max(100*time.Millisecond, buildTime))
-		q.refreshRemaining = len(queue) / 2
-		if hasCold {
-			q.refreshAt = time.Now().Add(time.Second)
-			q.refreshRemaining = cap(queue)
-		}
+		// Begin the next scan while this whole plan can still feed workers.
+		// Waiting a scan duration or half a queue can exhaust a fast consumer
+		// before a catalog-sized replacement is ready. The 100ms debounce
+		// still bounds rebuild frequency, including tiny caches.
+		q.refreshAt = notBefore
+		q.refreshRemaining = cap(queue)
 	}
 	q.cache.queueChannelBytes.Store(int64(cap(queue)+cap(q.retained)) * 16)
 	q.rebuild = q.makeRebuildCallback(next, notBefore)

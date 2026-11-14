@@ -212,3 +212,48 @@ func TestWarmFirstQueuePlansWarmOverlap(t *testing.T) {
 		t.Fatal("fully warm work cannot overlap its next plan")
 	}
 }
+
+// A large plan must start its replacement before consumers use half of it,
+// even when the preceding scan took longer than the remaining write time.
+func TestQueueStartsReplacementBeforeHalfConsumed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := New()
+		defer c.Stop()
+		c.SetRestartOrder(func() bool { return true })
+		entered, release := make(chan struct{}), make(chan struct{})
+		var calls atomic.Int64
+		c.SetRestartWarmFirst(func(string) bool { return true }, func(exit <-chan bool) bool {
+			if calls.Add(1) == 1 {
+				time.Sleep(2 * time.Second)
+				return true
+			}
+			close(entered)
+			select {
+			case <-release:
+				return true
+			case <-exit:
+				return false
+			}
+		}, nil)
+		for i := range 128 {
+			c.Add(points.OnePoint(fmt.Sprintf("queued.%03d", i), 1, int64(i)))
+		}
+		q, abort := c.WriteoutQueue(), make(chan bool)
+		defer close(abort)
+		first := q.Get(abort)
+		c.Pop(first)
+		time.Sleep(101 * time.Millisecond)
+		second := q.Get(abort)
+		if second == "" || second == first {
+			t.Fatal("old eligible plan did not keep writing")
+		}
+		synctest.Wait()
+		select {
+		case <-entered:
+		default:
+			t.Fatal("replacement scan waited for half the queue")
+		}
+		close(release)
+		synctest.Wait()
+	})
+}

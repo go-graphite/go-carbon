@@ -38,7 +38,7 @@ func TestBoundedTransferIngestDifferential(t *testing.T) {
 		t.Cleanup(func() { closeTestStore(t, s) })
 		return s
 	}
-	old, bounded := open(), open()
+	old, bounded, wal := open(), open(), open()
 	// Reference retains the old namespace grouping with an oversized first table.
 	var oldPaths []string
 	for start := 0; start < len(keys); {
@@ -67,29 +67,50 @@ func TestBoundedTransferIngestDifferential(t *testing.T) {
 	if err := bounded.ingestTransferTables(ctx, paths); err != nil {
 		t.Fatal(err)
 	}
-	a, err := old.db.NewIter(nil)
-	if err != nil {
+	if err := wal.stageTransferWAL(ctx, stage, 1); err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
-	b, err := bounded.db.NewIter(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-	av, bv := a.First(), b.First()
-	for av && bv {
-		if !bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value()) {
-			t.Fatalf("stored bytes differ at %x", a.Key())
+	for _, candidate := range []*Store{bounded, wal} {
+		a, err := old.db.NewIter(nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		av, bv = a.Next(), b.Next()
-	}
-	if av != bv || a.Error() != nil || b.Error() != nil {
-		t.Fatal("iterator results differ", a.Error(), b.Error())
+		b, err := candidate.db.NewIter(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		av, bv := a.First(), b.First()
+		for av && bv {
+			if !bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value()) {
+				t.Fatalf("stored bytes differ at %x", a.Key())
+			}
+			av, bv = a.Next(), b.Next()
+		}
+		if av != bv || a.Error() != nil || b.Error() != nil {
+			t.Fatal("iterator results differ", a.Error(), b.Error())
+		}
+		a.Close()
+		b.Close()
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
+	if err := wal.stageTransferWAL(canceled, stage, 1); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
 	if err := bounded.ingestTransferTables(canceled, []string{"must-not-open"}); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
+}
+
+// Reference path from the preceding implementation, retained only as an oracle.
+func (s *Store) ingestTransferTables(ctx context.Context, paths []string) error {
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := s.db.IngestWithStats([]string{path}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

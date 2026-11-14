@@ -336,7 +336,7 @@ func (s *Store) transferSnapshotCached(ctx context.Context, reader pebble.Reader
 	return snapshotFrom(reader, m.Name)
 }
 
-// ImportTransfer reserves disjoint IDs and stages their keys in private SSTs
+// ImportTransfer reserves disjoint IDs and stages their keys in bounded WAL batches
 // before catalog publication. A target created meanwhile is merged under its writer lock.
 // Publication and merge use bounded stripe groups and a final WAL barrier.
 func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([]TransferProof, error) {
@@ -409,36 +409,17 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	}
 	began = time.Now()
 	stage := s.stageTransfer(first, records, metas)
-	if limit := s.transferBatchLimit(); len(stage.keys) > 0 && stage.bytes <= limit {
-		// Normal-size transfers commit as one NoSync batch: Pebble applies
-		// batches concurrently, while ingestion runs one SST set at a time.
-		// The final WAL barrier below makes the data durable together with
-		// the receipts published after it.
-		batch, err := s.writeTransferBatch(ctx, stage)
-		s.transferApply.build.Add(uint64(time.Since(began)))
-		if err != nil {
+	if needsFloatFormat {
+		if err := s.fenceFloatCodec(); err != nil {
 			return nil, err
 		}
-		if needsFloatFormat {
-			if err := s.fenceFloatCodec(); err != nil {
-				return nil, errors.Join(err, batch.Close())
-			}
-		}
-		began = time.Now()
-		err = errors.Join(ctx.Err(), batch.Commit(pebble.NoSync))
-		size := uint64(len(batch.Repr()))
-		err = errors.Join(err, batch.Close())
-		s.transferApply.ingest.Add(uint64(time.Since(began)))
-		if err != nil {
-			return nil, err
-		}
-		s.pendingSync.Store(true)
-		s.transferBatchStats.commits.Add(1)
-		s.transferBatchStats.entries.Add(uint64(len(records)))
-		s.transferBatchStats.bytes.Add(size)
-	} else if err := s.ingestTransferStage(ctx, first, stage, len(records), needsFloatFormat, began); err != nil {
+	}
+	s.transferApply.build.Add(uint64(time.Since(began)))
+	began = time.Now()
+	if err := s.stageTransferWAL(ctx, stage, len(records)); err != nil {
 		return nil, err
 	}
+	s.transferApply.ingest.Add(uint64(time.Since(began)))
 	proofs := make([]TransferProof, 0, len(records))
 	// Uncontended groups share one commit. A contended group falls back to
 	// per-name publication, which joins each ordinary single-stripe queue.
@@ -460,65 +441,6 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	s.transferApply.sync.Add(uint64(time.Since(began)))
 	s.invalidateReadCache()
 	return proofs, nil
-}
-
-// ingestTransferStage writes one SST per namespace/time bucket and ingests
-// them without entering the shared WAL/memtable staging path.
-func (s *Store) ingestTransferStage(ctx context.Context, first uint64, stage *transferStage, entries int, needsFloatFormat bool, began time.Time) error {
-	paths, err := s.writeTransferTables(ctx, first, stage)
-	s.transferApply.build.Add(uint64(time.Since(began)))
-	defer func() {
-		for _, p := range paths {
-			_ = s.fs.Remove(p)
-		}
-	}()
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if len(paths) == 0 {
-		return nil
-	}
-	if needsFloatFormat {
-		if err := s.fenceFloatCodec(); err != nil {
-			return err
-		}
-	}
-	began = time.Now()
-	err = s.ingestTransferTables(ctx, paths)
-	s.transferApply.ingest.Add(uint64(time.Since(began)))
-	if err != nil {
-		return err
-	}
-	s.ingestStats.entries.Add(uint64(entries))
-	return nil
-}
-
-// Pebble serializes ingest preparation with foreground commits, and target-level
-// searches hold the DB mutex needed by commit preparation. Release these locks
-// after each bounded table so a transfer spanning hundreds of time buckets
-// cannot obstruct foreground commits for the entire table set.
-// Reserved IDs remain unpublished until all tables have been ingested; a partial
-// failure leaves unreachable data, just as cancellation before publication does.
-func (s *Store) ingestTransferTables(ctx context.Context, paths []string) error {
-	for _, path := range paths {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		s.transferCommitMu.Lock()
-		stats, err := s.db.IngestWithStats([]string{path})
-		s.transferCommitMu.Unlock()
-		if err != nil {
-			return err
-		}
-		s.ingestStats.tables.Add(1)
-		s.ingestStats.bytes.Add(stats.Bytes)
-		s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
-		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
-	}
-	return nil
 }
 
 func (s *Store) lockTransfer(names []string) func() {
