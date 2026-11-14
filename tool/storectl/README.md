@@ -602,3 +602,8 @@ the manifest's timestamp windows. It never opens a running journal or writes
 metric data. See the [manifest and limits](../../internal/inputlog/inventory/README.md).
 The candidate list alone does not authorize filling; use `storectl sync` with
 the appropriate acknowledged source and gap windows for recovery.
+
+`storectl maintain anchors -secret-file /path/to/secret -journal dry-run.jsonl`
+inspects archive anchors through buckyd. Applying requires `-apply -plan PLAN
+-write-ok WRITE-OK`, with the plan SHA256 in WRITE-OK. See
+[anchor maintenance](../../internal/storemaint/anchors/README.md).
