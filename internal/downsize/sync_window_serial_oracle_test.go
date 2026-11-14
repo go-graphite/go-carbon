@@ -66,8 +66,8 @@ func (b *syncLiveBackend) serialCopyWindowOracle(ctx context.Context, source, ta
 		err = func() error {
 			defer func() { release() }()
 			defer j.close()
-			for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
-				end := min(start+chunkstore.NativeMaxRangeNames, len(names))
+			for start := 0; start < len(names); start += int(nativeRangeNames) {
+				end := min(start+int(nativeRangeNames), len(names))
 				t := task{Stream: id, Source: source, Target: target, Start: int64(start), End: int64(end)}
 				if saved, ok := j.tasks[taskKey(t)]; ok {
 					t = saved

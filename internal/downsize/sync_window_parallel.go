@@ -18,9 +18,10 @@ type syncWindowProgressKey struct{}
 func runSyncWindowRanges(ctx context.Context, names, streams int, run func(context.Context, int, int) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	rangeNames := min(chunkstore.NativeMaxRangeNames, max(1, int(nativeRangeNames)))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for range min(max(1, streams), (names+chunkstore.NativeMaxRangeNames-1)/chunkstore.NativeMaxRangeNames) {
+	for range min(max(1, streams), (names+rangeNames-1)/rangeNames) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -28,14 +29,14 @@ func runSyncWindowRanges(ctx context.Context, names, streams int, run func(conte
 				if ctx.Err() != nil {
 					continue
 				}
-				if err := run(ctx, start, min(start+chunkstore.NativeMaxRangeNames, names)); err != nil {
+				if err := run(ctx, start, min(start+rangeNames, names)); err != nil {
 					cancel(err)
 				}
 			}
 		}()
 	}
 feed:
-	for start := 0; start < names; start += chunkstore.NativeMaxRangeNames {
+	for start := 0; start < names; start += rangeNames {
 		select {
 		case jobs <- start:
 		case <-ctx.Done():

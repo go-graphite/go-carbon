@@ -88,11 +88,14 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 // Resume a serial journal with a parallel driver. Native identities, target
 // precedence and all float bits must match a clean serial reference.
 func TestSyncWindowParallelDifferentialResume(t *testing.T) {
+	previousLimit := nativeRangeNames
+	nativeRangeNames = 16
+	defer func() { nativeRangeNames = previousLimit }()
 	for _, status := range []int{0, http.StatusConflict, http.StatusRequestEntityTooLarge} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			ctx := context.Background()
 			source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
-			names := copyNames("metric.", store.NativeMaxRangeNames*2+1)
+			names := copyNames("metric.", int(nativeRangeNames)*2+1)
 			for _, n := range names {
 				addPoints(t, source, n, math.Copysign(0, -1))
 			}
@@ -114,11 +117,11 @@ func TestSyncWindowParallelDifferentialResume(t *testing.T) {
 					r.Body = io.NopCloser(bytes.NewReader(raw))
 					var req struct{ Range store.NativeRange }
 					_ = json.Unmarshal(raw, &req)
-					if req.Range.Start >= store.NativeMaxRangeNames && fail.Load() {
+					if req.Range.Start >= nativeRangeNames && fail.Load() {
 						http.Error(w, "interrupted fill", 503)
 						return
 					}
-					reject := status == http.StatusConflict && slices.Contains(req.Range.Names, names[store.NativeMaxRangeNames+7]) || status == http.StatusRequestEntityTooLarge && len(req.Range.Names) > 2048
+					reject := status == http.StatusConflict && slices.Contains(req.Range.Names, names[int(nativeRangeNames)+7]) || status == http.StatusRequestEntityTooLarge && len(req.Range.Names) > int(nativeRangeNames)/2
 					if reject {
 						http.Error(w, "isolate rejected range", status)
 						return
@@ -135,7 +138,7 @@ func TestSyncWindowParallelDifferentialResume(t *testing.T) {
 			windows := syncRanges{{Name: "early", From: testMetricNow - 20, Until: testMetricNow - 10}, {Name: "late", From: testMetricNow - 10, Until: testMetricNow}}
 			good := slices.Clone(names)
 			if status == http.StatusConflict {
-				good = slices.Delete(good, store.NativeMaxRangeNames+7, store.NativeMaxRangeNames+8)
+				good = slices.Delete(good, int(nativeRangeNames)+7, int(nativeRangeNames)+8)
 			}
 			serial := newSyncLiveBackend(syncLiveOptions{copyStreams: 1})
 			stop := serial.beginWindowCopy()
