@@ -328,8 +328,12 @@ func openLines(path string) (*os.File, *bufio.Scanner, error) {
 func (s *syncer) unionSource() syncNameSource {
 	var f *os.File
 	var scanner *bufio.Scanner
+	total := s.sum.Discovered
+	if s.legacyCopyReceipts {
+		total = s.both + len(s.copied)
+	}
 	return syncNameSource{
-		total: s.sum.Discovered,
+		total: total,
 		next: func() (string, uint64, error) {
 			if f == nil {
 				var err error
@@ -338,9 +342,12 @@ func (s *syncer) unionSource() syncNameSource {
 				}
 			}
 			for scanner.Scan() {
-				name, mask, _, err := parseUnionLine(scanner.Text())
+				name, mask, onTarget, err := parseUnionLine(scanner.Text())
 				if err != nil {
 					return "", 0, err
+				}
+				if s.legacyCopyReceipts && (mask == 0 || (!onTarget && !s.copied[name])) {
+					continue
 				}
 				return name, mask, nil
 			}
@@ -545,7 +552,14 @@ feed:
 }
 
 func (s *syncer) copyMissing(ctx context.Context) error {
-	if s.windowOnly() {
+	// Older window campaigns recorded full-history imports with the same
+	// per-source receipts as non-window campaigns. Replay that protocol for
+	// their lifetime so switching transports cannot repeat completed imports.
+	legacy := len(s.j.find(func(r syncRow) bool {
+		return r.Kind == "copied" && (r.Phase == "missing" || r.Phase == "missing-batch")
+	})) > 0
+	s.legacyCopyReceipts = s.windowOnly() && legacy
+	if s.windowOnly() && !legacy {
 		return s.copyMissingWindow(ctx)
 	}
 	missing, err := s.readMissing()
@@ -577,6 +591,44 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		if len(names) == 0 {
 			continue
 		}
+		// Batch widths depend on the stream budget, which may change on resume.
+		// Recover old receipts by their sorted name bounds before making new waves.
+		for _, r := range s.j.find(func(r syncRow) bool {
+			return r.Kind == "copied" && r.Phase == "missing-batch" && r.Source == source
+		}) {
+			first := sort.SearchStrings(names, r.First)
+			last := sort.Search(len(names), func(i int) bool { return names[i] > r.Last })
+			if first >= last {
+				continue
+			}
+			batch := names[first:last]
+			shortNames := map[string]bool{}
+			for _, n := range r.Short {
+				shortNames[n] = true
+			}
+			count := 0
+			for _, n := range batch {
+				if !shortNames[n] {
+					count++
+				}
+			}
+			// A precheck may have omitted absent names inside the bounds. Do not
+			// credit an ambiguous range without an exact accounting of its names.
+			if count != r.Names {
+				continue
+			}
+			for _, n := range r.Short {
+				short[n] = true
+			}
+			s.applyCopy(batch, r.Short, r.Copied, r.Failed, r.Forbidden)
+		}
+		remaining := names[:0]
+		for _, n := range names {
+			if !s.copied[n] && !short[n] && !s.failedCp[n] {
+				remaining = append(remaining, n)
+			}
+		}
+		names = remaining
 		absentSource := map[string]bool{}
 		// Copy each bounded wave as soon as its precheck finishes. Preparation
 		// for a huge catalog must not delay all imports until the last name.
