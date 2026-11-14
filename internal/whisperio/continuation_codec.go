@@ -819,6 +819,9 @@ func (c *ContinuationCodec) Fetch(ctx context.Context, kv store.ContinuationIO, 
 		return nil, err
 	}
 	defer w.Close()
+	if !w.IsCompressed() {
+		return fetchClassic(ctx, w, m, int(clock().Unix()), from, until)
+	}
 	series, err := w.Fetch(from, until)
 	if err != nil || series == nil {
 		return nil, err
