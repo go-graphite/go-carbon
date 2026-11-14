@@ -764,7 +764,7 @@ func (s *syncer) startExplicitNames(ctx context.Context, after string) *syncList
 	return l
 }
 
-// Explicit inventories use bounded native existence probes rather than walking
+// Explicit inventories use bounded metadata existence probes rather than walking
 // an unrelated multi-million-name catalog. The synthetic lister retains names
 // absent from every probe, so absence still requires the verifier's full proof.
 func (s *syncer) startScopedList(ctx context.Context, store, after string) *syncLister {
@@ -778,48 +778,50 @@ func (s *syncer) startScopedList(ctx context.Context, store, after string) *sync
 			return
 		}
 		defer f.Close()
-		end := s.o.now().Unix() - int64(s.o.settle.Seconds())
+		// Each store gets a bounded share of the stream budget. A cohort keeps
+		// memory bounded and is emitted in input order despite concurrent reads.
+		parallel := max(1, min(4, s.o.streams/(len(s.o.from)+1)))
 		var batch []string
 		flush := func() bool {
 			if len(batch) == 0 {
 				return true
 			}
-			got, e := s.digest(ctx, store, batch, syncRange{From: max(int64(1), end-86400), Until: end})
-			present := map[string]bool{}
-			if errors.Is(e, errSyncNoDigest) {
-				info, ie := s.b.Info(ctx, store, batch)
-				e = ie
-				for n := range info {
-					present[n] = true
-				}
-			} else {
-				for n := range got {
-					present[n] = true
-				}
+			pages := make([][]string, (len(batch)+499)/500)
+			errs := make([]error, len(pages))
+			var wg sync.WaitGroup
+			for i := range pages {
+				names := batch[i*500 : min(len(batch), (i+1)*500)]
+				wg.Go(func() {
+					// Discovery needs authoritative membership, not point equality.
+					present, err := s.b.Info(ctx, store, names)
+					errs[i] = err
+					for _, n := range names {
+						if _, found := present[n]; found {
+							pages[i] = append(pages[i], n)
+						}
+					}
+				})
 			}
-			if e != nil {
-				l.errc <- e
+			wg.Wait()
+			if err := errors.Join(errs...); err != nil {
+				l.errc <- err
 				return false
-			}
-			var page []string
-			for _, n := range batch {
-				if present[n] {
-					page = append(page, n)
-				}
 			}
 			batch = nil
-			select {
-			case l.pages <- page:
-				return true
-			case <-ctx.Done():
-				return false
+			for _, page := range pages {
+				select {
+				case l.pages <- page:
+				case <-ctx.Done():
+					return false
+				}
 			}
+			return true
 		}
 		for scan.Scan() {
 			n := strings.TrimSpace(scan.Text())
 			if n > after && strings.HasPrefix(n, s.o.prefix) {
 				batch = append(batch, n)
-				if len(batch) >= 500 && !flush() {
+				if len(batch) >= 500*parallel && !flush() {
 					return
 				}
 			}
