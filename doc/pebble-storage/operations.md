@@ -95,7 +95,7 @@ steps with different evidence:
 1. Use `status.py` to inspect the complete receipt. Require shared phase, no active
    conversion, no skipped originals and no error before source-tree pruning.
 2. Follow reclaim queue/completion counters and record free bytes and used inodes
-   for the source mount. Use U28's `store-prune-empty-dirs` with its own readiness,
+   for the source mount. Use U28's `storectl maintain prune-empty-dirs` with its own readiness,
    lock, exclusion and no-follow safeguards. Complete read-only inventories before
    and after can confirm remaining originals/empty directories; truncated samples
    cannot prove completion.

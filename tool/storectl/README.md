@@ -572,3 +572,21 @@ boundary; completed range receipts remain authoritative.
 
 Without `--merge-session`, live cached/revised names retain their existing
 conservative deferral behavior.
+
+## Local maintenance
+
+The same binary provides maintenance commands; no separate maintenance binaries
+are installed. Run `storectl maintain ACTION --help` for action flags.
+
+| Command | Use |
+| --- | --- |
+| `storectl maintain cold-pack` | Pack, unpack or downgrade an exclusively opened offline store; see [cold-pack](../../doc/cold-pack.md). |
+| `storectl maintain convert` | Import complete Whisper archives with identity-bound resume and verification; see [conversion](../../doc/shared-exact-blocks.md#bulk-conversion). |
+| `storectl maintain prune-empty-dirs` | Remove empty original directories while checking daemon readiness; see [pruning](../../internal/storemaint/prune/README.md). |
+| `storectl maintain reclaim-orphans` | Inspect orphaned staged imports offline; `-apply` publishes reclaimed ownership. |
+| `storectl maintain configs` | Compare old/new schemas and aggregations against a file-list cache; see the [example](../../README.md#useful-toolscommands). |
+
+Offline actions retain the store's exclusive-open and source-binding checks.
+Stop the daemon before cold-pack, conversion into its store, or orphan reclaim.
+Pruning checks the running local daemon and retains its health and filesystem
+guards. Existing maintenance checkpoints and receipts retain their data format.

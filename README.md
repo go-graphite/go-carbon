@@ -738,11 +738,11 @@ Some illustrations of schema changes:
 
 #### Useful Tools/Commands
 
-`tool/persister_configs_differ`: persister_configs_differ is a tool that we can use to reason the impact of the config changes using file list cache and the new and old config files.
+`storectl maintain configs` reports the impact of schema and aggregation changes using a file-list cache and the old and new configuration files.
 
 ```bash
-$ go build -o persister_configs_differ tool/persister_configs_differ
-$ ./persister_configs_differ  \
+$ make storectl
+$ ./storectl maintain configs  \
     -file-list-cache carbonserver-file-list-cache.gzip  \
     -new-aggregation new-storage-aggregation.conf  \
     -new-schema new-storage-schemas.conf  \

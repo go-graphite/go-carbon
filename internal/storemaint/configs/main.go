@@ -1,0 +1,117 @@
+package configs
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/persister"
+)
+
+// Main reports the impact of
+// config changes using a file-list cache and the old and new config files.
+//
+// usages: storectl maintain configs  \
+//         -file-list-cache carbonserver-file-list-cache.gzip  \
+//         -new-aggregation new-storage-aggregation.conf  \
+//         -new-schema new-storage-schemas.conf  \
+//         -old-aggregation oldstorage-aggregation.conf  \
+//         -old-schema old-storage-schemas.conf
+
+func Main(args []string) error {
+	flags := flag.NewFlagSet("storectl maintain configs", flag.ContinueOnError)
+	oldSchemaFile := flags.String("old-schema", "", "old schema file")
+	newSchemaFile := flags.String("new-schema", "", "new schema file")
+	oldAggregationFile := flags.String("old-aggregation", "", "old aggregation file")
+	newAggregationFile := flags.String("new-aggregation", "", "new aggregation file")
+	printMetrics := flags.Bool("print-metrics", false, "print metrics with inconsistent configs")
+	metricsFile := flags.String("file-list-cache", "", "metrics file list cache")
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("unexpected positional arguments")
+	}
+
+	oldSchemas, err := persister.ReadWhisperSchemas(*oldSchemaFile)
+	if err != nil {
+		return err
+	}
+	newSchemas, err := persister.ReadWhisperSchemas(*newSchemaFile)
+	if err != nil {
+		return err
+	}
+	oldAggregations, err := persister.ReadWhisperAggregation(*oldAggregationFile)
+	if err != nil {
+		return err
+	}
+	newAggregations, err := persister.ReadWhisperAggregation(*newAggregationFile)
+	if err != nil {
+		return err
+	}
+
+	flc, err := carbonserver.NewFileListCache(*metricsFile, carbonserver.FLCVersionUnspecified, 'r')
+	if err != nil {
+		return err
+	}
+	defer flc.Close()
+
+	schemaChanges := map[string]int{}
+	aggregationChanges := map[string]int{}
+	for {
+		flcEntry, err := flc.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		entry := flcEntry.Path
+		if entry == "" || !strings.HasSuffix(entry, ".wsp") {
+			continue
+		}
+		metric := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(entry, "/"), ".wsp"), "/", ".")
+
+		// log.Printf("metric = %+v\n", metric)
+		//
+		// counter++
+		// if counter%100_000 == 0 {
+		// 	fmt.Printf("count = %+v\n", count)
+		// }
+
+		oldSchema, _ := oldSchemas.Match(metric)
+		newSchema, _ := newSchemas.Match(metric)
+		if !oldSchema.Retentions.Equal(newSchema.Retentions) {
+			// fmt.Println(oldSchema.RetentionStr + "->" + newSchema.RetentionStr)
+			schemaChanges[oldSchema.RetentionStr+"->"+newSchema.RetentionStr] += 1
+
+			if *printMetrics {
+				fmt.Printf("%q,%q,%s,%s,%s\n", oldSchema.RetentionStr, newSchema.RetentionStr, oldSchema.Name, newSchema.Name, metric)
+			}
+		}
+		oldAggregation := oldAggregations.Match(metric)
+		newAggregation := newAggregations.Match(metric)
+		if oldAggregation.AggregationMethod() != newAggregation.AggregationMethod() {
+			// fmt.Println(oldSchema.RetentionStr + "->" + newSchema.RetentionStr)
+			aggregationChanges[oldAggregation.AggregationMethod().String()+"->"+newAggregation.AggregationMethod().String()] += 1
+
+			if *printMetrics {
+				fmt.Printf("%s,%s,%s,%s,%s\n", oldAggregation.AggregationMethod().String(), newAggregation.AggregationMethod().String(), oldAggregation.Name(), newAggregation.Name(), metric)
+			}
+		}
+	}
+	fmt.Println("schema-changes")
+	for rule, count := range schemaChanges {
+		fmt.Println(rule, count)
+	}
+	fmt.Println("aggregation-changes")
+	for rule, count := range aggregationChanges {
+		fmt.Println(rule, count)
+	}
+	return nil
+}
