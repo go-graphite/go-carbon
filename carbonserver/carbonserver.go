@@ -1541,7 +1541,7 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 		overlayRead.Go(func() {
 			overlay, overlayBase, overlayErr = pending.readSnapshotOverlay(u.listener.fileListCache)
 		})
-		snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.storageFilesystemPath())
+		snapshot, err := u.listener.openSavedIndexSnapshot()
 		overlayRead.Wait()
 		if err != nil {
 			// This one-time bootstrap uses the existing saved catalogue. Waiting

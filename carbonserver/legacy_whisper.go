@@ -40,3 +40,21 @@ func (l *CarbonserverListener) storageFilesystemPath() string {
 	}
 	return l.whisperData
 }
+
+// Source completion changes disk accounting, not the identity of an existing
+// saved catalog. Older generations are rooted at whisperData; validate those
+// with the same path/device/inode and checksums they were written with. Newly
+// built catalogs use the store root and need no source access on later starts.
+func (l *CarbonserverListener) openSavedIndexSnapshot() (*indexSnapshot, error) {
+	root := l.storageFilesystemPath()
+	snapshot, err := openIndexSnapshot(l.fileListCache, root)
+	if err == nil || root == l.whisperData {
+		return snapshot, err
+	}
+	legacy, legacyErr := openIndexSnapshot(l.fileListCache, l.whisperData)
+	if legacyErr == nil {
+		l.logger.Info("reusing saved index with Whisper root identity")
+		return legacy, nil
+	}
+	return nil, err
+}

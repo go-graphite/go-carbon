@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -108,5 +109,84 @@ func TestMetricStoreCheckpointPreservesCatalogAndPendingNames(t *testing.T) {
 				t.Fatal("fallback did not use the authoritative store catalog")
 			}
 		})
+	}
+}
+
+// Upgrading from a Whisper-root catalog must reuse its base and overlay even
+// when source completion selects the store directory for filesystem accounting.
+func TestCompletedStoreReusesWhisperRootCheckpoint(t *testing.T) {
+	cache, root, entries := snapshotFixture(t)
+	first := overlayListener(t, cache, root)
+	first.insertRealtimeMetric(first.CurrentFileIndex().trieIdx, "pending.only")
+	id, err := first.CheckpointReadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := first.CurrentFileIndex().trieIdx.snapshot.manifest.Index.Name
+	db, err := store.Open(t.TempDir(), store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	next := unstartedOverlayListener(t, cache, root)
+	next.SetMetricStore(db)
+	next.SetLegacyWhisperDisabled(true)
+	if next.storageFilesystemPath() != db.Directory() {
+		t.Fatal("completed store space accounting uses source")
+	}
+	validated := false
+	next.WarmupIndexWithPending(func(got string, visit, _ func(string) error) error {
+		validated = true
+		if got != id {
+			return fmt.Errorf("checkpoint identity changed: %q != %q", got, id)
+		}
+		return visit("checkpoint.only")
+	})
+	next.WaitForWarmup()
+	if !validated || !next.HasMappedIndex() || next.RecoveryIndexID() != id {
+		t.Fatal("restart did not reuse saved index and overlay")
+	}
+	if next.CurrentFileIndex().trieIdx.snapshot.manifest.Index.Name != generation {
+		t.Fatal("restart rebuilt the saved catalog")
+	}
+	for _, name := range []string{metricFromVirtualPath(entries[0].Path), "pending.only", "checkpoint.only"} {
+		if !next.MetricExists(name) {
+			t.Fatalf("reused index lost %s", name)
+		}
+	}
+}
+
+func TestWhisperRootCheckpointStillValidatesIdentityAndContents(t *testing.T) {
+	cache, root, _ := snapshotFixture(t)
+	db, err := store.Open(t.TempDir(), store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	l := unstartedOverlayListener(t, cache, root)
+	l.SetMetricStore(db)
+	l.SetLegacyWhisperDisabled(true)
+	l.SetWhisperData(t.TempDir())
+	if snapshot, err := l.openSavedIndexSnapshot(); err == nil {
+		_ = snapshot.close()
+		t.Fatal("accepted a different source root")
+	}
+	l.SetWhisperData(root)
+	manifest, err := readIndexSnapshotManifest(snapshotManifestPath(cache))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(cache), manifest.Index.Name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[0] ^= 1
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err := l.openSavedIndexSnapshot(); err == nil {
+		_ = snapshot.close()
+		t.Fatal("accepted corrupt saved index")
 	}
 }
