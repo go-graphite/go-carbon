@@ -358,6 +358,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	shard.items.set(name, values)
 	s := c.settings.Load().(*cacheSettings)
 	c.addSizeLocked(shard, int64(values.count()), s.sizeSlack)
+	c.stat.recoveredPoints.Add(uint64(values.count()))
 	// A metric the store already has keeps its saved points durable here
 	// until written (the source retires only then), so it may wait for a
 	// spread deadline and be written once with its first live points. A new

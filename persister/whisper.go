@@ -81,36 +81,38 @@ type Whisper struct {
 	incrementalPriority      atomic.Pointer[func(string)]
 	// incrementalComplete routes writes to the store without an ownership
 	// check once the migration has left no originals.
-	incrementalComplete atomic.Bool
-	mirrorImportMissing bool
-	mirrorFiles         bool
-	mirrorState         *MirrorState
-	tagsEnabled         bool
-	taggedFn            func(string, bool)
-	schemas             WhisperSchemas
-	aggregation         *WhisperAggregation
-	workersCount        int
-	rootPath            string
-	created             uint32 // counter
-	nameTooLong         uint32 // counter: points dropped for metric names the store refuses
-	nameTooLongLogged   atomic.Int64
-	nameTooLongTotal    atomic.Uint64
-	updateOperations    uint32 // counter
-	committedPoints     uint32 // counter
-	oooDiscardedPoints  uint32 // counter
-	oooDiverted         uint32 // counter
-	oooCompactions      uint32 // counter
-	oooCompactErrors    uint32 // counter
-	extended            uint32 // counter
-	sparse              bool
-	flock               bool
-	compressed          bool
-	hashFilenames       bool
-	removeEmptyFile     bool
-	maxUpdatesPerSecond int
-	autoUpdate          autoUpdateRate
-	updateTicker        *helper.ThrottleTicker
-	storeMutex          [storeMutexCount]sync.Mutex
+	incrementalComplete  atomic.Bool
+	mirrorImportMissing  bool
+	mirrorFiles          bool
+	mirrorState          *MirrorState
+	tagsEnabled          bool
+	taggedFn             func(string, bool)
+	schemas              WhisperSchemas
+	aggregation          *WhisperAggregation
+	workersCount         int
+	rootPath             string
+	created              uint32 // counter
+	nameTooLong          uint32 // counter: points dropped for metric names the store refuses
+	nameTooLongLogged    atomic.Int64
+	nameTooLongTotal     atomic.Uint64
+	updateOperations     uint32 // counter
+	committedPointsTotal atomic.Uint64
+	writeDroppedPoints   atomic.Uint64
+	committedPoints      uint32 // counter
+	oooDiscardedPoints   uint32 // counter
+	oooDiverted          uint32 // counter
+	oooCompactions       uint32 // counter
+	oooCompactErrors     uint32 // counter
+	extended             uint32 // counter
+	sparse               bool
+	flock                bool
+	compressed           bool
+	hashFilenames        bool
+	removeEmptyFile      bool
+	maxUpdatesPerSecond  int
+	autoUpdate           autoUpdateRate
+	updateTicker         *helper.ThrottleTicker
+	storeMutex           [storeMutexCount]sync.Mutex
 	// converting names metrics whose original is being imported. Their
 	// writeouts are deferred instead of holding a store stripe for the import.
 	converting sync.Map
@@ -655,13 +657,15 @@ func (p *Whisper) prepareWhisperCreate(metric, path string, err error) bool {
 		if !settings.removeEmptyFile || err2 != nil || stat.Size() > 0 {
 			p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
 			if errors.Is(err, syscall.ENAMETOOLONG) {
-				p.popConfirm(metric)
+				p.dropNameTooLong(metric)
 			}
 			return false
 		}
 		if err := os.Remove(path); err != nil {
 			p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
-			p.popConfirm(metric)
+			if values, ok := p.popConfirm(metric); ok {
+				p.writeDroppedPoints.Add(uint64(len(values.Data)))
+			}
 			return false
 		}
 		p.logger.Warn("deleted empty whisper file", zap.String("path", path))
@@ -788,6 +792,7 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 	}
 
 	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
+	p.committedPointsTotal.Add(uint64(len(values.Data)))
 	p.recordUpdate()
 	if p.confirm != nil {
 		defer p.confirm(values)
@@ -946,6 +951,9 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("updateOperations", float64(updateOperations))
 	send("committedPoints", float64(committedPoints))
+	send("committed_points_total", float64(p.CommittedPoints()))
+	send("write_dropped_points_total", float64(p.WriteDroppedPoints()))
+	send("write_failed_points_total", float64(p.writeStats.shared.failedPoints.Load()+p.writeStats.original.failedPoints.Load()))
 	if updateOperations > 0 {
 		send("pointsPerUpdate", float64(committedPoints)/float64(updateOperations))
 	} else {
@@ -954,6 +962,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 	send("nameTooLongDroppedPoints", float64(nameTooLong))
+	send("name_too_long_dropped_points_total", float64(p.NameTooLongDroppedPoints()))
 	send("oooDiscardedPoints", float64(oooDiscardedPoints))
 	if settings.outOfOrder.enabled {
 		// oooDiverted tracks how many of the oooDiscardedPoints above were

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -23,10 +24,22 @@ func TestNativeCopyAfterLiveClaimsAboveRecoveryLimit(t *testing.T) {
 	testNativeCopyAfterRestoreBeforeSavedWriteout(t, true)
 }
 
+// The recovery fixture uses a few MiB on real disk. Its correctness must not
+// depend on the host filesystem's production free-space reserve. Each case
+// runs in its own process, so replacing vfs.Default cannot affect other cases.
+type nativeRestoreDiskFS struct{ vfs.FS }
+
+func (nativeRestoreDiskFS) GetDiskUsage(string) (vfs.DiskUsage, error) {
+	return vfs.DiskUsage{}, vfs.ErrUnsupported
+}
+
 func testNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T, liveClaims bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
+	previousFS := vfs.Default
+	vfs.Default = nativeRestoreDiskFS{previousFS}
+	t.Cleanup(func() { vfs.Default = previousFS })
 	path, cfg := pendingCheckpointConfig(t)
 	cfg.Whisper.StorageBackend, cfg.Whisper.StoreDir = "pebble-chunk", t.TempDir()
 	cfg.Whisper.StoreEncoding = "exact"

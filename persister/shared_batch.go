@@ -116,6 +116,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		}
 		for _, batch := range values {
 			atomic.AddUint32(&p.committedPoints, uint32(len(batch.Data)))
+			p.committedPointsTotal.Add(uint64(len(batch.Data)))
 			p.recordUpdate()
 			if p.confirm != nil {
 				if guarded, ok := p.metricStore.(interface{ SharedWriteGuard(string) func() }); ok {
