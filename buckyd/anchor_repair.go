@@ -37,7 +37,7 @@ func (s *Service) archiveAnchors(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		writeError(w, err, 400)
+		writeError(w, err, bodyErrorStatus(err))
 		return
 	}
 	if len(request.Names) == 0 || len(request.Names) > maxAnchorNames {

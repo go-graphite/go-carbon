@@ -40,7 +40,7 @@ func (s *Service) activityBackfill(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		writeError(w, err, 400)
+		writeError(w, err, bodyErrorStatus(err))
 		return
 	}
 	if request.Start.IsZero() || !request.End.After(request.Start) || request.End.After(time.Now()) || len(request.Baselines) > 128 || request.Limit < 0 || request.Limit > 128 {
