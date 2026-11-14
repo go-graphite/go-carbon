@@ -412,8 +412,8 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	began = time.Now()
 	stage := s.stageTransfer(first, records, metas)
 	if limit := s.transferBatchLimit(); len(stage.keys) > 0 && stage.bytes <= limit {
-		// Normal-size transfers commit as one NoSync batch: Pebble applies
-		// batches concurrently, while ingestion runs one SST set at a time.
+		// Normal-size transfers use bounded NoSync batches. Large memtable
+		// applies delay publication of every later live commit in Pebble.
 		// The final WAL barrier below makes the data durable together with
 		// the receipts published after it.
 		batch, err := s.writeTransferBatch(ctx, stage)
@@ -427,7 +427,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			}
 		}
 		began = time.Now()
-		err = errors.Join(ctx.Err(), batch.Commit(pebble.NoSync))
+		err = s.commitTransferBatch(ctx, batch, transferCommitBytes)
 		size := uint64(len(batch.Repr()))
 		err = errors.Join(err, batch.Close())
 		s.transferApply.ingest.Add(uint64(time.Since(began)))

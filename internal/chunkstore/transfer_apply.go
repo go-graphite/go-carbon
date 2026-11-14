@@ -179,6 +179,19 @@ const (
 // commitTransferParts commits, in one batch, the pending parts whose stripes
 // it acquires without waiting and whose targets are unchanged.
 func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransfer, pending []int) ([]partOutcome, error) {
+	// Keep a publication round small too: merged archive data can be much
+	// larger than the original staging keys. Every name remains atomic; a
+	// single oversized name is allowed and all other parts stay pending.
+	allPending := pending
+	bytes := 0
+	for j, i := range pending {
+		next := len(parts[i].batch.Repr())
+		if j > 0 && bytes+next > transferCommitBytes {
+			pending = pending[:j]
+			break
+		}
+		bytes += next
+	}
 	names := make([]string, len(pending))
 	epochs := make([]uint64, len(pending))
 	absent := false
@@ -200,7 +213,7 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return nil, err
 	}
-	out := make([]partOutcome, len(pending))
+	out := make([]partOutcome, len(allPending))
 	batch := s.db.NewBatch()
 	defer batch.Close()
 	var sidecars []SidecarRecord
@@ -273,6 +286,9 @@ func (s *Store) publishTransferSingles(ctx context.Context, records []TransferMe
 }
 
 func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer) (bool, error) {
+	if len(p.metas) > 1 && len(p.batch.Repr()) > transferCommitBytes {
+		return false, errTransferSplit
+	}
 	names := make([]string, len(p.metas))
 	absent := false
 	for i, m := range p.metas {
