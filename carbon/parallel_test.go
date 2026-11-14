@@ -58,12 +58,19 @@ func isolatedTestProcessMode(t *testing.T, parallel bool) bool {
 	// observe their own progress; output volume is not a reliable heartbeat.
 	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
 	cmd.Env = append(os.Environ(), isolatedTestCase+"="+t.Name())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("isolated case: %v\n%s", err, out)
-	}
-	if testing.Verbose() {
-		t.Logf("%s", out)
+	// Stream phase and failure output while the child is alive. Buffering it
+	// until Wait returns loses the child's diagnostics if the package expires.
+	cmd.Stdout = testProcessOutput{t}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("isolated case: %v", err)
 	}
 	return true
+}
+
+type testProcessOutput struct{ t *testing.T }
+
+func (out testProcessOutput) Write(p []byte) (int, error) {
+	out.t.Logf("%s", p)
+	return len(p), nil
 }
