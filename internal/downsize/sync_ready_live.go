@@ -45,7 +45,11 @@ func (b *syncLiveBackend) Process(ctx context.Context, store string, port int) (
 		count := 0
 		for scan.Scan() {
 			fields := strings.Fields(scan.Text())
-			if len(fields) >= 2 && fields[0] == "process_start_time_seconds" {
+			name := ""
+			if len(fields) > 0 {
+				name, _, _ = strings.Cut(fields[0], "{")
+			}
+			if len(fields) >= 2 && name == "process_start_time_seconds" {
 				start, e = strconv.ParseFloat(fields[1], 64)
 				if e != nil {
 					return e
