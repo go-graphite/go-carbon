@@ -105,3 +105,40 @@ func TestNativeCombineConfigAndRestart(t *testing.T) {
 		t.Fatal("invalid budget accepted by ReadConfig")
 	}
 }
+
+func TestNativeExportMemoryAndRestart(t *testing.T) {
+	for _, tc := range []struct {
+		exports            int
+		ram                uint64
+		detectErr, invalid bool
+	}{
+		{1, 0, true, false}, {2, 144 << 30, false, false}, {2, (144 << 30) - 1, false, true}, {2, 0, true, true}, {0, 1 << 40, false, true}, {9, 1 << 40, false, true}, {8, 1 << 40, false, false},
+	} {
+		cfg := NewConfig()
+		cfg.Whisper.StoreNativeExportConcurrency = tc.exports
+		err := cfg.validateNativeCombineBudget(func() (uint64, error) {
+			if tc.detectErr {
+				return 0, errors.New("unavailable")
+			}
+			return tc.ram, nil
+		})
+		if (err != nil) != tc.invalid {
+			t.Fatalf("%+v: %v", tc, err)
+		}
+	}
+	old := NewConfig()
+	old.Whisper.StorageBackend = "pebble-chunk"
+	next := *old
+	next.Whisper.StoreNativeExportConcurrency = 2
+	if !storageSettingsChanged(old, &next) {
+		t.Fatal("export admission reload accepted")
+	}
+	path := filepath.Join(t.TempDir(), "native-export.conf")
+	if err := os.WriteFile(path, []byte("[whisper]\nstore-native-export-concurrency=1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ReadConfig(path)
+	if err != nil || cfg.Whisper.StoreNativeExportConcurrency != 1 || len(cfg.unknownKeys) != 0 {
+		t.Fatal("export TOML lost", cfg, err)
+	}
+}
