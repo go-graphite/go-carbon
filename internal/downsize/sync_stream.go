@@ -3,6 +3,7 @@ package downsize
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -451,13 +452,36 @@ func firstSource(mask uint64, forbid map[string]bool, from []string) int {
 // Missing source metadata is distinct from short retention, so another source
 // can still supply a name that disappeared since discovery.
 func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, short, absent []string, err error) {
-	type key struct {
-		first, last string
-		count       int
-	}
-	cached := map[key]syncRow{}
+	// Exact names make the cache independent of batch size and wave boundaries.
+	// Older receipts can be recovered when their bounds still account exactly
+	// for the input names; never infer coverage from an ambiguous range.
+	cached := map[string]byte{}
 	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "prechecked" && r.Source == s.o.from[src] }) {
-		cached[key{r.First, r.Last, r.Names}] = r
+		if len(names) == 0 || r.Last < names[0] || r.First > names[len(names)-1] {
+			continue
+		}
+		selected := r.Selected
+		if len(selected) > 0 {
+			first := sort.SearchStrings(selected, names[0])
+			last := sort.Search(len(selected), func(i int) bool { return selected[i] > names[len(names)-1] })
+			selected = selected[first:last]
+		} else {
+			first := sort.SearchStrings(names, r.First)
+			last := sort.Search(len(names), func(i int) bool { return names[i] > r.Last })
+			if last-first != r.Names {
+				continue
+			}
+			selected = names[first:last]
+		}
+		for _, n := range selected {
+			cached[n] = 1
+		}
+		for _, n := range r.Short {
+			cached[n] = 2
+		}
+		for _, n := range r.Absent {
+			cached[n] = 3
+		}
 	}
 	count := (len(names) + s.o.batch - 1) / s.o.batch
 	rows := make([]syncRow, count)
@@ -474,19 +498,25 @@ func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, 
 			defer wg.Done()
 			for i := range jobs {
 				chunk := names[i*s.o.batch : min((i+1)*s.o.batch, len(names))]
-				k := key{chunk[0], chunk[len(chunk)-1], len(chunk)}
-				if r, ok := cached[k]; ok {
-					rows[i] = r
-					s.prog.done.Add(int64(len(chunk)))
-					continue
-				}
-				// Over-limit legacy names cannot be imported. Leave them in keep
-				// for the copier to journal as failures, without metadata I/O.
-				var valid []string
+				var unknown, valid []string
+				r := syncRow{Kind: "prechecked", Source: s.o.from[src]}
 				for _, n := range chunk {
-					if chunkstore.ValidateMetricName(n) == nil {
-						valid = append(valid, n)
+					switch cached[n] {
+					case 2:
+						r.Short = append(r.Short, n)
+					case 3:
+						r.Absent = append(r.Absent, n)
+					case 0:
+						unknown = append(unknown, n)
+						// Invalid names are left for the copier to reject locally.
+						if chunkstore.ValidateMetricName(n) == nil {
+							valid = append(valid, n)
+						}
 					}
+				}
+				if len(unknown) == 0 {
+					rows[i] = r
+					continue
 				}
 				info := map[string][]syncArchive{}
 				var e error
@@ -497,22 +527,23 @@ func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, 
 					fail(e)
 					return
 				}
-				r := syncRow{Kind: "prechecked", Source: s.o.from[src], First: k.first, Last: k.last, Names: k.count}
-				for _, n := range chunk {
+				fresh := syncRow{Kind: "prechecked", Source: s.o.from[src], First: unknown[0], Last: unknown[len(unknown)-1], Names: len(unknown), Selected: unknown}
+				for _, n := range unknown {
 					if chunkstore.ValidateMetricName(n) != nil {
 						continue
 					} else if _, ok := info[n]; !ok {
-						r.Absent = append(r.Absent, n)
+						fresh.Absent = append(fresh.Absent, n)
 					} else if !s.o.includeShort && syncShort(info[n]) {
-						r.Short = append(r.Short, n)
+						fresh.Short = append(fresh.Short, n)
 					}
 				}
-				if e := s.j.append(r); e != nil {
+				if e := s.j.append(fresh); e != nil {
 					fail(e)
 					return
 				}
+				r.Short = append(r.Short, fresh.Short...)
+				r.Absent = append(r.Absent, fresh.Absent...)
 				rows[i] = r
-				s.prog.done.Add(int64(len(chunk)))
 			}
 		}()
 	}
@@ -551,6 +582,91 @@ feed:
 	return keep, short, absent, nil
 }
 
+// recoverMissingWaves adopts pre-wave-manifest journals from older clients.
+// Their immutable names files already contain the successful precheck result.
+// Validate the full identity before treating any such file as campaign state.
+func (s *syncer) recoverMissingWaves(src int) error {
+	paths, err := filepath.Glob(filepath.Join(s.o.state, fmt.Sprintf("missing-batch-r*-s%d*.jsonl", src)))
+	if err != nil {
+		return err
+	}
+	rows := s.j.find(func(r syncRow) bool { return r.Source == s.o.from[src] })
+	for _, path := range paths {
+		var group, source int
+		if _, err := fmt.Sscanf(filepath.Base(path), "missing-batch-r%d-s%d", &group, &source); err != nil || source != src {
+			continue
+		}
+		represented := false
+		for _, r := range rows {
+			if r.Kind == "missing-wave" && r.Round == group {
+				represented = true
+				break
+			}
+		}
+		if represented {
+			continue
+		}
+		namesPath := strings.TrimSuffix(path, ".jsonl") + ".names"
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		var header copyRow
+		err = json.NewDecoder(file).Decode(&header)
+		file.Close()
+		if err != nil {
+			return fmt.Errorf("read legacy copy header: %w", err)
+		}
+		identity, err := copyIdentity(copyOptions{froms: []string{s.o.from[src]}, to: s.o.to, names: namesPath})
+		if err != nil {
+			return err
+		}
+		if header.Kind != "header" || header.Identity != identity {
+			return fmt.Errorf("legacy missing-copy journal identity mismatch: %s", path)
+		}
+		f, scan, err := openLines(namesPath)
+		if err != nil {
+			return err
+		}
+		var names []string
+		for scan.Scan() {
+			names = append(names, scan.Text())
+		}
+		err = scan.Err()
+		f.Close()
+		if err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			continue
+		}
+		// Completed old waves already have parent receipts. Restore their exact
+		// membership even when vanished names make bound-only replay ambiguous.
+		complete := false
+		for _, r := range rows {
+			if r.Kind == "copied" && r.Phase == "missing-batch" && r.Round == group && r.Names == len(names) && r.First == names[0] && r.Last == names[len(names)-1] {
+				complete = len(r.Failed) == 0
+				// An ordinary receipt may already have been replayed above.
+				unseen := false
+				for _, n := range names {
+					unseen = unseen || (!s.copied[n] && !s.failedCp[n])
+				}
+				if unseen {
+					s.restoreMissingCopy(names, r)
+				}
+				break
+			}
+		}
+		if complete {
+			continue
+		}
+		if err := s.j.append(syncRow{Kind: "missing-wave", Source: s.o.from[src], Round: group, Selected: names, SelectionComplete: true}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *syncer) copyMissing(ctx context.Context) error {
 	// Older window campaigns recorded full-history imports with the same
 	// per-source receipts as non-window campaigns. Replay that protocol for
@@ -575,6 +691,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 	short := map[string]bool{}
 	work := 0
 	for src, source := range s.o.from {
+		replayBase := s.prog.done.Load()
 		var names []string
 		for _, m := range missing {
 			if !s.copied[m.name] && !short[m.name] && !s.failedCp[m.name] && firstSource(m.mask, s.forbid, s.o.from) == src {
@@ -586,6 +703,8 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 				short[n] = true
 			}
 			s.applyCopy(names, r.Short, r.Copied, r.Failed, r.Forbidden)
+			s.prog.advance(int64(len(s.copied) + len(short) + len(s.failedCp)))
+			s.prog.replayed.Add(s.prog.done.Load() - replayBase)
 			continue
 		}
 		if len(names) == 0 {
@@ -614,30 +733,56 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			}
 			// A precheck may have omitted absent names inside the bounds. Do not
 			// credit an ambiguous range without an exact accounting of its names.
-			if count != r.Names {
+			if len(r.Selected) > 0 {
+				batch = r.Selected
+			} else if count != r.Names {
 				continue
 			}
 			for _, n := range r.Short {
 				short[n] = true
 			}
-			s.applyCopy(batch, r.Short, r.Copied, r.Failed, r.Forbidden)
+			s.restoreMissingCopy(batch, r)
 		}
-		remaining := names[:0]
-		for _, n := range names {
-			if !s.copied[n] && !short[n] && !s.failedCp[n] {
-				remaining = append(remaining, n)
+		if err := s.recoverMissingWaves(src); err != nil {
+			return err
+		}
+		absentSource := map[string]bool{}
+		// Keep a pending wave's exact input stable across retries and changes to
+		// concurrency. Its precheck rows and transfer journal remain reusable.
+		pending := s.j.find(func(r syncRow) bool { return r.Kind == "missing-wave" && r.Source == source })
+		reserved := map[string]bool{}
+		nextGroup := 1
+		for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "copied" && r.Source == source }) {
+			nextGroup = max(nextGroup, r.Round+1)
+		}
+		for _, r := range pending {
+			nextGroup = max(nextGroup, r.Round+1)
+			for _, n := range r.Selected {
+				reserved[n] = true
 			}
 		}
-		names = remaining
-		absentSource := map[string]bool{}
-		// Copy each bounded wave as soon as its precheck finishes. Preparation
-		// for a huge catalog must not delay all imports until the last name.
 		wave := s.o.batch * s.o.streams
-		for start, group := 0, 1; start < len(names); start, group = start+wave, group+1 {
-			chunk := names[start:min(start+wave, len(names))]
-			s.prog.begin("precheck", len(chunk))
+		var fresh []string
+		for _, n := range names {
+			if !reserved[n] && !s.copied[n] && !short[n] && !s.failedCp[n] {
+				fresh = append(fresh, n)
+			}
+		}
+		process := func(chunk []string, group int, prepared bool) error {
+			unfinished := false
+			for _, n := range chunk {
+				unfinished = unfinished || (!s.copied[n] && !short[n] && !s.failedCp[n])
+			}
+			if !unfinished {
+				return nil
+			}
 			checkedAt := time.Now()
-			keep, shortNames, absent, err := s.dropShort(ctx, src, chunk)
+			keep := chunk
+			var shortNames, absent []string
+			var err error
+			if !prepared {
+				keep, shortNames, absent, err = s.dropShort(ctx, src, chunk)
+			}
 			if err != nil {
 				return err
 			}
@@ -648,25 +793,61 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 				absentSource[n] = true
 			}
 			event("sync_prechecked", map[string]any{"source": source, "names": len(chunk), "keep": len(keep), "short": len(shortNames), "absent": len(absent), "group": group, "seconds": time.Since(checkedAt).Seconds(), "names_per_second": float64(len(chunk)) / time.Since(checkedAt).Seconds()})
-			s.prog.begin("copy", len(keep))
+			allDone := true
+			for _, n := range keep {
+				allDone = allDone && (s.copied[n] || s.failedCp[n])
+			}
+			completed := int64(len(s.copied) + len(short) + len(s.failedCp))
+			s.prog.advance(completed)
+			// A previous completed attempt may contain successful names alongside
+			// failures. Its journal reports those names too: count them only once.
+			base := completed
+			for _, n := range keep {
+				if s.copied[n] || s.failedCp[n] {
+					base--
+				}
+			}
+			if allDone {
+				return nil
+			}
 			res := syncCopyResult{}
-			completed := s.j.find(func(r syncRow) bool {
-				return r.Kind == "copied" && r.Phase == "missing-batch" && r.Source == source && r.Round == group && len(keep) > 0 && r.Names == len(keep) && r.First == keep[0] && r.Last == keep[len(keep)-1]
-			})
-			if len(completed) > 0 {
-				r := completed[len(completed)-1]
-				res = syncCopyResult{Copied: r.Copied, Failed: r.Failed, Forbidden: r.Forbidden}
-			} else if len(keep) > 0 {
-				if res, err = s.copyFrom(ctx, "missing-batch", group, src, keep, shortNames...); err != nil {
+			if len(keep) > 0 {
+				copyCtx := context.WithValue(ctx, syncCopyDurableProgressKey{}, func(done int64, replay bool) {
+					old := s.prog.done.Load()
+					s.prog.advance(base + done)
+					if replay {
+						s.prog.replayed.Add(s.prog.done.Load() - old)
+					}
+				})
+				if res, err = s.copyFrom(copyCtx, "missing-batch", group, src, keep, shortNames...); err != nil {
 					return err
 				}
 			}
 			s.applyCopy(keep, nil, res.Copied, res.Failed, res.Forbidden)
 			work += len(chunk)
-			s.prog.done.Store(int64(len(keep)))
-			if res.Forbidden {
+			s.prog.advance(int64(len(s.copied) + len(short) + len(s.failedCp)))
+			return nil
+		}
+		// Restore durable progress before doing any new metadata or transfer I/O.
+		s.prog.advance(int64(len(s.copied) + len(short) + len(s.failedCp)))
+		s.prog.replayed.Add(s.prog.done.Load() - replayBase)
+		for _, r := range pending {
+			if err := process(r.Selected, r.Round, r.SelectionComplete); err != nil {
+				return err
+			}
+			if s.forbid[source] {
 				break
 			}
+		}
+		for start := 0; start < len(fresh) && !s.forbid[source]; start += wave {
+			chunk := fresh[start:min(start+wave, len(fresh))]
+			if err := s.j.append(syncRow{Kind: "missing-wave", Source: source, Round: nextGroup, Selected: chunk}); err != nil {
+				return err
+			}
+			if err := process(chunk, nextGroup, false); err != nil {
+				return err
+			}
+			nextGroup++
 		}
 		for i := range missing {
 			if absentSource[missing[i].name] {
@@ -688,6 +869,22 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 	return nil
 }
 
+// Failed names remain eligible on resume; only successful receipts suppress
+// work. The original wave and child journal keep the successful subset stable.
+func (s *syncer) restoreMissingCopy(names []string, r syncRow) {
+	failed := make(map[string]bool, len(r.Failed))
+	for _, n := range r.Failed {
+		failed[n] = true
+	}
+	successful := make([]string, 0, len(names))
+	for _, n := range names {
+		if !failed[n] {
+			successful = append(successful, n)
+		}
+	}
+	s.applyCopy(successful, r.Short, r.Copied, nil, r.Forbidden)
+}
+
 func (s *syncer) applyCopy(names, short []string, copied int, failed []string, forbidden bool) {
 	if forbidden {
 		return
@@ -701,12 +898,14 @@ func (s *syncer) applyCopy(names, short []string, copied int, failed []string, f
 		s.failedCp[n] = true
 		s.addResidual(syncHole{Name: n}, "copy_failed")
 	}
+	newlyCopied := 0
 	for _, n := range names {
-		if !skip[n] {
+		if !skip[n] && !s.copied[n] {
 			s.copied[n] = true
+			newlyCopied++
 		}
 	}
-	s.sum.Copied += copied
+	s.sum.Copied += min(copied, newlyCopied)
 	s.sum.CopyFailed += len(failed)
 }
 

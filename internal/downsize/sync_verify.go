@@ -117,6 +117,15 @@ func (p *syncProgress) begin(phase string, total int) {
 	p.replayed.Store(0)
 }
 
+// advance accepts replayed or live durable receipts without moving backwards.
+func (p *syncProgress) advance(done int64) {
+	for old := p.done.Load(); done > old; old = p.done.Load() {
+		if p.done.CompareAndSwap(old, done) {
+			return
+		}
+	}
+}
+
 func (s *syncer) sampled(name string) bool {
 	if len(s.o.windows) == 0 {
 		return true // no windows: every name over its full history

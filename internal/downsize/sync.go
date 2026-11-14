@@ -587,10 +587,9 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		s.forbid[source] = true
 		event("sync_source_forbidden", map[string]any{"level": "error", "source": source, "target": s.o.to, "hint": "the target transfer-sources allowlist does not list this source; continuing with the others"})
 	}
-	var selected []string
-	if s.windowOnly() && !s.legacyCopyReceipts {
-		selected = names
-	}
+	// Exact membership allows replay even when precheck omitted names inside
+	// the bounds or a subsequent run uses different batch sizes.
+	selected := names
 	journalStarted := time.Now()
 	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, SelectionComplete: s.windowOnly()}); err != nil {
 		return res, err

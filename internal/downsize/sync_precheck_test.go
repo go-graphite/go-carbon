@@ -120,6 +120,7 @@ func TestSyncPrecheckBoundedCheckpoint(t *testing.T) {
 	}
 	defer j.close()
 	s.j = j
+	s.o.batch = 2 // regroup on resume; the cached single-name result must survive
 	var calls atomic.Int64
 	b.info = func(_ context.Context, _ string, names []string) (map[string][]syncArchive, error) {
 		calls.Add(1)
