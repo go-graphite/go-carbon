@@ -98,6 +98,14 @@ func ReadCaptureFrames(reader io.Reader, visit func([]byte, int) error) (int, er
 	return ReadCaptureFramesBuffer(reader, 256<<10, visit)
 }
 func ReadCaptureFramesBuffer(reader io.Reader, buffer int, visit func([]byte, int) error) (int, error) {
+	return readCaptureFramesBuffer(reader, buffer, func(raw []byte, n int, _ int64) ([]byte, error) {
+		return raw, visit(raw, n)
+	})
+}
+
+// readCaptureFramesBuffer lets a pipeline exchange ownership of its decode
+// buffer. The returned buffer is the only one the reader may overwrite.
+func readCaptureFramesBuffer(reader io.Reader, buffer int, visit func([]byte, int, int64) ([]byte, error)) (int, error) {
 	reader = bufio.NewReaderSize(reader, max(4096, buffer))
 	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxCaptureRaw))
 	if err != nil {
@@ -107,6 +115,7 @@ func ReadCaptureFramesBuffer(reader io.Reader, buffer int, visit func([]byte, in
 	var header [CaptureHeaderSize]byte
 	var frame, raw []byte
 	count := 0
+	var offset int64
 	for {
 		_, err := io.ReadFull(reader, header[:])
 		if errors.Is(err, io.EOF) {
@@ -133,7 +142,8 @@ func ReadCaptureFramesBuffer(reader io.Reader, buffer int, visit func([]byte, in
 		if err != nil {
 			return count, err
 		}
-		if err = visit(raw, n); err != nil {
+		offset += int64(size)
+		if raw, err = visit(raw, n, offset); err != nil {
 			return count, err
 		}
 		count += n

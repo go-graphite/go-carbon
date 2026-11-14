@@ -1,7 +1,6 @@
 package carbon
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -427,16 +426,14 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			var e error
 			if framed {
 				worker := &startupShard{owner: s}
-				position := &startupHistoryReader{reader: reader}
-				buffered := bufio.NewReaderSize(position, max(4096, s.policy.readBuffer))
-				loaded, e = recovery.ReadCaptureFramesBuffer(buffered, s.policy.readBuffer, func(raw []byte, n int) error {
-					if e := s.waitCapture(); e != nil {
-						return e
+				loaded, e = recovery.ReadCaptureFramesPipeline(reader, s.policy.readBuffer, func(raw []byte, n int, stop <-chan struct{}) (int64, error) {
+					if e := s.waitCaptureUntil(stop); e != nil {
+						return 0, e
 					}
-					cost, e := captureMetricBytes(raw, core)
-					if e != nil {
-						return e
-					}
+					return captureMetricBytes(raw, core)
+				}, func(raw []byte, n int, end, cost int64) error {
+					// Admission belongs to the ordered consumer: legacy count-only
+					// limits must observe application of the previous frame.
 					for !core.HasRecoveryCapacityBatch(n, cost) {
 						if cancelled() {
 							return errStartupReplayStopped
@@ -447,7 +444,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 						return e
 					}
 					s.historyPoints.Add(int64(n))
-					advance(position.offset - int64(buffered.Buffered()))
+					advance(end)
 					return nil
 				})
 			} else {
