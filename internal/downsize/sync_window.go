@@ -436,7 +436,8 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 	if err != nil {
 		return nil, nil, err
 	}
-	// Keep the complete session handle, including any readiness state.
+	// Borrow the initialized session, including its readiness state. Rebuilding
+	// it from the ID loses the boundary validation performed by session.
 	b.windowSources.mu.Lock()
 	c.sessions[source] = b.windowSources.sessions[source]
 	b.windowSources.mu.Unlock()
