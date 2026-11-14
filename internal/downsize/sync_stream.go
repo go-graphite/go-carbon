@@ -545,7 +545,13 @@ feed:
 }
 
 func (s *syncer) copyMissing(ctx context.Context) error {
-	if s.windowOnly() {
+	// Older window campaigns recorded full-history imports with the same
+	// per-source receipts as non-window campaigns. Replay that protocol for
+	// their lifetime so switching transports cannot repeat completed imports.
+	legacy := len(s.j.find(func(r syncRow) bool {
+		return r.Kind == "copied" && (r.Phase == "missing" || r.Phase == "missing-batch")
+	})) > 0
+	if s.windowOnly() && !legacy {
 		return s.copyMissingWindow(ctx)
 	}
 	missing, err := s.readMissing()
