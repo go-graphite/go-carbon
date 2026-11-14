@@ -20,7 +20,7 @@ import (
 )
 
 // TestSyncLiveCarbonserver: v3 info fails a whole request with 404 when one
-// name is unknown; fallback requests each name exactly once.
+// name is unknown; recursive splitting preserves known names.
 func TestSyncLiveCarbonserver(t *testing.T) {
 	known := map[string]bool{"a": true, "c": true}
 	var requests [][]string
@@ -70,7 +70,7 @@ func TestSyncLiveCarbonserver(t *testing.T) {
 	if len(info) != 2 || info["a"][0].Step != 60 || info["c"] == nil {
 		t.Fatalf("info %+v", info)
 	}
-	if want := [][]string{{"a", "b", "c", "d"}, {"a"}, {"b"}, {"c"}, {"d"}}; !reflect.DeepEqual(requests, want) {
+	if want := [][]string{{"a", "b", "c", "d"}, {"a", "b"}, {"a"}, {"b"}, {"c", "d"}, {"c"}, {"d"}}; !reflect.DeepEqual(requests, want) {
 		t.Fatalf("info requests %v, want %v", requests, want)
 	}
 	got, err := b.Fetch(context.Background(), store, []string{"a", "b"}, 120, 240)

@@ -153,6 +153,7 @@ func (s *syncer) verifyBatch(ctx context.Context, round int, names []string) (sy
 		row.Unindexed = append(row.Unindexed, part.Unindexed...)
 		row.Short = append(row.Short, part.Short...)
 		row.Skipped = append(row.Skipped, part.Skipped...)
+		row.Resolved = append(row.Resolved, part.Resolved...)
 	}
 	return row, nil
 }
@@ -165,9 +166,19 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 	if err != nil {
 		return fmt.Errorf("target info: %w", err)
 	}
+	if err := s.resolveAbsent(ctx, row, names, info); err != nil {
+		return err
+	}
+	resolved := map[string]bool{}
+	for _, r := range row.Resolved {
+		resolved[r.Name] = true
+	}
 	var eligible, full []string
 	schemas := map[string][]syncArchive{}
 	for _, n := range names {
+		if resolved[n] {
+			continue
+		}
 		archives, ok := info[n]
 		switch {
 		case !ok:
@@ -422,6 +433,9 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 			sv, ok := got[n]
 			tv := targetPoints[n]
 			if !ok || sv.Step <= 0 || (tv.Step != 0 && tv.Step != sv.Step) {
+				if ok && sv.Step > 0 {
+					row.Skipped = append(row.Skipped, syncSkip{n, "schema_step_mismatch"})
+				}
 				continue // retention differs: not comparable at one step
 			}
 			from := (w.From + sv.Step - 1) / sv.Step * sv.Step
@@ -542,6 +556,9 @@ func (s *syncer) checkFull(ctx context.Context, row *syncRow, names []string, sc
 				for _, n := range subset {
 					sv, ok := got[n]
 					if !ok || sv.Step != a.Step {
+						if ok {
+							row.Skipped = append(row.Skipped, syncSkip{n, "schema_step_mismatch"})
+						}
 						continue // not served at this step: retention differs
 					}
 					if h, ok := syncCompare(n, source, sv, target[n], a.Step, from, until); ok {

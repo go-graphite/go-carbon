@@ -257,8 +257,8 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 }
 
 // Info returns retentions for the names carbonserver knows. A batch 404 does
-// not identify the missing name. Fall back to exact-name requests once,
-// skipping each absent name without recursively splitting healthy neighbors.
+// not identify the missing name. Recursively split failing batches,
+// preserving healthy sub-batches and omitting only individual absent names.
 func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string) (map[string][]syncArchive, error) {
 	base, err := b.carbon(store)
 	if err != nil {
@@ -299,8 +299,9 @@ func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string
 			var httpErr *syncHTTPError
 			if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
 				if count > 1 {
-					for _, name := range names[cursor : cursor+count] {
-						if err := walk([]string{name}); err != nil {
+					mid := cursor + count/2
+					for _, half := range [][]string{names[cursor:mid], names[mid : cursor+count]} {
+						if err := walk(half); err != nil {
 							return err
 						}
 					}

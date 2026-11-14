@@ -52,7 +52,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
 	flags.StringVar(&c.phase, "phase", "all", "all (discover, copy, verify, fill, reverify) or copy (only metric copy, legacy journal format)")
 	flags.IntVar(&c.sync.batch, "verify-batch", 500, "names per verification batch")
-	flags.IntVar(&c.sync.maxRounds, "max-rounds", 4, "verify/fill rounds")
+	flags.IntVar(&c.sync.maxRounds, "max-rounds", 0, "optional round limit; 0 converges while making progress")
 	flags.DurationVar(&c.sync.settle, "settle", 10*time.Minute, "ignore the newest points while replicas are writing")
 	flags.IntVar(&c.sync.sampleEvery, "sample-every", 1, "only with --window and full history enabled: check 1 in N full histories (1 all, 0 none)")
 	flags.BoolVar(&c.sync.fullHistory, "full-history", true, "compatibility flag: full-history copy/fill is enabled by default; use --no-full-history for window-only work")

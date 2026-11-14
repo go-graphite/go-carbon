@@ -319,7 +319,7 @@ func (s *syncer) unionSource() syncNameSource {
 	var f *os.File
 	var scanner *bufio.Scanner
 	return syncNameSource{
-		total: s.both + len(s.copied),
+		total: s.sum.Discovered,
 		next: func() (string, uint64, error) {
 			if f == nil {
 				var err error
@@ -332,7 +332,7 @@ func (s *syncer) unionSource() syncNameSource {
 				if err != nil {
 					return "", 0, err
 				}
-				if mask != 0 && (onTarget || s.copied[name]) {
+				if mask != 0 || onTarget {
 					return name, mask, nil
 				}
 			}
@@ -619,7 +619,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		if !s.copied[m.name] && !short[m.name] && !s.failedCp[m.name] && firstSource(m.mask, s.forbid, s.o.from) < 0 {
 			reason := "missing_only_on_forbidden_source"
 			if m.mask == 0 {
-				reason = "missing_on_all_sources"
+				continue // Fresh all-source verification resolves stale catalogs below.
 			}
 			s.addResidual(syncHole{Name: m.name, Source: s.sourcesOf(m.mask)}, reason)
 		}
