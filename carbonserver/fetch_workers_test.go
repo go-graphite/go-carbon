@@ -60,7 +60,7 @@ func TestFetchWorkersMatchSerial(t *testing.T) {
 	var want [][]byte
 	for i, name := range files {
 		if leafs[i] {
-			r, err := l.fetchSingleMetric(name, "alias", 1789999872, 1790000000)
+			r, err := l.fetchSingleMetric(context.Background(), name, "alias", 1789999872, 1790000000)
 			if err == nil {
 				data, err := r.proto2().MarshalVT()
 				if err != nil {
@@ -75,7 +75,7 @@ func TestFetchWorkersMatchSerial(t *testing.T) {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
 			l.maxFetchDataGoroutines = limit
 			for _, n := range []int{0, 1, len(files)} {
-				got, err := l.fetchData("fetch.*", "alias", files[:n], leafs[:n], nil, 1789999872, 1790000000)
+				got, err := l.fetchData(context.Background(), "fetch.*", "alias", files[:n], leafs[:n], nil, 1789999872, 1790000000)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -126,7 +126,7 @@ func TestFetchWorkersBoundConcurrency(t *testing.T) {
 	defer once.Do(func() { close(release) })
 	done := make(chan int, 1)
 	go func() {
-		got, _ := l.fetchData("fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
+		got, _ := l.fetchData(context.Background(), "fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
 		done <- len(got)
 	}()
 	timer := time.NewTimer(2 * time.Second)
@@ -158,7 +158,7 @@ func BenchmarkFetchWorkers(b *testing.B) {
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
-					got, err := l.fetchData("fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
+					got, err := l.fetchData(context.Background(), "fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
 					if err != nil || len(got) != count {
 						b.Fatal("incomplete fetch", len(got), err)
 					}

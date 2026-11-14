@@ -37,7 +37,7 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 			return nil
 		}
-		if _, err := listener.fetchFromDisk("servers.api.cpu.user", now-10, now); err != nil {
+		if _, err := listener.fetchFromDisk(context.Background(), "servers.api.cpu.user", now-10, now); err != nil {
 			t.Fatal(err)
 		}
 		diskWait := time.Duration(atomic.LoadUint64(&listener.metrics.DiskWaitTimeNS))

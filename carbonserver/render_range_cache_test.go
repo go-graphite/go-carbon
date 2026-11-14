@@ -72,11 +72,11 @@ func TestRenderRangeCacheInvalidationAndOverlay(t *testing.T) {
 	check := func(from, until int32, wantHit bool) {
 		t.Helper()
 		before := l.metrics.RangeCacheHit
-		want, e := oracle.fetchSingleMetric(name, "alias", from, until)
+		want, e := oracle.fetchSingleMetric(context.Background(), name, "alias", from, until)
 		if e != nil {
 			t.Fatal(e)
 		}
-		got, e := l.fetchSingleMetric(name, "alias", from, until)
+		got, e := l.fetchSingleMetric(context.Background(), name, "alias", from, until)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -141,7 +141,7 @@ func TestRenderRangeCacheInvalidationAndOverlay(t *testing.T) {
 	if err := db.Delete(context.Background(), name); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.fetchSingleMetric(name, "alias", from, until); err == nil {
+	if _, err := l.fetchSingleMetric(context.Background(), name, "alias", from, until); err == nil {
 		t.Fatal("deleted metric returned old prefix")
 	}
 	if _, err := db.Create(context.Background(), store.MetricConfig{Name: name, Retentions: []store.Retention{{Step: 2, Count: 43200}}, AggregationMethod: store.Sum}); err != nil {
@@ -237,7 +237,7 @@ func TestRenderRangeCacheConcurrentRevision(t *testing.T) {
 	}()
 	defer wg.Wait()
 	for range 100 {
-		r, err := l.fetchSingleMetric(name, "alias", rangeScreenNow-3600, rangeScreenNow)
+		r, err := l.fetchSingleMetric(context.Background(), name, "alias", rangeScreenNow-3600, rangeScreenNow)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +257,7 @@ func TestRenderRangeCacheRetentionBoundary(t *testing.T) {
 	c := l.queryRangeCache.Load()
 	c.now = func() time.Time { return time.Unix(stamp.Load(), 0) }
 	const from, until = rangeScreenNow - 86399, rangeScreenNow
-	if _, err := l.fetchSingleMetric(names[0], "alias", from, until); err != nil {
+	if _, err := l.fetchSingleMetric(context.Background(), names[0], "alias", from, until); err != nil {
 		t.Fatal(err)
 	}
 	calls := 0
@@ -268,7 +268,7 @@ func TestRenderRangeCacheRetentionBoundary(t *testing.T) {
 		}
 		return time.Unix(stamp.Load(), 0)
 	}
-	r, err := l.fetchSingleMetric(names[0], "alias", from, until)
+	r, err := l.fetchSingleMetric(context.Background(), names[0], "alias", from, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestRenderRangeCacheBudgetAndConcurrentReaders(t *testing.T) {
 	// Two prefixes fit; a third evicts the least recently used entry.
 	c.limit = 32 << 10
 	for _, i := range []int{0, 1, 0, 2} {
-		if _, err := l.fetchSingleMetric(names[i], "alias", rangeScreenNow-3600, rangeScreenNow); err != nil {
+		if _, err := l.fetchSingleMetric(context.Background(), names[i], "alias", rangeScreenNow-3600, rangeScreenNow); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -296,7 +296,7 @@ func TestRenderRangeCacheBudgetAndConcurrentReaders(t *testing.T) {
 		t.Fatal("LRU/budget failure")
 	}
 	c.limit = 1 // Oversize results are served without retention.
-	if _, err := l.fetchSingleMetric(names[3], "alias", rangeScreenNow-3600, rangeScreenNow); err != nil {
+	if _, err := l.fetchSingleMetric(context.Background(), names[3], "alias", rangeScreenNow-3600, rangeScreenNow); err != nil {
 		t.Fatal(err)
 	}
 	if c.get(names[3]) != nil {
@@ -315,7 +315,7 @@ func TestRenderRangeCacheBudgetAndConcurrentReaders(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := range 30 {
-				r, err := l.fetchSingleMetric(names[(worker+j)%len(names)], "alias", rangeScreenNow-3600, rangeScreenNow)
+				r, err := l.fetchSingleMetric(context.Background(), names[(worker+j)%len(names)], "alias", rangeScreenNow-3600, rangeScreenNow)
 				if err != nil {
 					t.Error(err)
 					return

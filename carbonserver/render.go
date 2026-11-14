@@ -454,10 +454,10 @@ func (listener *CarbonserverListener) fetchTargets(ctx context.Context, format r
 				var res []response
 				var err error
 				if format == protoV2Format || format == jsonFormat {
-					res, err = listener.fetchData(metric.Name, "", files, leafs, trieNodes, fromTime, untilTime)
+					res, err = listener.fetchData(ctx, metric.Name, "", files, leafs, trieNodes, fromTime, untilTime)
 				} else {
 					// FIXME: why should we pass metric name instead of path Expression and fill it in afterwards?
-					res, err = listener.fetchData(metric.Name, metric.Name, files, leafs, trieNodes, fromTime, untilTime)
+					res, err = listener.fetchData(ctx, metric.Name, metric.Name, files, leafs, trieNodes, fromTime, untilTime)
 					for i := range res {
 						res[i].PathExpression = metric.PathExpression
 					}
@@ -618,8 +618,7 @@ func renderResponseBufferSize(targets map[timeRange][]target, metricGlobMap map[
 	return size
 }
 
-// nolint:unparam // FIXME - this always returns a nil error
-func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, trieNodes []*trieNode, fromTime, untilTime int32) ([]response, error) {
+func (listener *CarbonserverListener) fetchData(ctx context.Context, metric, pathExpression string, files []string, leafs []bool, trieNodes []*trieNode, fromTime, untilTime int32) ([]response, error) {
 	var multi []response
 	var errs []error
 	var wg sync.WaitGroup
@@ -633,13 +632,16 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 		maxFetchDataGoroutines = 2 * runtime.GOMAXPROCS(0)
 	}
 	fetch := func(i int, fileName string) {
+		if ctx.Err() != nil {
+			return
+		}
 		if !leafs[i] {
 			listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression),
 				zap.String("metricName", metric), zap.String("fileName", fileName))
 			// can't fetch a directory
 			return
 		}
-		response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
+		response, err := listener.fetchSingleMetric(ctx, fileName, pathExpression, fromTime, untilTime)
 		mu.Lock()
 		defer mu.Unlock()
 		if err == nil {
@@ -667,12 +669,15 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				for ; i < len(files); i = int(next.Add(1) - 1) {
+				for ; i < len(files) && ctx.Err() == nil; i = int(next.Add(1) - 1) {
 					fetch(i, files[i])
 				}
 			}(worker)
 		}
 		wg.Wait()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(errs) != 0 {
 		listener.logger.Warn("errors occur while fetching data",

@@ -106,12 +106,12 @@ func assertMetricStoreCatalogDoesNotCreateFiles(t *testing.T, listener *Carbonse
 func assertMetricStoreReadPaths(t *testing.T, listener *CarbonserverListener, metricCache *cache.Cache, now int32) {
 	t.Helper()
 	metricCache.Add(points.OnePoint("servers.api.cpu.user", 99, int64(now-2)))
-	fine, err := listener.fetchSingleMetric("servers.api.cpu.user", "", now-10, now)
+	fine, err := listener.fetchSingleMetric(context.Background(), "servers.api.cpu.user", "", now-10, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertFineMetricStoreResponse(t, fine)
-	coarse, err := listener.fetchSingleMetric("servers.api.cpu.user", "", now-240, now-121)
+	coarse, err := listener.fetchSingleMetric(context.Background(), "servers.api.cpu.user", "", now-240, now-121)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestMetricStoreFetchKeepsSchemaAndSeriesTogether(t *testing.T) {
 		done <- nil
 	}()
 	for i := 0; i < 200; i++ {
-		response, err := listener.fetchSingleMetric("schema.switch", "", now-10, now)
+		response, err := listener.fetchSingleMetric(context.Background(), "schema.switch", "", now-10, now)
 		if err != nil {
 			t.Fatal(err)
 		}

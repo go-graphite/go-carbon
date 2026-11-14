@@ -112,7 +112,7 @@ func checkReadDuringSlowSharedCommit(t *testing.T, phase string, maintained bool
 	addBatch := func() { c.Add(&points.Points{Metric: metric, Data: append([]points.Point(nil), input...)}) }
 	addBatch()
 	c.Add(points.OnePoint(metric, 66, now-10))
-	golden, err := listener.fetchSingleMetric(metric, "", int32(now-20), int32(now))
+	golden, err := listener.fetchSingleMetric(context.Background(), metric, "", int32(now-20), int32(now))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func checkReadDuringSlowSharedCommit(t *testing.T, phase string, maintained bool
 	}
 	read := make(chan readResult, 1)
 	go func() {
-		r, e := listener.fetchSingleMetric(metric, "", int32(now-20), int32(now))
+		r, e := listener.fetchSingleMetric(context.Background(), metric, "", int32(now-20), int32(now))
 		read <- readResult{r, e}
 	}()
 	select {
@@ -180,7 +180,7 @@ func checkReadDuringSlowSharedCommit(t *testing.T, phase string, maintained bool
 	case <-time.After(3 * time.Second):
 		t.Fatal("cache handoff did not finish")
 	}
-	after, err := listener.fetchSingleMetric(metric, "", int32(now-20), int32(now))
+	after, err := listener.fetchSingleMetric(context.Background(), metric, "", int32(now-20), int32(now))
 	if err != nil {
 		t.Fatal(err)
 	}

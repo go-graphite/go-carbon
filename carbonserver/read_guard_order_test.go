@@ -24,7 +24,7 @@ func TestQueuedReadDoesNotBlockPersist(t *testing.T) {
 
 	read := make(chan error, 1)
 	go func() {
-		_, err := l.fetchFromDisk(names[0], rangeScreenNow-3600, rangeScreenNow)
+		_, err := l.fetchFromDisk(context.Background(), names[0], rangeScreenNow-3600, rangeScreenNow)
 		read <- err
 	}()
 	time.Sleep(100 * time.Millisecond) // let the read reach the slot queue

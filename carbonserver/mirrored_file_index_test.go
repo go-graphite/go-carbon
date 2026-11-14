@@ -50,7 +50,7 @@ func TestMirroredStorePreservesMappedFileIndexAndSharedReads(t *testing.T) {
 	if !listener.MetricExists(metric) || listener.MetricExists("catalog_only") {
 		t.Fatal("discovery is not using the original file index")
 	}
-	series, err := listener.fetchFromDisk(metric, int32(now-5), int32(now))
+	series, err := listener.fetchFromDisk(context.Background(), metric, int32(now-5), int32(now))
 	if err != nil {
 		t.Fatal(err)
 	}

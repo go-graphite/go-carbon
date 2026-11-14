@@ -70,7 +70,7 @@ func TestIncrementalReadCannotLoseConfirmedCacheBatch(t *testing.T) {
 		}
 		return c.Get(name)
 	}
-	response, err := listener.fetchFromDisk(metric, int32(now-20), int32(now))
+	response, err := listener.fetchFromDisk(context.Background(), metric, int32(now-20), int32(now))
 	if err != nil {
 		t.Fatal(err)
 	}

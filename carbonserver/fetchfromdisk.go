@@ -53,20 +53,20 @@ func (s metricStoreSeries) Values() []float64 {
 // guard stripe, or persister writes on that stripe (SharedWriteGuard) wait for
 // the whole read queue. Release the slot once the store reads are done and the
 // guard when the cache capture or original-file read is done.
-func guardedStoreRead(metricStore *store.Store, metric string) (ctx context.Context, releaseSlot, releaseGuard func(), err error) {
-	ctx, releaseSlot, err = metricStore.AdmitRead(context.Background(), metric)
+func guardedStoreRead(parent context.Context, metricStore *store.Store, metric string) (ctx context.Context, releaseSlot, releaseGuard func(), err error) {
+	ctx, releaseSlot, err = metricStore.AdmitRead(parent, metric)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return ctx, releaseSlot, metricStore.OriginalReadGuard(metric), nil
 }
 
-func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
+func (listener *CarbonserverListener) fetchFromDisk(ctx context.Context, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
 	metricStore := listener.getMetricStore()
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()
 	if metricStore != nil {
-		ctx, releaseSlot, guard, err := guardedStoreRead(metricStore, metric)
+		ctx, releaseSlot, guard, err := guardedStoreRead(ctx, metricStore, metric)
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +89,7 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 		// retry before taking it again: never wait for a slot under the guard.
 		releaseGuard()
 		releaseGuard = func() {}
-		ctx, releaseSlot, guard, admitErr := guardedStoreRead(metricStore, metric)
+		ctx, releaseSlot, guard, admitErr := guardedStoreRead(ctx, metricStore, metric)
 		if admitErr != nil {
 			return nil, admitErr
 		}

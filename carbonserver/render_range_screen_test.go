@@ -134,7 +134,7 @@ func newRangeScreenFixture(t testing.TB, step int, cacheBytes int64) (*Carbonser
 func rangeScreenFetch(l *CarbonserverListener, name string, prefix response, from, until int32) (response, error) {
 	// Prefix stops on the store's interval grid. Whisper's Interval rounds
 	// exclusive from up by one step; subtract it to fetch the adjacent slot.
-	tail, err := l.fetchSingleMetric(name, "alias", int32(prefix.StopTime-prefix.StepTime), until)
+	tail, err := l.fetchSingleMetric(context.Background(), name, "alias", int32(prefix.StopTime-prefix.StepTime), until)
 	if err != nil {
 		return response{}, err
 	}
@@ -158,7 +158,7 @@ func BenchmarkRenderRangeScreen(b *testing.B) {
 		for _, tailSeconds := range []int{360, 1020, 1860} {
 			prefixes := make([]response, len(names))
 			for i, name := range names {
-				full, err := l.fetchSingleMetric(name, "alias", from, until)
+				full, err := l.fetchSingleMetric(context.Background(), name, "alias", from, until)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -172,7 +172,7 @@ func BenchmarkRenderRangeScreen(b *testing.B) {
 					// Validate the complete wire response against full fetch, including
 					// NaN bits/absence, metadata, alignment and request timestamps.
 					for i, name := range names {
-						want, err := l.fetchSingleMetric(name, "alias", from, until)
+						want, err := l.fetchSingleMetric(context.Background(), name, "alias", from, until)
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -195,7 +195,7 @@ func BenchmarkRenderRangeScreen(b *testing.B) {
 						if cached {
 							r, err = rangeScreenFetch(l, names[i], prefixes[i], from, until)
 						} else {
-							r, err = l.fetchSingleMetric(names[i], "alias", from, until)
+							r, err = l.fetchSingleMetric(context.Background(), names[i], "alias", from, until)
 						}
 						if err != nil {
 							b.Fatal(err)
@@ -285,7 +285,7 @@ func TestRenderRangeMovingWindowScreen(t *testing.T) {
 						_ = syscall.Getrusage(syscall.RUSAGE_SELF, &before)
 						for _, name := range names {
 							start := time.Now()
-							r, err := l.fetchSingleMetric(name, "alias", from, until)
+							r, err := l.fetchSingleMetric(context.Background(), name, "alias", from, until)
 							if err != nil {
 								t.Fatal(err)
 							}

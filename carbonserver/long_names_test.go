@@ -40,7 +40,7 @@ func TestLongNamesReadFindAndGlob(t *testing.T) {
 					t.Fatal("store catalog applied filesystem limits")
 				}
 				assertStoreGlob(t, listener, name, true)
-				fine, err := listener.fetchSingleMetric(name, "", now-10, now)
+				fine, err := listener.fetchSingleMetric(context.Background(), name, "", now-10, now)
 				if err != nil {
 					t.Fatal(err)
 				}
