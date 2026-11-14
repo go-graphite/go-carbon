@@ -2796,7 +2796,7 @@ func (listener *CarbonserverListener) waitIndexForHandoff() {
 // its request drain time, so a busy address is retried for that long.
 func (listener *CarbonserverListener) bindHTTP(addr *net.TCPAddr) (*net.TCPListener, func() error, error) {
 	if listener.inheritListener == nil {
-		ln, err := net.ListenTCP("tcp", addr)
+		ln, err := helper.ListenTCP("tcp", addr)
 		return ln, nil, err
 	}
 	inherited, commit, err := listener.inheritListener(addr)
@@ -2811,7 +2811,7 @@ func (listener *CarbonserverListener) bindHTTP(addr *net.TCPAddr) (*net.TCPListe
 	}
 	deadline := time.Now().Add(45 * time.Second)
 	for {
-		ln, err := net.ListenTCP("tcp", addr)
+		ln, err := helper.ListenTCP("tcp", addr)
 		if err == nil || !errors.Is(err, syscall.EADDRINUSE) || time.Now().After(deadline) {
 			return ln, nil, err
 		}
@@ -3063,7 +3063,7 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 		return err
 	}
 
-	listener.grpcListener, err = net.ListenTCP("tcp", grpcAddr)
+	listener.grpcListener, err = helper.ListenTCP("tcp", grpcAddr)
 	if err != nil {
 		return err
 	}

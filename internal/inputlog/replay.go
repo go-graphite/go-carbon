@@ -34,6 +34,22 @@ type replayFrame struct {
 	apply   bool
 }
 
+// StartWithReplay starts live group commit and returns a reader over the
+// immutable predecessor frames. ReleaseCopy must run only after replayed history
+// is durably persisted; until then every live frame retains the old replay start.
+// The caller must join this reader before closing the log.
+func (l *Log) StartWithReplay(src Source, shards int) func(func(*points.Points), <-chan struct{}) (ReplayStats, error) {
+	reader := &Log{prefix: l.prefix, pending: l.pending, logger: l.logger}
+	l.RetainReplay()
+	l.Start(src, shards)
+	return func(apply func(*points.Points), stop <-chan struct{}) (ReplayStats, error) {
+		stats, err := reader.ReplayStopped(apply, stop)
+		l.total.replayed.Add(stats.Points)
+		l.total.replayNanos.Store(int64(stats.Duration))
+		return stats, err
+	}
+}
+
 // Replay applies every point recorded after the last position known to be
 // persisted. Points of one metric are applied in their recorded order; apply
 // runs concurrently for different partitions, so for different metrics. A

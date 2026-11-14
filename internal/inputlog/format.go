@@ -78,8 +78,9 @@ type frameHeader struct {
 	length    uint32 // payload bytes
 	rawLength uint32 // decompressed payload bytes
 	points    uint32
-	// Every point recorded before this position was persisted when the frame
-	// was written. Replay starts at the last valid frame's position.
+	// Every point recorded before this position was persisted or relogged at
+	// or after it when the frame was written. Replay starts at the last valid
+	// frame's position.
 	replayFrom position
 	crc        uint32 // payload crc32c
 }

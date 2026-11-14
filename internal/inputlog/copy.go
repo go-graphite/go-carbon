@@ -117,6 +117,10 @@ func (l *Log) requestCopy(op string) (CopyState, error) {
 }
 
 func (l *Log) copyRequest(r copyRequest) {
+	if r.op == "relog" {
+		r.reply <- copyReply{err: l.relogCache()}
+		return
+	}
 	if r.op == "release" {
 		l.copyPin = nil
 		r.reply <- copyReply{}

@@ -57,6 +57,7 @@ type cacheSettings struct {
 type Cache struct {
 	mu                   sync.Mutex
 	pending              atomic.Pointer[pendingRecovery]
+	inputReplay          atomic.Pointer[inputReplay]
 	startupAt            atomic.Pointer[time.Time]
 	recoveryAdmission    atomic.Pointer[recoveryAdmission]
 	recoveryBlockedUntil atomic.Int64
@@ -371,6 +372,10 @@ func (c *Cache) Get(key string) []points.Point {
 
 	shard := c.GetShard(key)
 
+	var history []points.Point
+	if r := c.inputReplay.Load(); r != nil {
+		history = r.history.Get(key)
+	}
 	var data []points.Point
 	shard.mu.Lock()
 	// Immutable recovery bytes remain visible until this same lock protects
@@ -402,15 +407,21 @@ func (c *Cache) Get(key string) []points.Point {
 		queued = values.compact
 	}
 	shard.mu.Unlock()
-	if queued.n == 0 {
+	if queued.n != 0 {
+		data = queued.appendDecoded(data)
+	}
+	if len(history) == 0 {
 		return data
 	}
-	return queued.appendDecoded(data)
+	return append(history, data...)
 }
 
 // Has reports whether key has unwritten points. Unlike Get it takes a read
 // lock, copies nothing, and does not count as a cache query.
 func (c *Cache) Has(key string) bool {
+	if r := c.inputReplay.Load(); r != nil && r.history.Has(key) {
+		return true
+	}
 	shard := c.GetShard(key)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
@@ -431,6 +442,10 @@ func (c *Cache) Has(key string) bool {
 }
 
 func (c *Cache) Confirm(p *points.Points) {
+	if r := c.inputReplay.Load(); r != nil {
+		r.history.Confirm(p)
+		return
+	}
 	shard := c.GetShard(p.Metric)
 
 	shard.mu.Lock()
@@ -464,6 +479,10 @@ func removeNotConfirmed(shard *Shard, p *points.Points) bool {
 
 // Requeue moves a failed write from the in-flight list back to the live cache.
 func (c *Cache) Requeue(p *points.Points) {
+	if r := c.inputReplay.Load(); r != nil {
+		r.history.Requeue(p)
+		return
+	}
 	shard := c.GetShard(p.Metric)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -518,6 +537,9 @@ func (c *Cache) Requeue(p *points.Points) {
 
 func (c *Cache) Len() int32 {
 	var l int32
+	if r := c.inputReplay.Load(); r != nil {
+		l = r.history.Len()
+	}
 	for _, shard := range c.data {
 		l += shard.metrics.Load()
 	}
@@ -526,6 +548,9 @@ func (c *Cache) Len() int32 {
 
 func (c *Cache) NotConfirmedLength() int32 {
 	var l int32
+	if r := c.inputReplay.Load(); r != nil {
+		l = r.history.NotConfirmedLength()
+	}
 	for _, shard := range c.data {
 		l += shard.notConfirmedCount.Load()
 	}
@@ -534,6 +559,9 @@ func (c *Cache) NotConfirmedLength() int32 {
 
 // IsEmpty reports whether the cache has neither queued nor in-flight points.
 func (c *Cache) IsEmpty() bool {
+	if r := c.inputReplay.Load(); r != nil {
+		return false
+	}
 	if r := c.pending.Load(); r != nil && r.remaining.Load() != 0 {
 		return false
 	}
@@ -556,6 +584,9 @@ func (c *Cache) IsEmpty() bool {
 // Hot paths use approxSize instead of visiting every shard.
 func (c *Cache) Size() int64 {
 	var size int64
+	if r := c.inputReplay.Load(); r != nil {
+		size = r.history.Size()
+	}
 	for _, shard := range c.data {
 		size += shard.size.Load()
 	}
@@ -1062,6 +1093,9 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 
 // Pop removes an element from the map and returns it
 func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
+	if r := c.inputReplay.Load(); r != nil {
+		return r.history.Pop(key)
+	}
 	// Try to get shard.
 	hash := xxh3.HashString(key)
 	shard := c.data[hash&(shardCount-1)]
@@ -1098,6 +1132,9 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 }
 
 func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
+	if r := c.inputReplay.Load(); r != nil {
+		return r.history.PopNotConfirmed(key)
+	}
 	// Try to get shard.
 	hash := xxh3.HashString(key)
 	shard := c.data[hash&(shardCount-1)]

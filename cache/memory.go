@@ -100,6 +100,9 @@ func (c *Cache) queueMemory() int64 {
 // published at allocation changes; sampling never waits for a shard lock.
 func (c *Cache) EstimatedBytes() int64 {
 	var n int64
+	if r := c.inputReplay.Load(); r != nil {
+		n = r.history.EstimatedBytes()
+	}
 	for _, shard := range c.data {
 		n += shard.memory.Load()
 	}

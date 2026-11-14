@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,19 +149,16 @@ func TestSharedAppBindFailureReleasesStore(t *testing.T) {
 		return
 	}
 	path, cfg := sharedAppConfig(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	cfg.Buckyd.Bind = listener.Addr().String()
+	// Occupied ports now retry. A malformed endpoint still fails immediately
+	// and must release the already-open store.
+	cfg.Buckyd.Bind = "127.0.0.1:invalid"
 	writeSharedConfig(t, path, cfg)
 	app := New(path)
 	if err := app.ParseConfig(); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Start(); err == nil {
-		t.Fatal("occupied buckyd port accepted")
+		t.Fatal("invalid buckyd endpoint accepted")
 	}
 	if app.MetricStore != nil || app.Cache != nil {
 		t.Fatal("failed Start leaked shared storage")

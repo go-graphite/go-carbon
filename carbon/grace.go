@@ -64,6 +64,9 @@ func (app *App) DumpStop() (err error) {
 	if app.MetricStore != nil {
 		app.MetricStore.CancelNativeTransfers()
 	}
+	if app.Config.Dump.InputLogOnly {
+		return app.stopWithInputLog(stopStarted)
+	}
 	if s := app.startupInput; s != nil && s.replayStarted.Load() {
 		if !s.stopDirectSwitch() {
 			return app.stopStreamingInputForHandoff(stopStarted)
@@ -92,6 +95,14 @@ func (app *App) DumpStop() (err error) {
 			zapwriter.Logger("input-log").Error("input log not synced after the failed dump", zap.Error(syncErr))
 		}
 	}()
+	if r := app.inputReplay; r != nil && r.started {
+		// Keep input and persistence active until all predecessor history is
+		// accounted for. A dump must never retire a partially replayed journal.
+		<-r.done
+		if r.err != nil {
+			return r.err
+		}
+	}
 
 	if !app.Config.Dump.Enabled {
 		// The input log is then the only copy of unpersisted points: stop
@@ -580,7 +591,7 @@ var checkpointDumpHook func()
 // startStopFlush starts the first flush. Assumes we are holding app.Lock().
 func (app *App) startStopFlush() *stopFlush {
 	f := &stopFlush{app: app, started: time.Now()}
-	if earlyStopFlush && app.Config.Dump.Enabled {
+	if earlyStopFlush && (app.Config.Dump.Enabled || app.Config.Dump.InputLogOnly) {
 		f.again()
 	}
 	return f
@@ -650,7 +661,7 @@ func (f *stopFlush) done() <-chan struct{} {
 func (app *App) stopStoreBackground() <-chan struct{} {
 	stopped := make(chan struct{})
 	db := app.MetricStore
-	if db == nil || !app.Config.Dump.Enabled {
+	if db == nil || (!app.Config.Dump.Enabled && !app.Config.Dump.InputLogOnly) {
 		close(stopped)
 		return stopped
 	}
@@ -823,6 +834,7 @@ func (app *App) handOffStoreInput(logger *zap.Logger, handover *inputHandover) t
 	}
 	switch {
 	case taken:
+		handover.transferred = true
 		logger.Info("input handed off to successor", fields...)
 	case errors.Is(err, handoff.ErrSuccessorCannotTakeInput):
 		// The caller stops input at once: every second more is tail the

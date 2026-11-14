@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
@@ -27,6 +28,10 @@ import (
 // existing protocol, including when upgrading from a predecessor that does not
 // know about startup capture. Mirrored read handoff retains its existing path.
 func (app *App) startStartupInput() error {
+	app.inputLogHandoff = false
+	if app.Config.Dump.InputLogOnly || (app.restart.prev != nil && app.restart.prev.InputLogOnly) {
+		return app.takeInputLogOnlySockets()
+	}
 	fences, err := filepath.Glob(filepath.Join(app.Config.Dump.Path, "input.*.tail.bin.capture-epoch-*"+startupDirectSuffix))
 	if err != nil {
 		return err
@@ -167,7 +172,7 @@ func listenStartupCapture(options *tcp.Options) (*tcp.Handoff, *tcp.Options, err
 	if err != nil {
 		return nil, nil, err
 	}
-	listener, err := net.ListenTCP("tcp", addr)
+	listener, err := helper.ListenTCP("tcp", addr)
 	if err != nil {
 		return nil, nil, err
 	}

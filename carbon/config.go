@@ -358,6 +358,8 @@ type pprofConfig struct {
 }
 
 type dumpConfig struct {
+	// InputLogOnly is an experimental stop without a dump or capture tail.
+	InputLogOnly      bool   `toml:"input-log-only"`
 	Enabled           bool   `toml:"enabled"`
 	Path              string `toml:"path"`
 	RestorePerSecond  int    `toml:"restore-per-second"`
