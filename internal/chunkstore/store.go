@@ -46,6 +46,11 @@ const (
 )
 
 type Options struct {
+	// BlockLoadConcurrency bounds simultaneous uncached SST block loads across
+	// foreground readers, persisters and compactions. Zero selects 16.
+	// The limit can be changed without reopening with SetBlockLoadConcurrency.
+	BlockLoadConcurrency int
+
 	// NativeImportConcurrency bounds admitted imports (1..8). NativeCombineWorkers
 	// bounds workers per import (1..32). NativeCombineMemory is the store-wide
 	// estimated scratch allowance, including results waiting for SST consumers.
@@ -221,6 +226,7 @@ func (o Options) WithFS(fs vfs.FS) Options {
 
 type Store struct {
 	readSlots             *fifo.Semaphore
+	blockLoadSlots        *fifo.Semaphore
 	readMu                sync.Mutex // serializes read registration with cancellation
 	readCount             int
 	readDone              chan struct{} // closed after cancellation and the last view closes
@@ -416,6 +422,9 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.Continuation != nil && !options.ExactBlocks {
 		return nil, errors.New("CWhisper continuation requires exact point blocks")
 	}
+	if options.BlockLoadConcurrency < 0 || options.BlockLoadConcurrency > 1024 {
+		return nil, errors.New("block load concurrency must be 0..1024")
+	}
 	if options.SyncInterval < 0 {
 		return nil, errors.New("store sync interval must be non-negative")
 	}
@@ -537,8 +546,9 @@ func Open(dir string, options Options) (*Store, error) {
 	s.coldPack.floatFormat.Store(format >= 11)
 	s.referenceFormat.Store(format >= 12)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
+	s.blockLoadSlots = fifo.NewSemaphore(blockLoadConcurrency(options.BlockLoadConcurrency))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
-		LoadBlockSema:            fifo.NewSemaphore(maxConcurrentBlockLoads),
+		LoadBlockSema:            s.blockLoadSlots,
 		MaxConcurrentCompactions: func() int { return int(s.compactionWorkers.Load()) },
 		EventListener:            &pebble.EventListener{WriteStallBegin: s.writeStallBegin, WriteStallEnd: s.writeStallEnd, TableCreated: pacing.tableCreated},
 	}
@@ -1242,6 +1252,8 @@ type CompactionKinds struct {
 }
 
 type Stats struct {
+	BlockLoadCapacity, BlockLoadsInProgress, BlockLoadWaits int64
+
 	ColdPack                                                                                           ColdPackStats
 	TransferExport                                                                                     TransferExportStats
 	MirrorCanonicalBatches, MirrorBlindBatches                                                         uint64
@@ -1343,7 +1355,9 @@ func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold 
 		flushed += level.BytesFlushed
 		levelCompacted[i], levelRead[i], levelBytes[i], levelScores[i] = level.BytesCompacted, level.BytesRead, level.Size, level.Score
 	}
+	loads := s.blockLoadSlots.Stats()
 	stats := Stats{ColdPack: cold,
+		BlockLoadCapacity: loads.Capacity, BlockLoadsInProgress: loads.Outstanding, BlockLoadWaits: loads.NumHadToWait,
 		MirrorCanonicalBatches: s.mirrorCanonical.Load(), MirrorBlindBatches: s.mirrorBlind.Load(),
 		DiskBytes: uint64(m.DiskSpaceUsage()), WALBytes: m.WAL.Size, MemTableBytes: m.MemTable.Size,
 		Materializations: s.materializations.Load(), Operands: s.operands.Load(),
@@ -1455,6 +1469,24 @@ func (s *Store) SetFlushRate(rate int64) error {
 		rate = 0
 	}
 	s.compactionControl.setFlushMode(rate)
+	return nil
+}
+
+func blockLoadConcurrency(limit int) int64 {
+	if limit == 0 {
+		return maxConcurrentBlockLoads
+	}
+	return int64(limit)
+}
+
+// SetBlockLoadConcurrency resizes the existing admission gate. In-flight loads
+// retain their slots when shrinking; queued loads resume as capacity becomes
+// available. Keeping the same semaphore preserves a single store-wide budget.
+func (s *Store) SetBlockLoadConcurrency(limit int) error {
+	if limit < 0 || limit > 1024 {
+		return errors.New("block load concurrency must be 0..1024")
+	}
+	s.blockLoadSlots.UpdateCapacity(blockLoadConcurrency(limit))
 	return nil
 }
 

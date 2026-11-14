@@ -68,6 +68,7 @@ type migrationSnapshot struct {
 }
 
 type storeStatsView struct {
+	blockLoadCapacity, blockLoadsInProgress, blockLoadWaits                 int64
 	coldPack                                                                store.ColdPackStats
 	thaws                                                                   whisperio.ThawStats
 	classicReanchors                                                        whisperio.ClassicReanchorStats
@@ -208,6 +209,9 @@ var migrationMetricSpecs = func() []metricSpec {
 		gauge("pebble_memtable_bytes", "Memtable bytes, including queued memtables.", func(s *migrationSnapshot) float64 { return float64(s.stats.memTableBytes) }),
 		gauge("pebble_l0_files", "L0 tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.l0Files) }),
 		gauge("pebble_l0_sublevels", "L0 sublevels.", func(s *migrationSnapshot) float64 { return float64(s.stats.l0Sublevels) }),
+		gauge("pebble_block_load_capacity", "Concurrent uncached SST block load budget.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockLoadCapacity) }),
+		gauge("pebble_block_loads_in_progress", "Uncached SST block loads holding admission slots.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockLoadsInProgress) }),
+		counter("pebble_block_load_waits_total", "Uncached SST block loads that queued for admission.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockLoadWaits) }),
 		gauge("pebble_compactions_in_progress", "Running compactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionsInProgress) }),
 		counter("pebble_continuation_range_deletes_total", "Continuation prefix deletes written as range tombstones; each one makes the next memtable reader re-fragment every range tombstone in it.", func(s *migrationSnapshot) float64 { return float64(s.stats.rangeDeletes) }),
 		counter("pebble_continuation_skipped_block_deletes_total", "Block rewrites that overwrote their old groups in place instead of deleting them (store-reuse-block-keys).", func(s *migrationSnapshot) float64 { return float64(s.stats.skippedBlockDeletes) }),
@@ -643,6 +647,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,
 			transferMergeAppended: st.TransferMergeAppended, transferMergeAppendedClassic: st.TransferMergeAppendedClassic, transferMergeFallbacks: st.TransferMergeFallbacks,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
+			blockLoadCapacity: st.BlockLoadCapacity, blockLoadsInProgress: st.BlockLoadsInProgress, blockLoadWaits: st.BlockLoadWaits,
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,
 			compactionPacerTargetRate: st.CompactionPacerTargetRate, compactionPacerAuto: st.CompactionPacerAuto, compactionPacerBypass: st.CompactionPacerBypass != "", compactionPacerBypasses: st.CompactionPacerBypasses,
