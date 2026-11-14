@@ -100,12 +100,14 @@ func (s *syncer) resolveAbsent(ctx context.Context, row *syncRow, names []string
 						return
 					}
 					for _, n := range ns {
+						matched := false
 						for _, d := range digests[n] {
-							if d.Step != a.Step {
-								r.uncertain[n] = true
+							if d.Step == a.Step {
+								matched = true
+								r.positive[n] = r.positive[n] || d.Count > 0
 							}
-							r.positive[n] = r.positive[n] || d.Count > 0
 						}
+						r.uncertain[n] = r.uncertain[n] || !matched
 					}
 				} else {
 					points, e := s.fetch(ctx, store, ns, from, until)

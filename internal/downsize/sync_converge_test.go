@@ -235,3 +235,17 @@ func TestSyncConvergeExplicitAbsentNames(t *testing.T) {
 		t.Fatal(string(data))
 	}
 }
+
+func TestSyncConvergeExplicitNamesCheckUnlistedPeersEveryRound(t *testing.T) {
+	o := convergeOptions(t)
+	o.namesFile = "explicit-scope"
+	s := &syncer{o: o}
+	s.masks.Store("unlisted", uint64(0))
+	if got := s.holders(1, []string{"unlisted"}); len(got) != 1 {
+		t.Fatal(got)
+	}
+	s.masks.Store("unlisted", uint64(1))
+	if got := s.holders(1, []string{"unlisted"}); len(got) != 1 {
+		t.Fatal(got)
+	}
+}

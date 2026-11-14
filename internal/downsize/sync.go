@@ -582,7 +582,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		}
 		stalled := previousScore >= 0 && score >= previousScore
 		previousScore = score
-		if (fillable == 0 && len(next) == 0) || stalled || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
+		if s.o.noCopy || (fillable == 0 && len(next) == 0) || stalled || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
 			break
 		}
 		s.phase("fill")

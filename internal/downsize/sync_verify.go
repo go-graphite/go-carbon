@@ -216,7 +216,7 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 func (s *syncer) holders(src int, names []string) []string {
 	var subset []string
 	for _, n := range names {
-		if mask, ok := s.masks.Load(n); ok && mask.(uint64)&(1<<uint(src)) != 0 {
+		if mask, ok := s.masks.Load(n); ok && (mask.(uint64)&(1<<uint(src)) != 0 || s.o.namesFile != "") {
 			subset = append(subset, n)
 		}
 	}
