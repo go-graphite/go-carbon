@@ -373,7 +373,12 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	}
 	if deferred {
 		now, held := s.writeoutTime(time.Now())
-		values.firstArrival = s.restoreArrival(values, now)
+		if at := r.bundle.FirstArrival(name); at != 0 {
+			values.firstArrival = time.Unix(0, at)
+		} else {
+			values.firstArrival = s.restoreArrival(values, now)
+		}
+		values.Arrival.Store(arrivalNanos(values.firstArrival))
 		if startup {
 			c.spreadStartup(values, s, now, held)
 		}
@@ -466,6 +471,7 @@ func (c *Cache) DumpPendingRange(seg, parts int, out *recovery.Segment) error {
 		if !found {
 			continue
 		}
+		out.NoteArrival(name, r.bundle.FirstArrival(name))
 		if raw {
 			err = r.bundle.RawRecords(slot, func(raw []byte, count int) error { return out.WriteRaw(name, raw, count) })
 		} else {

@@ -25,6 +25,7 @@ func (shard *Shard) visitLocked(scratch *points.Points, write func(*points.Point
 	}
 	for _, values := range shard.items.all {
 		scratch.Metric = values.Metric
+		scratch.FirstArrival = arrivalNanos(values.firstArrival)
 		scratch.Data = values.compact.appendDecoded(scratch.Data[:0])
 		if err := write(scratch); err != nil {
 			return err
@@ -220,7 +221,7 @@ func (c *Cache) DumpShardsCompact(lo, hi int, write func(metric string, data []b
 // DumpShardsCompactTo transcodes queued points into the stable disk codec.
 // Segment must copy the reused scratch, including for block dumps.
 func (c *Cache) DumpShardsCompactTo(lo, hi int, out *recovery.Segment) error {
-	return c.DumpShardsCompact(lo, hi, out.WriteCompact)
+	return c.DumpShards(lo, hi, out.WritePoints)
 }
 
 func (shard *Shard) visitCompactLocked(scratch *[]byte, decoded *[]points.Point, write func(string, []byte, int) error) error {

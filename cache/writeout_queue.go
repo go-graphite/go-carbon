@@ -15,10 +15,11 @@ type WriteoutQueue struct {
 	// Writeout queue. Usage:
 	// q := <- queue
 	// p := cache.Pop(q.Metric)
-	queue     chan string
-	refreshAt time.Time
-	rebuild   func(abort chan bool) chan bool // return chan waiting for complete
-	wake      chan struct{}
+	queue            chan string
+	refreshAt        time.Time
+	refreshRemaining int
+	rebuild          func(abort chan bool) chan bool // return chan waiting for complete
+	wake             chan struct{}
 	// Nonnegative nanoseconds relative to epoch, plus one (zero means unset).
 	wakeAt atomic.Int64
 	epoch  time.Time
@@ -133,7 +134,9 @@ func (q *WriteoutQueue) update() {
 	defer phasecpu.Set(phasecpu.Other)
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
-	queue, next, hasCold := q.cache.makeQueuePlan(time.Now())
+	started := time.Now()
+	queue, next, hasCold := q.cache.makeQueuePlan(started)
+	buildTime := time.Since(started)
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
 		next = notBefore
@@ -142,8 +145,17 @@ func (q *WriteoutQueue) update() {
 	q.Lock()
 	q.queue = queue
 	q.refreshAt = time.Time{}
-	if hasCold && queue != nil {
-		q.refreshAt = time.Now().Add(time.Second)
+	q.refreshRemaining = 0
+	if queue != nil {
+		// Start the next plan while half of this plan can still feed workers.
+		// Debounce against the measured scan cost; arrivals in an empty cache
+		// still use the existing deadline wake-up.
+		q.refreshAt = time.Now().Add(max(100*time.Millisecond, buildTime))
+		q.refreshRemaining = len(queue) / 2
+		if hasCold {
+			q.refreshAt = time.Now().Add(time.Second)
+			q.refreshRemaining = cap(queue)
+		}
 	}
 	q.cache.queueChannelBytes.Store(int64(cap(queue)) * 16)
 	q.rebuild = q.makeRebuildCallback(next, notBefore)
@@ -162,8 +174,9 @@ QueueLoop:
 		queue := q.queue
 		rebuild := q.rebuild
 		refreshAt := q.refreshAt
+		refreshRemaining := q.refreshRemaining
 		q.RUnlock()
-		if !refreshAt.IsZero() && !time.Now().Before(refreshAt) {
+		if !refreshAt.IsZero() && len(queue) <= refreshRemaining && !time.Now().Before(refreshAt) {
 			select {
 			case <-rebuild(abort):
 				continue QueueLoop

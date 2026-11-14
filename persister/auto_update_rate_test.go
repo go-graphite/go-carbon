@@ -631,10 +631,14 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 				if auto && os.Getenv("AUTO_CAP_SIM_BASELINE") == "" {
 					for w, cv := range cvs {
 						need := float64(metrics) / delay.Seconds()
-						if w >= 2 && (means[w] < need*.95 || means[w] > need*1.10) {
+						// A finite urgent prefix can leave an extra live batch for one
+						// full phase after its last write. Wall-clock phases need not
+						// align with these 15-minute reporting buckets.
+						steady := time.Duration(w)*15*time.Minute >= drain+delay+autoUpdateSlack(delay)
+						if steady && (means[w] < need*.95 || means[w] > need*1.10) {
 							t.Errorf("window %d-%d min rate=%g need=%g", w*15, (w+1)*15, means[w], need)
 						}
-						if w >= 2 && cv > .15 {
+						if steady && cv > .15 {
 							t.Errorf("window %d-%d min cv=%g exceeds .15", w*15, (w+1)*15, cv)
 						}
 					}

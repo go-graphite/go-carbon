@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -58,55 +59,61 @@ func TestWarmFirstQueueRefreshFindsLaterWarmArrival(t *testing.T) {
 	})
 }
 
-func TestColdRefreshKeepsWritingWhileQueueRebuildWaits(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c := New()
-		defer c.Stop()
-		c.SetRestartOrder(func() bool { return true })
-		entered, release := make(chan struct{}), make(chan struct{})
-		var calls atomic.Int64
-		c.SetRestartWarmFirst(func(name string) bool { return name == "warm-later" }, func(exit <-chan bool) bool {
-			if calls.Add(1) == 1 {
-				return true
-			}
-			close(entered)
-			select {
-			case <-release:
-				return true
-			case <-exit:
-				return false
-			}
-		}, func() {})
-		c.Add(points.OnePoint("cold-one", 1, 1))
-		c.Add(points.OnePoint("cold-two", 1, 2))
-		q, abort := c.WriteoutQueue(), make(chan bool)
-		defer close(abort)
-		if got := q.Get(abort); got != "cold-one" {
-			t.Fatal(got)
-		}
-		c.Add(points.OnePoint("warm-later", 1, 3))
-		time.Sleep(time.Second + time.Millisecond)
-		got := make(chan string, 1)
-		go func() { got <- q.Get(abort) }()
-		<-entered
-		select {
-		case name := <-got:
-			if name != "cold-two" {
-				t.Fatal("pending refresh hid eligible old work", name)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("queue rebuild parked writeout despite eligible old work")
-		}
-		q.RLock()
-		rebuild := q.rebuild
-		q.RUnlock()
-		finished := rebuild(abort)
-		close(release)
-		<-finished
-		if name := q.Get(abort); name != "warm-later" {
-			t.Fatal("finished refresh did not expose newer warm work", name)
-		}
-	})
+func TestRefreshKeepsWritingWhileQueueRebuildWaits(t *testing.T) {
+	for _, allWarm := range []bool{false, true} {
+		t.Run(fmt.Sprint(allWarm), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := New()
+				defer c.Stop()
+				c.SetRestartOrder(func() bool { return true })
+				entered, release := make(chan struct{}), make(chan struct{})
+				var calls atomic.Int64
+				c.SetRestartWarmFirst(func(name string) bool { return allWarm || name == "warm-later" }, func(exit <-chan bool) bool {
+					if calls.Add(1) == 1 {
+						return true
+					}
+					close(entered)
+					select {
+					case <-release:
+						return true
+					case <-exit:
+						return false
+					}
+				}, func() {})
+				c.Add(points.OnePoint("cold-one", 1, 1))
+				c.Add(points.OnePoint("cold-two", 1, 2))
+				q, abort := c.WriteoutQueue(), make(chan bool)
+				defer close(abort)
+				if got := q.Get(abort); got != "cold-one" {
+					t.Fatal(got)
+				}
+				c.Pop("cold-one")
+				c.Add(points.OnePoint("warm-later", 1, 3))
+				time.Sleep(time.Second + time.Millisecond)
+				got := make(chan string, 1)
+				go func() { got <- q.Get(abort) }()
+				<-entered
+				select {
+				case name := <-got:
+					if name != "cold-two" {
+						t.Fatal("pending refresh hid eligible old work", name)
+					}
+					c.Pop(name)
+				case <-time.After(time.Second):
+					t.Fatal("queue rebuild parked writeout despite eligible old work")
+				}
+				q.RLock()
+				rebuild := q.rebuild
+				q.RUnlock()
+				finished := rebuild(abort)
+				close(release)
+				<-finished
+				if name := q.Get(abort); name != "warm-later" {
+					t.Fatal("finished refresh did not expose newer warm work", name)
+				}
+			})
+		})
+	}
 }
 
 func TestWarmFirstQueueAdmissionCancelsWithoutLocks(t *testing.T) {
@@ -186,7 +193,7 @@ func TestWarmFirstQueueRestartsAfterCancelledAdmission(t *testing.T) {
 	}
 }
 
-func TestWarmFirstQueueKeepsFullyWarmSnapshot(t *testing.T) {
+func TestWarmFirstQueuePlansWarmOverlap(t *testing.T) {
 	c := New()
 	defer c.Stop()
 	c.SetRestartOrder(func() bool { return true })
@@ -201,7 +208,7 @@ func TestWarmFirstQueueKeepsFullyWarmSnapshot(t *testing.T) {
 	q.RLock()
 	refreshAt := q.refreshAt
 	q.RUnlock()
-	if !refreshAt.IsZero() {
-		t.Fatal("fully warm work was forced to rescan before draining")
+	if refreshAt.IsZero() {
+		t.Fatal("fully warm work cannot overlap its next plan")
 	}
 }

@@ -63,6 +63,7 @@ func (it *item) decode() *points.Points {
 	if p == nil {
 		p = &points.Points{Metric: it.Metric}
 	}
+	p.FirstArrival = arrivalNanos(it.firstArrival)
 	p.Data = it.compact.appendDecoded(nil)
 	it.compact = compactPoints{}
 	return p
@@ -254,3 +255,10 @@ func (m *itemMap) all(yield func(string, *item) bool) {
 }
 
 func itemTag(hash uint64) byte { return byte(hash>>57) | 0x80 }
+
+func arrivalNanos(at time.Time) int64 {
+	if at.IsZero() {
+		return 0
+	}
+	return at.UnixNano()
+}

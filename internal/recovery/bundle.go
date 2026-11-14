@@ -219,6 +219,7 @@ func (m mappings) close() error {
 // Bundle owns immutable mappings. Read returns detached points; the reachability
 // cleanup cannot release a mapping while a cache reader still owns this bundle.
 type Bundle struct {
+	arrivals map[string]int64
 	manifest Manifest
 	index    *Index
 	maps     mappings
@@ -302,6 +303,10 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 		}
 	}
 	b := &Bundle{manifest: manifest, dir: dir}
+	b.arrivals, err = ReadArrivals(filepath.Join(dir, manifest.Cache.Name))
+	if err != nil {
+		return nil, err
+	}
 	defer func() {
 		if err != nil {
 			_ = b.Close()
@@ -340,12 +345,20 @@ func (b *Bundle) Find(metric string) (uint64, bool, error) {
 }
 func (b *Bundle) Read(slot uint64) (*points.Points, error) {
 	defer runtime.KeepAlive(b)
-	return b.index.Read(slot)
+	p, err := b.index.Read(slot)
+	if p != nil {
+		p.FirstArrival = b.FirstArrival(p.Metric)
+	}
+	return p, err
 }
 
 func (b *Bundle) ReadForWrite(slot uint64, extra int) (*points.Points, error) {
 	defer runtime.KeepAlive(b)
-	return b.index.ReadForWrite(slot, extra)
+	p, err := b.index.ReadForWrite(slot, extra)
+	if p != nil {
+		p.FirstArrival = b.FirstArrival(p.Metric)
+	}
+	return p, err
 }
 
 // RawRecords visits slot's encoded records in replay order; see Index.RawRecords.
@@ -453,6 +466,7 @@ func (b *Bundle) Retire() error {
 			}
 		}
 	}
+	_ = os.Remove(ArrivalPath(filepath.Join(b.dir, b.manifest.Cache.Name)))
 	// Leave the manifest: missing source files force fallback, and a subsequent
 	// shutdown atomically replaces it. This never removes another generation.
 	return syncDirectory(b.dir)

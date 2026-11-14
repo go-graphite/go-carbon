@@ -25,8 +25,11 @@ type Point struct {
 
 // Points from carbon clients
 type Points struct {
-	Metric string
-	Data   []Point
+	// FirstArrival is the cache residence origin in Unix nanoseconds. Zero means
+	// unknown (legacy recovery); it never changes point timestamps or values.
+	FirstArrival int64 `json:"-"`
+	Metric       string
+	Data         []Point
 }
 
 // New creates new instance of Points
@@ -55,8 +58,9 @@ func NowPoint(metric string, value float64) *Points {
 // Copy returns copy of object
 func (p *Points) Copy() *Points {
 	return &Points{
-		Metric: p.Metric,
-		Data:   p.Data,
+		Metric:       p.Metric,
+		Data:         p.Data,
+		FirstArrival: p.FirstArrival,
 	}
 }
 

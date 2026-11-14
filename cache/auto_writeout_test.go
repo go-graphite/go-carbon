@@ -30,6 +30,7 @@ func TestAutoWriteoutKeepsPhasesAfterEarlyWrite(t *testing.T) {
 					names[i] = fmt.Sprintf("phase.metric.%08d", i)
 					p := points.OnePoint(names[i], 1, time.Now().Unix())
 					if restored {
+						p.FirstArrival = time.Now().UnixNano()
 						c.AddRestored(p)
 					} else {
 						c.Add(p)
@@ -72,25 +73,25 @@ func TestAutoWriteoutKeepsPhasesAfterEarlyWrite(t *testing.T) {
 	}
 }
 
-func TestAutoWriteoutHeldClockAndThreshold(t *testing.T) {
+func TestAutoWriteoutStartupKeepsClockAndThreshold(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := batchingCache(t, 1, time.Minute)
+		c := batchingCache(t, 2, time.Minute)
 		c.SetWriteoutPacing(true)
 		c.PauseStartupWriteout()
 		c.AddPoint([]byte("held.phase"), 1, time.Now().Unix())
-		if c.WriteoutReady("held.phase") {
-			t.Fatal("threshold released held data")
-		}
-		time.Sleep(time.Hour)
-		released := time.Now()
-		c.ResumeStartupWriteout(released)
 		at := deadlineOf(c, "held.phase")
-		if !at.After(released) || at.After(released.Add(time.Minute)) {
-			t.Fatal("held phase did not start at release")
+		time.Sleep(time.Hour)
+		c.ResumeStartupWriteout(time.Now())
+		if got := deadlineOf(c, "held.phase"); !got.Equal(at) {
+			t.Fatalf("release moved deadline from %v to %v", at, got)
 		}
-		time.Sleep(time.Minute)
 		if !c.WriteoutReady("held.phase") {
-			t.Fatal("held phase did not become eligible")
+			t.Fatal("startup reset an expired deadline")
+		}
+		c.AddPoint([]byte("full.batch"), 1, 1)
+		c.AddPoint([]byte("full.batch"), 2, 2)
+		if !c.WriteoutReady("full.batch") {
+			t.Fatal("startup suppressed full-batch threshold")
 		}
 	})
 }

@@ -882,7 +882,13 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 		)
 	}()
 
+	arrivals, err := recovery.ReadArrivals(filename)
+	if err != nil {
+		logger.Error("arrival metadata unavailable; recovering all point records", zap.Error(err))
+		arrivals = nil
+	}
 	visit := func(p *points.Points) {
+		p.FirstArrival = arrivals[p.Metric]
 		pointsCount += len(p.Data)
 		storeFunc(p)
 	}
@@ -978,7 +984,10 @@ FilesLoop:
 		if info, err := os.Stat(filename); err == nil {
 			restoredBytes += info.Size()
 		}
-		app.RestoreFromFile(filename, storeFunc)
+		if restoreErr := app.RestoreFromFile(filename, storeFunc); restoreErr != nil {
+			logger.Error("restore failed; keeping source file", zap.String("filename", filename), zap.Error(restoreErr))
+			continue
+		}
 
 		// The input log recorded the restored points; they must be durable
 		// there before their only other copy goes.
@@ -987,6 +996,9 @@ FilesLoop:
 			continue
 		}
 		err = os.Remove(filename)
+		if err == nil {
+			_ = os.Remove(recovery.ArrivalPath(filename))
+		}
 		if err != nil {
 			logger.Error("remove failed", zap.String("filename", filename), zap.Error(err))
 		}

@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -21,22 +22,24 @@ import (
 // Writer writes an ordinary legacy binary source and records its exact extents.
 // Both cache dump and concurrent input diversion can share one Builder.
 type Writer struct {
-	mu         sync.Mutex
-	file       *os.File
-	buffer     *sink
-	builder    *Builder
-	source     int
-	format     Format
-	input      *compactInput // compact input files
-	inputDone  bool
-	scratch    []byte
-	encoded    []byte
-	closed     bool
-	err        error
-	points     int64 // accepted by WritePoints as records
-	descriptor File
-	syncOnce   sync.Once
-	syncErr    error
+	arrivals      *os.File
+	arrivalBuffer *bufio.Writer
+	mu            sync.Mutex
+	file          *os.File
+	buffer        *sink
+	builder       *Builder
+	source        int
+	format        Format
+	input         *compactInput // compact input files
+	inputDone     bool
+	scratch       []byte
+	encoded       []byte
+	closed        bool
+	err           error
+	points        int64 // accepted by WritePoints as records
+	descriptor    File
+	syncOnce      sync.Once
+	syncErr       error
 }
 
 // InputFileBuffer sizes the buffers of input files: the WAL a dump stop
@@ -333,6 +336,9 @@ func (w *Writer) WritePoints(p *points.Points) error {
 	if len(p.Data) == 0 {
 		return nil
 	}
+	if w.err = w.writeArrivals([]arrivalRecord{{p.Metric, p.FirstArrival}}); w.err != nil {
+		return w.err
+	}
 	if w.format == FormatBlocks {
 		return fmt.Errorf("a %v cache dump is written in segments", w.format)
 	}
@@ -379,10 +385,11 @@ func releaseChunk(buf []byte) {
 }
 
 type segment struct {
-	chunks  [][]byte
-	entries []BatchEntry
-	err     error
-	done    chan struct{}
+	arrivals []arrivalRecord
+	chunks   [][]byte
+	entries  []BatchEntry
+	err      error
+	done     chan struct{}
 }
 
 // Segment collects one concurrently encoded part of a WriteSegments call.
@@ -401,6 +408,7 @@ func (g *Segment) Format() Format { return g.format }
 
 // WritePoints encodes p as one record of the file's format.
 func (g *Segment) WritePoints(p *points.Points) error {
+	g.NoteArrival(p.Metric, p.FirstArrival)
 	if len(p.Data) == 0 {
 		return nil
 	}
@@ -620,6 +628,9 @@ func (w *Writer) appendSegment(s *segment) error {
 	if w.closed {
 		return os.ErrClosed
 	}
+	if w.err = w.writeArrivals(s.arrivals); w.err != nil {
+		return w.err
+	}
 	for _, chunk := range s.chunks {
 		if w.err = w.buffer.Submit(chunk, releaseChunk); w.err != nil {
 			return w.err
@@ -660,6 +671,9 @@ func (w *Writer) Flush() (File, error) {
 	// caller owns the completed builder; do not retain its construction tables.
 	w.builder = nil
 	w.err = errors.Join(w.err, w.buffer.Flush())
+	if w.arrivalBuffer != nil {
+		w.err = errors.Join(w.err, w.arrivalBuffer.Flush())
+	}
 	if w.err == nil {
 		info, err := w.file.Stat()
 		w.err = err
@@ -676,9 +690,15 @@ func (w *Writer) Sync() error {
 	w.syncOnce.Do(func() {
 		if _, err := w.Flush(); err != nil {
 			w.syncErr = errors.Join(err, w.file.Close())
+			if w.arrivals != nil {
+				w.syncErr = errors.Join(w.syncErr, w.arrivals.Close())
+			}
 			return
 		}
 		w.syncErr = errors.Join(w.file.Sync(), w.file.Close())
+		if w.arrivals != nil {
+			w.syncErr = errors.Join(w.syncErr, w.arrivals.Sync(), w.arrivals.Close())
+		}
 	})
 	return w.syncErr
 }

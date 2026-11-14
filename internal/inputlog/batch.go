@@ -95,7 +95,7 @@ func (s *streamEncoder) addBatch(w *streamScratch, b *Batch) {
 			}
 			previous = ref
 		}
-		w.rows[start+i] = row{id: id, ts: p.Timestamp, bits: math.Float64bits(p.Value)}
+		w.rows[start+i] = row{id: id, ts: p.Timestamp, bits: math.Float64bits(p.Value), arrival: b.Refs[i].Arrival.Load()}
 	}
 }
 

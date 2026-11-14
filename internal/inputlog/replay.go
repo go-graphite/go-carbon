@@ -146,6 +146,12 @@ func decodeFrame(dec *zstd.Decoder, f replayFrame, raw []byte, stream *streamDec
 		visit = nil
 	}
 	raw, err := decompress(dec, f, raw)
+	ages, ageErr := arrivalFrame(f.payload)
+	if err == nil {
+		err = ageErr
+	}
+	stream.arrivals = ages
+
 	n := 0
 	if err == nil {
 		n, err = stream.decode(raw, visit)

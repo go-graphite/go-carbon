@@ -45,9 +45,10 @@ const maxRowBytes = binary.MaxVarintLen32 + binary.MaxVarintLen64 + 9
 const maxSortRows = 1 << 18
 
 type row struct {
-	id   uint32
-	ts   int64
-	bits uint64
+	id      uint32
+	ts      int64
+	bits    uint64
+	arrival int64
 }
 
 type lastPoint struct {
@@ -57,8 +58,9 @@ type lastPoint struct {
 
 // streamEncoder is a partition's encoding state for the segment seq.
 type streamEncoder struct {
-	seq    uint64
-	frames uint64
+	seq       uint64
+	frames    uint64
+	frameAges []byte
 	// epoch identifies this stream among every stream encoded by the
 	// process, so a StreamRef's id never outlives its stream.
 	epoch uint32
@@ -112,7 +114,7 @@ func (s *streamEncoder) add(w *streamScratch, e Entry) {
 	} else {
 		id = s.lookup(w, e.Ref)
 	}
-	w.rows = append(w.rows, row{id: id, ts: e.Timestamp, bits: math.Float64bits(e.Value)})
+	w.rows = append(w.rows, row{id: id, ts: e.Timestamp, bits: math.Float64bits(e.Value), arrival: e.Ref.Arrival.Load()})
 }
 
 // lookup returns ref's id in the stream, defining its name if new, and
@@ -173,6 +175,20 @@ func (s *streamEncoder) encodeFrame(w *streamScratch, rows []row, defined int, n
 	dst = append(dst, names...)
 	ids, stamps, values := w.cols[0][:0], w.cols[1][:0], w.cols[2][:0]
 	prev := row{}
+	s.frameAges = s.frameAges[:0]
+	for start := 0; start < len(rows); {
+		end := start + 1
+		at := rows[start].arrival
+		for end < len(rows) && rows[end].id == rows[start].id {
+			other := rows[end].arrival
+			if other == 0 || at != 0 && other < at {
+				at = other
+			}
+			end++
+		}
+		s.frameAges = binary.AppendVarint(s.frameAges, at)
+		start = end
+	}
 	for _, r := range rows {
 		ids = binary.AppendUvarint(ids, uint64(r.id-prev.id))
 		want := lastPoint{ts: prev.ts}
@@ -248,13 +264,14 @@ var errStream = errors.New("input log frame does not continue its stream")
 
 // streamDecoder is a partition's decoding state for one segment.
 type streamDecoder struct {
-	seq    uint64
-	frames uint64
-	broken bool
-	names  []string
-	last   []lastPoint
-	data   []points.Point
-	groups []group
+	seq      uint64
+	frames   uint64
+	broken   bool
+	names    []string
+	last     []lastPoint
+	data     []points.Point
+	groups   []group
+	arrivals []int64
 }
 
 // group is a run of rows of one name in a decoded frame.
@@ -313,6 +330,9 @@ func (d *streamDecoder) decode(raw []byte, visit func(*points.Points)) (int, err
 	if ids.err != nil || stamps.err != nil || values.err != nil || len(ids.data)+len(stamps.data)+len(values.data) > 0 {
 		return 0, errFrame
 	}
+	if d.arrivals != nil && len(d.arrivals) != len(d.groups) {
+		return 0, errFrame
+	}
 	d.frames++
 	if visit != nil {
 		for i, g := range d.groups {
@@ -320,7 +340,11 @@ func (d *streamDecoder) decode(raw []byte, visit func(*points.Points)) (int, err
 			if i+1 < len(d.groups) {
 				end = d.groups[i+1].start
 			}
-			visit(&points.Points{Metric: d.names[g.id], Data: append([]points.Point(nil), d.data[g.start:end]...)})
+			at := int64(0)
+			if d.arrivals != nil {
+				at = d.arrivals[i]
+			}
+			visit(&points.Points{FirstArrival: at, Metric: d.names[g.id], Data: append([]points.Point(nil), d.data[g.start:end]...)})
 		}
 	}
 	return int(count), nil

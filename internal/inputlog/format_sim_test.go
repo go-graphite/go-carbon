@@ -147,7 +147,7 @@ func simVariants() []func() simVariant {
 			for _, e := range entries {
 				var id uint32
 				id, names = s.id(e.Metric(), names)
-				rows = append(rows, row{id, e.Timestamp, math.Float64bits(e.Value)})
+				rows = append(rows, row{id: id, ts: e.Timestamp, bits: math.Float64bits(e.Value)})
 			}
 			slices.SortStableFunc(rows, func(a, b row) int { return int(a.id) - int(b.id) })
 			prev := row{}
