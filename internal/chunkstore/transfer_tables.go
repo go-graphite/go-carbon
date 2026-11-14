@@ -136,6 +136,59 @@ func (s *Store) writeTransferBatch(ctx context.Context, stage *transferStage) (*
 	return b, nil
 }
 
+// Bound each unpublished staging commit independently of the transfer's SST
+// crossover. Pebble publishes commits in sequence order: a large memtable
+// apply can hold later live commits, which in turn hold metric stripes. A
+// single oversized value stays intact. No rate limit or sleep is involved.
+const transferCommitBytes = 1 << 20
+
+func (s *Store) commitTransferBatch(ctx context.Context, verified *pebble.Batch, limit int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(verified.Repr()) <= limit && verified.Count() <= 4096 {
+		return verified.Commit(pebble.NoSync)
+	}
+	part := s.db.NewBatch()
+	defer func() { _ = part.Close() }()
+	flush := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := part.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		part.Reset()
+		return nil
+	}
+	r := verified.Reader()
+	for {
+		kind, key, value, ok, err := r.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		if kind != pebble.InternalKeyKindSet {
+			return errors.New("unexpected operation in verified transfer batch")
+		}
+		// Include the maximum encoded entry overhead and batch header.
+		if part.Count() > 0 && (len(part.Repr())+len(key)+len(value)+11 > limit || part.Count() >= 4096) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		if err := part.Set(key, value, nil); err != nil {
+			return err
+		}
+	}
+	if part.Count() > 0 {
+		return flush()
+	}
+	return ctx.Err()
+}
+
 func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage *transferStage) error {
 	if int(b.Count()) != len(stage.keys) {
 		return errors.New("staged transfer batch count verification failed")
