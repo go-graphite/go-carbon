@@ -361,3 +361,33 @@ func TestRestoreWriterConcurrentWriteout(t *testing.T) {
 		t.Fatal("concurrent writeout changed input-log bits/order")
 	}
 }
+
+func TestRestoreWriterReadAheadBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := New()
+		entered, release, added := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		w := c.NewRestoreWriter(4, func(p *points.Points) {
+			if len(p.Data) > maxRestorePendingPoints {
+				close(entered)
+				<-release
+			}
+			// The callback owns this record, so it may release its decoded data.
+			p.Data = nil
+		})
+		w.Add(&points.Points{Metric: "oversized", Data: make([]points.Point, maxRestorePendingPoints+1)})
+		<-entered
+		go func() { w.Add(points.OnePoint("next", 1, 1)); close(added) }()
+		synctest.Wait()
+		select {
+		case <-added:
+			t.Fatal("oversized record did not run alone")
+		default:
+		}
+		close(release)
+		<-added
+		w.Close()
+		if w.pendingPoints != 0 {
+			t.Fatal("read-ahead reservation leaked", w.pendingPoints)
+		}
+	})
+}

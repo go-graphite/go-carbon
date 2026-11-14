@@ -39,9 +39,10 @@ func (c *Cache) NewRestoreWriter(workers int, consume func(*points.Points)) *Res
 		w.queues[i] = q
 		w.workers.Go(func() {
 			for p := range q {
+				weight := restoreWeight(p)
 				consume(p)
 				w.mu.Lock()
-				w.pendingPoints -= restoreWeight(p)
+				w.pendingPoints -= weight
 				w.space.Broadcast()
 				w.mu.Unlock()
 				w.pending.Done()
