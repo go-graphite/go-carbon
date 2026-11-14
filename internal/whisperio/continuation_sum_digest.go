@@ -12,10 +12,9 @@ import (
 )
 
 // The identity is logical time, never a physical block or pack-group index.
-// A value is exactly one uint64 sum. The current formats have physical presence
-// bits, not canonical finite-point presence bits; packed groups have neither.
-// Consequently only a complete finite bucket is cached: its existence certifies
-// all 8192 slots, and its count is implicit. Sparse buckets use Fetch's oracle.
+// Dense complete buckets keep the original eight-byte sum. Other entries also
+// store their canonical finite count and exact covered slot bounds. Invalidation
+// follows logical time buckets, including partial ranges and sparse histories.
 const sumBucketSlots = 64 * 128
 
 var sumRevisionKey = []byte(store.ContinuationDigestPrefix)
@@ -43,27 +42,18 @@ func sumCacheCurrent(kv store.ContinuationIO, revision uint64) (bool, error) {
 	return len(data) == 8 && binary.BigEndian.Uint64(data) == revision, nil
 }
 
-// A short settle interval avoids repeatedly caching an active head. Cache
-// invalidation, rather than age alone, guarantees correctness for late writes.
-func (c *ContinuationCodec) sumSettle() time.Duration {
-	if c.DigestSettle > 0 {
-		return c.DigestSettle
-	}
-	return time.Hour
-}
-
 // SumDigest reads the canonical archive view on a single immutable snapshot.
-// Complete buckets older than settle (at least one archive step) are lazily
-// cached. Partial retention edges, open buckets and sparse histories are
-// decoded. The sum is probabilistic, not a cryptographic integrity proof.
+// Every visited bucket range is lazily cached, including sparse and partial
+// ranges. A hit requires the exact slot bounds and a current revision fence.
+// The sum is probabilistic, not a cryptographic integrity proof.
 func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.ContinuationIO, m store.Metadata, from, until int, clock func() time.Time, steps ...int) ([]store.SumArchive, error) {
-	fs := newContinuationFiles(kv, true).withClock(clock)
-	fs.rangeReads = true
-	w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
-	if err != nil {
-		return nil, err
-	}
-	defer w.Close()
+	// A cache hit must not open or reconstruct the virtual Whisper files.
+	var w *whisper.Whisper
+	defer func() {
+		if w != nil {
+			_ = w.Close()
+		}
+	}()
 	now := int(clock().Unix())
 	current, err := sumCacheCurrent(kv, m.Revision)
 	if err != nil {
@@ -86,16 +76,25 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 			bucket := start / span
 			end := min(hi, (bucket+1)*span)
 			key := sumBucketKey(ai, bucket)
-			eligible := start == bucket*span && end == (bucket+1)*span && end <= now-max(int(c.sumSettle()/time.Second), r.Step)
-			if current && eligible {
+			firstSlot := (start - bucket*span) / r.Step
+			endSlot := (end - bucket*span) / r.Step
+			if current {
 				value, err := kv.Get(key)
 				if err != nil && !errors.Is(err, store.ErrNotFound) {
 					return nil, err
 				}
-				if err == nil && len(value) == 8 {
-					total.Merge(store.PointSum{Sum: binary.BigEndian.Uint64(value), Count: sumBucketSlots})
+				if d, ok := decodeSumBucket(value, firstSlot, endSlot); err == nil && ok {
+					total.Merge(d)
 					start = end
 					continue
+				}
+			}
+			if w == nil {
+				fs := newContinuationFiles(kv, true).withClock(clock)
+				fs.rangeReads = true
+				w, err = whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
+				if err != nil {
+					return nil, err
 				}
 			}
 			series, err := w.FetchArchiveWindow(whisper.ArchiveWindow{Archive: ai, From: start, Until: end})
@@ -106,11 +105,11 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 			for i, v := range series.Values() {
 				d.Add(int64(series.FromTime()+i*r.Step), v)
 			}
-			if writable && eligible && d.Count == sumBucketSlots {
+			if writable {
 				if !filled && !current {
 					cache.ClearDigestCache()
 				}
-				cache.CacheDigest(key, binary.BigEndian.AppendUint64(nil, d.Sum))
+				cache.CacheDigest(key, encodeSumBucket(d, firstSlot, endSlot))
 				filled = true
 			}
 			total.Merge(d)
@@ -122,6 +121,32 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 		cache.CacheDigest(sumRevisionKey, binary.BigEndian.AppendUint64(nil, m.Revision))
 	}
 	return out, nil
+}
+
+// The extended value remains disposable and backward compatible: older readers
+// ignore its length. Slot bounds distinguish a clipped request from a full bucket.
+func encodeSumBucket(d store.PointSum, first, end int) []byte {
+	value := binary.BigEndian.AppendUint64(nil, d.Sum)
+	if first == 0 && end == sumBucketSlots && d.Count == sumBucketSlots {
+		return value
+	}
+	value = binary.BigEndian.AppendUint16(value, uint16(d.Count))
+	value = binary.BigEndian.AppendUint16(value, uint16(first))
+	return binary.BigEndian.AppendUint16(value, uint16(end))
+}
+
+func decodeSumBucket(value []byte, first, end int) (store.PointSum, bool) {
+	if len(value) == 8 && first == 0 && end == sumBucketSlots {
+		return store.PointSum{Sum: binary.BigEndian.Uint64(value), Count: sumBucketSlots}, true
+	}
+	if len(value) != 14 || int(binary.BigEndian.Uint16(value[10:12])) != first || int(binary.BigEndian.Uint16(value[12:14])) != end {
+		return store.PointSum{}, false
+	}
+	count := uint64(binary.BigEndian.Uint16(value[8:10]))
+	if count > uint64(end-first) {
+		return store.PointSum{}, false
+	}
+	return store.PointSum{Sum: binary.BigEndian.Uint64(value), Count: count}, true
 }
 
 // sumWriteView collects only header metadata, never historical point payloads.

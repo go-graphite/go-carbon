@@ -326,8 +326,8 @@ func TestSumDigestUninstrumentedMutationFence(t *testing.T) {
 	for k, v := range kv.mapContinuationIO {
 		if len(k) == 9 && k[:3] == "ds/" {
 			cached++
-			if len(v) != 8 {
-				t.Fatal("sum value not 8 bytes")
+			if len(v) != 8 && len(v) != 14 {
+				t.Fatal("invalid sum value size")
 			}
 		}
 	}
@@ -448,6 +448,58 @@ func TestSumDigestStoreReopenAndWrites(t *testing.T) {
 	for _, entry := range exported[0].Keys {
 		if len(entry.Key) >= 2 && string(entry.Key[:2]) == "ds" {
 			t.Fatal("transfer contains local cache")
+		}
+	}
+}
+
+// Reject historical file reads, including opening headers, after the first fill.
+// This is stronger than a time benchmark: all warm sparse/edge ranges must be
+// answered using the persisted digest entries alone.
+type sumCacheOnlyIO struct{ *sumTestIO }
+
+func (kv sumCacheOnlyIO) Get(key []byte) ([]byte, error) {
+	if len(key) < 2 || string(key[:2]) != "ds" {
+		return nil, fmt.Errorf("unexpected continuation reconstruction: %x", key)
+	}
+	return kv.sumTestIO.Get(key)
+}
+func (kv sumCacheOnlyIO) Visit(key []byte, fn func([]byte, []byte) error) error {
+	return fmt.Errorf("unexpected continuation scan: %x", key)
+}
+
+func TestSumDigestSparseAndPartialNoReconstruction(t *testing.T) {
+	ctx := context.Background()
+	now := 1700000000
+	clock := func() time.Time { return time.Unix(int64(now), 0) }
+	codec := &ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}
+	kv := &sumTestIO{mapContinuationIO: mapContinuationIO{}}
+	m := store.Metadata{MetricConfig: store.MetricConfig{Name: "sparse", Retentions: []store.Retention{{Step: 1, Count: 200000}, {Step: 60, Count: 12000}}, AggregationMethod: store.Last}}
+	if err := codec.Create(ctx, kv, m, clock); err != nil {
+		t.Fatal(err)
+	}
+	rng := rand.New(rand.NewSource(8144))
+	var input []store.Point
+	for i := 0; i < 100000; i += 3 {
+		v := math.Float64frombits(rng.Uint64())
+		if i%27 == 0 {
+			v = math.Float64frombits(0x8000000000000000)
+		}
+		input = append(input, store.Point{Timestamp: int64(now - 120000 + i), Value: v})
+	}
+	if err := codec.Update(ctx, kv, m, input, -1, clock, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.Revision++
+	for _, bounds := range [][2]int{{0, 0}, {now - 90001, now - 601}, {now - 1799, now - 17}} {
+		want, _ := sumOracle(t, kv, m, now, bounds[0], bounds[1])
+		for _, view := range []store.ContinuationIO{kv, sumCacheOnlyIO{kv}} {
+			got, err := codec.SumDigest(ctx, view, m, bounds[0], bounds[1], clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("bounds %v: got %+v want %+v", bounds, got, want)
+			}
 		}
 	}
 }
