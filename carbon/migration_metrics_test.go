@@ -381,3 +381,38 @@ func TestMigrationCollectorExportsTransferRequeues(t *testing.T) {
 		t.Fatal("requeue telemetry missing")
 	}
 }
+
+func TestCollectorReportsCumulativeAdmissionRejections(t *testing.T) {
+	c := cache.New()
+	c.SetThrottle(func(*points.Points, bool) bool { return true })
+	c.Add(&points.Points{Metric: "rejected", Data: make([]points.Point, 7)})
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{Cache: c}})
+	for range 2 {
+		c.Stat(func(string, float64) {})
+		families, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]float64{
+			"cache_throttled_points_total":            7,
+			"cache_received_points_total":             7,
+			"cache_recovered_points_total":            0,
+			"cache_xlog_diverted_points_total":        0,
+			"cache_overflow_dropped_points_total":     0,
+			"cache_invalid_tag_rejected_points_total": 0,
+			"cache_xlog_write_failed_points_total":    0,
+		}
+		for _, f := range families {
+			if value, ok := want[f.GetName()]; ok {
+				if f.GetType() != dto.MetricType_COUNTER || f.GetMetric()[0].GetCounter().GetValue() != value {
+					t.Fatalf("%s: %v, want counter %v", f.GetName(), f, value)
+				}
+				delete(want, f.GetName())
+			}
+		}
+		if len(want) != 0 {
+			t.Fatalf("missing metrics %v", want)
+		}
+	}
+}

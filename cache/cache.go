@@ -86,12 +86,19 @@ type Cache struct {
 	stat struct {
 		size                int64 // published part of the size, changing via atomic; see Shard.sizeDelta
 		bytes               atomic.Int64
-		queueBuildCnt       uint32        // number of times writeout queue was built
-		queueBuildTimeMs    uint32        // time spent building writeout queue in milliseconds
-		queueWriteoutTime   uint32        // in milliseconds
-		overflowCnt         uint32        // drop packages if cache full
-		queryCnt            uint32        // number of queries
-		tagsNormalizeErrors uint32        // tags normalize errors count
+		queueBuildCnt       uint32 // number of times writeout queue was built
+		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
+		queueWriteoutTime   uint32 // in milliseconds
+		overflowCnt         uint32 // drop packages if cache full
+		queryCnt            uint32 // number of queries
+		tagsNormalizeErrors uint32 // tags normalize errors count
+		receivedPoints      atomic.Uint64
+		recoveredPoints     atomic.Uint64
+		xlogDivertedPoints  atomic.Uint64
+		throttledPoints     atomic.Uint64
+		overflowPoints      atomic.Uint64
+		invalidTagPoints    atomic.Uint64
+		xlogFailedPoints    atomic.Uint64
 		nameTooLong         atomic.Uint64 // points refused because the name exceeds points.MaxMetricNameBytes
 
 		droppedRealtimeIndex uint32 // new metrics failed to be indexed in realtime
@@ -118,7 +125,9 @@ type indexFilter struct {
 
 // A "thread" safe string to anything map.
 type Shard struct {
-	livePoints uint64 // accepted live points, protected by mu; excludes restoration
+	receivedPoints atomic.Uint64 // fast intake, independent of other shards
+	inFlightPoints atomic.Int64
+	livePoints     uint64 // accepted live points, protected by mu; excludes restoration
 
 	streamGeneration uint64
 	streamSeries     []seriesSlot
@@ -322,6 +331,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	s := c.settings.Load().(*cacheSettings)
 
 	send("size", float64(c.Size()))
+	c.admissionStat(send)
 	send("metrics", float64(c.Len()))
 	send("maxSize", float64(s.maxSize))
 	send("notConfirmed", float64(c.NotConfirmedLength()))
@@ -440,6 +450,7 @@ func removeNotConfirmed(shard *Shard, p *points.Points) bool {
 
 		copy(shard.notConfirmed[i:], shard.notConfirmed[i+1:shard.notConfirmedUsed])
 		shard.notConfirmedUsed--
+		shard.inFlightPoints.Add(-int64(len(p.Data)))
 		shard.inFlightBytes -= flightMemory(p)
 		shard.notConfirmed[shard.notConfirmedUsed] = nil
 		return true
@@ -653,6 +664,7 @@ func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
 }
 
 func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, hash uint64, value float64, timestamp int64) {
+	shard.receivedPoints.Add(1)
 	if c.throttleWithHash != nil {
 		// The throttle does not retain the points of a cached metric.
 		shard.scratchData[0] = points.Point{Value: value, Timestamp: timestamp}
@@ -660,6 +672,7 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		throttled := c.throttleWithHash(&shard.scratch, true, hash, &values.throttle)
 		shard.scratch.Metric = ""
 		if throttled {
+			c.stat.throttledPoints.Add(1)
 			return
 		}
 	}
@@ -735,7 +748,18 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	c.addWithRestore(p, restored, recovered, false, nil, nil)
 }
 
-func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) <-chan struct{} {
+func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) (wait <-chan struct{}) {
+	// Restore may retry while waiting for journal space; count a record only
+	// once it has completed intake. Requeue never enters this path.
+	defer func() {
+		if wait == nil {
+			if restored || recovered {
+				c.stat.recoveredPoints.Add(uint64(len(p.Data)))
+			} else {
+				c.stat.receivedPoints.Add(uint64(len(p.Data)))
+			}
+		}
+	}()
 	s := c.settings.Load().(*cacheSettings)
 
 	// Every new name reaches the cache here: the fast paths only append to
@@ -746,7 +770,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 
 	if s.xlog != nil {
-		s.xlog(p)
+		c.divert(s.xlog, p)
 		return nil
 	}
 
@@ -755,6 +779,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		p.Metric, err = tags.Normalize(p.Metric)
 		if err != nil {
 			atomic.AddUint32(&c.stat.tagsNormalizeErrors, 1)
+			c.stat.invalidTagPoints.Add(uint64(len(p.Data)))
 			return nil
 		}
 	}
@@ -769,7 +794,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	// behind the shard dump. Recheck under the same lock so it cannot miss both
 	// the dump and the input log.
 	if current := c.settings.Load().(*cacheSettings); current.xlog != nil {
-		current.xlog(p)
+		c.divert(current.xlog, p)
 		return nil
 	}
 	if restored && !recovered {
@@ -815,6 +840,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		throttleState = shard.throttleScratch
 		shard.throttleScratch = nil
 		if rejected {
+			c.stat.throttledPoints.Add(uint64(len(p.Data)))
 			return nil
 		}
 	}
@@ -898,6 +924,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 func (c *Cache) overflows(s *cacheSettings, count int) bool {
 	if s.maxSize > 0 && c.approxSize() > s.maxSize || s.maxBytes > 0 && c.stat.bytes.Load()+c.queueMemory() > s.maxBytes {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
+		c.stat.overflowPoints.Add(uint64(count))
 		return true
 	}
 	return false
@@ -1022,6 +1049,7 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
+		shard.inFlightPoints.Add(int64(len(p.Data)))
 		shard.flightPeak = max(shard.flightPeak, shard.notConfirmedUsed)
 		shard.inFlightBytes += flightMemory(p)
 		c.syncMemoryLocked(shard)

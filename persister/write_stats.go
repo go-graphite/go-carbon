@@ -8,12 +8,13 @@ import (
 // backendWriteStats accumulates committed writes for one backend. Unlike the
 // periodic stats counters these never reset, so Prometheus rates them.
 type backendWriteStats struct {
-	updates, points, failures, nanos atomic.Uint64
+	updates, points, failures, nanos, failedPoints atomic.Uint64
 }
 
 func (s *backendWriteStats) observe(points int, took time.Duration, err error) {
 	if err != nil {
 		s.failures.Add(1)
+		s.failedPoints.Add(uint64(points))
 		return
 	}
 	s.updates.Add(1)
@@ -29,12 +30,12 @@ type persisterWriteStats struct {
 // BackendWrites reports cumulative updates, points, failures and seconds spent
 // writing to the shared store and to original whisper files.
 type BackendWrites struct {
-	Updates, Points, Failures uint64
-	Seconds                   float64
+	Updates, Points, Failures, FailedPoints uint64
+	Seconds                                 float64
 }
 
 func (s *backendWriteStats) snapshot() BackendWrites {
-	return BackendWrites{Updates: s.updates.Load(), Points: s.points.Load(), Failures: s.failures.Load(), Seconds: float64(s.nanos.Load()) / 1e9}
+	return BackendWrites{FailedPoints: s.failedPoints.Load(), Updates: s.updates.Load(), Points: s.points.Load(), Failures: s.failures.Load(), Seconds: float64(s.nanos.Load()) / 1e9}
 }
 
 func (p *Whisper) WriteStats() (pebble, whisper BackendWrites) {
@@ -60,3 +61,9 @@ func (p *Whisper) TransferFlushRequeues() map[string]uint64 {
 
 // NameTooLongDroppedPoints reports cumulative points discarded by name or path limits.
 func (p *Whisper) NameTooLongDroppedPoints() uint64 { return p.nameTooLongTotal.Load() }
+
+// CommittedPoints counts successful input batches once, regardless of backend.
+func (p *Whisper) CommittedPoints() uint64 { return p.committedPointsTotal.Load() }
+
+// WriteDroppedPoints counts points permanently discarded after a file error.
+func (p *Whisper) WriteDroppedPoints() uint64 { return p.writeDroppedPoints.Load() }
