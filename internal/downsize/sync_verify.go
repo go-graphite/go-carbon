@@ -725,6 +725,8 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 				targetNames = append(targetNames, n)
 			}
 		}
+		// The local read supersedes any endpoint negotiation failure.
+		target.err = nil
 		target.points = map[string]syncSeries{}
 		target.digests = map[string][]syncDigest{}
 		if len(targetNames) > 0 {

@@ -280,3 +280,26 @@ func TestSyncLegacyTargetReadOnceAfterNegotiation(t *testing.T) {
 		t.Fatalf("target SHA calls=%d want1", b.calls)
 	}
 }
+
+func TestSyncFullTargetWithoutDigestEndpoints(t *testing.T) {
+	f, o, _ := threeSources(t)
+	f.noDigest[syncT] = true
+	b := &sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true}}
+	s := &syncer{o: o, b: b}
+	names := []string{"a.clean", "b.holes", "c.peerhole"}
+	schemas := map[string][]syncArchive{}
+	for _, n := range names {
+		s.masks.Store(n, uint64(7))
+		schemas[n] = syncTestSchema
+	}
+	var want, got syncRow
+	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("digest-unavailable target changed holes: got %+v want %+v", got, want)
+	}
+}
