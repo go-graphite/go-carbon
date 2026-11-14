@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/go-graphite/go-carbon/internal/storemaint/anchors"
 	"github.com/go-graphite/go-carbon/internal/storemaint/coldpack"
-	"github.com/go-graphite/go-carbon/internal/storemaint/configs"
 	"github.com/go-graphite/go-carbon/internal/storemaint/convert"
 	"github.com/go-graphite/go-carbon/internal/storemaint/foldooo"
 	"github.com/go-graphite/go-carbon/internal/storemaint/migration"
@@ -15,7 +14,7 @@ import (
 )
 
 func maintain(args []string) error {
-	const usage = "usage: storectl maintain migration|fold-ooo|anchors|cold-pack|convert|prune-empty-dirs|reclaim-orphans|configs [flags]"
+	const usage = "usage: storectl maintain migration|fold-ooo|anchors|cold-pack|convert|prune-empty-dirs|reclaim-orphans [flags]"
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -37,8 +36,6 @@ func maintain(args []string) error {
 		return prune.Main(args[1:])
 	case "reclaim-orphans":
 		return reclaim.Main(args[1:])
-	case "configs":
-		return configs.Main(args[1:])
 	default:
 		return fmt.Errorf("unknown maintenance action %q; %s", args[0], usage)
 	}

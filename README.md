@@ -738,30 +738,6 @@ Some illustrations of schema changes:
 
 #### Useful Tools/Commands
 
-`storectl maintain configs` reports the impact of schema and aggregation changes using a file-list cache and the old and new configuration files.
-
-```bash
-$ make storectl
-$ ./storectl maintain configs  \
-    -file-list-cache carbonserver-file-list-cache.gzip  \
-    -new-aggregation new-storage-aggregation.conf  \
-    -new-schema new-storage-schemas.conf  \
-    -old-aggregation oldstorage-aggregation.conf  \
-    -old-schema old-storage-schemas.conf
-
-# example output:
-#
-#     schema-changes
-#     1d:10y->1m:14d,5m:60d,60m:2y 790
-#     1h:10y->1m:14d,5m:60d,60m:2y 1332
-#     1d:10y->1m:14d,30m:2y 2414
-#     1d:10y->1d:2y 844
-#     1m:30d,1h:1y,1d:10y->1m:14d,5m:60d,60m:2y 183730
-#     aggregation-changes
-#     average->sum 126650
-#     average->last 9715
-```
-
 `-check-policies` flag in `go-carbon`: we can use to see how many metrics are having inconsistent schemas or aggregation policies against the config file:
 
 ```bash

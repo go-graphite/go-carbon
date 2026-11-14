@@ -9,7 +9,7 @@ import (
 func TestMaintenanceDispatch(t *testing.T) {
 	// Repeated parsing in one process must not share flags or run an operation.
 	for pass := 0; pass < 2; pass++ {
-		for _, action := range []string{"cold-pack", "convert", "prune-empty-dirs", "reclaim-orphans", "configs"} {
+		for _, action := range []string{"cold-pack", "convert", "prune-empty-dirs", "reclaim-orphans"} {
 			if err := run([]string{"maintain", action, "--help"}); !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("%s help: %v", action, err)
 			}
