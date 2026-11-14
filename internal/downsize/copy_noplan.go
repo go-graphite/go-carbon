@@ -30,6 +30,7 @@ import (
 // points win in the importer, so redoing a batch is harmless.
 
 type copyOptions struct {
+	onCommitted                                      func(int) // optional observer, called after a durable new batch receipt
 	auth                                             *hostTokenCache
 	rate                                             *syncRateLimit
 	froms                                            []string
@@ -533,6 +534,9 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 				return err
 			}
 			c.stats.copied.Add(int64(len(names)))
+			if c.o.onCommitted != nil {
+				c.o.onCommitted(len(names))
+			}
 			c.progress.success()
 			c.stats.bytes.Add(bytes)
 			batches := c.stats.batches.Add(1)

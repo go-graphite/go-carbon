@@ -91,6 +91,9 @@ type syncSkip struct {
 
 // syncProgress is the live counter set the progress ticker reports.
 type syncProgress struct {
+	copyActive   int64 // fresh committed names in the unfinished source list
+	copyFresh    int64 // fresh committed names over this phase
+	copyObserved bool
 	mu           sync.Mutex
 	phase        string
 	total        int
@@ -109,6 +112,7 @@ func (p *syncProgress) begin(phase string, total int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.phase, p.total, p.started = phase, total, time.Now()
+	p.copyActive, p.copyFresh, p.copyObserved = 0, 0, false
 	p.done.Store(0)
 	p.replayed.Store(0)
 }
@@ -938,8 +942,9 @@ func (s *syncer) progressLine() {
 	p := &s.prog
 	p.mu.Lock()
 	phase, total, started := p.phase, p.total, p.started
+	done := p.done.Load() + p.copyActive
+	fresh, observed := p.copyFresh, p.copyObserved
 	p.mu.Unlock()
-	done := p.done.Load()
 	elapsed := time.Since(started).Seconds()
 	fields := map[string]any{"phase": phase, "done": done, "total": total, "skipped": p.skipped.Load(),
 		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d verify_streams=%d", s.o.streams, s.o.verifyConcurrency())}
@@ -958,10 +963,29 @@ func (s *syncer) progressLine() {
 	}
 	if elapsed > 0 && done > 0 {
 		rate := float64(max(0, done-p.replayed.Load())) / elapsed
+		if observed {
+			rate = float64(fresh) / elapsed
+		}
 		fields["names_per_second"] = rate
 		if rate > 0 && total > int(done) {
 			fields["eta_seconds"] = float64(int64(total)-done) / rate
 		}
 	}
 	event("sync_progress", fields)
+}
+
+// Copy receipts stay authoritative; these counters expose committed batches
+// while a potentially multi-million-name donor list is still being copied.
+func (p *syncProgress) copyCommitted(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.copyObserved = true
+	p.copyActive += int64(n)
+	p.copyFresh += int64(n)
+}
+func (p *syncProgress) finishCopy(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done.Add(int64(n))
+	p.copyActive = 0
 }
