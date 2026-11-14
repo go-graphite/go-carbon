@@ -690,6 +690,9 @@ func (w *Writer) Sync() error {
 	w.syncOnce.Do(func() {
 		if _, err := w.Flush(); err != nil {
 			w.syncErr = errors.Join(err, w.file.Close())
+			if w.arrivals != nil {
+				w.syncErr = errors.Join(w.syncErr, w.arrivals.Close())
+			}
 			return
 		}
 		w.syncErr = errors.Join(w.file.Sync(), w.file.Close())
