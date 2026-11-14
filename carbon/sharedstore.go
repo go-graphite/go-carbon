@@ -477,7 +477,7 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 func (app *App) configureTransferCache() {
 	core := app.Cache
 	app.MetricStore.SetTransferPending(core.Has, func() bool { return !core.IsEmpty() })
-	app.MetricStore.SetNativePendingSnapshot(core.NativePendingNames)
+	app.MetricStore.SetNativePendingCheck(core.Has)
 	app.Buckyd.SetTransferFlush(func(ctx context.Context, names []string) error {
 		// Stop can hold App's lock while waiting for Buckyd handlers.
 		if !app.TryRLock() {

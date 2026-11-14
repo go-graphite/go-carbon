@@ -57,8 +57,8 @@ func (s *Store) pinNativeSource(session string) (*NativeSource, error) {
 		return nil, err
 	}
 	started := time.Now().UTC()
-	source := &NativeSource{store: s, view: s.db.NewSnapshot(), checkCurrent: session == "" && s.nativePendingSnapshot != nil, MergeSession: session, SnapshotStartedAt: started, SnapshotPinnedAt: time.Now().UTC()}
-	if source.checkCurrent {
+	source := &NativeSource{store: s, view: s.db.NewSnapshot(), checkCurrent: session == "" && (s.nativePendingSnapshot != nil || s.nativePendingCheck != nil), MergeSession: session, SnapshotStartedAt: started, SnapshotPinnedAt: time.Now().UTC()}
+	if source.checkCurrent && s.nativePendingCheck == nil {
 		pending, err := s.nativePendingSnapshot()
 		if err != nil {
 			source.view.Close()
@@ -73,6 +73,16 @@ func (s *Store) pinNativeSource(session string) (*NativeSource, error) {
 // names once per pin; the export hot path never takes cache/metric locks.
 func (s *Store) SetNativePendingSnapshot(snapshot func() (map[string]struct{}, error)) {
 	s.nativePendingSnapshot = snapshot
+}
+
+// SetNativePendingCheck avoids copying the complete live cache at pin time.
+// Exports check only requested names, before taking the current revision view:
+// a pending name is omitted, or a concurrent flush changes its revision and is
+// omitted by that view. Names queued after the pin may also be deferred.
+// The callback is installed before listeners start and must include in-flight
+// writes and recovery names until their committed revisions are visible.
+func (s *Store) SetNativePendingCheck(check func(string) bool) {
+	s.nativePendingCheck = check
 }
 func (s *NativeSource) Close() error {
 	s.mu.Lock()
@@ -143,6 +153,19 @@ func (s *NativeSource) WriteWindow(ctx context.Context, names []string, out io.W
 	slices.SortFunc(metas, func(a, b Metadata) int { return cmp.Compare(a.ID, b.ID) })
 	var current *transferReader
 	if s.checkCurrent {
+		// Observe cache membership before the revision snapshot. Confirmation
+		// cannot hide a queued write from both checks: its commit precedes the
+		// cache removal and therefore appears in this newer revision view.
+		if s.store.nativePendingCheck != nil {
+			for i, m := range metas {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if m.ID != 0 && s.store.nativePendingCheck(m.Name) {
+					metas[i] = Metadata{MetricConfig: MetricConfig{Name: m.Name}}
+				}
+			}
+		}
 		view := s.store.db.NewSnapshot()
 		defer view.Close()
 		current = &transferReader{reader: view, ordered: true, native: true}
