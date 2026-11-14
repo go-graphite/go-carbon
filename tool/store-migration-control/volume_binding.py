@@ -1,4 +1,4 @@
-"""Fence reboot-only device renumbering before a V6 service opens its store.
+"""Validate modern source identities and fence legacy V6 device renumbering.
 
 Record on a verified running node, then invoke rebind in ExecStartPre. A proof
 without a filesystem UUID is never accepted. SST/WAL files are never rewritten.
@@ -95,10 +95,73 @@ def marker_bytes(proof, devices):
     return result
 
 
+# Keep this explicit list aligned with checkFormatForContinuation in store.go.
+CONTINUATION_FORMATS = {('go-carbon-chunks-v%d\n' % n).encode()
+                        for n in [6, 7, 9, 11, 12]}
+
+
+def stable_source_identity(source, current, recorded):
+    if recorded.startswith('token:'):
+        token = read_regular(source / '.go-carbon-migration-source')
+        if not re.fullmatch(b'[0-9a-f]{32}\n', token):
+            raise ValueError('invalid source identity token')
+        return 'token:' + token.decode().rstrip('\n')
+    if not recorded.startswith('birth:'):
+        raise ValueError('unsupported stable source identity')
+    # GNU stat obtains nanosecond birth time with statx, just as the Go reader
+    # does. Do not round through a float or accept an unavailable birth time.
+    result = subprocess.run(
+        ['stat', '--printf=%d\n%i\n%W\n%w\n', '--', str(source)],
+        check=True, capture_output=True, text=True, timeout=10)
+    fields = result.stdout.splitlines()
+    if len(fields) != 4 or not all(re.fullmatch(r'[0-9]+', x) for x in fields[:3]):
+        raise ValueError('source directory birth time unavailable')
+    device, inode, seconds = map(int, fields[:3])
+    fraction = re.search(r'\.([0-9]{9}) [+-][0-9]{4}$', fields[3])
+    after = source.lstat()
+    if ((device, inode) != (current['device'], current['inode']) or
+            (after.st_dev, after.st_ino) != (device, inode)):
+        raise ValueError('source changed while reading stable identity')
+    if not fraction or seconds == 0:
+        raise ValueError('source directory birth time unavailable')
+    return 'birth:%d:%d:%s' % (inode, seconds, fraction[1])
+
+
+def validate_stable_markers(proof, current, raw):
+    roots = proof['roots']
+    store = Path(roots['store']['path'])
+    # Modern archive-policy adoption is deliberately outside this read-only
+    # path. Never ignore a policy merely because its proof did not record it.
+    if 'archive' in roots or os.path.lexists(store / 'INCREMENTAL-SOURCE-ARCHIVE.json'):
+        raise ValueError('stable source validation requires no archive policy')
+    source = Path(roots['source']['path'])
+    parts = raw.decode().split('\n')
+    if len(parts) != 4 or parts[0] != 'go-carbon-incremental-v2' or parts[1] != str(source) or parts[3]:
+        raise ValueError('unexpected stable source binding')
+    wanted = stable_source_identity(source, current['source'], parts[2])
+    if parts[2] != wanted:
+        raise ValueError('unexpected stable source identity')
+    guard = paths(proof)['guard']
+    # The modern Go binding does not require the historical source-root keep
+    # file. When one remains, validate it too; do not create or rewrite it.
+    if os.path.lexists(guard):
+        expected = marker_bytes(proof, {k: v['device'] for k, v in current.items()})['guard']
+        if json.loads(read_regular(guard)) != expected:
+            raise ValueError('unexpected directory binding: ' + str(guard))
+    return wanted
+
+
 def validate_markers(proof, current):
     store = Path(proof['roots']['store']['path'])
-    if read_regular(store / 'CHUNKSTORE') != b'go-carbon-chunks-v6\n':
-        raise ValueError('V6 format required')
+    format_marker = read_regular(store / 'CHUNKSTORE')
+    if format_marker not in CONTINUATION_FORMATS:
+        raise ValueError('supported continuation format required (V6/V7/V9/V11/V12)')
+    source_marker = read_regular(paths(proof)['source'])
+    if source_marker.startswith(b'go-carbon-incremental-v2\n'):
+        validate_stable_markers(proof, current, source_marker)
+        return []
+    if format_marker != b'go-carbon-chunks-v6\n':
+        raise ValueError('modern continuation format requires a stable V2 source binding')
     if 'archive' not in proof['roots'] and (store / 'INCREMENTAL-SOURCE-ARCHIVE.json').exists():
         raise ValueError('unrecorded archive policy')
     previous = marker_bytes(proof, {k: v['device'] for k, v in proof['roots'].items()})
@@ -168,6 +231,14 @@ def store_lock(store):
 def rebind(proof_path, inspect=False):
     proof = json.loads(read_regular(proof_path))
     current = current_roots(proof)
+    source_marker = read_regular(paths(proof)['source'])
+    if source_marker.startswith(b'go-carbon-incremental-v2\n'):
+        validate_markers(proof, current)
+        # Stable identities never need device-number rebinding, even after a
+        # reboot. In particular do not rewrite the existing proof or markers.
+        return {'changed': False, 'pending_changes': 0, 'updated_markers': 0,
+                'source_identity': source_marker.decode().split('\n')[2],
+                'roots': current}
     if inspect:
         changes = validate_markers(proof, current)
         return {'changed': False, 'pending_changes': len(changes), 'roots': current}

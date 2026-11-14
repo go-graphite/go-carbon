@@ -88,3 +88,43 @@ resume. It never rewrites SSTs, WALs or metric data. Replaced directories,
 unrecorded archive policies, symlinks, unavailable UUIDs and non-XFS mounts fail.
 Existing compatible V6 executables remain usable because marker formats do not
 change. The drop-in need not restart a serving process when installed.
+
+## Modern bindings on held nodes
+
+A CHUNKSTORE V9 cold-pack marker is newer than V6, and must never be relabelled
+V6. V6 introduced physical continuation writer state; V7/V9/V11/V12 retain that
+mode with newer storage layouts. Current go-carbon writes the source binding as
+`go-carbon-incremental-v2` followed by its canonical path and either inode plus
+nanosecond birth time or a source token. The old helper's V6/V1-only check can
+therefore refuse a correctly upgraded store.
+
+For V2 bindings the helper validates the existing proof's XFS UUID and directory
+inodes, the exact current birth identity (GNU stat/statx) or existing token, and
+any remaining source-root keep file. Both `inspect` and `rebind` stay read-only:
+no marker, proof, token, guard, SST or WAL is created or rewritten. Missing birth
+time, a replaced volume/directory, a changed token, an unexpected archive policy
+or an unknown format refuses. Modern archive policies require separate
+qualification; this path accepts only nodes without one. V6/V1 device-number
+repair retains its existing lock and backup behavior.
+
+Synthetic V9/V2 birth-binding examples in `fixtures/volume-binding/` cover
+nodes with and without a historical source-root keep file. Neither state
+requires a marker edit.
+
+After this change has landed, use the narrow repository installer on each held
+node. It requires the expected prior helper SHA, successful read-only identity
+qualification and an existing `DO_NOT_REENABLE` Puppet hold. It appends the
+supplied reason, preserves the rest of the hold, and replaces only the hook.
+It does not restart/reload a service or edit the unit, configuration or proof.
+
+```sh
+sudo python3 -I install_volume_binding.py \
+  --proof /etc/go-carbon-storage-guard/<host>-proof.json \
+  --expected-previous-sha256 <sha256-of-reviewed-existing-helper> \
+  --source-sha256 <sha256-of-landed-volume_binding.py> \
+  --hold-reason 'volume-binding: modern identity qualified; hook MR <url>'
+```
+
+For stdin transport, add `--source-stdin` and supply the exact landed helper bytes
+on stdin. Compare the helper SHA before and after installation and run `inspect`
+through the installed path. Keep existing unit/drop-in bytes unchanged.

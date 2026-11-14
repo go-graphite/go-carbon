@@ -1,0 +1,23 @@
+{
+  "proof": {
+    "version": 1,
+    "roots": {
+      "source": {
+        "path": "/srv/source",
+        "uuid": "22222222-2222-4222-8222-222222222222",
+        "inode": 131,
+        "device": 64775
+      },
+      "store": {
+        "path": "/srv/store",
+        "uuid": "22222222-2222-4222-8222-222222222222",
+        "inode": 21855847,
+        "device": 64775
+      }
+    }
+  },
+  "format": "go-carbon-chunks-v9\n",
+  "source_marker": "go-carbon-incremental-v2\n/srv/source\nbirth:131:1792067669:055189092\n",
+  "guard": null,
+  "archive": null
+}
