@@ -3,6 +3,7 @@ package carbon
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -449,5 +450,32 @@ func TestPendingCheckpointMetrics(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing checkpoint metrics: %v", want)
+	}
+}
+
+func TestSharedBatchFallbackMetricReasons(t *testing.T) {
+	want := map[string]uint64{"import_pending": 1, "absent": 2, "format": 3, "reanchor_deferred": 4}
+	snapshot := &migrationSnapshot{batchFallbacks: want}
+	found := make(map[string]bool)
+	for _, spec := range migrationMetricSpecs {
+		if !strings.Contains(spec.desc.String(), `fqName: "persister_shared_batch_fallbacks_total"`) {
+			continue
+		}
+		metric := prometheus.MustNewConstMetric(spec.desc, spec.kind, spec.value(snapshot))
+		out := &dto.Metric{}
+		if err := metric.Write(out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Label) != 1 || out.Label[0].GetName() != "reason" {
+			t.Fatal(out)
+		}
+		reason := out.Label[0].GetValue()
+		if out.GetCounter().GetValue() != float64(want[reason]) || want[reason] == 0 {
+			t.Fatal(out)
+		}
+		found[reason] = true
+	}
+	if len(found) != len(want) {
+		t.Fatal(found)
 	}
 }

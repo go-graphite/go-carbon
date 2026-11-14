@@ -98,7 +98,8 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		}
 		err := p.metricStore.(batchMetricStore).UpdateBatch(ctx, updates, maintenance)
 		timer.Leave()
-		if !errors.Is(err, store.ErrImportPending) {
+		reason := sharedBatchFallbackReason(err)
+		if reason < 0 {
 			for _, batch := range values {
 				p.writeStats.shared.observe(len(batch.Data), time.Since(start), err)
 			}
@@ -109,7 +110,10 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			}
 			// A deferred re-anchor fails the whole batch; retry one by one so
 			// only that metric's points stay cached.
-			fallback = errors.Is(err, store.ErrImportPending) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrFormat) || errors.Is(err, store.ErrReanchorDeferred)
+			fallback = reason >= 0
+			if fallback {
+				p.writeStats.batchFallbacks[reason].Add(1)
+			}
 			if !fallback {
 				p.logger.Error("write shared batch", zap.Error(err))
 			}
@@ -139,5 +143,37 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		for _, metric := range metrics {
 			p.store(metric)
 		}
+	}
+}
+
+var sharedBatchFallbackReasons = [...]string{"import_pending", "absent", "format", "reanchor_deferred"}
+
+// Inspect every joined leaf: an expected deferral must never hide an IO error.
+func sharedBatchFallbackReason(err error) int {
+	if group, ok := err.(interface{ Unwrap() []error }); ok {
+		reason := -1
+		for _, child := range group.Unwrap() {
+			next := sharedBatchFallbackReason(child)
+			if next < 0 || reason >= 0 && reason != next {
+				return -1
+			}
+			reason = next
+		}
+		return reason
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return sharedBatchFallbackReason(wrapped.Unwrap())
+	}
+	switch {
+	case errors.Is(err, store.ErrImportPending):
+		return 0
+	case errors.Is(err, store.ErrNotFound):
+		return 1
+	case errors.Is(err, store.ErrFormat):
+		return 2
+	case errors.Is(err, store.ErrReanchorDeferred):
+		return 3
+	default:
+		return -1
 	}
 }
