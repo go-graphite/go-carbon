@@ -538,6 +538,13 @@ func installDirectCaptureForTest(t *testing.T, app *App) *startupInput {
 	app.startupCaptureState.Store(s)
 	app.finishStartupInput(app.Cache)
 	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	// This stop fixture deliberately retains a partial live batch so the dump
+	// must cover it. Suppress automatic source draining only in this fixture;
+	// the reclamation tests exercise the production drain policy separately.
+	sink := *s.sink.Load()
+	sink.drain = nil
+	s.sink.Store(&sink)
+	app.Cache.SetRecoveryDrain(false)
 	if err := app.Cache.SetWriteoutBatching(1000000, time.Hour); err != nil {
 		t.Fatal(err)
 	}

@@ -198,6 +198,8 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 	}
 	sink.directAdd = add
 	sink.drain = core.SetRecoveryDrain
+	// Persist startup sources without waiting for steady-state batch deadlines.
+	core.SetRecoveryDrain(true)
 	if s.receiver != nil {
 		s.receiver.SetPointOut(addPoint)
 		if receiverStoreHook == nil {
