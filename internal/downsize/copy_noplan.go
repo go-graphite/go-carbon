@@ -520,6 +520,10 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 			proofs = nil
 			var err error
 			headers, err = c.m.pull(ctx, t, names, budget, &proofs)
+			var conflict *apiError
+			if len(names) == 1 && errors.As(err, &conflict) && conflict.Status == http.StatusConflict {
+				headers, err = c.m.copyPolicyConflict(ctx, t, names[0], budget, &proofs, err)
+			}
 			return err
 		})
 		if err == nil {
