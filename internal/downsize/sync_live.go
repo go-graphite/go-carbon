@@ -451,6 +451,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 }
 
 type syncCopyProgressKey struct{}
+type syncCopyDurableProgressKey struct{}
 
 // Copy runs the copy engine over a name list. A one-name probe first detects
 // a target that refuses the source (403: not in its transfer-sources), so a
@@ -462,28 +463,76 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
 	}
 	defer b.recordTime("copy", source)()
+	progress, _ := ctx.Value(syncCopyDurableProgressKey{}).(func(int64, bool))
 	namesPath := journal[:len(journal)-len(".jsonl")] + ".names"
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {
 		return syncCopyResult{}, err
 	}
 	probeJournal := journal + ".probe"
-	_ = os.Remove(probeJournal)
-	if err := b.copy(ctx, b.copyOptions(source, target, probeNames, probeJournal, 0)); err != nil {
-		if ctx.Err() != nil {
-			return syncCopyResult{}, ctx.Err()
-		}
-		var api *apiError
-		if (errors.As(err, &api) && api.Status == http.StatusForbidden) || journalStatus(probeJournal, http.StatusForbidden) {
-			return syncCopyResult{Forbidden: true}, nil
-		}
-		event("sync_copy_probe_failed", map[string]any{"level": "warn", "source": source, "error": err.Error()})
+	// A successful probe (or main transfer) is durable. Only failed probes
+	// need another request, since an allowlist may have changed on resume.
+	unprobed, err := copyJournalFailures(journal, source, names[:1])
+	if err != nil {
+		return syncCopyResult{}, err
 	}
-	var err error
+	if len(unprobed) > 0 {
+		unprobed, err = copyJournalFailures(probeJournal, source, names[:1])
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+	}
+	probeWasNew := len(unprobed) > 0
+	if probeWasNew {
+		if err := os.Remove(probeJournal); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return syncCopyResult{}, err
+		}
+		if err := b.copy(ctx, b.copyOptions(source, target, probeNames, probeJournal, 0)); err != nil {
+			if ctx.Err() != nil {
+				return syncCopyResult{}, ctx.Err()
+			}
+			var api *apiError
+			if (errors.As(err, &api) && api.Status == http.StatusForbidden) || journalStatus(probeJournal, http.StatusForbidden) {
+				return syncCopyResult{Forbidden: true}, nil
+			}
+			event("sync_copy_probe_failed", map[string]any{"level": "warn", "source": source, "error": err.Error()})
+		}
+	}
+	// The probe already imported and verified this name. Credit it in the
+	// immutable main journal, so the full copy never imports it a second time.
+	probeFailed, err := copyJournalFailures(probeJournal, source, names[:1])
+	if err != nil {
+		return syncCopyResult{}, err
+	}
+	if len(probeFailed) == 0 {
+		options := b.copyOptions(source, target, namesPath, journal, len(names))
+		identity, err := copyIdentity(options)
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+		j, err := openCopyJournal(journal, identity)
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+		if !j.cover(source)(names[0]) {
+			err = j.done("", names[0], names[0], 1, 0, 0)
+			if committed, ok := ctx.Value(syncCopyProgressKey{}).(func(int)); err == nil && probeWasNew && ok {
+				committed(1)
+			}
+		}
+		if err == nil && progress != nil {
+			progress(j.completedNames, !probeWasNew)
+		}
+		j.close()
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+	}
 	for attempt := 1; attempt <= b.o.copyAttempts; attempt++ {
-		o := b.copyOptions(source, target, namesPath, journal, len(names))
-		o.onCommitted, _ = ctx.Value(syncCopyProgressKey{}).(func(int))
-		err = b.copy(ctx, o)
+		options := b.copyOptions(source, target, namesPath, journal, len(names))
+		options.onCommitted, _ = ctx.Value(syncCopyProgressKey{}).(func(int))
+		options.onProgress = progress
+		err = b.copy(ctx, options)
 		if err == nil || ctx.Err() != nil {
 			break
 		}

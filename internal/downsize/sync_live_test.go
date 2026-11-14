@@ -104,7 +104,11 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 	b := newSyncLiveBackend(syncLiveOptions{copyAttempts: 2})
 	b.copy = func(_ context.Context, o copyOptions) error {
 		calls++
-		j, err := openCopyJournal(o.state, "x")
+		identity, err := copyIdentity(o)
+		if err != nil {
+			return err
+		}
+		j, err := openCopyJournal(o.state, identity)
 		if err != nil {
 			return err
 		}
@@ -121,7 +125,11 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 	}
 	// A source that works: names not covered by a done range are failures.
 	b.copy = func(_ context.Context, o copyOptions) error {
-		j, err := openCopyJournal(o.state, "y"+o.names)
+		identity, err := copyIdentity(o)
+		if err != nil {
+			return err
+		}
+		j, err := openCopyJournal(o.state, identity)
 		if err != nil {
 			return err
 		}
@@ -180,7 +188,11 @@ func TestSyncCopyTransferControls(t *testing.T) {
 		if o.maxBytes != 16<<20 || o.transferIdle != 80*time.Second {
 			t.Fatalf("controls not forwarded: %+v", o)
 		}
-		j, err := openCopyJournal(o.state, o.names)
+		identity, err := copyIdentity(o)
+		if err != nil {
+			return err
+		}
+		j, err := openCopyJournal(o.state, identity)
 		if err != nil {
 			return err
 		}
@@ -222,7 +234,11 @@ func TestSyncLiveCopyFinalSkipsAreNotEngineAborts(t *testing.T) {
 		if calls == 1 {
 			return nil
 		} // source probe
-		j, err := openCopyJournal(o.state, "test")
+		identity, err := copyIdentity(o)
+		if err != nil {
+			return err
+		}
+		j, err := openCopyJournal(o.state, identity)
 		if err != nil {
 			return err
 		}

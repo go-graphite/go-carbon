@@ -30,7 +30,8 @@ import (
 // points win in the importer, so redoing a batch is harmless.
 
 type copyOptions struct {
-	onCommitted                                      func(int) // optional observer, called after a durable new batch receipt
+	onCommitted                                      func(int)         // optional observer, called after a durable new batch receipt
+	onProgress                                       func(int64, bool) // completed journal names, after fsync; includes replay
 	auth                                             *hostTokenCache
 	rate                                             *syncRateLimit
 	froms                                            []string
@@ -235,6 +236,10 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		return err
 	}
 	defer journal.close()
+	journal.onProgress = o.onProgress
+	if o.onProgress != nil {
+		o.onProgress(journal.completedNames, true)
+	}
 	c.o, c.journal, c.serverMax = o, journal, target.MaxBodyBytes
 	defer c.closeCatalogs()
 	c.sizer = &batchSizer{budget: min(o.maxBytes, target.MaxBodyBytes), maxNames: o.maxNames, perName: copyInitialBytesPerName}
@@ -722,6 +727,7 @@ type copyJournal struct {
 	file           *os.File
 	ranges         []copyRange
 	completedNames int64
+	onProgress     func(int64, bool)
 }
 
 type copyRange struct{ Source, First, Last string }
@@ -840,6 +846,9 @@ func (j *copyJournal) appendRows(rows []copyRow) error {
 		if row.Kind == "done" {
 			j.completedNames += int64(row.Names)
 		}
+	}
+	if j.onProgress != nil {
+		j.onProgress(j.completedNames, false)
 	}
 	return nil
 }

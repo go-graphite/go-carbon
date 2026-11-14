@@ -35,8 +35,14 @@ Disconnected receivers produce a stderr warning and bounded retries at the next
 snapshot; telemetry never changes transfer admission or the command result.
 
 Sync uses the exact snapshot also written to progress JSON, including
-`done` and `total` for the current phase/batch. Durable cumulative counters and
-the rate retain their existing meanings. Nested copy snapshots cannot replace
+`done` and `total` for the current phase. The legacy missing-copy phase keeps
+one total across all preparation and transfer waves: metadata prechecks do not
+reset it. Verified, fsynced per-name transfer receipts advance it within a wave;
+resuming restores those receipts without reporting them as new throughput.
+Exact precheck results and wave inputs are journaled so changes to batch size or
+concurrency do not repeat completed metadata requests or transfers. Retryable
+transfer failures back off and retry uncovered names using the same journal.
+Durable cumulative counters and the rate retain their existing meanings. Nested copy snapshots cannot replace
 the parent sync snapshot. Commands without a progress file emit only lifecycle
 heartbeats. Phase appears in the series name.
 
