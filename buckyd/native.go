@@ -39,6 +39,8 @@ type nativePullRequest struct {
 	Session string
 }
 
+const nativeMergeHeader = "X-Native-Merge-Session"
+
 var nativeTransferClient = &http.Client{Transport: nativeTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func nativeTransport() *http.Transport {
@@ -109,7 +111,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/v1/native/capabilities" && r.Method == http.MethodGet {
-		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeTimeWindow": true, "NativeDeferredCombine": true, "DurableRangeReceipt": true, "AtomicMissingOnlyNonNaN": s.finiteCacheFence != nil, "AtomicMissingOnly": s.finiteCacheFence != nil, "AtomicMissingOnlyProtocol": 1, "AtomicMissingOnlyMaxPoints": chunkstore.MissingOnlyMaxPoints, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
+		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeTimeWindow": true, "NativeDeferredCombine": true, "NativePinnedMerge": true, "DurableRangeReceipt": true, "AtomicMissingOnlyNonNaN": s.finiteCacheFence != nil, "AtomicMissingOnly": s.finiteCacheFence != nil, "AtomicMissingOnlyProtocol": 1, "AtomicMissingOnlyMaxPoints": chunkstore.MissingOnlyMaxPoints, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
 		return
 	}
 	if strings.HasPrefix(path, "/v1/native/source/") && r.Method == http.MethodDelete {
@@ -149,7 +151,20 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 	}
 	switch path {
 	case "/v1/native/source":
-		pin, err := s.store.PinNativeSource()
+		var request struct{ MergeSession string }
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, err, http.StatusBadRequest)
+			return
+		}
+		var pin *chunkstore.NativeSource
+		var err error
+		if request.MergeSession == "" {
+			pin, err = s.store.PinNativeSource()
+		} else {
+			pin, err = s.store.PinNativeMergeSource(request.MergeSession)
+		}
 		if err != nil {
 			fail(err)
 			return
@@ -170,7 +185,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		session.timer = time.AfterFunc(15*time.Minute, func() { s.expireNativeSource(id) })
 		s.nativeSources[id] = session
 		s.nativeMu.Unlock()
-		writeNativeJSON(w, map[string]any{"ID": id, "StoreFormat": s.store.TransferFormat(), "Expires": time.Now().Add(15 * time.Minute)})
+		writeNativeJSON(w, map[string]any{"ID": id, "StoreFormat": s.store.TransferFormat(), "Expires": time.Now().Add(15 * time.Minute), "MergeSession": pin.MergeSession, "SnapshotStartedAt": pin.SnapshotStartedAt, "SnapshotPinnedAt": pin.SnapshotPinnedAt, "BackfillFromUnix": int64(0), "BackfillFullRetention": pin.MergeSession != ""})
 	case "/v1/native/export":
 		var request nativeExportRequest
 		if !decode(&request) {
@@ -207,6 +222,9 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("X-Store-Format", strconv.Itoa(s.store.TransferFormat()))
+		if session.source.MergeSession != "" {
+			w.Header().Set(nativeMergeHeader, session.source.MergeSession)
+		}
 		out := &nativeResponseWriter{ResponseWriter: w}
 		if err := session.source.WriteWindow(ctx, request.Names, out, request.Window); err != nil {
 			if out.bytes == 0 {
@@ -309,7 +327,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 				names = append(names, name)
 			}
 		}
-		response, err := s.nativeExport(r.Context(), request.Range.Source, request.Session, names, request.Range.Window)
+		response, err := s.nativeExport(r.Context(), request.Range.Source, request.Session, names, request.Range.Window, request.Range.MergeSession, request.Range.Combine)
 		if err != nil {
 			fail(err)
 			return
@@ -342,7 +360,7 @@ func writeNativeJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func (s *Service) nativeExport(ctx context.Context, source, session string, names []string, window *chunkstore.NativeWindow) (*http.Response, error) {
+func (s *Service) nativeExport(ctx context.Context, source, session string, names []string, window *chunkstore.NativeWindow, mergeSession string, combine bool) (*http.Response, error) {
 	u, err := s.transferSourceOrigin(source)
 	if err != nil {
 		return nil, err
@@ -372,6 +390,11 @@ func (s *Service) nativeExport(ctx context.Context, source, session string, name
 		defer response.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return nil, fmt.Errorf("native source export HTTP%d: %s", response.StatusCode, body)
+	}
+	mode := response.Header.Get(nativeMergeHeader)
+	if mode != mergeSession || mode != "" && combine {
+		response.Body.Close()
+		return nil, errors.New("pinned merge source requires matching absent-only merge session")
 	}
 	format, _ := strconv.Atoi(response.Header.Get("X-Store-Format"))
 	if format > s.store.AcceptTransferFormat() {

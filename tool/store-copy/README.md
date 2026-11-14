@@ -494,3 +494,37 @@ store-copy sync --from http://source:4242 --to http://target:4242 \
 
 Keep the original `--streams` and `--verify-batch` when resuming. `--verify-streams`
 changes verification workers only; zero keeps the original shared worker count.
+
+### Pre-cutover merge from a live donor
+
+Use an explicit session only when a later backfill owns the donor's cached and
+post-snapshot delta:
+
+```sh
+store-copy run --plan plan --state merge-state.jsonl \
+  --engine bulk --bulk-only --merge-session precutover-history --apply
+```
+
+Both donor and destination must advertise `NativePinnedMerge`; upgrade hosts
+before using this mode. It exports the donor's committed MVCC snapshot even for
+names already in cache or revised after the pin. A name that exists only in cache
+has no committed history to export and remains deferred. Every target name is
+still created only if absent at publication, including a name created while the
+import was being prepared. Existing names are skipped. Combine, metric fallback,
+deferred combine, deletion and reconciliation are refused in this mode.
+
+The controller fsyncs a `NativeSource` journal row before the first pull from each
+pin. It contains the donor origin, merge session, source pin ID,
+`SnapshotStartedAt` (before the pin), `SnapshotPinnedAt` (after the pin),
+`BackfillFromUnix: 0` and `BackfillFullRetention: true`. The explicit safe event
+lower bound is Unix 0, so no queued or historical timestamp can fall before it.
+Retain every row across resumes and use the earliest start per donor for the
+post-cutover delta. This is a **commit boundary**, not an event-time watermark:
+queued points and late input can carry earlier timestamps. Backfill all retained
+history for those names (or use an independently proven earlier event bound),
+then require complete timestamp/IEEE-754 parity. Do not truncate backfill to the
+wall-clock pin time. A restarted controller takes a new pin and records another
+boundary; completed range receipts remain authoritative.
+
+Without `--merge-session`, live cached/revised names retain their existing
+conservative deferral behavior.

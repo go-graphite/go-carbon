@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -20,6 +22,11 @@ type NativeSource struct {
 	closed       bool
 	pending      map[string]struct{}
 	checkCurrent bool
+	// SnapshotStartedAt precedes the MVCC pin. Backfill must also cover queued
+	// and late event timestamps; this is a commit boundary, not an event watermark.
+	SnapshotStartedAt time.Time
+	SnapshotPinnedAt  time.Time
+	MergeSession      string
 }
 
 // SetNativeReady fences incomplete conversion/recovery without imposing
@@ -33,11 +40,25 @@ func (s *Store) checkNativeReady() error {
 }
 
 func (s *Store) PinNativeSource() (*NativeSource, error) {
+	return s.pinNativeSource("")
+}
+
+// PinNativeMergeSource exports committed history even for queued or revised
+// names. The caller owns post-cutover delta backfill and absent-only import.
+func (s *Store) PinNativeMergeSource(session string) (*NativeSource, error) {
+	if session == "" || len(session) > 128 || strings.ContainsAny(session, "\r\n") {
+		return nil, ErrFormat
+	}
+	return s.pinNativeSource(session)
+}
+
+func (s *Store) pinNativeSource(session string) (*NativeSource, error) {
 	if err := errors.Join(s.checkNativeReady(), s.fileOwnershipError(), s.nativeDiskCheck()); err != nil {
 		return nil, err
 	}
-	source := &NativeSource{store: s, view: s.db.NewSnapshot(), checkCurrent: s.nativePendingSnapshot != nil}
-	if s.nativePendingSnapshot != nil {
+	started := time.Now().UTC()
+	source := &NativeSource{store: s, view: s.db.NewSnapshot(), checkCurrent: session == "" && s.nativePendingSnapshot != nil, MergeSession: session, SnapshotStartedAt: started, SnapshotPinnedAt: time.Now().UTC()}
+	if source.checkCurrent {
 		pending, err := s.nativePendingSnapshot()
 		if err != nil {
 			source.view.Close()

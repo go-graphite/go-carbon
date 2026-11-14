@@ -13,6 +13,7 @@ import (
 	"math"
 	"math/bits"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -28,6 +29,7 @@ type NativeRange struct {
 	Names                           []string
 	Candidates                      []byte `json:",omitempty"`
 	Combine                         bool   `json:",omitempty"`
+	MergeSession                    string `json:",omitempty"`
 	// Selection is an immutable phase-2 ordinal bitmap. Candidates is the
 	// receiver's transient export filter and deliberately does not identify work.
 	DeferredFrom string `json:",omitempty"`
@@ -62,6 +64,9 @@ func (r NativeReceipt) IsCopied(index int) bool {
 }
 
 func (r NativeRange) Identity() (string, string, error) {
+	if r.MergeSession != "" && (r.Combine || len(r.MergeSession) > 128 || strings.ContainsAny(r.MergeSession, "\r\n")) {
+		return "", "", ErrFormat
+	}
 	for _, value := range []string{r.Operation, r.Plan, r.Stream} {
 		if len(value) != 64 {
 			return "", "", ErrFormat
@@ -98,6 +103,9 @@ func (r NativeRange) Identity() (string, string, error) {
 	}
 	if r.Window != nil {
 		domain += fmt.Sprintf("/window/%d/%d", r.Window.From, r.Window.Until)
+	}
+	if r.MergeSession != "" {
+		domain += "/merge/" + r.MergeSession
 	}
 	if r.DeferredFrom != "" || r.Selection != nil {
 		if !r.Combine || len(r.DeferredFrom) != 64 || len(r.Selection) != (len(r.Names)+7)/8 {
@@ -243,6 +251,9 @@ func (r NativeReceipt) Validate() error {
 func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
 	ctx, cancel := s.NativeTransferContext(ctx)
 	defer cancel()
+	if request.MergeSession != "" && request.Combine {
+		return receipt, ErrFormat
+	}
 	if request.Combine {
 		return s.nativeCombineImport(ctx, request, input)
 	}

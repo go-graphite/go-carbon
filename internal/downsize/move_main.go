@@ -32,6 +32,7 @@ type options struct {
 	nativeWindow                                                                     *chunkstore.NativeWindow
 	engine                                                                           string
 	bulkOnly                                                                         bool
+	mergeSession                                                                     string
 	bulkCombine                                                                      bool
 	deferredOnly                                                                     bool
 	deferredRange                                                                    string
@@ -97,6 +98,7 @@ func MoveMain(args []string) error {
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
 	flags.StringVar(&o.engine, "engine", "metric", "metric or bulk (native absent-name SST engine; existing plan/journal)")
 	flags.BoolVar(&o.bulkOnly, "bulk-only", false, "finish native absence pass and leave deferred combines in the same journal")
+	flags.StringVar(&o.mergeSession, "merge-session", "", "explicit pinned donor snapshot for absent-only pre-cutover merge; requires --engine bulk --bulk-only; records commit boundaries in journal")
 	flags.BoolVar(&o.bulkCombine, "combine-existing", false, "combine present names natively with optimistic publication (requires --engine bulk)")
 	flags.BoolVar(&o.deferredOnly, "deferred-only", false, "combine only acknowledged native deferrals; never issue plan gaps")
 	flags.StringVar(&o.deferredRange, "deferred-range", "", "restrict deferred work to one existing STREAM:START:END journal range")
@@ -152,6 +154,9 @@ func MoveMain(args []string) error {
 func run(ctx context.Context, o options) error {
 	if (o.from != "" || o.until != "") && (o.engine != "bulk" || !o.bulkOnly) {
 		return errors.New("time windows require --engine bulk --bulk-only")
+	}
+	if o.mergeSession != "" && (o.engine != "bulk" || !o.bulkOnly || o.bulkCombine || o.deferredOnly || o.deferredRange != "" || o.delete || o.reconcile || len(o.mergeSession) > 128 || strings.ContainsAny(o.mergeSession, "\r\n")) {
+		return errors.New("--merge-session requires --engine bulk --bulk-only without combine, deferred, delete or reconcile modes")
 	}
 	if (o.deferredOnly || o.deferredRange != "") && (o.engine != "bulk" || !o.bulkCombine || !o.bulkOnly) {
 		return errors.New("deferred scope requires --engine bulk --combine-existing --bulk-only")

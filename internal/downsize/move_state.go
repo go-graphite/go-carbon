@@ -56,8 +56,9 @@ type journal struct {
 }
 
 type journalRow struct {
-	MaxSpeedDecisionSHA256 string         `json:",omitempty"`
-	SkippedIntegrity       *integritySkip `json:",omitempty"`
+	NativeSource           *nativeSourceCheckpoint `json:",omitempty"`
+	MaxSpeedDecisionSHA256 string                  `json:",omitempty"`
+	SkippedIntegrity       *integritySkip          `json:",omitempty"`
 	Operation              string
 	Plan                   string
 	Task                   task
