@@ -58,7 +58,7 @@ func TestSyncCommandModesAndFlags(t *testing.T) {
 			if p.Streams != 16 || p.VerifyStreams > 16 || p.CopyStreams > 16 {
 				t.Fatalf("budget %+v", p)
 			}
-			if len(c.sync.windows) > 0 && !c.sync.fullHistory && (p.Scope != "windows-only" || p.Engine != "native-window" || p.CopyStreams != 1 || p.CopyBatchBytes != 0) {
+			if len(c.sync.windows) > 0 && !c.sync.fullHistory && (p.Scope != "windows-only" || p.Engine != "native-window" || p.CopyStreams != p.Streams || p.CopyBatchBytes != 0) {
 				t.Fatalf("native %+v", p)
 			}
 			if c.sync.fullHistory && len(c.sync.windows) > 0 && (p.Scope != "windows+full-history" || p.Engine != "metric") {

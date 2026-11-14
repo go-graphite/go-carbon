@@ -998,3 +998,14 @@ func (p *syncProgress) finishCopy(n int) {
 	p.done.Add(int64(n))
 	p.copyActive = 0
 }
+
+// Replayed receipts advance the in-flight source cursor without inflating rate.
+func (p *syncProgress) windowCommitted(n int, replayed bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.copyObserved = true
+	p.copyActive += int64(n)
+	if !replayed {
+		p.copyFresh += int64(n)
+	}
+}

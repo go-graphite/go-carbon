@@ -212,7 +212,6 @@ func (c *syncCommand) policy(streams int) *effectiveSyncPolicy {
 		if !c.sync.fullHistory {
 			p.Engine = "native-window"
 			p.Scope = "windows-only"
-			p.CopyStreams = 1
 			p.CopyBatchNames = chunkstore.NativeMaxRangeNames
 			p.CopyBatchBytes = 0
 			p.SampleEvery = 0
