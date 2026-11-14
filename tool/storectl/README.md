@@ -151,12 +151,43 @@ memory. A token-minting wrapper or `BUCKYD_TOKEN` is unnecessary for sync.
 
 ## READY and block inputs
 
+For a closed crash repair, explicitly scope READY to the declared windows:
+
+```sh
+storectl sync --source http://replica-a:4242 --source http://replica-b:4242 \
+  --to http://target:4242 --state ./crash-state --streams 0 \
+  --window early:1794500000:1794501200 --window late:1794503600:1794504800 \
+  --no-full-history --settle 0s --include-short-retention \
+  --ready-scope windows --gap-ledger-complete \
+  --carbonapi-url http://read.example.org
+```
+
+This real repair invocation uses the existing native target-wins window importer,
+checks every discovered eligible name against all supplied replicas, and finishes
+with independent policy, window parity, process fencing and window read-back checks.
+`ready.json` records `scope: windows`; this attests only the named windows and is
+not a full-history or decommissioning certificate. Omit `--period` for this mode.
+Sparse windows do not require 50 names with data. The 100-name policy cohort and
+all-name verification still apply. A restart is repaired with fresh window-only
+journals without widening the import to full histories.
+
+The report includes `repair.filled_points`, measured as net finite point additions
+in the serving archive over each native window transfer, including missing-name
+copies. Baselines are saved before import and survive resume. An interrupted,
+failed or unavailable measurement yields a null total and an unmeasured-transfer
+count. These are stored archive points, not the original received point count;
+live persistence in the same windows can also contribute to net additions.
+`unrecoverable_points` is null: data absent from every replica cannot be counted
+without an independent input inventory. Replica parity cannot prove that no such
+data was lost.
+
 READY is the final default phase of `sync`. It writes atomic `STATE/ready.json`
 with `verdict: READY` or `NOT_READY`, reasons, scope, process snapshots, sample and
 counts. Exit 0 establishes READY; exit 2 reports incomplete sync or READY gates.
 An earlier verdict is invalidated before a new run. `--no-ready` opts out and
-invalidates a previous READY; `--no-verify` or `--no-full-history` cannot establish
-readiness. No separate ready, check, fill or verify command is needed.
+invalidates a previous READY; `--no-verify` cannot establish readiness.
+`--no-full-history` requires explicit `--ready-scope windows` for a scoped proof.
+No separate ready, check, fill or verify command is needed.
 
 Provide every donor and peer as a source, the complete closed block period with
 `--period FROM:UNTIL`, all known input gaps with `--window`, the read API URL with

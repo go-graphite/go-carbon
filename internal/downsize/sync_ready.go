@@ -19,6 +19,7 @@ import (
 var ErrSyncNotReady = errors.New("sync NOT_READY; see ready.json")
 
 type syncReadyOptions struct {
+	scope        string
 	noReady      bool
 	carbonAPI    string
 	metricsPort  int
@@ -47,13 +48,17 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
-	ProofState        string     `json:"proof_state"`
-	Ring              string     `json:"ring"`
-	NamesSHA256       string     `json:"names_sha256,omitempty"`
-	Prefix            string     `json:"prefix,omitempty"`
-	Period            syncRanges `json:"period"`
-	GapLedgerComplete bool       `json:"gap_ledger_complete"`
-	Exclusions        []string   `json:"exclusions"`
+	Repair              *windowRepairCount `json:"repair,omitempty"`
+	Scope               string             `json:"scope"`
+	UnrecoverablePoints *int64             `json:"unrecoverable_points"`
+	UnrecoverableReason string             `json:"unrecoverable_reason"`
+	ProofState          string             `json:"proof_state"`
+	Ring                string             `json:"ring"`
+	NamesSHA256         string             `json:"names_sha256,omitempty"`
+	Prefix              string             `json:"prefix,omitempty"`
+	Period              syncRanges         `json:"period"`
+	GapLedgerComplete   bool               `json:"gap_ledger_complete"`
+	Exclusions          []string           `json:"exclusions"`
 
 	Schema           int                     `json:"schema"`
 	Verdict          string                  `json:"verdict"`
@@ -97,6 +102,11 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		return initial()
 	}
 	report := readyReport{Ring: o.ring, NamesSHA256: o.namesHash, Prefix: o.prefix, Period: r.period, GapLedgerComplete: r.gapsComplete, Exclusions: []string{"archive-expiration boundary plus 2400s margin", "newest unsettled points outside explicit gap windows"}, Schema: 1, Verdict: "NOT_READY", Reasons: []string{"sync in progress"}, Target: o.to, Sources: o.from, Windows: append(syncRanges(nil), o.windows...), Counts: map[string]readyCount{}}
+	report.Scope = r.scope
+	if report.Scope == "" {
+		report.Scope = "full-history"
+	}
+	report.UnrecoverableReason = "Points absent from every replica cannot be counted without an independent input inventory. Parity certifies available replica coverage only."
 	if !o.includeShort {
 		report.Exclusions = append(report.Exclusions, "names with all archives retaining at most 3 days")
 	}
@@ -105,6 +115,13 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		return err
 	}
 	defer func() {
+		if r.scope == "windows" {
+			counts, e := collectWindowPointCounts(o.state)
+			if e != nil {
+				err = errors.Join(err, e)
+			}
+			report.Repair = &counts
+		}
 		if err != nil {
 			report.Reasons = append(report.Reasons, err.Error())
 		}
@@ -177,7 +194,7 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		return e
 	}
 	validation := readyPrerequisites(*o, r)
-	if o.noVerify || (len(o.windows) > 0 && !o.fullHistory) {
+	if o.noVerify || (len(o.windows) > 0 && !o.fullHistory && r.scope != "windows") {
 		report.Reasons = append(report.Reasons, validation...)
 		return nil
 	}
@@ -208,7 +225,7 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			recovery.state = filepath.Join(o.state, fmt.Sprintf("ready-recovery-%d-%d", time.Now().UnixNano(), generation))
 			recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
 			recovery.settle = 0
-			recovery.fullHistory = true
+			recovery.fullHistory = r.scope != "windows"
 			recovery.sampleEvery = 1
 			previous = after
 			if e = runSync(ctx, recovery, b); e != nil {
@@ -240,7 +257,7 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		if needsFill && !o.noCopy && !repairedParity {
 			recovery := *o
 			recovery.state = filepath.Join(o.state, fmt.Sprintf("ready-fill-%d", time.Now().UnixNano()))
-			recovery.fullHistory = true
+			recovery.fullHistory = r.scope != "windows"
 			recovery.sampleEvery = 1
 			recovery.settle = 0
 			recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
@@ -274,10 +291,10 @@ func readyPrerequisites(o syncOptions, r syncReadyOptions) []string {
 	if o.noVerify {
 		out = append(out, "verification disabled")
 	}
-	if len(o.windows) > 0 && !o.fullHistory {
+	if len(o.windows) > 0 && !o.fullHistory && r.scope != "windows" {
 		out = append(out, "full-history verification disabled")
 	}
-	if o.sampleEvery != 1 && len(o.windows) > 0 {
+	if o.sampleEvery != 1 && len(o.windows) > 0 && r.scope != "windows" {
 		out = append(out, "full-history verification sampled; READY requires --sample-every=1")
 	}
 	if r.carbonAPI == "" {
@@ -287,6 +304,23 @@ func readyPrerequisites(o syncOptions, r syncReadyOptions) []string {
 	}
 	if !r.gapsComplete {
 		out = append(out, "--gap-ledger-complete is required")
+	}
+	if r.scope == "windows" {
+		if len(o.windows) == 0 || o.fullHistory {
+			out = append(out, "window READY requires --window and --no-full-history")
+		}
+		if o.settle != 0 {
+			out = append(out, "window READY requires --settle=0s")
+		}
+		for _, w := range o.windows {
+			if w.Until > o.now().Unix() {
+				out = append(out, "gap still open: "+w.Name)
+			}
+		}
+		if len(r.period) != 0 {
+			out = append(out, "window READY certifies --window only; omit --period")
+		}
+		return out
 	}
 	if len(r.period) != 1 {
 		out = append(out, "one --period FROM:UNTIL is required")
@@ -468,7 +502,11 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 				continue
 			}
 			full := readyCount{}
-			for _, a := range p.Archives {
+			archives := p.Archives
+			if r.scope == "windows" {
+				archives = nil
+			}
+			for _, a := range archives {
 				from, until := syncWindow(o.now().Unix(), a, o.settle)
 				if from >= until {
 					continue
@@ -484,23 +522,25 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 			if full.Points > 0 {
 				full.Names = 1
 			}
-			readyAdd(report, "history "+source, full)
+			if r.scope != "windows" {
+				readyAdd(report, "history "+source, full)
+			}
 			for wi, w := range windows {
 				row, e := readyCompare(ctx, b, source, o.to, name, w.From, w.Until, 0)
 				if e != nil {
 					return e
 				}
 				key := "period " + source
-				if wi > 0 {
+				if wi >= len(r.period) {
 					key = fmt.Sprintf("window %d %s %s", wi, w.Name, source)
 				}
 				readyAdd(report, key, row)
 			}
 		}
-		if report.Counts["period "+source].Names < 50 {
+		if r.scope != "windows" && report.Counts["period "+source].Names < 50 {
 			report.Reasons = append(report.Reasons, "period sample minimum: "+source+" requires 50 names with data")
 		}
-		if report.Counts["history "+source].Names < 50 {
+		if r.scope != "windows" && report.Counts["history "+source].Names < 50 {
 			report.Reasons = append(report.Reasons, "full-history sample minimum: "+source+" requires 50 names with data")
 		}
 	}
@@ -509,11 +549,17 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 			report.Reasons = append(report.Reasons, fmt.Sprintf("parity %s: %+v", key, row))
 		}
 	}
-	for _, duration := range []int64{86400, 7 * 86400} {
-		key := fmt.Sprintf("readback %d", duration)
+	readWindows := syncRanges{{"86400", o.now().Unix() - 3600 - 86400, o.now().Unix() - 3600}, {"604800", o.now().Unix() - 3600 - 7*86400, o.now().Unix() - 3600}}
+	if r.scope == "windows" {
+		readWindows = report.Windows
+	}
+	for wi, w := range readWindows {
+		key := "readback " + w.Name
+		if r.scope == "windows" {
+			key = fmt.Sprintf("readback window %d %s", wi, w.Name)
+		}
 		row := readyCount{}
-		until := o.now().Unix() - 3600
-		from := until - duration
+		from, until := w.From, w.Until
 		for _, name := range readbackSample {
 			target, e := b.Fetch(ctx, o.to, []string{name}, from, until)
 			if e != nil {
@@ -546,7 +592,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 			}
 		}
 		report.Counts[key] = row
-		if row.Names < 50 || row.Missing > 0 || row.StepMismatch > 0 {
+		if (r.scope != "windows" && row.Names < 50) || row.Missing > 0 || row.StepMismatch > 0 {
 			report.Reasons = append(report.Reasons, fmt.Sprintf("%s minimum/parity failure: %+v", key, row))
 		}
 	}
