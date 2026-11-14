@@ -155,9 +155,9 @@ func (c *Cache) tryStreamPoint(hash uint64, hint *atomic.Uint64, value float64, 
 				// boundary. A second pre-lock settings load is unnecessary.
 				s := c.settings.Load().(*cacheSettings)
 				if s.xlog == nil && !s.tagsEnabled {
-					c.addPointLocked(sh, s, it, hash, value, ts)
+					handled := c.addPointLocked(sh, s, it, hash, value, ts)
 					sh.mu.Unlock()
-					return true
+					return handled
 				}
 			}
 		}
@@ -178,7 +178,7 @@ type streamPointHint struct {
 // and publishes the hint before unlocking, including for an existing rejected item.
 func (c *Cache) refreshStreamPoint(name string, hash uint64, hint *atomic.Uint64, value float64, ts int64) {
 	binding := streamPointHint{name: name, hash: hash, hint: hint}
-	c.addWithRestore(points.OnePoint(name, value, ts), false, false, false, &binding, nil)
+	c.addWaiting(points.OnePoint(name, value, ts), false, false, &binding)
 }
 
 // StreamSeriesIndexBytes reports the fixed-width weak index capacity. Series

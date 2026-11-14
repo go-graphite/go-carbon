@@ -8,6 +8,7 @@ import (
 // AddPoints amortizes lookup and locking for consecutive points of one metric.
 // It borrows name and data. Admission, logging and wake-ups remain per point.
 func (c *Cache) AddPoints(name []byte, data []points.Point) {
+next:
 	for len(data) > 0 {
 		if len(data) == 1 {
 			c.AddPoint(name, data[0].Value, data[0].Timestamp)
@@ -39,7 +40,13 @@ func (c *Cache) AddPoints(name []byte, data []points.Point) {
 				}
 				return
 			}
-			c.addPointLocked(shard, s, values, hash, p.Value, p.Timestamp)
+			if !c.addPointLocked(shard, s, values, hash, p.Value, p.Timestamp) {
+				shard.mu.Unlock()
+				// Re-resolve the item after waiting; it may have been popped.
+				c.AddPoint(name, p.Value, p.Timestamp)
+				data = data[i+1:]
+				continue next
+			}
 		}
 		shard.mu.Unlock()
 		return
