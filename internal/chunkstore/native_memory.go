@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -27,7 +28,7 @@ const (
 
 const (
 	DefaultNativeImportConcurrency = 1
-	DefaultNativeExportConcurrency = 1
+	DefaultNativeExportConcurrency = 0
 	// Conservative planning charge for decoded points, source/output buffers,
 	// range metadata and iterators at the existing per-name limits. This is
 	// additional to import scratch and the store/cache baseline, not an RSS cap.
@@ -38,17 +39,23 @@ const (
 
 // ValidateNativeExportConcurrency bounds independent export scratch allocations.
 func ValidateNativeExportConcurrency(exports int) error {
-	if exports < 1 || exports > 8 {
-		return fmt.Errorf("native export concurrency must be 1..8")
+	if exports < 0 || exports > 8 {
+		return fmt.Errorf("native export concurrency must be 0..8")
 	}
 	return nil
+}
+
+// AutoNativeExportConcurrency scales independent export work with CPU capacity.
+// Keep the existing maximum scratch bound; the application also budgets RAM.
+func AutoNativeExportConcurrency() int {
+	return min(8, max(1, runtime.GOMAXPROCS(0)/8))
 }
 
 // NativeExportConcurrency is fixed at Open. Waiting exporters are admitted
 // before allocating range metadata, iterators or materialized history.
 func (s *Store) NativeExportConcurrency() int {
 	if s.nativeExportConcurrency == 0 {
-		return DefaultNativeExportConcurrency
+		return AutoNativeExportConcurrency()
 	}
 	return s.nativeExportConcurrency
 }

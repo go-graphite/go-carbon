@@ -84,7 +84,7 @@ func TestNativeCombineOptions(t *testing.T) {
 		// Unset import concurrency preserves the original one-slot gates and
 		// total/workers scratch partition, including non-default worker budgets.
 		s.initNativeContext()
-		if s.NativeImportConcurrency() != 1 || cap(s.nativeAdmission) != 1 || cap(s.nativeExportAdmission) != 1 {
+		if s.NativeImportConcurrency() != 1 || cap(s.nativeAdmission) != 1 || cap(s.nativeExportAdmission) != AutoNativeExportConcurrency() {
 			t.Fatal("unset import concurrency changed admission")
 		}
 		release, err := s.admitNative(context.Background())

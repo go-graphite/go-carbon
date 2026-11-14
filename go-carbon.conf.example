@@ -71,12 +71,14 @@ store-memtable-size = 67108864
 # smaller of host RAM and Linux cgroup memory limit. Detection failure rejects
 # an increase. For example, 8 workers need at least 8589934592 bytes (8 GiB).
 # Four imports with 8 workers each need at least 34359738368 bytes (32 GiB).
-# Native export admission is independent: 1..8 streams per store, default 1.
+# Native export admission is independent: 0..8 streams per store. Zero (default)
+# selects GOMAXPROCS/8, bounded to 1..8, reduced to fit the RAM scratch budget.
+# Unknown or small RAM keeps one stream; explicit 1 restores serial export.
 # Queued exports allocate no history until admitted. Per-name history and range
 # limits remain fixed. Increases reserve a conservative 17 GiB per export plus
 # the import memory budget within 25% of available RAM; this plans scratch, not
 # total RSS. Observe RSS/cache headroom under load. Requires a restart.
-store-native-export-concurrency = 1
+store-native-export-concurrency = 0
 store-native-import-concurrency = 1
 store-native-combine-workers = 2
 store-native-combine-memory = 2147483648

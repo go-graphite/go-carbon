@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestNativeCombineBudget(t *testing.T) {
@@ -112,7 +114,7 @@ func TestNativeExportMemoryAndRestart(t *testing.T) {
 		ram                uint64
 		detectErr, invalid bool
 	}{
-		{1, 0, true, false}, {2, 144 << 30, false, false}, {2, (144 << 30) - 1, false, true}, {2, 0, true, true}, {0, 1 << 40, false, true}, {9, 1 << 40, false, true}, {8, 1 << 40, false, false},
+		{1, 0, true, false}, {2, 144 << 30, false, false}, {2, (144 << 30) - 1, false, true}, {2, 0, true, true}, {0, 1 << 40, false, false}, {9, 1 << 40, false, true}, {8, 1 << 40, false, false},
 	} {
 		cfg := NewConfig()
 		cfg.Whisper.StoreNativeExportConcurrency = tc.exports
@@ -140,5 +142,20 @@ func TestNativeExportMemoryAndRestart(t *testing.T) {
 	cfg, err := ReadConfig(path)
 	if err != nil || cfg.Whisper.StoreNativeExportConcurrency != 1 || len(cfg.unknownKeys) != 0 {
 		t.Fatal("export TOML lost", cfg, err)
+	}
+}
+
+func TestAutomaticNativeExportBudget(t *testing.T) {
+	cfg := NewConfig()
+	for _, tc := range []struct {
+		ram  uint64
+		want int
+	}{{0, 1}, {64 << 30, 1}, {144 << 30, min(2, store.AutoNativeExportConcurrency())}, {1 << 40, store.AutoNativeExportConcurrency()}} {
+		if got := cfg.nativeExportConcurrency(func() (uint64, error) { return tc.ram, nil }); got != tc.want {
+			t.Fatalf("RAM %d: %d != %d", tc.ram, got, tc.want)
+		}
+	}
+	if got := cfg.nativeExportConcurrency(func() (uint64, error) { return 0, errors.New("unknown") }); got != 1 {
+		t.Fatal(got)
 	}
 }

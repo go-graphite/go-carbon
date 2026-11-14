@@ -280,7 +280,10 @@ func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.Contin
 		return nil, false, store.ErrFormat
 	}
 	fs.rangeReads = true
-	for _, window := range windows {
+	for _, window := range coalesceNativeRollupWindows(windows, m.Retentions) {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		series, err := w.FetchArchiveWindow(window)
 		if err != nil {
 			return nil, false, err
@@ -443,4 +446,28 @@ func (c *ContinuationCodec) nativeClassicFragments(ctx context.Context, kv store
 		}
 	}
 	return result, true, nil
+}
+
+// Compressed buffers can name the same coarse slot many times. Fetch each
+// union once so each overlapping storage block is decoded once per run rather
+// than once per fine point. Never span a retention or introduce an absent slot.
+func coalesceNativeRollupWindows(windows []whisper.ArchiveWindow, retentions []store.Retention) []whisper.ArchiveWindow {
+	slices.SortFunc(windows, func(a, b whisper.ArchiveWindow) int {
+		if n := cmp.Compare(a.Archive, b.Archive); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.From, b.From)
+	})
+	result := windows[:0]
+	for _, window := range windows {
+		if len(result) > 0 {
+			last := &result[len(result)-1]
+			if last.Archive == window.Archive && window.From <= last.Until && max(last.Until, window.Until)-last.From <= retentions[window.Archive].Step*retentions[window.Archive].Count {
+				last.Until = max(last.Until, window.Until)
+				continue
+			}
+		}
+		result = append(result, window)
+	}
+	return result
 }
