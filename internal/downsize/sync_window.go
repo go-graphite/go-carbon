@@ -42,9 +42,6 @@ func (s *syncer) copyWindows() syncRanges {
 // Copy each batch immediately, rather than waiting for the complete catalog.
 // This separate phase leaves old full-history copy/precheck rows reusable.
 func (s *syncer) copyMissingWindow(ctx context.Context) error {
-	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
-		defer b.beginWindowCopy()()
-	}
 	f, scan, err := openLines(s.missingPath())
 	if err != nil {
 		return err
@@ -59,6 +56,15 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		if err := s.j.append(syncRow{Kind: "window-policy", Identity: string(policy)}); err != nil {
 			return err
 		}
+	}
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-resolved" }) {
+		s.sum.Copied += r.Copied
+	}
+	if err := s.retryWindowSelections(ctx); err != nil {
+		return err
+	}
+	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
+		defer b.beginWindowCopy()()
 	}
 	s.phase("copy")
 	s.prog.begin("window missing", s.sum.Missing)
@@ -124,11 +130,6 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
 				return fmt.Errorf("window selection differs from catalog batch %d", group)
 			}
-			if r, ok := selections[k]; ok && r.SelectionComplete {
-				for _, skip := range r.Skipped {
-					s.addResidual(syncHole{Name: skip.Name, Source: source}, skip.Reason)
-				}
-			}
 			if r, ok := completed[k]; ok && r.SelectionComplete {
 				s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)
 				continue
@@ -163,7 +164,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 				}
 				for _, n := range subset {
 					if unresolved[n] {
-						reason := "source window selection unresolved: missing metadata or pending snapshot"
+						reason := syncWindowSelectionReason
 						skipped = append(skipped, syncSkip{n, reason})
 						s.addResidual(syncHole{Name: n, Source: source}, reason)
 						event("sync_window_selection_skipped", map[string]any{"level": "warn", "source": source, "metric": n, "reason": reason})
@@ -304,8 +305,9 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 		return nil, err
 	}
 	out := map[string][]syncDigest{}
-	for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
-		subset := names[start:min(start+chunkstore.NativeMaxRangeNames, len(names))]
+	tooLarge := errors.New("window selection request too large")
+	var readSubset func([]string) error
+	readSubset = func(subset []string) error {
 		body, _ := json.Marshal(struct {
 			Session string
 			Names   []string
@@ -325,6 +327,9 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 				return err
 			}
 			defer response.Body.Close()
+			if response.StatusCode == http.StatusRequestEntityTooLarge {
+				return tooLarge
+			}
 			if response.StatusCode != http.StatusOK {
 				return fmt.Errorf("window export HTTP %d", response.StatusCode)
 			}
@@ -382,7 +387,22 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 			_, err = io.Copy(io.Discard, response.Body)
 			return err
 		}()
-		if err != nil {
+		if errors.Is(err, tooLarge) {
+			if len(subset) <= 1 {
+				return fmt.Errorf("window export HTTP 413 for a single name")
+			}
+			// Split only the transport request. The source pin, logical catalog
+			// group, window and durable copy identities remain unchanged.
+			mid := len(subset) / 2
+			if err := readSubset(subset[:mid]); err != nil {
+				return err
+			}
+			return readSubset(subset[mid:])
+		}
+		return err
+	}
+	for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
+		if err := readSubset(names[start:min(start+chunkstore.NativeMaxRangeNames, len(names))]); err != nil {
 			return nil, err
 		}
 	}
@@ -412,10 +432,13 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 		b.windowSources.release()
 		b.windowPinned = time.Now()
 	}
-	id, err := b.windowSources.session(ctx, source)
+	_, err := b.windowSources.session(ctx, source)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.sessions[source] = &nativeRemoteSession{id: id}
+	// Keep the complete session handle, including any readiness state.
+	b.windowSources.mu.Lock()
+	c.sessions[source] = b.windowSources.sessions[source]
+	b.windowSources.mu.Unlock()
 	return c, func() {}, nil
 }

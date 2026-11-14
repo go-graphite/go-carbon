@@ -453,7 +453,7 @@ receipts have separate journal records. Switching to `--full-history` requires
 a fresh state directory. Keep `--verify-batch`, the windows and the settle
 cutoff unchanged when resuming a partially completed window transfer.
 
-A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. The residual is retained in the selection journal and restored on resume; it prevents a successful exit even if serving-archive verification finds no holes. It is never treated as empty history. Only complete selection checkpoints are reused.
+A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. Skipped selections are retried on fresh native pins when resuming and again after the missing-name scan. Only a complete window selection, followed by a successful window-only copy when points exist, writes a durable resolution. Original selection and native copy intents stay unchanged. Unresolved source coverage still prevents a successful exit even if another replica or serving-archive verification finds no holes; it is never treated as empty history.
 
 ### Durable discovery and progress snapshots
 
