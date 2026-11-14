@@ -29,6 +29,7 @@ const (
 const (
 	DefaultNativeImportConcurrency = 1
 	DefaultNativeExportConcurrency = 0
+	MaxNativeExportConcurrency     = 16
 	// Conservative planning charge for decoded points, source/output buffers,
 	// range metadata and iterators at the existing per-name limits. This is
 	// additional to import scratch and the store/cache baseline, not an RSS cap.
@@ -39,16 +40,16 @@ const (
 
 // ValidateNativeExportConcurrency bounds independent export scratch allocations.
 func ValidateNativeExportConcurrency(exports int) error {
-	if exports < 0 || exports > 8 {
-		return fmt.Errorf("native export concurrency must be 0..8")
+	if exports < 0 || exports > MaxNativeExportConcurrency {
+		return fmt.Errorf("native export concurrency must be 0..16")
 	}
 	return nil
 }
 
 // AutoNativeExportConcurrency scales independent export work with CPU capacity.
-// Keep the existing maximum scratch bound; the application also budgets RAM.
+// The application additionally clamps the total scratch charge against RAM.
 func AutoNativeExportConcurrency() int {
-	return min(8, max(1, runtime.GOMAXPROCS(0)/8))
+	return min(MaxNativeExportConcurrency, max(1, runtime.GOMAXPROCS(0)/8))
 }
 
 // NativeExportConcurrency is fixed at Open. Waiting exporters are admitted

@@ -39,7 +39,7 @@ func (w *gatedNativeExportWriter) Write(p []byte) (int, error) {
 func TestNativeExportConcurrentBytesAndAdmission(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	source, now := openTestStore(t, "/export", Options{fs: vfs.NewMem(), ExactBlocks: true, NativeExportConcurrency: 2, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	source, now := openTestStore(t, "/export", Options{fs: vfs.NewMem(), ExactBlocks: true, NativeExportConcurrency: 16, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	defer closeTestStore(t, source)
 	createTestMetric(t, source, "native.export")
 	if err := source.UpdateMany(ctx, "native.export", []Point{{Timestamp: int64(now - 60), Value: math.Copysign(0, -1)}, {Timestamp: int64(now - 30), Value: math.SmallestNonzeroFloat64}}); err != nil {
@@ -54,17 +54,17 @@ func TestNativeExportConcurrentBytesAndAdmission(t *testing.T) {
 	if err := pin.Write(ctx, []string{"native.export"}, &oracle); err != nil {
 		t.Fatal(err)
 	}
-	entered := make(chan struct{}, 2)
+	entered := make(chan struct{}, 16)
 	release := make(chan struct{})
 	var once sync.Once
 	defer once.Do(func() { close(release) })
-	outputs := make([]*gatedNativeExportWriter, 2)
-	done := make(chan error, 2)
+	outputs := make([]*gatedNativeExportWriter, 16)
+	done := make(chan error, 16)
 	for i := range outputs {
 		outputs[i] = &gatedNativeExportWriter{entered: entered, release: release, ctx: ctx}
 		go func(i int) { done <- pin.Write(ctx, []string{"native.export"}, outputs[i]) }(i)
 	}
-	for range 2 {
+	for range 16 {
 		select {
 		case <-entered:
 		case <-ctx.Done():
@@ -78,7 +78,7 @@ func TestNativeExportConcurrentBytesAndAdmission(t *testing.T) {
 		t.Fatal("queued export escaped admission", err, untouched.Len())
 	}
 	once.Do(func() { close(release) })
-	for range 2 {
+	for range 16 {
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
@@ -91,9 +91,9 @@ func TestNativeExportConcurrentBytesAndAdmission(t *testing.T) {
 }
 
 func TestNativeExportBudgetOptions(t *testing.T) {
-	for _, n := range []int{-1, 0, 1, 2, 8, 9} {
+	for _, n := range []int{-1, 0, 1, 2, 8, 16, 17} {
 		s, err := Open(t.TempDir(), Options{NativeExportConcurrency: n, CacheSize: 1 << 20, MemTableSize: 1 << 20})
-		if n < 0 || n > 8 {
+		if n < 0 || n > MaxNativeExportConcurrency {
 			if err == nil {
 				s.Close()
 				t.Fatal("invalid export admission accepted", n)
