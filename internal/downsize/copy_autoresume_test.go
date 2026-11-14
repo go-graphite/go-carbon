@@ -285,10 +285,12 @@ func TestOriginListRepeatsAndSplits(t *testing.T) {
 // copy re-pulls the whole batch until the window closes; nothing fails.
 func TestPlanFreeCopySettlesThroughSourceRestartConflicts(t *testing.T) {
 	f, froms, dst := newRestartFixture(t, copyNames("a.", 400))
-	until := time.Now().Add(150 * time.Millisecond)
+	// Anchor the restart window to actual pulls; catalogue fsyncs and a busy
+	// test host must not consume the whole window before the first request.
+	var attempts atomic.Int64
 	var conflicts atomic.Int64
 	f.pullCode = func() int {
-		if time.Now().Before(until) {
+		if attempts.Add(1) <= 3 {
 			conflicts.Add(1)
 			return http.StatusConflict
 		}

@@ -34,18 +34,19 @@ func (s *syncer) unionPath() string   { return filepath.Join(s.o.state, "union.t
 func (s *syncer) missingPath() string { return filepath.Join(s.o.state, "missing.tsv") }
 
 type syncLister struct {
-	pages chan []string
-	errc  chan error
-	page  []string
-	head  string
-	done  bool
+	pages    chan []string
+	errc     chan error
+	page     []string
+	head     string
+	done     bool
+	finished chan struct{}
 }
 
-func (s *syncer) startList(ctx context.Context, store string) *syncLister {
-	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1)}
+func (s *syncer) startList(ctx context.Context, store, after string) *syncLister {
+	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
 	go func() {
 		defer close(l.pages)
-		after := ""
+		defer close(l.finished)
 		for {
 			page, err := s.b.List(ctx, store, s.o.prefix, after, syncListPage)
 			if err != nil {
@@ -74,7 +75,13 @@ func (s *syncer) startList(ctx context.Context, store string) *syncLister {
 
 func (l *syncLister) advance(ctx context.Context) error {
 	for len(l.page) == 0 {
-		page, ok := <-l.pages
+		var page []string
+		var ok bool
+		select {
+		case page, ok = <-l.pages:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		if !ok {
 			select {
 			case err := <-l.errc:
@@ -94,30 +101,13 @@ func (l *syncLister) advance(ctx context.Context) error {
 }
 
 type syncTSV struct {
-	path string
 	file *os.File
 	w    *bufio.Writer
 }
 
-func createTSV(path string) (*syncTSV, error) {
-	f, err := os.Create(path + ".tmp")
-	if err != nil {
-		return nil, err
-	}
-	return &syncTSV{path: path, file: f, w: bufio.NewWriterSize(f, 1<<20)}, nil
-}
-
-func (t *syncTSV) commit() error {
-	if err := errors.Join(t.w.Flush(), t.file.Sync(), t.file.Close()); err != nil {
-		return err
-	}
-	return os.Rename(t.path+".tmp", t.path)
-}
-
-func (t *syncTSV) abort() { _ = t.file.Close(); _ = os.Remove(t.path + ".tmp") }
-
-// discover merges the catalogs. The files are renamed into place before the
-// journal row, so a resumed run reuses them instead of relisting.
+// discover durably merges consumed catalog prefixes. A journal checkpoint binds
+// per-source cursors to exact offsets in both output files; recovery drops only
+// the tail written after the last committed checkpoint.
 func (s *syncer) discover(ctx context.Context) error {
 	if rows := s.j.find(func(r syncRow) bool { return r.Kind == "discovered" }); len(rows) > 0 {
 		r := rows[0]
@@ -130,26 +120,62 @@ func (s *syncer) discover(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stores := append([]string{s.o.to}, s.o.from...)
+	cp := syncDiscoveryCheckpoint{Cursors: map[string]string{}}
+	if rows := s.j.find(func(r syncRow) bool { return r.Kind == "discover_checkpoint" }); len(rows) > 0 {
+		cp = *rows[len(rows)-1].Discovery
+		cp.Cursors = cloneCursors(cp.Cursors)
+		event("sync_discovery_resumed", map[string]any{"names": cp.Names, "cursors": cp.Cursors})
+	}
+	union, err := openDurableTSV(s.unionPath(), cp.UnionBytes)
+	if err != nil {
+		return err
+	}
+	defer union.file.Close()
+	missing, err := openDurableTSV(s.missingPath(), cp.MissingBytes)
+	if err != nil {
+		return err
+	}
+	defer missing.file.Close()
+	names, nMissing, notOwned, onTarget, both := cp.Names, cp.Missing, cp.NotOwned, cp.OnTarget, cp.Both
+	s.prog.done.Store(int64(names))
+	checkpoint := func() error {
+		u, err := union.durableOffset()
+		if err != nil {
+			return err
+		}
+		m, err := missing.durableOffset()
+		if err != nil {
+			return err
+		}
+		cp.UnionBytes, cp.MissingBytes = u, m
+		cp.Names, cp.Missing, cp.NotOwned, cp.OnTarget, cp.Both = names, nMissing, notOwned, onTarget, both
+		saved := cp
+		saved.Cursors = cloneCursors(cp.Cursors)
+		return s.j.append(syncRow{Kind: "discover_checkpoint", Discovery: &saved})
+	}
+	// Commit newly-created directory entries before any cursor can reference them.
+	if err := syncDirectory(s.o.state); err != nil {
+		return err
+	}
 	listers := make([]*syncLister, len(stores))
+	defer func() {
+		cancel()
+		for _, l := range listers {
+			if l != nil {
+				<-l.finished
+			}
+		}
+	}()
 	for i, store := range stores {
-		listers[i] = s.startList(ctx, store)
+		listers[i] = s.startList(ctx, store, cp.Cursors[store])
 	}
 	for _, l := range listers {
 		if err := l.advance(ctx); err != nil {
 			return err
 		}
 	}
-	union, err := createTSV(s.unionPath())
-	if err != nil {
-		return err
-	}
-	missing, err := createTSV(s.missingPath())
-	if err != nil {
-		union.abort()
-		return err
-	}
-	fail := func(err error) error { union.abort(); missing.abort(); return err }
-	names, nMissing, notOwned, onTarget, both := 0, 0, 0, 0, 0
+	lastCheckpoint, processed := time.Now(), 0
+	fail := func(err error) error { return errors.Join(err, checkpoint()) }
 	for {
 		head, found := "", false
 		for _, l := range listers {
@@ -159,6 +185,15 @@ func (s *syncer) discover(ctx context.Context) error {
 		}
 		if !found {
 			break
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if processed >= syncListPage || time.Since(lastCheckpoint) >= 3*time.Second {
+			if err := checkpoint(); err != nil {
+				return err
+			}
+			lastCheckpoint, processed = time.Now(), 0
 		}
 		var mask uint64
 		inTarget := false
@@ -171,34 +206,42 @@ func (s *syncer) discover(ctx context.Context) error {
 			} else {
 				mask |= 1 << uint(i-1)
 			}
-			if err := l.advance(ctx); err != nil {
-				return fail(err)
-			}
 		}
-		if !inTarget && s.owner != nil && !s.owner(head) {
+		owned := inTarget || s.owner == nil || s.owner(head)
+		if !owned {
 			notOwned++
-			continue
-		}
-		names++
-		s.prog.done.Add(1)
-		t := 0
-		if inTarget {
-			t = 1
-			onTarget++
-			if mask != 0 {
-				both++
-			}
 		} else {
-			nMissing++
-			fmt.Fprintf(missing.w, "%s\t%x\n", head, mask)
+			names++
+			s.prog.done.Add(1)
+			t := 0
+			if inTarget {
+				t = 1
+				onTarget++
+				if mask != 0 {
+					both++
+				}
+			} else {
+				nMissing++
+				fmt.Fprintf(missing.w, "%s\t%x\n", head, mask)
+			}
+			fmt.Fprintf(union.w, "%s\t%x\t%d\n", head, mask, t)
 		}
-		fmt.Fprintf(union.w, "%s\t%x\t%d\n", head, mask, t)
+		processed++
+		for i, l := range listers {
+			if !l.done && l.head == head {
+				cp.Cursors[stores[i]] = head
+			}
+		}
+		// All cursors and both output rows now describe the same consumed prefix.
+		for _, l := range listers {
+			if !l.done && l.head == head {
+				if err := l.advance(ctx); err != nil {
+					return fail(err)
+				}
+			}
+		}
 	}
-	if err := union.commit(); err != nil {
-		missing.abort()
-		return err
-	}
-	if err := missing.commit(); err != nil {
+	if err := checkpoint(); err != nil {
 		return err
 	}
 	s.sum.Discovered, s.sum.Missing, s.sum.NotOwned, s.sum.OnTarget, s.both = names, nMissing, notOwned, onTarget, both
