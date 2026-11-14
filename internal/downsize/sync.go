@@ -429,7 +429,11 @@ func (s *syncer) run(ctx context.Context) error {
 	if err := s.retryWindowSelections(ctx); err != nil {
 		return fmt.Errorf("retry window selections: %w", err)
 	}
-	return s.verifyAndFill(ctx)
+	err := s.verifyAndFill(ctx)
+	if s.o.noCopy && s.sum.Missing > 0 {
+		return errors.Join(err, fmt.Errorf("%w: --no-copy leaves %d names from discovery unimported; use a fresh state for an independent audit", ErrSyncResidual, s.sum.Missing))
+	}
+	return err
 }
 
 func (s *syncer) namesFile(kind string, round int, source int, names []string) (string, error) {

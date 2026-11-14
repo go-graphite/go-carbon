@@ -376,3 +376,15 @@ func TestSyncOptOuts(t *testing.T) {
 		t.Fatalf("no-verify fetch=%d digest=%d copies=%v", f.fetches.Load(), f.digested.Load(), f.copies)
 	}
 }
+
+func TestSyncNoCopyMissingIsResidual(t *testing.T) {
+	f := newFakeSync()
+	f.put(syncD1, "missing", syncTestSchema)
+	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), streams: 2, batch: 2, maxRounds: 4, noCopy: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+	if err := runSync(context.Background(), o, f); !errors.Is(err, ErrSyncResidual) {
+		t.Fatalf("missing copy must remain residual: %v", err)
+	}
+	if len(f.copies) != 0 || len(f.store(syncT).points) != 0 {
+		t.Fatal("read-only run wrote data")
+	}
+}
