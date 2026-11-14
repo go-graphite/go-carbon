@@ -75,31 +75,82 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-resolved" }) {
 		s.sum.Copied += r.Copied
 	}
-	if err := s.retryWindowSelections(ctx); err != nil {
-		return err
-	}
 	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
 		defer b.beginWindowCopy()()
 	}
 	s.phase("copy")
 	s.prog.begin("window missing", s.sum.Missing)
-	type key struct {
-		group  int
-		source string
-	}
-	selections, completed := map[key]syncRow{}, map[key]syncRow{}
+	selections, completed := map[syncWindowSelectionKey]syncRow{}, map[syncWindowSelectionKey]syncRow{}
 	for _, r := range s.j.find(func(r syncRow) bool {
 		return r.Kind == "window-selected" || r.Kind == "copied" && r.Phase == "window-missing"
 	}) {
-		k := key{r.Round, r.Source}
+		k := syncWindowSelectionKey{r.Round, r.Source}
 		if r.Kind == "window-selected" {
 			selections[k] = r
 		} else {
 			completed[k] = r
 		}
 	}
-	group, scanned := 0, 0
+	group, scanned, active := 0, 0, 0
+	workers := 1
+	if _, ok := s.b.(interface {
+		WindowPresenceRanges(context.Context, string, []string, syncRanges) (map[string][]syncDigest, error)
+	}); ok {
+		// Each group can select all donors concurrently. Keep the total number
+		// of requests within the stream budget, including selection requests.
+		workers = max(1, s.o.streams/max(1, len(s.o.from)))
+	}
+	type result struct {
+		group, names int
+		child        *syncer
+		started      time.Time
+		err          error
+	}
+	results := make(chan result, workers)
+	// Stop dispatching on cancellation, but drain issued groups. Cancelling a
+	// pull does not cancel the server's import, and would lose its durable ack.
+	workCtx := context.WithoutCancel(ctx)
+	var firstErr error
+	collect := func() {
+		r := <-results
+		active--
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+		for n := range r.child.copied {
+			s.copied[n] = true
+		}
+		for n := range r.child.failedCp {
+			s.failedCp[n] = true
+		}
+		for source := range r.child.forbid {
+			s.forbid[source] = true
+		}
+		s.sum.Copied += r.child.sum.Copied
+		s.sum.CopyFailed += r.child.sum.CopyFailed
+		s.sum.residual = append(s.sum.residual, r.child.sum.residual...)
+		if r.err == nil {
+			scanned += r.names
+			s.prog.done.Store(int64(scanned))
+			event("sync_window_missing", map[string]any{"group": r.group, "names": r.names, "scanned": scanned, "copied": s.sum.Copied, "seconds": time.Since(r.started).Seconds(), "groups_in_flight": active, "group_workers": workers})
+		}
+	}
+	// Every exit joins issued work before the shared pins or journal close.
+	defer func() {
+		for active > 0 {
+			collect()
+		}
+	}()
 	for {
+		if active == workers {
+			collect()
+		}
+		if firstErr != nil {
+			return firstErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var names []string
 		var masks []uint64
 		for len(names) < s.o.batch && scan.Scan() {
@@ -119,141 +170,164 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			break
 		}
 		group++
-		started := time.Now()
-		subsets := make([][]string, len(s.o.from))
-		for src, source := range s.o.from {
-			if s.forbid[source] {
-				continue
-			}
-			for i, n := range names {
-				if masks[i]&(1<<uint(src)) != 0 {
-					if err := chunkstore.ValidateMetricName(n); err == nil {
-						subsets[src] = append(subsets[src], n)
-					} else if !s.failedCp[n] {
-						s.applyCopy([]string{n}, nil, 0, []string{n}, false)
-					}
-				}
-			}
+		child := &syncer{o: s.o, b: s.b, j: s.j, copied: map[string]bool{}, failedCp: map[string]bool{}, forbid: map[string]bool{}}
+		for source, forbidden := range s.forbid {
+			child.forbid[source] = forbidden
 		}
-		type selectionResult struct {
-			digests map[string][]syncDigest
-			err     error
-		}
-		results := make([]selectionResult, len(s.o.from))
-		var workers sync.WaitGroup
-		// Only the live combined selector promises concurrent source access.
-		// State, journals and copies stay in original source order.
-		live, parallel := s.b.(interface {
-			WindowPresenceRanges(context.Context, string, []string, syncRanges) (map[string][]syncDigest, error)
-		})
-		if parallel {
-			slots := make(chan struct{}, max(1, s.o.streams))
-			for src, source := range s.o.from {
-				k := key{group, source}
-				if len(subsets[src]) == 0 || completed[k].SelectionComplete || selections[k].SelectionComplete {
-					continue
-				}
-				workers.Add(1)
-				go func() {
-					defer workers.Done()
-					select {
-					case slots <- struct{}{}:
-						defer func() { <-slots }()
-					case <-ctx.Done():
-						results[src].err = ctx.Err()
-						return
-					}
-					results[src].digests, results[src].err = live.WindowPresenceRanges(ctx, source, subsets[src], s.copyWindows())
-				}()
-			}
-			workers.Wait()
-		}
-		for src, source := range s.o.from {
-			subset := subsets[src]
-			if len(subset) == 0 {
-				continue
-			}
-			// Reuse completed selections on resume: native range identities include
-			// the precise names and must never depend on a later source snapshot.
-			var selected []string
-			var skipped []syncSkip
-			k := key{group, source}
-			if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
-				return fmt.Errorf("window selection differs from catalog batch %d", group)
-			}
-			if r, ok := completed[k]; ok && r.SelectionComplete {
-				s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)
-				continue
-			}
-			if r, ok := selections[k]; ok && r.SelectionComplete {
-				selected = r.Selected
-			} else {
-				relevant := map[string]bool{}
-				unresolved := map[string]bool{}
-				selectionWindows := s.copyWindows()
-				if parallel {
-					selectionWindows = selectionWindows[:min(1, len(selectionWindows))]
-				}
-				for _, w := range selectionWindows {
-					var digests map[string][]syncDigest
-					var err error
-					if parallel {
-						digests, err = results[src].digests, results[src].err
-					} else {
-						digests, err = s.windowPresence(ctx, source, subset, w)
-					}
-					if err != nil {
-						return fmt.Errorf("window missing selection on %s: %w", source, err)
-					}
-					for _, n := range subset {
-						var archives []syncArchive
-						count := int64(0)
-						for _, d := range digests[n] {
-							if d.Hash == syncWindowUnresolved {
-								unresolved[n] = true
-							}
-							archives = append(archives, syncArchive{Step: d.Step, Points: d.Points})
-							count += d.Count
-							if d.Hash == "window-incomplete" {
-								count++
-							}
-						}
-						if count > 0 && (s.o.includeShort || !syncShort(archives)) {
-							relevant[n] = true
-						}
-					}
-				}
-				for _, n := range subset {
-					if unresolved[n] {
-						reason := syncWindowSelectionReason
-						skipped = append(skipped, syncSkip{n, reason})
-						s.addResidual(syncHole{Name: n, Source: source}, reason)
-						event("sync_window_selection_skipped", map[string]any{"level": "warn", "source": source, "metric": n, "reason": reason})
-					} else if relevant[n] {
-						selected = append(selected, n)
-					}
-				}
-				if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, Skipped: skipped, SelectionComplete: true}); err != nil {
-					return err
-				}
-			}
-			if len(selected) == 0 {
-				continue
-			}
-			res, err := s.copyFrom(ctx, "window-missing", group, src, selected)
-			if err != nil {
-				return err
-			}
-			s.applyCopy(selected, nil, res.Copied, res.Failed, res.Forbidden)
-		}
-		scanned += len(names)
-		s.prog.done.Store(int64(scanned))
-		event("sync_window_missing", map[string]any{"group": group, "names": len(names), "scanned": scanned, "copied": s.sum.Copied, "seconds": time.Since(started).Seconds(), "names_per_second": float64(len(names)) / time.Since(started).Seconds()})
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+		active++
+		go func(group int) {
+			started := time.Now()
+			err := child.copyWindowGroup(workCtx, group, names, masks, selections, completed)
+			results <- result{group, len(names), child, started, err}
+		}(group)
+	}
+	for active > 0 {
+		collect()
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	s.endPhase("copy", scanned)
+	return nil
+}
+
+// A catalog group contains disjoint names. Its private apply state is merged by
+// the driver; the shared journal serializes durable rows. Donor order within a
+// group stays serial, so existing target values and the first donor still win.
+func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string, masks []uint64, selections, completed map[syncWindowSelectionKey]syncRow) error {
+	selectionStarted := time.Now()
+	subsets := make([][]string, len(s.o.from))
+	for src, source := range s.o.from {
+		if s.forbid[source] {
+			continue
+		}
+		for i, n := range names {
+			if masks[i]&(1<<uint(src)) != 0 {
+				if err := chunkstore.ValidateMetricName(n); err == nil {
+					subsets[src] = append(subsets[src], n)
+				} else if !s.failedCp[n] {
+					s.applyCopy([]string{n}, nil, 0, []string{n}, false)
+				}
+			}
+		}
+	}
+	type selectionResult struct {
+		digests map[string][]syncDigest
+		err     error
+	}
+	results := make([]selectionResult, len(s.o.from))
+	var workers sync.WaitGroup
+	// Only the live combined selector promises concurrent source access.
+	// State, journals and copies stay in original source order.
+	live, parallel := s.b.(interface {
+		WindowPresenceRanges(context.Context, string, []string, syncRanges) (map[string][]syncDigest, error)
+	})
+	if parallel {
+		slots := make(chan struct{}, max(1, s.o.streams))
+		for src, source := range s.o.from {
+			k := syncWindowSelectionKey{group, source}
+			if len(subsets[src]) == 0 || completed[k].SelectionComplete || selections[k].SelectionComplete {
+				continue
+			}
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				select {
+				case slots <- struct{}{}:
+					defer func() { <-slots }()
+				case <-ctx.Done():
+					results[src].err = ctx.Err()
+					return
+				}
+				results[src].digests, results[src].err = live.WindowPresenceRanges(ctx, source, subsets[src], s.copyWindows())
+			}()
+		}
+		workers.Wait()
+	}
+	event("sync_window_group_selection", map[string]any{"group": group, "seconds": time.Since(selectionStarted).Seconds()})
+	for src, source := range s.o.from {
+		subset := subsets[src]
+		if len(subset) == 0 {
+			continue
+		}
+		// Reuse completed selections on resume: native range identities include
+		// the precise names and must never depend on a later source snapshot.
+		var selected []string
+		var skipped []syncSkip
+		k := syncWindowSelectionKey{group, source}
+		if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
+			return fmt.Errorf("window selection differs from catalog batch %d", group)
+		}
+		if r, ok := completed[k]; ok && r.SelectionComplete {
+			s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)
+			continue
+		}
+		if r, ok := selections[k]; ok && r.SelectionComplete {
+			selected = r.Selected
+		} else {
+			relevant := map[string]bool{}
+			unresolved := map[string]bool{}
+			selectionWindows := s.copyWindows()
+			if parallel {
+				selectionWindows = selectionWindows[:min(1, len(selectionWindows))]
+			}
+			for _, w := range selectionWindows {
+				var digests map[string][]syncDigest
+				var err error
+				if parallel {
+					digests, err = results[src].digests, results[src].err
+				} else {
+					digests, err = s.windowPresence(ctx, source, subset, w)
+				}
+				if err != nil {
+					return fmt.Errorf("window missing selection on %s: %w", source, err)
+				}
+				for _, n := range subset {
+					var archives []syncArchive
+					count := int64(0)
+					for _, d := range digests[n] {
+						if d.Hash == syncWindowUnresolved {
+							unresolved[n] = true
+						}
+						archives = append(archives, syncArchive{Step: d.Step, Points: d.Points})
+						count += d.Count
+						if d.Hash == "window-incomplete" {
+							count++
+						}
+					}
+					if count > 0 && (s.o.includeShort || !syncShort(archives)) {
+						relevant[n] = true
+					}
+				}
+			}
+			for _, n := range subset {
+				if unresolved[n] {
+					reason := syncWindowSelectionReason
+					skipped = append(skipped, syncSkip{n, reason})
+					s.addResidual(syncHole{Name: n, Source: source}, reason)
+					event("sync_window_selection_skipped", map[string]any{"level": "warn", "source": source, "metric": n, "reason": reason})
+				} else if relevant[n] {
+					selected = append(selected, n)
+				}
+			}
+			if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, Skipped: skipped, SelectionComplete: true}); err != nil {
+				return err
+			}
+		}
+		if len(selected) == 0 {
+			continue
+		}
+		copyStarted := time.Now()
+		res, err := s.copyFrom(ctx, "window-missing", group, src, selected)
+		event("sync_window_group_copy", map[string]any{"group": group, "source": source, "names": len(selected), "seconds": time.Since(copyStarted).Seconds()})
+		if err != nil {
+			return err
+		}
+		s.applyCopy(selected, nil, res.Copied, res.Failed, res.Forbidden)
+	}
 	return nil
 }
 
@@ -279,7 +353,9 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 	}
 	failed := map[string]bool{}
 	for wi, w := range windows {
+		beforeStarted := time.Now()
 		before, beforeErr := b.Digest(ctx, target, names, w.From, w.Until)
+		event("sync_window_digest", map[string]any{"stage": "before", "source": source, "names": len(names), "seconds": time.Since(beforeStarted).Seconds()})
 		data, _ := json.Marshal([]any{source, target, names, w.From, w.Until})
 		hash := sha256.Sum256(data)
 		id := hex.EncodeToString(hash[:])
@@ -333,7 +409,9 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 		if err != nil {
 			return syncCopyResult{}, err
 		}
+		afterStarted := time.Now()
 		after, afterErr := b.Digest(ctx, target, names, w.From, w.Until)
+		event("sync_window_digest", map[string]any{"stage": "after", "source": source, "names": len(names), "seconds": time.Since(afterStarted).Seconds()})
 		count := func(d map[string][]syncDigest) int64 {
 			var n int64
 			for _, archives := range d {
@@ -416,7 +494,12 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 			if token := os.Getenv(b.o.tokenEnv); token != "" {
 				req.Header.Set("X-Buckyd-Authorization", token)
 			}
+			requestStarted := time.Now()
 			response, err := b.client.Do(req)
+			headersSeconds := time.Since(requestStarted).Seconds()
+			defer func() {
+				event("sync_window_export_time", map[string]any{"source": source, "names": len(subset), "headers_seconds": headersSeconds, "seconds": time.Since(requestStarted).Seconds()})
+			}()
 			if err != nil {
 				return err
 			}

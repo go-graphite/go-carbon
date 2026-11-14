@@ -401,6 +401,7 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 		return err
 	}
 	var receipt chunkstore.NativeReceipt
+	transferStarted := time.Now()
 	event("native_transfer", map[string]any{"source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End})
 	if _, err := c.requestOnce(ctx, t.Target, "/v1/native/pull", struct {
 		Range   chunkstore.NativeRange
@@ -432,7 +433,7 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	for _, skip := range receipt.Skipped {
 		nativeSkipEvent(receipt.Identity, skip)
 	}
-	event("native_verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "receipt": receipt.Identity, "window": c.nativeWindow, "boundary_skipped": receipt.WindowSkipped})
+	event("native_verified", map[string]any{"seconds": time.Since(transferStarted).Seconds(), "stream": t.Stream, "start": t.Start, "end": t.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "receipt": receipt.Identity, "window": c.nativeWindow, "boundary_skipped": receipt.WindowSkipped})
 	return nil
 }
 
