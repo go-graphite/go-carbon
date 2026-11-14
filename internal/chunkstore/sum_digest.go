@@ -83,9 +83,17 @@ func (s *Store) SumDigest(ctx context.Context, name string, from, until int, ste
 		return nil, err
 	}
 	defer release()
-	view := s.db.NewReadView()
-	defer view.Close()
-	m, err := metadataFrom(view, name)
+	batch := s.digestReadBatch(ctx)
+	var view *pebble.ReadView
+	var m Metadata
+	if batch != nil {
+		view = batch.view
+		m, err = batch.metadata(name)
+	} else {
+		view = s.db.NewReadView()
+		defer view.Close()
+		m, err = metadataFrom(view, name)
+	}
 	if err != nil {
 		return nil, err
 	}

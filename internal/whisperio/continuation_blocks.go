@@ -304,10 +304,16 @@ func (f *continuationFile) ReadStorageBlockRange(block whisper.ContinuationBlock
 }
 
 func (f *continuationFile) readStorageBlock(block whisper.ContinuationBlock, dst []whisper.TimeSeriesPoint, from, until int, partial bool) ([]whisper.TimeSeriesPoint, error) {
+	return f.walkStorageBlock(block, dst, from, until, partial, nil)
+}
+
+// walkStorageBlock can consume validated typed groups without building a second
+// per-block point array. The visitor is private to immutable digest reads.
+func (f *continuationFile) walkStorageBlock(block whisper.ContinuationBlock, dst []whisper.TimeSeriesPoint, from, until int, partial bool, consume func(store.Point) error) ([]whisper.TimeSeriesPoint, error) {
 	if err := f.validateBlock(block); err != nil {
 		return nil, err
 	}
-	if !partial && f.fs.verifiedBlocks != nil {
+	if consume == nil && !partial && f.fs.verifiedBlocks != nil {
 		if points, ok := f.fs.verifiedBlocks[verifiedBlockKey{file: f.data.id, block: block}]; ok {
 			return append(dst[:0], points...), nil
 		}
@@ -329,7 +335,7 @@ func (f *continuationFile) readStorageBlock(block whisper.ContinuationBlock, dst
 	if partial {
 		capacity = min(count, max(0, (until-from)/block.Step+1))
 	}
-	if cap(points) < capacity {
+	if consume == nil && cap(points) < capacity {
 		points = make([]whisper.TimeSeriesPoint, 0, capacity)
 	}
 	previous := int64(0)
@@ -395,7 +401,13 @@ func (f *continuationFile) readStorageBlock(block whisper.ContinuationBlock, dst
 				selected = decoded[lo:hi]
 			}
 			for _, point := range selected {
-				points = append(points, whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
+				if consume != nil {
+					if err := consume(point); err != nil {
+						return err
+					}
+				} else {
+					points = append(points, whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
+				}
 			}
 			previous = decoded[len(decoded)-1].Timestamp
 			if first == 0 {
@@ -430,7 +442,7 @@ func (f *continuationFile) readStorageBlock(block whisper.ContinuationBlock, dst
 		return nil, fmt.Errorf("continuation physical point bounds differ: file %d archive %d block %d: stored %d to %d, header %d to %d",
 			f.data.id, block.Archive, block.Index, firstTime, previous, block.First, block.Last)
 	}
-	if !partial && f.fs.verifiedBlocks != nil {
+	if consume == nil && !partial && f.fs.verifiedBlocks != nil {
 		f.fs.verifiedBlocks[verifiedBlockKey{file: f.data.id, block: block}] = append([]whisper.TimeSeriesPoint(nil), points...)
 	}
 	return points, nil

@@ -80,42 +80,44 @@ func (r DigestRequest) validate() error {
 // past windows. sum-v1 may populate its disposable persisted digest cache.
 func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, error) {
 	out := make([]DigestResult, len(r.Names))
-	for i, name := range r.Names {
+	err := s.store.DigestBatch(ctx, r.Names, func(ctx context.Context, i int) error {
+		name := r.Names[i]
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		out[i].Name = name
 		out[i].Mode = r.Mode
 		if r.Mode == "sum-v1" {
 			archives, err := s.store.SumDigest(ctx, name, int(r.From), int(r.Until), r.Step)
 			if errors.Is(err, chunkstore.ErrNotFound) {
-				continue
+				return nil
 			}
 			if err != nil {
-				return nil, fmt.Errorf("sum digest %s: %w", name, err)
+				return fmt.Errorf("sum digest %s: %w", name, err)
 			}
 			out[i].Found = true
 			for _, a := range archives {
 				out[i].Archives = append(out[i].Archives, DigestArchive{Step: a.Step, Points: a.Points, Count: int(a.Count), Hash: a.Sum, From: a.From, Until: a.Until})
 			}
-			continue
+			return nil
 		}
 		// Fetch starts one step after its from time (whisper intervals), so
 		// ask from From-1 to keep a point at From; digestSeries drops points
 		// outside [From, Until).
 		series, err := s.store.Fetch(ctx, name, int(r.From)-1, int(r.Until))
 		if errors.Is(err, chunkstore.ErrNotFound) {
-			continue
+			return nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("digest %s: %w", name, err)
+			return fmt.Errorf("digest %s: %w", name, err)
 		}
 		out[i].Found = true
 		if series != nil && series.Step > 0 {
 			out[i].Archives = []DigestArchive{digestSeries(series, r.From, r.Until)}
 		}
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
 func digestSeries(series *chunkstore.Series, from, until int64) DigestArchive {

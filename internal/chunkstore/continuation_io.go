@@ -147,6 +147,8 @@ type continuationIO struct {
 	// iterBorrowed marks an iter the io's caller owns (see
 	// withBorrowedIterator): Close leaves it open.
 	iterBorrowed bool
+	// digestBatch also routes fresh Get calls through the batch iterator.
+	digestBatch bool
 	// iterBatch is the batch length iter last observed: a writable io's
 	// iterator is refreshed when the batch has grown since.
 	iterBatch int
@@ -294,6 +296,13 @@ func newFreshContinuationIO(ctx context.Context, batch *pebble.Batch, metric Met
 
 func (s *Store) newContinuationIO(ctx context.Context, reader pebble.Reader, batch *pebble.Batch, metric Metadata) *continuationIO {
 	io := newContinuationIO(ctx, reader, batch, metric)
+	if b := s.digestReadBatch(ctx); b != nil && batch == nil && reader == b.view {
+		iter, err := b.walk.iterator(&b.walk.continuation, continuationLower, continuationUpper)
+		if err == nil {
+			io.withBorrowedIterator(iter)
+			io.digestBatch = true
+		}
+	}
 	io.buckets = s.timeBuckets
 	io.indexBinder, _ = s.continuation.(ContinuationIndexBinder)
 	return io
@@ -422,7 +431,7 @@ func (io *continuationIO) read(key []byte, probe bool) ([]byte, error) {
 
 // readStore reads key from the io's reader (see read).
 func (io *continuationIO) readStore(key []byte, probe bool) ([]byte, error) {
-	if !probe {
+	if !probe && !io.digestBatch {
 		return io.lookup(key)
 	}
 	iter, err := io.sharedIter(key)
