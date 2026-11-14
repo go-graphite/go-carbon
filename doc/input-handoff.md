@@ -85,8 +85,17 @@ for memory and disk safety. Initial decompression and coalescing arenas scale wi
 available memory, within 64 KiB–4 MiB and 64 KiB–2 MiB bounds respectively.
 
 The spool budget is one quarter of (free disk + retained source bytes), resampled
-each second. Segment size scales with that budget. Catch-up duration is a measured
-ETA from backlog divided by replay-minus-capture rate, without an absolute deadline.
+before monitoring starts and each second thereafter. Exceeding this soft budget
+logs ERROR and sets `startup_capture_spool_over_budget=1`; intake continues.
+Segment size scales with the initial budget. The hard safety reserve is 5% of the
+spool filesystem's total capacity. Capture pauses only if the next frame would
+leave less than that reserve in actual available disk bytes (`statfs.Bavail`),
+independently of retained spool size. Capture appends since the latest sample are
+deducted from its free space; retired files return headroom only on a fresh sample.
+Other filesystem writers are reflected at the next sample. A failed disk sample
+logs ERROR, sets `startup_capture_fallback=1`, and retains the previous reserve
+sample. Catch-up duration is a measured ETA from backlog divided by
+replay-minus-capture rate, without an absolute deadline.
 A nonpositive margin logs ERROR and sets `startup_capture_continued=1`; intake
 continues durably. Only actual disk safety pressure or an I/O error may stop it.
 A disk safety stop logs ERROR, sets the fallback/paused metrics and reports expected

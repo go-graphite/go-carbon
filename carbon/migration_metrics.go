@@ -436,7 +436,7 @@ var startupCaptureDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_recovery_headroom_points", "Initial recovery point headroom estimate at 64 bytes per point; admission prices actual batches.", nil, nil),
 	prometheus.NewDesc("startup_capture_write_bytes_per_second", "Most recent measured raw capture write rate.", nil, nil),
 	prometheus.NewDesc("startup_capture_convergence_seconds", "Measured catch-up ETA; -1 when no positive convergence margin exists.", nil, nil),
-	prometheus.NewDesc("startup_capture_size_limit_bytes", "Current bounded startup capture size.", nil, nil),
+	prometheus.NewDesc("startup_capture_size_limit_bytes", "Soft startup spool budget; exceeding it reports pressure without pausing intake.", nil, nil),
 	prometheus.NewDesc("startup_capture_gomaxprocs", "Runnable CPU capacity used to size startup capture.", nil, nil),
 	prometheus.NewDesc("startup_capture_replay_points_per_second", "Most recent measured replay rate in points per second.", nil, nil),
 	prometheus.NewDesc("startup_capture_idle_cpus", "Most recent runtime idle CPU capacity.", nil, nil),
@@ -452,6 +452,7 @@ var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_replay_yields_total", "Replay waits for capture append pressure to clear.", nil, nil),
 	prometheus.NewDesc("startup_capture_history_replayed_points_total", "Captured frame points replayed from older startup epochs.", nil, nil),
 	prometheus.NewDesc("startup_capture_direct", "1 after startup capture permanently switches to ordinary cache admission and input logging; spool files may still await persistence.", nil, nil),
+	prometheus.NewDesc("startup_capture_spool_over_budget", "1 when retained startup spool bytes exceed the soft budget; intake continues unless disk safety requires a pause.", nil, nil),
 }
 
 var captureIODescs = []*prometheus.Desc{
@@ -521,7 +522,11 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if capture.direct.Load() {
 			direct = 1
 		}
-		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct}
+		overBudget := float64(0)
+		if capture.overBudget.Load() {
+			overBudget = 1
+		}
+		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct, overBudget}
 		for i, v := range extra {
 			kind := prometheus.GaugeValue
 			if i == 1 || i == 6 || i == 7 {

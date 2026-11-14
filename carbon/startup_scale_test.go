@@ -636,8 +636,8 @@ func TestStartupCaptureDiskSafetyDoesNotDeadlockStop(t *testing.T) {
 	s, _ := captureFixture(t)
 	denied := &testAdmission{}
 	s.startReplay(&startupSink{admission: denied, add: func(*points.Points, *cache.RecoverySource) {}, canRetire: func() bool { return false }}, func() error { return nil })
-	// Force a genuine safety-budget crossing without filling the physical disk.
-	s.startMonitor(1)
+	// Force a genuine free-space reserve crossing without filling the disk.
+	s.updateDiskSpace(49, 1000, s.diskWritten.Load())
 	written := make(chan error, 1)
 	go func() { written <- s.shards[0].Write(points.OnePoint("disk.safety", 1, 1).AppendBinary(nil), 1) }()
 	awaitCapture(t, func() bool { return s.paused.Load() })
