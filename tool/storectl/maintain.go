@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/storemaint/anchors"
 	"github.com/go-graphite/go-carbon/internal/storemaint/coldpack"
 	"github.com/go-graphite/go-carbon/internal/storemaint/configs"
 	"github.com/go-graphite/go-carbon/internal/storemaint/convert"
@@ -12,7 +13,7 @@ import (
 )
 
 func maintain(args []string) error {
-	const usage = "usage: storectl maintain cold-pack|convert|prune-empty-dirs|reclaim-orphans|configs [flags]"
+	const usage = "usage: storectl maintain anchors|cold-pack|convert|prune-empty-dirs|reclaim-orphans|configs [flags]"
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -20,6 +21,8 @@ func maintain(args []string) error {
 	case "--help", "-h":
 		fmt.Fprintln(os.Stdout, usage)
 		return flag.ErrHelp
+	case "anchors":
+		return anchors.Main(args[1:])
 	case "cold-pack":
 		return coldpack.Main(args[1:])
 	case "convert":

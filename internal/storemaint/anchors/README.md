@@ -39,8 +39,8 @@ history until their source-aware reconciliation is independently verified.
 Example on a store, with task-owned artifact paths:
 
 ```sh
-python3 run.py --secret-file /path/to/auth-secret --journal dry-run.jsonl
-python3 run.py --secret-file /path/to/auth-secret --names approved-names.txt \
+storectl maintain anchors --secret-file /path/to/auth-secret --journal dry-run.jsonl
+storectl maintain anchors --secret-file /path/to/auth-secret --names approved-names.txt \
   --journal apply.jsonl --apply --plan approved-plan.md --write-ok WRITE-OK
 ```
 
