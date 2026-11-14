@@ -768,3 +768,17 @@ sidecars through authenticated buckyd maintenance. Omit `-dry-run` and supply
 `storectl maintain migration rebind -proof FILE` preserves reboot-stable
 source/store bindings for systemd ExecStartPre. Use `record` once and `inspect`
 for a read-only qualification. See [installation and safety contract](../../internal/storemaint/migration/README.md).
+
+### Store restarts during sync
+
+`sync` waits through refused/reset connections, truncated responses, service
+unavailability, and store recovery/readiness errors until the operation succeeds
+or the caller cancels it. Restart waits use jittered backoff capped at 30 seconds;
+`--host-wait` does not expire a restart. Authorization, scope, and storage errors
+still fail. The wait is logged at most once per minute and exposed as
+`waiting_for_store` in `progress.json` and the Graphite progress phase.
+
+Native snapshot pins lost during restart are replaced, while durable range
+receipts and discovery/verification cursors retain the original journal identity.
+After stopping the client, use `storectl sync --resume STATE_DIRECTORY` to load its
+saved settings. Keep that directory and any adopted legacy copy journal.

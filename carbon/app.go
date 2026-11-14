@@ -574,6 +574,9 @@ func (app *App) ReloadConfig() error {
 // the returned channel before exiting or closing storage used by active reads.
 // Assumes we are holding app.Lock().
 func (app *App) stopListeners() <-chan struct{} {
+	if app.Buckyd != nil {
+		app.Buckyd.CancelTransfers()
+	}
 	app.stopInputListeners()
 	return app.stopReadListeners()
 }

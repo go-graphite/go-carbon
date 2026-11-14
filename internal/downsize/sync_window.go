@@ -396,6 +396,19 @@ func (b *syncLiveBackend) splitRejectedWindow(ctx context.Context, source, targe
 }
 
 func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges) (syncCopyResult, error) {
+	var result syncCopyResult
+	err := b.wait(ctx, "CopyWindow", source, func() error {
+		var err error
+		result, err = b.copyWindowOnce(ctx, source, target, names, journalPath, windows)
+		if ctx.Err() == nil && restartCopyError(err) {
+			b.expireWindowPins()
+		}
+		return err
+	})
+	return result, err
+}
+
+func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges) (syncCopyResult, error) {
 	if b.o.noCopy {
 		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
 	}
@@ -551,6 +564,19 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 // gaps are ignored. Precise copy windows still own boundary skips and receipts;
 // an envelope may conservatively select a trailing coarse bucket for that copy.
 func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source string, names []string, windows syncRanges) (map[string][]syncDigest, error) {
+	var result map[string][]syncDigest
+	err := b.wait(ctx, "WindowPresenceRanges", source, func() error {
+		var err error
+		result, err = b.windowPresenceRangesOnce(ctx, source, names, windows)
+		if ctx.Err() == nil && restartCopyError(err) {
+			b.expireWindowPins()
+		}
+		return err
+	})
+	return result, err
+}
+
+func (b *syncLiveBackend) windowPresenceRangesOnce(ctx context.Context, source string, names []string, windows syncRanges) (map[string][]syncDigest, error) {
 	if len(windows) == 0 {
 		return map[string][]syncDigest{}, nil
 	}
@@ -638,7 +664,7 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 				if response.StatusCode == http.StatusConflict {
 					return fmt.Errorf("%w: %s", conflict, message)
 				}
-				return fmt.Errorf("window export HTTP %d: %s", response.StatusCode, message)
+				return &apiError{Status: response.StatusCode, Message: string(message)}
 			}
 			stream, err := chunkstore.NewTransferStream(response.Body)
 			if err != nil {
@@ -809,4 +835,12 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 	c.sessions[source] = shared.sessions[source]
 	shared.mu.Unlock()
 	return c, b.windowMu.RUnlock, nil
+}
+
+// Borrowers release their read lock before retrying. Rotation happens only once
+// all current users finish, so a donor restart cannot invalidate a live borrow.
+func (b *syncLiveBackend) expireWindowPins() {
+	b.windowMu.Lock()
+	b.windowPinned = time.Time{}
+	b.windowMu.Unlock()
 }

@@ -61,6 +61,9 @@ func (app *App) DumpStop() (err error) {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	if app.Buckyd != nil {
+		app.Buckyd.CancelTransfers()
+	}
 	if app.MetricStore != nil {
 		app.MetricStore.CancelNativeTransfers()
 	}

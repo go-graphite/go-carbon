@@ -30,6 +30,7 @@ import (
 // points win in the importer, so redoing a batch is harmless.
 
 type copyOptions struct {
+	onWaiting                                        func(bool)
 	onCommitted                                      func(int)         // optional observer, called after a durable new batch receipt
 	onProgress                                       func(int64, bool) // completed journal names, after fsync; includes replay
 	auth                                             *hostTokenCache
@@ -210,7 +211,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: copyHeaderTimeout(o.transferIdle)}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	withSyncJWT(m.client, o.auth, append(append([]string(nil), o.froms...), o.to)...)
 	progress := newCopyProgress()
-	c := &planFreeCopier{hostWaiter: &hostWaiter{m: m, tick: o.tick, maxBackoff: o.maxBackoff, stallTimeout: o.stallTimeout, progress: progress}, progress: progress, o: o, started: time.Now(), multi: len(o.froms) > 1}
+	c := &planFreeCopier{hostWaiter: &hostWaiter{m: m, tick: o.tick, maxBackoff: o.maxBackoff, stallTimeout: o.stallTimeout, progress: progress, observeWait: o.onWaiting}, progress: progress, o: o, started: time.Now(), multi: len(o.froms) > 1}
 	var target copyStatus
 	sourceTransfers := 0
 	for _, from := range o.froms {
