@@ -346,3 +346,25 @@ func (listener *CarbonserverListener) applySharedStoreQuotas(trieIdx *trieIndex)
 	atomic.StoreUint64(&listener.metrics.MetricsKnown, files)
 	return nil
 }
+
+// canRenderWithoutIndex is limited to native storage: the committed catalog and
+// point reader can resolve literal names without discovery or filesystem scans.
+func (listener *CarbonserverListener) canRenderWithoutIndex() bool {
+	return listener.getMetricIndexStore() != nil
+}
+
+func literalRenderTargets(names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if name == "" || strings.ContainsAny(name, "*?[]{}\\/\x00") {
+			return false
+		}
+	}
+	return true
+}
+
+func (listener *CarbonserverListener) renderNeedsIndex(names []string) bool {
+	return listener.canRenderWithoutIndex() && listener.CurrentFileIndex() == nil && !literalRenderTargets(names)
+}
