@@ -222,6 +222,16 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 // the codec's descriptors directly, so size admission never retains history.
 func (s *Store) visitTransferKeys(ctx context.Context, reader pebble.Reader, m Metadata, add func([]byte, []byte) error, shared ...*transferReader) error {
 	if m.Continuation {
+		// Digest entries are disposable local caches, not transfer payload.
+		// A receiver's revision can numerically match the sender after merging
+		// different point sets, so a copied cache fence must never be trusted.
+		sourceAdd := add
+		add = func(key, value []byte) error {
+			if bytes.HasPrefix(key, []byte(ContinuationDigestPrefix)) {
+				return nil
+			}
+			return sourceAdd(key, value)
+		}
 		kv := s.newContinuationIO(ctx, reader, nil, m).withIterator()
 		if len(shared) > 0 {
 			it, err := shared[0].iterator(&shared[0].continuation, continuationLower, continuationUpper)

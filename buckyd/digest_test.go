@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -148,5 +149,63 @@ func TestTransferDigest(t *testing.T) {
 	service.Handler().ServeHTTP(response, req)
 	if response.Code != 405 {
 		t.Fatal("GET accepted", response.Code)
+	}
+}
+
+func TestTransferSumDigest(t *testing.T) {
+	service, db := testService(t)
+	ctx := context.Background()
+	if _, err := db.Create(ctx, chunkstore.MetricConfig{Name: "sum.a", Retentions: []chunkstore.Retention{{Step: 10, Count: 12}, {Step: 60, Count: 100}}, AggregationMethod: chunkstore.Average}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateMany(ctx, "sum.a", []chunkstore.Point{{Timestamp: 9900, Value: 1}, {Timestamp: 9910, Value: math.Copysign(0, -1)}}); err != nil {
+		t.Fatal(err)
+	}
+	r := DigestRequest{Names: []string{"sum.a", "missing"}, Mode: "sum-v1"}
+	if err := r.validate(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.digest(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[0].Found || len(got[0].Archives) != 2 || got[1].Found || got[0].Mode != "sum-v1" || got[1].Mode != "sum-v1" {
+		t.Fatalf("%+v", got)
+	}
+	var expected chunkstore.PointSum
+	expected.Add(9900, 1)
+	expected.Add(9910, math.Copysign(0, -1))
+	if got[0].Archives[0].Count != int(expected.Count) || got[0].Archives[0].Hash != fmt.Sprintf("%016x", expected.Sum) {
+		t.Fatalf("ordinary sum differs: %+v vs %+v", got[0].Archives[0], expected)
+	}
+	secret := []byte("sum-digest-secret")
+	service.secret = secret
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/transfer/digest", bytes.NewReader(data))
+	req.Header.Set(authHeader, token(t, secret, []string{"*"}, []string{"read"}))
+	response := httptest.NewRecorder()
+	service.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("sum HTTP: %d %s", response.Code, response.Body.String())
+	}
+	var wire []DigestResult
+	if err := json.Unmarshal(response.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) != len(got) || len(wire[0].Archives) != 2 || wire[0].Archives[0] != got[0].Archives[0] {
+		t.Fatalf("sum HTTP mismatch: %+v", wire)
+	}
+	r.Step = 60
+	selected, err := service.digest(ctx, r)
+	if err != nil || len(selected[0].Archives) != 1 || selected[0].Archives[0] != got[0].Archives[1] {
+		t.Fatalf("selected archive: %+v, %v", selected, err)
+	}
+
+	r.Mode = "unknown"
+	if r.validate() == nil {
+		t.Fatal("unknown mode accepted")
 	}
 }

@@ -521,6 +521,11 @@ func TestPrewarmRawStateMatchesOpen(t *testing.T) {
 				if err := codec.LoadState(ctx, raw, meta, clock); err != nil {
 					t.Fatal(err)
 				}
+				// Update checks the local digest fence before opening files;
+				// prewarm must include this state dependency (including a miss).
+				if _, err := sumCacheCurrent(opened, meta.Revision); err != nil {
+					t.Fatal(err)
+				}
 				fs := newContinuationFiles(opened, true).withClock(clock)
 				if err := fs.prefetchNames(); err != nil {
 					t.Fatal(err)
