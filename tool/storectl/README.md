@@ -8,15 +8,17 @@ The owning donor and receiver daemons must also contain the native engine.
 
 ## Controller progress metrics
 
-Every `storectl` invocation sends Graphite plaintext to `127.0.0.1:2003`
+Every `storectl` command with a `--state` sends Graphite plaintext to `127.0.0.1:2003`
 by default. Set `STORECTL_GRAPHITE_ADDR=receiver:2003` when the controller
 runs elsewhere. The receiver must accept and route this namespace. No daemon
 or scrape configuration change is required when a local receiver already exists.
 
-Series are `tools.storectl.<runner>.<invocation>.<command>.<phase>.<metric>`:
+Series are `tools.storectl.<runner>.<run>.<command>.<phase>.<metric>`:
 `done`, `total`, `names_per_second`, `active` and `heartbeat` (Unix seconds).
-Runner punctuation becomes underscores; the invocation is a fresh 12-character
-hash, so concurrent runs cannot overwrite one another. Snapshots are emitted at
+Runner punctuation becomes underscores; the run is a stable 12-character
+SHA256 prefix of the absolute, cleaned state path. Resumes and client/binary
+replacements reuse the same series; separate state paths distinguish concurrent runs.
+PID, start time and stream settings do not enter the identity. Snapshots are emitted at
 startup, every 15s and on exit. A phase transition clears the previous phase’s activity and rate.
 `active=0` records termination, not successful
 verification. Consult the command exit status and summary for success/residuals.

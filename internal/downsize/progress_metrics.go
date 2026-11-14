@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,13 +23,20 @@ func MainWithMetrics(args []string) error {
 		addr = "127.0.0.1:2003"
 	}
 	host, _ := os.Hostname()
-	operation := "unknown"
-	if len(args) > 0 {
-		operation = args[0]
+	prefix, state := progressMetricIdentity(host, args)
+	if state == "" {
+		return Main(args)
 	}
-	// One bounded identity per invocation, shared by nested sync copy operations.
-	id := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", host, os.Getpid(), time.Now().UnixNano()))))[:12]
-	p := &progressMetrics{addr: addr, prefix: "tools.storectl." + metricToken(host) + "." + id + "." + metricToken(operation), phase: "starting", active: 1}
+	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1}
+	if args[0] == "sync" {
+		// A legacy FILE resumes copying before its adjacent FILE.sync state.
+		// Both are the same controller; nested batch journals are excluded.
+		p.paths = map[string]bool{
+			state + ".progress.json":                      true,
+			filepath.Join(state, "progress.json"):         true,
+			filepath.Join(state+".sync", "progress.json"): true,
+		}
+	}
 	outputMu.Lock()
 	progressObserver = p.observe
 	outputMu.Unlock()
@@ -61,6 +69,42 @@ func MainWithMetrics(args []string) error {
 	return Main(args)
 }
 
+// The state path survives process restarts and binary/client replacements. Do
+// not include PID, time, flags that tune concurrency, or journal contents that
+// grow during copying. Commands without state do not publish copy progress.
+func progressMetricIdentity(host string, args []string) (prefix, state string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		key, value, equals := strings.Cut(args[i], "=")
+		if key != "--state" && key != "-state" {
+			continue
+		}
+		if !equals && i+1 < len(args) {
+			i++
+			value = args[i]
+		}
+		state = value
+	}
+	if state == "" {
+		return "", ""
+	}
+	state = metricStatePath(state)
+	id := fmt.Sprintf("%x", sha256.Sum256([]byte(state)))[:12]
+	return "tools.storectl." + metricToken(host) + "." + id + "." + metricToken(args[0]), state
+}
+
+func metricStatePath(path string) string {
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return filepath.Clean(path)
+}
+
 func metricToken(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' {
@@ -76,18 +120,26 @@ type progressMetrics struct {
 	addr, prefix, phase       string
 	active, done, total, rate float64
 	path, lastSentPhase       string
+	paths                     map[string]bool
 	warned                    bool
 }
 
 func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	p.mu.Lock()
-	// The parent publishes before any nested copy starts. Keep its identity.
-	if p.path == "" {
-		p.path = path
-	}
-	if p.path != path {
-		p.mu.Unlock()
-		return
+	if p.paths != nil {
+		if !p.paths[metricStatePath(path)] {
+			p.mu.Unlock()
+			return
+		}
+	} else {
+		// Other controllers publish their parent before nested copy starts.
+		if p.path == "" {
+			p.path = path
+		}
+		if p.path != path {
+			p.mu.Unlock()
+			return
+		}
 	}
 	p.phase = metricToken(snapshot.Phase)
 	if p.phase == "" {

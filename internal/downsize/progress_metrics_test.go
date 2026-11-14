@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -132,5 +133,110 @@ func TestProgressMetricsSourceBatchPreservesControllerPhase(t *testing.T) {
 	}
 	if s.prog.phase != "window retry" || s.prog.total != 1000 || s.prog.done.Load() != 150 {
 		t.Fatalf("batch replaced controller progress: %s %d/%d", s.prog.phase, s.prog.done.Load(), s.prog.total)
+	}
+}
+
+// A real legacy FILE resume must reuse the exact Graphite paths emitted by the
+// previous client, even though its journal has grown and concurrency changes.
+func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
+	f, src, dst := newFakeCopy(t, []string{"a", "b", "c"})
+	state := filepath.Join(t.TempDir(), "copy.jsonl")
+	fixture, err := os.ReadFile("testdata/legacy-copy.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture = []byte(strings.NewReplacer("SOURCE", src, "TARGET", dst).Replace(string(fixture)))
+	if err := os.WriteFile(state, fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("STORECTL_GRAPHITE_ADDR", listener.Addr().String())
+	lines := make(chan string, 200)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			s := bufio.NewScanner(c)
+			for s.Scan() {
+				lines <- s.Text()
+			}
+			c.Close()
+		}
+	}()
+	defer func() { listener.Close(); <-stopped }()
+	invoke := func(args []string) map[string]bool {
+		t.Helper()
+		if err := MainWithMetrics(args); err != nil {
+			t.Fatal(err)
+		}
+		// All synchronous sends precede this marker in the accept queue.
+		c, err := net.Dial("tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintln(c, "END")
+		c.Close()
+		paths := map[string]bool{}
+		for {
+			select {
+			case line := <-lines:
+				if line == "END" {
+					return paths
+				}
+				fields := strings.Fields(line)
+				if len(fields) != 3 || !strings.HasPrefix(fields[0], "tools.storectl.") {
+					t.Fatalf("unexpected series %q", line)
+				}
+				parts := strings.Split(fields[0], ".")
+				if len(parts) != 7 {
+					t.Fatalf("unexpected metric path %q", fields[0])
+				}
+				paths[strings.Join(parts[:5], ".")] = true
+			case <-time.After(3 * time.Second):
+				t.Fatal("missing metric marker")
+			}
+		}
+	}
+	args := []string{"sync", "--from", src, "--to", dst, "--state", state, "--no-verify", "--streams", "1"}
+	first := invoke(args)
+	args[len(args)-1] = "2"
+	second := invoke(args)
+	if len(first) != 1 || !reflect.DeepEqual(first, second) {
+		t.Fatalf("resume split metric identity:\n%v\n%v", first, second)
+	}
+	if !reflect.DeepEqual(f.imported, map[string]int{"c": 1}) {
+		t.Fatal(f.imported)
+	}
+}
+
+func TestProgressMetricsStateIdentityAndParentTransition(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	prefix, canonical := progressMetricIdentity("runner", []string{"sync", "--state", state})
+	for _, args := range [][]string{
+		{"sync", "--state=" + filepath.Join(filepath.Dir(state), ".", "state")},
+		{"sync", "-state", state, "--streams", "128"},
+		{"sync", "--state=discard", "--state=" + state},
+	} {
+		if got, _ := progressMetricIdentity("runner", args); got != prefix {
+			t.Fatalf("%v: %s != %s", args, got, prefix)
+		}
+	}
+	if other, _ := progressMetricIdentity("runner", []string{"sync", "--state", state + "-other"}); other == prefix {
+		t.Fatal("distinct state collision")
+	}
+	p := &progressMetrics{prefix: prefix, paths: map[string]bool{canonical + ".progress.json": true, filepath.Join(canonical+".sync", "progress.json"): true}}
+	p.observe(state+".progress.json", progressSnapshot{Phase: "copy", Done: 7, Status: "running"})
+	p.observe(filepath.Join(state+".sync", "progress.json"), progressSnapshot{Phase: "verify", Done: 8, Status: "running"})
+	p.observe(filepath.Join(state+".sync", "nested", "copy.progress.json"), progressSnapshot{Phase: "nested", Done: 999, Status: "running"})
+	if p.prefix != prefix || p.phase != "verify" || p.done != 8 {
+		t.Fatalf("parent transition lost: %+v", p)
 	}
 }
