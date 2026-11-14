@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -63,6 +64,10 @@ func TestTransferSourceDifferentialAndReplay(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer source.Close()
+			page, err := source.ListCatalogPage(ctx, "checkpoint.oracle.", "", 1000)
+			if err != nil || len(page) != len(names) {
+				t.Fatalf("offline catalog: got %d names, want %d: %v", len(page), len(names), err)
+			}
 			if other, err := store.OpenTransferSource(checkpoint, store.TransferSourceOptions{Continuation: codec}); err == nil {
 				other.Close()
 				t.Fatal("second checkpoint opener admitted")
@@ -140,6 +145,9 @@ func TestTransferSourceDifferentialAndReplay(t *testing.T) {
 			}
 			if err := source.Close(); err != nil {
 				t.Fatal(err)
+			}
+			if _, err := source.ListCatalogPage(ctx, "", "", 1000); !errors.Is(err, store.ErrClosed) {
+				t.Fatalf("offline catalog after close: %v", err)
 			}
 			after := sourceFiles(t, checkpoint)
 			if fmt.Sprint(before) != fmt.Sprint(after) {

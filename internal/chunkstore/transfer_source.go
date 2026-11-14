@@ -70,11 +70,24 @@ func OpenTransferSource(directory string, options TransferSourceOptions) (*Trans
 	s.coldPack.format.Store(format >= 9)
 	s.coldPack.floatFormat.Store(format >= 11)
 	s.referenceFormat.Store(format >= 12)
+	// Offline catalog discovery uses the same read admission as a live store.
+	s.readCtx, s.readCancel = context.WithCancel(context.Background())
+	s.readDone = make(chan struct{})
 	return &TransferSource{store: s}, nil
 }
 
 func (s *TransferSource) Close() error {
-	s.once.Do(func() { s.err = s.store.db.Close(); s.store.cache.Unref() })
+	s.once.Do(func() {
+		s.store.readMu.Lock()
+		s.store.readCancel()
+		if s.store.readCount == 0 {
+			close(s.store.readDone)
+		}
+		s.store.readMu.Unlock()
+		<-s.store.readDone
+		s.err = s.store.db.Close()
+		s.store.cache.Unref()
+	})
 	return s.err
 }
 
