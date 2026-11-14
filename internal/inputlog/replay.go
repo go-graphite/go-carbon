@@ -4,9 +4,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"runtime"
-	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -53,6 +51,10 @@ type ReplayCursor struct {
 	Records uint64 `json:"records"`
 }
 
+// ReplayCursors holds one cursor per on-disk partition. Each partition has a
+// single writer; callers may snapshot the set after replay workers have joined.
+type ReplayCursors [partitions]ReplayCursor
+
 // ReplayStopped joins all partition workers before returning on cancellation.
 func (l *Log) ReplayStopped(apply func(*points.Points), stop <-chan struct{}) (ReplayStats, error) {
 	return l.ReplayStoppedFrom(func(p *points.Points) bool { apply(p); return true }, stop, nil, nil)
@@ -83,26 +85,64 @@ func (l *Log) ReplayStoppedFrom(apply func(*points.Points) bool, stop <-chan str
 	}
 	from = active
 	workers := min(runtime.GOMAXPROCS(0), partitions)
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(workers), zstd.IgnoreChecksum(true))
-	if err != nil {
-		return stats, err
+	// Inventory metadata once. Each reader owns its payload buffer, decoder,
+	// stream state and ordered frame list. A blocked partition must not stall
+	// disk reads or decoding for other partitions behind a producer queue.
+	type work struct {
+		frame *frameRef
+		apply bool
 	}
-	defer dec.Close()
-	var pointCount, corrupt atomic.Int64
-	buffers := sync.Pool{New: func() any { return new([]byte) }}
-	// Each partition's frames go to one worker, which alone uses its stream.
-	var streams [partitions]streamDecoder
-	var blocked [partitions]bool
-	queues := make([]chan replayFrame, workers)
+	jobs := make([][]work, workers)
+	for _, list := range []struct {
+		frames []frameRef
+		apply  bool
+	}{{l.prefix, false}, {l.pending, true}} {
+		for i := range list.frames {
+			f := &list.frames[i]
+			if !list.apply && f.h.codec != codecStream {
+				continue
+			}
+			worker := int(f.h.partition) % workers
+			jobs[worker] = append(jobs[worker], work{f, list.apply})
+		}
+	}
+	type result struct {
+		stats ReplayStats
+		err   error
+	}
+	results := make([]result, workers)
 	var wg sync.WaitGroup
-	for i := range queues {
-		queues[i] = make(chan replayFrame, 4)
+	for i := range jobs {
 		wg.Go(func() {
-			var raw []byte
-			for f := range queues[i] {
-				var frameErr error
+			r := &results[i]
+			dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.IgnoreChecksum(true))
+			if err != nil {
+				r.err = err
+				return
+			}
+			defer dec.Close()
+			var raw, payload []byte
+			var streams [partitions]streamDecoder
+			var blocked [partitions]bool
+			for _, job := range jobs[i] {
+				select {
+				case <-stop:
+					r.err = errors.New("input log replay stopped")
+					return
+				default:
+				}
+				ref := job.frame
+				if cap(payload) < int(ref.h.length) {
+					payload = make([]byte, ref.h.length)
+				} else {
+					payload = payload[:ref.h.length]
+				}
+				if _, r.err = ref.seg.file.ReadAt(payload, ref.off+frameHeaderSize); r.err != nil {
+					return
+				}
+				f := replayFrame{payload: payload, h: ref.h, seq: ref.seg.seq, off: ref.off, apply: job.apply}
 				var records uint64
-				var accepted int
+				var frameErr error
 				cursor := from[f.h.partition]
 				raw, _, frameErr = decodeFrame(dec, f, raw[:0], &streams[f.h.partition], func(p *points.Points) {
 					records++
@@ -113,7 +153,7 @@ func (l *Log) ReplayStoppedFrom(apply func(*points.Points) bool, stop <-chan str
 						return
 					}
 					if apply(p) {
-						accepted += len(p.Data)
+						r.stats.Points += int64(len(p.Data))
 						if advance != nil {
 							advance(f.h.partition, ReplayCursor{Segment: f.seq, Salt: f.h.salt, Offset: f.off, Records: records})
 						}
@@ -121,56 +161,32 @@ func (l *Log) ReplayStoppedFrom(apply func(*points.Points) bool, stop <-chan str
 						blocked[f.h.partition] = true
 					}
 				})
-				pointCount.Add(int64(accepted))
 				if f.apply {
+					r.stats.Frames++
+					r.stats.Bytes += int64(len(payload))
 					l.replayPendingBytes.Add(-int64(frameHeaderSize) - int64(f.h.length))
+				} else {
+					r.stats.DictionaryFrames++
 				}
 				if frameErr != nil {
-					corrupt.Add(1)
+					r.stats.Corrupt++
 					l.logger.Warn("skipping corrupt input log frame", zap.Uint64("segment", f.seq),
 						zap.Uint16("partition", f.h.partition), zap.Error(frameErr))
 				}
-				payload := f.payload[:0]
-				buffers.Put(&payload)
 			}
 		})
 	}
-	var readErr error
-frames:
-	for i, f := range slices.Concat(l.prefix, l.pending) {
-		select {
-		case <-stop:
-			readErr = errors.New("input log replay stopped")
-			break frames
-		default:
-		}
-		replayed := i >= len(l.prefix)
-		if !replayed && f.h.codec != codecStream {
-			continue
-		}
-		buf := buffers.Get().(*[]byte)
-		payload := slices.Grow((*buf)[:0], int(f.h.length))[:f.h.length]
-		if _, readErr = f.seg.file.ReadAt(payload, f.off+frameHeaderSize); readErr != nil {
-			break
-		}
-		if replayed {
-			stats.Frames++
-			stats.Bytes += int64(len(payload))
-		} else {
-			stats.DictionaryFrames++
-		}
-		select {
-		case queues[int(f.h.partition)%workers] <- replayFrame{payload: payload, h: f.h, seq: f.seg.seq, off: f.off, apply: replayed}:
-		case <-stop:
-			readErr = errors.New("input log replay stopped")
-			break frames
-		}
-	}
-	for _, q := range queues {
-		close(q)
-	}
 	wg.Wait()
-	stats.Points, stats.Corrupt, stats.Duration = pointCount.Load(), corrupt.Load(), time.Since(started)
+	var readErr error
+	for _, r := range results {
+		stats.Frames += r.stats.Frames
+		stats.Points += r.stats.Points
+		stats.Bytes += r.stats.Bytes
+		stats.Corrupt += r.stats.Corrupt
+		stats.DictionaryFrames += r.stats.DictionaryFrames
+		readErr = errors.Join(readErr, r.err)
+	}
+	stats.Duration = time.Since(started)
 	l.total.replayed.Add(stats.Points)
 	l.total.replayNanos.Store(int64(stats.Duration))
 	return stats, readErr

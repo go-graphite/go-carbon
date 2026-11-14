@@ -394,7 +394,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			s.historyLog.Store(seg)
 			// The journal may have been retired and replaced since this cursor
 			// committed. Its per-segment salts decide which prefixes still match.
-			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, seg.source)
 			if err == nil {
 				seg.sealed.Store(true)
 				seg.replayed.Store(true)

@@ -136,7 +136,6 @@ type startupInput struct {
 	historyReady                                                        atomic.Bool
 	historyLog                                                          atomic.Pointer[startupSegment]
 	journalReset                                                        bool // owned by the direct-transition lock
-	journalMu                                                           sync.Mutex
 	journalOffsets                                                      map[uint16]inputlog.ReplayCursor
 	replayYields                                                        atomic.Int64
 	historyPoints                                                       atomic.Int64
