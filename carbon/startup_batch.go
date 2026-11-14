@@ -17,6 +17,8 @@ type captureGroup struct {
 	data   []points.Point
 }
 type captureBatch struct {
+	decoder     points.FrameDecoder
+	point       points.Points
 	index       map[string]int
 	groups      []captureGroup
 	used, count int
@@ -37,7 +39,7 @@ func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
 	resolver, _ := sink.admission.(interface {
 		ResolveRecoveryMetric([]byte) cache.RecoveryMetric
 	})
-	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
+	return b.decoder.Read(raw, func(name []byte, data []points.Point) {
 		tagged := bytes.IndexByte(name, ';') >= 0
 		if tagged {
 			clear(b.index)
@@ -55,7 +57,11 @@ func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
 				g.name = g.metric.Name()
 				b.cost += g.metric.OverheadBytes()
 			} else {
-				g.name = string(name)
+				if namer, ok := sink.admission.(interface{ RecoveryMetricName([]byte) string }); ok {
+					g.name = namer.RecoveryMetricName(name)
+				} else {
+					g.name = string(name)
+				}
 				b.cost += sink.admission.RecoveryMetricBytes(name)
 			}
 			if !tagged {
@@ -66,16 +72,18 @@ func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
 		b.count += len(data)
 	})
 }
+func (b *captureBatch) applyGroup(i int, source *cache.RecoverySource, sink *startupSink, live bool) {
+	g := &b.groups[i]
+	b.point.Metric, b.point.Data = g.name, g.data
+	if sink.groupedAdd != nil {
+		sink.groupedAdd(g.metric, &b.point, source, live)
+	} else {
+		sink.add(&b.point, source)
+	}
+}
 func (b *captureBatch) apply(source *cache.RecoverySource, sink *startupSink, live bool) {
 	for i := range b.used {
-		g := &b.groups[i]
-		if sink.groupedAdd != nil {
-			sink.groupedAdd(g.metric, g.data, source, live)
-		} else {
-			p := points.Points{Metric: g.name, Data: g.data}
-			// The cache consumes data synchronously, just like the borrowed decoder.
-			sink.add(&p, source)
-		}
+		b.applyGroup(i, source, sink, live)
 	}
 }
 func (b *captureBatch) checkCount(n int) error {
@@ -83,4 +91,38 @@ func (b *captureBatch) checkCount(n int) error {
 		return fmt.Errorf("capture batch point count: got %d want %d", b.count, n)
 	}
 	return nil
+}
+
+// Capture append uses a bounded owned-name memo, independent of the replay
+// owner's memo. No cache access is needed before startup attaches the sink.
+type captureWriteNames struct {
+	names map[string]string
+	bytes int
+}
+
+func (*captureWriteNames) HasRecoveryCapacityBatch(int, int64) bool { return true }
+func (*captureWriteNames) RecoveryMetricBytes([]byte) int64         { return 0 }
+func (m *captureWriteNames) RecoveryMetricName(name []byte) string {
+	if canonical, ok := m.names[string(name)]; ok {
+		return canonical
+	}
+	if m.names == nil {
+		m.names = make(map[string]string)
+	}
+	if len(m.names) >= 4096 || m.bytes+len(name) > 4<<20 {
+		clear(m.names)
+		m.bytes = 0
+	}
+	canonical := string(name)
+	m.names[canonical] = canonical
+	m.bytes += len(name)
+	return canonical
+}
+func (b *captureBatch) appendBinary(dst []byte) []byte {
+	for i := range b.used {
+		g := &b.groups[i]
+		p := points.Points{Metric: g.name, Data: g.data}
+		dst = p.AppendBinary(dst)
+	}
+	return dst
 }

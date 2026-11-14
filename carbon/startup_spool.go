@@ -87,7 +87,7 @@ type captureAdmission interface {
 	RecoveryMetricBytes([]byte) int64
 }
 type startupSink struct {
-	groupedAdd  func(cache.RecoveryMetric, []points.Point, *cache.RecoverySource, bool)
+	groupedAdd  func(cache.RecoveryMetric, *points.Points, *cache.RecoverySource, bool)
 	admission   captureAdmission
 	add         func(*points.Points, *cache.RecoverySource)
 	liveAdd     func(*points.Points, *cache.RecoverySource)
@@ -303,7 +303,15 @@ func (s *startupShard) appendLoop() {
 	defer close(s.written)
 	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(false))
 	defer enc.Close()
-	var buf, frame []byte
+	var buf, frame, grouped []byte
+	var batch captureBatch
+	names := &captureWriteNames{}
+	writeSink := &startupSink{admission: names}
+	// Requests are acknowledged only after the coalesced frame is written. The
+	// bounded linger adds no newly acknowledged, memory-only crash window.
+	linger := time.NewTimer(time.Hour)
+	linger.Stop()
+	defer linger.Stop()
 	var held startupAppend
 	haveHeld := false
 	var index uint64
@@ -381,6 +389,7 @@ func (s *startupShard) appendLoop() {
 		pending = append(pending[:0], first)
 		buf = append(buf[:0], first.data...)
 		count := first.count
+		linger.Reset(200 * time.Microsecond)
 
 	drain:
 		for len(buf) < s.owner.policy.writeBuffer {
@@ -397,10 +406,11 @@ func (s *startupShard) appendLoop() {
 				pending = append(pending, next)
 				buf = append(buf, next.data...)
 				count += next.count
-			default:
+			case <-linger.C:
 				break drain
 			}
 		}
+		linger.Stop()
 		var err error
 		if s.current.Load().sealed.Load() {
 			err = errors.New("startup capture partition is sealed")
@@ -408,10 +418,19 @@ func (s *startupShard) appendLoop() {
 			err = failure.err
 		} else {
 			encodedAt := time.Now()
-			frame = recovery.EncodeCaptureFrame(enc, buf, frame, count)
+			err = batch.prepare(buf, writeSink)
+			if err == nil {
+				err = batch.checkCount(count)
+			}
+			payload := buf
+			if err == nil && batch.used < count {
+				grouped = batch.appendBinary(grouped[:0])
+				payload = grouped
+			}
+			frame = recovery.EncodeCaptureFrame(enc, payload, frame, count)
 			s.timings[captureEncode].observe(encodedAt)
 			cur := s.current.Load()
-			if cur.size.Load() > 0 && cur.size.Load()+int64(len(frame)) > s.owner.policy.segmentBytes {
+			if err == nil && cur.size.Load() > 0 && cur.size.Load()+int64(len(frame)) > s.owner.policy.segmentBytes {
 				// Sealing rotates the append file, never the socket or input stream.
 				cur, err = rotate(cur)
 			}
@@ -859,6 +878,7 @@ func (s *startupShard) replay(sink *startupSink) {
 	defer dec.Close()
 	window := captureReadWindow{target: s.owner.policy.readBuffer}
 	raw := make([]byte, 0, s.owner.policy.readBuffer)
+	var batch captureBatch
 	for {
 		select {
 		case <-s.owner.replayStop:
@@ -921,12 +941,15 @@ func (s *startupShard) replay(sink *startupSink) {
 		if err := s.owner.waitCapture(); err != nil {
 			return
 		}
-		cost, e := captureMetricBytes(raw, sink.admission)
-		if e != nil {
+		if e := batch.prepare(raw, sink); e != nil {
 			s.fail(e)
 			return
 		}
-		for !sink.admission.HasRecoveryCapacityBatch(count, cost) {
+		if e := batch.checkCount(count); e != nil {
+			s.fail(e)
+			return
+		}
+		for !sink.admission.HasRecoveryCapacityBatch(count, batch.cost) {
 			s.live.Store(false)
 			select {
 			case <-s.owner.replayStop:
@@ -940,10 +963,7 @@ func (s *startupShard) replay(sink *startupSink) {
 		if s.live.Load() && sink.liveAdd != nil {
 			applySink.add = sink.liveAdd
 		}
-		if err = s.apply(raw, seg.source, &applySink); err != nil {
-			s.fail(err)
-			return
-		}
+		batch.apply(seg.source, &applySink, s.live.Load() && sink.liveAdd != nil)
 		s.commit(seg, pos.offset+int64(size), count, int64(size))
 	}
 }

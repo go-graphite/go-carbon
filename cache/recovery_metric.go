@@ -36,7 +36,7 @@ func (c *Cache) ResolveRecoveryMetric(name []byte) RecoveryMetric {
 // AddRecoveryMetric applies an admitted group through ordinary recovery/source
 // tracking. Tags still normalize before routing; a precomputed hash is used only
 // when normalization leaves the resolved name unchanged.
-func (c *Cache) AddRecoveryMetric(m RecoveryMetric, data []points.Point, source *RecoverySource, live bool) {
-	p := points.Points{Metric: m.name, Data: data}
-	c.addWithRestoreHashed(&p, !live, true, false, nil, source, &m)
+func (c *Cache) AddRecoveryMetric(m RecoveryMetric, p *points.Points, source *RecoverySource, live bool) {
+	p.Metric = m.name
+	c.addWithRestoreHashed(p, !live, true, false, nil, source, &m)
 }

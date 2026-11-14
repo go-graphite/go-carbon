@@ -467,27 +467,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			var loaded int
 			var e error
 			if framed {
-				worker := &startupShard{owner: s}
-				loaded, e = recovery.ReadCaptureFramesPipeline(reader, s.policy.readBuffer, func(raw []byte, n int, stop <-chan struct{}) (int64, error) {
-					if e := s.waitCaptureUntil(stop); e != nil {
-						return 0, e
-					}
-					return captureMetricBytes(raw, core)
-				}, func(raw []byte, n int, end, cost int64) error {
-					// Admission belongs to the ordered consumer: legacy count-only
-					// limits must observe application of the previous frame.
-					for !core.HasRecoveryCapacityBatch(n, cost) {
-						if cancelled() {
-							return errStartupReplayStopped
-						}
-						time.Sleep(time.Millisecond)
-					}
-					if e := worker.apply(raw, seg.source, sink); e != nil {
-						return e
-					}
+				loaded, e = s.replayCaptureBatches(reader, seg.source, sink, func(end int64, n int) {
 					s.historyPoints.Add(int64(n))
 					advance(offset + end)
-					return nil
 				})
 			} else {
 				// Keep the reader's consumed record frontier separate from read-ahead.
