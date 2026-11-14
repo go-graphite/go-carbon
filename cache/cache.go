@@ -95,8 +95,6 @@ type Cache struct {
 		receivedPoints      atomic.Uint64
 		recoveredPoints     atomic.Uint64
 		xlogDivertedPoints  atomic.Uint64
-		throttledPoints     atomic.Uint64
-		overflowPoints      atomic.Uint64
 		invalidTagPoints    atomic.Uint64
 		xlogFailedPoints    atomic.Uint64
 		nameTooLong         atomic.Uint64 // points refused because the name exceeds points.MaxMetricNameBytes
@@ -124,10 +122,16 @@ type indexFilter struct {
 }
 
 // A "thread" safe string to anything map.
+// Accounting writers hold mu, so load/store publication needs no atomic RMW.
+// Readers use atomic loads and never wait for ingestion or dump locks.
 type Shard struct {
-	receivedPoints atomic.Uint64 // fast intake, independent of other shards
-	inFlightPoints atomic.Int64
-	livePoints     uint64 // accepted live points, protected by mu; excludes restoration
+	recoveredPoints     atomic.Uint64 // writers hold mu
+	receivedPoints      atomic.Uint64 // live inputs refused/diverted after shard resolution
+	inFlightPoints      atomic.Int64  // writers hold mu
+	throttledPoints     atomic.Uint64 // writers hold mu
+	overflowPoints      atomic.Uint64 // writers hold mu
+	livePoints          uint64        // accepted live points, protected by mu; excludes restoration
+	livePointsPublished atomic.Uint64 // receipt publication, at most 63 accepted points behind
 
 	streamGeneration uint64
 	streamSeries     []seriesSlot
@@ -450,7 +454,7 @@ func removeNotConfirmed(shard *Shard, p *points.Points) bool {
 
 		copy(shard.notConfirmed[i:], shard.notConfirmed[i+1:shard.notConfirmedUsed])
 		shard.notConfirmedUsed--
-		shard.inFlightPoints.Add(-int64(len(p.Data)))
+		shard.inFlightPoints.Store(shard.inFlightPoints.Load() - int64(len(p.Data)))
 		shard.inFlightBytes -= flightMemory(p)
 		shard.notConfirmed[shard.notConfirmedUsed] = nil
 		return true
@@ -686,7 +690,6 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 	if shard.log.first != nil && shard.log.entries.Len() >= maxShardLogEntries {
 		return false
 	}
-	shard.receivedPoints.Add(1)
 	if c.throttleWithHash != nil {
 		// The throttle does not retain the points of a cached metric.
 		shard.scratchData[0] = points.Point{Value: value, Timestamp: timestamp}
@@ -694,11 +697,13 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		throttled := c.throttleWithHash(&shard.scratch, true, hash, &values.throttle)
 		shard.scratch.Metric = ""
 		if throttled {
-			c.stat.throttledPoints.Add(1)
+			shard.throttledPoints.Store(shard.throttledPoints.Load() + 1)
+			shard.receivedPoints.Store(shard.receivedPoints.Load() + 1)
 			return true
 		}
 	}
-	if c.overflows(s, 1) {
+	if c.overflows(shard, s, 1) {
+		shard.receivedPoints.Store(shard.receivedPoints.Load() + 1)
 		return true
 	}
 	capacity := cap(values.compact.buf)
@@ -713,6 +718,9 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		c.syncMemoryLocked(shard)
 	}
 	shard.livePoints++
+	if shard.livePoints&63 == 0 {
+		shard.livePointsPublished.Store(shard.livePoints)
+	}
 	c.addedLocked(shard, s, values, 1, true, false)
 	return true
 }
@@ -796,27 +804,18 @@ func (c *Cache) addWaiting(p *points.Points, restored, recovered bool, series *s
 }
 
 func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) (wait <-chan struct{}) {
-	// Restore may retry while waiting for journal space; count a record only
-	// once it has completed intake. Requeue never enters this path.
-	defer func() {
-		if wait == nil {
-			if restored || recovered {
-				c.stat.recoveredPoints.Add(uint64(len(p.Data)))
-			} else {
-				c.stat.receivedPoints.Add(uint64(len(p.Data)))
-			}
-		}
-	}()
 	s := c.settings.Load().(*cacheSettings)
 
 	// Every new name reaches the cache here: the fast paths only append to
 	// names already cached, so a refused name never takes cache memory.
 	if len(p.Metric) > points.MaxMetricNameBytes {
+		c.recordUnshardedInput(p, restored || recovered)
 		c.rejectNameTooLong(p)
 		return nil
 	}
 
 	if s.xlog != nil {
+		c.recordUnshardedInput(p, restored || recovered)
 		c.divert(s.xlog, p)
 		return nil
 	}
@@ -826,6 +825,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		p.Metric, err = tags.Normalize(p.Metric)
 		if err != nil {
 			atomic.AddUint32(&c.stat.tagsNormalizeErrors, 1)
+			c.recordUnshardedInput(p, restored || recovered)
 			c.stat.invalidTagPoints.Add(uint64(len(p.Data)))
 			return nil
 		}
@@ -835,7 +835,17 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	hash := xxh3.HashString(p.Metric)
 	shard := c.data[hash&(shardCount-1)]
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
+	accepted := false
+	defer func() {
+		if wait == nil {
+			if restored || recovered {
+				shard.recoveredPoints.Store(shard.recoveredPoints.Load() + uint64(len(p.Data)))
+			} else if !accepted {
+				shard.receivedPoints.Store(shard.receivedPoints.Load() + uint64(len(p.Data)))
+			}
+		}
+		shard.mu.Unlock()
+	}()
 
 	// An Add may have loaded its settings before graceful diversion, then waited
 	// behind the shard dump. Recheck under the same lock so it cannot miss both
@@ -891,13 +901,13 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		throttleState = shard.throttleScratch
 		shard.throttleScratch = nil
 		if rejected {
-			c.stat.throttledPoints.Add(uint64(len(p.Data)))
+			shard.throttledPoints.Store(shard.throttledPoints.Load() + uint64(len(p.Data)))
 			return nil
 		}
 	}
 
 	count := len(p.Data)
-	if liveAdmission && c.overflows(s, count) {
+	if liveAdmission && c.overflows(shard, s, count) {
 		return nil
 	}
 
@@ -975,7 +985,11 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		c.syncMemoryLocked(shard)
 	}
 	if !restored && !recovered {
+		accepted = true
 		shard.livePoints += uint64(count)
+		if shard.livePoints&63 < uint64(count) {
+			shard.livePointsPublished.Store(shard.livePoints)
+		}
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore && (!recovered || s.writeoutPhase.IsZero() || p.FirstArrival == 0 || immediate))
 	values.Arrival.Store(arrivalNanos(values.firstArrival))
@@ -985,10 +999,10 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	return nil
 }
 
-func (c *Cache) overflows(s *cacheSettings, count int) bool {
+func (c *Cache) overflows(shard *Shard, s *cacheSettings, count int) bool {
 	if s.maxSize > 0 && c.approxSize() > s.maxSize || s.maxBytes > 0 && c.stat.bytes.Load()+c.queueMemory() > s.maxBytes {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
-		c.stat.overflowPoints.Add(uint64(count))
+		shard.overflowPoints.Store(shard.overflowPoints.Load() + uint64(count))
 		return true
 	}
 	return false
@@ -1113,7 +1127,7 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
-		shard.inFlightPoints.Add(int64(len(p.Data)))
+		shard.inFlightPoints.Store(shard.inFlightPoints.Load() + int64(len(p.Data)))
 		shard.flightPeak = max(shard.flightPeak, shard.notConfirmedUsed)
 		shard.inFlightBytes += flightMemory(p)
 		c.syncMemoryLocked(shard)
