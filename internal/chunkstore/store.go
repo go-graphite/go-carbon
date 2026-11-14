@@ -88,12 +88,9 @@ type Options struct {
 	RelayoutReclaimBytes uint64
 	// ExactBlocks selects integer/floating-point adaptive encoding in a separate
 	// v4 store. A legacy store is never silently upgraded to this format.
-	ExactBlocks bool
-	CacheSize   int64
-	// DeferBlockCache bypasses SST block-cache admission until EnableBlockCache.
-	// Use during finite, receiver-gating recovery to avoid CLOCK scan convoys.
-	DeferBlockCache bool
-	MemTableSize    uint64
+	ExactBlocks  bool
+	CacheSize    int64
+	MemTableSize uint64
 	// Zero preserves Pebble's single-compactor/default concurrency policy.
 	CompactionWorkers       int
 	L0CompactionConcurrency int
@@ -314,8 +311,6 @@ type Store struct {
 	walSync                        *walSyncer
 	snapshotReleased               chan struct{}
 	cache                          *pebble.Cache
-	blockCacheReady                sync.Once
-	restoreBlockCache              func()
 	rangeDelCache                  *pebble.Cache
 	cacheShards                    int
 	now                            func() time.Time
@@ -644,21 +639,6 @@ func Open(dir string, options Options) (*Store, error) {
 			s.cache = pebble.NewCache(options.CacheSize)
 		}
 		opts.Cache = s.cache
-		if options.DeferBlockCache {
-			// Reserve before Pebble opens: the empty caches never admit a block,
-			// so disabling admission cannot itself trigger a long eviction scan.
-			release := s.cache.Reserve(int(s.cache.MaxSize()))
-			var releaseRanges func()
-			if s.rangeDelCache != nil {
-				releaseRanges = s.rangeDelCache.Reserve(int(s.rangeDelCache.MaxSize()))
-			}
-			s.restoreBlockCache = func() {
-				release()
-				if releaseRanges != nil {
-					releaseRanges()
-				}
-			}
-		}
 	}
 	walDir := dir
 	if options.WALDir != "" {
@@ -782,17 +762,6 @@ func Open(dir string, options Options) (*Store, error) {
 // Keep ordinary data/index concurrency while isolating the large range-deletion
 // blocks produced by reconciliation. Shared larger shards made eviction of a
 // large block hold up ordinary metadata reads. The combined budget is unchanged.
-// EnableBlockCache restores the configured cache budget after startup recovery.
-// The bypass changes only advisory SST caching; reads, writes and durability use
-// the ordinary Pebble paths throughout. Concurrent/repeated calls are safe.
-func (s *Store) EnableBlockCache() {
-	s.blockCacheReady.Do(func() {
-		if s.restoreBlockCache != nil {
-			s.restoreBlockCache()
-		}
-	})
-}
-
 func newExactBlockCaches(size int64, shards int) (*pebble.Cache, *pebble.Cache, int) {
 	ranges := min(size/8, int64(1<<30))
 	if shards <= 0 {
