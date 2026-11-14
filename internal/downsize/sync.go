@@ -383,6 +383,11 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		snap.Phase = s.prog.phase
 		snap.Done = s.prog.done.Load()
 		snap.Total = int64(s.prog.total)
+		snap.rateSet = true
+		snap.Rate = 0
+		if elapsed := time.Since(s.prog.started).Seconds(); elapsed > 0 {
+			snap.Rate = float64(max(0, snap.Done-s.prog.replayed.Load())) / elapsed
+		}
 		s.prog.mu.Unlock()
 		snap.Effective = o.policy
 		return snap
@@ -893,6 +898,7 @@ feed:
 		}
 		fed += len(chunk.names)
 		if r, ok := done[chunk.names[0]]; ok && r.Last == chunk.names[len(chunk.names)-1] {
+			s.prog.replayed.Add(int64(r.Names))
 			collect(r)
 			resumed += len(chunk.names)
 			continue

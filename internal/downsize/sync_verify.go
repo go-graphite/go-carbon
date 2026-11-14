@@ -96,6 +96,7 @@ type syncProgress struct {
 	total        int
 	started      time.Time
 	done         atomic.Int64
+	replayed     atomic.Int64 // journal progress, excluded from live throughput
 	skipped      atomic.Int64
 	digests      atomic.Int64 // names compared by digest
 	reads        atomic.Int64 // names read point by point
@@ -109,6 +110,7 @@ func (p *syncProgress) begin(phase string, total int) {
 	defer p.mu.Unlock()
 	p.phase, p.total, p.started = phase, total, time.Now()
 	p.done.Store(0)
+	p.replayed.Store(0)
 }
 
 func (s *syncer) sampled(name string) bool {
@@ -955,9 +957,9 @@ func (s *syncer) progressLine() {
 		}
 	}
 	if elapsed > 0 && done > 0 {
-		rate := float64(done) / elapsed
+		rate := float64(max(0, done-p.replayed.Load())) / elapsed
 		fields["names_per_second"] = rate
-		if total > int(done) {
+		if rate > 0 && total > int(done) {
 			fields["eta_seconds"] = float64(int64(total)-done) / rate
 		}
 	}
