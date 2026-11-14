@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,11 @@ import (
 // existing protocol, including when upgrading from a predecessor that does not
 // know about startup capture. Mirrored read handoff retains its existing path.
 func (app *App) startStartupInput() error {
+	resume, err := readStartupResume(app.Config.Dump.Path)
+	if err != nil {
+		return err
+	}
+
 	fences, err := filepath.Glob(filepath.Join(app.Config.Dump.Path, "input.*.tail.bin.capture-epoch-*"+startupDirectSuffix))
 	if err != nil {
 		return err
@@ -37,7 +43,7 @@ func (app *App) startStartupInput() error {
 	if err := app.tryStartupInput(); err != nil {
 		return err
 	}
-	if len(fences) > 0 && app.startupInput == nil {
+	if (len(fences) > 0 || resume != nil) && app.startupInput == nil {
 		return errors.New("retained direct capture requires ordered startup recovery; preserve sources and restore compatible configuration, manifest and headroom")
 	}
 	return nil
@@ -48,6 +54,10 @@ func (app *App) tryStartupInput() error {
 		return nil
 	}
 	c := app.Config
+	resume, resumeErr := readStartupResume(c.Dump.Path)
+	if resumeErr != nil {
+		return resumeErr
+	}
 	if !c.Dump.StoreInputHandoff || !c.Dump.Enabled ||
 		c.Whisper.StorageBackend != "pebble-chunk" || c.Whisper.StoreMirrorFiles ||
 		c.Tags.Enabled || !c.Tcp.Enabled || c.Tcp.BufferSize != 0 || c.Tcp.Compression != "" ||
@@ -92,13 +102,17 @@ func (app *App) tryStartupInput() error {
 			}
 		}
 	}
-	journalOnly := false
+	if resume != nil {
+		manifest.WAL.Name = strings.TrimSuffix(resume.Root, ".tail.bin") + ".bin"
+		missingCheckpoint = false
+	}
+	journalOnly := resume != nil
 	if missingCheckpoint && c.InputLog.Enabled && app.handoffClaim == nil {
 		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
 		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.tail.bin*"))
 		journalOnly = len(logs) > 0 || len(tails) > 0
 	}
-	if journalOnly {
+	if journalOnly && resume == nil {
 		// Reuse a stable capture namespace without manufacturing or changing
 		// a checkpoint. Ordinary journal validation remains authoritative.
 		manifest = recovery.Manifest{}
@@ -118,7 +132,7 @@ func (app *App) tryStartupInput() error {
 	for _, entry := range entries {
 		name := entry.Name()
 		generation := strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, recovery.CompactPrefix) || strings.HasPrefix(name, recovery.BlocksPrefix) || strings.HasPrefix(name, "input.") || strings.HasPrefix(name, recovery.CompactInputPrefix)
-		if generation && name != manifest.Cache.Name && name != manifest.WAL.Name && !recovery.IsGenerationTail(name, manifest.WAL.Name) {
+		if resume == nil && generation && name != manifest.Cache.Name && name != manifest.WAL.Name && !recovery.IsGenerationTail(name, manifest.WAL.Name) {
 			zapwriter.Logger("app").Error("startup capture requires a single ordered recovery generation; using ordinary recovery", zap.String("filename", name))
 			return nil
 		}
@@ -184,6 +198,7 @@ func (app *App) tryStartupInput() error {
 		closeTCPHandoff(h)
 		return err
 	}
+	spool.resume = resume
 	if receiverStoreHook != nil {
 		spool.observe, _ = receiverStoreHook(func(*points.Points) {}, func([]byte, float64, int64) {})
 	}
@@ -261,7 +276,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				return nil, err
 			}
 			stats := log.Metrics()
-			if stats.PointsWritten == 0 && stats.ReplayedPoints == 0 {
+			if stats.PointsWritten == 0 && stats.ReplayedPoints == 0 && (s.resume == nil || s.journalReset) {
 				// The usual handoff has a fresh journal. Its first records are
 				// the new direct suffix, so checkpoint/tail sources can remain
 				// pending and retire behind this retention pin.
@@ -289,6 +304,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			}
 			core.DisableInputLog()
 			core.EnableInputLogFromNow()
+			s.journalReset = true
 			if err := app.openInputLog(core); err != nil {
 				return nil, err
 			}
@@ -351,6 +367,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			}
 		}
 		tail := s.legacy.current.Load()
+		if tail.source == nil {
+			tail.source = s.legacy.stream.Next()
+		}
 		add := func(source *cache.RecoverySource) func(*points.Points) {
 			return func(p *points.Points) {
 				for !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
@@ -369,18 +388,24 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				return nil
 			}
 			seg := &startupSegment{source: s.legacy.stream.NextJournal()}
-			tail.next.Store(seg)
+			s.appendHistory(tail, seg)
 			tail = seg
 			s.historyLog.Store(seg)
+			// The journal may have been retired and replaced since this cursor
+			// committed. Its per-segment salts decide which prefixes still match.
 			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
-			seg.sealed.Store(true)
-			seg.replayed.Store(true)
+			if err == nil {
+				seg.sealed.Store(true)
+				seg.replayed.Store(true)
+			}
 			return err
 		}
 		openSegment := func(path string) (*startupSegment, error) {
 			if path == s.path {
 				seg := s.legacy.current.Load()
-				seg.source = s.legacy.stream.Next()
+				if seg.source == nil {
+					seg.source = s.legacy.stream.Next()
+				}
 				return seg, nil
 			}
 			f, e := os.OpenFile(path, os.O_RDWR, 0600)
@@ -410,17 +435,34 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				s.historyPendingSegments.Add(-1)
 			}
 			s.size.Add(info.Size())
-			tail.next.Store(seg)
+			s.appendHistory(tail, seg)
 			tail = seg
 			return seg, nil
 		}
 		replaySegment := func(seg *startupSegment, framed bool) error {
-			reader := startupStoppedReader{reader: io.NewSectionReader(seg.file, 0, seg.size.Load()), stop: s.replayStop}
+			offset := int64(0)
+			if s.resume != nil {
+				offset = s.resume.Offsets[filepath.Base(seg.path)]
+			}
+			// The stable raw-tail name is recreated empty when its previous
+			// incarnation was durably released. Its snapshot/store authority
+			// remains valid; the old byte cursor belongs to the removed file.
+			if seg.path == s.path && seg.size.Load() == 0 {
+				offset = 0
+			}
+			if offset < 0 || offset > seg.size.Load() {
+				return fmt.Errorf("invalid startup replay cursor for %s", seg.path)
+			}
+			seg.offset.Store(offset)
+			section := io.NewSectionReader(seg.file, offset, seg.size.Load()-offset)
+			reader := startupStoppedReader{reader: section, stop: s.replayStop}
 			var applied int64
 			advance := func(end int64) {
 				s.historyPendingBytes.Add(applied - end)
 				applied = end
+				seg.offset.Store(end)
 			}
+			advance(offset)
 			started := time.Now()
 			var loaded int
 			var e error
@@ -444,14 +486,27 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 						return e
 					}
 					s.historyPoints.Add(int64(n))
-					advance(end)
+					advance(offset + end)
 					return nil
 				})
 			} else {
-				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
+				// Keep the reader's consumed record frontier separate from read-ahead.
+				buffer := bufio.NewReaderSize(reader, 1<<20)
+				apply := add(seg.source)
+				e = points.ReadBinary(buffer, func(p *points.Points) {
+					apply(p)
+					if !cancelled() {
+						loaded += len(p.Data)
+						pos, _ := section.Seek(0, io.SeekCurrent)
+						advance(offset + pos - int64(buffer.Buffered()))
+					}
+				})
 			}
 			if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, io.ErrUnexpectedEOF) {
 				return e
+			}
+			if cancelled() {
+				return errStartupReplayStopped
 			}
 			advance(seg.size.Load())
 			if seg.size.Load() > 0 {
@@ -464,6 +519,23 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			seg.replayed.Store(true)
 			zapwriter.Logger("app").Info("input tail loaded", zap.String("filename", seg.path), zap.Int("points", loaded), zap.Duration("runtime", time.Since(started)), zap.Bool("input_capturing", true))
 			return nil
+		}
+		if s.resume != nil {
+			for _, name := range s.resume.Snapshots {
+				path := filepath.Join(filepath.Dir(s.path), name)
+				if _, e := os.Stat(path); errors.Is(e, os.ErrNotExist) {
+					continue
+				} else if e != nil {
+					return e
+				}
+				seg, e := openSegment(path)
+				if e != nil {
+					return e
+				}
+				if e = replaySegment(seg, false); e != nil {
+					return e
+				}
+			}
 		}
 		for i := 0; i < len(paths); {
 			if cancelled() {
@@ -567,17 +639,4 @@ func (r startupStoppedReader) Read(p []byte) (int, error) {
 	default:
 		return r.reader.Read(p)
 	}
-}
-
-// startupHistoryReader counts bytes fetched; subtract buffered read-ahead only
-// after a frame has applied, so queued or admission-blocked bytes stay pending.
-type startupHistoryReader struct {
-	reader io.Reader
-	offset int64
-}
-
-func (r *startupHistoryReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	r.offset += int64(n)
-	return n, err
 }

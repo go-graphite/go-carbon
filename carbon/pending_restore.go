@@ -25,7 +25,7 @@ func (app *App) pendingReadsCompatible() bool {
 }
 
 func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.MetricQueue) (bool, error) {
-	if !app.pendingReadsCompatible() {
+	if app.hasStartupResume() || !app.pendingReadsCompatible() {
 		return false, nil
 	}
 	cs := app.Carbonserver
@@ -256,7 +256,7 @@ func (app *App) pendingReadsConfigured() bool {
 // final state by now: a predecessor publishes it before it lets this
 // process start. Assumes we are holding app.Lock().
 func (app *App) startCheckpointOpen() {
-	if !app.pendingReadsConfigured() {
+	if app.hasStartupResume() || !app.pendingReadsConfigured() {
 		return
 	}
 	if w := app.Config.Whisper; app.handoffClaim != nil && w.StoreMirrorFiles && w.StoreLiveMigration {

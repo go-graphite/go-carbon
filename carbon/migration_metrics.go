@@ -463,6 +463,8 @@ var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_releasable_bytes", "Confirmed source prefix bytes awaiting the store durability fence or release.", nil, nil),
 	prometheus.NewDesc("startup_capture_released_bytes_total", "Source bytes durably released during this startup epoch.", nil, nil),
 	prometheus.NewDesc("startup_capture_release_failures_total", "Startup source durability fence or release failures.", nil, nil),
+	prometheus.NewDesc("startup_capture_history_releasable_bytes", "Confirmed inherited history prefix bytes awaiting durability or release.", nil, nil),
+	prometheus.NewDesc("startup_capture_live_releasable_bytes", "Confirmed live spool prefix bytes awaiting durability or release.", nil, nil),
 }
 
 var captureHistoryBytesDesc = prometheus.NewDesc("startup_capture_history_pending_bytes", "Encoded startup spool and journal bytes still waiting for history replay.", nil, nil)
@@ -551,7 +553,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if capture.overBudget.Load() {
 			overBudget = 1
 		}
-		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct, overBudget, float64(capture.releasableBytes.Load()), float64(capture.retiredBytes.Load()), float64(capture.releaseFailures.Load())}
+		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct, overBudget, float64(capture.releasableBytes.Load()), float64(capture.retiredBytes.Load()), float64(capture.releaseFailures.Load()), float64(capture.historyReleasableBytes.Load()), float64(capture.liveReleasableBytes.Load())}
 		for i, v := range extra {
 			kind := prometheus.GaugeValue
 			if i == 1 || i == 6 || i == 7 || i == 11 || i == 12 {

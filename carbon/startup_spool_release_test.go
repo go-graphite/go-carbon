@@ -205,6 +205,8 @@ func TestStartupSpoolReleaseMetrics(t *testing.T) {
 	s.size.Store(1000)
 	s.retiredBytes.Store(300)
 	s.releasableBytes.Store(200)
+	s.historyReleasableBytes.Store(150)
+	s.liveReleasableBytes.Store(50)
 	s.releaseFailures.Store(2)
 	s.historyPendingBytes.Store(111)
 	s.historyPendingSegments.Store(3)
@@ -216,7 +218,7 @@ func TestStartupSpoolReleaseMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]float64{"startup_capture_history_pending_bytes": 111, "startup_capture_history_pending_segments": 3, "startup_capture_retained_bytes": 700, "startup_capture_releasable_bytes": 200, "startup_capture_released_bytes_total": 300, "startup_capture_release_failures_total": 2}
+	want := map[string]float64{"startup_capture_history_pending_bytes": 111, "startup_capture_history_pending_segments": 3, "startup_capture_history_releasable_bytes": 150, "startup_capture_live_releasable_bytes": 50, "startup_capture_retained_bytes": 700, "startup_capture_releasable_bytes": 200, "startup_capture_released_bytes_total": 300, "startup_capture_release_failures_total": 2}
 	for _, f := range families {
 		if value, ok := want[f.GetName()]; ok {
 			m := f.Metric[0]

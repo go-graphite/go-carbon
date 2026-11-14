@@ -910,6 +910,9 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 
 // RestoreFromDir cache and input dumps from disk to memory
 func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
+	if app.hasStartupResume() {
+		return
+	}
 	startTime := time.Now()
 
 	logger := zapwriter.Logger("restore").With(zap.String("dir", dumpDir))

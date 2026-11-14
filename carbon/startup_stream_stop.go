@@ -9,10 +9,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// Do not publish a newer cache checkpoint ahead of an unreplayed older suffix:
-// ordinary chronological recovery would then replay that suffix too early.
-// Every external point is already either persisted or in an authoritative
-// capture segment, so preserve those sources and hand over the sockets directly.
+// Save the cache together with exact replay frontiers before handing over.
+// The resume cursor orders the saved cache before every unread source suffix;
+// ordinary chronological dump recovery cannot express that boundary.
 func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 	s := app.startupInput
 	if app.MetricStore != nil {
@@ -29,9 +28,16 @@ func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 		app.Persister.Stop()
 		app.Persister = nil
 	}
-	// Keep the advisory metadata accelerator current even though point-source
-	// ordering requires retaining the original dump. Reads and capture input
-	// remain available during this bounded preparation, as in ordinary shutdown.
+	// Join reclamation before recording source frontiers. Capture keeps appending.
+	s.stopOnce.Do(func() { close(s.stop) })
+	if s.monitored.Load() {
+		<-s.done
+	}
+	s.syncWG.Wait()
+	if err := app.saveStartupResume(s); err != nil {
+		return err
+	}
+	// Reads and capture input remain available during metadata preparation.
 	app.prepareMetadataCheckpoint(logger)
 	flush := app.startStopFlush()
 	flush.settle(preCloseFlushTimeout)
@@ -49,7 +55,7 @@ func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 	app.startupInput = nil
 	app.closeInputLog()
 	app.markHeartbeatClean()
-	logger.Info("capture sources retained across restart without checkpoint reordering", zap.Int64("captured_points", s.points.Load()), zap.Int64("replayed_points", s.replayedPoints.Load()))
+	logger.Info("capture replay snapshot and cursors saved for restart", zap.Int64("captured_points", s.points.Load()), zap.Int64("replayed_points", s.replayedPoints.Load()))
 	if s.sealErr != nil {
 		return errors.Join(s.closeErr, s.sealErr)
 	}
