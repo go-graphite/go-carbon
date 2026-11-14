@@ -368,6 +368,68 @@ func TestReadyUnavailableProcessPreventsCopyAndInvalidates(t *testing.T) {
 	}
 }
 
+func TestReadyWindowScopeRepairsEveryPeerAndPreservesOtherTimes(t *testing.T) {
+	f, o, r := newReadyFixture(t, 100)
+	o.fullHistory = false
+	o.windows = syncRanges{{"early", syncTestNow - 8*3600, syncTestNow - 6*3600}, {"late", syncTestNow - 4*3600, syncTestNow - 2*3600}}
+	r.scope, r.period = "windows", nil
+	// The last replica alone has one recoverable point. A separate target hole
+	// outside the declared windows must remain untouched.
+	inside, outside := syncTestNow-3*3600, syncTestNow-12*3600
+	for _, host := range []string{syncT, syncD1, syncD2} {
+		delete(f.store(host).points["metric.001"][3600], inside)
+	}
+	delete(f.store(syncT).points["metric.001"][3600], outside)
+	err := runSyncReady(context.Background(), &o, r, f, func() error { return runSync(context.Background(), o, f) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := readReadyReport(t, o.state)
+	if report.Verdict != "READY" || report.Scope != "windows" || report.UnrecoverablePoints != nil {
+		t.Fatalf("%+v", report)
+	}
+	if _, ok := f.store(syncT).points["metric.001"][3600][inside]; !ok {
+		t.Fatal("last peer's unique point was not recovered")
+	}
+	if _, ok := f.store(syncT).points["metric.001"][3600][outside]; ok {
+		t.Fatal("window repair widened to full history")
+	}
+	for key := range report.Counts {
+		if strings.HasPrefix(key, "history ") || strings.HasPrefix(key, "period ") {
+			t.Fatal("out-of-scope proof", key)
+		}
+	}
+	if len(report.Counts) != 8 {
+		t.Fatal("expected both windows against all three peers and read-back", report.Counts)
+	}
+}
+
+func TestReadyWindowScopePrerequisites(t *testing.T) {
+	_, base, options := newReadyFixture(t, 0)
+	base.fullHistory = false
+	base.windows = syncRanges{{"gap", syncTestNow - 600, syncTestNow - 60}}
+	options.scope, options.period = "windows", nil
+	if reasons := readyPrerequisites(base, options); len(reasons) != 0 {
+		t.Fatal(reasons)
+	}
+	for _, change := range []func(*syncOptions, *syncReadyOptions){
+		func(o *syncOptions, _ *syncReadyOptions) { o.noVerify = true },
+		func(o *syncOptions, _ *syncReadyOptions) { o.fullHistory = true },
+		func(o *syncOptions, _ *syncReadyOptions) { o.settle = time.Minute },
+		func(o *syncOptions, _ *syncReadyOptions) { o.windows = nil },
+		func(o *syncOptions, _ *syncReadyOptions) {
+			o.windows = syncRanges{{"open", syncTestNow - 60, syncTestNow + 60}}
+		},
+		func(_ *syncOptions, r *syncReadyOptions) { r.gapsComplete = false },
+	} {
+		o, r := base, options
+		change(&o, &r)
+		if reasons := readyPrerequisites(o, r); len(reasons) == 0 {
+			t.Fatal("invalid window proof accepted")
+		}
+	}
+}
+
 func TestReadyDisjointDonorCohortsMeetEachSourceMinimum(t *testing.T) {
 	f, o, r := newReadyFixture(t, 0)
 	for sourceIndex, source := range o.from {

@@ -359,6 +359,16 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 		data, _ := json.Marshal([]any{source, target, names, w.From, w.Until})
 		hash := sha256.Sum256(data)
 		id := hex.EncodeToString(hash[:])
+		pointPath := fmt.Sprintf("%s.window-%d-%s.window-points.json", journalPath, wi, id[:16])
+		measurement := windowPointCount{Source: source, Window: w}
+		if beforeErr == nil {
+			n := countWindowPoints(before)
+			measurement.Before = &n
+		}
+		measurement, err := readWindowPointCount(pointPath, measurement)
+		if err != nil {
+			return syncCopyResult{}, err
+		}
 		j, err := openJournal(fmt.Sprintf("%s.window-%d-%s", journalPath, wi, id[:16]), id)
 		if err != nil {
 			return syncCopyResult{}, err
@@ -411,6 +421,16 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 		}
 		afterStarted := time.Now()
 		after, afterErr := b.Digest(ctx, target, names, w.From, w.Until)
+		if measurement.After == nil && afterErr == nil {
+			if len(failed) > 0 {
+				measurement.Before = nil
+			}
+			n := countWindowPoints(after)
+			measurement.After = &n
+			if err := atomicStateJSON(pointPath, measurement); err != nil {
+				return syncCopyResult{}, err
+			}
+		}
 		event("sync_window_digest", map[string]any{"stage": "after", "source": source, "names": len(names), "seconds": time.Since(afterStarted).Seconds()})
 		count := func(d map[string][]syncDigest) int64 {
 			var n int64

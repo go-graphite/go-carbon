@@ -109,11 +109,20 @@ func TestSyncWindowNativeDifferential(t *testing.T) {
 		t.Fatal(presence, err)
 	}
 	path := filepath.Join(t.TempDir(), "copy.jsonl")
+	var added int64
 	for range 2 {
 		res, err := backend.CopyWindow(ctx, donor.URL, survivor.URL, []string{"new", "overlap"}, path, syncRanges{w})
 		if err != nil || res.Copied != 2 {
 			t.Fatal(res, err)
 		}
+		counts, err := collectWindowPointCounts(filepath.Dir(path))
+		if err != nil || counts.Added == nil || *counts.Added <= 0 {
+			t.Fatal("native point additions not measured", counts, err)
+		}
+		if added != 0 && added != *counts.Added {
+			t.Fatal("resume recounted additions", added, *counts.Added)
+		}
+		added = *counts.Added
 	}
 	for _, n := range []string{"new", "overlap"} {
 		want, err := oracle.Snapshot(ctx, n)

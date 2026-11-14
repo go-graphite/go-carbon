@@ -62,6 +62,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only --streams and --rate may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
+	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")
 	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
 	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for process_start_time_seconds on every store")
 	flags.Var(&c.ready.period, "period", "FROM:UNTIL block copy/cutover period in Unix seconds")
@@ -100,6 +101,12 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	if *noFullHistory && len(c.sync.windows) == 0 {
 		return c, errors.New("--no-full-history requires at least one --window")
+	}
+	if c.ready.scope != "full-history" && c.ready.scope != "windows" {
+		return c, errors.New("--ready-scope must be full-history or windows")
+	}
+	if c.ready.scope == "windows" && (c.sync.fullHistory || len(c.sync.windows) == 0 || c.sync.settle != 0 || len(c.ready.period) != 0) {
+		return c, errors.New("--ready-scope=windows requires --window --no-full-history --settle=0s and no --period")
 	}
 	// Sampling is inactive outside full-history window verification. Retain its
 	// historical identity value there so unchanged old journals still resume.
