@@ -102,6 +102,9 @@ func (p *Whisper) reclaimWorkers() int {
 // SetDeferredReclaim delays unlinking converted originals by at least delay and
 // batches them by directory; zero keeps reclamation inside each conversion.
 func (p *Whisper) SetDeferredReclaim(delay time.Duration) {
+	if p.incrementalComplete.Load() {
+		return
+	}
 	p.reclaimMu.Lock()
 	defer p.reclaimMu.Unlock()
 	p.ioMu.Lock()

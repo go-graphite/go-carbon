@@ -145,7 +145,7 @@ func (l *CarbonserverListener) loadMappedMetricStoreCatalog(db *store.Store) (_ 
 		return nil, err
 	}
 	defer cache.Abort()
-	writer, err := newIndexSnapshotWriter(l.fileListCache, l.whisperData)
+	writer, err := newIndexSnapshotWriter(l.fileListCache, l.storageFilesystemPath())
 	if err != nil {
 		return nil, err
 	}
@@ -172,13 +172,13 @@ func (l *CarbonserverListener) loadMappedMetricStoreCatalog(db *store.Store) (_ 
 	if err := writer.finish(); err != nil {
 		return nil, err
 	}
-	snapshot, err := openIndexSnapshot(l.fileListCache, l.whisperData)
+	snapshot, err := openIndexSnapshot(l.fileListCache, l.storageFilesystemPath())
 	if err != nil {
 		return nil, err
 	}
 	index.trieIdx = newTrie(".wsp", l.maxCreatesPerSecond, l.estimateSize)
 	index.trieIdx.snapshot = snapshot
-	if err := metricStoreFilesystemStats(l.whisperData, &index.freeSpace, &index.totalSpace); err != nil {
+	if err := metricStoreFilesystemStats(l.storageFilesystemPath(), &index.freeSpace, &index.totalSpace); err != nil {
 		return nil, errors.Join(err, snapshot.close())
 	}
 	l.prewarmNamespaceHashes(snapshot)

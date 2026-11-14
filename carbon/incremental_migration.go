@@ -42,6 +42,7 @@ type incrementalStoreMigration struct {
 	indexReady                         func() bool
 	priority                           *migrationPriority
 	budget                             *migrationBudget
+	completedAtStartup                 bool
 	metrics, points, resumed, unlinked atomic.Uint64
 	archived, skipped                  atomic.Uint64
 	active, working, largest           atomic.Int64
@@ -96,7 +97,7 @@ func (m *incrementalStoreMigration) progress(directory string, force bool) error
 }
 
 func completedIncrementalMigration(conf *Config) bool {
-	if !conf.Whisper.StoreIncrementalMigration {
+	if !conf.Whisper.StoreIncrementalMigration || conf.Whisper.StoreMirrorFiles {
 		return false
 	}
 	data, err := os.ReadFile(filepath.Join(sharedStorePath(conf), incrementalReceiptName))
@@ -132,6 +133,7 @@ func (app *App) startIncrementalStoreMigration() {
 		burst = *conf.Whisper.StoreMigrationHintBurst
 	}
 	m := &incrementalStoreMigration{cancel: cancel, done: make(chan struct{}), started: time.Now(), maximum: maximum, phase: "files", priority: newMigrationPriorityBurst(burst)}
+	m.completedAtStartup = app.legacyWhisperDisabled.Load()
 	p.SetIncrementalMigrationPriority(m.priority.offer)
 	if path := conf.Whisper.StoreMigrationControlFile; path != "" {
 		m.budget = newMigrationBudget(maximum)
@@ -156,7 +158,9 @@ func (app *App) startIncrementalStoreMigration() {
 			if m.skipped.Load() == 0 {
 				m.sourceComplete.Store(true)
 				p.SetIncrementalMigrationComplete()
+				app.legacyWhisperDisabled.Store(true)
 				if cs := app.Carbonserver; cs != nil {
+					cs.SetLegacyWhisperDisabled(true)
 					cs.SetMetricStoreFileIndex(false)
 					cs.RequestFileScan()
 				}
@@ -210,6 +214,11 @@ func (m *incrementalStoreMigration) converted(result persister.FileConversion) {
 }
 
 func (m *incrementalStoreMigration) run(ctx context.Context, p *persister.Whisper, db *store.Store, conf *Config) error {
+	if m.completedAtStartup {
+		m.sourceComplete.Store(true)
+		return nil
+	}
+
 	phasecpu.Set(phasecpu.Backfill)
 	defer phasecpu.Set(phasecpu.Other)
 	// The resource waiter must observe worker failures as well as shutdown.
@@ -221,8 +230,7 @@ func (m *incrementalStoreMigration) run(ctx context.Context, p *persister.Whispe
 		go func() { defer close(done); m.budget.run(workCtx, conf.Whisper.StoreMigrationControlFile) }()
 		defer func() { cancel(); <-done }()
 	}
-	completed := completedIncrementalMigration(conf)
-	m.sourceComplete.Store(completed)
+
 	directory := sharedStorePath(conf)
 	if err := m.progress(directory, true); err != nil {
 		return err
@@ -258,9 +266,6 @@ func (m *incrementalStoreMigration) run(ctx context.Context, p *persister.Whispe
 		if err := m.progress(directory, false); err != nil {
 			return err
 		}
-	}
-	if completed {
-		return nil
 	}
 
 	if m.indexReady != nil {
@@ -321,6 +326,17 @@ func (m *incrementalStoreMigration) run(ctx context.Context, p *persister.Whispe
 	}
 	if err := errors.Join(walkErr, ctx.Err()); err != nil {
 		return err
+	}
+	if m.skipped.Load() == 0 {
+		// Join unlink workers, then finish their durable pending queue before
+		// source completion retires every source check and cleanup path.
+		p.StopDeferredReclaim()
+		if err := db.VisitPendingFileCleanup(ctx, func(name string) error {
+			_, err := p.ConvertFile(ctx, name)
+			return err
+		}); err != nil {
+			return err
+		}
 	}
 	if conf.Whisper.StoreOOODirectWrites {
 		return m.checkNoSidecars(ctx, db, directory)

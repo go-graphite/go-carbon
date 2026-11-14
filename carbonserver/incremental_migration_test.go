@@ -199,6 +199,7 @@ func TestIncrementalMixedAPIAndMappedIndexSurviveReclamation(t *testing.T) {
 		t.Fatal("conversion invalidated every render cache entry")
 	}
 	check("shared-only index rebuilt")
+	l.SetLegacyWhisperDisabled(true)
 	l.SetMetricStoreFileIndex(false)
 	if err := l.RefreshMetricStoreIndex(); err != nil {
 		t.Fatal(err)
@@ -227,14 +228,18 @@ func TestIncrementalMixedAPIAndMappedIndexSurviveReclamation(t *testing.T) {
 	next.SetQuotas(nil)
 	next.SetFileListCacheVersion(2)
 	next.SetMetricStore(db)
-	next.SetMetricStoreFileIndex(true)
+	next.SetMetricStoreFileIndex(false)
+	next.SetLegacyWhisperDisabled(true)
 	next.SetIncrementalIndexScratch(filepath.Join(destination, "index"))
 	next.WarmupIndex()
 	next.WaitForWarmup()
+	if err := next.RefreshMetricStoreIndex(); err != nil {
+		t.Fatal(err)
+	}
 	for i, c := range cases {
 		status, body := incrementalWireReply(t, next, c)
 		if status != 200 || !bytes.Equal(body, golden[i]) {
-			t.Fatalf("restart changed %s %s %s", c.metric, c.path, c.format)
+			t.Fatalf("restart changed %s %s %s: status=%d want=%q got=%q", c.metric, c.path, c.format, status, golden[i], body)
 		}
 	}
 	if err := db.Delete(context.Background(), names[0]); err != nil {

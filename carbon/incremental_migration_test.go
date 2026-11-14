@@ -442,3 +442,85 @@ func TestIncrementalMigrationSkipsRejectedSourceAndKeepsIt(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletedIncrementalAppRestartsWithoutSource(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	path, cfg := incrementalAppFixture(t)
+	app := startIncrementalApp(t, path)
+	if app.legacyWhisperDisabled.Load() || app.Carbonserver.UsesSharedCatalogIndex() {
+		t.Fatal("incomplete migration disabled source")
+	}
+	incrementalLease(t, cfg, 2, 4)
+	m := app.incrementalMigration.Load()
+	select {
+	case <-m.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("migration did not complete")
+	}
+	if !app.legacyWhisperDisabled.Load() || !app.Carbonserver.UsesSharedCatalogIndex() || !completedIncrementalMigration(cfg) {
+		t.Fatal("runtime completion did not retire legacy paths")
+	}
+	app.Stop()
+	if err := os.Rename(cfg.Whisper.DataDir, cfg.Whisper.DataDir+".retired"); err != nil {
+		t.Fatal(err)
+	}
+	next := startIncrementalApp(t, path)
+	select {
+	case <-next.incrementalMigration.Load().done:
+	case <-time.After(time.Second):
+		t.Fatal("completed migration started source work")
+	}
+	if !next.legacyWhisperDisabled.Load() || !next.Carbonserver.UsesSharedCatalogIndex() {
+		t.Fatal("startup ignored durable completion")
+	}
+	if _, err := os.Stat(cfg.Whisper.DataDir); !os.IsNotExist(err) {
+		t.Fatalf("retired source recreated: %v", err)
+	}
+	for _, name := range []string{"first", "second", "third"} {
+		if _, err := next.MetricStore.Metadata(context.Background(), name); err != nil {
+			t.Fatalf("converted metric lost on restart: %v", err)
+		}
+	}
+	next.Stop()
+	// Embedded callers can clone a configuration captured before completion.
+	// They must take a fresh receipt snapshot even without ParseConfig.
+	direct := New(path)
+	direct.Config = cfg
+	if err := direct.Start(); err != nil {
+		t.Fatalf("direct configuration restart: %v", err)
+	}
+	t.Cleanup(direct.Stop)
+	waitMigration(t, func() bool {
+		return direct.legacyWhisperDisabled.Load() && direct.Carbonserver.UsesSharedCatalogIndex() && direct.Carbonserver.CurrentFileIndex() != nil
+	})
+}
+
+func TestCompletedIncrementalReceiptRequiresZeroSkipped(t *testing.T) {
+	cfg := NewConfig()
+	cfg.Whisper.StoreIncrementalMigration = true
+	cfg.Whisper.StoreDir = t.TempDir()
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"mode":"incremental","source_complete":true,"skipped":0}`, true},
+		{`{"mode":"incremental","source_complete":true,"skipped":1}`, false},
+		{`{"mode":"incremental","source_complete":true}`, false},
+		{`{"mode":"incremental","phase":"shared","skipped":0,"in_flight":0,"error":""}`, true},
+		{`{"mode":"incremental","phase":"files","skipped":0,"in_flight":0}`, false},
+		{`{"mode":"incremental","phase":"shared","skipped":0,"in_flight":1}`, false},
+	} {
+		if err := os.WriteFile(filepath.Join(cfg.Whisper.StoreDir, incrementalReceiptName), []byte(tc.body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if got := completedIncrementalMigration(cfg); got != tc.want {
+			t.Fatalf("receipt %s: %v", tc.body, got)
+		}
+	}
+	cfg.Whisper.StoreMirrorFiles = true
+	if completedIncrementalMigration(cfg) {
+		t.Fatal("mirror disabled source")
+	}
+}
