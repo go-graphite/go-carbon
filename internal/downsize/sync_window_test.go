@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,5 +258,130 @@ func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
 	}
 	if _, ok := f.store(syncT).archives["pending"]; ok {
 		t.Fatal("unresolved name was copied")
+	}
+}
+
+// Compare fresh-pin selection/copy with the scoped-pin path on the same
+// 2,048-name fixture. Include target-wins overlap and an unresolved source.
+func TestSyncWindowSharedPinDifferential2048(t *testing.T) {
+	ctx := context.Background()
+	source := nativeControllerStore(t)
+	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
+	names := make([]string, 2048)
+	for i := range names {
+		names[i] = fmt.Sprintf("metric.%04d", i)
+		value := float64(i) + 0.125
+		if i%17 == 0 {
+			value = math.Copysign(0, -1)
+		}
+		if i%19 == 0 {
+			value = math.SmallestNonzeroFloat64
+		}
+		addPoints(t, source, names[i], value)
+		if i%3 == 0 {
+			for _, target := range targets {
+				addPoints(t, target, names[i], 42)
+			}
+		}
+	}
+	var pins atomic.Int64
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) {
+		pins.Add(1)
+		return map[string]struct{}{names[0]: {}}, nil
+	})
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	w := syncRange{From: testMetricNow - 10, Until: testMetricNow}
+	var reference []map[string][]syncDigest
+	for mode, target := range targets {
+		survivor := httptest.NewServer(nativeControllerService(t, target))
+		backend := newSyncLiveBackend(syncLiveOptions{})
+		finish := func() {}
+		if mode == 1 {
+			finish = backend.beginWindowCopy()
+		}
+		path := t.TempDir()
+		before := pins.Load()
+		for start := 0; start < len(names); start += 128 {
+			batch := names[start : start+128]
+			presence, err := backend.WindowPresence(ctx, donor.URL, batch, w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == 0 {
+				reference = append(reference, presence)
+			} else if !reflect.DeepEqual(reference[start/128], presence) {
+				t.Fatal("selection differs", start)
+			}
+			var selected []string
+			for _, n := range batch {
+				if presence[n][0].Hash != syncWindowUnresolved {
+					selected = append(selected, n)
+				}
+			}
+			result, err := backend.CopyWindow(ctx, donor.URL, survivor.URL, selected, filepath.Join(path, fmt.Sprintf("batch-%d", start)), syncRanges{w})
+			if err != nil || result.Copied != len(selected) {
+				t.Fatal(result, err)
+			}
+		}
+		finish()
+		survivor.Close()
+		wantPins := int64(32)
+		if mode == 1 {
+			wantPins = 1
+		}
+		if got := pins.Load() - before; got != wantPins {
+			t.Fatalf("mode %d: pins %d, want %d", mode, got, wantPins)
+		}
+	}
+	for _, name := range names {
+		a, ea := targets[0].Snapshot(ctx, name)
+		b, eb := targets[1].Snapshot(ctx, name)
+		if !errors.Is(ea, eb) || !reflect.DeepEqual(a.Metadata.MetricConfig, b.Metadata.MetricConfig) || len(a.Archives) != len(b.Archives) {
+			t.Fatal("metadata differs", name, ea, eb)
+		}
+		for ai, archive := range a.Archives {
+			other := b.Archives[ai]
+			if archive.Retention != other.Retention || len(archive.Points) != len(other.Points) {
+				t.Fatal("archive differs", name)
+			}
+			for pi, point := range archive.Points {
+				q := other.Points[pi]
+				if point.Timestamp != q.Timestamp || math.Float64bits(point.Value) != math.Float64bits(q.Value) {
+					t.Fatal("point bits differ", name, point, q)
+				}
+			}
+		}
+	}
+}
+
+func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
+	ctx := context.Background()
+	source := nativeControllerStore(t)
+	addPoints(t, source, "changing", 1)
+	var pins atomic.Int64
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { pins.Add(1); return nil, nil })
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	backend := newSyncLiveBackend(syncLiveOptions{})
+	finish := backend.beginWindowCopy()
+	defer finish()
+	w := syncRange{From: testMetricNow - 10, Until: testMetricNow}
+	check := func(unresolved bool) {
+		t.Helper()
+		got, err := backend.WindowPresence(ctx, donor.URL, []string{"changing"}, w)
+		if err != nil || len(got["changing"]) == 0 || (got["changing"][0].Hash == syncWindowUnresolved) != unresolved {
+			t.Fatal(got, err)
+		}
+	}
+	check(false)
+	if err := source.UpdateMany(ctx, "changing", []store.Point{{Timestamp: testMetricNow - 5, Value: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	backend.windowPinned = time.Now().Add(-6 * time.Minute)
+	check(false)
+	if pins.Load() != 2 {
+		t.Fatal("pin was not rotated", pins.Load())
 	}
 }

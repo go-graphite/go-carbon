@@ -42,6 +42,9 @@ func (s *syncer) copyWindows() syncRanges {
 // Copy each batch immediately, rather than waiting for the complete catalog.
 // This separate phase leaves old full-history copy/precheck rows reusable.
 func (s *syncer) copyMissingWindow(ctx context.Context) error {
+	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
+		defer b.beginWindowCopy()()
+	}
 	f, scan, err := openLines(s.missingPath())
 	if err != nil {
 		return err
@@ -223,9 +226,13 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 		if m.transferIdle <= 0 {
 			m.transferIdle = defaultTransferIdle
 		}
-		c := &nativeController{mover: m, sessions: map[string]*nativeRemoteSession{}}
+		c, release, err := b.windowController(ctx, m, source)
+		if err != nil {
+			j.close()
+			return syncCopyResult{}, err
+		}
 		err = func() error {
-			defer c.release()
+			defer release()
 			defer j.close()
 			for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
 				end := min(start+chunkstore.NativeMaxRangeNames, len(names))
@@ -287,8 +294,11 @@ func (s *syncer) windowPresence(ctx context.Context, source string, names []stri
 }
 
 func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
-	c := &nativeController{mover: b.m, sessions: map[string]*nativeRemoteSession{}}
-	defer c.release()
+	c, release, err := b.windowController(ctx, b.m, source)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	id, err := c.session(ctx, source)
 	if err != nil {
 		return nil, err
@@ -377,4 +387,35 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 		}
 	}
 	return out, nil
+}
+
+// The missing-window loop is serial. Keep its source pins across journal batches
+// so capturing the global pending-name set is amortized, without changing batch
+// identities or native range limits. Bound snapshot age to limit retained files
+// and conservative revision exclusions. Existing pending/revision fences remain
+// authoritative; no omitted name becomes proof of empty history.
+func (b *syncLiveBackend) beginWindowCopy() func() {
+	b.windowSources = &nativeController{mover: b.m, sessions: map[string]*nativeRemoteSession{}}
+	b.windowPinned = time.Now()
+	return func() {
+		b.windowSources.release()
+		b.windowSources = nil
+	}
+}
+
+func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source string) (*nativeController, func(), error) {
+	c := &nativeController{mover: m, sessions: map[string]*nativeRemoteSession{}}
+	if b.windowSources == nil {
+		return c, c.release, nil
+	}
+	if time.Since(b.windowPinned) >= 5*time.Minute {
+		b.windowSources.release()
+		b.windowPinned = time.Now()
+	}
+	id, err := b.windowSources.session(ctx, source)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.sessions[source] = &nativeRemoteSession{id: id}
+	return c, func() {}, nil
 }
