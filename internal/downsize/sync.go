@@ -306,6 +306,7 @@ type syncResidual struct {
 
 type syncer struct {
 	legacyCopyReceipts bool // keep the selection and transport of old window campaigns
+	verificationBase   int  // append fresh rounds after a terminal residual verdict
 	o                  syncOptions
 	b                  syncBackend
 	j                  *syncJournal
@@ -357,6 +358,9 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	defer j.close()
 	s := &syncer{o: o, b: b, j: j, forbid: map[string]bool{}, failedCp: map[string]bool{}, copied: map[string]bool{}, started: time.Now()}
 	s.sum.phases = map[string]*syncPhase{}
+	if err := s.prepareVerificationRetry(); err != nil {
+		return err
+	}
 	if o.ring != "" {
 		if s.owner, err = ringplan.TargetOwner(o.ring, o.to); err != nil {
 			return err
@@ -391,6 +395,9 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	progressErr := err
 	if progressErr == nil && len(s.sum.residual) > 0 {
 		progressErr = ErrSyncResidual
+		if jerr := j.append(syncRow{Kind: "verification-incomplete", Round: s.verificationBase + s.sum.Rounds}); jerr != nil {
+			err = errors.Join(err, jerr)
+		}
 	}
 	if perr := stopFile(progressErr); perr != nil {
 		err = errors.Join(err, perr)
@@ -401,6 +408,47 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	}
 	if s.sum.Residual > 0 {
 		return fmt.Errorf("%w: %d residual (names or holes), see sync_done", ErrSyncResidual, s.sum.Residual)
+	}
+	return nil
+}
+
+// A terminal residual verdict ends a verification attempt. Its receipts must
+// remain available for diagnosis, but cannot stand in for a later observation
+// of the stores. Interrupted attempts retain their current round namespace.
+func (s *syncer) prepareVerificationRetry() error {
+	maxRound, pending, hasRetry := 0, false, false
+	for _, r := range s.j.rows {
+		if r.Kind == "verified" || r.Kind == "verification-incomplete" || r.Kind == "copied" && r.Phase == "fill" {
+			maxRound = max(maxRound, r.Round)
+		}
+		switch r.Kind {
+		case "verification-incomplete":
+			pending = true
+		case "verification-retry":
+			s.verificationBase, pending, hasRetry = r.Round, false, true
+		}
+	}
+	// Older clients did not journal the terminal verdict. Import their final
+	// residual progress snapshot once; subsequent retries are journal driven.
+	if !hasRetry && !pending && maxRound > 0 {
+		data, err := os.ReadFile(filepath.Join(s.o.state, "progress.json"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil {
+			var previous progressSnapshot
+			if err := json.Unmarshal(data, &previous); err != nil {
+				return fmt.Errorf("read previous sync progress: %w", err)
+			}
+			pending = previous.Status == "incomplete" && previous.Error == ErrSyncResidual.Error()
+		}
+	}
+	if pending && maxRound > 0 {
+		s.verificationBase = maxRound
+		if err := s.j.append(syncRow{Kind: "verification-retry", Round: maxRound}); err != nil {
+			return err
+		}
+		event("sync_verification_retry", map[string]any{"first_round": maxRound + 1})
 	}
 	return nil
 }
@@ -500,6 +548,9 @@ func (s *syncer) namesFile(kind string, round int, source int, names []string) (
 // copyFrom copies names from one source, recording the outcome. A source the
 // target refuses (403: not in transfer-sources) is marked forbidden.
 func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, names []string, short ...string) (syncCopyResult, error) {
+	if phase == "fill" {
+		round += s.verificationBase
+	}
 	source := s.o.from[src]
 	// The caller owns phase progress; a source batch must not reset its totals
 	// or replace a stable phase with an immutable per-batch journal identity.
@@ -639,7 +690,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 			}
 			var res syncCopyResult
 			if rows := s.j.find(func(r syncRow) bool {
-				return r.Kind == "copied" && r.Phase == "fill" && r.Round == round && r.Source == s.o.from[src]
+				return r.Kind == "copied" && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src]
 			}); len(rows) > 0 {
 				res = syncCopyResult{Copied: rows[0].Copied, Failed: rows[0].Failed, Forbidden: rows[0].Forbidden}
 			} else {
@@ -747,8 +798,9 @@ func (s *syncer) sourceIndex(source string) int {
 // workers. Completed batches are journaled with their holes; a resumed round
 // replays them instead of reading again (batch boundaries are deterministic).
 func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
+	journalRound := round + s.verificationBase
 	done := map[string]syncRow{}
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "verified" && r.Round == round }) {
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "verified" && r.Round == journalRound }) {
 		done[r.First] = r
 	}
 	phase := s.phase("verify")
@@ -757,7 +809,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	var unindexed []string
 	var skipped []syncSkip
 	holeNames := map[string]bool{}
-	s.prog.begin(fmt.Sprintf("verify round %d", round), set.total)
+	s.prog.begin(fmt.Sprintf("verify round %d", journalRound), set.total)
 	defer set.close()
 	collect := func(r syncRow) {
 		mu.Lock()
@@ -798,7 +850,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 				for i, n := range jb.names {
 					s.masks.Store(n, jb.masks[i])
 				}
-				row, err := s.verifyBatch(ctx, round, jb.names)
+				row, err := s.verifyBatch(ctx, journalRound, jb.names)
 				for _, n := range jb.names {
 					s.masks.Delete(n)
 				}
