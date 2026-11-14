@@ -601,7 +601,12 @@ func (m *mover) requestOnceWatched(ctx context.Context, endpoint, path string, b
 		return nil, &apiError{response.StatusCode, fmt.Sprintf("%s %s: HTTP %d %s", endpoint, path, response.StatusCode, message)}
 	}
 	if out != nil {
-		if proofs, ok := out.(*[]chunkstore.TransferProof); ok && response.Header.Get("Content-Type") == chunkstore.TransferProofContentType {
+		if records, ok := out.(*[]chunkstore.TransferMetric); ok {
+			*records, err = chunkstore.ReadTransferSize(response.Body, 160<<20, response.ContentLength)
+			if err != nil {
+				return nil, err
+			}
+		} else if proofs, ok := out.(*[]chunkstore.TransferProof); ok && response.Header.Get("Content-Type") == chunkstore.TransferProofContentType {
 			var err error
 			*proofs, err = chunkstore.ReadTransferProofs(response.Body)
 			if err != nil {
