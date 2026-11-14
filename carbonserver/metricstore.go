@@ -88,6 +88,13 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		return nil
 	}
 
+	// Catalog discovery no longer scans the legacy filesystem. Drop its last
+	// sidecar counts, including when a completed source switches to the catalog
+	// or a catalog refresh has no changes to publish.
+	atomic.StoreUint64(&listener.metrics.OOOFiles, 0)
+	atomic.StoreUint64(&listener.metrics.OOOPhysicalBytes, 0)
+	atomic.StoreUint64(&listener.metrics.LockFiles, 0)
+
 	started := time.Now()
 	after := listener.metricStoreCursor
 	previous := listener.CurrentFileIndex()

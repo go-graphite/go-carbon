@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -382,5 +383,47 @@ func TestMetricStoreStopDoesNotWaitForeverOnStuckRequest(t *testing.T) {
 	listener.endSharedStoreRequest(locked)
 	if accepted, _ := listener.beginSharedStoreRequest(); accepted {
 		t.Fatal("request admitted after stop")
+	}
+}
+
+func TestMetricStoreCatalogClearsFilesystemSidecarGauges(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"trigram", "trie", "mapped"} {
+		t.Run(mode, func(t *testing.T) {
+			db, err := store.Open(t.TempDir(), store.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			listener := NewCarbonserverListener(nil)
+			listener.timeBuckets = make([]uint64, listener.buckets+1)
+			listener.SetWhisperData(t.TempDir())
+			listener.SetTrieIndex(mode != "trigram")
+			listener.SetTrigramIndex(mode == "trigram")
+			if mode == "mapped" {
+				listener.fileListCache = t.TempDir() + "/file-list-cache"
+				listener.fileListCacheVersion = FLCVersion2
+			}
+			listener.SetMetricStore(db)
+			listener.SetMetricStoreFileIndex(true)
+			atomic.StoreUint64(&listener.metrics.OOOFiles, 3)
+			atomic.StoreUint64(&listener.metrics.OOOPhysicalBytes, 8192)
+			atomic.StoreUint64(&listener.metrics.LockFiles, 2)
+			// Keeping file discovery enabled must preserve its latest sidecar counts.
+			listener.SetMetricStoreFileIndex(true)
+			assertSidecarGauges(t, listener, 3, 8192, 2)
+			listener.SetMetricStoreFileIndex(false)
+			listener.updateFileList(listener.whisperData, nil, nil)
+			if listener.CurrentFileIndex() == nil {
+				t.Fatal("catalog index was not published")
+			}
+			assertSidecarGauges(t, listener, 0, 0, 0)
+			// A subsequent catalog pass with no changes must also clear stale counts.
+			atomic.StoreUint64(&listener.metrics.OOOFiles, 1)
+			atomic.StoreUint64(&listener.metrics.OOOPhysicalBytes, 1024)
+			atomic.StoreUint64(&listener.metrics.LockFiles, 1)
+			listener.updateFileList(listener.whisperData, nil, nil)
+			assertSidecarGauges(t, listener, 0, 0, 0)
+		})
 	}
 }
