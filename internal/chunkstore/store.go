@@ -58,7 +58,7 @@ type Options struct {
 	// estimated scratch allowance, including results waiting for SST consumers.
 	// Each worker receives total/imports/workers (at least 1 GiB). Zero selects
 	// 1 import / 2 workers / 2 GiB. Changes require reopening.
-	NativeExportConcurrency int // 1..8; zero selects one; requires reopening
+	NativeExportConcurrency int // 0..8; zero selects CPUs/8 (1..8); requires reopening
 	NativeImportConcurrency int
 	NativeCombineWorkers    int
 	NativeCombineMemory     int64
@@ -396,7 +396,7 @@ var storeComparer = func() *pebble.Comparer {
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
 	if options.NativeExportConcurrency == 0 {
-		options.NativeExportConcurrency = DefaultNativeExportConcurrency
+		options.NativeExportConcurrency = AutoNativeExportConcurrency()
 	}
 	if err := ValidateNativeExportConcurrency(options.NativeExportConcurrency); err != nil {
 		return nil, err

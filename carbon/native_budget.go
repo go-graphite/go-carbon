@@ -16,14 +16,14 @@ func (cfg *Config) validateNativeCombineBudget(available func() (uint64, error))
 	}
 	// Preserve the existing budget on small hosts and unsupported platforms.
 	// Only an increase needs detection, and detection failure rejects it.
-	if w.StoreNativeCombineMemory <= store.DefaultNativeCombineMemory && w.StoreNativeExportConcurrency == store.DefaultNativeExportConcurrency {
+	if w.StoreNativeCombineMemory <= store.DefaultNativeCombineMemory && w.StoreNativeExportConcurrency <= 1 {
 		return nil
 	}
 	ram, err := available()
 	if err != nil {
 		return fmt.Errorf("whisper.store-native-combine-memory: detect available RAM: %w", err)
 	}
-	if w.StoreNativeExportConcurrency > store.DefaultNativeExportConcurrency {
+	if w.StoreNativeExportConcurrency > 1 {
 		// Existing serial admission is preserved on small/unknown hosts. An
 		// increase must budget all admitted exports plus the import scratch pool.
 		required := uint64(w.StoreNativeExportConcurrency)*uint64(store.NativeExportMemoryPerStream) + uint64(w.StoreNativeCombineMemory)
@@ -35,4 +35,18 @@ func (cfg *Config) validateNativeCombineBudget(available func() (uint64, error))
 		return fmt.Errorf("whisper.store-native-combine-memory must not exceed 25%% of available RAM (%d bytes)", ram/4)
 	}
 	return nil
+}
+
+// Automatic admission uses CPU capacity only when the conservative export
+// scratch charge fits alongside import scratch. Unknown/small RAM keeps one.
+func (cfg *Config) nativeExportConcurrency(available func() (uint64, error)) int {
+	if n := cfg.Whisper.StoreNativeExportConcurrency; n != 0 {
+		return n
+	}
+	ram, err := available()
+	if err != nil || ram/4 <= uint64(cfg.Whisper.StoreNativeCombineMemory) {
+		return 1
+	}
+	memorySlots := (ram/4 - uint64(cfg.Whisper.StoreNativeCombineMemory)) / uint64(store.NativeExportMemoryPerStream)
+	return min(store.AutoNativeExportConcurrency(), int(max(uint64(1), min(uint64(8), memorySlots))))
 }

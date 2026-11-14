@@ -103,7 +103,10 @@ func TestNativeExportBudgetOptions(t *testing.T) {
 		if err != nil {
 			t.Fatal(n, err)
 		}
-		want := max(1, n)
+		want := n
+		if n == 0 {
+			want = AutoNativeExportConcurrency()
+		}
 		s.initNativeContext()
 		if s.NativeExportConcurrency() != want || cap(s.nativeExportAdmission) != want || cap(s.nativeAdmission) != 1 {
 			s.Close()
