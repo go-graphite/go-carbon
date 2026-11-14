@@ -9,10 +9,8 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-// A normal-size transfer commits as one batch instead of ingesting one SST
-// per time bucket (Pebble ingests one SST set at a time). Both paths must
-// publish bit-identical points, keep the target's own points on a merge, and
-// a transfer above the batch limit must still ingest SSTs.
+// Default transfers bypass shared memtables using private SSTs. Compare with
+// the batch oracle: target-wins merges must preserve identical stored points.
 func TestTransferBatchMatchesIngest(t *testing.T) {
 	for _, mode := range []struct {
 		name                  string
@@ -38,7 +36,7 @@ func TestTransferBatchMatchesIngest(t *testing.T) {
 			for _, limit := range []struct {
 				name  string
 				bytes int
-			}{{"batch", 0}, {"ingest", -1}, {"oversize", 1}} {
+			}{{"batch", 64 << 20}, {"ingest", 0}, {"oversize", 1}} {
 				target := transferStore(t, mode.continuation, mode.buckets)
 				target.SetTransferBatchBytesForTest(limit.bytes)
 				// Half the names are live on the target: the merge keeps its points.
@@ -53,6 +51,9 @@ func TestTransferBatchMatchesIngest(t *testing.T) {
 					t.Fatal(err)
 				}
 				st := target.Stats()
+				if st.IngestMemtableOverlaps != 0 {
+					t.Fatalf("private staging overlapped live memtables: %d", st.IngestMemtableOverlaps)
+				}
 				if limit.name == "batch" {
 					if st.TransferBatchCommits != 1 || st.TransferBatchEntries != uint64(len(names)) || st.TransferBatchBytes == 0 || st.IngestTables != 0 {
 						t.Fatalf("batch path: commits=%d entries=%d bytes=%d ingest tables=%d", st.TransferBatchCommits, st.TransferBatchEntries, st.TransferBatchBytes, st.IngestTables)

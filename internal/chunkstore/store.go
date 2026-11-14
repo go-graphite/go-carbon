@@ -362,8 +362,8 @@ type Store struct {
 	// transferMergeAppendOff merges every present continuation name with
 	// RestoreArchives (differential tests).
 	transferMergeAppendOff bool
-	// transferBatchBytes overrides transferBatchLimit (tests/benchmarks): 0
-	// keeps the default, negative always ingests SSTs.
+	// transferBatchBytes enables batch staging only in tests/benchmarks.
+	// The default (zero), and negative values, always ingest private SSTs.
 	transferBatchBytes int
 	// backgroundStopped is set once StopBackground completed.
 	backgroundStopped atomic.Bool

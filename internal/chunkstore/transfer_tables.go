@@ -105,18 +105,13 @@ func (s *Store) stageTransfer(first uint64, records []TransferMetric, metas []Me
 	return &transferStage{keys: keys, bytes: size, capture: capture, verify: verify}
 }
 
-// transferBatchLimit is the largest staged transfer committed as one batch.
-// Pebble ingests one SST set at a time (a capacity-1 semaphore) and places
-// each table by scanning every file of every level under db.mu, so a
-// 256-name transfer of ~93 bucket tables serialized all imports on one core.
-// Batches commit concurrently through the WAL and memtable. Stay far below
-// Pebble's large-batch threshold (MemTableSize/2), which would rotate the
-// memtable; larger transfers keep ingestion, where SSTs amortize better.
+// transferBatchLimit is a test/benchmark override. Private imported data must
+// bypass the foreground WAL and memtables, even for small transfers: sustained
+// copies can otherwise fill the shared flush queue and stall live writes.
+// SST bounds are split by namespace/time bucket and contain only reserved IDs,
+// so staging does not overlap live keys or force their memtables to flush.
 func (s *Store) transferBatchLimit() int {
-	if s.transferBatchBytes != 0 {
-		return max(0, s.transferBatchBytes)
-	}
-	return int(min(64<<20, s.pebbleOptions.MemTableSize/8))
+	return max(0, s.transferBatchBytes)
 }
 
 // writeTransferBatch stages the keys in one batch and verifies an
