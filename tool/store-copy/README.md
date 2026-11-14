@@ -9,6 +9,33 @@ Build with `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build ./tool/store-copy`
 The owning donor and receiver daemons must also contain the native engine.
 Existing metric commands keep their behavior unless `--engine bulk` is selected.
 
+## Controller progress metrics
+
+Every `store-copy` invocation sends Graphite plaintext to `127.0.0.1:2003`
+by default. Set `STORE_COPY_GRAPHITE_ADDR=receiver:2003` when the controller
+runs elsewhere. The receiver must accept and route this namespace. No daemon
+or scrape configuration change is required when a local receiver already exists.
+
+Series are `carbon.store_copy.<runner>.<invocation>.<command>.<phase>.<metric>`:
+`done`, `total`, `names_per_second`, `active` and `heartbeat` (Unix seconds).
+Runner punctuation becomes underscores; the invocation is a fresh 12-character
+hash, so concurrent runs cannot overwrite one another. Snapshots are emitted at
+startup, every 15s and on exit. A phase transition clears the previous phase’s activity and rate.
+`active=0` records termination, not successful
+verification. Consult the command exit status and summary for success/residuals.
+Disconnected receivers produce a stderr warning and bounded retries at the next
+snapshot; telemetry never changes transfer admission or the command result.
+
+Copy and sync use the exact snapshot also written to progress JSON, including
+`done` and `total` for the current phase/batch. Durable cumulative counters and
+the rate retain their existing meanings. Nested copy snapshots cannot replace
+the parent sync snapshot. Commands without a progress file emit only lifecycle
+heartbeats. Phase appears in the series name.
+
+These metrics require installing this tool version and launching a new process.
+An already running binary cannot start exporting them, and history is not backfilled.
+
+
 ## Plan-free copy (`copy`)
 
 `copy` discovers names and copies them. There is no plan directory, plan ID,

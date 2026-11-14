@@ -422,6 +422,8 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		j.mu.Unlock()
 		s.prog.mu.Lock()
 		snap.Phase = s.prog.phase
+		snap.Done = s.prog.done.Load()
+		snap.Total = int64(s.prog.total)
 		s.prog.mu.Unlock()
 		return snap
 	}, cancelFile)
@@ -505,7 +507,8 @@ func (s *syncer) namesFile(kind string, round int, source int, names []string) (
 // target refuses (403: not in transfer-sources) is marked forbidden.
 func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, names []string, short ...string) (syncCopyResult, error) {
 	source := s.o.from[src]
-	s.prog.begin(phase, len(names))
+	// The caller owns phase progress; a source batch must not reset its totals
+	// or replace a stable phase with an immutable per-batch journal identity.
 	journal, err := s.namesFile(phase, round, src, names)
 	if err != nil {
 		return syncCopyResult{}, err
@@ -621,6 +624,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 			break
 		}
 		s.phase("fill")
+		s.prog.begin("fill", fillable)
 		work := 0
 		for src := range s.o.from {
 			names := bySource[src]
@@ -653,6 +657,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 				}
 			}
 			s.sum.Filled += len(names) - len(res.Failed)
+			s.prog.done.Add(int64(len(names)))
 		}
 		s.endPhase("fill", work)
 		set = set[:0]
