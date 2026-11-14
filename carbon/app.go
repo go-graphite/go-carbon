@@ -574,6 +574,9 @@ func (app *App) ReloadConfig() error {
 // the returned channel before exiting or closing storage used by active reads.
 // Assumes we are holding app.Lock().
 func (app *App) stopListeners() <-chan struct{} {
+	if app.Buckyd != nil {
+		app.Buckyd.CancelTransfers()
+	}
 	app.stopInputListeners()
 	return app.stopReadListeners()
 }
@@ -581,9 +584,6 @@ func (app *App) stopListeners() <-chan struct{} {
 // Keep reads available while receivers and other input cleanup finish.
 // Assumes we are holding app.Lock().
 func (app *App) stopInputListeners() {
-	if app.Buckyd != nil {
-		app.Buckyd.CancelTransfers()
-	}
 	logger := zapwriter.Logger("app")
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {

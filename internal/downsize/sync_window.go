@@ -400,7 +400,7 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 	err := b.wait(ctx, "CopyWindow", source, func() error {
 		var err error
 		result, err = b.copyWindowOnce(ctx, source, target, names, journalPath, windows)
-		if restartCopyError(err) {
+		if ctx.Err() == nil && restartCopyError(err) {
 			b.expireWindowPins()
 		}
 		return err
@@ -568,7 +568,7 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 	err := b.wait(ctx, "WindowPresenceRanges", source, func() error {
 		var err error
 		result, err = b.windowPresenceRangesOnce(ctx, source, names, windows)
-		if restartCopyError(err) {
+		if ctx.Err() == nil && restartCopyError(err) {
 			b.expireWindowPins()
 		}
 		return err
