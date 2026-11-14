@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -365,6 +366,35 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 // Reuse the existing native window exporter and target-wins combiner. Durable
 // native intents/receipts are kept beside the ordinary sync journal; no metric
 // fallback is permitted because that API would silently import full history.
+// A rejected native batch must not strand unrelated names. Keep the original
+// intent journal intact and give each deterministic child its own window-bound
+// receipt identity. Even if a rejected parent applied points before failing,
+// native combine preserves existing target values when its children retry.
+func (b *syncLiveBackend) splitRejectedWindow(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges, err error) (syncCopyResult, error) {
+	var result syncCopyResult
+	if err == nil || ctx.Err() != nil {
+		return result, err
+	}
+	var api *apiError
+	if !errors.As(err, &api) || (api.Status != http.StatusRequestEntityTooLarge && api.Status != http.StatusConflict) {
+		return result, err
+	}
+	if len(names) <= 1 {
+		event("sync_window_copy_unresolved", map[string]any{"level": "error", "source": source, "target": target, "names": names, "reason": err.Error(), "retained": true})
+		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
+	}
+	event("sync_window_copy_split", map[string]any{"source": source, "target": target, "names": len(names), "reason": err.Error()})
+	mid := len(names) / 2
+	identity := sha256.Sum256([]byte(journalPath))
+	base := filepath.Join(filepath.Dir(journalPath), "window-split-"+hex.EncodeToString(identity[:16]))
+	left, err := b.CopyWindow(ctx, source, target, names[:mid], base+".left", windows)
+	if err != nil {
+		return left, err
+	}
+	right, err := b.CopyWindow(ctx, source, target, names[mid:], base+".right", windows)
+	return syncCopyResult{Copied: left.Copied + right.Copied, Failed: append(left.Failed, right.Failed...), Forbidden: left.Forbidden || right.Forbidden}, err
+}
+
 func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges) (syncCopyResult, error) {
 	if b.o.noCopy {
 		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
@@ -414,7 +444,7 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 			return syncCopyResult{}, err
 		}
 		err = func() error {
-			defer release()
+			defer func() { release() }()
 			defer j.close()
 			for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
 				end := min(start+chunkstore.NativeMaxRangeNames, len(names))
@@ -424,7 +454,30 @@ func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string,
 				}
 				if t.Native == nil || !t.Native.complete() {
 					if err := c.executeRange(ctx, t, names[start:end]); err != nil {
-						return err
+						// Split only this bounded rejected range, not the entire
+						// (potentially multi-million-name) fill or other windows.
+						path := fmt.Sprintf("%s.window-%d-%s.range-%d-%d", journalPath, wi, id[:16], start, end)
+						// Recursive copies must not borrow another shared pin while
+						// this parent holds its read lock: pin rotation takes
+						// the write lock and would deadlock both borrowers.
+						release()
+						release = func() {}
+						res, splitErr := b.splitRejectedWindow(ctx, source, target, names[start:end], path, syncRanges{w}, err)
+						if splitErr != nil {
+							return splitErr
+						}
+						if res.Forbidden {
+							return errors.New("window split source or target became forbidden")
+						}
+						for _, n := range res.Failed {
+							failed[n] = true
+						}
+						c, release, err = b.windowController(ctx, m, source)
+						if err != nil {
+							release = func() {}
+							return err
+						}
+						continue
 					}
 					t = j.tasks[taskKey(t)]
 					if err := b.o.rate.wait(ctx, t.Bytes); err != nil {
