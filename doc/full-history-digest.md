@@ -31,11 +31,15 @@ archive window -> complete time buckets -> cached uint64 sums
 
 Each archive's bucket is `floor(timestamp / (8192 * archive step))`, aligned to
 Unix epoch. Its key is `ds/ + archive:uint16 + bucket:uint32` within the metric
-generation, and its entire value is one big-endian uint64. A point hash is
-computed in memory from the timestamp and exact float64 bits using two
-SplitMix64 avalanches; no point hashes are stored. Addition wraps modulo 2^64.
-NaNs and infinities are excluded, as in the existing digest. Signed zeros and
-finite subnormals retain their bit patterns.
+generation. Dense complete buckets retain the original eight-byte sum. Sparse
+or partial ranges use fourteen bytes: sum:uint64, finite count:uint16, first
+slot:uint16 and exclusive end slot:uint16. Exact slot bounds are checked on a
+hit. There is at most one cached range per logical bucket; another range
+replaces it. Empty ranges of slots are cached with count zero. A point hash is
+computed from timestamp and exact float64 bits using two SplitMix64 avalanches;
+addition wraps modulo 2^64. NaNs and infinities are excluded, while signed zeros
+and finite subnormals retain their bit patterns. Older binaries ignore extended
+values and decode them instead.
 
 There is one additional 8-byte metric revision fence at `ds`, rather than a
 revision or count per bucket. Cache publication rechecks ID, generation and
@@ -49,26 +53,17 @@ does not discard history.
 Other mutation paths change the metric revision without advancing the fence,
 forcing lazy invalidation next time. Transfers exclude all local cache keys.
 
-## Count and format limit
+## Cache fills and invalidation
 
-Exact groups have **physical** presence bits. Cold-packed groups encode
-increasing timestamps and have no presence bitmap. Neither representation alone
-provides a canonical finite-point bitmap after overlap/sidecar/rollup resolution.
-Therefore the prototype caches only complete finite 8192-slot buckets: cache
-existence certifies that every slot was finite when filled, so the count is
-implicitly 8192. **No count is stored.** Sparse and partially covered buckets
-continue to decode. Ordinary non-continuation archives also use decoding.
-
-This implements the dense-history fast path, not the final decode-free path for
-every sparse history. Supporting sparse cached sums needs a proven cheap count
-source that handles duplicates, nonfinite values and cold packing without
-violating the disk budget. Adding an 8192-bit bitmap per bucket would itself be
-much more expensive than the sum, so that is not introduced here.
-
-Cache filling is lazy on a digest request. Complete buckets must end before
-`now - max(DigestSettle, archive step)`; `DigestSettle` defaults to one hour.
-Correctness depends on write invalidation, not age alone. Retention and request
-edges always use the canonical range read.
+All canonical bucket ranges, including sparse, open and retention/request
+edges, can be cached. Correctness depends on revision fences and existing
+bucket invalidation, rather than age. `DigestSettle` remains source compatible
+but no longer controls eligibility. Normal writes invalidate affected logical
+buckets; broad mutations invalidate the revision fence. Source points remain
+the only source of truth. Cold requests still reconstruct canonical data to
+fill the cache. Warm exact-range hits read only digest keys, without opening
+virtual Whisper files. This improves repeated verification; it does not claim
+that a first-ever digest of arbitrary history avoids decoding.
 
 ## Usage
 
@@ -154,7 +149,8 @@ these warm single-name timings do not predict fleet throughput.
 
 ## Remaining work before enabling automatic sync use
 
-- Support cheap canonical sparse counts under the same storage budget.
+- Measure sparse-cache disk cost on representative many-name workloads; fourteen-byte
+  entries change the original dense-only prototype budget.
 - Integrate client capability negotiation, all-archive comparisons, bucket
   mismatch localization and point comparison restricted to differing buckets.
   Ranged server digests exist; the client still uses its current verifier.
@@ -187,3 +183,14 @@ includes holes in multiple archives, absent names, target-only values, signed ze
 NaN, infinity and subnormal values. Wire tests reject old mode responses; mismatched
 archive bounds fall back to point comparison. Dense buckets retain their implicit
 8192 count; sparse buckets still decode, with no additional on-disk count format.
+
+## Sparse and edge-cache extension
+
+The extended cache keeps dense values at eight bytes and uses fourteen for
+sparse counts and clipped bounds. The fixture budget is now 0.30% live SST
+rather than the dense-only 0.15%: integer gauges measured 598 extra bytes
+(0.1594%) and long-retention integers 252 bytes (0.2704%). Earlier dense-only
+figures above describe the prototype, not the extended format. Warm sparse and
+partial-window differential tests reject every non-digest-key read, proving
+that those exact repeated requests perform no continuation reconstruction.
+Cold fills and changed request boundaries still decode their affected buckets.

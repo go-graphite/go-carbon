@@ -25,8 +25,8 @@ import (
 type ContinuationCodec struct {
 	// keepSnapshotReadAllocations retains the previous reader as a test oracle.
 	keepSnapshotReadAllocations bool
-	// DigestSettle is the minimum age of a complete cached digest bucket.
-	// Zero defaults to one hour. Late writes still invalidate old buckets.
+	// DigestSettle is retained for source compatibility. Digest cache validity
+	// follows revision fences and write invalidation, regardless of point age.
 	DigestSettle time.Duration
 	// RangeReadsEnabled prunes sealed groups using their existing time headers during
 	// Fetch. Skipped payloads are not decompressed or checked by the sealed CRC.

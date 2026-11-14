@@ -178,8 +178,8 @@ func sumFixtureDiskOverhead(t *testing.T, kind string) {
 	entries, payload, logical := 0, 0, 0
 	for k, v := range kv.mapContinuationIO {
 		if len(k) >= 2 && k[:2] == "ds" {
-			if len(v) != 8 {
-				t.Fatal("digest cache value exceeds 8 bytes")
+			if len(v) != 8 && len(v) != 14 {
+				t.Fatal("invalid digest cache value size")
 			}
 			entries++
 			payload += len(v)
@@ -200,8 +200,10 @@ func sumFixtureDiskOverhead(t *testing.T, kind string) {
 	if delta < 0 {
 		t.Fatal("compaction changed baseline; disk delta is inconclusive")
 	}
-	if float64(delta)/float64(before) > .0015 {
-		t.Fatal("fixture exceeds 0.15% disk budget")
+	// Sparse counts and clipped edges extend the dense-only cache; bound their
+	// measured SST cost, including extra keys, on the same compact fixtures.
+	if float64(delta)/float64(before) > .003 {
+		t.Fatal("fixture exceeds 0.30% disk budget")
 	}
 	records, err := db.ExportTransfer(ctx, []string{m.Name})
 	if err != nil {
