@@ -507,7 +507,9 @@ func (s *Store) ingestTransferTables(ctx context.Context, paths []string) error 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		s.transferCommitMu.Lock()
 		stats, err := s.db.IngestWithStats([]string{path})
+		s.transferCommitMu.Unlock()
 		if err != nil {
 			return err
 		}

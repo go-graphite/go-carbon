@@ -54,6 +54,10 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		if err != nil {
 			return nil, err
 		}
+		if len(records) > 1 && len(prepared.batch.Repr()) > transferPublicationBytes {
+			_ = prepared.batch.Close()
+			return s.publishTransferSplit(ctx, records, metas)
+		}
 		if s.transferApplyTestHook != nil {
 			s.transferApplyTestHook()
 		}
@@ -198,6 +202,7 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 	batch := s.db.NewBatch()
 	defer batch.Close()
 	var sidecars []SidecarRecord
+	var metas []Metadata
 	for j, i := range pending {
 		if !held[j] {
 			continue
@@ -210,10 +215,16 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 			out[j] = partChanged
 			continue
 		}
+		// A single metric is indivisible, but do not combine several large
+		// preparations into an unbounded publication batch.
+		if !batch.Empty() && len(batch.Repr())+len(parts[i].batch.Repr()) > transferPublicationBytes {
+			continue
+		}
 		if err := batch.Apply(parts[i].batch, nil); err != nil {
 			return nil, err
 		}
 		sidecars = append(sidecars, parts[i].sidecars...)
+		metas = append(metas, parts[i].metas...)
 		out[j] = partCommitted
 	}
 	if batch.Empty() && len(sidecars) == 0 {
@@ -224,7 +235,7 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}
-	if err := s.commitSidecarRecords(batch, sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
+	if err := s.commitTransferPublication(ctx, batch, metas, sidecars); err != nil {
 		return nil, err
 	}
 	s.pendingSync.Store(true)
@@ -320,7 +331,7 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}
-	if err := s.commitSidecarRecords(p.batch, p.sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
+	if err := s.commitTransferPublication(ctx, p.batch, p.metas, p.sidecars); err != nil {
 		return false, err
 	}
 	s.pendingSync.Store(true)

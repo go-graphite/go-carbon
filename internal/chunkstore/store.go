@@ -361,8 +361,12 @@ type Store struct {
 	mirrorBlind              atomic.Uint64
 	canonicalRuns            [64]IDSet
 	ingestStats              struct{ tables, entries, bytes, l0Bytes, memtableOverlaps atomic.Uint64 }
-	transferBatchStats       struct{ commits, entries, bytes atomic.Uint64 }
-	transferMergeStats       transferMergeStats
+	// transferCommitMu excludes import ingestion from import WAL apply. Live
+	// writers never acquire it. Pebble ingestion waits for visible sequence
+	// numbers while owning the foreground commit pipeline mutex.
+	transferCommitMu   sync.Mutex
+	transferBatchStats struct{ commits, entries, bytes atomic.Uint64 }
+	transferMergeStats transferMergeStats
 	// transferMergeAppendOff merges every present continuation name with
 	// RestoreArchives (differential tests).
 	transferMergeAppendOff bool
