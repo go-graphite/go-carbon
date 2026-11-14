@@ -51,13 +51,13 @@ func CheckTransferViewForTest(t *testing.T, s *Store, records []TransferMetric) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer want.close()
+	defer want.batch.Close()
 	got, err := s.prepareTransfer(ctx, records, metas, view)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer got.close()
-	if !bytes.Equal(want.retire.Repr(), got.retire.Repr()) || !bytes.Equal(want.batch.Repr(), got.batch.Repr()) || !reflect.DeepEqual(want.proofs, got.proofs) || !reflect.DeepEqual(want.sidecars, got.sidecars) || !reflect.DeepEqual(want.expected, got.expected) || !reflect.DeepEqual(want.metas, got.metas) {
+	defer got.batch.Close()
+	if !bytes.Equal(want.batch.Repr(), got.batch.Repr()) || !reflect.DeepEqual(want.proofs, got.proofs) || !reflect.DeepEqual(want.sidecars, got.sidecars) || !reflect.DeepEqual(want.expected, got.expected) || !reflect.DeepEqual(want.metas, got.metas) {
 		t.Fatal("iterator preparation differs from snapshot oracle")
 	}
 }

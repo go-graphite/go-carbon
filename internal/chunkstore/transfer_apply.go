@@ -12,40 +12,12 @@ var errTransferSplit = errors.New("transfer publication needs single-name queues
 
 type preparedTransfer struct {
 	batch           *pebble.Batch
-	retire          *pebble.Batch
 	expected, metas []Metadata
 	proofs          []TransferProof
 	sidecars        []SidecarRecord
 	// epochs are the metas' stripe epochs captured before the preparation
 	// view opened; commit skips the catalog re-read of unchanged stripes.
 	epochs []uint64
-}
-
-// close releases both the publication and unreachable-generation cleanup batches.
-func (p *preparedTransfer) close() {
-	_ = p.batch.Close()
-	if p.retire != nil {
-		_ = p.retire.Close()
-	}
-}
-
-// Publication has completed and released its mutation stripes. Reserved IDs are
-// never reused, so deleting the replaced generation cannot affect a later writer.
-// Readers that already opened a snapshot retain the old generation's keys.
-func (s *Store) retirePreparedTransfer(p *preparedTransfer) error {
-	if p.retire == nil || p.retire.Empty() {
-		return nil
-	}
-	if s.transferRetireTestHook != nil {
-		s.transferRetireTestHook()
-	}
-	began := time.Now()
-	err := p.retire.Commit(pebble.NoSync)
-	s.transferApply.retire.Add(uint64(time.Since(began)))
-	if err == nil {
-		s.pendingSync.Store(true)
-	}
-	return err
 }
 
 // Recompute after a concurrent target mutation; never merge a moving view or
@@ -86,10 +58,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			s.transferApplyTestHook()
 		}
 		committed, err := s.commitPreparedTransfer(ctx, prepared)
-		if err == nil && committed {
-			err = s.retirePreparedTransfer(prepared)
-		}
-		prepared.close()
+		_ = prepared.batch.Close()
 		if errors.Is(err, errTransferSplit) {
 			return s.publishTransferSplit(ctx, records, metas)
 		}
@@ -123,7 +92,7 @@ func (s *Store) publishTransferPartitioned(ctx context.Context, records []Transf
 	defer func() {
 		for _, p := range parts {
 			if p != nil {
-				p.close()
+				_ = p.batch.Close()
 			}
 		}
 	}()
@@ -143,30 +112,14 @@ func (s *Store) publishTransferPartitioned(ctx context.Context, records []Transf
 			return nil, err
 		}
 		next := make([]int, 0, len(pending))
-		// Keep the cleanup grouping of the successful publication, but run
-		// its memtable apply/publication after all mutation stripes are free.
-		cleanup := s.db.NewBatch()
-		for j, i := range pending {
-			if committed[j] == partCommitted && parts[i].retire != nil {
-				if err := cleanup.Apply(parts[i].retire, nil); err != nil {
-					_ = cleanup.Close()
-					return nil, err
-				}
-			}
-		}
-		err = s.retirePreparedTransfer(&preparedTransfer{retire: cleanup})
-		_ = cleanup.Close()
-		if err != nil {
-			return nil, err
-		}
 		for j, i := range pending {
 			switch committed[j] {
 			case partCommitted:
 				proofs[i] = parts[i].proofs[0]
-				parts[i].close()
+				_ = parts[i].batch.Close()
 				parts[i] = nil
 			case partChanged:
-				parts[i].close()
+				_ = parts[i].batch.Close()
 				parts[i] = nil
 				next = append(next, i)
 			default:
