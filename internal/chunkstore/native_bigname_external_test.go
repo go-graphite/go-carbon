@@ -13,9 +13,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
+
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
+
+// These fixtures exercise physical history and heap bounds, independently of
+// the developer machine's free-space percentage. Production retains its guard.
+type nativeHistoryTestFS struct{ vfs.FS }
+
+func (nativeHistoryTestFS) GetDiskUsage(string) (vfs.DiskUsage, error) {
+	return vfs.DiskUsage{}, vfs.ErrUnsupported
+}
 
 // Exercise the real continuation combiner as well as the ordinary exact-block
 // path. The large fixture is physical history, not just a retention declaration.
@@ -39,7 +49,7 @@ func testNativeContinuationLargeHistoryBoundedHeap(t *testing.T, count int) {
 	ctx := context.Background()
 	clock := func() time.Time { return time.Unix(int64(2*count), 0) }
 	open := func() *store.Store {
-		s, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, Continuation: &whisperio.ContinuationCodec{}, Now: clock, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+		s, err := store.Open(t.TempDir(), (store.Options{ExactBlocks: true, Continuation: &whisperio.ContinuationCodec{}, Now: clock, CacheSize: 1 << 20, MemTableSize: 1 << 20}).WithFS(nativeHistoryTestFS{vfs.Default}))
 		if err != nil {
 			t.Fatal(err)
 		}
