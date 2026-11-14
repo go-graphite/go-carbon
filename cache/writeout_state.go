@@ -5,6 +5,8 @@ import "time"
 // WriteoutState is a sampled view of existing batching and capacity state.
 // It needs no per-metric history and remains useful with the input log disabled.
 type WriteoutState struct {
+	// ReplayPoints counts accepted independent durable input, excluding checkpoint claims.
+	ReplayPoints uint64
 	// LivePoints counts accepted receiver points for this cache lifetime.
 	// Restored/recovered points and refused arrivals do not contribute.
 	LivePoints                     uint64
@@ -63,6 +65,7 @@ func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
 		state.Metrics += int64(shard.items.len())
 		state.Points += shard.sizePublished + shard.sizeDelta
 		state.LivePoints += shard.livePoints
+		state.ReplayPoints += shard.replayPoints
 		w := &shard.writeout
 		state.Eligible += w.immediate
 		if !held {

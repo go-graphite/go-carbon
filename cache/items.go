@@ -31,6 +31,8 @@ type item struct {
 	throttle        any            // hot for every configured quota check
 	pending         *points.Points // allocated only when recovery needs a queued identity
 	indexGeneration uint64
+	// source is a hint only: recoverySources owns all confirmation references.
+	source *RecoverySource
 }
 
 const (

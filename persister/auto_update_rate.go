@@ -133,6 +133,8 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 }
 
 type autoUpdateRate struct {
+	replayDemand            restartLiveDemand
+	replayRate              float64
 	liveDemand              restartLiveDemand
 	liveRate                atomic.Uint64 // float64 bits, shared with restart CPU observer
 	snapshot                cache.WriteoutState
@@ -209,7 +211,22 @@ func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
 	p.sampleRestartLiveDemandLocked(time.Now(), s)
 	a.snapshot = s
 	a.draining.Store(s.Draining)
-	a.ordinary = a.controller.step(time.Now(), s, a.floor, a.ceiling)
+	// Capture replay is continuing input, even after checkpoint recovery has
+	// finished. Its names/max-delay demand can be much smaller than the rate
+	// needed to persist the points already being admitted. Fund that demand
+	// from confirmed batch sizes, with catch-up headroom, within auto-max.
+	replay := s
+	replay.LivePoints = s.ReplayPoints
+	shared, original := p.WriteStats()
+	a.replayRate = a.replayDemand.step(time.Now(), replay, shared.Points+original.Points, shared.Updates+original.Updates) * (1.2 / autoUpdateMargin)
+	floor := max(a.floor, int(math.Ceil(min(a.replayRate, float64(int(^uint(0)>>1)/2)))))
+	if a.ceiling > 0 {
+		floor = min(floor, a.ceiling)
+	}
+	a.ordinary = a.controller.step(time.Now(), s, floor, a.ceiling)
+	if a.replayRate > float64(a.floor) && a.controller.reason == "floor" {
+		a.controller.reason = "recovery"
+	}
 	p.capacityLimitLocked(s)
 	p.applyAutoUpdateRateLocked()
 }

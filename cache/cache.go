@@ -130,6 +130,7 @@ type Shard struct {
 	inFlightPoints      atomic.Int64  // writers hold mu
 	throttledPoints     atomic.Uint64 // writers hold mu
 	overflowPoints      atomic.Uint64 // writers hold mu
+	replayPoints        uint64        // accepted independently durable input, protected by mu
 	livePoints          uint64        // accepted live points, protected by mu; excludes restoration
 	livePointsPublished atomic.Uint64 // receipt publication, at most 63 accepted points behind
 
@@ -950,9 +951,13 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 		c.writeoutQueue.notifyAt(writeoutDeadline(values, s))
 	}
-	metadataChanged := shard.setItemThrottle(values, throttleState)
 	if source != nil {
+		shard.replayPoints += uint64(len(p.Data))
+	}
+	metadataChanged := shard.setItemThrottle(values, throttleState)
+	if source != nil && (values.source == nil || values.source.stream != source.stream || values.source.sequence > source.sequence) {
 		shard.trackSource(shard.itemIdentity(values), source)
+		values.source = source
 		metadataChanged = true
 	}
 	capacity, logCapacity := cap(values.compact.buf), shard.log.stagingBytes()
