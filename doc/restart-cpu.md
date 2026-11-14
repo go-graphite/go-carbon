@@ -91,12 +91,19 @@ explicit offline maintenance calls keep their existing behavior. With metadata
 prewarm disabled or no metadata cache, no restart maintenance wait is installed.
 
 During fixed-mode restart pacing, the rate-token ceiling is three times the
-greater of saved steady throughput and queued metrics divided by max delay, replacing
-`max-updates-per-second`. Without saved throughput, a finite configured cap
-is raised to at least three times the queue floor; zero stays unlimited.
+greatest of saved steady throughput, queued metrics divided by max delay, and
+observed live-input demand, replacing `max-updates-per-second`. Without saved throughput, a finite configured cap
+is raised to at least three times the queue/live-input floor; zero stays unlimited.
 A growing queue can raise this rate ceiling; the CPU allowance stays fixed.
-Normal settings resume when pacing ends. The writeout floor is the greater of
-saved steady throughput and queued metrics divided by max delay. A separate
+Normal settings resume when pacing ends. The writeout floor is the greatest of
+saved steady throughput, queued metrics divided by max delay, and live-input
+demand. Every five seconds, live demand is accepted receiver points per second
+divided by observed committed points per update, with a 3% margin. Restored and
+replayed points do not count as new input. Until commits are observed, cached
+points per metric supplies the batch estimate; it also bounds the observed
+batch size so large restored batches cannot hide small live batches. Increases
+apply immediately; decreases decay over one minute. These observations use
+cumulative counters and work without the input log. A separate
 floor-rate admission bucket allows those writes despite process CPU debt. Every
 admitted update, including CPU-funded catch-up, debits that bucket, so the floor
 cannot fund extra catch-up. While writers or required preparation are pending,
