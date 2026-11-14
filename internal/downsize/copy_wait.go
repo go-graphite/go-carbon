@@ -113,7 +113,7 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 // restartCause matches a target 500 whose cause is the source export
 // transport (refused, reset or cut while the source restarts), as the target
 // buckyd reports it.
-var restartCause = []string{"connection refused", "connection reset", "broken pipe", "unexpected EOF", ": EOF", "i/o timeout", "no route to host", "server closed idle connection", "timeout awaiting response headers", "store recovery has not finished", "store recovery is not finished", "not ready", "native source session expired or daemon restarted", "context canceled"}
+var restartCause = []string{"connection refused", "connection reset", "broken pipe", "unexpected EOF", ": EOF", "i/o timeout", "no route to host", "server closed idle connection", "timeout awaiting response headers", "application lifecycle is busy; retry native copy", "store recovery has not finished", "store recovery is not finished", "not ready", "native source session expired or daemon restarted", "context canceled"}
 
 // transientCopyError reports errors a host restart produces: guard and
 // gateway responses, a target 500 caused by a source transport error, and any
