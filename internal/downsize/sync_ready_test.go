@@ -227,7 +227,7 @@ func TestReadyNoReadyAndFailureInvalidate(t *testing.T) {
 func TestReadyProcessAndReadbackHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/metrics" {
-			fmt.Fprintln(w, "process_start_time_seconds 123.5")
+			fmt.Fprintln(w, `process_start_time_seconds{cluster="test",location="west"} 123.5`)
 			return
 		}
 		if r.URL.Query().Get("noCache") != "true" || r.URL.Query().Get("target") != "metric" {
