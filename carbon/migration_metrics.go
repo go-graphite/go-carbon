@@ -465,6 +465,9 @@ var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_release_failures_total", "Startup source durability fence or release failures.", nil, nil),
 }
 
+var captureHistoryBytesDesc = prometheus.NewDesc("startup_capture_history_pending_bytes", "Encoded startup spool and journal bytes still waiting for history replay.", nil, nil)
+var captureHistorySegmentsDesc = prometheus.NewDesc("startup_capture_history_pending_segments", "Nonempty startup spool files still waiting for history replay; excludes the input journal.", nil, nil)
+
 var captureIODescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_operation_seconds_total", "Capture operation elapsed time, summed over independent owners.", []string{"operation"}, nil),
 	prometheus.NewDesc("startup_capture_operation_calls_total", "Capture operation calls.", []string{"operation"}, nil),
@@ -472,6 +475,8 @@ var captureIODescs = []*prometheus.Desc{
 }
 
 func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- captureHistoryBytesDesc
+	ch <- captureHistorySegmentsDesc
 	for _, desc := range captureIODescs {
 		ch <- desc
 	}
@@ -510,6 +515,16 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
+	var pendingHistory, pendingSegments int64
+	if capture := c.app.startupCaptureState.Load(); capture != nil {
+		pendingHistory = max(int64(0), capture.historyPendingBytes.Load())
+		pendingSegments = max(int64(0), capture.historyPendingSegments.Load())
+	}
+	if log := c.app.inputLog.Load(); log != nil {
+		pendingHistory += max(int64(0), log.ReplayPendingBytes())
+	}
+	ch <- prometheus.MustNewConstMetric(captureHistoryBytesDesc, prometheus.GaugeValue, float64(pendingHistory))
+	ch <- prometheus.MustNewConstMetric(captureHistorySegmentsDesc, prometheus.GaugeValue, float64(pendingSegments))
 	if capture := c.app.startupCaptureState.Load(); capture != nil {
 		for i, timing := range capture.ioTimings() {
 			ch <- prometheus.MustNewConstMetric(captureIODescs[0], prometheus.CounterValue, float64(timing.total)/1e9, captureOperations[i])

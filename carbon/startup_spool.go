@@ -133,6 +133,8 @@ type startupInput struct {
 	historyLog                                                          atomic.Pointer[startupSegment]
 	replayYields                                                        atomic.Int64
 	historyPoints                                                       atomic.Int64
+	historyPendingBytes                                                 atomic.Int64
+	historyPendingSegments                                              atomic.Int64
 	epoch                                                               int64
 	direct                                                              atomic.Bool
 	transition                                                          sync.Mutex
@@ -168,6 +170,10 @@ func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startup
 	s.file = f
 	s.legacy = &startupShard{owner: s, file: f, path: path}
 	s.legacy.size.Store(info.Size())
+	s.historyPendingBytes.Store(info.Size())
+	if info.Size() > 0 {
+		s.historyPendingSegments.Store(1)
+	}
 	s.size.Store(info.Size())
 	legacy := &startupSegment{file: f, path: path, unlock: unlock}
 	legacy.size.Store(info.Size())

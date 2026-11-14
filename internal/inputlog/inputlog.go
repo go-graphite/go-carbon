@@ -192,10 +192,11 @@ type Log struct {
 	// Valid segments found by Open, and their frames from the replay start.
 	// The frames before it in the same segment define names the pending
 	// frames use.
-	recovered []*segment
-	prefix    []frameRef
-	pending   []frameRef
-	nextSeq   uint64
+	recovered          []*segment
+	prefix             []frameRef
+	pending            []frameRef
+	replayPendingBytes atomic.Int64
+	nextSeq            uint64
 
 	// Owned by the cycle goroutine after Start.
 	src          Source
@@ -352,6 +353,9 @@ func Open(dir string, opts Options) (*Log, error) {
 		l.closeFiles()
 		_ = unlock()
 		return nil, err
+	}
+	for _, f := range l.pending {
+		l.replayPendingBytes.Add(int64(frameHeaderSize) + int64(f.h.length))
 	}
 	return l, nil
 }
@@ -1003,3 +1007,7 @@ func (l *Log) Stat(send func(metric string, value float64)) {
 		send("dropped", float64(dropped-l.stat.lastDropped.Swap(dropped)))
 	}
 }
+
+// ReplayPendingBytes reports encoded journal frame bytes not yet applied by
+// startup replay. It excludes dictionary-only prefixes and live log traffic.
+func (l *Log) ReplayPendingBytes() int64 { return l.replayPendingBytes.Load() }
