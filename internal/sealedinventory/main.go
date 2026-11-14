@@ -1,6 +1,5 @@
-// sealed-inventory reads immutable SSTs without opening a Pebble database.
-// Rewritten tables contain private experimental frames: never ingest them.
-package main
+// Package sealedinventory reads immutable SSTs without opening a Pebble database.
+package sealedinventory
 
 import (
 	"context"
@@ -93,47 +92,27 @@ type runner struct {
 	tempDirs                 []string
 }
 
-func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "sealed-inventory:", err)
-		os.Exit(1)
-	}
-}
+func Main(args []string) error { return run(args) }
 func run(args []string) error {
-	if len(args) == 0 || (args[0] != "inventory" && args[0] != "transcode") {
-		return errors.New("usage: sealed-inventory inventory|transcode -sst-dir DIR -out report.json [-tmp DIR] [-policy current,float-codec,prefix256,minfour,alp,chimp]")
-	}
-	c := config{mode: args[0]}
+	c := config{mode: "inventory"}
 	fs := flag.NewFlagSet(c.mode, flag.ContinueOnError)
 	fs.StringVar(&c.asOf, "as-of", "", "ordinary reason model clock (RFC3339; default scan start)")
 	fs.DurationVar(&c.writeWindow, "write-window", 24*time.Hour, "ordinary reason model: native range cold age")
 	fs.StringVar(&c.metadataDir, "metadata-dir", "", "all immutable store SSTs for descriptor/manifest index seeks (default sst-dir)")
 	fs.StringVar(&c.dir, "sst-dir", "", "directory of immutable SST files")
 	fs.StringVar(&c.out, "out", "", "JSON report (outside the SST directory)")
-	fs.StringVar(&c.tmp, "tmp", "", "temporary output directory, outside SST directory")
-	fs.StringVar(&c.policies, "policy", "current,float-codec", "comma-separated policies; research controls prefix256,minfour,alp,chimp also available")
 	fs.StringVar(&c.levels, "levels-json", "", "optional JSON filename-to-level mapping, copied from a known snapshot")
 	fs.IntVar(&c.level, "level", 6, "fallback writer level (0..6)")
 	fs.IntVar(&c.files, "files", 0, "first N files in sorted filename order; 0=all (sample before linking)")
 	fs.IntVar(&c.procs, "procs", 4, "GOMAXPROCS cap; codec CPU measurements run serially")
 	fs.Float64Var(&c.readMB, "read-mb-s", 200, "read token bucket MiB/s; 0=unlimited")
-	fs.BoolVar(&c.keep, "keep", false, "retain private experimental tables")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || c.dir == "" || c.out == "" || c.procs < 1 || c.files < 0 || c.level < 0 || c.level > 6 || c.readMB < 0 || math.IsNaN(c.readMB) || math.IsInf(c.readMB, 0) {
 		return errors.New("invalid/missing flags")
 	}
-	if c.mode == "transcode" && c.tmp == "" {
-		return errors.New("transcode requires -tmp")
-	}
-	for _, p := range strings.Split(c.policies, ",") {
-		switch p {
-		case "current", "prefix256", "minfour", "alp", "chimp", "float-codec", "float-codec-min":
-		default:
-			return fmt.Errorf("unknown policy %q", p)
-		}
-	}
+
 	var err error
 	c.dir, err = filepath.EvalSymlinks(c.dir)
 	if err != nil {
@@ -159,11 +138,7 @@ func run(args []string) error {
 		if err = outside(input, c.out); err != nil {
 			return err
 		}
-		if c.mode == "transcode" {
-			if err = outside(input, c.tmp); err != nil {
-				return err
-			}
-		}
+
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -198,11 +173,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if c.mode == "transcode" {
-		if err = spaceCheck(c.tmp, total); err != nil {
-			return err
-		}
-	}
+
 	r.outputLimit = 2 * total
 	start := time.Now()
 	progressDone := make(chan struct{})
@@ -249,15 +220,9 @@ func run(args []string) error {
 	result := report{OrdinaryCutoffUTC: analysisNow.Add(-c.writeWindow).UTC().Format(time.RFC3339), Ordinary: map[string]*ordinaryRow{}, OrdinaryByReason: map[string]*tally{}, SchemaVersion: 3, Mode: c.mode, Architecture: runtime.GOOS + "/" + runtime.GOARCH, GoVersion: runtime.Version(), StartedUTC: start.UTC().Format(time.RFC3339), Procs: c.procs, ReadMBPerSecond: c.readMB, Classes: map[string]*tally{}, Notes: []string{
 		"Ordinary rows partition ordinary bytes. Schema comes from store-wide manifests, else only archive ordinal is known. Newest-observed/open-candidate is relative to sampled tail groups, not proof of the live writer head. Missing metadata, obsolete versions and descriptor mismatch remain explicit. Descriptors/manifests are joined across every SST in metadata-dir using bounded index seeks, with a 32-reader LRU, 128-file/metric LRU and 2 MiB/8192-entry per-file/metric bound. Tail temperature/position still uses selected SSTs only; unseen tails remain unknown. Cross-file range deletions are not resolved.",
 		"PhysicalBytes is compressed data-block bytes including 5-byte trailers apportioned by user-key+value logical bytes; it is an exact accounting convention, not independent compressibility.",
-		"Bloom bits/key are inferred from serialized filter size; confirm BaselineWithin3Pct before extrapolating paired rewrite savings.",
 		"Every internal point entry/version is counted, including obsolete entries and point deletions. Tombstoned counts reflect only newer range deletions in the same file; cross-file liveness is not established by this offline inventory.",
-		"Files are scanned serially; process CPU (getrusage) brackets codec work only, excludes SST I/O/writer work and the bit oracle. GC and runtime background work can contribute.",
-		"Whole-file savings compare paired unchanged and candidate rewrites; original-file delta and baseline agreement are reported separately. These are per-file rewrites, not a cross-file compaction.",
-		"Production uses pure-Go Snappy outer blocks; inner research Zstd uses klauspost pure Go. No cgo required.",
 	}}
-	if c.mode == "transcode" {
-		result.Notes[0] = "Transcode omits ordinary eligibility metadata joins and leaves Ordinary/OrdinaryByReason empty. Classes, points and physical byte accounting still include every ordinary entry. Use inventory for ordinary details."
-	}
+
 	result.Policies = map[string]*policyReport{}
 	for _, path := range files {
 		if err = ctx.Err(); err != nil {
@@ -324,7 +289,6 @@ func run(args []string) error {
 		result.FloatSharePct = 100 * result.FloatDataBytes / float64(result.FileBytes)
 		result.SealedSharePct = 100 * result.SealedDataBytes / float64(result.FileBytes)
 	}
-	finishPolicies(result.Policies, result.BaselineBytes, result.FloatDataBytes)
 	result.WallSeconds = time.Since(start).Seconds()
 	result.ReadBytes = r.readBytes.Load()
 	if err = ctx.Err(); err != nil {
@@ -429,18 +393,4 @@ func listFiles(dir string, n int) ([]string, uint64, error) {
 		total += uint64(st.Size())
 	}
 	return paths, total, nil
-}
-func spaceCheck(dir string, input uint64) error {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
-		return err
-	}
-	available := st.Bavail * uint64(st.Bsize)
-	if available < 50<<30 {
-		return errors.New("temporary filesystem has less than 50 GiB free")
-	}
-	if input > available/2 {
-		return errors.New("2x sampled input exceeds free space")
-	}
-	return nil
 }

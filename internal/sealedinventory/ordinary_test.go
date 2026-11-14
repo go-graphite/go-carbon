@@ -1,4 +1,4 @@
-package main
+package sealedinventory
 
 import (
 	"bytes"
@@ -98,7 +98,7 @@ func TestOrdinaryReasonsAcrossSample(t *testing.T) {
 	write("000001.sst", metadata)
 	write("000002.sst", groups)
 	output := filepath.Join(root, "inventory.json")
-	if err := run([]string{"inventory", "-sst-dir", dir, "-out", output, "-read-mb-s", "0"}); err != nil {
+	if err := run([]string{"-sst-dir", dir, "-out", output, "-read-mb-s", "0"}); err != nil {
 		t.Fatal(err)
 	}
 	r := loadReport(t, output)
@@ -139,7 +139,7 @@ func TestOrdinaryReasonsAcrossSample(t *testing.T) {
 		}
 	}
 	sampleOut := filepath.Join(root, "sample.json")
-	if err := run([]string{"inventory", "-sst-dir", sampleDir, "-metadata-dir", dir, "-out", sampleOut, "-read-mb-s", "0"}); err != nil {
+	if err := run([]string{"-sst-dir", sampleDir, "-metadata-dir", dir, "-out", sampleOut, "-read-mb-s", "0"}); err != nil {
 		t.Fatal(err)
 	}
 	joined := loadReport(t, sampleOut)
@@ -161,7 +161,7 @@ func TestOrdinaryReasonsAcrossSample(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultOut := filepath.Join(root, "default-metadata.json")
-	if err := run([]string{"inventory", "-sst-dir", sampleDir, "-files", "1", "-out", defaultOut, "-read-mb-s", "0"}); err != nil {
+	if err := run([]string{"-sst-dir", sampleDir, "-files", "1", "-out", defaultOut, "-read-mb-s", "0"}); err != nil {
 		t.Fatal(err)
 	}
 	defaultJoin := loadReport(t, defaultOut)

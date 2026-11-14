@@ -607,3 +607,6 @@ the appropriate acknowledged source and gap windows for recovery.
 inspects archive anchors through buckyd. Applying requires `-apply -plan PLAN
 -write-ok WRITE-OK`, with the plan SHA256 in WRITE-OK. See
 [anchor maintenance](../../internal/storemaint/anchors/README.md).
+
+`storectl inventory sealed -sst-dir SNAPSHOT -out inventory.json` inspects
+immutable SST classes and ordinary eligibility; see [limits and interpretation](../../internal/sealedinventory/README.md).
