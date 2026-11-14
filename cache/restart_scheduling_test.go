@@ -87,6 +87,7 @@ func TestRefreshKeepsWritingWhileQueueRebuildWaits(t *testing.T) {
 				if got := q.Get(abort); got != "cold-one" {
 					t.Fatal(got)
 				}
+				c.Pop("cold-one")
 				c.Add(points.OnePoint("warm-later", 1, 3))
 				time.Sleep(time.Second + time.Millisecond)
 				got := make(chan string, 1)
@@ -97,6 +98,7 @@ func TestRefreshKeepsWritingWhileQueueRebuildWaits(t *testing.T) {
 					if name != "cold-two" {
 						t.Fatal("pending refresh hid eligible old work", name)
 					}
+					c.Pop(name)
 				case <-time.After(time.Second):
 					t.Fatal("queue rebuild parked writeout despite eligible old work")
 				}
