@@ -24,8 +24,8 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 	source := nativeControllerStore(t)
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
-	var active, peak atomic.Int64
-	var progressedWhileActive atomic.Bool
+	var active, peak, pulls atomic.Int64
+	var progressedBeforeLastPull atomic.Bool
 	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/native/capabilities" {
 			_ = json.NewEncoder(w).Encode(map[string]bool{"NativeTimeWindow": true, "NativeExactCombine": true, "NativeDeferredCombine": true})
@@ -35,6 +35,7 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		pulls.Add(1)
 		n := active.Add(1)
 		defer active.Add(-1)
 		for old := peak.Load(); n > old; old = peak.Load() {
@@ -67,10 +68,12 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 		b := newSyncLiveBackend(syncLiveOptions{copyStreams: streams, hostWait: time.Nanosecond})
 		stop := b.beginWindowCopy()
 		peak.Store(0)
+		pulls.Store(0)
+		progressedBeforeLastPull.Store(false)
 		started := time.Now()
 		ctx := context.WithValue(context.Background(), syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
-			if n > 0 && !replayed && active.Load() > 0 {
-				progressedWhileActive.Store(true)
+			if n > 0 && !replayed && pulls.Load() < int64(len(names)/store.NativeMaxRangeNames) {
+				progressedBeforeLastPull.Store(true)
 			}
 		})
 		res, err := b.CopyWindow(ctx, donor.URL, dst.URL, names, t.TempDir()+"/copy", syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
@@ -79,8 +82,8 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if streams > 1 && (peak.Load() < 2 || peak.Load() > int64(streams) || !progressedWhileActive.Load()) {
-			t.Fatal("ranges failed to overlap/report progress", peak.Load(), progressedWhileActive.Load())
+		if streams > 1 && (peak.Load() < 2 || peak.Load() > int64(streams) || !progressedBeforeLastPull.Load()) {
+			t.Fatal("ranges failed to overlap/report progress", peak.Load(), progressedBeforeLastPull.Load())
 		}
 	}
 }

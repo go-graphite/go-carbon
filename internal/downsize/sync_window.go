@@ -429,12 +429,10 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 	var failedMu sync.Mutex
 	markFailed := func(n string) { failedMu.Lock(); failed[n] = true; failedMu.Unlock() }
 	type windowCopy struct {
-		w                          syncRange
-		id, pointPath, journalPath string
-		before                     int64
-		beforeErr                  error
-		measurement                windowPointCount
-		m                          *mover
+		w               syncRange
+		id, journalPath string
+		measure         bool
+		m               *mover
 	}
 	copies := make([]windowCopy, 0, len(windows))
 	defer func() {
@@ -443,19 +441,12 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 		}
 	}()
 	for wi, w := range windows {
-		started := time.Now()
-		before, beforeErr := b.windowPointTotal(ctx, target, names, w)
-		event("sync_window_digest", map[string]any{"stage": "before", "source": source, "names": len(names), "seconds": time.Since(started).Seconds()})
 		data, _ := json.Marshal([]any{source, target, names, w.From, w.Until})
 		hash := sha256.Sum256(data)
 		id := hex.EncodeToString(hash[:])
 		path := fmt.Sprintf("%s.window-%d-%s", journalPath, wi, id[:16])
 		pointPath := path + ".window-points.json"
-		measurement := windowPointCount{Source: source, Window: w}
-		if beforeErr == nil {
-			measurement.Before = &before
-		}
-		measurement, err := readWindowPointCount(pointPath, measurement)
+		measure, err := prepareWindowRangeCounts(pointPath, windowPointCount{Source: source, Window: w})
 		if err != nil {
 			return syncCopyResult{}, err
 		}
@@ -467,7 +458,7 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 		if m.transferIdle <= 0 {
 			m.transferIdle = defaultTransferIdle
 		}
-		copies = append(copies, windowCopy{w, id, pointPath, path, before, beforeErr, measurement, m})
+		copies = append(copies, windowCopy{w, id, path, measure, m})
 	}
 	progress, _ := ctx.Value(syncWindowProgressKey{}).(func(string, int, bool))
 	// Each worker completes all windows of one disjoint name range. This
@@ -488,6 +479,24 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 					t = saved
 				}
 				m.stateMu.Unlock()
+				pointPath := fmt.Sprintf("%s.range-%d-%d.window-points.json", copy.journalPath, start, end)
+				var measurement windowPointCount
+				if copy.measure {
+					measurement, err = b.beginWindowRangeCount(ctx, target, names[start:end], w, pointPath, t.Native != nil, source)
+					if err != nil {
+						return err
+					}
+				}
+				rangeFailed := false
+				finishCount := func() error {
+					if !copy.measure || measurement.After != nil {
+						return nil
+					}
+					if rangeFailed {
+						measurement.Before = nil
+					}
+					return b.finishWindowRangeCount(ctx, target, names[start:end], w, pointPath, measurement)
+				}
 				if t.Native == nil || !t.Native.complete() {
 					err := b.executeWindowRange(ctx, c, t, names[start:end])
 					if err != nil {
@@ -511,7 +520,8 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 						for _, n := range res.Failed {
 							markFailed(n)
 						}
-						return nil
+						rangeFailed = true // children own their own counts; parent is uncertain
+						return finishCount()
 					}
 					fresh = true
 					m.stateMu.Lock()
@@ -523,16 +533,18 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 				}
 				for _, skip := range t.Native.Receipt.WindowSkipped {
 					if skip.Timestamp >= w.From && skip.Timestamp < w.Until && skip.Ordinal >= 0 && skip.Ordinal < end-start {
+						rangeFailed = true
 						markFailed(names[start+skip.Ordinal])
 						event("sync_window_boundary_skip", map[string]any{"level": "warn", "metric": names[start+skip.Ordinal], "timestamp": skip.Timestamp, "reason": skip.Reason})
 					}
 				}
 				for i, n := range names[start:end] {
 					if !t.Native.done(i) {
+						rangeFailed = true
 						markFailed(n)
 					}
 				}
-				return nil
+				return finishCount()
 			}()
 			if err != nil {
 				return err
@@ -545,24 +557,6 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 	})
 	if err != nil {
 		return syncCopyResult{}, err
-	}
-	for _, copy := range copies {
-		started := time.Now()
-		after, afterErr := b.windowPointTotal(ctx, target, names, copy.w)
-		measurement := copy.measurement
-		if measurement.After == nil && afterErr == nil {
-			if len(failed) > 0 {
-				measurement.Before = nil
-			}
-			measurement.After = &after
-			if err := atomicStateJSON(copy.pointPath, measurement); err != nil {
-				return syncCopyResult{}, err
-			}
-		}
-		event("sync_window_digest", map[string]any{"stage": "after", "source": source, "names": len(names), "seconds": time.Since(started).Seconds()})
-		if copy.beforeErr == nil && afterErr == nil {
-			event("sync_window_points", map[string]any{"scope": "serving_archive", "source": source, "names": len(names), "window": copy.w.Name, "before": copy.before, "after": after, "added": after - copy.before})
-		}
 	}
 	return syncCopyResult{Copied: len(names) - len(failed), Failed: sortedKeys(failed)}, nil
 }

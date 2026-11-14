@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -57,20 +56,6 @@ feed:
 	close(jobs)
 	wg.Wait()
 	return context.Cause(ctx)
-}
-
-// Digest responses are bounded to one range and reduced immediately. A fill
-// may cover millions of names; retaining their full digest maps defeats streaming.
-func (b *syncLiveBackend) windowPointTotal(ctx context.Context, target string, names []string, w syncRange) (int64, error) {
-	var total atomic.Int64
-	err := runSyncWindowRanges(ctx, len(names), b.o.copyStreams, func(ctx context.Context, start, end int) error {
-		d, err := b.Digest(ctx, target, names[start:end], w.From, w.Until)
-		if err == nil {
-			total.Add(countWindowPoints(d))
-		}
-		return err
-	})
-	return total.Load(), err
 }
 
 // Admission rejection applies no data. Retry the same durable identity, within
