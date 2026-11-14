@@ -3,6 +3,7 @@ package downsize
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -450,6 +451,34 @@ func (s *syncer) run(ctx context.Context) error {
 func (s *syncer) namesFile(kind string, round int, source int, names []string) (string, error) {
 	base := filepath.Join(s.o.state, fmt.Sprintf("%s-r%d-s%d", kind, round, source))
 	sort.Strings(names)
+	if !s.windowOnly() || s.legacyCopyReceipts {
+		// A changed stream budget or precheck result can assign a different
+		// name set to the same wave number. Keep matching partial journals,
+		// but never replace their input file with a different copy's names.
+		hash := sha256.New()
+		for _, name := range names {
+			fmt.Fprintln(hash, name)
+		}
+		file, err := os.Open(base + ".jsonl")
+		if err == nil {
+			var header copyRow
+			err = json.NewDecoder(file).Decode(&header)
+			file.Close()
+			if err != nil {
+				return "", fmt.Errorf("read copy journal header: %w", err)
+			}
+			var identity map[string]string
+			if err := json.Unmarshal([]byte(header.Identity), &identity); err != nil {
+				return "", fmt.Errorf("read copy journal identity: %w", err)
+			}
+			digest := fmt.Sprintf("%x", hash.Sum(nil))
+			if identity["names_sha256"] != digest {
+				base += "-" + digest
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
 	tmp := base + ".names.tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
