@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"reflect"
 	"testing"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -67,10 +68,17 @@ func TestClassicSnapshotMatchesWhisper(t *testing.T) {
 // Both stores run the real import/merge/restore path; only snapshot decoding
 // differs. Repeated overlapping imports exercise existing-target precedence.
 func TestClassicSnapshotImportStoredPoints(t *testing.T) {
+	for _, buckets := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bucketed=%t", buckets), func(t *testing.T) { testClassicSnapshotImportStoredPoints(t, buckets) })
+	}
+}
+
+func testClassicSnapshotImportStoredPoints(t *testing.T, buckets bool) {
 	ctx := context.Background()
 	dbs := make([]*store.Store, 2)
-	for i, codec := range []*ContinuationCodec{{keepClassicSnapshotReads: true}, {}} {
+	for i, codec := range []*ContinuationCodec{{keepClassicSnapshotReads: true, keepSnapshotReadAllocations: true}, {}} {
 		opts := coldOptions(codec)
+		opts.TimeBuckets = buckets
 		opts.Now = classicTestClock
 		db, err := store.Open(t.TempDir(), opts)
 		if err != nil {
@@ -88,13 +96,28 @@ func TestClassicSnapshotImportStoredPoints(t *testing.T) {
 			for j := 0; j < 200; j++ {
 				slots[rng.Intn(513)] = store.Point{Timestamp: int64(999000 + rng.Intn(70)*10), Value: math.Float64frombits(rng.Uint64())}
 			}
-			kv, m := placedClassicImage(t, []store.Retention{{Step: 10, Count: 513}}, []map[int]store.Point{slots})
+			coarse := map[int]store.Point{}
+			specials := []uint64{0, 1, 1 << 63, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000001234, 0x7ff0000000000001}
+			for j, bits := range specials {
+				coarse[j] = store.Point{Timestamp: int64(990000 + j*60), Value: math.Float64frombits(bits)}
+			}
+			kv, m := placedClassicImage(t, []store.Retention{{Step: 10, Count: 513}, {Step: 60, Count: 173}}, []map[int]store.Point{slots, coarse})
 			m.Name = fmt.Sprintf("snapshot.%d", n)
 			records = append(records, classicTransfer(kv, store.Snapshot{Metadata: m}))
 		}
-		for _, db := range dbs {
-			if _, err := db.ImportTransfer(ctx, records); err != nil {
+		var wantProofs []store.TransferProof
+		for i, db := range dbs {
+			proofs, err := db.ImportTransfer(ctx, records)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if err := db.VerifyTransfer(ctx, proofs); err != nil {
+				t.Fatal(err)
+			}
+			if i == 0 {
+				wantProofs = proofs
+			} else if !reflect.DeepEqual(wantProofs, proofs) {
+				t.Fatal("import proofs differ")
 			}
 		}
 		for _, r := range records {
