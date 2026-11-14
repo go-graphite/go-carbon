@@ -259,10 +259,18 @@ func (f *tailReadFixture) update(t testing.TB, i, batch int) {
 
 func TestContinuationTailReadStoreParity(t *testing.T) {
 	plain, cached := newTailReadFixture(t, true), newTailReadFixture(t, false)
+	tailReadStoreParity(t, plain, cached)
+}
+
+func tailReadStoreParity(t *testing.T, plain, cached *tailReadFixture) [2]uint64 {
+	t.Helper()
+	var reads [2]uint64
 	ctx := context.Background()
 	for i := range 64 {
-		for _, f := range []*tailReadFixture{plain, cached} {
+		for side, f := range []*tailReadFixture{plain, cached} {
+			count := store.CountStoreReadsForTest()
 			f.update(t, i, 564)
+			reads[side] += count()
 			if i == 31 {
 				if err := errors.Join(f.db.Flush(), f.db.Compact(), f.db.Close()); err != nil {
 					t.Fatal(err)
@@ -316,6 +324,7 @@ func TestContinuationTailReadStoreParity(t *testing.T) {
 			}
 		}
 	}
+	return reads
 }
 
 func BenchmarkContinuationTailReadReuse(b *testing.B) {

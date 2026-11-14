@@ -135,13 +135,14 @@ func TestPrewarmLoadsWhatUpdatesRead(t *testing.T) {
 			if s := cached.Stats().StateCache; s.Misses != misses {
 				t.Fatalf("updates after the prewarm missed the cache: %+v", s)
 			}
-			// Prewarm loads file state. The first append also loads its block
-			// descriptor and tail group; write-through keeps those two reads
-			// out of the following update.
+			// Prewarm loads file state. The first append also loads optional
+			// compressed tails and classic sidecar groups; write-through keeps
+			// those reads out of the following update. Their count depends on
+			// the archives involved, rather than being two keys per metric.
 			installed := roundReads()
 			t.Logf("reads per update: cold %.1f, prewarmed %.1f, installed %.1f", float64(cold)/float64(len(names)),
 				float64(prewarmed)/float64(len(names)), float64(installed)/float64(len(names)))
-			if prewarmed > installed+2*uint64(len(names)) || prewarmed >= cold {
+			if installed >= prewarmed || prewarmed >= cold {
 				t.Fatalf("updates read %d keys after the prewarm, %d after their own updates, %d cold", prewarmed, installed, cold)
 			}
 			for round := range 10 {
