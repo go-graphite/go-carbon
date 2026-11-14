@@ -27,6 +27,7 @@ import (
 // multi-fetch, and copies through the plan-free copy engine (planFreeCopy),
 // which owns batching, retries and its own resume journal.
 type syncLiveOptions struct {
+	copyTemplate *copyOptions
 	carbonPort   int
 	copyStreams  int
 	tokenEnv     string
@@ -376,9 +377,15 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 	if idle == 0 {
 		idle = defaultTransferIdle
 	}
-	return copyOptions{froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
+	o := copyOptions{froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
 		streams: b.o.copyStreams, maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
 		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute}
+	if b.o.copyTemplate != nil {
+		template := b.o.copyTemplate
+		o.maxNames, o.tick, o.maxBackoff, o.stallTimeout = template.maxNames, template.tick, template.maxBackoff, template.stallTimeout
+		o.progressInterval, o.debtGuard, o.policy = template.progressInterval, template.debtGuard, template.policy
+	}
+	return o
 }
 
 // Copy runs the copy engine over a name list. A one-name probe first detects

@@ -36,80 +36,83 @@ These metrics require installing this tool version and launching a new process.
 An already running binary cannot start exporting them, and history is not backfilled.
 
 
-## Plan-free copy (`copy`)
+## One end-to-end command (`sync`)
 
-`copy` discovers names and copies them. There is no plan directory, plan ID,
-segment or per-name estimate:
 
-```sh
-store-copy copy --from http://donor:4242 [--from http://donor2:4242 ...] --to http://target:4242 \
-  [--names FILE | --prefix P] [--ring ring.json] --state copy.jsonl \
-  [--streams N] [--max-batch-bytes B] [--max-batch-names N] [--stall-timeout 30m]
-```
-
-### Usage: one command
-
-One invocation copies a whole block and runs until it is done, hours if needed.
-Every retry, wait for a restarting host and resume happens inside the process:
-no wrapper loop, no relaunch.
+`sync` discovers the source/target union, copies missing names, verifies coverage,
+fills gaps and reverifies in one resumable run. Existing finite target values win.
+There is no plan directory or per-name byte estimate. `copy` is a compatibility
+alias: it prints the equivalent `store-copy sync` argv and calls the same code.
 
 ```sh
-export BUCKYD_TOKEN=...   # read+update JWT
-store-copy copy \
-  --from http://donor-a:4242 --from http://donor-b:4242 --from http://donor-c:4242 \
-  --to http://survivor:4242 --ring resize-spec.json \
-  --state /var/lib/carbon/copy/block-1.jsonl
+export BUCKYD_TOKEN=...  # read+update JWT, supplied by the operator
+store-copy sync \
+  --source http://donor-a:4242 --source http://donor-b:4242 \
+  --to http://target:4242 --state ./block-state --streams 0 \
+  --window closed:1794592020:1794592680 \
+  --window shard:1794595620:1794597120 \
+  --window dump:1794600000:1794603600
 ```
 
-- All donors feed one worker pool; `--ring` keeps only the names the survivor
-  owns. Journal rows carry their donor.
-- A donor or survivor restart is waited out: refused connections, transport
-  errors, 408/429/502/503/504, a target 500 caused by a refused source export,
-  and export 409/404/500 answers during a donor's restart window are retried
-  with backoff (`--retry-interval` to `--max-backoff`). The batch in flight is
-  re-pulled whole; existing target points win, so the redo is safe.
-- A host that does not answer means wait, without limit. The copy fails loudly
-  (`copy_stalled` ERROR, non-zero exit) only when every source and the target
-  answer their status endpoint and the calls still fail for `--stall-timeout`.
-- Killed or stopped: rerun the same command; the journal skips done ranges.
-- One `progress` line per `--progress-interval` (30s): done/total names (the
-  total is counted in the background), names/s and MB/s over the interval, ETA,
-  the current limiter (a host down and for how long, target 429 backpressure
-  with its compaction debt/L0/write stall, transient retries, busy transfer
-  streams, name discovery), retries and skipped names. `copy_done` ends the run
-  with the summary.
-- A name that keeps failing never stops the run: it is skipped (`name_skipped`),
-  retried once at the end (`retry_skipped`), and the names still failing are
-  listed in `<state>.skipped` (source, name, HTTP status, reason) and reported
-  by a non-zero exit. `--max-failures N` (default 0, off) aborts above N.
-- The watchdog fails the run (`copy_stalled`, non-zero exit) when no batch has
-  succeeded for `--stall-timeout` while every host answers and work is in
-  flight.
+All three gap windows are selected, copied, verified and filled in this invocation;
+no separate gap commands or shell receipt chain is needed. Repeating this exact
+command resumes the durable discovery cursor, verification batches and native
+receipts. Windows are half-open `[FROM, UNTIL)` in Unix seconds. Keep their order,
+`--verify-batch` and `--settle` unchanged on resume.
 
-- Names come from the source catalog (`/v1/transfer/list` pages, optionally
-  under `--prefix`) or from `--names` (byte-sorted unique, `LC_ALL=C sort -u`).
-- `--ring` takes a resize spec (its `new` ring) or a bare topology
-  (`{"hash":"jump_fnv1a","nodes":[{"id","node","endpoint"}]}`). Names whose
-  owner is not the `--to` endpoint are skipped.
-- Batches are cut by real exported bytes: the controller learns bytes per name
-  from each transfer's `X-Transfer-Bytes` and fills 75% of
-  `min(--max-batch-bytes, target max_body_bytes)`, up to `--max-batch-names`.
-  A 413 splits the batch in half. A single name may use the whole
-  `max_body_bytes`; a name above that is journaled as failed and skipped.
-- Streams default to `min(64, sum of source MaxTransfers, target MaxTransfers)`
-  from the start; no slow-start ramp. 429/502/503/504 (target storage pressure,
-  write stalls, transfer slots) back off and retry without aborting.
-- `--names` takes a single `--from`; with several donors use catalog discovery
-  (optionally `--prefix`). `--transport-retries` is deprecated and ignored.
-- `--state` is an append-only journal: a header with the copy identity (from,
-  to, prefix, names/ring file hashes), `done` rows with the first/last name of
-  each completed batch, and `failed` rows. Rerunning the same command skips done
-  ranges and retries failures. Target points win in the importer, so a batch
-  redone after a kill is harmless.
-- The command exits non-zero while any name is still skipped after the final
-  retry.
-- Only `--engine metric` is wired; `--engine bulk` and host-helper guards
-  (`--health-map`) still need the legacy `plan`/`run` pair.
+- Without `--window`, verify/copy/fill covers full history. With windows, writes
+  cover only those windows, using the native target-wins combiner. Add
+  `--full-history` explicitly to copy full histories and sample them in addition
+  to verifying every name in every window (`--sample-every 64`, 1=all, 0=none).
+- `--streams` is the total per-host transfer budget. Zero resolves advertised
+  source/target capacity (the smallest advertised per-host cap for end-to-end sync). Verify and copy are serial phases, so each can use the
+  entire budget; native window copies currently use one serial range stream.
+  `effective_config`, `sync_start` and `progress.json.effective` state the actual
+  engine, stream allocation, batch limits and window/full-history scope.
+- `--copy-streams` and `--verify-streams` no longer create independent pools: a different positive value is
+  rejected; an equal value or zero warns to remove it. In native window mode,
+  `--copy-streams`, `--max-batch-bytes` and other metric-engine-only settings are
+  rejected. Explicit inactive `--sample-every` warns. `--transport-retries` has
+  been removed and is an unknown flag.
+- Use repeated/comma-separated `--source URL`; `--from URL` remains a compatibility
+  alias in both spellings. This is distinct from legacy `run --from TIME`.
+- `--names FILE` means UTF-8 text, one metric name per line, byte-sorted and unique
+  (`LC_ALL=C sort -u`), **not a JSON array**. It restricts discovery while retaining
+  actual donor membership. The file hash binds the sync journal. The sorted
+  inventories stream from disk, including very large lists.
+- Names whose every archive retains at most three days are excluded from sync
+  unless `--include-short-retention` is set. `--settle 10m` excludes newest points.
+  These exclusions are part of the requested coverage, not a READY guarantee.
+
+### Copy-only compatibility and old journals
+
+Callers that require only the original metric transfer phase use:
+
+```sh
+store-copy sync --phase copy --source http://donor:4242 --to http://target:4242 \
+  --names sorted-names.txt --state copy.jsonl --streams 0
+```
+
+The original importer, real-byte batching, retry handling and journal identity are
+unchanged. Completed donor/name ranges resume, existing target points win, bad
+names are skipped and retried once at the end, and remaining skips exit nonzero.
+`--phase copy` retains short-retention names, as the old copy command did.
+`--max-batch-bytes` defaults to 16MiB, capped by target `max_body_bytes`; a single
+name may use the full target cap. `--max-batch-names` defaults to8192.
+
+An existing copy journal file (or a new `.jsonl` state path) used without
+`--phase copy` first resumes that journal, then continues verification/fill in
+`FILE.sync/`. Its transfer progress remains in `FILE.progress.json`; subsequent
+sync progress is in `FILE.sync/progress.json`. Other new end-to-end runs use a
+state directory directly. A file-shaped copy state excludes `--window`, because
+its original phase imports complete histories.
+
+Window sync defaults are one contract for every build of this code. Older forks
+that verified windows but copied full histories must merge this implementation,
+including CLI dispatch and window selection. To request their old write scope,
+use `--full-history` explicitly with a fresh state directory. Do not silently
+restore the fork's old default when resolving the merge. The effective scope in
+startup events and progress JSON makes the deployed behavior inspectable.
 
 ## Resize / merge baseline
 
@@ -411,7 +414,7 @@ forwards them to every missing-name and hole-fill transfer, including probes
 and retries. For example, resume a busy target with smaller batches:
 
 ```sh
-store-copy sync --from http://source:4242 --to http://target:4242 \
+store-copy sync --source http://source:4242 --to http://target:4242 \
   --state ./sync-state --max-batch-bytes=16777216 --transfer-idle-timeout=80s
 ```
 
@@ -437,13 +440,13 @@ recent gap, explicitly include those names so a two-day archive is compared and
 filled over the requested window too:
 
 ```sh
-store-copy sync --from http://peer-a:4242 --from http://peer-b:4242 \
+store-copy sync --source http://peer-a:4242 --from http://peer-b:4242 \
   --to http://target:4242 --window incident:1794595620:1794597120 \
-  --include-short-retention --sample-every 0 --state ./incident-fill
+  --include-short-retention --state ./incident-fill
 # Independent verification: use a new state directory with the same options.
-store-copy sync --from http://peer-a:4242 --from http://peer-b:4242 \
+store-copy sync --source http://peer-a:4242 --from http://peer-b:4242 \
   --to http://target:4242 --window incident:1794595620:1794597120 \
-  --include-short-retention --sample-every 0 --state ./incident-verify
+  --include-short-retention --state ./incident-verify
 ```
 
 Existing target points still win. The opt-in is part of the journal identity:
@@ -464,8 +467,8 @@ omitted by the native window exporter are reported as failed names/residuals,
 so a partial boundary copy cannot be reported as complete.
 
 ```sh
-store-copy sync --from http://source:4242 --to http://target:4242 \
-  --state ./gap-state --window incident:1794592020:1794592680 --sample-every 0
+store-copy sync --source http://source:4242 --to http://target:4242 \
+  --state ./gap-state --window incident:1794592020:1794592680
 ```
 
 Existing target values and points outside the windows remain unchanged. The

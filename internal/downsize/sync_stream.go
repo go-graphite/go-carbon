@@ -47,6 +47,31 @@ func (s *syncer) startList(ctx context.Context, store, after string) *syncLister
 	go func() {
 		defer close(l.pages)
 		defer close(l.finished)
+		// Each store merges its catalog with the same sorted file. Keep only
+		// one name in memory, even for multi-million-name copy inventories.
+		var scope *bufio.Scanner
+		var wanted string
+		advanceScope := func() bool {
+			for scope.Scan() {
+				wanted = strings.TrimSpace(scope.Text())
+				if wanted != "" {
+					return true
+				}
+			}
+			wanted = ""
+			return false
+		}
+		if s.o.namesFile != "" {
+			file, err := os.Open(s.o.namesFile)
+			if err != nil {
+				l.errc <- fmt.Errorf("--names: %w", err)
+				return
+			}
+			defer file.Close()
+			scope = bufio.NewScanner(file)
+			scope.Buffer(make([]byte, 256<<10), 1<<20)
+			advanceScope()
+		}
 		for {
 			page, err := s.b.List(ctx, store, s.o.prefix, after, syncListPage)
 			if err != nil {
@@ -63,6 +88,22 @@ func (s *syncer) startList(ctx context.Context, store, after string) *syncLister
 				}
 			}
 			after = page[len(page)-1]
+			if scope != nil {
+				var selected []string
+				for _, n := range page {
+					for wanted != "" && wanted < n {
+						advanceScope()
+					}
+					if wanted == n {
+						selected = append(selected, n)
+					}
+				}
+				if err := scope.Err(); err != nil {
+					l.errc <- fmt.Errorf("--names: %w", err)
+					return
+				}
+				page = selected
+			}
 			select {
 			case l.pages <- page:
 			case <-ctx.Done():

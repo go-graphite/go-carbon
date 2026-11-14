@@ -100,20 +100,21 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
-	Done       int64             `json:"done"`
-	Total      int64             `json:"total"`
-	Phase      string            `json:"phase"`
-	Round      int               `json:"round"`
-	Cursors    map[string]string `json:"cursors"`
-	Discovered int64             `json:"names_discovered"`
-	Verified   int64             `json:"names_verified"`
-	Filled     int64             `json:"names_filled"`
-	Copied     int64             `json:"names_copied"`
-	Holes      int64             `json:"holes"` // cumulative hole point observations across rounds
-	Rate       float64           `json:"names_per_second"`
-	Updated    time.Time         `json:"last_update"`
-	Status     string            `json:"status"`
-	Error      string            `json:"error,omitempty"`
+	Done       int64                `json:"done"`
+	Total      int64                `json:"total"`
+	Effective  *effectiveSyncPolicy `json:"effective,omitempty"`
+	Phase      string               `json:"phase"`
+	Round      int                  `json:"round"`
+	Cursors    map[string]string    `json:"cursors"`
+	Discovered int64                `json:"names_discovered"`
+	Verified   int64                `json:"names_verified"`
+	Filled     int64                `json:"names_filled"`
+	Copied     int64                `json:"names_copied"`
+	Holes      int64                `json:"holes"` // cumulative hole point observations across rounds
+	Rate       float64              `json:"names_per_second"`
+	Updated    time.Time            `json:"last_update"`
+	Status     string               `json:"status"`
+	Error      string               `json:"error,omitempty"`
 }
 
 func (p *progressSnapshot) apply(r syncRow) {
