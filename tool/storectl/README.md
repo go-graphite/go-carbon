@@ -15,9 +15,18 @@ or scrape configuration change is required when a local receiver already exists.
 
 Series are `tools.storectl.<runner>.<run>.<command>.<phase>.<metric>`:
 `done`, `total`, `names_per_second`, `active` and `heartbeat` (Unix seconds).
-Runner punctuation becomes underscores; the run is a stable 12-character
-SHA256 prefix of the absolute, cleaned state path. Resumes and client/binary
-replacements reuse the same series; separate state paths distinguish concurrent runs.
+Runner punctuation becomes underscores. The run label is the `--block` filename
+without its extension, or the `--resume` state-directory basename (`--state`
+basename for direct launches), lowercased with punctuation replaced by `-` and
+leading/trailing hyphens removed. For example, `--block history-east.json`
+publishes `tools.storectl.<runner>.history-east.sync.<phase>.<metric>`.
+Host-local claims in the user's cache directory (`storectl/metric-labels`) keep
+separate state paths from sharing a label: a colliding label gets the stable
+12-character SHA256 state-path hash appended. Empty labels become `state`.
+The first chosen label is retained on resume, including legacy journal adoption.
+Keep this cache across client replacements; it contains only state paths and labels.
+If the cache cannot be accessed, telemetry falls back to the state-path hash.
+Existing processes retain their original metric paths until relaunched.
 PID, start time and stream settings do not enter the identity. Snapshots are emitted at
 startup, every 15s and on exit. A phase transition clears the previous phase’s activity and rate.
 `active=0` records termination, not successful

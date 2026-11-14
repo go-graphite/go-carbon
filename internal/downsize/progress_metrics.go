@@ -77,19 +77,31 @@ func progressMetricIdentity(host string, args []string) (prefix, state string) {
 	if len(args) == 0 {
 		return "", ""
 	}
+	labelPath, blockLabel := "", ""
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--" {
 			break
 		}
 		key, value, equals := strings.Cut(args[i], "=")
-		if key != "--state" && key != "-state" && key != "--resume" && key != "-resume" {
+		if key != "--state" && key != "-state" && key != "--resume" && key != "-resume" && key != "--block" && key != "-block" {
 			continue
 		}
 		if !equals && i+1 < len(args) {
 			i++
 			value = args[i]
 		}
+		if key == "--block" || key == "-block" {
+			blockLabel = strings.TrimSuffix(filepath.Base(value), filepath.Ext(value))
+			if data, err := os.ReadFile(value); err == nil {
+				var block syncBlock
+				if json.Unmarshal(data, &block) == nil {
+					state = block.State
+				}
+			}
+			continue
+		}
 		state = value
+		labelPath = filepath.Base(filepath.Clean(value))
 		if key == "--resume" || key == "-resume" {
 			if data, err := os.ReadFile(filepath.Join(value, "config.json")); err == nil {
 				var saved savedSyncConfig
@@ -103,8 +115,85 @@ func progressMetricIdentity(host string, args []string) (prefix, state string) {
 		return "", ""
 	}
 	state = metricStatePath(state)
-	id := fmt.Sprintf("%x", sha256.Sum256([]byte(state)))[:12]
+	if blockLabel != "" {
+		labelPath = blockLabel
+	}
+	id := progressRunLabel(host, labelPath, state)
 	return "tools.storectl." + metricToken(host) + "." + id + "." + metricToken(args[0]), state
+}
+
+// Claims persist across client restarts. Atomic links publish complete owners so
+// concurrent processes cannot both claim one label for different state paths.
+func progressRunLabel(host, label, state string) (result string) {
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(state)))[:12]
+	label = strings.Trim(strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+			return r
+		}
+		return '-'
+	}, strings.ToLower(label)), "-")
+	if label == "" {
+		label = "state"
+	}
+	root, err := os.UserCacheDir()
+	if err != nil {
+		return hash
+	}
+	root = filepath.Join(root, "storectl", "metric-labels", metricToken(host))
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return hash
+	}
+	identity := filepath.Join(root, ".state-"+hash)
+	if saved, err := os.ReadFile(identity); err == nil && len(saved) > 0 {
+		return string(saved)
+	}
+	defer func() {
+		f, err := os.CreateTemp(root, ".identity-")
+		if err != nil {
+			return
+		}
+		defer os.Remove(f.Name())
+		_, writeErr := f.WriteString(result)
+		closeErr := f.Close()
+		if writeErr == nil && closeErr == nil {
+			_ = os.Link(f.Name(), identity)
+			if saved, err := os.ReadFile(identity); err == nil {
+				result = string(saved)
+			}
+		}
+	}()
+	f, err := os.CreateTemp(root, ".claim-")
+	if err != nil {
+		return hash
+	}
+	defer os.Remove(f.Name())
+	_, writeErr := f.WriteString(state)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		return hash
+	}
+	for i := 0; i < 100; i++ {
+		candidate := label
+		if i == 1 {
+			candidate += "-" + hash
+		}
+		if i > 1 {
+			candidate += fmt.Sprintf("-%s-%d", hash, i)
+		}
+		claim := filepath.Join(root, candidate)
+		if err := os.Link(f.Name(), claim); err == nil {
+			return candidate
+		}
+		if owner, err := os.ReadFile(claim); err == nil {
+			if string(owner) == state {
+				return candidate
+			}
+		} else {
+			return hash
+		}
+	}
+
+	return hash
 }
 
 func metricStatePath(path string) string {
