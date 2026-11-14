@@ -243,3 +243,40 @@ func TestSyncFullLegacySHAEmptySource(t *testing.T) {
 		t.Fatalf("empty source caused detail reads: %+v reads=%d", row, s.prog.reads.Load())
 	}
 }
+
+// Count target SHA calls separately from fixture point reads.
+type countedTargetSHA struct {
+	*servingSHA
+	calls int
+}
+
+func (f *countedTargetSHA) Digest(ctx context.Context, host string, names []string, from, until int64) (map[string][]syncDigest, error) {
+	if host == syncT {
+		f.calls++
+	}
+	return f.servingSHA.Digest(ctx, host, names, from, until)
+}
+func TestSyncLegacyTargetReadOnceAfterNegotiation(t *testing.T) {
+	f, o, _ := threeSources(t)
+	b := &countedTargetSHA{servingSHA: &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true, syncD1: true, syncD2: true, syncP: true}}}}
+	s := &syncer{o: o, b: b}
+	s.masks.Store("b.holes", uint64(7))
+	names := []string{"b.holes"}
+	schemas := map[string][]syncArchive{"b.holes": syncTestSchema}
+	var want syncRow
+	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		var got syncRow
+		if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(want, got) {
+			t.Fatalf("local target changed holes: got%+v want%+v", got, want)
+		}
+	}
+	if b.calls != 1 {
+		t.Fatalf("target SHA calls=%d want1", b.calls)
+	}
+}

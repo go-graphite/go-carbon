@@ -466,6 +466,19 @@ func syncWindowCovered(source syncSeries, target []syncDigest, w syncRange) bool
 	if source.Step <= 0 {
 		return true
 	}
+	d := syncSeriesSHA(source, w)
+	if d.Count == 0 {
+		return true
+	}
+	for _, t := range target {
+		if t.Step == d.Step && t.Count == d.Count && t.Hash == d.Hash {
+			return true
+		}
+	}
+	return false
+}
+
+func syncSeriesSHA(source syncSeries, w syncRange) syncDigest {
 	h := sha256.New()
 	var buf [16]byte
 	var count int64
@@ -479,17 +492,8 @@ func syncWindowCovered(source syncSeries, target []syncDigest, w syncRange) bool
 		_, _ = h.Write(buf[:])
 		count++
 	}
-	if count == 0 {
-		return true
-	}
 	sum := h.Sum(nil)
-	hash := hex.EncodeToString(sum[:8])
-	for _, d := range target {
-		if d.Step == source.Step && d.Count == count && d.Hash == hash {
-			return true
-		}
-	}
-	return false
+	return syncDigest{Step: source.Step, Count: count, Hash: hex.EncodeToString(sum[:8])}
 }
 
 // syncDigestMismatch reports whether a name needs a point-by-point read, and
@@ -583,6 +587,8 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		points  map[string]syncSeries
 	}
 	target := &check{store: s.o.to, names: names}
+	legacy, known := s.digests.Load("sum-v1:" + s.o.to)
+	localTarget := known && !legacy.(bool)
 	checks := []*check{target}
 	for src, source := range s.o.from {
 		subset := s.holders(src, names)
@@ -600,6 +606,9 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 	var wg sync.WaitGroup
 	w := syncRange{Name: "full", From: from, Until: until}
 	for _, c := range checks {
+		if c == target && localTarget {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -607,6 +616,44 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		}()
 	}
 	wg.Wait()
+	if localTarget {
+		// The legacy endpoint performs the same expensive target read as Fetch.
+		// Read it once locally, reusing its points if any source hash differs.
+		needed := map[string]bool{}
+		for _, c := range checks[1:] {
+			for _, n := range c.names {
+				empty := false
+				if c.err == nil {
+					for _, d := range c.digests[n] {
+						if d.Step == step && d.Count == 0 && ((d.From == 0 && d.Until == 0) || (d.From == from && d.Until == until)) {
+							empty = true
+						}
+					}
+				}
+				if !empty {
+					needed[n] = true
+				}
+			}
+		}
+		var targetNames []string
+		for _, n := range names {
+			if needed[n] {
+				targetNames = append(targetNames, n)
+			}
+		}
+		target.points = map[string]syncSeries{}
+		target.digests = map[string][]syncDigest{}
+		if len(targetNames) > 0 {
+			var err error
+			target.points, err = s.fetch(ctx, target.store, targetNames, from, until)
+			if err != nil {
+				return fmt.Errorf("target fetch: %w", err)
+			}
+			for n, series := range target.points {
+				target.digests[n] = []syncDigest{syncSeriesSHA(series, w)}
+			}
+		}
+	}
 	// Digest failures fall back to the original read path. In particular an
 	// unavailable endpoint must never turn an unchecked name into a match.
 	// On a mixed fleet, read an older holder once and compare its canonical
@@ -643,7 +690,7 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 						match = true
 					}
 					for _, td := range target.digests[n] {
-						if c.sum == target.sum && td.Step == step && sd.Points == td.Points && sd.From == td.From && sd.Until == td.Until && sd.Count == td.Count && sd.Hash == td.Hash {
+						if c.sum == target.sum && td.Step == step && (localTarget || sd.Points == td.Points) && sd.From == td.From && sd.Until == td.Until && sd.Count == td.Count && sd.Hash == td.Hash {
 							match = true
 						}
 					}
