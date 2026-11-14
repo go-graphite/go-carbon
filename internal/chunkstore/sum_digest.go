@@ -107,7 +107,7 @@ func (s *Store) SumDigest(ctx context.Context, name string, from, until int, ste
 	if !ok {
 		return nil, errors.New("sum digest unavailable for continuation codec")
 	}
-	io := &digestCacheIO{continuationIO: s.newContinuationIO(ctx, view, nil, m), pending: make(map[string][]byte)}
+	io := &digestCacheIO{continuationIO: s.newContinuationIO(ctx, view, nil, m).withIterator(), pending: make(map[string][]byte)}
 	defer io.Close()
 	at := s.now()
 	result, err := codec.SumDigest(ctx, io, m, from, until, func() time.Time { return at }, steps...)
