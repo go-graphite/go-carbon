@@ -24,6 +24,8 @@ func TestImportPublicationRequeuesLiveWithoutHoldingStripe(t *testing.T) {
 				source := transferStoreCached(t, continuation, true, cacheBytes)
 				target := transferStoreCached(t, continuation, true, cacheBytes)
 				oracle := transferStoreCached(t, continuation, true, cacheBytes)
+				// Compare default SST staging against the former memtable path.
+				oracle.SetTransferBatchBytesForTest(64 << 20)
 				name := "publication.live"
 				collision := ""
 				for i := 0; ; i++ {

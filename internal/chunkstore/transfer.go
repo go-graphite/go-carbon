@@ -336,8 +336,8 @@ func (s *Store) transferSnapshotCached(ctx context.Context, reader pebble.Reader
 	return snapshotFrom(reader, m.Name)
 }
 
-// ImportTransfer reserves disjoint IDs and stages their keys (one batch, or
-// whole SSTs for large transfers) before catalog publication. A target created meanwhile is merged under its writer lock.
+// ImportTransfer reserves disjoint IDs and stages their keys in private SSTs
+// before catalog publication. A target created meanwhile is merged under its writer lock.
 // Publication and merge use bounded stripe groups and a final WAL barrier.
 func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([]TransferProof, error) {
 	if len(records) == 0 || len(records) > MaxTransferMetrics {
@@ -463,7 +463,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 }
 
 // ingestTransferStage writes one SST per namespace/time bucket and ingests
-// them; used for transfers above transferBatchLimit.
+// them without entering the shared WAL/memtable staging path.
 func (s *Store) ingestTransferStage(ctx context.Context, first uint64, stage *transferStage, entries int, needsFloatFormat bool, began time.Time) error {
 	paths, err := s.writeTransferTables(ctx, first, stage)
 	s.transferApply.build.Add(uint64(time.Since(began)))
