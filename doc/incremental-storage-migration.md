@@ -136,14 +136,11 @@ handoff workers. On 1202, local-time quiet windows cover the actual 01:00 and
 03:00 maintenance schedules. On 1201 they also cover its 06:00 OOO merge,
 from 05:55 to 08:10. Process detection extends a pause if jobs overrun.
 
-`tool/store-migration-control` renews the version-1 worker lease. `workers: 0`
-pauses admissions; raising the live operator cap resumes without losing progress
-or restarting go-carbon. Admission grows through 1/2/4/8/16/24/32/48/64 workers,
-checking end-to-end request tails, CPU/RSS, backlog, real storage stalls, physical
-I/O and free-space reserve. Internal disk-wait phases differ by backend and are
-diagnostic, not a cross-backend latency gate. Actual request regressions remain
-a gate. Lease expiry falls back to one worker. Pending cleanup remains eligible
-with zero workers or low admission headroom. Nineteen policy tests pass.
+The optional `store-migration-control-file` reads a version-1 worker lease.
+`workers: 0` pauses new admissions while existing imports finish; lease expiry
+falls back to one worker. Monitor end-to-end request latency, backlog, CPU/RSS,
+real storage stalls and free space while setting migration worker limits.
+The standalone adaptive campaign controller is retired.
 
 Status is available through `/admin/info?scopes=cache,storage` and
 `store-dir/INCREMENTAL-STORE-MIGRATION.json`. Counters describe the current migration run and can reset on config reload
@@ -175,14 +172,11 @@ originals again and resets its skipped counters and names; durable completed
 owners are retained. Do not clear completion by editing the receipt or deleting
 authoritative source files.
 
-Both pilots now install `tool/store-migration-control/volume_binding.py` as a
-systemd `ExecStartPre`. A root-owned proof records the actual XFS UUID and all
-source/store/archive root inodes while bindings are valid. A later device-number
-change can update only those binding fields, under the engine's fcntl record
-lock; changed UUIDs, paths or inodes fail. An unchanged same-boot start only
-validates, preserving handoff behavior. Thirty policy/helper tests and native XFS
-checks pass, including live-engine exclusion and interrupted repair. Installation
-restarted neither app. See the [controller README](../tool/store-migration-control/README.md#reboot-stable-volume-binding).
+Use `storectl maintain migration rebind -proof FILE` as systemd `ExecStartPre`
+to validate the recorded XFS UUID and all source/store/archive directory inodes.
+It updates legacy device numbers only under the engine's fcntl record lock;
+stable V2 source identities are read-only. Preserve the existing proof when
+switching the unit invocation. See [binding setup and replacement contract](../internal/storemaint/migration/README.md).
 
 V6 imports physical writer state; flattened replace/fill/window corrections are
 rejected. V4/V5 stores are never silently relabelled V6. Once originals are
