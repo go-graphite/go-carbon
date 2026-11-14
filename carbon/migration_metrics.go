@@ -47,6 +47,7 @@ type migrationSnapshot struct {
 	persister                             bool
 	pebble, whisper                       persister.BackendWrites
 	transferRequeued                      map[string]uint64
+	batchFallbacks                        map[string]uint64
 	nameTooLongDropped, nativeRejected    uint64
 	committedPoints, writeDroppedPoints   uint64
 	store                                 bool
@@ -269,6 +270,14 @@ var migrationMetricSpecs = func() []metricSpec {
 	for _, reason := range []string{"canceled", "deadline", "absent", "storage_error"} {
 		item := persisterSpec("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", func(s *migrationSnapshot) float64 { return float64(s.transferRequeued[reason]) })
 		item.desc = prometheus.NewDesc("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", nil, prometheus.Labels{"reason": reason})
+		specs = append(specs, item)
+	}
+
+	for _, reason := range []string{"import_pending", "absent", "format", "reanchor_deferred"} {
+		const name = "persister_shared_batch_fallbacks_total"
+		const help = "Shared batches requeued and retried individually for expected routing or deferral outcomes; excludes storage write failures."
+		item := persisterSpec(name, help, func(s *migrationSnapshot) float64 { return float64(s.batchFallbacks[reason]) })
+		item.desc = prometheus.NewDesc(name, help, nil, prometheus.Labels{"reason": reason})
 		specs = append(specs, item)
 	}
 	specs = append(specs,
@@ -653,6 +662,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.reclaimQueued, s.reclaim = pm.ReclaimQueued, pm.Reclaim
 		s.pebble, s.whisper = p.WriteStats()
 		s.transferRequeued = p.TransferFlushRequeues()
+		s.batchFallbacks = p.SharedBatchFallbacks()
 		s.nameTooLongDropped = p.NameTooLongDroppedPoints()
 		s.committedPoints = p.CommittedPoints()
 		s.writeDroppedPoints = p.WriteDroppedPoints()

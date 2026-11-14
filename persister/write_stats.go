@@ -25,6 +25,7 @@ func (s *backendWriteStats) observe(points int, took time.Duration, err error) {
 type persisterWriteStats struct {
 	shared, original backendWriteStats
 	transferRequeued [4]atomic.Uint64
+	batchFallbacks   [4]atomic.Uint64
 }
 
 // BackendWrites reports cumulative updates, points, failures and seconds spent
@@ -82,3 +83,13 @@ func (p *Whisper) committedPointsDelta() uint64 {
 
 // WriteDroppedPoints counts points permanently discarded after a file error.
 func (p *Whisper) WriteDroppedPoints() uint64 { return p.writeDroppedPoints.Load() }
+
+// SharedBatchFallbacks counts batches retried through the individual writer.
+// These routing/deferral outcomes do not represent failed storage writes.
+func (p *Whisper) SharedBatchFallbacks() map[string]uint64 {
+	result := make(map[string]uint64, len(sharedBatchFallbackReasons))
+	for i, reason := range sharedBatchFallbackReasons {
+		result[reason] = p.writeStats.batchFallbacks[i].Load()
+	}
+	return result
+}
