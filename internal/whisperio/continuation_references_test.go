@@ -34,6 +34,8 @@ func TestReferencedClassicOverwriteAndEmptyShadow(t *testing.T) {
 		kv[string(item.Key)] = item.Value
 	}
 	fs := newContinuationFiles(kv, false).withClock(clock)
+	buffer := &continuationPointBuffer{ContinuationIO: kv, cacheReads: true}
+	fs.kv = buffer
 	d, err := fs.load("main.wsp")
 	if err != nil {
 		t.Fatal(err)
@@ -51,8 +53,6 @@ func TestReferencedClassicOverwriteAndEmptyShadow(t *testing.T) {
 		t.Fatal("empty override resurrected history", after, err)
 	}
 	// Mutations buffered before flush must shadow the immutable reference too.
-	buffer := &continuationPointBuffer{ContinuationIO: kv}
-	fs.kv = buffer
 	var changed store.PointBlock
 	changed.Present[0] = 1
 	changed.Points[0] = store.Point{Timestamp: points[0].Timestamp, Value: 999}

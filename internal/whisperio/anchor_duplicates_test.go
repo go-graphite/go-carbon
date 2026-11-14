@@ -36,11 +36,28 @@ func addAnchorCopy(t *testing.T, kv mapContinuationIO, slot int, p store.Point) 
 	t.Fatal("fixture has no classic block")
 }
 
+func anchorRawHeader(t *testing.T, kv mapContinuationIO) []byte {
+	t.Helper()
+	fs := newContinuationFiles(kv, false)
+	file, err := fs.OpenFile(fs.main(), os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	f := file.(*continuationFile)
+	header := make([]byte, 16+12*len(f.data.layout.Archives))
+	if _, err := f.ReadAt(header, 0); err != nil {
+		t.Fatal(err)
+	}
+	return header
+}
+
 func assertAnchorRepairMultisetAndFetch(t *testing.T, kv mapContinuationIO, m store.Metadata, now time.Time, duplicates int) {
 	t.Helper()
 	ctx := context.Background()
 	c := &ContinuationCodec{}
 	clock := func() time.Time { return now }
+	header := anchorRawHeader(t, kv)
 	before, err := c.Snapshot(ctx, kv, m, clock)
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +79,9 @@ func assertAnchorRepairMultisetAndFetch(t *testing.T, kv mapContinuationIO, m st
 		}
 	}
 	applyAnchorPlan(t, kv, plan)
+	if !bytes.Equal(header, anchorRawHeader(t, kv)) {
+		t.Fatal("raw policy/header bytes changed")
+	}
 	after, err := c.Snapshot(ctx, kv, m, clock)
 	if err != nil {
 		t.Fatal(err)

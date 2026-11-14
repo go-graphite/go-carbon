@@ -176,7 +176,9 @@ func TestFinitePatchOnlyOnePointAndDurable(t *testing.T) {
 	if err := store.EqualSnapshots(before, durable); err != nil {
 		t.Fatal(err)
 	}
-	// The durable receipt also refuses plan reuse after process restart.
+	// The durable receipt also refuses plan reuse after process restart,
+	// even with the current committed version and an already-correct point.
+	p.Expected = r.Version
 	if _, err := reopened.PatchFinite(ctx, p, core.FenceEmptyMetric); err == nil {
 		t.Fatal("replayed consumed plan after restart")
 	}
