@@ -75,7 +75,7 @@ type Cache struct {
 
 	writeStrategy WriteStrategy
 	writeoutQueue *WriteoutQueue
-	logPressure   chan struct{} // bounded wake for restore waiting on journal space
+	logPressure   chan struct{} // bounded wake for intake waiting on journal space
 
 	// Keep read-mostly settings off the cache lines written by counters and
 	// queue bookkeeping, including machines with 128-byte cache lines.
@@ -597,6 +597,7 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 		newSettings.xlog = func(p *points.Points) error { _, err := p.WriteTo(w); return err }
 	}
 	c.settings.Store(&newSettings)
+	go c.wakeLogAdmission()
 }
 
 // DivertToBinaryXlog writes complete binary records under one lock. Binary dump
@@ -613,6 +614,17 @@ func (c *Cache) DivertToBinaryXlog(w io.Writer) {
 		return err
 	}
 	c.settings.Store(&s)
+	go c.wakeLogAdmission()
+}
+
+// Diversion may be installed by a callback already holding a shard lock.
+// Wake asynchronously; waiters recheck diversion under their shard lock.
+func (c *Cache) wakeLogAdmission() {
+	for _, shard := range c.data {
+		shard.mu.Lock()
+		shard.log.wakeRestore()
+		shard.mu.Unlock()
+	}
 }
 
 // send metric to the new metrics channel
@@ -658,12 +670,21 @@ func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
 		c.add(points.OnePoint(string(name), value, timestamp), false, false)
 		return
 	}
-	defer shard.mu.Unlock()
-
-	c.addPointLocked(shard, s, values, hash, value, timestamp)
+	handled := func() bool {
+		defer shard.mu.Unlock()
+		return c.addPointLocked(shard, s, values, hash, value, timestamp)
+	}()
+	if !handled {
+		c.add(points.OnePoint(string(name), value, timestamp), false, false)
+	}
 }
 
-func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, hash uint64, value float64, timestamp int64) {
+// addPointLocked returns false before admission when journal space is exhausted.
+// The caller must release its lock and retry through the waiting intake path.
+func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, hash uint64, value float64, timestamp int64) bool {
+	if shard.log.first != nil && shard.log.entries.Len() >= maxShardLogEntries {
+		return false
+	}
 	shard.receivedPoints.Add(1)
 	if c.throttleWithHash != nil {
 		// The throttle does not retain the points of a cached metric.
@@ -673,11 +694,11 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		shard.scratch.Metric = ""
 		if throttled {
 			c.stat.throttledPoints.Add(1)
-			return
+			return true
 		}
 	}
 	if c.overflows(s, 1) {
-		return
+		return true
 	}
 	capacity := cap(values.compact.buf)
 	logGrew := false
@@ -692,10 +713,11 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 	}
 	shard.livePoints++
 	c.addedLocked(shard, s, values, 1, true, false)
+	return true
 }
 
-// AddRestored adds dump data without starting a new buffering deadline. Unlike
-// live input it waits for input-log space: the dump may be removed after Sync,
+// AddRestored adds dump data without starting a new buffering deadline. It
+// waits for input-log space: the dump may be removed after Sync,
 // so its points must never overflow the log's bounded admission buffer.
 func (c *Cache) AddRestored(p *points.Points) {
 	c.addRestored(p, false)
@@ -745,7 +767,31 @@ func (c *Cache) AddRecovered(p *points.Points) {
 }
 
 func (c *Cache) add(p *points.Points, restored, recovered bool) {
-	c.addWithRestore(p, restored, recovered, false, nil, nil)
+	c.addWaiting(p, restored, recovered, nil)
+}
+
+// addWaiting reserves bounded journal space before accepting live input. A
+// completed Sync covers every accepted point; pressure requests an early cycle.
+func (c *Cache) addWaiting(p *points.Points, restored, recovered bool, series *streamPointHint) {
+	for {
+		wait := c.addWithRestore(p, restored, recovered, false, series, nil)
+		if wait == nil {
+			return
+		}
+		if !recovered && len(p.Data) > maxShardLogEntries {
+			batch := *p
+			for start := 0; start < len(p.Data); start += maxShardLogEntries {
+				batch.Data = p.Data[start:min(start+maxShardLogEntries, len(p.Data))]
+				c.addWaiting(&batch, restored, recovered, series)
+			}
+			return
+		}
+		select {
+		case c.logPressure <- struct{}{}:
+		default:
+		}
+		<-wait
+	}
 }
 
 func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) (wait <-chan struct{}) {
@@ -797,8 +843,12 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		c.divert(current.xlog, p)
 		return nil
 	}
-	if restored && !recovered {
-		if wait := shard.log.restoreSpace(len(p.Data)); wait != nil {
+	if !recovered {
+		limit := maxShardLogEntries
+		if restored {
+			limit = maxShardRestoredLogEntries
+		}
+		if wait := shard.log.space(len(p.Data), limit); wait != nil {
 			return wait
 		}
 	}
@@ -1131,6 +1181,7 @@ func (c *Cache) DivertToPointWriter(write func(*points.Points) error) {
 	s := *c.settings.Load().(*cacheSettings)
 	s.xlog = write
 	c.settings.Store(&s)
+	go c.wakeLogAdmission()
 }
 
 // SetRestartOrder serves the oldest eligible queued points during restart.

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
@@ -143,43 +144,54 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 	}
 }
 
-func TestBookkeepingLogDrainLimitsAndLoss(t *testing.T) {
-	c := New()
-	c.SetMaxSize(0)
-	c.EnableInputLog()
-	name := "bounded.metric"
-	sh := c.GetShard(name)
-	index := slices.Index(c.data, sh)
-	for i := range maxShardLogEntries + 7 {
-		c.AddPoint([]byte(name), math.Float64frombits(uint64(i)), int64(i)-17)
-	}
-	if c.LogDropped() != 7 || c.Size() != maxShardLogEntries+7 {
-		t.Fatalf("cached=%d, lost=%d", c.Size(), c.LogDropped())
-	}
-	if sh.log.restoreSpace(1) == nil {
-		t.Fatal("restore bypassed its half-buffer admission limit")
-	}
-	wait := sh.log.waitDrained
-	batch := c.TakeLogBatch(index, 9, inputlog.Batch{})
-	select {
-	case <-wait:
-	default:
-		t.Fatal("drain did not release restore admission")
-	}
-	if batch.Len() != maxShardLogEntries {
-		t.Fatal("column lengths or live drain limit changed")
-	}
-	// Popping and reusing the name must not alter the already drained batch.
-	c.Pop(name)
-	c.AddPoint([]byte(name), 42, math.MinInt64)
-	for i, p := range batch.Entries(nil) {
-		if p.Metric() != name || math.Float64bits(p.Value) != uint64(i) || p.Timestamp != int64(i)-17 {
-			t.Fatalf("drained point %d changed", i)
+func TestBookkeepingLogDrainBackpressure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := New()
+		c.SetMaxSize(0)
+		c.EnableInputLog()
+		name := "bounded.metric"
+		sh := c.GetShard(name)
+		index := slices.Index(c.data, sh)
+		done := make(chan struct{})
+		go func() {
+			for i := range maxShardLogEntries + 7 {
+				c.AddPoint([]byte(name), math.Float64frombits(uint64(i)), int64(i)-17)
+			}
+			close(done)
+		}()
+		synctest.Wait()
+		if c.LogDropped() != 0 || c.Size() != maxShardLogEntries || sh.log.entries.Len() != maxShardLogEntries {
+			t.Fatalf("cached=%d, unlogged=%d, staged=%d", c.Size(), c.LogDropped(), sh.log.entries.Len())
 		}
-	}
-	if sh.log.entries.Len() != 1 || c.LogDropped() != 7 || sh.log.restoreSpace(maxShardRestoredLogEntries-1) != nil || sh.log.restoreSpace(maxShardRestoredLogEntries) == nil {
-		t.Fatal("drain changed loss accounting or restore limit")
-	}
+		select {
+		case <-done:
+			t.Fatal("live input bypassed full staging")
+		default:
+		}
+		if sh.log.restoreSpace(1) == nil {
+			t.Fatal("restore bypassed its half-buffer admission limit")
+		}
+		wait := sh.log.waitDrained
+		batch := c.TakeLogBatch(index, 9, inputlog.Batch{})
+		<-wait
+		synctest.Wait()
+		<-done
+		if batch.Len() != maxShardLogEntries || c.Size() != maxShardLogEntries+7 || sh.log.entries.Len() != 7 {
+			t.Fatal("drain failed to admit the waiting suffix")
+		}
+		c.TakeLogBatch(index, 10, inputlog.Batch{})
+		// Popping and reusing the name cannot change the immutable first batch.
+		c.Pop(name)
+		c.AddPoint([]byte(name), 42, math.MinInt64)
+		for i, p := range batch.Entries(nil) {
+			if p.Metric() != name || math.Float64bits(p.Value) != uint64(i) || p.Timestamp != int64(i)-17 {
+				t.Fatalf("drained point %d changed", i)
+			}
+		}
+		if sh.log.entries.Len() != 1 || c.LogDropped() != 0 || sh.log.restoreSpace(maxShardRestoredLogEntries-1) != nil || sh.log.restoreSpace(maxShardRestoredLogEntries) == nil {
+			t.Fatal("drain changed admission or restore limit")
+		}
+	})
 }
 
 func TestBookkeepingRelogBudget(t *testing.T) {

@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -524,5 +526,245 @@ func TestInputLogFromNowRetainsIndependentSpoolSource(t *testing.T) {
 	c.Confirm(p)
 	if !c.InputLogIdle() || source.Pending() != 0 {
 		t.Fatal("persisted authorities did not release")
+	}
+}
+
+// Live bursts exceeding a shard's staging limit must survive a later completed
+// sync. The reference is the complete accepted input, independent of cache Get.
+func TestInputLogLiveBurstCrashReplay(t *testing.T) {
+	const name = "live.burst"
+	want := make([]points.Point, maxShardLogEntries+17)
+	for i := range want {
+		want[i] = points.Point{Value: float64(i) + 0.25, Timestamp: 1700000000 + int64(i)}
+	}
+	c := New()
+	c.SetMaxSize(0)
+	dir := t.TempDir()
+	opts := inputlog.Options{SegmentSize: 64 << 10}
+	l, _ := startInputLog(t, dir, c, opts)
+	c.Add(&points.Points{Metric: name, Data: want})
+	syncLog(t, l)
+	l.Kill()
+	restarted := New()
+	restarted.SetMaxSize(0)
+	l, _ = startInputLog(t, dir, restarted, opts)
+	defer l.Close()
+	if got := restarted.Get(name); !slices.Equal(got, want) {
+		t.Fatalf("crash recovered %d/%d accepted points", len(got), len(want))
+	}
+}
+
+// Repeated relog/truncation must never retire the sole journal copy of a
+// large queued or in-flight batch, even when it cannot fit the staging buffer.
+func TestInputLogRelogOverflowCrashReplay(t *testing.T) {
+	for _, flight := range []bool{false, true} {
+		t.Run(fmt.Sprint("flight=", flight), func(t *testing.T) {
+			const name = "relog.large"
+			want := make([]points.Point, maxShardLogEntries+17)
+			for i := range want {
+				want[i] = points.Point{Value: float64(i) + 0.25, Timestamp: 1700000000 + int64(i)}
+			}
+			c := New()
+			c.SetMaxSize(0)
+			dir := t.TempDir()
+			opts := inputlog.Options{SyncInterval: time.Hour, MaxAge: 3 * time.Hour, SegmentSize: 64 << 10}
+			l, _ := startInputLog(t, dir, c, opts)
+			for start := 0; start < len(want); start += maxShardRestoredLogEntries {
+				c.Add(&points.Points{Metric: name, Data: want[start:min(start+maxShardRestoredLogEntries, len(want))]})
+				syncLog(t, l)
+			}
+			if flight {
+				c.PopNotConfirmed(name)
+			}
+			for round := range 12 {
+				// Force new segments and exercise both replay-start advancement
+				// and segment recycling while the large batch stays unpersisted.
+				for i := range 2000 {
+					c.AddPoint([]byte(fmt.Sprintf("relog.traffic.%d", i)), float64(round), int64(round))
+				}
+				syncLog(t, l)
+				for i := range 2000 {
+					persist(c, []string{fmt.Sprintf("relog.traffic.%d", i)})
+				}
+			}
+			l.Kill()
+			restarted := New()
+			restarted.SetMaxSize(0)
+			l, _ = startInputLog(t, dir, restarted, opts)
+			defer l.Close()
+			if got := restarted.Get(name); !slices.Equal(got, want) {
+				t.Fatalf("crash after relog recovered %d/%d accepted points", len(got), len(want))
+			}
+		})
+	}
+}
+
+// Exercise every public live intake path against the same bitwise input oracle.
+// The log's timer is an hour away, so crossing the per-shard bound must request
+// pressure and wait rather than silently accepting an unjournalled suffix.
+func TestInputLogIntakeCrashDifferential(t *testing.T) {
+	for _, mode := range []string{"Add", "AddPoint", "AddPoints", "AddPointBatch", "AddPointRef", "AddStreamPointRef", "AddStreamSeries"} {
+		t.Run(mode, func(t *testing.T) {
+			const name = "intake.same.shard"
+			want := make([]points.Point, maxShardLogEntries+17)
+			bits := []uint64{0, 1 << 63, 0x7ff8000000000042, 0x7ff0000000000000, 0xfff0000000000000, 1, 0x7fefffffffffffff}
+			for i := range want {
+				want[i] = points.Point{Value: math.Float64frombits(bits[i%len(bits)]), Timestamp: 1700000000 + int64(i/3-i%5)}
+			}
+			c := New()
+			c.SetMaxSize(0)
+			dir := t.TempDir()
+			l, _ := startInputLog(t, dir, c, inputlog.Options{SegmentSize: 64 << 10})
+			defer c.DisableInputLog()
+			defer l.Kill()
+			n := []byte(name)
+			switch mode {
+			case "Add":
+				c.Add(&points.Points{Metric: name, Data: want})
+			case "AddPoints":
+				c.AddPoints(n, want)
+			case "AddPointBatch":
+				names := make([][]byte, len(want))
+				for i := range names {
+					names[i] = n
+				}
+				c.AddPointBatch(names, want)
+			default:
+				var ref PointRef
+				var slot any
+				if mode == "AddStreamSeries" {
+					slot = c.ResolveStreamName(n)
+				}
+				for _, p := range want {
+					switch mode {
+					case "AddPoint":
+						c.AddPoint(n, p.Value, p.Timestamp)
+					case "AddPointRef":
+						c.AddPointRef(&ref, n, p.Value, p.Timestamp)
+					default:
+						c.AddStreamPoint(n, p.Value, p.Timestamp, &slot)
+					}
+				}
+			}
+			syncLog(t, l)
+			if c.Size() != int64(len(want)) || l.Metrics().Unlogged != 0 {
+				t.Fatal("intake lost points", c.Size(), l.Metrics())
+			}
+			l.Kill()
+			reopened, err := inputlog.Open(dir, inputlog.Options{SegmentSize: 64 << 10})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			count := 0
+			_, err = reopened.Replay(func(p *points.Points) {
+				if p.Metric != name {
+					t.Fatal("metric changed", p.Metric)
+				}
+				for _, got := range p.Data {
+					if count >= len(want) || got.Timestamp != want[count].Timestamp || math.Float64bits(got.Value) != math.Float64bits(want[count].Value) {
+						t.Fatal("crash replay changed point bits/order", count)
+					}
+					count++
+				}
+			})
+			if err != nil || count != len(want) {
+				t.Fatal("crash replay missing/duplicate points", count, len(want), err)
+			}
+			t.Logf("accepted=%d replayed=%d unlogged=0", len(want), count)
+		})
+	}
+}
+
+func TestInputLogWaitingLiveDiversion(t *testing.T) {
+	for _, mode := range []string{"point", "text", "binary", "disable"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := New()
+				c.SetMaxSize(0)
+				c.EnableInputLog()
+				const name = "waiting.live"
+				for i := range maxShardLogEntries {
+					c.AddPoint([]byte(name), float64(i), int64(i))
+				}
+				done := make(chan struct{})
+				go func() { c.AddPoint([]byte(name), 42, 1800000000); close(done) }()
+				synctest.Wait()
+				select {
+				case <-done:
+					t.Fatal("full journal did not block intake")
+				default:
+				}
+				var out bytes.Buffer
+				var saved int
+				switch mode {
+				case "point":
+					c.DivertToPointWriter(func(p *points.Points) error { saved += len(p.Data); return nil })
+				case "text":
+					c.DivertToXlog(&out)
+				case "binary":
+					c.DivertToBinaryXlog(&out)
+				case "disable":
+					c.DisableInputLog()
+				}
+				synctest.Wait()
+				select {
+				case <-done:
+				default:
+					t.Fatal("diversion stranded waiting intake")
+				}
+				if mode == "disable" {
+					if c.Size() != maxShardLogEntries+1 {
+						t.Fatal("disabled intake lost point")
+					}
+				} else {
+					if c.Size() != maxShardLogEntries || (mode == "point" && saved != 1) || (mode != "point" && out.Len() == 0) {
+						t.Fatal("diverted point lost or duplicated")
+					}
+				}
+			})
+		})
+	}
+}
+
+// Independent names exercise AddPointBatch's warm lookup hints, including a
+// full shard between validation and intake; consecutive names use AddPoints.
+func TestInputLogHintBatchCrashReplay(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	name := "hint.burst.first"
+	other := ""
+	for i := 0; other == ""; i++ {
+		n := fmt.Sprintf("hint.burst.other.%d", i)
+		if c.GetShard(n) == c.GetShard(name) {
+			other = n
+		}
+	}
+	want := map[string][]points.Point{}
+	names := make([][]byte, maxShardLogEntries+17)
+	data := make([]points.Point, len(names))
+	for i := range data {
+		n := name
+		if i%2 != 0 {
+			n = other
+		}
+		names[i] = []byte(n)
+		data[i] = points.Point{Value: float64(i) + 0.25, Timestamp: 1700000000 + int64(i)}
+		want[n] = append(want[n], data[i])
+	}
+	dir := t.TempDir()
+	l, _ := startInputLog(t, dir, c, inputlog.Options{SegmentSize: 64 << 10})
+	defer l.Kill()
+	c.AddPointBatch(names, data)
+	syncLog(t, l)
+	l.Kill()
+	restarted := New()
+	restarted.SetMaxSize(0)
+	l, _ = startInputLog(t, dir, restarted, inputlog.Options{SegmentSize: 64 << 10})
+	defer l.Close()
+	for n, ps := range want {
+		if got := restarted.Get(n); !slices.Equal(got, ps) {
+			t.Fatalf("%s recovered %d/%d", n, len(got), len(ps))
+		}
 	}
 }

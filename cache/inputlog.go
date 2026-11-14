@@ -8,8 +8,9 @@ import (
 )
 
 // maxShardLogEntries bounds a shard's unwritten input log records: a stalled
-// log must not exhaust memory. Further points are still cached, but not
-// logged. At 4.5M points/s a one-second cycle records about 4400 per shard,
+// log must not exhaust memory. Live intake waits outside the shard lock when
+// staging is full, requesting an early cycle instead of accepting unlogged input.
+// At 4.5M points/s a one-second cycle records about 4400 per shard,
 // but cycles stretch to seconds while shard locks are contended, and relays
 // then flush their backlog at several times the usual rate: 1<<15 dropped
 // up to 27M points per burst. Staging retains raw points in separate reference/value columns;
@@ -21,7 +22,7 @@ const maxShardLogEntries = 1 << 17
 const maxShardRestoredLogEntries = maxShardLogEntries / 2
 
 // LogPressure wakes group commit when restored data exhausts its bounded
-// staging allowance. Ordinary live input retains its periodic commit policy.
+// staging allowance, or live input fills its staging buffer.
 func (c *Cache) LogPressure() <-chan struct{} { return c.logPressure }
 
 // shardLog is a shard's part of the input log, guarded by the shard lock.
@@ -47,9 +48,12 @@ func (l *shardLog) stagingBytes() int64 {
 }
 
 // restoreSpace is called under the shard lock, before adding restored data.
-// Live input keeps its non-blocking admission policy.
 func (l *shardLog) restoreSpace(n int) <-chan struct{} {
-	if l.first == nil || l.entries.Len()+n <= maxShardRestoredLogEntries {
+	return l.space(n, maxShardRestoredLogEntries)
+}
+
+func (l *shardLog) space(n, limit int) <-chan struct{} {
+	if l.first == nil || l.entries.Len()+n <= limit {
 		return nil
 	}
 	if l.waitDrained == nil {
@@ -191,6 +195,12 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		if n > 0 && n+it.count() > budget {
 			return n
 		}
+		// Only a complete replacement may release the old journal generation.
+		// Oversized items pin their original segments until persistence; do not
+		// allocate/decode them just to clip and retire their sole durable copy.
+		if it.count() > maxShardLogEntries-l.entries.Len() {
+			continue
+		}
 		l.recordPoints(&it.StreamRef, it.compact.appendDecoded(nil))
 		n += it.count()
 		l.release(it.logFirst)
@@ -204,6 +214,9 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		}
 		if n > 0 && n+len(p.Data) > budget {
 			break
+		}
+		if len(p.Data) > maxShardLogEntries-l.entries.Len() {
+			continue
 		}
 		l.recordPoints(inputlog.NewStreamRef(p.Metric), p.Data)
 		n += len(p.Data)

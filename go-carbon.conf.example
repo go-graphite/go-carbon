@@ -1379,7 +1379,8 @@ format = "legacy"
 # and one fdatasync per interval, into preallocated segment files that are
 # recycled once every point in them has been persisted. Each segment records
 # a metric name once and refers to it by a small id afterwards, and encodes
-# each point against the metric's previous point in that segment.
+# each point against the metric's previous point in that segment. If a shard's
+# staging buffer fills, live intake waits for space and requests an early sync.
 #
 # A graceful dump stop (USR2 with [dump] enabled, which is also what
 # systemctl stop sends with KillSignal=USR2) deletes the log after the dump
@@ -1387,7 +1388,8 @@ format = "legacy"
 # dump. If the dump fails or the stop is killed before that, the log stays and
 # the next start replays it. With [dump] disabled, USR2 stops input and syncs
 # the log; the next start replays it. SIGTERM and SIGKILL end the process at
-# once: the next start replays the log, losing at most one sync-interval.
+# once: the next start replays the log. Input since the last successful sync
+# can be lost, including time spent collecting, encoding and writing a cycle.
 #
 # Restart only: SIGHUP refuses a configuration that changes this section, or
 # that raises cache.writeout-max-delay to the running log's max-age.
@@ -1399,7 +1401,7 @@ enabled = false
 # 4.5M points/s; metrics sending less often than a segment lasts cost about
 # 30 bytes per point, since every segment records their names again.
 path = "/var/lib/graphite/input-log/"
-# Group commit period: the most input an unclean exit loses.
+# Group commit period. Input is durable only after its cycle successfully syncs.
 sync-interval = "1s"
 # Preallocated size of each segment file, in bytes (at least 16MB). Each
 # segment records every name it uses once, about 30 bytes per active metric,
@@ -1411,8 +1413,10 @@ sync-interval = "1s"
 segment-size = 4294967296
 # Points still unpersisted after max-age (a write that keeps failing, or a
 # persister that is far behind) are recorded again at the head of the log,
-# so they no longer keep older segments. Bounds the log to about max-age of
-# input. "0s" (default) uses twice cache.writeout-max-delay, at least 30m.
+# so they no longer keep older segments. A batch larger than a shard's staging
+# limit retains its original segments until persistence confirms it; max-age
+# does not bound retention for such a batch. "0s" (default) uses twice
+# cache.writeout-max-delay, at least 30m.
 # It must exceed cache.writeout-max-delay, or points waiting for their
 # writeout are logged twice, and be at least two sync intervals.
 max-age = "0s"

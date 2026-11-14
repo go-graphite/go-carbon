@@ -35,8 +35,11 @@ func (c *Cache) AddPointRef(ref *PointRef, name []byte, value float64, timestamp
 		if uint(ref.slot) < uint(len(shard.items.slots)) {
 			values := shard.items.slots[ref.slot].item
 			if values != nil && values.streamGeneration == ref.generation && c.settings.Load().(*cacheSettings).xlog == nil {
-				c.addPointLocked(shard, s, values, values.hash, value, timestamp)
+				handled := c.addPointLocked(shard, s, values, values.hash, value, timestamp)
 				shard.mu.Unlock()
+				if !handled {
+					c.AddPoint(name, value, timestamp)
+				}
 				return
 			}
 		}

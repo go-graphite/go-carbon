@@ -131,6 +131,5 @@ func (c *Cache) addPointHint(hint *pointLookupHint, p points.Point) bool {
 	if it == nil || it.hash != hint.hash || it.Metric != hint.name || c.settings.Load().(*cacheSettings).xlog != nil {
 		return false
 	}
-	c.addPointLocked(sh, s, it, hint.hash, p.Value, p.Timestamp)
-	return true
+	return c.addPointLocked(sh, s, it, hint.hash, p.Value, p.Timestamp)
 }
