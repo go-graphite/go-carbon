@@ -10,6 +10,7 @@ import (
 	"runtime/metrics"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -57,6 +58,14 @@ type startupPosition struct {
 	segment *startupSegment
 	offset  int64
 }
+
+// A coherent filesystem sample, plus the capture append frontier before statfs.
+// Appends since that frontier consume headroom until the next sample; retirement
+// only returns headroom after statfs observes the freed blocks.
+type startupDiskSample struct {
+	free, reserve, written int64
+}
+
 type startupWriteError struct{ err error }
 type startupAppend struct {
 	data     []byte
@@ -86,6 +95,9 @@ type startupSink struct {
 	drain       func(bool)
 }
 type startupInput struct {
+	diskWritten                                                         atomic.Int64 // Physical appends only; opening older sources consumes no new disk.
+	diskSample                                                          atomic.Pointer[startupDiskSample]
+	overBudget                                                          atomic.Bool
 	file                                                                *os.File
 	path                                                                string
 	policy                                                              startupCapturePolicy
@@ -220,6 +232,7 @@ func (s *startupInput) Write(raw []byte, n int) error {
 		s.legacy.size.Add(int64(written))
 		s.legacy.first.Load().size.Add(int64(written))
 		s.size.Add(int64(written))
+		s.diskWritten.Add(int64(written))
 		s.rawBytes.Add(int64(written))
 		s.points.Add(int64(n))
 	}
@@ -406,6 +419,7 @@ func (s *startupShard) appendLoop() {
 					cur.size.Add(int64(n))
 					s.size.Add(int64(n))
 					s.owner.size.Add(int64(n))
+					s.owner.diskWritten.Add(int64(n))
 					s.owner.rawBytes.Add(int64(len(buf)))
 					s.owner.points.Add(int64(count))
 					if s.owner.observe != nil {
@@ -487,17 +501,53 @@ func (s *startupInput) requestFallback() {
 	}
 }
 func (s *startupInput) diskDanger(n int64) bool {
-	if !s.monitored.Load() {
+	disk := s.diskSample.Load()
+	if disk == nil {
 		return false
 	}
-	limit := s.effectiveBytes.Load()
-	return s.size.Load()-s.retiredBytes.Load()+n > max(0, limit)
+	if disk.free < disk.reserve {
+		return true
+	}
+	written := max(0, s.diskWritten.Load()-disk.written)
+	return n > disk.free-disk.reserve-written
+}
+
+func (s *startupInput) updateDiskSpace(free, total uint64, written int64) {
+	retained := max(0, s.size.Load()-s.retiredBytes.Load())
+	budget := (int64(min(free, 1<<62)) + retained) / 4
+	s.effectiveBytes.Store(budget)
+	s.diskSample.Store(&startupDiskSample{free: startupCapacityBytes(free), reserve: startupCapacityBytes(total / 20), written: written})
+	if retained > budget {
+		if s.overBudget.CompareAndSwap(false, true) {
+			zapwriter.Logger("app").Error("startup input exceeded soft spool budget; continuing durable capture without pausing input", zap.Int64("retained_bytes", retained), zap.Int64("budget_bytes", budget))
+		}
+	} else {
+		s.overBudget.Store(false)
+	}
+}
+
+func (s *startupInput) sampleDiskSpace() {
+	// Take the append frontier first: writes concurrent with statfs may already
+	// be reflected in Bavail, so double-counting them is conservative.
+	written := s.diskWritten.Load()
+	var info syscall.Statfs_t
+	if err := syscall.Statfs(filepath.Dir(s.path), &info); err != nil {
+		s.fallback.Store(true)
+		zapwriter.Logger("app").Error("startup input cannot sample disk safety reserve; keeping previous sample", zap.Error(err))
+		return
+	}
+	free := uint64(0)
+	if info.Bavail > 0 {
+		free = uint64(info.Bavail) * uint64(info.Bsize)
+	}
+	s.updateDiskSpace(free, uint64(info.Blocks)*uint64(info.Bsize), written)
 }
 func (s *startupInput) notePause() {
 	if s.paused.CompareAndSwap(false, true) {
 		s.fallback.Store(true)
 		s.pauseExpected.Store(-1)
-		zapwriter.Logger("app").Error("startup input reached actual disk safety reserve; capture backpressured", zap.Int64("retained_bytes", s.size.Load()-s.retiredBytes.Load()), zap.Int64("budget_bytes", s.effectiveBytes.Load()), zap.Int64("expected_pause_seconds", -1))
+		disk := s.diskSample.Load()
+		zapwriter.Logger("app").Error("startup input reached actual disk safety reserve; capture backpressured", zap.Int64("retained_bytes", s.size.Load()-s.retiredBytes.Load()), zap.Int64("budget_bytes", s.effectiveBytes.Load()), zap.Int64("expected_pause_seconds", -1), zap.Int64("sampled_free_bytes", disk.free), zap.Int64("reserve_bytes", disk.reserve), zap.Int64("written_since_sample_bytes", max(0, s.diskWritten.Load()-disk.written)))
 	}
 }
 
@@ -505,8 +555,9 @@ func (s *startupInput) notePause() {
 // convergence margin reports continued capture; only a disk safety reserve or
 // an I/O failure can backpressure sockets.
 func (s *startupInput) startMonitor(maxBytes int64) {
-	s.monitored.Store(true)
 	s.effectiveBytes.Store(maxBytes)
+	s.sampleDiskSpace()
+	s.monitored.Store(true)
 	go func() {
 		defer close(s.done)
 		tick := time.NewTicker(time.Second)
@@ -550,10 +601,7 @@ func (s *startupInput) startMonitor(maxBytes int64) {
 				idleBefore = cpu[0].Value.Float64()
 				s.idleCPUs.Store(int64(idle * 1000))
 
-				retained := s.size.Load() - s.retiredBytes.Load()
-				if free, err := migrationDiskFree(filepath.Dir(s.path)); err == nil {
-					s.effectiveBytes.Store((int64(min(free, 1<<62)) + retained) / 4)
-				}
+				s.sampleDiskSpace()
 				if s.syncing.CompareAndSwap(false, true) {
 					s.syncWG.Go(func() {
 						defer s.syncing.Store(false)
