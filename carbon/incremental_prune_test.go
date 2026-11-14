@@ -8,6 +8,9 @@ import (
 )
 
 func TestIncrementalCompletedUsesCatalogWithoutSourceWalkOnRestart(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := incrementalAppFixture(t)
 	cfg.Whisper.StoreMigrationReclaimDelay = &Duration{0}
 	writeSharedConfig(t, path, cfg)

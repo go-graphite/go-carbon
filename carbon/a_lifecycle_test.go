@@ -5,6 +5,7 @@ import "testing"
 // Start the longest independent matrices first so their waits overlap the
 // shorter application tests. Each matrix owns its own process and case limit.
 func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
+	t.Parallel() // Children own isolated processes in the bounded storage pool.
 	testPendingReadFormats(t)
 }
 

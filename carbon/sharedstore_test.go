@@ -520,6 +520,9 @@ func TestReloadCompactionRate(t *testing.T) {
 }
 
 func TestReloadCompactionHeadroomAndWarmup(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := incrementalAppFixture(t)
 	cfg.Whisper.StoreCompactionRate = -1
 	cfg.Whisper.StoreCompactionHeadroom = 1.25
@@ -554,6 +557,9 @@ func TestReloadCompactionHeadroomAndWarmup(t *testing.T) {
 }
 
 func TestReloadFlushRate(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := incrementalAppFixture(t)
 	cfg.Whisper.StoreFlushRate = 4 << 20
 	writeSharedConfig(t, path, cfg)
@@ -588,6 +594,9 @@ func TestReloadFlushRate(t *testing.T) {
 }
 
 func TestAutomaticCompactionPacingMigration(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := incrementalAppFixture(t)
 	cfg.Whisper.StoreCompactionRate = -1
 	writeSharedConfig(t, path, cfg)
