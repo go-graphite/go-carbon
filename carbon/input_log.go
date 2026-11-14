@@ -140,7 +140,7 @@ func (app *App) openInputLog(core *cache.Cache) error {
 		if err != nil {
 			return err
 		}
-		if len(paths) != 0 {
+		if len(paths) != 0 || (s.resume != nil && !s.journalReset) {
 			l.RetainReplay()
 			s.releaseLog = l.ReleaseCopy
 		}
@@ -163,6 +163,9 @@ func (app *App) openInputLog(core *cache.Cache) error {
 // Replayed points precede live points in each cache item, so they need not
 // drain before receivers open, even for compressed whisper.
 func (app *App) replayInputLog(core *cache.Cache) error {
+	if app.hasStartupResume() {
+		return nil
+	}
 	if s := app.startupInput; s != nil {
 		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
 		if err != nil {
@@ -198,19 +201,43 @@ func (app *App) replayInputLogWith(core *cache.Cache, stop <-chan struct{}, logP
 	app.restart.noteReplayed()
 	logger := zapwriter.Logger("input-log")
 	logger.Info("replaying input log before starting receivers", zap.String("path", logPath))
-	stats, err := l.ReplayStopped(func(p *points.Points) {
+	var from map[uint16]inputlog.ReplayCursor
+	var advance func(uint16, inputlog.ReplayCursor)
+	if s := app.startupInput; s != nil {
+		if s.resume != nil {
+			from = s.resume.JournalOffsets
+		}
+		advance = func(part uint16, cursor inputlog.ReplayCursor) {
+			s.journalMu.Lock()
+			defer s.journalMu.Unlock()
+			if s.journalOffsets == nil {
+				s.journalOffsets = make(map[uint16]inputlog.ReplayCursor)
+				for k, v := range from {
+					s.journalOffsets[k] = v
+				}
+			}
+			s.journalOffsets[part] = cursor
+		}
+	}
+	stats, err := l.ReplayStoppedFrom(func(p *points.Points) bool {
 		// Like tail replay: these points were accepted already, so no live
 		// quota applies, but recovery must leave room for persistence.
 		for draining && !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
 			select {
 			case <-stop:
-				return
+				return false
 			default:
 			}
 			time.Sleep(time.Millisecond)
 		}
+		select {
+		case <-stop:
+			return false
+		default:
+		}
 		add(p)
-	}, stop)
+		return true
+	}, stop, from, advance)
 	select {
 	case <-stop:
 		return errors.New("input log replay stopped")

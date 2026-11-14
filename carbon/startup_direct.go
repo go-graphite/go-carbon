@@ -171,6 +171,9 @@ func (s *startupInput) stopDirectSwitch() bool {
 // the ordinary stop's dump-before-removal boundary, then remove each old prefix
 // before the terminal fence. No receiver can submit to these files after direct.
 func (s *startupInput) retireAfterDump() error {
+	if err := removeStartupResume(filepath.Dir(s.path)); err != nil {
+		return err
+	}
 	if err := s.close(); err != nil {
 		return err
 	}

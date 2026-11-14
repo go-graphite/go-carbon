@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
@@ -51,7 +52,7 @@ type startupSegment struct {
 	unlock                    func() error
 	source                    *cache.RecoverySource
 	next                      atomic.Pointer[startupSegment]
-	size                      atomic.Int64
+	size, offset              atomic.Int64
 	sealed, replayed, retired atomic.Bool
 	closed, unlocked          bool // owned by the monitor, after the durable unlink
 }
@@ -97,6 +98,7 @@ type startupSink struct {
 	drain       func(bool)
 }
 type startupInput struct {
+	resume                                                              *startupResume
 	journalOnly                                                         bool         // No checkpoint/legacy dump; the continuous journal precedes capture.
 	diskWritten                                                         atomic.Int64 // Physical appends only; opening older sources consumes no new disk.
 	diskSample                                                          atomic.Pointer[startupDiskSample]
@@ -108,6 +110,8 @@ type startupInput struct {
 	shards                                                              []*startupShard
 	size, rawBytes, points, replayedPoints, replayedBytes, retiredBytes atomic.Int64
 	releasableBytes, releaseFailures                                    atomic.Int64
+	historyReleasableBytes, liveReleasableBytes                         atomic.Int64
+	historyMu                                                           sync.Mutex // publishes history and advances its prefix, including an empty list
 	receiver                                                            *tcp.TCP
 	observe                                                             func(*points.Points)
 	started                                                             time.Time
@@ -131,6 +135,9 @@ type startupInput struct {
 	replayStarted                                                       atomic.Bool
 	historyReady                                                        atomic.Bool
 	historyLog                                                          atomic.Pointer[startupSegment]
+	journalReset                                                        bool // owned by the direct-transition lock
+	journalMu                                                           sync.Mutex
+	journalOffsets                                                      map[uint16]inputlog.ReplayCursor
 	replayYields                                                        atomic.Int64
 	historyPoints                                                       atomic.Int64
 	historyPendingBytes                                                 atomic.Int64
@@ -690,6 +697,18 @@ func (s *startupInput) releaseFailed(sh *startupShard, err error) {
 	s.fallback.Store(true)
 }
 
+// appendHistory publishes a fully initialized immutable source. Replay may discover
+// another source after reclaim removed the last published one, so both publication
+// and prefix advancement serialize the empty-list transition.
+func (s *startupInput) appendHistory(tail, seg *startupSegment) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	tail.next.Store(seg)
+	if s.legacy.first.Load() == nil {
+		s.legacy.first.Store(seg)
+	}
+}
+
 // Delete only a durably retired contiguous prefix. The checkpoint and older
 // history remain ordering barriers: otherwise a crash could replay an older
 // correction after a newer source was deleted. Snapshot confirmation candidates
@@ -697,6 +716,10 @@ func (s *startupInput) releaseFailed(sh *startupShard, err error) {
 // fence. One store sync covers the whole candidate batch; directory syncs still
 // separate every unlink to preserve prefix order through crashes.
 func (s *startupInput) reclaim() {
+	s.reclaimWith(os.Remove, syncDir)
+}
+
+func (s *startupInput) reclaimWith(remove func(string) error, syncDirectory func(string) error) {
 	sink := s.sink.Load()
 	if sink == nil {
 		return
@@ -708,7 +731,9 @@ func (s *startupInput) reclaim() {
 		sink.drain(!s.direct.Load() || s.size.Load() != s.retiredBytes.Load())
 	}
 	s.releasableBytes.Store(0)
-	if !sink.canRetire() || !s.historyReady.Load() {
+	s.historyReleasableBytes.Store(0)
+	s.liveReleasableBytes.Store(0)
+	if !sink.canRetire() {
 		return
 	}
 	type candidate struct {
@@ -727,7 +752,11 @@ func (s *startupInput) reclaim() {
 		}
 		return true
 	}
-	historyComplete := collect(s.legacy)
+	// Read completion before traversing: reaching the end of the currently
+	// published list is not proof that replay has discovered all history.
+	historyReady := s.historyReady.Load()
+	historyComplete := collect(s.legacy) && historyReady
+	historyBytes := releasable
 	all := historyComplete
 	if all {
 		for _, sh := range s.shards {
@@ -737,6 +766,8 @@ func (s *startupInput) reclaim() {
 		}
 	}
 	s.releasableBytes.Store(releasable)
+	s.historyReleasableBytes.Store(historyBytes)
+	s.liveReleasableBytes.Store(releasable - historyBytes)
 	if len(candidates) > 0 && sink.syncStore != nil {
 		if err := sink.syncStore(); err != nil {
 			s.releaseFailed(s.legacy, err)
@@ -745,21 +776,29 @@ func (s *startupInput) reclaim() {
 	}
 	for _, c := range candidates {
 		seg, sh := c.seg, c.sh
-		if err := seg.release(sink.syncHistory, os.Remove, syncDir); err != nil {
+		if err := seg.release(sink.syncHistory, remove, syncDirectory); err != nil {
 			s.releaseFailed(sh, err)
 			return
 		}
 		seg.retired.Store(true)
 		s.retiredBytes.Add(seg.size.Load())
 		s.releasableBytes.Add(-seg.size.Load())
-		sh.first.CompareAndSwap(seg, seg.next.Load())
+		if sh == s.legacy {
+			s.historyReleasableBytes.Add(-seg.size.Load())
+			s.historyMu.Lock()
+			sh.first.CompareAndSwap(seg, seg.next.Load())
+			s.historyMu.Unlock()
+		} else {
+			s.liveReleasableBytes.Add(-seg.size.Load())
+			sh.first.CompareAndSwap(seg, seg.next.Load())
+		}
 	}
 	if !historyComplete {
 		return
 	}
 	if all && s.directFence != nil && !s.directFence.retired.Load() {
 		seg := s.directFence
-		if err := seg.release(nil, os.Remove, syncDir); err != nil {
+		if err := seg.release(nil, remove, syncDirectory); err != nil {
 			s.releaseFailed(s.legacy, err)
 			return
 		}
