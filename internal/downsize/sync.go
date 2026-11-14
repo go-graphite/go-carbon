@@ -432,12 +432,12 @@ func (s *syncer) run(ctx context.Context) error {
 			return fmt.Errorf("copy missing: %w", err)
 		}
 	}
+	if err := s.retryWindowSelections(ctx); err != nil {
+		return fmt.Errorf("retry window selections: %w", err)
+	}
 	if s.o.noVerify {
 		event("phase_skipped", map[string]any{"phase": "verify", "readiness": false})
 		return nil
-	}
-	if err := s.retryWindowSelections(ctx); err != nil {
-		return fmt.Errorf("retry window selections: %w", err)
 	}
 	err := s.verifyAndFill(ctx)
 	if s.o.noCopy && s.sum.Missing > 0 {
@@ -499,9 +499,11 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	if s.windowOnly() {
 		selected = names
 	}
+	journalStarted := time.Now()
 	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, SelectionComplete: s.windowOnly()}); err != nil {
 		return res, err
 	}
+	event("sync_copy_journal", map[string]any{"phase": phase, "round": round, "source": source, "seconds": time.Since(journalStarted).Seconds()})
 	return res, nil
 }
 
