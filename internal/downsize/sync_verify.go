@@ -2,9 +2,13 @@ package downsize
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -255,14 +259,15 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 		return fmt.Errorf("target: %w", errSyncStoreDown)
 	}
 	type sourceCheck struct {
-		source   string
-		subset   []string
-		digest   map[string][]syncDigest
-		err      error
-		detail   []string
-		points   map[string]syncSeries
-		fetchErr error
-		coarse   []syncHole
+		source    string
+		subset    []string
+		digest    map[string][]syncDigest
+		err       error
+		detail    []string
+		points    map[string]syncSeries
+		fetchErr  error
+		preloaded bool
+		coarse    []syncHole
 	}
 	var checks []*sourceCheck
 	for src, source := range s.o.from {
@@ -336,12 +341,47 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 		}
 		c.detail = detail
 	}
-	needPoints := false
+	// Older sources cannot digest remotely. Read them first, then use the
+	// same finite-point wire digest to avoid materializing matching target
+	// series. Keep mismatches on the original point-by-point comparison path.
+	var legacy sync.WaitGroup
 	for _, c := range checks {
-		needPoints = needPoints || len(c.detail) > 0
+		if !byDigest || !errors.Is(c.err, errSyncNoDigest) || len(c.detail) == 0 {
+			continue
+		}
+		legacy.Add(1)
+		go func() {
+			defer legacy.Done()
+			c.preloaded = true
+			s.prog.reads.Add(int64(len(c.detail)))
+			c.points, c.fetchErr = s.fetch(ctx, c.source, c.detail, w.From, w.Until)
+			if c.fetchErr != nil {
+				return
+			}
+			detail := make([]string, 0, len(c.detail))
+			for _, n := range c.detail {
+				if !syncWindowCovered(c.points[n], targetDigest[n], w) {
+					detail = append(detail, n)
+				}
+			}
+			c.detail = detail
+		}()
 	}
-	if !needPoints {
+	legacy.Wait()
+	needed := map[string]bool{}
+	for _, c := range checks {
+		for _, n := range c.detail {
+			needed[n] = true
+		}
+	}
+	if len(needed) == 0 {
 		return nil
+	}
+	var targetDetail []string
+	for _, n := range names {
+		if needed[n] {
+			targetDetail = append(targetDetail, n)
+		}
 	}
 	var targetPoints map[string]syncSeries
 	var targetFetchErr error
@@ -349,10 +389,10 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 	reads.Add(1)
 	go func() {
 		defer reads.Done()
-		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, names, w.From, w.Until)
+		targetPoints, targetFetchErr = s.fetch(ctx, s.o.to, targetDetail, w.From, w.Until)
 	}()
 	for _, c := range checks {
-		if len(c.detail) == 0 {
+		if len(c.detail) == 0 || c.preloaded {
 			continue
 		}
 		s.prog.reads.Add(int64(len(c.detail)))
@@ -392,6 +432,40 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 		}
 	}
 	return nil
+}
+
+// syncWindowCovered uses the digest endpoint's bit-exact wire algorithm.
+// Empty source windows cannot contain a hole. Nonempty windows require an
+// identical finite timestamp/value sequence at the same step; any uncertainty
+// falls back to the normal target fetch and point comparison.
+func syncWindowCovered(source syncSeries, target []syncDigest, w syncRange) bool {
+	if source.Step <= 0 {
+		return true
+	}
+	h := sha256.New()
+	var buf [16]byte
+	var count int64
+	for i, v := range source.Values {
+		ts := source.Start + int64(i)*source.Step
+		if ts < w.From || ts >= w.Until || math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		binary.BigEndian.PutUint64(buf[:8], uint64(ts))
+		binary.BigEndian.PutUint64(buf[8:], math.Float64bits(v))
+		_, _ = h.Write(buf[:])
+		count++
+	}
+	if count == 0 {
+		return true
+	}
+	sum := h.Sum(nil)
+	hash := hex.EncodeToString(sum[:8])
+	for _, d := range target {
+		if d.Step == source.Step && d.Count == count && d.Hash == hash {
+			return true
+		}
+	}
+	return false
 }
 
 // syncDigestMismatch reports whether a name needs a point-by-point read, and
