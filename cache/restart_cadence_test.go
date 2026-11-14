@@ -17,6 +17,7 @@ func cadenceCache(t *testing.T) *Cache {
 	c.SetMaxSize(0)
 	c.SetWriteoutPacing(true)
 	c.SetWriteoutRestoreSpread(true)
+	c.EnableInputLog()
 	if err := c.SetWriteoutSpread(.25); err != nil {
 		t.Fatal(err)
 	}
@@ -197,5 +198,18 @@ func TestKnownArrivalDoesNotDeferLegacyUrgentBatch(t *testing.T) {
 	c.AddRestored(p)
 	if !c.WriteoutReady("legacy.merge") {
 		t.Fatal("later metadata deferred unknown older history")
+	}
+}
+
+func TestUnloggedRestoreRemainsUrgentWithKnownAge(t *testing.T) {
+	c := batchingCache(t, 960, 1800*time.Second)
+	defer c.Stop()
+	c.SetWriteoutPacing(true)
+	c.SetWriteoutRestoreSpread(true)
+	p := points.OnePoint("unlogged", 1, 100)
+	p.FirstArrival = time.Now().UnixNano()
+	c.AddRestored(p)
+	if !c.WriteoutReady("unlogged") {
+		t.Fatal("restore without durable journal was deferred")
 	}
 }

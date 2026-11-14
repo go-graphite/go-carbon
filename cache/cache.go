@@ -901,7 +901,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	if !restored && !recovered {
 		shard.livePoints += uint64(count)
 	}
-	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore && (s.writeoutPhase.IsZero() || p.FirstArrival == 0 || immediate))
+	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore && (!recovered || s.writeoutPhase.IsZero() || p.FirstArrival == 0 || immediate))
 	values.Arrival.Store(arrivalNanos(values.firstArrival))
 	if series != nil && !exists && hash == series.hash && p.Metric == series.name {
 		shard.bindStreamHint(series.hint, values, slot)
