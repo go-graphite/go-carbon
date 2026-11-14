@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"os/exec"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
-	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/klauspost/compress/zstd"
@@ -73,6 +73,10 @@ func TestStartupHistoryReleaseWhileReplayIncomplete(t *testing.T) {
 }
 
 func TestStartupResumeGracefulPartialHistoryBitExact(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { startupResumeGracefulPartialHistory(t, false) })
+	t.Run("inputlog", func(t *testing.T) { startupResumeGracefulPartialHistory(t, true) })
+}
+func startupResumeGracefulPartialHistory(t *testing.T, newFormat bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -87,8 +91,11 @@ func TestStartupResumeGracefulPartialHistoryBitExact(t *testing.T) {
 	path := fmt.Sprintf("%s.capture-epoch-%020d.%06d.%012d.tail.bin", s.path, s.epoch-1, 0, 0)
 	first := (&points.Points{Metric: want.Metric, Data: want.Data[:32]}).AppendBinary(nil)
 	second := (&points.Points{Metric: want.Metric, Data: want.Data[32:]}).AppendBinary(nil)
-	raw := recovery.EncodeCaptureFrame(enc, first, nil, 32)
-	raw = append(raw, recovery.EncodeCaptureFrame(enc, second, nil, 32)...)
+	raw := capturetest.Encode(enc, first, nil, 32)
+	raw = append(raw, capturetest.Encode(enc, second, nil, 32)...)
+	if newFormat {
+		raw = inputlogCaptureFixture(t, first, second)
+	}
 	if err = os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +237,7 @@ func TestStartupHistoryDurabilityCrashProcess(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		path := fmt.Sprintf("%s.capture-epoch-%020d.%06d.%012d.tail.bin", s.path, s.epoch-1, 0, i)
 		p := &points.Points{Metric: want.Metric, Data: want.Data[bounds[i]:bounds[i+1]]}
-		if err = os.WriteFile(path, recovery.EncodeCaptureFrame(enc, p.AppendBinary(nil), nil, len(p.Data)), 0600); err != nil {
+		if err = os.WriteFile(path, capturetest.Encode(enc, p.AppendBinary(nil), nil, len(p.Data)), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {

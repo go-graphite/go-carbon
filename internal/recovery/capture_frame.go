@@ -9,27 +9,20 @@ import (
 	"io"
 	"os"
 
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/klauspost/compress/zstd"
 )
 
-// Capture frames are independent zstd blocks of the ordinary legacy records.
+// Legacy capture frames are read-only upgrade compatibility for one release.
+// New capture files are ordinary input-log segments.
+// Old frames are independent zstd blocks of the ordinary legacy records.
 // A completed write publishes the entire frame; a torn final frame contributes
 // no acknowledged submission. CRC detects corruption before any record applies.
 const CaptureHeaderSize = 24
 const captureMagic = 0x32534347 // GCS2
 const maxCaptureRaw = 64 << 20
 
-func EncodeCaptureFrame(enc *zstd.Encoder, raw, dst []byte, count int) []byte {
-	dst = append(dst[:0], make([]byte, CaptureHeaderSize)...)
-	dst = enc.EncodeAll(raw, dst)
-	binary.LittleEndian.PutUint32(dst, captureMagic)
-	binary.LittleEndian.PutUint32(dst[4:], uint32(len(dst)-CaptureHeaderSize))
-	binary.LittleEndian.PutUint32(dst[8:], uint32(len(raw)))
-	binary.LittleEndian.PutUint32(dst[12:], uint32(count))
-	binary.LittleEndian.PutUint32(dst[16:], crc32.Update(crc32.Checksum(dst[:16], castagnoli), castagnoli, dst[CaptureHeaderSize:]))
-	return dst
-}
 func CaptureFrameSize(header []byte) (int, error) {
 	if len(header) != CaptureHeaderSize || binary.LittleEndian.Uint32(header) != captureMagic {
 		return 0, errors.New("invalid capture frame header")
@@ -74,6 +67,31 @@ func ReadCaptureFileBorrowed(path string, visit func([]byte, []points.Point)) (i
 		return 0, err
 	}
 	defer f.Close()
+	if inputlog.IsSegment(f) {
+		replay, err := inputlog.NewSegmentReplay(f)
+		if err != nil {
+			return 0, err
+		}
+		defer replay.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return 0, err
+		}
+		total := 0
+		for {
+			records, _, n, err := replay.Next(info.Size())
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			if err != nil {
+				return total, err
+			}
+			for _, p := range records {
+				visit([]byte(p.Metric), p.Data)
+			}
+			total += n
+		}
+	}
 	return ReadCaptureReaderBorrowed(f, visit)
 }
 func ReadCaptureReader(reader io.Reader, visit func(*points.Points)) (int, error) {

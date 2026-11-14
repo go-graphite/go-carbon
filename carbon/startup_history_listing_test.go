@@ -4,6 +4,7 @@ package carbon
 
 import (
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"sync"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
-	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/zapwriter"
@@ -48,7 +48,7 @@ func TestStartupHistoryListsEveryLockedOlderPartition(t *testing.T) {
 	for i := range partitions {
 		path := fmt.Sprintf("%s.capture-epoch-%020d.%06d.%012d.tail.bin", s.path, s.epoch-1, i, 2)
 		p := points.OnePoint(fmt.Sprintf("history.%d", i), math.Float64frombits(0x8000000000000000+uint64(i)), int64(1700000000+i))
-		frame := recovery.EncodeCaptureFrame(encoder, p.AppendBinary(nil), nil, 1)
+		frame := capturetest.Encode(encoder, p.AppendBinary(nil), nil, 1)
 		historyBytes += int64(len(frame))
 		if err := os.WriteFile(path, frame, 0600); err != nil {
 			t.Fatal(err)
@@ -111,8 +111,8 @@ func TestStartupHistoryBacklogTracksAppliedFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer encoder.Close()
-	first := recovery.EncodeCaptureFrame(encoder, points.OnePoint("first.history", 1, 1).AppendBinary(nil), nil, 1)
-	second := recovery.EncodeCaptureFrame(encoder, points.OnePoint("second.history", 2, 2).AppendBinary(nil), nil, 1)
+	first := capturetest.Encode(encoder, points.OnePoint("first.history", 1, 1).AppendBinary(nil), nil, 1)
+	second := capturetest.Encode(encoder, points.OnePoint("second.history", 2, 2).AppendBinary(nil), nil, 1)
 	path := fmt.Sprintf("%s.capture-epoch-%020d.%06d.%012d.tail.bin", s.path, s.epoch-1, 0, 0)
 	if err := os.WriteFile(path, append(first, second...), 0600); err != nil {
 		t.Fatal(err)

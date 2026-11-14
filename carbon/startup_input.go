@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
@@ -466,7 +467,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			started := time.Now()
 			var loaded int
 			var e error
-			if framed {
+			if framed && inputlog.IsSegment(seg.file) {
+				loaded, e = s.replayInputSegment(seg, sink, offset, func(end int64, n int) { s.historyPoints.Add(int64(n)); advance(end) })
+			} else if framed {
 				loaded, e = s.replayCaptureBatches(reader, seg.source, sink, func(end int64, n int) {
 					s.historyPoints.Add(int64(n))
 					advance(offset + end)

@@ -3,6 +3,7 @@ package carbon
 import (
 	"bytes"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"math/rand/v2"
 	"strings"
@@ -34,7 +35,7 @@ func TestStartupHistoryPipelineStoredDifferential(t *testing.T) {
 		p.Add(math.Float64frombits(bits[(i+1)%len(bits)]), p.Data[0].Timestamp)
 		want = append(want, p.Data...)
 		epoch := i / 60
-		epochs[epoch] = append(epochs[epoch], recovery.EncodeCaptureFrame(enc, p.AppendBinary(nil), nil, len(p.Data))...)
+		epochs[epoch] = append(epochs[epoch], capturetest.Encode(enc, p.AppendBinary(nil), nil, len(p.Data))...)
 	}
 	replay := func(pipeline bool) *cache.Cache {
 		core := cache.New()
@@ -91,7 +92,7 @@ func BenchmarkStartupHistoryPipeline(b *testing.B) {
 			p := points.OnePoint(names[rng.IntN(namesCount)], rng.Float64(), 1700000000)
 			raw = p.AppendBinary(raw)
 		}
-		encoded = append(encoded, recovery.EncodeCaptureFrame(enc, raw, nil, perFrame)...)
+		encoded = append(encoded, capturetest.Encode(enc, raw, nil, perFrame)...)
 	}
 	for _, pipeline := range []bool{false, true} {
 		b.Run(fmt.Sprint(pipeline), func(b *testing.B) {

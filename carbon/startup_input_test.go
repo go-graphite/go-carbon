@@ -25,7 +25,6 @@ import (
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
-	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/zapwriter"
 	"github.com/zeebo/xxh3"
 )
@@ -294,10 +293,12 @@ func TestStartupInputCrashProcess(t *testing.T) {
 		shard := s.shards[xxh3.HashString(p.Metric)%uint64(len(s.shards))]
 		raw := p.AppendBinary(nil)
 		if stage == "during_append" && i == 1 {
-			enc, _ := zstd.NewWriter(nil)
-			raw = recovery.EncodeCaptureFrame(enc, raw, nil, len(p.Data))
-			enc.Close()
-			if _, err := shard.file.Write(raw[:len(raw)-1]); err != nil {
+			// Write the journal frame, then emulate a crash before its final
+			// byte reached disk. No deferred seal or cursor publication runs.
+			if err := shard.Write(raw, len(p.Data)); err != nil {
+				t.Fatal(err)
+			}
+			if err := shard.file.Truncate(shard.current.Load().size.Load() - 1); err != nil {
 				t.Fatal(err)
 			}
 			if err := shard.sync(); err != nil {
@@ -496,11 +497,11 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 }
 
 func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
-	if isolatedTestProcessSerial(t) {
-		return
-	}
 	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement", "direct_before_switch", "direct_during_seal", "direct_after_fence", "direct_after_switch", "direct_partial_retirement", "direct_full_retirement", "direct_next_epoch"} {
 		t.Run(stage, func(t *testing.T) {
+			if isolatedTestProcessSerial(t) {
+				return
+			}
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
 			cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format = true, t.TempDir(), "compact"

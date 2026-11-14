@@ -5,12 +5,14 @@ package carbon
 import (
 	"bytes"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"syscall"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/klauspost/compress/zstd"
@@ -47,14 +49,19 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 	}
 	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(false))
 	defer enc.Close()
-	groupedFrame := recovery.EncodeCaptureFrame(enc, writeBatch.appendBinary(nil), nil, n*32)
+	groupedFrame := capturetest.Encode(enc, writeBatch.appendBinary(nil), nil, n*32)
 	groupedEncoded := bytes.Repeat(groupedFrame, frames/32)
 	cpu := func() float64 {
 		var r syscall.Rusage
 		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &r)
 		return float64(r.Utime.Sec+r.Stime.Sec) + float64(r.Utime.Usec+r.Stime.Usec)/1e6
 	}
-	for _, mode := range []string{"original", "grouped-replay", "grouped-capture"} {
+	framesRaw := make([][]byte, frames/32)
+	for i := range framesRaw {
+		framesRaw[i] = bytes.Repeat(raw, 32)
+	}
+	inputWire := inputlogCaptureFixture(b, framesRaw...)
+	for _, mode := range []string{"original", "grouped-replay", "grouped-capture", "inputlog"} {
 		b.Run(mode, func(b *testing.B) {
 			core := cache.New()
 			core.SetMaxSize(0)
@@ -66,13 +73,25 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 			s := batchReplayOwner()
 			sh := &startupShard{}
 			var stream cache.RecoveryStream
+			file, e := os.CreateTemp(b.TempDir(), "capture")
+			if e != nil {
+				b.Fatal(e)
+			}
+			defer file.Close()
+			if _, e = file.Write(inputWire); e != nil {
+				b.Fatal(e)
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			started := cpu()
 			for range b.N {
 				source := stream.Next()
 				var err error
-				if mode != "original" {
+				if mode == "inputlog" {
+					seg := &startupSegment{file: file, source: source}
+					seg.size.Store(int64(len(inputWire)))
+					_, err = s.replayInputSegment(seg, sink, 0, func(int64, int) {})
+				} else if mode != "original" {
 					wire := encoded
 					if mode == "grouped-capture" {
 						wire = groupedEncoded
@@ -94,6 +113,14 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 			b.StopTimer()
 			total := float64(b.N * n * frames)
 			b.ReportMetric(used*1e6/total, "cpu-s/Mpt")
+			size := len(encoded)
+			if mode == "grouped-capture" {
+				size = len(groupedEncoded)
+			}
+			if mode == "inputlog" {
+				size = len(inputWire)
+			}
+			b.ReportMetric(float64(size)/float64(n*frames), "encoded-B/pt")
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/total, "ns/pt")
 			b.ReportMetric(float64(n*frames), "points/op")
 			if core.Size() != int64(200000+b.N*n*frames) {
@@ -111,6 +138,87 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkCaptureInputlogWrite(b *testing.B) {
+	path := os.Getenv("CAPTURE_BATCH_FIXTURE")
+	if path == "" {
+		b.Skip("set CAPTURE_BATCH_FIXTURE")
+	}
+	wire, err := os.ReadFile(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	dec, _ := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	defer dec.Close()
+	raw, n, err := recovery.DecodeCaptureFrame(dec, wire, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	cpu := func() float64 {
+		var r syscall.Rusage
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &r)
+		return float64(r.Utime.Sec+r.Stime.Sec) + float64(r.Utime.Usec+r.Stime.Usec)/1e6
+	}
+	for _, mode := range []string{"legacy-write", "legacy-sync", "inputlog"} {
+		b.Run(mode, func(b *testing.B) {
+			f, err := os.CreateTemp(b.TempDir(), "capture")
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer f.Close()
+			writer, err := inputlog.NewSegmentWriter(f, 1)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer writer.Close()
+			enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(false))
+			defer enc.Close()
+			var batch captureBatch
+			var records []*points.Points
+			var frame []byte
+			sink := &startupSink{admission: &captureWriteNames{}}
+			var size int64
+			b.ReportAllocs()
+			b.ResetTimer()
+			started := cpu()
+			for range b.N {
+				if err := batch.prepare(raw, sink); err != nil {
+					b.Fatal(err)
+				}
+				if mode == "inputlog" {
+					records = records[:0]
+					for i := range batch.used {
+						g := &batch.groups[i]
+						g.point.Metric, g.point.Data = g.name, g.data
+						records = append(records, &g.point)
+					}
+					count, err := writer.Append(records, nil)
+					if err != nil {
+						b.Fatal(err)
+					}
+					size += count
+				} else {
+					frame = capturetest.Encode(enc, raw, frame, n)
+					count, err := f.Write(frame)
+					if err != nil {
+						b.Fatal(err)
+					}
+					size += int64(count)
+					if mode == "legacy-sync" {
+						if err := f.Sync(); err != nil {
+							b.Fatal(err)
+						}
+					}
+				}
+			}
+			used := cpu() - started
+			b.StopTimer()
+			total := float64(b.N * n)
+			b.ReportMetric(used*1e6/total, "cpu-s/Mpt")
+			b.ReportMetric(float64(size)/total, "encoded-B/pt")
 		})
 	}
 }
