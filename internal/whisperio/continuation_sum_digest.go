@@ -67,6 +67,9 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 			continue
 		}
 		lo, hi := store.DigestBounds(r, now, from, until)
+		var sparse []store.PointSum
+		sparseChecked := false
+		sparseOK := false
 		var total store.PointSum
 		span := r.Step * sumBucketSlots
 		for start := lo; start < hi; {
@@ -101,7 +104,18 @@ func (c *ContinuationCodec) SumDigest(ctx context.Context, kv store.Continuation
 			if !w.IsCompressed() {
 				err = visitClassicWindow(ctx, w.StorageFile().(*continuationFile), ai, start, end, func(ts int, v float64) { d.Add(int64(ts), v) })
 			}
-			if w.IsCompressed() || errors.Is(err, errClassicUnalignedBase) {
+			if w.IsCompressed() && !sparseChecked {
+				sparseChecked = true
+				if !c.keepDenseSumReads && hi-lo >= r.MaxRetention()/2 {
+					sparse, sparseOK, err = compressedArchiveSums(ctx, w, ai, r, lo, hi)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+			if sparseOK {
+				d = sparse[bucket-lo/span]
+			} else if w.IsCompressed() || errors.Is(err, errClassicUnalignedBase) {
 				var series *whisper.TimeSeries
 				series, err = w.FetchArchiveWindow(whisper.ArchiveWindow{Archive: ai, From: start, Until: end})
 				if err == nil {

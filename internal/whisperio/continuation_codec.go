@@ -23,6 +23,8 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// keepDenseSumReads retains the canonical window reader as a test oracle.
+	keepDenseSumReads bool
 	// keepSnapshotReadAllocations retains the previous reader as a test oracle.
 	keepSnapshotReadAllocations bool
 	// DigestSettle is retained for source compatibility. Digest cache validity

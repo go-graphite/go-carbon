@@ -135,6 +135,10 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	// The metadata cache answers only for state committed before the view
 	// opens, judged by the epoch captured first (see stateCache).
 	cache := s.stateCache
+	batch := s.digestReadBatch(ctx)
+	if batch != nil {
+		cache = nil
+	}
 	var stripe, epoch uint64
 	if cache != nil {
 		stripe = s.metricStripe(name)
@@ -143,10 +147,17 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	// Opening a read view avoids the DB mutex used by registered snapshots.
 	// Its final release can still wait when it retires an old read state.
 	started := time.Now()
-	snapshot := s.db.NewReadView()
+	var snapshot *pebble.ReadView
+	if batch != nil {
+		snapshot = batch.view
+	} else {
+		snapshot = s.db.NewReadView()
+	}
 	defer func() {
 		closing := time.Now()
-		_ = snapshot.Close()
+		if batch == nil {
+			_ = snapshot.Close()
+		}
 		closed := time.Now()
 		s.fetchTimings.body.add(closing.Sub(started))
 		s.fetchTimings.readViewClose.add(closed.Sub(closing))
@@ -159,8 +170,15 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	if state != nil {
 		m = state.meta
 		m.MetricConfig = cloneConfig(m.MetricConfig)
-	} else if m, err = metadataFrom(snapshot, name); err != nil {
-		return nil, err
+	} else {
+		if batch != nil {
+			m, err = batch.metadata(name)
+		} else {
+			m, err = metadataFrom(snapshot, name)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := s.checkFileOwnership(m); err != nil {
 		return nil, err
