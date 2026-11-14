@@ -118,6 +118,9 @@ type Service struct {
 	nativePullAdmission chan struct{}
 	nativeMu            sync.Mutex
 	nativeSources       map[string]*nativeSourceSession
+	nativeCreating      map[string]time.Time
+	nativeClosing       map[string]*nativeSourceSession
+	nativeSourceStopped bool
 
 	config       Config
 	transferDebt atomic.Int64
