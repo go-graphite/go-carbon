@@ -153,8 +153,12 @@ store-l0-compaction-concurrency = 0
 # old location at the next start. Empty keeps them in the store directory.
 # Requires restart.
 # store-wal-dir = ""
-# Block cache shards; zero keeps four per CPU. Raise when readers queue on
-# cache shard locks behind the inserts that misses cause. Requires restart.
+# Block cache shards; zero chooses the count from CPU and cache capacity.
+# Raise a small explicit count when readers queue behind cache eviction. Keep
+# each shard large enough for the largest SST index block: oversized blocks
+# miss on every read. For example, a 90 GiB cache with 256 shards leaves over
+# 350 MiB per data/index shard after the separate range-deletion cache.
+# The total cache budget stays unchanged. Requires restart.
 # store-cache-shards = 0
 # Table cache shards; zero keeps Pebble's one per CPU. Requires restart.
 # store-table-cache-shards = 0
