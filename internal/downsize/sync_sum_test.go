@@ -2,6 +2,9 @@ package downsize
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -164,5 +167,79 @@ func TestSyncFullSumDifferentBoundsFallBack(t *testing.T) {
 	}
 	if !reflect.DeepEqual(want, got) || s.prog.digests.Load() != 0 {
 		t.Fatalf("incompatible bounds matched: %+v / %+v", got, want)
+	}
+}
+
+// servingSHA models an older server which supports SHA but not sum-v1.
+// Its digest covers the same single serving archive as a full point read.
+type servingSHA struct{ *sumSyncFixture }
+
+func (f *servingSHA) Digest(ctx context.Context, store string, names []string, from, until int64) (map[string][]syncDigest, error) {
+	points, err := f.fakeSync.Fetch(ctx, store, names, from, until)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]syncDigest{}
+	for n, series := range points {
+		h := sha256.New()
+		var buf [16]byte
+		var count int64
+		for i, v := range series.Values {
+			ts := series.Start + int64(i)*series.Step
+			if ts < from || ts >= until || math.IsNaN(v) || math.IsInf(v, 0) {
+				continue
+			}
+			binary.BigEndian.PutUint64(buf[:8], uint64(ts))
+			binary.BigEndian.PutUint64(buf[8:], math.Float64bits(v))
+			_, _ = h.Write(buf[:])
+			count++
+		}
+		out[n] = []syncDigest{{Step: series.Step, Count: count, Hash: hex.EncodeToString(h.Sum(nil)[:8])}}
+	}
+	return out, nil
+}
+
+func TestSyncFullLegacySHADifferential(t *testing.T) {
+	f, o, _ := threeSources(t)
+	b := &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true, syncD1: true, syncD2: true, syncP: true}}}
+	s := &syncer{o: o, b: b}
+	names := []string{"a.clean", "b.holes"}
+	schemas := map[string][]syncArchive{}
+	for _, n := range names {
+		s.masks.Store(n, uint64(7))
+		schemas[n] = syncTestSchema
+	}
+	var want, got syncRow
+	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("legacy SHA changed verdict: got %+v want %+v", got, want)
+	}
+	if s.prog.digests.Load() == 0 {
+		t.Fatal("legacy SHA never avoided point comparison")
+	}
+}
+
+func TestSyncFullLegacySHAEmptySource(t *testing.T) {
+	f, o, _ := threeSources(t)
+	for _, src := range o.from {
+		f.put(src, "a.clean", syncTestSchema)
+		for _, a := range syncTestSchema {
+			f.store(src).points["a.clean"][a.Step] = map[int64]float64{}
+		}
+	}
+	b := &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true, syncD1: true, syncD2: true, syncP: true}}}
+	s := &syncer{o: o, b: b}
+	s.masks.Store("a.clean", uint64(7))
+	var row syncRow
+	if err := s.checkFull(context.Background(), &row, []string{"a.clean"}, map[string][]syncArchive{"a.clean": syncTestSchema}, syncTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if len(row.Holes) != 0 || s.prog.reads.Load() != 0 {
+		t.Fatalf("empty source caused detail reads: %+v reads=%d", row, s.prog.reads.Load())
 	}
 }

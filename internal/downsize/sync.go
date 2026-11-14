@@ -866,6 +866,28 @@ func syncWindow(now int64, a syncArchive, settle time.Duration) (int64, int64) {
 // existing target points win.
 func syncCompare(name, source string, src, dst syncSeries, step, from, until int64) (syncHole, bool) {
 	h := syncHole{Name: name, Source: source, Step: step}
+	// Render returns an evenly spaced dense array. On the common aligned
+	// path, scan it directly: testing every requested timestamp through finite
+	// performs two divisions per point, including all the NaN padding.
+	if step > 0 && src.Step == step && (from-src.Start)%step == 0 {
+		first := max(int64(0), (from-src.Start)/step)
+		for i := first; i < int64(len(src.Values)); i++ {
+			ts := src.Start + i*step
+			if ts >= until {
+				break
+			}
+			v := src.Values[i]
+			if math.IsNaN(v) || math.IsInf(v, 0) || dst.finite(ts) {
+				continue
+			}
+			if h.Points == 0 {
+				h.First = ts
+			}
+			h.Last = ts
+			h.Points++
+		}
+		return h, h.Points > 0
+	}
 	for ts := from; ts < until; ts += step {
 		if src.finite(ts) && !dst.finite(ts) {
 			if h.Points == 0 {
