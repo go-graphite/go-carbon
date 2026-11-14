@@ -764,7 +764,7 @@ func (s *syncer) startExplicitNames(ctx context.Context, after string) *syncList
 	return l
 }
 
-// Explicit inventories use bounded native existence probes rather than walking
+// Explicit inventories use bounded metadata existence probes rather than walking
 // an unrelated multi-million-name catalog. The synthetic lister retains names
 // absent from every probe, so absence still requires the verifier's full proof.
 func (s *syncer) startScopedList(ctx context.Context, store, after string) *syncLister {
@@ -778,32 +778,22 @@ func (s *syncer) startScopedList(ctx context.Context, store, after string) *sync
 			return
 		}
 		defer f.Close()
-		end := s.o.now().Unix() - int64(s.o.settle.Seconds())
 		var batch []string
 		flush := func() bool {
 			if len(batch) == 0 {
 				return true
 			}
-			got, e := s.digest(ctx, store, batch, syncRange{From: max(int64(1), end-86400), Until: end})
-			present := map[string]bool{}
-			if errors.Is(e, errSyncNoDigest) {
-				info, ie := s.b.Info(ctx, store, batch)
-				e = ie
-				for n := range info {
-					present[n] = true
-				}
-			} else {
-				for n := range got {
-					present[n] = true
-				}
-			}
+			// Discovery needs catalog membership, not point equality. Info reads
+			// authoritative metadata; hashing a day of points here decodes history
+			// for every name before verification even begins.
+			present, e := s.b.Info(ctx, store, batch)
 			if e != nil {
 				l.errc <- e
 				return false
 			}
 			var page []string
 			for _, n := range batch {
-				if present[n] {
+				if _, found := present[n]; found {
 					page = append(page, n)
 				}
 			}
