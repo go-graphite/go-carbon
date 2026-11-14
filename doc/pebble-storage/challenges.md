@@ -86,9 +86,13 @@ Most diagnoses used the same tools:
   wider range, overlaps more files in other sublevels and in the base level,
   and drags more of them into each compaction. Compactions grow and conflict,
   L0 drains slower, and sublevels pile up.
-- **Fix.** Keep Pebble's 2 MiB L0 tables and make their syncs cheap (above).
-  `store-l0-target-file-size` exists for experiments at 4–8 MiB; deeper
-  levels keep their own sizes.
+- **Tradeoff.** Avoid unbounded L0 table growth and make syncs cheap (above).
+  At the other extreme, large memtables split into 2 MiB files can leave
+  tens of thousands of files in only a few sublevels. Every compaction
+  deleting an L0 file then rebuilds their sublevel metadata under the
+  manifest lock. Exact stores therefore raise default file sizes to a
+  memtable-size/128 floor, bounded at 16 MiB. Explicit table-size settings
+  remain available; watch both file count and sublevels when changing them.
 
 ## Incremental syncs waited behind write-back
 

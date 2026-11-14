@@ -151,8 +151,10 @@ Files move to paged headers on their first write in a v7 store.
 ## Pebble configuration that follows from the layout
 
 - **Merger.** `exactChunkMerger` for exact stores.
-- **Table sizes.** L0 2 MiB, doubling per level (Pebble defaults), unless
-  `store-target-file-size` or `store-l0-target-file-size` overrides them.
+- **Table sizes.** L0 2 MiB, doubling per level, with a floor of
+  `store-memtable-size / 128` (2–16 MiB) for exact stores. This bounds file
+  creation from large memtables and the L0 metadata rebuilt at publication.
+  `store-target-file-size` or `store-l0-target-file-size` overrides the defaults.
 - **Bloom filters.** Optional whole-key filters (`store-bloom-filter-bits`).
   They help point `Get`s (descriptors, groups, metadata). They do not help
   prefix scans (`Visit`), which still seek every overlapping L0 table and
