@@ -238,6 +238,7 @@ type Store struct {
 	nativeCounters        nativeCounters
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
+	nativePendingCheck    func(string) bool
 	nativeFailure         atomic.Pointer[ownershipError] // native write errors require owner recovery
 	nativeRanges          sync.Map                       // durable range identity -> context-aware publication lock
 	nativeContextOnce     sync.Once
