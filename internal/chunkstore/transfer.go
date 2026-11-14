@@ -1483,7 +1483,7 @@ func (s *Store) lockTransferWriters() func() {
 		}
 		for i := range s.importPublishing {
 			for _, done := range s.importPublishing[i] {
-				pending = done
+				pending = done.done
 				break
 			}
 			if pending != nil {

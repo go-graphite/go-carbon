@@ -3,14 +3,12 @@ package persister
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/lockset"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -28,19 +26,9 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 			return err
 		}
 		group := names[start:min(start+8, len(names))]
-		stripes := make([]uint64, 0, len(group))
-		for _, name := range group {
-			stripes = append(stripes, storeMutexIndex(name))
-		}
-		slices.Sort(stripes)
-		stripes = slices.Compact(stripes)
-		lockset.Lock(p.storeMutex[:], stripes)
+		unlock := p.lockStoreMetrics(group)
 		err := func() (result error) {
-			defer func() {
-				for i := len(stripes) - 1; i >= 0; i-- {
-					p.storeMutex[stripes[i]].Unlock()
-				}
-			}()
+			defer unlock()
 			var values []*points.Points
 			var updates []store.MetricUpdate
 			// The popped batches remain owned here until confirmation. In

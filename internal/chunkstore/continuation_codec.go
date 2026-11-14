@@ -48,10 +48,10 @@ func (s *Store) updateContinuation(ctx context.Context, m Metadata, input []Poin
 	return s.updateContinuationFrom(ctx, m, nil, false, input, retention, maintenance)
 }
 
-// updateContinuationFrom updates m, whose stripe the caller holds in a
-// mutation. With cache, it starts from m's cached state (nil when unknown) and
-// records the state it commits; the caller must commit nothing else in that
-// mutation.
+// updateContinuationFrom updates m, whose name the caller owns through a
+// mutation stripe or reservation. With cache, it starts from m's cached state
+// (nil when unknown) and records the state it commits; the caller must commit
+// nothing else in that mutation.
 func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) error {
 	if s.continuation == nil {
 		return ErrFormat
@@ -75,7 +75,7 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 }
 
 // prepareContinuationUpdate stages one metric without publishing its cache
-// state. The caller holds its stripe until the enclosing batch commits.
+// state. The caller reserves its name until the enclosing batch commits.
 func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) (Metadata, *stateView, *SidecarSummary, bool, error) {
 	io := s.newContinuationIO(ctx, batch, batch, m)
 	io.indexRevision = m.Revision + 1

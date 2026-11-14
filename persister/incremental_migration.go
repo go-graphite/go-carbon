@@ -58,8 +58,19 @@ func (p *Whisper) SetIncrementalMigrationComplete() {
 	// A writer may already have selected an original under its stripe. Drain
 	// those writes before publishing completion; subsequent routes use the store.
 	for i := range p.storeMutex {
-		p.storeMutex[i].Lock()
-		p.storeMutex[i].Unlock()
+		for {
+			p.storeMutex[i].Lock()
+			var pending chan struct{}
+			for _, done := range p.storePending[i] {
+				pending = done
+				break
+			}
+			p.storeMutex[i].Unlock()
+			if pending == nil {
+				break
+			}
+			<-pending
+		}
 	}
 }
 
@@ -174,8 +185,25 @@ func canonicalMetricPath(root, path, metric string) bool {
 }
 
 func (p *Whisper) lockMetricContext(ctx context.Context, name string) (func(), error) {
-	mutex := &p.storeMutex[storeMutexIndex(name)]
-	for !mutex.TryLock() {
+	for {
+		mutex := &p.storeMutex[storeMutexIndex(name)]
+		if mutex.TryLock() {
+			pending := p.storePending[storeMutexIndex(name)][name]
+			if pending == nil {
+				if err := ctx.Err(); err != nil {
+					mutex.Unlock()
+					return nil, err
+				}
+				return p.reserveStoreMetricsLocked([]string{name}, []uint64{storeMutexIndex(name)}), nil
+			}
+			mutex.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-pending:
+			}
+			continue
+		}
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -184,11 +212,6 @@ func (p *Whisper) lockMetricContext(ctx context.Context, name string) (func(), e
 		case <-timer.C:
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		mutex.Unlock()
-		return nil, err
-	}
-	return mutex.Unlock, nil
 }
 
 // FileConversion reports physical bytes unlinked, not a promised reduction in

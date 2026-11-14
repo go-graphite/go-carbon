@@ -57,13 +57,22 @@ func (s *Store) updateByNameImportPolicy(ctx context.Context, name string, input
 		}
 		return ErrNotFound
 	}
+retryLock:
 	timer.Enter(stagetime.LockWait)
 	var unlock func()
 	if retryImport {
 		mu := &s.metricMu[s.metricStripe(name)]
 		mu.Lock()
-		if s.importPendingLocked(name) != nil {
+		if pending := s.importPublishing[s.metricStripe(name)][name]; pending.done != nil {
 			mu.Unlock()
+			if pending.update {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-pending.done:
+				}
+				goto retryLock
+			}
 			return ErrImportPending
 		}
 		s.beginStateMutation(name)
@@ -71,15 +80,17 @@ func (s *Store) updateByNameImportPolicy(ctx context.Context, name string, input
 	} else {
 		unlock = s.lockMetricMutation(name)
 	}
-	defer unlock()
+	defer func() { unlock() }()
 
 	timer.Enter(stagetime.Route)
 	// The metadata cache holds the state the previous mutation committed,
 	// including the continuation keys this update starts by reading.
 	state, m := s.lockedState(name)
+	// Reserve only this name through reads, propagation, encode and commit.
+	unlock = s.releaseUpdateStripes([]string{name}, unlock)
 	var err error
 	if state == nil {
-		if m, err = s.metadataLockedOrAbsent(name); err != nil {
+		if m, err = metadataFrom(s.db, name); err != nil {
 			return err
 		}
 	}

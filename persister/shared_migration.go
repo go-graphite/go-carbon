@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
@@ -27,17 +26,11 @@ func (p *Whisper) ReconcileMirrorMetric(ctx context.Context, name string, verifi
 	if !p.mirrorFiles || p.mirrorState == nil {
 		return store.Metadata{}, 0, errors.New("live reconciliation requires rollback mirroring")
 	}
-	mutex := &p.storeMutex[storeMutexIndex(name)]
-	for !mutex.TryLock() {
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return store.Metadata{}, 0, ctx.Err()
-		case <-timer.C:
-		}
+	unlock, err := p.lockMetricContext(ctx, name)
+	if err != nil {
+		return store.Metadata{}, 0, err
 	}
-	defer mutex.Unlock()
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return store.Metadata{}, 0, err
 	}

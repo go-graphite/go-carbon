@@ -113,6 +113,7 @@ type Whisper struct {
 	autoUpdate              autoUpdateRate
 	updateTicker            *helper.ThrottleTicker
 	storeMutex              [storeMutexCount]sync.Mutex
+	storePending            [storeMutexCount]map[string]chan struct{}
 	// converting names metrics whose original is being imported. Their
 	// writeouts are deferred instead of holding a store stripe for the import.
 	converting sync.Map
@@ -538,9 +539,8 @@ func (p *Whisper) store(metric string) {
 	timer.Enter(stagetime.LockWait)
 	// avoid concurrent store same metric
 	// @TODO: may be flock?
-	mutexIndex := storeMutexIndex(metric)
-	p.storeMutex[mutexIndex].Lock()
-	defer p.storeMutex[mutexIndex].Unlock()
+	unlock := p.lockStoreMetrics([]string{metric})
+	defer unlock()
 	if _, converting := p.converting.Load(metric); converting {
 		// The points stay cached; a later writeout routes them to the new owner.
 		return

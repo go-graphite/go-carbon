@@ -22,7 +22,7 @@ import (
 // CPU, re-reading what the same process had just committed.
 //
 // Consistency rests on the rule that every mutation of a metric holds its
-// metricMu stripe (lockMetricMutation, or the purge loop). Under that stripe,
+// metricMu stripe or an exact-name publication reservation. Under the stripe,
 // beginMutation marks the name pending before anything commits, and
 // endMutation either installs the state the mutation committed (an update's
 // write-through, see installMutation) or forgets the name.
@@ -31,7 +31,7 @@ import (
 // including revision-neutral relayout. Restored records stay provisional
 // until their revision is validated by the loader or first use.
 //
-// A writer holding the stripe may use the entry's state as the latest
+// A writer owning the stripe or its name's reservation may use state as the latest
 // committed state: no other mutation can commit meanwhile.
 //
 // A reader without the stripe (Fetch) captures its shard's epoch before
@@ -258,8 +258,8 @@ func (c *stateCache) beginMutation(stripe uint64, name string) {
 }
 
 // installMutation records st as the state the current mutation of name left
-// committed. Call it under the stripe, after the commit succeeded or when the
-// mutation committed nothing.
+// committed. Call it while owning the name through its stripe or reservation,
+// after the commit succeeded or when the mutation committed nothing.
 func (c *stateCache) installMutation(stripe uint64, name string, st *metricState) {
 	sh := &c.shards[stripe]
 	sh.mu.Lock()
