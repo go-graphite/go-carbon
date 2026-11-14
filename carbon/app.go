@@ -924,9 +924,6 @@ func (app *App) Start() (err error) {
 	if err != nil {
 		return err
 	}
-	if app.MetricStore != nil {
-		defer app.MetricStore.EnableBlockCache()
-	}
 	app.startHeartbeat(core)
 	lap("storage")
 	if err = app.startAPI(core); err != nil {
@@ -966,9 +963,6 @@ func (app *App) Start() (err error) {
 	lap("input_log_replay")
 	if restoreBeforeReceivers && !readsStarted && !pendingReads {
 		app.restoreBeforeReceivers(core)
-	}
-	if app.MetricStore != nil {
-		app.MetricStore.EnableBlockCache()
 	}
 	lap("ordered_restore")
 	readsStarted = readsStarted || pendingReads
@@ -1144,16 +1138,13 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			RelayoutReclaimBytes:      uint64(conf.Whisper.StoreTimeBucketsRelayoutReclaimBytes),
 			RelayoutMinFreeBytes:      uint64(conf.Whisper.StoreTimeBucketsRelayoutMinFree),
 			RelayoutMaxCompactionDebt: uint64(conf.Whisper.StoreTimeBucketsRelayoutMaxDebt),
-			DeferBlockCache: conf.Dump.Enabled && conf.Whisper.Enabled &&
-				(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed()) &&
-				app.handoffClaim == nil && app.startupInput == nil,
-			ExactBlocks:       conf.Whisper.StoreEncoding == "exact",
-			IncrementalSource: incrementalSource,
-			IngestFileStages:  conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
-			IngestLinger:      conf.Whisper.StoreMigrationIngestLinger.Value(),
-			IngestGroupBytes:  conf.Whisper.StoreMigrationIngestGroup,
-			IngestParallel:    conf.Whisper.StoreMigrationIngestParallel,
-			CacheSize:         conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
+			ExactBlocks:               conf.Whisper.StoreEncoding == "exact",
+			IncrementalSource:         incrementalSource,
+			IngestFileStages:          conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
+			IngestLinger:              conf.Whisper.StoreMigrationIngestLinger.Value(),
+			IngestGroupBytes:          conf.Whisper.StoreMigrationIngestGroup,
+			IngestParallel:            conf.Whisper.StoreMigrationIngestParallel,
+			CacheSize:                 conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
 			BlockLoadConcurrency:        conf.Whisper.StoreBlockLoadConcurrency,
 			ReadConcurrency:             conf.Whisper.StoreReadConcurrency,
