@@ -27,13 +27,10 @@ func TestNativeLifecycleBusyRetry(t *testing.T) {
 			}))
 			defer server.Close()
 			m := &mover{client: server.Client()}
-			waiter := &hostWaiter{m: m, tick: time.Millisecond, maxBackoff: time.Millisecond, stallTimeout: time.Minute}
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			m.stallTimeout = time.Minute
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
-			err := waiter.retryTransient(ctx, "/v1/native/pull", []string{server.URL}, func() error {
-				_, err := m.requestOnce(ctx, server.URL, "/v1/native/pull", struct{}{}, nil)
-				return err
-			})
+			_, err := m.requestOnce(ctx, server.URL, "/v1/native/pull", struct{}{}, nil)
 			if recover {
 				if err != nil || calls != 2 {
 					t.Fatalf("calls=%d err=%v", calls, err)
