@@ -170,3 +170,32 @@ func TestLegacyRestartDoesNotInventArrivalAge(t *testing.T) {
 		t.Fatalf("legacy dump delayed until %v", got)
 	}
 }
+
+func TestRestoredOlderArrivalRefreshesExistingDeadline(t *testing.T) {
+	c := cadenceCache(t)
+	defer c.Stop()
+	c.Add(points.OnePoint("older", 1, 100))
+	c.makeQueueAt(time.Now()) // materialize the deadline accelerator
+	p := points.OnePoint("older", 2, 99)
+	p.FirstArrival = time.Now().Add(-time.Hour).UnixNano()
+	c.AddRestored(p)
+	if !c.WriteoutReady("older") {
+		t.Fatal("older restored batch retained the newer deadline")
+	}
+	q, _ := c.makeQueueAt(time.Now())
+	if len(q) != 1 || <-q != "older" {
+		t.Fatal("deadline accelerator hid restored age")
+	}
+}
+
+func TestKnownArrivalDoesNotDeferLegacyUrgentBatch(t *testing.T) {
+	c := cadenceCache(t)
+	defer c.Stop()
+	c.AddRestored(points.OnePoint("legacy.merge", 1, 99))
+	p := points.OnePoint("legacy.merge", 2, 100)
+	p.FirstArrival = time.Now().UnixNano()
+	c.AddRestored(p)
+	if !c.WriteoutReady("legacy.merge") {
+		t.Fatal("later metadata deferred unknown older history")
+	}
+}

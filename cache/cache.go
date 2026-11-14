@@ -852,8 +852,9 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
 	}
-	if restored && p.FirstArrival != 0 && !immediate && (values.firstArrival.IsZero() || p.FirstArrival < values.firstArrival.UnixNano()) {
+	if restored && p.FirstArrival != 0 && !immediate && (!exists || !values.firstArrival.IsZero() && p.FirstArrival < values.firstArrival.UnixNano()) {
 		if exists {
+			shard.items.invalidateItemDeadline(values)
 			shard.writeout.add(values, -1)
 		}
 		values.firstArrival = time.Unix(0, p.FirstArrival)
@@ -861,8 +862,8 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		if exists {
 			shard.writeout.add(values, 1)
 		}
+		c.writeoutQueue.notifyAt(writeoutDeadline(values, s))
 	}
-	values.Arrival.Store(arrivalNanos(values.firstArrival))
 	metadataChanged := shard.setItemThrottle(values, throttleState)
 	if source != nil {
 		shard.trackSource(shard.itemIdentity(values), source)
@@ -901,6 +902,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		shard.livePoints += uint64(count)
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore && (s.writeoutPhase.IsZero() || p.FirstArrival == 0 || immediate))
+	values.Arrival.Store(arrivalNanos(values.firstArrival))
 	if series != nil && !exists && hash == series.hash && p.Metric == series.name {
 		shard.bindStreamHint(series.hint, values, slot)
 	}
