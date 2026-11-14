@@ -1,0 +1,24 @@
+{
+  "target": "http://target.example:4242",
+  "donors": [
+    "http://donor.example:4242"
+  ],
+  "peers": [
+    "http://peer.example:4242"
+  ],
+  "ring": "",
+  "period": {
+    "from": 1794500000,
+    "until": 1794603600
+  },
+  "gaps": [
+    {
+      "name": "restart",
+      "from": 1794592020,
+      "until": 1794592680
+    }
+  ],
+  "gap_ledger_complete": true,
+  "carbonapi_url": "https://read.example.org",
+  "state": "./example-block-state"
+}

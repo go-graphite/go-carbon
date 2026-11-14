@@ -139,3 +139,110 @@ boundary files, and measure compaction write bytes per copied byte.
 Diagnosis method that paid off repeatedly: take a goroutine dump
 (`/debug/pprof/goroutine?debug=1`) and classify persister workers, flushes and
 compactions by their top frames before changing any setting.
+
+## Temporary maintenance boosts: November 2026 observations
+
+These settings were measured in production in November 2026. “Steady” means
+the baseline used in those measurements, not a compiled default. Anonymous
+dataset labels match [resource costs](resource-costs.md) and
+[cold-pack measurements](../cold-pack.md#production-measurements-24-november-2026).
+Use current setting definitions above when applying these historical results.
+
+**R** = applies on `SIGHUP` (`systemctl kill -s HUP --kill-who=main go-carbon`,
+then check `go-carbon.log` for `config successfully reloaded`); otherwise the key
+only takes effect at the next restart. A `SIGHUP` that carries a changed
+restart-only key is rejected as a whole, so other changes in the same reload do
+not apply either.
+
+### Rules before boosting
+
+1. **Boost one host first, with a peer.** Compare against a replica that keeps
+   steady values, at equal request rate: store updates/s, `cache_points`,
+   `pebble_compaction_debt_bytes`, L0 bytes, read p99 (5-minute window) and CPU.
+2. **Observe health and retain known steady values.** Investigate updates below
+   10% of the comparison peer while cache grows; read p99 above
+   max(2× peer, peer + 5 ms) for 3 samples; debt above
+   max(2× peer, peer + 8 GB, 12 GB) for 3 samples; or L0 above 10 GB.
+   These were comparison thresholds for this workload, not universal limits.
+   Signals require operator investigation; they do not automatically revert settings.
+3. **Boost one lever at a time.** Do not stage a boost into a restart wave or
+   combine it with a cache-size change.
+4. **Write the end date down.** Leftover boosts outlive their reason: on 4 Nov,
+   37 stores still ran 64 cold-pack workers at 1 GiB/s from a finished rollout,
+   and 78 stores still had the compaction boost the next morning. Scan the fleet
+   and return to steady values.
+5. **Reconcile configuration management.** Record any temporary override and
+   its expiry with the owner of the persistent configuration.
+
+### Compaction catch-up
+
+| Key | Steady | Boost | Effect | Undo |
+|---|---|---|---|---|
+| `store-compaction-rate-headroom` | 1.5 | 4.0 (max) | **R.** Multiplies the auto pacer's compaction budget. With debt bypass it let relayout and the first cold-pack pass run about 2× faster on D4/D2. | `SIGHUP` back to 1.5. |
+| `store-compaction-debt-bypass` | false | true | **R.** Stops pacing entirely when debt exceeds twice its learned baseline and 4 GiB. | `SIGHUP` back to false. |
+
+- Steady values verified on 5 Nov: store-D4-2 and store-D5-2 ran 1.5/false
+  for 8 h against peers on 4.0/true with equal updates, cache and p99; debt
+  swings between 0 and about 12 GB and drains on its own.
+- Use the boost only while a large one-off job (relayout, first cold-pack pass,
+  conversion) is compaction-bound. D3 was left out of the rollout boost.
+- `store-compaction-workers` (R, 10-16 on large hosts) is the other knob; raise
+  it only when L0 piles up and the disk has headroom.
+
+### Cold-pack (exact)
+
+| Key | Steady | Boost | Effect | Undo |
+|---|---|---|---|---|
+| `store-cold-pack-workers` | 8 | 64 (first pass) | **R.** Parallel packing workers. 64 workers at 1 GiB/s finished first passes in hours instead of days. | `SIGHUP` to 8. |
+| `store-cold-pack-bytes-per-second` | 268435456 (256 MiB/s) | 1073741824 (1 GiB/s) | **R.** Read + batch byte budget shared by the workers. | `SIGHUP` to 256 MiB/s. |
+| `store-cold-pack-interval` | `24h` | `10m` (first pass only) | **R.** Pass spacing. The measured release re-read all history on repeat passes to find a few new blocks (D6 10-36 MB/s for 4-60 blocks/s; D2 read p99 35 vs 15 ms during a pass), so never shorten it after the first complete pass. | `SIGHUP` to `24h`. |
+| `store-cold-pack-max-compaction-debt` | 32 GiB D1 / 128 GiB others | — | **R.** Cold-pack pauses above this debt; leave it as the brake. | — |
+| `store-cold-pack-write-window` | `24h` (default) | `6h` | **R.** Packs ranges older than the window. store-D4-3 at 6h: net −7.4% disk against its peer in 6 h, equal p99/updates. Changing it resets the cursor, so the next pass re-reads everything (+0.5 cores for its duration). | `SIGHUP` back to `24h`. |
+
+- **Near-pause instead of off** when a pass hurts reads: 1 worker at 1 MiB/s
+  keeps the cursor and costs almost nothing.
+- **Historical float-repack experiment** (D6) at 8 workers
+  starved persister writes through compaction pressure (updates 6.4k → 600/s in
+  2 min); 2 workers at 32 MiB/s was safe.
+- Repeat-pass read cost depends on the current watermark implementation;
+  see [cold-pack](../cold-pack.md). The near-pause result above is historical.
+
+### Relayout (v6 → time buckets)
+
+| Key | Steady after relayout | Boost | Effect | Undo |
+|---|---|---|---|---|
+| `store-time-buckets-relayout-rate` | 300 MiB/s D1 / 1 GiB/s others (finished stores) | 1 GiB/s | **R** for a positive rate; 1 pauses. Turning it on/off needs a restart. | `SIGHUP` to a lower positive rate, or 1 to pause. |
+| `store-time-buckets-relayout-workers` | 4 D1 / 8 others | 8-32 | **Restart only.** Work-stealing workers share the rate. A `SIGHUP` with a changed value is rejected, so edit it only right before a restart. | Edit the file before the next restart. |
+| `store-time-buckets-relayout-reclaim-bytes` | 256 GiB (32 GiB D1 default) | — | **R.** Copied bytes per reclaim batch. Smaller batches keep disk growth bounded; without reclaim, disk grew by about the bytes copied (store-D7-1 +0.9 TB/h). | — |
+| `store-time-buckets-relayout-min-free-bytes` | 200 GiB | — | **R.** Free-space brake; check free space before any relayout. | — |
+| `store-time-buckets-relayout-max-compaction-debt` | 128 GiB (32 GiB D1) | — | **R.** Debt brake. | — |
+
+### Persister throughput
+
+| Key | Steady | Boost / lever | Effect | Undo |
+|---|---|---|---|---|
+| `max-updates-per-second` | -1 (auto) | fixed cap | **R.** Lower caps mean fewer, fuller updates: host CPU −41-57% in cap tests, at the cost of a larger cache (memory, crash-loss window, dump size). Too low a cap lets the cache grow without bound (D1 concurrency 24: 1.7M committed vs 3.1M points/s intake). | `SIGHUP` back to -1. |
+| `max-updates-per-second-auto-max` | 22000 | higher | **R.** Ceiling for auto catch-up after a restart. | `SIGHUP`. |
+
+- Restart catch-up is CPU-bound (4-8× CPU for 6-12 min after a restart). Small
+  stores once wrote 0/s for hours because their restart CPU allowance was below
+  their mandatory work; the restart admission budget and warm-up gate govern it.
+- `GOMAXPROCS` 64 gave no win; `GOGC=150` (D2/D1) saves 7-11% RSS at equal CPU.
+
+### Changes that looked like boosts but were not
+
+- **Block-cache cuts** (store-D7-1 to 4 GiB: about 0% hits). Change cache sizes
+  only as a separate guarded canary, never inside a rollout.
+- **Cold-level zstd** (`store-compression-cold = "zstd"`): −4.2% disk for 2-2.7
+  cores on store-D1-4; parked.
+- **Prefix range cache v1**: read p99 2.5 → 5-6 ms; v2 fixed it.
+- **Pebble updates per commit** above 1: no gain at 2/4/8.
+
+### Restarts and relays
+
+A store restart is a relay event: each relay queues about 5 s of points per
+store (`HostQueueSize`), so a store that is unreachable longer drops points at
+the relays. On 5 Nov 2026 one dataset's relay pool had shrunk to 8 relays per region;
+release restarts dropped 6.3M and 7.6M points in two regions until 14 relays per
+region were restored. Before a restart wave, check relay count and queue size
+with the relay owner and watch `nanotube_throttled_host_records` per store.
