@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
@@ -131,8 +133,10 @@ func TestSyncWindowRejectedBatchDoesNotSplitTransportFailure(t *testing.T) {
 	}))
 	defer dst.Close()
 	backend := newSyncLiveBackend(syncLiveOptions{})
-	_, err := backend.CopyWindow(context.Background(), donor.URL, dst.URL, []string{"one", "two"}, filepath.Join(t.TempDir(), "copy"), syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
-	if err == nil || pulls.Load() != 1 {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := backend.CopyWindow(ctx, donor.URL, dst.URL, []string{"one", "two"}, filepath.Join(t.TempDir(), "copy"), syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
+	if !errors.Is(err, context.DeadlineExceeded) || pulls.Load() != 1 {
 		t.Fatal("ambiguous acknowledgement was split", err, pulls.Load())
 	}
 }
