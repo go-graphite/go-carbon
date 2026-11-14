@@ -32,7 +32,7 @@ import (
 //     (the importer keeps existing target points), then re-verify only them.
 //  5. repeat 3-4 while verification makes progress.
 //
-// Every phase is journaled under --state; rerunning the same command resumes.
+// Every phase is journaled under --state; --resume restores the saved run.
 // The stores are reached through syncBackend so the copy engine and the read
 // path can change underneath without touching the orchestration.
 
@@ -91,6 +91,7 @@ type syncOptions struct {
 	to               string
 	from             []string
 	ring, state      string
+	ringIdentity     string
 	prefix           string
 	streams          int
 	batch            int
@@ -319,10 +320,7 @@ type syncer struct {
 	prog     syncProgress
 }
 
-func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
-	if err := os.MkdirAll(o.state, 0o755); err != nil {
-		return err
-	}
+func syncIdentity(o syncOptions) (string, error) {
 	identityFields := map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "windows": o.windows.String(), "sample_every": o.sampleEvery}
 	if o.namesHash != "" {
 		identityFields["names_sha256"] = o.namesHash
@@ -335,11 +333,22 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	if o.includeShort {
 		identityFields["include_short_retention"] = true
 	}
+	if o.ringIdentity != "" {
+		identityFields["ring"] = o.ringIdentity
+	}
 	identity, err := json.Marshal(identityFields)
+	return string(identity), err
+}
+
+func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
+	if err := os.MkdirAll(o.state, 0o755); err != nil {
+		return err
+	}
+	identity, err := syncIdentity(o)
 	if err != nil {
 		return err
 	}
-	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), string(identity))
+	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity)
 	if err != nil {
 		return err
 	}

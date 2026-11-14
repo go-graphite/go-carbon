@@ -149,12 +149,12 @@ func TestSyncLegacyJournalOptOutAndWindows(t *testing.T) {
 	if err := os.WriteFile(state, fixture, 0600); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"--from", src, "--to", dst, "--state", state, "--no-verify"}
+	args := []string{"--from", src, "--to", dst, "--state", state, "--jwt-secret", syncTestJWTSecret(t), "--no-verify"}
 	if err := SyncMain(context.Background(), args); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(state + ".sync"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("no-verify created verification state: %v", err)
+	if _, err := os.Stat(filepath.Join(state+".sync", "sync.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-verify created verification journal: %v", err)
 	}
 	args = args[:len(args)-1]
 	if _, err := parseSyncCommand(append(args, "--window", "closed:100:200")); err != nil {

@@ -30,6 +30,8 @@ import (
 // points win in the importer, so redoing a batch is harmless.
 
 type copyOptions struct {
+	auth                                             *hostTokenCache
+	rate                                             *syncRateLimit
 	froms                                            []string
 	to, names, prefix, ring, state, engine, tokenEnv string
 	streams, maxNames, maxFailures                   int
@@ -204,6 +206,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	}
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: o.tick, transferIdle: o.transferIdle, debtGuardOff: !o.debtGuard},
 		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: copyHeaderTimeout(o.transferIdle)}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	withSyncJWT(m.client, o.auth, append(append([]string(nil), o.froms...), o.to)...)
 	progress := newCopyProgress()
 	c := &planFreeCopier{hostWaiter: &hostWaiter{m: m, tick: o.tick, maxBackoff: o.maxBackoff, stallTimeout: o.stallTimeout, progress: progress}, progress: progress, o: o, started: time.Now(), multi: len(o.froms) > 1}
 	var target copyStatus
@@ -522,6 +525,9 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 		}
 		if err == nil {
 			bytes, _ := strconv.ParseInt(headers.Get("X-Transfer-Bytes"), 10, 64)
+			if err := c.o.rate.wait(ctx, bytes); err != nil {
+				return err
+			}
 			c.sizer.observe(len(names), bytes)
 			if err := c.journal.done(c.rowSource(source), names[0], names[len(names)-1], len(names), bytes, time.Since(start)); err != nil {
 				return err
