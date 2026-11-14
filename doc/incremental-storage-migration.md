@@ -195,23 +195,9 @@ expire converted metrics; matching their retention/activity rules is required
 before fleet acceptance. Conversion preserves source mtime as activity; later
 shared writes refresh it.
 
-## Reproduce the paired storage diagnostic
+## Storage validation
 
-```sh
-go build -mod=vendor -o /tmp/continuation-replay ./tool/continuation-replay
-/tmp/continuation-replay -plan /private/corpus/plan.json \
-  -operations /private/corpus/operations.jsonl \
-  -work-dir /private/new-paired-run -procs 4 -profile
-```
-
-Version-1 plans record the sampling population, allocated main/OOO bytes,
-inclusion probability, pre-trace capture time/hashes, engine budgets and warmup.
-JSONL preserves actual batches, arrival times, float bits and read windows.
-Missing/changed inputs fail without resampling. CPU includes background engine
-work; conversion and final forced-fold verification are outside measurement.
-Final read hashes, writer state, reopens and source hashes must match.
-
-`-prepare-ingress` generates diagnostic batches from recorded ingress using the
-8-point/2-s cache policy; these are not captured production flushes. `-unpaced`
-is a functional diagnostic. The single-writer tool always reports
-`performance_qualified=false` and does not replace full application/find testing.
+Storage correctness and performance checks live with the storage packages.
+Run `make test-storage` for correctness and `make bench-storage` for measurements.
+The former standalone paired replay was a research diagnostic, not an operator
+command or a production acceptance gate.

@@ -158,29 +158,8 @@ read or write is needed. The existing style catalogue recognizes `runtime CPU: *
 for a 12-panel grid but does not yet recognize the new `runtime CPU by phase: *`
 row names; preserve this spec's explicitly requested 2x4 grid in later style sweeps.
 
-## Pipeline overhead A/B
+## Pipeline overhead measurements
 
-Build the standalone local harness with its benchmark-only 1µs p99 histogram:
-
-```sh
-GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build -tags phasecpubench -o /tmp/phase-cpu-bench ./tool/phase-cpu-bench
-python3 tool/phase-cpu-bench/run.py --binary /tmp/phase-cpu-bench --dir /tmp/phase-cpu-fixture --output /tmp/phase-cpu-results
-```
-
-The harness seeds and verifies at least one million realistic metric names through
-plain TCP into the shared Pebble store. The sender is a separate process, excluded
-from server CPU. GOMAXPROCS stays fixed at four. A bounded TCP feedback window
-keeps the cache stable while throughput follows the persist pipeline. The driver
-interleaves unprofiled controls with phase accounting and independent mutex/block
-settings at 1000/100/10, five repetitions each. It records uptime before/after each
-60s measurement and waits when load exceeds eight. Contaminated attempts remain
-in the raw JSON and are retried. The default phase interval is 60s with one 1s
-window, fully inside measurement after five seconds of settling.
-
-The `phasecpubench` tag adds a 512KiB microsecond histogram at the existing update
-observation point. The ordinary-build hook is empty and inlined away. This avoids
-claiming sub-bucket p99 changes from the production doubling buckets. The results
-include CPU seconds per million committed points, persisted/received points per
-second, p99 and its exact 1µs bucket bounds, cache backlog, drops, and actual
-profile-window coverage. CPU accounting accuracy is a separate check; it is not
-an overhead measurement.
+Use the package benchmarks (`make bench-storage`) and the runtime phase metrics
+above to measure storage work. The former standalone pipeline profiling
+experiment is retired; its recorded measurements remain historical evidence.
