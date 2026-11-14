@@ -1,10 +1,14 @@
 package downsize
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -117,7 +121,24 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 		}
 		return pending, nil
 	})
-	donor := httptest.NewServer(nativeControllerService(t, source))
+	handler := nativeControllerService(t, source)
+	var oversized atomic.Int64
+	donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/native/export" {
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var request struct{ Names []string }
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Error(err)
+			}
+			if stage.Load() < 3 && len(request.Names) == 128 {
+				oversized.Add(1)
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	defer donor.Close()
 	servers := []*httptest.Server{httptest.NewServer(nativeControllerService(t, targets[0])), httptest.NewServer(nativeControllerService(t, targets[1]))}
 	for _, server := range servers {
@@ -152,6 +173,9 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 	}
 	if len(s.resolvedWindowSelections()) != 0 {
 		t.Fatal("pending names resolved")
+	}
+	if oversized.Load() == 0 {
+		t.Fatal("oversized selection was not exercised")
 	}
 	stage.Store(1)
 	if err := s.retryWindowSelections(ctx); err != nil {
@@ -193,6 +217,7 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 	if err != nil || !strings.HasPrefix(string(final), string(original)) {
 		t.Fatal("rewrote initial journal", err)
 	}
+	stage.Store(3) // The independent oracle does not use the selection transport.
 	oracle := newSyncLiveBackend(syncLiveOptions{})
 	for start := 0; start < len(names); start += 128 {
 		result, err := oracle.CopyWindow(ctx, donor.URL, servers[1].URL, names[start:start+128], filepath.Join(t.TempDir(), "copy"), o.windows)

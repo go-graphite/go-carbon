@@ -305,8 +305,9 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 		return nil, err
 	}
 	out := map[string][]syncDigest{}
-	for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
-		subset := names[start:min(start+chunkstore.NativeMaxRangeNames, len(names))]
+	tooLarge := errors.New("window selection request too large")
+	var readSubset func([]string) error
+	readSubset = func(subset []string) error {
 		body, _ := json.Marshal(struct {
 			Session string
 			Names   []string
@@ -326,6 +327,9 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 				return err
 			}
 			defer response.Body.Close()
+			if response.StatusCode == http.StatusRequestEntityTooLarge {
+				return tooLarge
+			}
 			if response.StatusCode != http.StatusOK {
 				return fmt.Errorf("window export HTTP %d", response.StatusCode)
 			}
@@ -383,7 +387,22 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 			_, err = io.Copy(io.Discard, response.Body)
 			return err
 		}()
-		if err != nil {
+		if errors.Is(err, tooLarge) {
+			if len(subset) <= 1 {
+				return fmt.Errorf("window export HTTP 413 for a single name")
+			}
+			// Split only the transport request. The source pin, logical catalog
+			// group, window and durable copy identities remain unchanged.
+			mid := len(subset) / 2
+			if err := readSubset(subset[:mid]); err != nil {
+				return err
+			}
+			return readSubset(subset[mid:])
+		}
+		return err
+	}
+	for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
+		if err := readSubset(names[start:min(start+chunkstore.NativeMaxRangeNames, len(names))]); err != nil {
 			return nil, err
 		}
 	}
