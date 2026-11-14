@@ -110,7 +110,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		var extra any
 		if err := d.Decode(&extra); err != io.EOF {
-			writeError(w, errors.New("trailing JSON data"), 400)
+			writeError(w, errors.New("trailing JSON data"), bodyErrorStatus(err))
 			return false
 		}
 		return true
@@ -212,7 +212,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := request.validate(); err != nil {
-			writeError(w, err, 400)
+			writeError(w, err, bodyErrorStatus(err))
 			return
 		}
 		results, err := s.digest(r.Context(), request)
@@ -255,7 +255,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		defer s.transferPool.Put(buffer)
 		records, err := buffer.Read(r.Body, s.config.MaxBodyBytes, r.ContentLength)
 		if err != nil {
-			writeError(w, err, 400)
+			writeError(w, err, bodyErrorStatus(err))
 			return
 		}
 		proofs, err := s.store.ImportTransfer(r.Context(), records)
@@ -271,7 +271,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			var err error
 			proofs, err = chunkstore.ReadTransferProofs(r.Body)
 			if err != nil {
-				writeError(w, err, 400)
+				writeError(w, err, bodyErrorStatus(err))
 				return
 			}
 		} else if !decode(&proofs) {

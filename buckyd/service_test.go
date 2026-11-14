@@ -353,7 +353,7 @@ func TestOffloadRejectsOversizedDecodedBody(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/metrics/oversized?fetch_offload=true&server="+remote.Listener.Addr().String(), http.NoBody)
 	response := httptest.NewRecorder()
 	s.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
+	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized offload=%d", response.Code)
 	}
 	if _, err := db.Metadata(context.Background(), "oversized"); err == nil {

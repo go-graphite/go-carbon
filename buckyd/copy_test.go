@@ -58,6 +58,8 @@ func TestStoreCopyRequiresWholeStoreAdminACL(t *testing.T) {
 	}{
 		{"read token", []string{"*"}, []string{"read"}, http.StatusForbidden},
 		{"scoped admin", []string{"team.*"}, []string{"admin"}, http.StatusForbidden},
+		{"wildcard pattern admin", []string{"**"}, []string{"admin"}, http.StatusForbidden},
+		{"single-character pattern admin", []string{"?"}, []string{"admin"}, http.StatusForbidden},
 		{"whole-store admin", []string{"*"}, []string{"admin"}, http.StatusConflict},
 		{"root", []string{"*"}, []string{"*"}, http.StatusConflict},
 	} {

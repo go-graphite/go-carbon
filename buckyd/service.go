@@ -140,7 +140,6 @@ type Service struct {
 	nodes                         []Node
 	onChange                      func()
 	flushTransfer                 func(context.Context, []string) error
-	finiteCacheFence              chunkstore.FiniteCacheFence
 	pyroscope                     *pyroscope.Profiler
 	pprofServer                   *http.Server
 	pprofListener                 net.Listener
@@ -542,8 +541,6 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
 	mux.HandleFunc("/v1/maintenance/archive-anchors", s.archiveAnchors)
 	mux.HandleFunc("/v1/maintenance/sidecars", s.sidecars)
-	mux.HandleFunc("/v1/maintenance/finite-point", s.finitePoint)
-	mux.HandleFunc("/v1/maintenance/missing-only", s.missingOnly)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phasecpu.Set(phasecpu.Buckyd)
 		defer phasecpu.Set(phasecpu.Other)
@@ -663,13 +660,26 @@ func stat(m chunkstore.Metadata) MetricData {
 }
 func writeError(w http.ResponseWriter, err error, status int) { http.Error(w, err.Error(), status) }
 
+func bodyErrorStatus(err error) int {
+	var limit *http.MaxBytesError
+	if errors.As(err, &limit) || errors.Is(err, chunkstore.ErrTransferLimit) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" && r.Method != "POST" {
-		writeError(w, errors.New("bad request method"), 400)
+		writeError(w, errors.New("bad request method"), http.StatusMethodNotAllowed)
 		return
 	}
 	if err := s.allowedRoot("read", r); err != nil {
 		writeError(w, err, 403)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxBodyBytes)
+	if err := r.ParseForm(); err != nil {
+		writeError(w, err, bodyErrorStatus(err))
 		return
 	}
 	filter, err := listFilter(r)
@@ -757,7 +767,7 @@ func (s *Service) metric(w http.ResponseWriter, r *http.Request) {
 	}
 	op := map[string]string{"HEAD": "read", "GET": "read", "POST": "update", "PUT": "replace", "DELETE": "delete"}[r.Method]
 	if op == "" {
-		writeError(w, errors.New("bad request method"), 400)
+		writeError(w, errors.New("bad request method"), http.StatusMethodNotAllowed)
 		return
 	}
 	if err := s.allowed(name, op, r); err != nil {
@@ -947,8 +957,14 @@ func (s *Service) receiveFile(w http.ResponseWriter, r *http.Request) (string, f
 		return "", nil, false
 	}
 	n, copyErr := io.Copy(file, io.LimitReader(reader, s.config.MaxBodyBytes+1))
-	if copyErr != nil || n > s.config.MaxBodyBytes {
-		writeError(w, errors.New("request body exceeds limit or is invalid"), 400)
+	var limit *http.MaxBytesError
+	if n > s.config.MaxBodyBytes || errors.As(copyErr, &limit) {
+		writeError(w, errors.New("request body exceeds limit"), http.StatusRequestEntityTooLarge)
+		cleanup()
+		return "", nil, false
+	}
+	if copyErr != nil {
+		writeError(w, copyErr, http.StatusBadRequest)
 		cleanup()
 		return "", nil, false
 	}
@@ -1074,8 +1090,11 @@ func (s *Service) validateOffloadResponse(response *http.Response) (MetricData, 
 	if err := json.Unmarshal([]byte(response.Header.Get("X-Metric-Stat")), &remote); err != nil {
 		return MetricData{}, http.StatusBadGateway, errors.New("offload source missing metric stat")
 	}
-	if remote.Size < 0 || remote.Size > s.config.MaxBodyBytes {
-		return MetricData{}, http.StatusBadRequest, errors.New("offload source exceeds body limit")
+	if remote.Size < 0 {
+		return MetricData{}, http.StatusBadGateway, errors.New("offload source has a negative size")
+	}
+	if remote.Size > s.config.MaxBodyBytes {
+		return MetricData{}, http.StatusRequestEntityTooLarge, errors.New("offload source exceeds body limit")
 	}
 	return remote, http.StatusOK, nil
 }
@@ -1094,7 +1113,12 @@ func (s *Service) offloadFile(w http.ResponseWriter, response *http.Response, re
 	cleanup := func() { _ = file.Close(); _ = os.Remove(path) }
 	n, err := io.Copy(file, io.LimitReader(reader, s.config.MaxBodyBytes+1))
 	closeErr := file.Close()
-	if err != nil || closeErr != nil || n != remote.Size || n > s.config.MaxBodyBytes {
+	if n > s.config.MaxBodyBytes {
+		cleanup()
+		writeError(w, errors.New("offload body exceeds limit"), http.StatusRequestEntityTooLarge)
+		return "", nil, false
+	}
+	if err != nil || closeErr != nil || n != remote.Size {
 		cleanup()
 		writeError(w, errors.New("offload body does not match metric stat"), http.StatusBadRequest)
 		return "", nil, false
@@ -1150,7 +1174,7 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request, name string) {
 }
 func (s *Service) hashring(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		writeError(w, errors.New("bad request method"), 400)
+		writeError(w, errors.New("bad request method"), http.StatusMethodNotAllowed)
 		return
 	}
 	// Keep discovery unauthenticated for compatibility with standalone buckyd.

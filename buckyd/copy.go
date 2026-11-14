@@ -7,7 +7,7 @@ import (
 )
 
 func (s *Service) copyHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.allowed("*", "admin", r); err != nil {
+	if err := s.allowedRoot("admin", r); err != nil {
 		writeError(w, err, http.StatusForbidden)
 		return
 	}
