@@ -21,7 +21,7 @@ func TestCloseCancelsQueuedReads(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer release()
-		if err := s.readSlots.Acquire(context.Background(), maxConcurrentStoreReads-1); err != nil {
+		if err := s.readSlots.Acquire(context.Background(), s.Stats().ReadCapacity-1); err != nil {
 			t.Fatal(err)
 		}
 		const readers = 128
@@ -41,7 +41,7 @@ func TestCloseCancelsQueuedReads(t *testing.T) {
 		}
 		// A held admission is not an active view, so it must not block Close.
 		// Release after Close as queued HTTP handlers did during shutdown.
-		s.readSlots.Release(maxConcurrentStoreReads - 1)
+		s.readSlots.Release(s.Stats().ReadCapacity - 1)
 		release()
 		for range readers * 3 {
 			if err := <-done; err == nil {

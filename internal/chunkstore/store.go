@@ -50,7 +50,7 @@ type Options struct {
 	// foreground readers, persisters and compactions. Zero selects 16.
 	// The limit can be changed without reopening with SetBlockLoadConcurrency.
 	BlockLoadConcurrency int
-	// ReadConcurrency bounds foreground reads; zero keeps 32. Reloadable.
+	// ReadConcurrency bounds foreground reads; zero scales with GOMAXPROCS. Reloadable.
 	ReadConcurrency int
 
 	// NativeImportConcurrency bounds admitted imports (1..8). NativeCombineWorkers
@@ -1492,7 +1492,11 @@ func (s *Store) SetFlushRate(rate int64) error {
 
 func readConcurrency(limit int) int64 {
 	if limit == 0 {
-		return maxConcurrentStoreReads
+		// Cold reads wait for storage as well as CPU. Allow four outstanding
+		// reads per execution thread while retaining the historical small-host
+		// floor and the explicit configuration ceiling. Block loading has its
+		// own independent admission gate.
+		return int64(min(1024, max(32, 4*runtime.GOMAXPROCS(0))))
 	}
 	return int64(limit)
 }

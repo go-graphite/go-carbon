@@ -1,7 +1,14 @@
 package chunkstore
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"math"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -60,7 +67,7 @@ func TestReadConcurrency(t *testing.T) {
 		if err := s.SetReadConcurrency(0); err != nil {
 			t.Fatal(err)
 		}
-		if got := gate.Stats().Capacity; got != 32 {
+		if got := gate.Stats().Capacity; got != readConcurrency(0) {
 			t.Fatalf("default capacity %d", got)
 		}
 		for _, bad := range []int{-1, 1025} {
@@ -137,5 +144,80 @@ func TestReadAdmissionResizeAndQueue(t *testing.T) {
 	release2()
 	if st := s.Stats(); st.ReadsInProgress != 0 || st.ReadsQueued != 0 {
 		t.Fatalf("leaked %+v", st)
+	}
+}
+
+func TestAutomaticReadConcurrency(t *testing.T) {
+	old := runtime.GOMAXPROCS(0)
+	defer runtime.GOMAXPROCS(old)
+	for _, tc := range []struct{ procs, want int }{{1, 32}, {8, 32}, {16, 64}, {32, 128}, {192, 768}, {512, 1024}} {
+		runtime.GOMAXPROCS(tc.procs)
+		if got := readConcurrency(0); got != int64(tc.want) {
+			t.Fatalf("procs=%d: capacity=%d, want %d", tc.procs, got, tc.want)
+		}
+		if got := readConcurrency(7); got != 7 {
+			t.Fatal("automatic sizing overrode explicit limit")
+		}
+	}
+}
+
+// Changing the shared gate must leave digest wire bytes and every fetched float
+// bit unchanged, including sparse histories, signed zero and non-finite values.
+func TestReadConcurrencyDifferential(t *testing.T) {
+	s, now := openTestStore(t, t.TempDir(), Options{ReadConcurrency: 32})
+	defer closeTestStore(t, s)
+	ctx := context.Background()
+	const names = 128
+	for i := range names {
+		name := fmt.Sprintf("differential.%03d", i)
+		createTestMetric(t, s, name)
+		values := []float64{math.Copysign(0, -1), 0, math.SmallestNonzeroFloat64, math.MaxFloat64, math.Inf(1), math.Inf(-1), math.Float64frombits(0x7ff8000000000042), float64(i)}
+		var points []Point
+		for j, value := range values {
+			points = append(points, Point{Timestamp: int64((now/60 - 2*j - 1) * 60), Value: value})
+		}
+		if err := s.UpdateManyForArchive(ctx, name, points, 60*256); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() [][]byte {
+		out := make([][]byte, names)
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Go(func() {
+				name := fmt.Sprintf("differential.%03d", i)
+				digest, err := s.SumDigest(ctx, name, 0, 0)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				data, err := json.Marshal(digest)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				series, err := s.Fetch(ctx, name, now-3600, now)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				for _, value := range series.Values {
+					data = binary.BigEndian.AppendUint64(data, math.Float64bits(value))
+				}
+				out[i] = data
+			})
+		}
+		wg.Wait()
+		return out
+	}
+	want := read()
+	if err := s.SetReadConcurrency(0); err != nil {
+		t.Fatal(err)
+	}
+	got := read()
+	for i := range names {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Fatalf("name %d changed digest or point bits", i)
+		}
 	}
 }

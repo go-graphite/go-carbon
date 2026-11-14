@@ -163,7 +163,7 @@ func TestColdReadsBoundNativeIndexMemory(t *testing.T) {
 	if decoded <= cacheBytes/4 {
 		t.Fatalf("index %d must exceed cache shard capacity", decoded)
 	}
-	s, now := openTestStore(t, "/store", Options{fs: fs, ExactBlocks: true, CacheSize: cacheBytes, MemTableSize: 1 << 20})
+	s, now := openTestStore(t, "/store", Options{fs: fs, ExactBlocks: true, CacheSize: cacheBytes, MemTableSize: 1 << 20, ReadConcurrency: 32})
 	defer closeTestStore(t, s)
 	if err := s.db.Ingest([]string{"/index.sst"}); err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestColdReadsBoundNativeIndexMemory(t *testing.T) {
 	}
 	// Wait until admission is saturated and block loads have reached the FS.
 	deadline := time.Now().Add(10 * time.Second)
-	for (s.readSlots.Stats().Outstanding < maxConcurrentStoreReads || fs.active.Load() < maxConcurrentBlockLoads) && time.Now().Before(deadline) {
+	for (s.readSlots.Stats().Outstanding < 32 || fs.active.Load() < maxConcurrentBlockLoads) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	// Give any incorrectly admitted readers a chance to arrive as well.
@@ -193,9 +193,9 @@ func TestColdReadsBoundNativeIndexMemory(t *testing.T) {
 	duringMalloc, duringRSS := nativeReadInUse(t), nativeReadRSS()
 	outstanding := s.readSlots.Stats().Outstanding
 	peak := fs.peak.Load()
-	nativeBound := uint64(maxConcurrentStoreReads) * (uint64(decoded) + layout.TopIndex.Length + 1<<20)
+	nativeBound := uint64(32) * (uint64(decoded) + layout.TopIndex.Length + 1<<20)
 	t.Logf("names=%d requests=%d decoded_index=%d native_delta=%d RSS_delta=%d native_bound=%d admitted=%d loaders=%d", names, requests, decoded, int64(duringMalloc)-int64(beforeMalloc), int64(duringRSS)-int64(beforeRSS), nativeBound, outstanding, peak)
-	if outstanding != maxConcurrentStoreReads || peak > maxConcurrentBlockLoads || peak == 0 {
+	if outstanding != 32 || peak > maxConcurrentBlockLoads || peak == 0 {
 		t.Fatalf("unbounded reads: admitted=%d partition loads=%d", outstanding, peak)
 	}
 	// Cancellation must release a queued request without opening another view.

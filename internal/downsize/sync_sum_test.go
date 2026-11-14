@@ -356,3 +356,62 @@ func TestSyncMixedSHADigestBeforePointReads(t *testing.T) {
 		})
 	}
 }
+
+// Count controller target reads separately from the fixture's SHA oracle.
+type absentFullSource struct {
+	*countedMixedFull
+	targetReads atomic.Int64
+}
+
+func (b *absentFullSource) Fetch(ctx context.Context, host string, names []string, from, until int64) (map[string]syncSeries, error) {
+	if host == syncT {
+		b.targetReads.Add(int64(len(names)))
+	}
+	return b.countedMixedFull.Fetch(ctx, host, names, from, until)
+}
+
+func TestSyncFullAbsentLegacySourceDifferential(t *testing.T) {
+	for _, holes := range []bool{false, true} {
+		t.Run(fmt.Sprint(holes), func(t *testing.T) {
+			f, o, _ := threeSources(t)
+			names := []string{"a.clean", "b.holes", "c.peerhole"}
+			schemas := map[string][]syncArchive{}
+			for _, n := range names {
+				schemas[n] = syncTestSchema
+				for _, host := range append([]string{syncT}, o.from...) {
+					f.put(host, n, syncTestSchema)
+				}
+				// The discovery mask can outlive a donor's source retirement.
+				delete(f.store(syncD1).archives, n)
+				delete(f.store(syncP).archives, n)
+			}
+			if holes {
+				delete(f.store(syncT).points["b.holes"][60], syncTestNow-86400)
+			}
+			b := &absentFullSource{countedMixedFull: &countedMixedFull{servingSHA: &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncD1: true, syncP: true}}}}}
+			s := &syncer{o: o, b: b}
+			for _, n := range names {
+				s.masks.Store(n, uint64(7))
+			}
+			var want, got syncRow
+			if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+				t.Fatal(err)
+			}
+			b.targetReads.Store(0)
+			if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
+				t.Fatal(err)
+			}
+			a, _ := json.Marshal(want)
+			z, _ := json.Marshal(got)
+			if string(a) != string(z) {
+				t.Fatalf("ordered verdict bytes differ: got %s want %s", z, a)
+			}
+			if !holes && b.targetReads.Load() != 0 {
+				t.Fatalf("absent legacy holders caused %d target archive reads", b.targetReads.Load())
+			}
+			if holes && (b.targetReads.Load() == 0 || len(got.Holes) == 0) {
+				t.Fatal("real hole did not retain target read and verdict")
+			}
+		})
+	}
+}
