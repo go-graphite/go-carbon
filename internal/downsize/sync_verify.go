@@ -572,11 +572,51 @@ func (s *syncer) fullDigest(ctx context.Context, store string, names []string, s
 	return got, false, err
 }
 
+type fullArchiveDigest struct {
+	digests map[string][]syncDigest
+	sum     bool
+	err     error
+}
+
+func (s *syncer) fullArchiveDigests(ctx context.Context, names []string, step, from, until int64) map[string]fullArchiveDigest {
+	// Digest responses contain only fingerprints. Batch them by names, while
+	// materialized fallback reads below retain their independent byte budget.
+	stores := append([]string{s.o.to}, s.o.from...)
+	results := make([]fullArchiveDigest, len(stores))
+	var wg sync.WaitGroup
+	for i, store := range stores {
+		subset := names
+		if i > 0 {
+			subset = s.holders(i-1, names)
+			if s.isDown(store) {
+				continue
+			}
+		} else if legacy, known := s.digests.Load("sum-v1:" + store); known && !legacy.(bool) {
+			continue // the bounded local target read also supplies its legacy SHA
+		}
+		if len(subset) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i].digests, results[i].sum, results[i].err = s.fullDigest(ctx, store, subset, step, syncRange{Name: "full", From: from, Until: until})
+		}()
+	}
+	wg.Wait()
+	out := make(map[string]fullArchiveDigest, len(stores))
+	for i, store := range stores {
+		out[store] = results[i]
+	}
+	return out
+}
+
 // checkFullArchive uses exactly the same serving-archive window and hole
 // comparison as full point reads. Equal count+hash at the expected step proves
 // there are no holes; every other result takes the original point comparison.
 // Requests to independent stores overlap, but holes retain source/name order.
 func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
+	digests := s.fullArchiveDigests(ctx, names, step, from, until)
 	// A verification worker can retain a decoded response for the target and
 	// every holder. Bound the names by the archive's point count, rather than
 	// treating a 500-name week and a 500-name year as the same amount of work.
@@ -586,12 +626,12 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 	const budget = int64(64 << 20)
 	batch := fullVerifyBatchNames(len(names), len(s.o.from)+1, step, from, until, budget)
 	if batch >= len(names) {
-		return s.checkFullArchiveBatch(ctx, row, names, step, from, until)
+		return s.checkFullArchiveBatch(ctx, row, names, step, from, until, digests)
 	}
 	var result syncRow
 	for start := 0; start < len(names); start += batch {
 		end := min(start+batch, len(names))
-		if err := s.checkFullArchiveBatch(ctx, &result, names[start:end], step, from, until); err != nil {
+		if err := s.checkFullArchiveBatch(ctx, &result, names[start:end], step, from, until, digests); err != nil {
 			return err
 		}
 	}
@@ -627,7 +667,7 @@ func fullVerifyBatchNames(names, stores int, step, from, until, budget int64) in
 	return int(min(int64(names), max(int64(1), limit)))
 }
 
-func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
+func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names []string, step, from, until int64, digests map[string]fullArchiveDigest) error {
 	type check struct {
 		store   string
 		names   []string
@@ -657,16 +697,9 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 	var wg sync.WaitGroup
 	w := syncRange{Name: "full", From: from, Until: until}
 	for _, c := range checks {
-		if c == target && localTarget {
-			continue
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.digests, c.sum, c.err = s.fullDigest(ctx, c.store, c.names, step, w)
-		}()
+		d := digests[c.store]
+		c.digests, c.sum, c.err = d.digests, d.sum, d.err
 	}
-	wg.Wait()
 	if localTarget {
 		// The legacy endpoint performs the same expensive target read as Fetch.
 		// Read it once locally, reusing its points if any source hash differs.
