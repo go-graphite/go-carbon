@@ -518,6 +518,8 @@ type syncKey struct{ name, source string }
 func (s *syncer) verifyAndFill(ctx context.Context) error {
 	var set []string // rounds after the first: the names to re-verify
 	filledBefore := map[syncKey]bool{}
+	failedAttempts := map[syncKey]int{}
+	retryFailed := false
 	// latest is each name's most recent verification: its holes, or nil when
 	// clean; pending names were not indexed by the target's carbonserver.
 	latest := map[string][]syncHole{}
@@ -559,7 +561,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		fillable := 0
 		for _, h := range holes {
 			k := syncKey{h.Name, h.Source}
-			if s.forbid[h.Source] {
+			if s.forbid[h.Source] || failedAttempts[k] >= 3 {
 				continue
 			}
 			fillable++
@@ -582,9 +584,10 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		}
 		stalled := previousScore >= 0 && score >= previousScore
 		previousScore = score
-		if s.o.noCopy || (fillable == 0 && len(next) == 0) || stalled || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
+		if s.o.noCopy || (fillable == 0 && len(next) == 0) || (stalled && !retryFailed) || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
 			break
 		}
+		retryFailed = false
 		s.phase("fill")
 		s.prog.begin("fill", fillable)
 		work := 0
@@ -613,9 +616,17 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 				bad[n] = true
 			}
 			for _, n := range names {
-				if !bad[n] {
-					filledBefore[syncKey{n, s.o.from[src]}] = true
-					next[n] = true
+				// Failed imports remain in verification and keep their journal
+				// evidence. Permit up to three failed fills per name/source,
+				// even when the hole count has not improved yet.
+				k := syncKey{n, s.o.from[src]}
+				next[n] = true
+				if bad[n] {
+					failedAttempts[k]++
+					retryFailed = retryFailed || failedAttempts[k] < 3
+				} else {
+					delete(failedAttempts, k)
+					filledBefore[k] = true
 				}
 			}
 			s.sum.Filled += len(names) - len(res.Failed)
