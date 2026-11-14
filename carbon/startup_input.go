@@ -58,21 +58,8 @@ func (app *App) tryStartupInput() error {
 	// on the ordinary startup path, before a point can enter the cache.
 	f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
 	var manifest recovery.Manifest
-	journalOnly := false
-	if errors.Is(err, os.ErrNotExist) && c.InputLog.Enabled && app.handoffClaim == nil {
-		// An empty/new installation retains the ordinary checkpoint path.
-		// Only existing journals (or a retained capture from this path) need
-		// the journal-only recovery namespace.
-		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
-		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.tail.bin*"))
-		journalOnly = len(logs) > 0 || len(tails) > 0
-	}
-	if journalOnly {
-		// A journal-only crash has no checkpoint generation to hand over. Use
-		// a stable capture namespace, including across repeated crashes. Never
-		// manufacture a checkpoint or accept unrelated legacy dump generations.
-		manifest.WAL.Name = "input.journal-recovery.bin"
-	} else {
+	missingCheckpoint := errors.Is(err, os.ErrNotExist)
+	if !missingCheckpoint {
 		if err != nil {
 			return nil
 		}
@@ -81,7 +68,30 @@ func (app *App) tryStartupInput() error {
 		if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
 			return nil
 		}
+		// A previously retired checkpoint can leave its manifest behind.
+		// Only a fully absent pair can use journal-only recovery. A partial
+		// checkpoint retains the ordinary validation/recovery path.
+		if manifest.Cache.Name != "" && filepath.Base(manifest.Cache.Name) == manifest.Cache.Name {
+			_, cacheErr := os.Stat(filepath.Join(c.Dump.Path, manifest.Cache.Name))
+			_, walErr := os.Stat(filepath.Join(c.Dump.Path, manifest.WAL.Name))
+			missingCheckpoint = errors.Is(cacheErr, os.ErrNotExist) && errors.Is(walErr, os.ErrNotExist)
+		}
 	}
+	journalOnly := false
+	if missingCheckpoint && c.InputLog.Enabled && app.handoffClaim == nil {
+		logs, _ := filepath.Glob(filepath.Join(c.InputLog.Path, "*.log"))
+		tails, _ := filepath.Glob(filepath.Join(c.Dump.Path, "input.journal-recovery.tail.bin*"))
+		journalOnly = len(logs) > 0 || len(tails) > 0
+	}
+	if journalOnly {
+		// Reuse a stable capture namespace without manufacturing or changing
+		// a checkpoint. Ordinary journal validation remains authoritative.
+		manifest = recovery.Manifest{}
+		manifest.WAL.Name = "input.journal-recovery.bin"
+	} else if missingCheckpoint {
+		return nil
+	}
+
 	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {
 		return err
