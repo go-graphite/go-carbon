@@ -118,7 +118,11 @@ func syncBusyDelay(busy int) time.Duration {
 
 func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: 2 * time.Second, transferIdle: defaultTransferIdle},
-		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 2 * time.Minute}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+		// Digest handlers send headers after processing the entire batch. A
+		// shorter header deadline discards healthy work queued behind store
+		// reads and can make every retry repeat the same unfinished batch.
+		// The overall request deadline and caller context still bound each call.
+		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	b := &syncLiveBackend{o: o, m: m, client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64}}, copy: planFreeCopy}
 	withSyncJWT(b.m.client, o.auth, o.authOrigins...)
 	withSyncJWT(b.client, o.auth, o.authOrigins...)
