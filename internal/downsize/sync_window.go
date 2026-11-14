@@ -502,6 +502,25 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 				}
 				return fmt.Errorf("window export HTTP 413 for a single name")
 			}
+			// A truncated stream identifies complete record boundaries, but
+			// its results are untrusted until the checksum arrives. Re-export
+			// that prefix as one request rather than decoding it at every level
+			// of a binary split. Both partitions must still validate completely.
+			if truncated && len(attempt) > 0 && len(attempt) < len(subset) {
+				var complete, remainder []string
+				for _, name := range subset {
+					if _, ok := attempt[name]; ok {
+						complete = append(complete, name)
+					} else {
+						remainder = append(remainder, name)
+					}
+				}
+				event("sync_window_export_split", map[string]any{"source": source, "complete_records": len(complete), "remaining_names": len(remainder), "checksum_validated": false})
+				if err := readSubset(complete); err != nil {
+					return err
+				}
+				return readSubset(remainder)
+			}
 			// Split only the transport request. The source pin, logical catalog
 			// group, window and durable copy identities remain unchanged.
 			mid := len(subset) / 2
