@@ -91,14 +91,17 @@ type syncSkip struct {
 
 // syncProgress is the live counter set the progress ticker reports.
 type syncProgress struct {
-	mu      sync.Mutex
-	phase   string
-	total   int
-	started time.Time
-	done    atomic.Int64
-	skipped atomic.Int64
-	digests atomic.Int64 // names compared by digest
-	reads   atomic.Int64 // names read point by point
+	mu           sync.Mutex
+	phase        string
+	total        int
+	started      time.Time
+	done         atomic.Int64
+	skipped      atomic.Int64
+	digests      atomic.Int64 // names compared by digest
+	reads        atomic.Int64 // names read point by point
+	batches      atomic.Int64
+	batchNanos   atomic.Int64
+	compareNanos atomic.Int64
 }
 
 func (p *syncProgress) begin(phase string, total int) {
@@ -130,6 +133,8 @@ func (s *syncer) markDown(store string, err error) {
 // retried on halves down to single names, which are skipped with a reason so
 // one bad metric never stalls the run.
 func (s *syncer) verifyBatch(ctx context.Context, round int, names []string) (syncRow, error) {
+	started := time.Now()
+	defer func() { s.prog.batches.Add(1); s.prog.batchNanos.Add(int64(time.Since(started))) }()
 	row := syncRow{Kind: "verified", Round: round, First: names[0], Last: names[len(names)-1], Names: len(names)}
 	err := s.verifyNames(ctx, &row, names)
 	if err == nil || ctx.Err() != nil || errors.Is(err, errSyncStoreDown) && s.isDown(s.o.to) {
@@ -420,6 +425,8 @@ func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, 
 	if targetFetchErr != nil {
 		return fmt.Errorf("target fetch: %w", targetFetchErr)
 	}
+	compareStart := time.Now()
+	defer func() { s.prog.compareNanos.Add(int64(time.Since(compareStart))) }()
 	for _, c := range checks {
 		source, detail, got, err := c.source, c.detail, c.points, c.fetchErr
 		row.Holes = append(row.Holes, c.coarse...)
@@ -542,24 +549,23 @@ func (s *syncer) checkFull(ctx context.Context, row *syncRow, names []string, sc
 }
 
 // fullDigest negotiates cached sums independently of the legacy SHA endpoint.
-func (s *syncer) fullDigest(ctx context.Context, store string, names []string, step int64, w syncRange) (map[string][]syncDigest, error) {
+func (s *syncer) fullDigest(ctx context.Context, store string, names []string, step int64, w syncRange) (map[string][]syncDigest, bool, error) {
 	b, ok := s.b.(interface {
 		SumDigest(context.Context, string, []string, int64, int64, int64) (map[string][]syncDigest, error)
 	})
-	if !ok {
-		return s.digest(ctx, store, names, w)
-	}
 	key := "sum-v1:" + store
-	if v, ok := s.digests.Load(key); ok && !v.(bool) {
-		return nil, errSyncNoDigest
-	}
-	got, err := b.SumDigest(ctx, store, names, step, w.From, w.Until)
-	if errors.Is(err, errSyncNoDigest) {
+	v, known := s.digests.Load(key)
+	if ok && (!known || v.(bool)) {
+		got, err := b.SumDigest(ctx, store, names, step, w.From, w.Until)
+		if !errors.Is(err, errSyncNoDigest) {
+			return got, true, err
+		}
 		if _, loaded := s.digests.LoadOrStore(key, false); !loaded {
-			event("sync_full_digest_unavailable", map[string]any{"store": store, "fallback": "carbonserver multi-fetch"})
+			event("sync_full_digest_unavailable", map[string]any{"store": store, "fallback": "serving-archive SHA digest"})
 		}
 	}
-	return got, err
+	got, err := s.digest(ctx, store, names, w)
+	return got, false, err
 }
 
 // checkFullArchive uses exactly the same serving-archive window and hole
@@ -571,6 +577,7 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		store   string
 		names   []string
 		digests map[string][]syncDigest
+		sum     bool
 		err     error
 		detail  []string
 		points  map[string]syncSeries
@@ -596,7 +603,7 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.digests, c.err = s.fullDigest(ctx, c.store, c.names, step, w)
+			c.digests, c.sum, c.err = s.fullDigest(ctx, c.store, c.names, step, w)
 		}()
 	}
 	wg.Wait()
@@ -607,9 +614,9 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 	// Any uncertainty retains the original directional hole comparison.
 	if _, sums := s.b.(interface {
 		SumDigest(context.Context, string, []string, int64, int64, int64) (map[string][]syncDigest, error)
-	}); sums && target.err == nil {
+	}); sums && target.sum && target.err == nil {
 		for _, c := range checks[1:] {
-			if !errors.Is(c.err, errSyncNoDigest) {
+			if c.sum && !errors.Is(c.err, errSyncNoDigest) {
 				continue
 			}
 			wg.Add(1)
@@ -631,8 +638,12 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 					if sd.Step != step {
 						continue
 					}
+					// A finite-empty source cannot contain a directional hole.
+					if sd.Count == 0 && ((sd.From == from && sd.Until == until) || (sd.From == 0 && sd.Until == 0)) {
+						match = true
+					}
 					for _, td := range target.digests[n] {
-						if td.Step == step && sd.Points == td.Points && sd.From == td.From && sd.Until == td.Until && sd.Count == td.Count && sd.Hash == td.Hash {
+						if c.sum == target.sum && td.Step == step && sd.Points == td.Points && sd.From == td.From && sd.Until == td.Until && sd.Count == td.Count && sd.Hash == td.Hash {
 							match = true
 						}
 					}
@@ -672,6 +683,8 @@ func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []str
 	if len(target.detail) > 0 && target.err != nil {
 		return fmt.Errorf("target fetch: %w", target.err)
 	}
+	compareStart := time.Now()
+	defer func() { s.prog.compareNanos.Add(int64(time.Since(compareStart))) }()
 	for _, c := range checks[1:] {
 		if len(c.detail) == 0 {
 			continue
@@ -745,6 +758,9 @@ func (s *syncer) progressLine() {
 	elapsed := time.Since(started).Seconds()
 	fields := map[string]any{"phase": phase, "done": done, "total": total, "skipped": p.skipped.Load(),
 		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d verify_streams=%d", s.o.streams, s.o.verifyConcurrency())}
+	fields["verify_batches"] = p.batches.Load()
+	fields["batch_seconds"] = float64(p.batchNanos.Load()) / float64(time.Second)
+	fields["compare_seconds"] = float64(p.compareNanos.Load()) / float64(time.Second)
 	if st, ok := s.b.(interface{ syncTimings() []syncIOTiming }); ok {
 		fields["io_timings"] = st.syncTimings()
 	}

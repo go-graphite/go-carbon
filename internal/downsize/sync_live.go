@@ -60,27 +60,37 @@ type syncLiveBackend struct {
 // syncIOTime reports cumulative request time, including retries. Concurrent
 // calls overlap, so these seconds measure work, not elapsed phase time.
 type syncIOTime struct {
-	calls atomic.Int64
-	nanos atomic.Int64
+	calls  atomic.Int64
+	nanos  atomic.Int64
+	active atomic.Int64
+	peak   atomic.Int64
 }
 type syncIOTiming struct {
 	Operation string  `json:"operation"`
 	Store     string  `json:"store"`
 	Calls     int64   `json:"calls"`
 	Seconds   float64 `json:"seconds"`
+	Active    int64   `json:"active"`
+	Peak      int64   `json:"peak"`
 }
 
 func (b *syncLiveBackend) recordTime(operation, store string) func() {
 	started := time.Now()
 	v, _ := b.timings.LoadOrStore([2]string{operation, store}, &syncIOTime{})
 	t := v.(*syncIOTime)
-	return func() { t.nanos.Add(int64(time.Since(started))); t.calls.Add(1) }
+	active := t.active.Add(1)
+	for peak := t.peak.Load(); active > peak; peak = t.peak.Load() {
+		if t.peak.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	return func() { t.active.Add(-1); t.nanos.Add(int64(time.Since(started))); t.calls.Add(1) }
 }
 func (b *syncLiveBackend) syncTimings() []syncIOTiming {
 	var out []syncIOTiming
 	b.timings.Range(func(key, value any) bool {
 		k, v := key.([2]string), value.(*syncIOTime)
-		out = append(out, syncIOTiming{k[0], k[1], v.calls.Load(), float64(v.nanos.Load()) / float64(time.Second)})
+		out = append(out, syncIOTiming{k[0], k[1], v.calls.Load(), float64(v.nanos.Load()) / float64(time.Second), v.active.Load(), v.peak.Load()})
 		return true
 	})
 	sort.Slice(out, func(i, j int) bool {
