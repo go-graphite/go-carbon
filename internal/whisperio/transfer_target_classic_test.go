@@ -3,12 +3,13 @@ package whisperio
 import (
 	"context"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"math"
 	"math/rand"
 	"slices"
 	"testing"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 // The oracle reconstructs the whole target-wins union through RestoreArchives.

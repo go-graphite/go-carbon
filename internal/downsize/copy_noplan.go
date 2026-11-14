@@ -642,7 +642,7 @@ func (c *planFreeCopier) rejectNames(source string, names []string, status int, 
 		c.stats.failed.Add(1)
 		failed := c.skip(copySkip{Source: source, Name: name, Status: status, Reason: reason.Error()})
 		if c.o.maxFailures > 0 && failed > c.o.maxFailures {
-			return fmt.Errorf("%d names skipped, above --max-failures %d (last %s: %v)", failed, c.o.maxFailures, name, reason)
+			return fmt.Errorf("%d names skipped, above --max-failures %d (last %s: %s)", failed, c.o.maxFailures, name, reason.Error())
 		}
 	}
 	event("names_skipped", map[string]any{"level": "warn", "source": source, "names": len(names), "status": status, "error": reason.Error(), "skipped": c.skippedCount(), "journal": c.o.state})

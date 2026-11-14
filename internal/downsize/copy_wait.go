@@ -127,13 +127,14 @@ func (w *hostWaiter) awaitHosts(ctx context.Context, hosts []string, cause error
 	waited := false
 	for _, endpoint := range hosts {
 		var probe copyStatus
-		if err := w.probe(ctx, endpoint); err == nil {
+		switch err := w.probe(ctx, endpoint); {
+		case err == nil:
 			continue
-		} else if ctx.Err() != nil {
+		case ctx.Err() != nil:
 			return false, ctx.Err()
-		} else if !transientCopyError(err) {
+		case !transientCopyError(err):
 			continue
-		} else {
+		default:
 			w.progress.down(endpoint)
 			event("host_down", map[string]any{"level": "warn", "host": endpoint, "error": err.Error(), "batch_error": cause.Error()})
 		}

@@ -1,13 +1,13 @@
 package carbonserver
 
 import (
-	"github.com/go-graphite/go-carbon/helper"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/helper"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"go.uber.org/zap"
 )
 
@@ -185,7 +185,8 @@ func (l *CarbonserverListener) insertRealtimeCanonical(ti *trieIndex, metric str
 			return nil, nil, false
 		}
 	}
-	path := append(l.realtimePath[:0], '/')
+	path := l.realtimePath[:0]
+	path = append(path, '/')
 	for i := range len(metric) {
 		c := metric[i]
 		if c == '.' {

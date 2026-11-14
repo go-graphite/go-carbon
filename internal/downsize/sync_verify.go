@@ -254,7 +254,7 @@ func (s *syncer) digest(ctx context.Context, store string, names []string, w syn
 // so a window costs its slowest call (a cross-site replica) instead of the
 // sum of all of them. Point reads for mismatches and older stores use the
 // same fan-out, with results consumed in source order.
-func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, w syncRange) error {
+func (s *syncer) checkWindow(ctx context.Context, row *syncRow, names []string, _ map[string][]syncArchive, w syncRange) error {
 	if s.isDown(s.o.to) {
 		return fmt.Errorf("target: %w", errSyncStoreDown)
 	}
