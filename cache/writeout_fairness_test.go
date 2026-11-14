@@ -12,20 +12,36 @@ import (
 // refresh. Point ownership stays in the cache; scheduling may only change which
 // metric is popped first, including across the nonblocking batch-fill path.
 func TestWriteoutRefreshDrainsColdTail(t *testing.T) {
+	testWriteoutRefreshDrainsTail(t, false)
+}
+
+func TestWriteoutRefreshDrainsRecoveryTail(t *testing.T) {
+	testWriteoutRefreshDrainsTail(t, true)
+}
+
+func testWriteoutRefreshDrainsTail(t *testing.T, draining bool) {
+	t.Helper()
 	for _, nonblocking := range []bool{false, true} {
 		t.Run(fmt.Sprint(nonblocking), func(t *testing.T) {
 			c := New()
 			defer c.Stop()
+			c.SetRecoveryDrain(draining)
 			c.SetRestartOrder(func() bool { return true })
-			c.SetRestartWarmFirst(func(n string) bool { return n == "warm" }, nil, nil)
+			c.SetRestartWarmFirst(func(n string) bool { return n == "a.warm" }, nil, nil)
+			stream := &RecoveryStream{}
+			source := stream.Next()
 			originals := map[string][]points.Point{}
 			for i := range 8 {
-				name := fmt.Sprintf("cold.%d", i)
+				name := fmt.Sprintf("z.cold.%d", i)
 				data := []points.Point{{Value: math.Float64frombits(0x7ff8000000000001 + uint64(i)), Timestamp: int64(i + 1)}, {Value: math.Copysign(0, -1), Timestamp: int64(i + 1)}}
 				originals[name] = data
-				c.Add(&points.Points{Metric: name, Data: data})
+				if draining {
+					c.AddRecoveredFrom(&points.Points{Metric: name, Data: data}, source)
+				} else {
+					c.Add(&points.Points{Metric: name, Data: data})
+				}
 			}
-			c.Add(points.OnePoint("warm", 1, 0))
+			c.Add(points.OnePoint("a.warm", 1, 0))
 			q := c.WriteoutQueue()
 			q.update()
 			abort := make(chan bool)
@@ -57,10 +73,13 @@ func TestWriteoutRefreshDrainsColdTail(t *testing.T) {
 					}
 				}
 				c.Confirm(p)
-				if name == "warm" {
-					c.Add(points.OnePoint("warm", 1, 0))
+				if name == "a.warm" {
+					c.Add(points.OnePoint("a.warm", 1, 0))
 				}
 				q.update()
+			}
+			if source.Pending() != 0 {
+				t.Fatalf("recovery source still pins %d batches", source.Pending())
 			}
 			if len(seen) != len(originals) {
 				t.Fatalf("refresh starved cold points: wrote %d of %d cold metrics", len(seen), len(originals))
