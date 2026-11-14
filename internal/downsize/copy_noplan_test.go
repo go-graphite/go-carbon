@@ -142,6 +142,45 @@ func copyNames(prefix string, n int) []string {
 	return out
 }
 
+func TestPlanFreeCopyRejectsLegacyLongNamesLocally(t *testing.T) {
+	boundary := "b" + strings.Repeat("x", store.MaxMetricNameBytes-1)
+	invalid := "c" + strings.Repeat("x", store.MaxMetricNameBytes)
+	// UTF-8 limits are bytes, not runes.
+	unicode := "d" + strings.Repeat("é", store.MaxMetricNameBytes/2)
+	names := []string{"a", boundary, invalid, unicode, "z"}
+	f, src, dst := newFakeCopy(t, names)
+	o := copyTestOptions(t, src, dst)
+	err := planFreeCopy(context.Background(), o)
+	var skipped *copySkippedError
+	if !errors.As(err, &skipped) || skipped.count != 2 {
+		t.Fatalf("want two explicit failures, got %v", err)
+	}
+	for _, n := range []string{invalid, unicode} {
+		if f.imported[n] != 0 {
+			t.Fatal("invalid name sent to target")
+		}
+	}
+	for _, n := range []string{"a", boundary, "z"} {
+		if f.imported[n] != 1 {
+			t.Fatalf("valid name imported %d times", f.imported[n])
+		}
+	}
+	failed, err := copyJournalFailures(o.state, src, names)
+	if err != nil || len(failed) != 2 || failed[0] != invalid || failed[1] != unicode {
+		t.Fatalf("failed names lost inside successful ranges: %d, %v", len(failed), err)
+	}
+	// Resume rechecks failures locally, without recopying healthy neighbors.
+	err = planFreeCopy(context.Background(), o)
+	if !errors.As(err, &skipped) || skipped.count != 2 || len(f.imported) != 3 {
+		t.Fatalf("resume: imports=%d, err=%v", len(f.imported), err)
+	}
+	for _, count := range f.imported {
+		if count != 1 {
+			t.Fatal("resume recopied a completed name")
+		}
+	}
+}
+
 func TestPlanFreeCopyDiscoversPagedPrefixAndBatchesByBytes(t *testing.T) {
 	wanted := copyNames("a.", 3000)
 	catalog := append(append([]string{}, wanted...), copyNames("b.", 500)...)

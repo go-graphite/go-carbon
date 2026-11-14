@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 // Stores hold tens of millions of names, so discovery never keeps a catalog
@@ -379,14 +381,28 @@ func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, 
 					s.prog.done.Add(int64(len(chunk)))
 					continue
 				}
-				info, e := s.b.Info(ctx, s.o.from[src], chunk)
+				// Over-limit legacy names cannot be imported. Leave them in keep
+				// for the copier to journal as failures, without metadata I/O.
+				var valid []string
+				for _, n := range chunk {
+					if chunkstore.ValidateMetricName(n) == nil {
+						valid = append(valid, n)
+					}
+				}
+				info := map[string][]syncArchive{}
+				var e error
+				if len(valid) > 0 {
+					info, e = s.b.Info(ctx, s.o.from[src], valid)
+				}
 				if e != nil {
 					fail(e)
 					return
 				}
 				r := syncRow{Kind: "prechecked", Source: s.o.from[src], First: k.first, Last: k.last, Names: k.count}
 				for _, n := range chunk {
-					if _, ok := info[n]; !ok {
+					if chunkstore.ValidateMetricName(n) != nil {
+						continue
+					} else if _, ok := info[n]; !ok {
 						r.Absent = append(r.Absent, n)
 					} else if !s.o.includeShort && syncShort(info[n]) {
 						r.Short = append(r.Short, n)

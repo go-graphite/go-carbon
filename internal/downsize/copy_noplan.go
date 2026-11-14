@@ -440,6 +440,15 @@ func (c *planFreeCopier) run(ctx context.Context, sources []copySource, owner fu
 func (c *planFreeCopier) produce(ctx context.Context, source copySource, owner func(string) bool, out chan<- copyBatch) error {
 	cover := c.journal.cover(source.origin)
 	var batch []string
+	var rejected []string
+	flushRejected := func() error {
+		if len(rejected) == 0 {
+			return nil
+		}
+		err := c.rejectNames(source.origin, rejected, 0, chunkstore.ErrNameTooLong)
+		rejected = nil
+		return err
+	}
 	previous, first := "", true
 	flush := func() error {
 		if len(batch) == 0 {
@@ -459,6 +468,9 @@ func (c *planFreeCopier) produce(ctx context.Context, source copySource, owner f
 		}
 		name, err := source.next()
 		if errors.Is(err, io.EOF) {
+			if err := flushRejected(); err != nil {
+				return err
+			}
 			return flush()
 		}
 		if err != nil {
@@ -477,6 +489,23 @@ func (c *planFreeCopier) produce(ctx context.Context, source copySource, owner f
 			c.stats.notOwned.Add(1)
 			continue
 		}
+		if err := chunkstore.ValidateMetricName(name); err != nil {
+			// Catalogs can retain names written before the intake limit. Keep
+			// failures explicit without poisoning every neighboring batch.
+			if err := flush(); err != nil {
+				return err
+			}
+			rejected = append(rejected, name)
+			if len(rejected) >= 1000 {
+				if err := flushRejected(); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := flushRejected(); err != nil {
+			return err
+		}
 		batch = append(batch, name)
 		if len(batch) >= c.sizer.names() {
 			if err := flush(); err != nil {
@@ -490,6 +519,11 @@ func (c *planFreeCopier) produce(ctx context.Context, source copySource, owner f
 // other definitive rejections split a multi-name batch in half; a single name
 // that still fails is journaled as a failure and skipped, so nothing stalls.
 func (c *planFreeCopier) send(ctx context.Context, source string, names []string, settled bool) error {
+	if len(names) == 1 {
+		if err := chunkstore.ValidateMetricName(names[0]); err != nil {
+			return c.rejectName(source, names[0], 0, err)
+		}
+	}
 	budget := c.sizer.budget
 	if len(names) == 1 {
 		budget = c.serverMax
@@ -588,17 +622,31 @@ func (c *planFreeCopier) send(ctx context.Context, source string, names []string
 		if api != nil {
 			status = api.Status
 		}
-		if err := c.journal.failed(c.rowSource(source), names[0], status, err.Error()); err != nil {
-			return err
-		}
-		c.stats.failed.Add(1)
-		failed := c.skip(copySkip{Source: source, Name: names[0], Status: status, Reason: err.Error()})
-		event("name_skipped", map[string]any{"level": "warn", "source": source, "metric": names[0], "status": status, "error": err.Error(), "skipped": failed})
-		if c.o.maxFailures > 0 && failed > c.o.maxFailures {
-			return fmt.Errorf("%d names skipped, above --max-failures %d (last %s: %v)", failed, c.o.maxFailures, names[0], err)
-		}
-		return nil
+		return c.rejectName(source, names[0], status, err)
 	}
+}
+
+func (c *planFreeCopier) rejectName(source, name string, status int, reason error) error {
+	return c.rejectNames(source, []string{name}, status, reason)
+}
+
+func (c *planFreeCopier) rejectNames(source string, names []string, status int, reason error) error {
+	rows := make([]copyRow, len(names))
+	for i, name := range names {
+		rows[i] = copyRow{Kind: "failed", Source: c.rowSource(source), Name: name, Status: status, Error: reason.Error()}
+	}
+	if err := c.journal.appendRows(rows); err != nil {
+		return err
+	}
+	for _, name := range names {
+		c.stats.failed.Add(1)
+		failed := c.skip(copySkip{Source: source, Name: name, Status: status, Reason: reason.Error()})
+		if c.o.maxFailures > 0 && failed > c.o.maxFailures {
+			return fmt.Errorf("%d names skipped, above --max-failures %d (last %s: %v)", failed, c.o.maxFailures, name, reason)
+		}
+	}
+	event("names_skipped", map[string]any{"level": "warn", "source": source, "names": len(names), "status": status, "error": reason.Error(), "skipped": c.skippedCount(), "journal": c.o.state})
+	return nil
 }
 
 var errCopyProof = errors.New("import proof mismatch")
@@ -767,14 +815,26 @@ func openCopyJournal(path, identity string) (*copyJournal, error) {
 }
 
 func (j *copyJournal) append(row copyRow) error {
-	row.Time = time.Now().UTC().Format(time.RFC3339Nano)
-	data, err := json.Marshal(row)
-	if err != nil {
-		return err
+	return j.appendRows([]copyRow{row})
+}
+
+// appendRows keeps local validation failures durable without one fsync per
+// name. Each row still has its own newline, so interrupted writes resume.
+func (j *copyJournal) appendRows(rows []copyRow) error {
+	var data []byte
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, row := range rows {
+		row.Time = stamp
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		data = append(data, encoded...)
+		data = append(data, '\n')
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if _, err := j.file.Write(append(data, '\n')); err != nil {
+	if _, err := j.file.Write(data); err != nil {
 		return err
 	}
 	return j.file.Sync()

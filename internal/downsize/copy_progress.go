@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 // copyProgress tracks what a long copy is doing for the periodic progress
@@ -147,6 +149,12 @@ func (c *planFreeCopier) retrySkipped(ctx context.Context) error {
 		}()
 	}
 	for _, s := range list {
+		if chunkstore.ValidateMetricName(s.Name) != nil {
+			// The immutable name limit cannot heal after a transfer retry.
+			// Its failure is already durable; keep it in the final report.
+			c.skip(s)
+			continue
+		}
 		select {
 		case work <- s:
 		case <-ctx.Done():
