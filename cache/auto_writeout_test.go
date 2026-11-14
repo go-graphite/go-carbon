@@ -30,6 +30,7 @@ func TestAutoWriteoutKeepsPhasesAfterEarlyWrite(t *testing.T) {
 					names[i] = fmt.Sprintf("phase.metric.%08d", i)
 					p := points.OnePoint(names[i], 1, time.Now().Unix())
 					if restored {
+						p.FirstArrival = time.Now().UnixNano()
 						c.AddRestored(p)
 					} else {
 						c.Add(p)

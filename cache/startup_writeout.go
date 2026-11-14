@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// startupWriteout freezes batching time while metadata warms. Arrivals and
-// deadlines use the same clock, so release needs no per-metric rescheduling.
+// startupWriteout retains the legacy fixed-rate startup clock. Automatic
+// pacing uses real arrival time and stable wall-clock phases during warmup.
 type startupWriteout struct {
 	at       time.Time
 	released atomic.Pointer[time.Time]
