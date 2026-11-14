@@ -392,6 +392,9 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 			}
 		}
 		s.prog.mu.Unlock()
+		if live, ok := s.b.(*syncLiveBackend); ok {
+			snap.WaitingForStore = live.waiting.Load() > 0
+		}
 		snap.Effective = o.policy
 		return snap
 	}, cancelFile)

@@ -144,6 +144,8 @@ type Service struct {
 	pprofServer                   *http.Server
 	pprofListener                 net.Listener
 	pprofErr                      chan error
+	requestContext                context.Context
+	requestCancel                 context.CancelFunc
 	stopped                       bool
 	copyMu                        sync.RWMutex
 	storeCopy                     *storecopy.Manager
@@ -315,6 +317,7 @@ func (s *Service) Start() error {
 	}
 	s.listener = listener
 	s.stopped = false
+	s.requestContext, s.requestCancel = context.WithCancel(context.Background())
 	s.server = newHTTPServer(bind, s.Handler())
 	if s.config.Pprof != "" {
 		pprofListener, err := net.Listen("tcp", s.config.Pprof)
@@ -433,10 +436,23 @@ func (s *Service) changed() {
 		callback()
 	}
 }
-func (s *Service) Stop() error {
+
+// CancelTransfers rejects new work and cancels admitted requests without waiting.
+// Call before input handoff; Stop later joins handlers before storage closes.
+func (s *Service) CancelTransfers() {
+	s.mu.Lock()
+	s.stopped = true
+	if s.requestCancel != nil {
+		s.requestCancel()
+	}
+	s.mu.Unlock()
 	if s.store != nil {
 		s.store.CancelNativeTransfers()
 	}
+}
+
+func (s *Service) Stop() error {
+	s.CancelTransfers()
 	resources := s.takeResources()
 	if resources.server == nil {
 		s.closeNativeSources()
@@ -547,7 +563,8 @@ func (s *Service) Handler() http.Handler {
 		s.mu.Lock()
 		if s.stopped {
 			s.mu.Unlock()
-			http.Error(w, "buckyd is stopped", http.StatusServiceUnavailable)
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "buckyd is stopping; retry after restart", http.StatusServiceUnavailable)
 			return
 		}
 		// A missing secret must never select the legacy unauthenticated path.
@@ -564,10 +581,31 @@ func (s *Service) Handler() http.Handler {
 			s.secret = secret
 			s.authPending.Store(false)
 		}
+		if s.requestContext == nil {
+			s.requestContext, s.requestCancel = context.WithCancel(context.Background())
+		}
+		serviceCtx := s.requestContext
+		ctx, cancel := context.WithCancel(r.Context())
+		cancelDone := make(chan struct{})
+		stop := context.AfterFunc(serviceCtx, func() {
+			defer close(cancelDone)
+			cancel()
+			// Request cancellation alone cannot unblock an upload's Body.Read or a
+			// blocked socket write. Allow a short window for a retryable error reply.
+			controller := http.NewResponseController(w)
+			_ = controller.SetReadDeadline(time.Now())
+			_ = controller.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		})
 		s.handlers.Add(1)
 		s.mu.Unlock()
 		defer s.handlers.Done()
-		mux.ServeHTTP(w, r)
+		defer cancel()
+		defer func() {
+			if !stop() {
+				<-cancelDone
+			}
+		}()
+		mux.ServeHTTP(&restartResponse{ResponseWriter: w, ctx: serviceCtx}, r.WithContext(ctx))
 	})
 }
 
@@ -1191,4 +1229,37 @@ func (s *Service) hashring(w http.ResponseWriter, r *http.Request) {
 // through the app's existing persister before exporting committed raw bytes.
 func (s *Service) SetTransferFlush(flush func(context.Context, []string) error) {
 	s.flushTransfer = flush
+}
+
+// Preserve streaming and ResponseController support. Once a stream has started,
+// cancellation cuts it short; before headers, return an explicit retryable status.
+type restartResponse struct {
+	http.ResponseWriter
+	ctx   context.Context
+	wrote bool
+}
+
+func (w *restartResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *restartResponse) WriteHeader(code int) {
+	if w.wrote {
+		return
+	}
+	w.wrote = true
+	if w.ctx.Err() != nil {
+		code = http.StatusServiceUnavailable
+		w.Header().Set("Retry-After", "1")
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+func (w *restartResponse) Write(p []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+func (w *restartResponse) Flush() {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }

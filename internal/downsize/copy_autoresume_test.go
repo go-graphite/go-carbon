@@ -241,19 +241,20 @@ func TestPlanFreeCopyRidesThroughSourceAndTargetRestarts(t *testing.T) {
 	}
 }
 
-// Every host answers its status endpoint but the pull keeps failing
-// transiently: that is a genuine stall and fails loudly after --stall-timeout.
-func TestPlanFreeCopyStallFailsOnlyWithHostsUp(t *testing.T) {
+// A serving status endpoint does not imply native readiness. Keep waiting
+// through a 503 outage beyond the old stall budget, until caller cancellation.
+func TestPlanFreeCopyRestartWaitsWithStatusUp(t *testing.T) {
 	f, froms, dst := newRestartFixture(t, copyNames("a.", 50))
 	f.pullCode = func() int { return http.StatusServiceUnavailable }
 	o := copyTestOptions(t, froms[0], dst.url())
 	o.tick, o.maxBackoff = 5*time.Millisecond, 20*time.Millisecond
 	o.stallTimeout = 150 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	o.progressInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	err := planFreeCopy(ctx, o)
-	if !errors.Is(err, errCopyStall) {
-		t.Fatalf("want stall error, got %v", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want caller deadline, got %v", err)
 	}
 }
 

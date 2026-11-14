@@ -49,10 +49,14 @@ type syncLiveBackend struct {
 	listLimit            atomic.Int64 // learned catalog page cap after a truncated JSON response
 	infoLimits           sync.Map     // store -> *atomic.Int64, learned metadata request cap
 	bytes                atomic.Int64 // response bytes read for verification
-	waits                atomic.Int64 // retries while a store was unavailable
-	busy                 atomic.Int64 // retries after 429 (all transfer slots taken)
-	timings              sync.Map     // phase + store -> *syncIOTime
-	windowSelectionSlots sync.Map     // source -> once-initialized selection admission
+	waiting              atomic.Int64
+	waitLogMu            sync.Mutex
+	waitLog              time.Time
+	retryTick            time.Duration // tests may shorten restart waits
+	waits                atomic.Int64  // retries while a store was unavailable
+	busy                 atomic.Int64  // retries after 429 (all transfer slots taken)
+	timings              sync.Map      // phase + store -> *syncIOTime
+	windowSelectionSlots sync.Map      // source -> once-initialized selection admission
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
 	windowPinned         time.Time
@@ -145,13 +149,21 @@ type syncHTTPError struct {
 
 func (e *syncHTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.status, e.body) }
 
-// wait retries transport errors and 429/5xx answers until the store has
-// failed for --host-wait without one success: a restart or a busy store is
-// waited out inside the tool. A 429 is retried after syncBusyDelay; other
-// failures back off from 2 s to 30 s.
+// wait keeps restart failures inside the current operation, without a deadline.
+// A 429 retains its busy budget. Other API/validation errors return immediately.
+// Jittered backoff caps at 30s and wait logs are limited to once per minute.
 func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call func() error) error {
 	defer b.recordTime(what, store)()
-	delay := 2 * time.Second
+	delay := b.retryTick
+	if delay <= 0 {
+		delay = 2 * time.Second
+	}
+	var waiting bool
+	defer func() {
+		if waiting {
+			b.waiting.Add(-1)
+		}
+	}()
 	var since time.Time
 	busy := 0
 	for attempt := 1; ; attempt++ {
@@ -167,13 +179,13 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 		} else if errors.As(err, &api) {
 			status = api.Status
 		}
-		if status != 0 && status != http.StatusTooManyRequests && status < 500 {
+		if status != http.StatusTooManyRequests && !restartCopyError(err) {
 			return err
 		}
 		if since.IsZero() {
 			since = time.Now()
 		}
-		if time.Since(since) > b.o.hostWait {
+		if !restartCopyError(err) && time.Since(since) > b.o.hostWait {
 			return fmt.Errorf("%s %s: %w for %s: %w", what, store, errSyncStoreDown, b.o.hostWait, err)
 		}
 		if status == http.StatusTooManyRequests {
@@ -185,8 +197,17 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 			continue
 		}
 		b.waits.Add(1)
-		event("sync_host_wait", map[string]any{"what": what, "store": store, "attempt": attempt, "delay_seconds": delay.Seconds(), "error": err.Error()})
-		if err := sleepContext(ctx, delay); err != nil {
+		if !waiting {
+			waiting = true
+			b.waiting.Add(1)
+		}
+		b.waitLogMu.Lock()
+		if time.Since(b.waitLog) >= time.Minute {
+			b.waitLog = time.Now()
+			event("sync_host_wait", map[string]any{"state": "waiting for store", "what": what, "store": store, "attempt": attempt, "delay_seconds": delay.Seconds(), "error": err.Error()})
+		}
+		b.waitLogMu.Unlock()
+		if err := sleepContext(ctx, delay/2+rand.N(delay/2+1)); err != nil {
 			return err
 		}
 		delay = min(2*delay, 30*time.Second)
@@ -439,7 +460,13 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 	if idle == 0 {
 		idle = defaultTransferIdle
 	}
-	o := copyOptions{auth: b.o.auth, rate: b.o.rate, froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
+	o := copyOptions{onWaiting: func(waiting bool) {
+		if waiting {
+			b.waiting.Add(1)
+		} else {
+			b.waiting.Add(-1)
+		}
+	}, auth: b.o.auth, rate: b.o.rate, froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
 		streams: b.o.copyStreams, maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
 		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute}
 	if b.o.copyTemplate != nil {
@@ -487,7 +514,7 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 		if err := os.Remove(probeJournal); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return syncCopyResult{}, err
 		}
-		if err := b.copy(ctx, b.copyOptions(source, target, probeNames, probeJournal, 0)); err != nil {
+		if err := b.copyResuming(ctx, source, b.copyOptions(source, target, probeNames, probeJournal, 0)); err != nil {
 			if ctx.Err() != nil {
 				return syncCopyResult{}, ctx.Err()
 			}
@@ -532,7 +559,7 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 		options := b.copyOptions(source, target, namesPath, journal, len(names))
 		options.onCommitted, _ = ctx.Value(syncCopyProgressKey{}).(func(int))
 		options.onProgress = progress
-		err = b.copy(ctx, options)
+		err = b.copyResuming(ctx, source, options)
 		if err == nil || ctx.Err() != nil {
 			break
 		}
@@ -609,4 +636,8 @@ func copyJournalFailures(path, source string, names []string) ([]string, error) 
 		}
 	}
 	return failed, nil
+}
+
+func (b *syncLiveBackend) copyResuming(ctx context.Context, source string, options copyOptions) error {
+	return b.wait(ctx, "copy", source, func() error { return b.copy(ctx, options) })
 }

@@ -83,7 +83,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.IntVar(&c.live.carbonPort, "carbonserver-port", 8080, "carbonserver port on every store for verification")
 	flags.IntVar(&c.sync.verifyStreams, "verify-streams", 0, "deprecated compatibility flag: 0 or the same value as --streams; an independent verification budget is rejected")
 	flags.IntVar(&c.live.copyStreams, "copy-streams", 0, "deprecated compatibility flag: use --streams for the total budget; a different positive value is rejected")
-	flags.DurationVar(&c.live.hostWait, "host-wait", 30*time.Minute, "wait for a restarting store before failing reads")
+	flags.DurationVar(&c.live.hostWait, "host-wait", 30*time.Minute, "busy-store wait budget; restart failures are always retried until cancellation")
 	flags.IntVar(&c.live.copyAttempts, "copy-attempts", 6, "copy engine runs per name list, resuming its journal")
 	if err := flags.Parse(args); err != nil {
 		return c, err

@@ -240,6 +240,9 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 		}
 	}
 	p.phase = metricToken(snapshot.Phase)
+	if snapshot.WaitingForStore {
+		p.phase = "waiting_for_store"
+	}
 	if p.phase == "" {
 		p.phase = "starting"
 	}

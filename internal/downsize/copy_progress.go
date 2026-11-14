@@ -18,12 +18,13 @@ import (
 // copyProgress tracks what a long copy is doing for the periodic progress
 // line and the stall watchdog. All methods are nil-safe.
 type copyProgress struct {
-	mu          sync.Mutex
-	waiting     map[string]time.Time // host -> not answering since
-	lastSuccess time.Time
-	retries     atomic.Int64
-	inFlight    atomic.Int64
-	total       atomic.Int64 // names this run will copy; -1 until counted
+	restartWaiting atomic.Int64
+	mu             sync.Mutex
+	waiting        map[string]time.Time // host -> not answering since
+	lastSuccess    time.Time
+	retries        atomic.Int64
+	inFlight       atomic.Int64
+	total          atomic.Int64 // names this run will copy; -1 until counted
 }
 
 func newCopyProgress() *copyProgress {
@@ -94,7 +95,7 @@ func (p *copyProgress) waits(roles map[string]string) []string {
 func (p *copyProgress) stuck() time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.waiting) > 0 || p.inFlight.Load() == 0 {
+	if p.restartWaiting.Load() > 0 || len(p.waiting) > 0 || p.inFlight.Load() == 0 {
 		p.lastSuccess = time.Now()
 	}
 	return time.Since(p.lastSuccess)

@@ -4,18 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
 // hostWaiter is the shared wait/retry policy for copy commands that talk to
 // buckyd origins (copy today, sync next): a host that does not answer its
 // status endpoint is restarting and is waited for without limit; transient
-// failures while every host answers fail loudly only after stallTimeout.
+// failures unrelated to a restart fail loudly after stallTimeout.
 type hostWaiter struct {
 	m                              *mover
+	logMu                          sync.Mutex
+	lastLog                        time.Time
+	observeWait                    func(bool)
 	tick, maxBackoff, stallTimeout time.Duration
 	progress                       *copyProgress // optional
 }
@@ -25,10 +32,21 @@ var errCopyStall = errors.New("copy stalled")
 // retryTransient retries guard responses (429 left by request, 502/503/504),
 // refused/reset connections and other transport errors with capped
 // exponential backoff for as long as a source or target restart takes. Only
-// --stall-timeout without a successful call ends it, loudly. Definitive API
+// non-restart --stall-timeout without a successful call ends it. Definitive API
 // errors and idle timeouts return at once.
 func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []string, call func() error) error {
 	delay := w.tick
+	waiting := false
+	defer func() {
+		if waiting {
+			if w.progress != nil {
+				w.progress.restartWaiting.Add(-1)
+			}
+			if w.observeWait != nil {
+				w.observeWait(false)
+			}
+		}
+	}()
 	var since, first time.Time
 	wasDown := false
 	for attempt := 1; ; attempt++ {
@@ -66,12 +84,26 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 			since = now
 		}
 		wasDown = down
-		if stuck := time.Since(since); !down && stuck >= w.stallTimeout {
+		if stuck := time.Since(since); !down && !restartCopyError(err) && stuck >= w.stallTimeout {
 			event("copy_stalled", map[string]any{"level": "error", "path": path, "hosts": hosts, "attempts": attempt, "stuck_seconds": stuck.Seconds(), "stall_timeout": w.stallTimeout.String(), "error": err.Error()})
 			return fmt.Errorf("%w: %s: no progress for %s with every host up (--stall-timeout %s): %w", errCopyStall, path, stuck.Round(time.Second), w.stallTimeout, err)
 		}
-		event("guard_retry", map[string]any{"path": path, "attempt": attempt, "delay_seconds": delay.Seconds(), "host_down": down, "retry_seconds": time.Since(first).Seconds(), "error": err.Error()})
-		if err := sleepContext(ctx, delay); err != nil {
+		if !waiting && restartCopyError(err) {
+			waiting = true
+			if w.progress != nil {
+				w.progress.restartWaiting.Add(1)
+			}
+			if w.observeWait != nil {
+				w.observeWait(true)
+			}
+		}
+		w.logMu.Lock()
+		if time.Since(w.lastLog) >= time.Minute {
+			w.lastLog = time.Now()
+			event("guard_retry", map[string]any{"path": path, "attempt": attempt, "delay_seconds": delay.Seconds(), "host_down": down, "retry_seconds": time.Since(first).Seconds(), "error": err.Error()})
+		}
+		w.logMu.Unlock()
+		if err := sleepContext(ctx, delay/2+rand.N(delay/2+1)); err != nil {
 			return err
 		}
 		delay = min(2*delay, w.maxBackoff)
@@ -81,7 +113,7 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 // restartCause matches a target 500 whose cause is the source export
 // transport (refused, reset or cut while the source restarts), as the target
 // buckyd reports it.
-var restartCause = []string{"connection refused", "connection reset", "broken pipe", "unexpected EOF", ": EOF", "i/o timeout", "no route to host", "server closed idle connection", "timeout awaiting response headers"}
+var restartCause = []string{"connection refused", "connection reset", "broken pipe", "unexpected EOF", ": EOF", "i/o timeout", "no route to host", "server closed idle connection", "timeout awaiting response headers", "store recovery has not finished", "store recovery is not finished", "not ready", "native source session expired or daemon restarted", "context canceled"}
 
 // transientCopyError reports errors a host restart produces: guard and
 // gateway responses, a target 500 caused by a source transport error, and any
@@ -169,4 +201,35 @@ func (w *hostWaiter) firstDown(ctx context.Context, hosts []string) string {
 		}
 	}
 	return ""
+}
+
+// restartCopyError excludes validation, authorization and storage failures.
+func restartCopyError(err error) bool {
+	var api *apiError
+	var h *syncHTTPError
+	if errors.As(err, &h) {
+		api = &apiError{Status: h.status, Message: h.body}
+	} else {
+		_ = errors.As(err, &api)
+	}
+	if api != nil {
+		if api.Status == 503 || api.Status == 502 || api.Status == 504 {
+			return true
+		}
+		if api.Status == 500 || api.Status == 410 {
+			msg := strings.ToLower(api.Message)
+			for _, cause := range restartCause {
+				if strings.Contains(msg, strings.ToLower(cause)) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) && dns.IsNotFound {
+		return false
+	}
+	var ne net.Error
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.As(err, &ne)
 }

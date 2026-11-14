@@ -581,6 +581,9 @@ func (app *App) stopListeners() <-chan struct{} {
 // Keep reads available while receivers and other input cleanup finish.
 // Assumes we are holding app.Lock().
 func (app *App) stopInputListeners() {
+	if app.Buckyd != nil {
+		app.Buckyd.CancelTransfers()
+	}
 	logger := zapwriter.Logger("app")
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {
