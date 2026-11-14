@@ -18,7 +18,6 @@ import (
 // value handles close. Queued callers hold no Pebble buffers. Block loading is
 // separately bounded for writeout and background readers as well.
 const (
-	maxConcurrentStoreReads = 32
 	maxConcurrentBlockLoads = 16
 )
 

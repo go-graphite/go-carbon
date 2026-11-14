@@ -95,7 +95,8 @@ store-compaction-workers = 0
 # Increase only when profiles show admission waits and the device has headroom.
 store-block-load-concurrency = 0
 # Foreground store reads (render, metadata, digest and history fetch) share this
-# budget. 0 keeps 32; range 0..1024. SIGHUP resizes without interrupting reads.
+# budget. 0 uses 4 * GOMAXPROCS, bounded to 32..1024; range 0..1024.
+# SIGHUP recomputes the automatic budget and resizes without interrupting reads.
 # Each admitted read can pin uncached SST buffers: raising this increases memory
 # pressure. Tune using store_read_capacity/store_reads_in_progress/store_reads_queued.
 store-read-concurrency = 0

@@ -810,7 +810,11 @@ func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names 
 				}
 			}
 			if !match && c.points != nil && c.err == nil {
-				match = syncSumCovered(c.points[n], target.digests[n], step, from, until)
+				// A successful source fetch that omitted this name has no
+				// directional holes. The point comparison below also skips it;
+				// do not materialize a target archive just to reach that verdict.
+				series, found := c.points[n]
+				match = !found || syncSumCovered(series, target.digests[n], step, from, until)
 			}
 
 			if match {
