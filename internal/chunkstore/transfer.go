@@ -487,16 +487,35 @@ func (s *Store) ingestTransferStage(ctx context.Context, first uint64, stage *tr
 		}
 	}
 	began = time.Now()
-	stats, err := s.db.IngestWithStats(paths)
+	err = s.ingestTransferTables(ctx, paths)
 	s.transferApply.ingest.Add(uint64(time.Since(began)))
 	if err != nil {
 		return err
 	}
-	s.ingestStats.tables.Add(uint64(len(paths)))
 	s.ingestStats.entries.Add(uint64(entries))
-	s.ingestStats.bytes.Add(stats.Bytes)
-	s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
-	s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
+	return nil
+}
+
+// Pebble serializes ingest preparation with foreground commits, and target-level
+// searches hold the DB mutex needed by commit preparation. Release these locks
+// after each bounded table so a transfer spanning hundreds of time buckets
+// cannot obstruct foreground commits for the entire table set.
+// Reserved IDs remain unpublished until all tables have been ingested; a partial
+// failure leaves unreachable data, just as cancellation before publication does.
+func (s *Store) ingestTransferTables(ctx context.Context, paths []string) error {
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		stats, err := s.db.IngestWithStats([]string{path})
+		if err != nil {
+			return err
+		}
+		s.ingestStats.tables.Add(1)
+		s.ingestStats.bytes.Add(stats.Bytes)
+		s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
+		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
+	}
 	return nil
 }
 

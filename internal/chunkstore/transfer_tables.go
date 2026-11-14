@@ -157,17 +157,27 @@ func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage 
 	return stage.verify(ctx)
 }
 
+// A single validated key/value may exceed this payload target and is kept
+// intact. Table boundaries never change the stored key/value bytes.
+const transferTableBytes = 8 << 20
+
 func (s *Store) writeTransferTables(ctx context.Context, first uint64, stage *transferStage) (paths []string, err error) {
 	keys := stage.keys
 	// Keep each namespace/time bucket in a separate table, so its bounds cover
 	// only the reserved IDs and cannot overlap unrelated foreground writes.
 	for len(keys) > 0 {
 		n := 1
+		size := len(keys[0].Key) + len(keys[0].Value) + 16
 		prefix := keys[0].Key[:1]
 		if prefix[0] == continuationBucketKeyPrefix {
 			prefix = keys[0].Key[:5]
 		}
 		for n < len(keys) && bytes.HasPrefix(keys[n].Key, prefix) {
+			next := len(keys[n].Key) + len(keys[n].Value) + 16
+			if size+next > transferTableBytes {
+				break
+			}
+			size += next
 			n++
 		}
 		path := s.fs.PathJoin(s.dir, fmt.Sprintf("transfer-%020d-%d.sst", first, len(paths)))
