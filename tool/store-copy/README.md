@@ -1,13 +1,13 @@
-# Store copy
+# Store controller
 
-`store-copy` grows the existing `downsize` controller. Both entrypoints call the
+`storectl` is the store controller; `store-copy` prints a deprecation notice and calls the
 same code and use identical plans, manifest hashes, operation IDs and journals.
 The resize/merge native baseline is the first consumer; replacement, gap repair
 and remaining legacy frontends migrate after its canary.
 
-Build with `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build ./tool/store-copy`.
+Build with `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build ./tool/storectl`.
 The owning donor and receiver daemons must also contain the native engine.
-Existing metric commands keep their behavior unless `--engine bulk` is selected.
+The compatibility entry point uses the same CLI and journal engine.
 
 ## Controller progress metrics
 
@@ -42,11 +42,11 @@ An already running binary cannot start exporting them, and history is not backfi
 `sync` discovers the source/target union, copies missing names, verifies coverage,
 fills gaps and reverifies in one resumable run. Existing finite target values win.
 There is no plan directory or per-name byte estimate. `copy` is a compatibility
-alias: it prints the equivalent `store-copy sync` argv and calls the same code.
+alias: it prints the equivalent `storectl sync` argv and calls the same code.
 
 ```sh
 export BUCKYD_TOKEN=...  # read+update JWT, supplied by the operator
-store-copy sync \
+storectl sync \
   --source http://donor-a:4242 --source http://donor-b:4242 \
   --to http://target:4242 --state ./block-state --streams 0 \
   --window closed:1794592020:1794592680 \
@@ -60,10 +60,14 @@ command resumes the durable discovery cursor, verification batches and native
 receipts. Windows are half-open `[FROM, UNTIL)` in Unix seconds. Keep their order,
 `--verify-batch` and `--settle` unchanged on resume.
 
-- Without `--window`, verify/copy/fill covers full history. With windows, writes
-  cover only those windows, using the native target-wins combiner. Add
-  `--full-history` explicitly to copy full histories and sample them in addition
-  to verifying every name in every window (`--sample-every 64`, 1=all, 0=none).
+- Full-history copy/fill is enabled by default, including runs with windows. Every
+  selected window is verified for every name; additional full histories are sampled
+  (`--sample-every 64`, 1=all, 0=none). Set `--no-full-history` with windows to
+  restrict all writes to those windows using the native target-wins combiner.
+  `--full-history` remains an accepted compatibility spelling.
+- `--no-copy` makes verification read-only: missing coverage stays residual.
+  `--no-verify` stops after discovery/copy and does not prove readiness.
+  `--phase copy` selects only the original journal-compatible metric engine.
 - `--streams` is the total per-host transfer budget. Zero resolves advertised
   source/target capacity (the smallest advertised per-host cap for end-to-end sync). Verify and copy are serial phases, so each can use the
   entire budget; native window copies currently use one serial range stream.
@@ -89,7 +93,7 @@ receipts. Windows are half-open `[FROM, UNTIL)` in Unix seconds. Keep their orde
 Callers that require only the original metric transfer phase use:
 
 ```sh
-store-copy sync --phase copy --source http://donor:4242 --to http://target:4242 \
+storectl sync --phase copy --source http://donor:4242 --to http://target:4242 \
   --names sorted-names.txt --state copy.jsonl --streams 0
 ```
 
@@ -107,12 +111,14 @@ sync progress is in `FILE.sync/progress.json`. Other new end-to-end runs use a
 state directory directly. A file-shaped copy state excludes `--window`, because
 its original phase imports complete histories.
 
-Window sync defaults are one contract for every build of this code. Older forks
-that verified windows but copied full histories must merge this implementation,
-including CLI dispatch and window selection. To request their old write scope,
-use `--full-history` explicitly with a fresh state directory. Do not silently
-restore the fork's old default when resolving the merge. The effective scope in
-startup events and progress JSON makes the deployed behavior inspectable.
+Window sync defaults are one contract for every build of this code. Previously,
+master copied windows only unless `--full-history` was set, while older forks
+verified windows and copied complete histories. The shared default now includes
+full history, following the all-phases-by-default contract. Merge this CLI and its
+window dispatch into older branches together; use `--no-full-history` to retain
+an existing window-only journal, and `--full-history` (or no scope flag) for an
+existing full-history journal. Scope is bound to the journal identity, so an
+incompatible resume fails rather than silently widening old work.
 
 ## Resize / merge baseline
 
@@ -120,9 +126,9 @@ After the campaign owner pauses the existing controller, retains its journal and
 approves the concrete binary/plan through the campaign's PLAN-READY/WRITE-OK flow:
 
 ```sh
-store-copy run --plan /path/to/existing-plan --state /path/to/existing-journal \
+storectl run --plan /path/to/existing-plan --state /path/to/existing-journal \
   --engine bulk --bulk-only --apply
-store-copy status --plan /path/to/existing-plan --state /path/to/existing-journal
+storectl status --plan /path/to/existing-plan --state /path/to/existing-journal
 ```
 
 Do not create another journal or change the operation identity. The existing
@@ -178,10 +184,10 @@ The daemon rejects native ranges above 4096 names (`chunkstore.NativeMaxRangeNam
 The controller sends every native plan stream as consecutive sub-ranges of at
 most 4096 names, so plans with larger segments (the old 100,000-name default,
 or `config --mode plan --segment-metrics 10000`) also work. Resume skips the
-sub-ranges that already completed. `store-copy plan --segment-metrics N` sets
+sub-ranges that already completed. `storectl plan --segment-metrics N` sets
 the names per plan stream segment and defaults to 4096.
 
-`store-copy plan --names FILE --source URL --target URL --out DIR --apply` plans an
+`storectl plan --names FILE --source URL --target URL --out DIR --apply` plans an
 exact name list (one name per line, byte-sorted and unique: `LC_ALL=C sort -u`)
 from one buckyd origin to another. The result is the same plan, byte for byte,
 that `config --mode plan` writes for a one-member old ring, a one-member new ring
@@ -243,13 +249,13 @@ value, raising or lowering it, without a new journal or re-copy. Each override
 is printed as a `policy_override` event and a `WARNING` line on stderr, saved in
 the journal before any transfer is admitted, and listed with the effective
 policy under `backlog_policy`, `read_p99_policy` and `policy_overrides` in
-`store-copy status`. `--backlog-baseline-window` is fixed: it describes how the
+`storectl status`. `--backlog-baseline-window` is fixed: it describes how the
 saved baseline was learned. Journals written before the read policy was saved
 adopt this run's read flags (default floor 50 ms) and record the replaced 2 ms
 floor as an override.
 
 ```sh
-store-copy run --engine metric --plan SAME_PLAN --state SAME_STATE \
+storectl run --engine metric --plan SAME_PLAN --state SAME_STATE \
   --health-map SAME_HEALTH_MAP --apply --read-p99-floor-ms 80 --backlog-soft-ratio 4
 ```
 
@@ -274,7 +280,7 @@ export RESIZE_MAX_SPEED_DECISION_SHA256=EXACT_RAW_DECISION_SHA256
 export RESIZE_MAX_SPEED_WRITE_OK=/campaign/existing-WRITE-OK.json
 export RESIZE_MAX_SPEED_WRITE_OK_SHA256=EXACT_EXISTING_WRITE_OK_SHA256
 export RESIZE_HOST_JWT_REFRESH=1
-store-copy run --engine metric --plan SAME_PLAN --state SAME_STATE \
+storectl run --engine metric --plan SAME_PLAN --state SAME_STATE \
   --health-map SAME_HEALTH_MAP --apply # retain the original metric arguments
 ```
 
@@ -322,9 +328,9 @@ Use a root read token in `BUCKYD_TOKEN`; no token is written to capture metadata
 Check free disk before capture, and remove private captures/profiles afterward.
 
 ```sh
-store-copy capture-native --source http://DONOR:PORT \
+storectl capture-native --source http://DONOR:PORT \
   --names planned-sample-names.json --out /private/scratch/native.json
-store-copy bulk-eval --native --native-capture /private/scratch/native.json \
+storectl bulk-eval --native --native-capture /private/scratch/native.json \
   --scratch /private/scratch --batch 100000 --workers 32 \
   --overlap-percent 50 --profile-prefix /private/scratch/native-proof
 ```
@@ -363,9 +369,9 @@ of archive timestamps. Both endpoints are required, in Unix seconds or whole
 second RFC3339. Use the target-wins engine for existing names:
 
 ```sh
-store-copy plan --spec gap-spec.json --out gap-plan --apply \
+storectl plan --spec gap-spec.json --out gap-plan --apply \
   --from 2026-01-01T00:00:00Z --until 2026-01-01T01:00:00Z
-store-copy run --plan gap-plan --state gap-window.jsonl \
+storectl run --plan gap-plan --state gap-window.jsonl \
   --engine bulk --bulk-only --combine-existing --apply
 ```
 
@@ -414,7 +420,7 @@ forwards them to every missing-name and hole-fill transfer, including probes
 and retries. For example, resume a busy target with smaller batches:
 
 ```sh
-store-copy sync --source http://source:4242 --to http://target:4242 \
+storectl sync --source http://source:4242 --to http://target:4242 \
   --state ./sync-state --max-batch-bytes=16777216 --transfer-idle-timeout=80s
 ```
 
@@ -440,11 +446,11 @@ recent gap, explicitly include those names so a two-day archive is compared and
 filled over the requested window too:
 
 ```sh
-store-copy sync --source http://peer-a:4242 --from http://peer-b:4242 \
+storectl sync --source http://peer-a:4242 --from http://peer-b:4242 \
   --to http://target:4242 --window incident:1794595620:1794597120 \
   --include-short-retention --state ./incident-fill
 # Independent verification: use a new state directory with the same options.
-store-copy sync --source http://peer-a:4242 --from http://peer-b:4242 \
+storectl sync --source http://peer-a:4242 --from http://peer-b:4242 \
   --to http://target:4242 --window incident:1794595620:1794597120 \
   --include-short-retention --state ./incident-verify
 ```
@@ -467,7 +473,7 @@ omitted by the native window exporter are reported as failed names/residuals,
 so a partial boundary copy cannot be reported as complete.
 
 ```sh
-store-copy sync --source http://source:4242 --to http://target:4242 \
+storectl sync --source http://source:4242 --to http://target:4242 \
   --state ./gap-state --window incident:1794592020:1794592680
 ```
 
@@ -518,7 +524,7 @@ the source of truth; the snapshot is for monitoring. No tokens enter these files
 Resume verification with more parallel reads while keeping copy batch receipts stable:
 
 ```sh
-store-copy sync --from http://source:4242 --to http://target:4242 \
+storectl sync --from http://source:4242 --to http://target:4242 \
   --state ./sync-state --streams 16 --verify-streams 128
 ```
 

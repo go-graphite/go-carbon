@@ -82,7 +82,7 @@ func (l *originList) Set(value string) error {
 
 // PlanFreeCopyMain is the compatibility spelling of the canonical sync command.
 func PlanFreeCopyMain(ctx context.Context, args []string) error {
-	event("command_alias", map[string]any{"argv": append([]string{"store-copy", "sync"}, args...)})
+	event("command_alias", map[string]any{"argv": append([]string{"storectl", "sync"}, args...)})
 	return SyncMain(ctx, args)
 }
 

@@ -27,6 +27,7 @@ import (
 // multi-fetch, and copies through the plan-free copy engine (planFreeCopy),
 // which owns batching, retries and its own resume journal.
 type syncLiveOptions struct {
+	noCopy       bool
 	copyTemplate *copyOptions
 	carbonPort   int
 	copyStreams  int
@@ -394,6 +395,9 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 // aborts (a store restarting) are rerun from its journal up to
 // --copy-attempts; names still failing are reported, not fatal.
 func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names []string, journal string) (syncCopyResult, error) {
+	if b.o.noCopy {
+		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
+	}
 	defer b.recordTime("copy", source)()
 	namesPath := journal[:len(journal)-len(".jsonl")] + ".names"
 	probeNames := journal + ".probe.names"

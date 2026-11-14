@@ -31,9 +31,9 @@ func TestSyncCommandModesAndFlags(t *testing.T) {
 		{"default", nil, ""},
 		{"windows", []string{"--window", "closed:100:200", "--window", "dump:300:400"}, ""},
 		{"full", []string{"--window", "100:200", "--full-history", "--max-batch-bytes", "65536"}, ""},
-		{"native bytes", []string{"--window", "100:200", "--max-batch-bytes", "65536"}, "--max-batch-bytes has no effect"},
-		{"native streams", []string{"--window", "100:200", "--copy-streams", "0"}, "--copy-streams has no effect"},
-		{"native attempts", []string{"--window", "100:200", "--copy-attempts", "2"}, "--copy-attempts has no effect"},
+		{"native bytes", []string{"--window", "100:200", "--no-full-history", "--max-batch-bytes", "65536"}, "--max-batch-bytes has no effect"},
+		{"native streams", []string{"--window", "100:200", "--no-full-history", "--copy-streams", "0"}, "--copy-streams has no effect"},
+		{"native attempts", []string{"--window", "100:200", "--no-full-history", "--copy-attempts", "2"}, "--copy-attempts has no effect"},
 		{"independent budget", []string{"--streams", "8", "--copy-streams", "2"}, "no longer sets an independent pool"},
 		{"verify separate", []string{"--streams", "8", "--verify-streams", "16"}, "no longer sets an independent budget"},
 		{"verify same", []string{"--streams", "8", "--verify-streams", "8"}, ""},
@@ -64,7 +64,7 @@ func TestSyncCommandModesAndFlags(t *testing.T) {
 			if len(c.sync.windows) > 0 && !c.sync.fullHistory && (p.Scope != "windows-only" || p.Engine != "native-window" || p.CopyStreams != 1 || p.CopyBatchBytes != 0) {
 				t.Fatalf("native %+v", p)
 			}
-			if c.sync.fullHistory && (p.Scope != "windows+full-history" || p.Engine != "metric") {
+			if c.sync.fullHistory && len(c.sync.windows) > 0 && (p.Scope != "windows+full-history" || p.Engine != "metric") {
 				t.Fatalf("full %+v", p)
 			}
 		})
@@ -248,7 +248,7 @@ func TestSyncNamesDiscoveryStreamingAndResume(t *testing.T) {
 }
 
 func TestSyncInactiveSamplingWarns(t *testing.T) {
-	for _, extra := range [][]string{{"--sample-every", "0"}, {"--window", "100:200", "--sample-every", "1"}, {"--full-history"}} {
+	for _, extra := range [][]string{{"--sample-every", "0"}, {"--window", "100:200", "--no-full-history", "--sample-every", "1"}, {"--full-history"}} {
 		old := os.Stdout
 		r, w, err := os.Pipe()
 		if err != nil {
@@ -332,5 +332,47 @@ func TestSyncAliasEndToEndAndLegacyTransition(t *testing.T) {
 				t.Fatalf("%s", data)
 			}
 		})
+	}
+}
+
+func TestSyncOptOuts(t *testing.T) {
+	c, err := parseSyncCommand(syncCLIArgs(t, "--window", "100:200", "--no-full-history", "--no-copy", "--no-verify"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.sync.fullHistory || !c.sync.noCopy || !c.sync.noVerify || !c.live.noCopy {
+		t.Fatalf("optouts: %+v", c)
+	}
+	defaults, err := parseSyncCommand(syncCLIArgs(t, "--window", "100:200"))
+	if err != nil || !defaults.sync.fullHistory {
+		t.Fatalf("default history: %+v %v", defaults.sync, err)
+	}
+	if _, err := parseSyncCommand(syncCLIArgs(t, "--no-full-history")); err == nil {
+		t.Fatal("unbounded no-full-history accepted")
+	}
+	// A read-only backend must never contact either endpoint, even for fills.
+	b := newSyncLiveBackend(syncLiveOptions{noCopy: true})
+	names := []string{"a", "b"}
+	for _, native := range []bool{false, true} {
+		var res syncCopyResult
+		if native {
+			res, err = b.CopyWindow(context.Background(), "invalid", "invalid", names, "unused", syncRanges{{From: 100, Until: 200}})
+		} else {
+			res, err = b.Copy(context.Background(), "invalid", "invalid", names, "unused")
+		}
+		if err != nil || !reflect.DeepEqual(res.Failed, names) || res.Copied != 0 {
+			t.Fatalf("read only native=%v: %+v %v", native, res, err)
+		}
+	}
+	// Copy-only orchestration must not call verification endpoints.
+	f := newFakeSync()
+	f.put(syncD1, "a", syncTestSchema)
+	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), streams: 2, batch: 2, maxRounds: 4, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+	o.noVerify = true
+	if err := runSync(context.Background(), o, f); err != nil {
+		t.Fatal(err)
+	}
+	if f.fetches.Load() != 0 || f.digested.Load() != 0 || len(f.copies) == 0 {
+		t.Fatalf("no-verify fetch=%d digest=%d copies=%v", f.fetches.Load(), f.digested.Load(), f.copies)
 	}
 }

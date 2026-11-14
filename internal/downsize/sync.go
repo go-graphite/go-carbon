@@ -18,7 +18,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/downsize/ringplan"
 )
 
-// store-copy sync brings one target store to complete history from every
+// storectl sync brings one target store to complete history from every
 // replica that may hold its names, in one resumable invocation:
 //
 //  1. discover: union of the source catalogs (/v1/transfer/list) that the
@@ -83,24 +83,25 @@ type syncBackend interface {
 }
 
 type syncOptions struct {
-	verifyStreams int
-	policy        *effectiveSyncPolicy
-	namesHash     string
-	namesFile     string
-	to            string
-	from          []string
-	ring, state   string
-	prefix        string
-	streams       int
-	batch         int
-	maxRounds     int
-	settle        time.Duration
-	windows       syncRanges
-	sampleEvery   int
-	includeShort  bool
-	fullHistory   bool
-	progress      time.Duration
-	now           func() time.Time
+	noCopy, noVerify bool
+	verifyStreams    int
+	policy           *effectiveSyncPolicy
+	namesHash        string
+	namesFile        string
+	to               string
+	from             []string
+	ring, state      string
+	prefix           string
+	streams          int
+	batch            int
+	maxRounds        int
+	settle           time.Duration
+	windows          syncRanges
+	sampleEvery      int
+	includeShort     bool
+	fullHistory      bool
+	progress         time.Duration
+	now              func() time.Time
 }
 
 func (o *syncOptions) normalize() error {
@@ -327,7 +328,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	}
 	// Keep old default journals resumable, but never reuse skipped comparisons
 	// when a recovery opts into short-retention names.
-	if o.fullHistory {
+	if o.fullHistory && len(o.windows) > 0 {
 		identityFields["full_history"] = true
 	}
 	if o.includeShort {
@@ -416,8 +417,14 @@ func (s *syncer) run(ctx context.Context) error {
 	if err := s.discover(ctx); err != nil {
 		return fmt.Errorf("discover: %w", err)
 	}
-	if err := s.copyMissing(ctx); err != nil {
-		return fmt.Errorf("copy missing: %w", err)
+	if !s.o.noCopy {
+		if err := s.copyMissing(ctx); err != nil {
+			return fmt.Errorf("copy missing: %w", err)
+		}
+	}
+	if s.o.noVerify {
+		event("phase_skipped", map[string]any{"phase": "verify", "readiness": false})
+		return nil
 	}
 	if err := s.retryWindowSelections(ctx); err != nil {
 		return fmt.Errorf("retry window selections: %w", err)

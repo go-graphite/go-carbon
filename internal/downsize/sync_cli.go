@@ -30,6 +30,8 @@ type effectiveSyncPolicy struct {
 	Windows        string `json:"windows"`
 	SampleEvery    int    `json:"sample_every"`
 	Phase          string `json:"phase"`
+	NoCopy         bool   `json:"no_copy"`
+	NoVerify       bool   `json:"no_verify"`
 }
 
 type syncCommand struct {
@@ -43,17 +45,20 @@ type syncCommand struct {
 
 func parseSyncCommand(args []string) (syncCommand, error) {
 	var c syncCommand
-	flags := flag.NewFlagSet("store-copy sync", flag.ContinueOnError)
+	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
 	flags.Lookup("state").Usage = "state directory; existing copy journal FILE resumes first, with sync state in FILE.sync; --phase copy uses a journal file"
 	flags.Lookup("streams").Usage = "total per-host transfer budget; 0 uses source/target advertised capacity; serial verify and copy phases share this budget"
-	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; default copies window points only")
+	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
 	flags.StringVar(&c.phase, "phase", "all", "all (discover, copy, verify, fill, reverify) or copy (only metric copy, legacy journal format)")
 	flags.IntVar(&c.sync.batch, "verify-batch", 500, "names per verification batch")
 	flags.IntVar(&c.sync.maxRounds, "max-rounds", 4, "verify/fill rounds")
 	flags.DurationVar(&c.sync.settle, "settle", 10*time.Minute, "ignore the newest points while replicas are writing")
 	flags.IntVar(&c.sync.sampleEvery, "sample-every", 64, "only with --window --full-history: check 1 in N full histories (1 all, 0 none)")
-	flags.BoolVar(&c.sync.fullHistory, "full-history", false, "with --window: opt into full-history metric copy/fill and full-history sampling")
+	flags.BoolVar(&c.sync.fullHistory, "full-history", true, "compatibility flag: full-history copy/fill is enabled by default; use --no-full-history for window-only work")
+	noFullHistory := flags.Bool("no-full-history", false, "with --window: restrict all copying/filling to the selected windows")
+	flags.BoolVar(&c.sync.noCopy, "no-copy", false, "verify without writing missing names or filling holes; residuals remain nonzero")
+	flags.BoolVar(&c.sync.noVerify, "no-verify", false, "skip verification and fill after discovery/copy; does not establish readiness")
 	flags.BoolVar(&c.sync.includeShort, "include-short-retention", false, "also verify/fill names whose archives all retain at most 3 days")
 	flags.IntVar(&c.live.carbonPort, "carbonserver-port", 8080, "carbonserver port on every store for verification")
 	flags.IntVar(&c.sync.verifyStreams, "verify-streams", 0, "deprecated compatibility flag: 0 or the same value as --streams; an independent verification budget is rejected")
@@ -66,6 +71,12 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if flags.NArg() != 0 {
 		return c, fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
+	if *noFullHistory {
+		c.sync.fullHistory = false
+	}
+	if *noFullHistory && len(c.sync.windows) == 0 {
+		return c, errors.New("--no-full-history requires at least one --window")
+	}
 	c.explicit = map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { c.explicit[f.Name] = true })
 	if c.phase != "all" && c.phase != "copy" {
@@ -75,7 +86,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 		return c, errors.New("invalid streams, batch limits, retry settings or timeouts")
 	}
 	if c.copy.engine != "metric" {
-		return c, errors.New("--engine accepts metric; native window mode is selected automatically by --window without --full-history")
+		return c, errors.New("--engine accepts metric; native window mode is selected by --window --no-full-history")
 	}
 	if c.copy.names != "" && c.copy.prefix != "" {
 		return c, errors.New("--names and --prefix are exclusive")
@@ -95,7 +106,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	native := len(c.sync.windows) > 0 && !c.sync.fullHistory
 	if c.phase == "copy" {
-		for _, f := range []string{"window", "full-history", "verify-batch", "max-rounds", "settle", "sample-every", "include-short-retention", "carbonserver-port", "host-wait", "copy-attempts", "copy-streams", "verify-streams"} {
+		for _, f := range []string{"window", "full-history", "no-full-history", "no-copy", "no-verify", "verify-batch", "max-rounds", "settle", "sample-every", "include-short-retention", "carbonserver-port", "host-wait", "copy-attempts", "copy-streams", "verify-streams"} {
 			if c.explicit[f] {
 				return c, fmt.Errorf("--%s has no effect with --phase copy", f)
 			}
@@ -103,7 +114,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	} else if native {
 		for _, f := range []string{"max-batch-bytes", "copy-streams", "max-batch-names", "debt-guard", "retry-interval", "max-backoff", "stall-timeout", "max-failures", "engine", "copy-attempts"} {
 			if c.explicit[f] {
-				return c, fmt.Errorf("--%s has no effect in native window sync; remove it or explicitly select --full-history", f)
+				return c, fmt.Errorf("--%s has no effect in native window sync; remove it or remove --no-full-history", f)
 			}
 		}
 	}
@@ -134,6 +145,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 		}
 		c.sync.state = c.copy.state + ".sync"
 	}
+	c.live.noCopy = c.sync.noCopy
 	c.live.tokenEnv, c.live.copyBytes, c.live.copyIdle = c.copy.tokenEnv, c.copy.maxBytes, c.copy.transferIdle
 	return c, nil
 }
@@ -169,7 +181,7 @@ func readSyncNames(path string) (string, error) {
 }
 
 func (c *syncCommand) policy(streams int) *effectiveSyncPolicy {
-	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: c.phase}
+	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: c.phase, NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
 	if c.phase == "copy" {
 		p.VerifyStreams = 0
 		p.VerifyBatch = 0
