@@ -49,7 +49,7 @@ func (r result) blocked() bool {
 
 type row struct {
 	Identity identity        `json:"identity"`
-	At       int64           `json:"at"`
+	At       float64         `json:"at"`
 	Result   json.RawMessage `json:"result"`
 }
 
@@ -175,7 +175,7 @@ func run(c *remote.Client, id identity, path string, names []string, explicit bo
 			if res.Name != name {
 				return errors.New("maintenance response identity mismatch")
 			}
-			b, err := json.Marshal(row{Identity: id, At: time.Now().Unix(), Result: rows[0]})
+			b, err := json.Marshal(row{Identity: id, At: float64(time.Now().UnixNano()) / 1e9, Result: rows[0]})
 			if err != nil {
 				return err
 			}

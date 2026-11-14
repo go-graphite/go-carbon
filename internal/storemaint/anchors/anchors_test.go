@@ -113,3 +113,22 @@ func TestBadCatalog(t *testing.T) {
 		t.Fatal("accepted unordered catalog")
 	}
 }
+
+// Python time.time() journal timestamps are fractional seconds. A successful
+// old row must skip work on resume, including a nullable absent plan digest.
+func TestResumePythonJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal")
+	data := `{"identity":{"endpoint":"http://example.invalid","mode":"dry-run","cohort":"catalog","plan_sha256":null},"at":1794660000.123456,"result":{"name":"a","archives":[]}}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &remote.Client{}
+	id := identity{Endpoint: "http://example.invalid", Mode: "dry-run", Cohort: "catalog"}
+	if err := run(c, id, path, []string{"a"}, true, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != data {
+		t.Fatalf("resume altered successful journal: %s %v", after, err)
+	}
+}
