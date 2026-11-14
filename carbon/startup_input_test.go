@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -32,7 +33,7 @@ import (
 // Delay all storage/index work after the real input-only offer. More than the
 // default RAM read-ahead budget must still drain durably on each connection.
 func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
-	if isolatedTestProcessSerial(t) {
+	if isolatedTestProcess(t) {
 		return
 	}
 	defer zapwriter.Test()()
@@ -92,43 +93,32 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	case spool = <-captured:
 	case err := <-started:
 		t.Fatal(err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("no early capture")
+	case <-t.Context().Done():
+		t.Fatal("early capture cancelled")
 	}
 	if spool == nil || next.Cache != nil || next.MetricStore != nil {
 		t.Fatal("capture waited for storage")
 	}
 	const clients, records = 2, 100000
 	stamp := time.Now().Unix() - 5
+	// Drive the actual plaintext receiver in process. The socket transfer is
+	// exercised above; kernel loopback throughput must not decide whether the
+	// capture sink drains before storage opens. Each reader still supplies more
+	// than the default 8MiB read-ahead allowance, in bounded reusable batches.
 	var writers sync.WaitGroup
 	for client := range clients {
 		writers.Go(func() {
-			conn, err := net.Dial("tcp", address)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			defer conn.Close()
-			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			var data []byte
-			for seq := range records {
-				data = fmt.Appendf(data, "client%d.%s %d %d\n", client, strings.Repeat("longsegment.", 12)+"value", seq, stamp)
-			}
-			if len(data) <= 8<<20 {
-				t.Error("fixture must exceed per-connection RAM budget")
-			}
-			if _, err := conn.Write(data); err != nil {
-				t.Error(err)
+			name := fmt.Sprintf("client%d.%svalue", client, strings.Repeat("longsegment.", 12))
+			reader := &startupPointReader{name: name, stamp: stamp, records: records}
+			next.startupInput.receiver.HandleConnection(&startupReaderConn{Reader: reader})
+			if reader.bytes <= 8<<20 {
+				t.Error("fixture must exceed per-connection RAM budget", reader.bytes)
 			}
 		})
 	}
-	writers.Wait()
-	deadline := time.Now().Add(5 * time.Second)
-	for spool.points.Load() < clients*records {
-		if time.Now().After(deadline) {
-			t.Fatal("input did not drain before checkpoint", spool.points.Load())
-		}
-		time.Sleep(time.Millisecond)
+	writers.Wait() // HandleConnection joins its final capture flush before return.
+	if got := spool.points.Load(); got != clients*records {
+		t.Fatal("input did not drain before checkpoint", got)
 	}
 	counts := map[string]int{}
 	if err := visitCapture(spool, func(p *points.Points) {
@@ -142,17 +132,17 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	for name, count := range counts {
+		if count != records {
+			t.Fatalf("%s: captured %d, want %d", name, count, records)
+		}
+	}
 	if len(counts) != clients {
 		t.Fatal(counts)
 	}
 	release()
-	select {
-	case err := <-started:
-		if err != nil {
-			t.Fatal(err, zapwriter.TestString())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("startup did not catch up")
+	if err := awaitTestResult(t, "startup", started, testLogProgress); err != nil {
+		t.Fatal(err, zapwriter.TestString())
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
@@ -188,41 +178,27 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	case thirdSpool = <-thirdCaptured:
 	case err := <-thirdReady:
 		t.Fatal(err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("streaming successor never took input", zapwriter.TestString())
+	case <-t.Context().Done():
+		t.Fatal("streaming successor cancelled", zapwriter.TestString())
 	}
 	if thirdSpool == nil {
 		t.Fatal("streaming restart fell back to closed input")
 	}
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		t.Fatal(err)
-	}
 	name := "client0." + strings.Repeat("longsegment.", 12) + "value"
-	if _, err = fmt.Fprintf(conn, "%s 100001 %d\n", name, stamp); err != nil {
-		t.Fatal(err)
+	thirdSpool.receiver.HandleConnection(&startupReaderConn{Reader: strings.NewReader(fmt.Sprintf("%s 100001 %d\n", name, stamp))})
+	if thirdSpool.points.Load() != 1 {
+		t.Fatal("correction did not drain before checkpoint")
 	}
-	conn.Close()
-	awaitCapture(t, func() bool { return thirdSpool.points.Load() == 1 })
 	thirdRelease()
-	select {
-	case err := <-thirdReady:
-		if err != nil {
-			t.Fatal(err, zapwriter.TestString())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("second streaming restart stalled", zapwriter.TestString())
+	if err := awaitTestResult(t, "second streaming restart", thirdReady, testLogProgress); err != nil {
+		t.Fatal(err, zapwriter.TestString())
 	}
 	if err := <-stoppedAgain; err != nil {
 		t.Fatal(err, zapwriter.TestString())
 	}
-	deadline = time.Now().Add(10 * time.Second)
-	for thirdSpool.replayedPoints.Load() != 1 || !third.Cache.IsEmpty() {
-		if time.Now().After(deadline) {
-			t.Fatalf("third replay=%d captured=%d cache=%d flights=%d pending=%d failure=%v logs=%s", thirdSpool.replayedPoints.Load(), thirdSpool.points.Load(), third.Cache.Size(), third.Cache.NotConfirmedLength(), third.Cache.PendingOutstanding(), thirdSpool.sealErr, zapwriter.TestString())
-		}
-		time.Sleep(time.Millisecond)
-	}
+	awaitTestProgress(t, "third replay", func() bool {
+		return thirdSpool.replayedPoints.Load() == 1 && third.Cache.IsEmpty()
+	}, func() any { return [2]int64{thirdSpool.replayedPoints.Load(), third.Cache.Size()} })
 	snap, err := third.MetricStore.Snapshot(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +381,7 @@ func TestPredecessorCrashProcess(t *testing.T) {
 }
 
 func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
-	if isolatedTestProcessSerial(t) {
+	if isolatedTestProcess(t) {
 		return
 	}
 	for _, stage := range []string{"before_dump", "during_warm", "during_dump", "after_dump"} {
@@ -497,11 +473,13 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 }
 
 func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	// One isolated matrix owns its globals. Only the process that actually
+	// crashes needs a fresh executable for each stage.
 	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement", "direct_before_switch", "direct_during_seal", "direct_after_fence", "direct_after_switch", "direct_partial_retirement", "direct_full_retirement", "direct_next_epoch"} {
 		t.Run(stage, func(t *testing.T) {
-			if isolatedTestProcessSerial(t) {
-				return
-			}
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
 			cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format = true, t.TempDir(), "compact"
@@ -551,7 +529,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			if err := os.WriteFile(tail, nil, 0600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartupInputCrashProcess$")
 			cmd.Env = append(os.Environ(), "HANDOFF_CRASH_STAGE="+stage, "HANDOFF_CRASH_STAMP="+strconv.FormatInt(stamp, 10), "HANDOFF_CRASH_TAIL="+tail, "HANDOFF_CRASH_CONFIG="+path)
@@ -608,13 +586,15 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				}
 			}
 			for _, app := range []*App{actual, ref} {
-				deadline := time.Now().Add(5 * time.Second)
-				for !app.Cache.IsEmpty() || app.Cache.PendingOutstanding() != 0 {
-					if time.Now().After(deadline) {
-						t.Fatal("recovery did not drain", zapwriter.TestString())
+				awaitTestProgress(t, "crash recovery drain", func() bool {
+					return app.Cache.IsEmpty() && app.Cache.PendingOutstanding() == 0
+				}, func() any {
+					cycles := int64(0)
+					if log := app.inputLog.Load(); log != nil {
+						cycles = log.Metrics().Cycles
 					}
-					time.Sleep(time.Millisecond)
-				}
+					return [3]int64{app.Cache.Size(), int64(app.Cache.PendingOutstanding()), cycles}
+				})
 			}
 			for _, name := range []string{"handoff.metric", "tail.only"} {
 				// Store confirmation can precede asynchronous publication of a
@@ -643,4 +623,40 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// startupReaderConn lets the real receiver consume deterministic input without
+// OS socket buffers or wall-clock I/O deadlines. The reader owns no resources.
+type startupReaderConn struct{ io.Reader }
+
+func (*startupReaderConn) Write([]byte) (int, error)        { return 0, io.ErrClosedPipe }
+func (*startupReaderConn) Close() error                     { return nil }
+func (*startupReaderConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*startupReaderConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*startupReaderConn) SetDeadline(time.Time) error      { return nil }
+func (*startupReaderConn) SetReadDeadline(time.Time) error  { return nil }
+func (*startupReaderConn) SetWriteDeadline(time.Time) error { return nil }
+
+type startupPointReader struct {
+	name                string
+	stamp               int64
+	records, seq, bytes int
+	offset              int
+	buf                 []byte
+}
+
+func (r *startupPointReader) Read(dst []byte) (int, error) {
+	if r.offset == len(r.buf) {
+		r.buf, r.offset = r.buf[:0], 0
+		if r.seq == r.records {
+			return 0, io.EOF
+		}
+		for end := min(r.seq+256, r.records); r.seq < end; r.seq++ {
+			r.buf = fmt.Appendf(r.buf, "%s %d %d\n", r.name, r.seq, r.stamp)
+		}
+	}
+	n := copy(dst, r.buf[r.offset:])
+	r.offset += n
+	r.bytes += n
+	return n, nil
 }

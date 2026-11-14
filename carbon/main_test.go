@@ -50,5 +50,26 @@ func TestMain(m *testing.M) {
 		}
 		_ = os.Setenv(testHandoffSuccessorDir, dir)
 	}
-	os.Exit(m.Run())
+	var seedDir string
+	if os.Getenv(incrementalSeedEnv) == "" {
+		var err error
+		seedDir, err = os.MkdirTemp("", "carbon-test-seed-")
+		if err == nil {
+			seed := filepath.Join(seedDir, "seed.wsp")
+			err = buildIncrementalSeed(seed)
+			if err == nil {
+				err = os.Setenv(incrementalSeedEnv, seed)
+			}
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			_ = os.RemoveAll(seedDir)
+			os.Exit(1)
+		}
+	}
+	code := m.Run()
+	if seedDir != "" {
+		_ = os.RemoveAll(seedDir)
+	}
+	os.Exit(code)
 }

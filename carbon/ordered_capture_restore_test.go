@@ -55,7 +55,9 @@ func TestOrderedRestoreWithRetainedCapturePressure(t *testing.T) {
 	defer old.Stop()
 	old.Persister.Stop()
 	old.Persister = nil
-	const metric, restored, captured = "handoff.metric", 500000, 100000
+	// Cross the per-shard restore staging limit (1<<16) twice, even if an
+	// initial sync overlaps the first batch. Every point targets one shard.
+	const metric, restored, captured = "handoff.metric", 2*(1<<16) + 1, 2000
 	stamp := time.Now().Unix() - 30
 	data := make([]points.Point, restored)
 	for i := range data {
@@ -101,8 +103,8 @@ func TestOrderedRestoreWithRetainedCapturePressure(t *testing.T) {
 	case spool = <-claimed:
 	case err := <-ready:
 		t.Fatal(err, zapwriter.TestString())
-	case <-time.After(10 * time.Second):
-		t.Fatal("input handoff did not reach capture", zapwriter.TestString())
+	case <-t.Context().Done():
+		t.Fatal("input handoff cancelled", zapwriter.TestString())
 	}
 	if spool == nil {
 		t.Fatal("handoff did not start early capture")
@@ -152,18 +154,20 @@ func TestOrderedRestoreWithRetainedCapturePressure(t *testing.T) {
 	}
 	started := time.Now()
 	start()
-	select {
-	case err := <-ready:
-		if err != nil {
-			t.Fatal(err, zapwriter.TestString())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("ordered restore waited on log timer", zapwriter.TestString())
+	if err := awaitTestResult(t, "ordered restore", ready, testLogProgress); err != nil {
+		t.Fatal(err, zapwriter.TestString())
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
 	}
-	awaitCapture(t, func() bool { return spool.replayedPoints.Load() == captured && next.Cache.IsEmpty() })
+	awaitTestProgress(t, "retained capture replay", func() bool {
+		return spool.replayedPoints.Load() == captured && next.Cache.IsEmpty()
+	}, func() any {
+		return [3]int64{spool.replayedPoints.Load(), next.Cache.Size(), next.inputLog.Load().Metrics().Cycles}
+	})
+	if next.inputLog.Load().Metrics().Cycles == 0 {
+		t.Fatal("restore never requested a commit with the periodic timer an hour away")
+	}
 	if !strings.Contains(zapwriter.TestString(), "using ordered restore") {
 		t.Fatal("fixture did not refuse the checkpoint accelerator")
 	}

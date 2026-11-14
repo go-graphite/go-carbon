@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,16 +40,12 @@ func incrementalAppFixture(t *testing.T) (string, *Config) {
 	if err := os.MkdirAll(cfg.Whisper.DataDir, 0750); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().Unix()
+	seed, err := incrementalSeedBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"first", "second", "third"} {
-		w, err := whisper.CreateWithOptions(filepath.Join(cfg.Whisper.DataDir, name+".wsp"), whisper.NewRetentionsNoPointer([]whisper.Retention{whisper.NewRetention(1, 3600)}), whisper.Average, .5, &whisper.Options{Compressed: true, OutOfOrder: true, FLock: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: int(now - 30), Value: 1}, {Time: int(now - 20), Value: 2}}); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
+		if err := os.WriteFile(filepath.Join(cfg.Whisper.DataDir, name+".wsp"), seed, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -160,7 +158,13 @@ func TestIncrementalAppContinuesFromRemovedFilesAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: int(time.Now().Unix() - 25), Value: 17.25}}); err != nil {
+	// Order the correction against the immutable seed, rather than the
+	// elapsed time since TestMain created it. This must always create OOO data.
+	seedStamp, err := strconv.ParseInt(os.Getenv(incrementalSeedStampEnv), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: int(seedStamp - 25), Value: 17.25}}); err != nil {
 		t.Fatal(err)
 	}
 	if w.OutOfOrderPath() == "" {
@@ -523,4 +527,31 @@ func TestCompletedIncrementalReceiptRequiresZeroSkipped(t *testing.T) {
 	if completedIncrementalMigration(cfg) {
 		t.Fatal("mirror disabled source")
 	}
+}
+
+const incrementalSeedEnv = "GRAPHITE_TEST_INCREMENTAL_SEED"
+const incrementalSeedStampEnv = "GRAPHITE_TEST_INCREMENTAL_STAMP"
+
+// Every fixture gets private mutable files; their identical initial Whisper
+// image is created once by TestMain and inherited by all subprocesses.
+var incrementalSeedBytes = sync.OnceValues(func() ([]byte, error) {
+	return os.ReadFile(os.Getenv(incrementalSeedEnv))
+})
+
+func buildIncrementalSeed(path string) error {
+	w, err := whisper.CreateWithOptions(path, whisper.NewRetentionsNoPointer([]whisper.Retention{whisper.NewRetention(1, 3600)}), whisper.Average, .5, &whisper.Options{Compressed: true, OutOfOrder: true, FLock: true})
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	if err := os.Setenv(incrementalSeedStampEnv, strconv.FormatInt(now, 10)); err != nil {
+		_ = w.Close()
+		return err
+	}
+	err = w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: int(now - 30), Value: 1}, {Time: int(now - 20), Value: 2}})
+	closeErr := w.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
