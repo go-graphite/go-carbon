@@ -87,6 +87,7 @@ type captureAdmission interface {
 	RecoveryMetricBytes([]byte) int64
 }
 type startupSink struct {
+	groupedAdd  func(cache.RecoveryMetric, []points.Point, *cache.RecoverySource, bool)
 	admission   captureAdmission
 	add         func(*points.Points, *cache.RecoverySource)
 	liveAdd     func(*points.Points, *cache.RecoverySource)

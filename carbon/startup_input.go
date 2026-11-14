@@ -244,7 +244,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 	if s == nil {
 		return
 	}
-	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
+	sink := &startupSink{groupedAdd: core.AddRecoveryMetric, admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
 	if app.MetricStore != nil {
 		sink.syncStore = app.MetricStore.Sync
 	}
