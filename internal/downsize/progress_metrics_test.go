@@ -241,3 +241,47 @@ func TestProgressMetricsStateIdentityAndParentTransition(t *testing.T) {
 		t.Fatalf("parent transition lost: %+v", p)
 	}
 }
+
+func TestProgressMetricHumanLabels(t *testing.T) {
+	host := "runner-" + metricToken(t.TempDir())
+	cache, _ := os.UserCacheDir()
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(cache, "storectl", "metric-labels", host)) })
+	dir := t.TempDir()
+	state := filepath.Join(dir, "Night Copy")
+	prefix, _ := progressMetricIdentity(host, []string{"sync", "--state", state})
+	if !strings.Contains(prefix, ".night-copy.sync") {
+		t.Fatal(prefix)
+	}
+	again, _ := progressMetricIdentity(host, []string{"sync", "--resume", state})
+	if again != prefix {
+		t.Fatal(prefix, again)
+	}
+	other, _ := progressMetricIdentity(host, []string{"sync", "--state", filepath.Join(t.TempDir(), "Night Copy")})
+	if other == prefix || !strings.Contains(other, ".night-copy-") {
+		t.Fatal(other)
+	}
+	block := filepath.Join(dir, "History East.json")
+	if err := os.WriteFile(block, []byte(fmt.Sprintf(`{"state":%q}`, filepath.Join(dir, "state"))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, canonical := progressMetricIdentity(host, []string{"sync", "--block", block})
+	if !strings.Contains(got, ".history-east.sync") || canonical != filepath.Join(dir, "state") {
+		t.Fatal(got, canonical)
+	}
+	resumed, _ := progressMetricIdentity(host, []string{"sync", "--resume", filepath.Join(dir, "state")})
+	if resumed != got {
+		t.Fatal("block label changed on resume", got, resumed)
+	}
+	// Saved legacy copy-state changes observation paths, not the resume label.
+	resume := filepath.Join(dir, "Resume State")
+	if err := os.Mkdir(resume, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resume, "config.json"), []byte(`{"copy_state":"/legacy/journal"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, canonical = progressMetricIdentity(host, []string{"sync", "--resume=" + resume})
+	if !strings.Contains(got, ".resume-state.sync") || canonical != "/legacy/journal" {
+		t.Fatal(got, canonical)
+	}
+}
