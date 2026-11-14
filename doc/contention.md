@@ -112,3 +112,14 @@ late corrections. Set `GO_CARBON_CONVOY=1`; add
 `GO_CARBON_CONVOY_HOTSPOT=1` for deliberately colliding stripes. Its default
 three-minute deadline makes import starvation a failing result rather than an
 unbounded benchmark; `GO_CARBON_CONVOY_LIMIT` accepts another bounded duration.
+
+Import publication keeps the catalog/revision/receipt and replacement data in
+one stripe-protected commit. Point deletes for the replaced generation commit
+immediately afterwards, outside the stripes, followed by the request's shared
+WAL barrier. IDs are reserved durably and never reused. A reader that already
+opened a snapshot retains the replaced keys; a later writer follows the new
+catalog. If the process fails between publication and cleanup, the old generation
+can remain as unreachable storage, just as unpublished staging can after an
+interrupted transfer. No old-generation delete can precede successful publication.
+`Stats.TransferApply` exposes cumulative import lock wait/hold worker seconds,
+maximum observed hold, preparation and retirement time, and stripe counts.

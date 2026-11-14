@@ -349,6 +349,9 @@ type Store struct {
 	// transferMergeAppendOff merges every present continuation name with
 	// RestoreArchives (differential tests).
 	transferMergeAppendOff bool
+	// Differential oracle for the former atomic publication/retirement batch.
+	transferRetireLocked   bool
+	transferRetireTestHook func()
 	// transferBatchBytes overrides transferBatchLimit (tests/benchmarks): 0
 	// keeps the default, negative always ingests SSTs.
 	transferBatchBytes int
@@ -1282,6 +1285,7 @@ type Stats struct {
 	// Transfers committed as one batch instead of SST ingestion: commits,
 	// imported names, and batch bytes.
 	TransferBatchCommits, TransferBatchEntries, TransferBatchBytes uint64
+	TransferApply                                                  TransferApplyStats
 	// Present continuation names merged by appending the target's newer
 	// points to the staged source (of which classic sources merged in place),
 	// and those merged by RestoreArchives, by reason
@@ -1366,6 +1370,7 @@ func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold 
 	stats.CacheShards = s.cacheShards
 	stats.StateCache = s.stateCache.stats()
 	stats.TransferExport = s.transferExport.stats()
+	stats.TransferApply = s.TransferApplyStats()
 	stats.CompactOnceRunning = s.compactOnce.running.Load()
 	stats.UpdatePointLookups = s.updatePointLookups.Load()
 	if s.rangeDelCache != nil {
