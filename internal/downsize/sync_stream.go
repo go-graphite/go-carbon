@@ -43,6 +43,9 @@ type syncLister struct {
 }
 
 func (s *syncer) startList(ctx context.Context, store, after string) *syncLister {
+	if s.o.namesFile != "" {
+		return s.startScopedList(ctx, store, after)
+	}
 	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
 	go func() {
 		defer close(l.pages)
@@ -161,6 +164,9 @@ func (s *syncer) discover(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stores := append([]string{s.o.to}, s.o.from...)
+	if s.o.namesFile != "" {
+		stores = append(stores, "@names")
+	}
 	cp := syncDiscoveryCheckpoint{Cursors: map[string]string{}}
 	if rows := s.j.find(func(r syncRow) bool { return r.Kind == "discover_checkpoint" }); len(rows) > 0 {
 		cp = *rows[len(rows)-1].Discovery
@@ -208,7 +214,11 @@ func (s *syncer) discover(ctx context.Context) error {
 		}
 	}()
 	for i, store := range stores {
-		listers[i] = s.startList(ctx, store, cp.Cursors[store])
+		if store == "@names" {
+			listers[i] = s.startExplicitNames(ctx, cp.Cursors[store])
+		} else {
+			listers[i] = s.startList(ctx, store, cp.Cursors[store])
+		}
 	}
 	for _, l := range listers {
 		if err := l.advance(ctx); err != nil {
@@ -244,7 +254,7 @@ func (s *syncer) discover(ctx context.Context) error {
 			}
 			if i == 0 {
 				inTarget = true
-			} else {
+			} else if i <= len(s.o.from) {
 				mask |= 1 << uint(i-1)
 			}
 		}
@@ -319,7 +329,7 @@ func (s *syncer) unionSource() syncNameSource {
 	var f *os.File
 	var scanner *bufio.Scanner
 	return syncNameSource{
-		total: s.both + len(s.copied),
+		total: s.sum.Discovered,
 		next: func() (string, uint64, error) {
 			if f == nil {
 				var err error
@@ -328,13 +338,11 @@ func (s *syncer) unionSource() syncNameSource {
 				}
 			}
 			for scanner.Scan() {
-				name, mask, onTarget, err := parseUnionLine(scanner.Text())
+				name, mask, _, err := parseUnionLine(scanner.Text())
 				if err != nil {
 					return "", 0, err
 				}
-				if mask != 0 && (onTarget || s.copied[name]) {
-					return name, mask, nil
-				}
+				return name, mask, nil
 			}
 			if err := scanner.Err(); err != nil {
 				return "", 0, err
@@ -619,7 +627,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		if !s.copied[m.name] && !short[m.name] && !s.failedCp[m.name] && firstSource(m.mask, s.forbid, s.o.from) < 0 {
 			reason := "missing_only_on_forbidden_source"
 			if m.mask == 0 {
-				reason = "missing_on_all_sources"
+				continue // Fresh all-source verification resolves stale catalogs below.
 			}
 			s.addResidual(syncHole{Name: m.name, Source: s.sourcesOf(m.mask)}, reason)
 		}
@@ -658,4 +666,117 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Explicit scope names are discovery candidates even when every catalog omits
+// them. Their synthetic cursor carries no source bit and makes absence durable.
+func (s *syncer) startExplicitNames(ctx context.Context, after string) *syncLister {
+	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
+	go func() {
+		defer close(l.pages)
+		defer close(l.finished)
+		f, scan, err := openLines(s.o.namesFile)
+		if err != nil {
+			l.errc <- err
+			return
+		}
+		defer f.Close()
+		var page []string
+		send := func() bool {
+			select {
+			case l.pages <- page:
+				page = nil
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for scan.Scan() {
+			n := strings.TrimSpace(scan.Text())
+			if n <= after || !strings.HasPrefix(n, s.o.prefix) {
+				continue
+			}
+			page = append(page, n)
+			if len(page) == syncListPage && !send() {
+				return
+			}
+		}
+		if err := scan.Err(); err != nil {
+			l.errc <- err
+			return
+		}
+		if len(page) > 0 {
+			send()
+		}
+	}()
+	return l
+}
+
+// Explicit inventories use bounded native existence probes rather than walking
+// an unrelated multi-million-name catalog. The synthetic lister retains names
+// absent from every probe, so absence still requires the verifier's full proof.
+func (s *syncer) startScopedList(ctx context.Context, store, after string) *syncLister {
+	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
+	go func() {
+		defer close(l.pages)
+		defer close(l.finished)
+		f, scan, err := openLines(s.o.namesFile)
+		if err != nil {
+			l.errc <- err
+			return
+		}
+		defer f.Close()
+		end := s.o.now().Unix() - int64(s.o.settle.Seconds())
+		var batch []string
+		flush := func() bool {
+			if len(batch) == 0 {
+				return true
+			}
+			got, e := s.digest(ctx, store, batch, syncRange{From: max(int64(1), end-86400), Until: end})
+			present := map[string]bool{}
+			if errors.Is(e, errSyncNoDigest) {
+				info, ie := s.b.Info(ctx, store, batch)
+				e = ie
+				for n := range info {
+					present[n] = true
+				}
+			} else {
+				for n := range got {
+					present[n] = true
+				}
+			}
+			if e != nil {
+				l.errc <- e
+				return false
+			}
+			var page []string
+			for _, n := range batch {
+				if present[n] {
+					page = append(page, n)
+				}
+			}
+			batch = nil
+			select {
+			case l.pages <- page:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for scan.Scan() {
+			n := strings.TrimSpace(scan.Text())
+			if n > after && strings.HasPrefix(n, s.o.prefix) {
+				batch = append(batch, n)
+				if len(batch) >= 500 && !flush() {
+					return
+				}
+			}
+		}
+		if err := scan.Err(); err != nil {
+			l.errc <- err
+			return
+		}
+		flush()
+	}()
+	return l
 }

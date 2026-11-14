@@ -204,6 +204,9 @@ func TestSyncWindowSubsetDifferential(t *testing.T) {
 				if err := s.checkWindow(context.Background(), &got, names, nil, w); err != nil {
 					t.Fatal(err)
 				}
+				if variant == "retentions" {
+					want.Skipped = append(want.Skipped, syncSkip{"c.peerhole", "schema_step_mismatch"})
+				}
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("got %+v; want %+v", got, want)
 				}

@@ -30,7 +30,7 @@ import (
 //     timestamp where a source has a finite point and the target has none.
 //  4. fill: re-pull names with holes from each source that has the points
 //     (the importer keeps existing target points), then re-verify only them.
-//  5. repeat 3-4 until no fillable hole remains or --max-rounds.
+//  5. repeat 3-4 while verification makes progress.
 //
 // Every phase is journaled under --state; rerunning the same command resumes.
 // The stores are reached through syncBackend so the copy engine and the read
@@ -128,7 +128,7 @@ func (o *syncOptions) normalize() error {
 	if o.state == "" {
 		return errors.New("--state directory required (rerun the same command with it to resume)")
 	}
-	if o.verifyStreams < 0 || o.streams < 1 || o.batch < 1 || o.maxRounds < 1 || o.settle < 0 || o.sampleEvery < 0 {
+	if o.verifyStreams < 0 || o.streams < 1 || o.batch < 1 || o.maxRounds < 0 || o.settle < 0 || o.sampleEvery < 0 {
 		return errors.New("invalid --streams/--verify-batch/--max-rounds/--settle")
 	}
 	if o.now == nil {
@@ -157,6 +157,7 @@ type syncHole struct {
 }
 
 type syncRow struct {
+	Resolved          []syncSkip               `json:"resolved,omitempty"`
 	Discovery         *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
 	Selected          []string                 `json:"selected,omitempty"`
 	SelectionComplete bool                     `json:"selection_complete,omitempty"`
@@ -523,7 +524,8 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 	pending := map[string]bool{}
 	skippedLast := map[string]string{} // name -> reason of its latest skip
 	var err error
-	for round := 1; round <= s.o.maxRounds; round++ {
+	previousScore := int64(-1)
+	for round := 1; ; round++ {
 		s.sum.Rounds = round
 		names := s.unionSource()
 		if round > 1 {
@@ -557,7 +559,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		fillable := 0
 		for _, h := range holes {
 			k := syncKey{h.Name, h.Source}
-			if s.forbid[h.Source] || filledBefore[k] {
+			if s.forbid[h.Source] {
 				continue
 			}
 			fillable++
@@ -574,7 +576,13 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 			next[k.Name] = true
 		}
 		event("sync_round", map[string]any{"round": round, "verified": len(set), "holes": len(holes), "fillable": fillable, "unindexed": len(unindexed), "skipped": len(skipped)})
-		if (fillable == 0 && len(next) == 0) || round == s.o.maxRounds {
+		score := int64(len(unindexed) + len(skipped))
+		for _, h := range holes {
+			score += int64(max(1, h.Points))
+		}
+		stalled := previousScore >= 0 && score >= previousScore
+		previousScore = score
+		if s.o.noCopy || (fillable == 0 && len(next) == 0) || stalled || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
 			break
 		}
 		s.phase("fill")
@@ -620,6 +628,16 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		}
 		sort.Strings(set)
 	}
+	// Copy failures are provisional: verification may recover the same name
+	// from another holder. Keep only failures still evidenced by the final read.
+	kept := s.sum.residual[:0]
+	for _, r := range s.sum.residual {
+		if (r.Reason == "copy_failed" || r.Reason == "missing_only_on_forbidden_source") && len(latest[r.Name]) == 0 && !pending[r.Name] && skippedLast[r.Name] == "" {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	s.sum.residual = kept
 	// Residual: each name's latest holes, and names never indexed.
 	names := make([]string, 0, len(latest))
 	for n := range latest {
@@ -628,7 +646,10 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 	sort.Strings(names)
 	for _, n := range names {
 		for _, h := range latest[n] {
-			reason := "max_rounds"
+			reason := "copy_failed"
+			if s.o.maxRounds > 0 && s.sum.Rounds >= s.o.maxRounds {
+				reason = "round_limit"
+			}
 			switch {
 			case s.forbid[h.Source]:
 				reason = "source_forbidden"
@@ -652,7 +673,11 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 	}
 	sort.Strings(skippedNames)
 	for _, n := range skippedNames {
-		s.addResidual(syncHole{Name: n}, "skipped: "+skippedLast[n])
+		reason := skippedLast[n]
+		if reason != "schema_step_mismatch" {
+			reason = "skipped: " + reason
+		}
+		s.addResidual(syncHole{Name: n}, reason)
 	}
 	return nil
 }
@@ -689,6 +714,15 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 		holes = append(holes, r.Holes...)
 		unindexed = append(unindexed, r.Unindexed...)
 		skipped = append(skipped, r.Skipped...)
+		for _, resolved := range r.Resolved {
+			kept := s.sum.residual[:0]
+			for _, residual := range s.sum.residual {
+				if residual.Name != resolved.Name {
+					kept = append(kept, residual)
+				}
+			}
+			s.sum.residual = kept
+		}
 		for _, h := range r.Holes {
 			if !holeNames[h.Name] {
 				holeNames[h.Name] = true
@@ -865,6 +899,16 @@ func (s *syncer) summary(err error) {
 		fields["verdict"] = "COMPLETE"
 	} else {
 		fields["verdict"] = "INCOMPLETE"
+	}
+	resolved := map[string]syncSkip{}
+	for _, r := range s.j.find(func(r syncRow) bool { return len(r.Resolved) > 0 }) {
+		for _, item := range r.Resolved {
+			resolved[item.Name] = item
+		}
+	}
+	fields["resolved_empty"] = len(resolved)
+	if err := atomicStateJSON(filepath.Join(s.o.state, "resolved.json"), resolved); err != nil {
+		event("sync_resolution_error", map[string]any{"error": err.Error()})
 	}
 	event("sync_done", fields)
 	if f, ferr := os.Create(filepath.Join(s.o.state, "residual.json")); ferr == nil {

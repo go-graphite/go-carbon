@@ -82,8 +82,10 @@ receipts. Windows are half-open `[FROM, UNTIL)` in Unix seconds. Keep their orde
   alias in both spellings. This is distinct from legacy `run --from TIME`.
 - `--names FILE` means UTF-8 text, one metric name per line, byte-sorted and unique
   (`LC_ALL=C sort -u`), **not a JSON array**. It restricts discovery while retaining
-  actual donor membership. The file hash binds the sync journal. The sorted
-  inventories stream from disk, including very large lists.
+  actual donor membership through bounded existence probes. It also retains
+  explicitly requested names absent from every catalog, so verification can
+  classify them. The file hash binds the sync journal. Inventories stream from
+  disk, including very large lists; unrelated catalogs are not scanned.
 - Names whose every archive retains at most three days are excluded from sync
   unless `--include-short-retention` is set. `--settle 10m` excludes newest points.
   These exclusions are part of the requested coverage, not a READY guarantee.
@@ -432,8 +434,15 @@ Missing-name retention checks use `--streams` bounded parallel batches and
 checkpoint each completed `--verify-batch` in the sync journal. Each bounded
 wave is copied before checking the next wave, so large catalogs start importing
 without waiting for every source name to be checked. A batch `/info` 404 falls
-back to exact-name requests once; an absent name is skipped on that source and
-can be tried on a later source. Names absent everywhere are reported as residuals.
+back to recursive halves until missing names are isolated; healthy sub-batches
+remain batched. An absent name can be tried on a later source. Before resolving
+an empty name, sync checks the target and every configured source, including
+peer survivors, over all native retention archives. Proven empty names receive
+`absent_all_sources` in `sync.jsonl` and `resolved.json`, and do not remain residual.
+Failed or incomplete proofs retain machine-readable reasons in `residual.json`.
+Fill rounds continue while the remaining hole/skip count decreases; use
+`--max-rounds N` to impose a limit (`0`, the default, converges). Stalled fills
+retain `persisted_after_fill` with source, step, count and timestamp evidence.
 Resume with the same batch and stream settings to reuse the copy wave journals.
 If a metadata request ends in EOF or a timeout, the client halves its name
 batch and retries the same cursor. It remembers the smaller cap per source
