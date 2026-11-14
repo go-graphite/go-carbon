@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/klauspost/compress/zstd"
@@ -27,6 +29,10 @@ func batchReplayOwner() *startupInput {
 }
 
 func TestCaptureBatchStoredDifferential(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { captureStoredDifferential(t, false) })
+	t.Run("inputlog", func(t *testing.T) { captureStoredDifferential(t, true) })
+}
+func captureStoredDifferential(t *testing.T, newFormat bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -37,21 +43,31 @@ func TestCaptureBatchStoredDifferential(t *testing.T) {
 	wants := map[string][]points.Point{}
 	for i := range 192 {
 		var raw []byte
-		for j := range 4 {
+		for j := range 6 {
 			name := fmt.Sprintf("batch.metric.%d", j)
+			canonical := name
+			if j >= 4 {
+				canonical = "batch.alias;a=1;b=2"
+				name = canonical
+				if j == 4 {
+					name = "batch.alias;b=2;a=1"
+				}
+			}
 			p := points.OnePoint(name, math.Float64frombits(bits[(i+j)%len(bits)]), 1700000000+int64(i%23))
 			// Include multi-point records and same-record corrections too.
 			if i%5 == 0 {
 				p.Add(math.Float64frombits(bits[(i+j+1)%len(bits)]), p.Data[0].Timestamp)
 			}
-			wants[name] = append(wants[name], p.Data...)
+			wants[canonical] = append(wants[canonical], p.Data...)
 			raw = p.AppendBinary(raw)
 		}
 		n := 0
 		_ = points.ReadBinaryBytesBorrowed(raw, func(_ []byte, p []points.Point) { n += len(p) })
-		epochs[i/64] = append(epochs[i/64], recovery.EncodeCaptureFrame(enc, raw, nil, n)...)
+		epochs[i/64] = append(epochs[i/64], capturetest.Encode(enc, raw, nil, n)...)
 	}
 	fast, ref := cache.New(), cache.New()
+	fast.SetTagsEnabled(true)
+	ref.SetTagsEnabled(true)
 	fast.SetMaxSize(0)
 	fast.SetRecoveryMemory(func() (uint64, bool) { return 1 << 30, true })
 	ref.SetMaxSize(0)
@@ -60,13 +76,37 @@ func TestCaptureBatchStoredDifferential(t *testing.T) {
 		sink := &startupSink{admission: fast, add: fast.AddRecoveredFrom, groupedAdd: fast.AddRecoveryMetric}
 		source := fastStream.Next()
 		cursor := int64(0)
-		_, err := batchReplayOwner().replayCaptureBatches(bytes.NewReader(epoch), source, sink, func(end int64, _ int) {
+		advance := func(end int64, _ int) {
 			if end <= cursor {
 				t.Fatal("cursor did not advance")
 			}
 			cursor = end
-		})
-		if err != nil || cursor != int64(len(epoch)) {
+		}
+		length := len(epoch)
+		var err error
+		if newFormat {
+			var frames [][]byte
+			_, err = recovery.ReadCaptureFrames(bytes.NewReader(epoch), func(raw []byte, _ int) error { frames = append(frames, bytes.Clone(raw)); return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire := inputlogCaptureFixture(t, frames...)
+			f, e := os.CreateTemp(t.TempDir(), "capture")
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e = f.Write(wire); e != nil {
+				t.Fatal(e)
+			}
+			seg := &startupSegment{file: f, source: source}
+			seg.size.Store(int64(len(wire)))
+			_, err = batchReplayOwner().replayInputSegment(seg, sink, 0, advance)
+			_ = f.Close()
+			length = len(wire)
+		} else {
+			_, err = batchReplayOwner().replayCaptureBatches(bytes.NewReader(epoch), source, sink, advance)
+		}
+		if err != nil || cursor != int64(length) {
 			t.Fatal("replay/source frontier", cursor, err, source.Pending())
 		}
 		rs := refStream.Next()
@@ -141,11 +181,27 @@ func TestCaptureBatchCrashProcess(t *testing.T) {
 		}
 		os.Exit(99) // Unacknowledged window/source remains; no deferred cleanup.
 	}
-	_, _ = batchReplayOwner().replayCaptureBatches(bytes.NewReader(wire), source, sink, func(int64, int) { _ = os.WriteFile(filepath.Join(root, "advanced"), []byte("unsafe"), 0600) })
+	advance := func(int64, int) { _ = os.WriteFile(filepath.Join(root, "advanced"), []byte("unsafe"), 0600) }
+	if inputlog.IsSegment(bytes.NewReader(wire)) {
+		f, e := os.Open(filepath.Join(root, "capture"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer f.Close()
+		seg := &startupSegment{file: f, source: source}
+		seg.size.Store(int64(len(wire)))
+		_, _ = batchReplayOwner().replayInputSegment(seg, sink, 0, advance)
+	} else {
+		_, _ = batchReplayOwner().replayCaptureBatches(bytes.NewReader(wire), source, sink, advance)
+	}
 	t.Fatal("crash hook not reached")
 }
 
 func TestCaptureBatchCrashMidFrameStoredDifferential(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { captureCrashMidFrame(t, false) })
+	t.Run("inputlog", func(t *testing.T) { captureCrashMidFrame(t, true) })
+}
+func captureCrashMidFrame(t *testing.T, newFormat bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -159,7 +215,10 @@ func TestCaptureBatchCrashMidFrameStoredDifferential(t *testing.T) {
 			raw = points.OnePoint(name, math.Float64frombits(bits[i%len(bits)]), 1700000000+int64(i%17)).AppendBinary(raw)
 		}
 	}
-	wire := recovery.EncodeCaptureFrame(enc, raw, nil, 180)
+	wire := capturetest.Encode(enc, raw, nil, 180)
+	if newFormat {
+		wire = inputlogCaptureFixture(t, raw)
+	}
 	if err := os.WriteFile(filepath.Join(root, "capture"), wire, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +244,18 @@ func TestCaptureBatchCrashMidFrameStoredDifferential(t *testing.T) {
 	ref.SetMaxSize(0)
 	var stream cache.RecoveryStream
 	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, groupedAdd: core.AddRecoveryMetric}
-	_, err = batchReplayOwner().replayCaptureBatches(bytes.NewReader(wire), stream.Next(), sink, func(int64, int) {})
+	if newFormat {
+		f, e := os.Open(filepath.Join(root, "capture"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer f.Close()
+		seg := &startupSegment{file: f, source: stream.Next()}
+		seg.size.Store(int64(len(wire)))
+		_, err = batchReplayOwner().replayInputSegment(seg, sink, 0, func(int64, int) {})
+	} else {
+		_, err = batchReplayOwner().replayCaptureBatches(bytes.NewReader(wire), stream.Next(), sink, func(int64, int) {})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +325,7 @@ func TestCaptureBatchSplitsAtHardAdmissionLimit(t *testing.T) {
 	var wire []byte
 	for i := range 32 {
 		p := points.OnePoint("bounded.group", float64(i), int64(i))
-		wire = append(wire, recovery.EncodeCaptureFrame(enc, p.AppendBinary(nil), nil, 1)...)
+		wire = append(wire, capturetest.Encode(enc, p.AppendBinary(nil), nil, 1)...)
 	}
 	var stream cache.RecoveryStream
 	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, groupedAdd: core.AddRecoveryMetric}

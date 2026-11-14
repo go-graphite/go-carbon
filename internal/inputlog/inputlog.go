@@ -578,7 +578,7 @@ func (l *Log) Retire() error {
 	entries, err := os.ReadDir(l.dir)
 	for _, e := range entries {
 		if name := e.Name(); strings.HasSuffix(name, logSuffix) || strings.HasSuffix(name, spareSuffix) {
-			err = errors.Join(err, os.Remove(filepath.Join(l.dir, name)))
+			err = errors.Join(err, RetireSegment(filepath.Join(l.dir, name), os.Remove, syncDir))
 		}
 	}
 	return errors.Join(err, syncDir(l.dir), l.unlock())

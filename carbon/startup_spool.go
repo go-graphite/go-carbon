@@ -16,10 +16,8 @@ import (
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/inputlog"
-	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
-	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
 )
@@ -44,6 +42,7 @@ type startupShard struct {
 	stream       cache.RecoveryStream
 	names        map[string]string
 	nameBytes    int
+	writer       *inputlog.SegmentWriter
 	timings      [captureIOCount]captureTiming
 }
 type startupSegment struct {
@@ -301,10 +300,14 @@ func (s *startupInput) waitCaptureUntil(cancel <-chan struct{}) error {
 
 func (s *startupShard) appendLoop() {
 	defer close(s.written)
-	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(false))
-	defer enc.Close()
-	var buf, frame, grouped []byte
+	var buf []byte
+	defer func() {
+		if s.writer != nil {
+			s.writer.Close()
+		}
+	}()
 	var batch captureBatch
+	var records []*points.Points
 	names := &captureWriteNames{}
 	writeSink := &startupSink{admission: names}
 	// Requests are acknowledged only after the coalesced frame is written. The
@@ -326,6 +329,10 @@ func (s *startupShard) appendLoop() {
 			return cur, err
 		}
 		index++
+		if s.writer != nil {
+			s.writer.Close()
+			s.writer = nil
+		}
 		cur.next.Store(next)
 		s.current.Store(next)
 		cur.sealed.Store(true)
@@ -422,44 +429,47 @@ func (s *startupShard) appendLoop() {
 			if err == nil {
 				err = batch.checkCount(count)
 			}
-			payload := buf
-			if err == nil && batch.used < count {
-				grouped = batch.appendBinary(grouped[:0])
-				payload = grouped
-			}
-			frame = recovery.EncodeCaptureFrame(enc, payload, frame, count)
-			s.timings[captureEncode].observe(encodedAt)
 			cur := s.current.Load()
-			if err == nil && cur.size.Load() > 0 && cur.size.Load()+int64(len(frame)) > s.owner.policy.segmentBytes {
-				// Sealing rotates the append file, never the socket or input stream.
+			if err == nil && cur.size.Load() > 0 && cur.size.Load()+int64(len(buf)) > s.owner.policy.segmentBytes {
+				if s.writer != nil {
+					s.writer.Close()
+					s.writer = nil
+				}
 				cur, err = rotate(cur)
 			}
-			if err == nil {
-				for s.owner.diskDanger(int64(len(frame))) {
-					s.owner.notePause()
-					select {
-					case <-s.owner.stop:
-						err = errors.New("capture stopped at disk safety reserve")
-					case <-time.After(10 * time.Millisecond):
-					}
-					if err != nil {
-						break
-					}
-				}
+			if err == nil && s.writer == nil {
+				s.writer, err = inputlog.NewSegmentWriter(cur.file, index+1)
 			}
 			if err == nil {
-				writtenAt := time.Now()
-				n, e := cur.file.Write(frame)
-				s.timings[captureWrite].observe(writtenAt)
-				err = e
-				if err == nil && n != len(frame) {
-					err = io.ErrShortWrite
+				clear(records)
+				records = records[:0]
+				for i := range batch.used {
+					g := &batch.groups[i]
+					g.point.Metric, g.point.Data = g.name, g.data
+					records = append(records, &g.point)
 				}
+				before := s.writer.Metrics()
+				var n int64
+				n, err = s.writer.Append(records, func(n int64) error {
+					s.timings[captureEncode].observe(encodedAt)
+					for s.owner.diskDanger(n) {
+						s.owner.notePause()
+						select {
+						case <-s.owner.stop:
+							return errors.New("capture stopped at disk safety reserve")
+						case <-time.After(10 * time.Millisecond):
+						}
+					}
+					return nil
+				})
+				after := s.writer.Metrics()
+				s.timings[captureWrite].observeDuration(after.Stages[inputlog.StageWrite] - before.Stages[inputlog.StageWrite])
+				s.timings[captureSync].observeDuration(after.Stages[inputlog.StageSync] - before.Stages[inputlog.StageSync])
 				if err == nil {
-					cur.size.Add(int64(n))
-					s.size.Add(int64(n))
-					s.owner.size.Add(int64(n))
-					s.owner.diskWritten.Add(int64(n))
+					cur.size.Add(n)
+					s.size.Add(n)
+					s.owner.size.Add(n)
+					s.owner.diskWritten.Add(n)
 					s.owner.rawBytes.Add(int64(len(buf)))
 					s.owner.points.Add(int64(count))
 					if s.owner.observe != nil {
@@ -693,10 +703,7 @@ func (seg *startupSegment) release(syncHistory func() error, remove func(string)
 		}
 		return nil
 	}
-	if err := remove(seg.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := syncDirectory(filepath.Dir(seg.path)); err != nil {
+	if err := inputlog.RetireSegment(seg.path, remove, syncDirectory); err != nil {
 		return err
 	}
 	var errs []error
@@ -870,14 +877,13 @@ func (s *startupInput) startReplay(sink *startupSink, legacy func() error) {
 	})
 }
 func (s *startupShard) replay(sink *startupSink) {
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(64<<20))
-	if err != nil {
-		s.fail(err)
-		return
-	}
-	defer dec.Close()
-	window := captureReadWindow{target: s.owner.policy.readBuffer}
-	raw := make([]byte, 0, s.owner.policy.readBuffer)
+	var replay *inputlog.SegmentReplay
+	var replaySegment *startupSegment
+	defer func() {
+		if replay != nil {
+			replay.Close()
+		}
+	}()
 	var batch captureBatch
 	for {
 		select {
@@ -926,29 +932,33 @@ func (s *startupShard) replay(sink *startupSink) {
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		frame, e := window.frame(seg, pos.offset, seg.size.Load())
-		if e != nil {
-			s.fail(e)
-			return
+		if replaySegment != seg {
+			if replay != nil {
+				replay.Close()
+			}
+			var err error
+			replay, err = inputlog.NewSegmentReplay(seg.file)
+			if err != nil {
+				s.fail(err)
+				return
+			}
+			replaySegment = seg
 		}
-		size := len(frame)
-		var count int
-		raw, count, err = recovery.DecodeCaptureFrame(dec, frame, raw)
+		records, end, count, err := replay.Next(seg.size.Load())
+		if errors.Is(err, io.EOF) {
+			s.commit(seg, end, 0, end-pos.offset)
+			continue
+		}
 		if err != nil {
 			s.fail(err)
 			return
 		}
-		if err := s.owner.waitCapture(); err != nil {
+		if err = s.owner.waitCapture(); err != nil {
 			return
 		}
-		if e := batch.prepare(raw, sink); e != nil {
-			s.fail(e)
-			return
-		}
-		if e := batch.checkCount(count); e != nil {
-			s.fail(e)
-			return
-		}
+		batch.prepareRecords(records, sink)
+		size := end - pos.offset
+
 		for !sink.admission.HasRecoveryCapacityBatch(count, batch.cost) {
 			s.live.Store(false)
 			select {

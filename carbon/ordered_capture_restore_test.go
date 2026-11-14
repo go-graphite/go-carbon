@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"net"
 	"os"
@@ -114,7 +115,7 @@ func TestOrderedRestoreWithRetainedCapturePressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	older := fmt.Sprintf("%s.capture-epoch-%020d.%06d.%012d.tail.bin", spool.path, spool.epoch-1, 0, 0)
-	frame := recovery.EncodeCaptureFrame(encoder, batch.AppendBinary(nil), nil, 1)
+	frame := capturetest.Encode(encoder, batch.AppendBinary(nil), nil, 1)
 	encoder.Close()
 	if err := os.WriteFile(older, frame, 0600); err != nil {
 		t.Fatal(err)

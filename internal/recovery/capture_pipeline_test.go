@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"errors"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"io"
 	"math"
 	"testing"
@@ -29,7 +30,7 @@ func pipelineFixture(t *testing.T) ([]byte, [][]byte) {
 		}
 		raw := p.AppendBinary(nil)
 		raws = append(raws, raw)
-		encoded = append(encoded, EncodeCaptureFrame(enc, raw, nil, len(p.Data))...)
+		encoded = append(encoded, capturetest.Encode(enc, raw, nil, len(p.Data))...)
 	}
 	return encoded, raws
 }

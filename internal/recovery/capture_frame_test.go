@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"errors"
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestCaptureFrameExactPrefixAndCorruption(t *testing.T) {
 	}
 	enc, _ := zstd.NewWriter(nil)
 	defer enc.Close()
-	frame := EncodeCaptureFrame(enc, raw, nil, 3)
+	frame := capturetest.Encode(enc, raw, nil, 3)
 	path := filepath.Join(t.TempDir(), "capture.bin")
 	for cut := range len(frame) {
 		if err := os.WriteFile(path, append(bytes.Clone(frame), frame[:cut]...), 0600); err != nil {

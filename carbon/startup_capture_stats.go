@@ -20,7 +20,10 @@ type captureTiming struct{ calls, total, maximum atomic.Int64 }
 type captureTimingValue struct{ calls, total, maximum int64 }
 
 func (t *captureTiming) observe(start time.Time) {
-	elapsed := time.Since(start).Nanoseconds()
+	t.observeDuration(time.Since(start))
+}
+func (t *captureTiming) observeDuration(duration time.Duration) {
+	elapsed := duration.Nanoseconds()
 	t.calls.Add(1)
 	t.total.Add(elapsed)
 	for old := t.maximum.Load(); elapsed > old; old = t.maximum.Load() {

@@ -13,6 +13,7 @@ import (
 // Tagged names are ordering barriers: different spellings can normalize to the
 // same cache key, so they must retain their original interleaving.
 type captureGroup struct {
+	point  points.Points
 	metric cache.RecoveryMetric
 	name   string
 	data   []points.Point
@@ -26,7 +27,7 @@ type captureBatch struct {
 	cost        int64
 }
 
-func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
+func (b *captureBatch) reset() {
 	if b.index == nil {
 		b.index = make(map[string]int)
 	}
@@ -37,42 +38,53 @@ func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
 		b.groups[i].data = b.groups[i].data[:0]
 	}
 	b.used, b.count, b.cost = 0, 0, 0
+}
+func (b *captureBatch) prepare(raw []byte, sink *startupSink) error {
+	b.reset()
+	return b.decoder.Read(raw, func(name []byte, data []points.Point) { b.add(name, data, sink) })
+}
+func (b *captureBatch) prepareRecords(records []*points.Points, sink *startupSink) {
+	b.reset()
+	for _, p := range records {
+		b.add([]byte(p.Metric), p.Data, sink)
+	}
+}
+func (b *captureBatch) add(name []byte, data []points.Point, sink *startupSink) {
 	resolver, _ := sink.admission.(interface {
 		ResolveRecoveryMetric([]byte) cache.RecoveryMetric
 	})
-	return b.decoder.Read(raw, func(name []byte, data []points.Point) {
-		tagged := bytes.IndexByte(name, ';') >= 0
-		if tagged {
-			clear(b.index)
+	tagged := bytes.IndexByte(name, ';') >= 0
+	if tagged {
+		clear(b.index)
+	}
+	i, exists := b.index[string(name)]
+	if !exists {
+		i = b.used
+		b.used++
+		if i == len(b.groups) {
+			b.groups = append(b.groups, captureGroup{})
 		}
-		i, exists := b.index[string(name)]
-		if !exists {
-			i = b.used
-			b.used++
-			if i == len(b.groups) {
-				b.groups = append(b.groups, captureGroup{})
-			}
-			g := &b.groups[i]
-			if resolver != nil {
-				g.metric = resolver.ResolveRecoveryMetric(name)
-				g.name = g.metric.Name()
-				b.cost += g.metric.OverheadBytes()
+		g := &b.groups[i]
+		if resolver != nil {
+			g.metric = resolver.ResolveRecoveryMetric(name)
+			g.name = g.metric.Name()
+			b.cost += g.metric.OverheadBytes()
+		} else {
+			if namer, ok := sink.admission.(interface{ RecoveryMetricName([]byte) string }); ok {
+				g.name = namer.RecoveryMetricName(name)
 			} else {
-				if namer, ok := sink.admission.(interface{ RecoveryMetricName([]byte) string }); ok {
-					g.name = namer.RecoveryMetricName(name)
-				} else {
-					g.name = string(name)
-				}
-				b.cost += sink.admission.RecoveryMetricBytes(name)
+				g.name = string(name)
 			}
-			if !tagged {
-				b.index[g.name] = i
-			}
+			b.cost += sink.admission.RecoveryMetricBytes(name)
 		}
-		b.groups[i].data = append(b.groups[i].data, data...)
-		b.count += len(data)
-	})
+		if !tagged {
+			b.index[g.name] = i
+		}
+	}
+	b.groups[i].data = append(b.groups[i].data, data...)
+	b.count += len(data)
 }
+
 func (b *captureBatch) applyGroup(i int, source *cache.RecoverySource, sink *startupSink, live bool) {
 	b.applyRange(i, 0, len(b.groups[i].data), source, sink, live)
 }
