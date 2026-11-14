@@ -3,9 +3,12 @@ package downsize
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -450,5 +453,55 @@ func TestSyncCopyWindowsUnionNativeDifferential(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSyncWindowTruncatedSelectionSplitsWithoutPartialResults(t *testing.T) {
+	source := nativeControllerStore(t)
+	names := []string{"a", "bad", "c", "d"}
+	for _, name := range names {
+		addPoints(t, source, name, math.Copysign(0, -1))
+	}
+	service := nativeControllerService(t, source)
+	good := httptest.NewServer(service)
+	defer good.Close()
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/native/export" {
+			service.ServeHTTP(w, r)
+			return
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var req struct{ Names []string }
+		if err = json.Unmarshal(raw, &req); err != nil {
+			t.Error(err)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		response := httptest.NewRecorder()
+		service.ServeHTTP(response, r)
+		data := response.Body.Bytes()
+		if response.Code == 200 && (len(req.Names) > 1 || req.Names[0] == "bad") {
+			data = data[:len(data)/2]
+		}
+		w.WriteHeader(response.Code)
+		_, _ = w.Write(data)
+	}))
+	defer broken.Close()
+	ctx := context.Background()
+	window := syncRange{From: testMetricNow - 10, Until: testMetricNow}
+	baseline := newSyncLiveBackend(syncLiveOptions{})
+	want, err := baseline.WindowPresence(ctx, good.URL, names, window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want["bad"] = []syncDigest{{Hash: syncWindowUnresolved}}
+	backend := newSyncLiveBackend(syncLiveOptions{})
+	got, err := backend.WindowPresence(ctx, broken.URL, names, window)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal("truncated results leaked or healthy names lost", got, want, err)
 	}
 }

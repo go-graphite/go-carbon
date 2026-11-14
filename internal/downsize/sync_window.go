@@ -327,6 +327,7 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 			Names   []string
 			Window  *chunkstore.NativeWindow
 		}{id, subset, &chunkstore.NativeWindow{From: w.From, Until: w.Until}})
+		attempt := map[string][]syncDigest{}
 		err := func() error {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, source+"/v1/native/export", bytes.NewReader(body))
 			if err != nil {
@@ -371,7 +372,7 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 					// An omitted record is unknown coverage, never empty history.
 					// Preserve a per-name marker while consuming the rest of the
 					// stream, including its checksum, so healthy names proceed.
-					out[record.Config.Name] = []syncDigest{{Hash: syncWindowUnresolved}}
+					attempt[record.Config.Name] = []syncDigest{{Hash: syncWindowUnresolved}}
 					continue
 				}
 				if record.NativeSkip != nil {
@@ -391,7 +392,7 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 							hash = "window-incomplete"
 						}
 					}
-					out[record.Config.Name] = append(out[record.Config.Name], syncDigest{Step: int64(a.Retention.Step), Points: int64(a.Retention.Count), Count: count, Hash: hash})
+					attempt[record.Config.Name] = append(attempt[record.Config.Name], syncDigest{Step: int64(a.Retention.Step), Points: int64(a.Retention.Count), Count: count, Hash: hash})
 				}
 			}
 			_, _, err = stream.Finish()
@@ -401,8 +402,19 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 			_, err = io.Copy(io.Discard, response.Body)
 			return err
 		}()
-		if errors.Is(err, tooLarge) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		truncated := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		if errors.Is(err, tooLarge) || truncated {
 			if len(subset) <= 1 {
+				if truncated {
+					// A failed stream cannot prove empty history. Isolate the
+					// name as unresolved so other metrics keep moving.
+					event("sync_window_export_unresolved", map[string]any{"level": "warn", "source": source, "metric": subset[0], "reason": "truncated native window export"})
+					out[subset[0]] = []syncDigest{{Hash: syncWindowUnresolved}}
+					return nil
+				}
 				return fmt.Errorf("window export HTTP 413 for a single name")
 			}
 			// Split only the transport request. The source pin, logical catalog
@@ -412,6 +424,12 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 				return err
 			}
 			return readSubset(subset[mid:])
+		}
+		if err == nil {
+			// Publish only after the complete stream and checksum validate.
+			for name, digests := range attempt {
+				out[name] = digests
+			}
 		}
 		return err
 	}
