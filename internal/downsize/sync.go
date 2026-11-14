@@ -577,7 +577,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 			return res, errors.New("backend does not support window-only copy")
 		}
 		if phase == "fill" {
-			ctx = context.WithValue(ctx, syncWindowProgressKey{}, s.prog.windowCommitted)
+			ctx = syncWindowProgressContext(ctx, s.prog.windowCommitted)
 			if live, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
 				defer live.beginWindowCopy()()
 			}

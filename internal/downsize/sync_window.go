@@ -469,7 +469,7 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 		}
 		copies = append(copies, windowCopy{w, id, pointPath, path, before, beforeErr, measurement, m})
 	}
-	progress, _ := ctx.Value(syncWindowProgressKey{}).(func(int, bool))
+	progress, _ := ctx.Value(syncWindowProgressKey{}).(func(string, int, bool))
 	// Each worker completes all windows of one disjoint name range. This
 	// exposes fully processed names without waiting for a whole donor/window.
 	err := runSyncWindowRanges(ctx, len(names), b.o.copyStreams, func(ctx context.Context, start, end int) error {
@@ -495,7 +495,7 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 						// before pin rotation can acquire the exclusive lock.
 						release()
 						release = func() {}
-						childCtx := context.WithValue(ctx, syncWindowProgressKey{}, func(n int, replayed bool) {
+						childCtx := context.WithValue(ctx, syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
 							if n > 0 && !replayed {
 								fresh = true
 							}
@@ -539,7 +539,7 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 			}
 		}
 		if progress != nil {
-			progress(end-start, !fresh)
+			progress(fmt.Sprintf("%s:%d:%d", journalPath, start, end), end-start, !fresh)
 		}
 		return nil
 	})

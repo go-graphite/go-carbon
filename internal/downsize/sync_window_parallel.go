@@ -13,6 +13,17 @@ import (
 
 type syncWindowProgressKey struct{}
 
+// A backend can retry a donor from its receipts within the same invocation.
+// Publish each completed range once across those attempts.
+func syncWindowProgressContext(ctx context.Context, report func(int, bool)) context.Context {
+	var seen sync.Map
+	return context.WithValue(ctx, syncWindowProgressKey{}, func(key string, n int, replayed bool) {
+		if _, loaded := seen.LoadOrStore(key, true); !loaded {
+			report(n, replayed)
+		}
+	})
+}
+
 // Fixed workers and an unbuffered queue bound live range data by streams, not
 // catalog size. Every exit joins workers before journals or source pins close.
 func runSyncWindowRanges(ctx context.Context, names, streams int, run func(context.Context, int, int) error) error {
@@ -70,16 +81,21 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 	if wait <= 0 {
 		wait = 30 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(ctx, wait)
-	defer cancel()
+	deadline := time.Now().Add(wait)
 	for attempt := 0; ; attempt++ {
 		err := c.executeRange(ctx, t, names)
 		var api *apiError
 		if !errors.As(err, &api) || api.Status != http.StatusTooManyRequests {
 			return err
 		}
+		if time.Now().After(deadline) {
+			return err
+		}
 		b.busy.Add(1)
-		if err := sleepContext(ctx, syncBusyDelay(attempt)); err != nil {
+		waitCtx, cancel := context.WithDeadline(ctx, deadline)
+		err = sleepContext(waitCtx, syncBusyDelay(attempt))
+		cancel()
+		if err != nil {
 			return err
 		}
 	}

@@ -64,11 +64,11 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 	defer dst.Close()
 	names := copyNames("metric.", store.NativeMaxRangeNames*8)
 	for _, streams := range []int{1, 4} {
-		b := newSyncLiveBackend(syncLiveOptions{copyStreams: streams})
+		b := newSyncLiveBackend(syncLiveOptions{copyStreams: streams, hostWait: time.Nanosecond})
 		stop := b.beginWindowCopy()
 		peak.Store(0)
 		started := time.Now()
-		ctx := context.WithValue(context.Background(), syncWindowProgressKey{}, func(n int, replayed bool) {
+		ctx := context.WithValue(context.Background(), syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
 			if n > 0 && !replayed && active.Load() > 0 {
 				progressedWhileActive.Store(true)
 			}
@@ -82,6 +82,26 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 		if streams > 1 && (peak.Load() < 2 || peak.Load() > int64(streams) || !progressedWhileActive.Load()) {
 			t.Fatal("ranges failed to overlap/report progress", peak.Load(), progressedWhileActive.Load())
 		}
+	}
+}
+
+func TestSyncWindowProgressRetryDeduplicates(t *testing.T) {
+	var p syncProgress
+	p.begin("fill", 8)
+	ctx := syncWindowProgressContext(context.Background(), p.windowCommitted)
+	report := ctx.Value(syncWindowProgressKey{}).(func(string, int, bool))
+	var workers sync.WaitGroup
+	for range 192 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			report("first:0:4", 4, false)
+			report("second:0:4", 4, true)
+		}()
+	}
+	workers.Wait()
+	if p.copyActive != 8 || p.copyFresh != 4 {
+		t.Fatal("retry progress duplicated", p.copyActive, p.copyFresh)
 	}
 }
 
@@ -155,7 +175,7 @@ func TestSyncWindowParallelDifferentialResume(t *testing.T) {
 			fail.Store(false)
 			parallel := newSyncLiveBackend(syncLiveOptions{copyStreams: 3})
 			var fresh, replayed atomic.Int64
-			progressCtx := context.WithValue(ctx, syncWindowProgressKey{}, func(n int, replay bool) {
+			progressCtx := context.WithValue(ctx, syncWindowProgressKey{}, func(_ string, n int, replay bool) {
 				if replay {
 					replayed.Add(int64(n))
 				} else {
