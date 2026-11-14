@@ -52,7 +52,7 @@ type syncLiveBackend struct {
 	waits                atomic.Int64 // retries while a store was unavailable
 	busy                 atomic.Int64 // retries after 429 (all transfer slots taken)
 	timings              sync.Map     // phase + store -> *syncIOTime
-	windowSelectionSlots sync.Map     // source -> chan struct{}; keep selection ahead of pulls bounded
+	windowSelectionSlots sync.Map     // source -> once-initialized selection admission
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
 	windowPinned         time.Time

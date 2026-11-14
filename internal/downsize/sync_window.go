@@ -555,11 +555,22 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 		return map[string][]syncDigest{}, nil
 	}
 	defer b.recordTime("window_selection", source)()
-	// One selection per donor leaves at most one selection ahead of a copy
-	// pull on older servers with serial export admission. Disjoint groups and
-	// different donors still overlap; queued groups retain no source pin.
-	v, _ := b.windowSelectionSlots.LoadOrStore(source, make(chan struct{}, 1))
-	slot := v.(chan struct{})
+	// Match the donor's export capacity, leaving one slot for copy pulls.
+	// Older donors omit the capability and retain serial selection. Learn once
+	// per donor so disjoint groups share a bound without retaining queued pins.
+	v, _ := b.windowSelectionSlots.LoadOrStore(source, sync.OnceValues(func() (chan struct{}, error) {
+		var capability struct{ NativeExportConcurrency int }
+		if _, err := b.m.requestOnce(ctx, source, "/v1/native/capabilities", nil, &capability); err != nil {
+			return nil, err
+		}
+		limit := max(1, min(8, capability.NativeExportConcurrency)-1)
+		event("sync_window_selection_capacity", map[string]any{"source": source, "exports": capability.NativeExportConcurrency, "selections": limit})
+		return make(chan struct{}, limit), nil
+	}))
+	slot, err := v.(func() (chan struct{}, error))()
+	if err != nil {
+		return nil, err
+	}
 	select {
 	case slot <- struct{}{}:
 		defer func() { <-slot }()
