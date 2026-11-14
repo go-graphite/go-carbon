@@ -270,35 +270,24 @@ func (s *startupShard) fail(err error) {
 	}
 }
 
-// A socket flush fans out to the capture queues before it can acknowledge its
-// input. Let append owners clear a burst before replay consumes more CPU/cache
-// capacity. The per-shard request count includes encoding/writes and blocked
-// submitters; an empty channel alone can hide a stalled coalesced batch.
+// Replay waits only for cancellation here; memory admission governs capacity.
 func (s *startupInput) waitCapture() error {
-	for {
-		// At the disk reserve capture needs replay/persistence to retire sources.
-		// Yielding to its blocked writer would create a circular wait.
-		if s.paused.Load() {
-			return nil
-		}
-		busy := false
-		for _, shard := range s.shards {
-			if shard.pending.Load() > 4 {
-				busy = true
-				break
-			}
-		}
-		if !busy {
-			return nil
-		}
-		s.replayYields.Add(1)
-		select {
-		case <-s.stop:
-			return errStartupReplayStopped
-		case <-s.replayStop:
-			return errStartupReplayStopped
-		case <-time.After(time.Millisecond):
-		}
+	return s.waitCaptureUntil(nil)
+}
+
+func (s *startupInput) waitCaptureUntil(cancel <-chan struct{}) error {
+	// Capture append queues already bound input buffering. Recovery admission
+	// bounds replay memory; pending appends are not a replay capacity signal.
+	// A global append threshold can park every reader behind one busy writer.
+	select {
+	case <-cancel:
+		return errStartupReplayStopped
+	case <-s.stop:
+		return errStartupReplayStopped
+	case <-s.replayStop:
+		return errStartupReplayStopped
+	default:
+		return nil
 	}
 }
 

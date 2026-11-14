@@ -12,9 +12,9 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
-// A stalled append owner must stop background replay before more cache work is
-// admitted. Once capture drains, replay resumes without dropping queued input.
-func TestReplayYieldsToQueuedCapture(t *testing.T) {
+// A stalled append owner must not park unrelated replay. Capture still drains
+// every accepted request after the owner resumes.
+func TestReplayProgressesDuringQueuedCapture(t *testing.T) {
 	s, _ := captureFixture(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
@@ -44,18 +44,19 @@ func TestReplayYieldsToQueuedCapture(t *testing.T) {
 	go func() { resumed <- s.waitCapture() }()
 	select {
 	case err := <-resumed:
-		t.Fatal("replay admitted work while append queue stalled", err)
-	case <-time.After(20 * time.Millisecond):
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued append stalled unrelated replay")
 	}
 	unblock()
 	<-encoded
 	if len(s.shards[0].requests) != 0 || s.shards[0].pending.Load() != 16 {
 		t.Fatal("fixture did not hide pending writes outside the channel")
 	}
-	select {
-	case err := <-resumed:
-		t.Fatal("replay ignored the in-flight capture batch", err)
-	case <-time.After(20 * time.Millisecond):
+	if err := s.waitCapture(); err != nil {
+		t.Fatal(err)
 	}
 	unblockEncoded()
 	for range 17 {
@@ -63,40 +64,26 @@ func TestReplayYieldsToQueuedCapture(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	select {
-	case err := <-resumed:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("replay did not resume after capture drained")
-	}
+
 	if s.points.Load() != 17 || s.shards[0].pending.Load() != 0 {
 		t.Fatal("capture lost accepted points", s.points.Load())
 	}
 }
 
-func TestReplayCaptureYieldCancels(t *testing.T) {
+func TestReplayCaptureChecksCancellation(t *testing.T) {
 	for _, replayOnly := range []bool{false, true} {
 		s := &startupInput{stop: make(chan struct{}), replayStop: make(chan struct{}), shards: []*startupShard{{requests: make(chan startupAppend, 8)}}}
 		for range 8 {
 			s.shards[0].requests <- startupAppend{}
 		}
 		s.shards[0].pending.Store(8)
-		done := make(chan error, 1)
-		go func() { done <- s.waitCapture() }()
 		if replayOnly {
 			close(s.replayStop)
 		} else {
 			close(s.stop)
 		}
-		select {
-		case err := <-done:
-			if !errors.Is(err, errStartupReplayStopped) {
-				t.Fatal(err)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("shutdown stranded paced replay")
+		if err := s.waitCapture(); !errors.Is(err, errStartupReplayStopped) {
+			t.Fatal("shutdown ignored", err)
 		}
 	}
 }
