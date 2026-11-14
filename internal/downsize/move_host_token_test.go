@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -150,5 +152,33 @@ func TestHostTokenUnauthorizedRefreshesBothTransferAndAbsenceCredentials(t *test
 	response.Body.Close()
 	if response.StatusCode != 200 || reads != 3 {
 		t.Fatal("absence credential did not refresh", response.StatusCode, reads)
+	}
+}
+
+func TestHostTokenConfiguredSecretPath(t *testing.T) {
+	t.Setenv("RESIZE_HOST_JWT_REFRESH", "1")
+	path := filepath.Join(t.TempDir(), "signing-key")
+	if err := os.WriteFile(path, []byte("configured-fake-signing-key\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := &mover{options: options{hostJWTSecret: path}, tuner: newTuner(nil, capacity{8, 32, 1 << 20, 100}, true, 0, 2)}
+	m.tuner.enableMaxSpeed(nil, "decision")
+	raw, err := m.authorizationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := jwt.Parse(raw, func(*jwt.Token) (any, error) { return []byte("configured-fake-signing-key"), nil }, jwt.WithValidMethods([]string{"HS256"}))
+	if err != nil || !parsed.Valid {
+		t.Fatal("configured key was not used", err)
+	}
+	if hostJWTSecretPath != "/etc/go-carbon/buckyd_api_jwt_secret" {
+		t.Fatal("generic default changed")
+	}
+	m.invalidateHostToken()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.authorizationToken(); err == nil || err.Error() != "host-local JWT secret unavailable" {
+		t.Fatal("missing configured key did not fail closed", err)
 	}
 }

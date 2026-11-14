@@ -156,6 +156,11 @@ func ValidateResize(data []byte) error {
 }
 
 func replacements(s specification) ([]WholeCopy, bool, error) {
+	// Jump instances are identities within a cluster. Matching instance 000 in
+	// independent clusters does not make the live target a replacement disk.
+	if s.TargetCluster != "" && s.TargetCluster != s.Cluster {
+		return nil, false, nil
+	}
 	var whole []WholeCopy
 	oldIDs := make(map[string]bool)
 	byIdentity := make(map[string]member)

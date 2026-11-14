@@ -121,9 +121,9 @@ func TestNativeWindowCommittedPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := func(id, endpoint string) map[string]any {
-		return map[string]any{"hash": "jump_fnv1a", "replicas": 1, "nodes": []map[string]string{{"id": id, "node": id + ":2003=" + id, "endpoint": endpoint}}}
+		return map[string]any{"hash": "jump_fnv1a", "replicas": 1, "nodes": []map[string]string{{"id": id, "node": id + ":2003=000", "endpoint": endpoint}}}
 	}
-	spec := map[string]any{"version": 1, "cluster": "source", "site": "test", "old": node("old", "http://127.0.0.1:4242"), "new": node("new", "http://127.0.0.1:4243"), "inputs": []map[string]string{{"source": "old", "path": names, "format": "lines"}}}
+	spec := map[string]any{"version": 1, "cluster": "source", "target_cluster": "target", "site": "test", "old": node("old", "http://127.0.0.1:4242"), "new": node("new", "http://127.0.0.1:4243"), "inputs": []map[string]string{{"source": "old", "path": names, "format": "lines"}}}
 	data, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatal(err)
@@ -165,5 +165,17 @@ func TestNativeWindowCommittedPlan(t *testing.T) {
 	}
 	if _, err := readPlanStructure(plan, false); err == nil {
 		t.Fatal("changed window digest accepted")
+	}
+}
+
+func TestNativeWindowRefusesPinnedMergeSession(t *testing.T) {
+	names := []string{"window.merge.refusal"}
+	plan := nativeMergeGeneratedPlan(t, "http://127.0.0.1:4242", "http://127.0.0.1:4243", names)
+	o := testOptions(plan)
+	o.engine, o.bulkOnly, o.mergeSession = "bulk", true, "history"
+	o.delete = false
+	o.from, o.until = "1970-01-01T00:00:01Z", "1970-01-01T00:00:02Z"
+	if err := run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "windowed plans") {
+		t.Fatal("windowed pinned merge was not refused before contacting peers", err)
 	}
 }

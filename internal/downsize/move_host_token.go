@@ -22,7 +22,7 @@ type hostTokenCache struct {
 	readSecret func() ([]byte, error)
 }
 
-func (c *hostTokenCache) get() (string, error) {
+func (c *hostTokenCache) get(secretPath string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -34,7 +34,10 @@ func (c *hostTokenCache) get() (string, error) {
 	}
 	reader := c.readSecret
 	if reader == nil {
-		reader = func() ([]byte, error) { return os.ReadFile(hostJWTSecretPath) }
+		if secretPath == "" {
+			secretPath = hostJWTSecretPath
+		}
+		reader = func() ([]byte, error) { return os.ReadFile(secretPath) }
 	}
 	key, err := reader()
 	if err != nil {
@@ -64,7 +67,7 @@ func (m *mover) authorizationToken() (string, error) {
 	if enabled != "1" || m.delete || m.tuner == nil || m.tuner.maxSpeed == nil {
 		return "", errors.New("host-local JWT renewal requires explicit maximum-speed copy-only mode")
 	}
-	return m.hostToken.get()
+	return m.hostToken.get(m.hostJWTSecret)
 }
 
 func (m *mover) invalidateHostToken() {

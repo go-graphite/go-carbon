@@ -383,7 +383,7 @@ and a separate gap-fill journal. The window is hashed into new plans and range
 identities, checksummed into v3 transfer headers, and saved in the journal domain.
 Resumes inherit saved endpoints; changing them requires a separate operation.
 All peers must advertise `NativeTimeWindow`. Windowed runs require `--bulk-only`;
-metric fallback and whole-store replacement are refused.
+metric fallback, whole-store replacement and `--merge-session` are refused.
 Without a window, the original v2 protocol and full-retention behavior remain.
 
 Each archive keeps the same normalized, ring-selected source values as the full
