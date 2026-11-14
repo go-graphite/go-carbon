@@ -416,3 +416,38 @@ func TestCollectorReportsCumulativeAdmissionRejections(t *testing.T) {
 		}
 	}
 }
+
+func TestPendingCheckpointMetrics(t *testing.T) {
+	app := &App{Cache: cache.New()}
+	app.pendingRecoveryFailures.Store(3)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(&migrationCollector{app: app})
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{
+		"cache_pending_checkpoint_unclaimed_metrics":    0,
+		"cache_pending_checkpoint_confirmations":        0,
+		"cache_pending_checkpoint_urgent_confirmations": 0,
+		"pending_checkpoint_failures_total":             3,
+	}
+	for _, family := range families {
+		expected, ok := want[family.GetName()]
+		if !ok {
+			continue
+		}
+		metric := family.Metric[0]
+		actual := metric.GetGauge().GetValue()
+		if family.GetType() == dto.MetricType_COUNTER {
+			actual = metric.GetCounter().GetValue()
+		}
+		if actual != expected {
+			t.Fatalf("%s=%v, want %v", family.GetName(), actual, expected)
+		}
+		delete(want, family.GetName())
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing checkpoint metrics: %v", want)
+	}
+}

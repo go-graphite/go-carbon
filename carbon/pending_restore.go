@@ -152,7 +152,13 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 			}
 		}
 		if err := core.RecoverPending(stop, restoreRate); err != nil {
-			logger.Warn("pending recovery stopped", zap.Error(err))
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			app.pendingRecoveryFailures.Add(1)
+			logger.Error("pending recovery stopped", zap.Error(err))
 			return
 		}
 		// Every saved name is now in cache or persisted. Native publication
@@ -186,11 +192,13 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 		// native mutation is durable, including points claimed from its tail.
 		if app.MetricStore != nil {
 			if err := app.MetricStore.Sync(); err != nil {
+				app.pendingRecoveryFailures.Add(1)
 				logger.Error("pending recovery not synced; checkpoint retained", zap.Error(err))
 				return
 			}
 		}
 		if err := core.FinishPendingRecovery(); err != nil {
+			app.pendingRecoveryFailures.Add(1)
 			logger.Error("pending recovery not retired", zap.Error(err))
 			return
 		}

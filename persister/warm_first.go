@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
@@ -36,7 +37,7 @@ func (p *Whisper) startWarmFirst() {
 		return
 	}
 	validator, _ := p.metricStore.(checkpointValidator)
-	p.warmPending = &warmReservations{names: make(map[string]struct{})}
+	p.warmPending = &warmReservations{}
 	recv, tryRecv := p.recv, p.tryRecv
 	p.warmOriginalRecv, p.warmOriginalTryRecv = recv, tryRecv
 	ready := make(chan string, store.DefaultPrewarmBatch)
@@ -185,23 +186,35 @@ func (p *Whisper) startWarmFirst() {
 // Reservations are bounded by worker batch slots, the raw/ready/prefetch
 // windows and one name per source pump. They prevent refreshed snapshots from
 // spending rate/CPU grants on names already in the pipeline.
-type warmReservations struct {
+type warmReservations [256]warmReservationShard
+
+// A reservation spans the source pump, prefetch and writer. Only the same
+// metric needs exclusion; unrelated writers must not share a global mutex.
+func (r *warmReservations) forName(name string) *warmReservationShard {
+	return &r[helper.HashString(name)&uint64(len(r)-1)]
+}
+
+type warmReservationShard struct {
 	mu    sync.Mutex
 	names map[string]struct{}
 }
 
 func (p *Whisper) claimWarmName(name string) bool {
-	pending := p.warmPending
+	pending := p.warmPending.forName(name)
 	pending.mu.Lock()
 	defer pending.mu.Unlock()
 	if _, exists := pending.names[name]; exists {
 		return false
 	}
+	if pending.names == nil {
+		pending.names = make(map[string]struct{})
+	}
 	pending.names[name] = struct{}{}
 	return true
 }
 func (p *Whisper) finishWarmName(name string) {
-	if pending := p.warmPending; pending != nil {
+	if reservations := p.warmPending; reservations != nil {
+		pending := reservations.forName(name)
 		pending.mu.Lock()
 		delete(pending.names, name)
 		pending.mu.Unlock()

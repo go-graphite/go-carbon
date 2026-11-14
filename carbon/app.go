@@ -112,10 +112,11 @@ type App struct {
 	heartbeatCollectorOnce sync.Once
 	// readRelease, when set, lets the next instance start while this one keeps
 	// serving reads after a dump stop (see SetReadHandoff).
-	readRelease   func()
-	pendingStop   chan struct{}
-	pendingDone   chan struct{}
-	readSuccessor string
+	readRelease             func()
+	pendingStop             chan struct{}
+	pendingDone             chan struct{}
+	pendingRecoveryFailures atomic.Uint64
+	readSuccessor           string
 	// successorResolver, if set, tells DumpStop the binary the service
 	// manager starts next when it differs from readSuccessor.
 	successorResolver func() string
