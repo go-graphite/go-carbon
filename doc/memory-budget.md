@@ -1,7 +1,8 @@
 # Memory budget
 
 `[common] memory-budget` is an optional startup policy. The default, `""`, keeps
-the existing cache sizes. `"0"` also disables the policy.
+the existing read-cache sizes. `"0"` also disables the policy. The write-cache
+point limit is derived independently when omitted, as described below.
 
 Without `memory-budget` and without the `GOMEMLIMIT` environment variable, the Go
 runtime soft memory limit defaults to half of host memory (the smaller of RAM
@@ -78,3 +79,38 @@ repository defaults remain a 256 MiB store cache, a disabled metadata cache and
 a disabled write-cache byte limit. A single set of fixed fractions cannot
 reproduce deployments with different cache/heap proportions; preserve their
 explicit overrides when enabling the policy incrementally.
+
+## Automatic write-cache point limit
+
+Omitting `[cache] max-size` enables automatic sizing at startup and on SIGHUP,
+independently of `memory-budget`. It uses the same total-memory reader: physical
+RAM on macOS, or the smaller of RAM and visible cgroup limits on Linux. It does
+not use free or available RAM, which changes as the cache fills.
+
+The point limit is `floor(floor(total_bytes * memory-share) / bytes_per_point)`,
+clamped to at least one point and at most the signed 64-bit limit. The default
+`memory-share` is 0.15; it must be above zero and at most 0.9. The default
+`bytes-per-point = 0` uses 3.0 at startup. On reload it uses
+`cache_estimated_bytes / cache_points` when at least one million points are
+cached and the byte estimate is positive. A finite positive `bytes-per-point`
+fixes that estimate instead. Measurements are not persisted across restarts.
+
+```toml
+[cache]
+# Leave max-size absent to activate automatic sizing.
+memory-share = 0.15
+bytes-per-point = 0
+```
+
+At the startup defaults, 512 GiB gives 27,487,790,694 points and 1 TiB gives
+54,975,581,388 points. Explicit `max-size` always overrides, including zero for
+unlimited. If total memory cannot be detected, automatic sizing logs an error
+and retains the 1,000,000-point fallback. Explicit `max-bytes` remains an
+independent additional limit. The byte estimate and its share are not an RSS
+cap; leave room for GC, metadata, read caches and native allocations.
+
+The `automatic cache max-size resolved` log records total memory, share, byte
+budget, bytes per point and the resolved point limit. Prometheus exports
+`cache_limit_auto`, `cache_limit_memory_share`, `cache_limit_bytes`,
+`cache_limit_bytes_per_point` and `cache_limit_points`. The existing Graphite
+`cache.maxSize` stat also reports the effective point limit.
