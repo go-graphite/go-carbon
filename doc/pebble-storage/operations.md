@@ -1,10 +1,8 @@
 # Shared-store operations
 
-The [operator tools](../../tool/ops/README.md) cover canaries, migration/reclaim
-status, fleet comparisons, capacity estimates, input logging, stale artifacts,
-SMART collection and expiration-policy generation. They operate on explicit
-inputs, with local fakes for their tests. They do not require a particular fleet
-layout or monitoring provider.
+Use [storectl](../../tool/storectl/README.md) for supported local inventories,
+maintenance and resumable synchronization. Fleet dashboards and host collectors
+belong to the deployment's monitoring and configuration management.
 
 ## Dashboard
 
@@ -33,8 +31,8 @@ logging must be configured before their optional panels have data.
 
 Process CPU per point includes read traffic, GC, migration and compaction. The
 stage series measure worker elapsed time and may exceed process CPU. The dashboard
-uses Pebble point/update counters for those panels; use the CLI's `--backend
-whisper` for an original-file comparison or adjust those dashboard queries.
+uses Pebble point/update counters for those panels; adjust the dashboard queries
+when comparing with an original-file backend.
 During mixed-backend/mirror conversion, stage time is not exclusively attributable
 to one backend. Compare completed stores and equivalent traffic windows. Never
 average histogram bucket quantiles to claim a fleet p99.
@@ -92,8 +90,9 @@ After migration, distinguish logical ownership, original-file reclamation,
 empty-directory pruning, filesystem free space and SSD discard. They are separate
 steps with different evidence:
 
-1. Use `status.py` to inspect the complete receipt. Require shared phase, no active
-   conversion, no skipped originals and no error before source-tree pruning.
+1. Inspect the daemon's complete migration receipt through its authenticated
+   administrative API. Require shared phase, no active conversion, no skipped
+   originals and no error before source-tree pruning.
 2. Follow reclaim queue/completion counters and record free bytes and used inodes
    for the source mount. Use U28's `storectl maintain prune-empty-dirs` with its own readiness,
    lock, exclusion and no-follow safeguards. Complete read-only inventories before
