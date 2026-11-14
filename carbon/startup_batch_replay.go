@@ -21,8 +21,10 @@ func (s *startupInput) replayCaptureBatches(reader io.Reader, source *cache.Reco
 	applied := 0
 	limit := min(8<<20, max(64<<10, s.policy.readBuffer*2))
 	maxFrames := 32
+	legacyAdmission := false
 	if policy, ok := sink.admission.(interface{ RecoveryBatchingEnabled() bool }); ok && !policy.RecoveryBatchingEnabled() {
 		maxFrames = 1
+		legacyAdmission = true
 	}
 
 	flush := func() error {
@@ -36,6 +38,17 @@ func (s *startupInput) replayCaptureBatches(reader io.Reader, source *cache.Reco
 			return err
 		}
 		reserved := sink.admission.HasRecoveryCapacityBatch(count, groups.cost)
+		// Count-only admission deliberately accepts a complete frame once the
+		// cache falls below its threshold, even when the frame exceeds it. Keep
+		// that boundary: a partial frame can otherwise fill the cache while its
+		// durable cursor still waits for the rest of the frame.
+		for legacyAdmission && !reserved {
+			if err := s.waitCapture(); err != nil {
+				return err
+			}
+			time.Sleep(time.Millisecond)
+			reserved = sink.admission.HasRecoveryCapacityBatch(count, groups.cost)
+		}
 		for i := range groups.used {
 			g := &groups.groups[i]
 			if reserved {
