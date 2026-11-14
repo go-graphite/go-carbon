@@ -220,3 +220,18 @@ func TestSyncConvergeNoCatalogHolders(t *testing.T) {
 		t.Fatal("unproven empty scope", rows, s.sum.residual)
 	}
 }
+
+func TestSyncConvergeExplicitAbsentNames(t *testing.T) {
+	o := convergeOptions(t)
+	o.namesFile = filepath.Join(t.TempDir(), "scope.names")
+	if err := os.WriteFile(o.namesFile, []byte("absent.one\nabsent.two\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSync(context.Background(), o, newFakeSync()); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(o.state, "resolved.json"))
+	if !strings.Contains(string(data), "absent.one") || !strings.Contains(string(data), "absent.two") {
+		t.Fatal(string(data))
+	}
+}

@@ -161,6 +161,9 @@ func (s *syncer) discover(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stores := append([]string{s.o.to}, s.o.from...)
+	if s.o.namesFile != "" {
+		stores = append(stores, "@names")
+	}
 	cp := syncDiscoveryCheckpoint{Cursors: map[string]string{}}
 	if rows := s.j.find(func(r syncRow) bool { return r.Kind == "discover_checkpoint" }); len(rows) > 0 {
 		cp = *rows[len(rows)-1].Discovery
@@ -208,7 +211,11 @@ func (s *syncer) discover(ctx context.Context) error {
 		}
 	}()
 	for i, store := range stores {
-		listers[i] = s.startList(ctx, store, cp.Cursors[store])
+		if store == "@names" {
+			listers[i] = s.startExplicitNames(ctx, cp.Cursors[store])
+		} else {
+			listers[i] = s.startList(ctx, store, cp.Cursors[store])
+		}
 	}
 	for _, l := range listers {
 		if err := l.advance(ctx); err != nil {
@@ -244,7 +251,7 @@ func (s *syncer) discover(ctx context.Context) error {
 			}
 			if i == 0 {
 				inTarget = true
-			} else {
+			} else if i <= len(s.o.from) {
 				mask |= 1 << uint(i-1)
 			}
 		}
@@ -656,4 +663,48 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Explicit scope names are discovery candidates even when every catalog omits
+// them. Their synthetic cursor carries no source bit and makes absence durable.
+func (s *syncer) startExplicitNames(ctx context.Context, after string) *syncLister {
+	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
+	go func() {
+		defer close(l.pages)
+		defer close(l.finished)
+		f, scan, err := openLines(s.o.namesFile)
+		if err != nil {
+			l.errc <- err
+			return
+		}
+		defer f.Close()
+		var page []string
+		send := func() bool {
+			select {
+			case l.pages <- page:
+				page = nil
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for scan.Scan() {
+			n := strings.TrimSpace(scan.Text())
+			if n <= after || !strings.HasPrefix(n, s.o.prefix) {
+				continue
+			}
+			page = append(page, n)
+			if len(page) == syncListPage && !send() {
+				return
+			}
+		}
+		if err := scan.Err(); err != nil {
+			l.errc <- err
+			return
+		}
+		if len(page) > 0 {
+			send()
+		}
+	}()
+	return l
 }
