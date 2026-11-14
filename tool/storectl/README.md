@@ -183,7 +183,8 @@ repeats independent checks and the process fence. Interrupted or legacy journals
 without a process snapshot require a fresh verification generation before READY.
 An unresolved policy conflict or an open declared gap remains NOT_READY.
 
-A generic JSON file can supply all block inputs:
+A generic JSON file can supply all block inputs. A complete, synthetic
+[example-block.json](example-block.json) is included for adaptation:
 
 ```json
 {
@@ -203,6 +204,25 @@ A generic JSON file can supply all block inputs:
 storectl sync --block block.json --streams 0
 storectl sync --resume ./block-state
 ```
+
+Block fields are strict: unknown fields are rejected. `target` is the receiver
+URL; `donors` and `peers` enumerate every source to compare; `ring` is a ring
+file path (empty means the full catalog); `period` is the complete closed
+cutover interval; `gaps` contains uniquely named closed windows with `from` and
+`until` Unix seconds. `gap_ledger_complete` attests that all required windows
+are recorded, and `carbonapi_url` supplies independent read-back. `state` is
+the durable controller state path. An optional `names` path restricts discovery
+to a sorted inventory; omission means full discovery, not a sample.
+Use absolute input/state paths on the controller. Draft or open windows and an
+incomplete ledger must remain blocking until reviewed against the actual writer
+and restart ledger; never clear a flag just to pass validation.
+
+`storectl sync --block /absolute/path/to/block.json --help` expands the block
+before displaying help without starting sync. It checks strict schema and block
+prerequisites, but does not check connectivity or establish READY; help returns
+the CLI help exit status. Exit status, `ready.json`, and complete source/window
+coverage decide readiness. Resume uses the saved local inputs, so the original
+campaign file need not remain in a repository.
 
 An optional `names` path restricts discovery to a fixed inventory. Block scope
 cannot be overridden by flags. Saved configuration retains the descriptor and READY

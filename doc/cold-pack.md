@@ -408,3 +408,241 @@ duty budget. Normal updates and decoders are unchanged. Changing the selector
 invalidates the saved sweep cursor. The offline tool accepts
 `-float-codec -float-exhaustive`. Disable the selector to restore prefix
 selection for future packing; existing v11 frames require no conversion.
+
+## Production measurements: 2–4 November 2026
+
+Historical observations from a production fleet. D1–D14 are anonymous dataset
+labels, and store labels identify comparisons only. Values describe the measured
+release and workload, rather than current defaults or universal savings.
+
+Measured 4 Nov 2026 ~10:15 CET unless stated otherwise. Window for disk changes:
+3 Nov 09:00 (just before the rollout) → 4 Nov ~10:15.
+
+### What cold-pack does
+
+Packing works one metric block at a time. A block is one archive's native time
+range of one metric. A packed D1 block averages about 13,400 points.
+
+Ordinary (v7, time-bucketed) data is stored as 128-point groups, each under its
+own Pebble key. Cold-pack rewrites a block's history into 4,096-point sealed
+groups with a stronger encoding. The rewrite and the deletion of the old group
+keys happen in one atomic batch, and the rewrite is only committed if the new key
+plus value bytes are smaller than the old ones. Only time-bucketed blocks larger
+than one 128-point group are eligible; ranges above 65,536 points are skipped.
+
+### Per-block "metadata", before and after
+
+From the layout in the code (`internal/whisperio`, `internal/chunkstore/sealed.go`).
+
+| Item | Before (128-point groups) | After (4,096-point groups) |
+|---|---|---|
+| Block descriptor | ~33 B key + 8 B value (point count, time bucket) | ~33 B key + 12 B value (adds "packed, groups of 4,096") |
+| Group keys per 13,356-point D1 block | ~105 keys × ~42 B (store prefix, time bucket, metric id, archive, block, group number) | ~4 keys × ~42 B |
+| Per-group header | 6 B (version, flags, CRC32) | 16 B (version, flags, count, first timestamp, step, CRC) |
+| Per-group slot bitmap | 16 B (which of the 128 slots are filled) | none |
+| **Overhead per D1 block** | **≈ 6.8 KB** (105 × 64 B + descriptor) | **≈ 0.28 KB** (4 × 58 B + descriptor) |
+| Timestamps | one delta varint per point (1 B at a regular step), then zstd if the body is ≥ 128 B | one run (start + step) for regular series |
+| Values | integer delta varints, or 8 float byte planes | constant run, linear run, or integer delta / delta-of-delta varints; other floats as 8 byte planes; zstd over the body |
+
+Every 128 points paid about 64 bytes of key, header and bitmap before any point
+data. Cold-pack does **not** change the per-metric metadata records (writer
+header pages, about 1.2–4.5 KB per metric) or the metadata cache; those were
+reduced separately by metadata pack (`store-metadata-cache-pack`).
+
+### Measured per block (last 24 h, all cold-pack hosts)
+
+Logical key + value bytes before Pebble's own compression, from
+`increase(store_cold_pack_{blocks,points,input_bytes,output_bytes}_total[24h])`.
+
+| Cluster | Hosts | Blocks packed | Points per block | Before → after per block | Before → after per point | Cut |
+|---|---|---|---|---|---|---|
+| D1 | 18 | 1,417M | 13,356 | 18.6 → 10.2 KB | 1.39 → 0.77 B/pt | −45% |
+| D2 | store-D2-1 | 64.8M | 14,288 | 13.9 → 6.1 KB | 0.97 → 0.43 | −56% |
+| D3 | store-D3-1 | 74.0M | 14,612 | 16.1 → 7.7 KB | 1.10 → 0.53 | −52% |
+| D8 | store-D8-1 | 65.6M | 15,936 | 17.1 → 7.5 KB | 1.07 → 0.47 | −56% |
+| D5 | store-D5-1 | 46.7M | 11,931 | 17.4 → 9.9 KB | 1.46 → 0.83 | −43% |
+| D6 | store-D6-1 | 35.5M | 12,115 | 20.7 → 13.5 KB | 1.71 → 1.11 | −35% |
+| D7 | store-D7-1 | 34.9M | 11,432 | 24.4 → 16.7 KB | 2.14 → 1.46 | −32% |
+| D4 | store-D4-1 | 16.1M | 25,298 | 26.6 → 12.3 KB | 1.05 → 0.49 | −54% |
+| D9 | store-D9-1 | 17.7M | 13,215 | 13.1 → 4.9 KB | 0.99 → 0.37 | −63% |
+| D10 | store-D10-1 | 3.0M | 30,393 | 27.8 → 10.8 KB | 0.92 → 0.36 | −61% |
+| D11 | store-D11-1 | 2.8M | 23,620 | 20.7 → 7.6 KB | 0.88 → 0.32 | −63% |
+| D12 | store-D12-1 | 4.1M | 22,256 | 14.9 → 3.2 KB | 0.67 → 0.15 | −78% |
+| D13 | store-D13-1 | 3.9M | 11,955 | 15.3 → 8.3 KB | 1.28 → 0.70 | −46% |
+| D14 | store-D14-1 | 3.2M | 5,379 | 6.1 → 2.6 KB | 1.13 → 0.49 | −57% |
+
+#### Where the saving comes from
+
+Estimate from the layout above:
+
+- D1: of the 8.4 KB saved per block, about **6.5 KB (~77%) is removed
+  overhead** (keys, headers, bitmaps) and about **1.9 KB (~23%) is better
+  encoding** (11.8 → 9.9 KB of point data).
+- D2: overhead is ~88% of the saving (7.2 → 0.28 KB overhead, 6.7 → 5.8 KB data);
+  its blocks carry less point data, so the fixed per-group cost was a bigger share.
+- D7 and D6 gain least: their values are float-heavy, and the encoding
+  helps floats less than integers.
+
+### Disk: Pebble bytes before and after
+
+`pebble_disk_bytes` at 3 Nov 09:00 vs 4 Nov ~10:15.
+
+#### Worked example: store-D1-1
+
+| | Before (3 Nov 09:00) | After (4 Nov 10:15) |
+|---|---|---|
+| Pebble disk | 1,860 GB | 1,271 GB (**−589 GB, −31.7%**) |
+| L6 | 1,627 GB | 1,167 GB |
+| L5 (overlap) | 187 GB | 65 GB |
+| L4 | 24 GB | 17 GB |
+
+In 25 h cold-pack on this host rewrote 86.9M blocks (1.16 trillion points); their
+logical size went from 1.62 TB to 0.89 TB (−0.73 TB). On disk that showed up as
+−0.59 TB, after a day of new data had also been added.
+
+#### Per cluster
+
+| Cluster | Cold-pack host(s) | Change since 3 Nov 09:00 | vs peers without cold-pack, now |
+|---|---|---|---|
+| D1, 16 hosts | 16 production stores | −30 to −32% (1.74–2.08 → 1.20–1.42 TB each) | no unpacked D1 left |
+| D1 | store-D1-2 | −26% (1.69 → 1.26 TB; was already v7) | |
+| D1 | store-D1-3 | −22% (1.72 → 1.35 TB) | |
+| D1 | store-D1-4 | +7% (1.16 → 1.23 TB; packed since 2 Nov, this is growth) | |
+| D8 | store-D8-1 | −39% (1.19 → 0.73 TB) | −43% |
+| D9 | store-D9-1 | −46% (0.25 → 0.13 TB) | −47% |
+| D5 | store-D5-1 | −36% (0.98 → 0.62 TB) | −36% |
+| D2 | store-D2-1 | −28% (1.11 → 0.80 TB) | −35% |
+| D4 | store-D4-1 | −15% (0.53 → 0.45 TB) | −23% (peers grew 10%) |
+| D10 | store-D10-1 | −30% (0.12 → 0.08 TB) | −26% |
+| D3 | store-D3-1 | −22% (1.63 → 1.27 TB) | −23% |
+| D6 | store-D6-1 | −18% (1.13 → 0.93 TB) | −20% |
+| D11 | store-D11-1 | −47% (0.08 → 0.04 TB) | −33% |
+| D12 | store-D12-1 | −42% (0.08 → 0.05 TB) | −34% |
+| D13 | store-D13-1 | −22% (0.11 → 0.08 TB) | −26% |
+| D14 | store-D14-1 | −62% (0.04 → 0.02 TB) | −43% |
+| D7 | store-D7-1 | +10% (1.54 → 1.68 TB) | +10% (first pass still running over relayout copies) |
+
+**Net on the 31 cold-pack hosts: −11.2 TB in about 25 h**, roughly 10 TB of it
+on D1.
+
+#### Why disk drops ~31% when the block bytes drop 45%
+
+1. **Pebble already compresses.** Shared key prefixes and Snappy SST blocks mean
+   the per-group key overhead that cold-pack removes never cost its full logical
+   size on disk.
+2. **Some data is not packable:** the recent hot tail until it ages out,
+   per-metric metadata records and the name index, blocks with more than 65,536
+   points, and old-layout (v6, not time-bucketed) blocks, which need relayout
+   first.
+3. **New data keeps arriving**, about a day's worth inside this window.
+
+Compaction also contributes on its own: the L5 overlap shrinking on store-D1-1 is
+part of the drop. On an uncompacted host compaction alone is about −10%
+(store-D1-5 reference, 2 Nov: L5 178 GB + L4 22 GB of overlap).
+
+#### Like-for-like check (2 Nov 2026)
+
+Both stores fully compacted with `store-compact-once`, same logical load (active
+series 8.63M vs 8.70M, 2.84M points/s each):
+
+| | store-D1-4 (v9, exact cold-pack) | store-D1-2 (v7, no cold-pack) | Delta |
+|---|---|---|---|
+| `pebble_disk_bytes` | 1,167.2 GB | 1,559.3 GB | −25.1% |
+| L6 | 1,145.5 GB | 1,546.3 GB | −25.9% |
+| Bytes per active series | 135.3 KB | 179.3 KB | −24.5% |
+| df used | 1,328.1 GB | 1,733.1 GB | −23.4% |
+
+After a full relayout (so older v6 history becomes packable) and a second
+compaction, store-D1-4 reached 1,136.9 GB; with zstd on cold levels
+(`store-compression-cold = "zstd"`) 1,089.4 GB (−30% vs store-D1-2). zstd is
+parked: it cost 2–2.7 cores (≈ +15–18% process CPU) for −4.2% disk, and CPU binds
+in sizing.
+
+### Cost
+
+#### While passes run
+
+D1 medians at the same time of day before the rollout and on 4 Nov morning
+before the release:
+
+| | region 1 | region 2 | region 3 |
+|---|---|---|---|
+| CPU (cores per store) | 14.8 → 17.7 | 12.4 → 18.4 | 12.8 → 19.4 |
+| Read p99 | +0.1 to +0.7 ms in the morning (region 2 2.3 → 3.0 ms); up to +1.4 ms at night in region 2 | | |
+| Updates/s | unchanged | | |
+
+Over the last 25 h cold-pack on D1 read **101.8 TB to write 21.3 TB**
+(store-D1-1 alone read 6.2 TB to repack 1.6 TB). The excess is repeat passes
+re-reading already packed history every interval (1h default). The worst cases
+were the non-D1 rollout hosts during repeat passes: store-D2-1 read 23.5–29.9 MB/s
+to pack 4.8–5.5 blocks/s (4.3–6.2 MB read per packed block), with read p99 28–41
+ms vs ~15 ms on its peers; store-D6-1 reached 5–7× its peers' p99.
+
+Mitigation used on 4 Nov 2026: increase the pass interval to `24h` on 29
+stores after the first pass (08:05–09:15 CET). The interval gates the next pass,
+so it does not stop a running pass. A historical per-metric-summary prototype
+showed no repeat-pass read saving on a frequently updated dataset: pass 2 read
+70.7 GB over the first 4M metrics, versus 66.5/69.4 GB previously, with zero
+summary skips. Hourly writes changed every metric revision. The 256 KB per packed
+block observed on pass 1 measured backlog work, not repeat-pass efficiency.
+
+A leftover pass at 64 workers and 1 GiB/s raised read p99 from 20 to 35 ms at
+about 580 req/s (15–18 ms on previous days). Packing accounted for 52% of one
+store's process CPU, mostly history reads. Setting one worker and 1 MiB/s by
+SIGHUP reduced that store's p99 from 41 to 13.5 ms within 8 minutes; that setting
+was applied to the dataset at 17:37 CET. These are historical observations;
+current cursor/watermark behavior is described above.
+
+#### Steady state
+
+Reading packed blocks once passes are done costs **0.16% of process CPU**
+(store-D1-1, 30 s CPU profile 4 Nov 09:55: sealed decode 0.70 of 426.8 CPU-s; no
+Repack samples).
+
+### Re-measuring
+
+Reproduce the metric-derived numbers with your Prometheus-compatible datasource
+and the appropriate job and instance selectors:
+
+```promql
+# per-block before/after, per host (sum by cluster; divide by blocks or points)
+increase(store_cold_pack_blocks_total[24h])
+increase(store_cold_pack_points_total[24h])
+increase(store_cold_pack_input_bytes_total[24h])    # logical bytes before
+increase(store_cold_pack_output_bytes_total[24h])   # logical bytes after
+
+# read cost of a pass (read per packed block = read rate / blocks rate)
+rate(store_cold_pack_read_bytes_total[5m])
+rate(store_cold_pack_blocks_total[5m])
+
+# first packing (all sealing minus repacking)
+sum by (cluster) (rate(store_cold_pack_blocks_total[5m]))
+  - sum by (cluster) (rate(store_cold_pack_repacked_blocks_total[5m]))
+sum by (cluster) (rate(store_cold_pack_points_total[5m]))
+  - sum by (cluster) (rate(store_cold_pack_repacked_points_total[5m]))
+
+# thawing: blocks/s by writer entrypoint, points/s and logical read+rewrite bytes/s
+sum by (cluster, reason) (rate(store_cold_pack_thaws_total[5m]))
+sum by (cluster) (rate(store_cold_pack_thawed_points_total[5m]))
+sum by (cluster) (rate(store_cold_pack_thawed_bytes_total[5m]))
+
+# repacking previously thawed ranges: blocks/s, points/s and logical bytes/s
+sum by (cluster) (rate(store_cold_pack_repacked_blocks_total[5m]))
+sum by (cluster) (rate(store_cold_pack_repacked_points_total[5m]))
+sum by (cluster) (rate(store_cold_pack_repacked_input_bytes_total[5m]))
+sum by (cluster) (rate(store_cold_pack_repacked_output_bytes_total[5m]))
+
+# disk, now vs a reference time
+pebble_disk_bytes
+pebble_level_bytes
+```
+
+Lifecycle series require the thaw/repack counter release on every compared host.
+Use the usual `job="go_carbon"` and host/cluster selectors when combining jobs.
+Thaw reasons are `append`, `patch`, `rewrite` and administrative `unpack`, named
+after the real codec entrypoints. Slot reuse directly replaces the old range and
+does not thaw it. Thaw rates include completed work whose surrounding transaction
+is later discarded; packing/repacking rates count committed batches. Pack totals
+exclude administrative unpacking in this release. Repack history persists across
+restarts, but thaws executed by older binaries are unmarked. See
+[lifecycle accounting](#observability-and-qualification).

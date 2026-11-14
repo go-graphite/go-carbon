@@ -37,6 +37,11 @@ out, with how each was diagnosed and fixed.
    fix and result, including the compaction-debt arithmetic and why L0 tables
    stay small.
 
+9. [resource-costs.md](resource-costs.md): dated memory, CPU, I/O, network, disk
+   and restart measurements with per-component boundaries and uncertainties.
+10. [Cold-pack production measurements](../cold-pack.md#production-measurements-24-november-2026):
+    logical block savings, physical disk changes and repeat-pass cost.
+
 ## Status
 
 Experimental and opt-in. The file backend remains the default. Format v7
