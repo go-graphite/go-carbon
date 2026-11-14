@@ -269,6 +269,9 @@ func validateStorageConfig(cfg *Config) error {
 	if cfg.Whisper.StoreCacheSize <= 0 || cfg.Whisper.StoreMemTableSize < 64<<10 {
 		return errors.New("shared storage requires positive cache size and memtable size >= 65536")
 	}
+	if cfg.Whisper.StoreBlockLoadConcurrency < 0 || cfg.Whisper.StoreBlockLoadConcurrency > 1024 {
+		return errors.New("whisper.store-block-load-concurrency must be 0..1024")
+	}
 	if cfg.Whisper.StoreCompactionWorkers < 0 || cfg.Whisper.StoreCompactionWorkers > 64 || cfg.Whisper.StoreL0CompactionConcurrency < 0 || cfg.Whisper.StoreL0CompactionConcurrency > 64 {
 		return errors.New("shared storage compaction workers and L0 concurrency must be 0..64")
 	}
@@ -429,6 +432,9 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 	send("compactionDebt", float64(stats.CompactionDebt))
 	send("compactionsInProgress", float64(stats.CompactionsInProgress))
 	send("compactionWorkers", float64(stats.CompactionWorkers))
+	send("blockLoadCapacity", float64(stats.BlockLoadCapacity))
+	send("blockLoadsInProgress", float64(stats.BlockLoadsInProgress))
+	send("blockLoadWaits", float64(stats.BlockLoadWaits))
 	send("compactionRate", float64(stats.CompactionRate))
 	send("compactionPacerTargetRate", float64(stats.CompactionPacerTargetRate))
 	var auto, bypass float64

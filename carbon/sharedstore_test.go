@@ -199,6 +199,8 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"negative compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{-time.Second} }},
 		{"long compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{25 * time.Hour} }},
 		{"invalid flush rate", func(c *Config) { c.Whisper.StoreFlushRate = -2 }},
+		{"negative block load concurrency", func(c *Config) { c.Whisper.StoreBlockLoadConcurrency = -1 }},
+		{"large block load concurrency", func(c *Config) { c.Whisper.StoreBlockLoadConcurrency = 1025 }},
 		{"negative compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = -1 }},
 		{"zero relayout reclaim", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutReclaimBytes = 0 }},
 		{"negative relayout reclaim", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutReclaimBytes = -1 }},
@@ -431,6 +433,7 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 	cfg.Whisper.StoreTimeBuckets = true
 	cfg.Whisper.StoreTimeBucketsRelayoutRate = 1 << 20
 	cfg.Whisper.StoreCompactionWorkers = 4
+	cfg.Whisper.StoreBlockLoadConcurrency = 32
 	writeSharedConfig(t, path, cfg)
 	app := startIncrementalApp(t, path)
 	store := app.MetricStore
@@ -438,6 +441,7 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 		t.Fatalf("compaction workers %d, want 4", got)
 	}
 	next := *cfg
+	next.Whisper.StoreBlockLoadConcurrency = 64
 	next.Whisper.StoreCompactionWorkers = 2
 	next.Whisper.StoreTimeBucketsRelayoutRate = 1
 	next.Whisper.StoreTimeBucketsRelayoutMinFree = 300 << 30
@@ -452,6 +456,9 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 	}
 	if app.MetricStore != store {
 		t.Fatal("reload replaced the store")
+	}
+	if got := store.Stats().BlockLoadCapacity; got != 64 {
+		t.Fatalf("reloaded block load capacity %d, want 64", got)
 	}
 	if got := store.Stats().CompactionWorkers; got != 2 {
 		t.Fatalf("reloaded compaction workers %d, want 2", got)

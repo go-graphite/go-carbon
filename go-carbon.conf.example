@@ -90,6 +90,10 @@ store-native-combine-memory = 2147483648
 # flushes wait behind them and writes stall: fewer workers can raise write
 # throughput at the cost of slower debt reduction.
 store-compaction-workers = 0
+# Store-wide uncached SST block loads, shared by reads, writeout and compaction.
+# 0 keeps 16; range 0..1024. Reloadable; lowering lets active loads finish.
+# Increase only when profiles show admission waits and the device has headroom.
+store-block-load-concurrency = 0
 # Aggregate compaction SST output bytes per second: 0 off (default), positive
 # fixed budget, -1 automatic. Reloads on SIGHUP, including waiting writes.
 # Auto learns unpaced for the warm-up (default one hour), then targets headroom
