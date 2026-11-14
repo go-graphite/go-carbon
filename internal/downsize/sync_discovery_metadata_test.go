@@ -8,17 +8,33 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type metadataDiscovery struct {
 	*fakeSync
-	err   error
-	calls int
+	err    error
+	calls  atomic.Int64
+	active atomic.Int64
+	peak   atomic.Int64
 }
 
 func (b *metadataDiscovery) Info(ctx context.Context, store string, names []string) (map[string][]syncArchive, error) {
-	b.calls++
+	b.calls.Add(1)
+	active := b.active.Add(1)
+	defer b.active.Add(-1)
+	for old := b.peak.Load(); active > old; old = b.peak.Load() {
+		if b.peak.CompareAndSwap(old, active) {
+			break
+		}
+	}
+	select {
+	case <-time.After(time.Millisecond):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -51,7 +67,7 @@ func TestScopedDiscoveryUsesMetadata(t *testing.T) {
 				t.Fatal(err)
 			}
 			b := &metadataDiscovery{fakeSync: f}
-			s := &syncer{o: syncOptions{namesFile: path, prefix: "scope."}, b: b}
+			s := &syncer{o: syncOptions{namesFile: path, prefix: "scope.", streams: 8}, b: b}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			l := s.startScopedList(ctx, syncT, after)
@@ -69,8 +85,11 @@ func TestScopedDiscoveryUsesMetadata(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("membership mismatch: got %d want %d", len(got), len(want))
 			}
-			if b.calls < 3 {
-				t.Fatalf("expected multiple bounded batches, got %d", b.calls)
+			if b.calls.Load() < 3 {
+				t.Fatalf("expected multiple bounded batches, got %d", b.calls.Load())
+			}
+			if peak := b.peak.Load(); peak < 2 || peak > 4 {
+				t.Fatalf("unexpected concurrency %d", peak)
 			}
 		})
 	}

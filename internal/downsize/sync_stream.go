@@ -778,38 +778,50 @@ func (s *syncer) startScopedList(ctx context.Context, store, after string) *sync
 			return
 		}
 		defer f.Close()
+		// Each store gets a bounded share of the stream budget. A cohort keeps
+		// memory bounded and is emitted in input order despite concurrent reads.
+		parallel := max(1, min(4, s.o.streams/(len(s.o.from)+1)))
 		var batch []string
 		flush := func() bool {
 			if len(batch) == 0 {
 				return true
 			}
-			// Discovery needs catalog membership, not point equality. Info reads
-			// authoritative metadata; hashing a day of points here decodes history
-			// for every name before verification even begins.
-			present, e := s.b.Info(ctx, store, batch)
-			if e != nil {
-				l.errc <- e
-				return false
+			pages := make([][]string, (len(batch)+499)/500)
+			errs := make([]error, len(pages))
+			var wg sync.WaitGroup
+			for i := range pages {
+				names := batch[i*500 : min(len(batch), (i+1)*500)]
+				wg.Go(func() {
+					// Discovery needs authoritative membership, not point equality.
+					present, err := s.b.Info(ctx, store, names)
+					errs[i] = err
+					for _, n := range names {
+						if _, found := present[n]; found {
+							pages[i] = append(pages[i], n)
+						}
+					}
+				})
 			}
-			var page []string
-			for _, n := range batch {
-				if _, found := present[n]; found {
-					page = append(page, n)
-				}
+			wg.Wait()
+			if err := errors.Join(errs...); err != nil {
+				l.errc <- err
+				return false
 			}
 			batch = nil
-			select {
-			case l.pages <- page:
-				return true
-			case <-ctx.Done():
-				return false
+			for _, page := range pages {
+				select {
+				case l.pages <- page:
+				case <-ctx.Done():
+					return false
+				}
 			}
+			return true
 		}
 		for scan.Scan() {
 			n := strings.TrimSpace(scan.Text())
 			if n > after && strings.HasPrefix(n, s.o.prefix) {
 				batch = append(batch, n)
-				if len(batch) >= 500 && !flush() {
+				if len(batch) >= 500*parallel && !flush() {
 					return
 				}
 			}
