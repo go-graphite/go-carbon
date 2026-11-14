@@ -61,7 +61,7 @@ preserve both, and choosing between them is outside the requested operation.
 
 ## Qualification
 
-`store-copy bulk-eval` imports the actual captured survivor, stops private
+`storectl bulk-eval` imports the actual captured survivor, stops private
 background maintenance before seeding, and checks original encoded donor layouts
 before timing. Logical survivor images preserve history semantics but lose their
 native layout and therefore cannot qualify native survivor read cost.
@@ -106,7 +106,7 @@ For example, from the existing campaign directory, using its original plan and
 journal (the stream/ordinals below must come from that journal):
 
 ```sh
-store-copy run --plan refresh1-plan --state copy-refresh1-state.jsonl \
+storectl run --plan refresh1-plan --state copy-refresh1-state.jsonl \
   --engine bulk --combine-existing --bulk-only --deferred-only \
   --deferred-range STREAM:START:END --max-batches 1 --apply
 ```
@@ -132,7 +132,7 @@ an updated receiver (old receivers reject the new skip flag).
 `Skipped` in the durable receipt reports each uncopied ordinal/name, encoded bytes,
 physical point bound, archive slots, reason and estimated worker bytes when the
 combine budget is binding. These ordinals remain deferred, never completed.
-`store-copy` prints a `native_skipped` event per name after journaling the receipt,
+`storectl` prints a `native_skipped` event per name after journaling the receipt,
 including on acknowledgement recovery. A retry keeps the original receipt;
 retrying a size skip with different receiver limits needs a new range identity.
 
@@ -206,8 +206,8 @@ startup. Explicit reconciliation can abandon its **original identity** without
 publishing another name or contacting a donor:
 
 ```sh
-store-copy native-abandon --target http://TARGET:PORT --identity OLD_IDENTITY
-store-copy native-abandon --target http://TARGET:PORT --identity OLD_IDENTITY --apply
+storectl native-abandon --target http://TARGET:PORT --identity OLD_IDENTITY
+storectl native-abandon --target http://TARGET:PORT --identity OLD_IDENTITY --apply
 ```
 
 The first command is a local dry run. The second uses the root read/update token

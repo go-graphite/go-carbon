@@ -28,7 +28,7 @@ type nativeCapture struct {
 }
 
 func NativeCaptureMain(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("store-copy capture-native", flag.ContinueOnError)
+	flags := flag.NewFlagSet("storectl capture-native", flag.ContinueOnError)
 	source := flags.String("source", "", "donor Buckyd origin")
 	namesPath := flags.String("names", "", "JSON array of planned names")
 	out := flags.String("out", "", "new private capture metadata path; raw bytes use .transfer suffix")

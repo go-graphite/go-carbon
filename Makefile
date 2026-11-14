@@ -108,15 +108,12 @@ gox-build: out/$(NAME)-linux-386 out/$(NAME)-linux-amd64 out/$(NAME)-linux-arm64
 
 .PHONY: storectl storectl-build
 storectl:
-	$(GO) build -o storectl ./tool/storectl
+	$(GO) build -ldflags '-X main.BuildVersion=$(VERSION)' -o storectl ./tool/storectl
 
-storectl-build: out/storectl-linux-386 out/storectl-linux-amd64 out/storectl-linux-arm64 out/store-copy-linux-386 out/store-copy-linux-amd64 out/store-copy-linux-arm64
+storectl-build: out/storectl-linux-386 out/storectl-linux-amd64 out/storectl-linux-arm64
 
 out/storectl-linux-%: out $(SRCS)
-	GOOS=linux GOARCH=$* $(GO) build -o $@ ./tool/storectl
-
-out/store-copy-linux-%: out $(SRCS)
-	GOOS=linux GOARCH=$* $(GO) build -o $@ ./tool/store-copy
+	GOOS=linux GOARCH=$* $(GO) build -ldflags '-X main.BuildVersion=$(VERSION)' -o $@ ./tool/storectl
 
 ARCH = 386 amd64 arm64
 out/$(NAME)-linux-%: out $(SRCS)

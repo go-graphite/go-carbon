@@ -15,7 +15,7 @@ import (
 // Explicit reconciliation command: no donor, import, replan or journal rewrite.
 // The old identity is never recycled; a later copy needs a fresh reviewed plan.
 func nativeAbandonMain(ctx context.Context, args []string, out io.Writer) error {
-	flags := flag.NewFlagSet("store-copy native-abandon", flag.ContinueOnError)
+	flags := flag.NewFlagSet("storectl native-abandon", flag.ContinueOnError)
 	target := flags.String("target", "", "target Buckyd origin")
 	identity := flags.String("identity", "", "exact legacy native combine identity (64 hex characters)")
 	token := flags.String("token-env", "BUCKYD_TOKEN", "root read/update JWT environment variable")

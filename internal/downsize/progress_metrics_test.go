@@ -33,7 +33,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 			c.Close()
 		}
 	}()
-	p := &progressMetrics{addr: listener.Addr().String(), prefix: "carbon.store_copy.runner.run.sync", phase: "starting", active: 1}
+	p := &progressMetrics{addr: listener.Addr().String(), prefix: "tools.storectl.runner.run.sync", phase: "starting", active: 1}
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
 		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running"})
 		// Internal copy progress must not replace parent sync phase or totals.

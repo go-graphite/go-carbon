@@ -80,12 +80,6 @@ func (l *originList) Set(value string) error {
 	return nil
 }
 
-// PlanFreeCopyMain is the compatibility spelling of the canonical sync command.
-func PlanFreeCopyMain(ctx context.Context, args []string) error {
-	event("command_alias", map[string]any{"argv": append([]string{"storectl", "sync"}, args...)})
-	return SyncMain(ctx, args)
-}
-
 func registerCopyFlags(flags *flag.FlagSet, o *copyOptions) {
 	flags.Var((*originList)(&o.froms), "source", "source buckyd origin, e.g. http://donor:4242; repeat (or comma-separate) to copy every donor of a block into --to in one run")
 	flags.Var((*originList)(&o.froms), "from", "compatibility alias for --source (URL)")

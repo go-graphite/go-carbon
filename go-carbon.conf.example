@@ -954,9 +954,9 @@ auth-jwt-secret-file = ""
 # apply. Requires a secret path. Other initial errors remain fatal. Restart to
 # apply; the default preserves strict startup on missing secrets.
 wait-for-auth-secret = false
-# Native gap copy: store-copy run --engine bulk --bulk-only --bulk-combine
+# Native gap copy: storectl run --engine bulk --bulk-only --bulk-combine
 # --from UNIX_OR_RFC3339 --until UNIX_OR_RFC3339 (exclusive). No daemon option;
-# see tool/store-copy/README.md for archive boundaries and resume scope.
+# see tool/storectl/README.md for archive boundaries and resume scope.
 # Whole-store checkpoint/copy API: /admin/store-copy on this listener, protected
 # by the same JWT header with namespaces=["*"] and ops=["admin"] (or root "*").
 # Requires input-log.enabled; refuses incomplete conversion, tags, expiration
@@ -982,7 +982,7 @@ replicas = 1
 pprof = ""
 pyroscope = ""
 # Bounds concurrent exports/imports and encoded/decoded import size.
-max_transfers = 0 # auto: max(128, CPUs); store-copy defaults its streams to the smaller of both ends; explicit positive values remain ceilings
+max_transfers = 0 # auto: max(128, CPUs); storectl defaults its streams to the smaller of both ends; explicit positive values remain ceilings
 max_body_bytes = 167772160
 # Archive-anchor maintenance (/v1/maintenance/archive-anchors) is admitted
 # separately from transfers: at most max-maintenance-requests requests at once

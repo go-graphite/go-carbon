@@ -12,17 +12,17 @@ case "$linkage" in
   release)
     export CC='zig cc -target x86_64-linux-gnu.2.28' CXX='zig c++ -target x86_64-linux-gnu.2.28'
     daemon_flags="-X main.BuildVersion=$version"
-    tool_flags=''
+    tool_flags="-X main.BuildVersion=$version"
     ;;
   static)
     export CC='zig cc -target x86_64-linux-musl' CXX='zig c++ -target x86_64-linux-musl'
     daemon_flags="-X main.BuildVersion=$version -linkmode external -extldflags -static"
-    tool_flags='-linkmode external -extldflags -static'
+    tool_flags="-X main.BuildVersion=$version -linkmode external -extldflags -static"
     ;;
   *) echo 'linkage must be release or static' >&2; exit 2;;
 esac
 go build -ldflags "$daemon_flags" -o "$out/go-carbon-$linkage" .
-go build -ldflags "$tool_flags" -o "$out/store-copy-$linkage" ./tool/store-copy
-file "$out/go-carbon-$linkage" "$out/store-copy-$linkage"
+go build -ldflags "$tool_flags" -o "$out/storectl-$linkage" ./tool/storectl
+file "$out/go-carbon-$linkage" "$out/storectl-$linkage"
 go version -m "$out/go-carbon-$linkage"
-shasum -a 256 "$out/go-carbon-$linkage" "$out/store-copy-$linkage"
+shasum -a 256 "$out/go-carbon-$linkage" "$out/storectl-$linkage"

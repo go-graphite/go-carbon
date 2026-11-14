@@ -11,13 +11,13 @@ import (
 )
 
 // progressObserver receives the exact snapshots published to progress JSON.
-// Installed only by store-copy before workers start; guarded by outputMu.
+// Installed only by storectl before workers start; guarded by outputMu.
 var progressObserver func(string, progressSnapshot)
 
 // MainWithMetrics exports controller progress through a local Graphite receiver.
 // Delivery is bounded and never changes the transfer result or retry policy.
 func MainWithMetrics(args []string) error {
-	addr := os.Getenv("STORE_COPY_GRAPHITE_ADDR")
+	addr := os.Getenv("STORECTL_GRAPHITE_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:2003"
 	}
@@ -28,7 +28,7 @@ func MainWithMetrics(args []string) error {
 	}
 	// One bounded identity per invocation, shared by nested sync copy operations.
 	id := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", host, os.Getpid(), time.Now().UnixNano()))))[:12]
-	p := &progressMetrics{addr: addr, prefix: "carbon.store_copy." + metricToken(host) + "." + id + "." + metricToken(operation), phase: "starting", active: 1}
+	p := &progressMetrics{addr: addr, prefix: "tools.storectl." + metricToken(host) + "." + id + "." + metricToken(operation), phase: "starting", active: 1}
 	outputMu.Lock()
 	progressObserver = p.observe
 	outputMu.Unlock()
@@ -135,6 +135,6 @@ func (p *progressMetrics) send() {
 	}
 	if err != nil && !p.warned {
 		p.warned = true
-		fmt.Fprintln(os.Stderr, "store-copy: progress metric delivery failed:", err)
+		fmt.Fprintln(os.Stderr, "storectl: progress metric delivery failed:", err)
 	}
 }

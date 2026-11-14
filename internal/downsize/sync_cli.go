@@ -38,7 +38,6 @@ type syncCommand struct {
 	sync          syncOptions
 	copy          copyOptions
 	live          syncLiveOptions
-	phase         string
 	legacyJournal bool
 	explicit      map[string]bool
 }
@@ -47,10 +46,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	var c syncCommand
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
-	flags.Lookup("state").Usage = "state directory; existing copy journal FILE resumes first, with sync state in FILE.sync; --phase copy uses a journal file"
+	flags.Lookup("state").Usage = "state directory; existing copy journal FILE resumes first, with sync state in FILE.sync"
 	flags.Lookup("streams").Usage = "total per-host transfer budget; 0 uses source/target advertised capacity; serial verify and copy phases share this budget"
 	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
-	flags.StringVar(&c.phase, "phase", "all", "all (discover, copy, verify, fill, reverify) or copy (only metric copy, legacy journal format)")
 	flags.IntVar(&c.sync.batch, "verify-batch", 500, "names per verification batch")
 	flags.IntVar(&c.sync.maxRounds, "max-rounds", 0, "optional round limit; 0 converges while making progress")
 	flags.DurationVar(&c.sync.settle, "settle", 10*time.Minute, "ignore the newest points while replicas are writing")
@@ -84,9 +82,6 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if !c.explicit["sample-every"] && (len(c.sync.windows) == 0 || !c.sync.fullHistory) {
 		c.sync.sampleEvery = 64
 	}
-	if c.phase != "all" && c.phase != "copy" {
-		return c, errors.New("--phase must be all or copy")
-	}
 	if c.copy.streams < 0 || c.live.copyStreams < 0 || c.copy.maxBytes < 65536 || c.copy.transferIdle <= 0 || c.copy.maxNames < 1 || c.copy.maxNames > chunkstore.MaxTransferMetrics || c.copy.maxFailures < 0 || c.copy.tick <= 0 || c.copy.maxBackoff < c.copy.tick || c.copy.stallTimeout <= 0 || c.copy.progressInterval <= 0 || c.live.hostWait <= 0 || c.live.copyAttempts < 1 {
 		return c, errors.New("invalid streams, batch limits, retry settings or timeouts")
 	}
@@ -110,21 +105,15 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 		return c, errors.New("--verify-streams no longer sets an independent budget; use --streams (keep old copy-wave state settings or use a fresh state directory)")
 	}
 	native := len(c.sync.windows) > 0 && !c.sync.fullHistory
-	if c.phase == "copy" {
-		for _, f := range []string{"window", "full-history", "no-full-history", "no-copy", "no-verify", "verify-batch", "max-rounds", "settle", "sample-every", "include-short-retention", "carbonserver-port", "host-wait", "copy-attempts", "copy-streams", "verify-streams"} {
-			if c.explicit[f] {
-				return c, fmt.Errorf("--%s has no effect with --phase copy", f)
-			}
-		}
-	} else if native {
+	if native {
 		for _, f := range []string{"max-batch-bytes", "copy-streams", "max-batch-names", "debt-guard", "retry-interval", "max-backoff", "stall-timeout", "max-failures", "engine", "copy-attempts"} {
 			if c.explicit[f] {
 				return c, fmt.Errorf("--%s has no effect in native window sync; remove it or remove --no-full-history", f)
 			}
 		}
 	}
-	if c.phase == "all" && c.explicit["max-failures"] {
-		return c, errors.New("--max-failures is managed per sync batch; use --phase copy to set it explicitly")
+	if c.explicit["max-failures"] {
+		return c, errors.New("--max-failures is managed per sync batch")
 	}
 	if c.copy.names != "" {
 		var err error
@@ -133,20 +122,18 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 		if err != nil {
 			return c, err
 		}
-		if c.phase == "copy" && len(c.copy.froms) > 1 {
-			return c, errors.New("--names with --phase copy takes one --source (or --from) URL")
-		}
 	}
 	if info, err := os.Stat(c.copy.state); err == nil {
 		c.legacyJournal = !info.IsDir()
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if errors.Is(err, os.ErrNotExist) {
+		// Retain old launchers' file-shaped state for new copies too.
+		c.legacyJournal = strings.HasSuffix(c.copy.state, ".jsonl")
+	} else {
 		return c, err
 	}
-	// Retain old launchers' file-shaped state for new copies too.
-	c.legacyJournal = c.legacyJournal || strings.HasSuffix(c.copy.state, ".jsonl")
-	if c.phase == "all" && c.legacyJournal {
-		if len(c.sync.windows) > 0 {
-			return c, errors.New("--window requires a sync state directory; a legacy copy journal imports full histories; resume it with --phase copy")
+	if c.legacyJournal {
+		if native {
+			return c, errors.New("a legacy copy journal imports full histories; --no-full-history requires a sync state directory")
 		}
 		c.sync.state = c.copy.state + ".sync"
 	}
@@ -186,11 +173,7 @@ func readSyncNames(path string) (string, error) {
 }
 
 func (c *syncCommand) policy(streams int) *effectiveSyncPolicy {
-	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: c.phase, NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
-	if c.phase == "copy" {
-		p.VerifyStreams = 0
-		p.VerifyBatch = 0
-	}
+	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: "all", NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
 	if len(c.sync.windows) > 0 {
 		p.Scope = "windows+full-history"
 		p.SampleEvery = c.sync.sampleEvery
@@ -243,9 +226,7 @@ func SyncMain(ctx context.Context, args []string) error {
 			target = status
 		} else {
 			if status.MaxTransfers > 0 {
-				if c.phase == "copy" {
-					sourceCapacity += status.MaxTransfers
-				} else if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
+				if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
 					sourceCapacity = status.MaxTransfers
 				}
 			}
@@ -265,20 +246,25 @@ func SyncMain(ctx context.Context, args []string) error {
 	c.live.copyTemplate = &c.copy
 	backend.o = c.live
 	event("effective_config", map[string]any{"effective": c.sync.policy})
-	if c.phase == "copy" {
-		return planFreeCopy(ctx, c.copy)
-	}
-	if c.legacyJournal {
-		event("legacy_copy_resume", map[string]any{"copy_journal": c.copy.state, "sync_state": c.sync.state})
-		if err := planFreeCopy(ctx, c.copy); err != nil {
-			return err
-		}
-	}
-	err = runSync(ctx, c.sync, backend)
+	err = c.run(ctx, backend)
 	event("sync_io", map[string]any{"timings": backend.syncTimings()})
 	if errors.Is(err, ErrSyncResidual) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitSyncResidual)
 	}
 	return err
+}
+
+// run preserves the legacy copy journal before entering the sync journal.
+func (c *syncCommand) run(ctx context.Context, backend syncBackend) error {
+	if c.legacyJournal && !c.sync.noCopy {
+		event("legacy_copy_resume", map[string]any{"copy_journal": c.copy.state, "sync_state": c.sync.state})
+		if err := planFreeCopy(ctx, c.copy); err != nil {
+			return err
+		}
+		if c.sync.noVerify {
+			return nil
+		}
+	}
+	return runSync(ctx, c.sync, backend)
 }
