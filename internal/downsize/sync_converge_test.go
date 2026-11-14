@@ -221,13 +221,19 @@ func TestSyncConvergeNoCatalogHolders(t *testing.T) {
 	}
 }
 
+type noCatalogSync struct{ *fakeSync }
+
+func (f noCatalogSync) List(context.Context, string, string, string, int) ([]string, error) {
+	return nil, fmt.Errorf("explicit scope must not scan catalogs")
+}
+
 func TestSyncConvergeExplicitAbsentNames(t *testing.T) {
 	o := convergeOptions(t)
 	o.namesFile = filepath.Join(t.TempDir(), "scope.names")
 	if err := os.WriteFile(o.namesFile, []byte("absent.one\nabsent.two\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runSync(context.Background(), o, newFakeSync()); err != nil {
+	if err := runSync(context.Background(), o, noCatalogSync{newFakeSync()}); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(filepath.Join(o.state, "resolved.json"))

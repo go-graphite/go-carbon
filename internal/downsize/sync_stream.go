@@ -43,6 +43,9 @@ type syncLister struct {
 }
 
 func (s *syncer) startList(ctx context.Context, store, after string) *syncLister {
+	if s.o.namesFile != "" {
+		return s.startScopedList(ctx, store, after)
+	}
 	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
 	go func() {
 		defer close(l.pages)
@@ -705,6 +708,75 @@ func (s *syncer) startExplicitNames(ctx context.Context, after string) *syncList
 		if len(page) > 0 {
 			send()
 		}
+	}()
+	return l
+}
+
+// Explicit inventories use bounded native existence probes rather than walking
+// an unrelated multi-million-name catalog. The synthetic lister retains names
+// absent from every probe, so absence still requires the verifier's full proof.
+func (s *syncer) startScopedList(ctx context.Context, store, after string) *syncLister {
+	l := &syncLister{pages: make(chan []string, 4), errc: make(chan error, 1), finished: make(chan struct{})}
+	go func() {
+		defer close(l.pages)
+		defer close(l.finished)
+		f, scan, err := openLines(s.o.namesFile)
+		if err != nil {
+			l.errc <- err
+			return
+		}
+		defer f.Close()
+		end := s.o.now().Unix() - int64(s.o.settle.Seconds())
+		var batch []string
+		flush := func() bool {
+			if len(batch) == 0 {
+				return true
+			}
+			got, e := s.digest(ctx, store, batch, syncRange{From: max(int64(1), end-86400), Until: end})
+			present := map[string]bool{}
+			if errors.Is(e, errSyncNoDigest) {
+				info, ie := s.b.Info(ctx, store, batch)
+				e = ie
+				for n := range info {
+					present[n] = true
+				}
+			} else {
+				for n := range got {
+					present[n] = true
+				}
+			}
+			if e != nil {
+				l.errc <- e
+				return false
+			}
+			var page []string
+			for _, n := range batch {
+				if present[n] {
+					page = append(page, n)
+				}
+			}
+			batch = nil
+			select {
+			case l.pages <- page:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		for scan.Scan() {
+			n := strings.TrimSpace(scan.Text())
+			if n > after && strings.HasPrefix(n, s.o.prefix) {
+				batch = append(batch, n)
+				if len(batch) >= 500 && !flush() {
+					return
+				}
+			}
+		}
+		if err := scan.Err(); err != nil {
+			l.errc <- err
+			return
+		}
+		flush()
 	}()
 	return l
 }
