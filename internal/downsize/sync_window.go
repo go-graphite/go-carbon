@@ -8,14 +8,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"io"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
+
+const syncWindowUnresolved = "window-unresolved"
 
 type syncWindowBackend interface {
 	CopyWindow(context.Context, string, string, []string, string, syncRanges) (syncCopyResult, error)
@@ -114,9 +116,15 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			// Reuse completed selections on resume: native range identities include
 			// the precise names and must never depend on a later source snapshot.
 			var selected []string
+			var skipped []syncSkip
 			k := key{group, source}
 			if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
 				return fmt.Errorf("window selection differs from catalog batch %d", group)
+			}
+			if r, ok := selections[k]; ok && r.SelectionComplete {
+				for _, skip := range r.Skipped {
+					s.addResidual(syncHole{Name: skip.Name, Source: source}, skip.Reason)
+				}
 			}
 			if r, ok := completed[k]; ok && r.SelectionComplete {
 				s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)
@@ -126,6 +134,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 				selected = r.Selected
 			} else {
 				relevant := map[string]bool{}
+				unresolved := map[string]bool{}
 				for _, w := range s.copyWindows() {
 					digests, err := s.windowPresence(ctx, source, subset, w)
 					if err != nil {
@@ -135,6 +144,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 						var archives []syncArchive
 						count := int64(0)
 						for _, d := range digests[n] {
+							if d.Hash == syncWindowUnresolved {
+								unresolved[n] = true
+							}
 							archives = append(archives, syncArchive{Step: d.Step, Points: d.Points})
 							count += d.Count
 							if d.Hash == "window-incomplete" {
@@ -147,11 +159,16 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 					}
 				}
 				for _, n := range subset {
-					if relevant[n] {
+					if unresolved[n] {
+						reason := "source window selection unresolved: missing metadata or pending snapshot"
+						skipped = append(skipped, syncSkip{n, reason})
+						s.addResidual(syncHole{Name: n, Source: source}, reason)
+						event("sync_window_selection_skipped", map[string]any{"level": "warn", "source": source, "metric": n, "reason": reason})
+					} else if relevant[n] {
 						selected = append(selected, n)
 					}
 				}
-				if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, SelectionComplete: true}); err != nil {
+				if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, Skipped: skipped, SelectionComplete: true}); err != nil {
 					return err
 				}
 			}
@@ -322,7 +339,11 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 				}
 				delete(expected, record.Config.Name)
 				if len(record.Config.Retentions) == 0 {
-					return fmt.Errorf("source window selection unresolved for %q: missing metadata or pending snapshot", record.Config.Name)
+					// An omitted record is unknown coverage, never empty history.
+					// Preserve a per-name marker while consuming the rest of the
+					// stream, including its checksum, so healthy names proceed.
+					out[record.Config.Name] = []syncDigest{{Hash: syncWindowUnresolved}}
+					continue
 				}
 				if record.NativeSkip != nil {
 					return fmt.Errorf("window export skipped %s: %s", record.Config.Name, record.NativeSkip.Reason)

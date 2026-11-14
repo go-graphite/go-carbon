@@ -1,10 +1,12 @@
 package downsize
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -205,14 +207,53 @@ func TestSyncWindowPresenceIncludesCoarseOnlyPoints(t *testing.T) {
 	}
 }
 
-func TestSyncWindowPresenceRejectsPendingSnapshot(t *testing.T) {
+func TestSyncWindowPresenceRetainsPendingResidual(t *testing.T) {
 	source := nativeControllerStore(t)
 	addPoints(t, source, "pending", 42)
+	addPoints(t, source, "healthy", 7)
 	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { return map[string]struct{}{"pending": {}}, nil })
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
 	backend := newSyncLiveBackend(syncLiveOptions{})
-	if _, err := backend.WindowPresence(context.Background(), donor.URL, []string{"pending"}, syncRange{From: testMetricNow - 10, Until: testMetricNow}); err == nil {
-		t.Fatal("pending snapshot was treated as empty coverage")
+	got, err := backend.WindowPresence(context.Background(), donor.URL, []string{"pending", "healthy"}, syncRange{From: testMetricNow - 10, Until: testMetricNow})
+	if err != nil || len(got["pending"]) != 1 || got["pending"][0].Hash != syncWindowUnresolved || len(got["healthy"]) == 0 || got["healthy"][0].Count == 0 {
+		t.Fatal("pending record aborted batch or became empty history", got, err)
+	}
+}
+
+type unresolvedWindowBackend struct{ *fakeSync }
+
+func (b unresolvedWindowBackend) WindowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
+	got, err := b.Digest(ctx, source, names, w.From, w.Until)
+	for _, n := range names {
+		if n == "pending" {
+			got[n] = []syncDigest{{Hash: syncWindowUnresolved}}
+		}
+	}
+	return got, err
+}
+
+func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
+	f := newFakeSync()
+	w := syncRange{Name: "gap", From: syncTestNow - 600, Until: syncTestNow - 120}
+	for _, n := range []string{"healthy", "pending"} {
+		f.store(syncD1).archives[n] = []syncArchive{{Step: 60, Points: 10000}}
+		f.store(syncD1).points[n] = map[int64]map[int64]float64{60: {w.From: 42}}
+	}
+	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), batch: 2, streams: 1, maxRounds: 1, windows: syncRanges{w}, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+	for range 2 {
+		if err := runSync(context.Background(), o, unresolvedWindowBackend{f}); !errors.Is(err, ErrSyncResidual) {
+			t.Fatal("unresolved coverage reported success", err)
+		}
+		if f.store(syncT).points["healthy"][60][w.From] != 42 {
+			t.Fatal("healthy peer was not copied")
+		}
+		data, err := os.ReadFile(filepath.Join(o.state, "residual.json"))
+		if err != nil || !bytes.Contains(data, []byte("source window selection unresolved")) {
+			t.Fatal("selection residual lost on resume", string(data), err)
+		}
+	}
+	if _, ok := f.store(syncT).archives["pending"]; ok {
+		t.Fatal("unresolved name was copied")
 	}
 }
