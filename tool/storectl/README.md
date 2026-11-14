@@ -39,7 +39,7 @@ An already running binary cannot start exporting them, and history is not backfi
 
 
 `sync` discovers the source/target union, copies missing names, verifies coverage,
-fills gaps and reverifies in one resumable run. Existing finite target values win.
+fills gaps, reverifies and runs READY gates in one resumable run. Existing finite target values win.
 There is no plan directory or per-name byte estimate. Names absent on the target
 go directly to transfer after batched source retention checks; coverage comparison
 runs after transfer, when both stores hold the name.
@@ -49,12 +49,15 @@ runs after transfer, when both stores hold the name.
 storectl sync \
   --source http://donor-a:4242 --source http://donor-b:4242 \
   --to http://target:4242 --state ./block-state --streams 0 \
+  --window period:1794500000:1794603600 \
   --window closed:1794592020:1794592680 \
   --window shard:1794595620:1794597120 \
-  --window dump:1794600000:1794603600
+  --window dump:1794600000:1794603600 \
+  --period 1794500000:1794603600 --gap-ledger-complete \
+  --carbonapi-url https://read.example.org
 ```
 
-All three gap windows are selected, copied, verified and filled in this invocation;
+The whole period and all three gap windows are selected, copied, verified and filled in this invocation;
 no separate gap commands or shell receipt chain is needed.
 `storectl sync --resume ./block-state` restores the saved configuration and
 continues the durable discovery cursor, verification batches and native receipts.
@@ -145,6 +148,67 @@ Sync signs its own buckyd JWT using `--jwt-secret`, defaulting to
 token hourly at request time, including after idle phases. It rereads the secret
 file on renewal. Only the secret path is saved; tokens and signing keys remain in
 memory. A token-minting wrapper or `BUCKYD_TOKEN` is unnecessary for sync.
+
+## READY and block inputs
+
+READY is the final default phase of `sync`. It writes atomic `STATE/ready.json`
+with `verdict: READY` or `NOT_READY`, reasons, scope, process snapshots, sample and
+counts. Exit 0 establishes READY; exit 2 reports incomplete sync or READY gates.
+An earlier verdict is invalidated before a new run. `--no-ready` opts out and
+invalidates a previous READY; `--no-verify` or `--no-full-history` cannot establish
+readiness. No separate ready, check, fill or verify command is needed.
+
+Provide every donor and peer as a source, the complete closed block period with
+`--period FROM:UNTIL`, all known input gaps with `--window`, the read API URL with
+`--carbonapi-url`, and `--gap-ledger-complete`. A windowed run must include a
+window enclosing the period. Future/open windows block READY. Default full-history
+verification checks all names; sampled full-history verification cannot certify READY.
+
+The final checks compare aggregation, retention and xFilesFactor on every eligible
+discovered source name. Deterministic cohorts of up to 100 names per source are independently read
+over the whole period, every gap and all retained archives;
+require at least 50 names with data per source over full history and the period.
+Sparse gap windows have no artificial sample floor. A separate 100-name target
+cohort drives carbonapi read-back, which checks
+24h and 7d windows ending one hour ago, requiring 50 target-data names and matching
+steps, finite coverage and values. Historical parity keeps existing target values;
+read-back compares values with 1e-9 relative tolerance. Normal short-retention
+exclusions and the 2400s archive-expiration margin remain in effect.
+
+Process snapshots use `process_start_time_seconds` at each store's metrics endpoint
+(port 7007; change with `--process-metrics-port`). Target or source restarts add
+conservative windows spanning the observation interval. The same invocation closes,
+fills and verifies them using fresh full-history journals and copy receipts, then
+repeats independent checks and the process fence. Interrupted or legacy journals
+without a process snapshot require a fresh verification generation before READY.
+An unresolved policy conflict or an open declared gap remains NOT_READY.
+
+A generic JSON file can supply all block inputs:
+
+```json
+{
+  "target": "http://target:4242",
+  "donors": ["http://donor-a:4242", "http://donor-b:4242"],
+  "peers": ["http://peer:4242"],
+  "ring": "",
+  "period": {"from": 1794500000, "until": 1794603600},
+  "gaps": [{"name": "restart", "from": 1794592020, "until": 1794592680}],
+  "gap_ledger_complete": true,
+  "carbonapi_url": "https://read.example.org",
+  "state": "./block-state"
+}
+```
+
+```sh
+storectl sync --block block.json --streams 0
+storectl sync --resume ./block-state
+```
+
+An optional `names` path restricts discovery to a fixed inventory. Block scope
+cannot be overridden by flags. Saved configuration retains the descriptor and READY
+inputs; use `--resume ./block-state` to continue. Sync renews its JWT as described above. Existing legacy copy journal FILE
+continues to use FILE.sync/ for subsequent verification and READY state.
+
 
 ## Resize / merge baseline
 

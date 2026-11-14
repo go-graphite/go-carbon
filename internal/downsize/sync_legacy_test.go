@@ -149,7 +149,7 @@ func TestSyncLegacyJournalOptOutAndWindows(t *testing.T) {
 	if err := os.WriteFile(state, fixture, 0600); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"--from", src, "--to", dst, "--state", state, "--jwt-secret", syncTestJWTSecret(t), "--no-verify"}
+	args := []string{"--from", src, "--to", dst, "--state", state, "--no-ready", "--jwt-secret", syncTestJWTSecret(t), "--no-verify"}
 	if err := SyncMain(context.Background(), args); err != nil {
 		t.Fatal(err)
 	}
