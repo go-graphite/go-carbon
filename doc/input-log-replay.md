@@ -59,3 +59,72 @@ point, and checks every point's order and bits outside the measured interval.
 Repeated points make this a compressed fixture workload, not a production
 throughput prediction. `JOURNAL_REPLAY_STACKS` optionally writes a goroutine snapshot;
 use that in a separate diagnostic run because sampling perturbs timing.
+
+## Proposed shared startup intake log
+
+The following is a follow-up design, not behavior implemented by this PR.
+
+The input log should open before receivers are offered, independently of cache
+construction. A committed append is the acknowledgment boundary. Cache
+collection must not append a second copy of a record that already has a durable
+log position. Normal metric preparation must be shared with this earlier path:
+aliases need the same canonical partition and correction order before encoding,
+with the existing validation and admission semantics preserved.
+
+Each partition has a durable committed tail, an applied frontier, and recovery
+coverage established by persistence or a committed cache snapshot. Applying a
+record advances only the applied frontier. Unread records pin their segments;
+applied but unpersisted records retain their original segment/generation through
+cache source ownership. Confirmations release those references. A minimum
+protected frontier with no uncovered holes controls retirement, rather than
+reader progress or the current cache generation. Dictionary prefixes remain
+available for every retained suffix.
+
+```text
+accepted input → append + sync → committed tail
+                                    ↓
+                         ordered partition reader
+                                    ↓
+                             applied frontier
+                                    ↓
+                         cache → confirmed persistence
+                                    ↓
+                           recovery-pin release
+```
+
+Replay must continue beyond the startup inventory to the committed live tail.
+When its remaining suffix fits a bounded admission reservation, a partition can
+fence new input assignments, finish that suffix, and switch its owner to direct
+application under the same partition fence. Incoming writers then append and
+sync before direct application. The fence must cover position assignment and
+the mode transition; a global log mutex must never be held while waiting for
+cache admission. If a bounded suffix cannot be admitted, ordinary replay
+continues. Other partitions keep progressing. Source references and no-relog
+insertion are required on both sides of this transition.
+
+An upgrade needs a durable cut before any new intake acknowledgment. Existing
+journal history and retained capture epochs already have a correction order,
+including direct-switch fences. Roll to a fresh journal segment/dictionary and
+commit an upgrade manifest that records the old journal cut and read-only
+legacy source order/cursors. A crash must recover this order:
+
+```text
+existing checkpoint + ordered legacy history → journal suffix after upgrade cut
+```
+
+The manifest must survive segment retirement and partial replay, and its update
+must be committed with the cache snapshot/cursors that protect skipped records.
+Retained legacy sources replay once and retire after persistence. The upgrade
+path must never open another legacy capture writer. Segment identity includes
+salt as well as sequence because retired sequence numbers can be reused.
+
+The journal writer owns one disk-pressure decision, preserving the current 5%
+reserve pause semantics and still-meaningful metrics. Shutdown first fences
+partition intake/direct application, joins readers, and commits the complete
+cache-snapshot/cursor transaction. Only then can old source pins be released.
+
+This design still requires implementation and crash proofs for the upgrade cut,
+partial partition switches, append/sync acknowledgment, original-generation
+retention, and shutdown. The existing 15-stage archive matrix should exercise
+those boundaries with both legacy capture formats, aliases, special float bits
+and same-timestamp corrections before the capture writer/catalog code is removed.
