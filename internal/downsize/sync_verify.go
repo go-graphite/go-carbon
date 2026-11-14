@@ -577,6 +577,57 @@ func (s *syncer) fullDigest(ctx context.Context, store string, names []string, s
 // there are no holes; every other result takes the original point comparison.
 // Requests to independent stores overlap, but holes retain source/name order.
 func (s *syncer) checkFullArchive(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
+	// A verification worker can retain a decoded response for the target and
+	// every holder. Bound the names by the archive's point count, rather than
+	// treating a 500-name week and a 500-name year as the same amount of work.
+	// Four copies allow for the wire body, decoded values and decoder growth.
+	// This is a working-set budget, not a hard process limit: one name is the
+	// minimum request, and callers still need a process memory limit.
+	const budget = int64(64 << 20)
+	batch := fullVerifyBatchNames(len(names), len(s.o.from)+1, step, from, until, budget)
+	if batch >= len(names) {
+		return s.checkFullArchiveBatch(ctx, row, names, step, from, until)
+	}
+	var result syncRow
+	for start := 0; start < len(names); start += batch {
+		end := min(start+batch, len(names))
+		if err := s.checkFullArchiveBatch(ctx, &result, names[start:end], step, from, until); err != nil {
+			return err
+		}
+	}
+	// Keep the existing holder/name order of hole verdicts in the journal.
+	sources := make(map[string]int, len(s.o.from))
+	for i, source := range s.o.from {
+		sources[source] = i
+	}
+	positions := make(map[string]int, len(names))
+	for i, name := range names {
+		positions[name] = i
+	}
+	sort.SliceStable(result.Holes, func(i, j int) bool {
+		a, b := result.Holes[i], result.Holes[j]
+		if sources[a.Source] != sources[b.Source] {
+			return sources[a.Source] < sources[b.Source]
+		}
+		return positions[a.Name] < positions[b.Name]
+	})
+	row.Holes = append(row.Holes, result.Holes...)
+	row.Skipped = append(row.Skipped, result.Skipped...)
+	return nil
+}
+
+func fullVerifyBatchNames(names, stores int, step, from, until, budget int64) int {
+	if names == 0 || step <= 0 || until <= from {
+		return names
+	}
+	// Divide before multiplying so a long retention or many peers cannot
+	// overflow the byte estimate and accidentally remove the bound.
+	points := (until-from)/step + 2
+	limit := budget / 4 / 8 / int64(max(stores, 1)) / points
+	return int(min(int64(names), max(int64(1), limit)))
+}
+
+func (s *syncer) checkFullArchiveBatch(ctx context.Context, row *syncRow, names []string, step, from, until int64) error {
 	type check struct {
 		store   string
 		names   []string
