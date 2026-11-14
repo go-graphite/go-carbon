@@ -628,6 +628,16 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		}
 		sort.Strings(set)
 	}
+	// Copy failures are provisional: verification may recover the same name
+	// from another holder. Keep only failures still evidenced by the final read.
+	kept := s.sum.residual[:0]
+	for _, r := range s.sum.residual {
+		if (r.Reason == "copy_failed" || r.Reason == "missing_only_on_forbidden_source") && len(latest[r.Name]) == 0 && !pending[r.Name] && skippedLast[r.Name] == "" {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	s.sum.residual = kept
 	// Residual: each name's latest holes, and names never indexed.
 	names := make([]string, 0, len(latest))
 	for n := range latest {
