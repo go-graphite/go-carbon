@@ -1,4 +1,4 @@
-package main
+package foldooo
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/storemaint/remote"
 )
 
 func TestFoldToolCheckpointAndDryRun(t *testing.T) {
@@ -49,7 +50,7 @@ func TestFoldToolCheckpointAndDryRun(t *testing.T) {
 	}))
 	defer server.Close()
 	o := options{endpoint: server.URL, checkpoint: path, limit: 1, dry: true}
-	if err := run(context.Background(), server.Client(), o); err != nil {
+	if err := run(context.Background(), &remote.Client{Endpoint: server.URL, HTTP: server.Client(), Secret: []byte("test")}, o); err != nil {
 		t.Fatal(err)
 	}
 	if folds != 0 {
@@ -59,7 +60,7 @@ func TestFoldToolCheckpointAndDryRun(t *testing.T) {
 		t.Fatal("dry run wrote checkpoint")
 	}
 	o.dry = false
-	if err := run(context.Background(), server.Client(), o); err == nil {
+	if err := run(context.Background(), &remote.Client{Endpoint: server.URL, HTTP: server.Client(), Secret: []byte("test")}, o); err == nil {
 		t.Fatal("expected interrupted request")
 	}
 	value, err := os.ReadFile(path)
@@ -72,7 +73,7 @@ func TestFoldToolCheckpointAndDryRun(t *testing.T) {
 	}
 	fail = false
 	scansBefore := scans
-	if err := run(context.Background(), server.Client(), o); err != nil {
+	if err := run(context.Background(), &remote.Client{Endpoint: server.URL, HTTP: server.Client(), Secret: []byte("test")}, o); err != nil {
 		t.Fatal(err)
 	}
 	if scans != scansBefore || folds != 2 {
@@ -95,7 +96,7 @@ func TestFoldToolUsesReadyCatalog(t *testing.T) {
 		json.NewEncoder(w).Encode(store.SidecarFoldPage{Done: true, Inventory: store.SidecarInventory{Ready: true}})
 	}))
 	defer server.Close()
-	if err := run(context.Background(), server.Client(), options{endpoint: server.URL, limit: 1000}); err != nil {
+	if err := run(context.Background(), &remote.Client{Endpoint: server.URL, HTTP: server.Client(), Secret: []byte("test")}, options{endpoint: server.URL, limit: 1000}); err != nil {
 		t.Fatal(err)
 	}
 	if gets != 1 || folds != 1 {
@@ -116,7 +117,7 @@ func TestFoldToolPacesAcrossPages(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	err := run(ctx, server.Client(), options{endpoint: server.URL, limit: 1, rate: 1})
+	err := run(ctx, &remote.Client{Endpoint: server.URL, HTTP: server.Client(), Secret: []byte("test")}, options{endpoint: server.URL, limit: 1, rate: 1})
 	if !errors.Is(err, context.DeadlineExceeded) || folds != 1 {
 		t.Fatalf("pacing: folds=%d err=%v", folds, err)
 	}

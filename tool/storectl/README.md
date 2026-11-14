@@ -610,3 +610,7 @@ inspects archive anchors through buckyd. Applying requires `-apply -plan PLAN
 
 `storectl inventory sealed -sst-dir SNAPSHOT -out inventory.json` inspects
 immutable SST classes and ordinary eligibility; see [limits and interpretation](../../internal/sealedinventory/README.md).
+
+`storectl maintain fold-ooo -secret-file /path/to/secret -dry-run` inspects
+sidecars through authenticated buckyd maintenance. Omit `-dry-run` and supply
+`-checkpoint cursor.json` to fold with resumable progress. See [sidecar maintenance](../../doc/store-ooo-fold.md).

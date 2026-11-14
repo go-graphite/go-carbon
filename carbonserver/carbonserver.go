@@ -2852,7 +2852,6 @@ func (listener *CarbonserverListener) newHTTPMux() *http.ServeMux {
 	mux.HandleFunc("/forcescan", listener.forceScanHandler)
 	mux.HandleFunc("/admin/quota", listener.quotaHandler)
 	mux.HandleFunc("/admin/info", listener.adminInfoHandler)
-	mux.HandleFunc("/admin/store/sidecars", listener.sidecarsHandler)
 	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "User-agent: *\nDisallow: /") })
 	return mux
 }

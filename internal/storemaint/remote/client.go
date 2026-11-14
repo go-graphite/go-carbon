@@ -3,6 +3,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,9 @@ func New(endpoint, secretFile string, apply bool) (*Client, error) {
 	return &Client{Endpoint: strings.TrimRight(endpoint, "/"), Secret: secret, Apply: apply, HTTP: &http.Client{Timeout: 120 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 func (c *Client) Do(method, path string, body, result any) error {
+	return c.DoContext(context.Background(), method, path, body, result)
+}
+func (c *Client) DoContext(ctx context.Context, method, path string, body, result any) error {
 	var data []byte
 	var err error
 	if body != nil {
@@ -41,7 +45,7 @@ func (c *Client) Do(method, path string, body, result any) error {
 			return err
 		}
 	}
-	req, err := http.NewRequest(method, c.Endpoint+path, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, c.Endpoint+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}

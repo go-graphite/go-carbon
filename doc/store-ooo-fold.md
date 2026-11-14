@@ -76,7 +76,7 @@ store reports readiness zero until its first complete admin scan indexes old
 sidecars; partial totals must not be interpreted as complete. After running an older
 binary that does not maintain this inventory, run a complete scan again.
 
-`GET /admin/store/sidecars` returns these totals. `POST` with `action=scan`
+`GET /v1/maintenance/sidecars` returns these totals. `POST` with `action=scan`
 walks the metric catalog in bounded pages, including idle/staged metrics. `after`
 is an exclusive cursor; `limit` is 1–10000. A complete sequential scan starting
 with an empty cursor establishes readiness. `dry-run=true` reports the physical
@@ -84,14 +84,14 @@ inventory without committing indexes or changing readiness.
 
 ## Fold pass
 
-Build `tool/store-ooo-fold`. It uses the running daemon and shares its per-metric
+Build `tool/storectl`. It uses the running daemon and shares its per-metric
 locks; it does not open the daemon's Pebble database separately.
 
 ```sh
-store-ooo-fold -url http://127.0.0.1:8080 -dry-run
-store-ooo-fold -url http://127.0.0.1:8080 -scan
-store-ooo-fold -url http://127.0.0.1:8080 -checkpoint /tmp/ooo-fold.json
-store-ooo-fold -url http://127.0.0.1:8080 -checkpoint /tmp/ooo-fold.json -rate 500
+storectl maintain fold-ooo -secret-file /path/to/secret -url http://127.0.0.1:4242 -dry-run
+storectl maintain fold-ooo -secret-file /path/to/secret -url http://127.0.0.1:4242 -scan
+storectl maintain fold-ooo -secret-file /path/to/secret -url http://127.0.0.1:4242 -checkpoint /tmp/ooo-fold.json
+storectl maintain fold-ooo -secret-file /path/to/secret -url http://127.0.0.1:4242 -checkpoint /tmp/ooo-fold.json -rate 500
 ```
 
 The default pass uses the sidecar catalog directly when it is ready, and
@@ -101,7 +101,7 @@ the last completed page. An interrupted page is safe to retry: completed folds
 have removed their catalog entries. New entries behind a saved cursor need a
 new pass; a nonzero ending inventory starts another pass until none remain. A completed checkpoint restarts from the beginning next time.
 
-`POST /admin/store/sidecars?action=fold&limit=1000&after=...&rate=0` exposes the
+`POST /v1/maintenance/sidecars?action=fold&limit=1000&after=...&rate=0` exposes the
 same operation; `dry-run=true` only counts indexed sidecars. A legacy store must
 complete its initial scan first. A request cancellation discards the current
 metric's uncommitted batch. History rewritten during admin folding uses the
