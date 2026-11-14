@@ -176,21 +176,24 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			return err
 		}
 	}
-	// Selection residuals added by the main scan can now be removed only with a
-	// durable resolution. Copy failures and boundary residuals stay authoritative.
-	doneNames := map[syncKey]bool{}
-	for k, names := range resolved {
-		for n := range names {
-			doneNames[syncKey{n, k.source}] = true
-		}
-	}
+	// Rebuild selection uncertainty from the durable original selections and
+	// resolutions, including sources that are now forbidden. Copy and boundary
+	// failures have their own residuals and remain untouched.
 	kept := s.sum.residual[:0]
 	for _, r := range s.sum.residual {
-		if r.Reason != syncWindowSelectionReason || !doneNames[syncKey{r.Name, r.Source}] {
+		if r.Reason != syncWindowSelectionReason {
 			kept = append(kept, r)
 		}
 	}
 	s.sum.residual = kept
+	for _, r := range rows {
+		k := syncWindowSelectionKey{r.Round, r.Source}
+		for _, skip := range r.Skipped {
+			if !resolved[k][skip.Name] {
+				s.addResidual(syncHole{Name: skip.Name, Source: r.Source}, syncWindowSelectionReason)
+			}
+		}
+	}
 	event("sync_window_retry_done", map[string]any{"attempted": attempted, "resolved": recovered, "remaining": remaining})
 	return nil
 }

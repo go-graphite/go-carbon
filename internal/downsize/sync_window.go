@@ -63,7 +63,6 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	if err := s.retryWindowSelections(ctx); err != nil {
 		return err
 	}
-	resolved := s.resolvedWindowSelections()
 	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
 		defer b.beginWindowCopy()()
 	}
@@ -130,13 +129,6 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			k := key{group, source}
 			if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
 				return fmt.Errorf("window selection differs from catalog batch %d", group)
-			}
-			if r, ok := selections[k]; ok && r.SelectionComplete {
-				for _, skip := range r.Skipped {
-					if !resolved[syncWindowSelectionKey{group, source}][skip.Name] {
-						s.addResidual(syncHole{Name: skip.Name, Source: source}, skip.Reason)
-					}
-				}
 			}
 			if r, ok := completed[k]; ok && r.SelectionComplete {
 				s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)

@@ -288,6 +288,14 @@ func TestSyncWindowRetrySelectionErrorKeepsResidualAndContinues(t *testing.T) {
 		}
 		s.addResidual(syncHole{Name: n, Source: syncD1}, syncWindowSelectionReason)
 	}
+	s.forbid[syncD1] = true
+	if err := s.retryWindowSelections(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.sum.residual) != 2 {
+		t.Fatal("forbidden source lost residuals", s.sum.residual)
+	}
+	delete(s.forbid, syncD1)
 	if err := s.retryWindowSelections(ctx); err != nil {
 		t.Fatal(err)
 	}
