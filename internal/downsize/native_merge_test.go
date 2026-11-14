@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestNativeMergeController100PinnedAndDurableBoundary(t *testing.T) {
 	defer donor.Close()
 	destination := httptest.NewServer(nativeControllerService(t, target))
 	defer destination.Close()
-	plan := fixturePlan(t, donor.URL, destination.URL, names)
+	plan := nativeMergeGeneratedPlan(t, donor.URL, destination.URL, names)
 	o := testOptions(plan)
 	o.engine = "bulk"
 	o.delete = false
@@ -114,6 +115,41 @@ func TestNativeMergeController100PinnedAndDurableBoundary(t *testing.T) {
 	if err := run(ctx, o); err == nil {
 		t.Fatal("merge journal resumed in default mode")
 	}
+}
+
+func nativeMergeGeneratedPlan(t *testing.T, source, target string, names []string) string {
+	t.Helper()
+	root := t.TempDir()
+	namesPath := filepath.Join(root, "names.txt")
+	if err := os.WriteFile(namesPath, []byte(strings.Join(names, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	node := func(id, address, endpoint string) map[string]any {
+		return map[string]any{"hash": "jump_fnv1a", "replicas": 1, "nodes": []map[string]string{{"id": id, "node": address, "endpoint": endpoint}}}
+	}
+	spec := map[string]any{"version": 1, "cluster": "source", "target_cluster": "combined", "site": "test",
+		"old": node("old", "127.0.0.1:2003=000", source), "new": node("new", "127.0.0.1:2004=000", target),
+		"inputs": []map[string]string{{"source": "old", "path": namesPath, "format": "lines"}}}
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "spec.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan := filepath.Join(root, "plan")
+	if err := Main([]string{"plan", "--spec", path, "--out", plan, "--apply"}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := readPlanStructure(plan, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Whole) != 0 || len(p.Streams) != 1 || p.Streams[0].Metrics != int64(len(names)) {
+		t.Fatal("independent singleton became whole-store replacement", p.Whole, p.Streams)
+	}
+	return plan
 }
 
 func TestNativeMergeRefusesUnsafeModes(t *testing.T) {

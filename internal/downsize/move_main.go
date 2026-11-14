@@ -34,6 +34,8 @@ type options struct {
 	bulkOnly                                                                         bool
 	mergeSession                                                                     string
 	bulkCombine                                                                      bool
+	nativeSourceBarrier                                                              bool
+	hostJWTSecret                                                                    string
 	deferredOnly                                                                     bool
 	deferredRange                                                                    string
 	maxBatches                                                                       int64
@@ -99,6 +101,8 @@ func MoveMain(args []string) error {
 	flags.StringVar(&o.engine, "engine", "metric", "metric or bulk (native absent-name SST engine; existing plan/journal)")
 	flags.BoolVar(&o.bulkOnly, "bulk-only", false, "finish native absence pass and leave deferred combines in the same journal")
 	flags.StringVar(&o.mergeSession, "merge-session", "", "explicit pinned donor snapshot for absent-only pre-cutover merge; requires --engine bulk --bulk-only; records commit boundaries in journal")
+	flags.StringVar(&o.hostJWTSecret, "host-jwt-secret", hostJWTSecretPath, "host-local JWT signing key path when RESIZE_HOST_JWT_REFRESH=1")
+	flags.BoolVar(&o.nativeSourceBarrier, "native-source-barrier", false, "drain native ranges before each source change in committed plan order")
 	flags.BoolVar(&o.bulkCombine, "combine-existing", false, "combine present names natively with optimistic publication (requires --engine bulk)")
 	flags.BoolVar(&o.deferredOnly, "deferred-only", false, "combine only acknowledged native deferrals; never issue plan gaps")
 	flags.StringVar(&o.deferredRange, "deferred-range", "", "restrict deferred work to one existing STREAM:START:END journal range")
@@ -152,6 +156,9 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.nativeSourceBarrier && o.engine != "bulk" {
+		return errors.New("--native-source-barrier requires --engine bulk")
+	}
 	if (o.from != "" || o.until != "") && (o.engine != "bulk" || !o.bulkOnly) {
 		return errors.New("time windows require --engine bulk --bulk-only")
 	}

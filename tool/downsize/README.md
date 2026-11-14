@@ -401,6 +401,15 @@ physical guards; `--delete-rate` paces actual conditional deletion, not these
 non-destructive markers.
 # Observing copy admission without transferring
 
+For a cross-cluster merge into an existing live store, set `cluster` to the
+source cluster and `target_cluster` to the destination cluster. Keep each ring's
+exact identities (including singleton jump index `000`). Matching jump instances
+in different clusters are independent: `plan` inventories the source and emits
+metric-range merges, never a whole-store replacement. The target keeps its own
+metrics. Routing and schema preparation must be reviewed separately; `config`
+rejects cross-cluster drafts because replacing one cluster cannot describe the
+combined routing and read-backend changes safely.
+
 `resize run --apply --observe-only 10m` runs the same admission and resource
 guards, persists observations, and exits without starting transfer workers.
 Use the same plan, state and health-map flags as the intended copy. This also
@@ -426,3 +435,12 @@ Device latency uses a persisted per-host baseline in microseconds. Three samples
 above max(baseline maximum × 1.25, 10 ms) throttle admission; at utilization >90%
 the floor is 2 ms. This replaces idle-sensitive fixed latency limits, discovered
 by the copying-off tuning observation (12.691 ms await at 1.20% utilization).
+
+Native plan runs can set `--native-source-barrier` to finish each contiguous
+source group before starting the next donor, preserving plan donor precedence
+while running ranges from the same donor concurrently.
+
+Host-local credential renewal (`RESIZE_HOST_JWT_REFRESH=1`) reads
+`--host-jwt-secret` (default `/etc/go-carbon/buckyd_api_jwt_secret`).
+Set this flag in the local wrapper when the signing key lives elsewhere.
+Renewal remains limited to explicit maximum-speed copy-only operation.

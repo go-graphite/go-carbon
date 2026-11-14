@@ -57,6 +57,7 @@ type specification struct {
 	Placements       map[string]Placement     `json:"placements,omitempty"`
 	Version          int                      `json:"version"`
 	Cluster          string                   `json:"cluster"`
+	TargetCluster    string                   `json:"target_cluster,omitempty"`
 	Site             string                   `json:"site"`
 	Old              topology                 `json:"old"`
 	New              topology                 `json:"new"`

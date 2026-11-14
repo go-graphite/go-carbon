@@ -40,7 +40,7 @@ func runNative(ctx context.Context, o options) error {
 	if err := resolveNativeWindow(&o, p); err != nil {
 		return err
 	}
-	if o.nativeWindow != nil && !o.bulkOnly {
+	if o.nativeWindow != nil && (!o.bulkOnly || o.mergeSession != "") {
 		return errors.New("windowed plans require --bulk-only; metric fallback cannot preserve a time window")
 	}
 	if len(p.Whole) > 0 {
@@ -162,39 +162,8 @@ func runNative(ctx context.Context, o options) error {
 	if workers == 0 {
 		workers = runtime.NumCPU()
 	}
-	event("native_operation", map[string]any{"plan_id": p.PlanID, "operation": j.operation, "state": o.state, "workers": workers, "hardware_sized": o.streams == 0})
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	jobs := make(chan route)
-	var wg sync.WaitGroup
-	var first error
-	var once sync.Once
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for r := range jobs {
-				if err := c.route(ctx, r); err != nil {
-					once.Do(func() { first = err; cancel() })
-					return
-				}
-			}
-		}()
-	}
-enqueue:
-	for _, r := range p.Streams {
-		select {
-		case jobs <- r:
-		case <-ctx.Done():
-			break enqueue
-		}
-	}
-	close(jobs)
-	wg.Wait()
-	if first != nil {
-		return first
-	}
-	if err := ctx.Err(); err != nil {
+	event("native_operation", map[string]any{"plan_id": p.PlanID, "operation": j.operation, "state": o.state, "workers": workers, "hardware_sized": o.streams == 0, "source_barrier": o.nativeSourceBarrier})
+	if err := runNativeRoutes(ctx, p.Streams, workers, o.nativeSourceBarrier, c.route); err != nil {
 		return err
 	}
 	var deferred int64

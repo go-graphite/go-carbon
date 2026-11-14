@@ -16,6 +16,9 @@ import (
 )
 
 func generateConfig(s specification, old, next *ring, id string, opt options, out io.Writer) error {
+	if s.TargetCluster != "" && s.TargetCluster != s.Cluster {
+		return errors.New("cross-cluster moves require reviewed routing/configuration: preserve the target cluster and its existing read backends")
+	}
 	if s.Old.Hash != "jump_fnv1a" || s.Old.Replicas != 1 || s.New.Hash != "jump_fnv1a" || s.New.Replicas != 1 {
 		return errors.New("jump relay configuration generation requires jump_fnv1a and replicas=1")
 	}
