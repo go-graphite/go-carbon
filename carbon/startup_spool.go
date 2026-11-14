@@ -53,6 +53,7 @@ type startupSegment struct {
 	next                      atomic.Pointer[startupSegment]
 	size                      atomic.Int64
 	sealed, replayed, retired atomic.Bool
+	closed, unlocked          bool // owned by the monitor, after the durable unlink
 }
 type startupPosition struct {
 	segment *startupSegment
@@ -75,6 +76,7 @@ type startupAppend struct {
 	promoted chan bool
 	fenced   chan error
 	seal     bool
+	rotate   bool
 }
 
 // RecoveryAdmission is deliberately structural: adaptive-caps owns allocation
@@ -104,6 +106,7 @@ type startupInput struct {
 	legacy                                                              *startupShard
 	shards                                                              []*startupShard
 	size, rawBytes, points, replayedPoints, replayedBytes, retiredBytes atomic.Int64
+	releasableBytes, releaseFailures                                    atomic.Int64
 	receiver                                                            *tcp.TCP
 	observe                                                             func(*points.Points)
 	started                                                             time.Time
@@ -300,6 +303,22 @@ func (s *startupShard) appendLoop() {
 	var held startupAppend
 	haveHeld := false
 	var index uint64
+	rotate := func(cur *startupSegment) (*startupSegment, error) {
+		started := time.Now()
+		defer s.timings[captureRotate].observe(started)
+		if err := s.syncFile(cur.file); err != nil {
+			return cur, err
+		}
+		next, err := s.newSegment(index+1, true)
+		if err != nil {
+			return cur, err
+		}
+		index++
+		cur.next.Store(next)
+		s.current.Store(next)
+		cur.sealed.Store(true)
+		return next, nil
+	}
 	pending := make([]startupAppend, 0, 256)
 	for {
 		var first startupAppend
@@ -313,6 +332,18 @@ func (s *startupShard) appendLoop() {
 		}
 		if !ok {
 			break
+		}
+		if first.rotate {
+			cur, applied := s.current.Load(), s.applied.Load()
+			if !cur.sealed.Load() && cur.size.Load() > 0 && applied.segment == cur && applied.offset == cur.size.Load() && cur.source.Pending() == 0 {
+				if _, err := rotate(cur); err != nil {
+					s.owner.releaseFailed(s, err)
+					s.fail(err)
+				} else {
+					cur.replayed.Store(true)
+				}
+			}
+			continue
 		}
 		if first.fenced != nil {
 			cur, applied := s.current.Load(), s.applied.Load()
@@ -354,7 +385,7 @@ func (s *startupShard) appendLoop() {
 				if !open {
 					break drain
 				}
-				if next.promoted != nil || next.fenced != nil {
+				if next.promoted != nil || next.fenced != nil || next.rotate {
 					held = next
 					haveHeld = true
 					break drain
@@ -377,22 +408,8 @@ func (s *startupShard) appendLoop() {
 			s.timings[captureEncode].observe(encodedAt)
 			cur := s.current.Load()
 			if cur.size.Load() > 0 && cur.size.Load()+int64(len(frame)) > s.owner.policy.segmentBytes {
-				// Sealing rotates the append file, never the socket or the input stream.
-				rotatedAt := time.Now()
-				err = s.syncFile(cur.file)
-				if err == nil {
-					next, e := s.newSegment(index+1, true)
-					err = e
-					if err == nil {
-						index++
-						cur.next.Store(next)
-						s.current.Store(next)
-						cur.sealed.Store(true)
-						cur = next
-					}
-				}
-
-				s.timings[captureRotate].observe(rotatedAt)
+				// Sealing rotates the append file, never the socket or input stream.
+				cur, err = rotate(cur)
 			}
 			if err == nil {
 				for s.owner.diskDanger(int64(len(frame))) {
@@ -605,6 +622,7 @@ func (s *startupInput) startMonitor(maxBytes int64) {
 				if s.syncing.CompareAndSwap(false, true) {
 					s.syncWG.Go(func() {
 						defer s.syncing.Store(false)
+						s.rotateConfirmed()
 						var wg sync.WaitGroup
 						for _, sh := range s.shards {
 							wg.Go(func() { sh.fail(sh.sync()) })
@@ -626,78 +644,140 @@ func (s *startupShard) sync() error {
 	return s.syncFile(cur.file)
 }
 
-// Delete only a durably retired contiguous prefix. A directory sync between
-// removals prevents an older correction reappearing after a newer segment was
-// removed in a crash. The history stream gates all current partition retirement.
-func (s *startupInput) reclaim() {
-	sink := s.sink.Load()
-	if sink == nil || !sink.canRetire() || !s.historyReady.Load() {
+// A caught-up partition can retain an almost-full append file indefinitely
+// while another partition or older history prevents the direct switch. Ask its
+// sole append owner to rotate a confirmed frontier so reclaim can free it. This
+// request must never wait behind a writer paused at the disk reserve.
+func (s *startupInput) rotateConfirmed() {
+	if s.direct.Load() {
 		return
 	}
-	retire := func(sh *startupShard) bool {
-		for seg := sh.first.Load(); seg != nil; seg = sh.first.Load() {
+	for _, sh := range s.shards {
+		select {
+		case sh.requests <- startupAppend{rotate: true}:
+		default:
+		}
+	}
+}
+
+// release is retryable after unlink, directory sync, close or unlock fails. A
+// missing name is expected after an interrupted release; sync it again before
+// advancing the prefix. Never retry Close on an already invalidated descriptor.
+func (seg *startupSegment) release(syncHistory func() error, remove func(string) error, syncDirectory func(string) error) error {
+	if seg.file == nil {
+		if syncHistory != nil {
+			return syncHistory()
+		}
+		return nil
+	}
+	if err := remove(seg.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := syncDirectory(filepath.Dir(seg.path)); err != nil {
+		return err
+	}
+	var errs []error
+	if !seg.closed {
+		seg.closed = true
+		errs = append(errs, seg.file.Close())
+	}
+	if !seg.unlocked {
+		seg.unlocked = true
+		errs = append(errs, seg.unlock())
+	}
+	return errors.Join(errs...)
+}
+
+func (s *startupInput) releaseFailed(sh *startupShard, err error) {
+	s.releaseFailures.Add(1)
+	zapwriter.Logger("app").Error("startup spool release failed; retaining recovery prefix", zap.String("filename", sh.path), zap.Error(err))
+	s.fallback.Store(true)
+}
+
+// Delete only a durably retired contiguous prefix. The checkpoint and older
+// history remain ordering barriers: otherwise a crash could replay an older
+// correction after a newer source was deleted. Snapshot confirmation candidates
+// BEFORE the store sync, so confirmations arriving during Sync wait for the next
+// fence. One store sync covers the whole candidate batch; directory syncs still
+// separate every unlink to preserve prefix order through crashes.
+func (s *startupInput) reclaim() {
+	sink := s.sink.Load()
+	if sink == nil {
+		return
+	}
+	// Capture is a finite recovery obligation even when some partitions are
+	// already live. Waiting for all partitions to switch to direct input lets
+	// ordinary batching keep source references (and disk space) pinned.
+	if sink.drain != nil {
+		sink.drain(!s.direct.Load() || s.size.Load() != s.retiredBytes.Load())
+	}
+	s.releasableBytes.Store(0)
+	if !sink.canRetire() || !s.historyReady.Load() {
+		return
+	}
+	type candidate struct {
+		sh  *startupShard
+		seg *startupSegment
+	}
+	var candidates []candidate
+	var releasable int64
+	collect := func(sh *startupShard) bool {
+		for seg := sh.first.Load(); seg != nil; seg = seg.next.Load() {
 			if !seg.sealed.Load() || !seg.replayed.Load() || seg.source.Pending() != 0 {
 				return false
 			}
-			var err error
-			if sink.syncStore != nil {
-				if err = sink.syncStore(); err != nil {
-					sh.fail(err)
-					return false
-				}
-			}
-			if seg.file == nil {
-				if sink.syncHistory != nil {
-					err = sink.syncHistory()
-				}
-			} else {
-				err = os.Remove(seg.path)
-				if err == nil {
-					err = syncDir(filepath.Dir(seg.path))
-				}
-				if err == nil {
-					err = errors.Join(seg.file.Close(), seg.unlock())
-				}
-			}
-			if err != nil {
-				sh.fail(err)
-				return false
-			}
-			seg.retired.Store(true)
-			s.retiredBytes.Add(seg.size.Load())
-			sh.first.CompareAndSwap(seg, seg.next.Load())
+			candidates = append(candidates, candidate{sh, seg})
+			releasable += seg.size.Load()
 		}
 		return true
 	}
-	if !retire(s.legacy) {
-		return
-	}
-	all := true
-	for _, sh := range s.shards {
-		if !retire(sh) {
-			all = false
+	historyComplete := collect(s.legacy)
+	all := historyComplete
+	if all {
+		for _, sh := range s.shards {
+			if !collect(sh) {
+				all = false
+			}
 		}
+	}
+	s.releasableBytes.Store(releasable)
+	if len(candidates) > 0 && sink.syncStore != nil {
+		if err := sink.syncStore(); err != nil {
+			s.releaseFailed(s.legacy, err)
+			return
+		}
+	}
+	for _, c := range candidates {
+		seg, sh := c.seg, c.sh
+		if err := seg.release(sink.syncHistory, os.Remove, syncDir); err != nil {
+			s.releaseFailed(sh, err)
+			return
+		}
+		seg.retired.Store(true)
+		s.retiredBytes.Add(seg.size.Load())
+		s.releasableBytes.Add(-seg.size.Load())
+		sh.first.CompareAndSwap(seg, seg.next.Load())
+	}
+	if !historyComplete {
+		return
 	}
 	if all && s.directFence != nil && !s.directFence.retired.Load() {
 		seg := s.directFence
-		if err := os.Remove(seg.path); err != nil {
-			s.legacy.fail(err)
+		if err := seg.release(nil, os.Remove, syncDir); err != nil {
+			s.releaseFailed(s.legacy, err)
 			return
 		}
-		if err := syncDir(filepath.Dir(seg.path)); err != nil {
-			s.legacy.fail(err)
-			return
-		}
-		_ = seg.file.Close()
-		_ = seg.unlock()
 		seg.retired.Store(true)
 	}
 	if s.releaseLog != nil && (s.directFence == nil || s.directFence.retired.Load()) {
 		if err := s.releaseLog(); err != nil {
-			s.legacy.fail(err)
+			s.releaseFailed(s.legacy, err)
 			return
 		}
 		s.releaseLog = nil
+	}
+	if sink.drain != nil && s.direct.Load() && s.size.Load() == s.retiredBytes.Load() {
+		sink.drain(false)
 	}
 }
 
@@ -895,15 +975,29 @@ func (s *startupInput) close() error {
 				if !seg.retired.Load() && seg.file != nil {
 					// Append owners have already joined after their final Sync;
 					// history files were immutable before this process opened them.
-					if seg == s.legacy.current.Load() {
+					if seg == s.legacy.current.Load() && !seg.closed {
 						errs = append(errs, seg.file.Sync())
 					}
-					errs = append(errs, seg.file.Close(), seg.unlock())
+					if !seg.closed {
+						seg.closed = true
+						errs = append(errs, seg.file.Close())
+					}
+					if !seg.unlocked {
+						seg.unlocked = true
+						errs = append(errs, seg.unlock())
+					}
 				}
 			}
 		}
 		if seg := s.directFence; seg != nil && !seg.retired.Load() {
-			errs = append(errs, seg.file.Close(), seg.unlock())
+			if !seg.closed {
+				seg.closed = true
+				errs = append(errs, seg.file.Close())
+			}
+			if !seg.unlocked {
+				seg.unlocked = true
+				errs = append(errs, seg.unlock())
+			}
 		}
 		s.closeErr = errors.Join(errs...)
 		s.sealedAt = time.Now()

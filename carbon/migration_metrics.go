@@ -460,6 +460,9 @@ var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_history_replayed_points_total", "Captured frame points replayed from older startup epochs.", nil, nil),
 	prometheus.NewDesc("startup_capture_direct", "1 after startup capture permanently switches to ordinary cache admission and input logging; spool files may still await persistence.", nil, nil),
 	prometheus.NewDesc("startup_capture_spool_over_budget", "1 when retained startup spool bytes exceed the soft budget; intake continues unless disk safety requires a pause.", nil, nil),
+	prometheus.NewDesc("startup_capture_releasable_bytes", "Confirmed source prefix bytes awaiting the store durability fence or release.", nil, nil),
+	prometheus.NewDesc("startup_capture_released_bytes_total", "Source bytes durably released during this startup epoch.", nil, nil),
+	prometheus.NewDesc("startup_capture_release_failures_total", "Startup source durability fence or release failures.", nil, nil),
 }
 
 var captureIODescs = []*prometheus.Desc{
@@ -533,10 +536,10 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if capture.overBudget.Load() {
 			overBudget = 1
 		}
-		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct, overBudget}
+		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct, overBudget, float64(capture.releasableBytes.Load()), float64(capture.retiredBytes.Load()), float64(capture.releaseFailures.Load())}
 		for i, v := range extra {
 			kind := prometheus.GaugeValue
-			if i == 1 || i == 6 || i == 7 {
+			if i == 1 || i == 6 || i == 7 || i == 11 || i == 12 {
 				kind = prometheus.CounterValue
 			}
 			ch <- prometheus.MustNewConstMetric(captureStreamDescs[i], kind, v)
