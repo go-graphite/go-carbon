@@ -623,15 +623,8 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 			unlockNames()
 		}
 	}()
-	s.mu.Lock()
 	lockedBegan := time.Now()
 	s.nativeCounters.publishWait.Add(uint64(lockedBegan.Sub(waitBegan)))
-	locked := true
-	defer func() {
-		if locked {
-			s.mu.Unlock()
-		}
-	}() // same lock as normal Create
 	b := s.db.NewBatch()
 	defer b.Close()
 	walk := &transferReader{reader: s.db}
@@ -683,15 +676,17 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 	if err := b.Delete(nativeIntentKey(receipt.Identity), nil); err != nil {
 		return err
 	}
+	held := uint64(time.Since(lockedBegan))
+	unlockNames = s.releaseImportStripes(names, nil, unlockNames)
+	if s.transferCommitTestHook != nil {
+		s.transferCommitTestHook()
+	}
 	if err := s.commitSidecarRecords(b, sidecars, func(b *pebble.Batch) error { return s.db.ApplyNoSyncWait(b, pebble.Sync) }); err != nil {
 		s.nativeWriteFailed(err)
 		return err
 	}
-	s.mu.Unlock()
-	locked = false
 	unlockNames()
 	unlockNames = nil
-	held := uint64(time.Since(lockedBegan))
 	s.nativeCounters.publishHold.Add(held)
 	for old := s.nativeCounters.maxPublishHold.Load(); held > old; old = s.nativeCounters.maxPublishHold.Load() {
 		if s.nativeCounters.maxPublishHold.CompareAndSwap(old, held) {
@@ -699,7 +694,7 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 		}
 	}
 	// Catalogs, sidecar inventory and the receipt became visible together
-	// under the creation lock. Keep the per-range lock until fsync completes:
+	// while their names were reserved. Keep the per-range lock until fsync completes:
 	// neither this import nor a duplicate/receipt query can acknowledge early.
 	// ApplyNoSyncWait retains the batch until SyncWait, including when a
 	// crash hook fails. Closing it early can recycle its pending sync state.

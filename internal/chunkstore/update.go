@@ -32,6 +32,20 @@ func (s *Store) UpdateManyMaintained(ctx context.Context, name string, input []P
 }
 
 func (s *Store) updateByNameMaintained(ctx context.Context, name string, input []Point, targetRetention int, maintenance *ContinuationMaintenance) error {
+	return s.updateByNameImportPolicy(ctx, name, input, targetRetention, maintenance, false)
+}
+
+// TryUpdateMany retains UpdateMany's atomic write semantics but asks the caller
+// to retry its unchanged input when an import is publishing this exact name.
+func (s *Store) TryUpdateMany(ctx context.Context, name string, input []Point) error {
+	return s.updateByNameImportPolicy(ctx, name, input, -1, nil, true)
+}
+
+func (s *Store) TryUpdateManyMaintained(ctx context.Context, name string, input []Point, maintenance ContinuationMaintenance) error {
+	return s.updateByNameImportPolicy(ctx, name, input, -1, &maintenance, true)
+}
+
+func (s *Store) updateByNameImportPolicy(ctx context.Context, name string, input []Point, targetRetention int, maintenance *ContinuationMaintenance, retryImport bool) error {
 	if err := s.fileOwnershipError(); err != nil {
 		return err
 	}
@@ -44,8 +58,21 @@ func (s *Store) updateByNameMaintained(ctx context.Context, name string, input [
 		return ErrNotFound
 	}
 	timer.Enter(stagetime.LockWait)
-	unlock := s.lockMetricMutation(name)
+	var unlock func()
+	if retryImport {
+		mu := &s.metricMu[s.metricStripe(name)]
+		mu.Lock()
+		if s.importPendingLocked(name) != nil {
+			mu.Unlock()
+			return ErrImportPending
+		}
+		s.beginStateMutation(name)
+		unlock = s.mutationUnlock(name, mu.Unlock)
+	} else {
+		unlock = s.lockMetricMutation(name)
+	}
 	defer unlock()
+
 	timer.Enter(stagetime.Route)
 	// The metadata cache holds the state the previous mutation committed,
 	// including the continuation keys this update starts by reading.

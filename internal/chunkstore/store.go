@@ -257,18 +257,19 @@ type Store struct {
 	nativeCombineWorkerMemory int64
 
 	// Owner-driven maintenance lives until close, independently of StopBackground.
-	explicitMaintenance   operationState
-	coldPack              coldPackState
-	transferPendingAny    func() bool
-	transferPending       func(string) bool
-	transferExport        transferExportCounters
-	transferApply         transferApplyCounters
-	transferApplyTestHook func() // deterministic concurrent-publication tests only
-	sidecars              sidecarCatalog
-	transferDeleteRanges  atomic.Uint64
-	compactOnce           compactOnceState
-	manualCompaction      manualCompactionState
-	referenceFormat       atomic.Bool
+	explicitMaintenance    operationState
+	coldPack               coldPackState
+	transferPendingAny     func() bool
+	transferPending        func(string) bool
+	transferExport         transferExportCounters
+	transferApply          transferApplyCounters
+	transferApplyTestHook  func() // deterministic concurrent-publication tests only
+	transferCommitTestHook func() // after stripes are released, before import commit
+	sidecars               sidecarCatalog
+	transferDeleteRanges   atomic.Uint64
+	compactOnce            compactOnceState
+	manualCompaction       manualCompactionState
+	referenceFormat        atomic.Bool
 	// transferRereadMetadata disables the unchanged-epoch commit shortcut (tests).
 	transferRereadMetadata bool
 	// transferSplitSingles restores the single-name split of contended groups (tests).
@@ -317,10 +318,12 @@ type Store struct {
 	syncStop                       chan struct{}
 	syncDone                       chan struct{}
 	// mu serializes metric ID allocation from the catalog sequence. Mutations
-	// of one metric hold its metricMu stripe; readers use consistent read views.
-	mu            sync.Mutex
-	metricMu      [metricStripes]sync.Mutex
-	finitePatchMu sync.Mutex
+	// of one metric hold its metricMu stripe or an import publication reservation;
+	// readers use consistent read views.
+	mu               sync.Mutex
+	metricMu         [metricStripes]sync.Mutex
+	importPublishing [metricStripes]map[string]chan struct{}
+	finitePatchMu    sync.Mutex
 	// mutationEpoch advances at both ends of every mutation, even without a
 	// metadata cache. Optimistic maintenance can validate its immutable view
 	// under the stripe without an LSM read. Saturation disables that shortcut.
@@ -1544,9 +1547,16 @@ func (s *Store) writeStallEnd() {
 func (s *Store) lockMetric(name string) func() {
 	// The writeout queue groups metrics by low hash bits. Use high bits so
 	// unrelated metrics in one queued cache shard can make progress together.
-	mu := &s.metricMu[s.metricStripe(name)]
-	mu.Lock()
-	return mu.Unlock
+	for {
+		mu := &s.metricMu[s.metricStripe(name)]
+		mu.Lock()
+		if done := s.importPendingLocked(name); done != nil {
+			mu.Unlock()
+			<-done
+			continue
+		}
+		return mu.Unlock
+	}
 }
 
 // Thousands of concurrent conversions share these stripes with persister

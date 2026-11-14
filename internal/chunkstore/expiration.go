@@ -58,9 +58,13 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 			_ = view.Close()
 		}
 	}()
+	deleteNames := make([]string, len(expected))
+	for i := range expected {
+		deleteNames[i] = expected[i].Name
+	}
+	s.lockImportFreeNames(deleteNames, false)
 	stable := make(map[uint64]bool, len(stripes))
 	for i, stripe := range stripes {
-		s.metricMu[stripe].Lock()
 		stable[stripe] = epochs[i] != math.MaxUint64 && epochs[i] == s.mutationEpoch[stripe].Load()
 	}
 	for _, m := range expected {

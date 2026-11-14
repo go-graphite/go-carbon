@@ -43,6 +43,10 @@ func (s *Store) publishPointPatch(ctx context.Context, m Metadata, epoch uint64,
 	if !mu.TryLock() {
 		return result, ErrConflict
 	}
+	if s.importPendingLocked(m.Name) != nil {
+		mu.Unlock()
+		return result, ErrConflict
+	}
 	lockedAt := time.Now()
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	err = fence(lockCtx, m.Name, func() error {

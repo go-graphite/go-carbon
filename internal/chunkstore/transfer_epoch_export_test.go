@@ -30,3 +30,7 @@ func (s *Store) RawKeyValuesForTest() ([][2][]byte, error) {
 	}
 	return out, errors.Join(it.Error(), it.Close())
 }
+
+// SetTransferCommitHookForTest pauses publication after releasing its stripes.
+func (s *Store) SetTransferCommitHookForTest(hook func()) { s.transferCommitTestHook = hook }
+func (s *Store) MetricStripeForTest(name string) uint64   { return s.metricStripe(name) }

@@ -185,3 +185,54 @@ func TestSharedBatchFallsBackWithoutLosingPoints(t *testing.T) {
 		}
 	}
 }
+
+type importingMetricStore struct {
+	failedSharedStore
+	pending bool
+}
+
+func (s *importingMetricStore) UpdateBatch(context.Context, []store.MetricUpdate, *store.ContinuationMaintenance) error {
+	return store.ErrImportPending
+}
+func (s *importingMetricStore) TryUpdateMany(_ context.Context, name string, _ []points.Point) error {
+	if name == "pending" && s.pending {
+		return store.ErrImportPending
+	}
+	*s.calls = append(*s.calls, name)
+	return nil
+}
+
+func TestSharedImportPendingRetainsInputAndCommitsOtherNames(t *testing.T) {
+	c := cache.New()
+	c.EnableInputLog()
+	for _, name := range []string{"pending", "free"} {
+		c.Add(points.OnePoint(name, 3, 1790000000))
+	}
+	for shard := range cache.ShardCount {
+		c.TakeLogEntries(shard, 9, nil)
+	}
+	before := c.LogLowWater()
+	var calls []string
+	db := &importingMetricStore{failedSharedStore: failedSharedStore{calls: &calls}, pending: true}
+	p := NewWhisper(t.TempDir(), nil, NewWhisperAggregation(), nil, c.PopNotConfirmed, c.Confirm, c.Pop)
+	p.SetRequeue(c.Requeue)
+	p.SetMetricStore(db)
+	p.storeSharedBatch([]string{"pending", "free"})
+	if !reflect.DeepEqual(calls, []string{"free"}) {
+		t.Fatalf("commits %v", calls)
+	}
+	if len(c.Get("pending")) != 1 || len(c.Get("free")) != 0 || c.NotConfirmedLength() != 0 {
+		t.Fatal("deferred/committed cache state incorrect")
+	}
+	if c.LogLowWater() != before {
+		t.Fatal("deferred input lost its original log generation")
+	}
+	db.pending = false
+	p.store("pending")
+	if len(c.Get("pending")) != 0 || c.NotConfirmedLength() != 0 || c.LogLowWater() <= before {
+		t.Fatal("retry was not committed/confirmed")
+	}
+	if st, _ := p.WriteStats(); st.Failures != 0 {
+		t.Fatal("expected deferral counted as storage failure")
+	}
+}
