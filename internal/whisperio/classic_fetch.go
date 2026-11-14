@@ -36,7 +36,10 @@ func visitClassicWindow(ctx context.Context, f *continuationFile, ai, from, unti
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		group, err := f.classicGroup(ai, a, slot/128, false)
+		// Consume each group before advancing. Immutable reads can reuse the
+		// file's decode buffer instead of allocating a PointBlock per group;
+		// buffered writes and referenced groups retain their owned path.
+		group, err := f.classicSnapshotGroup(ai, a, slot/128)
 		if err != nil {
 			return err
 		}

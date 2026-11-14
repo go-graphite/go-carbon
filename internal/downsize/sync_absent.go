@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 )
 
@@ -85,7 +86,29 @@ func (s *syncer) resolveAbsent(ctx context.Context, row *syncRow, names []string
 					groups[a] = append(groups[a], n)
 				}
 			}
-			for a, ns := range groups {
+			// Presence needs one finite point; only absence needs every archive.
+			// Try the finer archives first and stop probing a store/name once
+			// it is present. verifyNames still compares its complete history.
+			archives := make([]syncArchive, 0, len(groups))
+			for a := range groups {
+				archives = append(archives, a)
+			}
+			sort.Slice(archives, func(i, j int) bool {
+				if archives[i].Step == archives[j].Step {
+					return archives[i].Points < archives[j].Points
+				}
+				return archives[i].Step < archives[j].Step
+			})
+			for _, a := range archives {
+				ns := groups[a][:0]
+				for _, n := range groups[a] {
+					if !r.positive[n] {
+						ns = append(ns, n)
+					}
+				}
+				if len(ns) == 0 {
+					continue
+				}
 				from, until := probe.From, probe.Until
 				if a.Step > 0 {
 					from, until = syncWindow(now, a, s.o.settle)
