@@ -426,24 +426,40 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 		}
 	}
 	failed := map[string]bool{}
+	var failedMu sync.Mutex
+	markFailed := func(n string) { failedMu.Lock(); failed[n] = true; failedMu.Unlock() }
+	type windowCopy struct {
+		w                          syncRange
+		id, pointPath, journalPath string
+		before                     int64
+		beforeErr                  error
+		measurement                windowPointCount
+		m                          *mover
+	}
+	copies := make([]windowCopy, 0, len(windows))
+	defer func() {
+		for _, copy := range copies {
+			copy.m.journal.close()
+		}
+	}()
 	for wi, w := range windows {
-		beforeStarted := time.Now()
-		before, beforeErr := b.Digest(ctx, target, names, w.From, w.Until)
-		event("sync_window_digest", map[string]any{"stage": "before", "source": source, "names": len(names), "seconds": time.Since(beforeStarted).Seconds()})
+		started := time.Now()
+		before, beforeErr := b.windowPointTotal(ctx, target, names, w)
+		event("sync_window_digest", map[string]any{"stage": "before", "source": source, "names": len(names), "seconds": time.Since(started).Seconds()})
 		data, _ := json.Marshal([]any{source, target, names, w.From, w.Until})
 		hash := sha256.Sum256(data)
 		id := hex.EncodeToString(hash[:])
-		pointPath := fmt.Sprintf("%s.window-%d-%s.window-points.json", journalPath, wi, id[:16])
+		path := fmt.Sprintf("%s.window-%d-%s", journalPath, wi, id[:16])
+		pointPath := path + ".window-points.json"
 		measurement := windowPointCount{Source: source, Window: w}
 		if beforeErr == nil {
-			n := countWindowPoints(before)
-			measurement.Before = &n
+			measurement.Before = &before
 		}
 		measurement, err := readWindowPointCount(pointPath, measurement)
 		if err != nil {
 			return syncCopyResult{}, err
 		}
-		j, err := openJournal(fmt.Sprintf("%s.window-%d-%s", journalPath, wi, id[:16]), id)
+		j, err := openJournal(path, id)
 		if err != nil {
 			return syncCopyResult{}, err
 		}
@@ -451,95 +467,101 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 		if m.transferIdle <= 0 {
 			m.transferIdle = defaultTransferIdle
 		}
-		c, release, err := b.windowController(ctx, m, source)
-		if err != nil {
-			j.close()
-			return syncCopyResult{}, err
-		}
-		err = func() error {
-			defer func() { release() }()
-			defer j.close()
-			for start := 0; start < len(names); start += chunkstore.NativeMaxRangeNames {
-				end := min(start+chunkstore.NativeMaxRangeNames, len(names))
+		copies = append(copies, windowCopy{w, id, pointPath, path, before, beforeErr, measurement, m})
+	}
+	progress, _ := ctx.Value(syncWindowProgressKey{}).(func(string, int, bool))
+	// Each worker completes all windows of one disjoint name range. This
+	// exposes fully processed names without waiting for a whole donor/window.
+	err := runSyncWindowRanges(ctx, len(names), b.o.copyStreams, func(ctx context.Context, start, end int) error {
+		fresh := false
+		for _, copy := range copies {
+			err := func() error {
+				w, id, m, j := copy.w, copy.id, copy.m, copy.m.journal
+				c, release, err := b.windowController(ctx, m, source)
+				if err != nil {
+					return err
+				}
+				defer func() { release() }()
 				t := task{Stream: id, Source: source, Target: target, Start: int64(start), End: int64(end)}
+				m.stateMu.Lock()
 				if saved, ok := j.tasks[taskKey(t)]; ok {
 					t = saved
 				}
+				m.stateMu.Unlock()
 				if t.Native == nil || !t.Native.complete() {
-					if err := c.executeRange(ctx, t, names[start:end]); err != nil {
-						// Split only this bounded rejected range, not the entire
-						// (potentially multi-million-name) fill or other windows.
-						path := fmt.Sprintf("%s.window-%d-%s.range-%d-%d", journalPath, wi, id[:16], start, end)
-						// Recursive copies must not borrow another shared pin while
-						// this parent holds its read lock: pin rotation takes
-						// the write lock and would deadlock both borrowers.
+					err := b.executeWindowRange(ctx, c, t, names[start:end])
+					if err != nil {
+						// A recursive split must release its borrowed source
+						// before pin rotation can acquire the exclusive lock.
 						release()
 						release = func() {}
-						res, splitErr := b.splitRejectedWindow(ctx, source, target, names[start:end], path, syncRanges{w}, err)
-						if splitErr != nil {
-							return splitErr
+						childCtx := context.WithValue(ctx, syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
+							if n > 0 && !replayed {
+								fresh = true
+							}
+						})
+						path := fmt.Sprintf("%s.range-%d-%d", copy.journalPath, start, end)
+						res, err := b.splitRejectedWindow(childCtx, source, target, names[start:end], path, syncRanges{w}, err)
+						if err != nil {
+							return err
 						}
 						if res.Forbidden {
 							return errors.New("window split source or target became forbidden")
 						}
 						for _, n := range res.Failed {
-							failed[n] = true
+							markFailed(n)
 						}
-						c, release, err = b.windowController(ctx, m, source)
-						if err != nil {
-							release = func() {}
-							return err
-						}
-						continue
+						return nil
 					}
+					fresh = true
+					m.stateMu.Lock()
 					t = j.tasks[taskKey(t)]
+					m.stateMu.Unlock()
 					if err := b.o.rate.wait(ctx, t.Bytes); err != nil {
 						return err
 					}
 				}
-				// Native exports deliberately omit incomplete trailing coarse
-				// buckets. Never count such an in-window omission as success.
 				for _, skip := range t.Native.Receipt.WindowSkipped {
 					if skip.Timestamp >= w.From && skip.Timestamp < w.Until && skip.Ordinal >= 0 && skip.Ordinal < end-start {
-						failed[names[start+skip.Ordinal]] = true
+						markFailed(names[start+skip.Ordinal])
 						event("sync_window_boundary_skip", map[string]any{"level": "warn", "metric": names[start+skip.Ordinal], "timestamp": skip.Timestamp, "reason": skip.Reason})
 					}
 				}
 				for i, n := range names[start:end] {
-					if t.Native == nil || !t.Native.done(i) {
-						failed[n] = true
+					if !t.Native.done(i) {
+						markFailed(n)
 					}
 				}
+				return nil
+			}()
+			if err != nil {
+				return err
 			}
-			return nil
-		}()
-		if err != nil {
-			return syncCopyResult{}, err
 		}
-		afterStarted := time.Now()
-		after, afterErr := b.Digest(ctx, target, names, w.From, w.Until)
+		if progress != nil {
+			progress(fmt.Sprintf("%s:%d:%d", journalPath, start, end), end-start, !fresh)
+		}
+		return nil
+	})
+	if err != nil {
+		return syncCopyResult{}, err
+	}
+	for _, copy := range copies {
+		started := time.Now()
+		after, afterErr := b.windowPointTotal(ctx, target, names, copy.w)
+		measurement := copy.measurement
 		if measurement.After == nil && afterErr == nil {
 			if len(failed) > 0 {
 				measurement.Before = nil
 			}
-			n := countWindowPoints(after)
-			measurement.After = &n
-			if err := atomicStateJSON(pointPath, measurement); err != nil {
+			measurement.After = &after
+			if err := atomicStateJSON(copy.pointPath, measurement); err != nil {
 				return syncCopyResult{}, err
 			}
 		}
-		event("sync_window_digest", map[string]any{"stage": "after", "source": source, "names": len(names), "seconds": time.Since(afterStarted).Seconds()})
-		count := func(d map[string][]syncDigest) int64 {
-			var n int64
-			for _, archives := range d {
-				for _, a := range archives {
-					n += a.Count
-				}
-			}
-			return n
-		}
-		if beforeErr == nil && afterErr == nil {
-			event("sync_window_points", map[string]any{"scope": "serving_archive", "source": source, "names": len(names), "window": w.Name, "before": count(before), "after": count(after), "added": count(after) - count(before)})
+		event("sync_window_digest", map[string]any{"stage": "after", "source": source, "names": len(names), "seconds": time.Since(started).Seconds()})
+		if copy.beforeErr == nil && afterErr == nil {
+			event("sync_window_points", map[string]any{"scope": "serving_archive", "source": source, "names": len(names), "window": copy.w.Name, "before": copy.before, "after": after, "added": after - copy.before})
 		}
 	}
 	return syncCopyResult{Copied: len(names) - len(failed), Failed: sortedKeys(failed)}, nil

@@ -87,7 +87,10 @@ Windows are half-open `[FROM, UNTIL)` in Unix seconds.
   `--no-verify` stops after discovery/copy and does not prove readiness.
 - `--streams` is the total per-host transfer budget. Zero resolves advertised
   source/target capacity (the smallest advertised per-host cap for end-to-end sync). Verify and copy are serial phases, so each can use the
-  entire budget; native window copies currently use one serial range stream.
+  entire budget. Native window fills run disjoint ranges of at most 4,096 names
+  concurrently up to this budget, preserving donor order and durable range receipts.
+  Fill `done` and `names_per_second` advance after each range completes all selected
+  windows; replayed receipts advance progress without adding fresh throughput.
   `effective_config`, `sync_start` and `progress.json.effective` state the actual
   engine, stream allocation, batch limits and window/full-history scope.
 - `--copy-streams` and `--verify-streams` no longer create independent pools: a different positive value is
