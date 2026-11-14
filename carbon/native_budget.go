@@ -8,7 +8,7 @@ import (
 
 func (cfg *Config) validateNativeCombineBudget(available func() (uint64, error)) error {
 	w := cfg.Whisper
-	if err := store.ValidateNativeCombineBudget(w.StoreNativeCombineWorkers, w.StoreNativeCombineMemory); err != nil {
+	if err := store.ValidateNativeImportBudget(w.StoreNativeImportConcurrency, w.StoreNativeCombineWorkers, w.StoreNativeCombineMemory); err != nil {
 		return fmt.Errorf("whisper.store-native-combine: %w", err)
 	}
 	// Preserve the existing budget on small hosts and unsupported platforms.

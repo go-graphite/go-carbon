@@ -62,13 +62,16 @@ store-dir = ""
 store-cache-size = 268435456
 store-memtable-size = 67108864
 # Native import preparation: 1..32 workers, capped by max-cpu and pending names.
-# One import per store; each worker (including its queued result) receives
-# total memory / configured workers, at least 1 GiB. These are conservative
+# Admission allows 1..8 imports per store (default 1). Each worker (including
+# its queued result) receives total memory / imports / workers, at least 1 GiB.
+# The total memory budget is shared across imports. These are conservative
 # scratch estimates, not an RSS cap: Pebble, SST writers, staging, GC and the
-# rest of the application need additional headroom. Both require a restart.
+# rest of the application need additional headroom. All require a restart.
 # Memory is bytes; increases above the 2 GiB default must fit within 25% of the
 # smaller of host RAM and Linux cgroup memory limit. Detection failure rejects
 # an increase. For example, 8 workers need at least 8589934592 bytes (8 GiB).
+# Four imports with 8 workers each need at least 34359738368 bytes (32 GiB).
+store-native-import-concurrency = 1
 store-native-combine-workers = 2
 store-native-combine-memory = 2147483648
 # Background compaction budget. Zero selects CPUs/6 workers, from 4 to 64

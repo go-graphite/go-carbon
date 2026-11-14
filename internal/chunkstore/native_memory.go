@@ -26,9 +26,28 @@ const (
 )
 
 const (
-	DefaultNativeCombineWorkers = 2
-	DefaultNativeCombineMemory  = nativeCombineMemory
+	DefaultNativeImportConcurrency = 1
+	DefaultNativeCombineWorkers    = 2
+	DefaultNativeCombineMemory     = nativeCombineMemory
 )
+
+// ValidateNativeImportBudget partitions one store-wide scratch allowance across
+// all admitted imports. Increasing admission must not multiply that allowance.
+func ValidateNativeImportBudget(imports, workers int, memory int64) error {
+	if imports < 1 || imports > 8 {
+		return fmt.Errorf("native import concurrency must be 1..8")
+	}
+	return ValidateNativeCombineBudget(workers, memory/int64(imports))
+}
+
+// NativeImportConcurrency is fixed at Open; Buckyd uses the same admission cap
+// before opening a donor so queued requests do not retain export responses.
+func (s *Store) NativeImportConcurrency() int {
+	if s.nativeImportConcurrency == 0 {
+		return DefaultNativeImportConcurrency
+	}
+	return s.nativeImportConcurrency
+}
 
 // ValidateNativeCombineBudget keeps at least the original 1 GiB allowance per
 // worker. The application additionally caps increases against available RAM.
@@ -68,7 +87,7 @@ func ValidateNativeNames(names []string) error {
 func (s *Store) initNativeContext() {
 	s.nativeContextOnce.Do(func() {
 		s.nativeContext, s.nativeCancel = context.WithCancel(context.Background())
-		s.nativeAdmission = make(chan struct{}, 1)
+		s.nativeAdmission = make(chan struct{}, s.NativeImportConcurrency())
 		s.nativeExportAdmission = make(chan struct{}, 1)
 	})
 }

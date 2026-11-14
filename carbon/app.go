@@ -1118,6 +1118,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
+			NativeImportConcurrency:   conf.Whisper.StoreNativeImportConcurrency,
 			NativeCombineWorkers:      conf.Whisper.StoreNativeCombineWorkers,
 			NativeCombineMemory:       conf.Whisper.StoreNativeCombineMemory,
 			MaintenanceWait:           app.storeMaintenance.wait,

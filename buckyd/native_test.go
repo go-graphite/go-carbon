@@ -17,9 +17,13 @@ import (
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-func newNativeTestService(t *testing.T) (*Service, *chunkstore.Store) {
+func newNativeTestService(t *testing.T, imports ...int) (*Service, *chunkstore.Store) {
 	t.Helper()
-	db, err := chunkstore.Open("/db", chunkstore.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, Now: func() time.Time { return time.Unix(10000, 0) }}.WithFS(vfs.NewMem()))
+	concurrency := 1
+	if len(imports) != 0 {
+		concurrency = imports[0]
+	}
+	db, err := chunkstore.Open("/db", chunkstore.Options{NativeImportConcurrency: concurrency, NativeCombineMemory: int64(concurrency) * 2 << 30, ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, Now: func() time.Time { return time.Unix(10000, 0) }}.WithFS(vfs.NewMem()))
 	if err != nil {
 		t.Fatal(err)
 	}

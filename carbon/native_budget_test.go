@@ -49,20 +49,30 @@ func TestNativeCombineBudget(t *testing.T) {
 
 func TestNativeCombineConfigAndRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "carbon.conf")
+	if err := os.WriteFile(path, []byte("[whisper]\nstorage-backend='pebble-chunk'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	defaults, err := ReadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Whisper.StoreNativeImportConcurrency != 1 || defaults.Whisper.StoreNativeCombineWorkers != 2 || defaults.Whisper.StoreNativeCombineMemory != 2<<30 {
+		t.Fatal("unset TOML changed serial defaults")
+	}
 	// Use exactly the default budget so this test also runs on small hosts.
-	if err := os.WriteFile(path, []byte("[whisper]\nstorage-backend='pebble-chunk'\nstore-native-combine-workers=1\nstore-native-combine-memory=2147483648\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("[whisper]\nstorage-backend='pebble-chunk'\nstore-native-import-concurrency=2\nstore-native-combine-workers=1\nstore-native-combine-memory=2147483648\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := ReadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Whisper.StoreNativeCombineWorkers != 1 || cfg.Whisper.StoreNativeCombineMemory != 2<<30 || len(cfg.unknownKeys) != 0 {
+	if cfg.Whisper.StoreNativeImportConcurrency != 2 || cfg.Whisper.StoreNativeCombineWorkers != 1 || cfg.Whisper.StoreNativeCombineMemory != 2<<30 || len(cfg.unknownKeys) != 0 {
 		t.Fatal("TOML native budget lost")
 	}
 	old := NewConfig()
 	old.Whisper.StorageBackend = "pebble-chunk"
-	if old.Whisper.StoreNativeCombineWorkers != 2 || old.Whisper.StoreNativeCombineMemory != 2<<30 {
+	if old.Whisper.StoreNativeImportConcurrency != 1 || old.Whisper.StoreNativeCombineWorkers != 2 || old.Whisper.StoreNativeCombineMemory != 2<<30 {
 		t.Fatal("defaults changed")
 	}
 	if !storageSettingsChanged(old, cfg) {
@@ -75,6 +85,18 @@ func TestNativeCombineConfigAndRestart(t *testing.T) {
 	}
 	if storageSettingsChanged(old, old) {
 		t.Fatal("unchanged budget requires restart")
+	}
+	next = *old
+	next.Whisper.StoreNativeImportConcurrency = 2
+	if !storageSettingsChanged(old, &next) {
+		t.Fatal("admission must require restart")
+	}
+	if err := next.validateNativeCombineBudget(func() (uint64, error) { return 128 << 30, nil }); err == nil {
+		t.Fatal("admission multiplied the scratch allowance")
+	}
+	next.Whisper.StoreNativeCombineMemory = 4 << 30
+	if err := next.validateNativeCombineBudget(func() (uint64, error) { return 128 << 30, nil }); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("[whisper]\nstore-native-combine-workers=0\n"), 0600); err != nil {
 		t.Fatal(err)
