@@ -15,7 +15,12 @@ type WriteoutQueue struct {
 	// Writeout queue. Usage:
 	// q := <- queue
 	// p := cache.Pop(q.Metric)
-	queue            chan string
+	queue chan string
+	// Retain one finite plan across refreshes so a busy warm prefix cannot
+	// indefinitely discard its cold tail. Consumers alternate both plans.
+	retained         chan string
+	hasCold          bool
+	turn             atomic.Uint64
 	refreshAt        time.Time
 	refreshRemaining int
 	rebuild          func(abort chan bool) chan bool // return chan waiting for complete
@@ -143,7 +148,14 @@ func (q *WriteoutQueue) update() {
 	}
 
 	q.Lock()
+	if len(q.retained) == 0 {
+		q.retained = nil
+		if q.hasCold {
+			q.retained = q.queue
+		}
+	}
 	q.queue = queue
+	q.hasCold = hasCold
 	q.refreshAt = time.Time{}
 	q.refreshRemaining = 0
 	if queue != nil {
@@ -157,7 +169,7 @@ func (q *WriteoutQueue) update() {
 			q.refreshRemaining = cap(queue)
 		}
 	}
-	q.cache.queueChannelBytes.Store(int64(cap(queue)) * 16)
+	q.cache.queueChannelBytes.Store(int64(cap(queue)+cap(q.retained)) * 16)
 	q.rebuild = q.makeRebuildCallback(next, notBefore)
 	q.Unlock()
 }
@@ -172,6 +184,7 @@ QueueLoop:
 		}
 		q.RLock()
 		queue := q.queue
+		retained := q.retained
 		rebuild := q.rebuild
 		refreshAt := q.refreshAt
 		refreshRemaining := q.refreshRemaining
@@ -186,13 +199,10 @@ QueueLoop:
 			}
 		}
 
-		select {
-		case metric := <-queue:
-			if !q.cache.WriteoutReady(metric) {
-				continue QueueLoop
-			}
-			// pop from cache
+		if metric := q.takeReady(queue, retained); metric != "" {
 			return metric
+		}
+		select {
 		case <-abort:
 			return ""
 		default:
@@ -216,23 +226,37 @@ func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
 // Persister workers use it to fill a commit from work that is available now.
 func (q *WriteoutQueue) TryGet() string {
 	q.RLock()
-	queue := q.queue
+	queue, retained := q.queue, q.retained
 	q.RUnlock()
-	for {
-		select {
-		case metric := <-queue:
-			if q.cache.WriteoutReady(metric) {
-				return metric
-			}
-		default:
-			return ""
-		}
-	}
+	return q.takeReady(queue, retained)
 }
 
-// A long cold snapshot must not hide newly warm work until it empties. Refresh
-// it once a second during warm-first startup. Unconsumed names still belong to
-// the cache and are selected again; the consumer reserves names across rebuilds.
+// At most two plans are held. Every other dequeue favors the retained plan,
+// regardless of refresh frequency. Both use the ordinary eligibility recheck;
+// neither owns or mutates the points it names.
+func (q *WriteoutQueue) takeReady(queue, retained chan string) string {
+	if len(retained) > 0 && q.turn.Add(1)&1 == 0 {
+		queue, retained = retained, queue
+	}
+NextPlan:
+	for _, plan := range [2]chan string{queue, retained} {
+		for {
+			select {
+			case metric := <-plan:
+				if q.cache.WriteoutReady(metric) {
+					return metric
+				}
+			default:
+				continue NextPlan
+			}
+		}
+	}
+	return ""
+}
+
+// Warm-first refreshes expose newly warm work while the retained plan makes
+// bounded progress through older cold work. Reservations exclude names already
+// in the persister pipeline across both snapshots.
 func (q *WriteoutQueue) updateAdmitted(abort chan bool) bool {
 	select {
 	case <-abort:
