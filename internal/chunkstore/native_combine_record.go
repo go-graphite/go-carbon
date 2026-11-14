@@ -99,11 +99,15 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 			}
 		}
 	}
-	a, err := s.nativeRecordSnapshot(ctx, source)
+	var leases transferSnapshotLeases
+	defer leases.close()
+	unionScratch := transferUnionPool.Get().(*transferUnionScratch)
+	defer unionScratch.release()
+	a, err := s.nativeRecordSnapshotLeased(ctx, source, &leases)
 	if err != nil {
 		return TransferMetric{}, class, fmt.Errorf("native donor view %s: %w", source.Config.Name, err)
 	}
-	b, err := s.nativeRecordSnapshot(ctx, target)
+	b, err := s.nativeRecordSnapshotLeased(ctx, target, &leases)
 	if err != nil {
 		return TransferMetric{}, class, fmt.Errorf("native survivor view %s: %w", target.Config.Name, err)
 	}
@@ -115,10 +119,11 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 			return TransferMetric{}, class, err
 		}
 		class.Archives++
-		points, intersects, normalizes, err := nativeArchiveUnion(archive, b.Archives[i])
+		points, intersects, normalizes, err := nativeArchiveUnionInto(archive, b.Archives[i], unionScratch.buffer(i), true)
 		if err != nil {
 			return TransferMetric{}, class, err
 		}
+		unionScratch.archives[i] = points
 		if intersects {
 			class.IntersectingArchives++
 		}
@@ -182,6 +187,14 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 		}
 	}
 	return result, class, nil
+}
+
+func (s *Store) nativeRecordSnapshotLeased(ctx context.Context, record TransferMetric, leases *transferSnapshotLeases) (Snapshot, error) {
+	if !record.Continuation {
+		return s.nativeRecordSnapshot(ctx, record)
+	}
+	m := Metadata{MetricConfig: record.Config, ID: record.Version.ID, Generation: record.Version.Generation, Continuation: true}
+	return leases.snapshot(ctx, s.continuation, transferRecordIO(record), m, s.now)
 }
 
 func nativeClassicPointKey(key []byte) bool { return len(key) == 20 && key[0] == 'f' && key[9] == 'p' }

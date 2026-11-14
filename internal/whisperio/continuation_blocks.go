@@ -288,6 +288,18 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 // the full block when pruning is disabled or unavailable; Whisper clips it.
 // Only Fetch enables pruning; writer planning and verification keep full reads.
 func (f *continuationFile) ReadStorageBlockRange(block whisper.ContinuationBlock, from, until int) ([]whisper.TimeSeriesPoint, error) {
+	if f.fs.snapshotReads && !f.fs.rangeReads {
+		// Whisper's storedPoints immediately copies these values to its archive
+		// array. Reuse the last complete block when coarse rollup reads ask for
+		// it again, otherwise decode into the same operation-private buffer.
+		key := verifiedBlockKey{file: f.data.id, block: block}
+		if f.fs.snapshotBlockOK && f.fs.snapshotBlockKey == key {
+			return f.fs.snapshotBlock, nil
+		}
+		points, err := f.readStorageBlock(block, f.fs.snapshotBlock[:0], from, until, false)
+		f.fs.snapshotBlock, f.fs.snapshotBlockKey, f.fs.snapshotBlockOK = points, key, err == nil
+		return points, err
+	}
 	return f.readStorageBlock(block, nil, from, until, f.fs.rangeReads)
 }
 
