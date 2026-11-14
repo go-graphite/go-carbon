@@ -188,7 +188,7 @@ func (p *Whisper) capacityLimitLocked(s cache.WriteoutState) {
 	}
 	previous := a.capacity.limit
 	previousHard := a.capacity.hardCeiling
-	limit := a.capacity.step(time.Now(), a.capacitySample, s, a.floor, p.workersCount, min(runtime.NumCPU(), runtime.GOMAXPROCS(0)), a.applied, a.tokenWaiters.Load(), a.controller.target, a.controller.need*autoUpdateMargin)
+	limit := a.capacity.step(time.Now(), a.capacitySample, s, a.floor, p.workersCount, min(runtime.NumCPU(), runtime.GOMAXPROCS(0)), a.applied, a.tokenWaiters.Load(), a.controller.target, max(a.controller.need*autoUpdateMargin, a.replayRate))
 	if a.ordinary > limit {
 		a.ordinary = limit
 	}

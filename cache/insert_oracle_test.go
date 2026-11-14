@@ -25,9 +25,9 @@ func TestCacheInsertMetricMemoryBound(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("64-bit layout bound")
 	}
-	// One atomic residence timestamp in StreamRef lets journal encoding read it
-	// without racing cache retries (8 bytes per metric).
-	if size := unsafe.Sizeof(item{}); size != 200 {
+	// The queued source hint avoids repeated recovery-map probes. Its 8 bytes
+	// are accounted along with the atomic journal residence timestamp.
+	if size := unsafe.Sizeof(item{}); size != 208 {
 		t.Fatalf("item bookkeeping grew to %d bytes", size)
 	}
 }
