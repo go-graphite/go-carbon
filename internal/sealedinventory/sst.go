@@ -1,4 +1,4 @@
-package main
+package sealedinventory
 
 import (
 	"bytes"
@@ -7,20 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"math/bits"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/floatresearch"
 	"github.com/golang/snappy"
 	"github.com/klauspost/compress/zstd"
 )
@@ -32,7 +28,6 @@ var inventoryDecoders = sync.Pool{New: func() any {
 	}
 	return z
 }}
-var codec = floatresearch.Codec{EncodeCurrent: chunkstore.EncodeSealedPoints, DecodeCurrent: chunkstore.DecodeSealedPoints}
 
 type pacedFile struct {
 	*os.File
@@ -490,121 +485,5 @@ func (r *runner) scan(path string) (*fileReport, error) {
 			return nil, err
 		}
 	}
-	if r.cfg.mode == "transcode" {
-		if layout.RangeKey.Length > 0 {
-			return nil, errors.New("range-key SST unsupported; refusing a lossy rewrite")
-		}
-		opts, e := r.writerOptions(reader, layout, out)
-		if e != nil {
-			return nil, e
-		}
-		if err = r.transcode(path, out, opts); err != nil {
-			return nil, err
-		}
-	}
 	return out, nil
-}
-
-// Store.Open uses Pebble's default 4 KiB/Snappy levels and an optional whole-key
-// bloom. Read scalar level settings from an optional copied OPTIONS file; never
-// open the database/MANIFEST or take a lock. Names/merger come from each SST.
-func (r *runner) writerOptions(reader *sstable.Reader, l *sstable.Layout, out *fileReport) (sstable.WriterOptions, error) {
-	c := *pebble.DefaultComparer
-	c.Split = func(key []byte) int { return len(key) }
-	o := (&pebble.Options{Comparer: &c}).EnsureDefaults()
-	level := o.Level(out.Level)
-	entries, err := os.ReadDir(r.cfg.dir)
-	if err != nil {
-		return sstable.WriterOptions{}, err
-	}
-	optionsPath := ""
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "OPTIONS-") && e.Type().IsRegular() {
-			optionsPath = filepath.Join(r.cfg.dir, e.Name())
-		}
-	}
-	source := "store.go/Pebble defaults"
-	if optionsPath != "" {
-		fd, e := syscall.Open(optionsPath, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
-		if e != nil {
-			return sstable.WriterOptions{}, e
-		}
-		f := os.NewFile(uintptr(fd), optionsPath)
-		data, e := io.ReadAll(io.LimitReader(f, 4<<20))
-		_ = f.Close()
-		if e != nil {
-			return sstable.WriterOptions{}, e
-		}
-		section := ""
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "[") {
-				section = line
-				continue
-			}
-			if section != fmt.Sprintf("[Level \"%d\"]", out.Level) {
-				continue
-			}
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-			n, _ := strconv.Atoi(value)
-			switch key {
-			case "block_size":
-				level.BlockSize = n
-			case "block_restart_interval":
-				level.BlockRestartInterval = n
-			case "block_size_threshold":
-				level.BlockSizeThreshold = n
-			case "index_block_size":
-				level.IndexBlockSize = n
-			case "compression":
-				switch value {
-				case "Snappy":
-					level.Compression = pebble.SnappyCompression
-				case "NoCompression":
-					level.Compression = pebble.NoCompression
-				case "ZSTD":
-					level.Compression = pebble.ZstdCompression
-				default:
-					return sstable.WriterOptions{}, fmt.Errorf("unknown OPTIONS compression %q", value)
-				}
-			}
-		}
-		source = filepath.Base(optionsPath)
-	}
-	opts := o.MakeWriterOptions(out.Level, l.Format)
-	opts.BlockSize = level.BlockSize
-	opts.BlockRestartInterval = level.BlockRestartInterval
-	opts.BlockSizeThreshold = level.BlockSizeThreshold
-	opts.IndexBlockSize = level.IndexBlockSize
-	opts.Compression = level.Compression
-	opts.MergerName = reader.Properties.MergerName
-	// Bloom's serialized bits/key is recoverable from its bit array and key
-	// count to nearest bit; tiny filters round to cache lines, use default 10.
-	bits := 10
-	if l.Filter.Length > 69 && reader.Properties.NumEntries > 0 {
-		bits = int(math.Round(float64((l.Filter.Length-5)*8) / float64(reader.Properties.NumEntries)))
-		bits = max(1, min(32, bits))
-	}
-	if l.Filter.Length > 0 {
-		opts.FilterPolicy = bloom.FilterPolicy(bits)
-		opts.FilterType = sstable.TableFilter
-	}
-	out.WriterOptions = fmt.Sprintf("source=%s block=%d restart=%d threshold=%d index=%d compression=%s bloom_bits=%d(inferred if present) format=%s", source, opts.BlockSize, opts.BlockRestartInterval, opts.BlockSizeThreshold, opts.IndexBlockSize, opts.Compression, bits, l.Format)
-	return opts, nil
-}
-
-func isFloatGroup(key, v []byte) bool {
-	if len(v) < 16 || v[0] != 3 || v[1]&^byte(12) != 0 {
-		return false
-	}
-	if len(key) >= 22 && key[0] == 't' && key[5] == 'u' {
-		key = key[22:]
-	} else if len(key) >= 17 && key[0] == 'u' {
-		key = key[17:]
-	}
-	return len(key) == 20 && key[0] == 'f' && (key[9] == 'c' || key[9] == 'p')
 }
