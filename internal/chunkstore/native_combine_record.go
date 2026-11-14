@@ -208,13 +208,19 @@ func TransferSnapshot(ctx context.Context, record TransferMetric, codec Continua
 	if record.Continuation && codec == nil {
 		return Snapshot{}, ErrFormat
 	}
-	return (&Store{continuation: codec, now: now}).nativeRecordSnapshot(ctx, record)
+	return nativeRecordSnapshot(ctx, record, codec, now)
 }
 
 func (s *Store) nativeRecordSnapshot(ctx context.Context, record TransferMetric) (Snapshot, error) {
+	return nativeRecordSnapshot(ctx, record, s.continuation, s.now)
+}
+
+// Record decoding needs only the codec and clock. In particular, streaming
+// callers must not allocate the store's lock and metadata-cache arrays per name.
+func nativeRecordSnapshot(ctx context.Context, record TransferMetric, codec ContinuationCodec, now func() time.Time) (Snapshot, error) {
 	m := Metadata{MetricConfig: record.Config, ID: record.Version.ID, Generation: record.Version.Generation, Continuation: record.Continuation}
 	if record.Continuation {
-		return s.continuation.Snapshot(ctx, transferRecordIO(record), m, s.now)
+		return codec.Snapshot(ctx, transferRecordIO(record), m, now)
 	}
 	result := Snapshot{Metadata: m, Archives: make([]Archive, len(m.Retentions))}
 	for i, r := range m.Retentions {
