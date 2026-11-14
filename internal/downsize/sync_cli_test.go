@@ -269,7 +269,7 @@ func TestSyncEndToEndAndLegacyTransition(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			args := []string{"--source", source.URL, "--to", target.URL, "--state", state, "--jwt-secret", syncTestJWTSecret(t)}
+			args := []string{"--source", source.URL, "--to", target.URL, "--state", state, "--no-ready", "--jwt-secret", syncTestJWTSecret(t)}
 			if err := Main(append([]string{"sync"}, args...)); err != nil {
 				t.Fatal(err)
 			}

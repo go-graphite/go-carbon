@@ -45,6 +45,9 @@ func main() {
 	}
 	if err := run(os.Args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintln(os.Stderr, err)
+		if errors.Is(err, downsize.ErrSyncNotReady) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }

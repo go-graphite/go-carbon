@@ -37,6 +37,7 @@ type effectiveSyncPolicy struct {
 }
 
 type syncCommand struct {
+	ready         syncReadyOptions
 	sync          syncOptions
 	copy          copyOptions
 	live          syncLiveOptions
@@ -50,11 +51,22 @@ type syncCommand struct {
 
 func parseSyncCommand(args []string) (syncCommand, error) {
 	var c syncCommand
+	var err error
+	args, err = expandSyncBlock(args)
+	if err != nil {
+		return c, err
+	}
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only --streams and --rate may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
+	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
+	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
+	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for process_start_time_seconds on every store")
+	flags.Var(&c.ready.period, "period", "FROM:UNTIL block copy/cutover period in Unix seconds")
+	flags.BoolVar(&c.ready.gapsComplete, "gap-ledger-complete", false, "attest that --window includes every known input gap")
+	flags.String("block", "", "generic JSON block file containing target, donors, peers, period, gaps and read-back URL")
 	flags.Lookup("state").Usage = "state directory; existing copy journal FILE resumes first, with sync state in FILE.sync"
 	flags.Lookup("streams").Usage = "total per-host transfer budget; 0 uses source/target advertised capacity; serial verify and copy phases share this budget"
 	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
@@ -240,51 +252,53 @@ func SyncMain(ctx context.Context, args []string) error {
 	limiter := &syncRateLimit{bytesPerSecond: c.rate}
 	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
-	streams := c.copy.streams
-	var sourceCapacity int
-	var target copyStatus
-	for _, host := range append(append([]string(nil), c.sync.from...), c.sync.to) {
-		if streams != 0 && host != c.sync.to {
-			continue
-		}
-		var status copyStatus
-		err := backend.wait(ctx, "capacity", host, func() error {
-			_, err := backend.m.requestOnce(ctx, host, "/v1/transfer/status", nil, &status)
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("resolve transfer budget on %s: %w", host, err)
-		}
-		if host == c.sync.to {
-			target = status
-		} else {
-			if status.MaxTransfers > 0 {
-				if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
-					sourceCapacity = status.MaxTransfers
+	err = runSyncReady(ctx, &c.sync, c.ready, backend, func() error {
+		streams := c.copy.streams
+		var sourceCapacity int
+		var target copyStatus
+		for _, host := range append(append([]string(nil), c.sync.from...), c.sync.to) {
+			if streams != 0 && host != c.sync.to {
+				continue
+			}
+			var status copyStatus
+			err := backend.wait(ctx, "capacity", host, func() error {
+				_, err := backend.m.requestOnce(ctx, host, "/v1/transfer/status", nil, &status)
+				return err
+			})
+			if err != nil {
+				return fmt.Errorf("resolve transfer budget on %s: %w", host, err)
+			}
+			if host == c.sync.to {
+				target = status
+			} else {
+				if status.MaxTransfers > 0 {
+					if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
+						sourceCapacity = status.MaxTransfers
+					}
 				}
 			}
 		}
-	}
-	if streams == 0 {
-		streams = defaultCopyStreams(sourceCapacity, target.MaxTransfers)
-	}
-	c.sync.streams = streams
-	c.live.copyStreams = streams
-	c.copy.streams = streams
-	c.sync.policy = c.policy(streams)
-	if c.sync.policy.CopyBatchBytes > 0 && target.MaxBodyBytes > 0 {
-		c.sync.policy.CopyBatchBytes = min(c.sync.policy.CopyBatchBytes, target.MaxBodyBytes)
-	}
-	c.config.Flags["streams"] = strconv.Itoa(streams)
-	c.resuming = true
-	if err := c.saveConfig(); err != nil {
-		return err
-	}
-	c.copy.policy = c.sync.policy
-	c.live.copyTemplate = &c.copy
-	backend.o = c.live
-	event("effective_config", map[string]any{"effective": c.sync.policy})
-	err = c.run(ctx, backend)
+		if streams == 0 {
+			streams = defaultCopyStreams(sourceCapacity, target.MaxTransfers)
+		}
+		c.sync.streams = streams
+		c.live.copyStreams = streams
+		c.copy.streams = streams
+		c.sync.policy = c.policy(streams)
+		if c.sync.policy.CopyBatchBytes > 0 && target.MaxBodyBytes > 0 {
+			c.sync.policy.CopyBatchBytes = min(c.sync.policy.CopyBatchBytes, target.MaxBodyBytes)
+		}
+		c.config.Flags["streams"] = strconv.Itoa(streams)
+		c.resuming = true
+		if err := c.saveConfig(); err != nil {
+			return err
+		}
+		c.copy.policy = c.sync.policy
+		c.live.copyTemplate = &c.copy
+		backend.o = c.live
+		event("effective_config", map[string]any{"effective": c.sync.policy})
+		return c.run(ctx, backend)
+	})
 	event("sync_io", map[string]any{"timings": backend.syncTimings()})
 	if errors.Is(err, ErrSyncResidual) {
 		fmt.Fprintln(os.Stderr, err)

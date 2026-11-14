@@ -205,7 +205,7 @@ func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
 			}
 		}
 	}
-	args := []string{"sync", "--from", src, "--to", dst, "--state", state, "--jwt-secret", syncTestJWTSecret(t), "--no-verify", "--streams", "1"}
+	args := []string{"sync", "--from", src, "--to", dst, "--state", state, "--no-ready", "--jwt-secret", syncTestJWTSecret(t), "--no-verify", "--streams", "1"}
 	first := invoke(args)
 	args = []string{"sync", "--resume", state + ".sync", "--streams", "2"}
 	second := invoke(args)
