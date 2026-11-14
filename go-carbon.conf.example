@@ -153,7 +153,8 @@ store-l0-compaction-concurrency = 0
 # store-parallel-table-syncs = 0
 # Flush output table size only (deeper levels keep their sizes). Fewer, larger
 # L0 tables need fewer syncs but overlap more of the other L0 sublevels and of
-# the base level; 64 MiB once stalled writes on the L0 limit. Zero keeps 2 MiB.
+# the base level; 64 MiB once stalled writes on the L0 limit. Zero selects
+# the default: 2 MiB, raised to memtable-size/128 (at most 16 MiB) for exact stores.
 # store-l0-target-file-size = 0
 # Bloom filter bits per key in new tables (10 gives about 1% false positives).
 # Point reads then skip tables that cannot hold the key instead of searching

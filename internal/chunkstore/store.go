@@ -133,8 +133,9 @@ type Options struct {
 	// Zero preserves Pebble's default table-reader budget.
 	MaxOpenFiles int
 	// TargetFileSize sets the output table size of flushes and of every
-	// compaction level. Zero keeps Pebble's 2 MiB L0 default, doubling per
-	// level. Large L0 tables make each flush a sublevel spanning the keyspace:
+	// compaction level. Zero keeps Pebble's doubling defaults, with a floor
+	// of MemTableSize/128 (2..16 MiB) for exact stores. Large L0 tables
+	// make each flush a sublevel spanning the keyspace:
 	// on a production store, 64 MiB raised L0 sublevels from 1-4 to 14 and stalled
 	// writes on the L0 limit. Prefer BytesPerSync to reduce syncs.
 	TargetFileSize int64
@@ -586,12 +587,21 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.BytesPerSync > 0 {
 		opts.BytesPerSync = options.BytesPerSync
 	}
-	if options.TargetFileSize > 0 || options.L0TargetFileSize > 0 || options.BloomFilterBits > 0 {
+	// A multi-GiB memtable split into Pebble's default 2 MiB tables can
+	// accumulate tens of thousands of L0 files with very few sublevels.
+	// Removing even one L0 file rebuilds metadata for all remaining files
+	// under the manifest lock. Bound this publication work without using
+	// memtable-sized tables, whose wider overlap would stall live writes.
+	fileSizeFloor := int64(0)
+	if options.ExactBlocks {
+		fileSizeFloor = max(2<<20, min(16<<20, int64(options.MemTableSize/128)))
+	}
+	if options.TargetFileSize > 0 || options.L0TargetFileSize > 0 || options.BloomFilterBits > 0 || fileSizeFloor > 2<<20 {
 		opts.Levels = make([]pebble.LevelOptions, numLevels)
 		for i := range opts.Levels {
 			opts.Levels[i].TargetFileSize = options.TargetFileSize
 			if options.TargetFileSize == 0 {
-				opts.Levels[i].TargetFileSize = 2 << 20 << i // Pebble's default
+				opts.Levels[i].TargetFileSize = max(2<<20<<i, fileSizeFloor)
 			}
 		}
 		if options.L0TargetFileSize > 0 {
