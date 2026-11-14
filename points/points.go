@@ -27,7 +27,7 @@ type Point struct {
 type Points struct {
 	// FirstArrival is the cache residence origin in Unix nanoseconds. Zero means
 	// unknown (legacy recovery); it never changes point timestamps or values.
-	FirstArrival int64
+	FirstArrival int64 `json:"-"`
 	Metric       string
 	Data         []Point
 }
