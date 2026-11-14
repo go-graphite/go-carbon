@@ -191,7 +191,7 @@ func (app *App) replayInputLog(core *cache.Cache) error {
 		seg.next.Store(s.legacy.first.Load())
 		s.legacy.first.Store(seg)
 		s.historyLog.Store(seg)
-		err = app.replayInputLogWith(core, nil, app.Config.InputLog.Path, app.Persister != nil, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+		err = app.replayInputLogWith(core, nil, app.Config.InputLog.Path, app.Persister != nil, seg.source)
 		seg.sealed.Store(true)
 		seg.replayed.Store(true)
 		return err
@@ -199,9 +199,9 @@ func (app *App) replayInputLog(core *cache.Cache) error {
 	return app.replayInputLogStopped(core, nil)
 }
 func (app *App) replayInputLogStopped(core *cache.Cache, stop <-chan struct{}) error {
-	return app.replayInputLogWith(core, stop, app.Config.InputLog.Path, app.Persister != nil, core.AddRecovered)
+	return app.replayInputLogWith(core, stop, app.Config.InputLog.Path, app.Persister != nil, nil)
 }
-func (app *App) replayInputLogWith(core *cache.Cache, stop <-chan struct{}, logPath string, draining bool, add func(*points.Points)) error {
+func (app *App) replayInputLogWith(core *cache.Cache, stop <-chan struct{}, logPath string, draining bool, source *cache.RecoverySource) error {
 	l := app.inputLog.Load()
 	if l == nil || !l.NeedsReplay() {
 		return nil
@@ -211,26 +211,35 @@ func (app *App) replayInputLogWith(core *cache.Cache, stop <-chan struct{}, logP
 	logger.Info("replaying input log before starting receivers", zap.String("path", logPath))
 	var from map[uint16]inputlog.ReplayCursor
 	var advance func(uint16, inputlog.ReplayCursor)
+	// A partition has exactly one replay owner. Snapshot these slots only after
+	// ReplayStoppedFrom has joined every owner, including on cancellation.
+	var cursors inputlog.ReplayCursors
 	if s := app.startupInput; s != nil {
 		if s.resume != nil {
 			from = s.resume.JournalOffsets
 		}
+		for part, cursor := range from {
+			if int(part) < len(cursors) {
+				cursors[part] = cursor
+			}
+		}
 		advance = func(part uint16, cursor inputlog.ReplayCursor) {
-			s.journalMu.Lock()
-			defer s.journalMu.Unlock()
-			if s.journalOffsets == nil {
-				s.journalOffsets = make(map[uint16]inputlog.ReplayCursor)
-				for k, v := range from {
-					s.journalOffsets[k] = v
+			cursors[part] = cursor
+		}
+		defer func() {
+			s.journalOffsets = make(map[uint16]inputlog.ReplayCursor)
+			for part, cursor := range cursors {
+				if cursor.Salt != 0 {
+					s.journalOffsets[uint16(part)] = cursor
 				}
 			}
-			s.journalOffsets[part] = cursor
-		}
+		}()
 	}
 	stats, err := l.ReplayStoppedFrom(func(p *points.Points) bool {
 		// Like tail replay: these points were accepted already, so no live
 		// quota applies, but recovery must leave room for persistence.
-		for draining && !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
+		metric := core.ResolveRecoveryMetricString(p.Metric)
+		for draining && !core.HasRecoveryCapacityBatch(len(p.Data), metric.OverheadBytes()) {
 			select {
 			case <-stop:
 				return false
@@ -243,7 +252,7 @@ func (app *App) replayInputLogWith(core *cache.Cache, stop <-chan struct{}, logP
 			return false
 		default:
 		}
-		add(p)
+		core.AddRecoveryMetric(metric, p, source, false)
 		return true
 	}, stop, from, advance)
 	select {
