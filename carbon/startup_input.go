@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -302,6 +303,23 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				paths = append(paths, path)
 			}
 		}
+		// Inventory once, before any history applies. Scrapes and replay never
+		// rescan the directory. Refresh sizes after acquiring predecessor locks.
+		sizes := make(map[string]int64, len(paths))
+		var historyBytes, historySegments int64
+		for _, path := range paths {
+			info, e := os.Stat(path)
+			if e != nil {
+				return e
+			}
+			sizes[path] = info.Size()
+			historyBytes += info.Size()
+			if info.Size() > 0 {
+				historySegments++
+			}
+		}
+		s.historyPendingBytes.Store(historyBytes)
+		s.historyPendingSegments.Store(historySegments)
 		slices.Sort(paths)
 		fencedEpoch := ""
 		for _, path := range paths {
@@ -371,6 +389,13 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.Next()}
 			zapwriter.Logger("app").Info("historical input tail opened", zap.String("filename", path), zap.Duration("lock_wait", time.Since(started)))
 			seg.size.Store(info.Size())
+			s.historyPendingBytes.Add(info.Size() - sizes[path])
+			if sizes[path] == 0 && info.Size() > 0 {
+				s.historyPendingSegments.Add(1)
+			}
+			if sizes[path] > 0 && info.Size() == 0 {
+				s.historyPendingSegments.Add(-1)
+			}
 			s.size.Add(info.Size())
 			tail.next.Store(seg)
 			tail = seg
@@ -378,12 +403,19 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		}
 		replaySegment := func(seg *startupSegment, framed bool) error {
 			reader := startupStoppedReader{reader: io.NewSectionReader(seg.file, 0, seg.size.Load()), stop: s.replayStop}
+			var applied int64
+			advance := func(end int64) {
+				s.historyPendingBytes.Add(applied - end)
+				applied = end
+			}
 			started := time.Now()
 			var loaded int
 			var e error
 			if framed {
 				worker := &startupShard{owner: s}
-				loaded, e = recovery.ReadCaptureFramesBuffer(reader, s.policy.readBuffer, func(raw []byte, n int) error {
+				position := &startupHistoryReader{reader: reader}
+				buffered := bufio.NewReaderSize(position, max(4096, s.policy.readBuffer))
+				loaded, e = recovery.ReadCaptureFramesBuffer(buffered, s.policy.readBuffer, func(raw []byte, n int) error {
 					if e := s.waitCapture(); e != nil {
 						return e
 					}
@@ -401,6 +433,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 						return e
 					}
 					s.historyPoints.Add(int64(n))
+					advance(position.offset - int64(buffered.Buffered()))
 					return nil
 				})
 			} else {
@@ -408,6 +441,10 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			}
 			if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, io.ErrUnexpectedEOF) {
 				return e
+			}
+			advance(seg.size.Load())
+			if seg.size.Load() > 0 {
+				s.historyPendingSegments.Add(-1)
 			}
 			if seg.path == s.path {
 				s.legacy.offset.Store(seg.size.Load())
@@ -519,4 +556,17 @@ func (r startupStoppedReader) Read(p []byte) (int, error) {
 	default:
 		return r.reader.Read(p)
 	}
+}
+
+// startupHistoryReader counts bytes fetched; subtract buffered read-ahead only
+// after a frame has applied, so queued or admission-blocked bytes stay pending.
+type startupHistoryReader struct {
+	reader io.Reader
+	offset int64
+}
+
+func (r *startupHistoryReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.offset += int64(n)
+	return n, err
 }

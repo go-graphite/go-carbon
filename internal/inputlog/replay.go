@@ -73,6 +73,9 @@ func (l *Log) ReplayStopped(apply func(*points.Points), stop <-chan struct{}) (R
 				var frameErr error
 				raw, n, frameErr = decodeFrame(dec, f, raw[:0], &streams[f.h.partition], apply)
 				pointCount.Add(int64(n))
+				if f.apply {
+					l.replayPendingBytes.Add(-int64(frameHeaderSize) - int64(f.h.length))
+				}
 				if frameErr != nil {
 					corrupt.Add(1)
 					l.logger.Warn("skipping corrupt input log frame", zap.Uint64("segment", f.seq),

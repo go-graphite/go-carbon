@@ -206,6 +206,8 @@ func TestStartupSpoolReleaseMetrics(t *testing.T) {
 	s.retiredBytes.Store(300)
 	s.releasableBytes.Store(200)
 	s.releaseFailures.Store(2)
+	s.historyPendingBytes.Store(111)
+	s.historyPendingSegments.Store(3)
 	app := &App{}
 	app.startupCaptureState.Store(s)
 	registry := prometheus.NewPedanticRegistry()
@@ -214,7 +216,7 @@ func TestStartupSpoolReleaseMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]float64{"startup_capture_retained_bytes": 700, "startup_capture_releasable_bytes": 200, "startup_capture_released_bytes_total": 300, "startup_capture_release_failures_total": 2}
+	want := map[string]float64{"startup_capture_history_pending_bytes": 111, "startup_capture_history_pending_segments": 3, "startup_capture_retained_bytes": 700, "startup_capture_releasable_bytes": 200, "startup_capture_released_bytes_total": 300, "startup_capture_release_failures_total": 2}
 	for _, f := range families {
 		if value, ok := want[f.GetName()]; ok {
 			m := f.Metric[0]
@@ -475,5 +477,26 @@ func assertReleaseReplayBits(t *testing.T, got, want []points.Point) {
 		if p.Timestamp != want[i].Timestamp || math.Float64bits(p.Value) != math.Float64bits(want[i].Value) {
 			t.Fatal("replay changed value bits, timestamp or order", i)
 		}
+	}
+}
+
+func TestStartupHistoryBacklogAbsentCapture(t *testing.T) {
+	registry := prometheus.NewPedanticRegistry()
+	registry.MustRegister(&migrationCollector{app: &App{}})
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, f := range families {
+		if f.GetName() == "startup_capture_history_pending_bytes" || f.GetName() == "startup_capture_history_pending_segments" {
+			found++
+			if f.Metric[0].Gauge == nil || f.Metric[0].GetGauge().GetValue() != 0 {
+				t.Fatal("absent history must be zero", f)
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatal("missing empty history gauges", found)
 	}
 }
