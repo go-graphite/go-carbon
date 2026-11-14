@@ -28,10 +28,6 @@ type continuationFiles struct {
 	// snapshotReads is enabled only after private OOO folding has finished.
 	// Archive materialization then performs no writes.
 	snapshotReads bool
-	// exportWindow clips only complete archive reads. Narrow rollup dependency
-	// reads retain their original ranges and circular-owner checks.
-	exportWindow *store.NativeWindow
-	exportStep   int64
 	// storedPoints copies a physical block's values before requesting another
 	// block. Only immutable archive snapshots may borrow this decode buffer.
 	snapshotBlock    []whisper.TimeSeriesPoint
