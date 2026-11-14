@@ -1,0 +1,2 @@
+{"kind":"header","identity":"{\"from\":\"SOURCE\",\"names_sha256\":\"\",\"prefix\":\"\",\"ring_sha256\":\"\",\"to\":\"TARGET\"}","time":"2026-11-13T14:36:00Z"}
+{"kind":"done","first":"a","last":"b","names":2,"bytes":2000,"seconds":0.2,"time":"2026-11-13T14:36:01Z"}

@@ -18,13 +18,11 @@ import (
 // engine, journal, worker and transfer primitives.
 func Main(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: storectl sync [flags] (copy is an alias); compatibility: plan|run|status|worker|config|compare|snapshot")
+		return errors.New("usage: storectl sync [flags]; compatibility: plan|run|status|worker|config|compare|snapshot")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch args[0] {
-	case "copy":
-		return PlanFreeCopyMain(ctx, args[1:])
 	case "sync":
 		return SyncMain(ctx, args[1:])
 	case "run":

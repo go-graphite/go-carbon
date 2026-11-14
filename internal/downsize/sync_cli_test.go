@@ -39,10 +39,7 @@ func TestSyncCommandModesAndFlags(t *testing.T) {
 		{"verify same", []string{"--streams", "8", "--verify-streams", "8"}, ""},
 		{"same budget", []string{"--streams", "8", "--copy-streams", "8"}, ""},
 		{"removed flag", []string{"--transport-retries", "2"}, "flag provided but not defined"},
-		{"copy only", []string{"--phase", "copy"}, ""},
-		{"copy window", []string{"--phase", "copy", "--window", "100:200"}, "--window has no effect"},
-		{"copy sample", []string{"--phase", "copy", "--sample-every", "1"}, "--sample-every has no effect"},
-		{"phase", []string{"--phase", "verify"}, "--phase must"},
+		{"removed phase", []string{"--phase", "copy"}, "flag provided but not defined"},
 		{"negative", []string{"--streams", "-1"}, "invalid streams"},
 	}
 	for _, tt := range tests {
@@ -107,44 +104,6 @@ func TestSyncSourceAliasAndNamesFormat(t *testing.T) {
 	}
 	if c.sync.namesFile != names || c.sync.namesHash == "" {
 		t.Fatal(c.sync)
-	}
-}
-
-func TestSyncCopyAliasResumesLegacyJournal(t *testing.T) {
-	f, src, dst := newFakeCopy(t, []string{"a", "b", "c"})
-	o := copyTestOptions(t, src, dst)
-	if err := planFreeCopy(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	before := f.attempts
-	args := []string{"--phase", "copy", "--source", src, "--to", dst, "--state", o.state, "--streams", "4"}
-	if err := PlanFreeCopyMain(context.Background(), args); err != nil {
-		t.Fatal(err)
-	}
-	args[2] = "--from"
-	if err := SyncMain(context.Background(), args); err != nil {
-		t.Fatal(err)
-	}
-	if f.attempts != before {
-		t.Fatalf("reimported completed ranges: %d -> %d", before, f.attempts)
-	}
-	var snap progressSnapshot
-	data, err := os.ReadFile(o.state + ".progress.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(data, &snap); err != nil {
-		t.Fatal(err)
-	}
-	if snap.Copied != 3 || snap.Status != "complete" || snap.Effective == nil || snap.Effective.Streams != 4 || snap.Effective.CopyBatchBytes != f.maxBody {
-		t.Fatalf("snapshot %+v effective %+v", snap, snap.Effective)
-	}
-	c, err := parseSyncCommand([]string{"--source", src, "--to", dst, "--state", o.state})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !c.legacyJournal || c.sync.state != o.state+".sync" || c.phase != "all" {
-		t.Fatalf("legacy transition %+v", c)
 	}
 }
 
@@ -285,7 +244,7 @@ func TestSyncInactiveSamplingWarns(t *testing.T) {
 	}
 }
 
-func TestSyncAliasEndToEndAndLegacyTransition(t *testing.T) {
+func TestSyncEndToEndAndLegacyTransition(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/transfer/status":
@@ -311,9 +270,6 @@ func TestSyncAliasEndToEndAndLegacyTransition(t *testing.T) {
 				}
 			}
 			args := []string{"--source", source.URL, "--to", target.URL, "--state", state}
-			if err := Main(append([]string{"copy"}, args...)); err != nil {
-				t.Fatal(err)
-			}
 			if err := Main(append([]string{"sync"}, args...)); err != nil {
 				t.Fatal(err)
 			}
