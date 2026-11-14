@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -17,6 +18,49 @@ func TestWriteoutRefreshDrainsColdTail(t *testing.T) {
 
 func TestWriteoutRefreshDrainsRecoveryTail(t *testing.T) {
 	testWriteoutRefreshDrainsTail(t, true)
+}
+
+// Retained plans can repeat a name after the current plan has written it.
+// Recovery and pressure disable batching, but must still reject absent names
+// before the persister spends a mandatory writeout admission.
+func TestWriteoutRefreshSkipsConsumedNames(t *testing.T) {
+	for _, draining := range []bool{false, true} {
+		for _, nonblocking := range []bool{false, true} {
+			t.Run(fmt.Sprintf("draining=%v/nonblocking=%v", draining, nonblocking), func(t *testing.T) {
+				c := New()
+				defer c.Stop()
+				c.SetRecoveryDrain(draining)
+				if draining {
+					if err := c.SetWriteoutBatching(960, time.Hour); err != nil {
+						t.Fatal(err)
+					}
+				}
+				c.SetRestartOrder(func() bool { return true })
+				c.Add(points.OnePoint("a.consumed", 1, 1))
+				c.Add(points.OnePoint("z.remaining", 2, 2))
+				q := c.WriteoutQueue()
+				q.update()
+				q.update() // Both snapshots contain the two names.
+				if _, ok := c.Pop("a.consumed"); !ok {
+					t.Fatal("missing consumed fixture")
+				}
+				if c.WriteoutReady("a.consumed") {
+					t.Fatal("absent name is writeout ready")
+				}
+				abort := make(chan bool)
+				defer close(abort)
+				var got string
+				if nonblocking {
+					got = q.TryGet()
+				} else {
+					got = q.Get(abort)
+				}
+				if got != "z.remaining" {
+					t.Fatalf("spent admission on %q, want remaining name", got)
+				}
+			})
+		}
+	}
 }
 
 func testWriteoutRefreshDrainsTail(t *testing.T, draining bool) {

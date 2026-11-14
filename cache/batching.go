@@ -390,14 +390,14 @@ func writeoutDeadlineClock(values *item, s *cacheSettings) time.Time {
 // store lock: a queue entry can outlive the batch that originally made it ready.
 func (c *Cache) WriteoutReady(metric string) bool {
 	s := c.settings.Load().(*cacheSettings)
-	if !c.batchWrites(s) {
-		return true
-	}
+	batch := c.batchWrites(s)
 	shard := c.GetShard(metric)
 	shard.mu.RLock()
 	p := shard.items.get(metric)
 	exists := p != nil
-	ready := exists && !time.Now().Before(writeoutDeadline(p, s))
+	// Refreshes can retain the same name in two plans. Even without batching,
+	// a consumed name must not spend another mandatory writeout admission.
+	ready := exists && (!batch || !time.Now().Before(writeoutDeadline(p, s)))
 	shard.mu.RUnlock()
 	return ready
 }
