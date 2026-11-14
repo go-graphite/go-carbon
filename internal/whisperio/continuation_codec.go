@@ -793,7 +793,22 @@ func compactContinuation(w *whisper.Whisper, fs *continuationFiles, policy *stor
 	return err
 }
 
-func (c *ContinuationCodec) Fetch(ctx context.Context, kv store.ContinuationIO, m store.Metadata, from, until int, clock func() time.Time) (*store.Series, error) {
+func (c *ContinuationCodec) Fetch(ctx context.Context, kv store.ContinuationIO, m store.Metadata, from, until int, clock func() time.Time) (result *store.Series, err error) {
+	// Classic Whisper turns a base-interval read error into a string panic.
+	// A render may be canceled after the initial context check or file open.
+	// Translate only that cancellation panic; preserve every other panic,
+	// including an unrelated read failure racing with cancellation.
+	defer func() {
+		if value := recover(); value != nil {
+			cause := ctx.Err()
+			message, ok := value.(string)
+			if cause != nil && ok && message == "Failed to read baseInterval: "+cause.Error() {
+				result, err = nil, cause
+				return
+			}
+			panic(value)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
