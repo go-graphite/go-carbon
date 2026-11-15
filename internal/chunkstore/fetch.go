@@ -17,10 +17,7 @@ import (
 // each. Admit before opening a view and retain the slot until all iterators and
 // value handles close. Queued callers hold no Pebble buffers. Block loading is
 // separately bounded for writeout and background readers as well.
-const (
-	maxConcurrentBlockLoads = 16
-)
-
+//
 // readAdmission is a store read slot taken by AdmitRead and carried by its
 // context. Fetch and Metadata calls with that context use it instead of
 // waiting for another slot until the caller releases it.

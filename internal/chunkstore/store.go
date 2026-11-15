@@ -47,7 +47,8 @@ const (
 
 type Options struct {
 	// BlockLoadConcurrency bounds simultaneous uncached SST block loads across
-	// foreground readers, persisters and compactions. Zero selects 16.
+	// foreground readers, persisters and compactions. Zero selects GOMAXPROCS,
+	// clamped to 16..256; explicit positive limits are used unchanged.
 	// The limit can be changed without reopening with SetBlockLoadConcurrency.
 	BlockLoadConcurrency int
 	// ReadConcurrency bounds foreground reads; zero scales with GOMAXPROCS. Reloadable.
@@ -1520,9 +1521,17 @@ func (s *Store) SetReadConcurrency(limit int) error {
 
 func blockLoadConcurrency(limit int) int64 {
 	if limit == 0 {
-		return maxConcurrentBlockLoads
+		// Slots cover checksum, decompression and cache insertion as well as
+		// disk reads. Scale CPU work with available execution threads, while
+		// bounding cold-block allocations on both small and very large hosts.
+		return int64(min(256, max(16, runtime.GOMAXPROCS(0))))
 	}
 	return int64(limit)
+}
+
+// BlockLoadConcurrency returns the effective store-wide block load budget.
+func (s *Store) BlockLoadConcurrency() int64 {
+	return s.blockLoadSlots.Stats().Capacity
 }
 
 // SetBlockLoadConcurrency resizes the existing admission gate. In-flight loads
