@@ -112,6 +112,9 @@ type App struct {
 	heartbeatMetrics       atomic.Pointer[heartbeat.Heartbeat] // kept after stop for scrapes
 	heartbeatUncleanStarts atomic.Int64
 	heartbeatCollectorOnce sync.Once
+	// cacheLimit is the resolved write-cache limit (see resolveCacheLimit).
+	cacheLimit              atomic.Pointer[cacheLimit]
+	cacheLimitCollectorOnce sync.Once
 	// readRelease, when set, lets the next instance start while this one keeps
 	// serving reads after a dump stop (see SetReadHandoff).
 	readRelease             func()
@@ -509,6 +512,9 @@ func (app *App) ReloadConfig() error {
 	// Publishing identical cache settings invalidates deadline summaries and
 	// rebuilding an unchanged bloom filter discards its history. Preserve both
 	// on unrelated reloads, as well as preserving the writer pool below.
+	// A reload re-derives an automatic max-size from total memory and the
+	// cache's measured bytes per point.
+	app.resolveCacheLimit(app.Config, app.Cache)
 	before, after := previousConfig.Cache, app.Config.Cache
 	if before.MaxSize != after.MaxSize {
 		app.Cache.SetMaxSize(after.MaxSize)
@@ -1101,6 +1107,8 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		}
 	}
 	core = cache.New()
+	app.resolveCacheLimit(conf, nil)
+	app.registerCacheLimitMetrics()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetMaxBytes(conf.Cache.MaxBytes)
 	if runtime.GOOS == "linux" {

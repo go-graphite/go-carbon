@@ -711,8 +711,17 @@ remove-empty-file = false
 # visits if scan scheduling overhead outweighs live-input latency. Default on;
 # SIGHUP applies to the next queue rebuild. Persistence and quotas are unchanged.
 writeout-scan-yield = true
-# Limit of in-memory stored points (not metrics)
-max-size = "1M"
+# Limit of in-memory stored points (not metrics). When omitted, startup and
+# SIGHUP derive it from total RAM (or the smaller cgroup limit):
+# floor(floor(total_bytes * memory-share) / bytes_per_point), at least 1 point.
+# An explicit max-size always wins, including 0 for unlimited.
+# max-size = "1M"
+# Fraction of total memory for the estimated write cache, independent of
+# common.memory-budget. Must be > 0 and <= 0.9; default 0.15. Not an RSS cap.
+# memory-share = 0.15
+# Fixed bytes per point for automatic sizing. 0 (default) uses 3.0 at startup,
+# then EstimatedBytes / Size on SIGHUP when at least 1M points are cached.
+# bytes-per-point = 0
 # Optional additional byte budget, using cache_estimated_bytes (0 disables).
 # Includes metric names, compact buffer capacity and input-log tracking. This is
 # an estimate, not an RSS limit; leave room for Go GC, Pebble and native memory.
