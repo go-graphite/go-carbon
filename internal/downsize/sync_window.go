@@ -110,8 +110,8 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		err          error
 	}
 	results := make(chan result, workers)
-	// Read-only selections remain cancellable. Issued pulls drain separately
-	// because cancelling a pull can lose the server's durable acknowledgement.
+	// Selections and issued pulls share cancellation. Native intents are durable
+	// before dispatch; receipts resolve a lost acknowledgement on resume.
 	var firstErr error
 	collect := func() {
 		r := <-results
@@ -354,7 +354,7 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 			return err
 		}
 		copyStarted := time.Now()
-		res, err := s.copyFrom(context.WithoutCancel(ctx), "window-missing", group, src, selected)
+		res, err := s.copyFrom(ctx, "window-missing", group, src, selected)
 		event("sync_window_group_copy", map[string]any{"group": group, "source": source, "names": len(selected), "seconds": time.Since(copyStarted).Seconds()})
 		if err != nil {
 			return err

@@ -21,6 +21,10 @@ import (
 // nativeRangeNames caps every native range at the receiver limit; tests lower it.
 var nativeRangeNames = int64(chunkstore.NativeMaxRangeNames)
 
+// Cleanup is best effort: native intents and receipts, rather than source-pin
+// release, protect resume. Keep remote cleanup inside the CLI stop budget.
+const stopCleanupTimeout = 2 * time.Second
+
 type nativeController struct {
 	*mover
 	mu       sync.Mutex
@@ -254,7 +258,7 @@ func (c *nativeController) release() {
 	sessions := c.sessions
 	c.sessions = make(map[string]*nativeRemoteSession)
 	c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), stopCleanupTimeout)
 	defer cancel()
 	var wg sync.WaitGroup
 	for source, entry := range sessions {

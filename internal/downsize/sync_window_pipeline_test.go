@@ -89,7 +89,7 @@ func TestSyncWindowPipelineDifferentialAndResume(t *testing.T) {
 	}
 }
 
-func TestSyncWindowPipelineOverlapAndDrain(t *testing.T) {
+func TestSyncWindowPipelineOverlapAndCancel(t *testing.T) {
 	b, o := pipelineFixture(t, 4) // two disjoint groups, each with two donor requests
 	b.arrived = make(chan string, 64)
 	b.release = make(chan struct{})
@@ -114,22 +114,18 @@ func TestSyncWindowPipelineOverlapAndDrain(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		close(b.release)
-		t.Fatal("returned before draining issued work", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(b.release)
-	select {
-	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("drain did not finish")
+	case <-time.After(5 * time.Second):
+		close(b.release)
+		<-done
+		t.Fatal("issued copies ignored cancellation")
 	}
+	close(b.release)
 	b.arrived = nil
 	if err := runSync(context.Background(), o, b); err != nil {
-		t.Fatal("resume after drain", err)
+		t.Fatal("resume after cancellation", err)
 	}
 	if len(b.store(syncT).points) != 24 {
 		t.Fatal("resume lost undispatched groups")

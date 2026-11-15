@@ -76,6 +76,14 @@ The whole period and all three gap windows are selected, copied, verified and fi
 no separate gap commands or shell receipt chain is needed.
 `storectl sync --resume ./block-state` restores the saved configuration and
 continues the durable discovery cursor, verification batches and native receipts.
+
+SIGINT and SIGTERM cancel active HTTP requests, verification and retry backoff,
+join workers, and save interrupted progress before exiting. Native imports use
+fsynced intents and durable receipts: an import that committed before its response
+was cancelled is recovered on resume without applying the range twice. Source-pin
+cleanup is best effort with a shared 2s deadline; a stopped run never declares READY.
+Resume with the same state directory after replacing or restarting the client.
+
 Windows are half-open `[FROM, UNTIL)` in Unix seconds.
 
 - Full-history copy/fill is enabled by default, including runs with windows. Every

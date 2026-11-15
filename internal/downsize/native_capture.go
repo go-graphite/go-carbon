@@ -67,7 +67,7 @@ func NativeCaptureMain(ctx context.Context, args []string) error {
 		return err
 	}
 	defer func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		cleanup, cancel := context.WithTimeout(context.Background(), stopCleanupTimeout)
 		defer cancel()
 		req, e := http.NewRequestWithContext(cleanup, http.MethodDelete, endpoint+"/v1/native/source/"+pin.ID, nil)
 		if e != nil {

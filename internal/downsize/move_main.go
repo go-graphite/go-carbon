@@ -379,13 +379,13 @@ func run(ctx context.Context, o options) error {
 	}
 	if o.blockReads {
 		if err := m.readLeases(ctx, origins, false); err != nil {
-			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			cleanup, cancel := context.WithTimeout(context.Background(), stopCleanupTimeout)
 			defer cancel()
 			_ = m.readLeases(cleanup, origins, true)
 			return err
 		}
 		defer func() {
-			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			cleanup, cancel := context.WithTimeout(context.Background(), stopCleanupTimeout)
 			defer cancel()
 			_ = m.readLeases(cleanup, origins, true)
 		}()
