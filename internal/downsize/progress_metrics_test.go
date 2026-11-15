@@ -45,7 +45,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 24
+		count := 25
 		if index == 0 {
 			count++
 		}
@@ -79,16 +79,23 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 	if p.storeWaiting != 0 || p.storeWaitSeconds < 1 {
 		t.Fatal("wait duration lost", p.storeWaitSeconds)
 	}
-	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 24; i++ {
+	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete", RepairFailedNames: 7})
+	for i := 0; i < 25; i++ {
 		select {
 		case line := <-lines:
+			if strings.Contains(line, ".repair_failed_names ") && !strings.Contains(line, ".repair_failed_names 7 ") {
+				t.Fatal(line)
+			}
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {
 				t.Fatal(line)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("missing final sample")
 		}
+	}
+	p.observe("state/progress.json", progressSnapshot{Phase: "ready", Status: "running"})
+	if p.repairFailedNames != 7 {
+		t.Fatal("parent finalization erased repair failure metric")
 	}
 }
 

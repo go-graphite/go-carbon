@@ -3,6 +3,7 @@ package downsize
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -115,20 +116,82 @@ func TestSyncConvergeBitExact2000(t *testing.T) {
 	}
 }
 func TestSyncConvergeStalledEvidence(t *testing.T) {
-	f := newFakeSync()
-	o := convergeOptions(t)
-	schema := []syncArchive{{60, 10000}}
-	f.put(syncT, "hole", schema)
-	f.put(syncP, "hole", schema)
-	delete(f.store(syncT).points["hole"][60], syncTestNow-6000)
-	if err := runSync(context.Background(), o, partialSync{fakeSync: f, stuck: true}); err == nil {
-		t.Fatal("stalled sync succeeded")
-	}
-	data, _ := os.ReadFile(filepath.Join(o.state, "residual.json"))
-	if !strings.Contains(string(data), "persisted_after_fill") || !strings.Contains(string(data), `"points":1`) {
-		t.Fatal(string(data))
+	for _, stuck := range []bool{true, false} {
+		t.Run(fmt.Sprint(stuck), func(t *testing.T) {
+			f := newFakeSync()
+			o := convergeOptions(t)
+			schema := []syncArchive{{60, 10000}}
+			for _, host := range []string{syncT, syncP, syncD1} {
+				f.put(host, "hole", schema)
+			}
+			delete(f.store(syncT).points["hole"][60], syncTestNow-6000)
+			out, e := os.CreateTemp(t.TempDir(), "events-")
+			if e != nil {
+				t.Fatal(e)
+			}
+			original := os.Stdout
+			outputMu.Lock()
+			os.Stdout = out
+			outputMu.Unlock()
+			defer func() { outputMu.Lock(); os.Stdout = original; outputMu.Unlock(); out.Close() }()
+			err := runSync(context.Background(), o, partialSync{fakeSync: f, stuck: stuck})
+			outputMu.Lock()
+			os.Stdout = original
+			outputMu.Unlock()
+			if stuck && !errors.Is(err, ErrSyncResidual) || !stuck && err != nil {
+				t.Fatalf("residual exit: %v", err)
+			}
+			data, e := os.ReadFile(filepath.Join(o.state, "progress.json"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var snapshot progressSnapshot
+			if e = json.Unmarshal(data, &snapshot); e != nil {
+				t.Fatal(e)
+			}
+			want := int64(0)
+			if stuck {
+				want = 1
+			}
+			if snapshot.RepairFailedNames != want {
+				t.Fatalf("distinct repair failures=%d want%d", snapshot.RepairFailedNames, want)
+			}
+			data, e = os.ReadFile(out.Name())
+			if e != nil {
+				t.Fatal(e)
+			}
+			errorsSeen := 0
+			summarySeen := false
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var event map[string]json.RawMessage
+				if e = json.Unmarshal([]byte(line), &event); e != nil {
+					t.Fatal(e)
+				}
+				if string(event["event"]) == `"sync_repair_failed"` {
+					errorsSeen++
+					if string(event["metric"]) != `"hole"` || string(event["level"]) != `"ERROR"` || string(event["reason"]) != `"persisted_after_fill"` {
+						t.Fatal(string(line))
+					}
+					var holes []syncResidual
+					if e = json.Unmarshal(event["holes"], &holes); e != nil || len(holes) != 2 {
+						t.Fatalf("donor evidence: %s", line)
+					}
+				}
+				if string(event["event"]) == `"sync_done"` && string(event["level"]) == `"ERROR"` {
+					summarySeen = true
+				}
+			}
+			if int64(errorsSeen) != want || summarySeen != stuck {
+				t.Fatalf("errors=%d summary=%t stuck=%t", errorsSeen, summarySeen, stuck)
+			}
+			data, _ = os.ReadFile(filepath.Join(o.state, "residual.json"))
+			if stuck && (!strings.Contains(string(data), "persisted_after_fill") || !strings.Contains(string(data), `"points":1`)) {
+				t.Fatal(string(data))
+			}
+		})
 	}
 }
+
 func TestSyncConvergeAbsentProofError(t *testing.T) {
 	f := newFakeSync()
 	o := convergeOptions(t)

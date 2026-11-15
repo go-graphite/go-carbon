@@ -883,3 +883,14 @@ exports `store_retries`, `store_wait_seconds` (wall time with at least one pendi
 restart wait), and `waiting_for_store` under the existing run prefix, including
 capacity probes and READY read-back before/after the main transfer phases.
 The main transfer's `progress.json` also exposes `waiting_for_store`.
+
+A terminal sync with residuals emits `sync_done` with `level: "ERROR"` and returns
+a nonzero exit status. Each distinct metric that still has holes after an
+accepted fill also emits `sync_repair_failed` with `level: "ERROR"`, `metric`,
+`reason: "persisted_after_fill"`, and its source/window/archive evidence. These
+failures publish the fixed Graphite gauge
+`tools.storectl.<runner>.<run>.sync.repair_failed_names`; metric names remain in
+logs rather than becoming Graphite series. The count is retained through parent
+READY finalization within that client invocation and starts at zero for a new
+invocation. `residual.json` retains the full terminal residual evidence. An
+accepted transfer alone never proves a repair.
