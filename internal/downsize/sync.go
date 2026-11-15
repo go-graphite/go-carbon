@@ -502,7 +502,7 @@ func (s *syncer) run(ctx context.Context) error {
 			return fmt.Errorf("copy missing: %w", err)
 		}
 	}
-	if err := s.retryWindowSelections(ctx); err != nil {
+	if err := s.waitWindowSelections(ctx); err != nil {
 		return fmt.Errorf("retry window selections: %w", err)
 	}
 	if s.o.noVerify {
@@ -1043,12 +1043,20 @@ func syncCompare(name, source string, src, dst syncSeries, step, from, until int
 
 func (s *syncer) summary(err error) {
 	residualNames := map[string]bool{}
-	points := 0
+	points, pendingSelections := 0, 0
+	var actual []syncResidual
+	var pending []syncResidual
 	for _, r := range s.sum.residual {
+		if r.Reason == syncWindowSelectionReason {
+			pendingSelections++
+			pending = append(pending, r)
+			continue
+		}
+		actual = append(actual, r)
 		residualNames[r.Name] = true
 		points += r.Points
 	}
-	s.sum.Residual = len(s.sum.residual)
+	s.sum.Residual = len(actual)
 	s.sum.ResidualNames, s.sum.ResidualPoints = len(residualNames), points
 	forbidden := make([]string, 0, len(s.forbid))
 	for f := range s.forbid {
@@ -1063,7 +1071,7 @@ func (s *syncer) summary(err error) {
 		}
 		phases[name] = f
 	}
-	residual := s.sum.residual
+	residual := actual
 	const shown = 1000
 	if len(residual) > shown {
 		residual = residual[:shown]
@@ -1073,12 +1081,12 @@ func (s *syncer) summary(err error) {
 		"short_skipped": s.sum.Short, "not_owned": s.sum.NotOwned, "copied": s.sum.Copied, "copy_failed": s.sum.CopyFailed,
 		"verified": s.sum.Verified, "hole_names": s.sum.HoleNames, "hole_points": s.sum.HolePoints, "filled": s.sum.Filled,
 		"rounds": s.sum.Rounds, "residual": s.sum.Residual, "residual_names": s.sum.ResidualNames, "residual_points": points,
-		"residual_detail": residual, "forbidden_sources": forbidden, "phases": phases, "seconds": time.Since(s.started).Seconds(),
+		"pending_selections": pendingSelections, "residual_detail": residual, "forbidden_sources": forbidden, "phases": phases, "seconds": time.Since(s.started).Seconds(),
 	}
 	if err != nil {
 		fields["error"] = err.Error()
 	}
-	if err == nil && s.sum.Residual == 0 {
+	if err == nil && s.sum.Residual == 0 && pendingSelections == 0 {
 		fields["verdict"] = "COMPLETE"
 	} else {
 		fields["verdict"] = "INCOMPLETE"
@@ -1094,9 +1102,12 @@ func (s *syncer) summary(err error) {
 	if err := atomicStateJSON(filepath.Join(s.o.state, "resolved.json"), resolved); err != nil {
 		event("sync_resolution_error", map[string]any{"error": err.Error()})
 	}
+	if err := atomicStateJSON(filepath.Join(s.o.state, "pending-selections.json"), pending); err != nil {
+		event("sync_resolution_error", map[string]any{"error": err.Error()})
+	}
 	event("sync_done", fields)
 	if f, ferr := os.Create(filepath.Join(s.o.state, "residual.json")); ferr == nil {
-		_ = json.NewEncoder(f).Encode(s.sum.residual)
+		_ = json.NewEncoder(f).Encode(actual)
 		_ = f.Close()
 	}
 }

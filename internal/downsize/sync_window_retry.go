@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 const syncWindowSelectionReason = "source window selection unresolved: missing metadata or pending snapshot"
@@ -33,6 +34,33 @@ func (s *syncer) resolvedWindowSelections() map[syncWindowSelectionKey]map[strin
 // intent. Reselect only these names on fresh pins. Original selections and their
 // native range identities remain unchanged. Resolutions are committed only after
 // complete window selection and, where necessary, a successful window copy.
+// waitWindowSelections keeps transient selection uncertainty out of the point
+// repair loop. Each pass reopens source pins and reuses durable resolutions;
+// cancellation preserves the unresolved frontier for a later invocation.
+func (s *syncer) waitWindowSelections(ctx context.Context) error {
+	for delay := time.Second; ; delay = min(30*time.Second, delay*2) {
+		if err := s.retryWindowSelections(ctx); err != nil {
+			return err
+		}
+		pending := 0
+		for _, r := range s.sum.residual {
+			if r.Reason == syncWindowSelectionReason {
+				pending++
+			}
+		}
+		if pending == 0 {
+			return nil
+		}
+		if s.o.noCopy {
+			return fmt.Errorf("%w: %d pending window selections (--no-copy)", ErrSyncResidual, pending)
+		}
+		event("sync_window_selection_wait", map[string]any{"pending_selections": pending, "retry_seconds": delay.Seconds()})
+		if err := sleepContext(ctx, delay); err != nil {
+			return err
+		}
+	}
+}
+
 func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	if !s.windowOnly() {
 		return nil
@@ -66,8 +94,10 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	for _, r := range rows {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		var names []string
+		seen := map[string]bool{}
 		for _, skip := range r.Skipped {
-			if !resolved[k][skip.Name] {
+			if !resolved[k][skip.Name] && !seen[skip.Name] {
+				seen[skip.Name] = true
 				names = append(names, skip.Name)
 			}
 		}
@@ -121,6 +151,48 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			s.prog.done.Store(int64(attempted))
 			continue
 		}
+		// An export without metadata may also be a name that disappeared
+		// everywhere. Use the existing all-archive, all-store absence proof;
+		// zero points in this copy window alone are insufficient.
+		var uncertain []string
+		for _, n := range names {
+			if unknown[n] {
+				uncertain = append(uncertain, n)
+			}
+		}
+		if len(uncertain) > 0 {
+			// A native metadata hit disproves global absence even when this
+			// window is empty. Avoid whole-history probes for pending names.
+			end := s.o.now().Unix() - int64(s.o.settle.Seconds())
+			got, err := s.digest(ctx, r.Source, uncertain, syncRange{From: max(int64(1), end-86400), Until: end})
+			if err != nil {
+				return err
+			}
+			candidates := uncertain
+			uncertain = nil
+			for _, name := range candidates {
+				if _, found := got[name]; !found {
+					uncertain = append(uncertain, name)
+				}
+			}
+		}
+
+		if len(uncertain) > 0 {
+			var proof syncRow
+			err := s.resolveAbsent(ctx, &proof, uncertain, map[string][]syncArchive{})
+			for _, n := range uncertain {
+				s.masks.Delete(n)
+			}
+			if err != nil {
+				return err
+			}
+			for _, item := range proof.Resolved {
+				if item.Reason == "absent_all_sources" {
+					delete(unknown, item.Name)
+					delete(relevant, item.Name)
+				}
+			}
+		}
 		var selected, done []string
 		for _, n := range names {
 			if unknown[n] {
@@ -133,7 +205,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			}
 		}
 		copied := 0
-		if len(selected) > 0 {
+		if len(selected) > 0 && !s.o.noCopy {
 			// A different resolved subset gets its own native journal. A crash before
 			// the resolution row safely replays the same intent, with target wins.
 			data, _ := json.Marshal(selected)
@@ -189,10 +261,13 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		}
 	}
 	s.sum.residual = kept
+	pendingSeen := map[syncKey]bool{}
 	for _, r := range rows {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		for _, skip := range r.Skipped {
-			if !resolved[k][skip.Name] {
+			key := syncKey{skip.Name, r.Source}
+			if !resolved[k][skip.Name] && !pendingSeen[key] {
+				pendingSeen[key] = true
 				s.addResidual(syncHole{Name: skip.Name, Source: r.Source}, syncWindowSelectionReason)
 			}
 		}
