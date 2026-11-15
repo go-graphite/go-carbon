@@ -220,3 +220,44 @@ func TestSnapshotGroupImportMergeMatchesCurrentReader(t *testing.T) {
 		}
 	}
 }
+
+// Keep the previous owned-group reader as an independent byte oracle. Main
+// groups, absent groups and sidecars must all use identical snapshot contents.
+type snapshotProbeKV struct {
+	store.ContinuationIO
+	gets, probes map[string]int
+}
+
+func (kv *snapshotProbeKV) Get(key []byte) ([]byte, error) {
+	kv.gets[string(key)]++
+	return kv.ContinuationIO.Get(key)
+}
+
+func (kv *snapshotProbeKV) Probe(key []byte) ([]byte, error) {
+	kv.probes[string(key)]++
+	return kv.ContinuationIO.Get(key)
+}
+
+func TestSnapshotMainGroupsReuseReadProbes(t *testing.T) {
+	for _, sidecar := range []bool{false, true} {
+		t.Run(fmt.Sprint(sidecar), func(t *testing.T) {
+			f, want := snapshotGroupFixture(t, false, false, sidecar)
+			kv := &snapshotProbeKV{ContinuationIO: f.fs.kv, gets: map[string]int{}, probes: map[string]int{}}
+			f.fs.kv, f.fs.prober = kv, kv
+			f.fs.snapshotReads = true
+			got := make([]byte, len(want))
+			n, err := f.ReadAt(got, 0)
+			if err != nil || n != len(want) || !bytes.Equal(got, want) {
+				t.Fatalf("snapshot bytes changed: n=%d err=%v", n, err)
+			}
+			for ai, archive := range f.data.layout.Archives {
+				for gi := 0; gi*128 < archive.Count; gi++ {
+					key := string(continuationBodyKey(f.data.id, 'p', ai, 0, gi))
+					if kv.probes[key] == 0 || kv.gets[key] != 0 {
+						t.Fatalf("group %d/%d bypassed read probes: gets=%d probes=%d", ai, gi, kv.gets[key], kv.probes[key])
+					}
+				}
+			}
+		})
+	}
+}
