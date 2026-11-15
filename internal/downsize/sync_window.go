@@ -578,8 +578,17 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 				}
 				for _, skip := range skips {
 					if skip.Timestamp >= w.From && skip.Timestamp < w.Until && skip.Ordinal >= 0 && skip.Ordinal < end-start {
+						name := names[start+skip.Ordinal]
+						repaired, err := b.repairWindowBoundary(ctx, c, source, target, name, skip)
+						if err != nil {
+							return err
+						}
+						if repaired {
+							fresh = true
+							continue
+						}
 						rangeFailed = true
-						markFailed(names[start+skip.Ordinal])
+						markFailed(name)
 						event("sync_window_boundary_skip", map[string]any{"level": "warn", "metric": names[start+skip.Ordinal], "timestamp": skip.Timestamp, "reason": skip.Reason})
 					}
 				}
