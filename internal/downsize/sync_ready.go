@@ -255,7 +255,8 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			recovery.settle = 0
 			recovery.fullHistory = freshProof && r.scope != "windows"
 			recovery.sampleEvery = 1
-			checkpoint := readyRecovery{State: filepath.Base(recovery.state), Windows: recovery.windows, FullHistory: recovery.fullHistory, Processes: after, Restarts: report.Restarts, Scope: r.scope}
+			recovery.restartWindow = !freshProof
+			checkpoint := readyRecovery{RestartWindow: recovery.restartWindow, State: filepath.Base(recovery.state), Windows: recovery.windows, FullHistory: recovery.fullHistory, Processes: after, Restarts: report.Restarts, Scope: r.scope}
 			if checkpoint.Identity, e = syncIdentity(*o); e != nil {
 				return e
 			}
