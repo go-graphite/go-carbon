@@ -249,7 +249,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
-		s.changed()
+		s.transferImported(records)
 		w.Header().Set("X-Transfer-Bytes", strconv.FormatInt(n, 10))
 		replyProofs(proofs)
 	case "/v1/transfer/import":
@@ -265,7 +265,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
-		s.changed()
+		s.transferImported(records)
 		replyProofs(proofs)
 	case "/v1/transfer/verify":
 		var proofs []chunkstore.TransferProof
@@ -449,4 +449,18 @@ func (r *transferCountReader) Read(p []byte) (int, error) {
 
 func bulkTransport() *http.Transport {
 	return &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 90 * time.Second}
+}
+
+// Legacy full-metric transfers need the same committed-name publication as
+// native pulls. A catalog refresh alone can be gated during startup recovery.
+func (s *Service) transferImported(records []chunkstore.TransferMetric) {
+	s.mu.Lock()
+	callback := s.onNativeImport
+	s.mu.Unlock()
+	if callback != nil {
+		for _, record := range records {
+			callback(record.Config.Name)
+		}
+	}
+	s.changed()
 }

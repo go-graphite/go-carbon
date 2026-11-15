@@ -392,7 +392,7 @@ func (s *Service) SetOnChange(callback func()) {
 }
 
 // SetOnNativeImport installs a callback for each committed name in a successful
-// native pull, including receipt retries. It lets discovery queue names without
+// native or legacy bulk import, including receipt retries. It queues names without
 // waiting for a catalog scan.
 func (s *Service) SetOnNativeImport(callback func(string)) {
 	s.mu.Lock()
