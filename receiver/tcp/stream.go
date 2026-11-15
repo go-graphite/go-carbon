@@ -24,14 +24,16 @@ const (
 	streamNamesDefined
 	streamResets
 	streamDecodeErrors
+	streamBatchedPoints
+	streamPointRuns
 	streamCounterCount
 )
 
 var streamStatNames = [streamCounterCount]string{
-	"streamConnections", "streamFrames", "streamPayloadBytes", "streamNamesDefined", "streamResets", "streamDecodeErrors",
+	"streamConnections", "streamFrames", "streamPayloadBytes", "streamNamesDefined", "streamResets", "streamDecodeErrors", "streamBatchedPoints", "streamPointRuns",
 }
 var streamPromNames = [streamCounterCount]string{
-	"stream_connections_tcp_total", "stream_frames_tcp_total", "stream_payload_bytes_tcp_total", "stream_names_defined_tcp_total", "stream_resets_tcp_total", "stream_decode_errors_tcp_total",
+	"stream_connections_tcp_total", "stream_frames_tcp_total", "stream_payload_bytes_tcp_total", "stream_names_defined_tcp_total", "stream_resets_tcp_total", "stream_decode_errors_tcp_total", "stream_batched_points_tcp_total", "stream_point_runs_tcp_total",
 }
 var streamPromHelp = [streamCounterCount]string{
 	"Counter of stream connections received via the TCP endpoint.",
@@ -40,6 +42,8 @@ var streamPromHelp = [streamCounterCount]string{
 	"Counter of stream dictionary names defined via the TCP endpoint.",
 	"Counter of stream dictionary resets received via the TCP endpoint.",
 	"Counter of stream protocol or transport failures via the TCP endpoint.",
+	"Counter of stream points delivered in consecutive runs of at least two rows.",
+	"Counter of consecutive stream point runs delivered to the batch sink.",
 }
 
 // SetStreamPointOut installs an optional stream sink with a per-id opaque slot.
@@ -51,6 +55,14 @@ var streamPromHelp = [streamCounterCount]string{
 func (rcv *TCP) SetStreamPointOut(out func(name []byte, value float64, timestamp int64, slot *any)) {
 	if rcv.buffer == nil {
 		rcv.streamPointOut.Store(&out)
+	}
+}
+
+// SetStreamPointsOut configures a bounded consecutive-run sink for stream input.
+// Capture continues to use its own durable admission path.
+func (rcv *TCP) SetStreamPointsOut(out func([]byte, []points.Point, *any)) {
+	if rcv.buffer == nil {
+		rcv.streamPointsOut.Store(&out)
 	}
 }
 
@@ -158,6 +170,25 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 			}
 		}()
 	}
+	var run [64]points.Point
+	var runName []byte
+	var runSlot *any
+	var runSize int
+	var batchedPoints, pointRuns uint64
+	var runOut func([]byte, []points.Point, *any)
+	flushRun := func() {
+		if runSize != 0 {
+			if runSize == 1 {
+				streamOut(runName, run[0].Value, run[0].Timestamp, runSlot)
+			} else {
+				runOut(runName, run[:runSize], runSlot)
+				batchedPoints += uint64(runSize)
+				pointRuns++
+			}
+			runSize = 0
+			runName, runSlot = nil, nil
+		}
+	}
 	visit := func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 		if capture.out != nil {
 			if out := rcv.captureSink.direct.Load(); out != nil {
@@ -187,7 +218,21 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		case capture.out != nil:
 			capture.point(name, value, ts)
 		case streamOut != nil:
-			streamOut(name, value, ts, slot)
+			if out := rcv.streamPointsOut.Load(); out != nil {
+				if runSize != 0 && runSlot != slot {
+					flushRun()
+				}
+				if runSize == 0 {
+					runName, runSlot, runOut = name, slot, *out
+				}
+				run[runSize] = points.Point{Value: value, Timestamp: ts}
+				runSize++
+				if runSize == len(run) {
+					flushRun()
+				}
+			} else {
+				streamOut(name, value, ts, slot)
+			}
 		case pointOut != nil:
 			pointOut(name, value, ts)
 		case directOut != nil:
@@ -212,6 +257,12 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 
 		tracked.setReadDeadline(conn, time.Now().Add(2*time.Minute))
 		info, err := d.ReadFrame(r, visit)
+		flushRun() // No borrowed dictionary slot may cross a frame/read boundary.
+		if pointRuns != 0 {
+			rcv.streamCounters[streamBatchedPoints].Add(batchedPoints)
+			rcv.streamCounters[streamPointRuns].Add(pointRuns)
+			batchedPoints, pointRuns = 0, 0
+		}
 		if capture.out != nil {
 			if capture.flush() != nil {
 				return false
