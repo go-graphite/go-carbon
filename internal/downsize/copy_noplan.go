@@ -245,6 +245,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		o.onProgress(journal.completedNames, true)
 	}
 	c.o, c.journal, c.serverMax = o, journal, target.MaxBodyBytes
+	progress.resume(o.state, journal.completedNames)
 	defer c.closeCatalogs()
 	c.sizer = &batchSizer{budget: min(o.maxBytes, target.MaxBodyBytes), maxNames: o.maxNames, perName: copyInitialBytesPerName}
 	event("copy_start", map[string]any{"from": o.froms, "to": o.to, "names": o.names, "prefix": o.prefix, "ring": o.ring, "state": o.state, "streams": o.streams, "batch_bytes": c.sizer.budget, "max_body_bytes": target.MaxBodyBytes, "max_batch_names": o.maxNames, "resumed_ranges": len(journal.ranges), "source_max_transfers": sourceTransfers, "target_max_transfers": target.MaxTransfers, "stall_timeout": o.stallTimeout.String(), "effective": o.policy})

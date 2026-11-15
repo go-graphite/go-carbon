@@ -192,9 +192,12 @@ func (c *planFreeCopier) progressSnapshot() progressSnapshot {
 	if c.journal != nil {
 		c.journal.mu.Lock()
 		p.Copied = c.journal.completedNames
+		p.Done = p.Copied + int64(c.skippedCount())
 		p.Verified = p.Copied
 		c.journal.mu.Unlock()
 	}
+	// Until the catalog count is available, retain the durable completed floor.
+	p.Total = max(p.Total, p.Done)
 	c.catalogProgressMu.Lock()
 	defer c.catalogProgressMu.Unlock()
 	for source, cp := range c.catalogProgress {

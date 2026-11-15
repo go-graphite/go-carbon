@@ -2,6 +2,7 @@ package downsize
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,19 +19,30 @@ import (
 // copyProgress tracks what a long copy is doing for the periodic progress
 // line and the stall watchdog. All methods are nil-safe.
 type copyProgress struct {
-	restartWaiting atomic.Int64
-	mu             sync.Mutex
-	waiting        map[string]time.Time // host -> not answering since
-	lastSuccess    time.Time
-	retries        atomic.Int64
-	inFlight       atomic.Int64
-	total          atomic.Int64 // names this run will copy; -1 until counted
+	restartWaiting   atomic.Int64
+	mu               sync.Mutex
+	waiting          map[string]time.Time // host -> not answering since
+	lastSuccess      time.Time
+	retries          atomic.Int64
+	inFlight         atomic.Int64
+	total            atomic.Int64 // cumulative names, including completed receipts; -1 until counted
+	completedAtStart int64        // immutable after opening the journal, before workers start
 }
 
 func newCopyProgress() *copyProgress {
 	p := &copyProgress{waiting: map[string]time.Time{}, lastSuccess: time.Now()}
 	p.total.Store(-1)
 	return p
+}
+
+// Retain a previously counted denominator while the catalog is counted again.
+// The journal cursor is authoritative even for older remaining-only snapshots.
+func (p *copyProgress) resume(state string, completed int64) {
+	p.completedAtStart = completed
+	var previous progressSnapshot
+	if data, err := os.ReadFile(state + ".progress.json"); err == nil && json.Unmarshal(data, &previous) == nil {
+		p.total.Store(max(completed, previous.Total))
+	}
 }
 
 func (p *copyProgress) down(host string) {
@@ -198,10 +210,10 @@ func (c *planFreeCopier) writeSkipped() (string, error) {
 	return path, os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
-// countTotal counts the names this run will copy (owned, not yet journaled)
-// with a second pass over each name stream, so progress can show an ETA.
+// countTotal adds the remaining owned names to the durable starting cursor.
+// Newly appended receipts are already included in that remaining-name pass.
 func (c *planFreeCopier) countTotal(ctx context.Context, owner func(string) bool) {
-	var total int64
+	total := c.progress.completedAtStart
 	for _, from := range c.o.froms {
 		next, closeNames, err := c.nameSource(ctx, from)
 		if err != nil {
@@ -258,8 +270,11 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 		rate := float64(copied-lastCopied) / seconds
 		mbps := float64(bytes-lastBytes) / seconds / 1e6
 		skipped := c.skippedCount()
-		done := copied + int64(skipped)
-		total := c.progress.total.Load()
+		snapshot := c.progressSnapshot()
+		done, total := snapshot.Done, c.progress.total.Load()
+		if total >= 0 {
+			total = snapshot.Total
+		}
 		busy := c.progress.inFlight.Load()
 		waits := c.progress.waits(roles)
 		fields := map[string]any{"copied": copied, "skipped": skipped, "done": done, "names_per_second": rate, "mb_per_second": mbps,
