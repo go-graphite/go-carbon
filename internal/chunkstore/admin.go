@@ -181,6 +181,9 @@ func (s *Store) Delete(ctx context.Context, name string) error { return s.delete
 // unreferenced. The compaction then rewrites only the tables over that key
 // range, dropping the long keys and their tombstones.
 func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	ctx, end, ok := s.explicitMaintenance.begin(ctx)
 	if !ok {
 		return 0, context.Canceled
@@ -305,6 +308,9 @@ func (s *Store) DeleteIfUnchanged(ctx context.Context, name string, expected Met
 // revision record predates activity tracking. It only mutates the exact
 // revision observed by the caller, so an expiration scan cannot race a write.
 func (s *Store) InitializeActivity(ctx context.Context, name string, expected Metadata) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -335,6 +341,9 @@ func (s *Store) InitializeActivity(ctx context.Context, name string, expected Me
 }
 
 func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadata) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -446,6 +455,9 @@ func (s *Store) CreateFromSnapshot(ctx context.Context, snapshot Snapshot) (Meta
 }
 
 func (s *Store) replaceSnapshot(ctx context.Context, snapshot Snapshot, mustAbsent bool) (Metadata, error) {
+	if s.readOnly {
+		return Metadata{}, ErrReadOnly
+	}
 	if s.continuation != nil || snapshot.Metadata.Continuation {
 		return Metadata{}, fmt.Errorf("%w: flattened snapshots cannot replace writer continuation state; use verified file conversion", ErrFormat)
 	}
@@ -656,6 +668,9 @@ func storageTimestamp(timestamp int64) (int, error) {
 }
 
 func (s *Store) Fill(ctx context.Context, source Snapshot) (Metadata, error) {
+	if s.readOnly {
+		return Metadata{}, ErrReadOnly
+	}
 	if s.continuation != nil || source.Metadata.Continuation {
 		return Metadata{}, fmt.Errorf("%w: flattened fill cannot preserve writer continuation state", ErrFormat)
 	}

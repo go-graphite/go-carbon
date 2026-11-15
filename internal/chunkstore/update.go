@@ -46,6 +46,9 @@ func (s *Store) TryUpdateManyMaintained(ctx context.Context, name string, input 
 }
 
 func (s *Store) updateByNameImportPolicy(ctx context.Context, name string, input []Point, targetRetention int, maintenance *ContinuationMaintenance, retryImport bool) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if err := s.fileOwnershipError(); err != nil {
 		return err
 	}
