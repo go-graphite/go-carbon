@@ -61,6 +61,10 @@ func (app *App) DumpStop() (err error) {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	if app.v2 != nil {
+		app.stopV2()
+		return app.ExitError()
+	}
 	if app.Buckyd != nil {
 		app.Buckyd.CancelTransfers()
 	}
@@ -685,6 +689,11 @@ func readHandoffPath(conf *Config) string { return path.Join(conf.Dump.Path, "re
 // offers it. Call it as early as possible after parsing the config: a stopping
 // instance waits only handoff.RegisterTimeout before closing its listener.
 func (app *App) RegisterReadHandoff() {
+	// Legacy socket handoff can carry cache tails with no v2 journal/policy
+	// envelope. V2 opens its own listeners only after its backend replay ends.
+	if app.Config.V2.Enabled {
+		return
+	}
 	if app.Config.Dump.Path != "" && app.Config.Carbonserver.Enabled {
 		app.handoffClaim = handoff.Register(readHandoffPath(app.Config))
 	}

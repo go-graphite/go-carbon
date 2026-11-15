@@ -56,6 +56,7 @@ import (
 	"github.com/go-graphite/go-carbon/helper/grpcutil"
 	"github.com/go-graphite/go-carbon/helper/stat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/daemonstore"
 	"github.com/go-graphite/go-carbon/internal/hostcapacity"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/internal/whisperpath"
@@ -284,9 +285,11 @@ func (q *expireCache) getQueryItem(k string, size uint64, expire int32, versions
 }
 
 type CarbonserverListener struct {
-	indexStopOnce   sync.Once
-	indexPaused     atomic.Bool
-	startupScanGate <-chan struct{}
+	snapshotReader   daemonstore.Reader
+	handlerDurations *prom.HistogramVec
+	indexStopOnce    sync.Once
+	indexPaused      atomic.Bool
+	startupScanGate  <-chan struct{}
 	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
@@ -446,6 +449,9 @@ type prometheus struct {
 }
 
 func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
+	c.handlerDurations = prom.NewHistogramVec(prom.HistogramOpts{Name: "http_handler_duration_seconds_exp", Help: "Duration of HTTP requests by handler (exponential buckets)", Buckets: prom.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 20)}, []string{"handler"})
+	reg.MustRegister(c.handlerDurations)
+
 	c.prometheus = prometheus{
 		enabled: true,
 
@@ -2119,6 +2125,10 @@ func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric 
 }
 
 func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {
+	if listener.snapshotReader != nil {
+		resultCh <- listener.snapshotGlob(ctx, query)
+		return
+	}
 	defer func() {
 		if err := recover(); err != nil {
 			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, fmt.Errorf("%s\n%s", err, debug.Stack())}
@@ -2620,7 +2630,7 @@ func (listener *CarbonserverListener) checkRequestCtx(ctx context.Context) error
 }
 
 func (listener *CarbonserverListener) shouldBlockForIndex() bool {
-	return listener.NoServiceWhenIndexIsNotReady && listener.CurrentFileIndex() == nil
+	return listener.snapshotReader == nil && listener.NoServiceWhenIndexIsNotReady && listener.CurrentFileIndex() == nil
 }
 
 func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.HandlerFunc {
@@ -2857,6 +2867,9 @@ func (listener *CarbonserverListener) bindHTTP(addr *net.TCPAddr) (*net.TCPListe
 }
 
 func (listener *CarbonserverListener) startIndexUpdater() {
+	if listener.snapshotReader != nil {
+		return
+	}
 	if !listener.trigramIndex && !listener.trieIndex {
 		return
 	}
@@ -2956,6 +2969,18 @@ func (listener *CarbonserverListener) initializeCaches() {
 }
 
 func (listener *CarbonserverListener) bucketRequestTimesHTTP(req *http.Request, t time.Duration) {
+	if listener.handlerDurations != nil {
+		handler := "other"
+		switch req.URL.Path {
+		case "/render/":
+			handler = "render"
+		case "/metrics/find/":
+			handler = "find"
+		case "/info/":
+			handler = "info"
+		}
+		listener.handlerDurations.WithLabelValues(handler).Observe(t.Seconds())
+	}
 	bucket := listener.bucketRequestTimes(t)
 	if bucket >= listener.buckets {
 		listener.logger.Info("slow request",

@@ -59,7 +59,7 @@ func NewCollector(app *App) *Collector {
 
 	logger = logger.With(zap.String("endpoint", c.endpoint))
 
-	c.startSender(app.Cache.Add, endpoint, logger)
+	c.startSender(app.ingest, endpoint, logger)
 
 	sendCallback := func(moduleName string) func(metric string, value float64) {
 		return func(metric string, value float64) {
@@ -89,6 +89,9 @@ func NewCollector(app *App) *Collector {
 		c.stats = append(c.stats, moduleCallback("tcp", app.SocketStats))
 	}
 
+	if app.v2 != nil {
+		c.stats = append(c.stats, moduleCallback("v2", app.v2))
+	}
 	if app.Cache != nil {
 		c.stats = append(c.stats, moduleCallback("cache", app.Cache))
 	}

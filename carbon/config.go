@@ -415,6 +415,7 @@ type tracingConfig struct {
 
 // Config ...
 type Config struct {
+	V2 v2Config `toml:"v2"`
 	// Loaded once with configuration; never serialized as an operator setting.
 	incrementalMigrationComplete bool
 	// memoryBudget and memoryLimit are resolved at config load; an explicit
@@ -456,6 +457,7 @@ func NewLoggingConfig() zapwriter.Config {
 // NewConfig ...
 func NewConfig() *Config {
 	cfg := &Config{
+		V2: newV2Config(),
 		Buckyd: buckyd.Config{
 			Bind: "0.0.0.0:4242", Hash: "carbon", Replicas: 1,
 			TmpDir: os.TempDir(), Timeout: 3600,

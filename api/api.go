@@ -11,6 +11,7 @@ import (
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/carbonpb"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/stop"
 )
 
@@ -24,6 +25,7 @@ type Api struct {
 		cacheResponsePoints  uint32 // atomic
 	}
 	cache    *cache.Cache
+	query    func(context.Context, string) ([]points.Point, error)
 	listener *net.TCPListener
 }
 
@@ -31,6 +33,11 @@ func New(c *cache.Cache) *Api {
 	return &Api{
 		cache: c,
 	}
+}
+
+// SetCacheQuery installs an immutable snapshot query before Listen.
+func (api *Api) SetCacheQuery(query func(context.Context, string) ([]points.Point, error)) {
+	api.query = query
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -93,7 +100,16 @@ func (api *Api) CacheQuery(ctx context.Context, req *carbonpb.CacheRequest) (*ca
 	resPoints := 0
 
 	for i := 0; i < len(req.Metrics); i++ {
-		data := api.cache.Get(req.Metrics[i])
+		var data []points.Point
+		if api.query != nil {
+			var err error
+			data, err = api.query(ctx, req.Metrics[i])
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			data = api.cache.Get(req.Metrics[i])
+		}
 
 		if len(data) > 0 {
 			resMetrics++

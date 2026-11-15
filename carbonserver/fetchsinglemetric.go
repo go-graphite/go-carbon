@@ -154,7 +154,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(ctx context.Context, met
 		}
 
 		return resp, nil
-	case (errors.Is(err, os.ErrNotExist) || errors.Is(err, store.ErrNotFound)) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
+	case listener.snapshotReader == nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, store.ErrNotFound)) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
 		// No stored series (no Whisper file, or not in the shared store,
 		// including a completed incremental store): answer from cache as the series
 		// created from it would.

@@ -20,7 +20,6 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
 	populateMetricStoreCatalog(context.Background(), t, db, now)
 	listener := newMetricStoreTestListener(t, cache.New(), db, false)
 	var capacityReads hostcapacity.Latency
@@ -31,6 +30,9 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	synctest.Test(t, func(t *testing.T) {
+		// Read cancellation channels are first observed inside this bubble.
+		// Close them here as required by synctest ownership.
+		defer db.Close()
 		calls := 0
 		listener.cacheGet = func(string) []points.Point {
 			calls++

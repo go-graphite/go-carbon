@@ -184,6 +184,7 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 type CarbonlinkListener struct {
 	helper.Stoppable
 	cache       *Cache
+	query       func(string) ([]points.Point, error)
 	readTimeout time.Duration
 	tcpListener *net.TCPListener
 }
@@ -194,6 +195,12 @@ func NewCarbonlinkListener(cache *Cache) *CarbonlinkListener {
 		cache:       cache,
 		readTimeout: 30 * time.Second,
 	}
+}
+
+// SetCacheQuery installs a snapshot reader before Listen. Query failures close
+// the connection so callers cannot mistake an unavailable snapshot for no data.
+func (listener *CarbonlinkListener) SetCacheQuery(query func(string) ([]points.Point, error)) {
+	listener.query = query
 }
 
 // SetReadTimeout for read request from client
@@ -271,7 +278,16 @@ func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 			}
 
 			if req.Type == "cache-query" {
-				data := listener.cache.Get(req.Metric)
+				var data []points.Point
+				if listener.query != nil {
+					data, err = listener.query(req.Metric)
+					if err != nil {
+						logger.Error("cache query failed", zap.Error(err))
+						break
+					}
+				} else {
+					data = listener.cache.Get(req.Metric)
+				}
 
 				packed := packReply(data)
 				if packed == nil {

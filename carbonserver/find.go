@@ -422,6 +422,13 @@ GATHER:
 }
 
 func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Context, logger *zap.Logger, handler string, queries []string) ([]globs, bool, error) {
+	if listener.snapshotReader != nil {
+		if len(queries) == 0 {
+			return nil, false, nil
+		}
+		g, err := listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
+		return g, false, err
+	}
 	// Exact native fetches do not need discovery. Keep this result out of the
 	// discovery cache, so a startup miss cannot mask the completed catalog.
 	if handler == "render" && listener.canRenderWithoutIndex() && listener.CurrentFileIndex() == nil && literalRenderTargets(queries) {

@@ -339,7 +339,11 @@ func main() {
 	go func() {
 		for {
 			<-stopSignals
-			if err := app.DumpStop(); err == nil && release != nil && cfg.Dump.Enabled && !released {
+			if err := app.DumpStop(); err != nil {
+				mainLogger.Error("dump stop failed", zap.Error(err))
+				os.Exit(1)
+			}
+			if release != nil && cfg.Dump.Enabled && !released {
 				app.ReleaseForHandoff()
 				releaseToSupervisor()
 			}
@@ -361,6 +365,10 @@ func main() {
 	}()
 
 	app.Loop()
+	if err := app.ExitError(); err != nil {
+		mainLogger.Error("daemon stopped after storage failure", zap.Error(err))
+		os.Exit(1)
+	}
 
 	mainLogger.Info("stopped")
 }

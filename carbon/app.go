@@ -75,6 +75,9 @@ func (r *wspConfigRetriever) MetricAggrConf(metric string) (whisper.AggregationM
 }
 
 type App struct {
+	v2        *v2Runtime
+	v2Open    v2OpenFunc
+	v2Failure atomic.Pointer[v2Error]
 	sync.RWMutex
 	ConfigFilename         string
 	Config                 *Config
@@ -216,6 +219,11 @@ func (app *App) configure() error {
 	if err := validatePhaseCPU(cfg); err != nil {
 		return err
 	}
+	if app.Cache != nil || app.v2 != nil {
+		if err := v2ReloadError(app.Config, cfg); err != nil {
+			return err
+		}
+	}
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
 		return errors.New("storage and buckyd settings require a restart")
 	}
@@ -316,6 +324,9 @@ func loadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.Tcp.ValidateHandoffReadAhead(); err != nil {
+		return nil, err
+	}
+	if err := validateV2Config(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -463,6 +474,9 @@ func (app *App) ReloadConfig() error {
 		return err
 	}
 
+	if app.v2 != nil {
+		return app.reloadV2()
+	}
 	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
 	app.applyRuntimeProfiling()
 	app.applyMallocTrim()
@@ -663,6 +677,10 @@ func (app *App) stopReadListeners() <-chan struct{} {
 }
 
 func (app *App) stopAll() {
+	if app.v2 != nil {
+		app.stopV2()
+		return
+	}
 	if app.restartBudgetStop != nil {
 		app.restartBudgetStop()
 		app.restartBudgetStop = nil
@@ -906,6 +924,12 @@ func (app *App) Start() (err error) {
 	}()
 
 	conf := app.Config
+	if err = validateV2Config(conf); err != nil {
+		return err
+	}
+	if conf.V2.Enabled {
+		return app.startV2()
+	}
 	// ParseConfig already took this snapshot. Embedded callers may supply or
 	// clone Config directly; snapshot their receipt before source validation.
 	if app.completionConfig != conf {
@@ -1278,6 +1302,9 @@ func (app *App) startAPI(core *cache.Cache) (err error) {
 		}
 
 		grpcApi := api.New(core)
+		if app.v2 != nil {
+			grpcApi.SetCacheQuery(app.v2.CacheQuery)
+		}
 
 		if err = grpcApi.Listen(grpcAddr); err != nil {
 			return
@@ -1296,7 +1323,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsQueue *helpe
 		return nil, nil
 	}
 
-	if app.MetricStore == nil && (conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex) {
+	if app.v2 == nil && app.MetricStore == nil && (conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex) {
 		if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
 			return nil, fmt.Errorf("failed to stat whisper data directory: %w", err)
 		} else if fi.Mode()&os.ModeSymlink == 1 {
@@ -1311,6 +1338,9 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsQueue *helpe
 
 	// TODO: refactor: do not use var name the same as pkg name
 	carbonserver := carbonserver.NewCarbonserverListener(core.Get)
+	if app.v2 != nil {
+		carbonserver.SetSnapshotReader(app.v2)
+	}
 	carbonserver.SetCapacityReadLatency(&app.capacityReadLatency)
 	carbonserver.SetWhisperData(conf.Whisper.DataDir)
 	if app.MetricStore != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
@@ -1660,6 +1690,19 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	}
 	add, addPoint, addPoints := core.Add, core.AddPoint, core.AddPoints
 	addPointBatch := core.AddPointBatch
+	if app.v2 != nil {
+		ingest := app.v2.append
+		add = ingest
+		addPoint = func(name []byte, value float64, ts int64) {
+			ingest(&points.Points{Metric: string(name), Data: []points.Point{{Value: value, Timestamp: ts}}})
+		}
+		addPoints = func(name []byte, data []points.Point) { ingest(&points.Points{Metric: string(name), Data: data}) }
+		addPointBatch = func(names [][]byte, data []points.Point) {
+			for i, p := range data {
+				addPoint(names[i], p.Value, p.Timestamp)
+			}
+		}
+	}
 	if receiverStoreHook != nil {
 		add, addPoint = receiverStoreHook(add, addPoint)
 		addPointBatch = func(names [][]byte, data []points.Point) {
@@ -1675,6 +1718,10 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	}
 	addStreamPoint := core.AddStreamPoint
 	addStreamPoints := core.AddStreamPoints
+	if app.v2 != nil {
+		addStreamPoint = func(name []byte, value float64, ts int64, _ *any) { addPoint(name, value, ts) }
+		addStreamPoints = func(name []byte, data []points.Point, _ *any) { addPoints(name, data) }
+	}
 	// Start inherited handlers (including dictionary replay and bounded raw
 	// socket read-ahead) before replaying the tail. Gate every live sink, on
 	// every connection, so corrections in the tail always precede live rows.
@@ -1727,7 +1774,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			return
 		}
 
-		if rcv, err = receiver.New("udp", rcvOptions, core.Add); err != nil {
+		if rcv, err = receiver.New("udp", rcvOptions, add); err != nil {
 			return
 		}
 
@@ -1787,7 +1834,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			}); ok {
 				batches.SetStreamPointsOut(addStreamPoints)
 			}
-			if names, ok := rcv.(interface{ SetStreamNameResolver(func([]byte) any) }); ok {
+			if names, ok := rcv.(interface{ SetStreamNameResolver(func([]byte) any) }); ok && app.v2 == nil {
 				names.SetStreamNameResolver(core.ResolveStreamName)
 			}
 		}
@@ -1831,7 +1878,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			return
 		}
 
-		if rcv, err = receiver.New("pickle", rcvOptions, core.Add); err != nil {
+		if rcv, err = receiver.New("pickle", rcvOptions, add); err != nil {
 			return
 		}
 
@@ -1844,7 +1891,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 
 	/* CUSTOM RECEIVERS start */
 	for receiverName, receiverOptions := range conf.Receiver {
-		if rcv, err = receiver.New(receiverName, receiverOptions, core.Add); err != nil {
+		if rcv, err = receiver.New(receiverName, receiverOptions, add); err != nil {
 			return
 		}
 
@@ -1870,6 +1917,10 @@ func (app *App) startCarbonlink(core *cache.Cache) (err error) {
 		}
 
 		carbonlink := cache.NewCarbonlinkListener(core)
+		if app.v2 != nil {
+			v := app.v2
+			carbonlink.SetCacheQuery(func(name string) ([]points.Point, error) { return v.CacheQuery(context.Background(), name) })
+		}
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
 		// carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 
@@ -1936,7 +1987,7 @@ func (app *App) Loop() {
 	app.RUnlock()
 
 	if exitChan != nil {
-		<-app.exit
+		<-exitChan
 	}
 }
 

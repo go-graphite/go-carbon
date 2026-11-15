@@ -39,6 +39,10 @@ type retentionInfo struct {
 }
 
 func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, error) {
+	if listener.snapshotReader != nil {
+		m, err := listener.snapshotReader.Info(context.Background(), metric)
+		return snapshotMetricInfo(m), err
+	}
 	metricStore := listener.getMetricStore()
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()

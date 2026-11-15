@@ -62,6 +62,9 @@ func guardedStoreRead(parent context.Context, metricStore *store.Store, metric s
 }
 
 func (listener *CarbonserverListener) fetchFromDisk(ctx context.Context, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
+	if listener.snapshotReader != nil {
+		return listener.fetchSnapshot(ctx, metric, fromTime, untilTime)
+	}
 	metricStore := listener.getMetricStore()
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()

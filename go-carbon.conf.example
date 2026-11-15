@@ -1509,3 +1509,13 @@ encoding-duration = "seconds"
 # encoding = "mixed"
 # encoding-time = "iso8601"
 # encoding-duration = "seconds"
+
+# Experimental immutable-parts engine. All settings require a restart.
+# Builds without the durable daemon backend reject enabled=true at startup.
+[v2]
+enabled = false
+data-dir = "/var/lib/go-carbon/parts"
+shards = 16
+# Zero is invalid when enabled; size owners for the CPUs available to the daemon.
+owners = 16
+part-interval = "1s"
