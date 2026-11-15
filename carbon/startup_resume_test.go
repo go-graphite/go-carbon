@@ -483,7 +483,8 @@ func TestStartupResumeSelectsCursorWithoutOriginalManifest(t *testing.T) {
 	next.Config = NewConfig()
 	cfg := next.Config
 	cfg.Dump.Enabled, cfg.Dump.StoreInputHandoff, cfg.Dump.Path = true, true, filepath.Dir(s.path)
-	cfg.InputLog.Enabled = true
+	cfg.InputLog.Enabled, cfg.InputLog.Path = true, t.TempDir()
+	defer next.closeInputLog()
 	cfg.Whisper.StorageBackend = "pebble-chunk"
 	cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 	cfg.Udp.Enabled, cfg.Pickle.Enabled = false, false

@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,9 +12,61 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 )
+
+func TestInputLogOwnedBeforeCacheConstruction(t *testing.T) {
+	config := NewConfig()
+	config.InputLog.Enabled = true
+	config.InputLog.Path = t.TempDir()
+	config.InputLog.SegmentSize = 16 << 20
+	config.InputLog.SyncInterval = Duration{time.Hour}
+	previous := New("")
+	previous.Config = config
+	core := cache.New()
+	if err := previous.openInputLog(core); err != nil {
+		t.Fatal(err)
+	}
+	core.Add(points.OnePoint("before.cache", 42, 17))
+	if err := previous.syncInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	previous.closeInputLog()
+
+	next := New("")
+	next.Config = config
+	defer next.closeInputLog()
+	if err := next.ownInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	owned := next.inputLog.Load()
+	if next.Cache != nil || owned == nil || !owned.NeedsReplay() {
+		t.Fatal("early ownership requires a cache or consumed history")
+	}
+	if err := owned.Sync(); !errors.Is(err, inputlog.ErrClosed) {
+		t.Fatal("cache collection began before attachment", err)
+	}
+	if err := next.ownInputLog(); err != nil || next.inputLog.Load() != owned {
+		t.Fatal("early ownership reopened the locked journal", err)
+	}
+	next.Cache = cache.New()
+	if err := next.openInputLog(next.Cache); err != nil {
+		t.Fatal(err)
+	}
+	if next.inputLog.Load() != owned {
+		t.Fatal("cache attachment replaced the early owner")
+	}
+	if err := next.replayInputLogStopped(next.Cache, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []points.Point{{Value: 42, Timestamp: 17}}
+	if got := next.Cache.Get("before.cache"); !slices.Equal(got, want) {
+		t.Fatal("cache attachment lost historical input", got)
+	}
+}
 
 // inputLogTestConfig writes a config with the input log enabled and every
 // listener off. Without whisper there is no persister, so cached points stay.

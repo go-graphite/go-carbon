@@ -128,3 +128,34 @@ partial partition switches, append/sync acknowledgment, original-generation
 retention, and shutdown. The existing 15-stage archive matrix should exercise
 those boundaries with both legacy capture formats, aliases, special float bits
 and same-timestamp corrections before the capture writer/catalog code is removed.
+
+## Prepared append ownership (Draft)
+
+The application now acquires the journal directory after the predecessor commits
+its socket transfer, before constructing cache/storage. Cache attachment reuses
+that owner. It still starts journal collection after historical replay and still
+uses capture spool writers for startup intake.
+
+The follow-up contains cache-independent primitives awaiting application wiring:
+
+- `StartRecovery` preserves Open's immutable inventory while the writer runs.
+  A dedicated pin protects unread frames. `CompleteRecovery` joins through the
+  writer and transfers retention to a conservative current-generation fence;
+  it restores the original tick even if earlier empty cycles removed it.
+- `StartAppend` and `Append` commit bounded native batches through the existing
+  partition encoders, compression workers, positioned writes and syncs. A receipt
+  carries the original append generation and salted committed tail. `AttachSource`
+  establishes cache collection without replacing the writer or history inventory.
+- `CommitUpgradeCut` commits a fresh segment/dictionary boundary and an immutable
+  ordered legacy-source plan with salted journal cursors. Segment sync, temporary
+  manifest sync, rename and directory sync precede success. Reopening uses the
+  committed plan, and retirement cannot reuse its sequence number.
+
+The append pin deliberately has no release operation yet. Original-generation
+source tracking, bounded live-tail readers, canonical routing, the shared disk
+reserve and the shutdown snapshot fence must be connected before activation.
+The application does not call these new append/cut primitives. This Draft must
+remain unmerged until their first real intake usage and the extended archive
+crash differential are included. The cut's five-stage process-exit test proves
+its file transaction; it does not prove the application's legacy ordering or the
+new startup path. The existing 15-stage matrix continues to cover capture spools.
