@@ -212,6 +212,14 @@ func (s *Store) Fetch(ctx context.Context, name string, from, until int) (*daemo
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	// A read barrier seals all previously accepted receipts. This is a correct
+	// temporary visibility path; replacing it with pinned heads avoids read I/O.
+	if e := s.flush(); e != nil {
+		return nil, e
+	}
 	if s.mixed != nil {
 		return s.fetchMixed(ctx, name, from, until)
 	}
@@ -275,6 +283,9 @@ func (s *Store) Info(ctx context.Context, name string) (daemonstore.Metric, erro
 	if e := ctx.Err(); e != nil {
 		return daemonstore.Metric{}, e
 	}
+	if e := s.flush(); e != nil {
+		return daemonstore.Metric{}, e
+	}
 	var result daemonstore.Metric
 	// Info uses the exact pinned policy; Render with an out-of-retention range
 	// does not expose its catalog. Read it through the same immutable source.
@@ -295,6 +306,12 @@ func (s *Store) Info(ctx context.Context, name string) (daemonstore.Metric, erro
 	return toDaemonMetric(m), nil
 }
 func (s *Store) Find(ctx context.Context, pattern string) ([]daemonstore.Match, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	if e := s.flush(); e != nil {
+		return nil, e
+	}
 	seen := make(map[daemonstore.Match]struct{})
 	var out []daemonstore.Match
 	for _, o := range s.owners {

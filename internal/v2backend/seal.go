@@ -66,7 +66,7 @@ func (o *owner) recover() error {
 		if e != nil {
 			return e
 		}
-		if digest != m.Frontier.Policy || m.Frontier.Order > o.meta.Cursor {
+		if digest != m.Frontier.Policy || m.Frontier.Order > max(o.meta.Order, o.meta.Cursor) {
 			return errors.New("catalog policy/frontier mismatch")
 		}
 		policy, e := o.s.opts.Policy(name)
@@ -172,18 +172,35 @@ func (o *owner) commit(frames []frame) error {
 		if e != nil {
 			return e
 		}
-		batches := make([]sealrollup.Batch, 0, len(fs))
+		prepared, e := sealrollup.Prepare(cfg)
+		if e != nil {
+			return e
+		}
+		total := 0
+		for _, f := range fs {
+			total += len(f.points)
+		}
+		if cap(o.sampleScratch) < total {
+			o.sampleScratch = make([]sealrollup.Sample, total)
+		} else {
+			o.sampleScratch = o.sampleScratch[:total]
+		}
+		samples := o.sampleScratch
+		batches := o.batchScratch[:0]
 		for _, f := range fs {
 			if string(f.group) != string(m.Group) || !reflect.DeepEqual(f.policy, m.Policy) {
 				return errors.New("batch policy or placement changed inside seal")
 			}
-			b := sealrollup.Batch{Order: f.cursor, Now: f.clock, Points: make([]sealrollup.Sample, len(f.points))}
+			b := sealrollup.Batch{Order: f.order, Now: f.clock, Points: samples[:len(f.points):len(f.points)]}
 			for i, p := range f.points {
 				b.Points[i] = sealrollup.Sample{Time: p.Timestamp, Bits: math.Float64bits(p.Value), Sequence: uint64(i + 1)}
 			}
 			batches = append(batches, b)
+			samples = samples[len(f.points):]
 		}
-		plan, e := sealrollup.Plan(cfg, m.Frontier, func(a int, slot int64) (sealrollup.Sample, bool) { p, ok := m.slots[a][slot]; return p, ok }, batches)
+		plan, e := prepared.PlanWithWorkspace(m.Frontier, func(a int, slot int64) (sealrollup.Sample, bool) { p, ok := m.slots[a][slot]; return p, ok }, nil, batches, &o.workspace)
+		clear(batches)
+		o.batchScratch = batches[:0]
 		if e != nil {
 			return e
 		}
@@ -209,21 +226,9 @@ func (o *owner) commit(frames []frame) error {
 			}
 			dataFiles[file] = append(dataFiles[file], kv{key, sealrollup.EncodeRecord(r)})
 		}
-		// Keep the exact original boundaries/policy and receipt clocks as raw
-		// provenance in the SAME atomic ingest as authoritative replacements.
-		for i, f := range fs {
-			k := base
-			k.Archive = math.MaxUint32
-			k.BlockStart = f.clock
-			k.Ordinal = uint32(i)
-			key, e := partsformat.Encode(k)
-			if e != nil {
-				return e
-			}
-			value := binary.BigEndian.AppendUint64(nil, f.cursor)
-			value = append(value, f.payload...)
-			dataFiles[file] = append(dataFiles[file], kv{key, value})
-		}
+		// Original receipts remain in the retained durable journal. Archive rows,
+		// catalogue and its replay cursor/order publish atomically below; duplicating
+		// each receipt as another SST row would repeat policy/name/point bytes.
 		key, e := partsformat.Encode(base)
 		if e != nil {
 			return e
@@ -264,6 +269,7 @@ func (o *owner) commit(frames []frame) error {
 		meta.Revisions[k] = b.Revision
 	}
 	meta.Cursor = frames[len(frames)-1].cursor
+	meta.Order = frames[len(frames)-1].order
 	meta.Points += count
 	meta.Metrics = nil
 	for _, m := range next {

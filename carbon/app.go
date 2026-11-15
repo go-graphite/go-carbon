@@ -1697,11 +1697,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			ingest(&points.Points{Metric: string(name), Data: []points.Point{{Value: value, Timestamp: ts}}})
 		}
 		addPoints = func(name []byte, data []points.Point) { ingest(&points.Points{Metric: string(name), Data: data}) }
-		addPointBatch = func(names [][]byte, data []points.Point) {
-			for i, p := range data {
-				addPoint(names[i], p.Value, p.Timestamp)
-			}
-		}
+		addPointBatch = app.v2.appendBatch
 	}
 	if receiverStoreHook != nil {
 		add, addPoint = receiverStoreHook(add, addPoint)
@@ -1787,6 +1783,9 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 
 	/* TCP start */
 	if conf.Tcp.Enabled {
+		if app.v2 != nil {
+			conf.Tcp.CacheLookupBatch = true
+		}
 		if rcvOptions, err = receiver.WithProtocol(conf.Tcp, "tcp"); err != nil {
 			return
 		}

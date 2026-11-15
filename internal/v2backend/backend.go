@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,18 +27,21 @@ import (
 	"github.com/go-graphite/go-carbon/internal/partsread"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/points"
+	"golang.org/x/sync/semaphore"
 )
 
 var ErrClosed = errors.New("v2 backend closed")
 
 type frame struct {
-	name    string
-	group   partsformat.Group
-	policy  daemonstore.Metric
-	clock   int64
-	cursor  uint64
-	points  []points.Point
-	payload []byte
+	name     string
+	resolved *resolvedMetric
+	group    partsformat.Group
+	policy   daemonstore.Metric
+	clock    int64
+	cursor   uint64
+	order    uint64
+	points   []points.Point
+	payload  []byte
 }
 type metricState struct {
 	Name     []byte
@@ -52,34 +54,47 @@ type checkpoint struct {
 	Version        int
 	Journal        string
 	Cursor, Points uint64
+	Order          uint64
 	Metrics        []*metricState
 	Revisions      map[string]uint64
 }
 type command struct {
 	frame  *frame
+	batch  []frame
 	seal   []frame
 	op     byte
 	answer chan answer
 }
 type answer struct {
 	frames []frame
+	points []points.Point
 	err    error
 }
 type owner struct {
-	id          int
-	s           *Store
-	db          *pebble.DB
-	dir         string
-	requests    chan command
-	done        chan struct{}
-	active      []frame
-	meta        checkpoint
-	metrics     map[string]*metricState
-	pub         partsread.Publication
-	readCatalog atomic.Pointer[catalog]
+	id            int
+	s             *Store
+	db            *pebble.DB
+	dir           string
+	requests      chan command
+	admission     *semaphore.Weighted
+	done          chan struct{}
+	active        []frame
+	pending       []frame
+	nextOrder     uint64
+	workspace     sealrollup.Workspace
+	batchScratch  []sealrollup.Batch
+	sampleScratch []sealrollup.Sample
+	meta          checkpoint
+	metrics       map[string]*metricState
+	pub           partsread.Publication
+	readCatalog   atomic.Pointer[catalog]
 }
 type Store struct {
 	opts                          daemonstore.Options
+	resolved                      sync.Map
+	admissionContext              context.Context
+	cancelAdmission               context.CancelFunc
+	beforeSeal                    func(int)
 	now                           func() time.Time
 	log                           *partlog.Log
 	dbs                           []*pebble.DB
@@ -116,6 +131,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	s := &Store{opts: opts, now: now, errors: make(chan daemonstore.Failure, 1),
 		budget: partsread.NewBudget(256 << 20), stop: make(chan struct{}), done: make(chan struct{}),
 		watchStop: make(chan struct{}), watchDone: make(chan struct{})}
+	s.admissionContext, s.cancelAdmission = context.WithCancel(context.Background())
 	defer func() {
 		if err != nil {
 			s.abortOpen()
@@ -168,7 +184,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	}
 	for i := 0; i < opts.Owners; i++ {
 		o := &owner{id: i, s: s, db: s.dbs[i%opts.Shards], dir: filepath.Join(opts.DataDir, fmt.Sprintf("owner-%04d", i)),
-			requests: make(chan command, 64), done: make(chan struct{}), metrics: make(map[string]*metricState)}
+			admission: semaphore.NewWeighted(256 << 20), requests: make(chan command, 64), done: make(chan struct{}), metrics: make(map[string]*metricState)}
 		if e := os.MkdirAll(o.dir, 0750); e != nil {
 			return nil, e
 		}
@@ -176,6 +192,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 		if e := o.recover(); e != nil {
 			return nil, fmt.Errorf("owner %d: %w", i, e)
 		}
+		o.nextOrder = max(o.meta.Order, o.meta.Cursor)
 	}
 	if err = s.openLegacy(); err != nil {
 		return nil, err
@@ -188,25 +205,33 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	for _, o := range s.owners {
 		pendingPoints := 0
 		if e := s.log.Replay(o.id, o.meta.Cursor, func(r partlog.Record) error {
-			f, e := decodeFrame(r.Payload)
+			fs, e := decodeFrames(r.Payload)
 			if e != nil {
 				return e
 			}
-			f.clock = r.Clock
-			f.cursor = r.Cursor
-			if s.route(f.name) != o.id {
-				return errors.New("journal metric owner mismatch")
+			for _, f := range fs {
+				f.cursor = r.Cursor
+				if f.clock == 0 {
+					f.clock = r.Clock
+				}
+				if s.route(f.name) != o.id {
+					return errors.New("journal metric owner mismatch")
+				}
+				current, e := opts.Policy(f.name)
+				if e != nil {
+					return e
+				}
+				if !reflect.DeepEqual(current, f.policy) {
+					return errors.New("replay policy changed")
+				}
+				o.nextOrder++
+				f.order = o.nextOrder
+				f.payload = nil
+				o.active = append(o.active, f)
+				pendingPoints += len(f.points)
+				s.ingested.Add(uint64(len(f.points)))
 			}
-			current, e := opts.Policy(f.name)
-			if e != nil {
-				return e
-			}
-			if !reflect.DeepEqual(current, f.policy) {
-				return errors.New("replay policy changed")
-			}
-			o.active = append(o.active, f)
-			pendingPoints += len(f.points)
-			s.ingested.Add(uint64(len(f.points)))
+			// Never checkpoint a partial journal record: all its frames share Cursor.
 			if pendingPoints >= 1<<20 {
 				if e := o.commit(o.active); e != nil {
 					return e
@@ -266,6 +291,7 @@ func (s *Store) fail(op string, e error) error {
 	}
 	f := &daemonstore.Failure{Operation: op, Err: e}
 	if s.failure.CompareAndSwap(nil, f) {
+		s.cancelAdmission()
 		s.errors <- *f
 	}
 	return e
@@ -280,85 +306,108 @@ func (s *Store) status() error {
 	return nil
 }
 func (s *Store) Append(p *points.Points) error {
-	if e := s.status(); e != nil {
-		return e
-	}
 	if p == nil || len(p.Data) == 0 {
-		return nil
+		return s.status()
 	}
-	policy, e := s.opts.Policy(p.Metric)
+	f, e := s.makeFrame(p.Metric, p.Data, s.now().Unix())
 	if e != nil {
 		return e
 	}
-	if _, e = rollupConfig(policy); e != nil {
-		return e
-	}
-	if s.legacyCatalog != nil {
-		if old, ok := s.legacyCatalog.Lookup(p.Metric); ok {
-			if !reflect.DeepEqual(toDaemonMetric(old), policy) {
-				return errors.New("legacy policy differs from live policy")
-			}
-			if len(policy.Archives) > 1 {
-				return errors.New("legacy multiarchive writes require an exact physical-slot rollup seed")
-			}
-		}
-	}
-	group, e := partsformat.AssignGroup(partsformat.ID(p.Metric), nil)
-	if e != nil {
-		return e
-	}
-	f := frame{name: p.Metric, group: group, policy: policy, clock: s.now().Unix(), points: slices.Clone(p.Data)}
-	for _, p := range f.points {
-		if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 {
-			return errors.New("point timestamp outside storage range")
-		}
-	}
-	f.payload, e = encodeFrame(f)
-	if e != nil {
-		return e
-	}
-	a := make(chan answer, 1)
-	o := s.owners[s.route(p.Metric)]
-	select {
-	case o.requests <- command{frame: &f, answer: a}:
-	case <-o.done:
-		return ErrClosed
-	}
-	select {
-	case result := <-a:
-		return result.err
-	case <-o.done:
-		return ErrClosed
-	}
+	return s.admit([][]frame{{f}}, []int{s.route(p.Metric)})
 }
 func (o *owner) run() {
 	defer close(o.done)
-	for c := range o.requests {
+	var deferred *command
+	for {
+		var c command
+		if deferred != nil {
+			c = *deferred
+			deferred = nil
+		} else {
+			c = <-o.requests
+		}
 		var a answer
 		switch c.op {
 		case 'f':
 			a.frames = o.active
 			o.active = nil
-		case 's':
-			a.err = o.commit(c.seal)
+			o.pending = a.frames
+		case 'd':
+			o.pending = nil
+		case 'r':
+			for _, fs := range [][]frame{o.pending, o.active} {
+				for _, f := range fs {
+					if f.name == c.frame.name {
+						a.points = append(a.points, f.points...)
+					}
+				}
+			}
 		case 'q':
 			c.answer <- a
 			return
 		default:
-			a.err = o.s.status()
-			if a.err == nil {
-				f := *c.frame
-				if old := o.metrics[f.name]; old != nil && !reflect.DeepEqual(old.Policy, f.policy) {
-					a.err = errors.New("stored metric policy changed")
-				}
-				if a.err == nil {
-					f.cursor, a.err = o.s.log.Append(o.id, f.clock, f.payload)
-				}
-				if a.err == nil {
-					o.active = append(o.active, f)
-					o.s.ingested.Add(uint64(len(f.points)))
+			commands := []command{c}
+			fs := c.batch
+			if c.frame != nil {
+				fs = []frame{*c.frame}
+			}
+			wireBytes := encodedFramesSize(fs)
+		drain:
+			for len(fs) < 4096 {
+				select {
+				case next := <-o.requests:
+					if next.op != 0 {
+						deferred = &next
+						break drain
+					}
+					incoming := next.batch
+					if next.frame != nil {
+						incoming = []frame{*next.frame}
+					}
+					n := encodedFramesSize(incoming) - 8
+					if wireBytes+n > 8<<20 {
+						deferred = &next
+						break drain
+					}
+					wireBytes += n
+					commands = append(commands, next)
+					if next.frame != nil {
+						fs = append(fs, *next.frame)
+					} else {
+						fs = append(fs, next.batch...)
+					}
+				default:
+					break drain
 				}
 			}
+			a.err = o.s.status()
+			if a.err == nil {
+				var payload []byte
+				payload, a.err = encodeFrames(fs)
+				var cursor uint64
+				if a.err == nil {
+					cursor, a.err = o.s.log.Append(o.id, fs[0].clock, payload)
+				}
+				if a.err == nil {
+					var n uint64
+					for i := range fs {
+						o.nextOrder++
+						fs[i].order = o.nextOrder
+						fs[i].cursor = cursor
+						fs[i].payload = nil
+						n += uint64(len(fs[i].points))
+					}
+					o.active = append(o.active, fs...)
+					o.s.ingested.Add(n)
+				}
+			}
+			for _, cc := range commands {
+				cc.answer <- a
+			}
+			if a.err != nil && !errors.Is(a.err, ErrClosed) {
+				o.s.fail("owner", a.err)
+			}
+			continue
 		}
 		if a.err != nil && !errors.Is(a.err, ErrClosed) {
 			o.s.fail("owner", a.err)
@@ -384,12 +433,34 @@ func (s *Store) flush() error {
 	for i := range acks {
 		frozen[i] = (<-acks[i]).frames
 	}
+	anyFrames := false
+	for _, fs := range frozen {
+		anyFrames = anyFrames || len(fs) > 0
+	}
+	if !anyFrames {
+		return nil
+	}
 	// All frozen records are stable before ANY durable part cursor advances.
 	if e := s.log.Sync(); e != nil {
 		return s.fail("sync", e)
 	}
 	for i, o := range s.owners {
-		o.requests <- command{op: 's', seal: frozen[i], answer: acks[i]}
+		go func(o *owner, fs []frame, ack chan answer) {
+			if s.beforeSeal != nil && len(fs) > 0 {
+				s.beforeSeal(o.id)
+			}
+			e := o.commit(fs)
+			if e == nil {
+				o.admission.Release(frameCharge(fs))
+			}
+			if e != nil {
+				s.fail("seal", e)
+			}
+			done := make(chan answer, 1)
+			o.requests <- command{op: 'd', answer: done}
+			<-done
+			ack <- answer{err: e}
+		}(o, frozen[i], acks[i])
 	}
 	var err error
 	for i := range acks {
@@ -443,6 +514,7 @@ func (s *Store) watchErrors() {
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		s.closing.Store(true)
+		s.cancelAdmission()
 		close(s.stop)
 		<-s.done
 		s.closeErr = s.flush()
@@ -532,8 +604,27 @@ func decodeFrame(b []byte) (frame, error) {
 	return f, nil
 }
 
-// The carbonlink/gRPC cache is empty because all visible samples are in the
-// immutable publication; these protocols must not overlay a second write path.
+// CacheQuery borrows no mutable head: the admission owner copies its accepted
+// unsealed receipts while the caller waits on a bounded command exchange.
 func (s *Store) CacheQuery(ctx context.Context, name string) ([]points.Point, error) {
-	return nil, ctx.Err()
+	if e := s.status(); e != nil {
+		return nil, e
+	}
+	o := s.owners[s.route(name)]
+	a := make(chan answer, 1)
+	select {
+	case o.requests <- command{op: 'r', frame: &frame{name: name}, answer: a}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-o.done:
+		return nil, ErrClosed
+	}
+	select {
+	case r := <-a:
+		return r.points, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-o.done:
+		return nil, ErrClosed
+	}
 }

@@ -240,3 +240,22 @@ func (v *v2Runtime) CacheQuery(ctx context.Context, name string) ([]points.Point
 	v.queryFailure("cache", err)
 	return p, err
 }
+
+// appendBatch preserves ordered receiver boundaries and borrows buffers only
+// for the duration of the call. Other backends retain the scalar contract.
+func (v *v2Runtime) appendBatch(names [][]byte, data []points.Point) {
+	if v.app.ExitError() != nil {
+		return
+	}
+	if b, ok := v.Backend.(interface {
+		AppendBatch([][]byte, []points.Point) error
+	}); ok {
+		if e := b.AppendBatch(names, data); e != nil {
+			v.failure("append", e, true)
+		}
+		return
+	}
+	for i, p := range data {
+		v.append(&points.Points{Metric: string(names[i]), Data: []points.Point{p}})
+	}
+}

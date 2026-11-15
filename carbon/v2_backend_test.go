@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,9 +80,6 @@ func TestV2PortableDaemonTCPHTTP(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if e = app.v2.Backend.Flush(); e != nil {
-		t.Fatal(e)
-	}
 	request := &protov3.MultiFetchRequest{Metrics: []*protov3.FetchRequest{{Name: name, PathExpression: name, StartTime: from, StopTime: until}}}
 	encoded, e := proto.Marshal(request)
 	if e != nil {
@@ -144,8 +142,33 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	app.Config.V2.Owners = 16
 	app.Config.V2.Shards = 16
 	app.Config.V2.PartInterval.Duration = time.Second
+	for _, item := range []struct {
+		name string
+		dst  *int
+	}{{"V2_BACKEND_CPUS", &app.Config.Common.MaxCPU}, {"V2_BACKEND_OWNERS", &app.Config.V2.Owners}, {"V2_BACKEND_DBS", &app.Config.V2.Shards}} {
+		if v := os.Getenv(item.name); v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 {
+				t.Fatal("invalid " + item.name)
+			}
+			*item.dst = n
+		}
+	}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
+	}
+	var cpuFile *os.File
+	if dir := os.Getenv("V2_BACKEND_PROFILES"); dir != "" {
+		runtime.SetMutexProfileFraction(10)
+		runtime.SetBlockProfileRate(1000000)
+		var err error
+		cpuFile, err = os.Create(filepath.Join(dir, "cpu.pprof"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = pprof.StartCPUProfile(cpuFile); err != nil {
+			t.Fatal(err)
+		}
 	}
 	addr := app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
 	var stop atomic.Bool
@@ -164,21 +187,35 @@ func TestV2DaemonThroughput120(t *testing.T) {
 				return
 			}
 			defer conn.Close()
+			_ = conn.(*net.TCPConn).SetWriteBuffer(32 << 10)
 			var packet bytes.Buffer
 			stamp := time.Now().Unix() - 30
 			for n := range 1024 {
-				fmt.Fprintf(&packet, "load.p%d.metric%d %.17g %d\n", p, n%128, float64(n)+0.125, stamp)
+				fmt.Fprintf(&packet, "bench.namespace%d.cluster1.host%04d.component.requests.value %.17g %d\n", p%4, p*128+n%128, float64(n)+0.125, stamp)
 			}
 			data := packet.Bytes()
+			next := time.Now()
 			for !stop.Load() {
 				_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 				if _, err = conn.Write(data); err != nil {
 					return
 				}
+				if os.Getenv("V2_BACKEND_OFFER_1M") == "1" {
+					next = next.Add(32768 * time.Microsecond)
+					time.Sleep(time.Until(next))
+				}
 			}
 		}(producer)
 	}
-	time.Sleep(120 * time.Second)
+	duration := 120 * time.Second
+	if v := os.Getenv("V2_BACKEND_DURATION"); v != "" {
+		var err error
+		duration, err = time.ParseDuration(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(duration)
 	elapsed := time.Since(start).Seconds()
 	stats := app.v2.Backend.Stats()
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &usage1)
@@ -187,7 +224,20 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	runtime.ReadMemStats(&mem)
 	seconds := func(x syscall.Timeval) float64 { return float64(x.Sec) + float64(x.Usec)/1e6 }
 	cpu := seconds(usage1.Utime) + seconds(usage1.Stime) - seconds(usage0.Utime) - seconds(usage0.Stime)
-	t.Logf("V2_DAEMON_THROUGHPUT seconds=%.3f accepted=%d points_per_second=%.1f cpu_cores=%.3f maxrss_native_units=%d heap_bytes=%d device_write_bytes=%d device_MB_per_second=%.3f stats=%+v", elapsed, stats.IngestedPoints, float64(stats.IngestedPoints)/elapsed, cpu/elapsed, usage1.Maxrss, mem.HeapAlloc, io1-io0, float64(io1-io0)/elapsed/1e6, stats)
+	// This explicit opt-in benchmark must emit its receipt even without -test.v.
+	fmt.Printf("V2_DAEMON_THROUGHPUT seconds=%.3f accepted=%d points_per_second=%.1f cpu_cores=%.3f maxrss_native_units=%d heap_bytes=%d device_write_bytes=%d device_MB_per_second=%.3f stats=%+v\n", elapsed, stats.IngestedPoints, float64(stats.IngestedPoints)/elapsed, cpu/elapsed, usage1.Maxrss, mem.HeapAlloc, io1-io0, float64(io1-io0)/elapsed/1e6, stats)
+	if cpuFile != nil {
+		pprof.StopCPUProfile()
+		_ = cpuFile.Close()
+		for _, kind := range []string{"mutex", "block"} {
+			f, err := os.Create(filepath.Join(os.Getenv("V2_BACKEND_PROFILES"), kind+".pprof"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = pprof.Lookup(kind).WriteTo(f, 0)
+			_ = f.Close()
+		}
+	}
 	stop.Store(true)
 	wg.Wait()
 	if err := app.DumpStop(); err != nil {
