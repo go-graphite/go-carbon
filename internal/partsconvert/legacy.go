@@ -255,6 +255,17 @@ func deleteLegacy(ctx context.Context, db *pebble.DB, p LegacyPlan, checkpoint f
 			return err
 		}
 	}
+	// Catalog and sidecar-summary SSTs may be physically separate from archive
+	// SSTs. Compact their name spans too, without widening their exact deletes.
+	if len(p.Metrics) != 0 {
+		for _, prefix := range []string{"m/", "o/"} {
+			hi := partsformat.PrefixEnd([]byte(prefix))
+			if !p.Final {
+				hi = append([]byte(prefix), p.Upper...)
+			}
+			spans = append(spans, legacySpan{append([]byte(prefix), p.Lower...), hi})
+		}
+	}
 	for _, span := range spans {
 		if err := ctx.Err(); err != nil {
 			return err
