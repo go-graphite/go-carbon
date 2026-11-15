@@ -59,14 +59,14 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "streams", "rate":
+		case "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
-			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --streams and --rate may override it (use a new --state for a different run)", name)
+			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete) may override it (use a new --state for a different run)", name)
 		}
 	}
 	// Repeated flags append, so clear their CLI/default values before restoring.
-	c.copy.froms, c.sync.windows = nil, nil
+	c.copy.froms, c.sync.windows, c.ready.period = nil, nil, nil
 	names := make([]string, 0, len(saved.Flags))
 	for name := range saved.Flags {
 		names = append(names, name)
@@ -84,6 +84,9 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	c.explicit = saved.Explicit
 	if c.explicit == nil {
 		c.explicit = map[string]bool{}
+	}
+	if _, ok := overrides["period"]; ok {
+		c.ready.period = nil
 	}
 	for name, value := range overrides {
 		if err := flags.Lookup(name).Value.Set(value); err != nil {

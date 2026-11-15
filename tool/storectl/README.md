@@ -180,10 +180,23 @@ storectl sync --resume /var/lib/carbon/sync-state
 storectl sync --resume /var/lib/carbon/sync-state --streams 8 --rate 100000000
 ```
 
-Only `--streams` and `--rate` (aggregate copied bytes/s, paced between completed
-batches; zero means unlimited) may override a saved run. Scope, phase opt-outs,
-read-back settings and authentication configuration remain frozen. Use a new
-state directory to change them. An old state without `config.json` needs its
+`--streams` and `--rate` (aggregate copied bytes/s, paced between completed
+batches; zero means unlimited), plus the READY inputs `--carbonapi-url`,
+`--period` and `--gap-ledger-complete`, may override a saved run. For example,
+finish configuring a copy that started before its READY evidence was available:
+
+```sh
+storectl sync --resume /var/lib/carbon/sync-state \
+  --carbonapi-url https://read.example.org --period 1794500000:1794603600 \
+  --gap-ledger-complete=false
+```
+
+The replacement period replaces the saved period; it does not append to it or
+extend copied windows. All READY checks run again: an uncovered period or an
+incomplete gap ledger still blocks READY. Set the ledger attestation true only
+when every known input gap has been backfilled and verified. Overrides are saved
+for later resumes. Sources, target, copy windows, phase opt-outs and authentication
+remain frozen; use a new state directory to change them. An old state without `config.json` needs its
 original flags once alongside `--resume`; the tool checks the journal identity
 and saves the configuration for subsequent resumes.
 
