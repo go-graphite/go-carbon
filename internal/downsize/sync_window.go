@@ -290,7 +290,7 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 		if r, ok := selections[k]; ok && (r.First != names[0] || r.Last != names[len(names)-1] || r.Names != len(names)) {
 			return fmt.Errorf("window selection differs from catalog batch %d", group)
 		}
-		if r, ok := completed[k]; ok && r.SelectionComplete {
+		if r, ok := completed[k]; ok && r.SelectionComplete && !r.Forbidden {
 			s.applyCopy(r.Selected, nil, r.Copied, r.Failed, r.Forbidden)
 			continue
 		}

@@ -91,6 +91,7 @@ type syncSkip struct {
 
 // syncProgress is the live counter set the progress ticker reports.
 type syncProgress struct {
+	durableFloor int64 // completed verification receipts, visible while replaying
 	copyActive   int64 // fresh committed names in the unfinished source list
 	copyFresh    int64 // fresh committed names over this phase
 	copyObserved bool
@@ -109,9 +110,14 @@ type syncProgress struct {
 }
 
 func (p *syncProgress) begin(phase string, total int) {
+	p.beginReplay(phase, total, 0)
+}
+
+func (p *syncProgress) beginReplay(phase string, total int, durable int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.phase, p.total, p.started = phase, total, time.Now()
+	p.durableFloor = durable
 	p.copyActive, p.copyFresh, p.copyObserved = 0, 0, false
 	p.done.Store(0)
 	p.replayed.Store(0)
@@ -951,7 +957,8 @@ func (s *syncer) progressLine() {
 	p := &s.prog
 	p.mu.Lock()
 	phase, total, started := p.phase, p.total, p.started
-	done := p.done.Load() + p.copyActive
+	accounted := p.done.Load() + p.copyActive
+	done := max(accounted, p.durableFloor)
 	fresh, observed := p.copyFresh, p.copyObserved
 	p.mu.Unlock()
 	elapsed := time.Since(started).Seconds()
@@ -971,7 +978,7 @@ func (s *syncer) progressLine() {
 		}
 	}
 	if elapsed > 0 && done > 0 {
-		rate := float64(max(0, done-p.replayed.Load())) / elapsed
+		rate := float64(max(0, accounted-p.replayed.Load())) / elapsed
 		if observed {
 			rate = float64(fresh) / elapsed
 		}

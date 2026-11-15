@@ -366,9 +366,8 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 			return err
 		}
 	}
-	for _, r := range j.find(func(r syncRow) bool { return r.Kind == "copied" && r.Forbidden }) {
-		s.forbid[r.Source] = true
-	}
+	// Authorization is live configuration. A source rejected by a previous
+	// invocation must be probed again after its allowlist has been repaired.
 	event("sync_start", map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "state": o.state, "streams": o.streams, "verify_batch": o.batch, "max_rounds": o.maxRounds, "windows": o.windows.String(), "sample_every": o.sampleEvery, "resumed_rows": len(j.rows) - 1, "effective": o.policy})
 	ctx, cancelFile := context.WithCancelCause(ctx)
 	defer cancelFile(nil)
@@ -381,12 +380,13 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		j.mu.Unlock()
 		s.prog.mu.Lock()
 		snap.Phase = s.prog.phase
-		snap.Done = s.prog.done.Load() + s.prog.copyActive
+		accounted := s.prog.done.Load() + s.prog.copyActive
+		snap.Done = max(accounted, s.prog.durableFloor)
 		snap.Total = int64(s.prog.total)
 		snap.rateSet = true
 		snap.Rate = 0
 		if elapsed := time.Since(s.prog.started).Seconds(); elapsed > 0 {
-			snap.Rate = float64(max(0, snap.Done-s.prog.replayed.Load())) / elapsed
+			snap.Rate = float64(max(0, accounted-s.prog.replayed.Load())) / elapsed
 			if s.prog.copyObserved {
 				snap.Rate = float64(s.prog.copyFresh) / elapsed
 			}
@@ -709,7 +709,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 			}
 			var res syncCopyResult
 			if rows := s.j.find(func(r syncRow) bool {
-				return r.Kind == "copied" && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src]
+				return r.Kind == "copied" && !r.Forbidden && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src]
 			}); len(rows) > 0 {
 				res = syncCopyResult{Copied: rows[0].Copied, Failed: rows[0].Failed, Forbidden: rows[0].Forbidden}
 			} else {
@@ -828,7 +828,13 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	var unindexed []string
 	var skipped []syncSkip
 	holeNames := map[string]bool{}
-	s.prog.begin(fmt.Sprintf("verify round %d", journalRound), set.total)
+	// Publish the whole durable cursor before streaming the journaled batches
+	// back through the collector. Replay can take minutes for large name sets.
+	var durable int64
+	for _, r := range done {
+		durable += int64(r.Names)
+	}
+	s.prog.beginReplay(fmt.Sprintf("verify round %d", journalRound), set.total, durable)
 	defer set.close()
 	collect := func(r syncRow) {
 		mu.Lock()
