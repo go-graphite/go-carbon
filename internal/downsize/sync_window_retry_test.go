@@ -43,7 +43,7 @@ func TestSyncWindowRetryResumeAndOtherReplica(t *testing.T) {
 		b.store(source).points["metric"] = map[int64]map[int64]float64{60: {w.From: math.Copysign(0, -1), w.From - 60: 77}}
 	}
 	o := syncOptions{to: syncT, from: []string{syncD1, syncD2}, state: t.TempDir(), batch: 2, streams: 1, maxRounds: 1, windows: syncRanges{w}, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := runSync(ctx, o, b); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("peer coverage cleared unknown original source", err)

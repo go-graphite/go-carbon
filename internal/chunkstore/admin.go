@@ -241,7 +241,10 @@ func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
 		var err error
 		for _, r := range group {
 			m, decodeErr := decodeCatalog(r.name, r.value)
-			if err = b.Delete(catalogKey(r.name), nil); err == nil && decodeErr == nil {
+			if err = b.Delete(expirationReceiptKey(r.name), nil); err == nil {
+				err = b.Delete(catalogKey(r.name), nil)
+			}
+			if err == nil && decodeErr == nil {
 				err = b.Delete(revisionKey(m), nil)
 			}
 			if err == nil {

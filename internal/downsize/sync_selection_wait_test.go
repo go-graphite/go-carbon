@@ -2,7 +2,9 @@ package downsize
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,5 +60,33 @@ func TestSelectionWaitNarrowRetiresSuperseded(t *testing.T) {
 	}
 	if b.attempts != 2 || len(b.copies) != before {
 		t.Fatal("resolved name repeated")
+	}
+}
+
+type rejectedSelectionRepair struct{ *fakeSync }
+
+func (b rejectedSelectionRepair) CopyWindow(context.Context, string, string, []string, string, syncRanges) (syncCopyResult, error) {
+	return syncCopyResult{Failed: []string{"pending"}}, nil
+}
+func TestSelectionWaitRejectedRepairFailsLoudly(t *testing.T) {
+	path := t.TempDir()
+	j, err := openSyncJournal(filepath.Join(path, "sync.jsonl"), "rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	if err = j.append(syncRow{Kind: "window-selected", Round: 1, Source: syncD1, Skipped: []syncSkip{{"pending", syncWindowSelectionReason}}, SelectionComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	w := syncRange{From: syncTestNow - 600, Until: syncTestNow - 120}
+	f := newFakeSync()
+	f.store(syncD1).archives["pending"] = []syncArchive{{Step: 60, Points: 10000}}
+	f.store(syncD1).points["pending"] = map[int64]map[int64]float64{60: {w.From: 42}}
+	s := &syncer{o: syncOptions{to: syncT, from: []string{syncD1}, state: path, windows: syncRanges{w}, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}, b: rejectedSelectionRepair{f}, j: j, forbid: map[string]bool{}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = s.waitWindowSelections(ctx)
+	if !errors.Is(err, ErrSyncResidual) || !strings.Contains(err.Error(), "pending") {
+		t.Fatal("rejected repair entered endless selection wait", err)
 	}
 }

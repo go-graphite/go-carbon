@@ -65,9 +65,10 @@ func (s syncSeries) finite(ts int64) bool {
 }
 
 type syncCopyResult struct {
-	Copied    int
-	Failed    []string
-	Forbidden bool
+	Copied         int
+	Failed         []string
+	Forbidden      bool
+	ExpectedAbsent []string
 }
 
 // syncBackend is everything sync needs from the stores. Info and Fetch omit
@@ -305,22 +306,24 @@ type syncResidual struct {
 }
 
 type syncer struct {
-	legacyCopyReceipts bool // keep the selection and transport of old window campaigns
-	verificationBase   int  // append fresh rounds after a terminal residual verdict
-	o                  syncOptions
-	b                  syncBackend
-	j                  *syncJournal
-	copied             map[string]bool // missing names copied in this sync
-	masks              sync.Map        // name -> source mask, for names being verified
-	owner              func(string) bool
-	forbid             map[string]bool
-	sum                syncSummary
-	started            time.Time
-	failedCp           map[string]bool // names whose copy failed
-	both               int             // names on the target and on a source
-	down               sync.Map        // store -> reason: unavailable for --host-wait
-	digests            sync.Map        // store -> bool: serves /v1/transfer/digest
-	prog               syncProgress
+	windowRetryCopyError error // selection waits must not hide rejected repairs
+	legacyCopyReceipts   bool  // keep the selection and transport of old window campaigns
+	verificationBase     int   // append fresh rounds after a terminal residual verdict
+	o                    syncOptions
+	b                    syncBackend
+	j                    *syncJournal
+	copied               map[string]bool // missing names copied in this sync
+	masks                sync.Map        // name -> source mask, for names being verified
+	owner                func(string) bool
+	forbid               map[string]bool
+	sum                  syncSummary
+	started              time.Time
+	failedCp             map[string]bool // names whose copy failed
+	both                 int             // names on the target and on a source
+	down                 sync.Map        // store -> reason: unavailable for --host-wait
+	expectedAbsences     sync.Map        // current invocation, never historical exclusions
+	digests              sync.Map        // store -> bool: serves /v1/transfer/digest
+	prog                 syncProgress
 }
 
 func syncIdentity(o syncOptions) (string, error) {
@@ -511,7 +514,19 @@ func (s *syncer) run(ctx context.Context) error {
 	}
 	err := s.verifyAndFill(ctx)
 	if s.o.noCopy && s.sum.Missing > 0 {
-		return errors.Join(err, fmt.Errorf("%w: --no-copy leaves %d names from discovery unimported; use a fresh state for an independent audit", ErrSyncResidual, s.sum.Missing))
+		missing, e := s.readMissing()
+		if e != nil {
+			return errors.Join(err, e)
+		}
+		remaining := 0
+		for _, m := range missing {
+			if _, ok := s.expectedAbsences.Load(m.name); !ok {
+				remaining++
+			}
+		}
+		if remaining > 0 {
+			return errors.Join(err, fmt.Errorf("%w: --no-copy leaves %d names from discovery unimported; use a fresh state for an independent audit", ErrSyncResidual, remaining))
+		}
 	}
 	return err
 }
@@ -575,9 +590,36 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		round += s.verificationBase
 	}
 	source := s.o.from[src]
+	original := append([]string(nil), names...)
+	excluded, err := s.expectedAbsent(ctx, names)
+	if err != nil {
+		return syncCopyResult{}, err
+	}
+	var resolved []syncSkip
+	var selected []string
+	for _, n := range names {
+		if excluded[n] {
+			resolved = append(resolved, syncSkip{n, "expected_absent_target_expiration"})
+		} else {
+			selected = append(selected, n)
+		}
+	}
+	names = selected
+	copyPhase := phase
+	if len(excluded) > 0 {
+		data, _ := json.Marshal(names)
+		hash := sha256.Sum256(data)
+		copyPhase = fmt.Sprintf("%s-policy-%x", phase, hash[:8])
+	}
+	if len(names) == 0 {
+		if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Selected: original, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
+			return syncCopyResult{}, err
+		}
+		return syncCopyResult{ExpectedAbsent: original}, nil
+	}
 	// The caller owns phase progress; a source batch must not reset its totals
 	// or replace a stable phase with an immutable per-batch journal identity.
-	journal, err := s.namesFile(phase, round, src, names)
+	journal, err := s.namesFile(copyPhase, round, src, names)
 	if err != nil {
 		return syncCopyResult{}, err
 	}
@@ -610,9 +652,12 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	}
 	// Exact membership allows replay even when precheck omitted names inside
 	// the bounds or a subsequent run uses different batch sizes.
-	selected := names
+	selected = original
+	for _, item := range resolved {
+		res.ExpectedAbsent = append(res.ExpectedAbsent, item.Name)
+	}
 	journalStarted := time.Now()
-	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, SelectionComplete: s.windowOnly()}); err != nil {
+	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
 		return res, err
 	}
 	event("sync_copy_journal", map[string]any{"phase": phase, "round": round, "source": source, "seconds": time.Since(journalStarted).Seconds()})
@@ -771,7 +816,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 					filledBefore[k] = true
 				}
 			}
-			s.sum.Filled += len(names) - len(res.Failed)
+			s.sum.Filled += len(names) - len(res.Failed) - len(res.ExpectedAbsent)
 			if replayed {
 				s.prog.replayed.Add(int64(len(names)))
 			}
@@ -1099,6 +1144,9 @@ func (s *syncer) summary(err error) {
 		}
 	}
 	fields["resolved_empty"] = len(resolved)
+	expected := 0
+	s.expectedAbsences.Range(func(_, _ any) bool { expected++; return true })
+	fields["expected_absent"] = expected
 	if err := atomicStateJSON(filepath.Join(s.o.state, "resolved.json"), resolved); err != nil {
 		event("sync_resolution_error", map[string]any{"error": err.Error()})
 	}

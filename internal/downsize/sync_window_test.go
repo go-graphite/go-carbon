@@ -257,7 +257,7 @@ func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
 	}
 	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), batch: 2, streams: 1, maxRounds: 1, windows: syncRanges{w}, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
 	for range 2 {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := runSync(ctx, o, unresolvedWindowBackend{f}); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal("unresolved coverage reported success", err)

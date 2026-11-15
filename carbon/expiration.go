@@ -114,6 +114,7 @@ func loadExpirationConfig(cfg *Config) error {
 }
 
 func (app *App) startExpiration() {
+	app.configureExpirationEvidence()
 	cfg := app.Config.Whisper
 	if app.MetricStore == nil || (cfg.StoreExpiration.Value() == 0 && !cfg.ExpirationRules.Enabled()) {
 		return
@@ -479,6 +480,19 @@ func (r *metricExpirer) expirationPressure() bool {
 func (r *metricExpirer) deleteBatch(ctx context.Context, candidates []store.Metadata) ([]error, error) {
 	if len(candidates) == 0 {
 		return nil, nil
+	}
+	if batch, ok := r.db.(interface {
+		DeleteBatchWithExpirationReceipts(context.Context, []store.Metadata, map[string]store.ExpirationReceipt) ([]error, error)
+	}); ok {
+		receipts := map[string]store.ExpirationReceipt{}
+		now := r.now()
+		for _, m := range candidates {
+			policy, ttl := expirationPolicyIdentity(r.rules, r.expiration, r.dryRun, m.Name, now)
+			if ttl > 0 {
+				receipts[m.Name] = store.ExpirationReceipt{Policy: policy, DeletedAt: now.Unix(), LastUpdate: m.LastUpdate.Unix()}
+			}
+		}
+		return batch.DeleteBatchWithExpirationReceipts(ctx, candidates, receipts)
 	}
 	if batch, ok := r.db.(interface {
 		DeleteBatchIfUnchanged(context.Context, []store.Metadata) ([]error, error)

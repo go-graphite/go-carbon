@@ -142,6 +142,7 @@ type Service struct {
 	nodes                         []Node
 	onChange                      func()
 	onNativeImport                func(string)
+	expirationPolicy              func(string) (string, time.Duration, bool)
 	flushTransfer                 func(context.Context, []string) error
 	pyroscope                     *pyroscope.Profiler
 	pprofServer                   *http.Server
@@ -571,6 +572,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/transfer/", s.bulk)
 	mux.HandleFunc("/v1/native/", s.native)
 	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
+	mux.HandleFunc("/v1/expiration/evidence", s.expirationEvidence)
 	mux.HandleFunc("/v1/maintenance/archive-anchors", s.archiveAnchors)
 	mux.HandleFunc("/v1/maintenance/sidecars", s.sidecars)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
