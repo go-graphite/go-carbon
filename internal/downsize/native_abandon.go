@@ -10,6 +10,8 @@ import (
 	"net/http"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // Explicit reconciliation command: no donor, import, replan or journal rewrite.
@@ -36,7 +38,7 @@ func nativeAbandonMain(ctx context.Context, args []string, out io.Writer) error 
 	if !*apply {
 		return json.NewEncoder(out).Encode(map[string]any{"target": endpoint, "identity": *identity, "apply": false, "action": "abandon native combine without publishing"})
 	}
-	client := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: storehttp.NewTransport(&http.Transport{}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	m := &mover{options: options{tokenEnv: *token}, client: client}
 	var receipt chunkstore.NativeAbandonReceipt

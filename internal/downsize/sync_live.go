@@ -20,6 +20,8 @@ import (
 	"time"
 
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // syncLiveBackend reaches real stores: catalogs through buckyd
@@ -60,6 +62,7 @@ type syncLiveBackend struct {
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
 	windowPinned         time.Time
+	windowRestarted      atomic.Bool
 }
 
 // syncIOTime reports cumulative request time, including retries. Concurrent
@@ -126,8 +129,16 @@ func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 		// shorter header deadline discards healthy work queued behind store
 		// reads and can make every retry repeat the same unfinished batch.
 		// The overall request deadline and caller context still bound each call.
-		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	b := &syncLiveBackend{o: o, m: m, client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 64}}, copy: planFreeCopy}
+		client: &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(&http.Transport{MaxIdleConnsPerHost: 64}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	b := &syncLiveBackend{o: o, m: m, client: &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(&http.Transport{MaxIdleConnsPerHost: 64})}, copy: planFreeCopy}
+
+	restarted := func(origin string) {
+		b.m.binaryProofs.Delete(origin)
+		b.windowSelectionSlots.Delete(origin)
+		b.windowRestarted.Store(true)
+	}
+	b.m.client.Transport.(*storehttp.Transport).OnRestart = restarted
+	b.client.Transport.(*storehttp.Transport).OnRestart = restarted
 	withSyncJWT(b.m.client, o.auth, o.authOrigins...)
 	withSyncJWT(b.client, o.auth, o.authOrigins...)
 	return b
@@ -198,8 +209,6 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 		}
 		// Retire ephemeral state before the next attempt. In-flight requests
 		// keep their connections and borrowed pins until they finish.
-		b.m.client.CloseIdleConnections()
-		b.client.CloseIdleConnections()
 		b.windowSelectionSlots.Delete(store)
 		b.expireWindowPins()
 		b.waits.Add(1)
@@ -213,10 +222,15 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 			event("sync_host_wait", map[string]any{"state": "waiting for store", "what": what, "store": store, "attempt": attempt, "delay_seconds": delay.Seconds(), "error": err.Error()})
 		}
 		b.waitLogMu.Unlock()
+		if attempt == 1 && restartCopyError(err) {
+			continue
+		}
 		if err := sleepContext(ctx, delay/2+rand.N(delay/2+1)); err != nil {
 			return err
 		}
-		delay = min(2*delay, 30*time.Second)
+		if !restartCopyError(err) {
+			delay = min(2*delay, 30*time.Second)
+		}
 	}
 }
 

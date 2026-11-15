@@ -14,6 +14,8 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	hashing "github.com/go-graphite/go-carbon/internal/downsize/buckyhash"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // nativeRangeNames caps every native range at the receiver limit; tests lower it.
@@ -88,7 +90,7 @@ func runNative(ctx context.Context, o options) error {
 			return errors.New("--deferred-range must identify an acknowledged native journal range")
 		}
 	}
-	client := &http.Client{Transport: &http.Transport{MaxIdleConns: runtime.NumCPU() * 4, MaxIdleConnsPerHost: runtime.NumCPU() * 2}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: storehttp.NewTransport(&http.Transport{MaxIdleConns: runtime.NumCPU() * 4, MaxIdleConnsPerHost: runtime.NumCPU() * 2}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	m := &mover{options: o, planData: p, journal: j, client: client}
 	c := &nativeController{mover: m, sessions: make(map[string]*nativeRemoteSession)}

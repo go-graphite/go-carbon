@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // A native capture is private proof input, never a replacement checkpoint.
@@ -54,7 +56,7 @@ func NativeCaptureMain(ctx context.Context, args []string) error {
 	if len(names) == 0 {
 		return errors.New("empty native capture")
 	}
-	client := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: storehttp.NewTransport(&http.Transport{}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	m := &mover{options: options{tokenEnv: *tokenEnv}, client: client}
 	var pin struct {

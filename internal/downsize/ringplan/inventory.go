@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 type inventory struct {
@@ -35,7 +37,7 @@ type inventory struct {
 func openInventory(ctx context.Context, in input, offset int64, previous string, timeout time.Duration) (*inventory, error) {
 	v := &inventory{format: in.Format, defaultBytes: in.EstimatedBytes, offset: offset, previous: previous}
 	if in.Format == "transfer" {
-		client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client := &http.Client{Timeout: timeout, Transport: storehttp.NewTransport(http.DefaultTransport.(*http.Transport)), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		v.paged = func(after string) ([]string, error) {
 			u, err := url.Parse(in.URL)
 			if err != nil {
@@ -93,7 +95,7 @@ func openInventory(ctx context.Context, in input, offset int64, previous string,
 			}
 			req.Header.Set("X-Buckyd-Authorization", token)
 		}
-		client := &http.Client{Timeout: timeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("inventory redirects refused") }}
+		client := &http.Client{Timeout: timeout, Transport: storehttp.NewTransport(http.DefaultTransport.(*http.Transport)), CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errors.New("inventory redirects refused") }}
 		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err

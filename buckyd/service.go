@@ -452,6 +452,9 @@ func (s *Service) changed() {
 func (s *Service) CancelTransfers() {
 	s.mu.Lock()
 	s.stopped = true
+	if s.server != nil {
+		s.server.SetKeepAlivesEnabled(false)
+	}
 	if s.requestCancel != nil {
 		s.requestCancel()
 	}
@@ -573,6 +576,7 @@ func (s *Service) Handler() http.Handler {
 		s.mu.Lock()
 		if s.stopped {
 			s.mu.Unlock()
+			w.Header().Set("Connection", "close")
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "buckyd is stopping; retry after restart", http.StatusServiceUnavailable)
 			return

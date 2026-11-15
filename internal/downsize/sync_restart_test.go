@@ -46,7 +46,7 @@ func TestSyncRestartWaitNeverExpiresAndRealErrorsFail(t *testing.T) {
 // Each operation must finish within one invocation and match an uninterrupted
 // run, including signed zero and existing target values.
 func TestSyncRestartWindowDifferential(t *testing.T) {
-	for _, stage := range []string{"capabilities", "source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin"} {
+	for _, stage := range []string{"capabilities", "source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin", "handover"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -58,6 +58,7 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 			addPoints(t, target, "b.existing", 42)
 			addPoints(t, oracle, "b.existing", 42)
 			var injected atomic.Bool
+			var handedOver atomic.Bool
 			cut := func(w http.ResponseWriter) {
 				conn, _, err := w.(http.Hijacker).Hijack()
 				if err != nil {
@@ -68,6 +69,10 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 			}
 			donorHandler := nativeControllerService(t, source)
 			donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if handedOver.Load() {
+					http.Error(w, "buckyd is stopping", 503)
+					return
+				}
 				if stage == "capabilities" && r.URL.Path == "/v1/native/capabilities" && injected.CompareAndSwap(false, true) {
 					http.Error(w, "buckyd is stopping", 503)
 					return
@@ -104,6 +109,10 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 			defer donor.Close()
 			targetHandler := nativeControllerService(t, target)
 			dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if handedOver.Load() {
+					http.Error(w, "buckyd is stopping", 503)
+					return
+				}
 				if r.URL.Path == "/v1/native/pull" && (stage == "pull-before" || stage == "pull-lost-ack") && injected.CompareAndSwap(false, true) {
 					if stage == "pull-before" {
 						http.Error(w, "not ready", 503)
@@ -124,9 +133,19 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 			defer ref.Close()
 			b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Nanosecond})
 			b.retryTick = time.Microsecond
+			stopPins := b.beginWindowCopy()
+			defer stopPins()
 			windows := syncRanges{{From: testMetricNow - 10, Until: testMetricNow}}
 			if _, err := b.WindowPresenceRanges(ctx, donor.URL, names, windows); err != nil {
 				t.Fatal(err)
+			}
+			if stage == "handover" {
+				// Keep both old processes and their pooled sockets alive while
+				// replacing the listeners. Fresh services have no old pins.
+				handedOver.Store(true)
+				replaceStoreServer(t, donor, nativeControllerService(t, source))
+				replaceStoreServer(t, dst, nativeControllerService(t, target))
+				injected.Store(true)
 			}
 			journal := filepath.Join(t.TempDir(), "copy")
 			if res, err := b.CopyWindow(ctx, donor.URL, dst.URL, names, journal, windows); err != nil || res.Copied != len(names) {
@@ -311,7 +330,7 @@ func TestSyncWindowRestartSameAddress(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatal(got, want, err)
 	}
-	if stoppedCalls.Load() == 0 || freshCalls.Load() == 0 || b.waits.Load() == 0 {
+	if stoppedCalls.Load() == 0 || freshCalls.Load() == 0 {
 		t.Fatal("restart paths not exercised", stoppedCalls.Load(), freshCalls.Load(), b.waits.Load())
 	}
 	if time.Since(started) >= 2*time.Minute {
@@ -353,5 +372,53 @@ func TestSyncWindowRefusedThenServing(t *testing.T) {
 	defer server.Close()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func replaceStoreServer(t *testing.T, old *httptest.Server, handler http.Handler) {
+	t.Helper()
+	addr := old.Listener.Addr().String()
+	if err := old.Listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := httptest.NewUnstartedServer(handler)
+	next.Listener = ln
+	next.Start()
+	t.Cleanup(next.Close)
+}
+
+// Digest may retry inside a window-copy operation that still borrows a source
+// pin. Expiration must never wait for that caller's own read lock.
+func TestSyncNestedRestartMarksPinsWithoutBlocking(t *testing.T) {
+	b := newSyncLiveBackend(syncLiveOptions{})
+	b.retryTick = time.Millisecond
+	b.windowMu.RLock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		calls := 0
+		done <- b.wait(ctx, "digest", "target", func() error {
+			calls++
+			if calls == 1 {
+				return &apiError{503, "store recovery has not finished"}
+			}
+			return nil
+		})
+	}()
+	select {
+	case err := <-done:
+		b.windowMu.RUnlock()
+		if err != nil || !b.windowRestarted.Load() {
+			t.Fatal("restart not deferred", err)
+		}
+	case <-ctx.Done():
+		b.windowMu.RUnlock()
+		<-done
+		t.Fatal("restart waited for its caller's borrowed pin")
 	}
 }

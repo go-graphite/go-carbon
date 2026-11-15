@@ -18,6 +18,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 type nativeSourceSession struct {
@@ -41,10 +43,10 @@ type nativePullRequest struct {
 
 const nativeMergeHeader = "X-Native-Merge-Session"
 
-var nativeTransferClient = &http.Client{Transport: nativeTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var nativeTransferClient = &http.Client{Transport: storehttp.NewTransport(nativeTransport()), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func nativeTransport() *http.Transport {
-	t := bulkTransferClient.Transport.(*http.Transport).Clone()
+	t := bulkTransport()
 	t.ResponseHeaderTimeout = 0
 	return t
 }

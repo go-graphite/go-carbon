@@ -11,12 +11,16 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 func TestSyncDigestAllowsDelayedHeaders(t *testing.T) {
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		if r.URL.Path != "/legacy" {
+			calls.Add(1)
+		}
 		select {
 		case <-time.After(180 * time.Millisecond):
 			fmt.Fprint(w, `[{"Name":"a","Found":true,"Archives":[{"Step":60,"Count":2,"Hash":"0123456789abcdef"}]}]`)
@@ -27,7 +31,7 @@ func TestSyncDigestAllowsDelayedHeaders(t *testing.T) {
 	// Scale the old two-minute deadline to reproduce discarded work quickly.
 	old := &http.Client{Timeout: time.Second, Transport: &http.Transport{ResponseHeaderTimeout: 30 * time.Millisecond}}
 	defer old.CloseIdleConnections()
-	if resp, err := old.Get(server.URL); err == nil {
+	if resp, err := old.Get(server.URL + "/legacy"); err == nil {
 		resp.Body.Close()
 		t.Fatal("legacy header timeout did not discard delayed work")
 	}
@@ -37,7 +41,7 @@ func TestSyncDigestAllowsDelayedHeaders(t *testing.T) {
 	if b.m.client.Timeout != 10*time.Minute {
 		t.Fatal("overall request deadline changed")
 	}
-	if tr := b.m.client.Transport.(*http.Transport); tr.ResponseHeaderTimeout != 0 {
+	if tr := b.m.client.Transport.(*storehttp.Transport); tr.ResponseHeaderTimeout != 0 {
 		t.Fatal("sync still discards batches at a separate header deadline")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

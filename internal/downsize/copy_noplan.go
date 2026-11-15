@@ -21,6 +21,8 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/downsize/ringplan"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // Plan-free copy: discover names (source catalog or --names), optionally keep
@@ -208,7 +210,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		return err
 	}
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: o.tick, transferIdle: o.transferIdle, debtGuardOff: !o.debtGuard},
-		client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: copyHeaderTimeout(o.transferIdle)}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+		client: &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(&http.Transport{MaxIdleConnsPerHost: 128, MaxIdleConns: 256, ResponseHeaderTimeout: copyHeaderTimeout(o.transferIdle)}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	withSyncJWT(m.client, o.auth, append(append([]string(nil), o.froms...), o.to)...)
 	progress := newCopyProgress()
 	c := &planFreeCopier{hostWaiter: &hostWaiter{m: m, tick: o.tick, maxBackoff: o.maxBackoff, stallTimeout: o.stallTimeout, progress: progress, observeWait: o.onWaiting}, progress: progress, o: o, started: time.Now(), multi: len(o.froms) > 1}

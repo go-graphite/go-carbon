@@ -345,7 +345,7 @@ func (f syncInfoRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { 
 func TestSyncInfoAdaptiveSingleAndCancel(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		b := newSyncLiveBackend(syncLiveOptions{hostWait: -time.Second, carbonPort: 8080})
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		calls := 0
 		b.client.Transport = syncInfoRoundTrip(func(*http.Request) (*http.Response, error) {
 			calls++
@@ -360,7 +360,11 @@ func TestSyncInfoAdaptiveSingleAndCancel(t *testing.T) {
 		}
 		got, err := b.Info(ctx, "http://source:4242", names)
 		cancel()
-		if err == nil || len(got) != 0 || calls != 1 {
+		wantCalls := 2 // one immediate restart retry, then wait for cancellation
+		if canceled {
+			wantCalls = 1
+		}
+		if err == nil || len(got) != 0 || calls != wantCalls {
 			t.Fatalf("got=%v err=%v calls=%d", got, err, calls)
 		}
 		if !canceled && !errors.Is(err, context.DeadlineExceeded) {

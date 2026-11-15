@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/storehttp"
+
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -432,7 +434,7 @@ type transferUpstreamError struct {
 
 func (e *transferUpstreamError) Error() string { return e.message }
 
-var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 90 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(bulkTransport()), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 type transferCountReader struct {
 	io.Reader
@@ -443,4 +445,8 @@ func (r *transferCountReader) Read(p []byte) (int, error) {
 	n, err := r.Reader.Read(p)
 	r.n += int64(n)
 	return n, err
+}
+
+func bulkTransport() *http.Transport {
+	return &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 90 * time.Second}
 }

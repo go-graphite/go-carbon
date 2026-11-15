@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/storecopy"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 type workerRequest struct {
@@ -58,7 +60,7 @@ func newWorker(o workerOptions) (*worker, error) {
 	if secret == "" {
 		return nil, errors.New("empty worker control secret")
 	}
-	w := &worker{options: o, secret: secret, http: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConns: 128, MaxIdleConnsPerHost: 64}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	w := &worker{options: o, secret: secret, http: &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(&http.Transport{MaxIdleConns: 128, MaxIdleConnsPerHost: 64}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	if o.Helper != "" {
 		u, err := url.Parse(o.Helper)
 		if err != nil {
