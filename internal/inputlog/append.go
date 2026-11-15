@@ -15,9 +15,8 @@ type AppendReceipt struct {
 }
 
 type appendRequest struct {
-	partition uint16
-	batch     *Batch
-	reply     chan appendReply
+	batches [partitions]*Batch
+	reply   chan appendReply
 }
 type appendReply struct {
 	receipt AppendReceipt
@@ -65,29 +64,64 @@ func (l *Log) Append(partition uint16, batch *Batch) (AppendReceipt, error) {
 	if !l.started {
 		return AppendReceipt{}, ErrClosed
 	}
-	if partition >= partitions || batch == nil || batch.Len() == 0 || len(batch.Refs) != batch.Len() || batch.Len() > maxSortRows {
-		return AppendReceipt{}, errors.New("invalid input log append batch")
+	if partition >= partitions {
+		return AppendReceipt{}, errors.New("invalid input log append partition")
 	}
-	// Bound encoder memory even for distinct names. TCP capture buffers are
-	// much smaller; callers split larger submissions without crossing FIFO.
-	bytes := batch.Len() * 32
-	for _, ref := range batch.Refs {
-		if ref == nil {
-			return AppendReceipt{}, errors.New("nil input log append reference")
+	var batches [partitions]*Batch
+	batches[partition] = batch
+	return l.AppendGroup(batches)
+}
+
+// AppendGroup borrows all final partitions of one submission until one durable
+// group commit. The writer preserves submission order in every partition.
+func (l *Log) AppendGroup(batches [partitions]*Batch) (AppendReceipt, error) {
+	if !l.started {
+		return AppendReceipt{}, ErrClosed
+	}
+	n, bytes := 0, 0
+	for _, batch := range batches {
+		if batch == nil {
+			continue
 		}
-		bytes += len(ref.Metric)
-		if bytes > maxFrameRaw {
-			return AppendReceipt{}, errors.New("input log append batch exceeds frame budget")
+		size, err := validateAppendBatch(batch)
+		if err != nil {
+			return AppendReceipt{}, err
+		}
+		n += batch.Len()
+		bytes += size
+		if n > maxSortRows || bytes > maxFrameRaw {
+			return AppendReceipt{}, errors.New("input log append group exceeds frame budget")
 		}
 	}
+	if n == 0 {
+		return AppendReceipt{}, errors.New("empty input log append group")
+	}
+
 	reply := make(chan appendReply, 1)
 	select {
-	case l.appends <- appendRequest{partition: partition, batch: batch, reply: reply}:
+	case l.appends <- appendRequest{batches: batches, reply: reply}:
 		r := <-reply
 		return r.receipt, r.err
 	case <-l.done:
 		return AppendReceipt{}, ErrClosed
 	}
+}
+
+func validateAppendBatch(batch *Batch) (int, error) {
+	if batch == nil || batch.Len() == 0 || len(batch.Refs) != batch.Len() || batch.Len() > maxSortRows {
+		return 0, errors.New("invalid input log append batch")
+	}
+	bytes := batch.Len() * 32
+	for _, ref := range batch.Refs {
+		if ref == nil {
+			return 0, errors.New("nil input log append reference")
+		}
+		bytes += len(ref.Metric)
+		if bytes > maxFrameRaw {
+			return 0, errors.New("input log append batch exceeds frame budget")
+		}
+	}
+	return bytes, nil
 }
 
 func (l *Log) appendCycle(first appendRequest) {
@@ -104,13 +138,11 @@ Drain:
 		}
 	}
 	err := l.appendErr
-	if err == nil && l.src != nil {
-		err = l.cycle()
-	}
 	var receipt AppendReceipt
 	if err == nil {
+		// Append commits share the current cache generation. Only a cache
+		// collection advances it; socket submission rate is not elapsed time.
 		gen, seq := l.gen, l.target()
-		l.gen++
 		if l.appendPin == nil {
 			offset := int64(segmentHeaderSize)
 			if l.active != nil && l.active.seq == seq {
@@ -146,13 +178,14 @@ func (l *Log) encodeAppends(seq uint64, requests []appendRequest) {
 				part.enc.begin(seq)
 				emit := func(raw []byte, rows int) []byte { l.compress(part, p, raw, rows); return raw }
 				for _, request := range requests {
-					if int(request.partition) != p {
+					batch := request.batches[p]
+					if batch == nil {
 						continue
 					}
-					if len(scratch.rows)+request.batch.Len() > maxSortRows || len(scratch.names) > maxFrameRaw {
+					if len(scratch.rows)+batch.Len() > maxSortRows || len(scratch.names) > maxFrameRaw {
 						scratch.raw = part.enc.flush(&scratch.streamScratch, scratch.raw, emit)
 					}
-					part.enc.addBatch(&scratch.streamScratch, request.batch)
+					part.enc.addBatch(&scratch.streamScratch, batch)
 				}
 				scratch.raw = part.enc.flush(&scratch.streamScratch, scratch.raw, emit)
 			}

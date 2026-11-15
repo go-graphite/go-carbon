@@ -27,6 +27,13 @@ type ShardedCapture interface {
 	CaptureShards() []Capture
 }
 
+// BoundedCapture limits submissions admitted inside the receiver's ordering
+// fence. Waiting connections acquire these shared slots before the read lock,
+// so a direct switch joins bounded work rather than every connected handler.
+type BoundedCapture interface {
+	CaptureSlots() chan struct{}
+}
+
 // captureSubmitter reuses connection-owned acknowledgements. A submission
 // still lends its bytes only until the matching acknowledgement is received.
 type captureSubmitter interface{ SubmitCapture([]byte, int, chan error) }
@@ -88,11 +95,15 @@ type captureBuffer struct {
 	buf       []byte
 	n         int
 	err       error
+	slots     chan struct{}
 	sink      *captureSink
 }
 
 func newCaptureBuffer(out Capture) captureBuffer {
 	b := captureBuffer{out: out}
+	if bounded, ok := out.(BoundedCapture); ok {
+		b.slots = bounded.CaptureSlots()
+	}
 	if s, ok := out.(ShardedCapture); ok {
 		for _, out := range s.CaptureShards() {
 			b.shards = append(b.shards, captureBuffer{out: out})
@@ -122,6 +133,10 @@ func (b *captureBuffer) point(name []byte, value float64, timestamp int64) {
 
 func (b *captureBuffer) flush() error {
 	if b.sink != nil {
+		if b.slots != nil && b.sink.direct.Load() == nil {
+			b.slots <- struct{}{}
+			defer func() { <-b.slots }()
+		}
 		b.sink.RLock()
 		defer b.sink.RUnlock()
 		if out := b.sink.direct.Load(); out != nil {
