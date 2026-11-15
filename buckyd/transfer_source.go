@@ -40,7 +40,12 @@ func (s *Service) transferSourceOrigin(source string) (*url.URL, error) {
 			return origin(node.Server), nil
 		}
 	}
-	for _, configured := range s.config.TransferSources {
+	snapshot := s.transferSources.Load()
+	var sources []string
+	if snapshot != nil {
+		sources = *snapshot
+	}
+	for _, configured := range sources {
 		host := configured
 		if name, configuredPort, err := net.SplitHostPort(configured); err == nil {
 			host = name
@@ -54,4 +59,12 @@ func (s *Service) transferSourceOrigin(source string) (*url.URL, error) {
 		}
 	}
 	return nil, &transferUpstreamError{403, "source is neither a ring node nor a configured transfer source"}
+}
+
+// SetTransferSources replaces the additional trusted origins for subsequent
+// transfer requests. Existing requests retain their already validated origin.
+// Copy the slice so callers cannot mutate a published authorization policy.
+func (s *Service) SetTransferSources(sources []string) {
+	snapshot := append([]string(nil), sources...)
+	s.transferSources.Store(&snapshot)
 }

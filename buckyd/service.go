@@ -68,6 +68,7 @@ type Config struct {
 	Nodes            []string `toml:"nodes"`
 	// TransferSources lists hosts, besides the ring nodes, that /v1/transfer/pull
 	// may fetch from, e.g. the members of another ring during a resize.
+	// Reloadable with SIGHUP.
 	TransferSources []string `toml:"transfer-sources"`
 	ReadMTime       bool     `toml:"mtime"`
 	Sparse          bool     `toml:"sparse"`
@@ -121,14 +122,15 @@ type Service struct {
 	nativeClosing          map[string]*nativeSourceSession
 	nativeSourceStopped    bool
 
-	config       Config
-	transferDebt atomic.Int64
-	store        *chunkstore.Store
-	whisperIO    *whisperio.Adapter
-	secret       []byte
-	authPending  atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
-	server       *http.Server
-	listener     net.Listener
+	config          Config
+	transferSources atomic.Pointer[[]string]
+	transferDebt    atomic.Int64
+	store           *chunkstore.Store
+	whisperIO       *whisperio.Adapter
+	secret          []byte
+	authPending     atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
+	server          *http.Server
+	listener        net.Listener
 	// transferActive counts admitted transfers against transferLimit, which
 	// SetMaxTransfers changes live (SIGHUP) without a restart.
 	transferActive, transferLimit atomic.Int64
@@ -174,6 +176,7 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
 	s.SetMaxTransfers(config.MaxTransfers)
+	s.SetTransferSources(config.TransferSources)
 	s.authPending.Store(waiting)
 	return s, nil
 }
