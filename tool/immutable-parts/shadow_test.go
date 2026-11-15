@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +45,14 @@ func openShadowTail(path string) (*shadowTail, error) {
 	}
 	s := &shadowTail{file: f, offset: 64}
 	if _, err = f.ReadAt(s.header[:], 0); err == nil {
-		s.replay, err = inputlog.NewSegmentReplay(f)
+		table := crc32.MakeTable(crc32.Castagnoli)
+		if string(s.header[:8]) != "GCINLOG1" || crc32.Checksum(s.header[:32], table) != binary.LittleEndian.Uint32(s.header[32:]) {
+			err = io.ErrUnexpectedEOF
+		} else if seq, e := strconv.ParseUint(strings.TrimSuffix(filepath.Base(path), ".log"), 16, 64); e == nil && seq != binary.LittleEndian.Uint64(s.header[8:]) {
+			err = io.ErrUnexpectedEOF
+		} else {
+			s.replay, err = inputlog.NewSegmentReplay(f)
+		}
 	}
 	if err != nil {
 		_ = f.Close()
@@ -52,6 +60,22 @@ func openShadowTail(path string) (*shadowTail, error) {
 	}
 	return s, nil
 }
+
+// A newly visible preallocated path can precede its new segment header.
+func readyShadowTail(path string) (*shadowTail, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s, err := openShadowTail(path)
+		if err == nil {
+			return s, nil
+		}
+		if (!errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) || time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func (s *shadowTail) close() { s.replay.Close(); _ = s.file.Close() }
 func (s *shadowTail) next() ([]*points.Points, int64, error) {
 	var header [64]byte
@@ -194,7 +218,7 @@ func TestLiveShadow(t *testing.T) {
 	// Start at the newest segment's dictionary prefix, never at an arbitrary
 	// byte offset. Older segments/history are deliberately outside this run.
 	path := paths[len(paths)-1]
-	tail, err := openShadowTail(path)
+	tail, err := readyShadowTail(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,6 +309,8 @@ func TestLiveShadow(t *testing.T) {
 		}
 	}
 	emit("shadow_start")
+	deadline = time.Now().Add(duration)
+	sampleAt = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if time.Now().After(sampleAt) {
 			emit("shadow_sample")
@@ -309,7 +335,7 @@ func TestLiveShadow(t *testing.T) {
 				seq := binary.LittleEndian.Uint64(tail.header[8:])
 				nextPath := filepath.Join(source, fmt.Sprintf("%016x.log", seq+1))
 				if _, e := os.Stat(nextPath); e == nil {
-					next, e := openShadowTail(nextPath)
+					next, e := readyShadowTail(nextPath)
 					if e != nil {
 						t.Fatal(e)
 					}
@@ -420,7 +446,7 @@ func TestShadowEngineInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer writer.Close()
-	want := []uint64{0x7ff8000000000042, 1 << 63}
+	want := []uint64{0x7ff8000000000042, 1 << 63, 1}
 	record := points.OnePoint("fixture", math.Float64frombits(want[0]), 123)
 	record.Add(math.Float64frombits(want[1]), 124)
 	if _, err = writer.Append([]*points.Points{record}, nil); err != nil {
@@ -435,9 +461,42 @@ func TestShadowEngineInput(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "sink")
 	t.Setenv("V2_SHADOW_LOG_DIR", source)
 	t.Setenv("V2_SHADOW_OUT", out)
-	t.Setenv("V2_SHADOW_DURATION", "25ms")
+	t.Setenv("V2_SHADOW_DURATION", "2s")
 	t.Setenv("V2_SHADOW_SHARDS", "2")
+	rotated := make(chan error, 1)
+	go func() {
+		// Opening the owner directories happens after the harness selects the
+		// initial segment, so the successor cannot race that initial choice.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, e := os.Stat(filepath.Join(out, "parts", "owner-001")); e == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				rotated <- errors.New("sink did not open")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		file, e := os.Create(filepath.Join(source, "0000000000000002.log"))
+		if e != nil {
+			rotated <- e
+			return
+		}
+		defer file.Close()
+		w, e := inputlog.NewSegmentWriter(file, 2)
+		if e != nil {
+			rotated <- e
+			return
+		}
+		defer w.Close()
+		_, e = w.Append([]*points.Points{points.OnePoint("fixture", math.Float64frombits(want[2]), 125)}, nil)
+		rotated <- e
+	}()
 	TestLiveShadow(t)
+	if e := <-rotated; e != nil {
+		t.Fatal(e)
+	}
 	cfg := coreConfig{AppendParts: true, JournalIdentity: fmt.Sprintf("shadow:%x", header), Shards: 2, Producers: 1, MaxRows: 262144, PartitionSeconds: 3600}
 	engine, err := openCore(filepath.Join(out, "parts"), cfg)
 	if err != nil {
@@ -451,7 +510,7 @@ func TestShadowEngineInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 {
+	if len(rows) != len(want) {
 		t.Fatalf("got %d rows", len(rows))
 	}
 	for i, r := range rows {
