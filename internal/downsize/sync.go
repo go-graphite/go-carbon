@@ -410,6 +410,10 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	stopProgress()
 	progressErr := err
 	if progressErr == nil && len(s.sum.residual) > 0 {
+		failedNames := s.reportRepairFailures()
+		j.mu.Lock()
+		j.progress.RepairFailedNames = int64(failedNames)
+		j.mu.Unlock()
 		progressErr = ErrSyncResidual
 		if jerr := j.append(syncRow{Kind: "verification-incomplete", Round: s.verificationBase + s.sum.Rounds}); jerr != nil {
 			err = errors.Join(err, jerr)
@@ -1076,6 +1080,7 @@ func (s *syncer) summary(err error) {
 		fields["verdict"] = "COMPLETE"
 	} else {
 		fields["verdict"] = "INCOMPLETE"
+		fields["level"] = "ERROR"
 	}
 	resolved := map[string]syncSkip{}
 	for _, r := range s.j.find(func(r syncRow) bool { return len(r.Resolved) > 0 }) {
