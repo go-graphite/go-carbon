@@ -237,22 +237,44 @@ func (l *loggedCore) followError() error {
 }
 
 // startReplay is called before opening intake, never concurrently with append.
-// Its ready channel reports the first recovered snapshot has entered each core
+// Its ready channel reports the frozen historical prefix has entered each core
 // stream. Intake may append before ready: the same followers consume that suffix
 // after the backlog, so a new cursor can never overtake old records.
 func (l *loggedCore) startReplay(ctx context.Context) <-chan error {
+	ready := make(chan error, 1)
+	tails, err := l.journal.RecoveredTails(ctx)
+	if err != nil {
+		ready <- err
+		close(ready)
+		return ready
+	}
 	ctx, l.cancel = context.WithCancel(ctx)
 	from := l.frontier()
 	l.followers = make(chan error, len(from))
-	ready := make(chan error, 1)
 	initial := make(chan error, len(from))
 	for p, c := range from {
 		go func() {
 			announced := false
-			err := l.journal.Follow(ctx, p, c, func(r partlog.Record) error { return l.apply(p, r, false) }, func(last uint64) error {
+			announce := func() {
 				if !announced {
 					announced = true
 					initial <- nil
+				}
+			}
+			if c >= tails[p] {
+				announce()
+			}
+			err := l.journal.Follow(ctx, p, c, func(r partlog.Record) error {
+				if err := l.apply(p, r, false); err != nil {
+					return err
+				}
+				if r.Cursor >= tails[p] {
+					announce()
+				}
+				return nil
+			}, func(last uint64) error {
+				if last >= tails[p] {
+					announce()
 				}
 				return nil
 			})
