@@ -17,7 +17,10 @@ The source must use the current input-log format. Run only with an explicitly
 approved resource window on a shared host.
 
 Byte counts are logical bytes, including source framing and 32 bytes per PDC2
-record. PDC2 dictionaries reset per source segment; each source frame is split
+record. FirstArrival nanoseconds are preserved by default, including zero.
+`-arrival-seconds` explicitly selects a lossy whole-second diagnostic; that mode
+must never be described as full-fidelity source-record compression.
+PDC2 dictionaries reset per source segment; each source frame is split
 at a conservative 4MiB expanded estimate. Metadata definitions are empty: the
 reported journal cost excludes placement/policy metadata and checkpoints. The
 probe writes no journal or database and does not measure physical writes,
@@ -25,7 +28,8 @@ compaction, seals, fsync latency, SSTs, read latency or throughput capacity.
 It cannot establish an at-rest compression ratio.
 
 `-archives /path/to/exports` instead reads complete native transfer-v2 responses,
-decodes full physical archives, counts occupied points and configured capacity,
+decodes complete native snapshot archives (including computed rollup tails),
+counts exported occupied entries and configured capacity,
 and re-encodes the same slots with the exact packed-block encoder, including
 its raw IEEE fallback for ring images outside the ordinary codec domain. Every
 decoded timestamp and value bit is checked, including fallback blocks. The

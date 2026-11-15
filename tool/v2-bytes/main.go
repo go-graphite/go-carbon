@@ -73,6 +73,7 @@ func main() {
 	part := flag.Int("partition", -1, "select one independent input-log partition (0-15), -1 all")
 	limit := flag.Int("segments", 7, "oldest complete segments, newest excluded")
 	wait := flag.Int("wait", 0, "seconds to hold read descriptors before decoding")
+	secondClock := flag.Bool("arrival-seconds", false, "lossy arrival-clock diagnostic; default preserves nanoseconds")
 	manifest := flag.Bool("manifest", false, "headers only")
 	archives := flag.String("archives", "", "directory of complete native .transfer exports")
 	flag.Parse()
@@ -99,7 +100,7 @@ func main() {
 		defer s.f.Close()
 		segs = append(segs, s)
 	}
-	emit(map[string]any{"stage": "manifest", "segments": segs, "when_cet": time.Now().Format(time.RFC3339)})
+	emit(map[string]any{"stage": "manifest", "arrival_seconds": *secondClock, "segments": segs, "when_cet": time.Now().Format(time.RFC3339)})
 	if *manifest {
 		return
 	}
@@ -169,9 +170,9 @@ func main() {
 				if size+sz > 4<<20 {
 					flush()
 				}
-				clock := p.FirstArrival / 1e9
-				if clock == 0 {
-					clock = p.Data[0].Timestamp
+				clock := p.FirstArrival
+				if *secondClock {
+					clock /= 1e9
 				}
 				fs = append(fs, partlog.DictionaryFrame{Key: p.Metric, Clock: clock, Points: p.Data})
 				size += sz
