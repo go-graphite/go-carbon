@@ -23,6 +23,8 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// keepFetchBlockAllocations retains independent decode arrays as an oracle.
+	keepFetchBlockAllocations bool
 	// keepReferenceRetirementReads retains repeated alias probes as a test oracle.
 	keepReferenceRetirementReads bool
 	// keepDenseSumReads retains the canonical window reader as a test oracle.
@@ -827,6 +829,10 @@ func (c *ContinuationCodec) Fetch(ctx context.Context, kv store.ContinuationIO, 
 	defer w.Close()
 	if !w.IsCompressed() {
 		return fetchClassic(ctx, w, m, int(clock().Unix()), from, until)
+	}
+	if !c.keepFetchBlockAllocations && !fs.rangeReads {
+		workspace := borrowFetchBlock(fs)
+		defer releaseFetchBlock(fs, workspace)
 	}
 	series, err := w.Fetch(from, until)
 	if err != nil || series == nil {

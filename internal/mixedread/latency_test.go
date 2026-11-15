@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -33,9 +35,19 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy3" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
+	seed := int64(1)
+	if value := os.Getenv("GO_CARBON_MIXED_SEED"); value != "" {
+		var err error
+		seed, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rng := rand.New(rand.NewSource(seed))
+	fmt.Printf("MATCHED seed=%d comparison=%q; OS page cache retained\n", seed, path)
 	const clock int64 = 1794700800
 	dir, e := os.MkdirTemp(root, "latency-")
 	if e != nil {
@@ -162,10 +174,21 @@ func TestLatencyComparison(t *testing.T) {
 		_ = full.Close()
 	}
 	when := time.Now().In(time.FixedZone("CET", 3600)).Format("2006-01-02 15:04:05")
-	fmt.Println("| When (CET) | Class | Legacy p50 us | Mixed p50 us | Legacy p99 us | Mixed p99 us | Gate |")
+	comparison := "Mixed"
+	if path == "frozen" {
+		comparison = "Frozen"
+	}
+	fmt.Printf("| When (CET) | Class | Native p50 us | %s p50 us | Native p99 us | %s p99 us | Gate |\n", comparison, comparison)
 	fmt.Println("|---|---|---:|---:|---:|---:|---|")
-	for _, warm := range []bool{true, false} {
-		for _, width := range []int64{3600, 86400, 7 * 86400, 30 * 86400} {
+	warmOrder := []bool{true, false}
+	rng.Shuffle(len(warmOrder), func(i, j int) { warmOrder[i], warmOrder[j] = warmOrder[j], warmOrder[i] })
+	widths := []int64{3600, 86400, 7 * 86400, 30 * 86400}
+	rng.Shuffle(len(widths), func(i, j int) { widths[i], widths[j] = widths[j], widths[i] })
+	for _, warm := range warmOrder {
+		if path == "frozen" && !warm {
+			continue
+		}
+		for _, width := range widths {
 			var base, mix []int64
 			var baseBytes, mixedBytes uint64
 			old, full, r := open()
@@ -189,13 +212,31 @@ func TestLatencyComparison(t *testing.T) {
 			}
 			closePair(old, full)
 			old, full, r = open()
-			count := 200
+			count := 1000
 			if profile {
 				count = 2000
 			}
 			if !warm {
-				count = 30
+				count = 100
 			}
+			// Both warm paths complete their native lazy initialization first.
+			// Cold samples still use fresh block caches; no OS cache flush.
+			if warm {
+				for range 10 {
+					if _, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock)); err != nil {
+						t.Fatal(err)
+					}
+					if err := r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil }); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			frozen, err := old.ResolveFrozen(ctx, cfg.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base = make([]int64, 0, count)
+			mix = make([]int64, 0, count)
 			measure := func(mixed bool) {
 				var before, after runtime.MemStats
 				if profile {
@@ -213,11 +254,15 @@ func TestLatencyComparison(t *testing.T) {
 				a := time.Now()
 				var err error
 				if mixed {
-					if path == "legacy" {
+					if path == "frozen" {
+						_, err = old.FetchFrozen(ctx, frozen, int(clock-width), int(clock))
+					} else if path == "legacy" {
 						_, err = old.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 					} else {
 						err = r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
 					}
+				} else if path == "frozen" {
+					_, err = old.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 				} else {
 					_, err = full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 				}
@@ -246,8 +291,12 @@ func TestLatencyComparison(t *testing.T) {
 			for i := 0; i < count; i++ {
 				if !warm && i > 0 {
 					old, full, r = open()
+					frozen, err = old.ResolveFrozen(ctx, cfg.Name)
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
-				if i%2 == 0 {
+				if rng.Intn(2) == 0 {
 					measure(false)
 					measure(true)
 				} else {
@@ -278,6 +327,9 @@ func TestLatencyComparison(t *testing.T) {
 			fmt.Printf("| %s | %s %dh | %.1f | %.1f | %.1f | %.1f | %s |\n", when, kind, width/3600, float64(bp)/1000, float64(mp)/1000, float64(bq)/1000, float64(mq)/1000, gate)
 		}
 	}
+	if path == "frozen" {
+		return
+	}
 	old, full, r := open()
 	defer closePair(old, full)
 	var nativeNames, mixedNames []string
@@ -290,7 +342,7 @@ func TestLatencyComparison(t *testing.T) {
 	if !slices.Equal(nativeNames, mixedNames) {
 		t.Fatal("latency find fixture names mismatch")
 	}
-	var base, mix []int64
+	base, mix := make([]int64, 0, 1000), make([]int64, 0, 1000)
 	var before, after runtime.MemStats
 	var baseBytes, mixedBytes uint64
 	measureFind := func(mixed bool, sample int) {
@@ -336,7 +388,7 @@ func TestLatencyComparison(t *testing.T) {
 		}
 	}
 	for sample := range 1000 {
-		if sample%2 == 0 {
+		if rng.Intn(2) == 0 {
 			measureFind(false, sample)
 			measureFind(true, sample)
 		} else {

@@ -25,11 +25,11 @@ var continuationNames atomic.Uint64
 // Only headers and file identities stay in memory. Historical values live in
 // shared exact blocks; no raw Whisper body or per-metric OS file is retained.
 type continuationFiles struct {
-	// snapshotReads is enabled only after private OOO folding has finished.
-	// Archive materialization then performs no writes.
+	// snapshotReads permits borrowed block scratch for immutable reads. Fetch
+	// never writes; snapshots enable it only after private OOO folding finishes.
 	snapshotReads bool
 	// storedPoints copies a physical block's values before requesting another
-	// block. Only immutable archive snapshots may borrow this decode buffer.
+	// block. Only immutable read operations may borrow this decode buffer.
 	snapshotBlock    []whisper.TimeSeriesPoint
 	snapshotBlockKey verifiedBlockKey
 	snapshotBlockOK  bool
