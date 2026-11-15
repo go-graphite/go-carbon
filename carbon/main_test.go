@@ -1,13 +1,12 @@
 package carbon
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -15,9 +14,31 @@ import (
 
 const testHandoffSuccessorDir = "GRAPHITE_TEST_HANDOFF_SUCCESSOR_DIR"
 
-// Use persistent immutable stubs so macOS need not assess new executables
-// during a handoff. Isolated cases inherit the warmed paths and protocols.
+// Capability probes execute this same test binary through named symlinks.
+// This retains real subprocess probing without shell-script assessment during
+// a timed handoff. Isolated cases inherit the paths.
 func TestMain(m *testing.M) {
+	// Answer before storage fixtures, scheduler changes, or testing flag parsing.
+	// The symlink basename is the successor's advertised capability set.
+	if len(os.Args) > 1 {
+		probe := map[string]struct{ capability, protocol string }{
+			"-handoff-protocol":              {"read", handoff.Protocol},
+			"-input-handoff-protocol":        {"input", handoff.InputProtocol},
+			"-shared-store-handoff-protocol": {"shared", handoff.SharedStoreProtocol},
+			"-store-input-handoff-protocol":  {"store-input", handoff.StoreInputProtocol},
+		}
+		if p, ok := probe[os.Args[1]]; ok {
+			for _, capability := range strings.Split(filepath.Base(os.Args[0]), ",") {
+				if capability == p.capability {
+					fmt.Println(p.protocol)
+					os.Exit(0)
+				}
+			}
+			os.Exit(2)
+		}
+	}
+	var probeDir string
+
 	// Integration fixtures write only a few MiB. Production's percentage-based
 	// reserve can exceed all remaining space on a shared development machine,
 	// intentionally blocking capture forever. Give fixtures stable headroom,
@@ -46,30 +67,23 @@ func TestMain(m *testing.M) {
 		_ = os.Setenv(key, value)
 	}
 	if os.Getenv(testHandoffSuccessorDir) == "" {
-		dir := filepath.Join("testdata", "handoff-probes")
-		if _, err := os.Stat(dir); err != nil {
-			// Standalone test binaries may be invoked from the repository root.
-			dir = filepath.Join("carbon", dir)
+		binary, err := os.Executable()
+		if err == nil {
+			probeDir, err = os.MkdirTemp("", "carbon-handoff-probes-")
 		}
-		dir, err := filepath.Abs(dir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		for _, capabilities := range []string{"read,shared", "read,shared,input", "read,input", "read,input,store-input"} {
-			for _, flag := range []string{"-handoff-protocol", "-input-handoff-protocol", "-shared-store-handoff-protocol", "-store-input-handoff-protocol"} {
-				// Warm the rejection paths too: macOS executable assessment
-				// must not consume a timed rollback handoff's input window.
-				if err := exec.Command(filepath.Join(dir, capabilities), flag).Run(); err != nil {
-					var exit *exec.ExitError
-					if !errors.As(err, &exit) || exit.ExitCode() != 2 {
-						fmt.Fprintln(os.Stderr, err)
-						os.Exit(1)
-					}
+		if err == nil {
+			for _, capabilities := range []string{"read,shared", "read,shared,input", "read,input", "read,input,store-input"} {
+				if err = os.Symlink(binary, filepath.Join(probeDir, capabilities)); err != nil {
+					break
 				}
 			}
 		}
-		_ = os.Setenv(testHandoffSuccessorDir, dir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			_ = os.RemoveAll(probeDir)
+			os.Exit(1)
+		}
+		_ = os.Setenv(testHandoffSuccessorDir, probeDir)
 	}
 	var seedDir string
 	if os.Getenv(incrementalSeedEnv) == "" {
@@ -89,6 +103,9 @@ func TestMain(m *testing.M) {
 		}
 	}
 	code := m.Run()
+	if probeDir != "" {
+		_ = os.RemoveAll(probeDir)
+	}
 	if seedDir != "" {
 		_ = os.RemoveAll(seedDir)
 	}
