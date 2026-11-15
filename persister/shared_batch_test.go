@@ -323,6 +323,10 @@ func TestSharedBatchStagePartition(t *testing.T) {
 	if total <= 0 || math.Abs(sum-total) > total*.01 {
 		t.Fatalf("stages %.9f total %.9f", sum, total)
 	}
+	other := after[stagetime.Other].Seconds - before[stagetime.Other].Seconds
+	if other > total*.01 {
+		t.Fatalf("named stages cover only %.3f%% of total", 100*(sum-other)/total)
+	}
 	for _, s := range []stagetime.Stage{stagetime.CachePop, stagetime.Publish, stagetime.Acknowledge, stagetime.Other} {
 		if after[s].Calls == before[s].Calls {
 			t.Fatalf("stage %s absent", s)

@@ -54,6 +54,9 @@ func TestStageBatchPartition(t *testing.T) {
 		t.Fatalf("partition %.9fs total %.9fs", sum, total)
 	}
 	other := after[stagetime.Other].Seconds - before[stagetime.Other].Seconds
+	if other > total*.01 {
+		t.Fatalf("named stages cover only %.3f%% of total", 100*(sum-other)/total)
+	}
 	t.Logf("total %.6fs; other %.6fs (%.3f%%); named %.3f%%", total, other, 100*other/total, 100*(sum-other)/total)
 	// The residual is visible even if future work is added outside named stages.
 	if after[stagetime.Other].Calls == before[stagetime.Other].Calls {
