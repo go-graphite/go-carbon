@@ -309,3 +309,34 @@ func TestSwitchCaptureJoinsBoundedWorkWith280Handlers(t *testing.T) {
 		t.Fatalf("gap/duplicate: captured %d direct %d", captured.Load(), direct.Load())
 	}
 }
+
+// Empty protocol frames must progress even when every durable admission slot
+// and the exclusive direct-switch fence are occupied.
+func TestEmptyCaptureFlushDoesNotWaitForDurableAdmission(t *testing.T) {
+	for _, sharded := range []bool{false, true} {
+		slots := make(chan struct{}, 1)
+		slots <- struct{}{}
+		out := boundedCaptureProbe{Capture: captureFunc(func([]byte, int) error { t.Error("empty write"); return nil }), slots: slots}
+		b := newCaptureBuffer(out)
+		if sharded {
+			b.shards = []captureBuffer{{out: out}}
+		}
+		b.sink = &captureSink{}
+		b.sink.Lock()
+		done := make(chan error, 1)
+		go func() { done <- b.flush() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(time.Second):
+			b.sink.Unlock()
+			<-slots
+			<-done
+			t.Fatal("empty flush waited for disk/fence")
+		}
+		b.sink.Unlock()
+		<-slots
+	}
+}

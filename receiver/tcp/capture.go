@@ -175,6 +175,20 @@ func (b *captureBuffer) point(name []byte, value float64, timestamp int64) {
 }
 
 func (b *captureBuffer) flush() error {
+	// Protocol reset frames and a frame ending exactly on the batch boundary
+	// carry no outstanding work. Do not queue them behind durable submissions.
+	empty := b.n == 0 && b.pending == nil && !b.submitted
+	for i := range b.shards {
+		part := &b.shards[i]
+		if b.err == nil {
+			b.err = part.err
+		}
+		empty = empty && part.n == 0 && part.pending == nil && !part.submitted
+	}
+	if empty {
+		return b.err
+	}
+
 	if b.sink != nil {
 		if b.slots != nil && b.sink.direct.Load() == nil {
 			started := time.Now()
