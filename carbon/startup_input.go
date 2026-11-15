@@ -29,6 +29,15 @@ import (
 // existing protocol, including when upgrading from a predecessor that does not
 // know about startup capture. Mirrored read handoff retains its existing path.
 func (app *App) startStartupInput() error {
+	if app.Config.InputLog.StartupAppend {
+		if err := app.tryStartupInput(); err != nil {
+			return err
+		}
+		if app.startupInput == nil {
+			return errors.New("startup input log requires compatible recovery state and sufficient headroom")
+		}
+		return nil
+	}
 	resume, err := readStartupResume(app.Config.Dump.Path)
 	if err != nil {
 		return err
@@ -56,12 +65,15 @@ func (app *App) tryStartupInput() error {
 	}
 	c := app.Config
 	resume, resumeErr := readStartupResume(c.Dump.Path)
+	if c.InputLog.StartupAppend && legacyStartupPresent(c.Dump.Path) {
+		resume, resumeErr = nil, nil
+	}
 	if resumeErr != nil {
 		return resumeErr
 	}
 	if !c.Dump.StoreInputHandoff || !c.Dump.Enabled ||
 		c.Whisper.StorageBackend != "pebble-chunk" || c.Whisper.StoreMirrorFiles ||
-		c.Tags.Enabled || !c.Tcp.Enabled || c.Tcp.BufferSize != 0 || c.Tcp.Compression != "" ||
+		(c.Tags.Enabled && !c.InputLog.StartupAppend) || !c.Tcp.Enabled || c.Tcp.BufferSize != 0 || c.Tcp.Compression != "" ||
 		c.Udp.Enabled || c.Pickle.Enabled || len(c.Receiver) != 0 {
 		return nil
 	}
@@ -118,7 +130,7 @@ func (app *App) tryStartupInput() error {
 		// a checkpoint. Ordinary journal validation remains authoritative.
 		manifest = recovery.Manifest{}
 		manifest.WAL.Name = "input.journal-recovery.bin"
-	} else if missingCheckpoint {
+	} else if missingCheckpoint && !c.InputLog.StartupAppend {
 		return nil
 	}
 	if scanErr != nil {
@@ -133,7 +145,7 @@ func (app *App) tryStartupInput() error {
 	for _, entry := range entries {
 		name := entry.Name()
 		generation := strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, recovery.CompactPrefix) || strings.HasPrefix(name, recovery.BlocksPrefix) || strings.HasPrefix(name, "input.") || strings.HasPrefix(name, recovery.CompactInputPrefix)
-		if resume == nil && generation && name != manifest.Cache.Name && name != manifest.WAL.Name && !recovery.IsGenerationTail(name, manifest.WAL.Name) {
+		if !c.InputLog.StartupAppend && resume == nil && generation && name != manifest.Cache.Name && name != manifest.WAL.Name && !recovery.IsGenerationTail(name, manifest.WAL.Name) {
 			zapwriter.Logger("app").Error("startup capture requires a single ordered recovery generation; using ordinary recovery", zap.String("filename", name))
 			return nil
 		}
@@ -145,10 +157,13 @@ func (app *App) tryStartupInput() error {
 			orphanedCapture = info.Size() > 0 || isStartupDirectFence(name)
 		}
 	}
-	if app.handoffClaim == nil && !orphanedCapture && !journalOnly {
+	if app.handoffClaim == nil && !orphanedCapture && !journalOnly && !c.InputLog.StartupAppend {
 		return nil
 	}
 	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
+	if c.InputLog.StartupAppend {
+		policy.shards = 0
+	}
 	policy.log()
 	if policy.available < 64<<20 || policy.spoolBytes < 64<<20 {
 		state := &startupInput{policy: policy, sealed: make(chan struct{})}
@@ -194,12 +209,37 @@ func (app *App) tryStartupInput() error {
 			return errors.New("store input handoff has no TCP receiver")
 		}
 	}
+	// The predecessor can still own the journal until its socket transfer is
+	// committed. Take disk ownership after TakeInput, before any receiver starts
+	// acknowledging new input or any cache/storage allocation begins.
+	if c.InputLog.StartupAppend {
+		discarded, err := app.discardLegacyStartup()
+		if err != nil {
+			closeTCPHandoff(h)
+			return err
+		}
+		if discarded {
+			resume = nil
+		}
+	}
+	if err := app.ownInputLog(); err != nil {
+		closeTCPHandoff(h)
+		return err
+	}
+	if manifest.WAL.Name == "" {
+		manifest.WAL.Name = "input.journal-recovery.bin"
+	}
 	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
 	if err != nil {
 		closeTCPHandoff(h)
 		return err
 	}
 	spool.resume = resume
+	if c.InputLog.StartupAppend {
+		log := app.inputLog.Load()
+		log.StartAppend()
+		spool.journal = newStartupJournal(spool, log, c.InputLog.Path, c.Tags.Enabled)
+	}
 	if receiverStoreHook != nil {
 		spool.observe, _ = receiverStoreHook(func(*points.Points) {}, func([]byte, float64, int64) {})
 	}
@@ -266,7 +306,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			s.receiver.SetStreamNameResolver(core.ResolveStreamName)
 		}
 	}
-	if log := app.inputLog.Load(); log != nil && app.Config.InputLog.Enabled {
+	if log := app.inputLog.Load(); log != nil && app.Config.InputLog.Enabled && s.journal == nil {
 		sink.startLog = func() (func() error, error) {
 			log := app.inputLog.Load()
 			if log == nil {
@@ -385,6 +425,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			}
 		}
 		replayLog := func() error {
+			if s.journal != nil {
+				return nil
+			}
 			if s.historyLog.Load() != nil {
 				return nil
 			}
@@ -394,7 +437,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			s.historyLog.Store(seg)
 			// The journal may have been retired and replaced since this cursor
 			// committed. Its per-segment salts decide which prefixes still match.
-			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, seg.source)
 			if err == nil {
 				seg.sealed.Store(true)
 				seg.replayed.Store(true)

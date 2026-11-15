@@ -190,7 +190,7 @@ func TestInputLogRequeueKeepsSegments(t *testing.T) {
 // longer pins the segments behind it.
 func TestInputLogRelogsStragglers(t *testing.T) {
 	dir := t.TempDir()
-	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Hour}
+	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: time.Nanosecond}
 	c := New()
 	c.SetMaxSize(0)
 	l, _ := startInputLog(t, dir, c, opts)
@@ -236,7 +236,7 @@ func TestInputLogRelogsStragglers(t *testing.T) {
 // from Data, which a queued item does not hold.
 func TestInputLogRelogsQueuedStragglers(t *testing.T) {
 	dir := t.TempDir()
-	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: 3 * time.Hour}
+	opts := inputlog.Options{SegmentSize: 16 << 10, SyncInterval: time.Hour, MaxAge: time.Nanosecond}
 	c := New()
 	c.SetMaxSize(0)
 	l, _ := startInputLog(t, dir, c, opts)

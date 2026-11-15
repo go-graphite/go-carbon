@@ -483,7 +483,8 @@ func TestStartupResumeSelectsCursorWithoutOriginalManifest(t *testing.T) {
 	next.Config = NewConfig()
 	cfg := next.Config
 	cfg.Dump.Enabled, cfg.Dump.StoreInputHandoff, cfg.Dump.Path = true, true, filepath.Dir(s.path)
-	cfg.InputLog.Enabled = true
+	cfg.InputLog.Enabled, cfg.InputLog.Path = true, t.TempDir()
+	defer next.closeInputLog()
 	cfg.Whisper.StorageBackend = "pebble-chunk"
 	cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 	cfg.Udp.Enabled, cfg.Pickle.Enabled = false, false
@@ -617,7 +618,7 @@ func TestStartupResumePartialJournalSnapshot(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- app.replayInputLogWith(app.Cache, s.replayStop, cfg.InputLog.Path, true, app.Cache.AddRecovered)
+		done <- app.replayInputLogWith(app.Cache, s.replayStop, cfg.InputLog.Path, true, nil)
 	}()
 	awaitCapture(t, func() bool { return app.Cache.Size() > 0 })
 	close(s.replayStop)

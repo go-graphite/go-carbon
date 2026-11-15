@@ -141,6 +141,21 @@ func NewSegmentReplay(reader io.ReaderAt) (*SegmentReplay, error) {
 }
 func (r *SegmentReplay) Close() { r.dec.Close() }
 func (r *SegmentReplay) Next(frontier int64) ([]*points.Points, int64, int, error) {
+	return r.next(frontier, -1)
+}
+
+// NextPartition advances one independent partition reader through a committed
+// frontier. Other partitions require header reads only. Each owner retains its
+// own dictionary and payload buffers while the writer grows the segment.
+func (r *SegmentReplay) NextPartition(frontier int64, partition uint16) ([]*points.Points, int64, int, error) {
+	if partition >= partitions {
+		return nil, r.offset, 0, errors.New("invalid input log partition")
+	}
+	return r.next(frontier, int(partition))
+}
+func (r *SegmentReplay) Identity() (uint64, uint64) { return r.seg.seq, r.seg.salt }
+func (r *SegmentReplay) next(frontier int64, partition int) ([]*points.Points, int64, int, error) {
+again:
 	if r.offset == frontier {
 		return nil, r.offset, 0, io.EOF
 	}
@@ -158,6 +173,10 @@ func (r *SegmentReplay) Next(frontier int64) ([]*points.Points, int64, int, erro
 	end := r.offset + frameHeaderSize + int64(h.length)
 	if end > frontier {
 		return nil, r.offset, 0, io.ErrUnexpectedEOF
+	}
+	if partition >= 0 && int(h.partition) != partition {
+		r.offset = end
+		goto again
 	}
 	if cap(r.payload) < int(h.length) {
 		r.payload = make([]byte, h.length)

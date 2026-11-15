@@ -224,10 +224,19 @@ type Log struct {
 	pressure <-chan struct{}
 	copies   chan copyRequest
 	copyPin  *Position
-	stop     chan struct{}
-	done     chan struct{}
-	started  bool
-	closed   bool
+	// replayPin protects the immutable Open inventory while the writer runs.
+	// Only the writer may release it, after all replay owners have joined.
+	replayPin    *Position
+	replayDone   chan chan error
+	appends      chan appendRequest
+	appendPin    *Position
+	appendErr    error
+	attaches     chan sourceAttachment
+	appendStates chan appendStateRequest
+	stop         chan struct{}
+	done         chan struct{}
+	started      bool
+	closed       bool
 
 	stat  stats
 	total totals
@@ -475,7 +484,39 @@ func (l *Log) NeedsReplay() bool { return len(l.pending) > 0 }
 // Start begins group commit for the shards of src. Points Replay found are
 // kept until src reports them persisted at generation zero.
 func (l *Log) Start(src Source, shards int) {
+	l.start(src, shards, false)
+}
+
+// StartRecovery starts group commit without consuming Open's immutable replay
+// inventory. The writer can commit new input while independent readers apply
+// the historical prefix. CompleteRecovery must follow a successful joined
+// replay; cancellation keeps the prefix pinned until Close.
+func (l *Log) StartRecovery(src Source, shards int) {
+	if len(l.pending) > 0 {
+		l.replayPin = &Position{Segment: l.pending[0].seg.seq, Offset: l.pending[0].off}
+	}
+	l.start(src, shards, true)
+}
+
+func (l *Log) start(src Source, shards int, preserveReplay bool) {
+	l.setSource(src, shards)
+	l.workers = make([]workerBuffer, l.opts.Workers)
+	l.enc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest),
+		zstd.WithEncoderConcurrency(l.opts.Workers), zstd.WithEncoderCRC(false))
+	l.adoptRecovered(preserveReplay)
+	l.syncs, l.stop, l.done = make(chan chan error), make(chan struct{}), make(chan struct{})
+	l.copies = make(chan copyRequest)
+	l.replayDone = make(chan chan error)
+	l.appends = make(chan appendRequest)
+	l.attaches = make(chan sourceAttachment)
+	l.appendStates = make(chan appendStateRequest)
+	l.started = true
+	go l.run()
+}
+
+func (l *Log) setSource(src Source, shards int) {
 	l.src = src
+	l.pressure = nil
 	if source, ok := src.(PressureSource); ok {
 		l.pressure = source.LogPressure()
 	}
@@ -486,32 +527,66 @@ func (l *Log) Start(src Source, shards int) {
 	} else {
 		l.spare = make([][]Entry, l.shardsPer*partitions)
 	}
-	l.workers = make([]workerBuffer, l.opts.Workers)
-	l.enc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest),
-		zstd.WithEncoderConcurrency(l.opts.Workers), zstd.WithEncoderCRC(false))
-	l.adoptRecovered()
-	l.syncs, l.stop, l.done = make(chan chan error), make(chan struct{}), make(chan struct{})
-	l.copies = make(chan copyRequest)
-	l.started = true
-	go l.run()
 }
 
 // adoptRecovered keeps the segments from the replay start on, pinned at
 // generation zero with the items Replay loaded, and recycles the rest.
-func (l *Log) adoptRecovered() {
+func (l *Log) adoptRecovered(preserveReplay bool) {
 	first := uint64(0)
 	if len(l.pending) > 0 {
 		first = l.pending[0].seg.seq
 		l.ticks = append(l.ticks, tick{gen: 0, pos: position{first, l.pending[0].off}, at: time.Now()})
 	}
 	for _, seg := range l.recovered {
-		if len(l.pending) > 0 && seg.seq >= first {
+		if seg == l.active || len(l.pending) > 0 && seg.seq >= first {
 			l.live = append(l.live, seg)
 		} else {
 			l.free(seg)
 		}
 	}
-	l.recovered, l.prefix, l.pending = nil, nil, nil
+	l.recovered = nil
+	if !preserveReplay {
+		l.prefix, l.pending = nil, nil
+	}
+}
+
+// CompleteRecovery transfers historical retention to the cache's generation
+// low water. Replayed points were inserted at different CURRENT generations;
+// generation zero is not their persistence authority once the writer is live.
+// Call only after ReplayStoppedFrom has joined every reader successfully.
+func (l *Log) CompleteRecovery() error {
+	if !l.started {
+		return ErrClosed
+	}
+	reply := make(chan error, 1)
+	select {
+	case l.replayDone <- reply:
+		return <-reply
+	case <-l.done:
+		return ErrClosed
+	}
+}
+
+func (l *Log) completeRecovery() error {
+	if l.replayPin != nil {
+		from := position{l.replayPin.Segment, l.replayPin.Offset}
+		// Every historical insertion precedes this writer fence. Retaining
+		// through the next generation is conservative even when the source
+		// advanced its shard generations during replay.
+		for _, seg := range l.live {
+			seg.maxGen = max(seg.maxGen, l.gen)
+		}
+		for i := range l.ticks {
+			l.ticks[i].gen = max(l.ticks[i].gen, l.gen)
+		}
+		// The cache may have been empty before replay inserted its first
+		// point; truncate can already have removed the original zero tick.
+		l.ticks = append([]tick{{gen: l.gen, pos: from, at: time.Now()}}, l.ticks...)
+		l.replayPin = nil
+	}
+	l.prefix, l.pending = nil, nil
+	// Commit the new replay boundary before any subsequent recycling.
+	return l.cycle()
 }
 
 func (l *Log) run() {
@@ -528,6 +603,23 @@ func (l *Log) run() {
 		case reply = <-l.syncs:
 		case request := <-l.copies:
 			l.copyRequest(request)
+			continue
+		case reply := <-l.replayDone:
+			reply <- l.completeRecovery()
+			continue
+		case first := <-l.appends:
+			l.appendCycle(first)
+			continue
+		case request := <-l.appendStates:
+			l.appendState(request)
+			continue
+		case attachment := <-l.attaches:
+			if l.src != nil {
+				attachment.reply <- errors.New("input log already has a source")
+				continue
+			}
+			l.setSource(attachment.src, attachment.shards)
+			attachment.reply <- l.cycle()
 			continue
 		case <-l.stop:
 			return
@@ -612,6 +704,9 @@ func (l *Log) closeFiles() {
 // cycle commits one generation: everything the shards recorded before
 // switching to the next one. A cycle's frames all go to one segment.
 func (l *Log) cycle() error {
+	if l.src == nil {
+		return l.appendErr
+	}
 	started := time.Now()
 	gen := l.gen
 	l.gen++
@@ -741,6 +836,18 @@ func (l *Log) write(gen, seq uint64) error {
 			from = p
 		}
 	}
+	if l.replayPin != nil {
+		p := position{l.replayPin.Segment, l.replayPin.Offset}
+		if p.less(from) {
+			from = p
+		}
+	}
+	if l.appendPin != nil {
+		p := position{l.appendPin.Segment, l.appendPin.Offset}
+		if p.less(from) {
+			from = p
+		}
+	}
 	rolled := seg.end == segmentHeaderSize
 	for p := range l.parts {
 		part := &l.parts[p]
@@ -761,7 +868,11 @@ func (l *Log) write(gen, seq uint64) error {
 		l.steady = seg.end - first.off
 	}
 	errs = errors.Join(errs, l.flush(), l.syncDirty())
-	l.ticks = append(l.ticks, tick{gen: gen, pos: first, at: time.Now()})
+	// Many durable append groups can share a cache generation. Keep its first
+	// position/time, rather than retaining metadata for every socket buffer.
+	if len(l.ticks) == 0 || l.ticks[len(l.ticks)-1].gen != gen {
+		l.ticks = append(l.ticks, tick{gen: gen, pos: first, at: time.Now()})
+	}
 	if errs != nil {
 		l.total.writeErrors.Add(1)
 		l.logger.Error("input log write failed; points of this cycle are not durable", zap.Error(errs))
@@ -912,16 +1023,34 @@ func (l *Log) truncate() (relog time.Duration) {
 	for len(l.ticks) > 0 && l.ticks[0].gen < l.durable {
 		l.ticks = l.ticks[1:]
 	}
-	for l.copyPin == nil && len(l.live) > 0 && l.live[0] != l.active && l.live[0].maxGen < l.durable {
+	for l.copyPin == nil && l.replayPin == nil && l.appendPin == nil && len(l.live) > 0 && l.live[0] != l.active && l.live[0].maxGen < l.durable {
 		l.free(l.live[0])
 		l.live = l.live[1:]
 	}
-	if age := max(uint64(l.opts.MaxAge/l.opts.SyncInterval), 2); l.gen > age && low < l.gen-age {
-		at := time.Now()
-		n := int64(l.src.RelogBefore(l.gen-age, relogBudget))
-		relog = time.Since(at)
-		l.stat.relogged.Add(n)
-		l.total.relogged.Add(n)
+	// Independent recovery readers still consume the original suffix. Relogging
+	// older cache values into it would reorder corrections and feed replay back
+	// into itself, even if MaxAge has really elapsed.
+	if l.appendPin == nil && l.replayPin == nil {
+		var before uint64
+		for _, tick := range l.ticks {
+			if now.Sub(tick.at) < l.opts.MaxAge {
+				break
+			}
+			before = max(before, tick.gen+1)
+		}
+		// Keep the current and preceding collection generations out of relog.
+		if l.gen > 1 {
+			before = min(before, l.gen-1)
+		} else {
+			before = 0
+		}
+		if low < before {
+			at := time.Now()
+			n := int64(l.src.RelogBefore(before, relogBudget))
+			relog = time.Since(at)
+			l.stat.relogged.Add(n)
+			l.total.relogged.Add(n)
+		}
 	}
 	l.updateGauges(now, low)
 	l.stat.liveSegments.Store(int64(len(l.live)))
