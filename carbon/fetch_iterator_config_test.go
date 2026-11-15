@@ -1,8 +1,9 @@
 package carbon
 
 import (
-	"github.com/BurntSushi/toml"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestFetchSharedIteratorDefaultAndOptOut(t *testing.T) {
