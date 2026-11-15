@@ -26,14 +26,18 @@ The journal records exact original point bits, metric bytes, policy, placement,
 receipt clock and receipt boundaries. Metric names and opaque policy/placement
 definitions appear once per stream/process dictionary epoch, before references
 in the same checksummed journal record. Applies contain varint metric references,
-clock/timestamp deltas and unchanged 64-bit value bits. Independent 64KiB-window
+clock/timestamp deltas and exact 64-bit value bits XORed with the previous value
+for that name. The PDX1 envelope checksums predictor epochs and payloads; prediction
+does not canonicalize NaNs, signed zero or any other value. Independent 64KiB-window
 zstd blocks compress each batched record, with a raw fallback when compression
 would grow it. Replay limits expansion to the journal's 8MiB payload limit and
 validates block checksums before decoding any applies. Record headers still cost
 32 bytes, so tiny scalar appends can exceed 20 bytes per point; batching amortizes
 that cost. Replay rebuilds dictionaries from the retained epoch prefix, skipping
-already committed applies. Old V2B1/V2M1 records remain readable. Dictionary
-checkpoints are required before journal trimming can be enabled.
+already committed applies. Old V2B1/V2M1 and PDC1/PDC2 records remain readable.
+An older binary cannot decode new PDX1 records. Dictionary and predictor
+checkpoints are required before journal trimming can be enabled. Lossless
+compression cannot promise four bytes per point for arbitrary high-entropy values.
 
 Startup still completes journal/database recovery and replay before opening
 listeners. It does not satisfy the 100ms first-live-append requirement. A durable
@@ -86,14 +90,23 @@ The opt-in `V2_BACKEND_THROUGHPUT=1` daemon test runs for 120 seconds and report
 backend-accepted points, process CPU, peak RSS and device write bytes; run it
 inside an externally imposed CPU and device IO limit. Optional
 `V2_BACKEND_DURATION`, `V2_BACKEND_CPUS`, `V2_BACKEND_OWNERS` and `V2_BACKEND_DBS`
-control this isolated harness. `V2_BACKEND_OFFER_1M=1` paces its 32 TCP connections
+control this isolated harness. The single-archive fixture has 1,048,576 distinct
+names and advancing timestamps. `V2_BACKEND_CONNECTIONS` (default 64) and
+`V2_BACKEND_CARDINALITY` size the sender independently.
+`V2_BACKEND_OFFER_1M=1` paces its TCP connections
 to approximately 1M points/s; omit it for an unpaced run.
 `V2_BACKEND_PROFILES=<directory>` records CPU, mutex and block profiles.
-`V2_BACKEND_SENDER_CPUS=<Linux CPU list>` starts the 32 TCP senders in a separate
+`V2_BACKEND_SENDER_CPUS=<Linux CPU list>` starts the TCP senders in a separate
 process on the specified CPUs, excluding them from daemon CPU/RSS accounting.
+`V2_BACKEND_SENDER_MAXPROCS` (default 96) overrides the test binary's CPU cap for
+that process. `V2_BACKEND_SENDER_CAPACITY=1` selects the independent 15-second
+discard-sink ceiling test. Sender and backend CPU lists must be disjoint.
 `V2_BACKEND_EXEC_NS=<pre-exec Unix nanoseconds>` reports actual first TCP append
 latency from the runner timestamp. The benchmark always prints throughput,
-journal bytes/point, CPU/point, RSS and post-sender flush receipts.
+journal bytes/point, CPU/point, RSS and post-sender flush receipts. Five-second
+periodic receipts preserve partial results if an external health guard stops it.
+V2 TCP admission uses bounded 1024-point batches and flushes complete points before
+blocking on a socket read; other backend paths retain their existing batch size.
 `TestPortableBackendLiveOracle1680` runs the same classic oracle without Flush;
 `TestLiveReadsNeverSealAndSurvivePublication` verifies frozen/active visibility
 while sealing is blocked and preserves pinned responses across publication.
