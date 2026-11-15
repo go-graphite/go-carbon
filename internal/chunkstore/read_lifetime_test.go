@@ -134,3 +134,24 @@ func TestCloseForExitRejectsHeldReadAdmission(t *testing.T) {
 		t.Fatal("metadata bypassed CloseForExit")
 	}
 }
+
+// Reads may first register inside a synctest bubble after the store is opened.
+// The store owner must still be able to close every read parent outside it.
+func TestReadParentChannelsBelongToStoreOwner(t *testing.T) {
+	s := &Store{}
+	s.initReadContexts()
+	synctest.Test(t, func(t *testing.T) {
+		_ = s.readCtx.Done()
+		for range s.readParents {
+			_, release, err := s.readContext(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+		}
+	})
+	s.readCancel()
+	if s.ReadError() != ErrClosed {
+		t.Fatal("shutdown did not close read admission")
+	}
+}
