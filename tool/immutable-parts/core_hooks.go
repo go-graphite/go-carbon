@@ -20,9 +20,17 @@ type coreBatch struct {
 	Points []row
 }
 type coreSealInput struct {
+	Compact *compactRollupSelection
 	Rows    []row
 	Batches []coreBatch
 	Next    coreFrontier
+}
+
+// coreEncodedSeal borrows an immutable encoded head until the packet ACK.
+// Plan runs only on its owner and returns detached durable values.
+type coreEncodedSeal struct {
+	Points int
+	Plan   func(coreFrontier) (coreSealPlan, error)
 }
 type coreKV struct{ Key, Value []byte }
 type coreSealPlan struct {

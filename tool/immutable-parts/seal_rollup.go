@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -139,6 +140,12 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 		return nil, err
 	}
 	defer it.Close()
+	type compactRestore struct {
+		id      uint64
+		archive int
+		value   []byte
+	}
+	var compactRuns []compactRestore
 	orders := map[uint64]map[[2]int64]uint64{}
 	for it.First(); it.Valid(); it.Next() {
 		k, v := it.Key(), it.Value()
@@ -156,6 +163,8 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 			if err = json.Unmarshal(v, &get(binary.BigEndian.Uint64(k[2:])).Frontier); err != nil {
 				return nil, err
 			}
+		case len(k) == 31 && k[0] == 'S' && k[1] == 1 && k[18] == 'b':
+			compactRuns = append(compactRuns, compactRestore{binary.BigEndian.Uint64(k[10:]), int(binary.BigEndian.Uint32(k[19:])), slices.Clone(v)})
 		case len(k) == 31 && k[0] == 'S' && k[1] == 1 && k[18] == 'a':
 			id := binary.BigEndian.Uint64(k[10:18])
 			a := int(binary.BigEndian.Uint32(k[19:23]))
@@ -180,6 +189,34 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 	}
 	if err = it.Error(); err != nil {
 		return nil, err
+	}
+	for _, run := range compactRuns {
+		state := get(run.id)
+		if run.archive < 0 || run.archive >= len(state.Config.Archives) {
+			return nil, errors.New("invalid restored compact archive")
+		}
+		b, e := decodeCompactRun(run.value, run.id, 0, nil)
+		if e != nil {
+			return nil, e
+		}
+		a := state.Config.Archives[run.archive]
+		if orders[run.id] == nil {
+			orders[run.id] = map[[2]int64]uint64{}
+		}
+		for _, p := range b.Points {
+			if p.Time <= 0 || p.Time > math.MaxUint32 || p.Sequence == 0 {
+				return nil, errors.New("invalid restored compact sample")
+			}
+			pos := [2]int64{int64(run.archive), (p.Time / a.Step) % a.Count}
+			old, ok := state.Slots[pos]
+			if p.Sequence == orders[run.id][pos] && ok && (old.Time != p.Time || old.Bits != p.Bits) {
+				return nil, errors.New("conflicting compact rollup order")
+			}
+			if p.Sequence > orders[run.id][pos] {
+				state.Slots[pos] = p
+				orders[run.id][pos] = p.Sequence
+			}
+		}
 	}
 	for _, s := range o.state {
 		policy, e := sealrollup.PolicyDigest(s.Config)

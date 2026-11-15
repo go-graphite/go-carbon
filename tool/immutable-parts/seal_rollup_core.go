@@ -55,7 +55,12 @@ func openCoreRollups(root string, cfg coreConfig) (*coreEngine, []*atomicRollupO
 			return nil, nil, closeErr
 		}
 	}
-	e, err := openCoreWithHooks(root, cfg, coreHooks{PlanSeal: func(owner int, in coreSealInput) (coreSealPlan, error) { return planCoreRollups(states[owner], in) }})
+	e, err := openCoreWithHooks(root, cfg, coreHooks{PlanSeal: func(owner int, in coreSealInput) (coreSealPlan, error) {
+		if in.Compact != nil {
+			return planCompactCoreRollups(states[owner], in)
+		}
+		return planCoreRollups(states[owner], in)
+	}})
 	return e, states, err
 }
 

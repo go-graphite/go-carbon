@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"math"
 	"math/rand"
 	"os"
@@ -130,4 +132,114 @@ func rollupMemoryDensity(t *testing.T) int {
 		t.Fatal("invalid memory density")
 	}
 	return n
+}
+
+// Compression preserves complete original boundaries and every physical slot
+// across corrections, fine-ring wrap, replay and a cold owner reconstruction.
+func TestCompactEngineDifferentialReopen(t *testing.T) {
+	cfg := coreConfig{Shards: 1, Producers: 1, MaxRows: 100000, PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "compact-exact"}
+	root := t.TempDir()
+	e, states, err := openCoreRollups(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, classic, err := openCoreRollups(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := reference.close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	for seal := 1; seal <= 3; seal++ {
+		var h compactRollupHead
+		var all []coreBatch
+		id := uint64(0)
+		for _, density := range []int{118, 513} {
+			for _, wrap := range []bool{false, true} {
+				for method := sealrollup.Average; method <= sealrollup.First; method++ {
+					for _, xff := range []float32{0, .5, 1} {
+						id++
+						c := sealrollup.Config{Archives: []sealrollup.Archive{{Step: 1, Count: 600}, {Step: 60, Count: 120}, {Step: 3600, Count: 48}}, Method: method, XFilesFactor: xff}
+						policy, _ := json.Marshal(c)
+						advance := 20
+						if wrap {
+							advance = 600
+						}
+						now := int64(1794700800 + seal*advance)
+						b := coreBatch{ID: id, Order: uint64(seal), Clock: now, Policy: policy, Points: make([]row, density)}
+						for j := range b.Points {
+							bits := math.Float64bits(float64(j%17) - 8)
+							if j == 3 {
+								bits = 1 << 63
+							}
+							if j == 5 {
+								bits = 0x7ff80000000000ab
+							}
+							b.Points[j] = row{ID: id, Time: now - int64(density) + int64(j), Bits: bits, Seq: uint64(j + 1)}
+						}
+						if err = h.append(b); err != nil {
+							t.Fatal(err)
+						}
+						all = append(all, b)
+					}
+				}
+			}
+		}
+		if err = e.submitCompactRollupGroup(0, &h, uint64(seal)); err != nil {
+			t.Fatal(err)
+		}
+		if err = reference.submitBatches(0, all, uint64(seal), true); err != nil {
+			t.Fatal(err)
+		}
+		// A duplicate source cursor must not invoke its plan or publish another part.
+		if err = e.submitCompactRollupGroup(0, &h, uint64(seal)); err != nil {
+			t.Fatal(err)
+		}
+		h.reset()
+		clear(h.data[:cap(h.data)])
+		if e.owners[0].parts.Load() != uint64(seal) {
+			t.Fatal("duplicate cursor committed")
+		}
+		for id := uint64(1); id <= 72; id++ {
+			if !reflect.DeepEqual(states[0].state[id].Slots, classic[0].state[id].Slots) || states[0].state[id].Frontier != classic[0].state[id].Frontier {
+				t.Fatalf("seal%d metric%d archive mismatch", seal, id)
+			}
+			a := e.owners[0].db.NewSnapshot()
+			z := reference.owners[0].db.NewSnapshot()
+			got, gerr := coreRead(a, id)
+			want, werr := coreRead(z, id)
+			a.Close()
+			z.Close()
+			if gerr != nil || werr != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("seal%d metric%d raw mismatch %v/%v", seal, id, gerr, werr)
+			}
+		}
+	}
+	if err = e.close(); err != nil {
+		t.Fatal(err)
+	}
+	e, states, err = openCoreRollups(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := e.close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	for id := uint64(1); id <= 72; id++ {
+		if !reflect.DeepEqual(states[0].state[id].Slots, classic[0].state[id].Slots) || states[0].state[id].Frontier != classic[0].state[id].Frontier {
+			t.Fatalf("reopen metric%d mismatch", id)
+		}
+	}
+}
+
+func TestCompactRunRejectCorruption(t *testing.T) {
+	for _, v := range [][]byte{nil, {1}, {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {1, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0}} {
+		if _, err := decodeCompactRun(v, 1, 1, nil); err == nil {
+			t.Fatal("accepted corrupt compact record")
+		}
+	}
 }

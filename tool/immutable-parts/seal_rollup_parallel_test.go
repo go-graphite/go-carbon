@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"math"
 	"reflect"
 	"sync"
@@ -51,10 +53,7 @@ func checkParallelRollupGroupExact(t *testing.T, owners, producers int) {
 		errs := make(chan error, producers)
 		for p := range heads {
 			workers.Go(func() {
-				bs, err := heads[p].decode()
-				if err == nil {
-					err = parallel.submitRollupGroup(p, bs, uint64(n+1))
-				}
+				err := parallel.submitCompactRollupGroup(p, &heads[p], uint64(n+1))
 				errs <- err
 			})
 		}
@@ -68,7 +67,8 @@ func checkParallelRollupGroupExact(t *testing.T, owners, producers int) {
 			t.Fatal(err)
 		}
 	}
-	// Compare raw + persisted rollup bytes, including original batch receipts.
+	// Compare exact decoded raw receipts and physical archive timestamp/value/order bytes.
+	// The compact path stores one encoded run instead of duplicate raw rows.
 	dump := func(e *coreEngine) map[string]string {
 		out := map[string]string{}
 		for owner, o := range e.owners {
@@ -78,8 +78,37 @@ func checkParallelRollupGroupExact(t *testing.T, owners, producers int) {
 			}
 			for it.First(); it.Valid(); it.Next() {
 				k := it.Key()
-				if k[0] == 2 || k[0] == 'S' {
-					out[fmt.Sprintf("%d/%x", owner, k)] = string(it.Value())
+				if len(k) == 31 && k[0] == 'S' {
+					id := binary.BigEndian.Uint64(k[10:])
+					kind := k[18]
+					switch kind {
+					case 'r':
+						out[fmt.Sprintf("%d/%x", owner, k)] = string(it.Value())
+					case 'c':
+						b, e := decodeCompactRun(it.Value(), id, binary.BigEndian.Uint64(k[23:]), nil)
+						if e != nil {
+							t.Fatal(e)
+						}
+						key := append([]byte(nil), k...)
+						key[18] = 'r'
+						out[fmt.Sprintf("%d/%x", owner, key)] = string(encodeRollupBatch(b))
+					case 'a':
+						out[fmt.Sprintf("%d/%x", owner, k)] = string(it.Value()[2:])
+					case 'b':
+						archive := int(binary.BigEndian.Uint32(k[19:]))
+						a := inputs[0].Config.Archives[archive]
+						b, e := decodeCompactRun(it.Value(), id, 0, nil)
+						if e != nil {
+							t.Fatal(e)
+						}
+						for _, p := range b.Points {
+							key := append([]byte(nil), k...)
+							key[18] = 'a'
+							binary.BigEndian.PutUint64(key[23:], uint64((p.Time/a.Step)%a.Count))
+							r := sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: (p.Time / a.Step) % a.Count, Order: p.Sequence, Sample: p}}
+							out[fmt.Sprintf("%d/%x", owner, key)] = string(sealrollup.EncodeRecord(r)[2:])
+						}
+					}
 				}
 			}
 			if err = it.Error(); err != nil {

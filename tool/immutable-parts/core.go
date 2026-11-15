@@ -39,6 +39,7 @@ type coreFrontier struct {
 	ExpiredBefore int64
 }
 type corePacket struct {
+	encoded    *coreEncodedSeal
 	rows       []row
 	batches    []coreBatch
 	cursor     uint64
@@ -313,7 +314,7 @@ func (c coreConfig) headMaxAge() time.Duration {
 	return c.HeadMaxAge
 }
 func (o *coreOwner) poller() func() (bool, bool) {
-	head := make([]row, 0, o.cfg.MaxRows)
+	var head []row // Encoded seals never allocate a raw row head.
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
 	deadline := time.Now().Add(o.cfg.headMaxAge())
@@ -368,6 +369,47 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if p.stop {
 				stopped[producer] = true
 				left--
+				continue
+			}
+
+			if p.encoded != nil {
+				if failure == nil {
+					if !p.seal || p.encoded.Points < 0 || p.encoded.Points > o.cfg.MaxRows || p.encoded.Plan == nil || len(p.rows) != 0 || len(p.batches) != 0 {
+						failure = errors.New("invalid encoded seal")
+					} else if p.cursor > pending[producer] {
+						failure = flush()
+						if failure == nil {
+							next := o.meta
+							next.Cursors = slices.Clone(pending)
+							next.Cursors[producer] = p.cursor
+							next.NextPart++
+							var plan coreSealPlan
+							plan, failure = p.encoded.Plan(next)
+							var n uint64
+							if failure == nil {
+								n, failure = o.sealPlanned(nil, next, plan)
+							}
+							if failure == nil {
+								o.meta = next
+								pending[producer] = p.cursor
+								o.publishFrontier(next)
+								o.committed.Add(uint64(p.encoded.Points))
+								o.parts.Add(1)
+								o.bytes.Add(n)
+								o.pub.publish(o.db.NewSnapshot())
+								if o.hook != nil {
+									failure = o.hook(o.db.NewSnapshot(), nil)
+								}
+							}
+						}
+					}
+				}
+				if p.ack != nil {
+					p.ack <- failure
+				}
+				if p.lease != nil {
+					p.lease.remaining.Add(-1)
+				}
 				continue
 			}
 			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 {
@@ -510,6 +552,14 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return 0, err
 		}
 	}
+	return o.sealPlanned(head, next, plan)
+}
+
+func (o *coreOwner) sealPlanned(head []row, next coreFrontier, plan coreSealPlan) (uint64, error) {
+	if err := validateCoreSealPlan(plan); err != nil {
+		return 0, err
+	}
+	var err error
 	phaseStart := time.Now()
 	sortCoreRows(head, o.cfg.PartitionSeconds)
 	o.sortNS.Add(uint64(time.Since(phaseStart)))
@@ -725,8 +775,12 @@ func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 			v = v[24:]
 		}
 	}
+	if err = it.Error(); err != nil {
+		return nil, err
+	}
+	out, err = appendCompactCoreRows(s, id, out)
 	slices.SortFunc(out, less)
-	return out, it.Error()
+	return out, err
 }
 
 // Expiry is a stopped-owner operation until authoritative rollups exist. It
