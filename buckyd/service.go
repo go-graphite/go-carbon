@@ -5,6 +5,7 @@ package buckyd
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,6 +114,7 @@ type ACL struct {
 }
 
 type Service struct {
+	proofEpoch             string // service lifetime: metadata proofs never cross restarts
 	nativeRejectedRequests atomic.Uint64
 	nativePullOnce         sync.Once
 	nativePullAdmission    chan struct{}
@@ -175,7 +177,7 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
+	s := &Service{proofEpoch: rand.Text(), config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
 	s.SetMaxTransfers(config.MaxTransfers)
 	s.SetTransferSources(config.TransferSources)
