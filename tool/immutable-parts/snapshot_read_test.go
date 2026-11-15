@@ -75,6 +75,16 @@ func TestSnapshotReadBenchmark(t *testing.T) {
 		readers = n
 	}
 	cfg := coreConfig{Shards: 16, Producers: 4, MaxRows: 262144, PartitionSeconds: 86400}
+	for key, target := range map[string]*int{"PARTS_READ_BENCH_SHARDS": &cfg.Shards, "PARTS_READ_BENCH_PRODUCERS": &cfg.Producers} {
+		if v := os.Getenv(key); v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 192 {
+				t.Fatal("invalid", key)
+			}
+			*target = n
+		}
+	}
+
 	if err := runSnapshotReadBenchmark(out, cfg, time.Duration(seconds)*time.Second, 25_000_000, 1<<20, 3*time.Second, readers); err != nil {
 		t.Fatal(err)
 	}

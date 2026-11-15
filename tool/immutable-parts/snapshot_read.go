@@ -144,7 +144,7 @@ func runSnapshotReadBenchmark(out string, cfg coreConfig, duration time.Duration
 	cat := pr.CatalogFuncs{
 		LookupFunc: func(name string) (pr.Metric, bool) {
 			id, e := strconv.ParseUint(strings.TrimPrefix(name, "metric."), 10, 64)
-			return pr.Metric{ID: id, Archives: []pr.Archive{{Step: 1, Points: 86400}}}, e == nil && id < metrics
+			return pr.Metric{ID: id, Archives: []pr.Archive{{Step: 1, Points: 86400}}}, e == nil && id < metrics && strings.HasPrefix(name, "metric.")
 		},
 		FindFunc: func(ctx context.Context, pattern string, yield func(string) error) error {
 			if pattern != "metric.*" {
