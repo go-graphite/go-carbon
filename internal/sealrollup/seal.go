@@ -55,6 +55,33 @@ func Plan(c Config, prior Frontier, view View, batches []Batch) (SealPlan, error
 	if err != nil {
 		return SealPlan{}, err
 	}
+	p := Prepared{config: c, policy: policy}
+	return p.Plan(prior, view, nil, batches)
+}
+
+// Prepared owns a validated, immutable policy. Reuse it across metrics/seals
+// with that policy; configuration changes require a newly prepared value.
+type Prepared struct {
+	config Config
+	policy [32]byte
+}
+
+func Prepare(c Config) (*Prepared, error) {
+	policy, err := PolicyDigest(c)
+	if err != nil {
+		return nil, err
+	}
+	c.Archives = append([]Archive(nil), c.Archives...)
+	return &Prepared{config: c, policy: policy}, nil
+}
+func (p *Prepared) Plan(prior Frontier, view View, ranges RangeView, batches []Batch) (SealPlan, error) {
+	return p.PlanWithWorkspace(prior, view, ranges, batches, nil)
+}
+
+// PlanWithWorkspace is Plan with reusable owner-local scratch. Records remain
+// detached and may be retained until the atomic ingest completes.
+func (p *Prepared) PlanWithWorkspace(prior Frontier, view View, ranges RangeView, batches []Batch, w *Workspace) (SealPlan, error) {
+	c, policy := p.config, p.policy
 	if prior.Policy != ([32]byte{}) && prior.Policy != policy {
 		return SealPlan{}, fmt.Errorf("stored rollup policy changed")
 	}
@@ -72,7 +99,7 @@ func Plan(c Config, prior Frontier, view View, batches []Batch) (SealPlan, error
 			next.MaxTime = max(next.MaxTime, p.Time)
 		}
 	}
-	deltas, err := Reduce(c, view, batches)
+	deltas, err := reduce(c, view, ranges, batches, w)
 	if err != nil {
 		return SealPlan{}, err
 	}
