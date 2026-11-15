@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -109,6 +110,9 @@ func main() {
 	for _, s := range segs {
 		var enc partlog.DictionaryBlockEncoder
 		var dec partlog.DictionaryBlockDecoder
+		originalHeader := make([]byte, 64)
+		_, e := s.f.ReadAt(originalHeader, 0)
+		must(e)
 		view, frontier, selectedPoints, e := selectPartition(s.f, s.Bytes, *part)
 		must(e)
 		emit(map[string]any{"stage": "selection", "path": s.Path, "partition": *part, "bytes": frontier, "points": selectedPoints})
@@ -183,6 +187,15 @@ func main() {
 			if frames%100 == 0 {
 				emit(map[string]any{"stage": "progress", "points": total + count, "input_bytes": raw + offset, "elapsed": time.Since(began).Seconds()})
 			}
+		}
+		finalHeader := make([]byte, 64)
+		_, e = s.f.ReadAt(finalHeader, 0)
+		must(e)
+		if !bytes.Equal(originalHeader, finalHeader) {
+			panic("source segment recycled during replay")
+		}
+		if *part >= 0 && count != selectedPoints {
+			panic("selected source count changed")
 		}
 		replay.Close()
 		enc.Close()

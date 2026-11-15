@@ -10,7 +10,8 @@ go run ./tool/v2-bytes -input /path/to/immutable/input-log -segments 7
 ```
 
 The newest segment is excluded. Other descriptors are opened before decoding,
-so retirement cannot replace an already selected segment beneath the probe.
+and the probe rejects a header change during each segment replay. A descriptor
+does not pin a recycled inode; a live source can therefore make the probe fail.
 `-manifest` reads headers only; `-wait` holds selected descriptors before decoding.
 The source must use the current input-log format. Run only with an explicitly
 approved resource window on a shared host.
