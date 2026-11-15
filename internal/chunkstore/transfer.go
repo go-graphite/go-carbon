@@ -748,7 +748,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 				}
 				unionScratch.archives[j] = points
 				normalized = normalized || changed
-				points = retainTransferSlots(points, a.Retention)
+				points = retainTransferSlotsAt(points, a.Retention, s.now().Unix())
 				want.Archives[j] = Archive{a.Retention, points}
 			}
 			appended := false
@@ -863,6 +863,41 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 		}
 	}
 	return &preparedTransfer{batch: b, expected: expected, metas: metas, proofs: proofs, sidecars: sidecars}, nil
+}
+
+// PreferArchiveTimestamp resolves distinct epochs sharing a ring slot. A future
+// timestamp must not hide a point still readable within the current retention.
+// Otherwise the newer epoch wins; equal timestamps retain caller precedence.
+func PreferArchiveTimestamp(candidate, current int64, r Retention, now int64) bool {
+	if now <= 0 {
+		return candidate >= current
+	}
+	cutoff := now - int64(r.Step)*int64(r.Count)
+	if candidate > now && current > cutoff && current <= now {
+		return false
+	}
+	if current > now && candidate > cutoff && candidate <= now {
+		return true
+	}
+	return candidate >= current
+}
+
+func retainTransferSlotsAt(points []Point, retention Retention, now int64) []Point {
+	if len(points) > 1 && points[len(points)-1].Timestamp > now {
+		retained := borrowTransferSlots()
+		cutoff := now - int64(retention.Step)*int64(retention.Count)
+		for _, p := range points {
+			if p.Timestamp > cutoff && p.Timestamp <= now {
+				retained[p.Timestamp/int64(retention.Step)%int64(retention.Count)] = struct{}{}
+			}
+		}
+		points = slices.DeleteFunc(points, func(p Point) bool {
+			_, occupied := retained[p.Timestamp/int64(retention.Step)%int64(retention.Count)]
+			return p.Timestamp > now && occupied
+		})
+		releaseTransferSlots(retained)
+	}
+	return retainTransferSlots(points, retention)
 }
 
 // retainTransferSlots applies the same finite archive capacity as an ordinary

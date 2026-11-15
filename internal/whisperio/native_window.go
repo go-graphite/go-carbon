@@ -33,7 +33,7 @@ func (c *ContinuationCodec) NativeWindowSnapshot(ctx context.Context, kv store.C
 	until := (window.Until + maxStep - 1) / maxStep * maxStep
 	for ai, r := range m.Retentions {
 		snapshot.Archives[ai].Retention = r
-		parts, _, _, err := selectSpliceOwners(ctx, fragments[ai], nil, r)
+		parts, _, _, err := selectSpliceOwnersAt(ctx, fragments[ai], nil, r, clock().Unix())
 		if err != nil {
 			return store.Snapshot{}, nil, err
 		}
@@ -44,7 +44,7 @@ func (c *ContinuationCodec) NativeWindowSnapshot(ctx context.Context, kv store.C
 				latest = max(latest, spliceOrdinalTime(&f, i, r.Step))
 			}
 		}
-		cutoff := latest - int64(r.Step)*int64(r.Count)
+		cutoff := min(latest, clock().Unix()) - int64(r.Step)*int64(r.Count)
 		for _, part := range parts {
 			f := part.fragment
 			for i := part.ordinal; i < part.ordinal+part.count; i++ {
@@ -113,7 +113,7 @@ func (c *ContinuationCodec) CombineNativeWindow(ctx context.Context, donor, surv
 			return nil, class, false, nil
 		}
 		var intersects bool
-		selected[ai], bases[ai], intersects, err = selectSpliceOwners(ctx, a[ai], b[ai], r)
+		selected[ai], bases[ai], intersects, err = selectSpliceOwnersAt(ctx, a[ai], b[ai], r, clock().Unix())
 		if err != nil {
 			return nil, class, false, err
 		}

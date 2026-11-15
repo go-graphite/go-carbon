@@ -58,12 +58,12 @@ func SelectNativeWindow(snapshot Snapshot, w NativeWindow, now int64) (Snapshot,
 		if err != nil {
 			return Snapshot{}, nil, err
 		}
-		points = retainTransferSlots(points, a.Retention)
+		points = retainTransferSlotsAt(points, a.Retention, now)
 		// A fine archive must not veto history still held by a coarser one.
 		// Sparse rings may contain old, non-aliased cells: exclude those too,
 		// rather than resurrecting them after omitting the newer owners.
 		if len(points) > 0 {
-			cutoff := points[len(points)-1].Timestamp - int64(a.Retention.Step)*int64(a.Retention.Count)
+			cutoff := min(points[len(points)-1].Timestamp, now) - int64(a.Retention.Step)*int64(a.Retention.Count)
 			first := slices.IndexFunc(points, func(p Point) bool { return p.Timestamp > cutoff })
 			points = points[first:]
 		}
@@ -215,6 +215,10 @@ func (s *Store) bindContinuationIndex(key, value []byte, revision uint64) []byte
 // Window combine preserves survivor points outside the window, including NaN
 // payloads, except stale ring owners displaced by newer in-window points.
 func (s *Store) nativeCombineWindowRecord(ctx context.Context, source, target TransferMetric, w NativeWindow) (TransferMetric, NativeCombineClass, error) {
+	now := int64(0)
+	if s.now != nil {
+		now = s.now().Unix()
+	}
 	var class NativeCombineClass
 	if !samePolicy(source.Config, target.Config) || source.Continuation != target.Continuation {
 		return TransferMetric{}, class, ErrConflict
@@ -256,7 +260,7 @@ func (s *Store) nativeCombineWindowRecord(ctx context.Context, source, target Tr
 		if err != nil {
 			return TransferMetric{}, class, err
 		}
-		union = retainTransferSlots(union, r)
+		union = retainTransferSlotsAt(union, r, now)
 		union = slices.DeleteFunc(union, func(p Point) bool { return !w.Contains(p.Timestamp) })
 		slots := make(map[int64]Point, len(union)+len(outside))
 		for _, p := range union {
@@ -271,11 +275,11 @@ func (s *Store) nativeCombineWindowRecord(ctx context.Context, source, target Tr
 			}
 			outsideSlots[slot] = true
 			if incoming, ok := slots[slot]; ok {
-				if p.Timestamp > incoming.Timestamp {
+				if !PreferArchiveTimestamp(incoming.Timestamp, p.Timestamp, r, now) {
 					return TransferMetric{}, class, fmt.Errorf("window would evict newer out-of-window archive %d point %d: %w", ai, p.Timestamp, ErrConflict)
 				}
-				// Sharing a slot puts this older point at least one retention
-				// behind the incoming owner, just like a normal ring write.
+				// This owner is either stale by a whole ring, or a future
+				// epoch hiding a currently retained incoming point.
 				class.StaleEvictedPoints++
 				continue
 			}
