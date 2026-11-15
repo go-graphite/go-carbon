@@ -89,7 +89,30 @@ func TestCombinedRenderDifferential(t *testing.T) {
 						state[[2]int64{int64(d.Archive), d.Slot}] = d.Sample
 						records = append(records, Record{7, archives[d.Archive].Step, Sample{d.Sample.Time, d.Sample.Bits, d.Order}})
 					}
-					sources = append(sources, Freeze(records))
+					var blocks []SlotBlock
+					for ri, r := range records {
+						for _, a := range archives {
+							if a.Step != r.Step {
+								continue
+							}
+							slot := (r.Sample.Time / a.Step) % a.Points
+							if slot < 0 {
+								slot += a.Points
+							}
+							blocks = append(blocks, SlotBlock{ID: r.ID, Archive: a, Slots: SlotRange{slot, slot + 1}, Key: []byte(fmt.Sprint(ri))})
+						}
+					}
+					index, err := NewSlotIndex(blocks, func(ctx context.Context, key []byte, _ []SlotRange, y func(Sample) error) error {
+						var ri int
+						if _, e := fmt.Sscan(string(key), &ri); e != nil {
+							return e
+						}
+						return y(records[ri].Sample)
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					sources = append(sources, index)
 					var ps []chunkstore.Point
 					var ptrs []*whisper.TimeSeriesPoint
 					for _, p := range input {

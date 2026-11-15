@@ -32,93 +32,58 @@ type latencyStages struct {
 	Seek, Decode, Emit, Close int64
 	Records                   int64
 }
-type latencyArchiveSource struct {
-	snap   *pebble.Snapshot
-	stages *latencyStages
-}
 
-func (s latencyArchiveSource) scan(ctx context.Context, step, first, end int64, yield func(pr.Sample) error) error {
-	var lo, hi [16]byte
-	binary.BigEndian.PutUint64(lo[:8], uint64(step))
-	binary.BigEndian.PutUint64(hi[:8], uint64(step))
-	binary.BigEndian.PutUint64(lo[8:], uint64(first))
-	binary.BigEndian.PutUint64(hi[8:], uint64(end))
-	var seekStart time.Time
-	if s.stages != nil {
-		seekStart = time.Now()
-	}
-	it, e := s.snap.NewIter(&pebble.IterOptions{LowerBound: lo[:], UpperBound: hi[:]})
-	if e != nil {
-		return e
-	}
-	defer func() {
+// The exact block key is pinned in the directory. A cold engine read performs
+// one point lookup per intersecting block, without a series-index iterator.
+func latencyBlockReader(snap *pebble.Snapshot, stages *latencyStages) pr.ReadSlotBlock {
+	return func(ctx context.Context, key []byte, _ []pr.SlotRange, yield func(pr.Sample) error) error {
 		var start time.Time
-		if s.stages != nil {
+		if stages != nil {
 			start = time.Now()
 		}
-		_ = it.Close()
-		if s.stages != nil {
-			s.stages.Close += time.Since(start).Nanoseconds()
+		value, closer, err := snap.Get(key)
+		if stages != nil {
+			stages.Seek += time.Since(start).Nanoseconds()
 		}
-	}()
-	firstOK := it.First()
-	if s.stages != nil {
-		s.stages.Seek += time.Since(seekStart).Nanoseconds()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if stages != nil {
+				start = time.Now()
+			}
+			_ = closer.Close()
+			if stages != nil {
+				stages.Close += time.Since(start).Nanoseconds()
+			}
+		}()
+		if len(value)%24 != 0 {
+			return fmt.Errorf("invalid fixture block")
+		}
+		for len(value) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if stages != nil {
+				start = time.Now()
+			}
+			p := pr.Sample{Time: int64(binary.LittleEndian.Uint64(value)), Bits: binary.LittleEndian.Uint64(value[8:]), Sequence: binary.LittleEndian.Uint64(value[16:])}
+			if stages != nil {
+				stages.Decode += time.Since(start).Nanoseconds()
+				stages.Records++
+				start = time.Now()
+			}
+			err = yield(p)
+			if stages != nil {
+				stages.Emit += time.Since(start).Nanoseconds()
+			}
+			if err != nil {
+				return err
+			}
+			value = value[24:]
+		}
+		return nil
 	}
-	for ok := firstOK; ok; ok = it.Next() {
-		if e = ctx.Err(); e != nil {
-			return e
-		}
-		var decodeStart time.Time
-		if s.stages != nil {
-			decodeStart = time.Now()
-		}
-		v := it.Value()
-		if len(v) != 24 {
-			return fmt.Errorf("invalid fixture record")
-		}
-		sample := pr.Sample{Time: int64(binary.LittleEndian.Uint64(v)), Bits: binary.LittleEndian.Uint64(v[8:]), Sequence: binary.LittleEndian.Uint64(v[16:])}
-		if s.stages != nil {
-			s.stages.Decode += time.Since(decodeStart).Nanoseconds()
-			s.stages.Records++
-		}
-		var emitStart time.Time
-		if s.stages != nil {
-			emitStart = time.Now()
-		}
-		e = yield(sample)
-		if s.stages != nil {
-			s.stages.Emit += time.Since(emitStart).Nanoseconds()
-		}
-		if e != nil {
-			return e
-		}
-	}
-	return it.Error()
-}
-func (s latencyArchiveSource) HasArchive(ctx context.Context, id uint64, step int64) (bool, error) {
-	if e := ctx.Err(); e != nil {
-		return false, e
-	}
-	var lo, hi [8]byte
-	binary.BigEndian.PutUint64(lo[:], uint64(step))
-	binary.BigEndian.PutUint64(hi[:], uint64(step+1))
-	it, e := s.snap.NewIter(&pebble.IterOptions{LowerBound: lo[:], UpperBound: hi[:]})
-	if e != nil {
-		return false, e
-	}
-	defer it.Close()
-	ok := it.First()
-	return ok, it.Error()
-}
-func (s latencyArchiveSource) Scan(ctx context.Context, id uint64, a pr.Archive, from, until int64, y func(pr.Sample) error) error {
-	ranges, n := pr.SlotRanges(a, from, until)
-	for _, r := range ranges[:n] {
-		if e := s.scan(ctx, a.Step, r.From, r.Until, y); e != nil {
-			return e
-		}
-	}
-	return nil
 }
 func latencyPercentile(ds []int64, q float64) int64 {
 	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
@@ -181,22 +146,39 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		batch := pdb.NewBatch()
-		for i, d := range deltas {
-			var k [24]byte
-			var v [24]byte
-			binary.BigEndian.PutUint64(k[:8], uint64(archives[d.Archive].Step))
+		// Fixture block identities contain PG, vshard, complete series name,
+		// archive step and block slot. Production sources supply their own codec.
+		type fixtureBlock struct {
+			spec  pr.SlotBlock
+			value []byte
+		}
+		blocks := map[string]*fixtureBlock{}
+		for _, d := range deltas {
 			a := archives[d.Archive]
 			slot := (d.Sample.Time / a.Step) % a.Points
 			if slot < 0 {
 				slot += a.Points
 			}
-			binary.BigEndian.PutUint64(k[8:16], uint64(slot))
-			binary.BigEndian.PutUint64(k[16:], uint64(i))
-			binary.LittleEndian.PutUint64(v[:8], uint64(d.Sample.Time))
-			binary.LittleEndian.PutUint64(v[8:16], d.Sample.Bits)
-			binary.LittleEndian.PutUint64(v[16:], d.Order)
-			if e = batch.Set(k[:], v[:], nil); e != nil {
+			blockSlot := slot / 512 * 512
+			key := []byte("pg=fixture/vshard=0/series=sample/")
+			key = binary.BigEndian.AppendUint64(key, uint64(a.Step))
+			key = binary.BigEndian.AppendUint64(key, uint64(blockSlot))
+			b := blocks[string(key)]
+			if b == nil {
+				b = &fixtureBlock{spec: pr.SlotBlock{ID: 7, Archive: a, Slots: pr.SlotRange{From: slot, Until: slot + 1}, Key: key}}
+				blocks[string(key)] = b
+			}
+			b.spec.Slots.From = min(b.spec.Slots.From, slot)
+			b.spec.Slots.Until = max(b.spec.Slots.Until, slot+1)
+			b.value = binary.LittleEndian.AppendUint64(b.value, uint64(d.Sample.Time))
+			b.value = binary.LittleEndian.AppendUint64(b.value, d.Sample.Bits)
+			b.value = binary.LittleEndian.AppendUint64(b.value, d.Order)
+		}
+		var directory []pr.SlotBlock
+		batch := pdb.NewBatch()
+		for _, b := range blocks {
+			directory = append(directory, b.spec)
+			if e = batch.Set(b.spec.Key, b.value, nil); e != nil {
 				t.Fatal(e)
 			}
 		}
@@ -240,12 +222,15 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 					}
 					snap := pdb.NewSnapshot()
 					var pub pr.Publication
-					pub.Publish(pr.View{Catalog: pr.CatalogFuncs{LookupFunc: func(name string) (pr.Metric, bool) { return pr.Metric{ID: 7, Archives: archives}, name == "sample" }}, Parts: []pr.Source{latencyArchiveSource{snap: snap, stages: func() *latencyStages {
-						if profile {
-							return &stages
-						}
-						return nil
-					}()}}, Close: func() { _ = snap.Close() }})
+					var sourceStages *latencyStages
+					if profile {
+						sourceStages = &stages
+					}
+					source, err := pr.NewSlotIndex(directory, latencyBlockReader(snap, sourceStages))
+					if err != nil {
+						t.Fatal(err)
+					}
+					pub.Publish(pr.View{Catalog: pr.CatalogFuncs{LookupFunc: func(name string) (pr.Metric, bool) { return pr.Metric{ID: 7, Archives: archives}, name == "sample" }}, Parts: []pr.Source{source}, RetainedBytes: source.RetainedBytes(), Close: func() { _ = snap.Close() }})
 					pinStart := time.Now()
 					h, e := pub.Pin(pr.NewBudget(128<<20), 128<<20)
 					if e != nil {
@@ -319,7 +304,7 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 					_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "latency_profile", "class": label, "samples": repeats, "v2_alloc_bytes": allocV, "native_alloc_bytes": allocN, "v2_mallocs": mallocV, "native_mallocs": mallocN, "v2_gc": gcV, "native_gc": gcN, "pin_ns": pinNS, "source": stages})
 				}
 				v50, v99, n50, n99 := latencyPercentile(vd, .5), latencyPercentile(vd, .99), latencyPercentile(nd, .5), latencyPercentile(nd, .99)
-				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "snapshot_latency_comparison", "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "schema": def, "range_seconds": width, "fresh_engine_cache": cold, "os_page_cache": "uncontrolled", "samples": repeats, "v2_p50_ns": v50, "v2_p99_ns": v99, "native_p50_ns": n50, "native_p99_ns": n99, "latency_gate": v50 <= n50 && v99 <= n99, "exact_bits": true, "source": "disk_fixture_archive_codec", "sustained_ingest": false})
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "snapshot_latency_comparison", "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "schema": def, "range_seconds": width, "fresh_engine_cache": cold, "os_page_cache": "uncontrolled", "samples": repeats, "v2_p50_ns": v50, "v2_p99_ns": v99, "native_p50_ns": n50, "native_p99_ns": n99, "latency_gate": v50 <= n50 && v99 <= n99, "exact_bits": true, "source": "disk_fixture_indexed_slot_blocks", "sustained_ingest": false})
 			}
 		}
 		if e = native.Close(); e != nil {
