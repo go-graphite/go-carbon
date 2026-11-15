@@ -233,7 +233,20 @@ func TestPublisherWriterIsolation(t *testing.T) {
 				m := metrics[owner*64+(i/shards)%64]
 				h, err := owners[owner].pub.Pin(budget, 8<<20)
 				if err == nil {
-					_, err = h.Render(ctx, m.Name, 99, 161, 200)
+					var series *pr.Series
+					series, err = h.Render(ctx, m.Name, 99, 161, 200)
+					if err == nil {
+						if series == nil || len(series.Values) == 0 || math.Float64bits(series.Values[0]) != math.Float64bits(100) {
+							err = errors.New("published seed missing or changed")
+						} else {
+							for i, value := range series.Values {
+								if !math.IsNaN(value) && math.Float64bits(value) != math.Float64bits(float64(series.From+int64(i)*series.Step)) {
+									err = errors.New("published value bits differ from input")
+									break
+								}
+							}
+						}
+					}
 					h.Close()
 				}
 				if err != nil && ctx.Err() == nil {
