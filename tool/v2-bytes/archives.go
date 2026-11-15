@@ -58,7 +58,7 @@ func archiveProbe(dir string) {
 			for _, a := range snap.Archives {
 				capacity += int64(a.Retention.NumberOfPoints())
 				occupied += int64(len(a.Points))
-				sort.Slice(a.Points, func(i, j int) bool { return a.Points[i].Timestamp < a.Points[j].Timestamp })
+				sort.SliceStable(a.Points, func(i, j int) bool { return a.Points[i].Timestamp < a.Points[j].Timestamp })
 				for start := 0; start < len(a.Points); start += chunkstore.MaxSealedPoints {
 					end := min(start+chunkstore.MaxSealedPoints, len(a.Points))
 					ps := a.Points[start:end]
