@@ -47,6 +47,8 @@ type pendingWrites struct {
 	unpersisted map[*points.Points]int
 	// deferred holds the unpersisted items claimed with a spread deadline.
 	deferred map[*points.Points]struct{}
+	// scan holds only names absent from the validated read index.
+	scan map[*points.Points]struct{}
 }
 
 func (r *pendingRecovery) writesFor(p *points.Points) *pendingWrites {
@@ -60,17 +62,23 @@ func (r *pendingRecovery) writesFor(p *points.Points) *pendingWrites {
 const pendingWriteAttempts = 3
 
 func (r *pendingRecovery) track(p *points.Points) {
-	r.trackAs(p, false)
+	r.trackAs(p, false, true)
 }
 
 // trackAs tracks p, deferred if it waits for a spread writeout deadline.
-func (r *pendingRecovery) trackAs(p *points.Points, deferred bool) {
+func (r *pendingRecovery) trackAs(p *points.Points, deferred, scan bool) {
 	w := r.writesFor(p)
 	w.mu.Lock()
 	if w.unpersisted == nil {
 		w.unpersisted = make(map[*points.Points]int)
 	}
 	w.unpersisted[p] = 0
+	if scan {
+		if w.scan == nil {
+			w.scan = make(map[*points.Points]struct{})
+		}
+		w.scan[p] = struct{}{}
+	}
 	if deferred {
 		if w.deferred == nil {
 			w.deferred = make(map[*points.Points]struct{})
@@ -100,6 +108,7 @@ func (r *pendingRecovery) failed(p *points.Points) {
 		if n+1 >= pendingWriteAttempts {
 			delete(w.unpersisted, p)
 			delete(w.deferred, p)
+			delete(w.scan, p)
 		} else {
 			w.unpersisted[p] = n + 1
 		}
@@ -113,6 +122,7 @@ func (r *pendingRecovery) persisted(p *points.Points) {
 	w.mu.Lock()
 	delete(w.unpersisted, p)
 	delete(w.deferred, p)
+	delete(w.scan, p)
 	w.mu.Unlock()
 }
 
@@ -121,6 +131,10 @@ func (r *pendingRecovery) moved(from, to *points.Points) {
 	w.mu.Lock()
 	if n, ok := w.unpersisted[from]; ok {
 		_, fromDeferred := w.deferred[from]
+		if _, scan := w.scan[from]; scan {
+			delete(w.scan, from)
+			w.scan[to] = struct{}{}
+		}
 		delete(w.unpersisted, from)
 		delete(w.deferred, from)
 		_, toTracked := w.unpersisted[to]
@@ -364,7 +378,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	// spread deadline and be written once with its first live points. A new
 	// one is written at once: the first scan waits for it.
 	deferred := s.writeoutRestoreSpread && s.batching() && !r.isNewSlot(slot)
-	r.trackAs(shard.itemIdentity(values), deferred)
+	r.trackAs(shard.itemIdentity(values), deferred, r.isNewSlot(slot))
 	shard.log.trackItem(values)
 	r.claim(slot)
 	c.syncMemoryLocked(shard)
@@ -416,6 +430,25 @@ func (c *Cache) PendingUrgentOutstanding() uint64 {
 		return r.count(true)
 	}
 	return 0
+}
+
+// PendingScanOutstanding counts unclaimed history and claimed names absent from
+// the validated read index. Existing names already survive a storage scan, even
+// when their next write has no spread deadline. Source retirement still waits
+// for every confirmation through PendingOutstanding.
+func (c *Cache) PendingScanOutstanding() uint64 {
+	r := c.pending.Load()
+	if r == nil {
+		return 0
+	}
+	n := r.remaining.Load()
+	for i := range r.writes {
+		w := &r.writes[i]
+		w.mu.Lock()
+		n += uint64(len(w.scan))
+		w.mu.Unlock()
+	}
+	return n
 }
 
 // PendingRecoveryStats separates unread checkpoint names from cache batches
