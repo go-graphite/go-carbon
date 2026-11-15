@@ -30,6 +30,7 @@ type config struct {
 	dir                                                               string
 	workers, shards, metrics, points, archives, chunkMiB, blockPoints int
 	minFreeGiB                                                        uint64
+	partitionSeconds                                                  int64
 }
 type result struct {
 	Synthetic                                                                                  bool
@@ -52,6 +53,7 @@ func main() {
 	flag.IntVar(&c.archives, "archives", 1, "number of existing archives (1 to 4)")
 	flag.IntVar(&c.chunkMiB, "chunk-mib", 32, "bounded sort buffer per worker")
 	flag.IntVar(&c.blockPoints, "block-points", 4096, "stored slots per compressed archive block")
+	flag.Int64Var(&c.partitionSeconds, "partition-seconds", 86400, "synthetic time partition width; larger widths trade expiry granularity for compression")
 	flag.Uint64Var(&c.minFreeGiB, "min-free-gib", 8, "free space left for other users")
 	flag.Parse()
 	if *baseline {
@@ -111,7 +113,7 @@ func run(ctx context.Context, c config) (result, error) {
 	errCh := make(chan error, c.workers)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	identity := fmt.Sprintf("synthetic-stored-v2:%d:%d:%d:%d:%d", c.shards, c.metrics, c.points, c.archives, max(1, c.blockPoints))
+	identity := fmt.Sprintf("synthetic-stored-v2:%d:%d:%d:%d:%d:%d", c.shards, c.metrics, c.points, c.archives, max(1, c.blockPoints), c.partitionSeconds)
 	for worker := 0; worker < c.workers; worker++ {
 		wg.Add(1)
 		go func(worker int) {
@@ -204,7 +206,11 @@ func synthetic(c config, u partsconvert.Unit, identity string) partsconvert.Arch
 	if blockPoints == 0 {
 		blockPoints = 4096
 	}
-	return partsconvert.ArchiveSource{SnapshotID: identity, PartitionSeconds: 86400, BlockPoints: blockPoints, EmptyPartition: 20000,
+	partitionSeconds := c.partitionSeconds
+	if partitionSeconds == 0 {
+		partitionSeconds = 86400
+	}
+	return partsconvert.ArchiveSource{SnapshotID: identity, PartitionSeconds: partitionSeconds, BlockPoints: blockPoints, EmptyPartition: 20000,
 		UpperBound: func(context.Context, partsconvert.Unit) (uint64, error) {
 			// Covers incompressible values, keys, per-table overhead and policy.
 			n := uint64(c.metrics) * uint64(c.points) * uint64(c.archives)

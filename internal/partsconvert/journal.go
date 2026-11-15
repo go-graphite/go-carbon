@@ -47,6 +47,36 @@ func unitName(u Unit) string {
 	return fmt.Sprintf("%x-%04d", sum[:16], u.VShard)
 }
 
+// A synced cursor is insufficient if a power loss can discard its parent
+// directory entry. Make each newly created directory durable before ingest.
+func makeDurableDirectory(dir string) error {
+	info, err := os.Stat(dir)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("conversion directory is not a directory: %s", dir)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	parent := filepath.Dir(dir)
+	if parent == dir {
+		return err
+	}
+	if err = makeDurableDirectory(parent); err != nil {
+		return err
+	}
+	if err = os.Mkdir(dir, 0750); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	f, err := os.Open(parent)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
+}
+
 func readReceipt(dir string) (Receipt, error) {
 	var r Receipt
 	f, err := os.Open(filepath.Join(dir, "cursor.json"))

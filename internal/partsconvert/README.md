@@ -60,7 +60,11 @@ ingest placement, compaction counters, CPU, and allocated bytes. The directory
 must not already exist. `-compare-coldpack` builds an actual current native
 continuation/coldpack baseline and compares identical stored archive images after
 compaction. This checks stored slots, not full continuation/render semantics, and
-is not a real-traffic resource qualification.
+is not a real-traffic resource qualification. `-partition-seconds` explores
+compression versus expiry granularity; its default is one day. Wider partitions
+can improve sparse coarse-archive compression but require independent TTL and
+read-amplification validation. Changing this diagnostic flag does not define a
+production partition policy.
 
 Production prerequisites remain a raw read-only legacy scanner that never
 materializes rollups, the final immutable catalog/incarnation/source-tier envelope,

@@ -131,7 +131,7 @@ func (c *Converter) Run(ctx context.Context, u Unit) (Receipt, error) {
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); delete(c.active, u); c.mu.Unlock() }()
 	dir := filepath.Join(c.Directory, unitName(u))
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := makeDurableDirectory(dir); err != nil {
 		return zero, err
 	}
 	// A process-level flock also excludes a second converter using this journal.
