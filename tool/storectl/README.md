@@ -191,7 +191,12 @@ journals without widening the import to full histories.
 
 The report includes `repair.filled_points`, measured as net finite point additions
 in the serving archive over each native window transfer, including missing-name
-copies. Baselines are saved before import and survive resume. An interrupted,
+copies. Each bounded name range saves its baseline, imports, and measures its
+after-count before advancing to the next range; copying starts without a
+whole-catalog point-count scan. Completed measurements are reused on resume.
+Completed totals from older clients are retained once; incomplete older totals
+are superseded by range measurements, with already-imported ranges left unknown.
+An interrupted,
 failed or unavailable measurement yields a null total and an unmeasured-transfer
 count. These are stored archive points, not the original received point count;
 live persistence in the same windows can also contribute to net additions.
