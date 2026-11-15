@@ -58,9 +58,16 @@ func readWindowPointCount(path string, initial windowPointCount) (windowPointCou
 }
 
 func collectWindowPointCounts(state string) (windowRepairCount, error) {
+	return collectWindowPointCountsContext(context.Background(), state)
+}
+
+func collectWindowPointCountsContext(ctx context.Context, state string) (windowRepairCount, error) {
 	var total int64
 	out := windowRepairCount{Unit: "finite serving-archive points added in selected windows; includes missing-name copies; not raw input events"}
 	err := filepath.WalkDir(state, func(path string, entry fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			return err
 		}

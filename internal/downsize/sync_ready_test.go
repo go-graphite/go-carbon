@@ -487,3 +487,42 @@ func TestSyncReadyBlockResumeWithoutOriginalDescriptor(t *testing.T) {
 		})
 	}
 }
+
+func TestReadyCancellationKeepsProgress(t *testing.T) {
+	f, o, r := newReadyFixture(t, 1)
+	r.scope = "windows"
+	path := filepath.Join(o.state, "progress.json")
+	if err := atomicStateJSON(path, progressSnapshot{Phase: "verify", Done: 7}); err != nil {
+		t.Fatal(err)
+	}
+	// A cancelled finalizer must not traverse count files or publish partial
+	// repair totals. The malformed file would otherwise fail JSON decoding.
+	if err := os.WriteFile(filepath.Join(o.state, "copy.window-points.json"), []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := runSyncReady(ctx, &o, r, f, func() error { cancel(); return ctx.Err() })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		t.Fatal("cancelled finalizer read point-count file", err)
+	}
+	report := readReadyReport(t, o.state)
+	if report.Verdict != "NOT_READY" || report.Repair != nil {
+		t.Fatal(report)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var progress progressSnapshot
+	if err := json.Unmarshal(data, &progress); err != nil {
+		t.Fatal(err)
+	}
+	if progress.Status != "interrupted" || progress.Phase != "verify" || progress.Done != 7 {
+		t.Fatal(progress)
+	}
+}

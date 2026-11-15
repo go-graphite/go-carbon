@@ -60,7 +60,7 @@ func (b *cancelWindowSelectionBackend) WindowPresenceRanges(ctx context.Context,
 }
 
 // Cancelling queued selections must not wait for every serial donor export.
-// TestSyncWindowPipelineOverlapAndDrain separately proves issued pulls drain.
+// TestSyncWindowPipelineOverlapAndCancel also checks issued pulls.
 func TestSyncWindowCancellationStopsReadSelections(t *testing.T) {
 	base, o := pipelineFixture(t, 8)
 	b := &cancelWindowSelectionBackend{base, make(chan struct{}, 8)}

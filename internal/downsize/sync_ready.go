@@ -115,12 +115,17 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		return err
 	}
 	defer func() {
-		if r.scope == "windows" {
-			counts, e := collectWindowPointCounts(o.state)
+		if r.scope == "windows" && ctx.Err() == nil {
+			counts, e := collectWindowPointCountsContext(ctx, o.state)
 			if e != nil {
 				err = errors.Join(err, e)
 			}
-			report.Repair = &counts
+			if e == nil {
+				report.Repair = &counts
+			}
+		}
+		if ctx.Err() != nil && !errors.Is(err, ctx.Err()) {
+			err = errors.Join(err, ctx.Err())
 		}
 		if err != nil {
 			report.Reasons = append(report.Reasons, err.Error())
@@ -129,6 +134,9 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		status := "complete"
 		if err != nil || len(report.Reasons) > 0 {
 			status = "incomplete"
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				status = "interrupted"
+			}
 		}
 		if e := readyProgress(o.state, status, err); e != nil {
 			err = errors.Join(err, e)
@@ -665,7 +673,9 @@ func readyProgress(state, status string, checkErr error) error {
 	if err = json.Unmarshal(data, &progress); err != nil {
 		return err
 	}
-	progress.Phase = "ready"
+	if status != "interrupted" {
+		progress.Phase = "ready"
+	}
 	progress.Status = status
 	progress.Updated = time.Now()
 	if checkErr != nil {
