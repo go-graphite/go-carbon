@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/tags"
 	"github.com/klauspost/compress/zstd"
 	"go.uber.org/zap"
 )
@@ -19,10 +20,12 @@ import (
 // controls its ordering/retirement boundary. Append acknowledges only after the
 // ordinary journal write and data-sync barriers complete. It is single-owner.
 type SegmentWriter struct {
-	log     Log
-	scratch workerBuffer
-	ref     StreamRef
-	failed  error
+	log       Log
+	scratch   workerBuffer
+	ref       StreamRef
+	aliases   map[string]string
+	spellings map[string]bool
+	failed    error
 }
 
 func NewSegmentWriter(file *os.File, sequence uint64) (*SegmentWriter, error) {
@@ -46,7 +49,8 @@ func (w *SegmentWriter) Close()           { w.log.enc.Close() }
 func (w *SegmentWriter) Metrics() Metrics { return w.log.Metrics() }
 
 // Append preserves each name's order. Tagged spellings may alias after cache
-// normalization: frame barriers retain their interleaving across dictionary ids.
+// normalization: only conflicting spellings need frame barriers. Independent
+// tagged metrics retain the same batching as ordinary metric names.
 // reserve runs before disk mutation, with the exact bytes to be appended.
 func (w *SegmentWriter) Append(records []*points.Points, reserve func(int64) error) (written int64, err error) {
 	if w.failed != nil {
@@ -61,13 +65,32 @@ func (w *SegmentWriter) Append(records []*points.Points, reserve func(int64) err
 	part := &l.parts[0]
 	part.out, part.frames = part.out[:0], part.frames[:0]
 	part.enc.begin(l.active.seq)
+	clear(w.aliases)
+	clear(w.spellings)
 	flush := func() {
+		clear(w.aliases)
+		clear(w.spellings)
 		w.scratch.raw = part.enc.flush(&w.scratch.streamScratch, w.scratch.raw, func(raw []byte, n int) []byte { l.compress(part, 0, raw, n); return raw })
 	}
 	for _, p := range records {
-		tagged := strings.Contains(p.Metric, ";")
-		if tagged {
-			flush()
+		invalid := false
+		canonical := ""
+		var err error
+		if strings.Contains(p.Metric, ";") && !w.spellings[p.Metric] {
+			canonical, err = tags.Normalize(p.Metric)
+			previous, seen := w.aliases[canonical]
+			invalid = err != nil
+			if invalid || seen && previous != p.Metric {
+				flush()
+			}
+			if !invalid {
+				if w.aliases == nil {
+					w.aliases = make(map[string]string)
+					w.spellings = make(map[string]bool)
+				}
+				w.aliases[canonical] = p.Metric
+				w.spellings[p.Metric] = true
+			}
 		}
 		w.ref.Metric = p.Metric
 		w.ref.state.Store(0)
@@ -76,9 +99,18 @@ func (w *SegmentWriter) Append(records []*points.Points, reserve func(int64) err
 			part.enc.add(&w.scratch.streamScratch, ref.Entry(v.Value, v.Timestamp))
 			if len(w.scratch.rows) >= maxSortRows || len(w.scratch.names) >= 2*maxFrameRaw {
 				flush()
+				// A record may continue after this bounded flush. Keep its spelling
+				// visible to the next record's alias check.
+				if strings.Contains(p.Metric, ";") && !invalid {
+					if canonical == "" {
+						canonical, _ = tags.Normalize(p.Metric)
+					}
+					w.aliases[canonical] = p.Metric
+					w.spellings[p.Metric] = true
+				}
 			}
 		}
-		if tagged {
+		if invalid {
 			flush()
 		}
 	}
