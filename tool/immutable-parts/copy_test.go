@@ -39,6 +39,9 @@ func (copyQuietLogger) Fatalf(f string, a ...interface{}) { panic("pebble fatal:
 // One named metric per partition with exact special float payloads and ordered
 // sample bits. Random finite payloads make transfer-byte measurements honest.
 func copyFixture(t *testing.T, root string, partitions, blocks, points int, donors []*pebble.DB) []copyPartition {
+	return copyFixtureGrouped(t, root, partitions, blocks, points, donors, 0)
+}
+func copyFixtureGrouped(t *testing.T, root string, partitions, blocks, points int, donors []*pebble.DB, groups int) []copyPartition {
 	t.Helper()
 	var out []copyPartition
 	for pi := 0; pi < partitions; pi++ {
@@ -47,7 +50,11 @@ func copyFixture(t *testing.T, root string, partitions, blocks, points int, dono
 		var id partsformat.PartID
 		binary.BigEndian.PutUint64(id[:8], uint64(pi+1))
 		id[15] = 1
-		m := partsformat.Manifest{VShard: vs, Partition: int64(pi), Policy: sha256.Sum256([]byte("raw-ieee-v1"))}
+		var group partsformat.Group
+		if groups > 0 {
+			group = partsformat.Group(fmt.Sprintf("namespace-%d", pi%groups))
+		}
+		m := partsformat.Manifest{Group: group, VShard: vs, Partition: int64(pi), Policy: sha256.Sum256([]byte("raw-ieee-v1"))}
 		path := filepath.Join(root, "part-"+stringID(pi)+".sst")
 		f, e := vfs.Default.Create(path)
 		if e != nil {
@@ -56,7 +63,7 @@ func copyFixture(t *testing.T, root string, partitions, blocks, points int, dono
 		w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.NoCompression, TableFormat: sstable.TableFormatPebblev4})
 		state := uint64(pi + 1)
 		for bi := 0; bi < blocks; bi++ {
-			k, e := partsformat.Encode(partsformat.Key{VShard: vs, Partition: int64(pi), Metric: name, BlockStart: int64(bi * points), Part: id, Ordinal: uint32(bi)})
+			k, e := partsformat.Encode(partsformat.Key{Group: group, VShard: vs, Partition: int64(pi), Metric: name, BlockStart: int64(bi * points), Part: id, Ordinal: uint32(bi)})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -210,7 +217,7 @@ func TestCopyRangeRepairResizeAndCatchup(t *testing.T) {
 		t.Fatalf("equal inventories %v %v", plan, e)
 	}
 	wire, wireBytes, e := copyCompare(context.Background(), addr, manifests)
-	if e != nil || len(wire) != 0 || wireBytes != uint64(16+42*len(manifests)) {
+	if e != nil || len(wire) != 0 || wireBytes != uint64(20+54*len(manifests)) {
 		t.Fatalf("wire equal plan %v bytes%d err%v", wire, wireBytes, e)
 	}
 	// Remove a partition and add target-only stale data inside the same range.
@@ -390,4 +397,105 @@ func TestCopySenderRejectsRemoteIndex(t *testing.T) {
 	if <-done == nil {
 		t.Fatal("bad index accepted")
 	}
+}
+
+func TestCopyNamespaceMoveAndSourceRetirement(t *testing.T) {
+	root := t.TempDir()
+	donor := copyTestDB(t, filepath.Join(root, "donor"))
+	defer donor.Close()
+	target := copyTestDB(t, filepath.Join(root, "target"))
+	defer target.Close()
+	source := copyFixtureGrouped(t, root, 8, 2, 16, []*pebble.DB{donor}, 2)
+	plan, e := copyPlan(source, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	plan = copySelectGroup(source, plan, "namespace-1")
+	if len(plan) != 4 {
+		t.Fatal("group selection", plan)
+	}
+	addr, stop := copyTestServer(t, source)
+	defer stop()
+	_, e = copyTransfer(context.Background(), addr, source, plan, 4, []*pebble.DB{target}, root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	lo, hi, e := partsformat.GroupRange("namespace-1")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if copyRangeDigest(t, donor, lo, hi) != copyRangeDigest(t, target, lo, hi) {
+		t.Fatal("namespace target differs")
+	}
+	// Simulate the overlap window with an additional source-side log record;
+	// the second pinned snapshot is compared and repaired before retirement.
+	m := source[1].Manifest
+	k, e := partsformat.Encode(partsformat.Key{Group: m.Group, VShard: m.VShard, Partition: m.Partition, Metric: "copy.fixture.metric.0001", Part: partsformat.PartID{254}, BlockStart: 999})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = donor.Set(k, []byte("overlap-window-record"), pebble.Sync); e != nil {
+		t.Fatal(e)
+	}
+	snap := donor.NewSnapshot()
+	p, e := copyExport(snap, root, m, partsformat.PartID{253})
+	snap.Close()
+	if e != nil {
+		t.Fatal(e)
+	}
+	tail := []copyPartition{p}
+	tailAddr, tailStop := copyTestServer(t, tail)
+	defer tailStop()
+	old := []partsformat.Manifest{m}
+	tailPlan, _, e := copyCompare(context.Background(), tailAddr, old)
+	if e != nil || len(tailPlan) != 1 {
+		t.Fatal("overlap digest", tailPlan, e)
+	}
+	if _, e = copyTransfer(context.Background(), tailAddr, tail, tailPlan, 2, []*pebble.DB{target}, root); e != nil {
+		t.Fatal(e)
+	}
+	if copyRangeDigest(t, donor, lo, hi) != copyRangeDigest(t, target, lo, hi) {
+		t.Fatal("overlap repair differs")
+	}
+	otherLo, otherHi, _ := partsformat.GroupRange("namespace-0")
+	before := copyRangeDigest(t, donor, otherLo, otherHi)
+	// This private-test range deletion models the final, explicitly fenced
+	// retirement step. The transport itself never initiates source deletion.
+	if e = donor.DeleteRange(lo, hi, pebble.Sync); e != nil {
+		t.Fatal(e)
+	}
+	if before != copyRangeDigest(t, donor, otherLo, otherHi) {
+		t.Fatal("retirement changed unrelated namespace")
+	}
+	it, e := donor.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer it.Close()
+	if it.First() {
+		t.Fatal("retired namespace remains")
+	}
+}
+func copyRangeDigest(t *testing.T, db *pebble.DB, lo, hi []byte) [32]byte {
+	t.Helper()
+	it, e := db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer it.Close()
+	h := sha256.New()
+	for ok := it.First(); ok; ok = it.Next() {
+		v, e := it.ValueAndErr()
+		if e != nil {
+			t.Fatal(e)
+		}
+		h.Write(it.Key())
+		h.Write(v)
+	}
+	if e = it.Error(); e != nil {
+		t.Fatal(e)
+	}
+	var d [32]byte
+	copy(d[:], h.Sum(nil))
+	return d
 }

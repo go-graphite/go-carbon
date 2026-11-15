@@ -37,12 +37,13 @@ type copyPartition struct {
 // Target-only partitions are outside this donor's authority and stay untouched.
 func copyPlan(source []copyPartition, target []partsformat.Manifest) ([]int, error) {
 	type key struct {
+		group     partsformat.Group
 		shard     uint16
 		partition int64
 	}
 	digests := make(map[key][32]byte, len(target))
 	for _, m := range target {
-		k := key{m.VShard, m.Partition}
+		k := key{m.Group, m.VShard, m.Partition}
 		if _, ok := digests[k]; ok {
 			return nil, errors.New("duplicate target partition")
 		}
@@ -56,7 +57,7 @@ func copyPlan(source []copyPartition, target []partsformat.Manifest) ([]int, err
 	seen := make(map[key]bool, len(source))
 	for i, p := range source {
 		m := p.Manifest
-		k := key{m.VShard, m.Partition}
+		k := key{m.Group, m.VShard, m.Partition}
 		if seen[k] {
 			return nil, errors.New("duplicate source partition")
 		}
@@ -85,7 +86,7 @@ func copyPlan(source []copyPartition, target []partsformat.Manifest) ([]int, err
 // This cost belongs to export, not to the zero-rewrite transport measurement.
 // Fast-path writers retain their already partition-bounded seal SST instead.
 func copyExport(snap *pebble.Snapshot, dir string, m partsformat.Manifest, id partsformat.PartID) (copyPartition, error) {
-	lo, err := partsformat.PartitionPrefix(m.VShard, m.Partition)
+	lo, err := partsformat.PartitionPrefixForGroup(m.Group, m.VShard, m.Partition)
 	if err != nil {
 		return copyPartition{}, err
 	}
@@ -207,44 +208,55 @@ func copyServeConn(c net.Conn, source []copyPartition) error {
 	}
 }
 
-// The fixed-size digest exchange is 42 bytes per retained partition, regardless
-// of metric cardinality. Source descriptors belong to the same pinned snapshot
-// and are exchanged separately once, rather than re-enumerating names per round.
+// Digests are keyed by the exact portable group/vshard/partition prefix.
+// Metadata grows with partitions and placement labels, never metric names.
+// Source descriptors are supplied once for the same pinned snapshot.
 func copyServeCompare(c net.Conn, source []copyPartition) error {
-	var count [4]byte
-	if _, e := io.ReadFull(c, count[:]); e != nil {
+	var header [8]byte
+	if _, e := io.ReadFull(c, header[:]); e != nil {
 		return e
 	}
-	n := binary.BigEndian.Uint32(count[:])
-	if n > 1<<20 {
+	n, size := binary.BigEndian.Uint32(header[:4]), binary.BigEndian.Uint32(header[4:])
+	if n > 1<<20 || size > 64<<20 {
 		return errors.New("partition inventory too large")
 	}
-	b := make([]byte, int(n)*42)
+	b := make([]byte, int(size))
 	if _, e := io.ReadFull(c, b); e != nil {
 		return e
 	}
-	target := make(map[[10]byte][32]byte, n)
-	for len(b) > 0 {
-		var k [10]byte
+	target := make(map[string][32]byte, n)
+	for range n {
+		if len(b) < 4 {
+			return io.ErrUnexpectedEOF
+		}
+		klen := int(binary.BigEndian.Uint32(b[:4]))
+		b = b[4:]
+		if klen < 18 || klen > partsformat.MaxNameBytes+32 || len(b) < klen+32 {
+			return errors.New("invalid partition digest prefix")
+		}
+		k := string(b[:klen])
 		var d [32]byte
-		copy(k[:], b[:10])
-		copy(d[:], b[10:42])
+		copy(d[:], b[klen:klen+32])
+		b = b[klen+32:]
 		if _, ok := target[k]; ok {
 			return errors.New("duplicate digest partition")
 		}
 		target[k] = d
-		b = b[42:]
+	}
+	if len(b) != 0 {
+		return errors.New("trailing inventory bytes")
 	}
 	var plan []int
 	for i, p := range source {
-		var k [10]byte
-		binary.BigEndian.PutUint16(k[:2], p.Manifest.VShard)
-		binary.BigEndian.PutUint64(k[2:], uint64(p.Manifest.Partition))
+		k, e := partsformat.PartitionPrefixForGroup(p.Manifest.Group, p.Manifest.VShard, p.Manifest.Partition)
+		if e != nil {
+			return e
+		}
 		d, e := p.Manifest.Digest()
 		if e != nil {
 			return e
 		}
-		if got, ok := target[k]; !ok || got != d {
+		if got, ok := target[string(k)]; !ok || got != d {
 			plan = append(plan, i)
 		}
 	}
@@ -268,20 +280,33 @@ func copyCompare(ctx context.Context, address string, target []partsformat.Manif
 	if len(target) > 1<<20 {
 		return nil, 0, errors.New("partition inventory too large")
 	}
-	b := make([]byte, 12+len(target)*42)
-	binary.BigEndian.PutUint32(b[:4], ^uint32(0))
-	binary.BigEndian.PutUint32(b[8:12], uint32(len(target)))
-	for i, m := range target {
+	var payload bytes.Buffer
+	for _, m := range target {
+		prefix, e := partsformat.PartitionPrefixForGroup(m.Group, m.VShard, m.Partition)
+		if e != nil {
+			return nil, 0, e
+		}
 		d, e := m.Digest()
 		if e != nil {
 			return nil, 0, e
 		}
-		v := b[12+i*42:]
-		binary.BigEndian.PutUint16(v[:2], m.VShard)
-		binary.BigEndian.PutUint64(v[2:10], uint64(m.Partition))
-		copy(v[10:42], d[:])
+		if payload.Len()+4+len(prefix)+32 > 64<<20 {
+			return nil, 0, errors.New("partition inventory too large")
+		}
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(prefix)))
+		payload.Write(n[:])
+		payload.Write(prefix)
+		payload.Write(d[:])
 	}
-	if _, e = c.Write(b); e != nil {
+	var header [16]byte
+	binary.BigEndian.PutUint32(header[:4], ^uint32(0))
+	binary.BigEndian.PutUint32(header[8:12], uint32(len(target)))
+	binary.BigEndian.PutUint32(header[12:], uint32(payload.Len()))
+	if _, e = c.Write(header[:]); e != nil {
+		return nil, 0, e
+	}
+	if _, e = c.Write(payload.Bytes()); e != nil {
 		return nil, 0, e
 	}
 	var count [4]byte
@@ -300,7 +325,17 @@ func copyCompare(ctx context.Context, address string, target []partsformat.Manif
 	for i := range plan {
 		plan[i] = int(binary.BigEndian.Uint32(out[i*4:]))
 	}
-	return plan, uint64(len(b) + 4 + len(out)), nil
+	return plan, uint64(20 + payload.Len() + len(out)), nil
+}
+
+func copySelectGroup(source []copyPartition, plan []int, group partsformat.Group) []int {
+	var selected []int
+	for _, i := range plan {
+		if source[i].Manifest.Group == group {
+			selected = append(selected, i)
+		}
+	}
+	return selected
 }
 
 // Receive verifies and fsyncs every SST before atomically replacing a partition
@@ -309,7 +344,7 @@ func copyCompare(ctx context.Context, address string, target []partsformat.Manif
 // A durable owner frontier and READY publication are intentionally not implied.
 func copyReceivePartition(ctx context.Context, c net.Conn, source []copyPartition, pi int, db *pebble.DB, stage string) (uint64, error) {
 	p := source[pi]
-	lo, e := partsformat.PartitionPrefix(p.Manifest.VShard, p.Manifest.Partition)
+	lo, e := partsformat.PartitionPrefixForGroup(p.Manifest.Group, p.Manifest.VShard, p.Manifest.Partition)
 	if e != nil {
 		return 0, e
 	}

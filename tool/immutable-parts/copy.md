@@ -1,20 +1,21 @@
 # Immutable partition copy experiment
 
-This offline prototype adds a copy boundary to the portable format2 contract.
+This offline prototype adds a copy boundary to the portable format3 contract.
 It is not wired into the daemon, storectl, ownership changes, or READY. It builds
 on the immutable-parts prototype and keeps that PR Draft.
 
 The copy source owns a pinned inventory of immutable files, partitioned by
-`(vshard, time partition)`. Each file contains exactly one such range. Its keys
-start with that range, then a globally unique part identity, then the exact
+`(placement group, vshard, time partition)`. Each file contains exactly one such range. Its keys
+start with the exact placement group and that range, then a globally unique part identity, then the exact
 canonical metric name, archive, block start and ordinal. IDs therefore require
 no remapping between replicas. The part identity before the metric makes seal
 SST ranges disjoint for atomic multi-file ingestion. Independent names never
 alias through a truncated hash.
 
-`copyCompare` exchanges fixed-size partition digests over TCP. Its control
-traffic is 42 bytes per healthy target partition plus fixed framing and four
-bytes per mismatched source partition. The digest covers the physical immutable
+`copyCompare` exchanges partition digests over TCP. Entries contain the exact
+length-prefixed portable partition prefix and a SHA-256 digest. Control traffic
+is 54 bytes plus the placement-label length per healthy target partition,
+20 bytes of framing, and four bytes per mismatched source partition. The digest covers the physical immutable
 part inventory and policy, rather than logical metric equality; different
 sealing or compaction histories conservatively require a copy. Comparing all
 partition summaries is O(partitions), while payload I/O is O(mismatched bytes).
@@ -75,6 +76,17 @@ process binds loopback and publishes its address beneath COPY_ROOT. Receiving
 uses 16 target DBs, `COPY_STREAMS=1..64`, and `COPY_HOLES=0..1000` missing
 partitions. Healthy partitions are materialized outside the timed repair.
 Sender and receiver can run as distinct processes for CPU accounting. The
-benchmark deletes each target after close; source cleanup belongs to its caller.
+benchmark deletes each target after close; source cleanup belongs to its caller. `COPY_ONLY_GROUP`
+selects a namespace from the returned plan; preparation uses four placement groups.
 It is a trusted offline protocol; authentication, admission, resumable sessions,
 manifest persistence and daemon lifecycle integration remain future work.
+
+Namespace moves use the same transport: dual delivery during an externally
+coordinated route switch, one placement-group range transfer, partition digest
+repair for the overlap window, parity at a durable common frontier, then an
+explicit source group range deletion. The private namespace test verifies this
+data sequence, including preserving another group; it does not change routes.
+Catalog entries, name-incarnation tombstones and replay frontiers must be pinned
+with the data and published coherently. Copying data alone must never resurrect
+a deleted name. This format does not yet carry the required incarnation/tier
+contract, so READY and operational namespace deletion remain blocked.

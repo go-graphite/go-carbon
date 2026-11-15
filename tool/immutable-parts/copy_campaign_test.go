@@ -47,7 +47,7 @@ func TestCopyCampaign(t *testing.T) {
 		for s := 0; s < 16; s++ {
 			donors = append(donors, copyTestDB(t, filepath.Join(root, fmt.Sprintf("donor-%02d", s))))
 		}
-		source := copyFixture(t, dir, parts, blocks, 1024, donors)
+		source := copyFixtureGrouped(t, dir, parts, blocks, 1024, donors, 4)
 		exportStart := time.Now()
 		var exportBytes uint64
 		for i := 0; i < 10; i++ {
@@ -174,6 +174,10 @@ func TestCopyCampaign(t *testing.T) {
 	compare := time.Now()
 	plan, compareBytes, e := copyCompare(context.Background(), string(address), target)
 	compareSec := time.Since(compare).Seconds()
+	group := os.Getenv("COPY_ONLY_GROUP")
+	if group != "" {
+		plan = copySelectGroup(source, plan, partsformat.Group(group))
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -196,6 +200,7 @@ func TestCopyCampaign(t *testing.T) {
 	ioAfter := copyProcessIO()
 	cpu := float64(after.Utime.Sec-before.Utime.Sec+after.Stime.Sec-before.Stime.Sec) + float64(after.Utime.Usec-before.Utime.Usec+after.Stime.Usec-before.Stime.Usec)/1e6
 	row := map[string]any{"phase": "receive", "streams": streams, "holes": damage, "compare_seconds": compareSec, "compare_bytes": compareBytes, "stats": stats, "receiver_cpu_seconds": cpu, "receiver_cores": cpu / stats.Seconds, "MBps": float64(stats.Bytes) / stats.Seconds / 1e6}
+	row["group"] = group
 	row["write_bytes"] = ioAfter["write_bytes"] - ioBefore["write_bytes"]
 	row["read_bytes"] = ioAfter["read_bytes"] - ioBefore["read_bytes"]
 	if e != nil {
