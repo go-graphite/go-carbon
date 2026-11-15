@@ -12,10 +12,13 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/blevesearch/mmap-go"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 // ManifestName names a published checkpoint's manifest in its directory.
@@ -219,7 +222,7 @@ func (m mappings) close() error {
 // Bundle owns immutable mappings. Read returns detached points; the reachability
 // cleanup cannot release a mapping while a cache reader still owns this bundle.
 type Bundle struct {
-	arrivals map[string]int64
+	arrivals *arrivalIndex
 	manifest Manifest
 	index    *Index
 	maps     mappings
@@ -274,6 +277,7 @@ func loadManifest(dir string) (Manifest, error) {
 }
 
 func OpenBundle(dir, root string) (_ *Bundle, err error) {
+	started := time.Now()
 	manifest, err := loadManifest(dir)
 	if err != nil {
 		return nil, err
@@ -303,27 +307,37 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 		}
 	}
 	b := &Bundle{manifest: manifest, dir: dir}
-	b.arrivals, err = ReadArrivals(filepath.Join(dir, manifest.Cache.Name))
-	if err != nil {
-		return nil, err
-	}
 	defer func() {
 		if err != nil {
 			_ = b.Close()
 		}
 	}()
-	// These three immutable files are independent. Keep every checksum and
-	// structural check, but overlap validation instead of hashing serially.
-	b.maps = make(mappings, 3)
+	// The sources, index and optional arrival companion are independent. Keep
+	// every checksum and structural check, but overlap their validation.
+	b.maps = make(mappings, 4)
 	checks := make([]error, len(b.maps))
+	loads := make([]time.Duration, len(b.maps))
 	var wg sync.WaitGroup
 	for i, file := range []File{manifest.Cache, manifest.WAL, manifest.Index} {
-		wg.Go(func() { b.maps[i], checks[i] = mapFile(dir, file) })
+		wg.Go(func() {
+			start := time.Now()
+			b.maps[i], checks[i] = mapFile(dir, file)
+			loads[i] = time.Since(start)
+		})
 	}
+	wg.Go(func() {
+		start := time.Now()
+		b.arrivals, checks[3] = openArrivalIndex(filepath.Join(dir, manifest.Cache.Name))
+		loads[3] = time.Since(start)
+		if b.arrivals != nil {
+			b.maps[3] = b.arrivals.data
+		}
+	})
 	wg.Wait()
 	if err = errors.Join(checks...); err != nil {
 		return nil, err
 	}
+	verified := time.Now()
 	b.index, err = OpenFormat(b.maps[2], b.maps[0], b.maps[1], CacheFormat(manifest.Cache.Name))
 	if err != nil {
 		return nil, err
@@ -331,11 +345,23 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 	// Validation has touched every source byte. Do not retain a resident second
 	// copy of the checkpoint while restore builds the live cache. These remain
 	// valid read-only mappings: pending readers fault unchanged bytes back in.
-	for _, data := range b.maps {
+	for _, data := range b.maps[:3] {
 		discardMappedPages(data)
 	}
 	b.index.mappedCache = true
 	b.cleanup = runtime.AddCleanup(b, func(m mappings) { _ = m.close() }, b.maps)
+	arrivalSlots := 0
+	if b.arrivals != nil {
+		arrivalSlots = len(b.arrivals.slots)
+	}
+	zapwriter.Logger("recovery").Info("pending checkpoint opened",
+		zap.Duration("runtime", time.Since(started)),
+		zap.Duration("cache_verify_time", loads[0]), zap.Int("cache_bytes", len(b.maps[0])),
+		zap.Duration("wal_verify_time", loads[1]), zap.Int("wal_bytes", len(b.maps[1])),
+		zap.Duration("index_verify_time", loads[2]), zap.Int("index_bytes", len(b.maps[2])),
+		zap.Duration("arrivals_time", loads[3]), zap.Int("arrivals_bytes", len(b.maps[3])),
+		zap.Int("arrival_table_bytes", arrivalSlots*8),
+		zap.Duration("index_setup_time", time.Since(verified)))
 	return b, nil
 }
 
@@ -437,6 +463,7 @@ func (b *Bundle) Close() error {
 	err := b.maps.close()
 	b.maps = nil
 	b.index = nil
+	b.arrivals = nil
 	return err
 }
 
