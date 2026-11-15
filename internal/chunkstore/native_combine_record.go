@@ -37,6 +37,10 @@ type ContinuationNativeCombiner interface {
 // authoritative, and cannot be recreated by replaying the finest archive.
 func (s *Store) nativeCombineRecord(ctx context.Context, source, target TransferMetric) (TransferMetric, NativeCombineClass, error) {
 	var class NativeCombineClass
+	now := int64(0)
+	if s.now != nil {
+		now = s.now().Unix()
+	}
 	if !samePolicy(source.Config, target.Config) || source.Continuation != target.Continuation {
 		return TransferMetric{}, class, ErrConflict
 	}
@@ -130,7 +134,7 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 		if normalizes {
 			class.NormalizedArchives++
 		}
-		want.Archives[i] = Archive{archive.Retention, retainTransferSlots(points, archive.Retention)}
+		want.Archives[i] = Archive{archive.Retention, retainTransferSlotsAt(points, archive.Retention, now)}
 	}
 	result := TransferMetric{Config: source.Config, Version: source.Version, Continuation: source.Continuation}
 	if source.Continuation {

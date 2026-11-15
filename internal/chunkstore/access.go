@@ -133,6 +133,16 @@ func (w *chunkWriter) setPoint(archive, timestamp int, value float64) error {
 	}
 	p := Point{Timestamp: int64(timestamp), Value: value}
 	chunkSlot := slot % chunkSlots
+	// Ordinary late writes retain their existing last-write semantics. Only
+	// refuse a future epoch that would replace a currently retained owner.
+	now := int64(0)
+	if w.store != nil && w.store.now != nil {
+		now = w.store.now().Unix()
+	}
+	if now > 0 && c.current.has(chunkSlot) && p.Timestamp > now &&
+		!PreferArchiveTimestamp(p.Timestamp, c.current.Points[chunkSlot].Timestamp, r, now) {
+		return nil
+	}
 	c.current.set(chunkSlot, p)
 	c.changed[chunkSlot/64] |= uint64(1) << uint(chunkSlot%64)
 	c.dirty = true

@@ -32,7 +32,7 @@ func spliceRankAfter(epoch int64, f *spliceFragment, oldEpoch int64, old *splice
 	return f.sequence >= old.sequence
 }
 
-func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoch int64, r store.Retention) bool {
+func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoch int64, r store.Retention, now int64) bool {
 	mask := spliceMask(slot%128, count)
 	intersects := mask[0]&c.mask[0] != 0 || mask[1]&c.mask[1] != 0
 	if c.fragment == nil && c.owners == nil {
@@ -43,14 +43,18 @@ func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoc
 		return false
 	}
 	if c.owners == nil {
-		if mask[0]&c.mask[0] == c.mask[0] && mask[1]&c.mask[1] == c.mask[1] && spliceRankAfter(epoch, f, c.epoch, c.fragment) {
+		// Whole-fragment epoch ranking is valid only when neither fragment
+		// contains a future point; otherwise compare the occupied slots.
+		future := now > 0 && (spliceOrdinalTime(f, ordinal+count-1, r.Step) > now ||
+			spliceOrdinalTime(c.fragment, c.single.ordinal+c.single.count-1, r.Step) > now)
+		if !future && mask[0]&c.mask[0] == c.mask[0] && mask[1]&c.mask[1] == c.mask[1] && spliceRankAfter(epoch, f, c.epoch, c.fragment) {
 			c.single = splicePart{*f, slot, ordinal, count}
 			c.fragment = f
 			c.epoch = epoch
 			c.mask = mask
 			return intersects
 		}
-		if c.mask[0]&mask[0] == mask[0] && c.mask[1]&mask[1] == mask[1] && !spliceRankAfter(epoch, f, c.epoch, c.fragment) {
+		if !future && c.mask[0]&mask[0] == mask[0] && c.mask[1]&mask[1] == mask[1] && !spliceRankAfter(epoch, f, c.epoch, c.fragment) {
 			return intersects
 		}
 		c.owners = new([128]spliceSlotOwner)
@@ -64,7 +68,7 @@ func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoc
 		o := ordinal + i
 		ts := uint32(spliceOrdinalTime(f, o, r.Step))
 		old := &c.owners[(slot+i)%128]
-		if old.fragment == nil || ts > old.timestamp || ts == old.timestamp && spliceRankAfter(epoch, f, epoch, old.fragment) {
+		if old.fragment == nil || (ts != old.timestamp && store.PreferArchiveTimestamp(int64(ts), int64(old.timestamp), r, now)) || ts == old.timestamp && spliceRankAfter(epoch, f, epoch, old.fragment) {
 			*old = spliceSlotOwner{f, uint16(o), ts}
 		}
 	}
@@ -84,6 +88,10 @@ func spliceOrdinalTime(f *spliceFragment, ordinal, step int) int64 {
 // requiring per-slot comparisons allocates the fixed 128-slot winner table.
 // This avoids point-sized fragment lists and sorting in sparse histories.
 func selectSpliceOwners(ctx context.Context, a, b []spliceFragment, r store.Retention) ([]splicePart, int64, bool, error) {
+	return selectSpliceOwnersAt(ctx, a, b, r, 0)
+}
+
+func selectSpliceOwnersAt(ctx context.Context, a, b []spliceFragment, r store.Retention, now int64) ([]splicePart, int64, bool, error) {
 	chunks := make(map[int]*spliceOwnerChunk)
 	intersects := false
 	for _, fragments := range [][]spliceFragment{a, b} {
@@ -98,7 +106,7 @@ func selectSpliceOwners(ctx context.Context, a, b []spliceFragment, r store.Rete
 					chunk = &spliceOwnerChunk{}
 					chunks[slot/128] = chunk
 				}
-				intersects = chunk.add(f, slot, ordinal, count, epoch, r) || intersects
+				intersects = chunk.add(f, slot, ordinal, count, epoch, r, now) || intersects
 			}
 			if f.irregular {
 				for ordinal := f.ordinal; ordinal < f.ordinal+f.count; ordinal++ {

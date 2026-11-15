@@ -15,6 +15,10 @@ func (s *Store) nativeCombineChunks(ctx context.Context, source, target Transfer
 	result := TransferMetric{Config: source.Config, Version: source.Version}
 	class := NativeCombineClass{Archives: len(source.Config.Retentions)}
 	intersected := make([]bool, class.Archives)
+	now := int64(0)
+	if s.now != nil {
+		now = s.now().Unix()
+	}
 	var a, b chunk
 	for i, j := 0, 0; i < len(source.Keys) || j < len(target.Keys); {
 		if err := ctx.Err(); err != nil {
@@ -73,7 +77,7 @@ func (s *Store) nativeCombineChunks(ctx context.Context, source, target Transfer
 				intersected[archive] = true
 			}
 			for slot, p := range b.Points {
-				if b.has(slot) && (!a.has(slot) || p.Timestamp >= a.Points[slot].Timestamp) {
+				if b.has(slot) && (!a.has(slot) || PreferArchiveTimestamp(p.Timestamp, a.Points[slot].Timestamp, r, now)) {
 					a.set(slot, p)
 				}
 			}

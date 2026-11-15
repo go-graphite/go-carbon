@@ -48,7 +48,7 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 			base = repairs
 			repaired = make(map[int]uint64)
 		}
-		drops, err := reanchorClassicArchive(ctx, repairs, archive)
+		drops, err := reanchorClassicArchiveAt(ctx, repairs, archive, clock().Unix())
 		if err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 		// Nothing from the failed attempt is retained, including propagation to
 		// sibling archives. Reopen Whisper after changing slot zero: its previous
 		// offsets were calculated from the old anchor.
-		drops, err := reanchorClassicArchive(ctx, repairs, conflict.archive)
+		drops, err := reanchorClassicArchiveAt(ctx, repairs, conflict.archive, clock().Unix())
 		if err != nil {
 			return err
 		}
@@ -113,6 +113,10 @@ func (c *ContinuationCodec) updateReanchoring(ctx context.Context, kv store.Cont
 // and writes only the groups whose points change. The surviving points are the
 // ones the original min-anchored repair kept; only their rotation differs.
 func reanchorClassicArchive(ctx context.Context, kv store.ContinuationIO, ai int) (uint64, error) {
+	return reanchorClassicArchiveAt(ctx, kv, ai, 0)
+}
+
+func reanchorClassicArchiveAt(ctx context.Context, kv store.ContinuationIO, ai int, now int64) (uint64, error) {
 	fs := newContinuationFiles(kv, false)
 	file, err := fs.OpenFile(fs.main(), os.O_RDWR, 0600)
 	if err != nil {
@@ -182,7 +186,8 @@ func reanchorClassicArchive(ctx context.Context, kv store.ContinuationIO, ai int
 		oldBase = old[0].Points[0].Timestamp
 	}
 	// Congruence is independent of the chosen base. A ring cannot represent
-	// two distinct timestamps in one congruence class; retain the newer one.
+	// two distinct timestamps in one congruence class; prefer a currently
+	// retained point over a future epoch, otherwise retain the newer one.
 	// For duplicate timestamps prefer the copy visible at the existing anchor.
 	// winner holds slot+1 of each congruence class's survivor, 0 for none.
 	winner := make([]int32, a.Count)
@@ -203,7 +208,7 @@ func reanchorClassicArchive(ctx context.Context, kv store.ContinuationIO, ai int
 			drops++
 		}
 		visible := oldBase != 0 && int(((ts-oldBase)/step%count+count)%count) == slot
-		if ts > prev || ts == prev && visible {
+		if ts != prev && store.PreferArchiveTimestamp(ts, prev, store.Retention{Step: a.Step, Count: a.Count}, now) || ts == prev && visible {
 			winner[absolute] = int32(slot + 1)
 		}
 	}

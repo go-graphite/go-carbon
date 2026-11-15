@@ -43,7 +43,7 @@ func (c *ContinuationCodec) CombineNative(ctx context.Context, donor, survivor s
 	bases := make([]int64, len(a))
 	for ai, r := range m.Retentions {
 		var intersects bool
-		selected[ai], bases[ai], intersects, err = selectSpliceOwners(ctx, a[ai], b[ai], r)
+		selected[ai], bases[ai], intersects, err = selectSpliceOwnersAt(ctx, a[ai], b[ai], r, clock().Unix())
 		if err != nil {
 			return nil, class, false, err
 		}

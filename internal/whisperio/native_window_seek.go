@@ -294,12 +294,12 @@ func (c *ContinuationCodec) PlanNativeWindowPatch(ctx context.Context, kv store.
 			if block.Present[i/64]&(1<<uint(i%64)) != 0 {
 				old := block.Points[i]
 				if !window.Contains(old.Timestamp) {
-					if old.Timestamp > p.Timestamp {
+					if !store.PreferArchiveTimestamp(p.Timestamp, old.Timestamp, archive.Retention, clock().Unix()) {
 						return nil, class, false, fmt.Errorf("window would evict newer out-of-window archive %d point %d: %w", ai, old.Timestamp, store.ErrConflict)
 					}
 					class.StaleEvictedPoints++
 				}
-				if old.Timestamp > p.Timestamp || old.Timestamp == p.Timestamp && !math.IsNaN(old.Value) {
+				if !store.PreferArchiveTimestamp(p.Timestamp, old.Timestamp, archive.Retention, clock().Unix()) || old.Timestamp == p.Timestamp && !math.IsNaN(old.Value) {
 					continue
 				}
 			}
