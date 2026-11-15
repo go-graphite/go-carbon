@@ -150,7 +150,7 @@ func TestAdmissionCrashRecovery100(t *testing.T) {
 			}
 			line += string(b[:n])
 		}
-		time.Sleep(time.Duration((trial*17)%1000) * time.Microsecond)
+		time.Sleep(time.Duration((trial*7919)%200000) * time.Microsecond)
 		_ = c.Process.Kill()
 		_ = c.Wait()
 		_ = out.Close()
