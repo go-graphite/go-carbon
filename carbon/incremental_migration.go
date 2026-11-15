@@ -151,6 +151,11 @@ func (app *App) startIncrementalStoreMigration() {
 		defer cancel()
 		defer p.SetIncrementalMigrationPriority(nil)
 		err := m.run(ctx, p, db, conf)
+		// Drain writers that selected legacy ownership before publishing source
+		// completion, without holding the receipt/state mutex while they finish.
+		if err == nil && m.skipped.Load() == 0 {
+			p.SetIncrementalMigrationComplete()
+		}
 		m.mu.Lock()
 		switch {
 		case err == nil:
@@ -168,7 +173,6 @@ func (app *App) startIncrementalStoreMigration() {
 		// Source readers may still be draining. Never hold the migration
 		// state mutex across another component's I/O gate.
 		if err == nil && m.skipped.Load() == 0 {
-			p.SetIncrementalMigrationComplete()
 			app.legacyWhisperDisabled.Store(true)
 			if cs := app.Carbonserver; cs != nil {
 				cs.SetLegacyWhisperDisabled(true)
