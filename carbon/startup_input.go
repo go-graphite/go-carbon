@@ -220,7 +220,6 @@ func (app *App) tryStartupInput() error {
 		}
 		if discarded {
 			resume = nil
-			journalOnly = true
 		}
 	}
 	if err := app.ownInputLog(); err != nil {
