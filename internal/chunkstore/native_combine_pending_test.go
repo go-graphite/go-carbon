@@ -83,6 +83,9 @@ func TestNativeCombineDefersCacheOnlyTargetAcrossCrash(t *testing.T) {
 			if receipt.CopiedCount != 2 || receipt.DeferredCount != 1 || receipt.IsCopied(0) || !receipt.IsCopied(1) || !receipt.IsCopied(2) || len(receipt.Mappings) != 2 {
 				t.Fatal("cache-only target was published or present target was gated", receipt)
 			}
+			if len(receipt.Skipped) != 1 || receipt.Skipped[0].Ordinal != 0 || receipt.Skipped[0].Name != names[0] || receipt.Skipped[0].Reason != "target catalog absent with pending writes" {
+				t.Fatal("lost durable pending-target reason", receipt.Skipped)
+			}
 			if _, err := target.Metadata(ctx, names[0]); !errors.Is(err, ErrNotFound) {
 				t.Fatal("cache-only history became visible", err)
 			}

@@ -67,6 +67,7 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 		wait = 30 * time.Minute
 	}
 	deadline := time.Now().Add(wait)
+	transfers := 0
 	for attempt := 0; ; attempt++ {
 		// Replaying the initial receipt cannot make deferred ordinals progress.
 		// Reuse the native deferred protocol, whose chained receipt identities
@@ -78,9 +79,48 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 		c.stateMu.Unlock()
 		var err error
 		if t.Native != nil && !t.Native.Intent && !t.Native.complete() {
-			err = c.executeDeferred(ctx, t, names)
+			// The scan's borrowed pin can predate a source flush. Own a fresh
+			// pin for this attempt without closing any concurrent borrower's pin.
+			err = func() error {
+				next := &nativeController{mover: c.mover, sessions: map[string]*nativeRemoteSession{}}
+				defer next.release()
+				return next.executeDeferred(ctx, t, names)
+			}()
 		} else {
 			err = c.executeRange(ctx, t, names)
+		}
+		if err == nil {
+			transfers++
+			c.stateMu.Lock()
+			t = c.journal.tasks[taskKey(t)]
+			c.stateMu.Unlock()
+			if t.Native == nil || t.Native.complete() {
+				return nil
+			}
+			exhausted := transfers >= max(1, b.o.copyAttempts) || time.Now().After(deadline)
+			reportWindowDeferred(t, names, transfers, exhausted)
+			if exhausted {
+				// The caller retains these exact names in Failed. A durable HTTP
+				// acknowledgement never completes an uncopied ordinal.
+				return nil
+			}
+			delay := b.retryTick
+			if delay <= 0 {
+				delay = 2 * time.Second
+			}
+			waitCtx, cancel := context.WithDeadline(ctx, deadline)
+			err = sleepContext(waitCtx, delay)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+					// This is exhausted deferral work, not a transport timeout
+					// for the outer restart waiter to retry indefinitely.
+					reportWindowDeferred(t, names, transfers, true)
+					return nil
+				}
+				return err
+			}
+			continue
 		}
 		var api *apiError
 		if !errors.As(err, &api) || api.Status != http.StatusTooManyRequests {
@@ -96,5 +136,30 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 		if err != nil {
 			return err
 		}
+	}
+}
+
+func reportWindowDeferred(t task, names []string, attempt int, exhausted bool) {
+	level := "warn"
+	if exhausted {
+		level = "ERROR"
+	}
+	receipt := t.Native.Receipt
+	if n := len(t.Native.Combines); n > 0 && t.Native.Combines[n-1].Receipt != nil {
+		receipt = *t.Native.Combines[n-1].Receipt
+	}
+	reasons := make(map[int]string, len(receipt.Skipped))
+	for _, skip := range receipt.Skipped {
+		reasons[skip.Ordinal] = skip.Reason
+	}
+	for i, name := range names {
+		if t.Native.done(i) {
+			continue
+		}
+		reason := reasons[i]
+		if reason == "" {
+			reason = "native receipt omitted name without a reason (source absent, pending or changed; legacy target creation fence)"
+		}
+		event("sync_window_deferred", map[string]any{"level": level, "metric": name, "source": t.Source, "target": t.Target, "receipt": receipt.Identity, "attempt": attempt, "reason": reason, "exhausted": exhausted})
 	}
 }
