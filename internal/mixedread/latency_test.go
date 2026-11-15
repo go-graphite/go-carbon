@@ -27,6 +27,7 @@ func TestLatencyComparison(t *testing.T) {
 	root := os.Getenv("GO_CARBON_MIXED_LATENCY_DIR")
 	profile := os.Getenv("GO_CARBON_MIXED_PROFILE") != ""
 	traced := os.Getenv("GO_CARBON_MIXED_TRACE") != ""
+	class := os.Getenv("GO_CARBON_MIXED_CLASS")
 	path := os.Getenv("GO_CARBON_MIXED_COMPARE")
 	local := os.Getenv("GO_CARBON_MIXED_LATENCY_LOCAL") != ""
 	if profile || local {
@@ -35,8 +36,14 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" {
 		t.Fatal("benchmark requires assigned private host directory")
+	}
+	if class != "" && !profile && !traced {
+		t.Fatal("class selection is for diagnostics only; the latency gate must run every class")
+	}
+	if class != "" && !slices.Contains([]string{"warm-1h", "warm-24h", "warm-168h", "warm-720h", "cold-blockcache-1h", "cold-blockcache-24h", "cold-blockcache-168h", "cold-blockcache-720h", "warm-find4096"}, class) {
+		t.Fatal("unknown diagnostic class")
 	}
 	seed := int64(1)
 	if value := os.Getenv("GO_CARBON_MIXED_SEED"); value != "" {
@@ -189,6 +196,14 @@ func TestLatencyComparison(t *testing.T) {
 			continue
 		}
 		for _, width := range widths {
+			kind := "warm"
+			if !warm {
+				kind = "cold-blockcache"
+			}
+			className := fmt.Sprintf("%s-%dh", kind, width/3600)
+			if class != "" && class != className {
+				continue
+			}
 			var base, mix []int64
 			var baseBytes, mixedBytes uint64
 			old, full, r := open()
@@ -320,14 +335,11 @@ func TestLatencyComparison(t *testing.T) {
 			if mp <= bp && mq <= bq {
 				gate = "PASS"
 			}
-			kind := "warm"
-			if !warm {
-				kind = "cold-blockcache"
-			}
 			fmt.Printf("| %s | %s %dh | %.1f | %.1f | %.1f | %.1f | %s |\n", when, kind, width/3600, float64(bp)/1000, float64(mp)/1000, float64(bq)/1000, float64(mq)/1000, gate)
+			fmt.Printf("LATENCY seed=%d class=%s comparison=%s samples=%d native_p50_ns=%d native_p99_ns=%d mixed_p50_ns=%d mixed_p99_ns=%d gate=%s\n", seed, className, comparison, count, bp, bq, mp, mq, gate)
 		}
 	}
-	if path == "frozen" {
+	if path == "frozen" || (class != "" && class != "warm-find4096") {
 		return
 	}
 	old, full, r := open()
@@ -407,6 +419,7 @@ func TestLatencyComparison(t *testing.T) {
 		gate = "PASS"
 	}
 	fmt.Printf("| %s | warm find4096 | %.1f | %.1f | %.1f | %.1f | %s |\n", when, float64(bp)/1000, float64(mp)/1000, float64(bq)/1000, float64(mq)/1000, gate)
+	fmt.Printf("LATENCY seed=%d class=warm-find4096 comparison=%s samples=%d native_p50_ns=%d native_p99_ns=%d mixed_p50_ns=%d mixed_p99_ns=%d gate=%s\n", seed, comparison, len(base), bp, bq, mp, mq, gate)
 }
 func quantiles(ns []int64) (int64, int64) {
 	slices.Sort(ns)
