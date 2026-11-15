@@ -1,6 +1,9 @@
 package inputlog
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 type metricsSource struct{ fakeSource }
 
@@ -19,6 +22,36 @@ func TestStatDoesNotEnterSource(t *testing.T) {
 		})
 		if got != want {
 			t.Fatalf("dropped delta %g want %g", got, want)
+		}
+	}
+}
+
+func TestStatDuringStart(t *testing.T) {
+	l, err := Open(t.TempDir(), Options{SyncInterval: time.Hour, SegmentSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.total.unlogged.Store(7)
+	started := make(chan struct{})
+	go func() {
+		l.Start(newFakeSource(), partitions)
+		close(started)
+	}()
+	defer l.Close()
+	var dropped float64
+	for {
+		l.Stat(func(name string, value float64) {
+			if name == "dropped" {
+				dropped += value
+			}
+		})
+		select {
+		case <-started:
+			if dropped != 7 {
+				t.Fatalf("dropped delta sum %g, want 7", dropped)
+			}
+			return
+		default:
 		}
 	}
 }
