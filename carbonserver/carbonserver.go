@@ -1143,12 +1143,12 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency 
 	}
 	stopRealtime := listener.startRealtimeIndexer(exit)
 	defer stopRealtime()
-	if listener.startupScanGate != nil {
-		select {
-		case <-listener.startupScanGate:
-		case <-exit:
-			return
-		}
+	// Pending recovery delays scans, but the published index must still
+	// service quota reloads and accounting while recovery is in progress.
+	startupScanGate := listener.startupScanGate
+	scanEvents, forceEvents := scanFrequency, force
+	if startupScanGate != nil {
+		scanEvents, forceEvents = nil, nil
 	}
 	cacheMetricNames := make(map[string]struct{})
 	knownMetricsStatTicker, quotaAndUsageStatTicker, stopTickers := listener.fileListStatTickers()
@@ -1160,8 +1160,12 @@ uloop:
 		select {
 		case <-exit:
 			return
-		case <-scanFrequency:
-		case <-force:
+		case <-startupScanGate:
+			startupScanGate = nil
+			scanEvents, forceEvents = scanFrequency, force
+			continue uloop
+		case <-scanEvents:
+		case <-forceEvents:
 		case <-knownMetricsStatTicker:
 			// It's only useful when using realtime index as the
 			// scanFrequency should be a long interval/duration
@@ -1294,13 +1298,9 @@ func (listener *CarbonserverListener) statKnownMetrics(knownMetricsStatTicker <-
 }
 
 func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTicker <-chan time.Time) {
-	listener.refreshIndexQuotaAndUsage(listener.CurrentFileIndex(), quotaAndUsageStatTicker)
-}
-
-func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex, quotaAndUsageStatTicker <-chan time.Time) {
 	listener.metricStoreIndexMu.Lock()
 	defer listener.metricStoreIndexMu.Unlock()
-	listener.refreshIndexQuotaAndUsageLocked(fidx, quotaAndUsageStatTicker)
+	listener.refreshIndexQuotaAndUsageLocked(listener.CurrentFileIndex(), quotaAndUsageStatTicker)
 }
 
 func (listener *CarbonserverListener) refreshIndexQuotaAndUsageLocked(fidx *fileIndex, quotaAndUsageStatTicker <-chan time.Time) {
@@ -1318,10 +1318,9 @@ func (listener *CarbonserverListener) refreshIndexQuotaAndUsageLocked(fidx *file
 		}
 	}()
 
+	// Publication passes the next index before installing it as current.
+	// Always account against the supplied generation, including shared stores.
 	sharedStore := listener.getMetricIndexStore() != nil
-	if sharedStore {
-		fidx = listener.CurrentFileIndex()
-	}
 
 	if !listener.isQuotaEnabled() || (!sharedStore && (!listener.concurrentIndex || listener.realtimeIndex <= 0)) || fidx == nil || fidx.trieIdx == nil {
 		return
