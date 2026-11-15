@@ -53,6 +53,33 @@ type ContinuationIO interface {
 	Visit([]byte, func([]byte, []byte) error) error
 }
 
+// ContinuationRangeReader visits a half-open suffix range on an immutable view.
+// Callback bytes are borrowed until the callback returns. It lets adapters read
+// adjacent physical groups with one seek instead of a point lookup per group.
+type ContinuationRangeReader interface {
+	VisitRange(start, end []byte, visit func([]byte, []byte) error) error
+}
+
+func (io *continuationIO) VisitRange(start, end []byte, visit func([]byte, []byte) error) error {
+	if err := io.ctx.Err(); err != nil {
+		return err
+	}
+	iter, err := io.reader.NewIter(&pebble.IterOptions{LowerBound: io.key(start), UpperBound: io.key(end)})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		if err := io.ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(io.suffix(iter.Key()), iter.Value()); err != nil {
+			return err
+		}
+	}
+	return iter.Error()
+}
+
 // ContinuationProber reads keys that are usually absent or long unchanged,
 // where an io reading through one shared iterator saves opening a table per
 // read in every level (see continuationIO.Probe). Results equal Get's.

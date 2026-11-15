@@ -32,6 +32,11 @@ func visitClassicWindow(ctx context.Context, f *continuationFile, ai, from, unti
 		return errClassicUnalignedBase
 	}
 	slot := ((from-base)/a.Step%a.Count + a.Count) % a.Count
+	// Sequential classic groups share their LSM table handles. Keep the point
+	// reader for tiny windows and private overlays/reference-backed files.
+	if reader, ok := f.fs.kv.(store.ContinuationRangeReader); ok && f.fs.readOnly && !f.sidecar && !f.data.references && (until-from)/a.Step > 256 && from > 0 {
+		return visitClassicRange(ctx, reader, f, ai, from, until, slot, visit)
+	}
 	for ts := from; ts < until; {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -108,4 +113,46 @@ func fetchClassic(ctx context.Context, w *whisper.Whisper, m store.Metadata, now
 		return &store.Series{Metadata: m, FromTime: series.FromTime(), UntilTime: series.UntilTime(), Step: series.Step(), Values: series.Values()}, nil
 	}
 	return &store.Series{Metadata: m, FromTime: lo, UntilTime: hi, Step: a.Step, Values: values}, nil
+}
+
+// visitClassicRange preserves circular slot validation while decoding one group
+// at a time. The scan wraps at most once and never retains a decoded archive.
+func visitClassicRange(ctx context.Context, reader store.ContinuationRangeReader, f *continuationFile, ai, from, until, slot int, visit func(int, float64)) error {
+	a := f.data.layout.Archives[ai]
+	for ts := from; ts < until; {
+		n := min(a.Count-slot, (until-ts)/a.Step)
+		first, end := slot, slot+n
+		startKey := continuationBodyKey(f.data.id, 'p', ai, 0, first/128)
+		endKey := continuationBodyKey(f.data.id, 'p', ai, 0, (end+127)/128)
+		var group store.PointBlock
+		err := reader.VisitRange(startKey, endKey, func(key, value []byte) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if len(key) != len(startKey) {
+				return errors.New("invalid classic group key")
+			}
+			gi := int(binary.BigEndian.Uint32(key[len(key)-4:]))
+			if skipUnallocatedGroups && !f.classicGroupAllocated(a, gi) {
+				return nil
+			}
+			if err := store.DecodePointBlock(value, &group); err != nil {
+				return err
+			}
+			for index := max(first, gi*128); index < min(end, (gi+1)*128); index++ {
+				i := index % 128
+				expected := ts + (index-first)*a.Step
+				if group.Present[i/64]&(uint64(1)<<uint(i%64)) != 0 && int(uint32(group.Points[i].Timestamp)) == expected {
+					visit(expected, group.Points[i].Value)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		ts += n * a.Step
+		slot = 0
+	}
+	return nil
 }
