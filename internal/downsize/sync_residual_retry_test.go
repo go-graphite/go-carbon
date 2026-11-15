@@ -161,7 +161,7 @@ func TestSyncInterruptedResumeRetriesDeniedFill(t *testing.T) {
 	}
 }
 
-func TestSyncVerificationResumePublishesDurableFloorBeforeReplay(t *testing.T) {
+func TestSyncVerificationResumeCountsOnlyMatchedReceipts(t *testing.T) {
 	o := convergeOptions(t)
 	o.batch = 1
 	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), "floor-test")
@@ -174,6 +174,10 @@ func TestSyncVerificationResumePublishesDurableFloorBeforeReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// An obsolete batch can overlap newer receipts or refer to removed names.
+	if err := j.append(syncRow{Kind: "verified", Round: 1, First: "removed", Last: "zzz", Names: 1000}); err != nil {
+		t.Fatal(err)
+	}
 	s := &syncer{o: o, b: newFakeSync(), j: j}
 	s.sum.phases = map[string]*syncPhase{}
 	next := 0
@@ -182,7 +186,7 @@ func TestSyncVerificationResumePublishesDurableFloorBeforeReplay(t *testing.T) {
 			s.prog.mu.Lock()
 			floor, accounted := s.prog.durableFloor, s.prog.done.Load()
 			s.prog.mu.Unlock()
-			if floor != 2 || accounted != 0 {
+			if floor != 0 || accounted != 0 {
 				t.Fatalf("before first replay: durable=%d accounted=%d", floor, accounted)
 			}
 		}

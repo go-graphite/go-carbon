@@ -384,6 +384,10 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		snap.Done = max(accounted, s.prog.durableFloor)
 		snap.Total = int64(s.prog.total)
 		snap.rateSet = true
+		snap.rateDone = max(0, accounted-s.prog.replayed.Load())
+		if s.prog.copyObserved {
+			snap.rateDone = s.prog.copyFresh
+		}
 		snap.Rate = 0
 		if elapsed := time.Since(s.prog.started).Seconds(); elapsed > 0 {
 			snap.Rate = float64(max(0, accounted-s.prog.replayed.Load())) / elapsed
@@ -831,13 +835,10 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	var unindexed []string
 	var skipped []syncSkip
 	holeNames := map[string]bool{}
-	// Publish the whole durable cursor before streaming the journaled batches
-	// back through the collector. Replay can take minutes for large name sets.
-	var durable int64
-	for _, r := range done {
-		durable += int64(r.Names)
-	}
-	s.prog.beginReplay(fmt.Sprintf("verify round %d", journalRound), set.total, durable)
+	// Receipts can overlap after a resumed run changes batch boundaries. Only
+	// matching batches below prove progress in the current name stream; summing
+	// old rows can exceed the catalog and hide hours of fresh verification.
+	s.prog.begin(fmt.Sprintf("verify round %d", journalRound), set.total)
 	defer set.close()
 	collect := func(r syncRow) {
 		mu.Lock()

@@ -258,6 +258,8 @@ func SyncMain(ctx context.Context, args []string) error {
 	limiter := &syncRateLimit{bytesPerSecond: c.rate}
 	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
+	defer backend.client.CloseIdleConnections()
+	defer backend.m.client.CloseIdleConnections()
 	err = runSyncReady(ctx, &c.sync, c.ready, backend, func() error {
 		streams := c.copy.streams
 		var sourceCapacity int

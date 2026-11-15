@@ -101,7 +101,8 @@ func atomicStateJSON(path string, value any) error {
 
 type progressSnapshot struct {
 	WaitingForStore bool                 `json:"waiting_for_store"`
-	rateSet         bool                 // controller supplied Rate from its live phase counters
+	rateSet         bool                 // controller supplied fresh work counter
+	rateDone        int64                // excludes journal replay and discovery
 	Done            int64                `json:"done"`
 	Total           int64                `json:"total"`
 	Effective       *effectiveSyncPolicy `json:"effective,omitempty"`
@@ -151,9 +152,7 @@ func startProgressFile(ctx context.Context, path string, snapshot func() progres
 	stop := make(chan struct{})
 	var writeErr error
 	var mu sync.Mutex
-	started := time.Now()
-	initial := snapshot()
-	base := initial.Discovered + initial.Verified + initial.Filled + initial.Copied
+	var rate progressRate
 	write := func(status string, runErr error) {
 		p := snapshot()
 		p.Updated = time.Now()
@@ -161,8 +160,9 @@ func startProgressFile(ctx context.Context, path string, snapshot func() progres
 		if runErr != nil {
 			p.Error = runErr.Error()
 		}
-		if !p.rateSet {
-			p.Rate = float64(p.Discovered+p.Verified+p.Filled+p.Copied-base) / time.Since(started).Seconds()
+		p.Rate = rate.observe(p.Updated, p)
+		if status != "running" {
+			p.Rate = 0
 		}
 		outputMu.Lock()
 		if progressObserver != nil {
@@ -212,4 +212,34 @@ func startProgressFile(ctx context.Context, path string, snapshot func() progres
 		defer mu.Unlock()
 		return writeErr
 	}
+}
+
+// progressRate measures fresh work over three minutes, rather than a lifetime
+// average or a sum of discovery, copied and verified counters for the same name.
+// Each progress writer owns one estimator, so nested controllers do not mix.
+type progressRate struct {
+	phase   string
+	round   int
+	samples []progressMetricSample
+}
+
+func (r *progressRate) observe(now time.Time, p progressSnapshot) float64 {
+	done := float64(p.Done)
+	if p.rateSet {
+		done = float64(p.rateDone)
+	}
+	if r.phase != p.Phase || r.round != p.Round || len(r.samples) > 0 && done < r.samples[len(r.samples)-1].done {
+		r.samples = nil
+	}
+	r.phase, r.round = p.Phase, p.Round
+	r.samples = append(r.samples, progressMetricSample{now, done})
+	cutoff := now.Add(-3 * time.Minute)
+	for len(r.samples) > 1 && r.samples[1].at.Before(cutoff) {
+		r.samples = r.samples[1:]
+	}
+	first := r.samples[0]
+	if elapsed := now.Sub(first.at).Seconds(); elapsed > 0 {
+		return max(0, done-first.done) / elapsed
+	}
+	return 0
 }

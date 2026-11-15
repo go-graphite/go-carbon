@@ -2,6 +2,7 @@ package storehttp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -192,5 +194,83 @@ func TestInterruptedResponseRetiresOrigin(t *testing.T) {
 	resp.Body.Close()
 	if err != io.ErrUnexpectedEOF || restarts.Load() != 1 || tr.pool(srv.URL) == old {
 		t.Fatalf("interrupted response retained pool: %v restarts=%d", err, restarts.Load())
+	}
+}
+
+// Local dial exhaustion must leave healthy in-flight keepalives reusable.
+func TestLocalExhaustionPreservesPool(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			close(entered)
+			<-release
+		}
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+	var dials, restarts atomic.Int64
+	tr := NewTransport(&http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dials.Add(1) > 1 {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.EADDRNOTAVAIL}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}})
+	tr.OnRestart = func(string) { restarts.Add(1) }
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	defer client.CloseIdleConnections()
+	call := func(path string) error {
+		resp, err := client.Get(srv.URL + path)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return err
+	}
+	old := tr.pool(srv.URL)
+	held := make(chan error, 1)
+	go func() { held <- call("/hold") }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("request not started")
+	}
+	err := call("/fail")
+	close(release)
+	if heldErr := <-held; heldErr != nil {
+		t.Fatal(heldErr)
+	}
+	if !errors.Is(err, syscall.EADDRNOTAVAIL) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tr.pool(srv.URL) != old || restarts.Load() != 0 {
+		t.Fatal("local failure retired healthy pool")
+	}
+	if err := call("/reuse"); err != nil {
+		t.Fatalf("healthy connection lost: %v", err)
+	}
+	if dials.Load() != 2 {
+		t.Fatalf("did not reuse connection: %d dials", dials.Load())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	if _, err := tr.RoundTrip(req); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if tr.pool(srv.URL) != old || restarts.Load() != 0 {
+		t.Fatal("cancellation retired healthy pool")
+	}
+}
+
+func TestTransportPoolLimits(t *testing.T) {
+	tr := NewTransport(&http.Transport{})
+	if tr.MaxConnsPerHost != 1024 || tr.IdleConnTimeout != 90*time.Second {
+		t.Fatal("unbounded default pool")
+	}
+	tr = NewTransport(&http.Transport{MaxConnsPerHost: 17, IdleConnTimeout: time.Second})
+	if tr.MaxConnsPerHost != 17 || tr.IdleConnTimeout != time.Second {
+		t.Fatal("explicit limits changed")
 	}
 }

@@ -3,6 +3,7 @@ package storehttp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Transport keeps independent pools per origin. Replacing a pool also prevents
@@ -25,7 +27,17 @@ type Transport struct {
 }
 
 func NewTransport(base *http.Transport) *Transport {
-	return &Transport{Transport: base.Clone(), origins: make(map[string]*http.Transport)}
+	base = base.Clone()
+	// Short copy invocations and long controllers both need bounded pools.
+	// Preserve an explicitly configured limit; the default leaves room for all
+	// normal transfer streams without retaining unbounded idle sockets.
+	if base.MaxConnsPerHost == 0 {
+		base.MaxConnsPerHost = max(1024, base.MaxIdleConnsPerHost)
+	}
+	if base.IdleConnTimeout == 0 {
+		base.IdleConnTimeout = 90 * time.Second
+	}
+	return &Transport{Transport: base, origins: make(map[string]*http.Transport)}
 }
 
 func (t *Transport) pool(origin string) *http.Transport {
@@ -41,12 +53,13 @@ func (t *Transport) pool(origin string) *http.Transport {
 
 func (t *Transport) retire(origin string, p *http.Transport) {
 	t.mu.Lock()
-	if t.origins[origin] == p {
+	current := t.origins[origin] == p
+	if current {
 		delete(t.origins, origin)
 	}
 	t.mu.Unlock()
 	p.CloseIdleConnections()
-	if t.OnRestart != nil {
+	if current && t.OnRestart != nil {
 		t.OnRestart(origin)
 	}
 }
@@ -88,9 +101,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		r := req.Clone(httptrace.WithClientTrace(req.Context(), trace))
 		response, err := pool.RoundTrip(r)
 		retry := readOnly(req) && err != nil && (errors.Is(err, syscall.ECONNREFUSED) || reused && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)))
-		if err != nil {
+		if err != nil && !LocalError(err) {
 			t.retire(origin, pool)
-		} else {
+		} else if err == nil {
 			response.Body = &restartBody{ReadCloser: response.Body, retire: func() { t.retire(origin, pool) }}
 		}
 		if err == nil && response.StatusCode == http.StatusServiceUnavailable {
@@ -146,8 +159,15 @@ type restartBody struct {
 
 func (b *restartBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
-	if err != nil && err != io.EOF {
+	if err != nil && err != io.EOF && !LocalError(err) {
 		b.once.Do(b.retire)
 	}
 	return n, err
+}
+
+// LocalError cannot be fixed by replacing a store connection generation.
+// Evicting healthy sockets on cancellation or local port exhaustion amplifies
+// the resource shortage and needlessly invalidates native source sessions.
+func LocalError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE)
 }

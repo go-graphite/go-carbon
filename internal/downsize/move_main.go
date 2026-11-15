@@ -551,7 +551,7 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 
 func (m *mover) requestAttempt(ctx context.Context, endpoint, path string, body any, out any) (headers http.Header, err error) {
 	defer func(parent context.Context) {
-		if parent.Err() == nil && restartCopyError(err) {
+		if parent.Err() == nil && restartCopyError(err) && !storehttp.LocalError(err) {
 			// Run after response bodies close so a stopping daemon cannot
 			// return its connection to the idle pool for the next retry.
 			storehttp.CloseOriginConnections(m.client.Transport, endpoint)

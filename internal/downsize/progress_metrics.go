@@ -236,7 +236,7 @@ type progressMetrics struct {
 func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	p.mu.Lock()
 	if p.paths != nil {
-		if !p.paths[metricStatePath(path)] {
+		if !p.accepts(path) {
 			p.mu.Unlock()
 			return
 		}
@@ -259,9 +259,10 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 		p.phase = "starting"
 	}
 	p.code, p.round = progressPhase(snapshot)
-	if oldPhase != p.phase || oldRound != p.round || float64(snapshot.Done) < p.done {
+	if oldPhase != p.phase || oldRound != p.round || p.path != path || float64(snapshot.Done) < p.done {
 		p.samples = nil
 	}
+	p.path = path
 	p.done, p.total, p.rate = float64(snapshot.Done), float64(snapshot.Total), snapshot.Rate
 	p.active = 0
 	if snapshot.Status == "running" {
@@ -418,4 +419,22 @@ func progressVersion(version string) string {
 		version += "-dirty"
 	}
 	return version
+}
+
+// READY may start a fresh sync after a store restart or final parity check.
+// Its direct child is part of this run; per-batch child journals are not.
+func (p *progressMetrics) accepts(path string) bool {
+	path = metricStatePath(path)
+	if p.paths[path] {
+		return true
+	}
+	if filepath.Base(path) != "progress.json" {
+		return false
+	}
+	parent := filepath.Dir(path)
+	name := filepath.Base(parent)
+	if !strings.HasPrefix(name, "ready-recovery-") && !strings.HasPrefix(name, "ready-fill-") {
+		return false
+	}
+	return p.paths[filepath.Join(filepath.Dir(parent), "progress.json")]
 }
