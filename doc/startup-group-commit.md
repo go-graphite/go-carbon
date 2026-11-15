@@ -57,6 +57,15 @@ are discarded, and a large map's high-water charge survives reuse. Allocator
 size classes, dead objects awaiting collection, goroutine stacks and runtime
 metadata remain additional heap costs.
 
+The 32MiB idle ceiling counts buffers only while they are in the pool. A small
+request can borrow a previously larger buffer while reserving only its current
+work charge. At the 128MiB admission limit, the deliberately loose ceiling of
+2048 admitted requests times 1MiB per borrowed pool entry is 2GiB of retained
+buffer accounting, before new work and other owners. Such entries cannot all be
+idle simultaneously, and this is not a measured workload, but it makes clear why
+adding 128MiB active plus 32MiB idle is not a worst-case heap calculation. An
+additional capacity reservation would be needed to charge borrowed high water.
+
 The ordinary input-log writer retains memory across Stage calls and is not
 covered by the admission limit:
 
