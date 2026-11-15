@@ -57,8 +57,9 @@ The opt-in `TestSnapshotReadBenchmark` uses locked Linux reader threads with a
 separate CPU mask (`PARTS_READ_BENCH_CPUS`). Launch its process with `taskset` on
 writer CPUs; overlapping masks are rejected. Keep GOMAXPROCS, the writer CPU
 mask, engine settings and publication hook identical across reader counts. The
-harness samples thread masks, CPU/mutex/block profiles, allocation/GC counters,
-Pebble cache/snapshot/zombie metrics and debt. Read counts and latency exclude
+harness reports allocation/GC counters, Pebble cache/snapshot/zombie metrics and
+debt. Use standard test CPU/mutex/block profile flags and sample per-thread masks
+from `/proc/PID/task/TID/status` during each arm. Read counts and latency exclude
 warmup and final settle. Numeric append-part keys remain an offline fixture;
 this adapter does not implement the portable placement-group codec.
 

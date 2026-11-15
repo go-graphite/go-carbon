@@ -105,6 +105,13 @@ func TestSnapshotReadBenchmark(t *testing.T) {
 
 	snapshotBenchmarkWithHook = snapshotProfiledBenchmarkWithHook
 	snapshotReaderAffinity = pinSnapshotReader
+	if readers > 0 {
+		restore, err := pinSnapshotReader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		restore()
+	}
 	rate := uint64(30_000_000)
 	if v := os.Getenv("PARTS_READ_BENCH_RATE"); v != "" {
 		var e error

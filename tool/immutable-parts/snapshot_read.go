@@ -363,5 +363,9 @@ func runSnapshotReadBenchmark(out string, cfg coreConfig, duration time.Duration
 		rateReads = float64(total.count) / readingSeconds
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "snapshot_reads", "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "readers": readers, "reads": total.count, "reads_per_second": rateReads, "active_seconds": readingSeconds, "warmup_seconds": warmup.Seconds(), "read_p50_us_upper": total.quantile(.5), "read_p99_us_upper": total.quantile(.99), "latency_over_100ms": total.bins[len(total.bins)-1], "empty_reads": total.empty, "failed_reads": total.failed, "admission_rejections": total.admission, "first_error": total.firstError, "populated_slots": total.points, "read_budget_bytes": 8 << 30, "gomaxprocs": runtime.GOMAXPROCS(0), "budget_after_close": budget.Used(), "workload": "synthetic_preidentified_rows_with_populated_raw_1h_1d_renders"})
+	if total.failed > 0 || total.empty > 0 || (readers > 0 && total.count == 0) || budget.Used() != 0 {
+		return errors.Join(err, fmt.Errorf("snapshot read qualification failed: reads=%d errors=%d empty=%d retained=%d first=%s", total.count, total.failed, total.empty, budget.Used(), total.firstError))
+	}
+
 	return err
 }
