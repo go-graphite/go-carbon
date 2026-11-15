@@ -351,12 +351,13 @@ func storageSettingsChanged(old, next *Config) bool {
 	if old.Common.MemoryBudget != next.Common.MemoryBudget || old.memoryLimit != next.memoryLimit {
 		return true
 	}
-	// Transfer debt and the transfer cap are the only buckyd settings that
-	// change live. Keep listener, identity, authorization and the other
-	// concurrency settings restart-only.
+	// Transfer debt, the transfer cap and additional trusted origins change
+	// live. Keep listener, identity, credentials and the other concurrency
+	// settings restart-only.
 	before, after := old.Buckyd, next.Buckyd
 	before.TransferMaxCompactionDebt = after.TransferMaxCompactionDebt
 	before.MaxTransfers = after.MaxTransfers
+	before.TransferSources = after.TransferSources
 	if old.Whisper.StorageBackend != next.Whisper.StorageBackend || !reflect.DeepEqual(before, after) {
 		return true
 	}
