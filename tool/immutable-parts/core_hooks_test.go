@@ -107,11 +107,13 @@ func TestCoreConcurrentDurableFrontier(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		last := make([]uint64, cfg.Producers)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-done:
 				return
-			default:
+			case <-ticker.C:
 			}
 			f := e.durableFrontiers()
 			for p := range last {
