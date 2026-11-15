@@ -138,3 +138,22 @@ Correctness tests include independent producers, raw bit parity, restart replay,
 SIGKILL between owner publications, SIGKILL during actual journal replay, idle
 one-second sealing, frozen-head immutability and pinned partition-expiry views.
 These raw-archive tests do not establish render/rollup equivalence.
+
+Original apply batches can use `submitBatches` with `openCoreWithHooks` and a
+pure `PlanSeal` callback. The callback receives original clocks, order, opaque
+policy bytes and metric boundaries. It returns sorted, disjoint extension SSTs
+and a nonfailing postcommit publication callback. Raw data, extensions and owner
+frontier ingest atomically; the flat submit path rejects a configured planner.
+This is an offline numeric engine hook, not an importable production backend.
+`durableFrontiers` safely snapshots committed owner vectors during intake; log
+retirement also requires the log's own synced frontier.
+
+For CPU topology experiments, set `CORE_OWNER_CPUS` and `CORE_PRODUCER_CPUS` to
+comma-separated explicit Linux CPU IDs. Each list assigns goroutines round robin
+to locked OS threads. Empty lists use runtime scheduling. Consult actual topology
+first; affinity does not make cross-node routing or Pebble background work local.
+Use an offered rate well above measured throughput when looking for a ceiling;
+`-core-rate 30000000` itself caps a scaling curve at 30M points/s. Per-owner seal
+sort/encode/ingest wall seconds and aggregate producer queue wait are reported,
+alongside current live SST bytes and process counters. Queue wait sums can exceed
+wall time and `/proc/self/io` syscall counts are not physical-device IOPS.

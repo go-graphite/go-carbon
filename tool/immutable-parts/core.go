@@ -38,12 +38,14 @@ type coreFrontier struct {
 }
 type corePacket struct {
 	rows       []row
+	batches    []coreBatch
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
 }
 type coreQueue struct {
 	slots       [2]atomic.Pointer[corePacket]
+	blockedNS   atomic.Uint64
 	write, read uint64 // exactly one producer and one owner respectively
 }
 
@@ -55,7 +57,11 @@ func (q *coreQueue) pop() *corePacket {
 	return p
 }
 func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
+	var blocked time.Time
 	for !q.slots[q.write%2].CompareAndSwap(nil, p) {
+		if blocked.IsZero() {
+			blocked = time.Now()
+		}
 		select {
 		case <-dead:
 			return errors.New("owner stopped")
@@ -63,21 +69,29 @@ func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 		}
 		time.Sleep(10 * time.Microsecond)
 	}
+	if !blocked.IsZero() {
+		q.blockedNS.Add(uint64(time.Since(blocked)))
+	}
 	q.write++
 	return nil
 }
 
 type coreOwner struct {
-	hook                    func(*pebble.Snapshot, []row) error
-	db                      *pebble.DB
-	dir                     string
-	cfg                     coreConfig
-	meta                    coreFrontier
-	queues                  []*coreQueue
-	dead                    chan struct{}
-	done                    chan error
-	pub                     publication
-	committed, parts, bytes atomic.Uint64
+	hook                       func(*pebble.Snapshot, []row) error
+	ownerCPU                   []int
+	ownerIndex                 int
+	plan                       func(coreSealInput) (coreSealPlan, error)
+	frontier                   atomic.Pointer[coreFrontier]
+	db                         *pebble.DB
+	dir                        string
+	cfg                        coreConfig
+	meta                       coreFrontier
+	queues                     []*coreQueue
+	dead                       chan struct{}
+	done                       chan error
+	pub                        publication
+	committed, parts, bytes    atomic.Uint64
+	sortNS, encodeNS, ingestNS atomic.Uint64
 }
 type coreEngine struct {
 	owners []*coreOwner
@@ -99,9 +113,13 @@ func coreShard(id uint64, n int) int {
 // The optional hook owns its snapshot and receives a detached immutable head.
 // It runs on the owner; callers must bound retained bytes and release snapshots.
 func openCore(root string, cfg coreConfig) (*coreEngine, error) {
-	return openCoreWithHook(root, cfg, nil)
+	return openCoreWithHooks(root, cfg, coreHooks{})
 }
 func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapshot, []row) error) (*coreEngine, error) {
+	return openCoreWithHooks(root, cfg, coreHooks{Publish: hook})
+}
+func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
+	hook := hooks.Publish
 	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 {
 		return nil, os.ErrInvalid
 	}
@@ -125,10 +143,13 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
+		o := &coreOwner{ownerCPU: hooks.OwnerCPUs, ownerIndex: s, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
 		e.owners = append(e.owners, o)
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
+		}
+		if hooks.PlanSeal != nil {
+			o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
 		}
 		o.meta = coreFrontier{Version: 1, Config: cfg, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
 		b, c, err := db.Get(coreMetaKey)
@@ -144,6 +165,7 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 		if o.meta.Version != 1 || o.meta.Config != cfg || len(o.meta.Cursors) != cfg.Producers {
 			return fail(errors.New("owner format/config mismatch"))
 		}
+		o.publishFrontier(o.meta)
 		// Only uncommitted staging files remain after successful atomic ingestion.
 		files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
 		if err != nil {
@@ -172,6 +194,9 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return os.ErrInvalid
 	}
+	return e.submitPacket(producer, rows, nil, cursor, seal)
+}
+func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
 	parts := make([][]row, e.cfg.Shards)
 	for _, r := range rows {
 		s := coreShard(r.ID, e.cfg.Shards)
@@ -182,9 +207,16 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 			return errors.New("producer batch exceeds owner head bound")
 		}
 	}
+	byOwner := make([][]coreBatch, e.cfg.Shards)
+	for _, b := range batches {
+		owner := coreShard(b.ID, e.cfg.Shards)
+		b.Points = slices.Clone(b.Points)
+		b.Policy = slices.Clone(b.Policy)
+		byOwner[owner] = append(byOwner[owner], b)
+	}
 	var acks []chan error
 	for s, o := range e.owners {
-		p := &corePacket{rows: parts[s], cursor: cursor, seal: seal}
+		p := &corePacket{rows: parts[s], batches: byOwner[s], cursor: cursor, seal: seal}
 		if seal {
 			p.ack = make(chan error, 1)
 			acks = append(acks, p.ack)
@@ -207,8 +239,15 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 }
 func (o *coreOwner) run() {
 	defer close(o.dead)
+	unpin, err := coreAffinity(o.ownerCPU, o.ownerIndex)
+	if err != nil {
+		o.done <- err
+		return
+	}
+	defer unpin()
 	head := make([]row, 0, o.cfg.MaxRows)
 	pending := slices.Clone(o.meta.Cursors)
+	var batches []coreBatch
 	deadline := time.Now().Add(time.Second)
 	var headPublication time.Time
 	stopped := make([]bool, o.cfg.Producers)
@@ -221,11 +260,13 @@ func (o *coreOwner) run() {
 		next := o.meta
 		next.Cursors = slices.Clone(pending)
 		next.NextPart++
-		n, err := o.seal(head, next)
+		n, err := o.sealBatches(head, batches, next)
 		if err != nil {
 			return err
 		}
 		o.meta = next
+		o.publishFrontier(next)
+		batches = nil
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
 		o.bytes.Add(n)
@@ -253,12 +294,16 @@ func (o *coreOwner) run() {
 				left--
 				continue
 			}
+			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 {
+				failure = errors.New("seal planner requires original apply batches")
+			}
 			if failure == nil && p.cursor > pending[producer] {
 				if len(head)+len(p.rows) > o.cfg.MaxRows {
 					failure = flush()
 				}
 				if failure == nil {
 					head = append(head, p.rows...)
+					batches = append(batches, p.batches...)
 					pending[producer] = p.cursor
 				}
 			}
@@ -337,7 +382,24 @@ func sortCoreRows(head []row, seconds int64) {
 	})
 }
 func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
+	return o.sealBatches(head, nil, next)
+}
+func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
+	var plan coreSealPlan
+	var err error
+	if o.plan != nil {
+		plan, err = o.plan(coreSealInput{Rows: head, Batches: batches, Next: next})
+		if err != nil {
+			return 0, err
+		}
+		if err = validateCoreSealPlan(plan); err != nil {
+			return 0, err
+		}
+	}
+	phaseStart := time.Now()
 	sortCoreRows(head, o.cfg.PartitionSeconds)
+	o.sortNS.Add(uint64(time.Since(phaseStart)))
+	phaseStart = time.Now()
 	// Part-first data files are append-only within a time partition. Their
 	// frontier must live in another SST: putting a global ff key in every data
 	// file would make every file's range overlap the rest of the database.
@@ -361,7 +423,6 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 		}
 	}()
 	var path string
-	var err error
 	if !o.cfg.BlindBatch && len(head) > 0 {
 		writer, path, err = stage("data")
 		if err != nil {
@@ -423,11 +484,47 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 		return 0, err
 	}
 	if o.cfg.BlindBatch {
+		for _, file := range plan.Files {
+			for _, kv := range file {
+				if err = batch.Set(kv.Key, kv.Value, nil); err != nil {
+					return 0, err
+				}
+			}
+		}
 		if err = batch.Set(coreMetaKey, meta, nil); err != nil {
 			return 0, err
 		}
 		n := uint64(len(batch.Repr()))
-		return n, batch.Commit(pebble.Sync)
+		o.encodeNS.Add(uint64(time.Since(phaseStart)))
+		ingestStart := time.Now()
+		defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
+		if err = batch.Commit(pebble.Sync); err != nil {
+			return 0, err
+		}
+		if plan.Commit != nil {
+			plan.Commit()
+		}
+		return n, nil
+	}
+	for i, file := range plan.Files {
+		extra, xp, e := stage(fmt.Sprintf("extra-%03d", i))
+		if e != nil {
+			return 0, e
+		}
+		for _, kv := range file {
+			if e = extra.Set(kv.Key, kv.Value); e != nil {
+				break
+			}
+		}
+		e = errors.Join(e, extra.Close())
+		if e != nil {
+			return 0, e
+		}
+		st, e := os.Stat(xp)
+		if e != nil {
+			return 0, e
+		}
+		total += uint64(st.Size())
 	}
 	metadata, mp, err := stage("frontier")
 	if err != nil {
@@ -445,8 +542,14 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 	total += uint64(st.Size())
 	// One manifest edit atomically publishes all disjoint data/frontier SSTs.
 	// An interrupted ingestion can never advance the frontier without its data.
+	o.encodeNS.Add(uint64(time.Since(phaseStart)))
+	ingestStart := time.Now()
+	defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
 	if err = o.db.Ingest(paths); err != nil {
 		return 0, err
+	}
+	if plan.Commit != nil {
+		plan.Commit()
 	}
 	return total, nil
 }

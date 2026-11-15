@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -128,7 +130,9 @@ func coreReplayWithHook(journal, out string, cfg coreConfig, hook func(int, *peb
 func coreSample(engine *coreEngine, stage string, start time.Time, offered uint64) map[string]any {
 	var points, parts, bytes, debt, compacted uint64
 	var l0 int64
-	for _, o := range engine.owners {
+	var phases []map[string]any
+	var liveBytes uint64
+	for owner, o := range engine.owners {
 		points += o.committed.Load()
 		parts += o.parts.Load()
 		bytes += o.bytes.Load()
@@ -138,8 +142,16 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 			compacted += level.BytesCompacted
 		}
 		l0 += m.Levels[0].NumFiles
+		for _, level := range m.Levels {
+			liveBytes += uint64(level.Size)
+		}
+		var blocked uint64
+		for _, q := range o.queues {
+			blocked += q.blockedNS.Load()
+		}
+		phases = append(phases, map[string]any{"owner": owner, "committed": o.committed.Load(), "sort_seconds": float64(o.sortNS.Load()) / 1e9, "encode_seconds": float64(o.encodeNS.Load()) / 1e9, "ingest_seconds": float64(o.ingestNS.Load()) / 1e9, "producer_queue_wait_seconds": float64(blocked) / 1e9})
 	}
-	return map[string]any{"stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
+	return map[string]any{"owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
 }
 
 // A bounded synthetic durability/LSM workload, explicitly not captured traffic.
@@ -154,7 +166,15 @@ func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, r
 	if duration <= 0 || rate == 0 || metrics == 0 {
 		return os.ErrInvalid
 	}
-	engine, err := openCoreWithHook(out, cfg, hook)
+	ownerCPUs, err := parseCoreCPUs(os.Getenv("CORE_OWNER_CPUS"))
+	if err != nil {
+		return err
+	}
+	producerCPUs, err := parseCoreCPUs(os.Getenv("CORE_PRODUCER_CPUS"))
+	if err != nil {
+		return err
+	}
+	engine, err := openCoreWithHooks(out, cfg, coreHooks{Publish: hook, OwnerCPUs: ownerCPUs})
 	if err != nil {
 		return err
 	}
@@ -167,6 +187,12 @@ func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, r
 	target := uint64(duration.Seconds() * float64(rate))
 	for p := 0; p < cfg.Producers; p++ {
 		go func(p int) {
+			unpin, e := coreAffinity(producerCPUs, p)
+			if e != nil {
+				done <- e
+				return
+			}
+			defer unpin()
 			const batchSize = 32768
 			var sent uint64
 			for {
@@ -236,4 +262,21 @@ func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, r
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(final)
+}
+
+// parseCoreCPUs uses explicit IDs so topology comes from lscpu evidence rather
+// than assuming contiguous logical IDs are one NUMA node.
+func parseCoreCPUs(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, v := range strings.Split(s, ",") {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 0 || n >= 1024 {
+			return nil, os.ErrInvalid
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
