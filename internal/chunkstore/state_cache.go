@@ -270,7 +270,8 @@ func (c *stateCache) installMutation(stripe uint64, name string, st *metricState
 }
 
 // endMutation installs what installMutation recorded, or forgets name; call it
-// before releasing the stripe, whether the mutation committed or not.
+// while owning the name through its stripe or exact-name reservation, whether
+// the mutation committed or not.
 func (c *stateCache) endMutation(stripe uint64, name string) {
 	sh := &c.shards[stripe]
 	hash := c.hash(name)

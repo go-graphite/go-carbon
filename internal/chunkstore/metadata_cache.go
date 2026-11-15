@@ -64,13 +64,22 @@ func (s *Store) mutationUnlock(name string, unlock func()) func() {
 }
 
 func (s *Store) finishStateMutation(name string) {
+	if c := s.stateCache; c != nil {
+		c.endMutation(s.metricStripe(name), name)
+	}
+	s.finishStateMutationEpoch(name)
+}
+
+// finishStateMutationEpoch invalidates the small metadata ring and advances the
+// transfer epoch under the metric stripe, after state-cache publication.
+func (s *Store) finishStateMutationEpoch(name string) {
 	ring := &s.metadataCache[s.metricStripe(name)]
 	for i := range ring.entries {
 		if ring.entries[i].Name == name {
 			ring.entries[i] = Metadata{}
 		}
 	}
-	s.endStateMutation(name)
+	s.advanceMutationEpoch(s.metricStripe(name))
 }
 
 // beginStateMutation and endStateMutation bracket every mutation of name in

@@ -2,14 +2,13 @@ package chunkstore
 
 import (
 	"fmt"
-	"runtime"
 	"testing"
 	"time"
 )
 
 // Slow publication to one metadata cache shard must not retain any sibling
 // metric stripe. The committed batch is already atomic in Pebble.
-func TestPublicationCleanupDoesNotHoldSiblingStripe(t *testing.T) {
+func TestPublicationCleanupDoesNotHoldMetricStripes(t *testing.T) {
 	db, _ := openTestStore(t, t.TempDir(), Options{MetadataCacheSize: 8 << 20})
 	defer closeTestStore(t, db)
 	names := []string{"cleanup.a", "cleanup.b"}
@@ -20,23 +19,29 @@ func TestPublicationCleanupDoesNotHoldSiblingStripe(t *testing.T) {
 	finish := db.releaseImportStripes(names, nil)
 	sh := &db.stateCache.shards[db.metricStripe(names[0])]
 	sh.mu.Lock()
+	hash := db.stateCache.hash
+	entered := make(chan struct{})
+	db.stateCache.hash = func(name string) uint64 {
+		if name == names[0] {
+			close(entered)
+		}
+		return hash(name)
+	}
 	done := make(chan struct{})
 	go func() { finish(); close(done) }()
 	defer func() { sh.mu.Unlock(); <-done }()
-	first := &db.metricMu[db.metricStripe(names[0])]
-	deadline := time.Now().Add(3 * time.Second)
-	for first.TryLock() {
-		first.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("cleanup did not start")
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cleanup did not start")
+	}
+	for _, name := range names {
+		stripe := &db.metricMu[db.metricStripe(name)]
+		if !stripe.TryLock() {
+			t.Fatalf("slow cache publication retained metric stripe for %s", name)
 		}
-		runtime.Gosched()
+		stripe.Unlock()
 	}
-	sibling := &db.metricMu[db.metricStripe(names[1])]
-	if !sibling.TryLock() {
-		t.Fatal("slow cache publication retained a sibling metric stripe")
-	}
-	sibling.Unlock()
 }
 
 func TestUpdateDecodesStateWithoutMetricStripe(t *testing.T) {

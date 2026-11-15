@@ -58,9 +58,16 @@ func (s *Store) releaseMutationStripes(names []string, held []bool, update bool)
 	}
 	return func() {
 		for _, stripe := range stripes {
+			// The reservation still excludes every competing writer. Cache
+			// publication can compact a shard; do that without a metric stripe.
+			for _, name := range byStripe[stripe] {
+				if c := s.stateCache; c != nil {
+					c.endMutation(stripe, name)
+				}
+			}
 			s.metricMu[stripe].Lock()
 			for _, name := range byStripe[stripe] {
-				s.finishStateMutation(name)
+				s.finishStateMutationEpoch(name)
 				delete(s.importPublishing[stripe], name)
 			}
 			s.metricMu[stripe].Unlock()
