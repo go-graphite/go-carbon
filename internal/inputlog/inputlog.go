@@ -226,18 +226,19 @@ type Log struct {
 	copyPin  *Position
 	// replayPin protects the immutable Open inventory while the writer runs.
 	// Only the writer may release it, after all replay owners have joined.
-	replayPin    *Position
-	replayDone   chan chan error
-	appends      chan appendRequest
-	appendPin    *Position
-	appendErr    error
-	appendTrace  appendTrace
-	attaches     chan sourceAttachment
-	appendStates chan appendStateRequest
-	stop         chan struct{}
-	done         chan struct{}
-	started      bool
-	closed       bool
+	replayPin       *Position
+	replayDone      chan chan error
+	appends         chan appendRequest
+	appendPin       *Position
+	appendErr       error
+	appendTrace     appendTrace
+	lastSyncStarted time.Time // writer-owned trace clock
+	attaches        chan sourceAttachment
+	appendStates    chan appendStateRequest
+	stop            chan struct{}
+	done            chan struct{}
+	started         bool
+	closed          bool
 
 	stat  stats
 	total totals
@@ -913,6 +914,7 @@ func (l *Log) flush() error {
 }
 
 func (l *Log) syncDirty() error {
+	l.lastSyncStarted = time.Now()
 	var errs error
 	for _, seg := range l.dirty {
 		started := time.Now()

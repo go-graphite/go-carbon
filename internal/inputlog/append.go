@@ -171,7 +171,7 @@ Drain:
 		l.appendErr = err
 	}
 	if l.appendTrace.enabled.Load() {
-		event := &AppendEvent{Admitted: admitted.UnixNano(), EncodeStart: encodeStart.UnixNano(), EncodeEnd: encodeEnd.UnixNano(), Synced: syncEnd.UnixNano(), Requests: len(requests)}
+		event := &AppendEvent{Admitted: admitted.UnixNano(), EncodeStart: encodeStart.UnixNano(), EncodeEnd: encodeEnd.UnixNano(), Synced: syncEnd.UnixNano(), SyncStart: l.lastSyncStarted.UnixNano(), Requests: len(requests)}
 		for _, r := range requests {
 			event.Queued = append(event.Queued, r.queued.UnixNano())
 			for _, b := range r.batches {
@@ -218,9 +218,9 @@ func (l *Log) encodeAppends(seq uint64, requests []appendRequest) {
 // AppendEvent records one durable group on a common Unix nanosecond clock.
 // Synced precedes acknowledgement; Queued includes writer-channel admission.
 type AppendEvent struct {
-	Queued                                   []int64
-	Admitted, EncodeStart, EncodeEnd, Synced int64
-	Requests, Points                         int
+	Queued                                              []int64
+	Admitted, EncodeStart, EncodeEnd, SyncStart, Synced int64
+	Requests, Points                                    int
 }
 type appendTrace struct {
 	enabled atomic.Bool
