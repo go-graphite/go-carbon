@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ import (
 )
 
 func coreTestConfig() coreConfig {
-	return coreConfig{Shards: 4, Producers: 2, MaxRows: 64, PartitionSeconds: 60}
+	return coreConfig{AppendParts: true, Shards: 4, Producers: 2, MaxRows: 64, PartitionSeconds: 60}
 }
 func coreRows(producer, batch int) []row {
 	var out []row
@@ -499,5 +500,37 @@ func TestCorePublishesDetachedFrozenHead(t *testing.T) {
 drained:
 	if err = e.close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoreSortMatchesOriginalComparator(t *testing.T) {
+	rng := rand.New(rand.NewPCG(41, 93))
+	for trial := range 100 {
+		var rows []row
+		for i := range 1024 {
+			stamp := rng.Int64N(7200) - 3600
+			if trial%2 == 0 {
+				stamp = 1800000000 + rng.Int64N(30)
+			}
+			rows = append(rows, row{rng.Uint64N(10), stamp, rng.Uint64(), uint64(i)})
+		}
+		if trial == 0 {
+			rows = append(rows, row{Time: math.MinInt64}, row{Time: math.MaxInt64})
+		}
+		want := slices.Clone(rows)
+		slices.SortFunc(want, func(a, b row) int {
+			pa, pb := corePartition(a.Time, 3600), corePartition(b.Time, 3600)
+			if pa < pb {
+				return -1
+			}
+			if pa > pb {
+				return 1
+			}
+			return less(a, b)
+		})
+		sortCoreRows(rows, 3600)
+		if !slices.Equal(rows, want) {
+			t.Fatalf("partition sort differs trial%d", trial)
+		}
 	}
 }

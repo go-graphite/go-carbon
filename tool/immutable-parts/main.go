@@ -689,6 +689,7 @@ func main() {
 	coreMetrics := flag.Uint64("core-metrics", 16000000, "synthetic canonical IDs")
 	coreProducers := flag.Int("core-producers", 16, "independent producer streams")
 	coreSettle := flag.Duration("core-settle", 10*time.Second, "post-input compaction observation")
+	coreAppend := flag.Bool("core-append-parts", false, "put immutable part before metric and ingest frontier separately")
 	coreBlind := flag.Bool("core-blind-batch", false, "compare blind WAL batches with atomic SST ingestion")
 	cpuProfile := flag.String("cpuprofile", "", "write CPU profile")
 	mutexProfile := flag.String("mutexprofile", "", "write sampled mutex profile")
@@ -718,7 +719,7 @@ func main() {
 			must(pprof.Lookup("block").WriteTo(f, 0))
 		}()
 	}
-	cfg := coreConfig{Shards: *shards, Producers: *coreProducers, MaxRows: *maxRows, PartitionSeconds: 3600, BlindBatch: *coreBlind}
+	cfg := coreConfig{AppendParts: *coreAppend, Shards: *shards, Producers: *coreProducers, MaxRows: *maxRows, PartitionSeconds: 3600, BlindBatch: *coreBlind}
 	if *mode == "core-bench" {
 		must(coreBenchmark(*out, cfg, *coreDuration, *coreRate, *coreMetrics, *coreSettle))
 		return

@@ -23,6 +23,7 @@ import (
 var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
+	AppendParts                bool
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
 	PartitionSeconds           int64
@@ -307,9 +308,25 @@ func corePartition(t, seconds int64) int64 {
 	}
 	return q
 }
-func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
+
+// A one-second head normally fits a single time partition. Avoid the two
+// signed divisions per sort comparison in that measured common case; mixed
+// partitions retain the exact original comparator.
+func sortCoreRows(head []row, seconds int64) {
+	if len(head) < 2 {
+		return
+	}
+	low, high := head[0].Time, head[0].Time
+	for _, r := range head[1:] {
+		low = min(low, r.Time)
+		high = max(high, r.Time)
+	}
+	if corePartition(low, seconds) == corePartition(high, seconds) {
+		slices.SortFunc(head, less)
+		return
+	}
 	slices.SortFunc(head, func(a, b row) int {
-		pa, pb := corePartition(a.Time, o.cfg.PartitionSeconds), corePartition(b.Time, o.cfg.PartitionSeconds)
+		pa, pb := corePartition(a.Time, seconds), corePartition(b.Time, seconds)
 		if pa < pb {
 			return -1
 		}
@@ -318,19 +335,38 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 		}
 		return less(a, b)
 	})
-	// Both sinks receive exactly the same ordered blind puts, including frontier.
+}
+func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
+	sortCoreRows(head, o.cfg.PartitionSeconds)
+	// Part-first data files are append-only within a time partition. Their
+	// frontier must live in another SST: putting a global ff key in every data
+	// file would make every file's range overlap the rest of the database.
 	batch := o.db.NewBatch()
 	defer batch.Close()
 	var writer *sstable.Writer
-	path := filepath.Join(o.dir, fmt.Sprintf("stage-%020d.sst", o.meta.NextPart))
-	var err error
-	if !o.cfg.BlindBatch {
-		f, e := vfs.Default.Create(path)
-		if e != nil {
-			return 0, e
+	var paths []string
+	var total uint64
+	stage := func(suffix string) (*sstable.Writer, string, error) {
+		path := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-%s.sst", o.meta.NextPart, suffix))
+		f, err := vfs.Default.Create(path)
+		if err != nil {
+			return nil, "", err
 		}
-		writer = sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
-		defer os.Remove(path)
+		paths = append(paths, path)
+		return sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression}), path, nil
+	}
+	defer func() {
+		for _, p := range paths {
+			_ = os.Remove(p)
+		}
+	}()
+	var path string
+	var err error
+	if !o.cfg.BlindBatch && len(head) > 0 {
+		writer, path, err = stage("data")
+		if err != nil {
+			return 0, err
+		}
 	}
 	put := func(k, v []byte) error {
 		if writer != nil {
@@ -339,12 +375,15 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 		return batch.Set(k, v, nil)
 	}
 	for i := 0; i < len(head); {
-		p := corePartition(head[i].Time, o.cfg.PartitionSeconds)
-		if p < next.ExpiredBefore {
+		partition := corePartition(head[i].Time, o.cfg.PartitionSeconds)
+		if partition < next.ExpiredBefore {
+			if writer != nil {
+				_ = writer.Close()
+			}
 			return 0, errors.New("late point targets expired partition")
 		}
 		j := i + 1
-		for j < len(head) && j < i+256 && head[j].ID == head[i].ID && corePartition(head[j].Time, o.cfg.PartitionSeconds) == p {
+		for j < len(head) && j < i+256 && head[j].ID == head[i].ID && corePartition(head[j].Time, o.cfg.PartitionSeconds) == partition {
 			j++
 		}
 		value := make([]byte, (j-i)*24)
@@ -354,15 +393,18 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 			binary.LittleEndian.PutUint64(b[8:], r.Bits)
 			binary.LittleEndian.PutUint64(b[16:], r.Seq)
 		}
-		if err = put(coreKey(head[i], p, o.meta.NextPart, uint32(i)), value); err != nil {
+		key := coreKey(head[i], partition, o.meta.NextPart, uint32(i))
+		if o.cfg.AppendParts {
+			key[0] = 2
+			binary.BigEndian.PutUint64(key[9:17], o.meta.NextPart)
+			binary.BigEndian.PutUint64(key[17:25], head[i].ID)
+			binary.BigEndian.PutUint32(key[25:29], 0)
+			binary.BigEndian.PutUint64(key[29:37], uint64(head[i].Time)^(1<<63))
+		}
+		if err = put(key, value); err != nil {
 			break
 		}
 		i = j
-	}
-	meta, e := json.Marshal(next)
-	err = errors.Join(err, e)
-	if err == nil {
-		err = put(coreMetaKey, meta)
 	}
 	if writer != nil {
 		err = errors.Join(err, writer.Close())
@@ -373,19 +415,42 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 		if e != nil {
 			return 0, e
 		}
-		// Pebble publishes every key in this SST atomically and durably in its
-		// manifest. A frontier can never become visible without its blocks.
-		if err = o.db.Ingest([]string{path}); err != nil {
-			return 0, err
-		}
-		return uint64(st.Size()), nil
+		total += uint64(st.Size())
 	}
+	meta, e := json.Marshal(next)
+	err = errors.Join(err, e)
 	if err != nil {
 		return 0, err
 	}
-	n := uint64(len(batch.Repr()))
-	return n, batch.Commit(pebble.Sync)
+	if o.cfg.BlindBatch {
+		if err = batch.Set(coreMetaKey, meta, nil); err != nil {
+			return 0, err
+		}
+		n := uint64(len(batch.Repr()))
+		return n, batch.Commit(pebble.Sync)
+	}
+	metadata, mp, err := stage("frontier")
+	if err != nil {
+		return 0, err
+	}
+	err = metadata.Set(coreMetaKey, meta)
+	err = errors.Join(err, metadata.Close())
+	if err != nil {
+		return 0, err
+	}
+	st, err := os.Stat(mp)
+	if err != nil {
+		return 0, err
+	}
+	total += uint64(st.Size())
+	// One manifest edit atomically publishes all disjoint data/frontier SSTs.
+	// An interrupted ingestion can never advance the frontier without its data.
+	if err = o.db.Ingest(paths); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
+
 func (e *coreEngine) close() error {
 	var err error
 	for _, o := range e.owners {
@@ -413,7 +478,7 @@ func (e *coreEngine) globalFrontier() []uint64 {
 	return out
 }
 func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
-	it, err := s.NewIter(&pebble.IterOptions{LowerBound: []byte{1}, UpperBound: []byte{2}})
+	it, err := s.NewIter(&pebble.IterOptions{LowerBound: []byte{1}, UpperBound: []byte{3}})
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +489,11 @@ func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 		if len(k) != 41 {
 			return nil, errors.New("invalid core key")
 		}
-		if binary.BigEndian.Uint64(k[9:17]) != id {
+		offset := 9
+		if k[0] == 2 {
+			offset = 17
+		}
+		if binary.BigEndian.Uint64(k[offset:offset+8]) != id {
 			continue
 		}
 		v := it.Value()
@@ -458,13 +527,15 @@ func coreExpire(db *pebble.DB, before int64) error {
 		return errors.New("retention floor cannot move backwards")
 	}
 	meta.ExpiredBefore = before
-	upper := make([]byte, 9)
-	upper[0] = 1
-	binary.BigEndian.PutUint64(upper[1:], uint64(before)^(1<<63))
 	batch := db.NewBatch()
 	defer batch.Close()
-	if err = batch.DeleteRange([]byte{1}, upper, nil); err != nil {
-		return err
+	for _, prefix := range []byte{1, 2} {
+		upper := make([]byte, 9)
+		upper[0] = prefix
+		binary.BigEndian.PutUint64(upper[1:], uint64(before)^(1<<63))
+		if err = batch.DeleteRange([]byte{prefix}, upper, nil); err != nil {
+			return err
+		}
 	}
 	b, err = json.Marshal(meta)
 	if err != nil {

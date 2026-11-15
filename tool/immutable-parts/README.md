@@ -90,8 +90,10 @@ immutable-parts -mode core-bench -out trial -shards 16 \
 
 Each producer owns a two-slot atomic queue per shard. One owner per shard
 collects bounded heads, sorts at one second or the byte bound, and publishes
-immutable Snappy SST blocks without reading existing data. The SST includes
-its producer frontier vector, so blocks and replay position commit together.
+immutable Snappy SST blocks without reading existing data. Data and the producer
+frontier vector use separate, disjoint SSTs, ingested in one atomic manifest edit.
+Putting the global frontier key in each data SST would make their ranges overlap
+and cause unnecessary compaction. Blocks and replay position commit together.
 `-core-blind-batch` compares the same ordered puts in a synced blind WAL batch.
 An optional snapshot hook publishes a detached head and Pebble snapshot; callers
 must release every pin before closing the engine. No application data mutex is
@@ -105,6 +107,16 @@ source sequence. The stopped-owner expiry primitive deletes complete logical
 partition ranges and atomically persists an expiry floor. Pebble compaction
 reclaims physical bytes later. Automatic retention and authoritative rollups
 are not integrated, so enabling expiry is not safe for a multi-archive store.
+
+`-core-append-parts` instead orders the numeric experimental keys by time
+partition, immutable part, metric, archive and block. This keeps successive part
+ranges disjoint within a partition. Single-partition heads use an equivalent
+sort comparator that avoids signed partition division on every comparison.
+These numeric keys are not the proposed portable format in
+`internal/partsformat`: portable identities, virtual-shard file boundaries and
+retained copy files remain separate integration work. A data SST can still span
+time partitions, so logical range deletion does not imply immediate whole-file
+physical reclamation.
 
 `-mode core-replay -journal segment.log -out recovered` decodes an immutable
 single-segment input journal through the same producer and owner path. Restart
