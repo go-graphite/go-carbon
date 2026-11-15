@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
@@ -160,6 +162,60 @@ func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage 
 // A single validated key/value may exceed this payload target and is kept
 // intact. Table boundaries never change the stored key/value bytes.
 const transferTableBytes = 8 << 20
+
+// A process crash may leave staged files that were never ingested. The ID
+// reservation is durable and will not be reused; only Pebble's own numbered
+// files can back published data. Called before listeners under process ownership.
+func (s *Store) recoverTransferTables() error {
+	names, err := s.fs.List(s.dir)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		stem, ok := strings.CutPrefix(name, "transfer-")
+		if !ok || !strings.HasSuffix(stem, ".sst") {
+			continue
+		}
+		id, index, ok := strings.Cut(strings.TrimSuffix(stem, ".sst"), "-")
+		first, idErr := strconv.ParseUint(id, 10, 64)
+		n, indexErr := strconv.ParseUint(index, 10, 64)
+		if !ok || idErr != nil || indexErr != nil || name != fmt.Sprintf("transfer-%020d-%d.sst", first, n) {
+			continue
+		}
+		if err := s.fs.Remove(s.fs.PathJoin(s.dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Reserved IDs have no visible catalog entry and cannot be written by live
+// writers. Ingest their immutable history directly, avoiding the WAL,
+// memtables and flush work. Publication still validates live targets and
+// commits catalogs, revisions and proofs through the existing WAL barrier.
+func (s *Store) stageTransferData(ctx context.Context, first uint64, stage *transferStage, entries int) error {
+	// Only tests set this override, retaining the preceding implementation as
+	// a differential oracle for the complete import/merge/publication path.
+	if s.transferBatchBytes > 0 {
+		return s.stageTransferWAL(ctx, stage, entries)
+	}
+	paths, err := s.writeTransferTables(ctx, first, stage)
+	defer func() {
+		for _, path := range paths {
+			_ = s.fs.Remove(path)
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	// Use native copy's bounded synchronous ingest, including cancellation
+	// between groups. Never detach an ingest that outlives its caller.
+	if err := s.ingestNativeFiles(ctx, paths); err != nil {
+		return err
+	}
+	s.ingestStats.entries.Add(uint64(entries))
+	return nil
+}
 
 func (s *Store) writeTransferTables(ctx context.Context, first uint64, stage *transferStage) (paths []string, err error) {
 	keys := stage.keys

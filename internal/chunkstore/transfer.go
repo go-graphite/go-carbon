@@ -336,9 +336,9 @@ func (s *Store) transferSnapshotCached(ctx context.Context, reader pebble.Reader
 	return snapshotFrom(reader, m.Name)
 }
 
-// ImportTransfer reserves disjoint IDs and stages their keys in bounded WAL batches
-// before catalog publication. A target created meanwhile is merged under its writer lock.
-// Publication and merge use bounded stripe groups and a final WAL barrier.
+// ImportTransfer reserves disjoint IDs and stages their keys in verified SSTs
+// before catalog publication. Existing targets are merged from a stable view,
+// then revalidated under writer stripes before publication and a final WAL barrier.
 func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([]TransferProof, error) {
 	if len(records) == 0 || len(records) > MaxTransferMetrics {
 		return nil, errors.New("transfer needs 1..10000 metrics")
@@ -416,7 +416,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	}
 	s.transferApply.build.Add(uint64(time.Since(began)))
 	began = time.Now()
-	if err := s.stageTransferWAL(ctx, stage, len(records)); err != nil {
+	if err := s.stageTransferData(ctx, first, stage, len(records)); err != nil {
 		return nil, err
 	}
 	s.transferApply.ingest.Add(uint64(time.Since(began)))

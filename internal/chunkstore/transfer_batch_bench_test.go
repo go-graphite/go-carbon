@@ -155,6 +155,7 @@ func TestTransferImportConcurrencyBench(t *testing.T) {
 		memtable = 256
 	}
 	target := open("target", uint64(memtable)<<20)
+	target.SetTransferBatchBytesForTest(256 << 10)
 	importAll := func(streams, transfers int, prefix string) (time.Duration, []string) {
 		var next atomic.Int64
 		var mu sync.Mutex
@@ -195,7 +196,7 @@ func TestTransferImportConcurrencyBench(t *testing.T) {
 		for _, mode := range []struct {
 			name  string
 			limit int
-		}{{"small-wal", 16 << 10}, {"default-wal", 0}} {
+		}{{"wal", 256 << 10}, {"sst", 0}} {
 			target.SetTransferBatchBytesForTest(mode.limit)
 			stop := make(chan struct{})
 			var latencies []time.Duration

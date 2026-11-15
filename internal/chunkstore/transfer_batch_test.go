@@ -3,14 +3,15 @@ package chunkstore_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-// Compare WAL batch boundaries: target-wins merges and durable receipts must
-// preserve identical stored points. The raw-byte SST oracle is tested separately.
+// Compare SST ingestion with the preceding WAL path at different batch bounds:
+// target-wins merges and durable receipts must preserve identical stored points.
 func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 	for _, mode := range []struct {
 		name                  string
@@ -25,6 +26,9 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 				var history []store.Point
 				for ts := int64(940000 + i*70); ts < 999900; ts += 300 {
 					history = append(history, store.Point{Timestamp: ts, Value: float64(ts) / 7})
+				}
+				for j, bits := range []uint64{1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x3ff0000000000001} {
+					history[j].Value = math.Float64frombits(bits)
 				}
 				putTransferPoints(t, source, names[i], history)
 			}
@@ -54,7 +58,8 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 				if st.IngestMemtableOverlaps != 0 {
 					t.Fatalf("private staging overlapped live memtables: %d", st.IngestMemtableOverlaps)
 				}
-				if st.TransferBatchCommits == 0 || st.TransferBatchEntries != uint64(len(names)) || st.TransferBatchBytes == 0 || st.IngestTables != 0 {
+				if limit.bytes == 0 && (st.IngestTables == 0 || st.IngestEntries != uint64(len(names)) || st.TransferBatchBytes != 0) ||
+					limit.bytes > 0 && (st.TransferBatchCommits == 0 || st.TransferBatchEntries != uint64(len(names)) || st.TransferBatchBytes == 0 || st.IngestTables != 0) {
 					t.Fatalf("%s path: commits=%d entries=%d bytes=%d ingest tables=%d", limit.name, st.TransferBatchCommits, st.TransferBatchEntries, st.TransferBatchBytes, st.IngestTables)
 				}
 
@@ -88,9 +93,22 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if !reflect.DeepEqual(got.Archives, want.Archives) {
-						t.Fatalf("%s: %s snapshot differs across WAL batch boundaries", name, other)
+					if err := store.EqualSnapshots(want, got); err != nil {
+						t.Fatalf("%s: %s snapshot differs: %v", name, other, err)
 					}
+					if !reflect.DeepEqual(got.Metadata, want.Metadata) {
+						t.Fatalf("%s: %s metadata differs", name, other)
+					}
+				}
+			}
+			want, err := targets["default"].RawKeyValuesForTest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, other := range []string{"batch", "oversize"} {
+				got, err := targets[other].RawKeyValuesForTest()
+				if err != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s: encoded keys/values, metadata or receipts differ: %v", other, err)
 				}
 			}
 		})

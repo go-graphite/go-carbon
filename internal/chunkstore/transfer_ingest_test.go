@@ -8,7 +8,34 @@ import (
 	"fmt"
 	"math"
 	"testing"
+
+	"github.com/cockroachdb/pebble/vfs"
 )
+
+func TestTransferOrphanTablesRemovedOnOpen(t *testing.T) {
+	fs := vfs.NewMem()
+	s, _ := openTestStore(t, "/store", Options{fs: fs})
+	closeTestStore(t, s)
+	staged := "transfer-00000000000000000042-0.sst"
+	unknown := "transfer-not-an-engine-table.sst"
+	for _, name := range []string{staged, unknown} {
+		f, err := fs.Create(fs.PathJoin("/store", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, _ = openTestStore(t, "/store", Options{fs: fs})
+	defer closeTestStore(t, s)
+	if _, err := fs.Stat(fs.PathJoin("/store", staged)); err == nil {
+		t.Fatal("unpublished staged table survived recovery")
+	}
+	if _, err := fs.Stat(fs.PathJoin("/store", unknown)); err != nil {
+		t.Fatal("recovery removed an unrelated file", err)
+	}
+}
 
 // Compare the old single-ingest operation and bounded ingestion on precisely
 // the same immutable keys, including raw IEEE-754 payloads and table splits.
