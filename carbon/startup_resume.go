@@ -27,6 +27,7 @@ type startupResume struct {
 	Snapshots      []string                         `json:"snapshots"`
 	Offsets        map[string]int64                 `json:"offsets"`
 	JournalOffsets map[uint16]inputlog.ReplayCursor `json:"journal_offsets,omitempty"`
+	JournalEnds    map[uint16]inputlog.ReplayCursor `json:"journal_ends,omitempty"`
 }
 
 func readStartupResume(dir string) (*startupResume, error) {
@@ -86,6 +87,9 @@ func (app *App) saveStartupResumeAt(s *startupInput, stage func(string)) error {
 		}
 		state.Snapshots = append(state.Snapshots, s.resume.Snapshots...)
 		state.JournalOffsets = s.resume.JournalOffsets
+	}
+	if s.journal != nil {
+		state.JournalEnds = s.journal.cursors()
 	}
 	if s.journalOffsets != nil {
 		state.JournalOffsets = s.journalOffsets
