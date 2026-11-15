@@ -88,8 +88,9 @@ immutable-parts -mode core-bench -out trial -shards 16 \
   -max-rows 2097152 -core-settle 60s
 ```
 
-Each producer owns a two-slot atomic queue per shard. One owner per shard
-collects bounded heads, sorts at one second or the byte bound, and publishes
+Each producer owns a single-producer atomic queue per shard with a 256 KiB
+accounted payload quota. Ready owners receive packets before a producer waits
+for full queues. One owner per shard collects bounded heads, sorts at one second or the byte bound, and publishes
 immutable Snappy SST blocks without reading existing data. Data and the producer
 frontier vector use separate, disjoint SSTs, ingested in one atomic manifest edit.
 Putting the global frontier key in each data SST would make their ranges overlap
@@ -166,11 +167,16 @@ still copy those private packets into their own heads before sorting.
 
 ### NUMA-local pipelines and bounded dispatch
 
-`core-bench` keeps four reusable routing buffers per producer. A buffer is leased
-until all database consumers finish copying it, so the producer may reuse its
-input immediately without reallocating the dispatch backing slice each batch.
-SST key/value scratch is reused after `Set` returns. Apply-batch policies and
-points still detach from callers and retain their original boundaries.
+`core-bench` reuses producer routing buffers under an 8 MiB in-flight payload
+quota per producer. Queue pointer capacity follows the smallest packet charge;
+lease capacity follows producer metadata charges, rather than a fixed packet
+count. An indivisible packet larger than a quota is admitted only when that
+queue or producer is empty. Retained backing capacity and owner heads are
+separate from these in-flight accounting limits. A lease lasts until all
+database consumers finish copying its disjoint regions. Producers can reuse
+their input immediately after submission. Apply-batch policies, order and points
+remain detached with their original boundaries. SST key/value scratch is reused
+after `Set` returns.
 
 `-core-owners` sets execution-owner count independently of `-shards` (database
 count) and `-core-producers`. An execution owner can poll several databases;
@@ -202,3 +208,9 @@ not measure concurrent collector work. These measurements complement the L0,
 memtable, flush, compaction-debt and owner-phase counters. External stage files
 are created outside Pebble's object provider, so its `BytesPerSync` option does
 not apply to them.
+
+External SST output reuses a 1 MiB write buffer per owner. It drains before the
+original final durability sync and propagates both flush and sync failures. This
+batches small table writes without changing SST bytes or manifest publication.
+Queue tests cover ready-owner progress, FIFO, original apply groups, indexed
+seal acknowledgements, byte-credit refunds and indivisible oversized packets.
