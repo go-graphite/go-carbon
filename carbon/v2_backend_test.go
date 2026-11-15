@@ -569,7 +569,12 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 		}
 		// Wait across two group-sync ticks without publishing a part.
 		time.Sleep(2200 * time.Millisecond)
-		if err = os.WriteFile(filepath.Join(root, "ready"), []byte(strconv.FormatInt(stamp, 10)), 0600); err != nil {
+		// Publish the timestamp atomically: ReadFile can observe an empty newly
+		// created file before WriteFile fills it on a busy filesystem.
+		if err = os.WriteFile(filepath.Join(root, "ready.tmp"), []byte(strconv.FormatInt(stamp, 10)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Rename(filepath.Join(root, "ready.tmp"), filepath.Join(root, "ready")); err != nil {
 			t.Fatal(err)
 		}
 		select {}
@@ -610,10 +615,16 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 	if stats.IngestedPoints != 4 {
 		t.Fatalf("recovery counts %+v", stats)
 	}
-	stamp, _ := strconv.ParseInt(string(ready), 10, 64)
+	stamp, err := strconv.ParseInt(string(ready), 10, 64)
+	if err != nil {
+		t.Fatalf("invalid child readiness timestamp %q: %v", ready, err)
+	}
 	got, err := app.v2.Backend.Fetch(context.Background(), "routing.value", int(stamp-step), int(stamp+3*step))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatalf("missing replay response for timestamp %d", stamp)
 	}
 	if got.Release != nil {
 		defer got.Release()
