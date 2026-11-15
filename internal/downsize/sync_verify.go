@@ -224,19 +224,43 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 	}
 	now := s.o.now().Unix()
 	horizon := now - int64(s.o.settle.Seconds())
-	for _, w := range s.o.windows {
-		w.Until = min(w.Until, horizon)
-		if w.From >= w.Until || len(eligible) == 0 {
-			continue
-		}
-		if err := s.checkWindow(ctx, row, eligible, schemas, w); err != nil {
-			return err
-		}
+	if err := s.verifyWindows(ctx, row, eligible, schemas, horizon); err != nil {
+		return err
 	}
 	if len(full) > 0 {
 		if err := s.checkFull(ctx, row, full, schemas, now); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// verifyWindows shares physical comparisons for labels with identical effective
+// bounds. Keep a separate verdict under each label; the cache belongs only to
+// this name batch and does not replace subsequent rounds or full-history reads.
+func (s *syncer) verifyWindows(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, horizon int64) error {
+	seen := make(map[[2]int64]syncRow)
+	for _, w := range s.o.windows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		w.Until = min(w.Until, horizon)
+		if w.From >= w.Until || len(names) == 0 {
+			continue
+		}
+		key := [2]int64{w.From, w.Until}
+		verdict, ok := seen[key]
+		if !ok {
+			if err := s.checkWindow(ctx, &verdict, names, schemas, w); err != nil {
+				return err
+			}
+			seen[key] = verdict
+		}
+		for _, hole := range verdict.Holes {
+			hole.Window = w.Name
+			row.Holes = append(row.Holes, hole)
+		}
+		row.Skipped = append(row.Skipped, verdict.Skipped...)
 	}
 	return nil
 }
