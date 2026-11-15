@@ -91,22 +91,29 @@ type syncSkip struct {
 
 // syncProgress is the live counter set the progress ticker reports.
 type syncProgress struct {
-	durableFloor int64 // completed verification receipts, visible while replaying
-	copyActive   int64 // fresh committed names in the unfinished source list
-	copyFresh    int64 // fresh committed names over this phase
-	copyObserved bool
-	mu           sync.Mutex
-	phase        string
-	total        int
-	started      time.Time
-	done         atomic.Int64
-	replayed     atomic.Int64 // journal progress, excluded from live throughput
-	skipped      atomic.Int64
-	digests      atomic.Int64 // names compared by digest
-	reads        atomic.Int64 // names read point by point
-	batches      atomic.Int64
-	batchNanos   atomic.Int64
-	compareNanos atomic.Int64
+	nextVerifyNames *int64 // immutable count for the next convergence pass, guarded by mu
+	durableFloor    int64  // completed verification receipts, visible while replaying
+	copyActive      int64  // fresh committed names in the unfinished source list
+	copyFresh       int64  // fresh committed names over this phase
+	copyObserved    bool
+	mu              sync.Mutex
+	phase           string
+	total           int
+	started         time.Time
+	done            atomic.Int64
+	replayed        atomic.Int64 // journal progress, excluded from live throughput
+	skipped         atomic.Int64
+	digests         atomic.Int64 // names compared by digest
+	reads           atomic.Int64 // names read point by point
+	batches         atomic.Int64
+	batchNanos      atomic.Int64
+	compareNanos    atomic.Int64
+}
+
+func (p *syncProgress) planVerification(names int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextVerifyNames = &names
 }
 
 func (p *syncProgress) begin(phase string, total int) {
@@ -117,6 +124,7 @@ func (p *syncProgress) beginReplay(phase string, total int, durable int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.phase, p.total, p.started = phase, total, time.Now()
+	p.nextVerifyNames = nil
 	p.durableFloor = durable
 	p.copyActive, p.copyFresh, p.copyObserved = 0, 0, false
 	p.done.Store(0)

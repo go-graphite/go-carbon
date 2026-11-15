@@ -380,6 +380,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		j.mu.Unlock()
 		s.prog.mu.Lock()
 		snap.Phase = s.prog.phase
+		snap.NextVerifyNames = s.prog.nextVerifyNames
 		accounted := s.prog.done.Load() + s.prog.copyActive
 		snap.Done = max(accounted, s.prog.durableFloor)
 		snap.Total = int64(s.prog.total)
@@ -708,6 +709,21 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 		retryFailed = false
 		s.phase("fill")
 		s.prog.begin("fill", fillable)
+		// Count the planned convergence set without allocating another name map.
+		// A later source failure may change it; this is an ETA, not a receipt.
+		nextVerifyNames := int64(len(next))
+		for name, hs := range latest {
+			if next[name] {
+				continue
+			}
+			for _, h := range hs {
+				if seen[syncKey{name, h.Source}] {
+					nextVerifyNames++
+					break
+				}
+			}
+		}
+		s.prog.planVerification(nextVerifyNames)
 		work := 0
 		for src := range s.o.from {
 			names := bySource[src]

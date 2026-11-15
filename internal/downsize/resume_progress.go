@@ -100,6 +100,7 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	NextVerifyNames    *int64               `json:"next_verify_names,omitempty"` // distinct names after this fill; nil until planned
 	WaitingForStore    bool                 `json:"waiting_for_store"`
 	FreshDoneAvailable bool                 `json:"fresh_done_available"` // controller supplied fresh work counter
 	FreshDone          int64                `json:"fresh_done"`           // excludes journal replay and discovery

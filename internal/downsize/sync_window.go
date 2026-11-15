@@ -82,6 +82,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	}
 	s.phase("copy")
 	s.prog.begin("window missing", s.sum.Missing)
+	if !s.legacyCopyReceipts {
+		s.prog.planVerification(int64(s.sum.Discovered))
+	}
 	selections, completed := map[syncWindowSelectionKey]syncRow{}, map[syncWindowSelectionKey]syncRow{}
 	for _, r := range s.j.find(func(r syncRow) bool {
 		return r.Kind == "window-selected" || r.Kind == "copied" && r.Phase == "window-missing"
