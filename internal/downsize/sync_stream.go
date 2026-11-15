@@ -959,13 +959,15 @@ func (s *syncer) startScopedList(ctx context.Context, store, after string) *sync
 		// catalogue avoids per-name metadata (or history) probes before the bulk
 		// copy. Do not cache this result across discovery/restarts: imports may
 		// have populated the target since an earlier attempt.
-		if store == s.o.to {
-			page, err := s.b.List(ctx, store, s.o.prefix, "", 1)
+		if probe, ok := s.b.(interface {
+			EmptyTarget(context.Context, string) (bool, error)
+		}); ok && store == s.o.to {
+			empty, err := probe.EmptyTarget(ctx, store)
 			if err != nil {
 				l.errc <- fmt.Errorf("list empty target %s: %w", store, err)
 				return
 			}
-			if len(page) == 0 {
+			if empty {
 				return
 			}
 		}

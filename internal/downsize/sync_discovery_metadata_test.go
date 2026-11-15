@@ -117,7 +117,7 @@ func TestScopedDiscoveryEmptyTargetSkipsMetadata(t *testing.T) {
 	if err := os.WriteFile(path, []byte("a\nb\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	b := &metadataDiscovery{fakeSync: newFakeSync(), err: errors.New("must not probe empty target metadata")}
+	b := &emptyTargetDiscovery{&metadataDiscovery{fakeSync: newFakeSync(), err: errors.New("must not probe empty target metadata")}}
 	s := &syncer{o: syncOptions{namesFile: path, to: syncT}, b: b}
 	l := s.startScopedList(context.Background(), syncT, "")
 	if err := l.advance(context.Background()); err != nil {
@@ -130,6 +130,10 @@ func TestScopedDiscoveryEmptyTargetSkipsMetadata(t *testing.T) {
 }
 
 type emptyTargetDiscovery struct{ *metadataDiscovery }
+
+func (b *emptyTargetDiscovery) EmptyTarget(context.Context, string) (bool, error) {
+	return len(b.store(syncT).archives) == 0, nil
+}
 
 func (b *emptyTargetDiscovery) Info(ctx context.Context, origin string, names []string) (map[string][]syncArchive, error) {
 	if origin == syncT {
