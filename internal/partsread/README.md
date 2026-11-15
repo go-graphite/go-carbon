@@ -36,8 +36,10 @@ propagation. This package does not recompute rollups at query time.
 ./internal/partsread` exercises the optional sealrollup dependency once that
 sibling experiment is in the checkout. It feeds identical original batches to
 sealrollup, classic Whisper, native exact and continuation storage, then compares
-1h/1d/7d/30d renders from frozen head, parts and blocks bit for bit. The tag keeps
-the standalone snapshot primitive buildable before that stacked dependency lands.
+1h/1d/7d/30d renders from one durable part containing every retained batch
+version, bit for bit. Separate snapshot tests exercise head/part/block ordering
+and pinned replacement. The tag keeps the standalone snapshot primitive
+buildable before that stacked dependency lands.
 This bounded test fixes the admission clock; clock advancement and ring wrapping
 also need the reducer's separate compatibility suite before production use.
 
@@ -91,8 +93,9 @@ OS page cache. Its JSON records disclose the fixture codec and absence of sustai
 ingest; wide globs and the eventual production source require separate evidence.
 
 The latency fixture defaults to 200 warm and 30 fresh-engine-cache samples per
-class, with alternating read order. `PARTS_READ_PROFILE=1` adds per-class source
-seek/record decode/merge timers, process allocation/GC deltas and CPU labels;
+class, with alternating read order. `PARTS_READ_PROFILE=1` adds process
+allocation/GC deltas and CPU labels; the indexed-Pebble adapter also records
+source seek/record decode/merge timers. These
 profile timings are diagnostic and must not be used as latency gate results.
 `PARTS_READ_COMPARE_REPEATS` raises the warm sample count for CPU sampling.
 
