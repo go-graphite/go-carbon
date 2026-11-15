@@ -400,6 +400,9 @@ func (s *syncer) setSource(set []string) (syncNameSource, error) {
 	if err := scanner.Err(); err != nil {
 		return syncNameSource{}, err
 	}
+	if len(picked) != len(want) {
+		return syncNameSource{}, fmt.Errorf("verification frontier contains %d names absent from catalog", len(want)-len(picked))
+	}
 	i := 0
 	return syncNameSource{id: func() int64 { return picked[i-1].id }, total: len(picked), next: func() (string, uint64, error) {
 		if i >= len(picked) {

@@ -81,6 +81,11 @@ type readyReport struct {
 // any work. Each new restart uses a fresh recovery journal; an interrupted
 // recovery resumes that same journal, never the pre-restart receipts.
 func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syncReadyBackend, initial func() error) (err error) {
+	return runSyncReadyPrepared(ctx, o, r, b, nil, initial)
+}
+
+// prepare initializes shared backend budgets even when resume skips the root job.
+func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOptions, b syncReadyBackend, prepare, initial func() error) (err error) {
 	if o.now == nil {
 		o.now = time.Now
 	}
@@ -100,6 +105,11 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			}
 		} else if !errors.Is(e, os.ErrNotExist) {
 			return e
+		}
+		if prepare != nil {
+			if err := prepare(); err != nil {
+				return err
+			}
 		}
 		return initial()
 	}
@@ -200,8 +210,20 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			return e
 		}
 	}
-	if e = initial(); e != nil {
+	if prepare != nil {
+		if e = prepare(); e != nil {
+			return e
+		}
+	}
+	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
+	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
+	if e != nil {
 		return e
+	}
+	if resume == nil {
+		if e = initial(); e != nil {
+			return e
+		}
 	}
 	validation := readyPrerequisites(*o, r)
 	if o.noVerify || (len(o.windows) > 0 && !o.fullHistory && r.scope != "windows") {
@@ -210,11 +232,6 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 	}
 	state := o.state
 	if e = readyProgress(o.state, "running", nil); e != nil {
-		return e
-	}
-	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
-	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
-	if e != nil {
 		return e
 	}
 	if resume != nil {
