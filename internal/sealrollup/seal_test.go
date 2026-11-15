@@ -1,12 +1,13 @@
 package sealrollup
 
 import (
-	whisper "github.com/go-graphite/go-whisper"
 	"math"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
+
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 func TestSealPlanFrontierCorrections(t *testing.T) {

@@ -174,10 +174,10 @@ func TestCoreRollupPolicyFailure(t *testing.T) {
 	if owner.Errors.Load() != 1 || len(owner.state) != 0 {
 		t.Fatal("failure counter or detached plan")
 	}
-	for _, v := range e.durableFrontiers() {
-		if v[0] != 0 {
-			t.Fatal("failed policy advanced frontier")
-		}
+	// Atomicity is per owner: an empty peer owner may safely acknowledge its
+	// source cursor independently. Only the affected owner's cursor must stay.
+	if e.durableFrontiers()[coreShard(42, cfg.Shards)][0] != 0 {
+		t.Fatal("failed policy advanced affected owner frontier")
 	}
 	if err := e.close(); err == nil {
 		t.Fatal("owner failure lost on close")
