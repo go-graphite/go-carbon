@@ -133,3 +133,71 @@ native Fetch includes its view construction; source publication cost and
 sustained ingest remain separate gates. Both sources retain OS page cache.
 The portable daemon backend and the numeric core writer benchmark still need
 writer-side manifest integration; standalone fixture passes do not qualify them.
+
+## Backend integration contract
+
+The backend owns the following protocol. `BlockManifest` publishes one complete
+part; it does not persist the catalog, journal cursor, active part set, or a live
+publication. Completing the protocol is required before enabling this reader in
+the daemon or claiming writer-isolation qualification.
+
+1. **Persist one coherent envelope.** For each owner generation persist the
+   catalog revision (including archive policies and complete portable identities),
+   the sealed journal frontier vector, and the complete active part-reference set
+   in the same atomic durable transaction as the corresponding raw/archive SSTs.
+   A reference identifies a unique relative part path, manifest format version,
+   manifest generation and placement-group/routing-vshard scope. Record the
+   catalog-to-portable-key mapping needed by `OpenBlockPartWithIDs`; old local
+   numeric IDs are not a copy/restart identity. Use the core owner's final key
+   codec rather than inventing another placement-group encoding here.
+2. **Stage before committing references.** Freeze or transfer the owner buffers;
+   compute exact authoritative archive replacements at seal/compaction boundaries.
+   Call `PublishBlockPart` and wait for its data, manifest and directory syncs
+   before committing any reference to that part. A successful rename followed by
+   a failed parent sync is an uncertain publication, not permission to overwrite
+   the name. Open and validate every referenced file while retirement is excluded.
+   If opening, validation or durable envelope commit fails, keep the old live
+   view, report the error, and retain the journal needed for recovery. Do not
+   acknowledge a new durable frontier from an incomplete envelope.
+3. **Publish a matching immutable live view.** After durable commit, build one
+   `View{Generation, Frontier, Catalog, Head, Parts, Blocks}` from that envelope
+   and detached frozen heads. The view's frontier is the sealed frontier;
+   unsealed head visibility must not advance journal retirement. Publish the
+   whole view once, in owner generation order. Transfer resource ownership to
+   `Publication.Publish`; queries retain it with `Pin` until response encoding
+   finishes. Retained-byte accounting includes the entire catalog, directory,
+   frozen heads, open file resources and bounded per-reader decode scratch.
+   A `BlockFileSource` has a single close lifetime: open a separate descriptor
+   set per view, or supply an owner-level shared-resource reference count when
+   a part survives across views. Reusing the same source with independent
+   `View.Close = source.Close` callbacks would close it under a newer view.
+4. **Recover from committed references.** Load the last committed envelope before
+   opening reads or replaying intake. Open all referenced parts, check each
+   manifest version/generation and portable scope against its reference, remap
+   read IDs from the recovered catalog, then publish that coherent view. A
+   missing, truncated or corrupt referenced part is a recovery failure; silently
+   omitting it is data loss. Directory presence alone never advances a frontier.
+   Staging directories and complete unreferenced parts are uncommitted orphans;
+   reconcile them against committed envelopes before deletion and never promote
+   them merely because their generation is larger. Replay after the sealed
+   frontier through the same writer path. Trim journal segments only through
+   both the input log's fsynced frontier and the conservative minimum committed
+   owner frontier, after referenced-part durability has been established.
+5. **Retire after pins drain.** Compaction/retention first produces durable
+   replacements and commits the replacement active set, then publishes its new
+   view. The old view remains readable until all handles close. Its close
+   callback releases its descriptor ownership; delete a part only after no live
+   or recoverable committed envelope references it and all owning views have
+   drained. Serialize this decision with opening sources. OS descriptor pinning
+   tolerates unlink after open, but is not a replacement for durable reference
+   tracking. Preserve occupied NaNs, newer physical-slot invalidations and
+   retained versions until they cannot expose older values through either a
+   part or the legacy overlay. Whole-part copy applies the same durable-reference
+   protocol at the receiver before publication or journal retirement.
+
+The minimum integration tests cover crashes before/after part rename, before/after
+atomic envelope commit and before live publication; reopen with changed local
+catalog IDs; concurrent compaction with paused old readers; and failure to open a
+referenced part. Compare recovered and uninterrupted renders bit for bit. Reader
+load trials must consume those published parts with the same writer publication
+work enabled for every zero-reader and reader arm.
