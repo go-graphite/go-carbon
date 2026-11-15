@@ -24,17 +24,18 @@ type fakeSyncStore struct {
 }
 
 type fakeSync struct {
-	mu        sync.Mutex
-	stores    map[string]*fakeSyncStore
-	forbidden map[string]bool
-	copies    []string // "source names..." per Copy call
-	fetches   atomic.Int64
-	failAfter int64 // cancel the run after this many fetches (0 = never)
-	cancel    context.CancelFunc
-	hide      map[string]bool // names the target's carbonserver does not index yet
-	noDigest  map[string]bool // stores on a build without /v1/transfer/digest
-	poison    string          // fetching this name always fails
-	digested  atomic.Int64
+	listPageSize int // zero keeps tiny pages for paging tests
+	mu           sync.Mutex
+	stores       map[string]*fakeSyncStore
+	forbidden    map[string]bool
+	copies       []string // "source names..." per Copy call
+	fetches      atomic.Int64
+	failAfter    int64 // cancel the run after this many fetches (0 = never)
+	cancel       context.CancelFunc
+	hide         map[string]bool // names the target's carbonserver does not index yet
+	noDigest     map[string]bool // stores on a build without /v1/transfer/digest
+	poison       string          // fetching this name always fails
+	digested     atomic.Int64
 }
 
 const syncTestNow = int64(1_800_000_000)
@@ -86,7 +87,11 @@ func (f *fakeSync) List(_ context.Context, store, prefix, after string, limit in
 		}
 	}
 	sort.Strings(names)
-	return names[:min(limit, 2, len(names))], nil // tiny pages exercise paging
+	pageSize := f.listPageSize
+	if pageSize == 0 {
+		pageSize = 2 // tiny pages exercise paging
+	}
+	return names[:min(limit, pageSize, len(names))], nil
 }
 
 func (f *fakeSync) Info(_ context.Context, store string, names []string) (map[string][]syncArchive, error) {
@@ -247,6 +252,7 @@ func threeSources(t *testing.T) (*fakeSync, syncOptions, []int64) {
 }
 
 func TestSyncThreeSourcesFillsEverything(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	if err := runSync(context.Background(), o, f); err != nil {
 		t.Fatal(err)
@@ -286,6 +292,7 @@ func TestSyncThreeSourcesFillsEverything(t *testing.T) {
 }
 
 func TestSyncForbiddenPeerReportsResidual(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	f.forbidden[syncP] = true
 	err := runSync(context.Background(), o, f)
@@ -308,6 +315,7 @@ func TestSyncForbiddenPeerReportsResidual(t *testing.T) {
 }
 
 func TestSyncResumesAfterRestart(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	f.cancel, f.failAfter = cancel, 6
@@ -340,6 +348,7 @@ func TestSyncResumesAfterRestart(t *testing.T) {
 }
 
 func TestSyncUnindexedNameRetriedNextRound(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	f.hide["d.missing"] = true // copied, but carbonserver indexes it late
 	var calls atomic.Int64
@@ -357,6 +366,7 @@ func TestSyncUnindexedNameRetriedNextRound(t *testing.T) {
 }
 
 func TestSyncCompareCountsOnlyTargetAbsence(t *testing.T) {
+	t.Parallel()
 	src := syncSeries{Start: 0, Step: 60, Values: []float64{1, 2, math.NaN(), 4}}
 	dst := syncSeries{Start: 0, Step: 60, Values: []float64{9, math.NaN(), math.NaN(), math.NaN()}}
 	h, ok := syncCompare("x", "s", src, dst, 60, 0, 240)
@@ -366,6 +376,7 @@ func TestSyncCompareCountsOnlyTargetAbsence(t *testing.T) {
 }
 
 func TestSyncOptions(t *testing.T) {
+	t.Parallel()
 	o := syncOptions{to: "http://t:4242", from: []string{"http://t:4242"}, state: "x", streams: 1, batch: 1, maxRounds: 1}
 	if err := o.normalize(); err == nil {
 		t.Fatal("source equal to target must be refused")
@@ -382,6 +393,7 @@ func windowsAround(holes []int64) syncRanges {
 }
 
 func TestSyncWindowsByDigest(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	o.windows, o.sampleEvery = windowsAround(holes), 0
 	if err := runSync(context.Background(), o, f); err != nil {
@@ -404,6 +416,7 @@ func TestSyncWindowsByDigest(t *testing.T) {
 }
 
 func TestSyncWindowsWithoutDigestEndpoint(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	o.fullHistory = true // compatibility path for sources without window digests
 	o.windows, o.sampleEvery = windowsAround(holes), 0
@@ -417,6 +430,7 @@ func TestSyncWindowsWithoutDigestEndpoint(t *testing.T) {
 }
 
 func TestSyncSkipsBadMetric(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	f.poison = "a.clean"
 	err := runSync(context.Background(), o, f)
@@ -433,6 +447,7 @@ func TestSyncSkipsBadMetric(t *testing.T) {
 }
 
 func TestSyncRangesFlag(t *testing.T) {
+	t.Parallel()
 	var r syncRanges
 	if err := r.Set("w00:100:200 300:400,x:5:6"); err != nil {
 		t.Fatal(err)
@@ -446,6 +461,7 @@ func TestSyncRangesFlag(t *testing.T) {
 }
 
 func TestSyncPrefixScopesTheRun(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	o.prefix = "b."
 	if err := runSync(context.Background(), o, f); err != nil {
@@ -464,6 +480,7 @@ func TestSyncPrefixScopesTheRun(t *testing.T) {
 }
 
 func TestSyncShortRetentionRecovery(t *testing.T) {
+	t.Parallel()
 	for _, include := range []bool{false, true} {
 		t.Run(fmt.Sprintf("include=%t", include), func(t *testing.T) {
 			f := newFakeSync()
@@ -524,6 +541,7 @@ func (b *rendezvousSync) Fetch(ctx context.Context, store string, names []string
 }
 
 func TestSyncWindowConcurrentDetailParity(t *testing.T) {
+	t.Parallel()
 	for _, fallback := range []bool{false, true} {
 		t.Run(strconv.FormatBool(fallback), func(t *testing.T) {
 			f, o, holes := threeSources(t)
@@ -615,6 +633,7 @@ func (f *fakeSync) CopyWindow(ctx context.Context, source, target string, names 
 }
 
 func TestSyncVerifyConcurrencyBitExact(t *testing.T) {
+	t.Parallel()
 	var want map[string]uint64
 	for _, workers := range []int{0, 8} {
 		f, o, holes := threeSources(t)

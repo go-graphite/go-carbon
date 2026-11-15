@@ -56,6 +56,7 @@ func (r *maxSpeedRig) tick(t *testing.T, host string, seconds float64) {
 }
 
 func TestMaxSpeedNoLegacyWarmupOrStaticCoreCeiling(t *testing.T) {
+	t.Parallel()
 	r := newMaxSpeedRig(t)
 	h := r.tune.hosts["dst"]
 	if h.Streams <= 2 || h.baseline != nil || h.debtBaseline != nil || h.latencyBaseline != nil || h.Batch != 8192 {
@@ -91,6 +92,7 @@ func TestMaxSpeedNoLegacyWarmupOrStaticCoreCeiling(t *testing.T) {
 }
 
 func TestMaxSpeedWriteErrorsPauseOnlyAffectedPairsForQuiet120s(t *testing.T) {
+	t.Parallel()
 	r := newMaxSpeedRig(t)
 	s := r.samples["srcA"]
 	s.WriteErrors = 1
@@ -122,6 +124,7 @@ func TestMaxSpeedWriteErrorsPauseOnlyAffectedPairsForQuiet120s(t *testing.T) {
 }
 
 func TestMaxSpeedRestartAndUnavailableArePairLocal(t *testing.T) {
+	t.Parallel()
 	r := newMaxSpeedRig(t)
 	s := r.samples["srcA"]
 	s.Generation = "srcA:two"
@@ -152,6 +155,7 @@ func TestMaxSpeedRestartAndUnavailableArePairLocal(t *testing.T) {
 }
 
 func TestMaxSpeedMissingTelemetryOnlyThrottlesAndRetainsRealPauses(t *testing.T) {
+	t.Parallel()
 	r := newMaxSpeedRig(t)
 	h := r.tune.hosts["srcA"]
 	for range 20 {
@@ -177,6 +181,7 @@ func TestMaxSpeedMissingTelemetryOnlyThrottlesAndRetainsRealPauses(t *testing.T)
 }
 
 func TestMaxSpeedReadPause180sAndRecovery120s(t *testing.T) {
+	t.Parallel()
 	r := newMaxSpeedRig(t)
 	s := r.samples["dst"]
 	s.ReadRolling1mSamples = 1
@@ -225,6 +230,7 @@ func TestMaxSpeedReadPause180sAndRecovery120s(t *testing.T) {
 }
 
 func TestMaxSpeedThrottleAndDestinationOnlyBoundaries(t *testing.T) {
+	t.Parallel()
 	r := newMaxSpeedRig(t)
 	h := r.tune.hosts["dst"]
 	s := r.samples["dst"]
@@ -302,6 +308,7 @@ func TestMaxSpeedThrottleAndDestinationOnlyBoundaries(t *testing.T) {
 }
 
 func TestMaxSpeedAbsentProofBoundsDisabledOnlyExplicitMode(t *testing.T) {
+	t.Parallel()
 	j := &journal{absent: map[string]absentSourceSkip{"churn": {BatchMetrics: 128, Count: 128}}}
 	if j.absentError() == nil {
 		t.Fatal("default absence bound changed")
@@ -317,6 +324,7 @@ func TestMaxSpeedAbsentProofBoundsDisabledOnlyExplicitMode(t *testing.T) {
 }
 
 func TestMaxSpeedDecisionRequiresExactRawSHAAndOwner(t *testing.T) {
+	t.Parallel()
 	value := maximumSpeedDecisionFixtureValue()
 	raw, _ := json.Marshal(value)
 	path := filepath.Join(t.TempDir(), "decision.json")
@@ -339,6 +347,7 @@ func TestMaxSpeedDecisionRequiresExactRawSHAAndOwner(t *testing.T) {
 }
 
 func TestMaxSpeedIntegrityClassificationNeverSkipsJournalFailures(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		err              error
 		retry, integrity bool
@@ -383,6 +392,7 @@ func maximumSpeedDecisionFixtureValue() map[string]any {
 }
 
 func TestMaxSpeedAmendedStorageThrottleAndDynamicServerSlots(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		stop, sublevels int64
 		stall, throttle bool
@@ -422,6 +432,7 @@ func TestMaxSpeedAmendedStorageThrottleAndDynamicServerSlots(t *testing.T) {
 }
 
 func TestMaxSpeedDebtRemovalRequiresAmendedRawAuthority(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"old debt rule", "missing amendments"} {
 		value := maximumSpeedDecisionFixtureValue()
 		if mode == "old debt rule" {
@@ -442,6 +453,7 @@ func TestMaxSpeedDebtRemovalRequiresAmendedRawAuthority(t *testing.T) {
 }
 
 func TestMaxSpeedUpstream429BacksOffOnlyNamedSource(t *testing.T) {
+	t.Parallel()
 	body := struct {
 		Source   string
 		Names    []string

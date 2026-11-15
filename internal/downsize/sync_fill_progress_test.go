@@ -9,6 +9,7 @@ import (
 // A donor list can take hours. Observe its durable sub-batches before the
 // donor completes, and do not count a probe or journal replay as fresh work.
 func TestSyncLegacyCopyReportsCommittedBatches(t *testing.T) {
+	t.Parallel()
 	b := newSyncLiveBackend(syncLiveOptions{copyAttempts: 1})
 	var calls int
 	var reported []int
@@ -45,6 +46,7 @@ func TestSyncLegacyCopyReportsCommittedBatches(t *testing.T) {
 // Receipt replay must not be advertised as newly transferred names. Run the
 // real producer and durable copy journal twice against HTTP transfer endpoints.
 func TestSyncCopyCommittedObserverExcludesResume(t *testing.T) {
+	t.Parallel()
 	names := copyNames("metric.", 100)
 	f, src, dst := newFakeCopy(t, names)
 	o := copyTestOptions(t, src, dst)

@@ -43,6 +43,7 @@ func (b *sourceAbsenceRetryBackend) SumDigest(ctx context.Context, source string
 }
 
 func TestSyncWindowRetrySourceAbsentWithUnrelatedPeerHistory(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []string{"absent", "pending", "missing evidence", "activity", "changed", "metadata", "unsupported"} {
 		t.Run(tc, func(t *testing.T) {
 			b := &sourceAbsenceRetryBackend{retrySelectionBackend: &retrySelectionBackend{newFakeSync(), true}}

@@ -18,6 +18,7 @@ import (
 )
 
 func TestSyncRestartWaitNeverExpiresAndRealErrorsFail(t *testing.T) {
+	t.Parallel()
 	for _, failure := range []error{syscall.ECONNREFUSED, syscall.ECONNRESET, io.EOF, io.ErrUnexpectedEOF, &apiError{503, "stopping"}, &apiError{500, "application lifecycle is busy; retry native copy"}, &apiError{500, "store recovery has not finished"}, &syncHTTPError{500, "not ready"}} {
 		b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Nanosecond})
 		b.retryTick = time.Microsecond
@@ -46,6 +47,7 @@ func TestSyncRestartWaitNeverExpiresAndRealErrorsFail(t *testing.T) {
 // Each operation must finish within one invocation and match an uninterrupted
 // run, including signed zero and existing target values.
 func TestSyncRestartWindowDifferential(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"capabilities", "source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin", "handover", "source-export-503"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -233,6 +235,7 @@ func (b *restartingSyncBackend) Copy(ctx context.Context, source, target string,
 	return
 }
 func TestSyncRestartVerifyFillConvergesWithoutExit(t *testing.T) {
+	t.Parallel()
 	var oracle map[string]map[int64]map[int64]uint64
 	for _, restart := range []bool{false, true} {
 		f := newFakeSync()
@@ -289,6 +292,7 @@ func TestSyncRestartVerifyFillConvergesWithoutExit(t *testing.T) {
 // Closing a listener does not evict existing keepalive connections. Model the
 // old daemon draining there while the replacement serves the same address.
 func TestSyncWindowRestartSameAddress(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	source := nativeControllerStore(t)
@@ -347,6 +351,7 @@ func TestSyncWindowRestartSameAddress(t *testing.T) {
 }
 
 func TestSyncWindowRefusedThenServing(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	source := nativeControllerStore(t)
@@ -402,6 +407,7 @@ func replaceStoreServer(t *testing.T, old *httptest.Server, handler http.Handler
 // Digest may retry inside a window-copy operation that still borrows a source
 // pin. Expiration must never wait for that caller's own read lock.
 func TestSyncNestedRestartMarksPinsWithoutBlocking(t *testing.T) {
+	t.Parallel()
 	b := newSyncLiveBackend(syncLiveOptions{})
 	b.retryTick = time.Millisecond
 	b.windowMu.RLock()

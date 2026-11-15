@@ -18,6 +18,7 @@ import (
 // Both pin callbacks must start before either completes. This exercises the
 // shared-controller lifetime, rather than merely running an HTTP mock in parallel.
 func TestSyncWindowConcurrentDonorPins(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	arrived := make(chan struct{}, 2)
@@ -69,6 +70,7 @@ func TestSyncWindowConcurrentDonorPins(t *testing.T) {
 // Gaps, exact float bits, independently populated coarse archives, pending
 // names, target overlap and reused receipts all go through the deployed exporter.
 func TestSyncWindowEnvelopeSelectionDifferential(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
@@ -195,6 +197,7 @@ func (b *concurrentWindowSelection) WindowPresenceRanges(ctx context.Context, so
 	return b.Digest(ctx, source, names, windows[0].From, windows[0].Until)
 }
 func TestSyncWindowDriverConcurrentSelectionOrderedCopy(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	b := &concurrentWindowSelection{fakeSync: newFakeSync(), arrived: make(chan string, 4), release: make(chan struct{})}

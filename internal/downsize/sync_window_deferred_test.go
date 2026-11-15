@@ -15,6 +15,7 @@ import (
 // snapshot. Reusing the original pull would return its all-deferred receipt
 // forever, even after that source name becomes available.
 func TestSyncWindowDeferredResume(t *testing.T) {
+	t.Parallel()
 	for _, lostAck := range []bool{false, true} {
 		t.Run(map[bool]string{false: "acknowledged", true: "lost-ack"}[lostAck], func(t *testing.T) {
 			ctx := context.Background()
@@ -107,6 +108,7 @@ func TestSyncWindowDeferredResume(t *testing.T) {
 // A deferred receipt may copy fine points while refusing an incomplete coarse
 // boundary. Its completed bitmap must not hide that residual on later resumes.
 func TestSyncWindowDeferredBoundaryRemainsResidual(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	base := testMetricNow/60*60 - 120

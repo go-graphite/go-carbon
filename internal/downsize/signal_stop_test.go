@@ -40,10 +40,13 @@ func TestStorectlSignalHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+// Keep process launches outside parallel in-process journal tests: a fork can
+// briefly inherit an open flock until exec closes close-on-exec descriptors.
 func TestStorectlSignalStopAndResume(t *testing.T) {
 	for _, stage := range []string{"copy", "lost-ack", "verify", "backoff"} {
 		for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
 			t.Run(fmt.Sprintf("%s/%s", stage, sig), func(t *testing.T) {
+				t.Parallel()
 				source, target := nativeControllerStore(t), nativeControllerStore(t)
 				names := []string{"stop.a", "stop.b", "stop.c", "stop.d"}
 				for i, name := range names {

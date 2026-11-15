@@ -36,6 +36,7 @@ func newExpiryFixture(t *testing.T) (*expiryFixture, syncOptions, syncReadyOptio
 	return f, o, r
 }
 func TestExpectedAbsencePreservesReadyWithoutRefill(t *testing.T) {
+	t.Parallel()
 	f, o, r := newExpiryFixture(t)
 	if err := runSyncReady(context.Background(), &o, r, f, func() error { return runSync(context.Background(), o, f) }); err != nil {
 		t.Fatal(err)
@@ -62,6 +63,7 @@ func TestExpectedAbsencePreservesReadyWithoutRefill(t *testing.T) {
 	}
 }
 func TestExpectedAbsenceRejectsUnprovenPolicyAndActivity(t *testing.T) {
+	t.Parallel()
 	for _, variant := range []string{"receipt", "policy", "grace-boundary", "pending", "source-missing", "target-present", "future-receipt", "source-future"} {
 		t.Run(variant, func(t *testing.T) {
 			f, o, _ := newExpiryFixture(t)
@@ -101,6 +103,7 @@ func TestExpectedAbsenceRejectsUnprovenPolicyAndActivity(t *testing.T) {
 	}
 }
 func TestExpectedAbsenceExistingReadyVerdicts(t *testing.T) {
+	t.Parallel()
 	for _, hole := range []bool{false, true} {
 		t.Run(fmt.Sprint(hole), func(t *testing.T) {
 			base, o, r := newReadyFixture(t, 120)
@@ -119,6 +122,7 @@ func TestExpectedAbsenceExistingReadyVerdicts(t *testing.T) {
 }
 
 func TestExpectedAbsenceInvalidProofStillRepairs(t *testing.T) {
+	t.Parallel()
 	f, o, r := newExpiryFixture(t)
 	n := "expired.old"
 	e := f.evidence[o.from[2]][n]
@@ -139,6 +143,7 @@ func TestExpectedAbsenceInvalidProofStillRepairs(t *testing.T) {
 }
 
 func TestExpectedAbsenceNoCopyAuditDoesNotRequireExpiredNames(t *testing.T) {
+	t.Parallel()
 	f, o, r := newExpiryFixture(t)
 	o.noCopy = true
 	if err := runSyncReady(context.Background(), &o, r, f, func() error { return runSync(context.Background(), o, f) }); err != nil {

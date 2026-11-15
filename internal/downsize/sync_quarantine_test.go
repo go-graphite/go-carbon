@@ -36,6 +36,7 @@ func (f *quarantineFixture) Copy(ctx context.Context, source, target string, nam
 	return r, e
 }
 func TestSyncQuarantineThousandsAndResume(t *testing.T) {
+	t.Parallel()
 	base, o, r := newReadyFixture(t, 0)
 	o.from = []string{syncD1}
 	o.batch = 200
@@ -98,6 +99,7 @@ func TestSyncQuarantineThousandsAndResume(t *testing.T) {
 }
 
 func TestSyncPolicySkipAloneAllowsReady(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 110)
 	oversized := strings.Repeat("x", 4097)
 	f.store(syncD1).archives[oversized] = []syncArchive{{3600, 240}}
@@ -115,6 +117,7 @@ func TestSyncPolicySkipAloneAllowsReady(t *testing.T) {
 }
 
 func TestSyncIssueLedgerRecovery(t *testing.T) {
+	t.Parallel()
 	state := t.TempDir()
 	q, err := openSyncIssues(state)
 	if err != nil {
@@ -148,6 +151,7 @@ func TestSyncIssueLedgerRecovery(t *testing.T) {
 }
 
 func TestSyncWindowSelectionStallQuarantinesAndResumes(t *testing.T) {
+	t.Parallel()
 	state := t.TempDir()
 	q, err := openSyncIssues(state)
 	if err != nil {
@@ -191,6 +195,7 @@ func TestSyncWindowSelectionStallQuarantinesAndResumes(t *testing.T) {
 }
 
 func TestSyncReadOnlyResidualDoesNotQuarantine(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	if err := runSync(context.Background(), o, f); !errors.Is(err, ErrSyncResidual) || errors.Is(err, ErrSyncQuarantined) {
 		t.Fatal(err)

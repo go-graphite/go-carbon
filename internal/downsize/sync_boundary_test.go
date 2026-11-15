@@ -15,6 +15,7 @@ import (
 )
 
 func TestSyncClosedSparseBoundaryRepair(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ existing, later, recent, gap bool }{{false, true, false, false}, {true, true, false, false}, {false, false, false, false}, {true, false, false, false}, {true, true, true, false}, {false, true, true, false}, {false, true, false, true}} {
 		existing := tc.existing
 		t.Run(map[bool]string{false: "hole", true: "target-wins"}[existing]+map[bool]string{false: "/trailing", true: "/historical"}[tc.later]+map[bool]string{false: "", true: "/recent"}[tc.recent]+map[bool]string{false: "", true: "/gap"}[tc.gap], func(t *testing.T) {

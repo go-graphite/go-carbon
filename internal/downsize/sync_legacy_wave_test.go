@@ -14,6 +14,7 @@ import (
 )
 
 func TestLegacyWaveMembership(t *testing.T) {
+	t.Parallel()
 	for _, variant := range []string{"format", "enlarged", "replaced", "selected", "unknown", "wrong-source", "wrong-target", "extra-identity", "absent-input"} {
 		t.Run(variant, func(t *testing.T) {
 			dir := t.TempDir()
@@ -70,6 +71,7 @@ func TestLegacyWaveMembership(t *testing.T) {
 }
 
 func TestLegacyRecoveredPartialWaveKeepsReceipts(t *testing.T) {
+	t.Parallel()
 	f, source, target := newFakeCopy(t, []string{"a", "b", "c"})
 	dir := t.TempDir()
 	journal := filepath.Join(dir, "missing-batch-r1-s0.jsonl")
@@ -150,6 +152,7 @@ func TestLegacyRecoveredPartialWaveKeepsReceipts(t *testing.T) {
 // Each subdirectory contains the unmodified child journals/inputs, parent
 // receipt excerpts and a source-filtered missing.tsv excerpt from discovery.
 func TestLegacyWaveCapturedFixtures(t *testing.T) {
+	t.Parallel()
 	root := os.Getenv("STORECTL_LEGACY_FIXTURES")
 	if root == "" {
 		t.Skip("set STORECTL_LEGACY_FIXTURES to local read-only capture directories")

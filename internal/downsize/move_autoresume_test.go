@@ -31,6 +31,7 @@ func autoresumeSample(generation string, writePoints uint64) hostSample {
 // stalls) re-baselines the host instead of a hard stop; the next sample is
 // compared against the new process only.
 func TestTunerRestartRebaselinesInsteadOfAborting(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a", "b"}, capacity{Streams: 16, Batch: 8192, BatchBytes: 64 << 20, DeleteRate: 10000}, false, 0, 0)
 	if err := tune.observe("a", autoresumeSample("pid1:100", 1000000), storageSample{WriteStalls: 7}); err != nil {
 		t.Fatal(err)
@@ -66,6 +67,7 @@ func TestTunerRestartRebaselinesInsteadOfAborting(t *testing.T) {
 // A relaunch restores the journal's pre-restart Previous sample; the first
 // poll against the restarted host must not fail on it.
 func TestTunerRestoredPreviousFromOldGenerationDoesNotAbort(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a"}, capacity{Streams: 16, Batch: 8192, BatchBytes: 64 << 20, DeleteRate: 10000}, false, 0, 0)
 	old := autoresumeSample("pid1:100", 5000000)
 	old.Time -= 3600
@@ -81,6 +83,7 @@ func TestTunerRestoredPreviousFromOldGenerationDoesNotAbort(t *testing.T) {
 // A helper 503 (read histogram reset / missing counters) or a refused status
 // parks the host; the next good poll brings it back. Neither fails the run.
 func TestPollWaitsForHostThroughHelperAndStatusErrors(t *testing.T) {
+	t.Parallel()
 	var helperFail, statusFail atomic.Int32
 	helperFail.Store(1)
 	helper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +219,7 @@ func (r *resilientRig) run(t *testing.T, ctx context.Context) error {
 // The target drops connections (process gone) and then answers 503 while it
 // starts; every in-flight batch is re-pulled and every name is copied.
 func TestExecuteResilientRidesThroughTargetRestart(t *testing.T) {
+	t.Parallel()
 	r := newResilientRig(t, 12, func(w http.ResponseWriter, attempt int32) bool {
 		switch {
 		case attempt <= 3:
@@ -246,6 +250,7 @@ func TestExecuteResilientRidesThroughTargetRestart(t *testing.T) {
 // for; once it is up and still failing past --stall-timeout, the copy fails
 // loudly with errCopyStalled.
 func TestExecuteResilientStallsOnlyWhileHostsUp(t *testing.T) {
+	t.Parallel()
 	r := newResilientRig(t, 2, func(w http.ResponseWriter, attempt int32) bool {
 		http.Error(w, "broken", 503)
 		return true

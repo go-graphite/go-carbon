@@ -14,6 +14,7 @@ import (
 )
 
 func TestSingleMetricWaitsForAdaptiveByteBudget(t *testing.T) {
+	t.Parallel()
 	const maximum = 4 << 20
 	var tune *tuner
 	var budgets []int64
@@ -63,6 +64,7 @@ func TestSingleMetricWaitsForAdaptiveByteBudget(t *testing.T) {
 }
 
 func TestSingleMetricBudgetWaitHonorsCeilingAndCancellation(t *testing.T) {
+	t.Parallel()
 	for _, serverLimit := range []int64{0, 2 << 20} {
 		tune := newTestTuner([]string{"source", "target"}, capacity{1, 1, 4 << 20, 1}, true, 0, 0)
 		tune.hosts["source"].storePrevious = &storageSample{MaxBodyBytes: serverLimit}

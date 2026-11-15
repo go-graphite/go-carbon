@@ -177,6 +177,7 @@ func newRestartFixture(t *testing.T, catalogs ...[]string) (*restartFixture, []s
 // connections refused for longer than --stall-timeout), then a donor goes away
 // (the target answers 500 "connection refused"). The copy waits, re-pulls and
 // finishes with every name copied, no failure and no abort; a rerun resumes.
+// This real-network watchdog case must not compete with in-process journal I/O.
 func TestPlanFreeCopyRidesThroughSourceAndTargetRestarts(t *testing.T) {
 	a, b := copyNames("a.", 1500), copyNames("b.", 1500)
 	f, froms, dst := newRestartFixture(t, a, b)
@@ -244,6 +245,7 @@ func TestPlanFreeCopyRidesThroughSourceAndTargetRestarts(t *testing.T) {
 // A serving status endpoint does not imply native readiness. Keep waiting
 // through a 503 outage beyond the old stall budget, until caller cancellation.
 func TestPlanFreeCopyRestartWaitsWithStatusUp(t *testing.T) {
+	t.Parallel()
 	f, froms, dst := newRestartFixture(t, copyNames("a.", 50))
 	f.pullCode = func() int { return http.StatusServiceUnavailable }
 	o := copyTestOptions(t, froms[0], dst.url())
@@ -259,6 +261,7 @@ func TestPlanFreeCopyRestartWaitsWithStatusUp(t *testing.T) {
 }
 
 func TestPlanFreeCopyRejectsNamesWithSeveralDonors(t *testing.T) {
+	t.Parallel()
 	o := copyTestOptions(t, "http://a:4242", "http://c:4242")
 	o.froms = []string{"http://a:4242", "http://b:4242"}
 	names := t.TempDir() + "/names"
@@ -272,6 +275,7 @@ func TestPlanFreeCopyRejectsNamesWithSeveralDonors(t *testing.T) {
 }
 
 func TestOriginListRepeatsAndSplits(t *testing.T) {
+	t.Parallel()
 	var l originList
 	_ = l.Set("http://a:4242, http://b:4242")
 	_ = l.Set("http://c:4242")
@@ -399,6 +403,7 @@ func TestPlanFreeCopyPrintsProgressAndSkipsBadName(t *testing.T) {
 // A name that fails during the main pass but recovers is copied by the
 // end-of-run retry, and the run exits cleanly.
 func TestPlanFreeCopyRetriesSkippedNameAtEnd(t *testing.T) {
+	t.Parallel()
 	all := copyNames("a.", 100)
 	f, src, dst := newFakeCopy(t, all)
 	var singles atomic.Int64
@@ -428,6 +433,7 @@ func TestPlanFreeCopyRetriesSkippedNameAtEnd(t *testing.T) {
 // Transfers hang while every host answers: the watchdog fails loudly after
 // --stall-timeout instead of waiting forever.
 func TestPlanFreeCopyWatchdogFailsWhenStuckWithHostsUp(t *testing.T) {
+	t.Parallel()
 	f, src, dst := newFakeCopy(t, copyNames("a.", 20))
 	f.block = func(int) bool { return true }
 	o := copyTestOptions(t, src, dst)

@@ -35,6 +35,7 @@ func (b *boundedFullSync) Fetch(ctx context.Context, source string, names []stri
 }
 
 func TestSyncFullHistoryMemoryBudgetParity(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	// All stores disagree, so every name takes the materialized fallback.
 	// A week at one-minute resolution must not be fetched as one 500-name

@@ -10,6 +10,7 @@ import (
 )
 
 func TestCopyResumeProgressIsCumulative(t *testing.T) {
+	t.Parallel()
 	names := copyNames("metric.", 100)
 	file := filepath.Join(t.TempDir(), "names")
 	if err := os.WriteFile(file, []byte(strings.Join(names, "\n")+"\n"), 0600); err != nil {

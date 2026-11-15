@@ -13,6 +13,7 @@ import (
 )
 
 func TestNativeBoundedRetryCountsPendingIntentBeforeNewGap(t *testing.T) {
+	t.Parallel()
 	for _, lostAck := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lost_ack=%t", lostAck), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

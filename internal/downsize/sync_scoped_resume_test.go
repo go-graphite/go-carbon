@@ -15,6 +15,7 @@ import (
 // A terminal round followed by saved window resolutions used to start a new
 // generation against the whole catalog, including names already proved clean.
 func TestSyncResolvedWindowResumeOnlyRechecksResiduals(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", syncTestNow - 7200, syncTestNow - 3600}}
@@ -70,6 +71,7 @@ func (b *resumeDigestWatch) Digest(ctx context.Context, host string, names []str
 }
 
 func TestReadyResumeRunsSavedChildBeforeRoot(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	identity, _ := syncIdentity(o)
 	processes := map[string]readyProcess{}
@@ -93,6 +95,7 @@ func TestReadyResumeRunsSavedChildBeforeRoot(t *testing.T) {
 }
 
 func TestReadyResumePreparesBackendAndRejectsInvalidIntent(t *testing.T) {
+	t.Parallel()
 	for _, valid := range []bool{true, false} {
 		t.Run(map[bool]string{true: "valid", false: "invalid scope"}[valid], func(t *testing.T) {
 			f, o, r := newReadyFixture(t, 100)
@@ -121,6 +124,7 @@ func TestReadyResumePreparesBackendAndRejectsInvalidIntent(t *testing.T) {
 }
 
 func TestWindowResumeSetLegacySparseMembership(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", 1, 2}}
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("a\t1\t1\nb\t1\t1\nc\t1\t1\nz\t1\t1\n"), 0600); err != nil {
@@ -155,6 +159,7 @@ func TestWindowResumeSetLegacySparseMembership(t *testing.T) {
 }
 
 func TestWindowResumeSetRejectsIncompleteOriginalProof(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", 1, 2}}
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("a\t1\t1\nb\t1\t1\n"), 0600); err != nil {
@@ -205,6 +210,7 @@ func (b *repairedWindowProofWatch) Proofs(ctx context.Context, host string, name
 	return b.proofFixture.Proofs(ctx, host, names)
 }
 func TestSyncWindowRepairRechecksOnlyTouchedMutationFences(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	o.noCopy = false
 	o.maxRounds = 0
@@ -224,6 +230,7 @@ func TestSyncWindowRepairRechecksOnlyTouchedMutationFences(t *testing.T) {
 }
 
 func TestWindowResumePreservesHolesFromInterruptedBroadRetry(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", 1, 2}}
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("a\t1\t1\nb\t1\t1\n"), 0600); err != nil {

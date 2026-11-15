@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,7 @@ func replacementConfig(t *testing.T) (string, *carbon.Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Common.MaxCPU = 4
+	cfg.Common.MaxCPU = runtime.GOMAXPROCS(0) // preserve the test runner's -cpu setting
 	cfg.Common.MetricInterval = &carbon.Duration{Duration: time.Hour}
 	cfg.Udp.Enabled, cfg.Tcp.Enabled, cfg.Pickle.Enabled = false, false, false
 	cfg.Grpc.Enabled, cfg.Carbonlink.Enabled = false, false

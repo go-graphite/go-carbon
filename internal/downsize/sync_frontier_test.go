@@ -92,6 +92,7 @@ func seenProofNames(f *proofFixture) []string {
 	return names
 }
 func TestSyncTerminalRetryMutationFrontier(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(*proofFixture)
@@ -145,6 +146,7 @@ func TestSyncTerminalRetryMutationFrontier(t *testing.T) {
 	}
 }
 func TestSyncFrontierTornRecordAndChangedScope(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	if err := runSync(context.Background(), o, f); !errors.Is(err, ErrSyncResidual) {
 		t.Fatal(err)
@@ -170,6 +172,7 @@ func TestSyncFrontierTornRecordAndChangedScope(t *testing.T) {
 	}
 }
 func TestSyncFrontierWriteDuringVerification(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	o.noCopy = false
 	o.maxRounds = 0
@@ -200,6 +203,7 @@ func (f readyProofFixture) Proofs(ctx context.Context, host string, names []stri
 	return f.proof.Proofs(ctx, host, names)
 }
 func TestSyncFrontierReadyVerdicts(t *testing.T) {
+	t.Parallel()
 	for _, hole := range []bool{false, true} {
 		for _, copy := range []bool{false, true} {
 			var verdicts []string
@@ -228,6 +232,7 @@ func TestSyncFrontierReadyVerdicts(t *testing.T) {
 }
 
 func TestSyncFrontierCannotCertifyExpandedPeriod(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	b := readyProofFixture{f, &proofFixture{fakeSync: f.fakeSync, epoch: "one"}}
 	if err := runSyncReady(context.Background(), &o, r, b, func() error { return runSync(context.Background(), o, b) }); err != nil {
@@ -244,6 +249,7 @@ func TestSyncFrontierCannotCertifyExpandedPeriod(t *testing.T) {
 }
 
 func TestSyncFrontierNewDonorAfterDiscovery(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	ts := int64(syncTestNow - 6*3600)
 	delete(f.store(syncT).points["metric.02"][3600], ts)
@@ -289,6 +295,7 @@ func (f *mutateCleanDuringCopy) Copy(ctx context.Context, source, target string,
 	return r, err
 }
 func TestSyncFrontierRechecksCleanNamesBetweenRounds(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	o.noCopy = false
 	o.maxRounds = 0
@@ -302,6 +309,7 @@ func TestSyncFrontierRechecksCleanNamesBetweenRounds(t *testing.T) {
 }
 
 func TestSyncFrontierArchiveSelectionAgesWithoutWrite(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	for _, host := range []string{syncT, syncD1, syncD2} {
 		f.store(host).archives["metric.02"] = []syncArchive{{60, 20}, {3600, 240}}

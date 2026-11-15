@@ -25,6 +25,7 @@ func convergeOptions(t *testing.T) syncOptions {
 	return syncOptions{to: syncT, from: []string{syncD1, syncP}, state: t.TempDir(), streams: 2, batch: 64, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
 }
 func TestSyncConvergeAbsentAllSources(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	if err := runSync(context.Background(), o, staleSync{f}); err != nil {
@@ -70,7 +71,9 @@ func (f partialSync) Copy(_ context.Context, source, target string, names []stri
 	return syncCopyResult{Copied: len(names)}, nil
 }
 func TestSyncConvergeBitExact2000(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
+	f.listPageSize = 197 // mismatched pages still cross every 250-name batch
 	o := convergeOptions(t)
 	o.batch = 250
 	schema := []syncArchive{{Step: 3600, Points: 100}}
@@ -193,6 +196,7 @@ func TestSyncConvergeStalledEvidence(t *testing.T) {
 }
 
 func TestSyncConvergeAbsentProofError(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	f.noDigest[syncP] = true
@@ -203,6 +207,7 @@ func TestSyncConvergeAbsentProofError(t *testing.T) {
 }
 
 func TestSyncConvergeKnownEmpty(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprint(legacy), func(t *testing.T) {
 			f := newFakeSync()
@@ -247,6 +252,7 @@ func (f servingSync) Digest(ctx context.Context, store string, names []string, f
 	return got, nil
 }
 func TestSyncConvergeChecksEveryArchive(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	schema := []syncArchive{{Step: 60, Points: 360}, {Step: 3600, Points: 100}}
@@ -264,6 +270,7 @@ func TestSyncConvergeChecksEveryArchive(t *testing.T) {
 }
 
 func TestSyncConvergeNoCatalogHolders(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("absent\t0\t0\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -291,6 +298,7 @@ func (f noCatalogSync) List(context.Context, string, string, string, int) ([]str
 }
 
 func TestSyncConvergeExplicitAbsentNames(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.namesFile = filepath.Join(t.TempDir(), "scope.names")
 	if err := os.WriteFile(o.namesFile, []byte("absent.one\nabsent.two\n"), 0600); err != nil {
@@ -306,6 +314,7 @@ func TestSyncConvergeExplicitAbsentNames(t *testing.T) {
 }
 
 func TestSyncConvergeExplicitNamesCheckUnlistedPeersEveryRound(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.namesFile = "explicit-scope"
 	s := &syncer{o: o}
@@ -335,6 +344,7 @@ func (f *failingFillSync) Copy(ctx context.Context, source, target string, names
 	return f.fakeSync.Copy(ctx, source, target, names, journal)
 }
 func TestSyncConvergeRetriesFailedFill(t *testing.T) {
+	t.Parallel()
 	for _, failures := range []int{1, 2, 100} {
 		t.Run(fmt.Sprint(failures), func(t *testing.T) {
 			f := &failingFillSync{fakeSync: newFakeSync(), failures: failures}

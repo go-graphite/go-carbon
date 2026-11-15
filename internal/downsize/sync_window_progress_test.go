@@ -12,6 +12,7 @@ import (
 
 // A real resume retains durable progress; completed runs report no active work.
 func TestSyncWindowResumedThroughput(t *testing.T) {
+	t.Parallel()
 	b, o := pipelineFixture(t, 8)
 	o.noVerify = true // observe selection progress independently of copy/verify counts
 	// Catalog names whose requested windows are empty still constitute new
@@ -59,6 +60,7 @@ func (b *cancelWindowSelectionBackend) WindowPresenceRanges(ctx context.Context,
 // Cancelling queued selections must not wait for every serial donor export.
 // TestSyncWindowPipelineOverlapAndCancel also checks issued pulls.
 func TestSyncWindowCancellationStopsReadSelections(t *testing.T) {
+	t.Parallel()
 	base, o := pipelineFixture(t, 8)
 	b := &cancelWindowSelectionBackend{base, make(chan struct{}, 8)}
 	ctx, cancel := context.WithCancel(context.Background())

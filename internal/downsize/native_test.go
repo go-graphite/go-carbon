@@ -17,7 +17,7 @@ import (
 
 func nativeControllerStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open("/db", store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour}.WithFS(vfs.NewMem()))
+	s, err := store.Open("/db", store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(testMetricNow, 0) }}.WithFS(vfs.NewMem()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +38,7 @@ func nativeControllerService(t *testing.T, s *store.Store) http.Handler {
 	return service.Handler()
 }
 func TestNativeControllerSharedJournalAndReviewedFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target, reference := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	var names []string
@@ -177,6 +178,7 @@ func TestNativeControllerSharedJournalAndReviewedFallback(t *testing.T) {
 }
 
 func TestNativeControllerLostAckCannotReplayThroughMetricPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	names := []string{"native.lost.ack"}
@@ -247,6 +249,7 @@ func TestNativeControllerLostAckCannotReplayThroughMetricPath(t *testing.T) {
 }
 
 func TestNativeCompletedStreamDoesNotReadPlanRows(t *testing.T) {
+	t.Parallel()
 	deferred := []task{{Start: 0, End: 1, Native: &nativeRangeState{Receipt: store.NativeReceipt{Count: 1}, Done: []byte{0}}}}
 	if !nativeStreamCovered(deferred, 1, false) || nativeStreamCovered(deferred, 1, true) {
 		t.Fatal("phase-1 coverage hid phase-2 deferrals")
