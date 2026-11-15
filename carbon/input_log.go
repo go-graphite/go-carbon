@@ -94,16 +94,14 @@ func inputLogReloadError(old, next *Config) error {
 	return nil
 }
 
-// openInputLog runs before anything can reach the cache. A log that holds
-// points to replay starts only after replayInputLog.
-func (app *App) openInputLog(core *cache.Cache) error {
+// ownInputLog takes exclusive disk ownership without requiring a cache. Startup
+// capture calls it immediately after taking the predecessor's input offer.
+func (app *App) ownInputLog() error {
 	conf := app.Config.InputLog
-	if !conf.Enabled {
+	if !conf.Enabled || app.inputLog.Load() != nil {
 		return nil
 	}
-	copyRecovery := false
 	if data, err := os.ReadFile(filepath.Join(conf.Path, inputlog.CopyMarkerName)); err == nil {
-		copyRecovery = true
 		var marker struct {
 			Files []inputlog.CopyFile `json:"files"`
 		}
@@ -135,6 +133,20 @@ func (app *App) openInputLog(core *cache.Cache) error {
 	zapwriter.Logger("input-log").Info("input log opened", zap.String("path", conf.Path), zap.Int64("segment_size", conf.SegmentSize),
 		zap.Duration("max_age", inputLogMaxAge(app.Config)), zap.Bool("needs_replay", l.NeedsReplay()))
 	app.inputLog.Store(l)
+	return nil
+}
+
+// openInputLog attaches the cache to the already owned log. The historical
+// replay completes before cache group commit begins. Early journal appends
+// require a durable upgrade cut before this ordering can change.
+func (app *App) openInputLog(core *cache.Cache) error {
+	if err := app.ownInputLog(); err != nil {
+		return err
+	}
+	l := app.inputLog.Load()
+	if l == nil {
+		return nil
+	}
 	if s := app.startupInput; s != nil {
 		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
 		if err != nil {
@@ -148,8 +160,10 @@ func (app *App) openInputLog(core *cache.Cache) error {
 	core.EnableInputLog()
 	if !l.NeedsReplay() {
 		l.Start(core, cache.ShardCount)
-		if copyRecovery {
+		if _, err := os.Stat(filepath.Join(app.Config.InputLog.Path, inputlog.CopyMarkerName)); err == nil {
 			return l.FinishCopyReplay()
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
 	return nil

@@ -744,7 +744,8 @@ func TestStartupDirectEmptyFenceAdoptsLegacyTail(t *testing.T) {
 	app.Config = NewConfig()
 	cfg := app.Config
 	cfg.Dump.Enabled, cfg.Dump.StoreInputHandoff, cfg.Dump.Path = true, true, t.TempDir()
-	cfg.InputLog.Enabled = true
+	cfg.InputLog.Enabled, cfg.InputLog.Path = true, t.TempDir()
+	defer app.closeInputLog()
 	cfg.Whisper.StorageBackend = "pebble-chunk"
 	cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 	cfg.Udp.Enabled, cfg.Pickle.Enabled = false, false

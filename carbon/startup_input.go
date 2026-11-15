@@ -194,6 +194,13 @@ func (app *App) tryStartupInput() error {
 			return errors.New("store input handoff has no TCP receiver")
 		}
 	}
+	// The predecessor can still own the journal until its socket transfer is
+	// committed. Take disk ownership after TakeInput, before any receiver starts
+	// acknowledging new input or any cache/storage allocation begins.
+	if err := app.ownInputLog(); err != nil {
+		closeTCPHandoff(h)
+		return err
+	}
 	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
 	if err != nil {
 		closeTCPHandoff(h)
