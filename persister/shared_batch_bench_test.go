@@ -11,7 +11,7 @@ import (
 // Drive the worker's batch path: cache pop, continuation codec, shared commit,
 // cache confirmation and timing, with the same reusable timer as a worker.
 func BenchmarkSharedBatchTimings(b *testing.B) {
-	for _, count := range []int{32, 210} {
+	for _, count := range []int{1, 4, 32, 210} {
 		b.Run(fmt.Sprintf("points=%d", count), func(b *testing.B) {
 			update := sharedTimingWorkload(b, count)
 			for i := range 16 {

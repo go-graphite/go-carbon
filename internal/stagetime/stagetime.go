@@ -53,13 +53,13 @@ const (
 	NumStages
 )
 
-var stageNames = [NumStages]string{"total", "route", "lock_wait", "load", "tail_read", "decode", "encode", "ooo_merge", "commit", "original_write", "publish", "acknowledge", "cache_pop", "other"}
+var stageNames = phasecpu.PersisterStageNames
 
 func (s Stage) String() string { return stageNames[s] }
 
 // SampleEvery is the fraction of updates (one in SampleEvery) whose stages are
 // timed and labelled.
-const SampleEvery = 8
+const SampleEvery = phasecpu.PersisterStageSampleEvery
 
 type counter struct {
 	nanos, calls atomic.Uint64
