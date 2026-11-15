@@ -102,13 +102,23 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 	// A handoff gets here before the store opens; startStorage starts it then.
 	app.startMetadataPrewarm("pending checkpoint", core.PendingNames())
 	app.setRestoredDump(bundle.Bytes())
-	// The first filesystem scan must not run before checkpoint-only metrics
-	// have Whisper files, or it would drop them from the index.
+	// Filesystem scans need checkpoint-only names to have Whisper files.
+	// Shared-catalog scans instead merge the prepared pending overlay before
+	// publication, including names still served from the immutable checkpoint.
+	// They can start as soon as that validated overlay is installed.
+	scanIndependent := cs.UsesSharedCatalogIndex()
 	gate, openGate, stopGateLimit := newScanGate(pendingScanGateLimit, func() {
 		logger.Warn("first scan no longer waits for pending recovery",
 			zap.Duration("limit", pendingScanGateLimit), zap.Uint64("outstanding", core.PendingOutstanding()))
 	})
 	cs.SetStartupScanGate(gate)
+	if scanIndependent {
+		stopGateLimit()
+		openGate()
+		logger.Info("startup scan gate opened", zap.Duration("runtime", time.Since(started)),
+			zap.String("reason", "shared catalog preserves pending names"),
+			zap.Uint64("pending_metrics", core.PendingOutstanding()))
+	}
 	defer func() {
 		if app.pendingDone == nil {
 			stopGateLimit()
@@ -171,7 +181,7 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 		// read index must reach storage before a scan; existing names survive
 		// reconciliation regardless of their writeout deadline. Keep all point
 		// sources until every saved metric has been persisted below.
-		for core.PendingScanOutstanding() != 0 {
+		for !scanIndependent && core.PendingScanOutstanding() != 0 {
 			select {
 			case <-stop:
 				return
@@ -180,10 +190,12 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 		}
 		stopGateLimit()
 		openGate()
-		logger.Info("startup scan gate opened", zap.Duration("runtime", time.Since(started)),
-			zap.Duration("load_seconds", loaded.Sub(started)),
-			zap.Duration("new_names_drain_seconds", time.Since(loaded)),
-			zap.Uint64("pending_metrics", core.PendingOutstanding()))
+		if !scanIndependent {
+			logger.Info("startup scan gate opened", zap.Duration("runtime", time.Since(started)),
+				zap.Duration("load_seconds", loaded.Sub(started)),
+				zap.Duration("new_names_drain_seconds", time.Since(loaded)),
+				zap.Uint64("pending_metrics", core.PendingOutstanding()))
+		}
 		for core.PendingOutstanding() != 0 {
 			select {
 			case <-stop:

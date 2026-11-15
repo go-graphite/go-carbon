@@ -75,22 +75,64 @@ func testNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T, liveClaims bool
 	first.ReleaseForHandoff()
 	first.Stop()
 	cfg.Whisper.MaxUpdatesPerSecond = 1
-	if liveClaims {
-		// Accepted input can claim saved history above either admission
-		// ceiling. The loader must notice those claims without allocating
-		// them again or waiting for writeout to drain below the limit.
-		cfg.Cache.MaxSize = 1
-	}
+	// Hold the background loader before it claims every saved name. Scans
+	// must work while reads still come from the immutable checkpoint.
+	cfg.Cache.MaxSize = 1
 	next := New(path)
 	next.Config = cfg
 	if err := next.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(next.Stop)
-	// Freeze writeout, not restore loading. This makes the saved-set assertion
-	// deterministic without a multi-minute test or a scheduling race.
+	// Freeze writeout so neither the scan nor native-copy assertions can
+	// pass by racing with a completed drain.
 	next.Persister.Stop()
+	// The scan must run with persistence frozen and retain every recovered
+	// name, including those that have never existed in the store catalog.
+	// Add directly to the catalog so observing it proves a scan published a
+	// new generation, even if the startup scan finished before this request.
+	const scanMetric = "scan.after-recovery"
+	if _, err := next.MetricStore.Create(context.Background(), store.MetricConfig{
+		Name: scanMetric, Retentions: []store.Retention{{Step: 1, Count: 3600}}, AggregationMethod: store.Average,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next.Carbonserver.RequestFileScan()
+	waitExpiration(t, func() bool {
+		next.Carbonserver.RequestFileScan()
+		return next.Carbonserver.MetricExists(scanMetric)
+	})
+	readFromCheckpoint := 0
+	for _, name := range names[:metrics] {
+		if !next.Carbonserver.MetricExists(name) {
+			t.Fatalf("scan dropped recovered name %q before writeout", name)
+		}
+		got := next.Cache.Get(name)
+		if len(got) == 0 {
+			// A worker may finish one metric before Stop returns. The
+			// final archive comparison below covers that persisted history.
+			continue
+		}
+		readFromCheckpoint++
+		if len(got) != len(saved) {
+			t.Fatalf("recovered read %s has %d points, want %d", name, len(got), len(saved))
+		}
+		for i, point := range got {
+			if point.Timestamp != saved[i].Timestamp || math.Float64bits(point.Value) != math.Float64bits(saved[i].Value) {
+				t.Fatalf("recovered read changed %s point %d", name, i)
+			}
+		}
+	}
+	if readFromCheckpoint < metrics-2 {
+		t.Fatal("scan test did not read the pending checkpoint", readFromCheckpoint)
+	}
+	select {
+	case <-next.storeRestoreLoaded:
+		t.Fatal("scan test did not overlap unclaimed saved names")
+	default:
+	}
 	if liveClaims {
+		// Accepted input claims saved history above the admission ceiling.
 		correction := points.Point{Timestamp: stamp, Value: 123}
 		for _, name := range names[:metrics] {
 			next.Cache.AddRecovered(&points.Points{Metric: name, Data: []points.Point{correction}})
@@ -99,6 +141,8 @@ func testNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T, liveClaims bool
 		if next.Cache.Size() <= int64(cfg.Cache.MaxSize) {
 			t.Fatal("fixture did not exceed recovery admission")
 		}
+	} else {
+		next.Cache.SetMaxSize(2_000_000)
 	}
 	if next.storeRestoreLoaded == nil {
 		t.Fatal("restart did not use pending checkpoint recovery")
