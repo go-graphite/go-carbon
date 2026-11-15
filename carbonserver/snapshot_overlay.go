@@ -18,13 +18,15 @@ import (
 
 	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"go.uber.org/zap"
 )
 
 type snapshotOverlayManifest struct {
-	Version int
-	Base    string
-	Records uint64
-	File    snapshotFile
+	Version           int
+	Base              string
+	Records           uint64
+	File              snapshotFile
+	CatalogCheckpoint string `json:",omitempty"`
 }
 
 func (s *indexSnapshot) identity() string {
@@ -136,6 +138,7 @@ func (ti *trieIndex) readSnapshotOverlay(cache string) (_ *trieIndex, base strin
 		return nil, "", fmt.Errorf("snapshot overlay record count differs")
 	}
 	pending.recoveryID = overlayIdentity(m)
+	pending.catalogCheckpoint = m.CatalogCheckpoint
 	return pending, m.Base, nil
 }
 
@@ -146,6 +149,7 @@ func (ti *trieIndex) installSnapshotOverlay(pending *trieIndex, base string) err
 	ti.root, ti.depth, ti.fileCount, ti.longestMetric = pending.root, pending.depth, pending.fileCount, pending.longestMetric
 	ti.builder = pending.builder
 	ti.recoveryID = pending.recoveryID
+	ti.catalogCheckpoint = pending.catalogCheckpoint
 	return nil
 }
 
@@ -159,6 +163,7 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	}
 	ti := index.trieIdx
 	l.drainRealtimeMetrics(ti)
+	catalogToken := l.prepareCatalogCheckpoint(ti)
 	dir := filepath.Dir(l.fileListCache)
 	placeholder, err := os.CreateTemp(dir, ".carbon-overlay-*.flc")
 	if err != nil {
@@ -200,6 +205,9 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	size := counter.n
 	m := snapshotOverlayManifest{Version: 1, Base: ti.snapshot.identity(), Records: uint64(len(names)), File: snapshotFile{Name: filepath.Base(path), Size: size}}
 	copy(m.File.SHA256[:], digest.Sum(nil))
+	if db := l.getMetricIndexStore(); db != nil && catalogToken != "" && catalogToken == db.CatalogCheckpointToken() {
+		m.CatalogCheckpoint = catalogToken
+	}
 	old, _ := readOverlayManifest(overlayManifestPath(l.fileListCache))
 	raw, err := json.Marshal(m)
 	if err != nil {
@@ -234,6 +242,12 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	}
 	if validOverlayFile(old.File.Name) && old.File.Name != m.File.Name {
 		_ = os.Remove(filepath.Join(dir, old.File.Name))
+	}
+	if l.getMetricIndexStore() != nil {
+		l.logger.Info("shared metric-store catalog checkpoint saved",
+			zap.Bool("certified", m.CatalogCheckpoint != ""),
+			zap.Uint64("mapped_metrics", ti.snapshot.manifest.Records),
+			zap.Uint64("overlay_metrics", m.Records))
 	}
 	return overlayIdentity(m), nil
 }

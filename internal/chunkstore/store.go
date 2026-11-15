@@ -331,9 +331,12 @@ type Store struct {
 	// mutationEpoch advances at both ends of every mutation, even without a
 	// metadata cache. Optimistic maintenance can validate its immutable view
 	// under the stripe without an LSM read. Saturation disables that shortcut.
-	mutationEpoch      [metricStripes]atomic.Uint64
-	metadataCache      [metricStripes]metadataRing
-	catalogMembership  *catalogMembership
+	mutationEpoch     [metricStripes]atomic.Uint64
+	metadataCache     [metricStripes]metadataRing
+	catalogMembership *catalogMembership
+
+	catalogOpenSequence uint64
+
 	catalogChanges     atomic.Pointer[catalogChanges]
 	materializations   atomic.Uint64
 	operands           atomic.Uint64
@@ -678,6 +681,9 @@ func Open(dir string, options Options) (*Store, error) {
 		}
 	}
 	s.db, s.dir, s.fs, s.pebbleOptions = db, dir, fs, opts.Clone().EnsureDefaults()
+	s.catalogOpenSequence = db.VisibleSequence()
+	// Capture catalog mutations during open/recovery as well as normal writes.
+	s.catalogChanges.Store(&catalogChanges{version: 1, floor: 1})
 	if options.MetadataCacheCheckpoint && s.stateCache != nil {
 		s.checkpoint.lazy = options.MetadataCacheCheckpointLazy
 		if err := s.openMetadataCheckpoint(); err != nil {

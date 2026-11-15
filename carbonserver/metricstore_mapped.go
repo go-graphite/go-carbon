@@ -26,7 +26,10 @@ func (l *CarbonserverListener) updateMappedMetricStoreIndex(db *store.Store, pre
 	}
 	if !rebuild {
 		ti := previous.trieIdx
-		if int(ti.getFileCount())+len(changes) > metricStoreOverlayLimit {
+		// The certified restart overlay already occupies this memory. Apply the
+		// first journal delta before scheduling its compaction on a later pass.
+		restarting := l.metricStoreCursor == 1 && ti.catalogCheckpoint != ""
+		if !restarting && int(ti.getFileCount())+len(changes) > metricStoreOverlayLimit {
 			rebuild = true
 		}
 		for _, m := range changes {
@@ -111,6 +114,12 @@ func (l *CarbonserverListener) updateMappedMetricStoreIndex(db *store.Store, pre
 			zap.Int64("overlay_metrics", previous.trieIdx.getFileCount()),
 			zap.Duration("runtime", time.Since(started)),
 		)
+	}
+	if !rebuild && len(changes) != 0 {
+		l.logger.Info("shared metric-store catalog delta applied",
+			zap.Int("changed_metrics", len(changes)),
+			zap.Uint64("catalog_cursor", cursor),
+			zap.Duration("runtime", time.Since(started)))
 	}
 	l.refreshMetricStoreSpace(previous)
 	return nil
