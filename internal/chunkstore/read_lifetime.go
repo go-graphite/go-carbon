@@ -2,6 +2,25 @@ package chunkstore
 
 import "context"
 
+// Keep the shutdown signal separate from the parents used to register reads.
+// context.AfterFunc adds/removes children under its parent's mutex; using one
+// parent for every read makes unrelated requests contend on that mutex.
+func (s *Store) initReadContexts() {
+	var cancel context.CancelFunc
+	s.readCtx, cancel = context.WithCancel(context.Background())
+	cancels := []context.CancelFunc{cancel}
+	for i := range s.readParents {
+		s.readParents[i], cancel = context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+	}
+	s.readCancel = func() {
+		// Close admission first, then wake queued/active reads on every parent.
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}
+}
+
 // ReadError reports whether read admission is closed. Servers also check this
 // before returning cached results, so shutdown is not reported as missing data.
 func (s *Store) ReadError() error {
@@ -21,7 +40,8 @@ func (s *Store) readContext(ctx context.Context) (context.Context, func(), error
 		return ctx, func() {}, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(s.readCtx, cancel)
+	parent := s.readParents[(s.readParentNext.Add(1)-1)%uint64(len(s.readParents))]
+	stop := context.AfterFunc(parent, cancel)
 	return ctx, func() { stop(); cancel() }, nil
 }
 

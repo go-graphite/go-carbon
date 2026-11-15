@@ -239,6 +239,8 @@ type Store struct {
 	readDone              chan struct{} // closed after cancellation and the last view closes
 	readCtx               context.Context
 	readCancel            context.CancelFunc
+	readParents           [32]context.Context
+	readParentNext        atomic.Uint64
 	nativeCounters        nativeCounters
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
@@ -518,7 +520,7 @@ func Open(dir string, options Options) (*Store, error) {
 		options.MemTableSize = 64 << 20
 	}
 	s := &Store{readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
-	s.readCtx, s.readCancel = context.WithCancel(context.Background())
+	s.initReadContexts()
 	s.readDone = make(chan struct{})
 	s.maintenanceWait = options.MaintenanceWait
 	s.maintenanceCtx, s.maintenanceStop = context.WithCancel(context.Background())
