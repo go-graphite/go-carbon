@@ -58,6 +58,7 @@ type Publisher struct {
 	options     Options
 	publication pr.Publication
 	current     Envelope
+	currentView pr.View // non-owning descriptor of the committed publication
 	parts       map[string]*part
 	retired     []*part
 	pending     *Plan
@@ -109,6 +110,37 @@ func (p *Publisher) step(s string) {
 // Pin delegates directly to the atomic reader publication.
 func (p *Publisher) Pin(b *pr.Budget, work int64) (*pr.Handle, error) {
 	return p.publication.Pin(b, work)
+}
+
+// AcquireView transfers a separately pinned coherent view to another existing
+// reader Publication. It is an owner-lifecycle operation, not a per-query call.
+// Its Close shares the same part refcounts as ordinary readers and copy pins.
+func (p *Publisher) AcquireView() (pr.View, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.current.Generation == 0 {
+		return pr.View{}, pr.ErrClosed
+	}
+	v := p.currentView
+	v.Frontier = slices.Clone(v.Frontier)
+	v.Head = slices.Clone(v.Head)
+	v.Parts = slices.Clone(v.Parts)
+	v.Blocks = slices.Clone(v.Blocks)
+	v.RetainedBytes += int64(len(v.Frontier)*8 + (len(v.Head)+len(v.Parts)+len(v.Blocks))*16)
+	var held []*part
+	for _, s := range p.parts {
+		s.retain()
+		held = append(held, s)
+	}
+	var once sync.Once
+	v.Close = func() {
+		once.Do(func() {
+			for _, s := range held {
+				s.release()
+			}
+		})
+	}
+	return v, nil
 }
 
 type Request struct {
@@ -423,6 +455,7 @@ func (plan *Plan) Commit() {
 	}
 	p.parts = plan.active
 	p.current = plan.envelope
+	p.currentView = plan.view
 	p.pending = nil
 	plan.done = true
 	p.publication.Publish(plan.view)
@@ -482,6 +515,7 @@ func (p *Publisher) Recover(value []byte) error {
 	}
 	p.parts = plan.active
 	p.current = plan.envelope
+	p.currentView = plan.view
 	p.publication.Publish(plan.view)
 	return nil
 }
@@ -503,6 +537,22 @@ func (p *Publisher) Collect() error {
 		// A remapped descriptor set may share this same physical directory.
 		if p.parts[s.ref.Name] != nil {
 			s.mu.Unlock()
+			continue
+		}
+		// Catalog remaps open distinct descriptor sets for one physical part.
+		// Every such set participates in its lifetime, including old views.
+		pinned := false
+		for _, other := range p.retired {
+			if other == s || other.ref.Name != s.ref.Name {
+				continue
+			}
+			other.mu.Lock()
+			pinned = pinned || other.users != 0 || other.persistent
+			other.mu.Unlock()
+		}
+		if pinned {
+			s.mu.Unlock()
+			keep = append(keep, s)
 			continue
 		}
 		p.step("retiring")
@@ -544,6 +594,7 @@ func (p *Publisher) Close() {
 		s.release()
 	}
 	p.parts = nil
+	p.currentView = pr.View{}
 }
 
 func (r Ref) String() string { return fmt.Sprintf("%s@%d/%s", r.Name, r.Generation, r.Codec) }

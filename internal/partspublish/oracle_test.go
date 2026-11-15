@@ -56,7 +56,7 @@ func TestPublisherRenderDifferential(t *testing.T) {
 				cfg := chunkstore.MetricConfig{Name: name, AggregationMethod: chunkstore.AggregationMethod(method), XFilesFactor: .5}
 				var archives []Archive
 				for _, r := range rets {
-					a := Archive{int64(r.SecondsPerPoint()), int64(r.NumberOfPoints())}
+					a := Archive{Step: int64(r.SecondsPerPoint()), Points: int64(r.NumberOfPoints())}
 					archives = append(archives, a)
 					c.Archives = append(c.Archives, sr.Archive{Step: a.Step, Count: a.Points})
 					cfg.Retentions = append(cfg.Retentions, chunkstore.Retention{Step: int(a.Step), Count: int(a.Points)})
@@ -99,7 +99,7 @@ func TestPublisherRenderDifferential(t *testing.T) {
 					var records []Record
 					for _, d := range ds {
 						state[[2]int64{int64(d.Archive), d.Slot}] = d.Sample
-						records = append(records, Record{7, archives[d.Archive].Step, Sample{d.Sample.Time, d.Sample.Bits, d.Order}})
+						records = append(records, Record{ID: 7, Step: archives[d.Archive].Step, Sample: Sample{Time: d.Sample.Time, Bits: d.Sample.Bits, Sequence: d.Order}})
 					}
 					var blocks []SlotBlock
 					for ri, r := range records {
@@ -115,7 +115,7 @@ func TestPublisherRenderDifferential(t *testing.T) {
 							if e != nil {
 								t.Fatal(e)
 							}
-							blocks = append(blocks, SlotBlock{ID: r.ID, Archive: a, Slots: SlotRange{slot, slot + 1}, Key: key})
+							blocks = append(blocks, SlotBlock{ID: r.ID, Archive: a, Slots: SlotRange{From: slot, Until: slot + 1}, Key: key})
 						}
 					}
 					for i, b := range blocks {

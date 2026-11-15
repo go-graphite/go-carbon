@@ -338,3 +338,80 @@ func TestConcurrentPinnedReadersAcrossSharedGenerations(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestAcquireViewSharesLifetimeAcrossBackendPublications(t *testing.T) {
+	root := t.TempDir()
+	p := testPublisher(t, root, 1, nil)
+	commitRequest(t, p, testRequest(t, 1, "a", 1))
+	first, err := p.AcquireView()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.AcquireView()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sealed, live pr.Publication
+	sealed.Publish(first)
+	live.Publish(second)
+	defer sealed.Close()
+	defer live.Close()
+	h, err := live.Pin(pr.NewBudget(1<<30), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	commitRequest(t, p, testRequest(t, 2, "b", 2))
+	sealed.Close()
+	live.Close()
+	if err = p.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if got := renderBits(t, h); got != 1 {
+		t.Fatal(got)
+	}
+	if _, err = os.Stat(filepath.Join(root, "a")); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	if got := renderBits(t, h); got != 1 {
+		t.Fatal("backend pin lost part after publisher shutdown", got)
+	}
+	h.Close()
+	if err = p.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(root, "a")); !os.IsNotExist(err) {
+		t.Fatal("backend pin failed to retire", err)
+	}
+}
+
+func TestRetirementWaitsForEveryRemappedDescriptorSet(t *testing.T) {
+	root := t.TempDir()
+	p := testPublisher(t, root, 1, nil)
+	r := testRequest(t, 1, "a", 1)
+	commitRequest(t, p, r)
+	old := pin(t, p)
+	r.Envelope.Generation = 2
+	r.Envelope.Frontier = []uint64{2}
+	r.Envelope.Catalog = append([]byte(" "), r.Envelope.Catalog...)
+	r.Added = nil
+	commitRequest(t, p, r)
+	commitRequest(t, p, testRequest(t, 3, "b", 2))
+	if err := p.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a")); err != nil {
+		t.Fatal("deleted remapped pinned part", err)
+	}
+	if got := renderBits(t, old); got != 1 {
+		t.Fatal(got)
+	}
+	old.Close()
+	if err := p.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a")); !os.IsNotExist(err) {
+		t.Fatal("drained part remains", err)
+	}
+}

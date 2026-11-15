@@ -80,7 +80,7 @@ func checkCrashOracle(t *testing.T, p *Publisher, fixture []oracleMetric) {
 	t.Helper()
 	count := 0
 	for _, m := range fixture {
-		h, err := p.Pin(pr.NewBudget(1<<30), 1<<20)
+		h, err := p.Pin(pr.NewBudget(1<<30), 128<<20)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -171,6 +171,23 @@ func TestPublisherCrashChild(t *testing.T) {
 }
 func runOracleCrashMatrix(t *testing.T, fixture []oracleMetric) {
 	t.Helper()
+	// Preserve every version while using the writer's normal bounded block
+	// policy. One 24-byte filesystem Write per sample is an unrelated fixture
+	// construction bottleneck on instrumented local filesystems.
+	for i := range fixture {
+		var blocks []pr.BlockData
+		last := map[pr.Archive]int{}
+		for _, b := range fixture[i].Blocks {
+			index, ok := last[b.Archive]
+			if !ok || len(blocks[index].Samples)+len(b.Samples) > pr.ArchiveBlockBytes(b.Archive)/24 {
+				index = len(blocks)
+				last[b.Archive] = index
+				blocks = append(blocks, pr.BlockData{SlotBlock: pr.SlotBlock{ID: b.ID, Archive: b.Archive, Slots: pr.SlotRange{From: 0, Until: b.Archive.Points}, Key: slices.Clone(b.Key)}})
+			}
+			blocks[index].Samples = append(blocks[index].Samples, b.Samples...)
+		}
+		fixture[i].Blocks = blocks
+	}
 	count, err := strconv.Atoi(os.Getenv("PARTS_PUBLISH_CRASHES"))
 	if err != nil || count < 200 {
 		t.Fatal("PARTS_PUBLISH_CRASHES must be >=200")
@@ -200,7 +217,15 @@ func runOracleCrashMatrix(t *testing.T, fixture []oracleMetric) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := testPublisher(t, filepath.Join(root, "parts"), 1, nil)
+	staged := 0
+	p := testPublisher(t, filepath.Join(root, "parts"), 1, func(step string) {
+		if step == "staged" {
+			staged++
+			if staged%50 == 0 {
+				t.Logf("fixture staged parts=%d/%d", staged, len(fixture))
+			}
+		}
+	})
 	plan, err := p.PlanSeal(Request{Envelope: e, Added: added})
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +257,11 @@ func runOracleCrashMatrix(t *testing.T, fixture []oracleMetric) {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPublisherCrashChild$", "-test.timeout=25s")
 		cmd.Env = append(os.Environ(), "PARTS_PUBLISH_CHILD_ROOT="+root, "PARTS_PUBLISH_CRASH_STEP="+step, "PARTS_PUBLISH_CRASH_INDEX="+strconv.Itoa(i), "PARTS_PUBLISH_NEW_ID="+hex.EncodeToString(intendedID[:]))
 		output, err := cmd.CombinedOutput()
+		timedOut := ctx.Err() != nil
 		cancel()
+		if timedOut {
+			t.Fatalf("child timed out instead of reaching requested cut %s: %s", step, output)
+		}
 		if err == nil {
 			t.Fatal("child survived", step)
 		}

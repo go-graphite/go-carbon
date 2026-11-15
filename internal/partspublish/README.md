@@ -34,7 +34,8 @@ Local numeric read IDs can change after restart. The publisher additionally
 checks full GCP3 keys, exact scope, consistent part UUID, catalog/read-ID agreement,
 and archive dimensions before admitting any new descriptor set. Sources surviving
 across generations share one refcount. A changed catalog opens a new descriptor
-set so old readers retain their own ID mapping.
+set so old readers retain their own ID mapping. Retirement checks all descriptor
+sets for the physical part, so a pin on an older mapping still prevents deletion.
 
 Call `PlanSeal` before ingest. Add `Plan.Value` at a reserved owner-local metadata
 key in the SAME atomic durable ingest as the raw/archive SSTs and owner frontier.
@@ -52,6 +53,10 @@ an input log.
 
 `Pin` goes directly to the atomic publication and never takes the writer mutex.
 Views contain detached catalog and frontier data and the complete sealed part set.
+`AcquireView` transfers another coherent view to an existing backend publication
+without reopening files. It retains the same shared part references; each
+recipient publication owns its returned Close callback. Call it during owner
+publication, while ordinary queries continue to use their existing lock-free Pin.
 Unsealed-head publication remains the backend's responsibility: an unsealed head
 must be frozen and cannot advance this durable frontier. Whole-part copies or any
 external database snapshot retaining an envelope must also hold `PinEnvelope`.
