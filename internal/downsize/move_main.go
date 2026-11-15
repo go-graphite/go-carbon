@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 type options struct {
@@ -236,7 +238,7 @@ func run(ctx context.Context, o options) error {
 	for h := range hosts {
 		origins = append(origins, h)
 	}
-	m := &mover{options: o, planData: p, helpers: map[string]string{}, client: &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 2 * o.streams, MaxIdleConns: 256, ResponseHeaderTimeout: 90 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	m := &mover{options: o, planData: p, helpers: map[string]string{}, client: &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(&http.Transport{MaxIdleConnsPerHost: 2 * o.streams, MaxIdleConns: 256, ResponseHeaderTimeout: 90 * time.Second}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	defer m.client.CloseIdleConnections()
 	if o.delete && len(p.Whole) == 0 {
 		if err := m.checkBarrier(); err != nil {
@@ -552,7 +554,7 @@ func (m *mover) requestAttempt(ctx context.Context, endpoint, path string, body 
 		if parent.Err() == nil && restartCopyError(err) {
 			// Run after response bodies close so a stopping daemon cannot
 			// return its connection to the idle pool for the next retry.
-			m.client.CloseIdleConnections()
+			storehttp.CloseOriginConnections(m.client.Transport, endpoint)
 			m.binaryProofs.Delete(endpoint)
 		}
 	}(ctx)

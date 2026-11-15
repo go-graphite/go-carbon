@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestCancelTransfersBeforeStop(t *testing.T) {
@@ -56,7 +57,7 @@ func TestCancelTransfersBeforeStop(t *testing.T) {
 	}
 	reject := httptest.NewRecorder()
 	s.Handler().ServeHTTP(reject, httptest.NewRequest("GET", "/v1/native/capabilities", nil))
-	if reject.Code != 503 {
+	if reject.Code != 503 || reject.Header().Get("Connection") != "close" {
 		t.Fatal("new work admitted")
 	}
 	if err := s.Stop(); err != nil {
@@ -110,5 +111,49 @@ func TestCancelTransfersUnblocksPartialUpload(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != 503 {
 		t.Fatal(response.Status)
+	}
+}
+
+func TestCancelTransfersClosesIdleKeepalive(t *testing.T) {
+	s, _ := newNativeTestService(t)
+	server := httptest.NewUnstartedServer(s.Handler())
+	closed := make(chan struct{}, 1)
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	server.Start()
+	defer server.Close()
+	s.mu.Lock()
+	s.server = server.Config
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.server = nil; s.mu.Unlock() }()
+	client := &http.Client{Transport: &http.Transport{}}
+	defer client.CloseIdleConnections()
+	req, _ := http.NewRequest("GET", server.URL+"/v1/native/capabilities", nil)
+	req.Header.Set(authHeader, token(t, s.secret, []string{"*"}, []string{"*"}))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	s.CancelTransfers()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("stopping service kept idle connection open")
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 || !resp.Close {
+		t.Fatal("stopping response kept connection alive", resp.Status)
 	}
 }

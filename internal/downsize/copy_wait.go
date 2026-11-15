@@ -103,10 +103,15 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 			event("guard_retry", map[string]any{"path": path, "attempt": attempt, "delay_seconds": delay.Seconds(), "host_down": down, "retry_seconds": time.Since(first).Seconds(), "error": err.Error()})
 		}
 		w.logMu.Unlock()
+		if attempt == 1 && restartCopyError(err) {
+			continue
+		}
 		if err := sleepContext(ctx, delay/2+rand.N(delay/2+1)); err != nil {
 			return err
 		}
-		delay = min(2*delay, w.maxBackoff)
+		if !restartCopyError(err) {
+			delay = min(2*delay, w.maxBackoff)
+		}
 	}
 }
 

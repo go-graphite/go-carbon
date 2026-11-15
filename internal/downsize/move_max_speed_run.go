@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // Maximum speed is an explicit copy-only override. The original plan and journal
@@ -117,7 +119,10 @@ func (m *mover) configureMaximumSpeed(ctx context.Context, origins []string) (bo
 	// Configure the fresh transport before its first request; the client's10m
 	// overall deadline and caller contexts still bound stalled transfers.
 	if m.client != nil {
-		if transport, ok := m.client.Transport.(*http.Transport); ok {
+		switch transport := m.client.Transport.(type) {
+		case *http.Transport:
+			transport.ResponseHeaderTimeout = 0
+		case *storehttp.Transport:
 			transport.ResponseHeaderTimeout = 0
 		}
 	}

@@ -3,6 +3,8 @@ package downsize
 import (
 	"net/http"
 	"net/url"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 // syncJWTTransport signs at request time, including after long idle phases.
@@ -49,4 +51,8 @@ func (t *syncJWTTransport) CloseIdleConnections() {
 	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
+}
+
+func (t *syncJWTTransport) CloseOriginConnections(origin string) {
+	storehttp.CloseOriginConnections(t.base, origin)
 }

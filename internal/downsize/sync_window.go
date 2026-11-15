@@ -881,10 +881,10 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 		b.windowMu.RUnlock()
 		return c, c.release, nil
 	}
-	if time.Since(b.windowPinned) >= syncWindowPinAge {
+	if b.windowRestarted.Load() || time.Since(b.windowPinned) >= syncWindowPinAge {
 		b.windowMu.RUnlock()
 		b.windowMu.Lock()
-		if b.windowSources != nil && time.Since(b.windowPinned) >= syncWindowPinAge {
+		if b.windowSources != nil && (b.windowRestarted.Swap(false) || time.Since(b.windowPinned) >= syncWindowPinAge) {
 			b.windowSources.release()
 			b.windowPinned = time.Now()
 		}
@@ -909,10 +909,9 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 	return c, b.windowMu.RUnlock, nil
 }
 
-// Borrowers release their read lock before retrying. Rotation happens only once
-// all current users finish, so a donor restart cannot invalidate a live borrow.
+// A nested digest can fail while its caller borrows a source pin. Mark it
+// stale without taking the exclusive lock; the next borrower rotates it once
+// all current users finish.
 func (b *syncLiveBackend) expireWindowPins() {
-	b.windowMu.Lock()
-	b.windowPinned = time.Time{}
-	b.windowMu.Unlock()
+	b.windowRestarted.Store(true)
 }

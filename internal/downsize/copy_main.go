@@ -21,6 +21,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/go-graphite/go-carbon/internal/storecopy"
+
+	"github.com/go-graphite/go-carbon/internal/storehttp"
 )
 
 func CopyMain(args []string) error {
@@ -102,7 +104,7 @@ func CopyMain(args []string) error {
 	}
 	client := &storecopy.Client{URL: *source, HTTP: &http.Client{
 		Timeout:   2 * time.Minute,
-		Transport: &http.Transport{MaxIdleConns: 128, MaxIdleConnsPerHost: *workers, ResponseHeaderTimeout: 30 * time.Second},
+		Transport: storehttp.NewTransport(&http.Transport{MaxIdleConns: 128, MaxIdleConnsPerHost: *workers, ResponseHeaderTimeout: 30 * time.Second}),
 	}}
 	defer client.HTTP.CloseIdleConnections()
 	if *tokenFile != "" {
