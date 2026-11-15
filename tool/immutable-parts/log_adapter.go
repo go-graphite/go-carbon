@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"os"
+	"slices"
+	"sync/atomic"
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
 )
@@ -11,10 +14,14 @@ import (
 // loggedCore is an offline wiring proof for the existing numeric-ID prototype.
 // The opaque production envelope must also carry canonical names, policy epochs
 // and original apply groups; this numeric experiment does not manufacture them.
-// Each producer calls append serially. Startup replay finishes before intake.
+// Each producer calls append serially. Optional followers accept journaled live
+// input immediately while one ordered consumer per stream catches up.
 type loggedCore struct {
-	journal *partlog.Log
-	engine  *coreEngine
+	journal   *partlog.Log
+	engine    *coreEngine
+	cancel    context.CancelFunc
+	followers chan error
+	failure   atomic.Pointer[logApplyFailure]
 }
 
 func openLoggedCore(logDir, partDir string, cfg coreConfig, opts partlog.Options) (*loggedCore, error) {
@@ -32,7 +39,7 @@ func openLoggedCoreWithHooks(logDir, partDir string, cfg coreConfig, opts partlo
 		_ = log.Close()
 		return nil, err
 	}
-	return &loggedCore{log, engine}, nil
+	return &loggedCore{journal: log, engine: engine}, nil
 }
 
 const logEnvelope = "NLOG0001"
@@ -154,6 +161,9 @@ func (l *loggedCore) appendBatches(producer int, batches []coreBatch, seal bool)
 	if e != nil {
 		return e
 	}
+	if l.cancel != nil {
+		return l.followError()
+	}
 	return l.apply(producer, partlog.Record{Cursor: cursor, Clock: batches[0].Clock, Payload: payload}, seal)
 }
 func (l *loggedCore) append(producer int, clock int64, rows []row, seal bool) error {
@@ -162,24 +172,84 @@ func (l *loggedCore) append(producer int, clock int64, rows []row, seal bool) er
 	if e != nil {
 		return e
 	}
+	if l.cancel != nil {
+		return l.followError()
+	}
 	return l.apply(producer, partlog.Record{Cursor: cursor, Clock: clock, Payload: payload}, seal)
 }
+
+// replay runs independent producer streams in parallel into the normal owner
+// queues. Each stream preserves cursor order; owners skip committed prefixes.
 func (l *loggedCore) replay() error {
-	// Per-producer frontiers are minima across all storage owners. Ahead owners
-	// reject records <=their atomic frontier inside the normal submit/run path.
-	from := l.engine.globalFrontier()
+	from := l.frontier()
+	done := make(chan error, len(from))
 	for p, c := range from {
-		var last uint64
-		if e := l.journal.Replay(p, c, func(r partlog.Record) error { last = r.Cursor; return l.apply(p, r, false) }); e != nil {
-			return e
-		}
-		if last > 0 {
-			if e := l.engine.submit(p, nil, last, true); e != nil {
-				return e
+		go func() {
+			last := c
+			err := l.journal.Replay(p, c, func(r partlog.Record) error { last = r.Cursor; return l.apply(p, r, false) })
+			if err == nil && last > 0 {
+				err = l.engine.submit(p, nil, last, true)
 			}
-		}
+			done <- err
+		}()
+	}
+	var err error
+	for range from {
+		err = errors.Join(err, <-done)
+	}
+	return err
+}
+
+type logApplyFailure struct{ err error }
+
+func (l *loggedCore) followError() error {
+	if failure := l.failure.Load(); failure != nil {
+		return failure.err
 	}
 	return nil
+}
+
+// startReplay is called before opening intake, never concurrently with append.
+// Its ready channel reports the first recovered snapshot has entered each core
+// stream. Intake may append before ready: the same followers consume that suffix
+// after the backlog, so a new cursor can never overtake old records.
+func (l *loggedCore) startReplay(ctx context.Context) <-chan error {
+	ctx, l.cancel = context.WithCancel(ctx)
+	from := l.frontier()
+	l.followers = make(chan error, len(from))
+	ready := make(chan error, 1)
+	initial := make(chan error, len(from))
+	for p, c := range from {
+		go func() {
+			announced := false
+			err := l.journal.Follow(ctx, p, c, func(r partlog.Record) error { return l.apply(p, r, false) }, func(last uint64) error {
+				if !announced {
+					announced = true
+					initial <- nil
+				}
+				return nil
+			})
+			if errors.Is(err, context.Canceled) {
+				err = nil
+			}
+			if err != nil {
+				l.failure.CompareAndSwap(nil, &logApplyFailure{err})
+			}
+			if !announced {
+				initial <- err
+			}
+			l.followers <- err
+		}()
+	}
+	go func() {
+		var err error
+		for range from {
+			err = errors.Join(err, <-initial)
+		}
+		ready <- err
+		close(ready)
+	}()
+	return ready
 }
 func (l *loggedCore) trim() error {
 	// Sync before observing committed vectors: never retire a journal prefix
@@ -190,4 +260,34 @@ func (l *loggedCore) trim() error {
 	}
 	return l.journal.Truncate(l.engine.durableFrontiers())
 }
-func (l *loggedCore) close() error { return errors.Join(l.engine.close(), l.journal.Close()) }
+
+// stopReplay is called after intake stops. It joins the stream consumers then
+// drains their accepted suffix into final durable owner barriers.
+func (l *loggedCore) stopReplay() error {
+	if l.cancel == nil {
+		return nil
+	}
+	l.cancel()
+	var err error
+	for range l.engine.cfg.Producers {
+		err = errors.Join(err, <-l.followers)
+	}
+	l.cancel = nil
+	return errors.Join(err, l.replay())
+}
+func (l *loggedCore) close() error {
+	return errors.Join(l.stopReplay(), l.engine.close(), l.journal.Close())
+}
+
+// Owners may still be sealing when followers stop; only atomic published
+// frontiers are safe to inspect while draining the accepted journal suffix.
+func (l *loggedCore) frontier() []uint64 {
+	vectors := l.engine.durableFrontiers()
+	low := slices.Clone(vectors[0])
+	for _, vector := range vectors[1:] {
+		for p, c := range vector {
+			low[p] = min(low[p], c)
+		}
+	}
+	return low
+}

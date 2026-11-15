@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -276,5 +277,73 @@ func TestLogBacklogBenchmark(t *testing.T) {
 	}
 	if e = logBacklogBenchmark(root, os.Getenv("PARTLOG_BENCH_PHASE"), total, 36000000, producers, owners); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestLogConcurrentReplayLiveExact(t *testing.T) {
+	root := t.TempDir()
+	cfg := loggedConfig()
+	cfg.Producers = 4
+	logDir := filepath.Join(root, "log")
+	journal, err := partlog.Open(logDir, partlog.Options{Streams: 4, SegmentBytes: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := range cfg.Producers {
+		for n := 1; n <= 10; n++ {
+			if _, err = journal.Append(p, int64(n), encodeLogRows(coreRows(p, n))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err := openLoggedCore(logDir, filepath.Join(root, "concurrent"), cfg, partlog.Options{SegmentBytes: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := l.startReplay(context.Background())
+	done := make(chan error, cfg.Producers)
+	for p := range cfg.Producers {
+		go func() {
+			for n := 11; n <= 20; n++ {
+				if err := l.append(p, int64(n), coreRows(p, n), false); err != nil {
+					done <- err
+					return
+				}
+			}
+			done <- nil
+		}()
+	}
+	for range cfg.Producers {
+		if err = <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = <-ready; err != nil {
+		t.Fatal(err)
+	}
+	if err = l.close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.JournalIdentity = l.journal.Identity()
+	want, err := coreDigest(filepath.Join(root, "concurrent"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle, err := openLoggedCore(logDir, filepath.Join(root, "oracle"), cfg, partlog.Options{SegmentBytes: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = oracle.replay(); err != nil {
+		t.Fatal(err)
+	}
+	if err = oracle.close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := coreDigest(filepath.Join(root, "oracle"), cfg)
+	if err != nil || got != want {
+		t.Fatalf("concurrent replay/live differs: want%s got%s err%v", want, got, err)
 	}
 }

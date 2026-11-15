@@ -2,6 +2,7 @@ package partlog
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -259,5 +260,115 @@ func TestAsyncSyncFailureIsReported(t *testing.T) {
 	}
 	if _, e = log.Append(0, 2, []byte{2}); e == nil {
 		t.Fatal("append succeeded after fatal sync failure")
+	}
+}
+
+// A deliberately stalled consumer must not occupy append or sync ownership.
+// Replay pins its old files even when a concurrent durable frontier retires them.
+func TestReplayDoesNotBlockAppendAndTrim(t *testing.T) {
+	log, err := Open(t.TempDir(), Options{Streams: 1, SegmentBytes: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	for i := 0; i < 4; i++ {
+		if _, err = log.Append(0, int64(i), []byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var got []byte
+	go func() {
+		done <- log.Replay(0, 0, func(r Record) error {
+			if r.Cursor == 1 {
+				close(entered)
+				<-release
+			}
+			got = append(got, r.Payload[0])
+			return nil
+		})
+	}()
+	<-entered
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := log.Append(0, 4, []byte{4})
+		if err == nil {
+			err = log.Sync()
+		}
+		if err == nil {
+			err = log.Truncate([][]uint64{{5}})
+		}
+		appendDone <- err
+	}()
+	select {
+	case err = <-appendDone:
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("replay blocked live append/sync/trim")
+	}
+	close(release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte{0, 1, 2, 3}) {
+		t.Fatalf("snapshot changed: %v", got)
+	}
+}
+func TestFollowOrderedLiveSuffix(t *testing.T) {
+	log, err := Open(t.TempDir(), Options{Streams: 2, SegmentBytes: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	for i := 0; i < 8; i++ {
+		if _, err = log.Append(0, int64(i), []byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var got []byte
+	go func() {
+		done <- log.Follow(ctx, 0, 0, func(r Record) error {
+			if r.Cursor == 1 {
+				close(entered)
+				<-release
+			}
+			if r.Clock != int64(r.Cursor-1) {
+				return fmt.Errorf("clock changed")
+			}
+			got = append(got, r.Payload[0])
+			if r.Cursor == 64 {
+				cancel()
+			}
+			return nil
+		}, nil)
+	}()
+	<-entered
+	for i := 8; i < 64; i++ {
+		if _, err = log.Append(0, int64(i), []byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(release)
+	select {
+	case err = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("live suffix never consumed")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if len(got) != 64 {
+		t.Fatal(len(got))
+	}
+	for i, v := range got {
+		if int(v) != i {
+			t.Fatalf("cursor inversion at%d: %d", i, v)
+		}
 	}
 }

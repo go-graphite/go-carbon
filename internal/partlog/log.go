@@ -4,6 +4,7 @@
 package partlog
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -50,11 +51,12 @@ type Record struct {
 	Payload []byte
 }
 type request struct {
-	record Record
-	op     string
-	from   uint64
-	apply  func(Record) error
-	done   chan answer
+	record   Record
+	op       string
+	from     uint64
+	apply    func(Record) error
+	snapshot *replaySnapshot
+	done     chan answer
 }
 type answer struct {
 	cursor uint64
@@ -243,15 +245,176 @@ func (l *Log) Sync() error {
 }
 
 // Replay skips complete records at or below from. The callback must complete
-// synchronously, preserve its clock/boundary and propagate errors; it must not
-// append to this same stream. Replaying a prefix already in parts is harmless
+// synchronously, preserve its clock/boundary and propagate errors. Append
+// remains available while the immutable replay snapshot is consumed. Replaying a prefix already in parts is harmless
 // only when the consumer atomically persists data and its cursor.
 func (l *Log) Replay(id int, from uint64, apply func(Record) error) error {
 	if apply == nil {
 		return os.ErrInvalid
 	}
-	_, e := l.call(id, request{op: "replay", from: from, apply: apply})
-	return e
+	snap, err := l.snapshot(id, from)
+	if err != nil {
+		return err
+	}
+	_, err = snap.read(context.Background(), from, nil, apply)
+	return err
+}
+
+type replayFile struct {
+	file    *os.File
+	segment segment
+}
+type replaySnapshot struct {
+	files    []replayFile
+	tail     uint64
+	identity []byte
+}
+type replayPosition struct {
+	path   string
+	offset int64
+	cursor uint64
+}
+
+func (l *Log) snapshot(id int, from uint64) (*replaySnapshot, error) {
+	snap := new(replaySnapshot)
+	_, err := l.call(id, request{op: "snapshot", from: from, snapshot: snap})
+	if err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+func (s *stream) capture(from uint64, snap *replaySnapshot) (err error) {
+	if from > s.last {
+		return errors.New("parts frontier exceeds journal tail")
+	}
+	if len(s.segments) > 0 && from+1 < s.segments[0].first {
+		return errors.New("parts frontier precedes retained journal")
+	}
+	snap.tail = s.last
+	snap.identity, _ = hex.DecodeString(s.log.identity)
+	defer func() {
+		if err != nil {
+			for _, entry := range snap.files {
+				_ = entry.file.Close()
+			}
+		}
+	}()
+	for _, seg := range s.segments {
+		if seg.last <= from {
+			continue
+		}
+		f, err := os.Open(seg.path)
+		if err != nil {
+			return err
+		}
+		snap.files = append(snap.files, replayFile{f, seg})
+	}
+	return nil
+}
+
+// read pins open descriptors, bounds the active segment at a complete record,
+// and validates frames outside the append/sync owner. Unlink by trim is safe.
+func (snap *replaySnapshot) read(ctx context.Context, from uint64, position *replayPosition, apply func(Record) error) (last uint64, err error) {
+	defer func() {
+		for _, entry := range snap.files {
+			err = errors.Join(err, entry.file.Close())
+		}
+	}()
+	last = from
+	var payload []byte
+	for _, entry := range snap.files {
+		seg := entry.segment
+		var segmentHeader [headerSize]byte
+		if _, err = entry.file.ReadAt(segmentHeader[:], 0); err != nil {
+			return last, err
+		}
+		if binary.LittleEndian.Uint32(segmentHeader[:]) != magic || binary.LittleEndian.Uint64(segmentHeader[8:]) != seg.first || !slices.Equal(segmentHeader[16:], snap.identity) {
+			return last, errors.New("part log segment identity mismatch")
+		}
+		offset, previous := int64(headerSize), seg.first-1
+		if position != nil && position.path == seg.path {
+			offset, previous = position.offset, position.cursor
+		}
+		reader := io.NewSectionReader(entry.file, offset, seg.size-offset)
+		var h [headerSize]byte
+		for offset < seg.size {
+			if err = ctx.Err(); err != nil {
+				return last, err
+			}
+			if _, err = io.ReadFull(reader, h[:]); err != nil {
+				return last, err
+			}
+			length := binary.LittleEndian.Uint32(h[4:])
+			cursor := binary.LittleEndian.Uint64(h[8:])
+			if binary.LittleEndian.Uint32(h[:]) != magic || length == 0 || length > maxPayload || cursor != previous+1 {
+				return last, errors.New("invalid part log record")
+			}
+			if cap(payload) < int(length) {
+				payload = make([]byte, length)
+			} else {
+				payload = payload[:length]
+			}
+			if _, err = io.ReadFull(reader, payload); err != nil {
+				return last, err
+			}
+			crc := crc32.Update(crc32.Checksum(h[:24], checksum), checksum, payload)
+			if crc != binary.LittleEndian.Uint32(h[24:]) {
+				return last, errors.New("part log checksum mismatch")
+			}
+			if cursor > from {
+				if err = apply(Record{cursor, int64(binary.LittleEndian.Uint64(h[16:])), payload}); err != nil {
+					return last, err
+				}
+				last = cursor
+			}
+			previous = cursor
+			offset += int64(headerSize + length)
+			if position != nil {
+				*position = replayPosition{seg.path, offset, cursor}
+			}
+		}
+	}
+	return last, nil
+}
+
+// Follow replays the recovered prefix, then tails new appends through the same
+// ordered callback per stream. Appends never wait for a replay callback. The
+// callback borrows Payload until return; caughtUp runs after each snapshot and
+// may publish a consumer barrier. Cancel stops at a record boundary. Callers
+// must use one consumer per stream and route each metric consistently.
+func (l *Log) Follow(ctx context.Context, id int, from uint64, apply func(Record) error, caughtUp func(uint64) error) error {
+	if apply == nil {
+		return os.ErrInvalid
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	position := new(replayPosition)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		snap, err := l.snapshot(id, from)
+		if err != nil {
+			return err
+		}
+		next, err := snap.read(ctx, from, position, apply)
+		if err != nil {
+			return err
+		}
+		if caughtUp != nil {
+			if err = caughtUp(next); err != nil {
+				return err
+			}
+		}
+		if next == from {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-tick.C:
+			}
+		}
+		from = next
+	}
 }
 
 // Truncate takes one cursor vector per storage shard. Every vector must include
@@ -331,8 +494,8 @@ func (s *stream) run() {
 				}
 			case "sync":
 				e = s.sync()
-			case "replay":
-				e = s.replay(r.from, r.apply)
+			case "snapshot":
+				e = s.capture(r.from, r.snapshot)
 			case "trim":
 				e = s.trim(r.from)
 			case "close":
@@ -341,7 +504,7 @@ func (s *stream) run() {
 				r.done <- answer{s.last, e}
 				return
 			}
-			if e != nil && r.op != "replay" && r.op != "trim" {
+			if e != nil && r.op != "snapshot" && r.op != "trim" {
 				s.setFailure(e)
 			}
 			r.done <- answer{s.last, e}
@@ -425,6 +588,7 @@ func (s *stream) scan(path string, tail bool, apply func(Record) error) (segment
 	}
 	seg.first = binary.LittleEndian.Uint64(h[8:])
 	seg.last = seg.first - 1
+	var payload []byte
 	for {
 		n, e := io.ReadFull(f, h[:])
 		if e == io.EOF {
@@ -441,7 +605,11 @@ func (s *stream) scan(path string, tail bool, apply func(Record) error) (segment
 		if binary.LittleEndian.Uint32(h[:]) != magic || length == 0 || length > maxPayload || cursor != seg.last+1 {
 			return seg, errors.New("invalid part log record")
 		}
-		payload := make([]byte, length)
+		if cap(payload) < int(length) {
+			payload = make([]byte, length)
+		} else {
+			payload = payload[:length]
+		}
 		if _, e = io.ReadFull(f, payload); e != nil {
 			if tail && (e == io.EOF || e == io.ErrUnexpectedEOF) {
 				return seg, errors.Join(f.Truncate(seg.size), f.Sync())
@@ -507,29 +675,6 @@ func (s *stream) recover() error {
 		}
 	}
 	return s.rotate()
-}
-func (s *stream) replay(from uint64, apply func(Record) error) error {
-	if from > s.last {
-		return errors.New("parts frontier exceeds journal tail")
-	}
-	if len(s.segments) > 0 && from+1 < s.segments[0].first {
-		return errors.New("parts frontier precedes retained journal")
-	}
-	for _, seg := range s.segments {
-		if seg.last <= from {
-			continue
-		}
-		_, e := s.scan(seg.path, false, func(r Record) error {
-			if r.Cursor <= from {
-				return nil
-			}
-			return apply(r)
-		})
-		if e != nil {
-			return e
-		}
-	}
-	return nil
 }
 func (s *stream) trim(frontier uint64) error {
 	if frontier > s.last {
