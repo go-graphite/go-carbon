@@ -19,11 +19,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// Native pulls bypass the ingestion cache. Their committed names must reach
+// Bulk transfers bypass the ingestion cache. Their committed names must reach
 // normal reads even while startup recovery blocks every catalog scan.
-func TestNativePullVisibleWhileScansGated(t *testing.T) {
-	for _, combine := range []bool{false, true} {
-		t.Run(fmt.Sprintf("combine=%t", combine), func(t *testing.T) {
+func TestTransferImportVisibleWhileScansGated(t *testing.T) {
+	for _, mode := range []string{"native", "native-combine", "pull", "import"} {
+		t.Run(mode, func(t *testing.T) {
+			combine := mode == "native-combine"
 			ctx := context.Background()
 			now := time.Now().Unix()
 			open := func() *store.Store {
@@ -102,18 +103,38 @@ func TestNativePullVisibleWhileScansGated(t *testing.T) {
 				}
 				return w
 			}
-			var pin struct{ ID string }
-			if err := json.Unmarshal(call(source, "/v1/native/source", struct{}{}).Body.Bytes(), &pin); err != nil {
-				t.Fatal(err)
-			}
-			request := struct {
-				Range   store.NativeRange
-				Session string
-			}{
-				Range: store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: remote.URL, End: 1, Names: []string{name}, Combine: combine}, Session: pin.ID,
-			}
 			index := l.CurrentFileIndex()
-			call(destination, "/v1/native/pull", request)
+			switch mode {
+			case "pull":
+				call(destination, "/v1/transfer/pull", map[string]any{"Source": remote.URL, "Names": []string{name}})
+			case "import":
+				records, err := donor.ExportTransfer(ctx, []string{name})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body bytes.Buffer
+				if err := store.WriteTransfer(&body, records); err != nil {
+					t.Fatal(err)
+				}
+				w := httptest.NewRecorder()
+				destination.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/transfer/import", &body))
+				if w.Code != http.StatusOK {
+					t.Fatalf("import: %d %s", w.Code, w.Body.String())
+				}
+			default:
+				var pin struct{ ID string }
+				if err := json.Unmarshal(call(source, "/v1/native/source", struct{}{}).Body.Bytes(), &pin); err != nil {
+					t.Fatal(err)
+				}
+				request := struct {
+					Range   store.NativeRange
+					Session string
+				}{
+					Range: store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: remote.URL, End: 1, Names: []string{name}, Combine: combine}, Session: pin.ID,
+				}
+				call(destination, "/v1/native/pull", request)
+			}
+
 			deadline := time.Now().Add(5 * time.Second)
 			for !l.MetricExists(name) && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
