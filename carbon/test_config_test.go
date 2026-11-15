@@ -3,6 +3,7 @@ package carbon
 import (
 	"bytes"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -10,6 +11,10 @@ import (
 
 func testConfig(t testing.TB, root string) string {
 	t.Helper()
+	// App.Start and ReloadConfig apply common.max-cpu process-wide. A serial
+	// fixture must not leave the rest of the package on its one-CPU setting.
+	cpus := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(cpus) })
 	path := TestConfig(root)
 	cfg, err := ReadConfig(path)
 	if err != nil {
