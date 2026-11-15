@@ -909,6 +909,9 @@ func retainTransferSlots(points []Point, retention Retention) []Point {
 	if len(points) < 2 || (points[len(points)-1].Timestamp-points[0].Timestamp)/int64(retention.Step) < int64(retention.Count) {
 		return points
 	}
+	if retention.Count <= transferBitmapSlots && retention.Count > 0 && len(points) >= 128 && points[0].Timestamp >= 0 {
+		return retainTransferSlotsBitmap(points, retention)
+	}
 	// Allocate only for slots actually present in the validated transfer; the
 	// archive capacity comes from the sender and must not size an allocation.
 	seen := borrowTransferSlots()
