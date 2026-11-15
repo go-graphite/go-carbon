@@ -216,7 +216,8 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			return fail(err)
 		}
 		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
-		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1"
+		o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
+		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
 		o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
 		e.owners = append(e.owners, o)
 		if hook != nil {

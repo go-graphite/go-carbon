@@ -23,9 +23,12 @@ type coreFileBuffer struct {
 	writer *bufio.Writer
 	// Opt-in offline experiment: retain one encoded SST until its exact size
 	// is known, preallocate it, then write and sync before ingestion. This adds
-	// at most one encoded SST's retained capacity per owner to the memory budget.
-	preallocate bool
-	whole       bytes.Buffer
+	// one encoded SST's retained capacity per owner to the memory budget. Direct
+	// output retains a second aligned copy, including at most 8190 padding bytes.
+	preallocate   bool
+	whole         bytes.Buffer
+	direct        bool
+	directScratch []byte
 }
 
 // One owner builds only one SST at a time. Reuse its output buffer across data,
@@ -65,12 +68,16 @@ func (f *coreMeasuredFile) flush() error {
 	f.owner.preallocateNS.Add(uint64(time.Since(start)))
 	if err == nil {
 		start = time.Now()
-		var n int
-		n, err = f.File.Write(data)
-		f.owner.fileWriteNS.Add(uint64(time.Since(start)))
-		if err == nil && n != len(data) {
-			err = io.ErrShortWrite
+		if f.owner.fileBuffer.direct {
+			f.owner.fileBuffer.directScratch, err = coreWriteDirect(f.File, data, f.owner.fileBuffer.directScratch)
+		} else {
+			var n int
+			n, err = f.File.Write(data)
+			if err == nil && n != len(data) {
+				err = io.ErrShortWrite
+			}
 		}
+		f.owner.fileWriteNS.Add(uint64(time.Since(start)))
 	}
 	f.prepareErr = err
 	return err

@@ -100,7 +100,7 @@ An optional snapshot hook publishes a detached head and Pebble snapshot; callers
 must release every pin before closing the engine. No application data mutex is
 shared with readers or producers. Pebble has its own internal synchronization.
 
-The offline core has two opt-in filesystem/CPU experiments. Neither changes the
+The offline core has three opt-in filesystem/CPU experiments. None changes the
 persisted configuration, keys, apply groups or final durable-ingest boundary:
 
 * `CORE_SST_PREALLOCATE=1` accumulates one encoded SST per owner, preallocates
@@ -108,13 +108,18 @@ persisted configuration, keys, apply groups or final durable-ingest boundary:
   final sync before ingestion. The owner's encoded-buffer capacity is reused;
   budget it in addition to its mutable head and admission queues. Platforms
   whose VFS treats preallocation as a no-op still write and sync normally.
+* `CORE_SST_DIRECT=1` implies preallocation and writes a private 4096-byte-aligned
+  copy using Linux `O_DIRECT`. Padding is truncated to the exact SST length
+  before the original final fsync. The retained aligned copy adds another
+  encoded SST buffer per owner. Unsupported filesystems return an error; there
+  is no silent fallback. Readers use independent buffered descriptors.
 * `CORE_BUCKET_SORT=1` groups the highest varying metric-ID byte before sorting
   each group with the original comparator. A private scratch slice adds 32
   bytes per head row. Mixed time partitions and ambiguous equal sort keys use
   the original sort, including its exact value-bit tie behavior. The scratch
   capacity is reused across seals.
 
-Both are disabled by default pending native stability/CPU measurements. Use
+All are disabled by default pending native stability/CPU measurements. Use
 fresh private directories and compare each option separately before combining:
 
 ```sh
@@ -130,7 +135,7 @@ fio sweep writes only fresh files below its output directory; a `STOP` file in
 that directory terminates its active fio process. Its end-of-stage mode syncs
 each file at the end; it does not issue a filesystem-wide sync or establish a
 single-sync seal protocol. CPU profiles are saved separately for each NUMA
-pipeline. Start records identify both experiment flags. Lease-credit wait
+pipeline. Start records identify all experiment flags. Lease-credit wait
 seconds/count and the live waiting-producer gauge are distinct from edge-queue
 waits. Phase, preallocation and file-write seconds are overlapping wall times,
 not additive CPU costs; use CPU profiles for per-stage CPU attribution.
