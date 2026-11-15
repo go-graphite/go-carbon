@@ -36,6 +36,9 @@ func TestStartupJournalLoadGate(t *testing.T) {
 	// timeout, shorter than this deliberately twenty-minute differential.
 	smoke := os.Getenv("STARTUP_LOAD_SMOKE") == "1"
 	rate, seconds, connections := int64(25_000_000), 600, 280
+	if os.Getenv("STARTUP_LOAD_DEPLOY") == "1" {
+		rate = 20_000_000
+	}
 	if os.Getenv("STARTUP_LOAD_REPLAY") == "1" {
 		rate, seconds, connections = 15_000_000, 30, 280
 	}
@@ -77,6 +80,9 @@ func TestStartupJournalLoadGate(t *testing.T) {
 		})
 	}
 	verdict := "PASS"
+	if os.Getenv("STARTUP_LOAD_DEPLOY") == "1" {
+		verdict = "PASS_20M_NOT_25M"
+	}
 	if os.Getenv("STARTUP_LOAD_REPLAY") == "1" {
 		verdict = "REPLAY_ONLY_NOT_WRITE_QUALIFIED"
 	}
@@ -345,6 +351,7 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		}
 		wg.Wait()
 	}()
+	replayOnly := os.Getenv("STARTUP_LOAD_REPLAY") == "1"
 	start := time.Now().Add(100 * time.Millisecond)
 	for id, c := range conns {
 		wg.Go(func() {
@@ -370,7 +377,13 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 				if smoke {
 					writeBudget = 10 * time.Second
 				}
-				_ = c.SetWriteDeadline(at.Add(writeBudget))
+				writeDeadline := at.Add(writeBudget)
+				if replayOnly {
+					// Observe actual live intake under backpressure for the full
+					// replay window; this diagnostic never qualifies a write gate.
+					writeDeadline = start.Add(time.Duration(seconds+5) * time.Second)
+				}
+				_ = c.SetWriteDeadline(writeDeadline)
 				if written, err := c.Write(wire); err != nil || written != len(wire) {
 					failures <- fmt.Errorf("socket write %d/%d: %v", written, len(wire), err)
 					return
@@ -392,6 +405,8 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 	wasDirect := false
 	previousSample := start
 	replayPeak := float64(0)
+	replayCommitted := uint64(0)
+	replayElapsed := time.Duration(0)
 	replaySamples := 0
 	for second := 1; second <= seconds; second++ {
 		time.Sleep(time.Until(start.Add(time.Duration(second) * time.Second)))
@@ -416,9 +431,13 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		sampleAt := time.Now()
 		commitRate := float64(committed-previousCommitted) / sampleAt.Sub(previousSample).Seconds()
 		replayActive := !s.direct.Load()
-		if replayActive && committed > previousCommitted {
-			replaySamples++
+		if replayActive {
+			if committed > previousCommitted {
+				replaySamples++
+			}
 			replayPeak = max(replayPeak, commitRate)
+			replayCommitted += committed - previousCommitted
+			replayElapsed += sampleAt.Sub(previousSample)
 		}
 		row := map[string]any{"commit_rate": commitRate, "sample_elapsed_ns": sampleAt.Sub(previousSample).Nanoseconds(), "replay_active": replayActive, "append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes,
 			"replayed": m.ReplayedPoints, "startup_replayed": s.replayedPoints.Load(), "journal_points": m.PointsWritten, "journal_bytes": m.BytesWritten, "journal_syncs": m.Syncs, "unlogged": m.Unlogged, "append_calls": timings[captureAppend].calls, "append_p99_upper_ns": timings[captureAppend].p99, "append_total_ns": timings[captureAppend].total, "append_max_ns": timings[captureAppend].maximum}
@@ -442,23 +461,27 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 			t.Fatalf("producer backpressured: %v", err)
 		default:
 		}
-		if !smoke && (sent.Load() < rate*int64(second) || intake < rate*int64(second)) {
+		if !smoke && !replayOnly && (sent.Load() < rate*int64(second) || intake < rate*int64(second)) {
 			t.Fatalf("offered load missed at second %d: %v", second, row)
 		}
 		if m.Relogged != 0 || m.WriteErrors != 0 || receiverErrors != 0 || s.paused.Load() {
 			t.Fatalf("durability/relog gate failed: %v", row)
 		}
-		if !smoke && wasDirect && committed-previousCommitted < uint64(intake)-previousIntake {
+		if !smoke && !replayOnly && wasDirect && committed-previousCommitted < uint64(intake)-previousIntake {
 			t.Fatalf("commits behind intake after direct: %v", row)
 		}
 		previousCommitted, previousIntake, wasDirect = committed, uint64(intake), s.direct.Load()
 		previousSample = sampleAt
 	}
-	if os.Getenv("STARTUP_LOAD_REPLAY") == "1" {
-		_ = evidence.Encode(map[string]any{"append": appendMode, "phase": "replay-summary", "peak_commit_rate": replayPeak, "replay_samples": replaySamples, "required_commit_rate": 25_000_000})
-		if replaySamples == 0 || replayPeak < 25_000_000 {
+	if replayOnly {
+		_ = evidence.Encode(map[string]any{"append": appendMode, "phase": "replay-summary", "peak_commit_rate": replayPeak, "active_committed": replayCommitted, "active_elapsed_ns": replayElapsed.Nanoseconds(), "active_commit_rate": float64(replayCommitted) / replayElapsed.Seconds(), "replay_samples": replaySamples, "required_commit_rate": 25_000_000, "actual_intake_rate": float64(intake) / float64(seconds), "offered_rate": rate, "archive_verified": false})
+		if replaySamples == 0 || float64(replayCommitted)/replayElapsed.Seconds() < 25_000_000 {
 			t.Errorf("replay commit target missed: peak %.0f/s across %d active samples", replayPeak, replaySamples)
 		}
+		if float64(intake)/float64(seconds) < 13_000_000 {
+			t.Error("replay diagnostic live intake below 13M/s")
+		}
+		return "" // Diagnostic only: neither final drain nor archive equivalence proved.
 	}
 	wg.Wait()
 	select {

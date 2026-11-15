@@ -83,3 +83,20 @@ writes and checks intake after drain instead of enforcing each one-second
 performance threshold; it validates the driver and archive differential only. Retain failure evidence, too. A
 passing smoke or local correctness suite does not authorize a canary; report
 qualification as pending if the Linux host or representative fixture is absent.
+
+Two additional explicit modes retain their own verdicts. `STARTUP_LOAD_DEPLOY=1`
+runs the same 600-second differential at 20 million points/s; success is
+`PASS_20M_NOT_25M` and does not establish the original 25M/s target.
+`STARTUP_LOAD_REPLAY=1` observes both paths for 30 seconds with 15M/s offered
+traffic and reports actual intake alongside per-second and mean total persistence
+commit rates while replay is active. Its socket deadline spans the observation
+window so backpressure does not abort the first sample. This mode requires mean
+active replay commits >=25M/s and actual live intake >=13M/s, includes zero-commit
+intervals in the denominator, and reports peaks separately. It returns before
+final drain or archive comparison and can never qualify either write gate.
+
+With `STARTUP_LOAD_PROFILE`, bounded per-group traces are also written to
+`PREFIX-{false,true}.groups.json`: receiver slot wait and acknowledgement times,
+writer queue/encode completion and durable completion times. The receiver trace
+retains at most 4096 recent events; it is not a complete count of all submissions.
+Compare only stable workloads, and record any competing daemon restart.
