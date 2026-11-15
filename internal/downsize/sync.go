@@ -531,9 +531,12 @@ func (s *syncer) namesFile(kind string, round int, source int, names []string) (
 				return "", fmt.Errorf("read copy journal identity: %w", err)
 			}
 			digest := fmt.Sprintf("%x", hash.Sum(nil))
-			if identity["names_sha256"] != digest {
-				base += "-" + digest
+			if identity["names_sha256"] == digest {
+				// Existing input may have been overwritten by an old client.
+				// Copy selects a separate authenticated input in that case.
+				return base + ".jsonl", nil
 			}
+			base += "-" + digest
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}

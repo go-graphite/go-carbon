@@ -583,9 +583,9 @@ feed:
 }
 
 // recoverMissingWaves adopts pre-wave-manifest journals from older clients.
-// Their immutable names files already contain the successful precheck result.
-// Validate the full identity before treating any such file as campaign state.
-func (s *syncer) recoverMissingWaves(src int) error {
+// Authenticate each original prechecked name set before adopting its receipts.
+// Older clients could overwrite the sibling input when reusing a wave number.
+func (s *syncer) recoverMissingWaves(src int, missing []syncMissing) error {
 	paths, err := filepath.Glob(filepath.Join(s.o.state, fmt.Sprintf("missing-batch-r*-s%d*.jsonl", src)))
 	if err != nil {
 		return err
@@ -617,25 +617,9 @@ func (s *syncer) recoverMissingWaves(src int) error {
 		if err != nil {
 			return fmt.Errorf("read legacy copy header: %w", err)
 		}
-		identity, err := copyIdentity(copyOptions{froms: []string{s.o.from[src]}, to: s.o.to, names: namesPath})
+		names, err := s.legacyWaveNames(header, namesPath, src, group, rows, missing)
 		if err != nil {
-			return err
-		}
-		if header.Kind != "header" || header.Identity != identity {
-			return fmt.Errorf("legacy missing-copy journal identity mismatch: %s", path)
-		}
-		f, scan, err := openLines(namesPath)
-		if err != nil {
-			return err
-		}
-		var names []string
-		for scan.Scan() {
-			names = append(names, scan.Text())
-		}
-		err = scan.Err()
-		f.Close()
-		if err != nil {
-			return err
+			return fmt.Errorf("legacy missing-copy journal %s: %w", path, err)
 		}
 		if len(names) == 0 {
 			continue
@@ -743,7 +727,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			}
 			s.restoreMissingCopy(batch, r)
 		}
-		if err := s.recoverMissingWaves(src); err != nil {
+		if err := s.recoverMissingWaves(src, missing); err != nil {
 			return err
 		}
 		absentSource := map[string]bool{}
