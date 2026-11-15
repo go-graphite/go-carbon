@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,8 +31,15 @@ func (j *startupJournal) acquire(bytes, points int) (func(), error) {
 	if bytes < 0 || points < 0 {
 		return nil, errors.New("invalid capture reservation")
 	}
-	charge := int64(bytes)*4 + int64(points)*128 + 64<<10
 	b := &j.budget
+	// Check arithmetic before multiplying: an invalid oversized reservation must
+	// never wrap negative and bypass admission.
+	if int64(bytes) > (math.MaxInt64-(64<<10))/4 || int64(points) > (math.MaxInt64-(64<<10)-4*int64(bytes))/128 {
+		b.rejected.Add(1)
+		zapwriter.Logger("app").Error("startup capture reservation overflows byte accounting", zap.Int("raw_bytes", bytes), zap.Int("points", points), zap.Int64("limit_bytes", b.limit))
+		return nil, errors.New("capture batch exceeds byte budget")
+	}
+	charge := int64(bytes)*4 + int64(points)*128 + 64<<10
 	b.mu.Lock()
 	if charge > b.limit {
 		b.rejected.Add(1)

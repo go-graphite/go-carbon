@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +47,7 @@ func TestCaptureAdmissionUsesBytesAndWakesOnStop(t *testing.T) {
 }
 
 func TestCaptureAdmissionPressureMetrics(t *testing.T) {
+	defer zapwriter.Test()()
 	s := &startupInput{stop: make(chan struct{})}
 	j := &startupJournal{owner: s, budget: captureByteBudget{limit: 200000, changed: make(chan struct{})}}
 	s.journal = j
@@ -92,6 +96,10 @@ func TestCaptureAdmissionPressureMetrics(t *testing.T) {
 	if len(want) > 0 {
 		t.Fatal("missing metrics", want)
 	}
+	logs := zapwriter.TestString()
+	if !strings.Contains(logs, "admission byte budget exhausted") || !strings.Contains(logs, "exceeds admission byte budget") {
+		t.Fatal("budget pressure was not logged", logs)
+	}
 }
 
 func TestCapturePoolAccountsSkewAndNameHighWater(t *testing.T) {
@@ -133,5 +141,18 @@ func TestCapturePoolAccountsSkewAndNameHighWater(t *testing.T) {
 	}
 	if got := j.pooledBytes.Load(); got != retained || got > 32<<20 {
 		t.Fatal("idle pool accounting", got, retained)
+	}
+}
+
+func TestCaptureAdmissionRejectsOverflow(t *testing.T) {
+	j := &startupJournal{owner: &startupInput{stop: make(chan struct{})}, budget: captureByteBudget{limit: 128 << 20, changed: make(chan struct{})}}
+	for _, input := range [][2]int{{math.MaxInt, 1}, {1, math.MaxInt}} {
+		if r, err := j.acquire(input[0], input[1]); err == nil {
+			r()
+			t.Fatal("overflow admitted", input)
+		}
+	}
+	if j.budget.used != 0 || j.budget.rejected.Load() != 2 {
+		t.Fatal("overflow accounting changed budget")
 	}
 }

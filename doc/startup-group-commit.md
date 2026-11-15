@@ -66,6 +66,7 @@ covered by the admission limit:
 | Raw / columns / new-name scratch | Per worker, reusable capacities at the largest frame/batch seen; raw frame target 4MiB, with one record of overshoot. Separate id, timestamp, value and name arrays coexist. |
 | Compression output and write buffer | Per-partition compressed cycle output plus a combined positioned-write buffer; capacities persist at the largest cycle, not the latest small submission. A cycle drains <=64 requests, targeting 8MiB estimated input and allowing the last <=4MiB request to overshoot. |
 | Stream dictionary | 16 partition maps retain metric strings and 16-byte previous-point state for every distinct name in the current segment. Rotation clears entries but retains map/slice high-water capacities. The configured segment size is a compressed disk limit, not a heap limit. |
+| Durable completions | Stage releases admission before sync. Pending receipts are independently limited: a commit triggers at 65,536, with at most 63 additional requests from the last drained group. Channels, receipts and slice slack remain additional heap, without borrowed point/name references. |
 | Compression runtime | Shared zstd encoder with worker concurrency; internal workspaces are additional. |
 | TCP receiver | Per-connection wire buffers and stream dictionary; the normal global stream dictionary reservation is 3GiB, independent of startup admission. |
 | Replay / cache / storage | Independent decoder dictionaries, replay frames, cache entries, and storage buffers; concurrent replay adds these to capture memory. |

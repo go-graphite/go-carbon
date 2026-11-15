@@ -101,11 +101,18 @@ func (j *startupJournal) writeAdmitted(raw []byte, expected int, stage bool) err
 		}
 		buffer.retained = retained
 		if retained <= 1<<20 {
-			j.pooledBytes.Add(retained)
-			select {
-			case j.buffers <- buffer:
-			default:
-				j.pooledBytes.Add(-retained)
+			// Reserve before publication so concurrent returns cannot overstate or
+			// exceed the idle-pool charge while receivers take buffers out.
+			for used := j.pooledBytes.Load(); used+retained <= 32<<20; used = j.pooledBytes.Load() {
+				if !j.pooledBytes.CompareAndSwap(used, used+retained) {
+					continue
+				}
+				select {
+				case j.buffers <- buffer:
+				default:
+					j.pooledBytes.Add(-retained)
+				}
+				break
 			}
 		}
 	}()
