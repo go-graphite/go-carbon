@@ -1,6 +1,7 @@
 package partsread
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -37,41 +38,18 @@ func NewSlotIndex(blocks []SlotBlock, read ReadSlotBlock) (*SlotIndex, error) {
 	if read == nil {
 		return nil, errors.New("nil immutable block reader")
 	}
-	s := &SlotIndex{blocks: slices.Clone(blocks), read: read, bytes: 64 + int64(len(blocks))*64}
+	s := &SlotIndex{blocks: slices.Clone(blocks), read: read}
+	s.bytes = 64 + int64(cap(s.blocks))*64
 	for i := range s.blocks {
 		b := &s.blocks[i]
 		if b.Archive.Step <= 0 || b.Archive.Points <= 0 || b.Slots.From < 0 || b.Slots.From >= b.Slots.Until || b.Slots.Until > b.Archive.Points || len(b.Key) == 0 {
 			return nil, errors.New("invalid immutable block directory entry")
 		}
 		b.Key = slices.Clone(b.Key)
-		s.bytes += int64(len(b.Key))
+		s.bytes += int64(cap(b.Key))
 	}
 	slices.SortFunc(s.blocks, func(a, b SlotBlock) int {
-		if a.ID != b.ID {
-			if a.ID < b.ID {
-				return -1
-			}
-			return 1
-		}
-		if a.Archive.Step != b.Archive.Step {
-			if a.Archive.Step < b.Archive.Step {
-				return -1
-			}
-			return 1
-		}
-		if a.Archive.Points != b.Archive.Points {
-			if a.Archive.Points < b.Archive.Points {
-				return -1
-			}
-			return 1
-		}
-		if a.Slots.From < b.Slots.From {
-			return -1
-		}
-		if a.Slots.From > b.Slots.From {
-			return 1
-		}
-		return 0
+		return cmp.Or(cmp.Compare(a.ID, b.ID), cmp.Compare(a.Archive.Step, b.Archive.Step), cmp.Compare(a.Archive.Points, b.Archive.Points), cmp.Compare(a.Slots.From, b.Slots.From))
 	})
 	return s, nil
 }

@@ -232,7 +232,7 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 					}
 					pub.Publish(pr.View{Catalog: pr.CatalogFuncs{LookupFunc: func(name string) (pr.Metric, bool) { return pr.Metric{ID: 7, Archives: archives}, name == "sample" }}, Parts: []pr.Source{source}, RetainedBytes: source.RetainedBytes(), Close: func() { _ = snap.Close() }})
 					pinStart := time.Now()
-					h, e := pub.Pin(pr.NewBudget(128<<20), 128<<20)
+					h, e := pub.Pin(pr.NewBudget(256<<20), 128<<20)
 					if e != nil {
 						t.Fatal(e)
 					}
