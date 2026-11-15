@@ -22,8 +22,15 @@ type report struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: parts-pack DB... | -repack SRC NEWDIR | -repartition SRC NEWDIR [HORIZON_DIVISOR] | -sample DIR")
+		fmt.Fprintln(os.Stderr, "usage: parts-pack DB... | -dictionary[-bundle] SRC NEWDIR | -repack SRC NEWDIR | -repartition SRC NEWDIR [HORIZON_DIVISOR] | -sample DIR")
 		os.Exit(2)
+	}
+	if len(os.Args) == 4 && (os.Args[1] == "-dictionary" || os.Args[1] == "-dictionary-bundle") {
+		if err := compactFixtureTables(os.Args[2], os.Args[3], os.Args[1] == "-dictionary-bundle"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	if len(os.Args) == 3 && os.Args[1] == "-sample" {
 		if err := processSample(os.Args[2]); err != nil {
