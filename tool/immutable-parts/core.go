@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
@@ -55,35 +56,74 @@ type coreDispatch struct {
 	counts    []int
 	waitSince []time.Time
 	packets   []corePacket
-}
-type coreRouter struct {
-	next  uint64
-	slots [4]coreDispatch
-}
-type coreQueue struct {
-	slots       [2]atomic.Pointer[corePacket]
-	blockedNS   atomic.Uint64
-	write, read uint64 // exactly one producer and one owner respectively
+	router    *coreRouter
+	bytes     uint64
 }
 
+const (
+	coreQueueBytes  = 256 << 10
+	coreStreamBytes = 8 << 20
+	corePacketBytes = uint64(unsafe.Sizeof(corePacket{}))
+)
+
+type coreRouter struct {
+	slots []coreDispatch
+	bytes atomic.Uint64
+}
+
+// The producer and consumer own write/read respectively. A byte quota limits
+// queued payloads; pointer slots cover even the smallest (empty) packets.
+type coreQueue struct {
+	slots       []atomic.Pointer[corePacket]
+	limit       uint64
+	written     uint64
+	released    atomic.Uint64
+	blockedNS   atomic.Uint64
+	write, read uint64
+}
+
+func newCoreQueue(limit uint64) *coreQueue {
+	return &coreQueue{limit: limit, slots: make([]atomic.Pointer[corePacket], max(1, limit/corePacketBytes))}
+}
+func (p *corePacket) size() uint64 {
+	n := corePacketBytes + uint64(len(p.rows))*uint64(unsafe.Sizeof(row{}))
+	for _, b := range p.batches {
+		n += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
+	}
+	return n
+}
+func (d *coreDispatch) release() {
+	// Capture before publishing remaining=0: the producer may reuse d then.
+	router, n := d.router, d.bytes
+	if d.remaining.Add(-1) == 0 && router != nil {
+		router.bytes.Add(-n)
+	}
+}
 func (q *coreQueue) pop() *corePacket {
-	p := q.slots[q.read%2].Swap(nil)
+	p := q.slots[q.read%uint64(len(q.slots))].Swap(nil)
 	if p != nil {
+		q.released.Add(p.size())
 		q.read++
 	}
 	return p
 }
 func (q *coreQueue) tryPush(p *corePacket) bool {
-	if !q.slots[q.write%2].CompareAndSwap(nil, p) {
+	n := p.size()
+	used := q.written - q.released.Load()
+	// An indivisible original group may exceed the quota, but only by itself.
+	if used != 0 && (n > q.limit || used > q.limit-n) {
 		return false
 	}
+	if !q.slots[q.write%uint64(len(q.slots))].CompareAndSwap(nil, p) {
+		return false
+	}
+	q.written += n
 	q.write++
 	return true
 }
-
 func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 	var blocked time.Time
-	for !q.slots[q.write%2].CompareAndSwap(nil, p) {
+	for !q.tryPush(p) {
 		if blocked.IsZero() {
 			blocked = time.Now()
 		}
@@ -97,7 +137,6 @@ func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 	if !blocked.IsZero() {
 		q.blockedNS.Add(uint64(time.Since(blocked)))
 	}
-	q.write++
 	return nil
 }
 
@@ -205,7 +244,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			}
 		}
 		for range cfg.Producers {
-			o.queues = append(o.queues, new(coreQueue))
+			o.queues = append(o.queues, newCoreQueue(coreQueueBytes))
 		}
 	}
 	workers := cfg.Owners
@@ -235,8 +274,30 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 }
 func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
 	router := &e.routers[producer]
-	d := &router.slots[router.next%uint64(len(router.slots))]
-	for d.remaining.Load() != 0 {
+	// Count every original packet's data, including detached apply groups.
+	charge := uint64(len(e.owners))*corePacketBytes + uint64(len(rows))*uint64(unsafe.Sizeof(row{}))
+	for _, b := range batches {
+		charge += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
+	}
+	if len(router.slots) == 0 {
+		router.slots = make([]coreDispatch, max(1, coreStreamBytes/(uint64(len(e.owners))*corePacketBytes)))
+	}
+	var d *coreDispatch
+	for d == nil {
+		used := router.bytes.Load()
+		if used == 0 || (charge <= coreStreamBytes && used <= coreStreamBytes-charge) {
+			// Reuse free leases first, rather than allocating a fresh payload on
+			// every lap of a large ring. No slow lease blocks unrelated free ones.
+			for i := range router.slots {
+				if router.slots[i].remaining.Load() == 0 {
+					d = &router.slots[i]
+					break
+				}
+			}
+		}
+		if d != nil {
+			break
+		}
 		for _, o := range e.owners {
 			select {
 			case <-o.dead:
@@ -246,7 +307,6 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		}
 		time.Sleep(10 * time.Microsecond)
 	}
-	router.next++
 	if len(d.parts) == 0 {
 		d.parts = make([][]row, e.cfg.Shards)
 		d.counts = make([]int, e.cfg.Shards)
@@ -292,6 +352,8 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	if seal {
 		acks = make([]chan error, len(e.owners))
 	}
+	d.router, d.bytes = router, charge
+	router.bytes.Add(charge)
 	d.remaining.Store(int32(len(e.owners)))
 	for s := range e.owners {
 		p := &d.packets[s]
@@ -437,7 +499,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				p.ack <- failure
 			}
 			if p.lease != nil {
-				p.lease.remaining.Add(-1)
+				p.lease.release()
 			}
 		}
 		if !found {

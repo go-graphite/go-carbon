@@ -11,7 +11,7 @@ import (
 func TestCoreFanoutOffersReadyOwnersBeforeWaiting(t *testing.T) {
 	e := &coreEngine{cfg: coreConfig{Shards: 3, Producers: 1, MaxRows: 8}, routers: make([]coreRouter, 1)}
 	for range 3 {
-		e.owners = append(e.owners, &coreOwner{dead: make(chan struct{}), queues: []*coreQueue{{}}})
+		e.owners = append(e.owners, &coreOwner{dead: make(chan struct{}), queues: []*coreQueue{newCoreQueue(2 * corePacketBytes)}})
 	}
 	q := e.owners[0].queues[0]
 	if err := q.push(new(corePacket), e.owners[0].dead); err != nil {
@@ -50,6 +50,6 @@ func TestCoreFanoutOffersReadyOwnersBeforeWaiting(t *testing.T) {
 		if p.cursor != 1 || p.lease == nil {
 			t.Fatalf("owner %d invalid packet", owner)
 		}
-		p.lease.remaining.Add(-1)
+		p.lease.release()
 	}
 }
