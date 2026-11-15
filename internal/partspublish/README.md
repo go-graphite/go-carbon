@@ -81,3 +81,41 @@ published and retiring cuts; every restart checks all 1,680 queries, the active
 reference count/uniqueness and atomic raw/frontier generation. The stage cut is
 after complete content fsync but before final rename; the sync cut is after rename
 and root fsync. These are process-crash tests, not power-loss/faulty-device tests.
+
+### Engine isolation and publication cost experiments
+
+`TestPublisherWriterIsolation` in `tool/immutable-parts` composes this publisher
+with the actual core `PlanSeal`/`Commit` transaction, extending the durable adapter
+correctness test. Every arm writes fixed24 immutable parts and atomically ingests
+their envelope with the raw data/frontier. Readers pin committed Views and call
+`partsread.Render`. The synthetic workload has 1,024 portable names across 16
+routing scopes, one scope per owner, and one `1s:1d` archive. This is an engine
+composition experiment; it does not qualify the production daemon's policy,
+journal, rollup, retention, admission or mixed-history adapter.
+
+Opt in with `PARTS_PUBLISH_BENCH_DIR` pointing to a nonexistent private directory
+and `PARTS_PUBLISH_READERS` set to `0`, `8`, `32` or `64`. Each process offers
+input for 20 seconds, waits for all producer barriers, reports durable throughput
+including that final barrier, then settles for three seconds. Seed transactions
+precede timing. The test retains every generated part through process shutdown.
+The default does not impose an offered-rate ceiling. On Linux, launch under a
+fixed writer `taskset` mask and set `PARTS_READ_BENCH_CPUS` to a disjoint reader
+mask. Keep `GOMAXPROCS`, masks, memory limit and profiles identical across arms.
+
+Preregistered seed `202611154` yields reader order
+`64,32,32,0,8,64,64,0,0,8,8,32`. Use a fresh process and directory per arm, record
+CPU/mutex/block profiles and compare each reader-count mean with the mean of all
+three zero-reader arms. The gate is at most 2% writer loss. Never qualify from a
+static source or a memory-only publication. Publication nanoseconds in the
+receipt sum owner work, rather than measuring elapsed wall time.
+
+`PARTS_PUBLISH_COST_DIR=<nonexistent-directory> go test -v
+./internal/partspublish -run '^TestPublicationCosts$' -count=1` measures 16 seals
+of 4,096 points and compares a catalog-stable publication with a catalog-byte
+change that reopens and verifies all 16 active parts (1,572,864 payload bytes).
+It prints publication ns/point and descriptor reopen milliseconds. Run the
+compiled test under `strace -f -e trace=fsync,fdatasync` for measured syscall
+counts. The receipt's source-derived count of five fsyncs per added part covers
+data, manifest, staging directory, intermediate parent and publisher root; it
+excludes the core's atomic-ingest synchronization. Do not substitute that source
+count for a measured syscall result.
