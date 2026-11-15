@@ -59,6 +59,17 @@ A newer out-of-window owner still causes a conflict. The reference union also
 continues to reject two out-of-window points sharing a slot: the window cannot
 preserve both, and choosing between them is outside the requested operation.
 
+Window export selects retention independently for each archive, relative to its
+latest normalized ring owner. Cells at least one archive retention older than
+that owner are omitted, even if a sparse ring still physically contains them.
+An expired fine archive exports no points while retained coarse archives still
+participate. Coarse values are copied bit for bit; aggregation and xFilesFactor
+are not reapplied. The original requested window still binds the wire checksum,
+range identity, and import validation. The framing and capabilities are unchanged:
+existing clients can use the new exporter, and an older exporter continues to
+reject historical requests safely. Target collision and target-wins checks remain
+in force.
+
 ## Qualification
 
 `storectl bulk-eval` imports the actual captured survivor, stops private
