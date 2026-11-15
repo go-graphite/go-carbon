@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
 const syncWindowSelectionReason = "source window selection unresolved: missing metadata or pending snapshot"
+const syncWindowSelectionStall = 2 * time.Minute
 
 type syncWindowSelectionKey struct {
 	group  int
@@ -38,6 +40,8 @@ func (s *syncer) resolvedWindowSelections() map[syncWindowSelectionKey]map[strin
 // repair loop. Each pass reopens source pins and reuses durable resolutions;
 // cancellation preserves the unresolved frontier for a later invocation.
 func (s *syncer) waitWindowSelections(ctx context.Context) error {
+	lastPending := -1
+	lastProgress := s.o.now()
 	for delay := time.Second; ; delay = min(30*time.Second, delay*2) {
 		if err := s.retryWindowSelections(ctx); err != nil {
 			return err
@@ -56,6 +60,21 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 		}
 		if s.o.noCopy {
 			return fmt.Errorf("%w: %d pending window selections (--no-copy)", ErrSyncResidual, pending)
+		}
+		if lastPending < 0 || pending < lastPending {
+			lastProgress = s.o.now()
+		}
+		lastPending = pending
+		if s.o.now().Sub(lastProgress) >= syncWindowSelectionStall {
+			var frontier []string
+			for _, r := range s.sum.residual {
+				if r.Reason == syncWindowSelectionReason {
+					frontier = append(frontier, r.Source+" "+r.Name)
+				}
+			}
+			sort.Strings(frontier)
+			event("sync_window_selection_stalled", map[string]any{"pending_selections": pending, "frontier": frontier, "reason": syncWindowSelectionReason})
+			return fmt.Errorf("%w: window selection made no progress for %s: %s: %v", ErrSyncResidual, syncWindowSelectionStall, syncWindowSelectionReason, frontier)
 		}
 		event("sync_window_selection_wait", map[string]any{"pending_selections": pending, "retry_seconds": delay.Seconds()})
 		if err := sleepContext(ctx, delay); err != nil {
@@ -116,6 +135,13 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		if s.forbid[r.Source] {
 			remaining += len(names)
 			continue
+		}
+		if b, ok := s.b.(interface {
+			prepareWindowSelection(context.Context, string, []string) error
+		}); ok && !s.o.noCopy {
+			if err := b.prepareWindowSelection(ctx, r.Source, names); err != nil {
+				return fmt.Errorf("%w: prepare pending window selections %v from %s: %w", ErrSyncResidual, names, r.Source, err)
+			}
 		}
 		relevant, unknown := map[string]bool{}, map[string]bool{}
 		selectionFailed := false

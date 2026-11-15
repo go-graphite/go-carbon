@@ -90,3 +90,37 @@ func TestSelectionWaitRejectedRepairFailsLoudly(t *testing.T) {
 		t.Fatal("rejected repair entered endless selection wait", err)
 	}
 }
+
+type stalledSelectionBackend struct {
+	*fakeSync
+	now *time.Time
+}
+
+func (b stalledSelectionBackend) WindowPresence(context.Context, string, []string, syncRange) (map[string][]syncDigest, error) {
+	*b.now = b.now.Add(3 * time.Minute)
+	return map[string][]syncDigest{"pending": {{Hash: syncWindowUnresolved}}}, nil
+}
+func TestSelectionWaitStalledFrontierFailsWithNames(t *testing.T) {
+	path := t.TempDir()
+	j, err := openSyncJournal(filepath.Join(path, "sync.jsonl"), "stalled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	if err = j.append(syncRow{Kind: "window-selected", Round: 1, Source: syncD1, Skipped: []syncSkip{{"pending", syncWindowSelectionReason}}, SelectionComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeSync()
+	f.put(syncD1, "pending", syncTestSchema)
+	now := time.Unix(syncTestNow, 0)
+	s := &syncer{o: syncOptions{to: syncT, from: []string{syncD1}, state: path, windows: syncRanges{{From: syncTestNow - 600, Until: syncTestNow - 120}}, includeShort: true, now: func() time.Time { return now }}, b: stalledSelectionBackend{f, &now}, j: j, forbid: map[string]bool{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = s.waitWindowSelections(ctx)
+	if !errors.Is(err, ErrSyncResidual) || !strings.Contains(err.Error(), "pending") || !strings.Contains(err.Error(), syncD1) {
+		t.Fatal("stalled selection did not fail with its frontier", err)
+	}
+	if len(s.sum.residual) != 1 || len(j.find(func(r syncRow) bool { return r.Kind == "window-resolved" })) != 0 {
+		t.Fatal("stalled selection was retired")
+	}
+}
