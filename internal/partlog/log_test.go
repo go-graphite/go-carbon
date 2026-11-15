@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/points"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestOrderedBitsClockAndRestart(t *testing.T) {
@@ -88,6 +89,15 @@ func TestMinimumFrontierRetainsSlowShard(t *testing.T) {
 	}
 	if !slices.Equal(cursors, []uint64{3, 4, 5, 6, 7, 8}) {
 		t.Fatal(cursors)
+	}
+	if e = l.Truncate([][]uint64{{8}, {8}}); e != nil {
+		t.Fatal(e)
+	}
+	if count() != 2 {
+		t.Fatal("trim exceeded synced cursor", count())
+	}
+	if e = l.Sync(); e != nil {
+		t.Fatal(e)
 	}
 	if e = l.Truncate([][]uint64{{8}, {8}}); e != nil {
 		t.Fatal(e)

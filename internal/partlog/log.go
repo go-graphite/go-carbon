@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/points"
 	"hash/crc32"
 	"io"
 	"math"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 const headerSize = 32
@@ -169,9 +169,18 @@ func Open(dir string, opts Options) (_ *Log, err error) {
 	for id := 0; id < opts.Streams; id++ {
 		s := &stream{log: l, id: id, requests: make(chan request, 2), done: make(chan struct{})}
 		l.streams = append(l.streams, s)
-		if err = s.recover(); err != nil {
-			return nil, err
-		}
+	}
+	// Streams share no records or cursors. Validate each independently, joining
+	// every recovery before returning or releasing the directory lock on error.
+	results := make(chan error, opts.Streams)
+	for _, s := range l.streams {
+		go func() { results <- s.recover() }()
+	}
+	for range l.streams {
+		err = errors.Join(err, <-results)
+	}
+	if err != nil {
+		return nil, err
 	}
 	for _, s := range l.streams {
 		go s.run()
@@ -526,6 +535,7 @@ func (s *stream) trim(frontier uint64) error {
 	if frontier > s.last {
 		return errors.New("frontier exceeds journal tail")
 	}
+	frontier = min(frontier, s.durable)
 	for len(s.segments) > 1 && s.segments[0].last < frontier {
 		seg := s.segments[0]
 		s.hook("before-retire")

@@ -32,6 +32,15 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 		_ = json.NewEncoder(os.Stdout).Encode(out)
 	}
 	opts := partlog.Options{Streams: producers, SegmentBytes: 1 << 30, SyncInterval: time.Second}
+	if phase == "scan" {
+		log, e := partlog.Open(filepath.Join(root, "log"), opts)
+		if e != nil {
+			return e
+		}
+		e = log.Close()
+		emit("log_recovery_scan_complete", 0, map[string]any{"error": fmt.Sprint(e)})
+		return e
+	}
 	if phase == "write" {
 		log, e := partlog.Open(filepath.Join(root, "log"), opts)
 		if e != nil {
@@ -99,7 +108,7 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 				if e := l.apply(p, r, false); e != nil {
 					return e
 				}
-				count.Add(uint64(len(r.Payload) / recordBytes))
+				count.Add(uint64((len(r.Payload) - logEnvelopeBytes) / recordBytes))
 				return nil
 			})
 			if e == nil && last > 0 {

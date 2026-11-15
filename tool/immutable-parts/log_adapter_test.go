@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"testing"
@@ -52,6 +53,60 @@ func TestLogNormalReplayAndTrim(t *testing.T) {
 	got, e := coreDigest(filepath.Join(root, "parts"), cfg)
 	if e != nil || got != want {
 		t.Fatal(want, got, e)
+	}
+}
+
+func TestLogOriginalBatchReplay(t *testing.T) {
+	root := t.TempDir()
+	cfg := loggedConfig()
+	cfg.MaxRows = 1 << 20
+	want := []coreBatch{
+		{ID: 1, Order: 7, Clock: -123, Policy: []byte("exact-policy-a"), Points: []row{{1, 991, 0x7ff8000000000042, 4}, {1, 991, 0x8000000000000000, 5}}},
+		{ID: 1, Order: 8, Clock: 17, Policy: []byte("exact-policy-b"), Points: []row{{1, 992, 1, 6}}},
+	}
+	var got []coreBatch
+	hooks := coreHooks{PlanSeal: func(_ int, in coreSealInput) (coreSealPlan, error) {
+		if len(in.Batches) == 0 {
+			return coreSealPlan{}, nil
+		}
+		got = append(got, in.Batches...)
+		return coreSealPlan{}, nil
+	}}
+	l, e := openLoggedCoreWithHooks(filepath.Join(root, "log"), filepath.Join(root, "live"), cfg, partlog.Options{}, hooks)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = l.appendBatches(0, want, true); e != nil {
+		t.Fatal(e)
+	}
+	if e = l.close(); e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("live metadata changed: %#v", got)
+	}
+	got = nil
+	l, e = openLoggedCoreWithHooks(filepath.Join(root, "log"), filepath.Join(root, "restart"), cfg, partlog.Options{}, hooks)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = l.replay(); e != nil {
+		t.Fatal(e)
+	}
+	if e = l.close(); e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("replay metadata changed: %#v", got)
+	}
+	raw, e := encodeLogBatches(want)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for cut := 0; cut < len(raw); cut++ {
+		if _, e = decodeLogBatches(raw[:cut]); e == nil {
+			t.Fatalf("truncation accepted at%d", cut)
+		}
 	}
 }
 
