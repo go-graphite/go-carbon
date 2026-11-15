@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"unsafe"
 
@@ -65,8 +66,10 @@ func BenchmarkCoreRollupSeal(b *testing.B) {
 	}
 }
 
-// Fixed point count at each supplied original-apply density. CPU counters cover
-// submit, core seal, rollups, publication and close. Journal I/O is excluded.
+// Fixed point count at each supplied original-apply density. One producer per
+// eight owners fills and retains compact original batches, then submits a single
+// seal barrier to its disjoint owner group. CPU includes generation, compression,
+// expansion, routing, core seal, rollups, publication and close. Journal I/O is excluded.
 // These are finite cost samples, never a settled-compaction qualification.
 func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	density, err := strconv.Atoi(os.Getenv("SEAL_BENCH_DENSITY"))
@@ -81,7 +84,9 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 		}
 	}
 	cores := runtime.GOMAXPROCS(0)
-	cfg := coreConfig{Shards: cores, Producers: 1, MaxRows: max(density, 2*metrics*density/cores), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "production-density-cost"}
+	producers := max(1, cores/8)
+	compact := os.Getenv("SEAL_BENCH_COMPACT") != "0"
+	cfg := coreConfig{Shards: cores, Producers: producers, MaxRows: max(density, 2*metrics*density/cores), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "production-density-cost"}
 	policyLimit, err := sealrollup.NewHeadPolicy(20_000_000, uint64(cfg.MaxRows)*uint64(cores)*96, 96, cores)
 	if err != nil {
 		b.Fatal(err)
@@ -95,29 +100,82 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	// One pointer-free backing array models the payload of held heads.
-	rows := make([]row, metrics*density)
-	batches := make([]coreBatch, metrics)
-	for i := range batches {
-		batches[i] = coreBatch{ID: uint64(i), Policy: policy, Points: rows[i*density : (i+1)*density]}
+	ids := make([][]uint64, producers)
+	for id := range metrics {
+		p := coreShard(uint64(id), cores) % producers
+		ids[p] = append(ids[p], uint64(id))
+	}
+	jobs := make([]chan int, producers)
+	errs := make(chan error, producers)
+	headBytes := make([]int, producers)
+	var workers sync.WaitGroup
+	for p := range producers {
+		jobs[p] = make(chan int)
+		workers.Go(func() {
+			h := compactRollupHead{batches: make([]compactRollupBatch, 0, len(ids[p]))}
+			scratch := make([]row, density)
+			rawRows := []row(nil)
+			rawBatches := []coreBatch(nil)
+			if !compact {
+				rawRows = make([]row, len(ids[p])*density)
+				rawBatches = make([]coreBatch, len(ids[p]))
+				for i, id := range ids[p] {
+					rawBatches[i] = coreBatch{ID: id, Policy: policy, Points: rawRows[i*density : (i+1)*density]}
+				}
+			}
+			for n := range jobs[p] {
+				order := uint64(n + 1)
+				now := int64(1794700800 + (n+1)*density)
+				var failure error
+				for i, id := range ids[p] {
+					points := scratch
+					if !compact {
+						points = rawBatches[i].Points
+					}
+					for j := range points {
+						points[j] = row{ID: id, Time: now - int64(density) + int64(j), Bits: math.Float64bits(float64((n + j) % 97)), Seq: uint64(j + 1)}
+					}
+					if compact {
+						failure = h.append(coreBatch{ID: id, Order: order, Clock: now, Policy: policy, Points: points})
+						if failure != nil {
+							break
+						}
+					} else {
+						rawBatches[i].Order, rawBatches[i].Clock = order, now
+					}
+				}
+				batches := rawBatches
+				if compact && failure == nil {
+					headBytes[p] = h.residentBytes()
+					batches, failure = h.decode()
+				} else if !compact {
+					headBytes[p] = len(rawRows)*int(unsafe.Sizeof(row{})) + len(rawBatches)*int(unsafe.Sizeof(coreBatch{}))
+				}
+				if failure == nil {
+					failure = e.submitRollupGroup(p, batches, order)
+				}
+				h.reset()
+				errs <- failure
+			}
+		})
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	start := atomicCPU()
 	for n := 0; n < b.N; n++ {
-		order := uint64(n + 1)
-		now := int64(1794700800 + (n+1)*density)
-		for i := range batches {
-			batch := &batches[i]
-			batch.Order, batch.Clock = order, now
-			for j := range batch.Points {
-				batch.Points[j] = row{ID: uint64(i), Time: now - int64(density) + int64(j), Bits: math.Float64bits(float64((n + j) % 97)), Seq: uint64(j + 1)}
+		for _, job := range jobs {
+			job <- n
+		}
+		for range producers {
+			if err := <-errs; err != nil {
+				b.Fatal(err)
 			}
 		}
-		if err = e.submitBatches(0, batches, order, true); err != nil {
-			b.Fatal(err)
-		}
 	}
+	for _, job := range jobs {
+		close(job)
+	}
+	workers.Wait()
 	if err = e.close(); err != nil {
 		b.Fatal(err)
 	}
@@ -128,12 +186,17 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	runtime.KeepAlive(e)
-	runtime.KeepAlive(batches)
+	held := 0
+	for _, n := range headBytes {
+		held += n
+	}
 	b.ReportMetric(points/b.Elapsed().Seconds(), "points/s")
 	b.ReportMetric(float64(cpu)/points, "cpu-ns/point")
-	b.ReportMetric(float64(len(rows))*float64(unsafe.Sizeof(row{})), "held-row-bytes")
+	b.ReportMetric(float64(held)/float64(metrics*density), "head-B/point")
 	b.ReportMetric(float64(memory.HeapAlloc), "postseal-heap-bytes")
 	b.ReportMetric(float64(density), "points/metric")
+	b.ReportMetric(float64(producers), "producers")
+
 }
 
 // Fixed production-like sparse cardinality as cores change: 262144 metrics,
