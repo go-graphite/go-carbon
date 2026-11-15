@@ -4,8 +4,9 @@ package chunkstore
 
 import (
 	"fmt"
-	"github.com/cockroachdb/pebble/vfs"
 	"io"
+
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 func lockExistingStoreFile(fs vfs.FS, name string) (io.Closer, error) {
