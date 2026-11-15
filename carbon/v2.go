@@ -146,14 +146,6 @@ func (app *App) stopV2() {
 	}
 }
 
-func (app *App) ingest(p *points.Points) {
-	if app.v2 != nil {
-		app.v2.append(p)
-		return
-	}
-	app.Cache.Add(p)
-}
-
 func (v *v2Runtime) failure(op string, err error, stop bool) {
 	v.failures.WithLabelValues(op).Inc()
 	zapwriter.Logger("v2").Error("v2 operation failed", zap.String("operation", op), zap.Error(err))

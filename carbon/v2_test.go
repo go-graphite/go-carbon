@@ -362,7 +362,7 @@ func TestV2FailureStopsAndRetainsExitError(t *testing.T) {
 			if async {
 				b.errors <- daemonstore.Failure{Operation: "sync", Err: failure}
 			} else {
-				app.ingest(&points.Points{Metric: "routing.value", Data: []points.Point{{Value: 1, Timestamp: 1}}})
+				app.v2.append(&points.Points{Metric: "routing.value", Data: []points.Point{{Value: 1, Timestamp: 1}}})
 			}
 			select {
 			case <-stopped:

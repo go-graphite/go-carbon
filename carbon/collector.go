@@ -59,7 +59,11 @@ func NewCollector(app *App) *Collector {
 
 	logger = logger.With(zap.String("endpoint", c.endpoint))
 
-	c.startSender(app.ingest, endpoint, logger)
+	ingest := app.Cache.Add
+	if app.v2 != nil {
+		ingest = app.v2.append
+	}
+	c.startSender(ingest, endpoint, logger)
 
 	sendCallback := func(moduleName string) func(metric string, value float64) {
 		return func(metric string, value float64) {
