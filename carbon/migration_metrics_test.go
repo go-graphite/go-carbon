@@ -443,17 +443,19 @@ func TestCollectorBalancesNameRefusalsAcrossIntakePaths(t *testing.T) {
 		counts := map[string]float64{}
 		for _, f := range families {
 			switch f.GetName() {
-			case "cache_name_too_long_rejected_points_total", "receiver_name_too_long_rejected_points_total", "cache_received_points_total", "cache_recovered_points_total":
+			case "cache_name_too_long_rejected_points_total":
+				t.Fatal("duplicate intake name-refusal counter is registered")
+			case "receiver_name_too_long_rejected_points_total", "cache_received_points_total", "cache_recovered_points_total":
 				if f.GetType() != dto.MetricType_COUNTER {
 					t.Fatalf("%s is not a counter", f.GetName())
 				}
 				counts[f.GetName()] = f.GetMetric()[0].GetCounter().GetValue()
 			}
 		}
-		if counts["cache_name_too_long_rejected_points_total"] != 9 || counts["receiver_name_too_long_rejected_points_total"] != 9 || counts["cache_received_points_total"] != 10 || counts["cache_recovered_points_total"] != 1 {
+		if counts["receiver_name_too_long_rejected_points_total"] != 9 || counts["cache_received_points_total"] != 10 || counts["cache_recovered_points_total"] != 1 {
 			t.Fatalf("incorrect intake accounting: %v", counts)
 		}
-		if counts["cache_received_points_total"]+counts["cache_recovered_points_total"] != counts["cache_name_too_long_rejected_points_total"]+float64(c.Size()) {
+		if counts["cache_received_points_total"]+counts["cache_recovered_points_total"] != counts["receiver_name_too_long_rejected_points_total"]+float64(c.Size()) {
 			t.Fatalf("unbalanced intake: %v, queued %d", counts, c.Size())
 		}
 	}
