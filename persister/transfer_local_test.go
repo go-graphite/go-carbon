@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -68,14 +69,14 @@ func TestTransferFlushLocalInterleavings(t *testing.T) {
 				codec := &transferLocalCodec{}
 				now := time.Unix(1_790_000_000, 0)
 				opts := store.Options{ExactBlocks: true, Continuation: codec, Now: func() time.Time { return now }, CacheSize: 1 << 20, MemTableSize: 1 << 20}
-				db, err := store.Open(t.TempDir(), opts)
+				db, err := store.Open(t.TempDir(), opts.WithFS(vfs.NewMem()))
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer db.Close()
 				controlOpts := opts
 				controlOpts.Continuation = &whisperio.ContinuationCodec{}
-				control, err := store.Open(t.TempDir(), controlOpts)
+				control, err := store.Open(t.TempDir(), controlOpts.WithFS(vfs.NewMem()))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -157,7 +158,16 @@ func TestTransferFlushLocalInterleavings(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				service.SetTransferFlush(p.FlushForTransfer)
+				service.SetTransferFlush(func(flushCtx context.Context, names []string) error {
+					cancelParent := cancel
+					cancel = func() {
+						cancelParent()
+						// The custom deadline context propagates through a goroutine.
+						// Wait for the handler's child before resuming storage work.
+						<-flushCtx.Done()
+					}
+					return p.FlushForTransfer(flushCtx, names)
+				})
 				requestNames := append([]string(nil), names...)
 				if stage == "absent_unqueued" {
 					requestNames = append(requestNames, "absent")
@@ -254,9 +264,31 @@ func TestTransferFlushLocalInterleavings(t *testing.T) {
 // server deadline supplies, with no timing-dependent test sleeps.
 type transferDeadlineContext struct{ context.Context }
 
+// Do not expose the embedded cancel context's private value: WithCancel would
+// register its child directly with that context and inherit Canceled, bypassing
+// our Err method. Cause must use our Err method for the same reason.
+func (transferDeadlineContext) Value(any) any { return nil }
+
 func (c transferDeadlineContext) Err() error {
 	if c.Context.Err() != nil {
 		return context.DeadlineExceeded
 	}
 	return nil
+}
+
+func TestTransferDeadlineContextPropagation(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := transferDeadlineContext{parent}
+	before, stopBefore := context.WithCancel(ctx)
+	defer stopBefore()
+	cancel()
+	<-before.Done()
+	after, stopAfter := context.WithCancel(ctx)
+	defer stopAfter()
+	for _, c := range []context.Context{ctx, before, after} {
+		if c.Err() != context.DeadlineExceeded || context.Cause(c) != context.DeadlineExceeded {
+			t.Fatalf("deadline propagation: Err=%v Cause=%v", c.Err(), context.Cause(c))
+		}
+	}
 }
