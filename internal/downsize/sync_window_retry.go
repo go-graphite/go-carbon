@@ -59,6 +59,9 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		}
 	}
 	s.prog.begin("window retry", total)
+	if !s.legacyCopyReceipts {
+		s.prog.planVerification(int64(s.sum.Discovered))
+	}
 	attempted, remaining, recovered := 0, 0, 0
 	for _, r := range rows {
 		k := syncWindowSelectionKey{r.Round, r.Source}

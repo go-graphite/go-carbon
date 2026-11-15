@@ -45,7 +45,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 20
+		count := 24
 		if index == 0 {
 			count++
 		}
@@ -80,7 +80,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		t.Fatal("wait duration lost", p.storeWaitSeconds)
 	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 24; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {

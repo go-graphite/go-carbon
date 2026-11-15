@@ -235,6 +235,8 @@ func metricToken(s string) string {
 }
 
 type progressMetrics struct {
+	ready                                 readyETAModel
+	snapshot                              progressSnapshot
 	mu                                    sync.Mutex
 	sendMu                                sync.Mutex
 	addr, prefix, phase                   string
@@ -285,6 +287,7 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 			return
 		}
 	}
+	p.snapshot = snapshot
 	oldPhase, oldRound := p.phase, p.round
 	p.phase = metricToken(snapshot.Phase)
 	if snapshot.WaitingForStore {
@@ -321,6 +324,7 @@ func (p *progressMetrics) send() {
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
 	at := time.Now()
 	eta := p.eta(at)
+	ready := p.ready.estimate(at, p.path, p.snapshot)
 	code, round := p.code, p.round
 	freshDone, freshAvailable, started := p.freshDone, p.freshDoneAvailable, p.started
 	retries, waiting, waitSeconds := p.storeRetries, float64(0), p.storeWaitSeconds
@@ -345,7 +349,7 @@ func (p *progressMetrics) send() {
 	for _, v := range []struct {
 		name  string
 		value float64
-	}{{"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
+	}{{"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"eta_ready_seconds", ready.seconds}, {"eta_ready_known_seconds", ready.known}, {"eta_ready_unknown_parts", float64(ready.unknown)}, {"phases_left", float64(ready.phases)}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
 	}
 	if p.version != "" {

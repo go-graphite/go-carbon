@@ -672,6 +672,9 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 	}
 	s.phase("copy")
 	s.prog.begin("copy", len(missing))
+	if !s.legacyCopyReceipts {
+		s.prog.planVerification(int64(s.sum.Discovered))
+	}
 	short := map[string]bool{}
 	work := 0
 	for src, source := range s.o.from {

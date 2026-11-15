@@ -56,6 +56,31 @@ Durable cumulative counters and the rate retain their existing meanings. Nested 
 the parent sync snapshot. Commands without a progress file emit only lifecycle
 heartbeats. Phase appears in the series name.
 
+Command-root `eta_seconds` estimates only the current phase. The READY metrics are:
+
+- `eta_ready_seconds`: remaining time through controller READY, or `-1` when
+  any required work is unmeasured. Only a completed READY attestation is zero;
+  entering the final READY checks does not mean they have passed.
+- `eta_ready_known_seconds`: conditional projection for measured work: the
+  current phase plus the next planned verification after copying or filling,
+  when this client has measured a verification rate. It is a partial estimate,
+  not a completion deadline or a guaranteed lower bound.
+- `eta_ready_unknown_parts`: number of unmeasured components, including future
+  residual repairs/convergence and final parity, gap coverage and read-back.
+- `phases_left`: minimum known stages through READY; `-1` means the remaining
+  stage count is unknown. Additional repairs may add stages.
+
+READY projections use fresh work observed during this client lifetime, exclude
+journal replay, and lose the current rate after a stall. Phase/round changes
+reset the measurement window. Progress JSON `next_verify_names` reports the
+planned distinct-name convergence count; it is omitted until known. Hole point
+observations are never interpreted as a count of repair names. Future repair
+volume and final READY checks have no measured work/rate yet, so the full ETA
+stays unknown while their measured portion remains visible. Controller READY
+covers its configured sources and windows; decommissioning a block additionally
+requires every copy, the complete gap ledger, and parity against every required
+donor and peer. These metrics do not authorize decommissioning.
+
 These metrics require installing this tool version and launching a new process.
 An already running binary cannot start exporting them, and history is not backfilled.
 
