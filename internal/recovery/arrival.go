@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // ArrivalPath is an optional versioned companion to an immutable dump. Older
@@ -111,4 +112,7 @@ func (w *Writer) writeArrivals(records []arrivalRecord) error {
 func (g *Segment) NoteArrival(name string, at int64) {
 	g.s.arrivals = append(g.s.arrivals, arrivalRecord{name, at})
 }
-func (b *Bundle) FirstArrival(name string) int64 { return b.arrivals[name] }
+func (b *Bundle) FirstArrival(name string) int64 {
+	defer runtime.KeepAlive(b)
+	return b.arrivals.first(name)
+}
