@@ -111,7 +111,15 @@ func (f *continuationFile) referencedClassicGroup(archive, index int, mutable bo
 }
 
 func (f *continuationFile) readReferencedClassicGroup(archive, index int, key []byte) (*store.PointBlock, error) {
-	data, err := f.fs.kv.Get(key)
+	// Fetch owns an immutable view, so absent overrides and long-lived aliases
+	// can reuse its iterator just like ordinary classic groups. Keep newest-
+	// version point lookups for writable batches. Always resolve the override
+	// first: even an empty group shadows an alias, including a malformed one.
+	read := f.fs.kv.Get
+	if f.fs.readOnly {
+		read = f.fs.probe
+	}
+	data, err := read(key)
 	group := new(store.PointBlock)
 	if err == nil {
 		return group, store.DecodePointBlock(data, group)
@@ -119,7 +127,7 @@ func (f *continuationFile) readReferencedClassicGroup(archive, index int, key []
 	if !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
-	data, err = f.fs.kv.Get(continuationBodyKey(f.data.id, 'a', archive, 0, index))
+	data, err = read(continuationBodyKey(f.data.id, 'a', archive, 0, index))
 	if errors.Is(err, store.ErrNotFound) {
 		return group, nil
 	}
