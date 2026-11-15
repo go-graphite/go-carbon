@@ -42,7 +42,29 @@ type captureSubmission interface {
 }
 
 // captureAdmission measures batches waiting outside the direct-write fence.
-type captureAdmission struct{ total, maximum, calls atomic.Int64 }
+type captureAdmission struct {
+	total, maximum, calls atomic.Int64
+	enabled               atomic.Bool
+	next                  atomic.Uint64
+	events                [4096]atomic.Pointer[CaptureEvent]
+}
+
+// CaptureEvent records receiver admission and its durable acknowledgement.
+type CaptureEvent struct {
+	Started, Admitted, Ack int64
+	Points                 int
+}
+
+func (rcv *TCP) TraceCapture() { rcv.captureAdmission.enabled.Store(true) }
+func (rcv *TCP) CaptureEvents() []CaptureEvent {
+	var out []CaptureEvent
+	for i := range rcv.captureAdmission.events {
+		if e := rcv.captureAdmission.events[i].Load(); e != nil {
+			out = append(out, *e)
+		}
+	}
+	return out
+}
 
 func (a *captureAdmission) observe(start time.Time) {
 	elapsed := time.Since(start).Nanoseconds()
@@ -156,9 +178,21 @@ func (b *captureBuffer) flush() error {
 	if b.sink != nil {
 		if b.slots != nil && b.sink.direct.Load() == nil {
 			started := time.Now()
+			n := b.n
+			for i := range b.shards {
+				n += b.shards[i].n
+			}
 			b.slots <- struct{}{}
 			if b.admission != nil {
 				b.admission.observe(started)
+			}
+			if b.admission != nil && b.admission.enabled.Load() {
+				admitted := time.Now().UnixNano()
+				defer func() {
+					e := &CaptureEvent{Started: started.UnixNano(), Admitted: admitted, Ack: time.Now().UnixNano(), Points: n}
+					a := b.admission
+					a.events[a.next.Add(1)%uint64(len(a.events))].Store(e)
+				}()
 			}
 			defer func() { <-b.slots }()
 		}

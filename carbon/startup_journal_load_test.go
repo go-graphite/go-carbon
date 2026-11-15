@@ -36,6 +36,9 @@ func TestStartupJournalLoadGate(t *testing.T) {
 	// timeout, shorter than this deliberately twenty-minute differential.
 	smoke := os.Getenv("STARTUP_LOAD_SMOKE") == "1"
 	rate, seconds, connections := int64(25_000_000), 600, 280
+	if os.Getenv("STARTUP_LOAD_REPLAY") == "1" {
+		rate, seconds, connections = 15_000_000, 30, 280
+	}
 	if smoke {
 		rate, seconds, connections = 10_000, 3, 32
 	} else if runtime.GOOS != "linux" || os.Getenv("STARTUP_LOAD_ISOLATED") != "1" {
@@ -74,6 +77,9 @@ func TestStartupJournalLoadGate(t *testing.T) {
 		})
 	}
 	verdict := "PASS"
+	if os.Getenv("STARTUP_LOAD_REPLAY") == "1" {
+		verdict = "REPLAY_ONLY_NOT_WRITE_QUALIFIED"
+	}
 	if smoke {
 		verdict = "SMOKE_ONLY_NOT_QUALIFIED"
 	}
@@ -309,6 +315,25 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		defer func() { pprof.StopCPUProfile(); profile.Close() }()
 	}
 
+	if prefix := os.Getenv("STARTUP_LOAD_PROFILE"); prefix != "" {
+		s.receiver.TraceCapture()
+		if l := app.inputLog.Load(); l != nil {
+			l.TraceAppends()
+		}
+		defer func() {
+			f, err := os.Create(fmt.Sprintf("%s-%t.groups.json", prefix, appendMode))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer f.Close()
+			var groups []inputlog.AppendEvent
+			if l := app.inputLog.Load(); l != nil {
+				groups = l.AppendEvents()
+			}
+			_ = json.NewEncoder(f).Encode(map[string]any{"capture": s.receiver.CaptureEvents(), "append": groups})
+		}()
+	}
 	var sent atomic.Int64
 	stop := make(chan struct{})
 	failures := make(chan error, connections)
@@ -365,6 +390,9 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 	}
 	var previousIntake, previousCommitted uint64
 	wasDirect := false
+	previousSample := start
+	replayPeak := float64(0)
+	replaySamples := 0
 	for second := 1; second <= seconds; second++ {
 		time.Sleep(time.Until(start.Add(time.Duration(second) * time.Second)))
 		s.receiver.Stat(sample)
@@ -385,7 +413,14 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 			m = log.Metrics()
 		}
 		timings := s.ioTimings()
-		row := map[string]any{"append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes,
+		sampleAt := time.Now()
+		commitRate := float64(committed-previousCommitted) / sampleAt.Sub(previousSample).Seconds()
+		replayActive := !s.direct.Load()
+		if replayActive && committed > previousCommitted {
+			replaySamples++
+			replayPeak = max(replayPeak, commitRate)
+		}
+		row := map[string]any{"commit_rate": commitRate, "sample_elapsed_ns": sampleAt.Sub(previousSample).Nanoseconds(), "replay_active": replayActive, "append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes,
 			"replayed": m.ReplayedPoints, "startup_replayed": s.replayedPoints.Load(), "journal_points": m.PointsWritten, "journal_bytes": m.BytesWritten, "journal_syncs": m.Syncs, "unlogged": m.Unlogged, "append_calls": timings[captureAppend].calls, "append_p99_upper_ns": timings[captureAppend].p99, "append_total_ns": timings[captureAppend].total, "append_max_ns": timings[captureAppend].maximum}
 		if s.receiver != nil {
 			total, maximum, calls := s.receiver.CaptureAdmission()
@@ -417,6 +452,13 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 			t.Fatalf("commits behind intake after direct: %v", row)
 		}
 		previousCommitted, previousIntake, wasDirect = committed, uint64(intake), s.direct.Load()
+		previousSample = sampleAt
+	}
+	if os.Getenv("STARTUP_LOAD_REPLAY") == "1" {
+		_ = evidence.Encode(map[string]any{"append": appendMode, "phase": "replay-summary", "peak_commit_rate": replayPeak, "replay_samples": replaySamples, "required_commit_rate": 25_000_000})
+		if replaySamples == 0 || replayPeak < 25_000_000 {
+			t.Errorf("replay commit target missed: peak %.0f/s across %d active samples", replayPeak, replaySamples)
+		}
 	}
 	wg.Wait()
 	select {

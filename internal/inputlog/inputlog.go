@@ -231,6 +231,7 @@ type Log struct {
 	appends      chan appendRequest
 	appendPin    *Position
 	appendErr    error
+	appendTrace  appendTrace
 	attaches     chan sourceAttachment
 	appendStates chan appendStateRequest
 	stop         chan struct{}

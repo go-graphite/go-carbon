@@ -18,6 +18,7 @@ type AppendReceipt struct {
 type appendRequest struct {
 	batches [partitions]*Batch
 	reply   chan appendReply
+	queued  time.Time
 }
 type appendReply struct {
 	receipt AppendReceipt
@@ -100,7 +101,7 @@ func (l *Log) AppendGroup(batches [partitions]*Batch) (AppendReceipt, error) {
 
 	reply := make(chan appendReply, 1)
 	select {
-	case l.appends <- appendRequest{batches: batches, reply: reply}:
+	case l.appends <- appendRequest{batches: batches, reply: reply, queued: time.Now()}:
 		r := <-reply
 		return r.receipt, r.err
 	case <-l.done:
@@ -126,6 +127,7 @@ func validateAppendBatch(batch *Batch) (int, error) {
 }
 
 func (l *Log) appendCycle(first appendRequest) {
+	admitted := time.Now()
 	requests := []appendRequest{first}
 	// Requests borrow caller-owned buffers. Bound each group; excess callers
 	// wait on the unbuffered channel without copying points into another spool.
@@ -138,6 +140,7 @@ Drain:
 			break Drain
 		}
 	}
+	encodeStart, encodeEnd, syncEnd := time.Time{}, time.Time{}, time.Time{}
 	err := l.appendErr
 	var receipt AppendReceipt
 	if err == nil {
@@ -152,9 +155,12 @@ Drain:
 			l.appendPin = &Position{Segment: seq, Offset: offset}
 		}
 		at := time.Now()
+		encodeStart = at
 		l.encodeAppends(seq, requests)
 		l.total.appendEncodeNanos.Add(time.Since(at).Nanoseconds())
+		encodeEnd = time.Now()
 		err = l.write(gen, seq)
+		syncEnd = time.Now()
 		if err == nil {
 			receipt = AppendReceipt{Generation: gen, Tail: Position{Segment: l.active.seq, Offset: l.active.end}, Salt: l.active.salt}
 		}
@@ -163,6 +169,18 @@ Drain:
 	// received no durability acknowledgment and the underlying write may be torn.
 	if err != nil {
 		l.appendErr = err
+	}
+	if l.appendTrace.enabled.Load() {
+		event := &AppendEvent{Admitted: admitted.UnixNano(), EncodeStart: encodeStart.UnixNano(), EncodeEnd: encodeEnd.UnixNano(), Synced: syncEnd.UnixNano(), Requests: len(requests)}
+		for _, r := range requests {
+			event.Queued = append(event.Queued, r.queued.UnixNano())
+			for _, b := range r.batches {
+				if b != nil {
+					event.Points += b.Len()
+				}
+			}
+		}
+		l.appendTrace.events[l.appendTrace.next.Add(1)%uint64(len(l.appendTrace.events))].Store(event)
 	}
 	for _, request := range requests {
 		request.reply <- appendReply{receipt: receipt, err: err}
@@ -195,4 +213,31 @@ func (l *Log) encodeAppends(seq uint64, requests []appendRequest) {
 		})
 	}
 	wg.Wait()
+}
+
+// AppendEvent records one durable group on a common Unix nanosecond clock.
+// Synced precedes acknowledgement; Queued includes writer-channel admission.
+type AppendEvent struct {
+	Queued                                   []int64
+	Admitted, EncodeStart, EncodeEnd, Synced int64
+	Requests, Points                         int
+}
+type appendTrace struct {
+	enabled atomic.Bool
+	next    atomic.Uint64
+	events  [4096]atomic.Pointer[AppendEvent]
+}
+
+// TraceAppends enables a bounded diagnostic ring; call before offering load.
+func (l *Log) TraceAppends() { l.appendTrace.enabled.Store(true) }
+
+// AppendEvents snapshots completed groups; order by Admitted when analysing.
+func (l *Log) AppendEvents() []AppendEvent {
+	var out []AppendEvent
+	for i := range l.appendTrace.events {
+		if e := l.appendTrace.events[i].Load(); e != nil {
+			out = append(out, *e)
+		}
+	}
+	return out
 }
