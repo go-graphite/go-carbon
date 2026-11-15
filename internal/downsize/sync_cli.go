@@ -270,7 +270,7 @@ func SyncMain(ctx context.Context, args []string) error {
 	backend := newSyncLiveBackend(c.live)
 	defer backend.client.CloseIdleConnections()
 	defer backend.m.client.CloseIdleConnections()
-	err = runSyncReady(ctx, &c.sync, c.ready, backend, func() error {
+	err = runSyncReadyPrepared(ctx, &c.sync, c.ready, backend, func() error {
 		streams := c.copy.streams
 		var sourceCapacity int
 		var target copyStatus
@@ -315,8 +315,8 @@ func SyncMain(ctx context.Context, args []string) error {
 		c.live.copyTemplate = &c.copy
 		backend.o = c.live
 		event("effective_config", map[string]any{"effective": c.sync.policy})
-		return c.run(ctx, backend)
-	})
+		return nil
+	}, func() error { return c.run(ctx, backend) })
 	event("sync_io", map[string]any{"timings": backend.syncTimings()})
 	if errors.Is(err, ErrSyncResidual) {
 		fmt.Fprintln(os.Stderr, err)

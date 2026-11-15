@@ -424,7 +424,11 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		j.progress.RepairFailedNames = int64(failedNames)
 		j.mu.Unlock()
 		progressErr = ErrSyncResidual
-		if jerr := j.append(syncRow{Kind: "verification-incomplete", Round: s.verificationBase + s.sum.Rounds}); jerr != nil {
+		var names []string
+		for _, r := range s.sum.residual {
+			names = append(names, r.Name)
+		}
+		if jerr := j.append(syncRow{Kind: "verification-incomplete", Round: s.verificationBase + s.sum.Rounds, Selected: names, SelectionComplete: true}); jerr != nil {
 			err = errors.Join(err, jerr)
 		}
 	}
@@ -446,6 +450,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 // of the stores. Interrupted attempts retain their current round namespace.
 func (s *syncer) prepareVerificationRetry() error {
 	maxRound, pending, hasRetry := 0, false, false
+	var terminal syncRow
 	for _, r := range s.j.rows {
 		if r.Kind == "verified" || r.Kind == "verification-incomplete" || r.Kind == "copied" && r.Phase == "fill" {
 			maxRound = max(maxRound, r.Round)
@@ -453,6 +458,7 @@ func (s *syncer) prepareVerificationRetry() error {
 		switch r.Kind {
 		case "verification-incomplete":
 			pending = true
+			terminal = r
 		case "verification-retry":
 			s.verificationBase, pending, hasRetry = r.Round, false, true
 		}
@@ -474,7 +480,7 @@ func (s *syncer) prepareVerificationRetry() error {
 	}
 	if pending && maxRound > 0 {
 		s.verificationBase = maxRound
-		if err := s.j.append(syncRow{Kind: "verification-retry", Round: maxRound}); err != nil {
+		if err := s.j.append(syncRow{Kind: "verification-retry", Round: maxRound, Selected: terminal.Selected, SelectionComplete: terminal.SelectionComplete}); err != nil {
 			return err
 		}
 		event("sync_verification_retry", map[string]any{"first_round": maxRound + 1})
@@ -689,15 +695,19 @@ type syncKey struct{ name, source string }
 // verifyAndFill runs verify/fill rounds. Round 1 verifies every name present
 // on the target and on at least one source; later rounds only names filled
 // or not yet indexed in the previous round. A mutation frontier checks metadata
-// for the whole catalog each round, reading data only for dirty names.
+// for the whole catalog each full-history round, reading data only for dirty
+// names. Closed windows retain their completed proof and only recheck repairs.
 func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
+	set, scopedResume, err := s.windowResumeSet()
+	if err != nil {
+		return err
+	}
 	if err = s.openFrontier(ctx); err != nil {
 		return err
 	}
 	if s.frontier != nil {
 		defer func() { err = errors.Join(err, s.frontier.file.Sync(), s.frontier.file.Close()) }()
 	}
-	var set []string // rounds after the first: the names to re-verify
 	filledBefore := map[syncKey]bool{}
 	failedAttempts := map[syncKey]int{}
 	retryFailed := false
@@ -710,7 +720,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	for round := 1; ; round++ {
 		s.sum.Rounds = round
 		names := s.unionSource()
-		if round > 1 && s.frontier == nil {
+		if (round > 1 && (s.frontier == nil || s.windowOnly())) || (round == 1 && scopedResume) {
 			if names, err = s.setSource(set); err != nil {
 				return err
 			}
@@ -1034,7 +1044,7 @@ feed:
 			break
 		}
 		fed += len(chunk.names)
-		if r, ok := done[chunk.names[0]]; s.frontier == nil && ok && r.Last == chunk.names[len(chunk.names)-1] {
+		if r, ok := done[chunk.names[0]]; s.frontier == nil && ok && r.Names == len(chunk.names) && r.Last == chunk.names[len(chunk.names)-1] {
 			s.prog.replayed.Add(int64(r.Names))
 			collect(r)
 			resumed += len(chunk.names)
