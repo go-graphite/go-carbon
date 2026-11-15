@@ -319,6 +319,7 @@ func BenchmarkClassicRollupProductionDensity(b *testing.B) {
 	}
 	var ids atomic.Uint64
 	b.ResetTimer()
+	ioStart := sealProcessWritten()
 	start := atomicCPU()
 	b.RunParallel(func(pb *testing.PB) {
 		id := int(ids.Add(1)) - 1
@@ -350,7 +351,9 @@ func BenchmarkClassicRollupProductionDensity(b *testing.B) {
 	}
 	cpu := atomicCPU() - start
 	b.StopTimer()
+	written := sealProcessWritten() - ioStart
 	points := float64(b.N * density)
+	b.ReportMetric(float64(written)/points, "written-B/point")
 	b.ReportMetric(points/b.Elapsed().Seconds(), "points/s")
 	b.ReportMetric(float64(cpu)/points, "cpu-ns/point")
 }

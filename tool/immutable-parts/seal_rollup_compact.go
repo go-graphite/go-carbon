@@ -128,7 +128,11 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 	}
 	slices.Sort(ids)
 	var data, meta []coreKV
-	configs := make(map[uint64]sealrollup.Config, len(ids))
+	type plannedConfig struct {
+		config  sealrollup.Config
+		records int
+	}
+	configs := make(map[uint64]plannedConfig, len(ids))
 	frontiers := make(map[uint64]sealrollup.Frontier, len(ids))
 	var scratch []sealrollup.Sample
 	var decoder compactRollupHead
@@ -209,7 +213,7 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		if e != nil {
 			return plan, e
 		}
-		configs[id], frontiers[id] = cfg, p.Next
+		configs[id], frontiers[id] = plannedConfig{cfg, len(p.Records)}, p.Next
 		// Records are ordered by archive/slot. Encode their timestamps, exact
 		// IEEE bits and individual source orders directly, without row slices.
 		for lo := 0; lo < len(p.Records); {
@@ -259,7 +263,8 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		for _, id := range ids {
 			s := o.state[id]
 			if s == nil {
-				s = &atomicRollupState{Config: configs[id], Slots: map[[2]int64]sealrollup.Sample{}}
+				cfg := configs[id]
+				s = &atomicRollupState{Config: cfg.config, Slots: make(map[[2]int64]sealrollup.Sample, cfg.records)}
 				s.index = sealrollup.NewSlots(s.Config.Archives)
 				o.state[id] = s
 			}

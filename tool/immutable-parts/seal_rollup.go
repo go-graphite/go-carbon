@@ -94,6 +94,9 @@ func rollupView(s *atomicRollupState) sealrollup.View {
 	if s == nil {
 		return nil
 	}
+	if s.index != nil {
+		return s.index.View
+	}
 	return func(a int, slot int64) (sealrollup.Sample, bool) {
 		p, ok := s.Slots[[2]int64{int64(a), slot}]
 		return p, ok
