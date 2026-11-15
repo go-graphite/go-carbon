@@ -837,14 +837,24 @@ for a read-only qualification. See [installation and safety contract](../../inte
 
 ### Store restarts during sync
 
-`sync` waits through refused/reset connections, truncated responses, service
-unavailability, and store recovery/readiness errors until the operation succeeds
-or the caller cancels it. Restart waits use jittered backoff capped at 30 seconds;
-`--host-wait` does not expire a restart. Authorization, scope, and storage errors
-still fail. The wait is logged at most once per minute and exposed as
-`waiting_for_store` in `progress.json` and the Graphite progress phase.
+`sync` waits through refused/reset connections, truncated responses, HTTP
+502/503/504 (including source errors forwarded by native pulls), and store
+recovery/readiness errors during copy, verification, fill and final READY checks.
+Restart waits use jittered exponential backoff capped at 30 seconds and have no
+time limit by default; `--host-wait` remains the admission busy budget.
+Authorization, invalid data, consistency and storage failures still fail.
 
 Native snapshot pins lost during restart are replaced, while durable range
 receipts and discovery/verification cursors retain the original journal identity.
 After stopping the client, use `storectl sync --resume STATE_DIRECTORY` to load its
 saved settings. Keep that directory and any adopted legacy copy journal.
+
+Use `storectl sync --resume STATE --timeout 2h` to bound the whole invocation,
+including restart waits, or `--timeout 0` to remove a saved deadline on resume.
+Cancellation keeps durable progress for the next `--resume`.
+
+Rate-limited WARN events report retry attempts and waiting seconds. Graphite
+exports `store_retries`, `store_wait_seconds` (wall time with at least one pending
+restart wait), and `waiting_for_store` under the existing run prefix, including
+capacity probes and READY read-back before/after the main transfer phases.
+The main transfer's `progress.json` also exposes `waiting_for_store`.

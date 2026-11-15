@@ -18,6 +18,18 @@ import (
 // Installed only by storectl before workers start; guarded by outputMu.
 var progressObserver func(string, progressSnapshot)
 
+// Retry observations also cover phases without a sync progress-file loop,
+// including initial capacity probes and final READY read-back.
+var storeWaitObserver func(int64, bool)
+
+func observeStoreWait(delta int64, retry bool) {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	if storeWaitObserver != nil {
+		storeWaitObserver(delta, retry)
+	}
+}
+
 // MainWithMetrics exports controller progress through a local Graphite receiver.
 // Delivery is bounded and never changes the transfer result or retry policy.
 func MainWithMetrics(args []string, version string) error {
@@ -48,6 +60,7 @@ func MainWithMetrics(args []string, version string) error {
 	}
 	outputMu.Lock()
 	progressObserver = p.observe
+	storeWaitObserver = p.observeStoreWait
 	outputMu.Unlock()
 	stop, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -67,6 +80,7 @@ func MainWithMetrics(args []string, version string) error {
 	defer func() {
 		outputMu.Lock()
 		progressObserver = nil
+		storeWaitObserver = nil
 		outputMu.Unlock()
 		close(stop)
 		<-stopped
@@ -227,6 +241,9 @@ type progressMetrics struct {
 	active, done, total, rate             float64
 	freshDone                             float64
 	freshDoneAvailable                    float64
+	storeRetries, storeWaiting            int64
+	storeWaitSeconds                      float64
+	storeWaitStarted                      time.Time
 	started                               float64
 	path, lastSentPhase                   string
 	paths                                 map[string]bool
@@ -234,6 +251,21 @@ type progressMetrics struct {
 	code, round                           int
 	samples                               []progressMetricSample
 	version, lastSentVersion, versionFile string
+}
+
+func (p *progressMetrics) observeStoreWait(delta int64, retry bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if retry {
+		p.storeRetries++
+	}
+	if p.storeWaiting == 0 && delta > 0 {
+		p.storeWaitStarted = time.Now()
+	}
+	p.storeWaiting += delta
+	if p.storeWaiting == 0 && delta < 0 {
+		p.storeWaitSeconds += time.Since(p.storeWaitStarted).Seconds()
+	}
 }
 
 func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
@@ -291,6 +323,11 @@ func (p *progressMetrics) send() {
 	eta := p.eta(at)
 	code, round := p.code, p.round
 	freshDone, freshAvailable, started := p.freshDone, p.freshDoneAvailable, p.started
+	retries, waiting, waitSeconds := p.storeRetries, float64(0), p.storeWaitSeconds
+	if p.storeWaiting > 0 {
+		waiting = 1
+		waitSeconds += at.Sub(p.storeWaitStarted).Seconds()
+	}
 	p.mu.Unlock()
 	// Fixed metric names; the run identity distinguishes simultaneous controllers.
 	// A timestamp heartbeat lets dashboards exclude stopped/abandoned runs.
@@ -308,7 +345,7 @@ func (p *progressMetrics) send() {
 	for _, v := range []struct {
 		name  string
 		value float64
-	}{{"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
+	}{{"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
 	}
 	if p.version != "" {

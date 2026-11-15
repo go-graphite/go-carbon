@@ -36,13 +36,16 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 	}()
 	p := &progressMetrics{addr: listener.Addr().String(), prefix: "tools.storectl.runner.run.sync", phase: "starting", active: 1, started: 123.5}
 	p.version, p.lastSentVersion = "0123456789ab", "fedcba987654"
+	p.observeStoreWait(1, true)
+	p.observeStoreWait(0, true)
+	p.storeWaitStarted = time.Now().Add(-time.Second)
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
 		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 17
+		count := 20
 		if index == 0 {
 			count++
 		}
@@ -58,6 +61,9 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 				t.Fatal("missing Graphite sample")
 			}
 		}
+		if got[p.prefix+".store_retries"] != "2" || got[p.prefix+".waiting_for_store"] != "1" || got[p.prefix+".store_wait_seconds"] == "0" {
+			t.Fatal("missing restart metrics", got)
+		}
 		if got[p.prefix+".process_start_time_seconds"] != "123.5" || got[p.prefix+".client.0123456789ab.active"] != "1" {
 			t.Fatal(got)
 		}
@@ -69,8 +75,12 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 			t.Fatal(got)
 		}
 	}
+	p.observeStoreWait(-1, false)
+	if p.storeWaiting != 0 || p.storeWaitSeconds < 1 {
+		t.Fatal("wait duration lost", p.storeWaitSeconds)
+	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 17; i++ {
+	for i := 0; i < 20; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {

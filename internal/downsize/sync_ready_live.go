@@ -133,7 +133,16 @@ func (b *syncLiveBackend) Policies(ctx context.Context, store string, names []st
 	}
 	return out, nil
 }
-func (b *syncLiveBackend) Readback(ctx context.Context, base, name string, from, until int64) (syncSeries, error) {
+func (b *syncLiveBackend) Readback(ctx context.Context, base, name string, from, until int64) (out syncSeries, err error) {
+	err = b.wait(ctx, "ready readback", base, func() error {
+		var e error
+		out, e = b.readbackOnce(ctx, base, name, from, until)
+		return e
+	})
+	return out, err
+}
+
+func (b *syncLiveBackend) readbackOnce(ctx context.Context, base, name string, from, until int64) (syncSeries, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return syncSeries{}, err
@@ -157,7 +166,7 @@ func (b *syncLiveBackend) Readback(ctx context.Context, base, name string, from,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return syncSeries{}, fmt.Errorf("readback HTTP %d", resp.StatusCode)
+		return syncSeries{}, &syncHTTPError{resp.StatusCode, "readback"}
 	}
 	var rows []struct {
 		Target     string        `json:"target"`
