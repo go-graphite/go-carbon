@@ -36,13 +36,27 @@ The producer follows a fixed clock in 100 ms windows, independent of write
 completion. Every write has a deadline at the end of that window. Missing a
 write deadline fails; reducing load when the consumer blocks is forbidden.
 Every second the evidence records offered, sent, received and committed points,
-direct state, relog count and write errors. Every sample requires intake and
+direct state, historical/live replay, journal bytes/syncs, relog count, write
+errors and append p99 latency. The p99 is the upper bound of a power-of-two
+nanosecond histogram over durable AppendGroup calls, excluding decode and
+admission wait; it is also exported as
+`startup_capture_operation_p99_seconds{operation="append"}`. Inventory records
+give the historical point count before live traffic starts. Every sample requires intake and
 sent >= offered, zero relog/errors/pause, and, after direct, commits keeping up
 with intake. Completion requires direct, an empty cache, commits >= total
 intake, and actual startup capture. Every stored name, archive retention,
 timestamp and IEEE value bit is hashed and compared across the two paths; an
 empty live result fails. A result is qualified only when **both trials pass**
 and the final evidence verdict is `PASS`.
+
+Both paths are attempted even if the first fails. Each path stops at its first
+failed threshold; an aborted trial is not a completed 600-second measurement.
+Selecting only one subtest yields `INCOMPLETE_NOT_QUALIFIED`, never `PASS`.
+Retain the JSONL and CPU/resource profiles for failures. A standalone test
+binary needs the repository's `carbon/testdata/handoff-probes` directory; the
+load gate does not use the successor probes, so setting
+`GRAPHITE_TEST_HANDOFF_SUCCESSOR_DIR` to an existing private directory can skip
+that unrelated TestMain warmup.
 
 A small driver check is available on a development machine:
 
