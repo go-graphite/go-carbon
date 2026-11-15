@@ -4,12 +4,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 )
 
 // censusReader presents a single journal partition as an unchanged logical

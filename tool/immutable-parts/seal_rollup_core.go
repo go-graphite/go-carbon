@@ -109,7 +109,8 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 	if count != len(in.Rows) {
 		return plan, errors.New("rollup/raw row count mismatch")
 	}
-	var data, meta []coreKV
+	data := make([]coreKV, 0, count+len(ids))
+	meta := make([]coreKV, 0, 2*len(ids)+1)
 	plans := make(map[uint64]sealrollup.SealPlan, len(ids))
 	preparedByID := make(map[uint64]*sealrollup.Prepared, len(ids))
 	for _, b := range in.Batches {

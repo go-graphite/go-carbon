@@ -53,22 +53,29 @@ type rollupKV struct{ key, value []byte }
 var atomicRollupPartKey = []byte{255, 'r'}
 
 func rollupMetaKey(kind byte, id uint64) []byte {
-	return binary.BigEndian.AppendUint64([]byte{255, kind}, id)
+	b := make([]byte, 10)
+	b[0], b[1] = 255, kind
+	binary.BigEndian.PutUint64(b[2:], id)
+	return b
 }
 func rollupDataKey(part, id uint64, kind byte, a uint32, slot uint64) []byte {
-	b := binary.BigEndian.AppendUint64([]byte{'S', 1}, part)
-	b = binary.BigEndian.AppendUint64(b, id)
-	b = append(b, kind)
-	b = binary.BigEndian.AppendUint32(b, a)
-	return binary.BigEndian.AppendUint64(b, slot)
+	b := make([]byte, 31)
+	b[0], b[1], b[18] = 'S', 1, kind
+	binary.BigEndian.PutUint64(b[2:], part)
+	binary.BigEndian.PutUint64(b[10:], id)
+	binary.BigEndian.PutUint32(b[19:], a)
+	binary.BigEndian.PutUint64(b[23:], slot)
+	return b
 }
 func encodeRollupBatch(b sealrollup.Batch) []byte {
-	out := binary.BigEndian.AppendUint64(nil, b.Order)
-	out = binary.BigEndian.AppendUint64(out, uint64(b.Now))
-	for _, p := range b.Points {
-		out = binary.BigEndian.AppendUint64(out, uint64(p.Time))
-		out = binary.BigEndian.AppendUint64(out, p.Bits)
-		out = binary.BigEndian.AppendUint64(out, p.Sequence)
+	out := make([]byte, 16+24*len(b.Points))
+	binary.BigEndian.PutUint64(out, b.Order)
+	binary.BigEndian.PutUint64(out[8:], uint64(b.Now))
+	for i, p := range b.Points {
+		at := 16 + 24*i
+		binary.BigEndian.PutUint64(out[at:], uint64(p.Time))
+		binary.BigEndian.PutUint64(out[at+8:], p.Bits)
+		binary.BigEndian.PutUint64(out[at+16:], p.Sequence)
 	}
 	return out
 }
