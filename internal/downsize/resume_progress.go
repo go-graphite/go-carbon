@@ -100,24 +100,24 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
-	WaitingForStore bool                 `json:"waiting_for_store"`
-	rateSet         bool                 // controller supplied fresh work counter
-	rateDone        int64                // excludes journal replay and discovery
-	Done            int64                `json:"done"`
-	Total           int64                `json:"total"`
-	Effective       *effectiveSyncPolicy `json:"effective,omitempty"`
-	Phase           string               `json:"phase"`
-	Round           int                  `json:"round"`
-	Cursors         map[string]string    `json:"cursors"`
-	Discovered      int64                `json:"names_discovered"`
-	Verified        int64                `json:"names_verified"`
-	Filled          int64                `json:"names_filled"`
-	Copied          int64                `json:"names_copied"`
-	Holes           int64                `json:"holes"` // cumulative hole point observations across rounds
-	Rate            float64              `json:"names_per_second"`
-	Updated         time.Time            `json:"last_update"`
-	Status          string               `json:"status"`
-	Error           string               `json:"error,omitempty"`
+	WaitingForStore    bool                 `json:"waiting_for_store"`
+	FreshDoneAvailable bool                 `json:"fresh_done_available"` // controller supplied fresh work counter
+	FreshDone          int64                `json:"fresh_done"`           // excludes journal replay and discovery
+	Done               int64                `json:"done"`
+	Total              int64                `json:"total"`
+	Effective          *effectiveSyncPolicy `json:"effective,omitempty"`
+	Phase              string               `json:"phase"`
+	Round              int                  `json:"round"`
+	Cursors            map[string]string    `json:"cursors"`
+	Discovered         int64                `json:"names_discovered"`
+	Verified           int64                `json:"names_verified"`
+	Filled             int64                `json:"names_filled"`
+	Copied             int64                `json:"names_copied"`
+	Holes              int64                `json:"holes"` // cumulative hole point observations across rounds
+	Rate               float64              `json:"names_per_second"`
+	Updated            time.Time            `json:"last_update"`
+	Status             string               `json:"status"`
+	Error              string               `json:"error,omitempty"`
 }
 
 func (p *progressSnapshot) apply(r syncRow) {
@@ -225,8 +225,8 @@ type progressRate struct {
 
 func (r *progressRate) observe(now time.Time, p progressSnapshot) float64 {
 	done := float64(p.Done)
-	if p.rateSet {
-		done = float64(p.rateDone)
+	if p.FreshDoneAvailable {
+		done = float64(p.FreshDone)
 	}
 	if r.phase != p.Phase || r.round != p.Round || len(r.samples) > 0 && done < r.samples[len(r.samples)-1].done {
 		r.samples = nil

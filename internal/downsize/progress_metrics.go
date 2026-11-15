@@ -30,7 +30,7 @@ func MainWithMetrics(args []string, version string) error {
 	if state == "" {
 		return Main(args)
 	}
-	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1, version: progressVersion(version)}
+	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1, version: progressVersion(version), started: float64(time.Now().UnixNano()) / 1e9}
 	if root, err := os.UserCacheDir(); err == nil {
 		p.versionFile = filepath.Join(root, "storectl", "metric-versions", fmt.Sprintf("%x", sha256.Sum256([]byte(prefix))))
 		if data, err := os.ReadFile(p.versionFile); err == nil {
@@ -225,6 +225,9 @@ type progressMetrics struct {
 	sendMu                                sync.Mutex
 	addr, prefix, phase                   string
 	active, done, total, rate             float64
+	freshDone                             float64
+	freshDoneAvailable                    float64
+	started                               float64
 	path, lastSentPhase                   string
 	paths                                 map[string]bool
 	warned                                bool
@@ -264,6 +267,10 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	}
 	p.path = path
 	p.done, p.total, p.rate = float64(snapshot.Done), float64(snapshot.Total), snapshot.Rate
+	p.freshDone, p.freshDoneAvailable = float64(snapshot.FreshDone), 0
+	if snapshot.FreshDoneAvailable {
+		p.freshDoneAvailable = 1
+	}
 	p.active = 0
 	if snapshot.Status == "running" {
 		p.active = 1
@@ -283,6 +290,7 @@ func (p *progressMetrics) send() {
 	at := time.Now()
 	eta := p.eta(at)
 	code, round := p.code, p.round
+	freshDone, freshAvailable, started := p.freshDone, p.freshDoneAvailable, p.started
 	p.mu.Unlock()
 	// Fixed metric names; the run identity distinguishes simultaneous controllers.
 	// A timestamp heartbeat lets dashboards exclude stopped/abandoned runs.
@@ -294,13 +302,13 @@ func (p *progressMetrics) send() {
 	for _, v := range []struct {
 		name  string
 		value float64
-	}{{"active", active}, {"done", done}, {"total", total}, {"names_per_second", rate}, {"heartbeat", float64(now)}} {
+	}{{"fresh_done", freshDone}, {"active", active}, {"done", done}, {"total", total}, {"names_per_second", rate}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s.%s %g %d\n", p.prefix, phase, v.name, v.value, now)
 	}
 	for _, v := range []struct {
 		name  string
 		value float64
-	}{{"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
+	}{{"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
 	}
 	if p.version != "" {

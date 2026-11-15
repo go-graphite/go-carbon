@@ -383,10 +383,10 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		accounted := s.prog.done.Load() + s.prog.copyActive
 		snap.Done = max(accounted, s.prog.durableFloor)
 		snap.Total = int64(s.prog.total)
-		snap.rateSet = true
-		snap.rateDone = max(0, accounted-s.prog.replayed.Load())
+		snap.FreshDoneAvailable = true
+		snap.FreshDone = max(0, accounted-s.prog.replayed.Load())
 		if s.prog.copyObserved {
-			snap.rateDone = s.prog.copyFresh
+			snap.FreshDone = s.prog.copyFresh
 		}
 		snap.Rate = 0
 		if elapsed := time.Since(s.prog.started).Seconds(); elapsed > 0 {

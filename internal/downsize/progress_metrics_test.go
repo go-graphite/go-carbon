@@ -34,15 +34,15 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 			c.Close()
 		}
 	}()
-	p := &progressMetrics{addr: listener.Addr().String(), prefix: "tools.storectl.runner.run.sync", phase: "starting", active: 1}
+	p := &progressMetrics{addr: listener.Addr().String(), prefix: "tools.storectl.runner.run.sync", phase: "starting", active: 1, started: 123.5}
 	p.version, p.lastSentVersion = "0123456789ab", "fedcba987654"
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
-		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running"})
+		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 13
+		count := 17
 		if index == 0 {
 			count++
 		}
@@ -58,19 +58,19 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 				t.Fatal("missing Graphite sample")
 			}
 		}
-		if got[p.prefix+".client.0123456789ab.active"] != "1" {
+		if got[p.prefix+".process_start_time_seconds"] != "123.5" || got[p.prefix+".client.0123456789ab.active"] != "1" {
 			t.Fatal(got)
 		}
 		if index == 0 && got[p.prefix+".client.fedcba987654.active"] != "0" {
 			t.Fatal(got)
 		}
 		prefix := p.prefix + "." + metricToken(phase) + "."
-		if got[prefix+"done"] != "12" || got[prefix+"total"] != "20" || got[prefix+"names_per_second"] != "3.5" || got[prefix+"active"] != "1" {
+		if got[prefix+"fresh_done"] != "5" || got[p.prefix+".phase_fresh_done"] != "5" || got[p.prefix+".fresh_done_available"] != "1" || got[prefix+"done"] != "12" || got[prefix+"total"] != "20" || got[prefix+"names_per_second"] != "3.5" || got[prefix+"active"] != "1" {
 			t.Fatal(got)
 		}
 	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 13; i++ {
+	for i := 0; i < 17; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {
@@ -101,7 +101,7 @@ func TestProgressMetricsUsesProgressFileSnapshot(t *testing.T) {
 	outputMu.Unlock()
 	defer func() { outputMu.Lock(); progressObserver = nil; outputMu.Unlock() }()
 	stop := startProgressFile(context.Background(), path, func() progressSnapshot {
-		return progressSnapshot{Phase: "discover", Done: 15, Total: 30, Discovered: 15}
+		return progressSnapshot{Phase: "copy", Done: 1000015, Total: 2000000, FreshDone: 15, FreshDoneAvailable: true}
 	}, nil)
 	if err := stop(context.Canceled); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestProgressMetricsUsesProgressFileSnapshot(t *testing.T) {
 	if !reflect.DeepEqual(stored, observed) {
 		t.Fatalf("JSON %+v differs from Graphite snapshot %+v", stored, observed)
 	}
-	if stored.Status != "interrupted" || stored.Done != 15 || stored.Total != 30 {
+	if stored.Status != "interrupted" || stored.Done != 1000015 || stored.Total != 2000000 || stored.FreshDone != 15 || !stored.FreshDoneAvailable {
 		t.Fatal(stored)
 	}
 }
