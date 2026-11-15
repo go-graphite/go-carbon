@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -16,6 +18,14 @@ const testHandoffSuccessorDir = "GRAPHITE_TEST_HANDOFF_SUCCESSOR_DIR"
 // Use persistent immutable stubs so macOS need not assess new executables
 // during a handoff. Isolated cases inherit the warmed paths and protocols.
 func TestMain(m *testing.M) {
+	cpus := min(runtime.GOMAXPROCS(0), 4)
+	if os.Getenv(isolatedTestCase) != "" {
+		// Four storage processes share the host with other builds. Keep their
+		// GC and worker schedulers from each claiming every available CPU.
+		cpus = min(cpus, 2)
+	}
+	runtime.GOMAXPROCS(cpus)
+	_ = os.Setenv("GOMAXPROCS", strconv.Itoa(cpus))
 	for key, value := range map[string]string{
 		"GRAPHITE_TEST_READ_PROTOCOL":        handoff.Protocol,
 		"GRAPHITE_TEST_INPUT_PROTOCOL":       handoff.InputProtocol,
@@ -50,5 +60,26 @@ func TestMain(m *testing.M) {
 		}
 		_ = os.Setenv(testHandoffSuccessorDir, dir)
 	}
-	os.Exit(m.Run())
+	var seedDir string
+	if os.Getenv(incrementalSeedEnv) == "" {
+		var err error
+		seedDir, err = os.MkdirTemp("", "carbon-test-seed-")
+		if err == nil {
+			seed := filepath.Join(seedDir, "seed.wsp")
+			err = buildIncrementalSeed(seed)
+			if err == nil {
+				err = os.Setenv(incrementalSeedEnv, seed)
+			}
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			_ = os.RemoveAll(seedDir)
+			os.Exit(1)
+		}
+	}
+	code := m.Run()
+	if seedDir != "" {
+		_ = os.RemoveAll(seedDir)
+	}
+	os.Exit(code)
 }

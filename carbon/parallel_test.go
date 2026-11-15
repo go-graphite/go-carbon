@@ -1,7 +1,6 @@
 package carbon
 
 import (
-	"context"
 	"flag"
 	"os"
 	"os/exec"
@@ -10,6 +9,10 @@ import (
 	"testing"
 	"time"
 )
+
+// Storage integration processes are memory intensive. Bound their fanout even
+// when the test binary inherits a large GOMAXPROCS or -test.parallel setting.
+var isolatedTestSlots = make(chan struct{}, 4)
 
 const isolatedTestCase = "GRAPHITE_TEST_ISOLATED_CASE"
 
@@ -31,31 +34,43 @@ func isolatedTestProcessSerial(t *testing.T) bool {
 func isolatedTestProcessMode(t *testing.T, parallel bool) bool {
 	t.Helper()
 	name := os.Getenv(isolatedTestCase)
-	if name == t.Name() || strings.HasPrefix(name, t.Name()+"/") || testing.CoverMode() != "" ||
+	if name == t.Name() || strings.HasPrefix(name, t.Name()+"/") || (name != "" && strings.HasPrefix(t.Name(), name+"/")) || testing.CoverMode() != "" ||
 		strings.Contains(flag.Lookup("test.run").Value.String(), "/") {
 		return false
 	}
 	if parallel {
 		t.Parallel()
+		isolatedTestSlots <- struct{}{}
+		defer func() { <-isolatedTestSlots }()
 	}
 	parts := strings.Split(t.Name(), "/")
 	for i := range parts {
 		parts[i] = "^" + regexp.QuoteMeta(parts[i]) + "$"
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer cancel()
 	args := []string{"-test.run=" + strings.Join(parts, "/"), "-test.v"}
+	if deadline, ok := t.Deadline(); ok {
+		args = append(args, "-test.timeout="+time.Until(deadline).String())
+	}
 	for _, name := range []string{"test.parallel", "test.short", "test.skip"} {
 		args = append(args, "-"+name+"="+flag.Lookup(name).Value.String())
 	}
-	cmd := exec.CommandContext(ctx, os.Args[0], args...)
+	// The package deadline bounds the process. Individual asynchronous waits
+	// observe their own progress; output volume is not a reliable heartbeat.
+	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
 	cmd.Env = append(os.Environ(), isolatedTestCase+"="+t.Name())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("isolated case: %v\n%s", err, out)
-	}
-	if testing.Verbose() {
-		t.Logf("%s", out)
+	// Stream phase and failure output while the child is alive. Buffering it
+	// until Wait returns loses the child's diagnostics if the package expires.
+	cmd.Stdout = testProcessOutput{t}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("isolated case: %v", err)
 	}
 	return true
+}
+
+type testProcessOutput struct{ t *testing.T }
+
+func (out testProcessOutput) Write(p []byte) (int, error) {
+	out.t.Logf("%s", p)
+	return len(p), nil
 }

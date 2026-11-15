@@ -29,6 +29,7 @@ func batchReplayOwner() *startupInput {
 }
 
 func TestCaptureBatchStoredDifferential(t *testing.T) {
+	t.Parallel() // Children own isolated processes in the bounded storage pool.
 	t.Run("legacy", func(t *testing.T) { captureStoredDifferential(t, false) })
 	t.Run("inputlog", func(t *testing.T) { captureStoredDifferential(t, true) })
 }
