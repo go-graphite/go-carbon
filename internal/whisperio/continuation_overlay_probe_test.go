@@ -143,6 +143,10 @@ func (t *referencedProbeTemplate) template(buckets bool) (string, int64, error) 
 // openReferencedProbe opens a private copy of a referenced store whose
 // memtable fills between two updates of a metric, as on a busy host.
 func openReferencedProbe(tb testing.TB, buckets bool) (*store.Store, *int64) {
+	return openReferencedProbeCodec(tb, buckets, &ContinuationCodec{ReuseBlockKeys: true})
+}
+
+func openReferencedProbeCodec(tb testing.TB, buckets bool, codec *ContinuationCodec) (*store.Store, *int64) {
 	tb.Helper()
 	index := 0
 	if buckets {
@@ -154,6 +158,7 @@ func openReferencedProbe(tb testing.TB, buckets bool) (*store.Store, *int64) {
 	}
 	clock := now
 	dir, options := levelsBenchOptions(tb.TempDir(), buckets, func() time.Time { return time.Unix(clock+1, 0) }, true)
+	options.Continuation = codec
 	options.CacheSize, options.MemTableSize, options.L0CompactionThreshold = 64<<20, 4<<20, 8
 	if err := os.CopyFS(dir, os.DirFS(template)); err != nil {
 		tb.Fatal(err)
