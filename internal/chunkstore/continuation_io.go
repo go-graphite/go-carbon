@@ -448,7 +448,7 @@ func (io *continuationIO) readStore(key []byte, probe bool) ([]byte, error) {
 	if io.iterBorrowed {
 		// Prewarm owns a bounded, ID-sorted batch. Keep its level iterators
 		// and decoded indexes positioned instead of doing a fresh bloom probe.
-		found = iter.SeekGE(full)
+		found = seekContinuationKey(iter, full)
 	} else {
 		found = iter.SeekPrefixGE(full)
 	}
@@ -459,6 +459,27 @@ func (io *continuationIO) readStore(key []byte, probe bool) ([]byte, error) {
 		return nil, err
 	}
 	return nil, ErrNotFound
+}
+
+// Immutable batch readers often request consecutive physical point groups.
+// Advance across an adjacent key without seeking every LSM level again. A gap,
+// backwards read or unrelated key still uses the ordinary seek. The caller
+// must compare the positioned key: advancing past an absent key is not a hit.
+func seekContinuationKey(iter *pebble.Iterator, key []byte) bool {
+	if iter.Valid() {
+		switch cmp := bytes.Compare(iter.Key(), key); {
+		case cmp == 0:
+			return true
+		case cmp < 0:
+			if !iter.Next() {
+				return false
+			}
+			if bytes.Compare(iter.Key(), key) >= 0 {
+				return true
+			}
+		}
+	}
+	return iter.SeekGE(key)
 }
 
 // lookup reads key with a fresh LSM lookup.
