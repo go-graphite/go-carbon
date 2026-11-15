@@ -67,8 +67,10 @@ const (
 )
 
 type coreRouter struct {
-	slots []coreDispatch
-	bytes atomic.Uint64
+	slots                       []coreDispatch
+	bytes                       atomic.Uint64
+	leaseWaitNS, leaseWaitCount atomic.Uint64
+	leaseWaiting                atomic.Bool
 }
 
 // The producer and consumer own write/read respectively. A byte quota limits
@@ -155,7 +157,10 @@ type coreOwner struct {
 	committed, parts, bytes      atomic.Uint64
 	sortNS, encodeNS, ingestNS   atomic.Uint64
 	syncNS, syncMaxNS, syncCalls atomic.Uint64
+	preallocateNS, fileWriteNS   atomic.Uint64
 	fileBuffer                   coreFileBuffer
+	bucketSort                   bool
+	sortScratch                  []row
 }
 type coreEngine struct {
 	owners  []*coreOwner
@@ -211,6 +216,8 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			return fail(err)
 		}
 		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
+		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1"
+		o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
 		e.owners = append(e.owners, o)
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
@@ -283,6 +290,13 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		router.slots = make([]coreDispatch, max(1, coreStreamBytes/(uint64(len(e.owners))*corePacketBytes)))
 	}
 	var d *coreDispatch
+	var waitStart time.Time
+	defer func() {
+		if !waitStart.IsZero() {
+			router.leaseWaitNS.Add(uint64(time.Since(waitStart)))
+			router.leaseWaiting.Store(false)
+		}
+	}()
 	for d == nil {
 		used := router.bytes.Load()
 		if used == 0 || (charge <= coreStreamBytes && used <= coreStreamBytes-charge) {
@@ -298,6 +312,11 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		if d != nil {
 			break
 		}
+		if waitStart.IsZero() {
+			waitStart = time.Now()
+			router.leaseWaitCount.Add(1)
+			router.leaseWaiting.Store(true)
+		}
 		for _, o := range e.owners {
 			select {
 			case <-o.dead:
@@ -306,6 +325,11 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 			}
 		}
 		time.Sleep(10 * time.Microsecond)
+	}
+	if !waitStart.IsZero() {
+		router.leaseWaitNS.Add(uint64(time.Since(waitStart)))
+		router.leaseWaiting.Store(false)
+		waitStart = time.Time{}
 	}
 	if len(d.parts) == 0 {
 		d.parts = make([][]row, e.cfg.Shards)
@@ -616,7 +640,11 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}
 	phaseStart := time.Now()
-	sortCoreRows(head, o.cfg.PartitionSeconds)
+	if o.bucketSort {
+		o.sortScratch = sortCoreRowsBucketed(head, o.cfg.PartitionSeconds, o.sortScratch)
+	} else {
+		sortCoreRows(head, o.cfg.PartitionSeconds)
+	}
 	o.sortNS.Add(uint64(time.Since(phaseStart)))
 	phaseStart = time.Now()
 	// Part-first data files are append-only within a time partition. Their

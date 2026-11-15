@@ -100,6 +100,41 @@ An optional snapshot hook publishes a detached head and Pebble snapshot; callers
 must release every pin before closing the engine. No application data mutex is
 shared with readers or producers. Pebble has its own internal synchronization.
 
+The offline core has two opt-in filesystem/CPU experiments. Neither changes the
+persisted configuration, keys, apply groups or final durable-ingest boundary:
+
+* `CORE_SST_PREALLOCATE=1` accumulates one encoded SST per owner, preallocates
+  its exact final length through the VFS, writes it, and performs the original
+  final sync before ingestion. The owner's encoded-buffer capacity is reused;
+  budget it in addition to its mutable head and admission queues. Platforms
+  whose VFS treats preallocation as a no-op still write and sync normally.
+* `CORE_BUCKET_SORT=1` groups the highest varying metric-ID byte before sorting
+  each group with the original comparator. A private scratch slice adds 32
+  bytes per head row. Mixed time partitions and ambiguous equal sort keys use
+  the original sort, including its exact value-bit tie behavior. The scratch
+  capacity is reused across seals.
+
+Both are disabled by default pending native stability/CPU measurements. Use
+fresh private directories and compare each option separately before combining:
+
+```sh
+python3 tool/immutable-parts/io_sweep.py --out /scratch/new-io-sweep
+CORE_SST_PREALLOCATE=1 python3 tool/immutable-parts/numa_bench.py \
+  --binary /absolute/path/immutable-parts --out /scratch/new-preallocate-trial \
+  --nodes '0:0-47,96-143' --producers 48 --owners 48 --dbs 48 \
+  --duration 120 --profiles
+```
+
+Adapt CPU IDs to actual topology and preflight/monitor colocated services. The
+fio sweep writes only fresh files below its output directory; a `STOP` file in
+that directory terminates its active fio process. Its end-of-stage mode syncs
+each file at the end; it does not issue a filesystem-wide sync or establish a
+single-sync seal protocol. CPU profiles are saved separately for each NUMA
+pipeline. Start records identify both experiment flags. Lease-credit wait
+seconds/count and the live waiting-producer gauge are distinct from edge-queue
+waits. Phase, preallocation and file-write seconds are overlapping wall times,
+not additive CPU costs; use CPU profiles for per-stage CPU attribution.
+
 Keys contain a time-partition prefix followed by canonical numeric metric ID,
 archive, block start, immutable part and block ordinal. IDs must come from an
 exact canonical-name catalogue: routing hashes IDs but does not replace identity

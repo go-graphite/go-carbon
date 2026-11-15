@@ -37,6 +37,8 @@ def main():
     parser.add_argument('--rate', type=int, default=300000000, help='aggregate')
     parser.add_argument('--max-rows', type=int, default=2097152)
     parser.add_argument('--settle', type=int, default=2)
+    parser.add_argument('--profiles', action='store_true',
+                        help='save one CPU profile per node in the trial directory')
     args = parser.parse_args()
     nodes = [item.split(':', 1) for item in args.nodes.split(';')]
     all_cpus = [cpu for _, mask in nodes for cpu in cpus(mask)]
@@ -59,6 +61,8 @@ def main():
                    str(args.max_rows), '-core-append-parts', '-core-duration',
                    str(args.duration) + 's', '-core-rate',
                    str(args.rate // len(nodes)), '-core-settle', str(args.settle) + 's']
+            if args.profiles:
+                cmd.extend(['-cpuprofile', str(args.out / (str(index) + '.cpu'))])
             output = (args.out / (str(index) + '.jsonl')).open('w')
             errors = (args.out / (str(index) + '.err')).open('w')
             child = subprocess.Popen(cmd, env=env, stdout=output, stderr=errors)

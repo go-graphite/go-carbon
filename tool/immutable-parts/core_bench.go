@@ -129,6 +129,18 @@ func coreReplayWithHook(journal, out string, cfg coreConfig, hook func(int, *peb
 }
 
 func coreSample(engine *coreEngine, stage string, start time.Time, offered uint64) map[string]any {
+	// Completed credit waits are separate from edge-queue waits. The live
+	// gauge also exposes a producer whose current wait has not completed yet.
+	var leaseWaitNS, leaseWaitCount uint64
+	var leaseWaiting int
+	for i := range engine.routers {
+		router := &engine.routers[i]
+		leaseWaitNS += router.leaseWaitNS.Load()
+		leaseWaitCount += router.leaseWaitCount.Load()
+		if router.leaseWaiting.Load() {
+			leaseWaiting++
+		}
+	}
 	runtimeSamples := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/gc/mark/assist:cpu-seconds"}, {Name: "/gc/scan/heap:bytes"}}
 	metrics.Read(runtimeSamples)
 	runtimeCounters := make(map[string]any, len(runtimeSamples))
@@ -140,7 +152,7 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 			runtimeCounters[sample.Name] = sample.Value.Uint64()
 		}
 	}
-	var syncNS, syncMaxNS, syncCalls uint64
+	var syncNS, syncMaxNS, syncCalls, preallocateNS, fileWriteNS uint64
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	var points, parts, bytes, debt, compacted uint64
@@ -156,6 +168,8 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 		syncNS += o.syncNS.Load()
 		syncMaxNS = max(syncMaxNS, o.syncMaxNS.Load())
 		syncCalls += o.syncCalls.Load()
+		preallocateNS += o.preallocateNS.Load()
+		fileWriteNS += o.fileWriteNS.Load()
 		m := o.db.Metrics()
 		debt += m.Compact.EstimatedDebt
 		for _, level := range m.Levels {
@@ -176,7 +190,7 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 		}
 		phases = append(phases, map[string]any{"owner": owner, "committed": o.committed.Load(), "sort_seconds": float64(o.sortNS.Load()) / 1e9, "encode_seconds": float64(o.encodeNS.Load()) / 1e9, "ingest_seconds": float64(o.ingestNS.Load()) / 1e9, "producer_queue_wait_seconds": float64(blocked) / 1e9})
 	}
-	return map[string]any{"runtime_counters": runtimeCounters, "sst_sync_seconds": float64(syncNS) / 1e9, "sst_sync_max_seconds": float64(syncMaxNS) / 1e9, "sst_sync_calls": syncCalls, "l0_sublevels": l0Sublevels, "read_amp": readAmp, "memtables": memtables, "memtable_bytes": memtableBytes, "flushes": flushes, "heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse, "total_alloc": memory.TotalAlloc, "num_gc": memory.NumGC, "gc_pause_ns": memory.PauseTotalNs, "gc_cpu_fraction": memory.GCCPUFraction, "owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
+	return map[string]any{"sst_preallocate_seconds": float64(preallocateNS) / 1e9, "sst_preallocated_write_seconds": float64(fileWriteNS) / 1e9, "producer_lease_wait_seconds": float64(leaseWaitNS) / 1e9, "producer_lease_wait_count": leaseWaitCount, "producer_lease_waiting": leaseWaiting, "runtime_counters": runtimeCounters, "sst_sync_seconds": float64(syncNS) / 1e9, "sst_sync_max_seconds": float64(syncMaxNS) / 1e9, "sst_sync_calls": syncCalls, "l0_sublevels": l0Sublevels, "read_amp": readAmp, "memtables": memtables, "memtable_bytes": memtableBytes, "flushes": flushes, "heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse, "total_alloc": memory.TotalAlloc, "num_gc": memory.NumGC, "gc_pause_ns": memory.PauseTotalNs, "gc_cpu_fraction": memory.GCCPUFraction, "owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
 }
 
 // A bounded synthetic durability/LSM workload, explicitly not captured traffic.
@@ -217,7 +231,7 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 	}
 	start := time.Now()
 	baseline := procStats()
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "sst_preallocate": engine.owners[0].fileBuffer.preallocate, "bucket_sort": engine.owners[0].bucketSort, "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
 	done := make(chan error, cfg.Producers)
 	var offered atomic.Uint64
 	cursors := make([]atomic.Uint64, cfg.Producers)
