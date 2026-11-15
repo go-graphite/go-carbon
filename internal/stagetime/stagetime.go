@@ -1,15 +1,9 @@
-// Package stagetime accounts where persister updates spend their time.
-//
-// Every update's total wall time feeds a cumulative counter, a histogram and a
-// per-scrape maximum. One update in SampleEvery also records its stages:
-// route, lock wait, load, tail read, decode, encode, out-of-order merge,
-// commit and original-file write. Sampled stage counters are scaled by
-// SampleEvery, so rates estimate the full workload while the clock reads stay
-// off most updates. Counters are sums across workers: dividing a rate by the
-// worker count estimates the wall time a stage adds per worker.
-//
-// A sampled update also labels its goroutine with the running stage
-// ("persister_stage"), so CPU profiles taken on demand break down by stage.
+// Package stagetime partitions sampled persister batch wall time into exclusive
+// stages. Total uses the same sample as its parts, including Other, so they add
+// up. All stage seconds are scaled by SampleEvery. The duration histogram and
+// maximum still measure every batch, including failures and no-work attempts.
+// Queue, throttle and batch-collection waits precede this measurement.
+// Sampled goroutines carry a persister_stage CPU profile label.
 package stagetime
 
 import (
@@ -26,7 +20,7 @@ import (
 type Stage uint8
 
 const (
-	// Total is the whole update, timed for every update.
+	// Total is the whole sampled batch, including otherwise unlabelled work.
 	Total Stage = iota
 	// Route covers metadata lookups that choose the backend and metric state.
 	Route
@@ -47,17 +41,25 @@ const (
 	Commit
 	// OriginalWrite writes a metric still owned by its original whisper file.
 	OriginalWrite
+	// Publish installs committed state and releases mutation reservations/batches.
+	Publish
+	// Acknowledge confirms or requeues cached input and updates write statistics.
+	Acknowledge
+	// CachePop collects cached input after acquiring the persister locks.
+	CachePop
+	// Other covers time between named stages, including instrumentation overhead.
+	Other
 	// NumStages is the number of stages.
 	NumStages
 )
 
-var stageNames = [NumStages]string{"total", "route", "lock_wait", "load", "tail_read", "decode", "encode", "ooo_merge", "commit", "original_write"}
+var stageNames [NumStages]string = phasecpu.PersisterStageNames
 
 func (s Stage) String() string { return stageNames[s] }
 
 // SampleEvery is the fraction of updates (one in SampleEvery) whose stages are
 // timed and labelled.
-const SampleEvery = 8
+const SampleEvery = phasecpu.PersisterStageSampleEvery
 
 type counter struct {
 	nanos, calls atomic.Uint64
@@ -102,6 +104,7 @@ var UpdateBounds = func() []float64 {
 var (
 	updateBuckets [19]atomic.Uint64 // last bucket is +Inf
 	updateMax     atomic.Int64
+	updateSum     atomic.Uint64
 	sampleTick    atomic.Uint64
 )
 
@@ -117,7 +120,10 @@ func bucketOf(d time.Duration) int {
 // ObserveUpdate records one update's total wall time.
 func ObserveUpdate(d time.Duration) {
 	observeBenchmarkUpdate(d)
-	add(Total, d, 1)
+	counters[Total].calls.Add(1)
+	if d > 0 {
+		updateSum.Add(uint64(d))
+	}
 	updateBuckets[bucketOf(d)].Add(1)
 	for cur := updateMax.Load(); int64(d) > cur && !updateMax.CompareAndSwap(cur, int64(d)); cur = updateMax.Load() {
 	}
@@ -133,7 +139,7 @@ func UpdateHistogram() (buckets map[float64]uint64, count uint64, sum float64) {
 		buckets[bound] = cumulative
 	}
 	count = cumulative + updateBuckets[len(UpdateBounds)].Load()
-	return buckets, count, float64(counters[Total].nanos.Load()) / 1e9
+	return buckets, count, float64(updateSum.Load()) / 1e9
 }
 
 // TakeUpdateMax returns the slowest update since the previous call and resets
@@ -143,7 +149,10 @@ func TakeUpdateMax() time.Duration { return time.Duration(updateMax.Swap(0)) }
 // Update holds the stage timing of one sampled update. It belongs to the
 // goroutine running the update.
 type Update struct {
-	base     context.Context
+	begin   time.Time
+	elapsed [NumStages]time.Duration
+	visited uint16
+	context.Context
 	stage    Stage
 	started  time.Time
 	children time.Duration // nested time inside the running stage
@@ -163,12 +172,35 @@ type contextKey struct{}
 // carrying its stage timer; others return ctx and a nil timer, on which every
 // method is a no-op.
 func Start(ctx context.Context) (context.Context, *Update) {
+	return StartAt(ctx, time.Now())
+}
+
+// StartAt reuses the caller's batch start clock reading.
+func StartAt(ctx context.Context, start time.Time) (context.Context, *Update) {
+	return StartReusable(ctx, start, nil)
+}
+
+// StartReusable uses goroutine-owned scratch for the lifetime of this batch.
+// A worker may reuse it after FinishUpdate; no per-batch allocation is needed.
+func StartReusable(ctx context.Context, start time.Time, scratch *Update) (context.Context, *Update) {
 	if sampleTick.Add(1)%SampleEvery != 0 {
 		return ctx, nil
 	}
-	u := &Update{stage: NumStages, base: ctx}
-	setLabel(Total)
-	return context.WithValue(ctx, contextKey{}, u), u
+	u := scratch
+	if u == nil {
+		u = new(Update)
+	}
+	*u = Update{stage: Other, Context: ctx, begin: start, started: start}
+	setLabel(Other)
+	return u, u
+}
+
+// Value exposes the timer while preserving all other parent context values.
+func (u *Update) Value(key any) any {
+	if _, ok := key.(contextKey); ok {
+		return u
+	}
+	return u.Context.Value(key)
 }
 
 // FromContext returns the update timer carried by ctx, or nil.
@@ -179,23 +211,32 @@ func FromContext(ctx context.Context) *Update {
 
 // Enter ends the running stage, if any, and starts s.
 func (u *Update) Enter(s Stage) {
+	if u == nil || u.stage == s {
+		return
+	}
+	u.EnterAt(s, time.Now())
+}
+
+// EnterAt reuses an existing boundary clock read.
+func (u *Update) EnterAt(s Stage, now time.Time) {
 	if u == nil {
 		return
 	}
-	now := time.Now()
 	u.leave(now)
 	u.stage, u.started = s, now
 	setLabel(s)
 }
 
-// Leave ends the running stage; later work is in the update's total only.
+// Leave ends the running stage; subsequent work belongs to Other.
 func (u *Update) Leave() {
 	if u == nil {
 		return
 	}
-	u.leave(time.Now())
-	u.stage = NumStages
-	setLabel(Total)
+	now := time.Now()
+	u.leave(now)
+	u.stage = Other
+	u.started = now
+	setLabel(Other)
 }
 
 func (u *Update) leave(now time.Time) {
@@ -206,7 +247,8 @@ func (u *Update) leave(now time.Time) {
 	// under their own stages.
 	d := now.Sub(u.started) - u.children
 	u.children, u.depth = 0, 0
-	add(u.stage, d*SampleEvery, SampleEvery)
+	u.elapsed[u.stage] += d
+	u.visited |= 1 << u.stage
 }
 
 // Nested starts a read or encode issued during the decode stage, possibly
@@ -232,7 +274,8 @@ func (u *Update) Unnest(s Stage, start time.Time) {
 	u.depth--
 	f := u.frames[u.depth]
 	d := time.Since(f.start)
-	add(s, (d-f.children)*SampleEvery, SampleEvery)
+	u.elapsed[s] += d - f.children
+	u.visited |= 1 << s
 	enclosing := u.stage
 	if u.depth > 0 {
 		u.frames[u.depth-1].children += d
@@ -245,12 +288,41 @@ func (u *Update) Unnest(s Stage, start time.Time) {
 
 // Finish ends the update and clears its goroutine label.
 func (u *Update) Finish() {
-	if u == nil {
+	if u != nil {
+		u.finish(time.Now())
+	}
+}
+
+// FinishUpdate shares one final clock read between the partition and the exact
+// all-batch duration histogram. It also works for an unsampled (nil) timer.
+func (u *Update) FinishUpdate(start time.Time) {
+	end := time.Now()
+	if u != nil {
+		u.finish(end)
+	}
+	ObserveUpdate(end.Sub(start))
+}
+
+func (u *Update) finish(end time.Time) {
+	if u.stage == NumStages {
 		return
 	}
-	u.leave(time.Now())
+	u.leave(end)
+	// Exclusive stage intervals partition the same start/end as Total.
+	// No-work gaps remain Other rather than disappearing from the breakdown.
+	var accounted time.Duration
+	for s := Route; s < NumStages; s++ {
+		accounted += u.elapsed[s]
+	}
+	u.elapsed[Other] += end.Sub(u.begin) - accounted
+	for s := Route; s < NumStages; s++ {
+		if u.visited&(1<<s) != 0 || s == Other {
+			add(s, u.elapsed[s]*SampleEvery, SampleEvery)
+		}
+	}
+	counters[Total].nanos.Add(uint64(end.Sub(u.begin)) * SampleEvery)
 	u.stage = NumStages
-	pprof.SetGoroutineLabels(u.base)
+	pprof.SetGoroutineLabels(u.Context)
 }
 
 var labelContexts = func() [NumStages + 1]context.Context {

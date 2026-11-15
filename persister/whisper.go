@@ -527,14 +527,15 @@ func storeMutexIndex(metric string) uint64 {
 	return (helper.HashString(metric) >> 32) & (storeMutexCount - 1)
 }
 
-func (p *Whisper) store(metric string) {
+func (p *Whisper) store(metric string) { p.storeTimed(metric, nil) }
+
+func (p *Whisper) storeTimed(metric string, scratch *stagetime.Update) {
 	// Every writeout's total time is recorded; one in stagetime.SampleEvery
 	// also times its stages and labels its goroutine for CPU profiles.
 	start := time.Now()
-	ctx, timer := stagetime.Start(phasecpu.Context(phasecpu.Persister))
+	ctx, timer := stagetime.StartReusable(phasecpu.Context(phasecpu.Persister), start, scratch)
 	defer func() {
-		timer.Finish()
-		stagetime.ObserveUpdate(time.Since(start))
+		timer.FinishUpdate(start)
 	}()
 	timer.Enter(stagetime.LockWait)
 	// avoid concurrent store same metric
@@ -816,7 +817,8 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 func (p *Whisper) worker(exit chan bool) {
 	phasecpu.Set(phasecpu.Persister)
 	defer phasecpu.Set(phasecpu.Other)
-	storeFunc := p.store
+	var stageTimer stagetime.Update
+	storeFunc := func(metric string) { p.storeTimed(metric, &stageTimer) }
 	var doneCb func()
 	if p.mockStore != nil {
 		storeFunc, doneCb = p.mockStore()
@@ -898,7 +900,7 @@ LOOP:
 		if len(metrics) > 0 {
 			additional = metrics[1:]
 			if len(metrics) > 1 {
-				p.storeSharedBatch(metrics)
+				p.storeSharedBatchTimed(metrics, &stageTimer)
 			} else {
 				storeFunc(metric)
 			}

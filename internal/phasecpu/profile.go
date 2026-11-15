@@ -22,12 +22,13 @@ const MinInterval = time.Minute
 var owner sync.Mutex
 
 type Profiler struct {
-	buffer             bytes.Buffer
-	stop, done         chan struct{}
-	once               sync.Once
-	cpu, sampled       [numPhases]atomic.Uint64
-	windows, failures  atomic.Uint64
-	covered, accounted atomic.Uint64
+	buffer                 bytes.Buffer
+	stop, done             chan struct{}
+	once                   sync.Once
+	cpu, sampled           [numPhases]atomic.Uint64
+	stageCPU, stageSampled [len(PersisterStageNames)]atomic.Uint64
+	windows, failures      atomic.Uint64
+	covered, accounted     atomic.Uint64
 }
 
 // Start owns the process CPU profiler for one second per interval. Other CPU
@@ -88,7 +89,8 @@ func (p *Profiler) capture(interval, window time.Duration) {
 	timer.Stop()
 	elapsed := time.Since(started)
 	pprof.StopCPUProfile()
-	totals, err := decode(p.buffer.Bytes())
+	var stages [len(PersisterStageNames)]uint64
+	totals, err := decodeStages(p.buffer.Bytes(), &stages)
 	if err != nil {
 		p.failures.Add(1)
 		return
@@ -104,6 +106,10 @@ func (p *Profiler) capture(interval, window time.Duration) {
 	for phase, nanos := range totals {
 		p.sampled[phase].Add(nanos)
 		p.cpu[phase].Add(uint64(float64(nanos) * scale))
+	}
+	for stage, nanos := range stages {
+		p.stageSampled[stage].Add(nanos)
+		p.stageCPU[stage].Add(uint64(float64(nanos) * scale * PersisterStageSampleEvery))
 	}
 	p.covered.Add(uint64(elapsed))
 	if scale == 1 {
@@ -124,11 +130,18 @@ var (
 )
 
 func (*Profiler) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{cpuDesc, sampledDesc, windowsDesc, failuresDesc, coveredDesc, accountedDesc} {
+	for _, d := range []*prometheus.Desc{stageCPUDesc, stageSampledDesc, cpuDesc, sampledDesc, windowsDesc, failuresDesc, coveredDesc, accountedDesc} {
 		ch <- d
 	}
 }
 func (p *Profiler) Collect(ch chan<- prometheus.Metric) {
+	for stage, name := range PersisterStageNames {
+		if stage == 0 {
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(stageCPUDesc, prometheus.CounterValue, float64(p.stageCPU[stage].Load())/1e9, name)
+		ch <- prometheus.MustNewConstMetric(stageSampledDesc, prometheus.CounterValue, float64(p.stageSampled[stage].Load())/1e9, name)
+	}
 	for phase := range numPhases {
 		name := names[phase]
 		ch <- prometheus.MustNewConstMetric(cpuDesc, prometheus.CounterValue, float64(p.cpu[phase].Load())/1e9, name)
@@ -168,7 +181,9 @@ func fields(data []byte, visit func(protowire.Number, protowire.Type, []byte, ui
 	return nil
 }
 
-func decode(data []byte) (out [numPhases]uint64, err error) {
+func decode(data []byte) ([numPhases]uint64, error) { return decodeStages(data, nil) }
+
+func decodeStages(data []byte, stages *[len(PersisterStageNames)]uint64) (out [numPhases]uint64, err error) {
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return out, err
@@ -276,6 +291,7 @@ func decode(data []byte) (out [numPhases]uint64, err error) {
 		phase := Other
 		pebble := Other
 		stage := false
+		stageIndex := 0
 		stackPhase := Other
 		var sampleCPU uint64
 		valueCount := 0
@@ -345,6 +361,12 @@ func decode(data []byte) (out [numPhases]uint64, err error) {
 					}
 				case "persister_stage":
 					stage = true
+					for i, name := range PersisterStageNames {
+						if i > 0 && name == str(value) {
+							stageIndex = i
+							break
+						}
+					}
 				case "pebble":
 					switch str(value) {
 					case "flush":
@@ -379,6 +401,10 @@ func decode(data []byte) (out [numPhases]uint64, err error) {
 			phase = Persister
 		}
 		out[phase] += sampleCPU
+		// Pebble background workers can inherit a caller label; their own label wins.
+		if stages != nil && stageIndex > 0 && pebble == Other {
+			stages[stageIndex] += sampleCPU
+		}
 	}
 	return out, nil
 }

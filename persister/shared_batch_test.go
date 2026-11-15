@@ -304,3 +304,65 @@ func TestSharedBatchFallbackAccounting(t *testing.T) {
 		})
 	}
 }
+
+// Include cache pop and acknowledgement around the real continuation codec.
+func TestSharedBatchStagePartition(t *testing.T) {
+	update := sharedTimingWorkload(t, 210)
+	before := stagetime.Snapshot()
+	for i := range 128 {
+		update(i)
+	}
+	after := stagetime.Snapshot()
+	total := after[stagetime.Total].Seconds - before[stagetime.Total].Seconds
+	var sum float64
+	for s := stagetime.Route; s < stagetime.NumStages; s++ {
+		d := after[s].Seconds - before[s].Seconds
+		sum += d
+		t.Logf("%s %.6fs %.3f%%", s, d, 100*d/total)
+	}
+	if total <= 0 || math.Abs(sum-total) > total*.01 {
+		t.Fatalf("stages %.9f total %.9f", sum, total)
+	}
+	other := after[stagetime.Other].Seconds - before[stagetime.Other].Seconds
+	if other > total*.01 {
+		t.Fatalf("named stages cover only %.3f%% of total", 100*(sum-other)/total)
+	}
+	for _, s := range []stagetime.Stage{stagetime.CachePop, stagetime.Publish, stagetime.Acknowledge, stagetime.Other} {
+		if after[s].Calls == before[s].Calls {
+			t.Fatalf("stage %s absent", s)
+		}
+	}
+}
+
+func sharedTimingWorkload(tb testing.TB, count int) func(int) {
+	tb.Helper()
+	now := time.Unix(1790000000, 0)
+	db, err := store.Open(tb.TempDir(), store.Options{ExactBlocks: true, Continuation: &whisperio.ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}, TimeBuckets: true, Now: func() time.Time { return now }, SyncInterval: time.Hour, CacheSize: 64 << 20, MemTableSize: 256 << 20, MetadataCacheSize: 128 << 20})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { _ = db.Close() })
+	c := cache.New()
+	p := NewWhisper(tb.TempDir(), nil, NewWhisperAggregation(), nil, c.PopNotConfirmed, c.Confirm, c.Pop)
+	p.SetMetricStore(db)
+	names := make([]string, 8)
+	for i := range names {
+		names[i] = fmt.Sprintf("batch.timing.%d", i)
+		if _, err := db.Create(context.Background(), store.MetricConfig{Name: names[i], Retentions: []store.Retention{{Step: 1, Count: 86400}, {Step: 60, Count: 43200}, {Step: 3600, Count: 8760}}, AggregationMethod: store.Average, XFilesFactor: .5}); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	var scratch stagetime.Update
+	update := func(round int) {
+		now = now.Add(time.Duration(count) * time.Second)
+		for _, name := range names {
+			batch := &points.Points{Metric: name, Data: make([]points.Point, count)}
+			for j := range batch.Data {
+				batch.Data[j] = points.Point{Timestamp: now.Unix() - int64(count-j), Value: float64((round+j)%97) + .125}
+			}
+			c.Add(batch)
+		}
+		p.storeSharedBatchTimed(names, &scratch)
+	}
+	return update
+}

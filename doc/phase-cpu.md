@@ -163,3 +163,25 @@ row names; preserve this spec's explicitly requested 2x4 grid in later style swe
 Use the package benchmarks (`make bench-storage`) and the runtime phase metrics
 above to measure storage work. The former standalone pipeline profiling
 experiment is retired; its recorded measurements remain historical evidence.
+
+## Persister stages
+
+The same profiler also exports `persister_stage_cpu_seconds_total{stage}`. These
+are estimates of real CPU samples, never wall duration renamed as CPU. One in
+eight write batches carries stage labels, so these samples are scaled by eight
+and by the successful profiling interval/window ratio. The companion
+`persister_stage_sampled_cpu_seconds_total` reports raw observed CPU seconds.
+Use at least a ten-minute rate; short or rare stages may have no samples.
+
+Stages cover synchronous worker work, including caller-side Pebble apply and
+sync CPU. Asynchronous flush, compaction and WAL workers remain separate phase
+CPU and are excluded even if they inherited a stage label. Stage CPU therefore
+does not sum to process CPU. Use the existing phase CPU counters for the rest.
+No additional profiler is started; disabled or conflicting profiling produces
+no new stage estimates, and skipped windows remain visible in profile counters.
+
+`persister_stage_seconds_total` remains wall time. Its exclusive stages partition
+the same sampled batch lifetime; `other` includes instrumentation and short
+boundary work. Queue collection and throttling before a batch starts are outside
+that lifetime. Read metadata, input pop, lock waits, update/codec work, commit,
+publication, and acknowledgement are named separately.

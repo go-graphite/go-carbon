@@ -10,6 +10,7 @@ import (
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/stagetime"
 )
 
 func TestPerCallBatchMatchesSerial(t *testing.T) {
@@ -43,7 +44,10 @@ func TestPerCallBatchMatchesSerial(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := grouped.UpdateBatch(ctx, updates, nil); err != nil {
+		timed, timer := stagetime.Start(ctx)
+		err := grouped.UpdateBatch(timed, updates, nil)
+		timer.Finish()
+		if err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range names {
