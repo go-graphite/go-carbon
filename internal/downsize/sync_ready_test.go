@@ -190,6 +190,21 @@ func TestReadyRestartDuringRunFillsAndAccepts(t *testing.T) {
 	if len(paths) != 1 {
 		t.Fatal("no fresh recovery journal", paths)
 	}
+	data, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var header syncRow
+	if err := json.Unmarshal([]byte(strings.SplitN(string(data), "\n", 2)[0]), &header); err != nil {
+		t.Fatal(err)
+	}
+	var scope map[string]any
+	if err := json.Unmarshal([]byte(header.Identity), &scope); err != nil {
+		t.Fatal(err)
+	}
+	if scope["full_history"] == true || scope["windows"] != report.Restarts.String() {
+		t.Fatalf("bound restart repeated original full-history proof: %s", header.Identity)
+	}
 }
 func TestReadyRestartSourceAndResumedProof(t *testing.T) {
 	f, o, r := newReadyFixture(t, 100)

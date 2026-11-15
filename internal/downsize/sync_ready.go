@@ -231,9 +231,15 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			report.Windows = append(report.Windows, gaps...)
 			recovery := *o
 			recovery.state = filepath.Join(o.state, fmt.Sprintf("ready-recovery-%d-%d", time.Now().UnixNano(), generation))
-			recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
+			// The initial journal already proves the original history. A known
+			// restart invalidates only its observation interval. An unbound
+			// journal has no such proof and still needs full revalidation.
+			recovery.windows = append(syncRanges(nil), report.Restarts...)
+			if freshProof {
+				recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
+			}
 			recovery.settle = 0
-			recovery.fullHistory = r.scope != "windows"
+			recovery.fullHistory = freshProof && r.scope != "windows"
 			recovery.sampleEvery = 1
 			previous = after
 			if e = runSync(ctx, recovery, b); e != nil {
