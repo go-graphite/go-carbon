@@ -209,8 +209,10 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 		}
 		// Retire ephemeral state before the next attempt. In-flight requests
 		// keep their connections and borrowed pins until they finish.
-		b.windowSelectionSlots.Delete(store)
-		b.expireWindowPins()
+		if !storehttp.LocalError(err) {
+			b.windowSelectionSlots.Delete(store)
+			b.expireWindowPins()
+		}
 		b.waits.Add(1)
 		if !waiting {
 			waiting = true

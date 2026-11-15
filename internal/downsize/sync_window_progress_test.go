@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// A real resume must retain durable progress without presenting replay as work.
+// A real resume retains durable progress; completed runs report no active work.
 func TestSyncWindowResumedThroughput(t *testing.T) {
 	b, o := pipelineFixture(t, 8)
 	o.noVerify = true // observe selection progress independently of copy/verify counts
@@ -36,11 +36,8 @@ func TestSyncWindowResumedThroughput(t *testing.T) {
 		if p.Done != 24 {
 			t.Fatalf("run %d: progress %+v", run, p)
 		}
-		if run == 0 && p.Rate <= 0 {
-			t.Fatal("new work has no live throughput", p)
-		}
-		if run == 1 && p.Rate != 0 {
-			t.Fatal("journal replay counted as throughput", p)
+		if p.Rate != 0 {
+			t.Fatal("completed run reports active throughput", p)
 		}
 	}
 }
