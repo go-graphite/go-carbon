@@ -3,6 +3,7 @@ package partsformat
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -99,5 +100,33 @@ func TestRejectCrossPartitionSSTAndInvalidKeys(t *testing.T) {
 	k.VShard = (k.VShard + 1) % VirtualShards
 	if _, err = Encode(k); err == nil {
 		t.Fatal("wrong routing accepted")
+	}
+}
+
+func TestImmutablePartRangesDoNotOverlap(t *testing.T) {
+	// Find many metric IDs in the same vshard. Every key of the first part
+	// must precede every key of the next, independent of metric sort order.
+	var ids []ID
+	for i := 0; len(ids) < 30; i++ {
+		id := ID(fmt.Sprintf("sample.%d", i))
+		if Route(id) == 0 {
+			ids = append(ids, id)
+		}
+	}
+	var previousLargest []byte
+	for part := byte(1); part < 6; part++ {
+		var keys [][]byte
+		for _, id := range ids {
+			k, err := Encode(Key{VShard: 0, Partition: 7, Metric: id, Part: PartID{part}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, k)
+		}
+		slices.SortFunc(keys, bytes.Compare)
+		if previousLargest != nil && bytes.Compare(previousLargest, keys[0]) >= 0 {
+			t.Fatal("immutable SST ranges overlap")
+		}
+		previousLargest = keys[len(keys)-1]
 	}
 }

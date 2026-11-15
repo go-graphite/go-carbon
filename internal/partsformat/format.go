@@ -32,6 +32,9 @@ func Route(id ID) uint16 {
 // are unsafe: newly assigned owners would overwrite keys copied from peers.
 type PartID [16]byte
 
+// Keys sort by ownership, time partition, immutable part, then metric/archive/block.
+// Part identity precedes metric identity so separate SSTs have disjoint ranges
+// and can be ingested together atomically without rewriting their keys.
 type Key struct {
 	VShard     uint16
 	Partition  int64
@@ -86,15 +89,14 @@ func Encode(k Key) ([]byte, error) {
 	}
 	b := make([]byte, 14+4+len(k.Metric)+4+8+16+4)
 	copy(b, prefix)
-	binary.BigEndian.PutUint32(b[14:], uint32(len(k.Metric)))
-	copy(b[18:], k.Metric)
-	pos := 18 + len(k.Metric)
+	copy(b[14:30], k.Part[:])
+	binary.BigEndian.PutUint32(b[30:], uint32(len(k.Metric)))
+	copy(b[34:], k.Metric)
+	pos := 34 + len(k.Metric)
 	binary.BigEndian.PutUint32(b[pos:], k.Archive)
 	pos += 4
 	binary.BigEndian.PutUint64(b[pos:], uint64(k.BlockStart)^(1<<63))
 	pos += 8
-	copy(b[pos:], k.Part[:])
-	pos += 16
 	binary.BigEndian.PutUint32(b[pos:], k.Ordinal)
 	return b, nil
 }
@@ -103,20 +105,19 @@ func Decode(b []byte) (Key, error) {
 	if len(b) < 50 || !bytes.Equal(b[:4], magic) {
 		return k, errors.New("invalid part key header")
 	}
-	n := int(binary.BigEndian.Uint32(b[14:18]))
+	n := int(binary.BigEndian.Uint32(b[30:34]))
 	if n == 0 || n > MaxNameBytes || len(b) != 50+n {
 		return k, errors.New("invalid part key length")
 	}
 	k.VShard = binary.BigEndian.Uint16(b[4:6])
 	k.Partition = int64(binary.BigEndian.Uint64(b[6:14]) ^ (1 << 63))
-	k.Metric = ID(string(b[18 : 18+n]))
-	pos := 18 + n
+	copy(k.Part[:], b[14:30])
+	k.Metric = ID(string(b[34 : 34+n]))
+	pos := 34 + n
 	k.Archive = binary.BigEndian.Uint32(b[pos:])
 	pos += 4
 	k.BlockStart = int64(binary.BigEndian.Uint64(b[pos:]) ^ (1 << 63))
 	pos += 8
-	copy(k.Part[:], b[pos:pos+16])
-	pos += 16
 	k.Ordinal = binary.BigEndian.Uint32(b[pos:])
 	if k.VShard >= VirtualShards || Route(k.Metric) != k.VShard {
 		return Key{}, errors.New("invalid part key routing")
