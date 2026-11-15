@@ -59,7 +59,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
-	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only --streams and --rate may override it")
+	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only streams, rate and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
 	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")

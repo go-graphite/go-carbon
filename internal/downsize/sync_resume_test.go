@@ -156,3 +156,44 @@ func TestSyncResumeRetainsRingAndNamesWithoutOriginalFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSyncResumeReadyInputsPreserveScopeAndGates(t *testing.T) {
+	c, err := parseSyncCommand(syncCLIArgs(t, "--window", "gap:1799999400:1800000000", "--period", "1799999400:1800000000", "--carbonapi-url", "https://old.example.org"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := syncIdentity(c.sync)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := parseSyncCommand([]string{"--resume", c.sync.state, "--carbonapi-url", "https://read.example.org", "--period", "1799999400:1800000060", "--gap-ledger-complete=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := syncIdentity(resumed.sync)
+	if err != nil || got != identity || !reflect.DeepEqual(c.sync.windows, resumed.sync.windows) {
+		t.Fatalf("scope changed: %s != %s, %v", got, identity, err)
+	}
+	if len(resumed.ready.period) != 1 || resumed.ready.period[0].Until != 1800000060 || resumed.ready.carbonAPI != "https://read.example.org" || resumed.ready.gapsComplete {
+		t.Fatalf("bad READY inputs: %+v", resumed.ready)
+	}
+	resumed.sync.now = func() time.Time { return time.Unix(1800001000, 0) }
+	reasons := strings.Join(readyPrerequisites(resumed.sync, resumed.ready), "; ")
+	if !strings.Contains(reasons, "--gap-ledger-complete is required") || !strings.Contains(reasons, "sync windows do not cover block period") {
+		t.Fatalf("READY gates bypassed: %s", reasons)
+	}
+	if err := resumed.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := parseSyncCommand([]string{"--resume", c.sync.state})
+	if err != nil || !reflect.DeepEqual(again.ready, resumed.ready) {
+		t.Fatalf("READY inputs not saved: %+v %v", again.ready, err)
+	}
+	attested, err := parseSyncCommand([]string{"--resume", c.sync.state, "--gap-ledger-complete"})
+	if err != nil || !attested.ready.gapsComplete {
+		t.Fatalf("attestation not adopted: %+v %v", attested.ready, err)
+	}
+}
