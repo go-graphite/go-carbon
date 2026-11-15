@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -283,6 +284,31 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		}
 		conns = append(conns, c)
 	}
+	if prefix := os.Getenv("STARTUP_LOAD_PROFILE"); prefix != "" {
+		writeWaitProfile := func(suffix string) {
+			out, err := os.Create(fmt.Sprintf("%s-%t.%s.block.pprof", prefix, appendMode, suffix))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer out.Close()
+			if err := pprof.Lookup("block").WriteTo(out, 0); err != nil {
+				t.Error(err)
+			}
+		}
+		writeWaitProfile("before")
+		defer writeWaitProfile("after")
+		profile, err := os.Create(fmt.Sprintf("%s-%t.cpu.pprof", prefix, appendMode))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(profile); err != nil {
+			profile.Close()
+			t.Fatal(err)
+		}
+		defer func() { pprof.StopCPUProfile(); profile.Close() }()
+	}
+
 	var sent atomic.Int64
 	stop := make(chan struct{})
 	failures := make(chan error, connections)
@@ -360,7 +386,7 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		}
 		timings := s.ioTimings()
 		row := map[string]any{"append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes,
-			"replayed": m.ReplayedPoints, "startup_replayed": s.replayedPoints.Load(), "journal_points": m.PointsWritten, "journal_bytes": m.BytesWritten, "journal_syncs": m.Syncs, "unlogged": m.Unlogged, "append_calls": timings[captureAppend].calls, "append_p99_upper_ns": timings[captureAppend].p99}
+			"replayed": m.ReplayedPoints, "startup_replayed": s.replayedPoints.Load(), "journal_points": m.PointsWritten, "journal_bytes": m.BytesWritten, "journal_syncs": m.Syncs, "unlogged": m.Unlogged, "append_calls": timings[captureAppend].calls, "append_p99_upper_ns": timings[captureAppend].p99, "append_total_ns": timings[captureAppend].total, "append_max_ns": timings[captureAppend].maximum}
 		if err := evidence.Encode(row); err != nil {
 			t.Fatal(err)
 		}

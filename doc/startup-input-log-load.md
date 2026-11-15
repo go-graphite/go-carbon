@@ -52,7 +52,17 @@ and the final evidence verdict is `PASS`.
 Both paths are attempted even if the first fails. Each path stops at its first
 failed threshold; an aborted trial is not a completed 600-second measurement.
 Selecting only one subtest yields `INCOMPLETE_NOT_QUALIFIED`, never `PASS`.
-Retain the JSONL and CPU/resource profiles for failures. A standalone test
+Retain the JSONL and CPU/resource profiles for failures. Set
+`STARTUP_LOAD_PROFILE=/private/evidence/live` to record one CPU profile per
+path, starting after inventory, frame prebuild and socket setup, and stopping
+before application shutdown. The same prefix records before/after block profiles;
+subtract the former with `go tool pprof -base BEFORE AFTER` to exclude setup
+waits. Enable sampling with `block-profile-rate = 1000000` under `[pprof]` in the private
+config; application startup resets the runtime sampling rate. The JSONL also
+records append total and maximum nanoseconds alongside the p99 upper bound.
+Do not also pass `-cpuprofile` in that mode.
+The load gate always samples real disk headroom, including when ordinary
+integration fixtures use deterministic disk samples. A standalone test
 binary needs the repository's `carbon/testdata/handoff-probes` directory; the
 load gate does not use the successor probes, so setting
 `GRAPHITE_TEST_HANDOFF_SUCCESSOR_DIR` to an existing private directory can skip

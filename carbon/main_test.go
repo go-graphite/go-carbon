@@ -25,6 +25,9 @@ func TestMain(m *testing.M) {
 	// pressure tests supply explicit samples through updateDiskSpace.
 	diskUsage := startupDiskUsage
 	startupDiskUsage = func(path string) (uint64, uint64, error) {
+		if os.Getenv("STARTUP_LOAD_GATE") == "1" {
+			return diskUsage(path)
+		}
 		_, _, err := diskUsage(path)
 		return 1 << 30, 2 << 30, err
 	}
