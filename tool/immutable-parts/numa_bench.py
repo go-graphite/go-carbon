@@ -116,16 +116,30 @@ def summarize(rows):
                 return x + (y-x) * (t-a) / (b-a)
         raise ValueError('missing sample interval')
     windows = []
-    for t in range(10, int(min(x['seconds'] for x in ends)) + 1, 10):
+    end = min(x['seconds'] for x in ends)
+    for t in range(10, int(end) + 1, 10):
         windows.append(sum(at(series, t) - at(series, t-10)
                            for series in samples) / 10 / 1e6)
+    # A trough may straddle aligned ten-second buckets. With linear sample
+    # interpolation, the sliding-window minimum occurs at a sample boundary
+    # or ten seconds after one, including either edge of the measured interval.
+    boundaries = {10., end} if end >= 10 else set()
+    for series in samples:
+        for t, _ in series:
+            boundaries.update(x for x in (t, t + 10) if 10 <= x <= end)
+    sliding = [(sum(at(series, t) - at(series, t-10)
+                    for series in samples) / 10 / 1e6, t)
+               for t in boundaries]
+    minimum, minimum_end = min(sliding) if sliding else (None, None)
     writes = sum(end['proc'].get('write_bytes', 0) - start['proc'].get('write_bytes', 0)
                  for end, start in zip(ends, starts))
     cpu = sum(end['proc'].get('cpu_seconds_CLK_TCK100', 0) -
               start['proc'].get('cpu_seconds_CLK_TCK100', 0) for end, start in zip(ends, starts))
     return dict(when_cet=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1))).isoformat(),
                 committed=n, seconds=seconds, million_per_second=n/seconds/1e6,
-                min_10s=min(windows) if windows else None, windows_10s=windows,
+                min_10s=minimum, min_10s_end=minimum_end,
+                aligned_min_10s=min(windows) if windows else None,
+                windows_10s=windows,
                 cores=cpu/seconds, write_MB_s=writes/seconds/1e6,
                 start_skew_s=max(start_times)-min(start_times),
                 debt_bytes=sum(x['estimated_debt_bytes'] for x in finals),
