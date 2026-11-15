@@ -56,7 +56,7 @@ type syncLiveBackend struct {
 	waits                atomic.Int64  // retries while a store was unavailable
 	busy                 atomic.Int64  // retries after 429 (all transfer slots taken)
 	timings              sync.Map      // phase + store -> *syncIOTime
-	windowSelectionSlots sync.Map      // source -> once-initialized selection admission
+	windowSelectionSlots sync.Map      // source -> *windowSelectionCapacity
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
 	windowPinned         time.Time
@@ -196,6 +196,12 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 			busy++
 			continue
 		}
+		// Retire ephemeral state before the next attempt. In-flight requests
+		// keep their connections and borrowed pins until they finish.
+		b.m.client.CloseIdleConnections()
+		b.client.CloseIdleConnections()
+		b.windowSelectionSlots.Delete(store)
+		b.expireWindowPins()
 		b.waits.Add(1)
 		if !waiting {
 			waiting = true

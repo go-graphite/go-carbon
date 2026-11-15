@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -45,7 +46,7 @@ func TestSyncRestartWaitNeverExpiresAndRealErrorsFail(t *testing.T) {
 // Each operation must finish within one invocation and match an uninterrupted
 // run, including signed zero and existing target values.
 func TestSyncRestartWindowDifferential(t *testing.T) {
-	for _, stage := range []string{"source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin"} {
+	for _, stage := range []string{"capabilities", "source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -67,6 +68,10 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 			}
 			donorHandler := nativeControllerService(t, source)
 			donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if stage == "capabilities" && r.URL.Path == "/v1/native/capabilities" && injected.CompareAndSwap(false, true) {
+					http.Error(w, "buckyd is stopping", 503)
+					return
+				}
 				if stage == "source-pin" && r.URL.Path == "/v1/native/source" && injected.CompareAndSwap(false, true) {
 					http.Error(w, "store recovery has not finished", 500)
 					return
@@ -251,5 +256,102 @@ func TestSyncRestartVerifyFillConvergesWithoutExit(t *testing.T) {
 		if len(f.copies) != before {
 			t.Fatal("completed journal replay duplicated names")
 		}
+	}
+}
+
+// Closing a listener does not evict existing keepalive connections. Model the
+// old daemon draining there while the replacement serves the same address.
+func TestSyncWindowRestartSameAddress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	source := nativeControllerStore(t)
+	addPoints(t, source, "restart.metric", 7)
+	handler := nativeControllerService(t, source)
+	var stopping atomic.Bool
+	var stoppedCalls, freshCalls atomic.Int64
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stopping.Load() {
+			stoppedCalls.Add(1)
+			http.Error(w, "buckyd is stopping", 503)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer old.Close()
+	b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Nanosecond})
+	defer b.client.CloseIdleConnections()
+	defer b.m.client.CloseIdleConnections()
+	b.retryTick = time.Millisecond
+	stop := b.beginWindowCopy()
+	defer stop()
+	names := []string{"restart.metric"}
+	windows := syncRanges{{From: testMetricNow - 10, Until: testMetricNow}}
+	want, err := b.WindowPresenceRanges(ctx, old.URL, names, windows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := old.Listener.Addr().String()
+	stopping.Store(true)
+	if err := old.Listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		freshCalls.Add(1)
+		handler.ServeHTTP(w, r)
+	}))
+	replacement.Listener = listener
+	replacement.Start()
+	defer replacement.Close()
+	started := time.Now()
+	got, err := b.WindowPresenceRanges(ctx, old.URL, names, windows)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal(got, want, err)
+	}
+	if stoppedCalls.Load() == 0 || freshCalls.Load() == 0 || b.waits.Load() == 0 {
+		t.Fatal("restart paths not exercised", stoppedCalls.Load(), freshCalls.Load(), b.waits.Load())
+	}
+	if time.Since(started) >= 2*time.Minute {
+		t.Fatal("recovery exceeded two minutes")
+	}
+}
+
+func TestSyncWindowRefusedThenServing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	source := nativeControllerStore(t)
+	addPoints(t, source, "restart.metric", 7)
+	server := httptest.NewUnstartedServer(nativeControllerService(t, source))
+	addr := server.Listener.Addr().String()
+	if err := server.Listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Nanosecond})
+	defer b.client.CloseIdleConnections()
+	defer b.m.client.CloseIdleConnections()
+	b.retryTick = time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		got, err := b.WindowPresenceRanges(ctx, "http://"+addr, []string{"restart.metric"}, syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
+		if err == nil && len(got["restart.metric"]) == 0 {
+			err = errors.New("selection missing after restart")
+		}
+		done <- err
+	}()
+	for b.waits.Load() == 0 && ctx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

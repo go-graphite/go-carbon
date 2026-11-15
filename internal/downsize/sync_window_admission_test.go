@@ -87,7 +87,7 @@ func TestSyncWindowSelectionCapacityDifferential(t *testing.T) {
 			}
 			// A separate serial client is the differential oracle for the same source pin.
 			serial := newSyncLiveBackend(syncLiveOptions{})
-			serial.windowSelectionSlots.Store(donor.URL, func() (chan struct{}, error) { return make(chan struct{}, 1), nil })
+			serial.windowSelectionSlots.Store(donor.URL, &windowSelectionCapacity{load: func() (chan struct{}, error) { return make(chan struct{}, 1), nil }})
 			want, err := serial.WindowPresenceRanges(ctx, donor.URL, names, windows)
 			if err != nil || !reflect.DeepEqual(want, oracle) {
 				t.Fatal("serial/concurrent export differs", err, want, oracle)

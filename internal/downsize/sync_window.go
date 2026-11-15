@@ -627,6 +627,10 @@ func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source strin
 	return result, err
 }
 
+type windowSelectionCapacity struct {
+	load func() (chan struct{}, error)
+}
+
 func (b *syncLiveBackend) windowPresenceRangesOnce(ctx context.Context, source string, names []string, windows syncRanges) (map[string][]syncDigest, error) {
 	if len(windows) == 0 {
 		return map[string][]syncDigest{}, nil
@@ -635,7 +639,7 @@ func (b *syncLiveBackend) windowPresenceRangesOnce(ctx context.Context, source s
 	// Match the donor's export capacity, leaving one slot for copy pulls.
 	// Older donors omit the capability and retain serial selection. Learn once
 	// per donor so disjoint groups share a bound without retaining queued pins.
-	v, _ := b.windowSelectionSlots.LoadOrStore(source, sync.OnceValues(func() (chan struct{}, error) {
+	v, _ := b.windowSelectionSlots.LoadOrStore(source, &windowSelectionCapacity{load: sync.OnceValues(func() (chan struct{}, error) {
 		var capability struct{ NativeExportConcurrency int }
 		if _, err := b.m.requestOnce(ctx, source, "/v1/native/capabilities", nil, &capability); err != nil {
 			return nil, err
@@ -643,9 +647,12 @@ func (b *syncLiveBackend) windowPresenceRangesOnce(ctx context.Context, source s
 		limit := max(1, min(8, capability.NativeExportConcurrency)-1)
 		event("sync_window_selection_capacity", map[string]any{"source": source, "exports": capability.NativeExportConcurrency, "selections": limit})
 		return make(chan struct{}, limit), nil
-	}))
-	slot, err := v.(func() (chan struct{}, error))()
+	})})
+	slot, err := v.(*windowSelectionCapacity).load()
 	if err != nil {
+		// OnceValues retains errors too. A restart must not poison this
+		// donor forever; remove only the generation we just observed.
+		b.windowSelectionSlots.CompareAndDelete(source, v)
 		return nil, err
 	}
 	select {

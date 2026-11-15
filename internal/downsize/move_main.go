@@ -547,13 +547,21 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 	}
 }
 
-func (m *mover) requestAttempt(ctx context.Context, endpoint, path string, body any, out any) (http.Header, error) {
+func (m *mover) requestAttempt(ctx context.Context, endpoint, path string, body any, out any) (headers http.Header, err error) {
+	defer func(parent context.Context) {
+		if parent.Err() == nil && restartCopyError(err) {
+			// Run after response bodies close so a stopping daemon cannot
+			// return its connection to the idle pool for the next retry.
+			m.client.CloseIdleConnections()
+			m.binaryProofs.Delete(endpoint)
+		}
+	}(ctx)
 	if !m.idleBounded(path) {
 		return m.requestOnceWatched(ctx, endpoint, path, body, out, nil)
 	}
 	ctx, watch, stop := watchIdle(ctx, m.transferIdle)
 	defer stop()
-	headers, err := m.requestOnceWatched(ctx, endpoint, path, body, out, watch)
+	headers, err = m.requestOnceWatched(ctx, endpoint, path, body, out, watch)
 	if err != nil && errors.Is(context.Cause(ctx), errTransferIdleCause) {
 		return nil, &transferIdleError{endpoint: endpoint, path: path, idle: m.transferIdle}
 	}
