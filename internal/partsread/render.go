@@ -10,6 +10,10 @@ type Series struct {
 	Metric            Metric
 	From, Until, Step int64
 	Values            []float64
+	// Occupied marks a physical-slot replacement, including an occupied NaN or
+	// a newer timestamp outside this range that invalidates an older ring slot.
+	// It has the same lifetime as Values.
+	Occupied []bool
 }
 
 func alignNext(t, step int64) int64 {
@@ -94,10 +98,14 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 	}
 	// Budget stays charged until the handle is closed, including prior results.
 	h.work -= n * 32
-	out := &Series{Metric: m, From: start, Until: end, Step: a.Step, Values: make([]float64, int(n))}
-	seq := make([]uint64, int(n))
-	times := make([]int64, int(n))
-	seen := make([]bool, int(n))
+	out := &Series{Metric: m, From: start, Until: end, Step: a.Step, Values: nil}
+	workspace := takeRenderWorkspace(int(n))
+	workspace.next = h.workspaces
+	h.workspaces = workspace
+	out.Values = workspace.values
+	seq, times, seen := workspace.sequences, workspace.times, workspace.seen
+	clear(seen)
+	out.Occupied = seen
 	for i := range out.Values {
 		out.Values[i] = math.NaN()
 	}
@@ -143,4 +151,47 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 		}
 	}
 	return out, nil
+}
+
+// Fixed-size idle caches retain at most 76MiB. Active arrays remain charged to
+// their handle until Close; an arbitrary query size is allocated exactly and
+// never cached. Idle memory is separate from the active-reader byte budget.
+type renderWorkspace struct {
+	values    []float64
+	sequences []uint64
+	times     []int64
+	seen      []bool
+	next      *renderWorkspace
+}
+
+var hourRenderWorkspaces = make(chan *renderWorkspace, 64)
+var dayRenderWorkspaces = make(chan *renderWorkspace, 32)
+
+func renderWorkspacePool(n int) chan *renderWorkspace {
+	switch n {
+	case 3600:
+		return hourRenderWorkspaces
+	case 86400:
+		return dayRenderWorkspaces
+	}
+	return nil
+}
+func takeRenderWorkspace(n int) *renderWorkspace {
+	if pool := renderWorkspacePool(n); pool != nil {
+		select {
+		case w := <-pool:
+			return w
+		default:
+		}
+	}
+	return &renderWorkspace{values: make([]float64, n), sequences: make([]uint64, n), times: make([]int64, n), seen: make([]bool, n)}
+}
+func releaseRenderWorkspace(w *renderWorkspace) {
+	w.next = nil
+	if pool := renderWorkspacePool(len(w.values)); pool != nil {
+		select {
+		case pool <- w:
+		default:
+		}
+	}
 }

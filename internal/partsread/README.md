@@ -40,3 +40,32 @@ sealrollup, classic Whisper, native exact and continuation storage, then compare
 the standalone snapshot primitive buildable before that stacked dependency lands.
 This bounded test fixes the admission clock; clock advancement and ring wrapping
 also need the reducer's separate compatibility suite before production use.
+
+Render workspaces for exactly 3,600 or 86,400 output slots are reused after the
+owning handle closes. Earlier results from the same handle keep separate arrays.
+Active workspace stays charged at 32B/slot; fixed idle channels retain at most
+76MiB separately from that admission budget. Other lengths allocate exactly the
+requested number of slots and are never cached. Reuse clears occupancy before
+merging and initializes absent values to the original NaN representation.
+
+`Series.Occupied` reports a physical-slot replacement even when its winner has a
+timestamp outside the returned interval. Mixed readers must use this bitmap to
+mask legacy values, including occupied NaNs and wrapped-slot invalidations. It
+shares the handle/callback lifetime of `Values`.
+
+The opt-in `TestSnapshotReadBenchmark` uses locked Linux reader threads with a
+separate CPU mask (`PARTS_READ_BENCH_CPUS`). Launch its process with `taskset` on
+writer CPUs; overlapping masks are rejected. Keep GOMAXPROCS, the writer CPU
+mask, engine settings and publication hook identical across reader counts. The
+harness samples thread masks, CPU/mutex/block profiles, allocation/GC counters,
+Pebble cache/snapshot/zombie metrics and debt. Read counts and latency exclude
+warmup and final settle. Numeric append-part keys remain an offline fixture;
+this adapter does not implement the portable placement-group codec.
+
+With the sibling seal reducer available, `-tags sealrollup_integration` enables
+`TestSnapshotLatencyComparison`. Set `PARTS_READ_COMPARE_DIR` to a new private
+directory. It compares exact bits and alternating-order timings with the native
+continuation engine for three schemas and 1h/1d/7d/30d ranges, using authoritative
+archive records in a disk-backed fixture source. Fresh engine caches retain the
+OS page cache. Its JSON records disclose the fixture codec and absence of sustained
+ingest; wide globs and the eventual production source require separate evidence.

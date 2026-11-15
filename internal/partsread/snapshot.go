@@ -121,6 +121,7 @@ type Handle struct {
 	budget        *Budget
 	charged, work int64
 	closed        atomic.Bool
+	workspaces    *renderWorkspace
 }
 
 func (p *Publication) Pin(b *Budget, workBytes int64) (*Handle, error) {
@@ -146,6 +147,12 @@ func (p *Publication) Pin(b *Budget, workBytes int64) (*Handle, error) {
 func (h *Handle) Close() {
 	if h.closed.CompareAndSwap(false, true) {
 		h.v.release()
+		for w := h.workspaces; w != nil; {
+			next := w.next
+			releaseRenderWorkspace(w)
+			w = next
+		}
+		h.workspaces = nil
 		h.budget.used.Add(-h.charged)
 	}
 }

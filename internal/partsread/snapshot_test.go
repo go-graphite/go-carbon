@@ -3,6 +3,7 @@ package partsread
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -71,7 +72,7 @@ func TestPhysicalSlotWinnerBeforeTimestampFilter(t *testing.T) {
 	}
 	defer h.Close()
 	s, err := h.Render(context.Background(), "sample", 9, 10, 10)
-	if err != nil || !math.IsNaN(s.Values[0]) {
+	if err != nil || !math.IsNaN(s.Values[0]) || !s.Occupied[0] {
 		t.Fatal("resurrected overwritten timestamp", s, err)
 	}
 }
@@ -171,5 +172,84 @@ func TestAdapterHoldsAdmissionUntilResponseConsumed(t *testing.T) {
 	})
 	if err != nil || b.Used() != 0 {
 		t.Fatal(err, b.Used())
+	}
+}
+
+func BenchmarkSparseRender(b *testing.B) {
+	for _, width := range []int64{3600, 86400} {
+		b.Run(fmt.Sprint(width), func(b *testing.B) {
+			var p Publication
+			p.Publish(View{Catalog: testCatalog([]Archive{{1, 86400}}), Parts: []Source{Freeze([]Record{{7, 1, Sample{1800000000, math.Float64bits(42), 1}}})}})
+			defer p.Close()
+			budget := NewBudget(8 << 20)
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				h, e := p.Pin(budget, 4<<20)
+				if e != nil {
+					b.Fatal(e)
+				}
+				s, e := h.Render(ctx, "sample", 1800000000-width, 1800000000, 1800000000)
+				if e != nil || len(s.Values) != int(width) {
+					b.Fatal(e)
+				}
+				h.Close()
+			}
+		})
+	}
+}
+
+func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
+	for _, width := range []int64{3600, 86400} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			const now int64 = 1800000000
+			const bits uint64 = 0x7ff8000000000042
+			var p Publication
+			cat := testCatalog([]Archive{{1, 86400}})
+			p.Publish(View{Catalog: cat, Parts: []Source{Freeze([]Record{{7, 1, Sample{now, bits, 0}}})}})
+			budget := NewBudget(16 << 20)
+			h, e := p.Pin(budget, 8<<20)
+			if e != nil {
+				t.Fatal(e)
+			}
+			first, e := h.Render(context.Background(), "sample", now-width, now, now)
+			if e != nil {
+				t.Fatal(e)
+			}
+			second, e := h.Render(context.Background(), "sample", now-width, now, now)
+			if e != nil {
+				t.Fatal(e)
+			}
+			last := len(first.Values) - 1
+			if !first.Occupied[last] || math.Float64bits(first.Values[last]) != bits {
+				t.Fatal("occupied NaN bits changed")
+			}
+			second.Values[last] = 42
+			second.Occupied[last] = false
+			if !first.Occupied[last] || math.Float64bits(first.Values[last]) != bits {
+				t.Fatal("later render changed an earlier result")
+			}
+			h.Close()
+			p.Publish(View{Catalog: cat})
+			h, e = p.Pin(budget, 8<<20)
+			if e != nil {
+				t.Fatal(e)
+			}
+			empty, e := h.Render(context.Background(), "sample", now-width, now, now)
+			if e != nil {
+				t.Fatal(e)
+			}
+			for i, v := range empty.Values {
+				if !math.IsNaN(v) || empty.Occupied[i] {
+					t.Fatal("stale pooled slot", i)
+				}
+			}
+			h.Close()
+			p.Close()
+			if budget.Used() != 0 {
+				t.Fatal("budget leak")
+			}
+		})
 	}
 }
