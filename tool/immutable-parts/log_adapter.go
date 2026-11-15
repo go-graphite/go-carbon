@@ -22,6 +22,7 @@ type loggedCore struct {
 	cancel    context.CancelFunc
 	followers chan error
 	failure   atomic.Pointer[logApplyFailure]
+	rows      [][]row
 }
 
 func openLoggedCore(logDir, partDir string, cfg coreConfig, opts partlog.Options) (*loggedCore, error) {
@@ -39,7 +40,7 @@ func openLoggedCoreWithHooks(logDir, partDir string, cfg coreConfig, opts partlo
 		_ = log.Close()
 		return nil, err
 	}
-	return &loggedCore{journal: log, engine: engine}, nil
+	return &loggedCore{journal: log, engine: engine, rows: make([][]row, cfg.Producers)}, nil
 }
 
 const logEnvelope = "NLOG0001"
@@ -53,12 +54,18 @@ func encodeLogRows(rows []row) []byte {
 	}
 	return b
 }
-func decodeLogRows(payload []byte) ([]row, error) {
+func decodeLogRows(payload []byte) ([]row, error) { return decodeLogRowsInto(nil, payload) }
+func decodeLogRowsInto(rows []row, payload []byte) ([]row, error) {
 	if len(payload) <= logEnvelopeBytes || string(payload[:8]) != logEnvelope || payload[8] != 0 || (len(payload)-logEnvelopeBytes)%recordBytes != 0 {
 		return nil, os.ErrInvalid
 	}
 	payload = payload[logEnvelopeBytes:]
-	rows := make([]row, len(payload)/recordBytes)
+	count := len(payload) / recordBytes
+	if cap(rows) < count {
+		rows = make([]row, count)
+	} else {
+		rows = rows[:count]
+	}
 	for i := range rows {
 		rows[i] = getRow(payload[i*recordBytes:])
 	}
@@ -146,10 +153,14 @@ func (l *loggedCore) apply(producer int, r partlog.Record, seal bool) error {
 		}
 		return l.engine.submitBatches(producer, batches, r.Cursor, seal)
 	}
-	rows, e := decodeLogRows(r.Payload)
+	if producer < 0 || producer >= len(l.rows) {
+		return os.ErrInvalid
+	}
+	rows, e := decodeLogRowsInto(l.rows[producer], r.Payload)
 	if e != nil {
 		return e
 	}
+	l.rows[producer] = rows
 	return l.engine.submit(producer, rows, r.Cursor, seal)
 }
 func (l *loggedCore) appendBatches(producer int, batches []coreBatch, seal bool) error {
