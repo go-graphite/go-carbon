@@ -418,6 +418,47 @@ func TestCollectorReportsCumulativeAdmissionRejections(t *testing.T) {
 	}
 }
 
+func TestCollectorBalancesNameRefusalsAcrossIntakePaths(t *testing.T) {
+	c := cache.New()
+	name := []byte(strings.Repeat("x", points.MaxMetricNameBytes+1))
+	c.Add(points.OnePoint(string(name), 1, 10).Add(2, 10))
+	c.AddPoint(name, 3, 10)
+	c.AddPoints(name, []points.Point{{Value: 4, Timestamp: 10}, {Value: 5, Timestamp: 10}})
+	var ref cache.PointRef
+	c.AddPointRef(&ref, name, 6, 10)
+	var slot any
+	c.AddStreamPoint(name, 7, 10, &slot)
+	c.AddPointBatch([][]byte{name}, []points.Point{{Value: 8, Timestamp: 10}})
+	c.AddRecovered(points.OnePoint(string(name), 9, 10))
+	// Repeated timestamps with a valid name remain separate unfinished input.
+	c.Add(points.OnePoint("accepted", 1, 10).Add(2, 10))
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{Cache: c}})
+	for range 2 {
+		c.Stat(func(string, float64) {})
+		families, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts := map[string]float64{}
+		for _, f := range families {
+			switch f.GetName() {
+			case "cache_name_too_long_rejected_points_total", "receiver_name_too_long_rejected_points_total", "cache_received_points_total", "cache_recovered_points_total":
+				if f.GetType() != dto.MetricType_COUNTER {
+					t.Fatalf("%s is not a counter", f.GetName())
+				}
+				counts[f.GetName()] = f.GetMetric()[0].GetCounter().GetValue()
+			}
+		}
+		if counts["cache_name_too_long_rejected_points_total"] != 9 || counts["receiver_name_too_long_rejected_points_total"] != 9 || counts["cache_received_points_total"] != 10 || counts["cache_recovered_points_total"] != 1 {
+			t.Fatalf("incorrect intake accounting: %v", counts)
+		}
+		if counts["cache_received_points_total"]+counts["cache_recovered_points_total"] != counts["cache_name_too_long_rejected_points_total"]+float64(c.Size()) {
+			t.Fatalf("unbalanced intake: %v, queued %d", counts, c.Size())
+		}
+	}
+}
+
 func TestPendingCheckpointMetrics(t *testing.T) {
 	app := &App{Cache: cache.New()}
 	app.pendingRecoveryFailures.Store(3)

@@ -29,15 +29,19 @@ popped batches. `cache_in_flight_points` is Graphite `cache.in_flight_points`.
 | Quota/throttle rejection | `cache_throttled_points_total` | Actual enforcing rejection, including throughput, usage and creation quotas |
 | Capacity rejection | `cache_overflow_dropped_points_total` | Point or byte capacity exceeded |
 | Invalid tag/name normalization | `cache_invalid_tag_rejected_points_total` | Every point in the refused batch |
-| Intake name too long | `receiver_name_too_long_rejected_points_total` | Graphite `cache.name_too_long_rejected_points_total` |
+| Intake name too long | `cache_name_too_long_rejected_points_total` | Graphite `cache.name_too_long_rejected_points_total`; legacy Prometheus alias `receiver_name_too_long_rejected_points_total` |
 | Backend name/path too long | `persister_name_too_long_dropped_points_total` | Disjoint from intake refusal |
 | Graceful diversion | `cache_xlog_diverted_points_total` | Successfully handed to shutdown buffering, outside the live cache |
 | Failed diversion | `cache_xlog_write_failed_points_total` | Entire affected batch; a partial write can have reached buffering |
 | Permanent file-error discard | `persister_write_dropped_points_total` | Failure to remove a broken empty Whisper file |
 | Failed backend attempts | `persister_write_failed_points_total` | Diagnostic only; repeated attempts count again and remain unfinished |
 
-Name-length Graphite metrics use `name_too_long_...` while their Prometheus
-names retain the established receiver/persister prefixes. Legacy Graphite
+The cache name-limit counter retains the legacy
+`receiver_name_too_long_rejected_points_total` alias. Both names read the same
+cache-owned total; never add them. During a rolling upgrade, use
+`rate(cache_name_too_long_rejected_points_total[1h]) or
+rate(receiver_name_too_long_rejected_points_total[1h])`, aggregating each rate
+to the same host labels first. Legacy Graphite
 `cache.overflow` and `persister.committedPoints` are interval counts;
 **do not differentiate them**. The new `_total` metrics never reset on `Stat`.
 Their Prometheus counters reset on component recreation, so rate calculations
@@ -101,3 +105,7 @@ intervals, exclude counter resets, and retain signed cache changes. Partial
 failed diversion writes and crashes can cross process boundaries; this is an
 input-accounting identity, not a proof that every committed point was fsynced
 or remains a distinct stored value indefinitely.
+
+For hourly comparisons, use `rate(counter[1h])` and
+`delta(gauge[1h]) / 3600`. `persister_ooo_direct_points_total` describes late
+points already included in committed input, rather than an additional loss.
