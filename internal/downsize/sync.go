@@ -715,9 +715,11 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 				continue
 			}
 			var res syncCopyResult
+			replayed := false
 			if rows := s.j.find(func(r syncRow) bool {
 				return r.Kind == "copied" && !r.Forbidden && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src]
 			}); len(rows) > 0 {
+				replayed = true
 				res = syncCopyResult{Copied: rows[0].Copied, Failed: rows[0].Failed, Forbidden: rows[0].Forbidden}
 			} else {
 				res, err = s.copyFrom(ctx, "fill", round, src, names)
@@ -748,6 +750,9 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 				}
 			}
 			s.sum.Filled += len(names) - len(res.Failed)
+			if replayed {
+				s.prog.replayed.Add(int64(len(names)))
+			}
 			s.prog.finishCopy(len(names))
 		}
 		s.endPhase("fill", work)
