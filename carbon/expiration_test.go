@@ -232,12 +232,13 @@ func TestExpirationWaitsForRestoreAndCanStopWhileWaiting(t *testing.T) {
 	}
 	for _, stopEarly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stopEarly=%v", stopEarly), func(t *testing.T) {
-			now := time.Unix(100_000, 0)
-			db := expirationTestDB(t, &now)
-			createExpirationMetric(t, db, "restored")
-			now = now.Add(time.Hour)
-			core := cache.New()
 			synctest.Test(t, func(t *testing.T) {
+				// Store read contexts and their cleanup must share the bubble.
+				now := time.Unix(100_000, 0)
+				db := expirationTestDB(t, &now)
+				createExpirationMetric(t, db, "restored")
+				now = now.Add(time.Hour)
+				core := cache.New()
 				restored := make(chan struct{})
 				r := &metricExpirer{db: db, now: func() time.Time { return now }, expiration: time.Hour,
 					rate: 1000, interval: time.Hour, stats: &expirationStats{}, restored: restored,
