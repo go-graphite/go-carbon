@@ -955,6 +955,20 @@ func (s *syncer) startScopedList(ctx context.Context, store, after string) *sync
 	go func() {
 		defer close(l.pages)
 		defer close(l.finished)
+		// An empty destination has nothing to compare. Its authoritative native
+		// catalogue avoids per-name metadata (or history) probes before the bulk
+		// copy. Do not cache this result across discovery/restarts: imports may
+		// have populated the target since an earlier attempt.
+		if store == s.o.to {
+			page, err := s.b.List(ctx, store, s.o.prefix, "", 1)
+			if err != nil {
+				l.errc <- fmt.Errorf("list empty target %s: %w", store, err)
+				return
+			}
+			if len(page) == 0 {
+				return
+			}
+		}
 		f, scan, err := openLines(s.o.namesFile)
 		if err != nil {
 			l.errc <- err
