@@ -25,6 +25,11 @@ func expirationTestDB(t *testing.T, now *time.Time) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		// A synctest case may need to close its lazily-created channels before
+		// leaving the bubble. Store.Close itself is deliberately not idempotent.
+		if errors.Is(db.ReadError(), store.ErrClosed) {
+			return
+		}
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -238,6 +243,13 @@ func TestExpirationWaitsForRestoreAndCanStopWhileWaiting(t *testing.T) {
 			now = now.Add(time.Hour)
 			core := cache.New()
 			synctest.Test(t, func(t *testing.T) {
+				// Reads lazily create cancellation channels inside this bubble.
+				// Close them here before the outer fixture cleanup runs.
+				defer func() {
+					if err := db.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
 				restored := make(chan struct{})
 				r := &metricExpirer{db: db, now: func() time.Time { return now }, expiration: time.Hour,
 					rate: 1000, interval: time.Hour, stats: &expirationStats{}, restored: restored,
