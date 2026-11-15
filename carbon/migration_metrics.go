@@ -25,18 +25,20 @@ type migrationCollector struct {
 var migrationSkippedDesc = prometheus.NewDesc("migration_metrics_skipped_total", "Scrapes skipped because application lifecycle or migration state was busy; other collectors remain available.", nil, nil)
 
 type metricSpec struct {
-	desc      *prometheus.Desc
-	kind      prometheus.ValueType
-	store     bool // reported only when a shared store is open
-	persister bool // reported only when a persister runs
-	migration bool // reported only while a migration run exists, including after it finished
-	cache     bool // reported only when the write cache exists
-	value     func(*migrationSnapshot) float64
+	desc           *prometheus.Desc
+	kind           prometheus.ValueType
+	store          bool // reported only when a shared store is open
+	persister      bool // reported only when a persister runs
+	migrationState bool // requires the migration phase/failure mutex
+	migration      bool // reported only while a migration run exists, including after it finished
+	cache          bool // reported only when the write cache exists
+	value          func(*migrationSnapshot) float64
 }
 
 type migrationSnapshot struct {
 	sidecars                              store.SidecarInventory
 	migration, running                    bool
+	migrationStateBusy                    bool
 	converted, points, reclaimed, resumed uint64
 	skipped                               uint64
 	inFlight, workers, maxWorkers         int
@@ -135,7 +137,7 @@ func importSidecarFoldCounts() []importFoldCount {
 
 var migrationMetricSpecs = func() []metricSpec {
 	spec := func(kind prometheus.ValueType, name, help string, v func(*migrationSnapshot) float64) metricSpec {
-		return metricSpec{desc: prometheus.NewDesc(name, help, nil, nil), kind: kind, store: strings.HasPrefix(name, "pebble_") || strings.HasPrefix(name, "store_") && !strings.HasPrefix(name, "store_migration_"), value: v}
+		return metricSpec{desc: prometheus.NewDesc(name, help, nil, nil), kind: kind, migrationState: name == "store_migration_running" || name == "store_migration_failed", store: strings.HasPrefix(name, "pebble_") || strings.HasPrefix(name, "store_") && !strings.HasPrefix(name, "store_migration_"), value: v}
 	}
 	counter := func(name, help string, v func(*migrationSnapshot) float64) metricSpec {
 		return spec(prometheus.CounterValue, name, help, v)
@@ -639,15 +641,17 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if m.budget != nil {
 			s.workers, s.inFlight, _ = m.budget.status()
 		}
-		if !m.mu.TryLock() {
+		if m.mu.TryLock() {
+			s.failed = m.failure != ""
+			// Keep completed counters while reporting no active conversions.
+			s.running = m.phase != "shared" && m.phase != "cancelled" && m.phase != "failed"
+			m.mu.Unlock()
+		} else {
+			// Only phase/failure are unavailable. Preserve independent atomic
+			// counters and store health, especially backend write failures.
+			s.migrationStateBusy = true
 			c.skipped.Add(1)
-			return
 		}
-		s.failed = m.failure != ""
-		// The run object outlives the run: after it ends its counters stay
-		// reported, but nothing is converting any more.
-		s.running = m.phase != "shared" && m.phase != "cancelled" && m.phase != "failed"
-		m.mu.Unlock()
 		s.waitingForSpace = m.spaceWaiting.Load() > 0
 		s.workingReserved = m.working.Load()
 	}
@@ -719,7 +723,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	c.app.RUnlock()
 	locked = false
 	for _, spec := range migrationMetricSpecs {
-		if spec.store && !s.store || spec.persister && !s.persister || spec.migration && !s.migration || spec.cache && !s.cache {
+		if spec.migrationState && s.migrationStateBusy || spec.store && !s.store || spec.persister && !s.persister || spec.migration && !s.migration || spec.cache && !s.cache {
 			continue
 		}
 		ch <- prometheus.MustNewConstMetric(spec.desc, spec.kind, spec.value(&s))

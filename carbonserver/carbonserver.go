@@ -1471,8 +1471,6 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 }
 
 func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error, func(string) error) error) (readFromCache bool) {
-	listener.legacyWhisperMu.RLock()
-	defer listener.legacyWhisperMu.RUnlock()
 	metricStore := listener.getMetricIndexStore()
 	if metricStore != nil && !(cacheOnly && prepare != nil) {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
@@ -1480,6 +1478,10 @@ func (listener *CarbonserverListener) updateFileListWithPending(dir string, cach
 		}
 		return false
 	}
+	// Shared catalog reconciliation performs no legacy-file I/O. Holding this
+	// gate across it would delay source retirement and native-copy readiness.
+	listener.legacyWhisperMu.RLock()
+	defer listener.legacyWhisperMu.RUnlock()
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
 		if r := recover(); r != nil {
