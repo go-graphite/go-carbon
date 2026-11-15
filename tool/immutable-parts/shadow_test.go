@@ -321,6 +321,18 @@ func TestLiveShadow(t *testing.T) {
 					tail = next
 					path = nextPath
 					continue
+				} else if !errors.Is(e, os.ErrNotExist) {
+					t.Fatal(e)
+				} else {
+					available, e := filepath.Glob(filepath.Join(source, "*.log"))
+					if e != nil {
+						t.Fatal(e)
+					}
+					for _, later := range available {
+						if later > nextPath {
+							t.Fatal("source segment gap before", later)
+						}
+					}
 				}
 			}
 			time.Sleep(25 * time.Millisecond)
