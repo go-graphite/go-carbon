@@ -7,6 +7,8 @@ import (
 	"math/bits"
 )
 
+// Series returned by Render borrows read-only Values and Occupied until Handle.Close.
+// RenderInto uses caller-owned writable Values; its Occupied is still read-only.
 type Series struct {
 	Metric            Metric
 	From, Until, Step int64

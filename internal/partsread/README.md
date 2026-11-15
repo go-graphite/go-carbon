@@ -95,3 +95,8 @@ class, with alternating read order. `PARTS_READ_PROFILE=1` adds per-class source
 seek/record decode/merge timers, process allocation/GC deltas and CPU labels;
 profile timings are diagnostic and must not be used as latency gate results.
 `PARTS_READ_COMPARE_REPEATS` raises the warm sample count for CPU sampling.
+
+`Render` results borrow read-only Values and Occupied until Handle.Close; consumers
+must copy before modifying either slice. Sparse cache reset relies on this
+contract. `RenderInto` writes caller-owned Values, while its Occupied stays
+read-only and handle-owned. Never use a live Render workspace as the overlay base.
