@@ -157,3 +157,9 @@ Use an offered rate well above measured throughput when looking for a ceiling;
 sort/encode/ingest wall seconds and aggregate producer queue wait are reported,
 alongside current live SST bytes and process counters. Queue wait sums can exceed
 wall time and `/proc/self/io` syscall counts are not physical-device IOPS.
+
+Producer dispatch counts rows per owner before allocating one exact backing
+slice, then gives each owner a disjoint region with a fixed capacity. This
+avoids repeated geometric allocations while preserving caller-owned input:
+callers can reuse their rows immediately after `submit` returns. The owners
+still copy those private packets into their own heads before sorting.

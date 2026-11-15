@@ -158,6 +158,54 @@ func TestCoreReplayAndProducerRouting(t *testing.T) {
 		})
 	}
 }
+func TestCoreSubmitDetachesCallerRows(t *testing.T) {
+	cfg := coreTestConfig()
+	e, err := openCore(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := e.close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	var want []row
+	for batch := 1; batch <= 2; batch++ {
+		rows := coreRows(0, batch)
+		want = append(want, rows...)
+		if err := e.submit(0, rows, uint64(batch), false); err != nil {
+			t.Fatal(err)
+		}
+		// Callers may immediately reuse their input after submit returns.
+		clear(rows)
+	}
+	if err := e.submit(0, nil, 3, true); err != nil {
+		t.Fatal(err)
+	}
+	for owner, o := range e.owners {
+		snap := o.db.NewSnapshot()
+		for id := uint64(0); id < 11; id++ {
+			if coreShard(id, cfg.Shards) != owner {
+				continue
+			}
+			var expected []row
+			for _, r := range want {
+				if r.ID == id {
+					expected = append(expected, r)
+				}
+			}
+			slices.SortFunc(expected, less)
+			got, err := coreRead(snap, id)
+			if err != nil || !slices.Equal(got, expected) {
+				t.Errorf("ID%d caller reuse changed durable rows: %v", id, err)
+			}
+		}
+		if err := snap.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCoreIdleOneSecondSeal(t *testing.T) {
 	cfg := coreTestConfig()
 	e, err := openCore(t.TempDir(), cfg)
