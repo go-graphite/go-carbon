@@ -7,6 +7,7 @@ import (
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"github.com/go-graphite/go-carbon/points"
 	"go.uber.org/zap"
@@ -49,7 +50,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) { p.storeSharedBatchTimed(m
 func (p *Whisper) storeSharedBatchTimed(metrics []string, scratch *stagetime.Update) {
 	settings := p.settings()
 	start := time.Now()
-	ctx, timer := stagetime.StartReusable(context.Background(), start, scratch)
+	ctx, timer := stagetime.StartReusable(phasecpu.Context(phasecpu.Persister), start, scratch)
 
 	timer.Enter(stagetime.LockWait)
 	unlock := p.lockStoreMetrics(metrics)
