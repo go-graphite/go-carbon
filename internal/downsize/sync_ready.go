@@ -48,17 +48,18 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
-	Repair              *windowRepairCount `json:"repair,omitempty"`
-	Scope               string             `json:"scope"`
-	UnrecoverablePoints *int64             `json:"unrecoverable_points"`
-	UnrecoverableReason string             `json:"unrecoverable_reason"`
-	ProofState          string             `json:"proof_state"`
-	Ring                string             `json:"ring"`
-	NamesSHA256         string             `json:"names_sha256,omitempty"`
-	Prefix              string             `json:"prefix,omitempty"`
-	Period              syncRanges         `json:"period"`
-	GapLedgerComplete   bool               `json:"gap_ledger_complete"`
-	Exclusions          []string           `json:"exclusions"`
+	HistoryVerifiedUntil int64              `json:"history_verified_until,omitempty"`
+	Repair               *windowRepairCount `json:"repair,omitempty"`
+	Scope                string             `json:"scope"`
+	UnrecoverablePoints  *int64             `json:"unrecoverable_points"`
+	UnrecoverableReason  string             `json:"unrecoverable_reason"`
+	ProofState           string             `json:"proof_state"`
+	Ring                 string             `json:"ring"`
+	NamesSHA256          string             `json:"names_sha256,omitempty"`
+	Prefix               string             `json:"prefix,omitempty"`
+	Period               syncRanges         `json:"period"`
+	GapLedgerComplete    bool               `json:"gap_ledger_complete"`
+	Exclusions           []string           `json:"exclusions"`
 
 	Schema           int                     `json:"schema"`
 	Verdict          string                  `json:"verdict"`
@@ -410,6 +411,9 @@ func readyRestartWindows(before, after map[string]readyProcess) syncRanges {
 // Independent reads take the 100 lowest stable name hashes per source and
 // for target read-back, so disjoint donor catalogs retain meaningful minima.
 func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncReadyBackend, state string, report *readyReport) error {
+	if err := frontierReadyBounds(o, r, report); err != nil {
+		return err
+	}
 	f, scan, err := openLines(filepath.Join(state, "union.tsv"))
 	if err != nil {
 		return err

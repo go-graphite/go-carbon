@@ -274,7 +274,7 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 		}
 	}
 	now := s.o.now().Unix()
-	horizon := now - int64(s.o.settle.Seconds())
+	horizon := s.verificationHorizon()
 	if err := s.verifyWindows(ctx, row, eligible, schemas, horizon); err != nil {
 		return err
 	}
@@ -637,6 +637,9 @@ func (s *syncer) checkFull(ctx context.Context, row *syncRow, names []string, sc
 		group := groups[key]
 		for _, a := range keyed[key] {
 			from, until := syncWindow(now, a, s.o.settle)
+			if s.frontier != nil {
+				until = min(until, s.verificationHorizon())
+			}
 			if from >= until {
 				continue
 			}

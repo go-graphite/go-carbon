@@ -161,6 +161,7 @@ type syncHole struct {
 }
 
 type syncRow struct {
+	Reused            int                      `json:"proof_reused,omitempty"`
 	Resolved          []syncSkip               `json:"resolved,omitempty"`
 	Discovery         *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
 	Selected          []string                 `json:"selected,omitempty"`
@@ -307,6 +308,7 @@ type syncResidual struct {
 }
 
 type syncer struct {
+	frontier             *syncFrontier
 	windowRetryCopyError error // selection waits must not hide rejected repairs
 	legacyCopyReceipts   bool  // keep the selection and transport of old window campaigns
 	verificationBase     int   // append fresh rounds after a terminal residual verdict
@@ -686,8 +688,15 @@ type syncKey struct{ name, source string }
 
 // verifyAndFill runs verify/fill rounds. Round 1 verifies every name present
 // on the target and on at least one source; later rounds only names filled
-// or not yet indexed in the previous round.
-func (s *syncer) verifyAndFill(ctx context.Context) error {
+// or not yet indexed in the previous round. A mutation frontier checks metadata
+// for the whole catalog each round, reading data only for dirty names.
+func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
+	if err = s.openFrontier(ctx); err != nil {
+		return err
+	}
+	if s.frontier != nil {
+		defer func() { err = errors.Join(err, s.frontier.file.Sync(), s.frontier.file.Close()) }()
+	}
 	var set []string // rounds after the first: the names to re-verify
 	filledBefore := map[syncKey]bool{}
 	failedAttempts := map[syncKey]int{}
@@ -697,12 +706,11 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 	latest := map[string][]syncHole{}
 	pending := map[string]bool{}
 	skippedLast := map[string]string{} // name -> reason of its latest skip
-	var err error
 	previousScore := int64(-1)
 	for round := 1; ; round++ {
 		s.sum.Rounds = round
 		names := s.unionSource()
-		if round > 1 {
+		if round > 1 && s.frontier == nil {
 			if names, err = s.setSource(set); err != nil {
 				return err
 			}
@@ -757,6 +765,17 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 			score += int64(max(1, h.Points))
 		}
 		stalled := previousScore >= 0 && score >= previousScore
+		if s.frontier != nil && stalled {
+			// A newly dirtied metric can replace the repaired residual at the
+			// same score. It has not had a repair attempt and is not stalled.
+			for _, h := range holes {
+				k := syncKey{h.Name, h.Source}
+				if !filledBefore[k] && failedAttempts[k] == 0 {
+					stalled = false
+					break
+				}
+			}
+		}
 		previousScore = score
 		if s.o.noCopy || (fillable == 0 && len(next) == 0) || (stalled && !retryFailed) || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
 			break
@@ -910,6 +929,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	var holes []syncHole
 	var unindexed []string
 	var skipped []syncSkip
+	frontierReused := 0
 	holeNames := map[string]bool{}
 	// Receipts can overlap after a resumed run changes batch boundaries. Only
 	// matching batches below prove progress in the current name stream; summing
@@ -920,6 +940,8 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 		mu.Lock()
 		defer mu.Unlock()
 		s.prog.done.Add(int64(r.Names))
+		s.prog.replayed.Add(int64(r.Reused))
+		frontierReused += r.Reused
 		holes = append(holes, r.Holes...)
 		unindexed = append(unindexed, r.Unindexed...)
 		skipped = append(skipped, r.Skipped...)
@@ -939,6 +961,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 		}
 	}
 	type job struct {
+		ids   []int64
 		names []string
 		masks []uint64
 	}
@@ -954,13 +977,19 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 			for jb := range jobs {
 				for i, n := range jb.names {
 					mask := jb.masks[i]
-					if s.o.restartWindow {
-						// A name can acquire another holder after catalog discovery.
+					if s.frontier != nil || s.o.restartWindow {
+						// Check holders acquired after catalog discovery too.
 						mask = (uint64(1) << uint(len(s.o.from))) - 1
 					}
 					s.masks.Store(n, mask)
 				}
-				row, err := s.verifyBatch(ctx, journalRound, jb.names)
+				var row syncRow
+				var err error
+				if s.frontier != nil {
+					row, err = s.verifyFrontierBatch(ctx, journalRound, jb.names, jb.ids)
+				} else {
+					row, err = s.verifyBatch(ctx, journalRound, jb.names)
+				}
 				for _, n := range jb.names {
 					s.masks.Delete(n)
 				}
@@ -996,13 +1025,16 @@ feed:
 				break feed
 			}
 			chunk.names = append(chunk.names, name)
+			if set.id != nil {
+				chunk.ids = append(chunk.ids, set.id())
+			}
 			chunk.masks = append(chunk.masks, mask)
 		}
 		if len(chunk.names) == 0 {
 			break
 		}
 		fed += len(chunk.names)
-		if r, ok := done[chunk.names[0]]; ok && r.Last == chunk.names[len(chunk.names)-1] {
+		if r, ok := done[chunk.names[0]]; s.frontier == nil && ok && r.Last == chunk.names[len(chunk.names)-1] {
 			s.prog.replayed.Add(int64(r.Names))
 			collect(r)
 			resumed += len(chunk.names)
@@ -1027,7 +1059,7 @@ feed:
 		points += h.Points
 	}
 	if round == 1 {
-		s.sum.Verified = fed
+		s.sum.Verified = fed - frontierReused
 		s.sum.HoleNames, s.sum.HolePoints = len(holeNames), points
 	}
 	phase.names += verified
@@ -1042,7 +1074,7 @@ feed:
 	})
 	sort.Strings(unindexed)
 	s.endPhase("verify", 0)
-	event("sync_verified", map[string]any{"round": round, "names": fed, "resumed": resumed, "hole_names": len(holeNames), "hole_points": points, "unindexed": len(unindexed), "skipped": len(skipped),
+	event("sync_verified", map[string]any{"round": round, "names": fed - frontierReused, "candidate_names": fed, "proof_reused": frontierReused, "resumed": resumed, "hole_names": len(holeNames), "hole_points": points, "unindexed": len(unindexed), "skipped": len(skipped),
 		"compared_by_digest": s.prog.digests.Load(), "read_point_by_point": s.prog.reads.Load()})
 	return holes, unindexed, skipped, nil
 }
