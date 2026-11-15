@@ -198,3 +198,37 @@ func TestStageTimerAndCloseForceSync(t *testing.T) {
 		})
 	}
 }
+
+func TestStageRecoveredFrontierRequiresNewSync(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(dir, withTestDefaults(Options{SegmentSize: 16 << 20}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.StartAppend()
+	if _, err := l.StageGroup(stageBatch("recovered", 1, 2)); err != nil {
+		t.Fatal(err)
+	}
+	// Serialize behind the positioned write without forcing durability.
+	if _, err := l.AppendState(); err != nil {
+		t.Fatal(err)
+	}
+	l.Kill()
+	l, err = Open(dir, withTestDefaults(Options{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.StartAppend()
+	defer l.Close()
+	state, err := l.AppendState()
+	if err != nil || len(state.Files) != 0 {
+		t.Fatal("recovered page-cache tail advertised before sync", state, err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = l.AppendState()
+	if err != nil || len(state.Files) != 1 || state.Files[0].Size <= segmentHeaderSize || state.Files[0].Size >= 16<<20 {
+		t.Fatal("expected validated, newly synced prefix", state, err)
+	}
+}

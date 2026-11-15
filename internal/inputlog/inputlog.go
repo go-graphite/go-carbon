@@ -559,6 +559,13 @@ func (l *Log) adoptRecovered(preserveReplay bool) {
 	}
 	for _, seg := range l.recovered {
 		if seg == l.active || len(l.pending) > 0 && seg.seq >= first {
+			if preserveReplay && l.src == nil && seg.end > segmentHeaderSize {
+				// A process crash can leave complete, unsynced page-cache
+				// frames. Establish durability before append readers advertise
+				// any recovered prefix as a synced frontier.
+				seg.synced = segmentHeaderSize
+				l.dirty = append(l.dirty, seg)
+			}
 			l.live = append(l.live, seg)
 		} else {
 			l.free(seg)
