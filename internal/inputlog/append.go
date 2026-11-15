@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // AppendReceipt identifies the original append generation and its durable tail.
@@ -19,6 +21,8 @@ type appendRequest struct {
 	batches [partitions]*Batch
 	reply   chan appendReply
 	queued  time.Time
+	staged  chan error
+	weight  int
 }
 type appendReply struct {
 	receipt AppendReceipt
@@ -77,8 +81,33 @@ func (l *Log) Append(partition uint16, batch *Batch) (AppendReceipt, error) {
 // AppendGroup borrows all final partitions of one submission until one durable
 // group commit. The writer preserves submission order in every partition.
 func (l *Log) AppendGroup(batches [partitions]*Batch) (AppendReceipt, error) {
+	completion, err := l.submitAppend(batches, false)
+	if err != nil {
+		return AppendReceipt{}, err
+	}
+	return completion.Wait()
+}
+
+// AppendCompletion separates buffer ownership from persistence. Wait returns an
+// ordered receipt only after the containing file has successfully synced.
+// A completion has one waiter; callers that only stage may discard it.
+type AppendCompletion struct{ done chan appendReply }
+
+func (c *AppendCompletion) Wait() (AppendReceipt, error) {
+	r := <-c.done
+	return r.receipt, r.err
+}
+
+// StageGroup borrows batches only until the encoder has consumed their columns
+// and names. Returning permits immediate reuse; it is not a durability receipt.
+// Sync, Close, and synchronous AppendGroup force all preceding staged work.
+func (l *Log) StageGroup(batches [partitions]*Batch) (*AppendCompletion, error) {
+	return l.submitAppend(batches, true)
+}
+
+func (l *Log) submitAppend(batches [partitions]*Batch, stage bool) (*AppendCompletion, error) {
 	if !l.started {
-		return AppendReceipt{}, ErrClosed
+		return nil, ErrClosed
 	}
 	n, bytes := 0, 0
 	for _, batch := range batches {
@@ -87,25 +116,34 @@ func (l *Log) AppendGroup(batches [partitions]*Batch) (AppendReceipt, error) {
 		}
 		size, err := validateAppendBatch(batch)
 		if err != nil {
-			return AppendReceipt{}, err
+			return nil, err
 		}
 		n += batch.Len()
 		bytes += size
 		if n > maxSortRows || bytes > maxFrameRaw {
-			return AppendReceipt{}, errors.New("input log append group exceeds frame budget")
+			return nil, errors.New("input log append group exceeds frame budget")
 		}
 	}
 	if n == 0 {
-		return AppendReceipt{}, errors.New("empty input log append group")
+		return nil, errors.New("empty input log append group")
 	}
 
 	reply := make(chan appendReply, 1)
+	var staged chan error
+	if stage {
+		staged = make(chan error, 1)
+	}
+	completion := &AppendCompletion{done: reply}
 	select {
-	case l.appends <- appendRequest{batches: batches, reply: reply, queued: time.Now()}:
-		r := <-reply
-		return r.receipt, r.err
+	case l.appends <- appendRequest{batches: batches, reply: reply, queued: time.Now(), staged: staged, weight: bytes}:
+		if staged != nil {
+			if err := <-staged; err != nil {
+				return nil, err
+			}
+		}
+		return completion, nil
 	case <-l.done:
-		return AppendReceipt{}, ErrClosed
+		return nil, ErrClosed
 	}
 }
 
@@ -126,52 +164,29 @@ func validateAppendBatch(batch *Batch) (int, error) {
 	return bytes, nil
 }
 
+// A pending receipt holds no borrowed input columns or names.
+type pendingAppend struct {
+	reply   chan appendReply
+	receipt AppendReceipt
+}
+
 func (l *Log) appendCycle(first appendRequest) {
 	admitted := time.Now()
 	requests := []appendRequest{first}
-	// Requests borrow caller-owned buffers. Bound each group; excess callers
-	// wait on the unbuffered channel without copying points into another spool.
+	weight := first.weight
 Drain:
-	for len(requests) < 64 {
+	for len(requests) < 64 && weight < 8<<20 {
 		select {
-		case request := <-l.appends:
-			requests = append(requests, request)
+		case r := <-l.appends:
+			requests = append(requests, r)
+			weight += r.weight
 		default:
 			break Drain
 		}
 	}
-	encodeStart, encodeEnd, syncEnd := time.Time{}, time.Time{}, time.Time{}
-	err := l.appendErr
-	var receipt AppendReceipt
-	if err == nil {
-		// Append commits share the current cache generation. Only a cache
-		// collection advances it; socket submission rate is not elapsed time.
-		gen, seq := l.gen, l.target()
-		if l.appendPin == nil {
-			offset := int64(segmentHeaderSize)
-			if l.active != nil && l.active.seq == seq {
-				offset = l.active.end
-			}
-			l.appendPin = &Position{Segment: seq, Offset: offset}
-		}
-		at := time.Now()
-		encodeStart = at
-		l.encodeAppends(seq, requests)
-		l.total.appendEncodeNanos.Add(time.Since(at).Nanoseconds())
-		encodeEnd = time.Now()
-		err = l.write(gen, seq)
-		syncEnd = time.Now()
-		if err == nil {
-			receipt = AppendReceipt{Generation: gen, Tail: Position{Segment: l.active.seq, Offset: l.active.end}, Salt: l.active.salt}
-		}
-	}
-	// A failed group cannot be followed in the same encoder stream: callers
-	// received no durability acknowledgment and the underlying write may be torn.
-	if err != nil {
-		l.appendErr = err
-	}
+	var event *AppendEvent
 	if l.appendTrace.enabled.Load() {
-		event := &AppendEvent{Admitted: admitted.UnixNano(), EncodeStart: encodeStart.UnixNano(), EncodeEnd: encodeEnd.UnixNano(), Synced: syncEnd.UnixNano(), SyncStart: l.lastSyncStarted.UnixNano(), Requests: len(requests)}
+		event = &AppendEvent{Admitted: admitted.UnixNano(), Requests: len(requests)}
 		for _, r := range requests {
 			event.Queued = append(event.Queued, r.queued.UnixNano())
 			for _, b := range r.batches {
@@ -180,11 +195,136 @@ Drain:
 				}
 			}
 		}
+	}
+	if l.appendPendingSince.IsZero() {
+		l.appendPendingSince = first.queued
+	}
+	err := l.appendErr
+	if err == nil && l.testAppendHook != nil {
+		err = l.testAppendHook("before-encode")
+	}
+	force := false
+	for _, r := range requests {
+		force = force || r.staged == nil
+	}
+	gen, seq := l.gen, l.target()
+	if err == nil {
+		if l.appendPin == nil {
+			offset := int64(segmentHeaderSize)
+			if l.active != nil && l.active.seq == seq {
+				offset = l.active.end
+			}
+			l.appendPin = &Position{Segment: seq, Offset: offset}
+		}
+		at := time.Now()
+		if event != nil {
+			event.EncodeStart = at.UnixNano()
+		}
+		l.encodeAppends(seq, requests)
+		l.total.appendEncodeNanos.Add(time.Since(at).Nanoseconds())
+		if l.testAppendHook != nil {
+			err = l.testAppendHook("after-encode")
+		}
+	}
+	if event != nil {
+		event.EncodeEnd = time.Now().UnixNano()
+	}
+	// No later operation dereferences request.batches: this is Stage's boundary.
+	for i := range requests {
+		requests[i].batches = [partitions]*Batch{}
+		if requests[i].staged != nil {
+			requests[i].staged <- err
+		}
+	}
+	if err == nil {
+		err = l.writeFrames(gen, seq)
+	}
+	if event != nil {
+		l.pendingAppendEvents = append(l.pendingAppendEvents, event)
+	}
+	if l.appendPendingSince.IsZero() {
+		l.appendPendingSince = first.queued
+	}
+	receipt := AppendReceipt{}
+	if err == nil {
+		receipt = AppendReceipt{Generation: gen, Tail: Position{Segment: l.active.seq, Offset: l.active.end}, Salt: l.active.salt}
+	}
+	for _, r := range requests {
+		l.pendingAppends = append(l.pendingAppends, pendingAppend{r.reply, receipt})
+	}
+	if err != nil {
+		l.finishAppends(err)
+	} else if force || l.total.bytes.Load()-l.appendSyncedBytes >= 64<<20 || len(l.pendingAppends) >= 65536 {
+		_ = l.commitAppends()
+	}
+}
+
+func (l *Log) finishAppends(err error) {
+	if errors.Is(err, ErrClosed) && len(l.pendingAppends) == 0 {
+		return
+	}
+	if err != nil {
+		if l.appendErr == nil {
+			l.total.writeErrors.Add(1)
+			l.logger.Error("input log append failed", zap.Error(err))
+		}
+		l.appendErr = err
+	}
+	for _, pending := range l.pendingAppends {
+		receipt := pending.receipt
+		if err != nil {
+			receipt = AppendReceipt{}
+		}
+		pending.reply <- appendReply{receipt: receipt, err: err}
+	}
+	for _, event := range l.pendingAppendEvents {
+		if err == nil {
+			event.Synced = time.Now().UnixNano()
+			event.SyncStart = l.lastSyncStarted.UnixNano()
+		}
 		l.appendTrace.events[l.appendTrace.next.Add(1)%uint64(len(l.appendTrace.events))].Store(event)
 	}
-	for _, request := range requests {
-		request.reply <- appendReply{receipt: receipt, err: err}
+	clear(l.pendingAppendEvents)
+	l.pendingAppendEvents = l.pendingAppendEvents[:0]
+	l.appendPendingSince = time.Time{}
+	clear(l.pendingAppends)
+	l.pendingAppends = l.pendingAppends[:0]
+}
+
+// Writer-owned: publication follows successful fdatasync, never encode/write.
+func (l *Log) commitAppends() error {
+	if l.appendErr != nil {
+		l.finishAppends(l.appendErr)
+		return l.appendErr
 	}
+	err := l.flush()
+	if err == nil {
+		err = l.syncDirty()
+	}
+	if err == nil {
+		l.appendSyncedBytes = l.total.bytes.Load()
+	}
+	if err == nil && l.testAppendHook != nil {
+		err = l.testAppendHook("before-publish")
+	}
+	if err == nil {
+		l.total.appendDurablePoints.Store(l.total.points.Load())
+		if !l.appendPendingSince.IsZero() {
+			elapsed := time.Since(l.appendPendingSince).Nanoseconds()
+			for old := l.total.appendMaxExposure.Load(); elapsed > old; old = l.total.appendMaxExposure.Load() {
+				if l.total.appendMaxExposure.CompareAndSwap(old, elapsed) {
+					break
+				}
+			}
+		}
+	}
+	l.finishAppends(err)
+	if err == nil && l.testAppendHook != nil {
+		if err = l.testAppendHook("after-publish"); err != nil {
+			l.finishAppends(err)
+		}
+	}
+	return err
 }
 
 func (l *Log) encodeAppends(seq uint64, requests []appendRequest) {

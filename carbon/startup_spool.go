@@ -235,9 +235,27 @@ func (s *startupShard) newSegment(index uint64, syncDirectory bool) (*startupSeg
 // connections wait before acquiring that fence, independently of decode slots.
 func (s *startupInput) CaptureSlots() chan struct{} {
 	if s.journal != nil {
-		return s.journal.captureSlots
+		return nil
 	}
 	return nil
+}
+
+// AcquireCapture reserves transient columns, names, encoder/compressor work and
+// the borrowed input before taking the receiver's direct-write fence.
+func (s *startupInput) AcquireCapture(bytes, points int) (func(), error) {
+	if s.journal == nil {
+		return func() {}, nil
+	}
+	return s.journal.acquire(bytes, points)
+}
+
+// StageCapture is receiver-only: its caller already owns the byte reservation.
+// Write retains its synchronous durability contract for existing callers.
+func (s *startupInput) StageCapture(raw []byte, n int) error {
+	if s.journal == nil {
+		return s.Write(raw, n)
+	}
+	return s.journal.writeAdmitted(raw, n, true)
 }
 
 func (s *startupInput) CaptureShards() []tcp.Capture {
@@ -1072,6 +1090,9 @@ func (s *startupInput) close() error {
 			<-sh.written
 		}
 		var errs []error
+		if s.journal != nil {
+			errs = append(errs, s.journal.log.Sync())
+		}
 		for _, sh := range append([]*startupShard{s.legacy}, s.shards...) {
 			if sh == nil {
 				continue

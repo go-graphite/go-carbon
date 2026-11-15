@@ -29,8 +29,7 @@ type startupJournal struct {
 	log             *inputlog.Log
 	dir             string
 	tags            bool
-	slots           chan struct{}
-	captureSlots    chan struct{}
+	budget          captureByteBudget
 	buffers         chan *startupJournalBuffer
 	appendTiming    captureTiming
 	encodingTiming  captureTiming
@@ -53,23 +52,24 @@ type startupJournalBuffer struct {
 }
 
 func newStartupJournal(s *startupInput, l *inputlog.Log, dir string, tagged bool) *startupJournal {
-	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, slots: make(chan struct{}, 32), captureSlots: make(chan struct{}, 32), buffers: make(chan *startupJournalBuffer, 32)}
+	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, buffers: make(chan *startupJournalBuffer, 32)}
+	j.budget.limit = max(1<<20, min(128<<20, s.policy.available/32))
+	j.budget.changed = make(chan struct{})
 	for i := range j.parts {
 		j.parts[i].source = j.parts[i].stream.Next()
 	}
 	return j
 }
 func (j *startupJournal) write(raw []byte, expected int) error {
-	admitted := time.Now()
-	// Bound decoded batches independently of TCP connection count. Slots are
-	// acquired before allocating native columns or canonical name references.
-	select {
-	case j.slots <- struct{}{}:
-	case <-j.owner.stop:
-		return inputlog.ErrClosed
+	release, err := j.acquire(len(raw), expected)
+	if err != nil {
+		return err
 	}
-	defer func() { <-j.slots }()
-	j.admissionTiming.observe(admitted)
+	defer release()
+	return j.writeAdmitted(raw, expected, false)
+}
+
+func (j *startupJournal) writeAdmitted(raw []byte, expected int, stage bool) error {
 	encoding := time.Now()
 	// Acknowledgement ends the writer's borrow. Reuse the bounded columns only
 	// after it returns, clearing references even on validation/write failures.
@@ -83,8 +83,19 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 		for i := range buffer.batches {
 			buffer.batches[i].Reset()
 		}
+		pooledNames := len(buffer.refs)
 		clear(buffer.refs)
-		j.buffers <- buffer
+		// Keep at most 32MiB of idle native columns outside active admission.
+		var retained int64
+		for i := range buffer.batches {
+			retained += buffer.batches[i].Bytes()
+		}
+		if retained <= 1<<20 && pooledNames <= 4096 {
+			select {
+			case j.buffers <- buffer:
+			default:
+			}
+		}
 	}()
 	batches, refs := &buffer.batches, buffer.refs
 	count := 0
@@ -138,7 +149,12 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 	}
 	if count > 0 {
 		started := time.Now()
-		_, err := j.log.AppendGroup(group)
+		var err error
+		if stage {
+			_, err = j.log.StageGroup(group)
+		} else {
+			_, err = j.log.AppendGroup(group)
+		}
 		j.appendTiming.observe(started)
 		if err != nil {
 			return err
@@ -302,6 +318,9 @@ func (j *startupJournal) replayPartition(part uint16, sink *startupSink) error {
 func (j *startupJournal) fence() error {
 	if failure := j.failure.Load(); failure != nil {
 		return failure.err
+	}
+	if err := j.log.Sync(); err != nil {
+		return err
 	}
 	state, err := j.log.AppendState()
 	if err != nil {

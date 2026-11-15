@@ -41,6 +41,10 @@ func (l *Log) requestAppendState(release bool) (CopyState, error) {
 }
 func (l *Log) appendState(r appendStateRequest) {
 	if r.release {
+		if err := l.commitAppends(); err != nil {
+			r.reply <- appendStateReply{err: err}
+			return
+		}
 		if l.src == nil {
 			r.reply <- appendStateReply{err: errors.New("append persistence requires an attached source")}
 			return
@@ -56,8 +60,11 @@ func (l *Log) appendState(r appendStateRequest) {
 	}
 	state := CopyState{From: Position{Segment: l.nextSeq, Offset: segmentHeaderSize}, To: Position{Segment: l.nextSeq, Offset: segmentHeaderSize}}
 	for _, seg := range l.live {
-		state.Files = append(state.Files, CopyFile{Name: filepath.Base(seg.path), Size: seg.end})
-		state.To = Position{Segment: seg.seq, Offset: seg.end}
+		if seg.synced <= segmentHeaderSize {
+			continue
+		}
+		state.Files = append(state.Files, CopyFile{Name: filepath.Base(seg.path), Size: seg.synced})
+		state.To = Position{Segment: seg.seq, Offset: seg.synced}
 	}
 	if l.replayPin != nil {
 		state.From = *l.replayPin

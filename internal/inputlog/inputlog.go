@@ -226,19 +226,24 @@ type Log struct {
 	copyPin  *Position
 	// replayPin protects the immutable Open inventory while the writer runs.
 	// Only the writer may release it, after all replay owners have joined.
-	replayPin       *Position
-	replayDone      chan chan error
-	appends         chan appendRequest
-	appendPin       *Position
-	appendErr       error
-	appendTrace     appendTrace
-	lastSyncStarted time.Time // writer-owned trace clock
-	attaches        chan sourceAttachment
-	appendStates    chan appendStateRequest
-	stop            chan struct{}
-	done            chan struct{}
-	started         bool
-	closed          bool
+	replayPin           *Position
+	replayDone          chan chan error
+	appends             chan appendRequest
+	appendPin           *Position
+	appendErr           error
+	pendingAppends      []pendingAppend
+	appendSyncedBytes   int64
+	testAppendHook      func(string) error
+	pendingAppendEvents []*AppendEvent
+	appendPendingSince  time.Time
+	appendTrace         appendTrace
+	lastSyncStarted     time.Time // writer-owned trace clock
+	attaches            chan sourceAttachment
+	appendStates        chan appendStateRequest
+	stop                chan struct{}
+	done                chan struct{}
+	started             bool
+	closed              bool
 
 	stat  stats
 	total totals
@@ -249,6 +254,7 @@ type Log struct {
 // totals are cumulative counters and gauges for Metrics, updated per frame,
 // write or sync and never per point.
 type totals struct {
+	appendDurablePoints, appendMaxExposure                atomic.Int64
 	appendEncodeNanos                                     atomic.Int64
 	bytes, points, syncs, writeErrors, relogged, unlogged atomic.Int64
 	replayed, replayNanos                                 atomic.Int64
@@ -286,6 +292,8 @@ func (l *Log) stage(s int, d time.Duration) { l.total.stageNanos[s].Add(int64(d)
 
 // Metrics are the log's cumulative counters since Open, and gauges.
 type Metrics struct {
+	AppendDurablePoints   int64
+	AppendMaxSyncExposure time.Duration
 	// AppendEncodingDuration is elapsed writer time encoding/compressing append
 	// groups. It excludes positioned writes and syncs, which have separate stages.
 	AppendEncodingDuration time.Duration
@@ -314,6 +322,8 @@ func (l *Log) Metrics() Metrics {
 		stages[i] = time.Duration(l.total.stageNanos[i].Load())
 	}
 	return Metrics{
+		AppendDurablePoints:    l.total.appendDurablePoints.Load(),
+		AppendMaxSyncExposure:  time.Duration(l.total.appendMaxExposure.Load()),
 		AppendEncodingDuration: time.Duration(l.total.appendEncodeNanos.Load()),
 		Cycles:                 l.total.cycles.Load(), Stages: stages,
 		BytesWritten: l.total.bytes.Load(), PointsWritten: l.total.points.Load(), Syncs: l.total.syncs.Load(),
@@ -409,6 +419,9 @@ func (l *Log) scan() error {
 		if frames, err = seg.scanFrames(frames); err != nil {
 			return err
 		}
+		// Only the validated recovered prefix is readable. Preallocated file
+		// capacity is not a committed frame frontier.
+		seg.synced = seg.end
 	}
 	if len(frames) == 0 {
 		return nil
@@ -600,11 +613,17 @@ func (l *Log) run() {
 	phasecpu.Set(phasecpu.InputLog)
 	defer phasecpu.Set(phasecpu.Other)
 	defer close(l.done)
+	defer l.finishAppends(ErrClosed)
 	ticker := time.NewTicker(l.opts.SyncInterval)
+	appendTicker := time.NewTicker(time.Second)
+	defer appendTicker.Stop()
 	defer ticker.Stop()
 	for {
 		var reply chan error
 		select {
+		case <-appendTicker.C:
+			_ = l.commitAppends()
+			continue
 		case <-ticker.C:
 		case <-l.pressure:
 		case reply = <-l.syncs:
@@ -711,6 +730,9 @@ func (l *Log) closeFiles() {
 // cycle commits one generation: everything the shards recorded before
 // switching to the next one. A cycle's frames all go to one segment.
 func (l *Log) cycle() error {
+	if err := l.commitAppends(); err != nil {
+		return err
+	}
 	if l.src == nil {
 		return l.appendErr
 	}
@@ -818,9 +840,20 @@ func (l *Log) compress(part *partitionBuffer, p int, raw []byte, rows int) {
 // write appends the cycle's frames to segment seq with one write, then syncs
 // it. A new segment's header goes out with them.
 func (l *Log) write(gen, seq uint64) error {
+	if err := l.writeFrames(gen, seq); err != nil {
+		l.finishAppends(err)
+		return err
+	}
+	return l.commitAppends()
+}
+
+func (l *Log) writeFrames(gen, seq uint64) error {
 	var errs error
 	if l.active == nil || l.active.seq != seq {
-		errs = errors.Join(l.flush(), l.syncDirty(), l.roll())
+		if err := l.commitAppends(); err != nil {
+			return err
+		}
+		errs = l.roll()
 	}
 	seg := l.active
 	if seg == nil {
@@ -874,7 +907,7 @@ func (l *Log) write(gen, seq uint64) error {
 	if !rolled {
 		l.steady = seg.end - first.off
 	}
-	errs = errors.Join(errs, l.flush(), l.syncDirty())
+	errs = errors.Join(errs, l.flush())
 	// Many durable append groups can share a cache generation. Keep its first
 	// position/time, rather than retaining metadata for every socket buffer.
 	if len(l.ticks) == 0 || l.ticks[len(l.ticks)-1].gen != gen {
@@ -895,7 +928,16 @@ func (l *Log) flush() error {
 	}
 	seg := l.wseg
 	defer func(at time.Time) { l.stage(StageWrite, time.Since(at)) }(time.Now())
-	_, err := seg.file.WriteAt(l.wbuf, l.woff)
+	var err error
+	if l.testAppendHook != nil {
+		err = l.testAppendHook("before-write")
+	}
+	if err == nil {
+		_, err = seg.file.WriteAt(l.wbuf, l.woff)
+	}
+	if err == nil && l.testAppendHook != nil {
+		err = l.testAppendHook("after-write")
+	}
 	l.stat.writes.Add(1)
 	l.stat.bytes.Add(int64(len(l.wbuf)))
 	l.total.bytes.Add(int64(len(l.wbuf)))
@@ -918,7 +960,16 @@ func (l *Log) syncDirty() error {
 	var errs error
 	for _, seg := range l.dirty {
 		started := time.Now()
-		err := datasync(seg.file)
+		var err error
+		if l.testAppendHook != nil {
+			err = l.testAppendHook("before-sync")
+		}
+		if err == nil {
+			err = datasync(seg.file)
+		}
+		if err == nil && l.testAppendHook != nil {
+			err = l.testAppendHook("after-sync")
+		}
 		took := time.Since(started)
 		l.stat.syncs.Add(1)
 		l.stat.syncNanos.Add(int64(took))

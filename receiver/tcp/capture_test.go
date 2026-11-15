@@ -340,3 +340,37 @@ func TestEmptyCaptureFlushDoesNotWaitForDurableAdmission(t *testing.T) {
 		<-slots
 	}
 }
+
+type stagedCaptureProbe struct {
+	entered, release chan struct{}
+	staged           atomic.Int64
+}
+
+func (s *stagedCaptureProbe) Write([]byte, int) error { panic("synchronous capture used") }
+func (s *stagedCaptureProbe) AcquireCapture(int, int) (func(), error) {
+	close(s.entered)
+	<-s.release
+	return func() {}, nil
+}
+func (s *stagedCaptureProbe) StageCapture([]byte, int) error { s.staged.Add(1); return nil }
+func TestCaptureByteWaitPrecedesDirectFence(t *testing.T) {
+	out := &stagedCaptureProbe{entered: make(chan struct{}), release: make(chan struct{})}
+	rcv := &TCP{}
+	b := newCaptureBuffer(out)
+	b.sink = &rcv.captureSink
+	b.point([]byte("ordered"), math.Float64frombits(1<<63), 7)
+	done := make(chan error, 1)
+	go func() { done <- b.flush() }()
+	<-out.entered
+	var got []*points.Points
+	if err := rcv.SwitchCapture(func(p *points.Points) { got = append(got, p) }, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	close(out.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if out.staged.Load() != 0 || len(got) != 1 || got[0].Metric != "ordered" || math.Float64bits(got[0].Data[0].Value) != 1<<63 {
+		t.Fatal("direct fence reordered staged data", got)
+	}
+}

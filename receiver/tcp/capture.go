@@ -34,6 +34,13 @@ type BoundedCapture interface {
 	CaptureSlots() chan struct{}
 }
 
+// StagedCapture separates receiver buffer ownership from durable completion.
+// The reservation covers all transient work and precedes the direct-write fence.
+type StagedCapture interface {
+	AcquireCapture(bytes, points int) (func(), error)
+	StageCapture([]byte, int) error
+}
+
 // captureSubmitter reuses connection-owned acknowledgements. A submission
 // still lends its bytes only until the matching acknowledgement is received.
 type captureSubmitter interface{ SubmitCapture([]byte, int, chan error) }
@@ -189,6 +196,18 @@ func (b *captureBuffer) flush() error {
 		return b.err
 	}
 
+	if out, ok := b.out.(StagedCapture); ok && b.sink != nil && b.sink.direct.Load() == nil {
+		started := time.Now()
+		release, err := out.AcquireCapture(len(b.buf), b.n)
+		if err != nil {
+			b.err = err
+			return err
+		}
+		defer release()
+		if b.admission != nil {
+			b.admission.observe(started)
+		}
+	}
 	if b.sink != nil {
 		if b.slots != nil && b.sink.direct.Load() == nil {
 			started := time.Now()
@@ -274,7 +293,11 @@ func (b *captureBuffer) flushCaptured() error {
 	if b.n == 0 || b.err != nil {
 		return b.err
 	}
-	b.err = b.out.Write(b.buf, b.n)
+	if out, ok := b.out.(StagedCapture); ok && b.sink != nil {
+		b.err = out.StageCapture(b.buf, b.n)
+	} else {
+		b.err = b.out.Write(b.buf, b.n)
+	}
 	b.buf, b.n = b.buf[:0], 0
 	return b.err
 }
