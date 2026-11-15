@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"runtime/trace"
 	"slices"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 func TestLatencyComparison(t *testing.T) {
 	root := os.Getenv("GO_CARBON_MIXED_LATENCY_DIR")
 	profile := os.Getenv("GO_CARBON_MIXED_PROFILE") != ""
+	traced := os.Getenv("GO_CARBON_MIXED_TRACE") != ""
 	path := os.Getenv("GO_CARBON_MIXED_COMPARE")
 	local := os.Getenv("GO_CARBON_MIXED_LATENCY_LOCAL") != ""
 	if profile || local {
@@ -31,7 +33,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy2" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy3" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	const clock int64 = 1794700800
@@ -105,6 +107,12 @@ func TestLatencyComparison(t *testing.T) {
 		names[fmt.Sprintf("find.metric.%04d", i)] = m
 	}
 	cat := catalog(names)
+	borrowedSnapshots := make(map[*chunkstore.Store]*partsread.Snapshot)
+	defer func() {
+		for _, s := range borrowedSnapshots {
+			s.Close()
+		}
+	}()
 	var pub partsread.Publication
 	pub.Publish(partsread.View{Catalog: cat, Parts: []partsread.Source{partsread.Freeze(records)}})
 	defer pub.Close()
@@ -118,11 +126,40 @@ func TestLatencyComparison(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		r, e := New(Options{Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(64 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
+		frozen, e := old.ResolveFrozen(ctx, cfg.Name)
+		if e != nil {
+			t.Fatal(e)
+		}
+		binding, e := BindLegacy(frozen, m)
+		if e != nil {
+			t.Fatal(e)
+		}
+		entries := make(map[string]catalogEntry, len(names))
+		for name, metric := range names {
+			entries[name] = catalogEntry{metric: metric}
+		}
+		entries[cfg.Name] = catalogEntry{metric: m, legacy: binding}
+		var boundPub partsread.Publication
+		boundPub.Publish(partsread.View{Catalog: entryCatalog{Catalog: cat, entries: entries}, Parts: []partsread.Source{partsread.Freeze(records)}})
+		snapshot, e := boundPub.Snapshot()
+		if e != nil {
+			t.Fatal(e)
+		}
+		boundPub.Close()
+		borrowedSnapshots[old] = snapshot
+		r, e := New(Options{Snapshot: snapshot, Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(64 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
 		if e != nil {
 			t.Fatal(e)
 		}
 		return old, full, r
+	}
+	closePair := func(old, full *chunkstore.Store) {
+		// Each generation drains before its legacy store closes. Do not retain
+		// every cold sample's complete catalog until the end of the benchmark.
+		borrowedSnapshots[old].Close()
+		delete(borrowedSnapshots, old)
+		_ = old.Close()
+		_ = full.Close()
 	}
 	when := time.Now().In(time.FixedZone("CET", 3600)).Format("2006-01-02 15:04:05")
 	fmt.Println("| When (CET) | Class | Legacy p50 us | Mixed p50 us | Legacy p99 us | Mixed p99 us | Gate |")
@@ -150,8 +187,7 @@ func TestLatencyComparison(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			_ = old.Close()
-			_ = full.Close()
+			closePair(old, full)
 			old, full, r = open()
 			count := 200
 			if profile {
@@ -170,6 +206,10 @@ func TestLatencyComparison(t *testing.T) {
 					pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", fmt.Sprintf("%t-%dh-%s", warm, width/3600, kind))))
 					runtime.ReadMemStats(&before)
 				}
+				var region *trace.Region
+				if traced {
+					region = trace.StartRegion(ctx, fmt.Sprintf("warm=%t,hours=%d,mixed=%t,sample=%d", warm, width/3600, mixed, len(base)+len(mix)))
+				}
 				a := time.Now()
 				var err error
 				if mixed {
@@ -182,6 +222,9 @@ func TestLatencyComparison(t *testing.T) {
 					_, err = full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 				}
 				elapsed := time.Since(a).Nanoseconds()
+				if region != nil {
+					region.End()
+				}
 				if mixed {
 					mix = append(mix, elapsed)
 				} else {
@@ -212,13 +255,11 @@ func TestLatencyComparison(t *testing.T) {
 					measure(false)
 				}
 				if !warm {
-					_ = old.Close()
-					_ = full.Close()
+					closePair(old, full)
 				}
 			}
 			if warm {
-				_ = old.Close()
-				_ = full.Close()
+				closePair(old, full)
 			}
 			if profile {
 				fmt.Printf("ALLOC warm=%t hours=%d native=%d mixed=%d bytes/op\n", warm, width/3600, baseBytes/uint64(count), mixedBytes/uint64(count))
@@ -238,8 +279,7 @@ func TestLatencyComparison(t *testing.T) {
 		}
 	}
 	old, full, r := open()
-	defer old.Close()
-	defer full.Close()
+	defer closePair(old, full)
 	var nativeNames, mixedNames []string
 	if err := cat.Find(ctx, "*", func(name string) error { nativeNames = append(nativeNames, name); return nil }); err != nil {
 		t.Fatal(err)
@@ -253,37 +293,58 @@ func TestLatencyComparison(t *testing.T) {
 	var base, mix []int64
 	var before, after runtime.MemStats
 	var baseBytes, mixedBytes uint64
-	for range 1000 {
+	measureFind := func(mixed bool, sample int) {
+		var region *trace.Region
+		kind := "native"
+		if mixed {
+			kind = "mixed"
+		}
+		if traced {
+			region = trace.StartRegion(ctx, fmt.Sprintf("find-%s-%d", kind, sample))
+		}
 		if profile {
-			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", "find-native")))
+			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", "find-"+kind)))
 			runtime.ReadMemStats(&before)
 		}
-		a := time.Now()
-		e = cat.Find(ctx, "*", func(string) error { return nil })
-		base = append(base, time.Since(a).Nanoseconds())
+		started := time.Now()
+		var err error
+		if mixed {
+			err = r.Find(ctx, "*", func(string) error { return nil })
+		} else {
+			err = cat.Find(ctx, "*", func(string) error { return nil })
+		}
+		elapsed := time.Since(started).Nanoseconds()
+		if region != nil {
+			region.End()
+		}
+		if mixed {
+			mix = append(mix, elapsed)
+		} else {
+			base = append(base, elapsed)
+		}
 		if profile {
 			runtime.ReadMemStats(&after)
-			baseBytes += after.TotalAlloc - before.TotalAlloc
-		}
-		if e != nil {
-			t.Fatal(e)
-		}
-		if profile {
-			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", "find-mixed")))
-			runtime.ReadMemStats(&before)
-		}
-		a = time.Now()
-		e = r.Find(ctx, "*", func(string) error { return nil })
-		mix = append(mix, time.Since(a).Nanoseconds())
-		if profile {
-			runtime.ReadMemStats(&after)
-			mixedBytes += after.TotalAlloc - before.TotalAlloc
+			if mixed {
+				mixedBytes += after.TotalAlloc - before.TotalAlloc
+			} else {
+				baseBytes += after.TotalAlloc - before.TotalAlloc
+			}
 			pprof.SetGoroutineLabels(ctx)
 		}
-		if e != nil {
-			t.Fatal(e)
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
+	for sample := range 1000 {
+		if sample%2 == 0 {
+			measureFind(false, sample)
+			measureFind(true, sample)
+		} else {
+			measureFind(true, sample)
+			measureFind(false, sample)
+		}
+	}
+
 	if profile {
 		fmt.Printf("ALLOC find native=%d mixed=%d bytes/op\n", baseBytes/1000, mixedBytes/1000)
 	}

@@ -108,6 +108,9 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 }
 
 func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix) (*Series, error) {
+	return s.fetchMetric(ctx, name, fromTime, untilTime, prefix, nil)
+}
+func (s *Store) fetchMetric(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix, frozen *FrozenMetric) (*Series, error) {
 	ctx, finish, err := s.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -167,7 +170,10 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	if cache != nil {
 		state = cache.get(stripe, name, epoch)
 	}
-	if state != nil {
+	if frozen != nil {
+		m = frozen.metadata
+		m.MetricConfig = cloneConfig(m.MetricConfig)
+	} else if state != nil {
 		m = state.meta
 		m.MetricConfig = cloneConfig(m.MetricConfig)
 	} else {

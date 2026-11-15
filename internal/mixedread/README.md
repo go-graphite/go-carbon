@@ -85,3 +85,36 @@ on actual persisted v2 sources, including concurrent ingestion. The unified-inde
 off retains the slower per-query union. The diagnostic enables it against the
 same immutable fixture catalog used by the native baseline. Warm classes take
 200 samples and fresh block-cache classes take 30, without dropping OS caches.
+
+## Bound immutable generations
+
+A publisher can opt into `Options.Snapshot` to retain one part generation for
+an entire reader lifetime. Publish a new Reader whenever that generation changes,
+stop admitting callers to the old Reader, drain its callers, then close its
+Snapshot and legacy store. `Snapshot.Close` is only valid after that drain;
+it must not race with `BorrowInto`, rendering, or another Close.
+
+The snapshot catalog must implement `partsread.LegacyCatalog`. Its single
+`LookupLegacy` call returns the part metric, a `*mixedread.LegacyBinding` for
+legacy-present names, and existence. A nil binding explicitly means v2-only.
+Build a binding once with `legacy.ResolveFrozen(ctx, name)` followed by
+`mixedread.BindLegacy(frozen, partMetric)`. The constructor verifies archive
+policy without requiring the two stores' numeric IDs to match. A union name
+alone never establishes legacy presence. The complete catalog must retain the
+existing index's Find implementation and coherent suppression rules.
+
+Pass the retained `publication.Snapshot()` and `UnifiedCatalog: true` to New.
+The bound Fetch resolves one generation-checked catalog token for both render
+paths; `FetchFrozen` uses the publication-time legacy metadata while preserving
+native store read admission, read-view cleanup, cancellation, and close handling.
+Returned native metadata remains an owned copy.
+
+Bound requests reuse handle/result storage and a sparse workspace callback.
+Their adapter bookkeeping performs no publication retain/release and introduces
+no writer lock; native legacy admission and read-view synchronization remain.
+The byte budget still charges every active request. Warm v2-only renders have
+zero adapter allocations. A small warm mixed fixture also adds no allocations
+over frozen legacy fetching (15 allocations/request on both paths). The legacy
+decoder and the existing index can still
+allocate, and cold workspace/pool misses can allocate. These statements do not
+establish a latency improvement or a persisted-part production qualification.

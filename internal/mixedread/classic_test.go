@@ -132,6 +132,26 @@ func TestClassicCutoverDifferential(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
+				frozen, e := legacy.ResolveFrozen(ctx, cfg.Name)
+				if e != nil {
+					t.Fatal(e)
+				}
+				binding, e := BindLegacy(frozen, metric)
+				if e != nil {
+					t.Fatal(e)
+				}
+				var boundPub partsread.Publication
+				boundPub.Publish(partsread.View{Catalog: entryCatalog{Catalog: cat, entries: map[string]catalogEntry{cfg.Name: {metric: metric, legacy: binding}}}, Parts: []partsread.Source{partsread.Freeze(post)}})
+				boundSnap, e := boundPub.Snapshot()
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer boundSnap.Close()
+				boundPub.Close()
+				bound, e := New(Options{Legacy: legacy, LegacyCatalog: cat, Parts: adapter, UnifiedCatalog: true, Snapshot: boundSnap})
+				if e != nil {
+					t.Fatal(e)
+				}
 				for _, width := range []int64{3600, 86400, 7 * 86400, 30 * 86400} {
 					from := clock - width
 					want, e := w.Fetch(int(from), int(clock))
@@ -158,6 +178,9 @@ func TestClassicCutoverDifferential(t *testing.T) {
 						shape = got
 					}
 					if e = mixed.Fetch(ctx, cfg.Name, from, clock, func(got *partsread.Series) error { check("mixed", got); return nil }); e != nil {
+						t.Fatal(e)
+					}
+					if e = bound.Fetch(ctx, cfg.Name, from, clock, func(got *partsread.Series) error { check("bound-mixed", got); return nil }); e != nil {
 						t.Fatal(e)
 					}
 					h, e := whole.Pin(partsread.NewBudget(128<<20), 128<<20)

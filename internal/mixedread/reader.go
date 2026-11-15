@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -23,6 +24,10 @@ var ErrPolicy = errors.New("mixed reader archive policy differs across cutover")
 // legacy binding requires publishing a new Reader and draining the old one.
 // Storage owners retain all handles and publications until Reader callers drain.
 type Options struct {
+	// Snapshot optionally binds a complete immutable part generation for this
+	// Reader. Its owner drains Reader callers before closing it. It must carry
+	// a LegacyCatalog whose values are *LegacyBinding or nil.
+	Snapshot      *partsread.Snapshot
 	Legacy        *chunkstore.Store
 	LegacyCatalog partsread.Catalog
 	// UnifiedCatalog declares Parts.Catalog authoritative for the complete name
@@ -41,7 +46,28 @@ type Options struct {
 	MaxFindNames int
 	Now          func() time.Time
 }
-type Reader struct{ opts Options }
+type request struct {
+	handle  partsread.Handle
+	legacy  partsread.Series
+	current partsread.Series
+}
+type Reader struct {
+	opts     Options
+	requests sync.Pool
+}
+
+func (r *Reader) takeRequest() *request {
+	if q := r.requests.Get(); q != nil {
+		return q.(*request)
+	}
+	return new(request)
+}
+func (r *Reader) releaseRequest(q *request) {
+	q.handle.Close()
+	q.legacy = partsread.Series{}
+	q.current = partsread.Series{}
+	r.requests.Put(q)
+}
 
 func New(opts Options) (*Reader, error) {
 	if opts.LegacyHorizon < 0 || opts.LegacyHorizon > math.MaxUint32 {
@@ -80,7 +106,10 @@ func New(opts Options) (*Reader, error) {
 		opts.Now = opts.Legacy.Now
 	}
 	opts.Parts.Now = opts.Now
-	return &Reader{opts}, nil
+	if opts.Snapshot != nil && (!opts.UnifiedCatalog || !opts.Snapshot.HasLegacyCatalog()) {
+		return nil, errors.New("bound snapshot requires complete explicit legacy metadata")
+	}
+	return &Reader{opts: opts}, nil
 }
 func (r *Reader) legacyAllowed(name string) bool {
 	return r.opts.SuppressLegacy == nil || !r.opts.SuppressLegacy(name)
@@ -89,11 +118,18 @@ func (r *Reader) legacyAllowed(name string) bool {
 // Find emits the catalog union once per name. It forwards each side's original
 // index query and bounds the duplicate set; it does not implement a glob parser.
 func (r *Reader) Find(ctx context.Context, pattern string, yield func(string) error) error {
-	h, err := r.opts.Parts.Catalog.Pin(r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+	q := r.takeRequest()
+	defer r.releaseRequest(q)
+	h := &q.handle
+	var err error
+	if r.opts.Snapshot != nil {
+		err = r.opts.Snapshot.BorrowInto(h, r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+	} else {
+		err = r.opts.Parts.Catalog.PinInto(h, r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+	}
 	if err != nil {
 		return err
 	}
-	defer h.Close()
 	if r.opts.UnifiedCatalog {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -142,6 +178,9 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if r.opts.Snapshot != nil {
+		return r.fetchBound(ctx, name, from, until, consume)
+	}
 	var legacyMetric partsread.Metric
 	var hasLegacy bool
 	if r.legacyAllowed(name) {
@@ -164,11 +203,13 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 		return consume(old)
 	}
 
-	h, err := p.Pin(r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+	q := r.takeRequest()
+	defer r.releaseRequest(q)
+	h := &q.handle
+	err := p.PinInto(h, r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
 	if err != nil {
 		return err
 	}
-	defer h.Close()
 	var old *partsread.Series
 	skipLegacy := hasLegacy && r.afterLegacyHorizon(legacyMetric, from)
 	if hasLegacy && !skipLegacy {
@@ -302,4 +343,127 @@ func (r *Reader) checkLegacyBudget(m partsread.Metric, from, until int64) error 
 		return partsread.ErrAdmission
 	}
 	return nil
+}
+
+// LegacyBinding is constructed once when the coherent catalog is published.
+// The associated store remains open until the reader generation drains.
+type LegacyBinding struct {
+	frozen *chunkstore.FrozenMetric
+	metric partsread.Metric
+}
+
+func BindLegacy(frozen *chunkstore.FrozenMetric, m partsread.Metric) (*LegacyBinding, error) {
+	if frozen == nil {
+		return nil, ErrPolicy
+	}
+	c := frozen.Config()
+	if c.AggregationMethod.String() != m.AggregationMethod || c.XFilesFactor != m.XFilesFactor || len(c.Retentions) != len(m.Archives) {
+		return nil, ErrPolicy
+	}
+	for i, a := range m.Archives {
+		if a.Step != int64(c.Retentions[i].Step) || a.Points != int64(c.Retentions[i].Count) {
+			return nil, ErrPolicy
+		}
+	}
+	m.Archives = slices.Clone(m.Archives)
+	return &LegacyBinding{frozen: frozen, metric: m}, nil
+}
+func (r *Reader) fetchFrozen(ctx context.Context, q *request, b *LegacyBinding, from, until int64) (*partsread.Series, error) {
+	if int64(int(from)) != from || int64(int(until)) != until {
+		return nil, errors.New("legacy query timestamp overflows int")
+	}
+	if err := r.checkLegacyBudget(b.metric, from, until); err != nil {
+		return nil, err
+	}
+	s, err := r.opts.Legacy.FetchFrozen(ctx, b.frozen, int(from), int(until))
+	if err != nil || s == nil {
+		return nil, err
+	}
+	q.legacy = partsread.Series{Metric: b.metric, From: int64(s.FromTime), Until: int64(s.UntilTime), Step: int64(s.Step), Values: s.Values}
+	return &q.legacy, nil
+}
+func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64, consume func(*partsread.Series) error) error {
+	q := r.takeRequest()
+	defer r.releaseRequest(q)
+	h := &q.handle
+	if err := r.opts.Snapshot.BorrowInto(h, r.opts.Parts.Budget, r.opts.Parts.WorkBytes); err != nil {
+		return err
+	}
+	resolved, err := h.Resolve(name)
+	if err != nil {
+		return err
+	}
+	var binding *LegacyBinding
+	if resolved.LegacyPresent() && r.legacyAllowed(name) {
+		var ok bool
+		binding, ok = resolved.Legacy().(*LegacyBinding)
+		if !ok || binding == nil || !samePolicy(binding.metric, resolved.Metric()) {
+			return ErrPolicy
+		}
+	}
+	legacyMetric := resolved.Metric()
+	hasLegacy := binding != nil
+	var old *partsread.Series
+	skipLegacy := hasLegacy && r.afterLegacyHorizon(legacyMetric, from)
+	if hasLegacy && !skipLegacy {
+		old, err = r.fetchFrozen(ctx, q, binding, from, until)
+		if err != nil {
+			return err
+		}
+	}
+	var current *partsread.Series
+	// An existing legacy result supplies the only dense output. RenderInto
+	// replaces physical slots directly; no dense occupancy scan or merge follows.
+	// One-slot results keep the ordinary path because an empty opposite archive
+	// can select a zero-width shape instead of Whisper's populated extension.
+	if old != nil && len(old.Values) > 1 {
+		current, err = h.RenderResolvedTo(ctx, resolved, from, until, r.opts.Now().Unix(), old, &q.current)
+	} else {
+		current, err = h.RenderResolvedTo(ctx, resolved, from, until, r.opts.Now().Unix(), nil, &q.current)
+	}
+	if errors.Is(err, partsread.ErrNotFound) && hasLegacy {
+		if skipLegacy {
+			old, err = r.fetchFrozen(ctx, q, binding, from, until)
+			if err != nil {
+				return err
+			}
+		}
+		return consume(old)
+	}
+	if errors.Is(err, partsread.ErrShape) {
+		return fmt.Errorf("%w: %w", ErrPolicy, err)
+	}
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return consume(old)
+	}
+	if hasLegacy && !samePolicy(legacyMetric, current.Metric) {
+		return ErrPolicy
+	}
+	if int64(len(current.Values)) > r.opts.Parts.WorkBytes/64 {
+		return partsread.ErrAdmission
+	}
+	if len(current.Occupied) != len(current.Values) {
+		return errors.New("part reader omitted physical slot occupancy")
+	}
+	if old == nil || len(old.Values) == 0 || len(old.Values) > 1 {
+		return consume(current)
+	}
+	if len(current.Values) == 0 {
+		return consume(old)
+	}
+	if current.From != old.From || current.Until != old.Until || current.Step != old.Step || len(current.Values) != len(old.Values) {
+		return fmt.Errorf("%w: render shapes differ", ErrPolicy)
+	}
+	// Untouched pooled part slots are immutable: sparse workspace release only
+	// resets occupied indices. Put the combined result in legacy's owned output.
+	for i, occupied := range current.Occupied {
+		if occupied {
+			old.Values[i] = current.Values[i]
+		}
+	}
+	current.Values = old.Values
+	return consume(current)
 }
