@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	whisper "github.com/go-graphite/go-whisper"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -139,6 +140,18 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	app := v2Fixture(t, &oracleBackend{})
 	app.v2Open = nil
 	app.Config.Common.MaxCPU = 32
+	// The ordinary fixture has a minute/hour policy. Use the single-archive
+	// intake shape explicitly here; repeated timestamps within a minute would
+	// otherwise conceal the cost of advancing fine-resolution data.
+	schema := filepath.Join(t.TempDir(), "throughput-schemas.conf")
+	if err := os.WriteFile(schema, []byte("[all]\npattern = .*\nretentions = 1s:1d\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	app.Config.Whisper.Schemas, err = persister.ReadWhisperSchemas(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
 	app.Config.V2.Owners = 16
 	app.Config.V2.Shards = 16
 	app.Config.V2.PartInterval.Duration = time.Second
@@ -157,6 +170,7 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
+	fmt.Printf("V2_DAEMON_CONFIG gomaxprocs=%d owners=%d dbs=%d\n", runtime.GOMAXPROCS(0), app.Config.V2.Owners, app.Config.V2.Shards)
 	// Measure an actual TCP append, not just listener construction. The runner
 	// supplies its pre-exec wall clock; absent it this is not an exec-start gate.
 	address := app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
@@ -262,7 +276,31 @@ func TestV2DaemonThroughput120(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(duration)
+	// Receipts survive an external health guard stopping this process. The final
+	// receipt uses the same counters and interval as these cumulative samples.
+	receipt := func(stage string) {
+		var u syscall.Rusage
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u)
+		seconds := func(x syscall.Timeval) float64 { return float64(x.Sec) + float64(x.Usec)/1e6 }
+		cpu := seconds(u.Utime) + seconds(u.Stime) - seconds(usage0.Utime) - seconds(usage0.Stime)
+		accepted := app.v2.Backend.Stats().IngestedPoints - points0
+		elapsed := time.Since(start).Seconds()
+		journal := journalDiskBytes(app.Config.V2.DataDir) - journal0
+		fmt.Printf("V2_DAEMON_RECEIPT stage=%s seconds=%.6f accepted=%d points_per_second=%.3f journal_bytes=%d journal_bytes_per_point=%.6f cpu_seconds=%.6f cpu_ns_per_point=%.3f rss_bytes=%d maxrss_native_units=%d stats=%+v\n", stage, elapsed, accepted, float64(accepted)/elapsed, journal, float64(journal)/float64(accepted), cpu, cpu*1e9/float64(accepted), nativeRSSBytes(), u.Maxrss, app.v2.Backend.Stats())
+	}
+	tick := time.NewTicker(5 * time.Second)
+	timer := time.NewTimer(duration)
+measure:
+	for {
+		select {
+		case <-tick.C:
+			receipt("periodic")
+		case <-timer.C:
+			break measure
+		}
+	}
+	tick.Stop()
+	receipt("final")
 	elapsed := time.Since(start).Seconds()
 	stats := app.v2.Backend.Stats()
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &usage1)
@@ -329,6 +367,19 @@ func TestV2DaemonExternalSender(t *testing.T) {
 	if addr == "" {
 		t.Skip("external sender only")
 	}
+	// TestMain deliberately caps ordinary test suites at four CPUs. This
+	// separate, explicitly requested load process has an independent budget.
+	cpus := v2BenchPositiveInt(t, "V2_BACKEND_SENDER_MAXPROCS", 96)
+	connections := v2BenchPositiveInt(t, "V2_BACKEND_CONNECTIONS", 64)
+	cardinality := v2BenchPositiveInt(t, "V2_BACKEND_CARDINALITY", 1048576)
+	if connections > cardinality {
+		t.Fatal("connections exceed cardinality")
+	}
+	runtime.GOMAXPROCS(cpus)
+	fmt.Printf("V2_TCP_SENDER_CONFIG gomaxprocs=%d connections=%d cardinality=%d advancing_timestamps=true\n", runtime.GOMAXPROCS(0), connections, cardinality)
+	start := time.Now()
+	var u0, u1 syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u0)
 	var stop atomic.Bool
 	go func() {
 		for !stop.Load() {
@@ -341,7 +392,7 @@ func TestV2DaemonExternalSender(t *testing.T) {
 	}()
 	var wg sync.WaitGroup
 	var sent atomic.Uint64
-	for producer := range 32 {
+	for producer := range connections {
 		wg.Add(1)
 		go func(p int) {
 			defer wg.Done()
@@ -351,16 +402,28 @@ func TestV2DaemonExternalSender(t *testing.T) {
 				return
 			}
 			defer conn.Close()
-			var packet bytes.Buffer
-			stamp := time.Now().Unix() - 30
-			for n := range 1024 {
-				fmt.Fprintf(&packet, "bench.namespace%d.cluster1.host%04d.component.requests.value %.17g %d\n", p%4, p*128+n%128, float64(n)+.125, stamp)
+			// Names and values are prepared once, independently of storage CPU.
+			// Each connection walks disjoint names, and timestamps advance with
+			// wall time instead of replaying one frozen packet for two minutes.
+			lines := make([][]byte, (cardinality+connections-1-p)/connections)
+			for i := range lines {
+				id := i*connections + p
+				lines[i] = []byte(fmt.Sprintf("bench.namespace%d.cluster1.host%07d.component.requests.value %d.125 ", id%4, id, id%100003))
 			}
-			data := packet.Bytes()
+			data := make([]byte, 0, 128<<10)
+			nextName := 0
 			next := time.Now()
 			for !stop.Load() {
-				_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
-				if _, e = conn.Write(data); e != nil {
+				data = data[:0]
+				stamp := time.Now().Unix() - 1
+				for range 1024 {
+					data = append(data, lines[nextName]...)
+					data = strconv.AppendInt(data, stamp, 10)
+					data = append(data, '\n')
+					nextName = (nextName + 1) % len(lines)
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				if _, e = io.Copy(conn, bytes.NewReader(data)); e != nil {
 					if !stop.Load() {
 						t.Error(e)
 					}
@@ -375,7 +438,80 @@ func TestV2DaemonExternalSender(t *testing.T) {
 		}(producer)
 	}
 	wg.Wait()
-	fmt.Printf("V2_TCP_SENDERS connections=32 full_write_points=%d\n", sent.Load())
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u1)
+	seconds := func(u syscall.Rusage) float64 {
+		return float64(u.Utime.Sec+u.Stime.Sec) + float64(u.Utime.Usec+u.Stime.Usec)/1e6
+	}
+	fmt.Printf("V2_TCP_SENDERS connections=%d full_write_points=%d seconds=%.6f points_per_second=%.3f cpu_seconds=%.6f maxrss_native_units=%d\n", connections, sent.Load(), time.Since(start).Seconds(), float64(sent.Load())/time.Since(start).Seconds(), seconds(u1)-seconds(u0), u1.Maxrss)
+}
+
+func v2BenchPositiveInt(t *testing.T, key string, fallback int) int {
+	t.Helper()
+	if value := os.Getenv(key); value != "" {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			t.Fatal("invalid " + key)
+		}
+		return n
+	}
+	return fallback
+}
+
+func nativeRSSBytes() uint64 {
+	b, _ := os.ReadFile("/proc/self/status")
+	for _, line := range strings.Split(string(b), "\n") {
+		var kb uint64
+		if _, err := fmt.Sscanf(line, "VmRSS: %d kB", &kb); err == nil {
+			return kb * 1024
+		}
+	}
+	return 0
+}
+
+// Same sender implementation and CPU placement as the daemon arm, with a TCP
+// discard sink on the daemon CPUs. This establishes sender headroom explicitly.
+func TestV2DaemonSenderCapacity(t *testing.T) {
+	if os.Getenv("V2_BACKEND_SENDER_CAPACITY") != "1" {
+		t.Skip("explicit native benchmark only")
+	}
+	runtime.GOMAXPROCS(v2BenchPositiveInt(t, "V2_BACKEND_CPUS", 96))
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			c, e := l.Accept()
+			if e != nil {
+				return
+			}
+			wg.Add(1)
+			go func() { defer wg.Done(); defer c.Close(); _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+	stopFile := filepath.Join(t.TempDir(), "stop")
+	cmd := exec.Command("taskset", "-c", os.Getenv("V2_BACKEND_SENDER_CPUS"), os.Args[0], "-test.run=^TestV2DaemonExternalSender$", "-test.v", "-test.timeout=60s")
+	cmd.Env = append(os.Environ(), "V2_BACKEND_SENDER_ADDR="+l.Addr().String(), "V2_BACKEND_SENDER_STOP="+stopFile)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	time.Sleep(15 * time.Second)
+	if err = os.WriteFile(stopFile, []byte("stop"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
 }
 
 func nativeWriteBytes() uint64 {
