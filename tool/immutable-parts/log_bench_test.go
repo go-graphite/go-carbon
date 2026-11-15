@@ -28,6 +28,31 @@ func TestLogReadStageCeilings(t *testing.T) {
 	}
 }
 
+func TestLogAppendFixtureKeepsOriginalClock(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PARTLOG_BENCH_OFFSET", "6000100")
+	if err := logBacklogBenchmark(root, "write", 100, 101, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := partlog.Open(filepath.Join(root, "log"), partlog.Options{Streams: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	if err = journal.Replay(0, 0, func(record partlog.Record) error {
+		rows, err := decodeLogRows(record.Payload)
+		if err != nil {
+			return err
+		}
+		if len(rows) != 100 || rows[0].Seq != 6000100 || record.Clock != rows[0].Time {
+			t.Fatalf("offset fixture lost original apply clock: clock=%d rows=%v", record.Clock, rows)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLogSIGKILLMidReplay(t *testing.T) {
 	const total, metrics = 100003, 101
 	cfg := coreConfig{AppendParts: true, Shards: 2, Producers: 1, MaxRows: 1 << 20, PartitionSeconds: 3600}

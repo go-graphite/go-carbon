@@ -293,3 +293,10 @@ open/recovery and final close; these are stage ceilings, not storage throughput.
 The replay-live settled rate includes journal open, historical replay, accepted
 live suffix draining, compaction waiting and final flush/close. Compaction debt
 is sampled immediately before close, while the databases remain open.
+
+For a bounded replay-live CPU capture, set `PARTLOG_BENCH_PROFILE` to an output
+path and optionally `PARTLOG_BENCH_PROFILE_SECONDS` (1–120, default20). Do not
+combine it with `-test.cpuprofile`. It completes the capture even while a slow
+replay continues, preserving a usable profile if the external IO guard later
+stops the process. Fixture extension via `PARTLOG_BENCH_OFFSET` preserves the
+original apply clock of the generated rows.

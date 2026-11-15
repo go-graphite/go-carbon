@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -99,7 +100,7 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 						rows[i] = row{seq % metrics, 1800000000 + int64(seq/6000000), math.Float64bits(float64(seq % 100003)), seq}
 					}
 					payload = encodeLogRowsInto(payload, rows)
-					if _, e := log.Append(p, 1800000000+int64(first/6000000), payload); e != nil {
+					if _, e := log.Append(p, 1800000000+int64((offset+first)/6000000), payload); e != nil {
 						done <- e
 						return
 					}
@@ -201,6 +202,11 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 // This exercises acceptance into the durable journal concurrently with ordered
 // replay. Live rows have disjoint sequence numbers but the same metric catalogue.
 func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, metrics uint64, emit func(string, uint64, map[string]any), start time.Time) error {
+	stopProfile, err := boundedReplayCPUProfile()
+	if err != nil {
+		return err
+	}
+	defer stopProfile()
 	replayStart := time.Now()
 	journal, err := partlog.OpenAdmission(filepath.Join(root, "log"), opts)
 	if err != nil {
@@ -349,6 +355,35 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	}
 	emit("replay_live_close_complete", committed, map[string]any{"error": fmt.Sprint(err), "backlog": total, "live_accepted": live.Load(), "whole_mpoints_per_second": float64(total+live.Load()) / time.Since(start).Seconds() / 1e6})
 	return err
+}
+
+// Finish a diagnostic profile before a slow replay can exhaust its IO slot.
+// The ordinary test-wide profile remains available when this option is unset.
+func boundedReplayCPUProfile() (func(), error) {
+	path := os.Getenv("PARTLOG_BENCH_PROFILE")
+	if path == "" {
+		return func() {}, nil
+	}
+	seconds := 20
+	if raw := os.Getenv("PARTLOG_BENCH_PROFILE_SECONDS"); raw != "" {
+		var err error
+		seconds, err = strconv.Atoi(raw)
+		if err != nil || seconds < 1 || seconds > 120 {
+			return nil, os.ErrInvalid
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	if err = pprof.StartCPUProfile(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	var once sync.Once
+	stop := func() { once.Do(func() { pprof.StopCPUProfile(); _ = f.Close() }) }
+	timer := time.AfterFunc(time.Duration(seconds)*time.Second, stop)
+	return func() { timer.Stop(); stop() }, nil
 }
 
 // Validate every persisted row against the generator and prove no duplicates
