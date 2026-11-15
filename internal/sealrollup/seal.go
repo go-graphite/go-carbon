@@ -118,7 +118,15 @@ func (p *Prepared) PlanWithWorkspace(prior Frontier, view View, ranges RangeView
 // EncodeRecord preserves occupied NaNs, signed zero, source order and the actual
 // epoch of a ring slot. Key identity supplies metric/archive/physical slot.
 func EncodeRecord(r Record) []byte {
-	b := make([]byte, 26)
+	return AppendRecord(nil, r)
+}
+
+// AppendRecord allows a seal writer to own one contiguous key/value arena.
+// Bytes are identical to EncodeRecord; the returned slice may alias dst.
+func AppendRecord(dst []byte, r Record) []byte {
+	at := len(dst)
+	dst = append(dst, make([]byte, 26)...)
+	b := dst[at:]
 	b[0] = 1
 	if r.Correction {
 		b[1] = 1
@@ -126,7 +134,7 @@ func EncodeRecord(r Record) []byte {
 	binary.BigEndian.PutUint64(b[2:], uint64(r.Sample.Time))
 	binary.BigEndian.PutUint64(b[10:], r.Sample.Bits)
 	binary.BigEndian.PutUint64(b[18:], r.Order)
-	return b
+	return dst
 }
 
 func DecodeRecord(archive int, physicalSlot int64, b []byte) (Record, error) {

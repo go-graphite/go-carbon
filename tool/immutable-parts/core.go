@@ -27,6 +27,7 @@ type coreConfig struct {
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
 	Owners                     int
+	HeadMaxAge                 time.Duration `json:",omitempty"`
 	PartitionSeconds           int64
 	BlindBatch                 bool
 }
@@ -135,14 +136,15 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
 	hook := hooks.Publish
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.HeadMaxAge < 0 {
 		return nil, os.ErrInvalid
 	}
 	if err := os.MkdirAll(root, 0750); err != nil {
 		return nil, err
 	}
 	diskConfig := cfg
-	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
+	diskConfig.Owners = 0     // execution geometry does not change routing or persisted bytes
+	diskConfig.HeadMaxAge = 0 // head scheduling does not change the durable format
 	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers)}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
@@ -304,11 +306,17 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	}
 	return nil
 }
+func (c coreConfig) headMaxAge() time.Duration {
+	if c.HeadMaxAge == 0 {
+		return time.Second
+	}
+	return c.HeadMaxAge
+}
 func (o *coreOwner) poller() func() (bool, bool) {
 	head := make([]row, 0, o.cfg.MaxRows)
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(o.cfg.headMaxAge())
 	var headPublication time.Time
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
@@ -331,7 +339,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.parts.Add(1)
 		o.bytes.Add(n)
 		head = head[:0]
-		deadline = time.Now().Add(time.Second)
+		deadline = time.Now().Add(o.cfg.headMaxAge())
 		o.pub.publish(o.db.NewSnapshot())
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
@@ -392,7 +400,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if !found {
 			if failure == nil && time.Now().After(deadline) {
 				failure = flush()
-				deadline = time.Now().Add(time.Second)
+				deadline = time.Now().Add(o.cfg.headMaxAge())
 			}
 		}
 		return false, found
