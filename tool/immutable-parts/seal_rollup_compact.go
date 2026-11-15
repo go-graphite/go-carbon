@@ -10,8 +10,8 @@ import (
 	"slices"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/partsrun"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
-	"github.com/golang/snappy"
 )
 
 type compactRollupSelection struct {
@@ -88,32 +88,21 @@ func compactRunValue(h *compactRollupHead, m compactRollupBatch) []byte {
 }
 
 func decodeCompactRun(value []byte, id, order uint64, scratch []sealrollup.Sample) (sealrollup.Batch, error) {
-	if len(value) < 18 || value[0] != 1 || value[1] > 1 {
-		return sealrollup.Batch{}, errors.New("invalid compact run header")
+	header, err := partsrun.Inspect(value, 1<<26)
+	if err != nil {
+		return sealrollup.Batch{}, err
 	}
-	n := binary.BigEndian.Uint64(value[2:])
-	// Every sample has at least one tag before block compression. Check the
-	// requested allocation against a finite record limit before allocating.
-	if n > 1<<26 {
-		return sealrollup.Batch{}, errors.New("compact run count exceeds bound")
+	if cap(scratch) < header.Count {
+		scratch = make([]sealrollup.Sample, header.Count)
 	}
-	payloadBytes := len(value) - 18
-	if value[1] == 1 {
-		var e error
-		payloadBytes, e = snappy.DecodedLen(value[18:])
-		if e != nil {
-			return sealrollup.Batch{}, e
-		}
-	}
-	if payloadBytes < 1 || uint64(payloadBytes) < n || uint64(payloadBytes) > 30*n+64 {
-		return sealrollup.Batch{}, errors.New("compact run count/payload mismatch")
-	}
-	if cap(scratch) < int(n) {
-		scratch = make([]sealrollup.Sample, n)
-	}
-	h := compactRollupHead{data: value[18:], policies: [][]byte{nil}}
-	m := compactRollupBatch{id: id, order: order, clock: int64(binary.BigEndian.Uint64(value[10:])), count: int(n), end: len(h.data), compressed: value[1] == 1}
-	return h.decodeBatch(m, scratch[:n])
+	scratch = scratch[:header.Count]
+	i := 0
+	err = partsrun.Visit(value, 1<<26, func(p partsrun.Sample) error {
+		scratch[i] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Sequence}
+		i++
+		return nil
+	})
+	return sealrollup.Batch{Order: order, Now: header.Clock, Points: scratch}, err
 }
 
 func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan, err error) {
@@ -229,15 +218,14 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 				hi++
 			}
 			records := p.Records[lo:hi]
-			var run compactRollupHead
-			err = run.appendValues(coreBatch{ID: id}, len(records), func(i int) row {
+			value, e := partsrun.Append(nil, 0, len(records), func(i int) partsrun.Sample {
 				r := records[i]
-				return row{ID: id, Time: r.Sample.Time, Bits: r.Sample.Bits, Seq: r.Order}
+				return partsrun.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order}
 			})
-			if err != nil {
-				return plan, err
+			if e != nil {
+				return plan, e
 			}
-			data = append(data, coreKV{Key: rollupDataKey(in.Next.NextPart, id, 'b', uint32(records[0].Archive), 0), Value: compactRunValue(&run, run.batches[0])})
+			data = append(data, coreKV{Key: rollupDataKey(in.Next.NextPart, id, 'b', uint32(records[0].Archive), 0), Value: value})
 			lo = hi
 		}
 		for _, m := range ms {

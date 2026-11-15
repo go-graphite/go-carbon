@@ -2,18 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"math"
 	"math/rand"
 	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"strconv"
+	"syscall"
 	"testing"
 	"unsafe"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/internal/partsrun"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -36,6 +40,17 @@ func TestCompactRollupHeadExact(t *testing.T) {
 		}
 		want = append(want, b)
 	}
+	for i, m := range h.batches {
+		b := want[i]
+		encoded, e := partsrun.Append(nil, b.Clock, len(b.Points), func(j int) partsrun.Sample {
+			p := b.Points[j]
+			return partsrun.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
+		})
+		if e != nil || !reflect.DeepEqual(encoded, compactRunValue(&h, m)) {
+			t.Fatal("shared persisted codec differs from admission codec", i, e)
+		}
+	}
+
 	got, err := h.decode()
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatal("lossless compact roundtrip", err)
@@ -241,5 +256,98 @@ func TestCompactRunRejectCorruption(t *testing.T) {
 		if _, err := decodeCompactRun(v, 1, 1, nil); err == nil {
 			t.Fatal("accepted corrupt compact record")
 		}
+	}
+}
+
+func TestCompactEngineCrashReplay(t *testing.T) {
+	cfg := coreRollupTestConfig()
+	cfg.Shards = 1
+	if root := os.Getenv("COMPACT_CRASH_ROOT"); root != "" {
+		e, _, err := openCoreRollups(root, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		submit := func(order uint64, value float64) {
+			var h compactRollupHead
+			for _, b := range coreRollupBatches(t, order, value) {
+				if err := h.append(b); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := e.submitCompactRollupGroup(0, &h, order); err != nil {
+				t.Fatal(err)
+			}
+		}
+		submit(1, 2)
+		kill := func() {
+			if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+				os.Exit(99)
+			}
+			select {}
+		}
+		prior := e.owners[0].plan
+		switch os.Getenv("COMPACT_CRASH_STAGE") {
+		case "before":
+			e.owners[0].plan = func(in coreSealInput) (coreSealPlan, error) { kill(); return prior(in) }
+		case "after-ingest":
+			e.owners[0].plan = func(in coreSealInput) (coreSealPlan, error) {
+				p, err := prior(in)
+				if err == nil {
+					p.Commit = kill
+				}
+				return p, err
+			}
+		}
+		submit(2, 7)
+		kill()
+		return
+	}
+	for _, stage := range []string{"before", "after-ingest", "after-publish"} {
+		t.Run(stage, func(t *testing.T) {
+			root := t.TempDir()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCompactEngineCrashReplay$")
+			cmd.Env = append(os.Environ(), "COMPACT_CRASH_ROOT="+root, "COMPACT_CRASH_STAGE="+stage)
+			out, err := cmd.CombinedOutput()
+			var killed *exec.ExitError
+			if !errors.As(err, &killed) {
+				t.Fatalf("expected crash: %v %s", err, out)
+			}
+			status, ok := killed.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("unexpected exit %v %s", err, out)
+			}
+			e, states, err := openCoreRollups(root, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := uint64(2)
+			if stage == "before" {
+				want = 1
+			}
+			if states[0].state[42].Frontier.Order != want || e.durableFrontiers()[0][0] != want {
+				t.Fatal("torn compact archive/frontier")
+			}
+			var h compactRollupHead
+			for _, b := range coreRollupBatches(t, 2, 7) {
+				if err = h.append(b); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = e.submitCompactRollupGroup(0, &h, 2); err != nil {
+				t.Fatal(err)
+			}
+			if states[0].state[42].Frontier.Order != 2 || states[0].state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+				t.Fatal("compact crash replay changed archive")
+			}
+			snap := e.owners[0].db.NewSnapshot()
+			rows, err := coreRead(snap, 42)
+			snap.Close()
+			if err != nil || len(rows) != 4 {
+				t.Fatal("raw receipt lost/duplicated", len(rows), err)
+			}
+			if err = e.close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
