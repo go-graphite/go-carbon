@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -59,11 +58,12 @@ type checkpoint struct {
 	Revisions      map[string]uint64
 }
 type command struct {
-	frame  *frame
-	batch  []frame
-	seal   []frame
-	op     byte
-	answer chan answer
+	frame    *frame
+	batch    []frame
+	seal     []frame
+	op       byte
+	answer   chan answer
+	activate func() error
 }
 type answer struct {
 	frames []frame
@@ -82,6 +82,7 @@ type owner struct {
 	active         []frame
 	pending        []frame
 	nextOrder      uint64
+	recovering     bool
 	journalEncoder partlog.DictionaryDeltaEncoder
 	workspace      sealrollup.Workspace
 	batchScratch   []sealrollup.Batch
@@ -93,6 +94,12 @@ type owner struct {
 	readBase       atomic.Pointer[liveBase]
 }
 type Store struct {
+	ready                         chan struct{}
+	readyOK                       atomic.Bool
+	firstAccepted                 chan struct{}
+	firstAcceptNS                 atomic.Int64
+	accepted                      atomic.Uint64
+	legacyReady                   atomic.Pointer[catalog]
 	opts                          daemonstore.Options
 	resolved                      sync.Map
 	admissionContext              context.Context
@@ -124,29 +131,19 @@ var _ daemonstore.Backend = (*Store)(nil)
 
 func Open(opts daemonstore.Options) (daemonstore.Backend, error) { return openAt(opts, time.Now) }
 
-func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error) {
-	if opts.DataDir == "" || opts.Owners < 1 || opts.Shards < 1 || opts.PartInterval <= 0 || opts.Policy == nil {
-		return nil, errors.New("invalid v2 backend options")
-	}
-	if err := os.MkdirAll(opts.DataDir, 0750); err != nil {
-		return nil, err
-	}
-	s := &Store{opts: opts, now: now, errors: make(chan daemonstore.Failure, 1),
-		budget: partsread.NewBudget(256 << 20), stop: make(chan struct{}), done: make(chan struct{}),
-		watchStop: make(chan struct{}), watchDone: make(chan struct{})}
-	s.admissionContext, s.cancelAdmission = context.WithCancel(context.Background())
-	defer func() {
-		if err != nil {
-			s.abortOpen()
-		}
-	}()
+func openAt(opts daemonstore.Options, now func() time.Time) (*Store, error) {
+	return openAdmissionAt(opts, now, false)
+}
+
+func (s *Store) initialize() (err error) {
+	opts := s.opts
 	// Each database's LOCK fences simultaneous processes before journal recovery.
 	for i := 0; i < opts.Shards; i++ {
 		dir := filepath.Join(opts.DataDir, fmt.Sprintf("db-%04d", i))
 		db, e := pebble.Open(dir, &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 },
 			EventListener: &pebble.EventListener{WriteStallBegin: func(pebble.WriteStallBeginInfo) { s.stalls.Add(1) }}})
 		if e != nil {
-			return nil, e
+			return e
 		}
 		s.dbs = append(s.dbs, db)
 	}
@@ -155,12 +152,12 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	marker := filepath.Join(opts.DataDir, "V2FORMAT")
 	if old, e := os.ReadFile(marker); e == nil {
 		if !bytes.Equal(old, format) {
-			return nil, errors.New("v2 format/geometry mismatch")
+			return errors.New("v2 format/geometry mismatch")
 		}
 	} else if errors.Is(e, os.ErrNotExist) {
 		f, e := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 		if e != nil {
-			return nil, e
+			return e
 		}
 		_, e = f.Write(format)
 		if e == nil {
@@ -168,113 +165,39 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 		}
 		e = errors.Join(e, f.Close())
 		if e != nil {
-			return nil, e
+			return e
 		}
 		d, e := os.Open(opts.DataDir)
 		if e != nil {
-			return nil, e
+			return e
 		}
 		e = errors.Join(d.Sync(), d.Close())
 		if e != nil {
-			return nil, e
+			return e
 		}
 	} else {
-		return nil, e
+		return e
 	}
-	s.log, err = partlog.Open(filepath.Join(opts.DataDir, "journal"), partlog.Options{Streams: opts.Owners, SyncInterval: time.Second})
-	if err != nil {
-		return nil, err
-	}
-	for i := 0; i < opts.Owners; i++ {
-		o := &owner{id: i, s: s, db: s.dbs[i%opts.Shards], dir: filepath.Join(opts.DataDir, fmt.Sprintf("owner-%04d", i)),
-			admission: semaphore.NewWeighted(256 << 20), requests: make(chan command, 64), done: make(chan struct{}), metrics: make(map[string]*metricState)}
+	for _, o := range s.owners {
+		o.db = s.dbs[o.id%opts.Shards]
 		if e := os.MkdirAll(o.dir, 0750); e != nil {
-			return nil, e
+			return e
 		}
-		s.owners = append(s.owners, o)
 		if e := o.recover(); e != nil {
-			return nil, fmt.Errorf("owner %d: %w", i, e)
+			return fmt.Errorf("owner %d: %w", o.id, e)
 		}
 		o.nextOrder = max(o.meta.Order, o.meta.Cursor)
 	}
 	if err = s.openLegacy(); err != nil {
-		return nil, err
+		return err
 	}
-	if err = s.log.Sync(); err != nil {
-		return nil, err
-	}
-	// Replay only collects while the journal stream is borrowed. Syncing from a
-	// replay callback would recursively wait on that same stream.
+	s.legacyReady.Store(s.legacyCatalog)
 	for _, o := range s.owners {
-		pendingPoints := 0
-		var decoder receiptDecoder
-		defer decoder.dictionary.Close()
-		// Definitions can precede the durable apply frontier. Decode the retained
-		// epoch prefix but never reapply a checkpointed receipt.
-		if e := s.log.Replay(o.id, 0, func(r partlog.Record) error {
-			fs, e := decoder.decode(r.Payload)
-			if e != nil {
-				return e
-			}
-			if r.Cursor <= o.meta.Cursor {
-				return nil
-			}
-			for _, f := range fs {
-				f.cursor = r.Cursor
-				if f.clock == 0 {
-					f.clock = r.Clock
-				}
-				if s.route(f.name) != o.id {
-					return errors.New("journal metric owner mismatch")
-				}
-				current, e := opts.Policy(f.name)
-				if e != nil {
-					return e
-				}
-				if !reflect.DeepEqual(current, f.policy) {
-					return errors.New("replay policy changed")
-				}
-				o.nextOrder++
-				f.order = o.nextOrder
-				f.payload = nil
-				o.active = append(o.active, f)
-				pendingPoints += len(f.points)
-				s.ingested.Add(uint64(len(f.points)))
-			}
-			// Never checkpoint a partial journal record: all its frames share Cursor.
-			if pendingPoints >= 1<<20 {
-				if e := o.commit(o.active); e != nil {
-					return e
-				}
-				o.active = nil
-				pendingPoints = 0
-			}
-			return nil
-		}); e != nil {
-			return nil, e
+		if e := s.recoverOwner(o); e != nil {
+			return e
 		}
 	}
-	if err = s.log.Sync(); err != nil {
-		return nil, err
-	}
-	for _, o := range s.owners {
-		if err = o.commit(o.active); err != nil {
-			return nil, err
-		}
-		o.active = nil
-		if err = o.publish(); err != nil {
-			return nil, err
-		}
-	}
-	if err = s.openMixed(); err != nil {
-		return nil, err
-	}
-	for _, o := range s.owners {
-		go o.run()
-	}
-	go s.maintain()
-	go s.watchErrors()
-	return s, nil
+	return s.openMixed()
 }
 
 func (s *Store) abortOpen() {
@@ -342,6 +265,11 @@ func (o *owner) run() {
 		}
 		var a answer
 		switch c.op {
+		case 'a':
+			a.err = c.activate()
+			if a.err == nil {
+				o.recovering = false
+			}
 		case 'f':
 			a.frames = o.active
 			o.active = nil
@@ -404,17 +332,30 @@ func (o *owner) run() {
 				if a.err == nil {
 					cursor, a.err = o.s.log.Append(o.id, fs[0].clock, payload)
 				}
+				if a.err == nil && o.s.firstAcceptNS.Load() == 0 {
+					a.err = o.s.log.Sync()
+					if a.err == nil && o.s.firstAcceptNS.CompareAndSwap(0, time.Now().UnixNano()) {
+						close(o.s.firstAccepted)
+					}
+				}
 				if a.err == nil {
 					var n uint64
 					for i := range fs {
-						o.nextOrder++
-						fs[i].order = o.nextOrder
+						if !o.recovering {
+							o.nextOrder++
+							fs[i].order = o.nextOrder
+						}
 						fs[i].cursor = cursor
 						fs[i].payload = nil
 						n += uint64(len(fs[i].points))
 					}
-					o.active = append(o.active, fs...)
-					o.s.ingested.Add(n)
+					o.s.accepted.Add(n)
+					if o.recovering {
+						o.admission.Release(frameCharge(fs))
+					} else {
+						o.active = append(o.active, fs...)
+						o.s.ingested.Add(n)
+					}
 				}
 			}
 			for _, cc := range commands {
@@ -492,6 +433,9 @@ func (s *Store) flush() error {
 	return err
 }
 func (s *Store) Flush() error {
+	if e := s.WaitReady(context.Background()); e != nil {
+		return e
+	}
 	if s.closing.Load() {
 		return ErrClosed
 	}
@@ -530,6 +474,7 @@ func (s *Store) watchErrors() {
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		s.closing.Store(true)
+		<-s.ready
 		s.cancelAdmission()
 		close(s.stop)
 		<-s.done
@@ -626,6 +571,9 @@ func decodeFrame(b []byte) (frame, error) {
 // CacheQuery borrows no mutable head: the admission owner copies its accepted
 // unsealed receipts while the caller waits on a bounded command exchange.
 func (s *Store) CacheQuery(ctx context.Context, name string) ([]points.Point, error) {
+	if e := s.readStatus(); e != nil {
+		return nil, e
+	}
 	if e := s.status(); e != nil {
 		return nil, e
 	}

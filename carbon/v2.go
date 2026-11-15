@@ -20,7 +20,7 @@ type v2OpenFunc = daemonstore.OpenFunc
 type v2Error struct{ err error }
 
 func openV2Backend(opts daemonstore.Options) (daemonstore.Backend, error) {
-	return v2backend.Open(opts)
+	return v2backend.OpenAdmission(opts)
 }
 
 func (app *App) ExitError() error {
@@ -72,6 +72,7 @@ func (app *App) startV2() (err error) {
 		return errors.New("v2 backend returned no storage handle")
 	}
 	app.v2 = newV2Runtime(app, b)
+	observeV2Admission(b)
 	if conf.Prometheus.Enabled && app.PromRegisterer != nil {
 		if err := app.PromRegisterer.Register(app.v2); err != nil {
 			return err
@@ -83,6 +84,9 @@ func (app *App) startV2() (err error) {
 	// receiver and query is redirected below; no legacy persister is started.
 	core := cache.New()
 	app.Cache = core
+	if err := app.startReceivers(core); err != nil {
+		return err
+	}
 	if err := app.startAPI(core); err != nil {
 		return err
 	}
@@ -94,9 +98,6 @@ func (app *App) startV2() (err error) {
 		return err
 	}
 	if err := app.startCarbonlink(core); err != nil {
-		return err
-	}
-	if err := app.startReceivers(core); err != nil {
 		return err
 	}
 	app.Collector = NewCollector(app)
