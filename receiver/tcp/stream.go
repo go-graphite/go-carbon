@@ -159,6 +159,7 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 	sinkReady := false
 	var directOut func(*points.Points)
 	capture := newCaptureBuffer(rcv.capture)
+	capture.admission = &rcv.captureAdmission
 	capture.sink = &rcv.captureSink
 	for i := range capture.shards {
 		capture.shards[i].sink = &rcv.captureSink

@@ -25,15 +25,17 @@ const startupJournalPartitions = 16
 // persistence. A single conservative pin covers all of them until the suffix
 // stops growing and every identity has been confirmed and synced.
 type startupJournal struct {
-	owner        *startupInput
-	log          *inputlog.Log
-	dir          string
-	tags         bool
-	slots        chan struct{}
-	captureSlots chan struct{}
-	buffers      chan *startupJournalBuffer
-	appendTiming captureTiming
-	parts        [startupJournalPartitions]struct {
+	owner           *startupInput
+	log             *inputlog.Log
+	dir             string
+	tags            bool
+	slots           chan struct{}
+	captureSlots    chan struct{}
+	buffers         chan *startupJournalBuffer
+	appendTiming    captureTiming
+	encodingTiming  captureTiming
+	admissionTiming captureTiming
+	parts           [startupJournalPartitions]struct {
 		stream  cache.RecoveryStream
 		source  *cache.RecoverySource
 		applied atomic.Pointer[inputlog.ReplayCursor]
@@ -58,6 +60,7 @@ func newStartupJournal(s *startupInput, l *inputlog.Log, dir string, tagged bool
 	return j
 }
 func (j *startupJournal) write(raw []byte, expected int) error {
+	admitted := time.Now()
 	// Bound decoded batches independently of TCP connection count. Slots are
 	// acquired before allocating native columns or canonical name references.
 	select {
@@ -66,6 +69,8 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 		return inputlog.ErrClosed
 	}
 	defer func() { <-j.slots }()
+	j.admissionTiming.observe(admitted)
+	encoding := time.Now()
 	// Acknowledgement ends the writer's borrow. Reuse the bounded columns only
 	// after it returns, clearing references even on validation/write failures.
 	var buffer *startupJournalBuffer
@@ -104,6 +109,7 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 		batches[part].AppendPoints(ref, p.Data)
 		count += len(p.Data)
 	})
+	j.encodingTiming.observe(encoding)
 	if err != nil {
 		return err
 	}

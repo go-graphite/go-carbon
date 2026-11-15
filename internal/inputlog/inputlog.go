@@ -247,6 +247,7 @@ type Log struct {
 // totals are cumulative counters and gauges for Metrics, updated per frame,
 // write or sync and never per point.
 type totals struct {
+	appendEncodeNanos                                     atomic.Int64
 	bytes, points, syncs, writeErrors, relogged, unlogged atomic.Int64
 	replayed, replayNanos                                 atomic.Int64
 	diskBytes, oldestNanos                                atomic.Int64
@@ -283,6 +284,9 @@ func (l *Log) stage(s int, d time.Duration) { l.total.stageNanos[s].Add(int64(d)
 
 // Metrics are the log's cumulative counters since Open, and gauges.
 type Metrics struct {
+	// AppendEncodingDuration is elapsed writer time encoding/compressing append
+	// groups. It excludes positioned writes and syncs, which have separate stages.
+	AppendEncodingDuration time.Duration
 	// Cycles counts group commit cycles, and Stages their time by stage.
 	Cycles                                          int64
 	Stages                                          [numStages]time.Duration
@@ -308,7 +312,8 @@ func (l *Log) Metrics() Metrics {
 		stages[i] = time.Duration(l.total.stageNanos[i].Load())
 	}
 	return Metrics{
-		Cycles: l.total.cycles.Load(), Stages: stages,
+		AppendEncodingDuration: time.Duration(l.total.appendEncodeNanos.Load()),
+		Cycles:                 l.total.cycles.Load(), Stages: stages,
 		BytesWritten: l.total.bytes.Load(), PointsWritten: l.total.points.Load(), Syncs: l.total.syncs.Load(),
 		WriteErrors: l.total.writeErrors.Load(), Relogged: l.total.relogged.Load(), Unlogged: l.total.unlogged.Load(),
 		ReplayedPoints: l.total.replayed.Load(), ReplayDuration: time.Duration(l.total.replayNanos.Load()),

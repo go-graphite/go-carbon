@@ -387,6 +387,18 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		timings := s.ioTimings()
 		row := map[string]any{"append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes,
 			"replayed": m.ReplayedPoints, "startup_replayed": s.replayedPoints.Load(), "journal_points": m.PointsWritten, "journal_bytes": m.BytesWritten, "journal_syncs": m.Syncs, "unlogged": m.Unlogged, "append_calls": timings[captureAppend].calls, "append_p99_upper_ns": timings[captureAppend].p99, "append_total_ns": timings[captureAppend].total, "append_max_ns": timings[captureAppend].maximum}
+		if s.receiver != nil {
+			total, maximum, calls := s.receiver.CaptureAdmission()
+			row["admission_total_ns"], row["admission_max_ns"], row["admission_calls"] = total, maximum, calls
+		}
+		if s.journal != nil {
+			row["encoding_total_ns"] = s.journal.encodingTiming.total.Load()
+			row["journal_admission_total_ns"] = s.journal.admissionTiming.total.Load()
+		}
+		row["writer_append_encode_compress_wall_ns"] = m.AppendEncodingDuration.Nanoseconds()
+		for i, stage := range m.Stages {
+			row["writer_"+inputlog.StageNames[i]+"_ns"] = stage.Nanoseconds()
+		}
 		if err := evidence.Encode(row); err != nil {
 			t.Fatal(err)
 		}

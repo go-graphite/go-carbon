@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // AppendReceipt identifies the original append generation and its durable tail.
@@ -150,7 +151,9 @@ Drain:
 			}
 			l.appendPin = &Position{Segment: seq, Offset: offset}
 		}
+		at := time.Now()
 		l.encodeAppends(seq, requests)
+		l.total.appendEncodeNanos.Add(time.Since(at).Nanoseconds())
 		err = l.write(gen, seq)
 		if err == nil {
 			receipt = AppendReceipt{Generation: gen, Tail: Position{Segment: l.active.seq, Offset: l.active.end}, Salt: l.active.salt}

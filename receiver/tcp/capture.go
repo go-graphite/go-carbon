@@ -41,6 +41,26 @@ type captureSubmission interface {
 	BeginWrite([]byte, int) func() error
 }
 
+// captureAdmission measures batches waiting outside the direct-write fence.
+type captureAdmission struct{ total, maximum, calls atomic.Int64 }
+
+func (a *captureAdmission) observe(start time.Time) {
+	elapsed := time.Since(start).Nanoseconds()
+	a.total.Add(elapsed)
+	a.calls.Add(1)
+	for old := a.maximum.Load(); elapsed > old; old = a.maximum.Load() {
+		if a.maximum.CompareAndSwap(old, elapsed) {
+			break
+		}
+	}
+}
+
+// CaptureAdmission reports bounded receiver admission time, before disk append.
+func (rcv *TCP) CaptureAdmission() (total, maximum, calls int64) {
+	a := &rcv.captureAdmission
+	return a.total.Load(), a.maximum.Load(), a.calls.Load()
+}
+
 // The exclusive fence joins every submitted batch, including connection-local
 // flushes, before sealing the spool. Buffered but unsubmitted records then use
 // the ordinary sink before their connection accepts its next direct point.
@@ -87,6 +107,7 @@ func (rcv *TCP) SwitchCapture(out func(*points.Points), seal func() error) error
 }
 
 type captureBuffer struct {
+	admission *captureAdmission
 	pending   func() error
 	done      chan error
 	submitted bool
@@ -134,7 +155,11 @@ func (b *captureBuffer) point(name []byte, value float64, timestamp int64) {
 func (b *captureBuffer) flush() error {
 	if b.sink != nil {
 		if b.slots != nil && b.sink.direct.Load() == nil {
+			started := time.Now()
 			b.slots <- struct{}{}
+			if b.admission != nil {
+				b.admission.observe(started)
+			}
 			defer func() { <-b.slots }()
 		}
 		b.sink.RLock()
