@@ -108,9 +108,9 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 }
 
 func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix) (*Series, error) {
-	return s.fetchMetric(ctx, name, fromTime, untilTime, prefix, nil)
+	return s.fetchMetric(ctx, name, fromTime, untilTime, prefix, nil, false)
 }
-func (s *Store) fetchMetric(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix, frozen *FrozenMetric) (*Series, error) {
+func (s *Store) fetchMetric(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix, frozen *FrozenMetric, valuesOnly bool) (*Series, error) {
 	ctx, finish, err := s.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -172,7 +172,9 @@ func (s *Store) fetchMetric(ctx context.Context, name string, fromTime, untilTim
 	}
 	if frozen != nil {
 		m = frozen.metadata
-		m.MetricConfig = cloneConfig(m.MetricConfig)
+		if !valuesOnly {
+			m.MetricConfig = cloneConfig(m.MetricConfig)
+		}
 	} else if state != nil {
 		m = state.meta
 		m.MetricConfig = cloneConfig(m.MetricConfig)

@@ -53,7 +53,7 @@ func TestBoundMixedAddsNoAllocationsToFrozenLegacy(t *testing.T) {
 		}
 	})
 	t.Logf("frozen legacy=%g mixed=%g allocations/request", native, mixed)
-	if mixed > native {
-		t.Fatalf("mixed adapter added %g allocations", mixed-native)
+	if mixed >= native {
+		t.Fatalf("value-only mixed path failed to save an allocation (delta %g)", mixed-native)
 	}
 }

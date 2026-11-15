@@ -65,6 +65,32 @@ func TestFrozenMetricStoreBindingAndBits(t *testing.T) {
 					t.Fatalf("bits at%d", i)
 				}
 			}
+			var retained []float64
+			sentinel := errors.New("consumer error")
+			err = s.FetchFrozenValues(ctx, m, clock-101, clock-98, func(from, until, step int, values []float64) error {
+				if from != want.FromTime || until != want.UntilTime || step != want.Step || len(values) != len(want.Values) {
+					t.Fatal("value-only shape")
+				}
+				for i, v := range values {
+					if math.Float64bits(v) != math.Float64bits(want.Values[i]) {
+						t.Fatalf("value-only bits at%d", i)
+					}
+				}
+				retained = values
+				return sentinel
+			})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("consumer error=%v", err)
+			}
+			retained[0] = 12345
+			if err = s.FetchFrozenValues(ctx, m, clock-101, clock-98, func(_, _, _ int, values []float64) error {
+				if math.Float64bits(values[0]) != math.Float64bits(want.Values[0]) || retained[0] != 12345 {
+					t.Fatal("value-only result aliased")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 			got.Metadata.Retentions[0].Step = 999
 			m.Config().Retentions[0].Step = 998
 			got, err = s.FetchFrozen(ctx, m, clock-101, clock-98)
@@ -76,14 +102,23 @@ func TestFrozenMetricStoreBindingAndBits(t *testing.T) {
 			if _, err = s.FetchFrozen(canceled, m, clock-101, clock-98); !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancel=%v", err)
 			}
+			if err = s.FetchFrozenValues(canceled, m, clock-101, clock-98, func(_, _, _ int, _ []float64) error { t.Fatal("called canceled consumer"); return nil }); !errors.Is(err, context.Canceled) {
+				t.Fatalf("value-only cancel=%v", err)
+			}
 			if err = s.Close(); err != nil {
 				t.Fatal(err)
+			}
+			if err = s.FetchFrozenValues(ctx, m, clock-101, clock-98, func(_, _, _ int, _ []float64) error { t.Fatal("called closed consumer"); return nil }); err == nil {
+				t.Fatal("value-only closed store accepted")
 			}
 			next, err := chunkstore.Open(path, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer next.Close()
+			if err = next.FetchFrozenValues(ctx, m, clock-101, clock-98, func(_, _, _ int, _ []float64) error { t.Fatal("called wrong-store consumer"); return nil }); !errors.Is(err, chunkstore.ErrFrozenMetric) {
+				t.Fatalf("value-only wrong store=%v", err)
+			}
 			if _, err = next.FetchFrozen(ctx, m, clock-101, clock-98); !errors.Is(err, chunkstore.ErrFrozenMetric) {
 				t.Fatalf("wrongstore=%v", err)
 			}

@@ -32,7 +32,7 @@ func (s *Store) FetchFrozen(ctx context.Context, m *FrozenMetric, from, until in
 	if m == nil || m.store != s || !s.ReadOnly() {
 		return nil, ErrFrozenMetric
 	}
-	return s.fetchMetric(ctx, m.metadata.Name, from, until, nil, m)
+	return s.fetchMetric(ctx, m.metadata.Name, from, until, nil, m, false)
 }
 
 // Config returns an owned copy for publication-time archive-policy validation.
@@ -41,4 +41,19 @@ func (m *FrozenMetric) Config() MetricConfig {
 		return MetricConfig{}
 	}
 	return cloneConfig(m.metadata.MetricConfig)
+}
+
+// FetchFrozenValues passes only the render shape and owned values to consume.
+// Immutable metadata stays inside the store, avoiding a retention-slice clone.
+// It retains the same admission, cancellation and read-view lifetime as Fetch.
+// Values belong to the consumer and remain valid after consume returns.
+func (s *Store) FetchFrozenValues(ctx context.Context, m *FrozenMetric, from, until int, consume func(from, until, step int, values []float64) error) error {
+	if m == nil || m.store != s || !s.ReadOnly() {
+		return ErrFrozenMetric
+	}
+	series, err := s.fetchMetric(ctx, m.metadata.Name, from, until, nil, m, true)
+	if err != nil || series == nil {
+		return err
+	}
+	return consume(series.FromTime, series.UntilTime, series.Step, series.Values)
 }

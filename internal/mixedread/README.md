@@ -83,8 +83,24 @@ best-case adapter comparison, not an SST or sustained-ingest qualification.
 The required production comparison still needs the same data, host and queries
 on actual persisted v2 sources, including concurrent ingestion. The unified-index option requires the owner to publish that index; leaving it
 off retains the slower per-query union. The diagnostic enables it against the
-same immutable fixture catalog used by the native baseline. Warm classes take
-200 samples and fresh block-cache classes take 30, without dropping OS caches.
+same immutable fixture catalog used by the native baseline. Warm and Find classes take
+1,000 paired samples; fresh block-cache classes take 100, without dropping OS
+caches. `GO_CARBON_MIXED_COMPARE=native` selects an independent native/native
+control with identical data and seeded shuffling. `GO_CARBON_MIXED_RAW=1` emits
+paired nanoseconds before percentile sorting. Run the three seeds 1409, 7321,
+and 9077 for both arms. The paired, repeat-stratified bootstrap uses 10,000
+draws and a two-sided 95% percentile interval for each p50/p99 ratio. A class
+passes only when both mixed/native upper bounds are at most the larger of 1.02
+and the corresponding native/native upper bound. Individual strict rows remain
+diagnostic; exit zero means the workload completed, not that this gate passed.
+
+`GO_CARBON_MIXED_ALLOCS=1` measures query-body allocations separately; its
+process-wide counters can include background bookkeeping. Keep this out of
+latency samples. `GO_CARBON_MIXED_INGEST=1` continuously publishes bounded
+memory parts while reads retain their immutable generation. A publication
+barrier starts each writer before reads, and writer receipts report progress.
+This exercises memory publication and snapshot isolation, not persisted ingest,
+reader-generation turnover, or a target-rate writer soak.
 
 ## Bound immutable generations
 
@@ -105,16 +121,18 @@ existing index's Find implementation and coherent suppression rules.
 
 Pass the retained `publication.Snapshot()` and `UnifiedCatalog: true` to New.
 The bound Fetch resolves one generation-checked catalog token for both render
-paths; `FetchFrozen` uses the publication-time legacy metadata while preserving
+paths; `FetchFrozenValues` uses the publication-time legacy metadata while preserving
 native store read admission, read-view cleanup, cancellation, and close handling.
-Returned native metadata remains an owned copy.
+Its callback exposes only shape and owned values, so immutable metadata can
+stay internal without a per-request retention clone. `Fetch` and `FetchFrozen`
+continue returning owned metadata copies.
 
 Bound requests reuse handle/result storage and a sparse workspace callback.
 Their adapter bookkeeping performs no publication retain/release and introduces
 no writer lock; native legacy admission and read-view synchronization remain.
 The byte budget still charges every active request. Warm v2-only renders have
 zero adapter allocations. A small warm mixed fixture also adds no allocations
-over frozen legacy fetching (15 allocations/request on both paths). The legacy
+over frozen legacy fetching (14 mixed versus 15 frozen allocations/request). The legacy
 decoder and the existing index can still
 allocate, and cold workspace/pool misses can allocate. These statements do not
 establish a latency improvement or a persisted-part production qualification.

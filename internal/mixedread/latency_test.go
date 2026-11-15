@@ -2,6 +2,7 @@ package mixedread
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -12,6 +13,8 @@ import (
 	"runtime/trace"
 	"slices"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +28,9 @@ import (
 // It is deliberately not evidence for a production SST reader or ingest soak.
 func TestLatencyComparison(t *testing.T) {
 	root := os.Getenv("GO_CARBON_MIXED_LATENCY_DIR")
+	allocs := os.Getenv("GO_CARBON_MIXED_ALLOCS") != ""
+	ingest := os.Getenv("GO_CARBON_MIXED_INGEST") != ""
+	raw := os.Getenv("GO_CARBON_MIXED_RAW") != ""
 	profile := os.Getenv("GO_CARBON_MIXED_PROFILE") != ""
 	traced := os.Getenv("GO_CARBON_MIXED_TRACE") != ""
 	class := os.Getenv("GO_CARBON_MIXED_CLASS")
@@ -36,7 +42,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced {
@@ -70,8 +76,8 @@ func TestLatencyComparison(t *testing.T) {
 		m.Archives = append(m.Archives, partsread.Archive{Step: int64(a.Step), Points: int64(a.Count)})
 		c.Archives = append(c.Archives, sr.Archive{Step: int64(a.Step), Count: int64(a.Count)})
 	}
-	paths := []string{filepath.Join(dir, "legacy"), filepath.Join(dir, "full")}
-	stores := make([]*chunkstore.Store, 2)
+	paths := []string{filepath.Join(dir, "legacy"), filepath.Join(dir, "full"), filepath.Join(dir, "control")}
+	stores := make([]*chunkstore.Store, len(paths))
 	for i, p := range paths {
 		s, e := chunkstore.Open(p, opts)
 		if e != nil {
@@ -109,6 +115,9 @@ func TestLatencyComparison(t *testing.T) {
 		if e = stores[1].UpdateMany(ctx, cfg.Name, ps); e != nil {
 			t.Fatal(e)
 		}
+		if e = stores[2].UpdateMany(ctx, cfg.Name, ps); e != nil {
+			t.Fatal(e)
+		}
 		if bi == 0 {
 			if e = stores[0].UpdateMany(ctx, cfg.Name, ps); e != nil {
 				t.Fatal(e)
@@ -135,9 +144,14 @@ func TestLatencyComparison(t *testing.T) {
 	var pub partsread.Publication
 	pub.Publish(partsread.View{Catalog: cat, Parts: []partsread.Source{partsread.Freeze(records)}})
 	defer pub.Close()
+	var writers sync.Map
 	open := func() (*chunkstore.Store, *chunkstore.Store, *Reader) {
 		t.Helper()
-		old, e := chunkstore.Open(paths[0], opts)
+		legacyPath := paths[0]
+		if path == "native" {
+			legacyPath = paths[2]
+		}
+		old, e := chunkstore.Open(legacyPath, opts)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -164,15 +178,54 @@ func TestLatencyComparison(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		boundPub.Close()
+		if !ingest {
+			boundPub.Close()
+		}
 		borrowedSnapshots[old] = snapshot
 		r, e := New(Options{Snapshot: snapshot, Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(64 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
 		if e != nil {
 			t.Fatal(e)
 		}
+		if ingest {
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			ready := make(chan struct{})
+			var published atomic.Uint64
+			writers.Store(old, func() { close(stop); <-done; fmt.Printf("INGEST publications=%d\n", published.Load()) })
+			// Readers retain an immutable generation while the same part publication
+			// accepts newly sealed parts. The legacy store remains read-only by design.
+			go func() {
+				defer close(done)
+				defer boundPub.Close()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						n := published.Add(1)
+						next := slices.Clone(records)
+						for i := range 256 {
+							next = append(next, partsread.Record{ID: 43, Step: 1, Sample: partsread.Sample{Time: clock + int64(n)*256 + int64(i), Bits: math.Float64bits(float64(i)), Sequence: n}})
+						}
+						// Include an exact replacement of a queried metric slot as well as
+						// new sibling samples; readers retain their coherent pinned generation.
+						next = append(next, partsread.Record{ID: 42, Step: 1, Sample: partsread.Sample{Time: clock - 1, Bits: math.Float64bits(float64((clock-1)%19) - 9), Sequence: n + uint64(clock)}})
+						boundPub.Publish(partsread.View{Catalog: entryCatalog{Catalog: cat, entries: entries}, Parts: []partsread.Source{partsread.Freeze(next)}})
+						if n == 1 {
+							close(ready)
+						}
+						runtime.Gosched()
+					}
+				}
+			}()
+			<-ready
+		}
 		return old, full, r
 	}
 	closePair := func(old, full *chunkstore.Store) {
+		if stop, ok := writers.LoadAndDelete(old); ok {
+			stop.(func())()
+		}
 		// Each generation drains before its legacy store closes. Do not retain
 		// every cold sample's complete catalog until the end of the benchmark.
 		borrowedSnapshots[old].Close()
@@ -184,6 +237,9 @@ func TestLatencyComparison(t *testing.T) {
 	comparison := "Mixed"
 	if path == "frozen" {
 		comparison = "Frozen"
+	}
+	if path == "native" {
+		comparison = "Native"
 	}
 	fmt.Printf("| When (CET) | Class | Native p50 us | %s p50 us | Native p99 us | %s p99 us | Gate |\n", comparison, comparison)
 	fmt.Println("|---|---|---:|---:|---:|---:|---|")
@@ -205,7 +261,7 @@ func TestLatencyComparison(t *testing.T) {
 				continue
 			}
 			var base, mix []int64
-			var baseBytes, mixedBytes uint64
+			var baseBytes, mixedBytes, baseAllocs, mixedAllocs uint64
 			old, full, r := open()
 			// Validate within the callback lifetime, outside measured samples.
 			want, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
@@ -254,7 +310,7 @@ func TestLatencyComparison(t *testing.T) {
 			mix = make([]int64, 0, count)
 			measure := func(mixed bool) {
 				var before, after runtime.MemStats
-				if profile {
+				if profile || allocs {
 					kind := "native"
 					if mixed {
 						kind = "mixed"
@@ -271,7 +327,7 @@ func TestLatencyComparison(t *testing.T) {
 				if mixed {
 					if path == "frozen" {
 						_, err = old.FetchFrozen(ctx, frozen, int(clock-width), int(clock))
-					} else if path == "legacy" {
+					} else if path == "legacy" || path == "native" {
 						_, err = old.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 					} else {
 						err = r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
@@ -290,12 +346,14 @@ func TestLatencyComparison(t *testing.T) {
 				} else {
 					base = append(base, elapsed)
 				}
-				if profile {
+				if profile || allocs {
 					runtime.ReadMemStats(&after)
 					if mixed {
 						mixedBytes += after.TotalAlloc - before.TotalAlloc
+						mixedAllocs += after.Mallocs - before.Mallocs
 					} else {
 						baseBytes += after.TotalAlloc - before.TotalAlloc
+						baseAllocs += after.Mallocs - before.Mallocs
 					}
 					pprof.SetGoroutineLabels(ctx)
 				}
@@ -325,10 +383,16 @@ func TestLatencyComparison(t *testing.T) {
 			if warm {
 				closePair(old, full)
 			}
-			if profile {
+			if profile || allocs {
 				fmt.Printf("ALLOC warm=%t hours=%d native=%d mixed=%d bytes/op\n", warm, width/3600, baseBytes/uint64(count), mixedBytes/uint64(count))
 			}
 
+			if allocs {
+				fmt.Printf("ALLOCS class=%s native_allocs=%.3f mixed_allocs=%.3f native_bytes=%.3f mixed_bytes=%.3f\n", className, float64(baseAllocs)/float64(count), float64(mixedAllocs)/float64(count), float64(baseBytes)/float64(count), float64(mixedBytes)/float64(count))
+			}
+			if raw {
+				emitLatencyPairs(seed, className, comparison, ingest, base, mix)
+			}
 			bp, bq := quantiles(base)
 			mp, mq := quantiles(mix)
 			gate := "FAIL"
@@ -356,7 +420,7 @@ func TestLatencyComparison(t *testing.T) {
 	}
 	base, mix := make([]int64, 0, 1000), make([]int64, 0, 1000)
 	var before, after runtime.MemStats
-	var baseBytes, mixedBytes uint64
+	var baseBytes, mixedBytes, baseAllocs, mixedAllocs uint64
 	measureFind := func(mixed bool, sample int) {
 		var region *trace.Region
 		kind := "native"
@@ -366,13 +430,13 @@ func TestLatencyComparison(t *testing.T) {
 		if traced {
 			region = trace.StartRegion(ctx, fmt.Sprintf("find-%s-%d", kind, sample))
 		}
-		if profile {
+		if profile || allocs {
 			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", "find-"+kind)))
 			runtime.ReadMemStats(&before)
 		}
 		started := time.Now()
 		var err error
-		if mixed {
+		if mixed && path != "native" {
 			err = r.Find(ctx, "*", func(string) error { return nil })
 		} else {
 			err = cat.Find(ctx, "*", func(string) error { return nil })
@@ -386,12 +450,14 @@ func TestLatencyComparison(t *testing.T) {
 		} else {
 			base = append(base, elapsed)
 		}
-		if profile {
+		if profile || allocs {
 			runtime.ReadMemStats(&after)
 			if mixed {
 				mixedBytes += after.TotalAlloc - before.TotalAlloc
+				mixedAllocs += after.Mallocs - before.Mallocs
 			} else {
 				baseBytes += after.TotalAlloc - before.TotalAlloc
+				baseAllocs += after.Mallocs - before.Mallocs
 			}
 			pprof.SetGoroutineLabels(ctx)
 		}
@@ -412,6 +478,12 @@ func TestLatencyComparison(t *testing.T) {
 	if profile {
 		fmt.Printf("ALLOC find native=%d mixed=%d bytes/op\n", baseBytes/1000, mixedBytes/1000)
 	}
+	if allocs {
+		fmt.Printf("ALLOCS class=warm-find4096 native_allocs=%.3f mixed_allocs=%.3f native_bytes=%.3f mixed_bytes=%.3f\n", float64(baseAllocs)/1000, float64(mixedAllocs)/1000, float64(baseBytes)/1000, float64(mixedBytes)/1000)
+	}
+	if raw {
+		emitLatencyPairs(seed, "warm-find4096", comparison, ingest, base, mix)
+	}
 	bp, bq := quantiles(base)
 	mp, mq := quantiles(mix)
 	gate := "FAIL"
@@ -424,4 +496,19 @@ func TestLatencyComparison(t *testing.T) {
 func quantiles(ns []int64) (int64, int64) {
 	slices.Sort(ns)
 	return ns[len(ns)/2], ns[(len(ns)*99-1)/100]
+}
+
+// Emit before quantiles sorts the arrays, preserving paired request order.
+func emitLatencyPairs(seed int64, class, comparison string, ingest bool, native, mixed []int64) {
+	row := struct {
+		Seed              int64
+		Class, Comparison string
+		Ingest            bool
+		Native, Mixed     []int64
+	}{seed, class, comparison, ingest, native, mixed}
+	b, err := json.Marshal(row)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("PAIRS %s\n", b)
 }

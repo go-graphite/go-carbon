@@ -375,12 +375,13 @@ func (r *Reader) fetchFrozen(ctx context.Context, q *request, b *LegacyBinding, 
 	if err := r.checkLegacyBudget(b.metric, from, until); err != nil {
 		return nil, err
 	}
-	s, err := r.opts.Legacy.FetchFrozen(ctx, b.frozen, int(from), int(until))
-	if err != nil || s == nil {
-		return nil, err
-	}
-	q.legacy = partsread.Series{Metric: b.metric, From: int64(s.FromTime), Until: int64(s.UntilTime), Step: int64(s.Step), Values: s.Values}
-	return &q.legacy, nil
+	var result *partsread.Series
+	err := r.opts.Legacy.FetchFrozenValues(ctx, b.frozen, int(from), int(until), func(from, until, step int, values []float64) error {
+		q.legacy = partsread.Series{Metric: b.metric, From: int64(from), Until: int64(until), Step: int64(step), Values: values}
+		result = &q.legacy
+		return nil
+	})
+	return result, err
 }
 func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64, consume func(*partsread.Series) error) error {
 	q := r.takeRequest()
