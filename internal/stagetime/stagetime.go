@@ -53,7 +53,7 @@ const (
 	NumStages
 )
 
-var stageNames = phasecpu.PersisterStageNames
+var stageNames [NumStages]string = phasecpu.PersisterStageNames
 
 func (s Stage) String() string { return stageNames[s] }
 
