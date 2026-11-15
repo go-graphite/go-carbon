@@ -1,5 +1,3 @@
-//go:build coreseal_integration
-
 package main
 
 import (
@@ -17,8 +15,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
-// openCoreRollups is the explicit original-batch entry point. The tag is needed
-// while the core hook and reducer remain separate stacked experimental PRs.
+// openCoreRollups is the explicit original-batch entry point.
 // This is a numeric offline engine, not the portable daemonstore backend.
 func openCoreRollups(root string, cfg coreConfig) (*coreEngine, []*atomicRollupOwner, error) {
 	states := make([]*atomicRollupOwner, cfg.Shards)
