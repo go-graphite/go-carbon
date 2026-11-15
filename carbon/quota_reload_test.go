@@ -91,6 +91,8 @@ func newQuotaReloadApp(t *testing.T, configure ...func(*Config)) (*App, func(str
 	cfg.Carbonserver.ConcurrentIndex = true
 	cfg.Carbonserver.RealtimeIndex = 100
 	cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
+	// Exercise periodic quotas within the test deadline, independently of name publication.
+	cfg.Carbonserver.QuotaUsageReportFrequency = &Duration{25 * time.Millisecond}
 	cfg.Whisper.QuotasFilename = filepath.Join(root, "quotas.conf")
 	quota := func(body string) {
 		t.Helper()
