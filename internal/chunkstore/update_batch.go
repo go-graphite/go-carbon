@@ -25,6 +25,8 @@ type MetricUpdate struct {
 // ordinary writers only hold one. Duplicate names see preceding writes in
 // the batch and advance their revision in input order.
 func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, maintenance *ContinuationMaintenance) error {
+	timer := stagetime.FromContext(ctx)
+	timer.Enter(stagetime.Route)
 	if err := s.fileOwnershipError(); err != nil {
 		return err
 	}
@@ -41,8 +43,6 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 			return ErrNotFound
 		}
 	}
-	timer := stagetime.FromContext(ctx)
-	timer.Enter(stagetime.Route)
 	stripes := make([]uint64, 0, len(updates))
 	names := make(map[string]bool, len(updates))
 	for _, update := range updates {
