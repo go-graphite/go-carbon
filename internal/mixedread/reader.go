@@ -223,6 +223,8 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 	if current.From != old.From || current.Until != old.Until || current.Step != old.Step || len(current.Values) != len(old.Values) {
 		return fmt.Errorf("%w: render shapes differ", ErrPolicy)
 	}
+	// Untouched pooled part slots are immutable: sparse workspace release only
+	// resets occupied indices. Put the combined result in legacy's owned output.
 	for i, occupied := range current.Occupied {
 		if occupied {
 			old.Values[i] = current.Values[i]

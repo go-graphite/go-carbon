@@ -68,7 +68,10 @@ cover every physical archive slot, including future timestamps; the log
 cutover clock alone is insufficient. A missing v2 catalog entry still falls
 back to legacy, preserving the legacy-only name shape. The one-slot compatibility
 path preserves Whisper's distinction between populated and empty zero-width
-archives. Results and their budgets live only through the callback.
+archives. Results and their budgets live only through the callback. Treat the
+borrowed series, values and occupancy mask as read-only; copy any data that must
+outlive the callback. The one-slot fallback overlays into legacy's owned buffer
+instead of modifying untouched slots in the pooled part workspace.
 
 ## Qualification
 
