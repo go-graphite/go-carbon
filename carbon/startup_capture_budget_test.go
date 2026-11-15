@@ -3,9 +3,6 @@ package carbon
 import (
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/points"
-	"github.com/lomik/zapwriter"
-	"github.com/prometheus/client_golang/prometheus"
 	"math"
 	"reflect"
 	"strings"
@@ -13,6 +10,9 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/points"
+	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestCaptureAdmissionUsesBytesAndWakesOnStop(t *testing.T) {
@@ -82,7 +82,7 @@ func TestCaptureAdmissionPressureMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]float64{"startup_capture_admission_limit_bytes": 200000, "startup_capture_admission_used_bytes": 0, "startup_capture_admission_waits_total": 1, "startup_capture_admission_rejections_total": 1}
+	want := map[string]float64{"startup_capture_admission_limit_bytes": 200000, "startup_capture_admission_used_bytes": 0, "startup_capture_admission_waits_total": 1, "startup_capture_admission_rejections_total": 1, "startup_capture_admission_calls_total": 2}
 	for _, f := range families {
 		if value, ok := want[f.GetName()]; ok {
 			m := f.Metric[0]

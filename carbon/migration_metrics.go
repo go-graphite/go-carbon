@@ -492,6 +492,9 @@ var captureAdmissionDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_admission_waits_total", "Capture submissions blocked by the admission byte budget.", nil, nil),
 	prometheus.NewDesc("startup_capture_admission_rejections_total", "Capture batches rejected for exceeding the admission byte budget.", nil, nil),
 	prometheus.NewDesc("startup_capture_idle_buffer_bytes", "Idle capture buffer accounting charge, including columns and a conservative map allowance.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_seconds_total", "Elapsed time of successful capture admission calls, including budget waits.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_calls_total", "Successful capture admission calls.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_max_seconds", "Longest successful capture admission call.", nil, nil),
 }
 
 var captureHistoryBytesDesc = prometheus.NewDesc("startup_capture_history_pending_bytes", "Encoded startup spool and journal bytes still waiting for history replay.", nil, nil)
@@ -564,10 +567,10 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			b.mu.Lock()
 			used := b.used
 			b.mu.Unlock()
-			values := []int64{b.limit, used, b.peak.Load(), b.waits.Load(), b.rejected.Load(), j.pooledBytes.Load()}
+			values := []float64{float64(b.limit), float64(used), float64(b.peak.Load()), float64(b.waits.Load()), float64(b.rejected.Load()), float64(j.pooledBytes.Load()), float64(j.admissionTiming.total.Load()) / 1e9, float64(j.admissionTiming.calls.Load()), float64(j.admissionTiming.maximum.Load()) / 1e9}
 			for i, value := range values {
 				kind := prometheus.GaugeValue
-				if i == 3 || i == 4 {
+				if i == 3 || i == 4 || i == 6 || i == 7 {
 					kind = prometheus.CounterValue
 				}
 				ch <- prometheus.MustNewConstMetric(captureAdmissionDescs[i], kind, float64(value))

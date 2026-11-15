@@ -85,3 +85,8 @@ the admission budget alone does not provide one.
 Exhaustion logs WARN with used/requested/limit bytes, at most once per 30 seconds;
 an oversized batch logs ERROR and returns an error. The limit is logged at startup.
 `startup_capture_idle_buffer_bytes` reports the separate idle-pool charge.
+
+`startup_capture_admission_seconds_total` divided by
+`startup_capture_admission_calls_total` gives mean successful admission latency;
+`startup_capture_admission_max_seconds` records its lifetime maximum.
+These include immediate admissions and exclude cancelled/rejected calls.
