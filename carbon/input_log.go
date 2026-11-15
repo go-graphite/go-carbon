@@ -167,6 +167,12 @@ func (app *App) replayInputLog(core *cache.Cache) error {
 		return nil
 	}
 	if s := app.startupInput; s != nil {
+		if s.journalOnly {
+			// Capture fences newer input. The background history reader replays
+			// this journal before capture, with cancellation and source tracking.
+			// Waiting here can fill the cache before Start releases worker gates.
+			return nil
+		}
 		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
 		if err != nil {
 			return err
