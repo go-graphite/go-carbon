@@ -42,6 +42,7 @@ func TestV2PortableDaemonTCPHTTP(t *testing.T) {
 	if e := app.Start(); e != nil {
 		t.Fatal(e)
 	}
+	waitV2BackendReady(t, app)
 	name := "routing.value"
 	schema, ok := app.Config.Whisper.Schemas.Match(name)
 	if !ok {
@@ -170,6 +171,7 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
+	waitV2BackendReady(t, app)
 	fmt.Printf("V2_DAEMON_CONFIG gomaxprocs=%d owners=%d dbs=%d\n", runtime.GOMAXPROCS(0), app.Config.V2.Owners, app.Config.V2.Shards)
 	// Measure an actual TCP append, not just listener construction. The runner
 	// supplies its pre-exec wall clock; absent it this is not an exec-start gate.
@@ -550,6 +552,7 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 		if err := app.Start(); err != nil {
 			t.Fatal(err)
 		}
+		waitV2BackendReady(t, app)
 		stamp := time.Now().Unix()/step*step - 5*step
 		conn, err := net.Dial("tcp", app.Receivers[0].Receiver.(*tcp.TCP).Addr().String())
 		if err != nil {
@@ -611,6 +614,7 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
+	waitV2BackendReady(t, app)
 	stats := app.v2.Backend.Stats()
 	if stats.IngestedPoints != 4 {
 		t.Fatalf("recovery counts %+v", stats)
@@ -639,4 +643,16 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 		}
 	}
 	t.Log("real TCP daemon SIGKILL: four synced unsealed journal records recovered with exact count and bits")
+}
+
+// Intake readiness precedes historical query readiness on the admission path.
+func waitV2BackendReady(t *testing.T, app *App) {
+	t.Helper()
+	if ready, ok := app.v2.Backend.(interface{ WaitReady(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := ready.WaitReady(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
