@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -96,6 +97,96 @@ func TestTransferDurableAcrossUnsyncedForegroundCrash(t *testing.T) {
 	}
 	if err := target.VerifyTransfer(ctx, proofs); !errors.Is(err, ErrConflict) {
 		t.Fatal("replacement inherited receipt", err)
+	}
+}
+
+// A crash after SST ingestion or partial catalog publication must leave only
+// complete visible names. Replaying the transfer uses fresh reserved IDs and
+// must retain the same points and durable proofs as an uninterrupted import.
+func TestTransferSSTInterruptedImportResumes(t *testing.T) {
+	for _, phase := range []string{"ingested", "published-group"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx := context.Background()
+			source, now := openTestStore(t, "/source", Options{fs: vfs.NewMem(), ExactBlocks: true})
+			defer closeTestStore(t, source)
+			names := make([]string, 17)
+			for i := range names {
+				names[i] = fmt.Sprintf("transfer.resume.%02d", i)
+				createTestMetric(t, source, names[i])
+				if err := source.UpdateMany(ctx, names[i], []Point{{Timestamp: int64(now - 60), Value: math.Float64frombits(1 << 63)}, {Timestamp: int64(now - 120), Value: float64(i) + 0.25}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			records, err := source.ExportTransfer(ctx, names)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fs := vfs.NewStrictMem()
+			opts := Options{fs: fs, ExactBlocks: true, SyncInterval: time.Hour}
+			target, _ := openTestStore(t, "/target", opts)
+			interrupted, cancel := context.WithCancel(ctx)
+			defer cancel()
+			calls := 0
+			if phase == "ingested" {
+				target.nativeTestHook = func(step string) error {
+					if step == "native-ingest-batch" {
+						calls++
+						cancel()
+						return context.Canceled
+					}
+					return nil
+				}
+			} else {
+				target.transferApplyTestHook = func() {
+					calls++
+					if calls == 2 {
+						cancel()
+					}
+				}
+			}
+			if _, err := target.ImportTransfer(interrupted, records); !errors.Is(err, context.Canceled) || calls == 0 {
+				t.Fatalf("interruption calls=%d err=%v", calls, err)
+			}
+			closeForCrashRecovery(t, target, fs)
+			target, _ = openTestStore(t, "/target", opts)
+			defer closeTestStore(t, target)
+			for _, name := range names {
+				got, err := target.Snapshot(ctx, name)
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := source.Snapshot(ctx, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := EqualSnapshots(want, got); err != nil {
+					t.Fatalf("partially published %s: %v", name, err)
+				}
+			}
+			proofs, err := target.ImportTransfer(ctx, records)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := target.VerifyTransfer(ctx, proofs); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range names {
+				want, err := source.Snapshot(ctx, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := target.Snapshot(ctx, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := EqualSnapshots(want, got); err != nil {
+					t.Fatalf("resumed %s: %v", name, err)
+				}
+			}
+		})
 	}
 }
 

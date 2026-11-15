@@ -372,7 +372,8 @@ type Store struct {
 	// transferMergeAppendOff merges every present continuation name with
 	// RestoreArchives (differential tests).
 	transferMergeAppendOff bool
-	// transferBatchBytes can reduce the import WAL byte cap in tests/benchmarks.
+	// transferBatchBytes selects the previous WAL staging path with this byte
+	// cap in differential tests/benchmarks. Production uses verified SSTs.
 	transferBatchBytes int
 	// backgroundStopped is set once StopBackground completed.
 	backgroundStopped atomic.Bool
@@ -694,6 +695,9 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	if err := s.loadSidecars(); err != nil {
 		return nil, s.openFailure(db, fmt.Errorf("load sidecar catalog: %w", err))
+	}
+	if err := s.recoverTransferTables(); err != nil {
+		return nil, s.openFailure(db, fmt.Errorf("recover transfer tables: %w", err))
 	}
 	if err := s.recoverNative(); err != nil {
 		return nil, s.openFailure(db, fmt.Errorf("recover native bulk: %w", err))
