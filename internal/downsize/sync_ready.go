@@ -76,8 +76,8 @@ type readyReport struct {
 }
 
 // runSyncReady owns the final phase and invalidates a prior attestation before
-// any work. Recovery always uses fresh journals, including fresh copy filenames:
-// pre-restart verification or transfer receipts cannot establish post-restart proof.
+// any work. Each new restart uses a fresh recovery journal; an interrupted
+// recovery resumes that same journal, never the pre-restart receipts.
 func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syncReadyBackend, initial func() error) (err error) {
 	if o.now == nil {
 		o.now = time.Now
@@ -182,8 +182,8 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 	if e != nil {
 		return e
 	}
-	// Keep an earlier snapshot until recovery and final reads succeed. Interrupted
-	// recovery is therefore retried with a new journal on the next invocation.
+	// Keep an earlier snapshot until recovery and final reads succeed. Recovery
+	// has its own durable process boundary and journal, restored below.
 	_, oldJournalErr := os.Stat(filepath.Join(o.state, "sync.jsonl"))
 	unbound := oldJournalErr == nil && len(previous) != len(before)
 	for store := range before {
@@ -210,6 +210,19 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 	if e = readyProgress(o.state, "running", nil); e != nil {
 		return e
 	}
+	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
+	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
+	if e != nil {
+		return e
+	}
+	if resume != nil {
+		if e = runSync(ctx, resume.options(*o), b); e != nil {
+			return fmt.Errorf("restart recovery: %w", e)
+		}
+		previous, state, unbound = resume.Processes, filepath.Join(o.state, resume.State), false
+		report.Restarts = append(report.Restarts, resume.Restarts...)
+		report.Windows = append(report.Windows, resume.Restarts...)
+	}
 	repairedParity := false
 	for generation := 0; ; generation++ {
 		after, e := capture()
@@ -234,13 +247,20 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			// The initial journal already proves the original history. A known
 			// restart invalidates only its observation interval. An unbound
 			// journal has no such proof and still needs full revalidation.
-			recovery.windows = append(syncRanges(nil), report.Restarts...)
+			recovery.windows = append(syncRanges(nil), gaps...)
 			if freshProof {
-				recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
+				recovery.windows = append(append(syncRanges(nil), o.windows...), gaps...)
 			}
 			recovery.settle = 0
 			recovery.fullHistory = freshProof && r.scope != "windows"
 			recovery.sampleEvery = 1
+			checkpoint := readyRecovery{State: filepath.Base(recovery.state), Windows: recovery.windows, FullHistory: recovery.fullHistory, Processes: after, Restarts: report.Restarts, Scope: r.scope}
+			if checkpoint.Identity, e = syncIdentity(*o); e != nil {
+				return e
+			}
+			if e = atomicStateJSON(recoveryPath, checkpoint); e != nil {
+				return e
+			}
 			previous = after
 			if e = runSync(ctx, recovery, b); e != nil {
 				return fmt.Errorf("restart recovery: %w", e)
@@ -293,6 +313,9 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		report.ProofState = state
 		if len(report.Reasons) == 0 {
 			if e = atomicStateJSON(snapshotPath, final); e != nil {
+				return e
+			}
+			if e = os.Remove(recoveryPath); e != nil && !errors.Is(e, os.ErrNotExist) {
 				return e
 			}
 		}
