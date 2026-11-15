@@ -47,10 +47,15 @@ type gmatcher struct {
 }
 
 type gstate struct {
-	// TODO: make c compact
-	c    [maxGstateCLen]bool
+	c    [(maxGstateCLen + 63) / 64]uint64
 	next []*gstate
 }
+
+// Each state accepts any byte plus the epsilon-split marker. Keep that set
+// in five words instead of a byte per flag: every compiled literal allocates
+// one state per character on both mutable and snapshot index queries.
+func (g *gstate) hasChar(c int) bool { return g.c[c>>6]&(uint64(1)<<(c&63)) != 0 }
+func (g *gstate) setChar(c int)      { g.c[c>>6] |= uint64(1) << (c & 63) }
 
 type gdstate struct {
 	gstates []*gstate
@@ -79,8 +84,8 @@ func (g *gstate) String() string {
 			return "end"
 		}
 		var b []byte
-		for c, t := range g.c {
-			if t {
+		for c := range maxGstateCLen {
+			if g.hasChar(c) {
 				if isAlphanumeric(byte(c)) {
 					b = append(b, byte(c))
 				} else {
@@ -117,7 +122,7 @@ func (g *gdstate) step(c byte) *gdstate {
 
 	var ng gdstate
 	for _, s := range g.gstates {
-		if s.c[c] || s.c['*'] {
+		if s.hasChar(int(c)) || s.hasChar('*') {
 			for _, ns := range s.next {
 				ng.gstates = g.add(ng.gstates, ns)
 			}
@@ -128,7 +133,7 @@ func (g *gdstate) step(c byte) *gdstate {
 }
 
 func (g *gdstate) add(list []*gstate, s *gstate) []*gstate {
-	if s.c[gstateSplit] {
+	if s.hasChar(gstateSplit) {
 		for _, ns := range s.next {
 			list = g.add(list, ns)
 		}
@@ -187,7 +192,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 
 					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
 						if j != '*' {
-							s.c[j] = true
+							s.setChar(int(j))
 						}
 					}
 
@@ -195,7 +200,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 					continue
 				}
 
-				s.c[expr[i]] = true
+				s.setChar(int(expr[i]))
 				i++
 			}
 			if i >= len(expr) || expr[i] != ']' {
@@ -206,7 +211,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 				// TODO: revisit
 				for i := 32; i <= 126; i++ {
 					if i != '*' {
-						s.c[i] = !s.c[i]
+						s.c[i>>6] ^= uint64(1) << (i & 63)
 					}
 				}
 			}
@@ -217,7 +222,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 		case '?':
 			m.exact = false
 			var star gstate
-			star.c['*'] = true
+			star.setChar('*')
 			cur.next = append(cur.next, &star)
 			cur = &star
 
@@ -230,16 +235,18 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			}
 
 			var split, star gstate
-			star.c['*'] = true
-			split.c[gstateSplit] = true
+			star.setChar('*')
+			split.setChar(gstateSplit)
 			split.next = append(split.next, &star)
 			cur.next = append(cur.next, &split)
 			star.next = append(star.next, &split)
 
 			cur = &split
 		case '{':
-			alterStart := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
-			alterEnd := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
+			alterStart := &gstate{}
+			alterStart.setChar(gstateSplit)
+			alterEnd := &gstate{}
+			alterEnd.setChar(gstateSplit)
 			cur.next = append(cur.next, alterStart)
 			cur = alterStart
 			alters = append(alters, [2]*gstate{alterStart, alterEnd})
@@ -263,7 +270,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			fallthrough
 		default:
 			s := &gstate{}
-			s.c[c] = true
+			s.setChar(int(c))
 			cur.next = append(cur.next, s)
 			cur = s
 		}
