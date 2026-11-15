@@ -157,3 +157,40 @@ Use an offered rate well above measured throughput when looking for a ceiling;
 sort/encode/ingest wall seconds and aggregate producer queue wait are reported,
 alongside current live SST bytes and process counters. Queue wait sums can exceed
 wall time and `/proc/self/io` syscall counts are not physical-device IOPS.
+
+Producer dispatch counts rows per owner before allocating one exact backing
+slice, then gives each owner a disjoint region with a fixed capacity. This
+avoids repeated geometric allocations while preserving caller-owned input:
+callers can reuse their rows immediately after `submit` returns. The owners
+still copy those private packets into their own heads before sorting.
+
+### NUMA-local pipelines and bounded dispatch
+
+`core-bench` keeps four reusable routing buffers per producer. A buffer is leased
+until all database consumers finish copying it, so the producer may reuse its
+input immediately without reallocating the dispatch backing slice each batch.
+SST key/value scratch is reused after `Set` returns. Apply-batch policies and
+points still detach from callers and retain their original boundaries.
+
+`-core-owners` sets execution-owner count independently of `-shards` (database
+count) and `-core-producers`. An execution owner can poll several databases;
+routing, snapshots and durable frontiers remain per database. The execution-owner
+count can change on restart without changing persisted routing.
+
+For a Linux machine with two NUMA nodes, launch separate runtimes with CPU and
+memory binding for the entire pipeline, including Pebble background threads:
+
+```sh
+python3 tool/immutable-parts/numa_bench.py --binary /absolute/path/immutable-parts \
+  --out /scratch/new-trial --nodes '0:0-47,96-143;1:48-95,144-191' \
+  --producers 48 --owners 48 --dbs 48 --duration 120
+```
+
+Use CPU/node IDs discovered on the actual host. Counts are per node; offered
+rate is aggregate. Synthetic metric IDs are split before pipeline entry into
+disjoint subsets by `-core-pipeline`/`-core-pipelines`. There is no cross-node
+producer-to-owner queue. Each process has its own allocator, scheduler, head
+buffers and databases. This launcher exercises the offline numeric engine; it
+does not implement portable admission, log routing or cross-node live recovery.
+Per-second heap/GC, memtable, flush, L0 and phase counters accompany process I/O.
+The launcher retains measurement JSON and deletes its synthetic databases.
