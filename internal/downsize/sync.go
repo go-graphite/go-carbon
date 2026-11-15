@@ -86,6 +86,7 @@ type syncBackend interface {
 
 type syncOptions struct {
 	noCopy, noVerify bool
+	restartWindow    bool // known restart: prior history is already proven
 	verifyStreams    int
 	policy           *effectiveSyncPolicy
 	namesHash        string
@@ -328,6 +329,9 @@ type syncer struct {
 
 func syncIdentity(o syncOptions) (string, error) {
 	identityFields := map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "windows": o.windows.String(), "sample_every": o.sampleEvery}
+	if o.restartWindow {
+		identityFields["restart_window"] = true
+	}
 	if o.namesHash != "" {
 		identityFields["names_sha256"] = o.namesHash
 	}
@@ -949,7 +953,12 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 			defer wg.Done()
 			for jb := range jobs {
 				for i, n := range jb.names {
-					s.masks.Store(n, jb.masks[i])
+					mask := jb.masks[i]
+					if s.o.restartWindow {
+						// A name can acquire another holder after catalog discovery.
+						mask = (uint64(1) << uint(len(s.o.from))) - 1
+					}
+					s.masks.Store(n, mask)
 				}
 				row, err := s.verifyBatch(ctx, journalRound, jb.names)
 				for _, n := range jb.names {

@@ -13,16 +13,18 @@ import (
 // process boundary let resume reuse post-restart receipts without widening the
 // window to the time of the next invocation. A later restart gets a new intent.
 type readyRecovery struct {
-	Identity    string                  `json:"identity"`
-	Scope       string                  `json:"scope"`
-	State       string                  `json:"state"`
-	Windows     syncRanges              `json:"windows"`
-	FullHistory bool                    `json:"full_history"`
-	Processes   map[string]readyProcess `json:"processes"`
-	Restarts    syncRanges              `json:"restarts"`
+	RestartWindow bool                    `json:"restart_window,omitempty"`
+	Identity      string                  `json:"identity"`
+	Scope         string                  `json:"scope"`
+	State         string                  `json:"state"`
+	Windows       syncRanges              `json:"windows"`
+	FullHistory   bool                    `json:"full_history"`
+	Processes     map[string]readyProcess `json:"processes"`
+	Restarts      syncRanges              `json:"restarts"`
 }
 
 func (r readyRecovery) options(o syncOptions) syncOptions {
+	o.restartWindow = r.RestartWindow
 	o.state = filepath.Join(o.state, r.State)
 	o.windows = append(syncRanges(nil), r.Windows...)
 	o.fullHistory, o.sampleEvery, o.settle = r.FullHistory, 1, 0

@@ -228,6 +228,24 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 	if len(names) == 0 {
 		return nil
 	}
+	if s.o.restartWindow {
+		if !s.windowOnly() {
+			return errors.New("restart window proof requires explicit windows without full history")
+		}
+		// The original generation proves history. Only the restart gaps lost
+		// that proof. In particular, absence outside a gap must not trigger
+		// resolveAbsent's whole-retention probes. Empty donor window digests
+		// need no point reads; positive mismatches still use every holder.
+		eligible := make([]string, 0, len(names))
+		for _, name := range names {
+			if archives, known := info[name]; known && !s.o.includeShort && syncShort(archives) {
+				row.Short = append(row.Short, name)
+				continue
+			}
+			eligible = append(eligible, name)
+		}
+		return s.verifyWindows(ctx, row, eligible, nil, s.o.now().Unix())
+	}
 	if err := s.resolveAbsent(ctx, row, names, info); err != nil {
 		return err
 	}
