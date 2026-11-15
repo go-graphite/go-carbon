@@ -44,6 +44,13 @@ func TestNativeHTTPBypassesLegacyLimitsAndRecoversReceipt(t *testing.T) {
 	ctx := context.Background()
 	source, donor := newNativeTestService(t)
 	destination, target := newNativeTestService(t)
+	var imported []string
+	destination.SetOnNativeImport(func(name string) {
+		if _, err := target.Metadata(ctx, name); err != nil {
+			t.Fatal("notified before catalog publication:", err)
+		}
+		imported = append(imported, name)
+	})
 	config := chunkstore.MetricConfig{Name: "native.new", AggregationMethod: chunkstore.Sum, Retentions: []chunkstore.Retention{{Step: 1, Count: 10000}}}
 	for _, name := range []string{"native.new", "native.existing"} {
 		config.Name = name
@@ -114,6 +121,9 @@ func TestNativeHTTPBypassesLegacyLimitsAndRecoversReceipt(t *testing.T) {
 	if receipt.CopiedCount != 1 || receipt.DeferredCount != 2 || !receipt.IsCopied(0) || receipt.IsCopied(1) || receipt.IsCopied(2) || receipt.Bytes <= destination.config.MaxBodyBytes {
 		t.Fatal("native limits/bitmap", receipt)
 	}
+	if len(imported) != 1 || imported[0] != "native.new" {
+		t.Fatalf("notified absent or deferred names: %v", imported)
+	}
 	snapshot, err := target.Snapshot(ctx, "native.new")
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +155,9 @@ func TestNativeHTTPBypassesLegacyLimitsAndRecoversReceipt(t *testing.T) {
 	_ = json.Unmarshal(response.Body.Bytes(), &again)
 	if again.Digest != receipt.Digest {
 		t.Fatal("receipt changed")
+	}
+	if len(imported) != 2 || imported[1] != "native.new" {
+		t.Fatalf("receipt retry did not restore discovery notification: %v", imported)
 	}
 	response = invoke(source, http.MethodDelete, "/v1/native/source/"+session.ID, nil, root)
 	if response.Code != 200 {

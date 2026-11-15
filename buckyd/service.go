@@ -139,6 +139,7 @@ type Service struct {
 	serveErr                      chan error
 	nodes                         []Node
 	onChange                      func()
+	onNativeImport                func(string)
 	flushTransfer                 func(context.Context, []string) error
 	pyroscope                     *pyroscope.Profiler
 	pprofServer                   *http.Server
@@ -385,6 +386,15 @@ func (s *Service) SetOnChange(callback func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onChange = callback
+}
+
+// SetOnNativeImport installs a callback for each committed name in a successful
+// native pull, including receipt retries. It lets discovery queue names without
+// waiting for a catalog scan.
+func (s *Service) SetOnNativeImport(callback func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onNativeImport = callback
 }
 
 // SetStoreCopy attaches the App-owned checkpoint input boundary before Start.
