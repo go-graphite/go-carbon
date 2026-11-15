@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -348,40 +349,65 @@ func TestDeferredReclaimKeepsUpWith10KProducer(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	db := &reclaimCompletionStore{total: count, done: make(chan struct{})}
-	p := &Whisper{rootPath: root, incrementalStore: db}
-	p.SetConversionIOSlots(512)
-	p.SetDeferredReclaim(time.Millisecond)
-	defer p.StopDeferredReclaim()
-	started := time.Now()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for i := 0; i < count; i += 500 {
-		<-ticker.C
-		for _, job := range jobs[i : i+500] {
-			if !p.reclaim.push(job) {
-				t.Fatal("producer fell back inline")
+	synctest.Test(t, func(t *testing.T) {
+		seen := make([]atomic.Bool, count)
+		db := &reclaimCompletionStore{total: count, done: make(chan struct{}), complete: func(m store.Metadata) error {
+			if m.ID == 0 || m.ID > count {
+				t.Errorf("unexpected cleanup identity: %+v", m)
+				return errors.New("unexpected cleanup identity")
+			}
+			want := jobs[m.ID-1]
+			if m.Name != want.name || m.Generation != want.generation || seen[m.ID-1].Swap(true) {
+				t.Errorf("incorrect or duplicate cleanup: %+v", m)
+			}
+			return nil
+		}}
+		p := &Whisper{rootPath: root, incrementalStore: db}
+		p.SetConversionIOSlots(512)
+		p.SetDeferredReclaim(time.Millisecond)
+		defer p.StopDeferredReclaim()
+		// Virtual time advances only when the producer and all reclaim workers
+		// are durably blocked. Real filesystem calls must return first, so shared
+		// disk/CPU contention cannot spend the scheduler's drain deadline.
+		started := time.Now()
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; i < count; i += 500 {
+			<-ticker.C
+			for _, job := range jobs[i : i+500] {
+				if !p.reclaim.push(job) {
+					t.Fatal("producer fell back inline")
+				}
+			}
+			// Let dispatched batches finish before observing the backlog. At
+			// 10k/s, one tick's arrivals may wait, but older work must drain.
+			synctest.Wait()
+			if queued := p.DeferredReclaimQueued(); queued > 10000 {
+				t.Fatalf("backlog exceeded one tick of production: queued=%d completed=%d", queued, db.completed.Load())
 			}
 		}
-	}
-	produced := time.Since(started)
-	select {
-	case <-db.done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("reclaim fell behind 10k/s producer: completed=%d queued=%d stats=%+v", db.completed.Load(), p.DeferredReclaimQueued(), p.DeferredReclaimStats())
-	}
-	// Stop joins the last batch so counters and cleared queue are observable.
-	r := p.reclaim
-	p.StopDeferredReclaim()
-	if r.completed.Load() != count || r.queued.Load() != 0 || r.inlineFallback.Load() != 0 {
-		t.Fatalf("completed=%d queued=%d fallback=%d", r.completed.Load(), r.queued.Load(), r.inlineFallback.Load())
-	}
-	for _, job := range jobs {
-		if _, err := os.Lstat(job.path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("original not reclaimed: %s %v", job.path, err)
+		produced := time.Since(started)
+		select {
+		case <-db.done:
+		case <-time.After(2 * reclaimTick):
+			t.Fatalf("reclaim did not drain after producer stopped: completed=%d queued=%d stats=%+v", db.completed.Load(), p.DeferredReclaimQueued(), p.DeferredReclaimStats())
 		}
-	}
-	t.Logf("producer: %d jobs in %s; drain: %s; batches=%d jobs/batch=%.1f batch-latency=%s unlink-worker-time=%s sync-worker-time=%s", count, produced, time.Since(started), r.batches.Load(), float64(r.jobs.Load())/float64(r.batches.Load()), time.Duration(r.batchNanos.Load()/r.batches.Load()), time.Duration(r.unlinkNanos.Load()), time.Duration(r.syncNanos.Load()))
+		// Stop joins the last batch so counters and cleared queue are observable.
+		r := p.reclaim
+		p.StopDeferredReclaim()
+		if r.completed.Load() != count || r.queued.Load() != 0 || r.inlineFallback.Load() != 0 {
+			t.Fatalf("completed=%d queued=%d fallback=%d", r.completed.Load(), r.queued.Load(), r.inlineFallback.Load())
+		}
+		for i, job := range jobs {
+			if !seen[i].Load() {
+				t.Fatalf("cleanup not completed: %s", job.name)
+			}
+			if _, err := os.Lstat(job.path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("original not reclaimed: %s %v", job.path, err)
+			}
+		}
+		t.Logf("%d cleanups completed exactly once; virtual production=%s virtual drain=%s batches=%d", count, produced, time.Since(started)-produced, r.batches.Load())
+	})
 }
 
 func TestDeferredReclaimSlowDirectoryDoesNotStallOtherWorkers(t *testing.T) {
