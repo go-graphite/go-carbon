@@ -203,6 +203,31 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 	if err != nil {
 		return fmt.Errorf("target info: %w", err)
 	}
+	var absent []string
+	for _, n := range names {
+		if _, ok := info[n]; !ok {
+			absent = append(absent, n)
+		}
+	}
+	excluded, err := s.expectedAbsent(ctx, absent)
+	if err != nil {
+		return err
+	}
+	for _, n := range absent {
+		if excluded[n] {
+			row.Resolved = append(row.Resolved, syncSkip{n, "expected_absent_target_expiration"})
+		}
+	}
+	active := make([]string, 0, len(names))
+	for _, n := range names {
+		if !excluded[n] {
+			active = append(active, n)
+		}
+	}
+	names = active
+	if len(names) == 0 {
+		return nil
+	}
 	if err := s.resolveAbsent(ctx, row, names, info); err != nil {
 		return err
 	}

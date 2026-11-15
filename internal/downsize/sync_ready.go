@@ -71,6 +71,7 @@ type readyReport struct {
 	Counts           map[string]readyCount   `json:"counts"`
 	Sample           []string                `json:"sample"`
 	PolicyNames      int                     `json:"policy_names"`
+	ExpectedAbsent   int                     `json:"expected_absent"`
 	PolicyMismatches int                     `json:"policy_mismatches"`
 	Finished         int64                   `json:"finished_at"`
 }
@@ -279,6 +280,7 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		report.Counts = map[string]readyCount{}
 		report.PolicyNames = 0
 		report.PolicyMismatches = 0
+		report.ExpectedAbsent = 0
 		if e = readyChecks(ctx, *o, r, b, state, &report); e != nil {
 			return e
 		}
@@ -439,12 +441,29 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		if e != nil {
 			return e
 		}
+		var absent []string
+		for _, name := range batch {
+			if _, ok := target[name]; !ok {
+				absent = append(absent, name)
+			}
+		}
+		excluded, e := expectedAbsent(ctx, b, o, absent)
+		if e != nil {
+			return e
+		}
+		report.ExpectedAbsent += len(excluded)
+		if len(excluded) > 0 {
+			event("sync_expected_absent", map[string]any{"phase": "ready policy", "names": len(excluded), "reason": "target_expiration"})
+		}
 		for _, source := range o.from {
 			policies, e := b.Policies(ctx, source, batch)
 			if e != nil {
 				return e
 			}
 			for name, p := range policies {
+				if excluded[name] {
+					continue
+				}
 				if !o.includeShort && readyShort(p.Archives) {
 					continue
 				}

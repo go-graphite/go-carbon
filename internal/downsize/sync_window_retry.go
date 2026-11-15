@@ -42,6 +42,9 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 		if err := s.retryWindowSelections(ctx); err != nil {
 			return err
 		}
+		if s.windowRetryCopyError != nil {
+			return s.windowRetryCopyError
+		}
 		pending := 0
 		for _, r := range s.sum.residual {
 			if r.Reason == syncWindowSelectionReason {
@@ -62,6 +65,7 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 }
 
 func (s *syncer) retryWindowSelections(ctx context.Context) error {
+	s.windowRetryCopyError = nil
 	if !s.windowOnly() {
 		return nil
 	}
@@ -218,6 +222,18 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 				}
 				event("sync_window_retry_failed", map[string]any{"level": "warn", "source": r.Source, "group": r.Round, "names": len(selected), "stage": "copy", "error": err.Error(), "retained": true})
 			}
+			excluded := map[string]bool{}
+			for _, n := range result.ExpectedAbsent {
+				excluded[n] = true
+			}
+			if err != nil || result.Forbidden || len(result.Failed) > 0 {
+				metric := selected[0]
+				if len(result.Failed) > 0 {
+					metric = result.Failed[0]
+				}
+				s.windowRetryCopyError = fmt.Errorf("%w: window selection repair rejected for %s", ErrSyncResidual, metric)
+				event("sync_window_retry_failed", map[string]any{"level": "ERROR", "metric": metric, "source": r.Source, "stage": "copy", "error": fmt.Sprint(err), "failed": len(result.Failed), "forbidden": result.Forbidden})
+			}
 			failed := map[string]bool{}
 			for _, n := range result.Failed {
 				failed[n] = true
@@ -226,7 +242,9 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 				for _, n := range selected {
 					if !failed[n] {
 						done = append(done, n)
-						copied++
+						if !excluded[n] {
+							copied++
+						}
 					}
 				}
 			}
