@@ -74,3 +74,55 @@ the complete run and write amplification relative to 32 input bytes/point;
 physical device traffic from other processes and filesystem metadata are outside
 that attribution. SST bytes are also reported separately. Any compaction debt at
 close means these are finite-run costs, not steady-state endurance numbers.
+
+## Durable owner experiment
+
+`-mode core-bench` measures a separate owner-local sink with independently
+configurable `-shards` (Pebble instances), `-core-producers`, CPU affinity and
+`GOMAXPROCS`. It generates synthetic preidentified rows; it does not measure
+network intake, canonical-name admission, rollups or existing daemon APIs.
+
+```sh
+immutable-parts -mode core-bench -out trial -shards 16 \
+  -core-producers 16 -core-duration 30m -core-rate 25000000 \
+  -max-rows 2097152 -core-settle 60s
+```
+
+Each producer owns a two-slot atomic queue per shard. One owner per shard
+collects bounded heads, sorts at one second or the byte bound, and publishes
+immutable Snappy SST blocks without reading existing data. The SST includes
+its producer frontier vector, so blocks and replay position commit together.
+`-core-blind-batch` compares the same ordered puts in a synced blind WAL batch.
+An optional snapshot hook publishes a detached head and Pebble snapshot; callers
+must release every pin before closing the engine. No application data mutex is
+shared with readers or producers. Pebble has its own internal synchronization.
+
+Keys contain a time-partition prefix followed by canonical numeric metric ID,
+archive, block start, immutable part and block ordinal. IDs must come from an
+exact canonical-name catalogue: routing hashes IDs but does not replace identity
+with a hash. Raw archive blocks preserve timestamps, IEEE value bits and original
+source sequence. The stopped-owner expiry primitive deletes complete logical
+partition ranges and atomically persists an expiry floor. Pebble compaction
+reclaims physical bytes later. Automatic retention and authoritative rollups
+are not integrated, so enabling expiry is not safe for a multi-archive store.
+
+`-mode core-replay -journal segment.log -out recovered` decodes an immutable
+single-segment input journal through the same producer and owner path. Restart
+reconstructs the name catalogue by decoding the dictionary prefix and resumes
+from the minimum durable owner frontier. Owners ahead of that minimum skip their
+already committed prefixes. Header identity and engine configuration are
+validated before reuse; staging SSTs left before atomic ingest are removed.
+This does not implement live multi-segment journal retirement, dictionary
+checkpointing or a production durability acknowledgement contract.
+
+Samples report committed and submitted counts, process CPU/IO/RSS, estimated
+compaction debt, L0 files and write stalls. The final seal checks that every
+submitted row committed; scheduled points and `target_met` expose backpressure.
+A finite run, nonzero debt at close, or a shortfall against the offered schedule
+cannot qualify sustained throughput. `-cpuprofile`, `-mutexprofile` and
+`-blockprofile` write profiles for diagnosing a plateau with unused hardware.
+
+Correctness tests include independent producers, raw bit parity, restart replay,
+SIGKILL between owner publications, SIGKILL during actual journal replay, idle
+one-second sealing, frozen-head immutability and pinned partition-expiry views.
+These raw-archive tests do not establish render/rollup equivalence.

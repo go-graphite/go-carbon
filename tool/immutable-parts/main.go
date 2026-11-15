@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -683,7 +684,49 @@ func main() {
 	passes := flag.Int("passes", 1, "fixture passes, later passes shifted in time")
 	maxRows := flag.Int("max-rows", 262144, "byte bound per owner /32")
 	limit := flag.Uint64("points", 450000000, "prepare point limit")
+	coreDuration := flag.Duration("core-duration", time.Minute, "core benchmark offered duration")
+	coreRate := flag.Uint64("core-rate", 25000000, "aggregate offered points per second")
+	coreMetrics := flag.Uint64("core-metrics", 16000000, "synthetic canonical IDs")
+	coreProducers := flag.Int("core-producers", 16, "independent producer streams")
+	coreSettle := flag.Duration("core-settle", 10*time.Second, "post-input compaction observation")
+	coreBlind := flag.Bool("core-blind-batch", false, "compare blind WAL batches with atomic SST ingestion")
+	cpuProfile := flag.String("cpuprofile", "", "write CPU profile")
+	mutexProfile := flag.String("mutexprofile", "", "write sampled mutex profile")
+	blockProfile := flag.String("blockprofile", "", "write sampled blocking profile")
 	flag.Parse()
+	if *cpuProfile != "" {
+		f, e := os.Create(*cpuProfile)
+		must(e)
+		must(pprof.StartCPUProfile(f))
+		defer func() { pprof.StopCPUProfile(); _ = f.Close() }()
+	}
+	if *mutexProfile != "" {
+		runtime.SetMutexProfileFraction(100)
+		defer func() {
+			f, e := os.Create(*mutexProfile)
+			must(e)
+			defer f.Close()
+			must(pprof.Lookup("mutex").WriteTo(f, 0))
+		}()
+	}
+	if *blockProfile != "" {
+		runtime.SetBlockProfileRate(1000000)
+		defer func() {
+			f, e := os.Create(*blockProfile)
+			must(e)
+			defer f.Close()
+			must(pprof.Lookup("block").WriteTo(f, 0))
+		}()
+	}
+	cfg := coreConfig{Shards: *shards, Producers: *coreProducers, MaxRows: *maxRows, PartitionSeconds: 3600, BlindBatch: *coreBlind}
+	if *mode == "core-bench" {
+		must(coreBenchmark(*out, cfg, *coreDuration, *coreRate, *coreMetrics, *coreSettle))
+		return
+	}
+	if *mode == "core-replay" {
+		must(coreReplay(*journal, *out, cfg))
+		return
+	}
 	if *mode == "prepare" {
 		must(prepare(*journal, *fixture, *schemas, *aggregation, *limit))
 	} else if *mode == "check" {
