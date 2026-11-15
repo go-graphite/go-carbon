@@ -1891,6 +1891,9 @@ func (app *App) startBuckyd() (err error) {
 		if app.metricStoreIndex != nil {
 			app.Buckyd.SetOnChange(app.metricStoreIndex.notify)
 		}
+		if app.Carbonserver != nil {
+			app.Buckyd.SetOnNativeImport(app.Carbonserver.QueueNewMetric)
+		}
 		app.configureTransferCache()
 		if err := app.configureStoreCopy(); err != nil {
 			return fmt.Errorf("configure store copy: %w", err)

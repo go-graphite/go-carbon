@@ -11,6 +11,16 @@ import (
 	"go.uber.org/zap"
 )
 
+// QueueNewMetric publishes a committed out-of-band write through the same
+// discovery queue as ingestion. The queue retains names until the initial
+// index is ready and is serviced independently of scans and recovery gates.
+// Other index configurations retain their catalog-scan refresh policy.
+func (listener *CarbonserverListener) QueueNewMetric(metric string) {
+	if listener.trieIndex && listener.concurrentIndex && listener.newMetricsQueue != nil {
+		listener.newMetricsQueue.Add(metric)
+	}
+}
+
 // IndexNewMetric inserts a metric synchronously. Live ingestion uses the pending
 // queue instead, so producers never wait for the trie writer lock.
 func (listener *CarbonserverListener) IndexNewMetric(metric string) bool {

@@ -285,6 +285,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if receipt, err := s.store.NativeReceipt(r.Context(), request.Range); err == nil {
+			s.nativeImported(request.Range.Names, receipt)
 			writeNativeJSON(w, receipt)
 			return
 		} else if !errors.Is(err, pebble.ErrNotFound) {
@@ -295,7 +296,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		} else if ready {
-			s.changed()
+			s.nativeImported(request.Range.Names, receipt)
 			writeNativeJSON(w, receipt)
 			return
 		}
@@ -335,11 +336,25 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
-		s.changed()
+		s.nativeImported(request.Range.Names, receipt)
 		writeNativeJSON(w, receipt)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Service) nativeImported(names []string, receipt chunkstore.NativeReceipt) {
+	s.mu.Lock()
+	callback := s.onNativeImport
+	s.mu.Unlock()
+	if callback != nil {
+		for i, name := range names {
+			if receipt.IsCopied(i) {
+				callback(name)
+			}
+		}
+	}
+	s.changed()
 }
 
 type nativeResponseWriter struct {
