@@ -116,6 +116,17 @@ func TestLogOriginalBatchReplay(t *testing.T) {
 // sends SIGKILL with seeded offsets around writes, sync and owner publication.
 // This proves process-crash recovery, not power-failure behavior of a device.
 func TestLogSIGKILLRecovery(t *testing.T) {
+	openCrashCore := func(logDir, partDir string, cfg coreConfig, opts partlog.Options) (*loggedCore, error) {
+		if os.Getenv("PARTLOG_CRASH_ADMISSION") != "1" {
+			return openLoggedCore(logDir, partDir, cfg, opts)
+		}
+		opts.Streams = cfg.Producers
+		journal, err := partlog.OpenAdmission(logDir, opts)
+		if err != nil {
+			return nil, err
+		}
+		return attachLoggedCore(journal, partDir, cfg, coreHooks{})
+	}
 	if root := os.Getenv("PARTLOG_CRASH_ROOT"); root != "" {
 		trial, _ := strconv.Atoi(os.Getenv("PARTLOG_CRASH_TRIAL"))
 		cfg := loggedConfig()
@@ -124,7 +135,7 @@ func TestLogSIGKILLRecovery(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(root, "sync-start"), []byte("sync"), 0600)
 			}
 		}
-		l, e := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{SyncInterval: 3 * time.Millisecond, SegmentBytes: 1 << 20, Hook: hook})
+		l, e := openCrashCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{SyncInterval: 3 * time.Millisecond, SegmentBytes: 1 << 20, Hook: hook})
 		if e != nil {
 			panic(e)
 		}
@@ -204,7 +215,7 @@ func TestLogSIGKILLRecovery(t *testing.T) {
 			_ = cmd.Wait()
 			_ = output.Close()
 			cfg := loggedConfig()
-			l, e := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{})
+			l, e := openCrashCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -278,6 +289,60 @@ func TestLogBacklogBenchmark(t *testing.T) {
 	}
 	if e = logBacklogBenchmark(root, os.Getenv("PARTLOG_BENCH_PHASE"), total, 36000000, producers, owners); e != nil {
 		t.Fatal(e)
+	}
+}
+
+// This opt-in process-start probe holds historical validation until a real
+// append succeeds. It measures journal admission only, without opening Pebble.
+func TestLogAdmissionExecBenchmark(t *testing.T) {
+	root := os.Getenv("PARTLOG_ADMISSION_BENCH_ROOT")
+	if root == "" {
+		t.Skip("set PARTLOG_ADMISSION_BENCH_ROOT for the process-start probe")
+	}
+	streams, err := strconv.Atoi(os.Getenv("PARTLOG_BENCH_PRODUCERS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	start := time.Now()
+	stages := make(map[string]float64)
+	journal, err := partlog.OpenAdmission(filepath.Join(root, "log"), partlog.Options{Streams: streams, Hook: func(_ int, phase string) {
+		switch phase {
+		case "admission-frontiers-ready", "admission-fence-ready", "admission-owners-ready":
+			stages[phase] = time.Since(start).Seconds() * 1000
+		}
+		if phase == "recover-scan" {
+			<-release
+		}
+	}})
+	if err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	_, err = journal.Append(0, -123, encodeLogRows([]row{{1, -3, 0x7ff8000000000042, 99}}))
+	accepted := time.Now()
+	close(release)
+	if err != nil {
+		_ = journal.Close()
+		t.Fatal(err)
+	}
+	execNS, err := strconv.ParseInt(os.Getenv("PARTLOG_BENCH_EXEC_UNIX_NS"), 10, 64)
+	if err != nil || execNS <= 0 {
+		_ = journal.Close()
+		t.Fatal("missing wrapper exec timestamp", err)
+	}
+	receipt := map[string]any{
+		"stage": "first_live_append_accepted", "when_cet": accepted.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano),
+		"exec_to_first_accept_ms":    float64(accepted.UnixNano()-execNS) / 1e6,
+		"journal_open_and_append_ms": accepted.Sub(start).Seconds() * 1000,
+		"streams":                    streams, "historical_validation_held_until_accept": true,
+		"admission_stages_ms": stages,
+	}
+	if err = json.NewEncoder(os.Stdout).Encode(receipt); err != nil {
+		t.Error(err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

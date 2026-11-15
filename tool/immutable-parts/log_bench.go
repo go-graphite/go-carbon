@@ -193,13 +193,12 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 // This exercises acceptance into the durable journal concurrently with ordered
 // replay. Live rows have disjoint sequence numbers but the same metric catalogue.
 func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, metrics uint64, emit func(string, uint64, map[string]any), start time.Time) error {
-	l, err := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, opts)
+	replayStart := time.Now()
+	journal, err := partlog.OpenAdmission(filepath.Join(root, "log"), opts)
 	if err != nil {
 		return err
 	}
-	emit("log_recovery_scan_complete", 0, nil)
-	replayStart := time.Now()
-	ready := l.startReplay(context.Background())
+	emit("journal_admission_open", 0, nil)
 	stop := make(chan struct{})
 	done := make(chan error, cfg.Producers)
 	var live atomic.Uint64
@@ -238,7 +237,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 					rows[i] = row{seq % metrics, 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
 				}
 				payload = encodeLogRowsInto(payload, rows)
-				if _, err := l.journal.Append(p, time.Now().Unix(), payload); err != nil {
+				if _, err := journal.Append(p, time.Now().Unix(), payload); err != nil {
 					done <- err
 					return
 				}
@@ -255,6 +254,16 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 			}
 		}()
 	}
+	l, err := attachLoggedCore(journal, filepath.Join(root, "parts"), cfg, coreHooks{})
+	if err != nil {
+		close(stop)
+		for range cfg.Producers {
+			err = errors.Join(err, <-done)
+		}
+		return err // attachLoggedCore closed the journal on failure.
+	}
+	emit("storage_open_complete", 0, nil)
+	ready := l.startReplay(context.Background())
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	running := true
@@ -283,7 +292,10 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	}
 	emit("backlog_snapshot_consumed", total, map[string]any{"backlog_seconds": backlogSeconds, "backlog_mpoints_per_second": float64(total) / backlogSeconds / 1e6, "live_accepted": live.Load(), "live_seconds": liveSeconds, "live_mpoints_per_second": float64(live.Load()) / liveSeconds / 1e6})
 	err = errors.Join(err, l.stopReplay())
-	deadline := time.Now().Add(5 * time.Second)
+	// Settlement is timed, not hidden behind a five-second early failure.
+	// A longer wait lowers the reported settled rate and cannot pass the
+	// throughput gate by excluding outstanding compaction work.
+	deadline := time.Now().Add(60 * time.Second)
 	settled := false
 	quiet := 0
 	for time.Now().Before(deadline) {
