@@ -1,8 +1,8 @@
 //go:build linux || darwin
 
-// parts-convert is an offline synthetic qualification tool. It never opens a
-// legacy store or connects to a running daemon. Production source/routing
-// adapters must be certified separately before using the package online.
+// parts-convert qualifies synthetic history and converts exclusively owned
+// offline legacy copies. It never connects to a running daemon. Online reader
+// publication and total-store disk bounds require separate qualification.
 package main
 
 import (
@@ -45,6 +45,9 @@ type result struct {
 func main() {
 	c := config{}
 	baseline := flag.Bool("compare-coldpack", false, "compare actual legacy cold-pack and converted SST bytes on identical stored slots")
+	legacyCopy := flag.String("convert-copy", "", "EXPERIMENTAL: exclusively owned offline legacy COPY to convert and delete batch by batch")
+	legacyBatch := flag.Int("copy-batch-metrics", 32, "maximum metrics per offline copy name batch")
+	legacyBytes := flag.Uint64("copy-batch-mib", 128, "aggregate output bound for an offline copy name batch")
 	flag.StringVar(&c.dir, "dir", "", "new, private output directory (required)")
 	flag.IntVar(&c.workers, "workers", 1, "parallel vshards/physical Pebble owners")
 	flag.IntVar(&c.shards, "shards", 16, "number of routing vshards to convert")
@@ -56,6 +59,21 @@ func main() {
 	flag.Int64Var(&c.partitionSeconds, "partition-seconds", 86400, "synthetic time partition width; larger widths trade expiry granularity for compression")
 	flag.Uint64Var(&c.minFreeGiB, "min-free-gib", 8, "free space left for other users")
 	flag.Parse()
+	if *legacyCopy != "" {
+		if *legacyBytes > ^uint64(0)>>20 {
+			fmt.Fprintln(os.Stderr, "ERROR: offline copy batch size overflows")
+			os.Exit(1)
+		}
+		r, err := convertLegacyCopy(context.Background(), *legacyCopy, c.dir, *legacyBatch, *legacyBytes<<20)
+		if err == nil {
+			err = writeCopyResult(r)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *baseline {
 		if c.dir == "" || c.shards < 1 || c.metrics < 1 || c.points < 1 || c.archives < 1 || c.archives > 4 {
 			fmt.Fprintln(os.Stderr, "ERROR: invalid comparison configuration")
