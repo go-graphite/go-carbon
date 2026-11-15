@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -181,9 +182,9 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			s.prog.done.Store(int64(attempted))
 			continue
 		}
-		// An export without metadata may also be a name that disappeared
-		// everywhere. Use the existing all-archive, all-store absence proof;
-		// zero points in this copy window alone are insufficient.
+		// Missing window metadata needs a fresh absence proof. A source-local
+		// proof resolves only this source's selection; peer selections and final
+		// all-donor parity remain independent.
 		var uncertain []string
 		for _, n := range names {
 			if unknown[n] {
@@ -202,6 +203,25 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			uncertain = nil
 			for _, name := range candidates {
 				if _, found := got[name]; !found {
+					uncertain = append(uncertain, name)
+				}
+			}
+		}
+
+		var sourceProof []syncSkip
+		if len(uncertain) > 0 {
+			absent, err := s.windowSourceAbsent(ctx, r.Source, uncertain)
+			if err != nil {
+				return err
+			}
+			candidates := uncertain
+			uncertain = nil
+			for _, name := range candidates {
+				if absent[name] {
+					delete(unknown, name)
+					delete(relevant, name)
+					sourceProof = append(sourceProof, syncSkip{Name: name, Reason: "source_absent_no_pending"})
+				} else {
 					uncertain = append(uncertain, name)
 				}
 			}
@@ -276,7 +296,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			}
 		}
 		if len(done) > 0 {
-			if err := s.j.append(syncRow{Kind: "window-resolved", Round: r.Round, Source: r.Source, Selected: done, Copied: copied}); err != nil {
+			if err := s.j.append(syncRow{Kind: "window-resolved", Round: r.Round, Source: r.Source, Selected: done, Copied: copied, Resolved: sourceProof}); err != nil {
 				return err
 			}
 			if resolved[k] == nil {
@@ -318,4 +338,54 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	}
 	event("sync_window_retry_done", map[string]any{"attempted": attempted, "resolved": recovered, "remaining": remaining})
 	return nil
+}
+
+// windowSourceAbsent proves that the original source has neither persisted
+// metadata in any archive nor live write activity. It cannot waive a peer's
+// selection, a target mismatch, or final verification. Never substitute a
+// serving-archive digest when full-history sums are unsupported.
+func (s *syncer) windowSourceAbsent(ctx context.Context, source string, names []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	evidence, ok := s.b.(expirationEvidenceBackend)
+	if !ok {
+		return out, nil
+	}
+	sums, ok := s.b.(interface {
+		SumDigest(context.Context, string, []string, int64, int64, int64) (map[string][]syncDigest, error)
+	})
+	if !ok {
+		return out, nil
+	}
+	before, err := evidence.ExpirationEvidence(ctx, source, names, false)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []string
+	for _, name := range names {
+		if e, found := before[name]; found && !e.Pending && e.Latest == 0 {
+			candidates = append(candidates, name)
+		}
+	}
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	got, err := sums.SumDigest(ctx, source, candidates, 0, 0, 0)
+	if errors.Is(err, errSyncNoDigest) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	after, err := evidence.ExpirationEvidence(ctx, source, candidates, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range candidates {
+		_, found := got[name]
+		e, known := after[name]
+		if !found && known && !e.Pending && e.Latest == 0 {
+			out[name] = true
+		}
+	}
+	return out, nil
 }
