@@ -343,3 +343,66 @@ func TestMissingSelectionUsesLegacyOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHorizonMissingPartMetadataKeepsLegacyShape(t *testing.T) {
+	const now = 1794700800
+	r, p, _ := fixture(t, nil)
+	p.Publish(partsread.View{Catalog: catalog(map[string]partsread.Metric{})})
+	r.opts.LegacyHorizon = now - 99
+	if err := r.Fetch(context.Background(), "metric", now-99, now-96, func(s *partsread.Series) error {
+		if s == nil || len(s.Values) != 3 {
+			t.Fatal("legacy-only shape lost", s)
+		}
+		for _, v := range s.Values {
+			if !math.IsNaN(v) {
+				t.Fatal(s.Values)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConvertedNameSkipsLegacyLookup(t *testing.T) {
+	const now = 1794700800
+	r, _, _ := fixture(t, []partsread.Record{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 100, Bits: math.Float64bits(99), Sequence: 1}}})
+	r.opts.SuppressLegacy = func(string) bool { return true }
+	r.opts.LegacyCatalog = partsread.CatalogFuncs{LookupFunc: func(string) (partsread.Metric, bool) {
+		t.Fatal("suppressed legacy lookup")
+		return partsread.Metric{}, false
+	}, FindFunc: func(context.Context, string, func(string) error) error { return nil }}
+	if err := r.Fetch(context.Background(), "metric", now-101, now-98, func(s *partsread.Series) error {
+		if s.Values[0] != 99 || !math.IsNaN(s.Values[1]) {
+			t.Fatal(s.Values)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOneSlotFallbackDoesNotContaminatePartWorkspace(t *testing.T) {
+	const now = 1794700800
+	r, _, _ := fixture(t, []partsread.Record{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 1, Bits: math.Float64bits(99), Sequence: 1}}})
+	for range 128 {
+		if err := r.Fetch(context.Background(), "metric", now-101, now-101, func(s *partsread.Series) error {
+			if len(s.Values) != 1 || s.Values[0] != 5 {
+				t.Fatal(s.Values)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// The part archive is populated elsewhere, but this physical slot has no
+		// replacement. Reusing the one-slot workspace must not reveal legacy bits.
+		if err := r.opts.Parts.Fetch(context.Background(), "metric", now-98, now-98, func(s *partsread.Series) error {
+			if len(s.Values) != 1 || !math.IsNaN(s.Values[0]) {
+				t.Fatal("legacy value leaked through workspace reuse", s.Values)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

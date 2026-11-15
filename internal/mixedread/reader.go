@@ -224,10 +224,11 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 		return fmt.Errorf("%w: render shapes differ", ErrPolicy)
 	}
 	for i, occupied := range current.Occupied {
-		if !occupied {
-			current.Values[i] = old.Values[i]
+		if occupied {
+			old.Values[i] = current.Values[i]
 		}
 	}
+	current.Values = old.Values
 	return consume(current)
 }
 

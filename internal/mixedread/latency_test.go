@@ -240,6 +240,16 @@ func TestLatencyComparison(t *testing.T) {
 	old, full, r := open()
 	defer old.Close()
 	defer full.Close()
+	var nativeNames, mixedNames []string
+	if err := cat.Find(ctx, "*", func(name string) error { nativeNames = append(nativeNames, name); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Find(ctx, "*", func(name string) error { mixedNames = append(mixedNames, name); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(nativeNames, mixedNames) {
+		t.Fatal("latency find fixture names mismatch")
+	}
 	var base, mix []int64
 	var before, after runtime.MemStats
 	var baseBytes, mixedBytes uint64
