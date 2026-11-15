@@ -3,7 +3,9 @@ package carbon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,10 +14,12 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 )
 
-func journalStartupFixture(t *testing.T, root string) *App {
+func journalStartupFixture(t *testing.T, root string, configure ...func(*Config)) *App {
 	t.Helper()
 	cfg := NewConfig()
 	cfg.Dump.Enabled, cfg.Dump.StoreInputHandoff = true, true
@@ -32,6 +36,9 @@ func journalStartupFixture(t *testing.T, root string) *App {
 	cfg.Tags.Enabled = true
 	if err := os.MkdirAll(cfg.Dump.Path, 0700); err != nil {
 		t.Fatal(err)
+	}
+	for _, apply := range configure {
+		apply(cfg)
 	}
 	app := New("")
 	app.Config = cfg
@@ -266,12 +273,19 @@ func TestStartupJournalAppRestart(t *testing.T) {
 	}
 	stamp := time.Now().Unix() - 5
 	p := points.OnePoint("journal.app", 1, stamp)
-	if err := s.Write(p.AppendBinary(nil), 1); err != nil {
+	// Drive the actual receiver: startup may already have switched by the
+	// time App.Start returns, so calling the retired capture writer is invalid.
+	conn, err := net.Dial("tcp", s.receiver.Addr().String())
+	if err != nil {
 		t.Fatal(err)
 	}
-	awaitCapture(t, func() bool { return s.direct.Load() && app.Cache.IsEmpty() })
-	if app.inputLog.Load().Metrics().PointsWritten < 1 {
-		t.Fatal("no startup journal writes")
+	if _, err := fmt.Fprintf(conn, "%s 1 %d\n", p.Metric, stamp); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	awaitCapture(t, func() bool { return s.direct.Load() && app.Persister.CommittedPoints() >= 1 && app.Cache.IsEmpty() })
+	if err := app.inputLog.Load().Sync(); err != nil {
+		t.Fatal(err)
 	}
 	if paths, _ := filepath.Glob(filepath.Join(cfg.Dump.Path, "*.capture-*")); len(paths) > 0 {
 		t.Fatal("spool created", paths)
@@ -297,5 +311,103 @@ func TestStartupJournalAppRestart(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("restart lost stored point")
+	}
+}
+
+// Claimed checkpoint items start in generation zero. They must never be
+// relogged into the same suffix that live startup readers are consuming.
+func TestStartupJournalPendingCheckpointDoesNotFeedReplay(t *testing.T) {
+	_, tail := intakeTailFixture(t, 0, 1, true, 3, 0)
+	dir := filepath.Dir(tail)
+	bundle, err := recovery.OpenBundle(dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close()
+	app := journalStartupFixture(t, t.TempDir(), func(cfg *Config) {
+		cfg.InputLog.MaxAge = Duration{time.Nanosecond}
+	})
+	defer closeJournalFixture(app)
+	name := "servers.host00000.application.component.requests.by_region.region00.by_status.success.total"
+	core := cache.New()
+	core.SetMaxSize(0)
+	core.SetTagsEnabled(true)
+	if err := core.AttachPendingRecovery(bundle); err != nil {
+		t.Fatal(err)
+	}
+	app.Cache = core
+	if err := app.openInputLog(core); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the real partition readers without the independent direct-switch
+	// monitor: this fixture deliberately keeps appending through the entire test.
+	replayDone := make(chan error, 1)
+	go func() {
+		replayDone <- app.startupInput.journal.replay(&startupSink{admission: core, groupedAdd: core.AddRecoveryMetric})
+	}()
+	defer func() {
+		app.startupInput.pauseReplay()
+		if err := <-replayDone; err != nil && !errors.Is(err, errStartupReplayStopped) {
+			t.Error(err)
+		}
+	}()
+	const count = 128
+	for i := range count {
+		p := points.OnePoint(name, float64(i), 1700000000+int64(i))
+		if err := app.startupInput.Write(p.AppendBinary(nil), 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := app.inputLog.Load().Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitCapture(t, func() bool { return len(core.Get(name)) >= count+3 })
+	if got := core.Get(name); len(got) != count+3 {
+		t.Fatalf("replayed checkpoint suffix grew: %d want %d", len(got), count+3)
+	}
+	m := app.inputLog.Load().Metrics()
+	if m.Relogged != 0 || m.PointsWritten != count {
+		t.Fatalf("recovery relogged into its own suffix: %+v", m)
+	}
+	for _, point := range core.Get(name) {
+		if point.Timestamp >= 1700000000 && math.Float64bits(point.Value) != math.Float64bits(float64(point.Timestamp-1700000000)) {
+			t.Fatalf("checkpoint correction bits changed: %+v", point)
+		}
+	}
+}
+
+func TestStartupJournalFenceWaitsForLastAcknowledgedTail(t *testing.T) {
+	app := journalStartupFixture(t, t.TempDir())
+	defer closeJournalFixture(app)
+	p := points.OnePoint("fence.last", 42, 1)
+	if err := app.startupInput.Write(p.AppendBinary(nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	j := app.startupInput.journal
+	state, err := j.log.AppendState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- app.startupInput.receiver.SwitchCapture(func(*points.Points) {}, j.fence) }()
+	// Durability is already acknowledged, but application has not caught up.
+	select {
+	case err := <-done:
+		t.Fatalf("fence returned before reader application: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	for i := range j.parts {
+		j.parts[i].applied.Store(&inputlog.ReplayCursor{Segment: state.To.Segment, Offset: state.To.Offset})
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct fence did not join its fixed tail")
+	}
+	if !j.fenced.Load() {
+		t.Fatal("direct published before journal fence")
 	}
 }

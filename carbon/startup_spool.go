@@ -230,6 +230,16 @@ func (s *startupShard) newSegment(index uint64, syncDirectory bool) (*startupSeg
 	}
 	return &startupSegment{file: f, path: path, unlock: unlock, source: s.stream.Next()}, nil
 }
+
+// CaptureSlots bounds handlers inside the receiver's direct-write fence. Other
+// connections wait before acquiring that fence, independently of decode slots.
+func (s *startupInput) CaptureSlots() chan struct{} {
+	if s.journal != nil {
+		return s.journal.captureSlots
+	}
+	return nil
+}
+
 func (s *startupInput) CaptureShards() []tcp.Capture {
 	out := make([]tcp.Capture, len(s.shards))
 	for i, sh := range s.shards {

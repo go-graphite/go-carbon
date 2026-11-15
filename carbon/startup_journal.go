@@ -2,7 +2,6 @@ package carbon
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,16 +25,16 @@ const startupJournalPartitions = 16
 // persistence. A single conservative pin covers all of them until the suffix
 // stops growing and every identity has been confirmed and synced.
 type startupJournal struct {
-	owner *startupInput
-	log   *inputlog.Log
-	dir   string
-	tags  bool
-	slots chan struct{}
-	parts [startupJournalPartitions]struct {
-		appendMu sync.Mutex
-		stream   cache.RecoveryStream
-		source   *cache.RecoverySource
-		applied  atomic.Pointer[inputlog.ReplayCursor]
+	owner        *startupInput
+	log          *inputlog.Log
+	dir          string
+	tags         bool
+	slots        chan struct{}
+	captureSlots chan struct{}
+	parts        [startupJournalPartitions]struct {
+		stream  cache.RecoveryStream
+		source  *cache.RecoverySource
+		applied atomic.Pointer[inputlog.ReplayCursor]
 	}
 	fenced   atomic.Bool
 	failure  atomic.Pointer[startupWriteError]
@@ -44,7 +43,7 @@ type startupJournal struct {
 }
 
 func newStartupJournal(s *startupInput, l *inputlog.Log, dir string, tagged bool) *startupJournal {
-	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, slots: make(chan struct{}, 32)}
+	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, slots: make(chan struct{}, 32), captureSlots: make(chan struct{}, 32)}
 	for i := range j.parts {
 		j.parts[i].source = j.parts[i].stream.Next()
 	}
@@ -91,31 +90,27 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 	if count > expected {
 		return errors.New("startup journal point count exceeds submission")
 	}
-	for part := range batches {
-		batch := &batches[part]
-		if batch.Len() == 0 {
-			continue
-		}
-		// A batch is at most one TCP read buffer. The input-log API enforces its
-		// frame budget before borrowing the columns until durable acknowledgement.
+	select {
+	case <-j.owner.stop:
+		return inputlog.ErrClosed
+	default:
+	}
+	for j.owner.diskDanger(int64(len(raw)) + 1<<20) {
+		j.owner.notePause()
 		select {
 		case <-j.owner.stop:
 			return inputlog.ErrClosed
-		default:
+		case <-time.After(10 * time.Millisecond):
 		}
-		for j.owner.diskDanger(int64(len(raw)) + 1<<20) {
-			j.owner.notePause()
-			select {
-			case <-j.owner.stop:
-				return inputlog.ErrClosed
-			case <-time.After(10 * time.Millisecond):
-			}
+	}
+	var group [startupJournalPartitions]*inputlog.Batch
+	for part := range batches {
+		if batches[part].Len() > 0 {
+			group[part] = &batches[part]
 		}
-		p := &j.parts[part]
-		p.appendMu.Lock()
-		_, err := j.log.Append(uint16(part), batch)
-		p.appendMu.Unlock()
-		if err != nil {
+	}
+	if count > 0 {
+		if _, err := j.log.AppendGroup(group); err != nil {
 			return err
 		}
 	}
@@ -273,7 +268,7 @@ func (j *startupJournal) replayPartition(part uint16, sink *startupSink) error {
 }
 
 // Called under transition and the receiver's exclusive submission fence. It
-// only compares committed frontiers: no journal lock spans cache admission.
+// drains a fixed committed frontier: no journal lock spans cache admission.
 func (j *startupJournal) fence() error {
 	if failure := j.failure.Load(); failure != nil {
 		return failure.err
@@ -282,10 +277,36 @@ func (j *startupJournal) fence() error {
 	if err != nil {
 		return err
 	}
-	for i := range j.parts {
-		cursor := j.parts[i].applied.Load()
-		if len(state.Files) > 0 && (cursor == nil || cursor.Segment != state.To.Segment || cursor.Offset != state.To.Offset) {
-			return fmt.Errorf("startup journal partition %d has not reached committed tail", i)
+	// The last durable acknowledgement can precede its reader by one poll or
+	// cache admission. Intake is now fenced, so let that fixed tail drain rather
+	// than reopening input on every attempt and perpetually moving the target.
+	deadline := time.NewTimer(250 * time.Millisecond)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		caught := true
+		for i := range j.parts {
+			cursor := j.parts[i].applied.Load()
+			if len(state.Files) > 0 && (cursor == nil || cursor.Segment != state.To.Segment || cursor.Offset != state.To.Offset) {
+				caught = false
+				break
+			}
+		}
+		if caught {
+			break
+		}
+		if failure := j.failure.Load(); failure != nil {
+			return failure.err
+		}
+		select {
+		case <-j.owner.stop:
+			return inputlog.ErrClosed
+		case <-j.owner.replayStop:
+			return errStartupReplayStopped
+		case <-deadline.C:
+			return errors.New("startup journal readers have not drained the fenced tail")
+		case <-tick.C:
 		}
 	}
 	j.fenced.Store(true)

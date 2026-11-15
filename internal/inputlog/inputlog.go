@@ -868,7 +868,11 @@ func (l *Log) write(gen, seq uint64) error {
 		l.steady = seg.end - first.off
 	}
 	errs = errors.Join(errs, l.flush(), l.syncDirty())
-	l.ticks = append(l.ticks, tick{gen: gen, pos: first, at: time.Now()})
+	// Many durable append groups can share a cache generation. Keep its first
+	// position/time, rather than retaining metadata for every socket buffer.
+	if len(l.ticks) == 0 || l.ticks[len(l.ticks)-1].gen != gen {
+		l.ticks = append(l.ticks, tick{gen: gen, pos: first, at: time.Now()})
+	}
 	if errs != nil {
 		l.total.writeErrors.Add(1)
 		l.logger.Error("input log write failed; points of this cycle are not durable", zap.Error(errs))
@@ -1023,12 +1027,30 @@ func (l *Log) truncate() (relog time.Duration) {
 		l.free(l.live[0])
 		l.live = l.live[1:]
 	}
-	if age := max(uint64(l.opts.MaxAge/l.opts.SyncInterval), 2); l.gen > age && low < l.gen-age {
-		at := time.Now()
-		n := int64(l.src.RelogBefore(l.gen-age, relogBudget))
-		relog = time.Since(at)
-		l.stat.relogged.Add(n)
-		l.total.relogged.Add(n)
+	// Independent recovery readers still consume the original suffix. Relogging
+	// older cache values into it would reorder corrections and feed replay back
+	// into itself, even if MaxAge has really elapsed.
+	if l.appendPin == nil && l.replayPin == nil {
+		var before uint64
+		for _, tick := range l.ticks {
+			if now.Sub(tick.at) < l.opts.MaxAge {
+				break
+			}
+			before = max(before, tick.gen+1)
+		}
+		// Keep the current and preceding collection generations out of relog.
+		if l.gen > 1 {
+			before = min(before, l.gen-1)
+		} else {
+			before = 0
+		}
+		if low < before {
+			at := time.Now()
+			n := int64(l.src.RelogBefore(before, relogBudget))
+			relog = time.Since(at)
+			l.stat.relogged.Add(n)
+			l.total.relogged.Add(n)
+		}
 	}
 	l.updateGauges(now, low)
 	l.stat.liveSegments.Store(int64(len(l.live)))

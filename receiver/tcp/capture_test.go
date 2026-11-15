@@ -3,8 +3,10 @@ package tcp
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -239,5 +241,71 @@ func TestSwitchCaptureTimeoutDoesNotSealAfterReturning(t *testing.T) {
 	}
 	if seals.Load() != 1 {
 		t.Fatal("cancelled switch ran its seal callback later", seals.Load())
+	}
+}
+
+type boundedCaptureProbe struct {
+	Capture
+	slots chan struct{}
+}
+
+func (b boundedCaptureProbe) CaptureSlots() chan struct{} { return b.slots }
+
+func TestSwitchCaptureJoinsBoundedWorkWith280Handlers(t *testing.T) {
+	const admitted = 32
+	const handlers = 280
+	entered := make(chan struct{}, handlers)
+	release := make(chan struct{})
+	var captured, direct atomic.Int64
+	out := boundedCaptureProbe{Capture: captureFunc(func([]byte, int) error { entered <- struct{}{}; <-release; captured.Add(1); return nil }), slots: make(chan struct{}, admitted)}
+	r := &TCP{}
+	var wg sync.WaitGroup
+	for range handlers {
+		wg.Go(func() {
+			b := newCaptureBuffer(out)
+			b.sink = &r.captureSink
+			b.point([]byte("same"), 1, 1)
+			if err := b.flush(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	for range admitted {
+		<-entered
+	}
+	switched := make(chan error, 1)
+	go func() {
+		switched <- r.SwitchCapture(func(p *points.Points) { direct.Add(int64(len(p.Data))) }, func() error {
+			if n := captured.Load(); n != admitted {
+				return fmt.Errorf("fenced %d captured handlers, want %d", n, admitted)
+			}
+			return nil
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for !r.captureSink.fencing.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	// A failed TryRLock proves the exclusive waiter has queued. Avoid relying
+	// on scheduler timing while the regression runs under race detection.
+	for r.captureSink.TryRLock() {
+		r.captureSink.RUnlock()
+		if time.Now().After(deadline) {
+			t.Fatal("exclusive fence did not queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-entered:
+		t.Fatal("waiting handlers entered the ordering fence")
+	default:
+	}
+	close(release)
+	if err := <-switched; err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if n := captured.Load() + direct.Load(); n != handlers {
+		t.Fatalf("gap/duplicate: captured %d direct %d", captured.Load(), direct.Load())
 	}
 }
