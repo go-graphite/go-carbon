@@ -1,8 +1,9 @@
-This package is an unfrozen format contract for copy experiments. The running
+The GCP3 key codec is stable for offline copy/conversion consumers. The full
+production record, catalogue and lifecycle contract remains unfrozen. The running
 offline owner engine in `tool/immutable-parts/core.go` still uses numeric formats1/2 and
 host-local numeric IDs; it does not yet write this portable format.
 
-The proposed key order is:
+The offline key order is:
 
 ```text
 GCP3 | placement group length:u32 | exact group bytes |
@@ -52,3 +53,13 @@ requirements before this format can be frozen or enabled in a daemon.
 Per-name incarnation tombstones, legacy-vs-live priority, schema-aware retention
 horizons, and group catalogue atomicity are additional unfrozen contracts; this
 codec alone does not implement those lifecycle operations.
+
+The core decision keeps incarnation and source-tier provenance out of replica-local
+numeric IDs and immutable part UUIDs. Any production envelope must carry a fenced,
+replicated name-incarnation authority, with live post-cutover records outranking
+converted legacy records even at historical timestamps. A local chunkstore
+generation is not portable authority. Group/vshard moves must carry catalogue,
+incarnation tombstones and durable journal frontiers from the same pinned snapshot
+as data and publish them atomically before READY. This key codec alone supplies
+none of those guarantees; it remains unsafe to activate live copying or deletion
+from the offline file-shipping measurements.

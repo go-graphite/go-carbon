@@ -198,14 +198,27 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 }
 func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
 	parts := make([][]row, e.cfg.Shards)
+	counts := make([]int, e.cfg.Shards)
+	for _, r := range rows {
+		s := coreShard(r.ID, e.cfg.Shards)
+		counts[s]++
+	}
+	for _, count := range counts {
+		if count > e.cfg.MaxRows {
+			return errors.New("producer batch exceeds owner head bound")
+		}
+	}
+	// One exact allocation avoids geometric slice growth on every owner. Full
+	// slice capacities keep concurrent owner buffers disjoint while the shared
+	// backing allocation remains live until its last packet is consumed.
+	storage := make([]row, len(rows))
+	for s, count := range counts {
+		parts[s] = storage[:0:count]
+		storage = storage[count:]
+	}
 	for _, r := range rows {
 		s := coreShard(r.ID, e.cfg.Shards)
 		parts[s] = append(parts[s], r)
-	}
-	for _, rs := range parts {
-		if len(rs) > e.cfg.MaxRows {
-			return errors.New("producer batch exceeds owner head bound")
-		}
 	}
 	byOwner := make([][]coreBatch, e.cfg.Shards)
 	for _, b := range batches {
