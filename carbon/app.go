@@ -35,6 +35,7 @@ import (
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
+	"github.com/go-graphite/go-carbon/receiver/socketstats"
 	"github.com/go-graphite/go-carbon/tags"
 	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/zapwriter"
@@ -79,6 +80,7 @@ type App struct {
 	Config                 *Config
 	Api                    *api.Api
 	Cache                  *cache.Cache
+	SocketStats            *socketstats.Collector
 	Receivers              []*NamedReceiver
 	CarbonLink             *cache.CarbonlinkListener
 	Persister              *persister.Whisper
@@ -590,6 +592,13 @@ func (app *App) stopListeners() <-chan struct{} {
 // Keep reads available while receivers and other input cleanup finish.
 // Assumes we are holding app.Lock().
 func (app *App) stopInputListeners() {
+	if app.SocketStats != nil {
+		app.SocketStats.Stop()
+		if app.PromRegisterer != nil {
+			app.PromRegisterer.Unregister(app.SocketStats)
+		}
+		app.SocketStats = nil
+	}
 	logger := zapwriter.Logger("app")
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {
@@ -1060,6 +1069,7 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 	app.applyRuntimeProfiling()
 	app.startExpiration()
 	app.startReanchorSweep()
+	app.startSocketStats()
 	app.Collector = NewCollector(app)
 	if app.Carbonserver != nil {
 		app.quotaReloader = startQuotaReloader(app.Config, app.Carbonserver)

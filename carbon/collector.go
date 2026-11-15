@@ -85,6 +85,10 @@ func NewCollector(app *App) *Collector {
 		RuntimeStat(sendCallback("runtime"))
 	})
 
+	if app.SocketStats != nil {
+		c.stats = append(c.stats, moduleCallback("tcp", app.SocketStats))
+	}
+
 	if app.Cache != nil {
 		c.stats = append(c.stats, moduleCallback("cache", app.Cache))
 	}
