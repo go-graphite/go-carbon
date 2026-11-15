@@ -3,7 +3,6 @@ package chunkstore_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -384,8 +383,9 @@ func TestNativeWindowRejectsRingEviction(t *testing.T) {
 			if err := pin.WriteWindow(ctx, []string{cfg.Name}, &wire, w); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := target.NativeImport(ctx, windowRange([]string{cfg.Name}, w), &wire); !errors.Is(err, store.ErrConflict) {
-				t.Fatal("newer outside ring owner must conflict", err)
+			receipt, err := target.NativeImport(ctx, windowRange([]string{cfg.Name}, w), &wire)
+			if err != nil || receipt.CopiedCount != 0 || receipt.DeferredCount != 1 || len(receipt.Skipped) != 1 || receipt.Skipped[0].Name != cfg.Name {
+				t.Fatal("newer outside owner must remain a named residual", receipt, err)
 			}
 			after, err := target.Snapshot(ctx, cfg.Name)
 			if err != nil {

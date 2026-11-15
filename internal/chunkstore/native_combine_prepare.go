@@ -68,6 +68,13 @@ func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Sn
 				sourceWalk.arena.free = sourceWalk.arena.slab
 				targetWalk.arena.free = targetWalk.arena.slab
 				p, keys, err := s.prepareNativeCombineRecord(workctx, view, Metadata(intent.Raw[task.input]), intent.Positions[task.input], first+uint64(task.index), sourceWalk, targetWalk, intent.Request.Window)
+				// A window conflict belongs to this name, not the transport range.
+				// Sparse compressed survivors can retain several timestamps for a
+				// circular slot. Rebuilding them would discard outside history;
+				// retain the name unchanged and durably defer it for exact checking.
+				if intent.Request.Window != nil && errors.Is(err, ErrConflict) {
+					err = &NativeSkip{Name: p.Meta.Name, Reason: "window combine conflict: " + err.Error()}
+				}
 				var skip *NativeSkip
 				if errors.As(err, &skip) {
 					skip.Ordinal = p.Position
