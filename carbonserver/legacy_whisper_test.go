@@ -6,7 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -167,5 +169,55 @@ func TestLegacyWhisperCompletionPreservesCacheOnlyReads(t *testing.T) {
 		if n := sameSeries(t, "cache-only completion", got, want); n == 0 {
 			t.Fatal("no points compared")
 		}
+	}
+}
+
+// Model migration completion holding its state mutex while retiring legacy I/O.
+// A catalog reconciliation must not delay either completion or native receipts.
+func TestSharedCatalogDoesNotBlockMigrationCompletion(t *testing.T) {
+	db, err := store.Open(t.TempDir(), store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	l := NewCarbonserverListener(nil)
+	l.logger = zap.NewNop()
+	l.SetMetricStore(db)
+	l.metricStoreRefreshMu.Lock()
+	scanDone := make(chan struct{})
+	go func() { l.updateFileList("", nil, nil); close(scanDone) }()
+	// Wait until the real catalog path is blocked at its refresh gate.
+	deadline := time.Now().Add(5 * time.Second)
+	entered := false
+	for time.Now().Before(deadline) {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		if bytes.Contains(buf[:n], []byte("updateMetricStoreIndex")) {
+			entered = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	var migrationMu sync.Mutex
+	migrationMu.Lock()
+	completed := make(chan struct{})
+	go func() { l.SetLegacyWhisperDisabled(true); migrationMu.Unlock(); close(completed) }()
+	receipt := make(chan struct{})
+	go func() { migrationMu.Lock(); migrationMu.Unlock(); close(receipt) }()
+	blocked := false
+	select {
+	case <-receipt:
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	l.metricStoreRefreshMu.Unlock()
+	<-scanDone
+	<-completed
+	<-receipt
+	if !entered {
+		t.Fatal("catalog did not reach its refresh gate")
+	}
+	if blocked {
+		t.Fatal("catalog reconciliation blocked migration completion and native receipt")
 	}
 }

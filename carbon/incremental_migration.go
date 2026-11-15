@@ -151,19 +151,17 @@ func (app *App) startIncrementalStoreMigration() {
 		defer cancel()
 		defer p.SetIncrementalMigrationPriority(nil)
 		err := m.run(ctx, p, db, conf)
+		// Drain writers that selected legacy ownership before publishing source
+		// completion, without holding the receipt/state mutex while they finish.
+		if err == nil && m.skipped.Load() == 0 {
+			p.SetIncrementalMigrationComplete()
+		}
 		m.mu.Lock()
 		switch {
 		case err == nil:
 			m.phase = "shared"
 			if m.skipped.Load() == 0 {
 				m.sourceComplete.Store(true)
-				p.SetIncrementalMigrationComplete()
-				app.legacyWhisperDisabled.Store(true)
-				if cs := app.Carbonserver; cs != nil {
-					cs.SetLegacyWhisperDisabled(true)
-					cs.SetMetricStoreFileIndex(false)
-					cs.RequestFileScan()
-				}
 			}
 		case errors.Is(err, context.Canceled):
 			m.phase = "cancelled"
@@ -172,6 +170,16 @@ func (app *App) startIncrementalStoreMigration() {
 			m.failure = err.Error()
 		}
 		m.mu.Unlock()
+		// Source readers may still be draining. Never hold the migration
+		// state mutex across another component's I/O gate.
+		if err == nil && m.skipped.Load() == 0 {
+			app.legacyWhisperDisabled.Store(true)
+			if cs := app.Carbonserver; cs != nil {
+				cs.SetLegacyWhisperDisabled(true)
+				cs.SetMetricStoreFileIndex(false)
+				cs.RequestFileScan()
+			}
+		}
 		if statusErr := m.progress(sharedStorePath(conf), true); statusErr != nil {
 			zapwriter.Logger("storage").Error("write incremental migration receipt", zap.Error(statusErr))
 		}
