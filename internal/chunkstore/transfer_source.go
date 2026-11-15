@@ -71,7 +71,7 @@ func OpenTransferSource(directory string, options TransferSourceOptions) (*Trans
 	s.coldPack.floatFormat.Store(format >= 11)
 	s.referenceFormat.Store(format >= 12)
 	// Offline catalog discovery uses the same read admission as a live store.
-	s.readCtx, s.readCancel = context.WithCancel(context.Background())
+	s.initReadContexts()
 	s.readDone = make(chan struct{})
 	return &TransferSource{store: s}, nil
 }
