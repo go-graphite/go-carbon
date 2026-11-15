@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -457,14 +458,15 @@ func (p *progressMetrics) eta(now time.Time) float64 {
 	return eta
 }
 
-// Public build revisions are bounded, safe Graphite path components.
+var progressRevisionPattern = regexp.MustCompile(`[0-9a-f]{12}`)
+
+// Match the daemon's 12-hex revision label, including prefixed release builds.
+// Only the revision and optional dirty marker become a Graphite path component.
 func progressVersion(version string) string {
+	version = strings.ToLower(version)
 	dirty := strings.HasSuffix(version, "-dirty")
-	version = strings.TrimSuffix(strings.ToLower(version), "-dirty")
-	if len(version) > 12 {
-		version = version[:12]
-	}
-	if len(version) != 12 || strings.Trim(version, "0123456789abcdef") != "" {
+	version = progressRevisionPattern.FindString(version)
+	if version == "" {
 		version = "unknown"
 	}
 	if dirty {
