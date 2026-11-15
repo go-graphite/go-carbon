@@ -23,6 +23,9 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// OwnerHeads is an experimental, bounded decoded-group adapter. Nil disables
+	// ownership and retention. It does not retain a virtual Whisper handle.
+	OwnerHeads *OwnerHeads
 	// keepReferenceRetirementReads retains repeated alias probes as a test oracle.
 	keepReferenceRetirementReads bool
 	// keepDenseSumReads retains the canonical window reader as a test oracle.
@@ -646,7 +649,10 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
-	return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
+	if c.OwnerHeads == nil {
+		return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
+	}
+	return c.OwnerHeads.update(c, ctx, kv, m, input, retention, clock, maintenance)
 }
 
 // updateAttempt leaves compressed writes on their existing path. Classic writes
@@ -657,6 +663,17 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 		return err
 	}
 	base := kv
+	var head *ownerHeadSession
+	if owned, ok := kv.(*ownerHeadIO); ok {
+		head = owned.head
+		head.nextAttempt()
+	} else if overlay, ok := kv.(*continuationOverlay); ok {
+		// A repair overlay can contain different slot anchors and sibling
+		// archives than the failed attempt. Retire all speculative groups.
+		if owned, ok := overlay.base.(*ownerHeadIO); ok {
+			owned.head.clear()
+		}
+	}
 	var buffer *continuationPointBuffer
 	// Even a batch shorter than one rollup interval can repeatedly update the
 	// same 128-point group. Flushing each intermediate value multiplies encode
@@ -669,6 +686,7 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	timer := stagetime.FromContext(ctx)
 	timer.Enter(stagetime.Load)
 	fs := newContinuationFiles(kv, false).withClock(clock)
+	fs.head = head
 	fs.reuseBlockKeys = c.ReuseBlockKeys
 	fs.guardClassicWrites = true
 	fs.reuseReferenceRetirements = !c.keepReferenceRetirementReads

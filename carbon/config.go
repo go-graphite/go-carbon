@@ -138,6 +138,8 @@ type whisperConfig struct {
 	StoreCacheShards             int       `toml:"store-cache-shards"`
 	StoreTableCacheShards        int       `toml:"store-table-cache-shards"`
 	StoreCompactOnce             string    `toml:"store-compact-once"`
+	StoreOwnerHeadOwners         int       `toml:"store-owner-head-owners"`
+	StoreOwnerHeadBytes          int64     `toml:"store-owner-head-bytes"`
 	StoreReuseBlockKeys          bool      `toml:"store-reuse-block-keys"`
 	StoreOOODirectWrites         bool      `toml:"store-ooo-direct-writes"`
 	StoreFetchSharedIterator     bool      `toml:"store-fetch-shared-iterator"`

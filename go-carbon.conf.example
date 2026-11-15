@@ -193,6 +193,12 @@ store-l0-compaction-concurrency = 0
 # the block's point count, so leftover groups past it are never read; they are
 # overwritten as the block refills. Saves a tombstone per old group, which
 # compaction otherwise carries down to the bottom level. Requires restart.
+# Experimental decoded-group retention; restart required. Both default to zero.
+# Owners alone measure serialization overhead; bytes enables bounded retention.
+# This keeps the exact codec, output format and both write-ahead logs unchanged.
+# It still opens virtual Whisper handles; qualify in isolated replay first.
+# store-owner-head-owners = 0
+# store-owner-head-bytes = 0
 # store-reuse-block-keys = false
 # Store late points (behind an archive's encoded watermark) in the blocks
 # covering their intervals, recomputing the coarse windows they change in place,

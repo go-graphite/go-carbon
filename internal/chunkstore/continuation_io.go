@@ -41,6 +41,19 @@ func DecodePointBlock(data []byte, block *PointBlock) error {
 	return nil
 }
 
+// ContinuationCommitObserver lets a codec retain disposable state only after the
+// enclosing database transaction commits. Callbacks run before input acknowledgement.
+// A failed preparation or commit discards the callback.
+type ContinuationCommitObserver interface {
+	AfterContinuationCommit(func(Metadata))
+	// ContinuationCacheScope is unique to this open store instance. A codec may
+	// be reused across stores; matching metric revisions alone is insufficient.
+	ContinuationCacheScope() *byte
+}
+
+func (io *continuationIO) AfterContinuationCommit(fn func(Metadata)) { io.afterCommit = fn }
+func (io *continuationIO) ContinuationCacheScope() *byte             { return io.cacheScope }
+
 // ContinuationIO scopes an adapter's file headers, physical blocks and OOO slots
 // to one metric generation. Reads own their returned bytes. The writer uses the
 // same indexed batch for all main-file and sidecar mutations; its caller owns
@@ -147,6 +160,8 @@ func isContinuationBucketSuffix(suffix []byte) bool {
 }
 
 type continuationIO struct {
+	cacheScope              *byte
+	afterCommit             func(Metadata)
 	revision, indexRevision uint64
 	indexBinder             ContinuationIndexBinder
 	sidecar                 *SidecarSummary
@@ -330,6 +345,7 @@ func (s *Store) newContinuationIO(ctx context.Context, reader pebble.Reader, bat
 			io.digestBatch = true
 		}
 	}
+	io.cacheScope = s.continuationScope
 	io.buckets = s.timeBuckets
 	io.indexBinder, _ = s.continuation.(ContinuationIndexBinder)
 	return io

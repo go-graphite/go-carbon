@@ -25,6 +25,7 @@ var continuationNames atomic.Uint64
 // Only headers and file identities stay in memory. Historical values live in
 // shared exact blocks; no raw Whisper body or per-metric OS file is retained.
 type continuationFiles struct {
+	head *ownerHeadSession
 	// snapshotReads is enabled only after private OOO folding has finished.
 	// Archive materialization then performs no writes.
 	snapshotReads bool
