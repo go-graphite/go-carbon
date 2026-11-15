@@ -1,4 +1,4 @@
-package main
+package v2core
 
 // The durable owner engine is an offline experiment. Callers own canonical ID
 // allocation and the durable input log. An ID is an identity, never a name hash;

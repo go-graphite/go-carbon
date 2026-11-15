@@ -1,4 +1,4 @@
-package main
+package v2core
 
 import (
 	"errors"
