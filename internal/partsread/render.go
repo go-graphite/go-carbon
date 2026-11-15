@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"math/bits"
 )
 
 type Series struct {
@@ -28,6 +29,20 @@ func alignNext(t, step int64) int64 {
 // Each archive is already resolved by the write/rollup engine; reads only choose
 // the latest authoritative version of each slot, preserving IEEE value bits.
 func (h *Handle) Render(ctx context.Context, name string, from, until, now int64) (*Series, error) {
+	return h.render(ctx, name, from, until, now, nil)
+}
+
+// RenderInto overlays occupied v2 slots onto an already aligned base result.
+// Untouched slots retain the caller's values. Occupied NaNs and wrapped winners
+// invalidate the base just as they do in Render. The caller owns base.Values;
+// it must not alias any live handle's workspace. Occupied remains handle-owned.
+func (h *Handle) RenderInto(ctx context.Context, name string, from, until, now int64, base *Series) (*Series, error) {
+	if base == nil {
+		return nil, errors.New("nil render base")
+	}
+	return h.render(ctx, name, from, until, now, base)
+}
+func (h *Handle) render(ctx context.Context, name string, from, until, now int64, base *Series) (*Series, error) {
 	if h.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -91,10 +106,13 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 		}
 	}
 	n := (end - start) / a.Step
-	// Values, winner sequence, timestamp and presence use at most 32B/slot;
+	// Values, winner sequence, timestamp, presence and touched indices use at most 32B/slot;
 	// no allocation grows with duplicate/input count.
-	if n < 0 || n > h.work/32 {
+	if n < 0 || n > math.MaxUint32 || n > h.work/32 {
 		return nil, ErrAdmission
+	}
+	if base != nil && (base.From != start || base.Until != end || base.Step != a.Step || int64(len(base.Values)) != n) {
+		return nil, ErrShape
 	}
 	// Budget stays charged until the handle is closed, including prior results.
 	h.work -= n * 32
@@ -106,8 +124,17 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 	seq, times, seen := workspace.sequences, workspace.times, workspace.seen
 	clear(seen)
 	out.Occupied = seen
-	for i := range out.Values {
-		out.Values[i] = math.NaN()
+	workspace.touched = workspace.touched[:0]
+	if base != nil {
+		out.Values = base.Values
+	} else {
+		for i := range out.Values {
+			out.Values[i] = math.NaN()
+		}
+	}
+	firstSlot := (start / a.Step) % a.Points
+	if firstSlot < 0 {
+		firstSlot += a.Points
 	}
 	emit := func(p Sample) error {
 		if err := ctx.Err(); err != nil {
@@ -117,7 +144,11 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 		if p.Time%a.Step != 0 {
 			return errors.New("source returned unaligned archive slot")
 		}
-		i := ((p.Time/a.Step)%a.Points - (start/a.Step)%a.Points + a.Points) % a.Points
+		slot := (p.Time / a.Step) % a.Points
+		if slot < 0 {
+			slot += a.Points
+		}
+		i := slot - firstSlot
 		if i < 0 {
 			i += a.Points
 		}
@@ -128,6 +159,9 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 			return ErrConflict
 		}
 		if !seen[i] || p.Sequence > seq[i] {
+			if !seen[i] {
+				workspace.touched = append(workspace.touched, uint32(i))
+			}
 			seen[i] = true
 			seq[i] = p.Sequence
 			times[i] = p.Time
@@ -145,52 +179,62 @@ func (h *Handle) Render(ctx context.Context, name string, from, until, now int64
 			}
 		}
 	}
-	for i := range out.Values {
-		if !seen[i] || times[i] != start+int64(i)*a.Step {
+	for _, i := range workspace.touched {
+		if times[i] != start+int64(i)*a.Step {
 			out.Values[i] = math.NaN()
 		}
 	}
 	return out, nil
 }
 
-// Fixed-size idle caches retain at most 76MiB. Active arrays remain charged to
-// their handle until Close; an arbitrary query size is allocated exactly and
-// never cached. Idle memory is separate from the active-reader byte budget.
+// Idle caches are bounded by size class, independently of active admission.
+// Each workspace allocates exactly its query length; a size class reuses only
+// exact matches, preserving the public 32B/slot active admission bound.
+// Total idle storage is below 32MiB. Queries above 131072 slots are uncached.
 type renderWorkspace struct {
 	values    []float64
 	sequences []uint64
 	times     []int64
 	seen      []bool
+	touched   []uint32
 	next      *renderWorkspace
 }
 
-var hourRenderWorkspaces = make(chan *renderWorkspace, 64)
-var dayRenderWorkspaces = make(chan *renderWorkspace, 32)
-
-func renderWorkspacePool(n int) chan *renderWorkspace {
-	switch n {
-	case 3600:
-		return hourRenderWorkspaces
-	case 86400:
-		return dayRenderWorkspaces
+var renderWorkspaces = func() [12]chan *renderWorkspace {
+	var pools [12]chan *renderWorkspace
+	for i := range pools {
+		// 64 .. 131072 slots, at most 1MiB per class, with a minimum
+		// of four entries at the largest sizes (about 13MiB for the last).
+		slots := 64 << i
+		depth := max(4, min(64, (1<<20)/(slots*25)))
+		pools[i] = make(chan *renderWorkspace, depth)
 	}
-	return nil
+	return pools
+}()
+
+func renderWorkspaceClass(n int) int {
+	if n < 0 || n > 131072 {
+		return -1
+	}
+	return max(0, bits.Len(uint(max(n, 1)-1))-6)
 }
 func takeRenderWorkspace(n int) *renderWorkspace {
-	if pool := renderWorkspacePool(n); pool != nil {
+	if class := renderWorkspaceClass(n); class >= 0 {
 		select {
-		case w := <-pool:
-			return w
+		case w := <-renderWorkspaces[class]:
+			if len(w.values) == n {
+				return w
+			}
 		default:
 		}
 	}
-	return &renderWorkspace{values: make([]float64, n), sequences: make([]uint64, n), times: make([]int64, n), seen: make([]bool, n)}
+	return &renderWorkspace{values: make([]float64, n), sequences: make([]uint64, n), times: make([]int64, n), seen: make([]bool, n), touched: make([]uint32, 0, n)}
 }
 func releaseRenderWorkspace(w *renderWorkspace) {
 	w.next = nil
-	if pool := renderWorkspacePool(len(w.values)); pool != nil {
+	if class := renderWorkspaceClass(cap(w.values)); class >= 0 {
 		select {
-		case pool <- w:
+		case renderWorkspaces[class] <- w:
 		default:
 		}
 	}

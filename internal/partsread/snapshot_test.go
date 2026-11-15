@@ -176,7 +176,7 @@ func TestAdapterHoldsAdmissionUntilResponseConsumed(t *testing.T) {
 }
 
 func BenchmarkSparseRender(b *testing.B) {
-	for _, width := range []int64{3600, 86400} {
+	for _, width := range []int64{1, 60, 720, 1440, 3600, 10080, 43200, 86400} {
 		b.Run(fmt.Sprint(width), func(b *testing.B) {
 			var p Publication
 			p.Publish(View{Catalog: testCatalog([]Archive{{1, 86400}}), Parts: []Source{Freeze([]Record{{7, 1, Sample{1800000000, math.Float64bits(42), 1}}})}})
@@ -201,7 +201,7 @@ func BenchmarkSparseRender(b *testing.B) {
 }
 
 func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
-	for _, width := range []int64{3600, 86400} {
+	for _, width := range []int64{1, 60, 720, 1440, 3600, 10080, 43200, 86400} {
 		t.Run(fmt.Sprint(width), func(t *testing.T) {
 			const now int64 = 1800000000
 			const bits uint64 = 0x7ff8000000000042
@@ -251,5 +251,96 @@ func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
 				t.Fatal("budget leak")
 			}
 		})
+	}
+}
+
+// Ring ranges may select several epochs, including replacements newer than
+// the requested timestamps. The index must retain those invalidations.
+func TestSlotRangesAndFrozenVersions(t *testing.T) {
+	ctx := context.Background()
+	a := Archive{Step: 7, Points: 13}
+	var input []Record
+	for slot := int64(-80); slot <= 80; slot++ {
+		input = append(input, Record{7, 7, Sample{slot * 7, uint64(slot + 100), uint64(slot + 100)}})
+	}
+	f := Freeze(input)
+	for from := int64(-26); from < 26; from++ {
+		for width := int64(0); width <= 13; width++ {
+			ranges, n := SlotRanges(a, from*7, (from+width)*7)
+			var got []Sample
+			if e := f.Scan(ctx, 7, a, from*7, (from+width)*7, func(p Sample) error { got = append(got, p); return nil }); e != nil {
+				t.Fatal(e)
+			}
+			at := 0
+			for _, r := range input {
+				slot := (r.Sample.Time / 7) % 13
+				if slot < 0 {
+					slot += 13
+				}
+				distance := (r.Sample.Time/7 - from) % 13
+				if distance < 0 {
+					distance += 13
+				}
+				wanted := distance < width
+				indexed := false
+				for _, span := range ranges[:n] {
+					indexed = indexed || slot >= span.From && slot < span.Until
+				}
+				if wanted != indexed {
+					t.Fatalf("range from%d width%d slot%d", from, width, slot)
+				}
+				if wanted {
+					if at >= len(got) || got[at] != r.Sample {
+						t.Fatalf("lost epoch from%d width%d at%d", from, width, at)
+					}
+					at++
+				}
+			}
+			if at != len(got) {
+				t.Fatal("extra records")
+			}
+		}
+	}
+}
+
+func TestRenderIntoPreservesUntouchedAndInvalidatesWrapped(t *testing.T) {
+	const payload uint64 = 0x7ff8000000000042
+	const negzero uint64 = 1 << 63
+	var pub Publication
+	pub.Publish(View{Catalog: testCatalog([]Archive{{1, 10}}), Parts: []Source{Freeze([]Record{
+		{7, 1, Sample{21, math.Float64bits(99), 3}},
+		{7, 1, Sample{12, payload, 2}},
+		{7, 1, Sample{13, negzero, 1}},
+	})}})
+	defer pub.Close()
+	b := NewBudget(4096)
+	h, e := pub.Pin(b, 4096)
+	if e != nil {
+		t.Fatal(e)
+	}
+	base := &Series{From: 11, Until: 15, Step: 1, Values: []float64{1, 2, 3, 4}}
+	bad := *base
+	bad.Step = 2
+	if _, e = h.RenderInto(context.Background(), "sample", 10, 14, 20, &bad); e == nil {
+		t.Fatal("shape mismatch accepted")
+	}
+	for i, v := range base.Values {
+		if v != float64(i+1) {
+			t.Fatal("bad shape changed base")
+		}
+	}
+	got, e := h.RenderInto(context.Background(), "sample", 10, 14, 20, base)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if &got.Values[0] != &base.Values[0] {
+		t.Fatal("overlay copied values")
+	}
+	if !math.IsNaN(got.Values[0]) || !got.Occupied[0] || math.Float64bits(got.Values[1]) != payload || math.Float64bits(got.Values[2]) != negzero || got.Values[3] != 4 || got.Occupied[3] {
+		t.Fatal("incorrect overlay", got)
+	}
+	h.Close()
+	if b.Used() != 0 || base.Values[3] != 4 {
+		t.Fatal("close changed caller ownership")
 	}
 }

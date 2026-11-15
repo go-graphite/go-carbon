@@ -13,6 +13,7 @@ var (
 	ErrClosed    = errors.New("snapshot publication closed")
 	ErrNotFound  = errors.New("metric not found")
 	ErrConflict  = errors.New("equal sequence has conflicting sample bits")
+	ErrShape     = errors.New("render base shape differs from selected archive")
 )
 
 type Archive struct{ Step, Points int64 }

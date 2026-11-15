@@ -41,12 +41,30 @@ the standalone snapshot primitive buildable before that stacked dependency lands
 This bounded test fixes the admission clock; clock advancement and ring wrapping
 also need the reducer's separate compatibility suite before production use.
 
-Render workspaces for exactly 3,600 or 86,400 output slots are reused after the
-owning handle closes. Earlier results from the same handle keep separate arrays.
-Active workspace stays charged at 32B/slot; fixed idle channels retain at most
-76MiB separately from that admission budget. Other lengths allocate exactly the
-requested number of slots and are never cached. Reuse clears occupancy before
-merging and initializes absent values to the original NaN representation.
+Render workspaces use bounded size-class channels, reusing only exact query
+lengths after the owning handle closes. Earlier results retain separate arrays.
+Values, winner sequences/timestamps, occupancy and sparse touched-slot indices
+use 29B/slot within the unchanged 32B/slot active reservation. Idle caches retain
+less than 32MiB across all size classes; requests above 131,072 slots are uncached.
+A cache size mismatch is discarded and allocates exactly the requested length.
+Reuse clears occupancy and initializes absent values to the original NaN bits.
+Only touched slots need the final timestamp validation pass.
+
+`Handle.RenderInto` overlays into a caller-owned, prefilled `Series.Values`.
+It validates the selected archive and aligned From/Until/Step/length before
+writing, returning `ErrShape` on mismatch. Untouched slots keep the base values;
+occupied NaNs and newer epochs outside the query invalidate legacy slots. Winner
+bits remain intact until the sparse final pass, preserving equal-sequence conflict
+detection. The supplied Values must not alias any live handle's workspaces;
+returned Occupied has the usual handle lifetime. Errors after a source starts
+can leave the supplied values partly modified, so callers discard them on error.
+
+`SlotRanges` returns at most two physical-slot intervals for a valid aligned
+query. Disk sources can seek an index by series/archive/physical-slot/version
+without scanning finer archives or every part. All versions in those intervals
+must be returned, including timestamps outside the query; filtering by wall time
+first would lose ring invalidations. Frozen sources use binary series bounds and
+seek over sorted timestamp runs that cannot occupy the requested physical slots.
 
 `Series.Occupied` reports a physical-slot replacement even when its winner has a
 timestamp outside the returned interval. Mixed readers must use this bitmap to
@@ -70,3 +88,9 @@ continuation engine for three schemas and 1h/1d/7d/30d ranges, using authoritati
 archive records in a disk-backed fixture source. Fresh engine caches retain the
 OS page cache. Its JSON records disclose the fixture codec and absence of sustained
 ingest; wide globs and the eventual production source require separate evidence.
+
+The latency fixture defaults to 200 warm and 30 fresh-engine-cache samples per
+class, with alternating read order. `PARTS_READ_PROFILE=1` adds per-class source
+seek/record decode/merge timers, process allocation/GC deltas and CPU labels;
+profile timings are diagnostic and must not be used as latency gate results.
+`PARTS_READ_COMPARE_REPEATS` raises the warm sample count for CPU sampling.
