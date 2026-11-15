@@ -31,10 +31,11 @@ import (
 // realOracle is deliberately an offline diagnostic, not a daemon publication.
 // Every oracle value is an IEEE bit pattern; JSON floats cannot preserve NaNs.
 type realOracle struct {
-	Version      int
-	Now, Seed    int64
-	CatalogNames uint64
-	Queries      []realQuery
+	Version                            int
+	Now, Seed                          int64
+	CatalogNames                       uint64
+	CatalogNamespaces, CatalogPolicies map[string]uint64
+	Queries                            []realQuery
 }
 type realQuery struct {
 	Name                           string
@@ -67,7 +68,7 @@ func captureRealAt(ctx context.Context, path, oraclePath string, now int64) erro
 	if oraclePath == "" {
 		return errors.New("real oracle path is required")
 	}
-	r := realOracle{Version: 1, Now: now, Seed: 20261115}
+	r := realOracle{Version: 1, Now: now, Seed: 20261115, CatalogNamespaces: make(map[string]uint64), CatalogPolicies: make(map[string]uint64)}
 	_, opts, err := realOptions(path, r.Now)
 	if err != nil {
 		return err
@@ -89,6 +90,18 @@ func captureRealAt(ctx context.Context, path, oraclePath string, now int64) erro
 			break
 		}
 		for _, m := range page {
+			namespace, _, _ := strings.Cut(m.Name, ".")
+			var policy strings.Builder
+			fmt.Fprintf(&policy, "%s/xff-%08x", m.AggregationMethod.String(), math.Float32bits(m.XFilesFactor))
+			for _, a := range m.Retentions {
+				fmt.Fprintf(&policy, "/%dx%d", a.Step, a.Count)
+			}
+			r.CatalogNamespaces[namespace]++
+			r.CatalogPolicies[policy.String()]++
+			if len(r.CatalogNamespaces) > 4096 || len(r.CatalogPolicies) > 4096 {
+				_ = s.Close()
+				return errors.New("copied catalogue exceeds 4096 namespace/policy accounting bound")
+			}
 			r.CatalogNames++
 			if len(selected) < 2000 {
 				selected = append(selected, m)

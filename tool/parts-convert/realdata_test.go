@@ -88,6 +88,14 @@ func TestRealOracleMixedAndSourceRoundTrip(t *testing.T) {
 	if len(oracle.Queries) != 2000 || oracle.CatalogNames != 2001 {
 		t.Fatalf("incorrect sample: %d/%d", len(oracle.Queries), oracle.CatalogNames)
 	}
+	if len(oracle.CatalogNamespaces) != 1 || oracle.CatalogNamespaces["sample"] != 2001 || len(oracle.CatalogPolicies) != 1 {
+		t.Fatalf("coverage must include all 2001 names: namespaces=%v policies=%v", oracle.CatalogNamespaces, oracle.CatalogPolicies)
+	}
+	for _, count := range oracle.CatalogPolicies {
+		if count != oracle.CatalogNames {
+			t.Fatalf("policy coverage=%d, catalogue=%d", count, oracle.CatalogNames)
+		}
+	}
 	if _, err = convertLegacyCopy(ctx, legacyPath, output, 4096, 256<<20); err != nil {
 		t.Fatal(err)
 	}

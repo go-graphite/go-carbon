@@ -12,8 +12,14 @@ Before converting a real copy, save a seeded random sample of 2,000 names and
 their legacy renders. The catalogue must contain at least 2,000 names. Sampling
 visits the complete copied catalogue, retains at most 2,000 metadata records,
 and chooses one archive and a range of at most 4,096 steps for each name. The
-oracle stores the fixed clock, archive policies, range, output shape, and every
-IEEE value bit, including NaN payloads and signed zero.
+oracle records namespace and actual archive-policy counts across the complete
+copied catalogue, separately from its 2,000-query sample. Namespace means the
+first name component; the policy key includes aggregation method, XFilesFactor
+bits, and every archive step/count. Accounting refuses more than 4,096 distinct
+namespaces or policies before any destructive conversion. Use these counts to
+check actual schema coverage; frequency words in metric names alone do not prove
+archive shape. The oracle stores the fixed clock, archive policies, range, output
+shape, and every IEEE value bit, including NaN payloads and signed zero.
 
 ```sh
 parts-convert -capture-real-copy /private/offline-copy \
