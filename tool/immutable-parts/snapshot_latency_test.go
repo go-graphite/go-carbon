@@ -102,6 +102,11 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 		t.Fatal(e)
 	}
 	ctx := context.Background()
+	direct := os.Getenv("PARTS_READ_COMPARE_STORAGE") == "direct"
+	sourceName := "disk_fixture_indexed_slot_blocks"
+	if direct {
+		sourceName = "disk_fixture_direct_slot_blocks"
+	}
 	const clock int64 = 1794700800
 	for si, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y"} {
 		dir := filepath.Join(root, fmt.Sprint(si))
@@ -174,9 +179,26 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 			b.value = binary.LittleEndian.AppendUint64(b.value, d.Sample.Bits)
 			b.value = binary.LittleEndian.AppendUint64(b.value, d.Order)
 		}
+		var partFile *os.File
+		if direct {
+			partFile, e = os.OpenFile(filepath.Join(dir, "immutable.part"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
 		var directory []pr.SlotBlock
 		batch := pdb.NewBatch()
 		for _, b := range blocks {
+			if direct {
+				offset, err := partFile.Seek(0, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = partFile.Write(b.value); err != nil {
+					t.Fatal(err)
+				}
+				b.spec.Key = fixtureBlockLocator(b.spec.Key, offset, b.value)
+			}
 			directory = append(directory, b.spec)
 			if e = batch.Set(b.spec.Key, b.value, nil); e != nil {
 				t.Fatal(e)
@@ -186,6 +208,18 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 			t.Fatal(e)
 		}
 		_ = batch.Close()
+		if direct {
+			if e = partFile.Sync(); e != nil {
+				t.Fatal(e)
+			}
+			if e = partFile.Close(); e != nil {
+				t.Fatal(e)
+			}
+			partFile, e = os.Open(filepath.Join(dir, "immutable.part"))
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
 		if e = pdb.Flush(); e != nil {
 			t.Fatal(e)
 		}
@@ -215,6 +249,15 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 						if e != nil {
 							t.Fatal(e)
 						}
+						if direct {
+							if e = partFile.Close(); e != nil {
+								t.Fatal(e)
+							}
+							partFile, e = os.Open(filepath.Join(dir, "immutable.part"))
+							if e != nil {
+								t.Fatal(e)
+							}
+						}
 						pdb, e = pebble.Open(filepath.Join(dir, "parts"), &pebble.Options{})
 						if e != nil {
 							t.Fatal(e)
@@ -226,7 +269,11 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 					if profile {
 						sourceStages = &stages
 					}
-					source, err := pr.NewSlotIndex(directory, latencyBlockReader(snap, sourceStages))
+					reader := latencyBlockReader(snap, sourceStages)
+					if direct {
+						reader = fixtureBlockFileReader(partFile, sourceStages)
+					}
+					source, err := pr.NewSlotIndex(directory, reader)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -304,7 +351,12 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 					_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "latency_profile", "class": label, "samples": repeats, "v2_alloc_bytes": allocV, "native_alloc_bytes": allocN, "v2_mallocs": mallocV, "native_mallocs": mallocN, "v2_gc": gcV, "native_gc": gcN, "pin_ns": pinNS, "source": stages})
 				}
 				v50, v99, n50, n99 := latencyPercentile(vd, .5), latencyPercentile(vd, .99), latencyPercentile(nd, .5), latencyPercentile(nd, .99)
-				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "snapshot_latency_comparison", "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "schema": def, "range_seconds": width, "fresh_engine_cache": cold, "os_page_cache": "uncontrolled", "samples": repeats, "v2_p50_ns": v50, "v2_p99_ns": v99, "native_p50_ns": n50, "native_p99_ns": n99, "latency_gate": v50 <= n50 && v99 <= n99, "exact_bits": true, "source": "disk_fixture_indexed_slot_blocks", "sustained_ingest": false})
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "snapshot_latency_comparison", "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "schema": def, "range_seconds": width, "fresh_engine_cache": cold, "os_page_cache": "uncontrolled", "samples": repeats, "v2_p50_ns": v50, "v2_p99_ns": v99, "native_p50_ns": n50, "native_p99_ns": n99, "latency_gate": v50 <= n50 && v99 <= n99, "exact_bits": true, "source": sourceName, "sustained_ingest": false})
+			}
+		}
+		if direct {
+			if e = partFile.Close(); e != nil {
+				t.Fatal(e)
 			}
 		}
 		if e = native.Close(); e != nil {
