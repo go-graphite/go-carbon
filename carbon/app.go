@@ -1818,6 +1818,14 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			r.SetPointsOut(addPoints)
 		}
 
+		if r, ok := rcv.(interface{ SetPointBatchSize(int) error }); ok && app.v2 != nil {
+			// Fan out buffered input in larger groups: a 64-point lookup batch
+			// otherwise becomes scalar journal calls across many storage owners.
+			if err = r.SetPointBatchSize(1024); err != nil {
+				return
+			}
+		}
+
 		if r, ok := rcv.(interface {
 			SetPointBatchOut(func([][]byte, []points.Point))
 		}); ok {

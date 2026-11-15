@@ -112,6 +112,7 @@ const plainLookupBatchSize = 64
 type TCP struct {
 	cacheLookupBatch bool
 	pointBatchOut    atomic.Pointer[func([][]byte, []points.Point)]
+	pointBatchSize   atomic.Int32
 	helper.Stoppable
 	out                      func(*points.Points)
 	name                     string // name for store metrics
@@ -182,6 +183,17 @@ func (rcv *TCP) SetPointBatchOut(out func([][]byte, []points.Point)) {
 		}
 		rcv.pointBatchOut.Store(&out)
 	}
+}
+
+// SetPointBatchSize sets the maximum borrowed batch for handlers when they
+// adopt SetPointBatchOut. Configure it before publishing that callback. Batches
+// still flush before a socket read can block, so sparse input gains no delay.
+func (rcv *TCP) SetPointBatchSize(size int) error {
+	if size < 1 || size > 1024 {
+		return fmt.Errorf("point batch size must be between 1 and 1024")
+	}
+	rcv.pointBatchSize.Store(int32(size))
+	return nil
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -394,8 +406,12 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 		if rcv.cacheLookupBatch && pointBatchOut == nil {
 			if out := rcv.pointBatchOut.Load(); out != nil {
 				pointBatchOut = *out
-				lookupNames = make([][]byte, 0, plainLookupBatchSize)
-				lookupData = make([]points.Point, 0, plainLookupBatchSize)
+				size := int(rcv.pointBatchSize.Load())
+				if size == 0 {
+					size = plainLookupBatchSize
+				}
+				lookupNames = make([][]byte, 0, size)
+				lookupData = make([]points.Point, 0, size)
 			}
 		}
 	}
