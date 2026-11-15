@@ -24,6 +24,7 @@ import (
 )
 
 var (
+	ErrReadOnly       = pebble.ErrReadOnly
 	ErrClosed         = errors.New("chunk store is closing")
 	ErrNotFound       = errors.New("metric not found")
 	ErrExists         = errors.New("metric already exists")
@@ -46,6 +47,11 @@ const (
 )
 
 type Options struct {
+	// ReadOnly opens existing storage without any filesystem mutations. It does
+	// not upgrade formats, move WALs, save checkpoints or run maintenance.
+	// The directory must not be open by another store; this is an offline view.
+	ReadOnly bool
+
 	// BlockLoadConcurrency bounds simultaneous uncached SST block loads across
 	// foreground readers, persisters and compactions. Zero selects 16.
 	// The limit can be changed without reopening with SetBlockLoadConcurrency.
@@ -231,6 +237,8 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
+	readOnly bool
+
 	readSlots             *fifo.Semaphore
 	readQueued            atomic.Int64
 	blockLoadSlots        *fifo.Semaphore
@@ -492,12 +500,16 @@ func Open(dir string, options Options) (*Store, error) {
 	if fs == nil {
 		fs = vfs.Default
 	}
+	fs = &storeLockFS{FS: fs}
+	if options.ReadOnly {
+		fs = readOnlyFS{FS: fs}
+	}
 	// Count real filesystem I/O innermost, below deferred syncs, so a batched
 	// sync is counted when it happens.
 	counting := newCountingFS(fs)
 	fs = counting
 	var deferredSync *deferredSyncFS
-	if options.ParallelTableSyncs > 0 {
+	if options.ParallelTableSyncs > 0 && !options.ReadOnly {
 		deferredSync = newDeferredSyncFS(fs, dir, options.ParallelTableSyncs)
 		fs = deferredSync
 	}
@@ -521,7 +533,7 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.MemTableSize == 0 {
 		options.MemTableSize = 64 << 20
 	}
-	s := &Store{readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s := &Store{readOnly: options.ReadOnly, readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
 	s.initReadContexts()
 	s.readDone = make(chan struct{})
 	s.maintenanceWait = options.MaintenanceWait
@@ -564,7 +576,7 @@ func Open(dir string, options Options) (*Store, error) {
 	s.referenceFormat.Store(format >= 12)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	s.blockLoadSlots = fifo.NewSemaphore(blockLoadConcurrency(options.BlockLoadConcurrency))
-	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
+	opts := &pebble.Options{ReadOnly: options.ReadOnly, DisableAutomaticCompactions: options.ReadOnly, MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
 		LoadBlockSema:            s.blockLoadSlots,
 		MaxConcurrentCompactions: func() int { return int(s.compactionWorkers.Load()) },
 		EventListener:            &pebble.EventListener{WriteStallBegin: s.writeStallBegin, WriteStallEnd: s.writeStallEnd, TableCreated: pacing.tableCreated},
@@ -655,9 +667,20 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	opts.WALDir = walDirOption(dir, walDir)
 	opened := time.Now()
-	if err := moveWAL(fs, dir, walDir, opts); err != nil {
-		unrefCaches(s)
-		return nil, fmt.Errorf("move chunk store WAL: %w", err)
+	if options.ReadOnly {
+		// Replay the recorded WAL in memory. A read-only open never relocates it.
+		recorded, err := readWALDir(fs, dir)
+		if err != nil {
+			unrefCaches(s)
+			return nil, err
+		}
+		opts.WALDir = walDirOption(dir, recorded)
+	}
+	if !options.ReadOnly {
+		if err := moveWAL(fs, dir, walDir, opts); err != nil {
+			unrefCaches(s)
+			return nil, fmt.Errorf("move chunk store WAL: %w", err)
+		}
 	}
 	s.openTimings.MoveWAL = time.Since(opened)
 	opened = time.Now()
@@ -674,7 +697,7 @@ func Open(dir string, options Options) (*Store, error) {
 		}
 		return nil, fmt.Errorf("open chunk store: %w", err)
 	}
-	if upgradeMarker {
+	if upgradeMarker && !options.ReadOnly {
 		if err := replaceFormatMarker(fs, dir, formatMarkerTimeBuckets); err != nil {
 			closeErr := db.Close()
 			unrefCaches(s)
@@ -682,6 +705,14 @@ func Open(dir string, options Options) (*Store, error) {
 		}
 	}
 	s.db, s.dir, s.fs, s.pebbleOptions = db, dir, fs, opts.Clone().EnsureDefaults()
+	if options.ReadOnly {
+		s.incrementalSource = options.IncrementalSource
+		// Sidecar readiness loading can create a durable readiness stamp.
+		// Fetch and catalog reads do not need that maintenance inventory.
+		s.sidecars.readyCh = make(chan struct{})
+		s.invalidateReadCache()
+		return s, nil
+	}
 	if options.MetadataCacheCheckpoint && s.stateCache != nil {
 		s.checkpoint.lazy = options.MetadataCacheCheckpointLazy
 		if err := s.openMetadataCheckpoint(); err != nil {
@@ -920,7 +951,7 @@ func checkFormatForContinuation(fs vfs.FS, dir string, options Options) (int, bo
 				return 0, false, false, fmt.Errorf("%w: continuation codec lacks v12 reference reader", ErrFormat)
 			}
 		}
-		if format == 6 && options.TimeBuckets {
+		if format == 6 && options.TimeBuckets && !options.ReadOnly {
 			// v6 data stays readable; only new blocks use the v7 layout. Open
 			// replaces the marker after Pebble opens.
 			return 7, false, true, nil
@@ -1169,6 +1200,13 @@ func (s *Store) close(forExit bool) error {
 		close(s.readDone)
 	}
 	s.readMu.Unlock()
+	if s.readOnly {
+		s.maintenanceStop()
+		<-s.readDone
+		err := s.db.Close()
+		unrefCaches(s)
+		return err
+	}
 	// Refuse new owner operations and cancel every admitted caller before any
 	// joins. Cancellation reaches each span's admission check synchronously.
 	s.explicitMaintenance.cancel()
@@ -1247,17 +1285,30 @@ func (s *Store) close(forExit bool) error {
 // Sync makes completed mutations durable without flushing the memtables.
 // Recovery sources may be retired only after this boundary, even when ordinary
 // mutations use periodic WAL syncing.
-func (s *Store) Sync() error { return s.syncWAL() }
+func (s *Store) Sync() error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
+	return s.syncWAL()
+}
 
 // Flush writes the memtables at full speed: its caller waits for them.
 func (s *Store) Flush() error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	s.compactionControl.urgentFlush(1)
 	defer s.compactionControl.urgentFlush(-1)
 	return s.db.Flush()
 }
 
 // AsyncFlush starts a flush nobody waits for, which flush pacing may spread.
-func (s *Store) AsyncFlush() (<-chan struct{}, error) { return s.db.AsyncFlush() }
+func (s *Store) AsyncFlush() (<-chan struct{}, error) {
+	if s.readOnly {
+		return nil, ErrReadOnly
+	}
+	return s.db.AsyncFlush()
+}
 func (s *Store) Compact() error {
 	// Explicit/offline compactions share the close lifetime. Close
 	// must not race a caller admitting its next file span after cancellation.
@@ -1594,6 +1645,9 @@ func (s *Store) metricStripe(name string) uint64 {
 }
 
 func (s *Store) commit(batch *pebble.Batch) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if err := batch.Commit(s.writeOptions); err != nil {
 		return err
 	}
@@ -1660,6 +1714,9 @@ func revisionKey(m Metadata) []byte {
 }
 
 func (s *Store) Create(ctx context.Context, config MetricConfig) (Metadata, error) {
+	if s.readOnly {
+		return Metadata{}, ErrReadOnly
+	}
 	if err := s.fileOwnershipError(); err != nil {
 		return Metadata{}, err
 	}
