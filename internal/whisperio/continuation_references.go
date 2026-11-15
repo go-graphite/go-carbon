@@ -157,10 +157,14 @@ func (f *continuationFile) retireReferences(key []byte) error {
 	if len(key) != 20 || key[9] != 'p' {
 		return store.ErrFormat
 	}
+	if f.data.retiredReferenceGroups[string(key)] {
+		return nil
+	}
 	alias := append([]byte(nil), key...)
 	alias[9] = 'a'
 	data, err := f.fs.probe(alias)
 	if errors.Is(err, store.ErrNotFound) {
+		f.rememberReferenceRetirement(key)
 		return nil
 	}
 	if err != nil {
@@ -203,5 +207,24 @@ func (f *continuationFile) retireReferences(key []byte) error {
 			}
 		}
 	}
-	return f.fs.kv.Delete(alias)
+	if err := f.fs.kv.Delete(alias); err != nil {
+		return err
+	}
+	f.rememberReferenceRetirement(key)
+	return nil
+}
+
+func (f *continuationFile) rememberReferenceRetirement(key []byte) {
+	if !f.fs.reuseReferenceRetirements {
+		return
+	}
+	if f.data.retiredReferenceGroups == nil {
+		f.data.retiredReferenceGroups = make(map[string]bool)
+	}
+	// Whole-file repairs may touch arbitrarily many groups. Forgetting old
+	// successes costs another probe, without changing their visible state.
+	if len(f.data.retiredReferenceGroups) >= 64 {
+		clear(f.data.retiredReferenceGroups)
+	}
+	f.data.retiredReferenceGroups[string(key)] = true
 }

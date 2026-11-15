@@ -33,6 +33,8 @@ type continuationFiles struct {
 	snapshotBlock    []whisper.TimeSeriesPoint
 	snapshotBlockKey verifiedBlockKey
 	snapshotBlockOK  bool
+	// reuseReferenceRetirements is private to updates, which never add aliases.
+	reuseReferenceRetirements bool
 	// Ordinary updates must not overwrite a timestamp from a different ring
 	// position in an old, incorrectly anchored classic image.
 	guardClassicWrites    bool
@@ -75,6 +77,9 @@ type verifiedBlockKey struct {
 }
 
 type continuationFileData struct {
+	// Only ordinary updates enable this bounded, operation-local memo. They
+	// delete reference aliases and never create them on the same filesystem.
+	retiredReferenceGroups    map[string]bool
 	windowIndex               *classicWindowIndex
 	windowLoaded, windowDirty bool
 	references                bool

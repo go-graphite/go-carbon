@@ -23,6 +23,8 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// keepReferenceRetirementReads retains repeated alias probes as a test oracle.
+	keepReferenceRetirementReads bool
 	// keepDenseSumReads retains the canonical window reader as a test oracle.
 	keepDenseSumReads bool
 	// keepSnapshotReadAllocations retains the previous reader as a test oracle.
@@ -669,6 +671,7 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	fs := newContinuationFiles(kv, false).withClock(clock)
 	fs.reuseBlockKeys = c.ReuseBlockKeys
 	fs.guardClassicWrites = true
+	fs.reuseReferenceRetirements = !c.keepReferenceRetirementReads
 	// Whisper replaces propagation errors with a recovered panic string.
 	// Keep the typed conflict on this private filesystem so coarse-archive
 	// collisions take the same repair path without changing vendored code.
