@@ -483,7 +483,7 @@ func consume(q *queue, db *pebble.DB, dir string, s int, cat catalogue, maxRows 
 		if o.Err != nil {
 			continue
 		}
-		for len(p.Rows) > 0 {
+		for len(p.Rows) > 0 && o.Err == nil {
 			n := min(maxRows-len(rs), len(p.Rows))
 			rs = append(rs, p.Rows[:n]...)
 			p.Rows = p.Rows[n:]

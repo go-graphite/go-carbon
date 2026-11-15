@@ -300,3 +300,25 @@ func TestRollupSignedZeroAndFloat32Occupancy(t *testing.T) {
 		t.Fatal("Whisper float32 xFilesFactor threshold differs")
 	}
 }
+
+func TestOwnerDrainsAfterSealFailure(t *testing.T) {
+	q := new(queue)
+	go func() {
+		q.push(&packet{Rows: []row{{ID: 0}, {ID: 0}, {ID: 0}}})
+		q.push(&packet{End: true})
+	}()
+	done := make(chan outcome, 1)
+	go func() {
+		// A nonexistent directory fails SST creation before touching the DB.
+		done <- consume(q, nil, filepath.Join(t.TempDir(), "missing"), 0,
+			catalogue{Metrics: []metric{{Steps: []int{1}}}}, 1, nil, nil)
+	}()
+	select {
+	case o := <-done:
+		if o.Err == nil {
+			t.Fatal("expected seal error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owner stopped draining after a failed seal")
+	}
+}
