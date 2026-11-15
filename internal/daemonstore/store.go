@@ -32,6 +32,9 @@ type Series struct {
 	Metric            Metric
 	From, Until, Step int
 	Values            []float64
+	// Release returns the backend response reservation. Protocols normally use
+	// ResponseScope; direct callers must call Release after consuming Values.
+	Release func()
 }
 type Stats struct {
 	IngestedPoints                     uint64

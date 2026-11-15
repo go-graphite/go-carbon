@@ -367,7 +367,7 @@ func TestV2FlagFailsClosedWithoutBackend(t *testing.T) {
 	}
 	defer zapwriter.Test()()
 	app := v2Fixture(t, &oracleBackend{})
-	app.v2Open = nil
+	app.v2Open = func(daemonstore.Options) (daemonstore.Backend, error) { return nil, daemonstore.ErrUnavailable }
 	if err := app.Start(); !errors.Is(err, daemonstore.ErrUnavailable) {
 		t.Fatal("expected unavailable backend", err)
 	}

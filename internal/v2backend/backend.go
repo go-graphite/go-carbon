@@ -1,0 +1,539 @@
+// Package v2backend composes the experimental immutable-parts daemon backend.
+// This is a single-origin store: import, deletion and replica ownership changes
+// are deliberately unavailable until a fenced incarnation protocol exists.
+package v2backend
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/cockroachdb/pebble"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/daemonstore"
+	"github.com/go-graphite/go-carbon/internal/mixedread"
+	"github.com/go-graphite/go-carbon/internal/partlog"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/partsread"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/points"
+)
+
+var ErrClosed = errors.New("v2 backend closed")
+
+type frame struct {
+	name    string
+	group   partsformat.Group
+	policy  daemonstore.Metric
+	clock   int64
+	cursor  uint64
+	points  []points.Point
+	payload []byte
+}
+type metricState struct {
+	Name     []byte
+	Group    []byte
+	Policy   daemonstore.Metric
+	Frontier sealrollup.Frontier
+	slots    []map[int64]sealrollup.Sample
+}
+type checkpoint struct {
+	Version        int
+	Journal        string
+	Cursor, Points uint64
+	Metrics        []*metricState
+	Revisions      map[string]uint64
+}
+type command struct {
+	frame  *frame
+	seal   []frame
+	op     byte
+	answer chan answer
+}
+type answer struct {
+	frames []frame
+	err    error
+}
+type owner struct {
+	id          int
+	s           *Store
+	db          *pebble.DB
+	dir         string
+	requests    chan command
+	done        chan struct{}
+	active      []frame
+	meta        checkpoint
+	metrics     map[string]*metricState
+	pub         partsread.Publication
+	readCatalog atomic.Pointer[catalog]
+}
+type Store struct {
+	opts                          daemonstore.Options
+	now                           func() time.Time
+	log                           *partlog.Log
+	dbs                           []*pebble.DB
+	owners                        []*owner
+	budget                        *partsread.Budget
+	legacy                        *store.Store
+	legacyCatalog                 *catalog
+	mixed                         *mixedread.Reader
+	errors                        chan daemonstore.Failure
+	failure                       atomic.Pointer[daemonstore.Failure]
+	closing                       atomic.Bool
+	closed                        atomic.Bool
+	flushMu                       sync.Mutex
+	closeOnce                     sync.Once
+	closeErr                      error
+	stop, done                    chan struct{}
+	watchStop, watchDone          chan struct{}
+	ingested, parts, stalls, debt atomic.Uint64
+	sealNS                        atomic.Int64
+	pins                          atomic.Int64
+}
+
+var _ daemonstore.Backend = (*Store)(nil)
+
+func Open(opts daemonstore.Options) (daemonstore.Backend, error) { return openAt(opts, time.Now) }
+
+func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error) {
+	if opts.DataDir == "" || opts.Owners < 1 || opts.Shards < 1 || opts.PartInterval <= 0 || opts.Policy == nil {
+		return nil, errors.New("invalid v2 backend options")
+	}
+	if err := os.MkdirAll(opts.DataDir, 0750); err != nil {
+		return nil, err
+	}
+	s := &Store{opts: opts, now: now, errors: make(chan daemonstore.Failure, 1),
+		budget: partsread.NewBudget(256 << 20), stop: make(chan struct{}), done: make(chan struct{}),
+		watchStop: make(chan struct{}), watchDone: make(chan struct{})}
+	defer func() {
+		if err != nil {
+			s.abortOpen()
+		}
+	}()
+	// Each database's LOCK fences simultaneous processes before journal recovery.
+	for i := 0; i < opts.Shards; i++ {
+		dir := filepath.Join(opts.DataDir, fmt.Sprintf("db-%04d", i))
+		db, e := pebble.Open(dir, &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 },
+			EventListener: &pebble.EventListener{WriteStallBegin: func(pebble.WriteStallBeginInfo) { s.stalls.Add(1) }}})
+		if e != nil {
+			return nil, e
+		}
+		s.dbs = append(s.dbs, db)
+	}
+	// Geometry and origin are restart invariants, never inferred from local IDs.
+	format := []byte(fmt.Sprintf("experimental-v2-single-origin-v1\nowners=%d\nshards=%d\n", opts.Owners, opts.Shards))
+	marker := filepath.Join(opts.DataDir, "V2FORMAT")
+	if old, e := os.ReadFile(marker); e == nil {
+		if !bytes.Equal(old, format) {
+			return nil, errors.New("v2 format/geometry mismatch")
+		}
+	} else if errors.Is(e, os.ErrNotExist) {
+		f, e := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+		if e != nil {
+			return nil, e
+		}
+		_, e = f.Write(format)
+		if e == nil {
+			e = f.Sync()
+		}
+		e = errors.Join(e, f.Close())
+		if e != nil {
+			return nil, e
+		}
+		d, e := os.Open(opts.DataDir)
+		if e != nil {
+			return nil, e
+		}
+		e = errors.Join(d.Sync(), d.Close())
+		if e != nil {
+			return nil, e
+		}
+	} else {
+		return nil, e
+	}
+	s.log, err = partlog.Open(filepath.Join(opts.DataDir, "journal"), partlog.Options{Streams: opts.Owners, SyncInterval: time.Second})
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < opts.Owners; i++ {
+		o := &owner{id: i, s: s, db: s.dbs[i%opts.Shards], dir: filepath.Join(opts.DataDir, fmt.Sprintf("owner-%04d", i)),
+			requests: make(chan command, 64), done: make(chan struct{}), metrics: make(map[string]*metricState)}
+		if e := os.MkdirAll(o.dir, 0750); e != nil {
+			return nil, e
+		}
+		s.owners = append(s.owners, o)
+		if e := o.recover(); e != nil {
+			return nil, fmt.Errorf("owner %d: %w", i, e)
+		}
+	}
+	if err = s.openLegacy(); err != nil {
+		return nil, err
+	}
+	if err = s.log.Sync(); err != nil {
+		return nil, err
+	}
+	// Replay only collects while the journal stream is borrowed. Syncing from a
+	// replay callback would recursively wait on that same stream.
+	for _, o := range s.owners {
+		pendingPoints := 0
+		if e := s.log.Replay(o.id, o.meta.Cursor, func(r partlog.Record) error {
+			f, e := decodeFrame(r.Payload)
+			if e != nil {
+				return e
+			}
+			f.clock = r.Clock
+			f.cursor = r.Cursor
+			if s.route(f.name) != o.id {
+				return errors.New("journal metric owner mismatch")
+			}
+			current, e := opts.Policy(f.name)
+			if e != nil {
+				return e
+			}
+			if !reflect.DeepEqual(current, f.policy) {
+				return errors.New("replay policy changed")
+			}
+			o.active = append(o.active, f)
+			pendingPoints += len(f.points)
+			s.ingested.Add(uint64(len(f.points)))
+			if pendingPoints >= 1<<20 {
+				if e := o.commit(o.active); e != nil {
+					return e
+				}
+				o.active = nil
+				pendingPoints = 0
+			}
+			return nil
+		}); e != nil {
+			return nil, e
+		}
+	}
+	if err = s.log.Sync(); err != nil {
+		return nil, err
+	}
+	for _, o := range s.owners {
+		if err = o.commit(o.active); err != nil {
+			return nil, err
+		}
+		o.active = nil
+		if err = o.publish(); err != nil {
+			return nil, err
+		}
+	}
+	if err = s.openMixed(); err != nil {
+		return nil, err
+	}
+	for _, o := range s.owners {
+		go o.run()
+	}
+	go s.maintain()
+	go s.watchErrors()
+	return s, nil
+}
+
+func (s *Store) abortOpen() {
+	for _, o := range s.owners {
+		o.pub.Close()
+	}
+	if s.log != nil {
+		_ = s.log.Close()
+	}
+	if s.legacy != nil {
+		_ = s.legacy.Close()
+	}
+	for _, db := range s.dbs {
+		_ = db.Close()
+	}
+}
+func (s *Store) route(name string) int {
+	return int(partsformat.Route(partsformat.ID(name))) % s.opts.Owners
+}
+func (s *Store) Errors() <-chan daemonstore.Failure { return s.errors }
+func (s *Store) fail(op string, e error) error {
+	if e == nil {
+		return nil
+	}
+	f := &daemonstore.Failure{Operation: op, Err: e}
+	if s.failure.CompareAndSwap(nil, f) {
+		s.errors <- *f
+	}
+	return e
+}
+func (s *Store) status() error {
+	if f := s.failure.Load(); f != nil {
+		return fmt.Errorf("%s: %w", f.Operation, f.Err)
+	}
+	if s.closing.Load() {
+		return ErrClosed
+	}
+	return nil
+}
+func (s *Store) Append(p *points.Points) error {
+	if e := s.status(); e != nil {
+		return e
+	}
+	if p == nil || len(p.Data) == 0 {
+		return nil
+	}
+	policy, e := s.opts.Policy(p.Metric)
+	if e != nil {
+		return e
+	}
+	if _, e = rollupConfig(policy); e != nil {
+		return e
+	}
+	if s.legacyCatalog != nil {
+		if old, ok := s.legacyCatalog.Lookup(p.Metric); ok {
+			if !reflect.DeepEqual(toDaemonMetric(old), policy) {
+				return errors.New("legacy policy differs from live policy")
+			}
+			if len(policy.Archives) > 1 {
+				return errors.New("legacy multiarchive writes require an exact physical-slot rollup seed")
+			}
+		}
+	}
+	group, e := partsformat.AssignGroup(partsformat.ID(p.Metric), nil)
+	if e != nil {
+		return e
+	}
+	f := frame{name: p.Metric, group: group, policy: policy, clock: s.now().Unix(), points: slices.Clone(p.Data)}
+	for _, p := range f.points {
+		if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 {
+			return errors.New("point timestamp outside storage range")
+		}
+	}
+	f.payload, e = encodeFrame(f)
+	if e != nil {
+		return e
+	}
+	a := make(chan answer, 1)
+	o := s.owners[s.route(p.Metric)]
+	select {
+	case o.requests <- command{frame: &f, answer: a}:
+	case <-o.done:
+		return ErrClosed
+	}
+	select {
+	case result := <-a:
+		return result.err
+	case <-o.done:
+		return ErrClosed
+	}
+}
+func (o *owner) run() {
+	defer close(o.done)
+	for c := range o.requests {
+		var a answer
+		switch c.op {
+		case 'f':
+			a.frames = o.active
+			o.active = nil
+		case 's':
+			a.err = o.commit(c.seal)
+		case 'q':
+			c.answer <- a
+			return
+		default:
+			a.err = o.s.status()
+			if a.err == nil {
+				f := *c.frame
+				if old := o.metrics[f.name]; old != nil && !reflect.DeepEqual(old.Policy, f.policy) {
+					a.err = errors.New("stored metric policy changed")
+				}
+				if a.err == nil {
+					f.cursor, a.err = o.s.log.Append(o.id, f.clock, f.payload)
+				}
+				if a.err == nil {
+					o.active = append(o.active, f)
+					o.s.ingested.Add(uint64(len(f.points)))
+				}
+			}
+		}
+		if a.err != nil && !errors.Is(a.err, ErrClosed) {
+			o.s.fail("owner", a.err)
+		}
+		c.answer <- a
+	}
+}
+func (s *Store) flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	if f := s.failure.Load(); f != nil {
+		return f.Err
+	}
+	frozen := make([][]frame, len(s.owners))
+	acks := make([]chan answer, len(s.owners))
+	for i, o := range s.owners {
+		acks[i] = make(chan answer, 1)
+		o.requests <- command{op: 'f', answer: acks[i]}
+	}
+	for i := range acks {
+		frozen[i] = (<-acks[i]).frames
+	}
+	// All frozen records are stable before ANY durable part cursor advances.
+	if e := s.log.Sync(); e != nil {
+		return s.fail("sync", e)
+	}
+	for i, o := range s.owners {
+		o.requests <- command{op: 's', seal: frozen[i], answer: acks[i]}
+	}
+	var err error
+	for i := range acks {
+		err = errors.Join(err, (<-acks[i]).err)
+	}
+	var debt uint64
+	for _, db := range s.dbs {
+		debt += db.Metrics().Compact.EstimatedDebt
+	}
+	s.debt.Store(debt)
+	// Retain the journal for now. Trimming requires an independently proven
+	// power-failure frontier/retention protocol, not only a SIGKILL test.
+	return err
+}
+func (s *Store) Flush() error {
+	if s.closing.Load() {
+		return ErrClosed
+	}
+	return s.flush()
+}
+func (s *Store) maintain() {
+	defer close(s.done)
+	t := time.NewTicker(s.opts.PartInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			if e := s.flush(); e != nil {
+				s.fail("seal", e)
+				return
+			}
+		}
+	}
+}
+func (s *Store) watchErrors() {
+	defer close(s.watchDone)
+	for {
+		select {
+		case <-s.watchStop:
+			return
+		case e := <-s.log.Errors():
+			if e != nil {
+				s.fail("journal", e)
+				return
+			}
+		}
+	}
+}
+func (s *Store) Close() error {
+	s.closeOnce.Do(func() {
+		s.closing.Store(true)
+		close(s.stop)
+		<-s.done
+		s.closeErr = s.flush()
+		s.flushMu.Lock()
+		defer s.flushMu.Unlock()
+		s.closed.Store(true)
+		for _, o := range s.owners {
+			a := make(chan answer, 1)
+			o.requests <- command{op: 'q', answer: a}
+			<-a
+			<-o.done
+			o.pub.Close()
+		}
+		close(s.watchStop)
+		<-s.watchDone
+		s.closeErr = errors.Join(s.closeErr, s.log.Close())
+		for _, db := range s.dbs {
+			s.closeErr = errors.Join(s.closeErr, db.Close())
+		}
+		if s.legacy != nil {
+			s.closeErr = errors.Join(s.closeErr, s.legacy.Close())
+		}
+	})
+	return s.closeErr
+}
+func (s *Store) Stats() daemonstore.Stats {
+	return daemonstore.Stats{IngestedPoints: s.ingested.Load(), Parts: int64(s.parts.Load()), WriteStalls: s.stalls.Load(), CompactionDebtBytes: s.debt.Load(), SealLatencySeconds: float64(s.sealNS.Load()) / 1e9, SnapshotPins: s.pins.Load()}
+}
+
+func rollupConfig(m daemonstore.Metric) (sealrollup.Config, error) {
+	c := sealrollup.Config{XFilesFactor: m.XFilesFactor}
+	for i, n := range []string{"average", "sum", "last", "max", "min", "first"} {
+		if m.AggregationMethod == n {
+			c.Method = sealrollup.Method(i + 1)
+		}
+	}
+	for _, a := range m.Archives {
+		c.Archives = append(c.Archives, sealrollup.Archive{Step: int64(a.Step), Count: int64(a.Points)})
+	}
+	return c, c.Validate()
+}
+func encodeFrame(f frame) ([]byte, error) {
+	p, e := json.Marshal(f.policy)
+	if e != nil {
+		return nil, e
+	}
+	b, e := partlog.EncodeBatch(partlog.Batch{Metric: f.name, PolicyEpoch: 1, Points: f.points})
+	if e != nil {
+		return nil, e
+	}
+	out := []byte{'V', '2', 'B', 1}
+	out = binary.BigEndian.AppendUint32(out, uint32(len(p)))
+	out = binary.BigEndian.AppendUint32(out, uint32(len(f.group)))
+	out = append(out, p...)
+	out = append(out, []byte(f.group)...)
+	return append(out, b...), nil
+}
+func decodeFrame(b []byte) (frame, error) {
+	var f frame
+	if len(b) < 12 || !bytes.Equal(b[:4], []byte{'V', '2', 'B', 1}) {
+		return f, errors.New("invalid v2 journal envelope")
+	}
+	n, g := uint64(binary.BigEndian.Uint32(b[4:8])), uint64(binary.BigEndian.Uint32(b[8:12]))
+	if n+g > uint64(len(b)-12) {
+		return f, errors.New("invalid v2 envelope lengths")
+	}
+	if e := json.Unmarshal(b[12:12+n], &f.policy); e != nil {
+		return f, e
+	}
+	f.group = partsformat.Group(string(b[12+n : 12+n+g]))
+	x, e := partlog.DecodeBatch(b[12+n+g:])
+	if e != nil {
+		return f, e
+	}
+	if x.PolicyEpoch != 1 {
+		return f, errors.New("unsupported policy epoch")
+	}
+	f.name = x.Metric
+	f.points = x.Points
+	f.payload = slices.Clone(b)
+	if _, e = rollupConfig(f.policy); e != nil {
+		return f, e
+	}
+	if f.group == "" || len(f.group) > partsformat.MaxNameBytes {
+		return f, errors.New("invalid persisted placement group")
+	}
+	return f, nil
+}
+
+// The carbonlink/gRPC cache is empty because all visible samples are in the
+// immutable publication; these protocols must not overlay a second write path.
+func (s *Store) CacheQuery(ctx context.Context, name string) ([]points.Point, error) {
+	return nil, ctx.Err()
+}

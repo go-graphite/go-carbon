@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/daemonstore"
+	"github.com/go-graphite/go-carbon/internal/v2backend"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,10 +19,8 @@ import (
 type v2OpenFunc = daemonstore.OpenFunc
 type v2Error struct{ err error }
 
-// openV2Backend is intentionally closed until the durable, exact engine adapter
-// is linked here. A benchmark command is not a daemon storage implementation.
-func openV2Backend(daemonstore.Options) (daemonstore.Backend, error) {
-	return nil, daemonstore.ErrUnavailable
+func openV2Backend(opts daemonstore.Options) (daemonstore.Backend, error) {
+	return v2backend.Open(opts)
 }
 
 func (app *App) ExitError() error {

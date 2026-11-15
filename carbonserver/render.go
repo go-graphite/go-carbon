@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/daemonstore"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-whisper"
 	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
@@ -163,6 +164,9 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 }
 
 func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req *http.Request) {
+	responseContext, releaseResponses := daemonstore.ResponseScope(req.Context())
+	defer releaseResponses()
+	req = req.WithContext(responseContext)
 	if listener.rejectClosedStore(wr) {
 		return
 	}
@@ -725,7 +729,8 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	phasecpu.Set(phasecpu.Render)
 	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()
-	ctx := stream.Context()
+	ctx, releaseResponses := daemonstore.ResponseScope(stream.Context())
+	defer releaseResponses()
 
 	var reqPeer string
 	p, ok := peer.FromContext(stream.Context())

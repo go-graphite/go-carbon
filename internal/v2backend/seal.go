@@ -1,0 +1,341 @@
+package v2backend
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"sort"
+	"time"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
+	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/vfs"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/partsops"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+)
+
+type kv struct{ key, value []byte }
+
+func metaKey(id int) []byte {
+	return binary.BigEndian.AppendUint32([]byte{255, 'V', '2', 1}, uint32(id))
+}
+func refPrefix(id int, name string) []byte {
+	b := binary.BigEndian.AppendUint32([]byte{253, 'V', '2', 1}, uint32(id))
+	b = binary.BigEndian.AppendUint32(b, uint32(len(name)))
+	return append(b, []byte(name)...)
+}
+func (o *owner) recover() error {
+	o.meta = checkpoint{Version: 1, Journal: o.s.log.Identity()}
+	data, c, e := o.db.Get(metaKey(o.id))
+	if e == nil {
+		e = json.Unmarshal(data, &o.meta)
+		e = errors.Join(e, c.Close())
+	} else if errors.Is(e, pebble.ErrNotFound) {
+		e = nil
+	}
+	if e != nil {
+		return e
+	}
+	if o.meta.Version != 1 || o.meta.Journal != o.s.log.Identity() {
+		return errors.New("owner checkpoint origin mismatch")
+	}
+	for _, m := range o.meta.Metrics {
+		name := string(m.Name)
+		if o.s.route(name) != o.id {
+			return errors.New("catalog metric owner mismatch")
+		}
+		if _, ok := o.metrics[name]; ok {
+			return errors.New("duplicate catalog metric")
+		}
+		cfg, e := rollupConfig(m.Policy)
+		if e != nil {
+			return e
+		}
+		digest, e := sealrollup.PolicyDigest(cfg)
+		if e != nil {
+			return e
+		}
+		if digest != m.Frontier.Policy || m.Frontier.Order > o.meta.Cursor {
+			return errors.New("catalog policy/frontier mismatch")
+		}
+		policy, e := o.s.opts.Policy(name)
+		if e != nil {
+			return e
+		}
+		if !reflect.DeepEqual(policy, m.Policy) {
+			return errors.New("stored policy differs from configured policy")
+		}
+		m.slots = make([]map[int64]sealrollup.Sample, len(m.Policy.Archives))
+		for i := range m.slots {
+			if i+1 < len(m.slots) {
+				m.slots[i] = make(map[int64]sealrollup.Sample)
+			}
+		}
+		o.metrics[name] = m
+	}
+	// Recover the reducer's physical slot view once, before any intake. Normal
+	// Append and seal never perform a Get/read-before-write against the database.
+	it, e := o.db.NewIter(&pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: []byte{'G', 'C', 'P', 4}})
+	if e != nil {
+		return e
+	}
+	defer it.Close()
+	for it.First(); it.Valid(); it.Next() {
+		k, e := partsformat.Decode(it.Key())
+		if e != nil {
+			return e
+		}
+		if k.Archive == math.MaxUint32 || o.s.route(string(k.Metric)) != o.id {
+			continue
+		}
+		m := o.metrics[string(k.Metric)]
+		if m == nil || string(m.Group) != string(k.Group) || int(k.Archive) >= len(m.slots) {
+			return errors.New("part has no matching durable policy")
+		}
+		r, e := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, it.Value())
+		if e != nil {
+			return e
+		}
+		a := m.Policy.Archives[k.Archive]
+		if r.Order > m.Frontier.Order || r.Sample.Time%int64(a.Step) != 0 || (r.Sample.Time/int64(a.Step))%int64(a.Points) != k.BlockStart {
+			return errors.New("invalid durable physical slot")
+		}
+		prior, ok := m.slots[k.Archive][k.BlockStart]
+		if ok && prior.Sequence == r.Order && (prior.Time != r.Sample.Time || prior.Bits != r.Sample.Bits) {
+			return errors.New("conflicting durable slot order")
+		}
+		if !ok || r.Order > prior.Sequence {
+			p := r.Sample
+			p.Sequence = r.Order
+			if m.slots[k.Archive] != nil {
+				m.slots[k.Archive][k.BlockStart] = p
+			}
+		}
+	}
+	o.s.ingested.Add(o.meta.Points)
+	return it.Error()
+}
+
+func (o *owner) commit(frames []frame) error {
+	if len(frames) == 0 {
+		return nil
+	}
+	started := time.Now()
+	var part partsformat.PartID
+	if _, e := rand.Read(part[:]); e != nil {
+		return e
+	}
+	byName := make(map[string][]frame)
+	var count uint64
+	for _, f := range frames {
+		if f.cursor <= o.meta.Cursor {
+			return errors.New("replayed committed batch in live seal")
+		}
+		byName[f.name] = append(byName[f.name], f)
+		count += uint64(len(f.points))
+	}
+	// Every data file covers exactly one portable (PG,vshard,partition) range.
+	dataFiles := make(map[string][]kv)
+	var refs, ops []kv
+	scopes := make(map[string]*partsops.Batch)
+	next := make(map[string]*metricState, len(o.metrics)+len(byName))
+	for n, m := range o.metrics {
+		next[n] = m
+	}
+	plans := make(map[string]sealrollup.SealPlan)
+	for name, fs := range byName {
+		last := fs[len(fs)-1]
+		m := o.metrics[name]
+		if m == nil {
+			m = &metricState{Name: []byte(name), Group: []byte(last.group), Policy: last.policy, slots: make([]map[int64]sealrollup.Sample, len(last.policy.Archives))}
+			for i := range m.slots {
+				if i+1 < len(m.slots) {
+					m.slots[i] = make(map[int64]sealrollup.Sample)
+				}
+			}
+		}
+		if string(m.Group) != string(last.group) || !reflect.DeepEqual(m.Policy, last.policy) {
+			return errors.New("metric placement/policy changed")
+		}
+		cfg, e := rollupConfig(m.Policy)
+		if e != nil {
+			return e
+		}
+		batches := make([]sealrollup.Batch, 0, len(fs))
+		for _, f := range fs {
+			if string(f.group) != string(m.Group) || !reflect.DeepEqual(f.policy, m.Policy) {
+				return errors.New("batch policy or placement changed inside seal")
+			}
+			b := sealrollup.Batch{Order: f.cursor, Now: f.clock, Points: make([]sealrollup.Sample, len(f.points))}
+			for i, p := range f.points {
+				b.Points[i] = sealrollup.Sample{Time: p.Timestamp, Bits: math.Float64bits(p.Value), Sequence: uint64(i + 1)}
+			}
+			batches = append(batches, b)
+		}
+		plan, e := sealrollup.Plan(cfg, m.Frontier, func(a int, slot int64) (sealrollup.Sample, bool) { p, ok := m.slots[a][slot]; return p, ok }, batches)
+		if e != nil {
+			return e
+		}
+		plans[name] = plan
+		copyMetric := *m
+		copyMetric.Frontier = plan.Next
+		next[name] = &copyMetric
+		vs := partsformat.Route(partsformat.ID(name))
+		partition := last.clock / 86400
+		base := partsformat.Key{Group: partsformat.Group(m.Group), VShard: vs, Partition: partition, Metric: partsformat.ID(name), Part: part}
+		prefix, e := partsformat.PartitionPrefixForGroup(partsformat.Group(m.Group), vs, partition)
+		if e != nil {
+			return e
+		}
+		file := string(prefix)
+		for _, r := range plan.Records {
+			k := base
+			k.Archive = uint32(r.Archive)
+			k.BlockStart = r.Slot
+			key, e := partsformat.Encode(k)
+			if e != nil {
+				return e
+			}
+			dataFiles[file] = append(dataFiles[file], kv{key, sealrollup.EncodeRecord(r)})
+		}
+		// Keep the exact original boundaries/policy and receipt clocks as raw
+		// provenance in the SAME atomic ingest as authoritative replacements.
+		for i, f := range fs {
+			k := base
+			k.Archive = math.MaxUint32
+			k.BlockStart = f.clock
+			k.Ordinal = uint32(i)
+			key, e := partsformat.Encode(k)
+			if e != nil {
+				return e
+			}
+			value := binary.BigEndian.AppendUint64(nil, f.cursor)
+			value = append(value, f.payload...)
+			dataFiles[file] = append(dataFiles[file], kv{key, value})
+		}
+		key, e := partsformat.Encode(base)
+		if e != nil {
+			return e
+		}
+		rkey := append(refPrefix(o.id, name), part[:]...)
+		refs = append(refs, kv{rkey, slices.Clone(key[:len(key)-16])})
+		// Generation 1 denotes this store's initial single origin only. This
+		// backend has no import/recreate/delete API and grants no replica epoch.
+		metadata := store.Metadata{MetricConfig: store.MetricConfig{Name: name, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}, Generation: 1, Revision: last.cursor, LastUpdate: time.Unix(last.clock, 0)}
+		for _, a := range m.Policy.Archives {
+			metadata.Retentions = append(metadata.Retentions, store.Retention{Step: a.Step, Count: a.Points})
+		}
+		scope := partsops.Scope{PlacementGroup: partsformat.Group(m.Group), VShard: vs}
+		keyScope := fmt.Sprintf("%x/%d", []byte(m.Group), vs)
+		b := scopes[keyScope]
+		if b == nil {
+			rev := o.meta.Revisions[keyScope]
+			b = &partsops.Batch{Scope: scope, ExpectedRevision: rev, Revision: rev + 1}
+			scopes[keyScope] = b
+		}
+		b.Upserts = append(b.Upserts, partsops.Metric{Scope: scope, Metadata: metadata})
+	}
+	for _, b := range scopes {
+		edits, e := partsops.EncodeEdits(*b)
+		if e != nil {
+			return e
+		}
+		for _, edit := range edits {
+			ops = append(ops, kv{edit.Key, edit.Value})
+		}
+	}
+	meta := o.meta
+	meta.Revisions = make(map[string]uint64, len(o.meta.Revisions)+len(scopes))
+	for k, v := range o.meta.Revisions {
+		meta.Revisions[k] = v
+	}
+	for k, b := range scopes {
+		meta.Revisions[k] = b.Revision
+	}
+	meta.Cursor = frames[len(frames)-1].cursor
+	meta.Points += count
+	meta.Metrics = nil
+	for _, m := range next {
+		meta.Metrics = append(meta.Metrics, m)
+	}
+	sort.Slice(meta.Metrics, func(i, j int) bool { return bytes.Compare(meta.Metrics[i].Name, meta.Metrics[j].Name) < 0 })
+	encoded, e := json.Marshal(meta)
+	if e != nil {
+		return e
+	}
+	var paths []string
+	defer func() {
+		for _, p := range paths {
+			_ = os.Remove(p)
+		}
+	}()
+	stage := func(rows []kv) error {
+		if len(rows) == 0 {
+			return nil
+		}
+		sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].key, rows[j].key) < 0 })
+		path := filepath.Join(o.dir, fmt.Sprintf("stage-%x-%04d.sst", part, len(paths)))
+		f, e := vfs.Default.Create(path)
+		if e != nil {
+			return e
+		}
+		paths = append(paths, path)
+		w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
+		for i, row := range rows {
+			if i > 0 && bytes.Equal(rows[i-1].key, row.key) {
+				_ = w.Close()
+				return errors.New("duplicate key in immutable seal")
+			}
+			if e = w.Set(row.key, row.value); e != nil {
+				_ = w.Close()
+				return e
+			}
+		}
+		return w.Close()
+	}
+	for _, rows := range dataFiles {
+		if e = stage(rows); e != nil {
+			return e
+		}
+	}
+	if e = stage(ops); e != nil {
+		return e
+	}
+	if e = stage(refs); e != nil {
+		return e
+	}
+	if e = stage([]kv{{metaKey(o.id), encoded}}); e != nil {
+		return e
+	}
+	// Ingest synchronizes the manifest publication. Journal Sync has already
+	// completed for every included original batch before this command was sent.
+	if e = o.db.Ingest(paths); e != nil {
+		return e
+	}
+	for name, plan := range plans {
+		m := next[name]
+		for _, r := range plan.Records {
+			p := r.Sample
+			p.Sequence = r.Order
+			if m.slots[r.Archive] != nil {
+				m.slots[r.Archive][r.Slot] = p
+			}
+		}
+	}
+	o.metrics = next
+	o.meta = meta
+	o.s.parts.Add(uint64(len(dataFiles)))
+	o.s.sealNS.Store(int64(time.Since(started)))
+	return o.publish()
+}
