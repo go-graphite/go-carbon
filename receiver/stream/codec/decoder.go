@@ -107,6 +107,10 @@ func (d *Decoder) ReadFrame(r io.Reader, visit Visit) (FrameInfo, error) {
 }
 
 func (d *Decoder) header(h []byte) (FrameInfo, error) {
+	return frameHeader(h, d.opts)
+}
+
+func frameHeader(h []byte, opts Options) (FrameInfo, error) {
 	if len(h) < HeaderSize {
 		return FrameInfo{}, ErrFrame
 	}
@@ -114,7 +118,7 @@ func (d *Decoder) header(h []byte) (FrameInfo, error) {
 	if h[1]|h[2]|h[3] != 0 || info.Kind > StateFrame {
 		return info, ErrFrame
 	}
-	if uint64(info.PayloadBytes) > uint64(d.opts.MaxFrameSize) || uint64(info.RawBytes) > uint64(d.opts.MaxFrameSize) || uint64(info.Rows) > uint64(d.opts.MaxRows) {
+	if uint64(info.PayloadBytes) > uint64(opts.MaxFrameSize) || uint64(info.RawBytes) > uint64(opts.MaxFrameSize) || uint64(info.Rows) > uint64(opts.MaxRows) {
 		return info, ErrLimit
 	}
 	if info.Kind == ResetFrame {
@@ -124,7 +128,7 @@ func (d *Decoder) header(h []byte) (FrameInfo, error) {
 	} else if info.PayloadBytes == 0 || info.RawBytes == 0 || (info.Kind == StateFrame && info.Rows != 0) || (info.Kind == DataFrame && info.Rows == 0) {
 		return info, ErrFrame
 	}
-	if d.z == nil && info.PayloadBytes != info.RawBytes {
+	if opts.Flags&FlagZstd == 0 && info.PayloadBytes != info.RawBytes {
 		return info, ErrFrame
 	}
 	return info, nil
