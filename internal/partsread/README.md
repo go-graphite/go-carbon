@@ -47,7 +47,8 @@ Values, winner sequences/timestamps, occupancy and sparse touched-slot indices
 use 29B/slot within the unchanged 32B/slot active reservation. Idle caches retain
 less than 112MiB across all size classes; requests above 131,072 slots are uncached.
 A cache size mismatch is discarded and allocates exactly the requested length.
-Reuse clears occupancy and initializes absent values to the original NaN bits.
+Allocation initializes values to the original NaN bits. Close resets only touched
+values and occupancy, so reuse avoids dense array initialization and clearing.
 Only touched slots need the final timestamp validation pass.
 
 `Handle.RenderInto` overlays into a caller-owned, prefilled `Series.Values`.

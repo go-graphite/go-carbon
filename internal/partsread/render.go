@@ -122,15 +122,10 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 	h.workspaces = workspace
 	out.Values = workspace.values
 	seq, times, seen := workspace.sequences, workspace.times, workspace.seen
-	clear(seen)
 	out.Occupied = seen
 	workspace.touched = workspace.touched[:0]
 	if base != nil {
 		out.Values = base.Values
-	} else {
-		for i := range out.Values {
-			out.Values[i] = math.NaN()
-		}
 	}
 	firstSlot := (start / a.Step) % a.Points
 	if firstSlot < 0 {
@@ -206,7 +201,7 @@ var renderWorkspaces = func() [12]chan *renderWorkspace {
 		// 64 .. 131072 slots, at most 1MiB per class, with a minimum
 		// of two entries at the largest sizes.
 		slots := 64 << i
-		depth := max(2, min(64, (1<<20)/(slots*25)))
+		depth := max(2, min(64, (1<<20)/(slots*29)))
 		pools[i] = make(chan *renderWorkspace, depth)
 	}
 	return pools
@@ -246,9 +241,21 @@ func takeRenderWorkspace(n int) *renderWorkspace {
 		default:
 		}
 	}
-	return &renderWorkspace{values: make([]float64, n), sequences: make([]uint64, n), times: make([]int64, n), seen: make([]bool, n), touched: make([]uint32, 0, n)}
+	w := &renderWorkspace{values: make([]float64, n), sequences: make([]uint64, n), times: make([]int64, n), seen: make([]bool, n), touched: make([]uint32, 0, n)}
+	for i := range w.values {
+		w.values[i] = math.NaN()
+	}
+	return w
 }
 func releaseRenderWorkspace(w *renderWorkspace) {
+	// Values are valid until Close. Reset only the slots that this handle wrote;
+	// all untouched slots are already canonical NaNs from allocation/last close.
+	// Overlay values belong to the caller and are never retained in w.values.
+	for _, i := range w.touched {
+		w.values[i] = math.NaN()
+		w.seen[i] = false
+	}
+	w.touched = w.touched[:0]
 	w.next = nil
 	if pool := renderWorkspacePool(len(w.values)); pool != nil {
 		select {

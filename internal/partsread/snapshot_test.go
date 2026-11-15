@@ -254,6 +254,41 @@ func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
 	}
 }
 
+// A source failure after filling the whole result must leave no dirty slots
+// in the idle cache, including occupied NaNs and sequence-zero winners.
+func TestRenderWorkspaceResetAfterPartialFailure(t *testing.T) {
+	const now int64 = 64
+	var records []Record
+	for ts := int64(1); ts <= now; ts++ {
+		records = append(records, Record{7, 1, Sample{ts, math.Float64bits(float64(ts)), 0}})
+	}
+	records = append(records, Record{7, 1, Sample{now, 0x7ff8000000000042, 0}})
+	var p Publication
+	p.Publish(View{Catalog: testCatalog([]Archive{{1, 128}}), Parts: []Source{Freeze(records)}})
+	defer p.Close()
+	b := NewBudget(8192)
+	h, err := p.Pin(b, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.Render(context.Background(), "sample", 0, now, now); !errors.Is(err, ErrConflict) {
+		t.Fatal("expected a partially filled conflicting result", err)
+	}
+	w := h.workspaces
+	if w == nil || len(w.touched) != int(now) {
+		t.Fatal("fixture did not fill the workspace")
+	}
+	h.Close()
+	for i, value := range w.values {
+		if !math.IsNaN(value) || w.seen[i] {
+			t.Fatal("failed render retained a dirty slot", i)
+		}
+	}
+	if len(w.touched) != 0 || b.Used() != 0 {
+		t.Fatal("workspace or budget retained")
+	}
+}
+
 // Ring ranges may select several epochs, including replacements newer than
 // the requested timestamps. The index must retain those invalidations.
 func TestSlotRangesAndFrozenVersions(t *testing.T) {
