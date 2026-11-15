@@ -4,6 +4,7 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/hostcapacity"
@@ -18,6 +19,19 @@ type startupCapturePolicy struct {
 	available, recoveryBytes, recoveryPoints, spoolBytes, segmentBytes int64
 }
 
+// Shared by initial sizing and ongoing reserve checks. Tests replace the
+// capacity sample before starting any applications or capture monitors.
+var startupDiskUsage = func(path string) (free, total uint64, err error) {
+	var info syscall.Statfs_t
+	if err = syscall.Statfs(path, &info); err != nil {
+		return 0, 0, err
+	}
+	if info.Bavail > 0 {
+		free = uint64(info.Bavail) * uint64(info.Bsize)
+	}
+	return free, uint64(info.Blocks) * uint64(info.Bsize), nil
+}
+
 func startupPolicy(path string) startupCapturePolicy {
 	// The shared sampler includes MemAvailable, Go memory limit, cgroup
 	// siblings, and a physical reserve. Non-Linux local fixtures use host RAM.
@@ -28,7 +42,7 @@ func startupPolicy(path string) startupCapturePolicy {
 		available = startupCapacityBytes(host / 8)
 	}
 
-	free, _ := migrationDiskFree(filepath.Dir(path))
+	free, _, _ := startupDiskUsage(filepath.Dir(path))
 	return chooseStartupPolicy(runtime.GOMAXPROCS(0), available, startupCapacityBytes(free))
 }
 

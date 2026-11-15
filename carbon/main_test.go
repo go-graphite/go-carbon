@@ -18,6 +18,17 @@ const testHandoffSuccessorDir = "GRAPHITE_TEST_HANDOFF_SUCCESSOR_DIR"
 // Use persistent immutable stubs so macOS need not assess new executables
 // during a handoff. Isolated cases inherit the warmed paths and protocols.
 func TestMain(m *testing.M) {
+	// Integration fixtures write only a few MiB. Production's percentage-based
+	// reserve can exceed all remaining space on a shared development machine,
+	// intentionally blocking capture forever. Give fixtures stable headroom,
+	// including crash subprocesses, while retaining real statfs errors. Disk
+	// pressure tests supply explicit samples through updateDiskSpace.
+	diskUsage := startupDiskUsage
+	startupDiskUsage = func(path string) (uint64, uint64, error) {
+		_, _, err := diskUsage(path)
+		return 1 << 30, 2 << 30, err
+	}
+
 	cpus := min(runtime.GOMAXPROCS(0), 4)
 	if os.Getenv(isolatedTestCase) != "" {
 		// Four storage processes share the host with other builds. Keep their

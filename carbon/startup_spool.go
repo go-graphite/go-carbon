@@ -10,7 +10,6 @@ import (
 	"runtime/metrics"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -580,17 +579,13 @@ func (s *startupInput) sampleDiskSpace() {
 	// Take the append frontier first: writes concurrent with statfs may already
 	// be reflected in Bavail, so double-counting them is conservative.
 	written := s.diskWritten.Load()
-	var info syscall.Statfs_t
-	if err := syscall.Statfs(filepath.Dir(s.path), &info); err != nil {
+	free, total, err := startupDiskUsage(filepath.Dir(s.path))
+	if err != nil {
 		s.fallback.Store(true)
 		zapwriter.Logger("app").Error("startup input cannot sample disk safety reserve; keeping previous sample", zap.Error(err))
 		return
 	}
-	free := uint64(0)
-	if info.Bavail > 0 {
-		free = uint64(info.Bavail) * uint64(info.Bsize)
-	}
-	s.updateDiskSpace(free, uint64(info.Blocks)*uint64(info.Bsize), written)
+	s.updateDiskSpace(free, total, written)
 }
 func (s *startupInput) notePause() {
 	if s.paused.CompareAndSwap(false, true) {

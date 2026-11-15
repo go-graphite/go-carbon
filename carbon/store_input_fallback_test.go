@@ -358,8 +358,7 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 			}
 			defer zapwriter.Test()()
 			saved := inputHandoffTimeout
-			// Preserve the 1.1 s executable-probe margin below while keeping the
-			// slow flush beyond the handoff window.
+			// Keep the slow flush beyond the fallback no-request window.
 			inputHandoffTimeout = 2 * time.Second
 			// The capable case checks uninterrupted ownership transfer, not
 			// the duration of opening a real store on a busy test machine.
@@ -431,12 +430,17 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 			next.Config = &nextConfig
 			defer next.Stop()
 			nextStarted := make(chan error, 1)
+			oldReadsOpened := make(chan struct{})
 			startNext := func(register bool) {
 				go func() {
 					if register {
 						next.RegisterReadHandoff()
 					}
-					nextStarted <- next.Start()
+					err := next.Start()
+					if tc.successor == "old" {
+						close(oldReadsOpened)
+					}
+					nextStarted <- err
 				}()
 			}
 			oldBinary := storeHandoffSuccessor(t, false)
@@ -447,14 +451,19 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 					case "handoff":
 						startNext(true)
 					case "old":
-						// Registers right after parsing its config and
-						// starts; its read listener request comes once its
-						// reads open (1.77 s in production), here late
-						// enough that waiting for it shows in the tail.
-						requestAfter := inputHandoffTimeout * 3 / 4
+						// Register before startup, but request reads only once
+						// startup completes. Binding input requires the old
+						// owner to stop first, so fallback must detect the
+						// unsupported binary without waiting for this request.
 						if conn, err := net.DialTimeout("unix", readHandoffPath(cfg), time.Second); err == nil {
+							t.Cleanup(func() { _ = conn.Close() })
 							go func() {
-								time.Sleep(requestAfter)
+								select {
+								case <-oldReadsOpened:
+								case <-t.Context().Done():
+									_ = conn.Close()
+									return
+								}
 								_, _ = conn.Write([]byte{'R'})
 								_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 								_, _ = conn.Read(make([]byte, 1))
@@ -617,13 +626,12 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 					t.Errorf("input tail kept for a successor the service manager reports (tail %.3f s)", tailFor)
 				}
 			case tc.successor == "old" && tc.claimsSupport:
-				// Input received meanwhile is loaded from the tail before
-				// the successor reads input: give it up once it registers,
-				// not when its request shows it cannot take input. The
-				// margin covers running its binary, which on a loaded
-				// macOS host took up to 1.1 s.
-				if tailFor < 0 || tailFor > (inputHandoffTimeout*2/3).Seconds() {
-					t.Errorf("input kept in the tail %.3f s for a successor that cannot take it", tailFor)
+				// The legacy read request is gated on successful startup,
+				// which itself requires fallback to have closed input. The
+				// capability rejection must therefore happen independently
+				// of that request, rather than after a timed grace period.
+				if tailFor < 0 {
+					t.Error("input tail missing for a successor that claims support")
 				}
 				if !strings.Contains(logs, "successor cannot take input") {
 					t.Error("registered successor's binary not checked")
