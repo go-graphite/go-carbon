@@ -1000,12 +1000,11 @@ func (l *Log) Stat(send func(metric string, value float64)) {
 	send("liveSegments", float64(l.stat.liveSegments.Load()))
 	send("spareSegments", float64(l.stat.spareSegments.Load()))
 	send("pinnedCycles", float64(l.stat.pinned.Load()))
-	if l.src != nil {
-		// The log cycle already samples the source into this counter. Source
-		// callbacks may take every cache shard lock; statistics must not.
-		dropped := l.total.unlogged.Load()
-		send("dropped", float64(dropped-l.stat.lastDropped.Swap(dropped)))
-	}
+	// Start may still be publishing the source when the collector establishes
+	// its baseline. Read only the sampled atomic counter, which is zero before
+	// the first cycle; source callbacks may take every cache shard lock.
+	dropped := l.total.unlogged.Load()
+	send("dropped", float64(dropped-l.stat.lastDropped.Swap(dropped)))
 }
 
 // ReplayPendingBytes reports encoded journal frame bytes not yet applied by

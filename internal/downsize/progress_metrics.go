@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,10 +236,14 @@ func metricToken(s string) string {
 }
 
 type progressMetrics struct {
+	ready                                 readyETAModel
+	snapshot                              progressSnapshot
 	mu                                    sync.Mutex
 	sendMu                                sync.Mutex
 	addr, prefix, phase                   string
 	active, done, total, rate             float64
+	quarantined, policySkipped            float64
+	repairFailedNames                     float64
 	freshDone                             float64
 	freshDoneAvailable                    float64
 	storeRetries, storeWaiting            int64
@@ -285,6 +290,10 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 			return
 		}
 	}
+	p.repairFailedNames = max(p.repairFailedNames, float64(snapshot.RepairFailedNames))
+	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
+	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
+	p.snapshot = snapshot
 	oldPhase, oldRound := p.phase, p.round
 	p.phase = metricToken(snapshot.Phase)
 	if snapshot.WaitingForStore {
@@ -319,8 +328,11 @@ func (p *progressMetrics) send() {
 	defer p.sendMu.Unlock()
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
+	repairFailedNames := p.repairFailedNames
+	quarantined, policySkipped := p.quarantined, p.policySkipped
 	at := time.Now()
 	eta := p.eta(at)
+	ready := p.ready.estimate(at, p.path, p.snapshot)
 	code, round := p.code, p.round
 	freshDone, freshAvailable, started := p.freshDone, p.freshDoneAvailable, p.started
 	retries, waiting, waitSeconds := p.storeRetries, float64(0), p.storeWaitSeconds
@@ -345,7 +357,7 @@ func (p *progressMetrics) send() {
 	for _, v := range []struct {
 		name  string
 		value float64
-	}{{"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
+	}{{"quarantined", quarantined}, {"policy_skipped", policySkipped}, {"repair_failed_names", repairFailedNames}, {"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"eta_ready_seconds", ready.seconds}, {"eta_ready_known_seconds", ready.known}, {"eta_ready_unknown_parts", float64(ready.unknown)}, {"phases_left", float64(ready.phases)}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
 	}
 	if p.version != "" {
@@ -450,14 +462,15 @@ func (p *progressMetrics) eta(now time.Time) float64 {
 	return eta
 }
 
-// Public build revisions are bounded, safe Graphite path components.
+var progressRevisionPattern = regexp.MustCompile(`[0-9a-f]{12}`)
+
+// Match the daemon's 12-hex revision label, including prefixed release builds.
+// Only the revision and optional dirty marker become a Graphite path component.
 func progressVersion(version string) string {
+	version = strings.ToLower(version)
 	dirty := strings.HasSuffix(version, "-dirty")
-	version = strings.TrimSuffix(strings.ToLower(version), "-dirty")
-	if len(version) > 12 {
-		version = version[:12]
-	}
-	if len(version) != 12 || strings.Trim(version, "0123456789abcdef") != "" {
+	version = progressRevisionPattern.FindString(version)
+	if version == "" {
 		version = "unknown"
 	}
 	if dirty {

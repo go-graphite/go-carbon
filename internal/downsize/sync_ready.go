@@ -48,17 +48,22 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
-	Repair              *windowRepairCount `json:"repair,omitempty"`
-	Scope               string             `json:"scope"`
-	UnrecoverablePoints *int64             `json:"unrecoverable_points"`
-	UnrecoverableReason string             `json:"unrecoverable_reason"`
-	ProofState          string             `json:"proof_state"`
-	Ring                string             `json:"ring"`
-	NamesSHA256         string             `json:"names_sha256,omitempty"`
-	Prefix              string             `json:"prefix,omitempty"`
-	Period              syncRanges         `json:"period"`
-	GapLedgerComplete   bool               `json:"gap_ledger_complete"`
-	Exclusions          []string           `json:"exclusions"`
+	Quarantined          int64              `json:"quarantined"`
+	PolicySkipped        int64              `json:"policy_skipped"`
+	QuarantinePath       string             `json:"quarantine_path,omitempty"`
+	PolicySkippedPath    string             `json:"policy_skipped_path,omitempty"`
+	HistoryVerifiedUntil int64              `json:"history_verified_until,omitempty"`
+	Repair               *windowRepairCount `json:"repair,omitempty"`
+	Scope                string             `json:"scope"`
+	UnrecoverablePoints  *int64             `json:"unrecoverable_points"`
+	UnrecoverableReason  string             `json:"unrecoverable_reason"`
+	ProofState           string             `json:"proof_state"`
+	Ring                 string             `json:"ring"`
+	NamesSHA256          string             `json:"names_sha256,omitempty"`
+	Prefix               string             `json:"prefix,omitempty"`
+	Period               syncRanges         `json:"period"`
+	GapLedgerComplete    bool               `json:"gap_ledger_complete"`
+	Exclusions           []string           `json:"exclusions"`
 
 	Schema           int                     `json:"schema"`
 	Verdict          string                  `json:"verdict"`
@@ -71,19 +76,32 @@ type readyReport struct {
 	Counts           map[string]readyCount   `json:"counts"`
 	Sample           []string                `json:"sample"`
 	PolicyNames      int                     `json:"policy_names"`
+	ExpectedAbsent   int                     `json:"expected_absent"`
 	PolicyMismatches int                     `json:"policy_mismatches"`
 	Finished         int64                   `json:"finished_at"`
 }
 
 // runSyncReady owns the final phase and invalidates a prior attestation before
-// any work. Recovery always uses fresh journals, including fresh copy filenames:
-// pre-restart verification or transfer receipts cannot establish post-restart proof.
+// any work. Each new restart uses a fresh recovery journal; an interrupted
+// recovery resumes that same journal, never the pre-restart receipts.
 func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syncReadyBackend, initial func() error) (err error) {
+	return runSyncReadyPrepared(ctx, o, r, b, nil, initial)
+}
+
+// prepare initializes shared backend budgets even when resume skips the root job.
+func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOptions, b syncReadyBackend, prepare, initial func() error) (err error) {
 	if o.now == nil {
 		o.now = time.Now
 	}
 	if err = os.MkdirAll(o.state, 0755); err != nil {
 		return err
+	}
+	if o.issues == nil {
+		var e error
+		o.issues, e = openSyncIssues(o.state)
+		if e != nil {
+			return e
+		}
 	}
 	lock, err := lockResumeState(filepath.Join(o.state, "ready"))
 	if err != nil {
@@ -98,6 +116,11 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			}
 		} else if !errors.Is(e, os.ErrNotExist) {
 			return e
+		}
+		if prepare != nil {
+			if err := prepare(); err != nil {
+				return err
+			}
 		}
 		return initial()
 	}
@@ -138,21 +161,32 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 				status = "interrupted"
 			}
 		}
-		if e := readyProgress(o.state, status, err); e != nil {
-			err = errors.Join(err, e)
-			report.Reasons = append(report.Reasons, e.Error())
-		}
+		report.Quarantined, report.PolicySkipped = o.issues.counts()
+		report.QuarantinePath = filepath.Join(o.issues.state, "quarantine.json")
+		report.PolicySkippedPath = filepath.Join(o.issues.state, "policy-skipped.json")
 		if len(report.Reasons) == 0 {
 			report.Verdict = "READY"
+			if report.Quarantined > 0 {
+				report.Verdict = "READY_EXCEPT"
+				err = fmt.Errorf("%w: %d names, %s", ErrSyncQuarantined, report.Quarantined, report.QuarantinePath)
+			}
 		} else {
 			report.Verdict = "NOT_READY"
 			err = errors.Join(err, ErrSyncNotReady)
+		}
+		if report.Verdict == "READY_EXCEPT" {
+			status = "ready_except"
+		}
+		if e := readyProgress(o.state, status, err); e != nil {
+			err = errors.Join(err, e)
+			report.Reasons = append(report.Reasons, e.Error())
+			report.Verdict = "NOT_READY"
 		}
 		if e := atomicStateJSON(path, report); e != nil {
 			err = errors.Join(err, e)
 			return
 		}
-		event("sync_ready", map[string]any{"verdict": report.Verdict, "reasons": report.Reasons, "path": path})
+		event("sync_ready", map[string]any{"verdict": report.Verdict, "reasons": report.Reasons, "path": path, "quarantined": report.Quarantined, "policy_skipped": report.PolicySkipped, "quarantine_path": report.QuarantinePath})
 	}()
 	report.Reasons = nil
 	previous := map[string]readyProcess{}
@@ -182,8 +216,8 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 	if e != nil {
 		return e
 	}
-	// Keep an earlier snapshot until recovery and final reads succeed. Interrupted
-	// recovery is therefore retried with a new journal on the next invocation.
+	// Keep an earlier snapshot until recovery and final reads succeed. Recovery
+	// has its own durable process boundary and journal, restored below.
 	_, oldJournalErr := os.Stat(filepath.Join(o.state, "sync.jsonl"))
 	unbound := oldJournalErr == nil && len(previous) != len(before)
 	for store := range before {
@@ -198,8 +232,20 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			return e
 		}
 	}
-	if e = initial(); e != nil {
+	if prepare != nil {
+		if e = prepare(); e != nil {
+			return e
+		}
+	}
+	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
+	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
+	if e != nil {
 		return e
+	}
+	if resume == nil {
+		if e = initial(); e != nil && !errors.Is(e, ErrSyncQuarantined) {
+			return e
+		}
 	}
 	validation := readyPrerequisites(*o, r)
 	if o.noVerify || (len(o.windows) > 0 && !o.fullHistory && r.scope != "windows") {
@@ -209,6 +255,14 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 	state := o.state
 	if e = readyProgress(o.state, "running", nil); e != nil {
 		return e
+	}
+	if resume != nil {
+		if e = runSync(ctx, resume.options(*o), b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
+			return fmt.Errorf("restart recovery: %w", e)
+		}
+		previous, state, unbound = resume.Processes, filepath.Join(o.state, resume.State), false
+		report.Restarts = append(report.Restarts, resume.Restarts...)
+		report.Windows = append(report.Windows, resume.Restarts...)
 	}
 	repairedParity := false
 	for generation := 0; ; generation++ {
@@ -234,15 +288,23 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			// The initial journal already proves the original history. A known
 			// restart invalidates only its observation interval. An unbound
 			// journal has no such proof and still needs full revalidation.
-			recovery.windows = append(syncRanges(nil), report.Restarts...)
+			recovery.windows = append(syncRanges(nil), gaps...)
 			if freshProof {
-				recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
+				recovery.windows = append(append(syncRanges(nil), o.windows...), gaps...)
 			}
 			recovery.settle = 0
 			recovery.fullHistory = freshProof && r.scope != "windows"
 			recovery.sampleEvery = 1
+			recovery.restartWindow = !freshProof
+			checkpoint := readyRecovery{RestartWindow: recovery.restartWindow, State: filepath.Base(recovery.state), Windows: recovery.windows, FullHistory: recovery.fullHistory, Processes: after, Restarts: report.Restarts, Scope: r.scope}
+			if checkpoint.Identity, e = syncIdentity(*o); e != nil {
+				return e
+			}
+			if e = atomicStateJSON(recoveryPath, checkpoint); e != nil {
+				return e
+			}
 			previous = after
-			if e = runSync(ctx, recovery, b); e != nil {
+			if e = runSync(ctx, recovery, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 				return fmt.Errorf("restart recovery: %w", e)
 			}
 			state = recovery.state
@@ -259,6 +321,7 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		report.Counts = map[string]readyCount{}
 		report.PolicyNames = 0
 		report.PolicyMismatches = 0
+		report.ExpectedAbsent = 0
 		if e = readyChecks(ctx, *o, r, b, state, &report); e != nil {
 			return e
 		}
@@ -275,7 +338,7 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 			recovery.sampleEvery = 1
 			recovery.settle = 0
 			recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
-			if e = runSync(ctx, recovery, b); e != nil {
+			if e = runSync(ctx, recovery, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 				return fmt.Errorf("final parity fill: %w", e)
 			}
 			repairedParity = true
@@ -293,6 +356,9 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 		report.ProofState = state
 		if len(report.Reasons) == 0 {
 			if e = atomicStateJSON(snapshotPath, final); e != nil {
+				return e
+			}
+			if e = os.Remove(recoveryPath); e != nil && !errors.Is(e, os.ErrNotExist) {
 				return e
 			}
 		}
@@ -384,6 +450,9 @@ func readyRestartWindows(before, after map[string]readyProcess) syncRanges {
 // Independent reads take the 100 lowest stable name hashes per source and
 // for target read-back, so disjoint donor catalogs retain meaningful minima.
 func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncReadyBackend, state string, report *readyReport) error {
+	if err := frontierReadyBounds(o, r, report); err != nil {
+		return err
+	}
 	f, scan, err := openLines(filepath.Join(state, "union.tsv"))
 	if err != nil {
 		return err
@@ -416,12 +485,29 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		if e != nil {
 			return e
 		}
+		var absent []string
+		for _, name := range batch {
+			if _, ok := target[name]; !ok {
+				absent = append(absent, name)
+			}
+		}
+		excluded, e := expectedAbsent(ctx, b, o, absent)
+		if e != nil {
+			return e
+		}
+		report.ExpectedAbsent += len(excluded)
+		if len(excluded) > 0 {
+			event("sync_expected_absent", map[string]any{"phase": "ready policy", "names": len(excluded), "reason": "target_expiration"})
+		}
 		for _, source := range o.from {
 			policies, e := b.Policies(ctx, source, batch)
 			if e != nil {
 				return e
 			}
 			for name, p := range policies {
+				if excluded[name] {
+					continue
+				}
 				if !o.includeShort && readyShort(p.Archives) {
 					continue
 				}
@@ -456,7 +542,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		if e != nil {
 			return e
 		}
-		if mask == 0 {
+		if mask == 0 || o.issues.excluded(name) {
 			continue
 		}
 		batch = append(batch, name)

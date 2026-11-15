@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -45,19 +46,23 @@ type DigestArchive struct {
 // empty when the window lies wholly outside the name's retention.
 type DigestResult struct {
 	Name     string
+	Proof    string `json:",omitempty"`
 	Mode     string `json:",omitempty"`
 	Found    bool
 	Archives []DigestArchive `json:",omitempty"`
 }
 
 func (r DigestRequest) validate() error {
+	if r.Mode == "proof-v1" && (r.From != 0 || r.Until != 0 || r.Step != 0) {
+		return errors.New("mutation proofs require zero bounds and step")
+	}
 	if len(r.Names) == 0 || len(r.Names) > chunkstore.MaxTransferMetrics {
 		return fmt.Errorf("digest needs 1..%d names", chunkstore.MaxTransferMetrics)
 	}
-	if r.Mode != "" && r.Mode != "sum-v1" {
+	if r.Mode != "" && r.Mode != "sum-v1" && r.Mode != "proof-v1" {
 		return errors.New("unknown digest mode")
 	}
-	if !(r.Mode == "sum-v1" && r.From == 0 && r.Until == 0) && (r.From <= 0 || r.Until <= r.From || r.Until > math.MaxInt32) {
+	if !(r.Mode == "proof-v1" || r.Mode == "sum-v1" && r.From == 0 && r.Until == 0) && (r.From <= 0 || r.Until <= r.From || r.Until > math.MaxInt32) {
 		return errors.New("digest window needs 0 < From < Until (Unix seconds)")
 	}
 	seen := make(map[string]struct{}, len(r.Names))
@@ -87,6 +92,30 @@ func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, 
 		}
 		out[i].Name = name
 		out[i].Mode = r.Mode
+		if r.Mode == "proof-v1" {
+			m, err := s.store.Metadata(ctx, name)
+			if err != nil && !errors.Is(err, chunkstore.ErrNotFound) {
+				return err
+			}
+			out[i].Found = err == nil
+			// Legacy files can change outside the native revision fence. Such
+			// ownership is explicitly unknown, never a reusable clean proof.
+			if s.proofEpoch == "" || s.store.IncrementalSource() != "" && (!out[i].Found || m.FileMigration != chunkstore.FileReclaimed) {
+				return nil
+			}
+			data, err := json.Marshal(struct {
+				Epoch   string
+				Found   bool
+				Version chunkstore.TransferVersion
+				Config  chunkstore.MetricConfig
+			}{s.proofEpoch, out[i].Found, chunkstore.TransferVersion{Name: name, ID: m.ID, Generation: m.Generation, Revision: m.Revision}, m.MetricConfig})
+			if err != nil {
+				return err
+			}
+			proof := sha256.Sum256(data)
+			out[i].Proof = hex.EncodeToString(proof[:])
+			return nil
+		}
 		if r.Mode == "sum-v1" {
 			archives, err := s.store.SumDigest(ctx, name, int(r.From), int(r.Until), r.Step)
 			if errors.Is(err, chunkstore.ErrNotFound) {

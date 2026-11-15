@@ -56,6 +56,31 @@ Durable cumulative counters and the rate retain their existing meanings. Nested 
 the parent sync snapshot. Commands without a progress file emit only lifecycle
 heartbeats. Phase appears in the series name.
 
+Command-root `eta_seconds` estimates only the current phase. The READY metrics are:
+
+- `eta_ready_seconds`: remaining time through controller READY, or `-1` when
+  any required work is unmeasured. Only a completed READY attestation is zero;
+  entering the final READY checks does not mean they have passed.
+- `eta_ready_known_seconds`: conditional projection for measured work: the
+  current phase plus the next planned verification after copying or filling,
+  when this client has measured a verification rate. It is a partial estimate,
+  not a completion deadline or a guaranteed lower bound.
+- `eta_ready_unknown_parts`: number of unmeasured components, including future
+  residual repairs/convergence and final parity, gap coverage and read-back.
+- `phases_left`: minimum known stages through READY; `-1` means the remaining
+  stage count is unknown. Additional repairs may add stages.
+
+READY projections use fresh work observed during this client lifetime, exclude
+journal replay, and lose the current rate after a stall. Phase/round changes
+reset the measurement window. Progress JSON `next_verify_names` reports the
+planned distinct-name convergence count; it is omitted until known. Hole point
+observations are never interpreted as a count of repair names. Future repair
+volume and final READY checks have no measured work/rate yet, so the full ETA
+stays unknown while their measured portion remains visible. Controller READY
+covers its configured sources and windows; decommissioning a block additionally
+requires every copy, the complete gap ledger, and parity against every required
+donor and peer. These metrics do not authorize decommissioning.
+
 These metrics require installing this tool version and launching a new process.
 An already running binary cannot start exporting them, and history is not backfilled.
 
@@ -858,3 +883,38 @@ exports `store_retries`, `store_wait_seconds` (wall time with at least one pendi
 restart wait), and `waiting_for_store` under the existing run prefix, including
 capacity probes and READY read-back before/after the main transfer phases.
 The main transfer's `progress.json` also exposes `waiting_for_store`.
+
+A terminal sync with residuals emits `sync_done` with `level: "ERROR"` and returns
+a nonzero exit status. Each distinct metric that still has holes after an
+accepted fill also emits `sync_repair_failed` with `level: "ERROR"`, `metric`,
+`reason: "persisted_after_fill"`, and its source/window/archive evidence. These
+failures publish the fixed Graphite gauge
+`tools.storectl.<runner>.<run>.sync.repair_failed_names`; metric names remain in
+logs rather than becoming Graphite series. The count is retained through parent
+READY finalization within that client invocation and starts at zero for a new
+invocation. `residual.json` retains the full terminal residual evidence. An
+accepted transfer alone never proves a repair.
+
+Fill progress totals count distinct `(metric, source)` transfers. A metric with
+holes in multiple archives or windows is selected once per source; donor fan-out
+can legitimately make this count exceed the preceding distinct verified-name
+count. `sync_round.holes` separately retains archive/window hole observations.
+
+### Named sync exceptions
+
+`storectl sync` records names exceeding the store's 4,096-byte creation limit in
+`policy-skipped.json`. These names never reach copy, verification or READY reads
+and do not prevent READY. Names still unresolved after the existing bounded
+selection or repair retries are recorded in `quarantine.json`; the remaining
+names continue through every phase. Both files contain the name, reason, phase,
+and first/last observation time and survive `--resume`. Recovery jobs share their
+parent's lists, preserving the original journals and immutable copy selections.
+
+Each newly excluded name emits an ERROR event. Progress JSON and Graphite expose
+`quarantined` and `policy_skipped` counts under the existing sync metric prefix.
+An otherwise successful final attestation is `READY_EXCEPT` when quarantined
+names remain, with their count and list path in `ready.json` and exit code **3**.
+It does not certify coverage for those names or count them as copied. Exit **2**
+continues to mean incomplete readiness; process, scope and read-back gates still
+apply to every other name. Keep both lists with the unit's saved state; resume
+preserves the exceptions rather than repeatedly attempting their failed work.

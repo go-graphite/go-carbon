@@ -26,6 +26,7 @@ import (
 // syncNameSource yields names with their source masks in byte order; next
 // returns io.EOF at the end.
 type syncNameSource struct {
+	id    func() int64 // stable union catalog line number for the last yielded name
 	total int
 	next  func() (string, uint64, error)
 	close func()
@@ -327,6 +328,7 @@ func openLines(path string) (*os.File, *bufio.Scanner, error) {
 // unionSource streams the names to verify in round 1: on the target (or
 // copied by this sync) and held by at least one source.
 func (s *syncer) unionSource() syncNameSource {
+	ordinal := int64(-1)
 	var f *os.File
 	var scanner *bufio.Scanner
 	total := s.sum.Discovered
@@ -334,6 +336,7 @@ func (s *syncer) unionSource() syncNameSource {
 		total = s.both + len(s.copied)
 	}
 	return syncNameSource{
+		id:    func() int64 { return ordinal },
 		total: total,
 		next: func() (string, uint64, error) {
 			if f == nil {
@@ -347,6 +350,7 @@ func (s *syncer) unionSource() syncNameSource {
 				if err != nil {
 					return "", 0, err
 				}
+				ordinal++
 				if s.legacyCopyReceipts && (mask == 0 || (!onTarget && !s.copied[name])) {
 					continue
 				}
@@ -377,24 +381,30 @@ func (s *syncer) setSource(set []string) (syncNameSource, error) {
 	}
 	defer f.Close()
 	type entry struct {
+		id   int64
 		name string
 		mask uint64
 	}
 	var picked []entry
+	ordinal := int64(-1)
 	for scanner.Scan() && len(picked) < len(want) {
+		ordinal++
 		name, mask, _, err := parseUnionLine(scanner.Text())
 		if err != nil {
 			return syncNameSource{}, err
 		}
 		if want[name] {
-			picked = append(picked, entry{name, mask})
+			picked = append(picked, entry{ordinal, name, mask})
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return syncNameSource{}, err
 	}
+	if len(picked) != len(want) {
+		return syncNameSource{}, fmt.Errorf("verification frontier contains %d names absent from catalog", len(want)-len(picked))
+	}
 	i := 0
-	return syncNameSource{total: len(picked), next: func() (string, uint64, error) {
+	return syncNameSource{id: func() int64 { return picked[i-1].id }, total: len(picked), next: func() (string, uint64, error) {
 		if i >= len(picked) {
 			return "", 0, io.EOF
 		}
@@ -419,6 +429,13 @@ func (s *syncer) readMissing() ([]syncMissing, error) {
 		name, mask, _, err := parseUnionLine(scanner.Text())
 		if err != nil {
 			return nil, err
+		}
+		skip, e := s.excludePolicy(name, "missing")
+		if e != nil {
+			return nil, e
+		}
+		if skip {
+			continue
 		}
 		out = append(out, syncMissing{name, mask})
 	}
@@ -672,6 +689,9 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 	}
 	s.phase("copy")
 	s.prog.begin("copy", len(missing))
+	if !s.legacyCopyReceipts {
+		s.prog.planVerification(int64(s.sum.Discovered))
+	}
 	short := map[string]bool{}
 	work := 0
 	for src, source := range s.o.from {
@@ -755,7 +775,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		process := func(chunk []string, group int, prepared bool) error {
 			unfinished := false
 			for _, n := range chunk {
-				unfinished = unfinished || (!s.copied[n] && !short[n] && !s.failedCp[n])
+				unfinished = unfinished || (!s.copied[n] && !short[n] && !s.failedCp[n] && !s.o.issues.excluded(n))
 			}
 			if !unfinished {
 				return nil
@@ -779,7 +799,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			event("sync_prechecked", map[string]any{"source": source, "names": len(chunk), "keep": len(keep), "short": len(shortNames), "absent": len(absent), "group": group, "seconds": time.Since(checkedAt).Seconds(), "names_per_second": float64(len(chunk)) / time.Since(checkedAt).Seconds()})
 			allDone := true
 			for _, n := range keep {
-				allDone = allDone && (s.copied[n] || s.failedCp[n])
+				allDone = allDone && (s.copied[n] || s.failedCp[n] || s.o.issues.excluded(n))
 			}
 			completed := int64(len(s.copied) + len(short) + len(s.failedCp))
 			s.prog.advance(completed)
@@ -884,7 +904,7 @@ func (s *syncer) applyCopy(names, short []string, copied int, failed []string, f
 	}
 	newlyCopied := 0
 	for _, n := range names {
-		if !skip[n] && !s.copied[n] {
+		if !skip[n] && !s.copied[n] && !s.o.issues.excluded(n) {
 			s.copied[n] = true
 			newlyCopied++
 		}

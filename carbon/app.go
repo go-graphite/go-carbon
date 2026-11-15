@@ -477,6 +477,9 @@ func (app *App) ReloadConfig() error {
 		if err = app.MetricStore.SetBlockLoadConcurrency(app.Config.Whisper.StoreBlockLoadConcurrency); err != nil {
 			return err
 		}
+		zapwriter.Logger("storage").Info("shared store block load concurrency reloaded",
+			zap.Int("configured", app.Config.Whisper.StoreBlockLoadConcurrency),
+			zap.Int64("effective", app.MetricStore.BlockLoadConcurrency()))
 		// Compaction concurrency and pacing trade background store work
 		// against foreground flushes, so they are tuned on a live host.
 		if err = app.MetricStore.SetCompactionWorkers(storeCompactionWorkers(app.Config.Whisper.StoreCompactionWorkers, runtime.NumCPU())); err != nil {
@@ -1221,7 +1224,9 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		}
 		ot := app.MetricStore.OpenTimings()
 		zapwriter.Logger("storage").Info("shared store opened", zap.Duration("wal_move", ot.MoveWAL), zap.Duration("pebble", ot.Pebble),
-			zap.Duration("configure", ot.Configure))
+			zap.Duration("configure", ot.Configure),
+			zap.Int("block_load_concurrency_configured", conf.Whisper.StoreBlockLoadConcurrency),
+			zap.Int64("block_load_concurrency_effective", app.MetricStore.BlockLoadConcurrency()))
 		if app.storeHandoffReady {
 			// The handoff attached the pending checkpoint before the store
 			// opened, too early for restoreWithPendingReads to prewarm it.
@@ -1917,6 +1922,7 @@ func (app *App) startBuckyd() (err error) {
 		if app.Carbonserver != nil {
 			app.Buckyd.SetOnNativeImport(app.Carbonserver.QueueNewMetric)
 		}
+		app.configureExpirationEvidence()
 		app.configureTransferCache()
 		if err := app.configureStoreCopy(); err != nil {
 			return fmt.Errorf("configure store copy: %w", err)

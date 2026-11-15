@@ -1127,6 +1127,9 @@ func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) 
 		if err := s.rangeTransferDelete(ctx, b, m, ranges); err != nil {
 			return err
 		}
+		if err := b.Delete(expirationReceiptKey(v.Name), nil); err != nil {
+			return err
+		}
 		if err := b.Delete(catalogKey(v.Name), nil); err != nil {
 			return err
 		}

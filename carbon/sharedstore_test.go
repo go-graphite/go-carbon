@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -476,6 +477,17 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 	if got := store.RelayoutStats(); got.MinFreeBytes != 300<<30 || got.MaxCompactionDebt != 16<<30 || got.ReclaimBytes != 64<<30 {
 		t.Fatalf("reloaded relayout limits: %+v", got)
 	}
+	// Resetting the override recomputes the budget after max-cpu is applied.
+	next.Whisper.StoreBlockLoadConcurrency = 0
+	next.Common.MaxCPU = 48
+	writeSharedConfig(t, path, &next)
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if app.MetricStore != store || store.BlockLoadConcurrency() != 48 || runtime.GOMAXPROCS(0) != 48 {
+		t.Fatalf("automatic reload: capacity=%d CPUs=%d", store.BlockLoadConcurrency(), runtime.GOMAXPROCS(0))
+	}
+
 	off := next
 	off.Whisper.StoreTimeBucketsRelayoutRate = 0
 	if !storageSettingsChanged(&next, &off) {

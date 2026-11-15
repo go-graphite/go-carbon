@@ -5,6 +5,7 @@ package buckyd
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,6 +114,7 @@ type ACL struct {
 }
 
 type Service struct {
+	proofEpoch             string // service lifetime: metadata proofs never cross restarts
 	nativeRejectedRequests atomic.Uint64
 	nativePullOnce         sync.Once
 	nativePullAdmission    chan struct{}
@@ -142,6 +144,7 @@ type Service struct {
 	nodes                         []Node
 	onChange                      func()
 	onNativeImport                func(string)
+	expirationPolicy              func(string) (string, time.Duration, bool)
 	flushTransfer                 func(context.Context, []string) error
 	pyroscope                     *pyroscope.Profiler
 	pprofServer                   *http.Server
@@ -174,7 +177,7 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
+	s := &Service{proofEpoch: rand.Text(), config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
 	s.SetMaxTransfers(config.MaxTransfers)
 	s.SetTransferSources(config.TransferSources)
@@ -392,7 +395,7 @@ func (s *Service) SetOnChange(callback func()) {
 }
 
 // SetOnNativeImport installs a callback for each committed name in a successful
-// native pull, including receipt retries. It lets discovery queue names without
+// native or legacy bulk import, including receipt retries. It queues names without
 // waiting for a catalog scan.
 func (s *Service) SetOnNativeImport(callback func(string)) {
 	s.mu.Lock()
@@ -571,6 +574,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/transfer/", s.bulk)
 	mux.HandleFunc("/v1/native/", s.native)
 	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
+	mux.HandleFunc("/v1/expiration/evidence", s.expirationEvidence)
 	mux.HandleFunc("/v1/maintenance/archive-anchors", s.archiveAnchors)
 	mux.HandleFunc("/v1/maintenance/sidecars", s.sidecars)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

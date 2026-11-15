@@ -332,6 +332,39 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 	return out, nil
 }
 
+// Proofs returns metadata-only mutation fences, including explicit absence.
+// Empty tokens mean unknown ownership. Old endpoints cannot authorize reuse.
+func (b *syncLiveBackend) Proofs(ctx context.Context, store string, names []string) ([]string, error) {
+	request := struct {
+		Names []string
+		Mode  string
+	}{names, "proof-v1"}
+	var reply []struct{ Name, Mode, Proof string }
+	err := b.wait(ctx, "proof", store, func() error {
+		reply = nil
+		_, err := b.m.requestOnce(ctx, store, "/v1/transfer/digest", request, &reply)
+		return err
+	})
+	var api *apiError
+	if errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusMethodNotAllowed || api.Status == http.StatusBadRequest) {
+		return nil, errSyncNoProof
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) != len(names) {
+		return nil, errSyncNoProof
+	}
+	out := make([]string, len(names))
+	for i, r := range reply {
+		if r.Mode != "proof-v1" || r.Name != names[i] {
+			return nil, errSyncNoProof
+		}
+		out[i] = r.Proof
+	}
+	return out, nil
+}
+
 // SumDigest requires an explicit mode echo: older endpoints can ignore Mode
 // and return SHA digests with a superficially identical wire shape.
 func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []string, step, from, until int64) (map[string][]syncDigest, error) {

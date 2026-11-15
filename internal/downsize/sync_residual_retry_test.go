@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestSyncResumeTerminalResidualRechecksStores(t *testing.T) {
+func TestSyncResumeTerminalResidualKeepsQuarantine(t *testing.T) {
 	f := newFakeSync()
 	o := convergeOptions(t)
 	schema := []syncArchive{{60, 10000}}
@@ -28,8 +28,8 @@ func TestSyncResumeTerminalResidualRechecksStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runSync(context.Background(), o, partialSync{fakeSync: f}); err != nil {
-		t.Fatalf("resume reused stale verification/fill receipts: %v", err)
+	if err := runSync(context.Background(), o, partialSync{fakeSync: f}); !errors.Is(err, ErrSyncQuarantined) {
+		t.Fatalf("resume lost quarantine verdict: %v", err)
 	}
 	after, err := os.ReadFile(p)
 	if err != nil {
@@ -38,8 +38,8 @@ func TestSyncResumeTerminalResidualRechecksStores(t *testing.T) {
 	if !bytes.HasPrefix(after, before) || !bytes.Contains(after[len(before):], []byte(`"kind":"verification-retry"`)) {
 		t.Fatal("retry did not append to original journal")
 	}
-	if _, ok := f.store(syncT).points["hole"][60][ts]; !ok {
-		t.Fatal("fresh fill never reached target")
+	if _, ok := f.store(syncT).points["hole"][60][ts]; ok {
+		t.Fatal("resume retried quarantined name")
 	}
 }
 
@@ -77,10 +77,9 @@ func TestSyncLegacyResidualRetryKeepsInterruptedGeneration(t *testing.T) {
 	}
 }
 
-// A denied transfer is evidence of an attempt, not a permanent source policy.
-// Exercise both missing-name and existing-name hole repair through a terminal
-// residual retry, retaining the original journal and already successful work.
-func TestSyncResumeRetriesRepairedSourceAllowlist(t *testing.T) {
+// A terminal failure is a durable named exception. Changing an allowlist does
+// not silently clear it; interrupted attempts below still retry on resume.
+func TestSyncResumeRetainsQuarantineAfterSourceAllowlistRepair(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		t.Run(fmt.Sprint("missing=", missing), func(t *testing.T) {
 			f := newFakeSync()
@@ -103,8 +102,8 @@ func TestSyncResumeRetriesRepairedSourceAllowlist(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.forbidden[syncD1] = false
-			if err := runSync(context.Background(), o, f); err != nil {
-				t.Fatalf("repaired allowlist did not recover: %v", err)
+			if err := runSync(context.Background(), o, f); !errors.Is(err, ErrSyncQuarantined) {
+				t.Fatalf("repaired allowlist silently cleared quarantine: %v", err)
 			}
 			after, err := os.ReadFile(path)
 			if err != nil {
@@ -113,8 +112,8 @@ func TestSyncResumeRetriesRepairedSourceAllowlist(t *testing.T) {
 			if !bytes.HasPrefix(after, before) {
 				t.Fatal("rewrote original journal")
 			}
-			if _, ok := f.store(syncT).points["repair"][60][ts]; !ok {
-				t.Fatal("source points not recovered")
+			if _, ok := f.store(syncT).points["repair"][60][ts]; ok {
+				t.Fatal("quarantined name was retried")
 			}
 			for _, call := range f.copies {
 				if strings.Contains(call, "already-good") {

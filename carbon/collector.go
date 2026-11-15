@@ -75,7 +75,12 @@ func NewCollector(app *App) *Collector {
 		}
 	}
 
+	// Modules may have counted input throughout a long startup (or reload).
+	// Establish their baseline without publishing that unbounded window as one
+	// metric interval. Stat still updates cumulative Prometheus counters.
+	discardStat := func(string, float64) {}
 	moduleCallback := func(moduleName string, moduleObj statModule) statFunc {
+		moduleObj.Stat(discardStat)
 		return func() {
 			moduleObj.Stat(sendCallback(moduleName))
 		}

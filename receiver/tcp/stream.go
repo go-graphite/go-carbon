@@ -95,7 +95,12 @@ func (rcv *TCP) streamFailure(conn net.Conn, err error) {
 	}
 	rcv.streamCounters[streamDecodeErrors].Add(1)
 	atomic.AddUint32(&rcv.errors, 1)
-	rcv.logger.Error("stream decode failed", zap.String("peer", conn.RemoteAddr().String()), zap.Error(err))
+	peer := ""
+	// An inherited socket can lose its peer address before net.FileConn.
+	if addr := conn.RemoteAddr(); addr != nil {
+		peer = addr.String()
+	}
+	rcv.logger.Error("stream decode failed", zap.String("peer", peer), zap.Error(err))
 }
 
 // handleStream runs under handlePlain's connection lifecycle. Every accepted

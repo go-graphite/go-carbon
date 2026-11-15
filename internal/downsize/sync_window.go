@@ -82,6 +82,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	}
 	s.phase("copy")
 	s.prog.begin("window missing", s.sum.Missing)
+	if !s.legacyCopyReceipts {
+		s.prog.planVerification(int64(s.sum.Discovered))
+	}
 	selections, completed := map[syncWindowSelectionKey]syncRow{}, map[syncWindowSelectionKey]syncRow{}
 	for _, r := range s.j.find(func(r syncRow) bool {
 		return r.Kind == "window-selected" || r.Kind == "copied" && r.Phase == "window-missing"
@@ -235,6 +238,13 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 			continue
 		}
 		for i, n := range names {
+			skip, e := s.excludePolicy(n, "window missing")
+			if e != nil {
+				return e
+			}
+			if skip {
+				continue
+			}
 			if masks[i]&(1<<uint(src)) != 0 {
 				if err := chunkstore.ValidateMetricName(n); err == nil {
 					subsets[src] = append(subsets[src], n)
@@ -575,8 +585,17 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 				}
 				for _, skip := range skips {
 					if skip.Timestamp >= w.From && skip.Timestamp < w.Until && skip.Ordinal >= 0 && skip.Ordinal < end-start {
+						name := names[start+skip.Ordinal]
+						repaired, err := b.repairWindowBoundary(ctx, c, source, target, name, skip)
+						if err != nil {
+							return err
+						}
+						if repaired {
+							fresh = true
+							continue
+						}
 						rangeFailed = true
-						markFailed(names[start+skip.Ordinal])
+						markFailed(name)
 						event("sync_window_boundary_skip", map[string]any{"level": "warn", "metric": names[start+skip.Ordinal], "timestamp": skip.Timestamp, "reason": skip.Reason})
 					}
 				}

@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -15,6 +16,10 @@ import (
 // DeleteBatchIfUnchanged commits at most 512 expiration candidates together.
 // Results correspond to input order; a conflict leaves that metric untouched.
 func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata) ([]error, error) {
+	return s.deleteBatchIfUnchanged(ctx, expected, nil)
+}
+
+func (s *Store) deleteBatchIfUnchanged(ctx context.Context, expected []Metadata, receipts map[string]ExpirationReceipt) ([]error, error) {
 	if len(expected) > 512 {
 		return nil, errors.New("delete batch exceeds 512 metrics")
 	}
@@ -154,6 +159,17 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 		}
 		b = filtered
 	}
+	for _, m := range removed {
+		if receipt, ok := receipts[m.Name]; ok {
+			data, err := json.Marshal(receipt)
+			if err != nil {
+				return nil, err
+			}
+			if err = b.Set(expirationReceiptKey(m.Name), data, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
 	records := make([]SidecarRecord, len(removed))
 	for i, m := range removed {
 		records[i].Name = m.Name
@@ -230,6 +246,9 @@ func (s *Store) prepareExpirationDeletes(ctx context.Context, batch *pebble.Batc
 // even when they read unrelated metrics. Expiration visits the existing keys
 // instead, then revalidates under the mutation stripes before committing.
 func (s *Store) appendExpirationDelete(ctx context.Context, b *pebble.Batch, reader *transferReader, m Metadata) error {
+	if err := b.Delete(expirationReceiptKey(m.Name), nil); err != nil {
+		return err
+	}
 	if err := b.Delete(catalogKey(m.Name), nil); err != nil {
 		return err
 	}
