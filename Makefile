@@ -42,6 +42,7 @@ debug:
 # Retain dependency oracles; go mod vendor omits test files.
 WHISPER_VENDOR_TESTS := \
 	align_points_test.go \
+	classic_propagation_test.go \
 	compress_bits_test.go \
 	continuation_off_grid_test.go \
 	existing_open_test.go \
