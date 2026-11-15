@@ -78,7 +78,13 @@ func (r *Reader) legacyAllowed(name string) bool {
 // Find emits the catalog union once per name. It forwards each side's original
 // index query and bounds the duplicate set; it does not implement a glob parser.
 func (r *Reader) Find(ctx context.Context, pattern string, yield func(string) error) error {
+	h, err := r.opts.Parts.Catalog.Pin(r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+	if err != nil {
+		return err
+	}
+	defer h.Close()
 	seen := make(map[string]struct{})
+	var nameBytes int64
 	emit := func(name string) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -86,13 +92,17 @@ func (r *Reader) Find(ctx context.Context, pattern string, yield func(string) er
 		if _, ok := seen[name]; ok {
 			return nil
 		}
-		if len(seen) >= r.opts.MaxFindNames {
+		// Include name bytes and conservative map/string bookkeeping. Keep
+		// this reservation pinned through both catalogs and consumer callbacks.
+		cost := int64(len(name)) + 96
+		if len(seen) >= r.opts.MaxFindNames || cost > r.opts.Parts.WorkBytes-nameBytes {
 			return partsread.ErrAdmission
 		}
+		nameBytes += cost
 		seen[name] = struct{}{}
 		return yield(name)
 	}
-	if err := r.opts.Parts.Find(ctx, pattern, emit); err != nil {
+	if err := h.Find(ctx, pattern, emit); err != nil {
 		return err
 	}
 	return r.opts.LegacyCatalog.Find(ctx, pattern, func(name string) error {

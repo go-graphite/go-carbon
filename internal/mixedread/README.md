@@ -19,7 +19,7 @@ err = reader.Fetch(ctx, name, from, until, func(s *partsread.Series) error {
 ```
 
 Find queries union both catalogs through their existing Graphite find indexes,
-with bounded duplicate tracking. The package has no competing glob parser.
+with duplicate tracking bounded by name count and the pinned byte reservation. The package has no competing glob parser.
 Render uses the same complete query interval on both backends, preserving archive
 selection. An occupied v2 physical slot wins over legacy, including stored NaNs
 and replacements whose newer ring timestamp invalidates the requested old slot.

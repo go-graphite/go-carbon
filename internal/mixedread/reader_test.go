@@ -211,3 +211,25 @@ func TestZeroWidthLegacyArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFindReservationCoversLegacyCallbacks(t *testing.T) {
+	r, p, m := fixture(t, nil)
+	p.Publish(partsread.View{Catalog: catalog(map[string]partsread.Metric{})})
+	r.opts.LegacyCatalog = catalog(map[string]partsread.Metric{"legacy.only": m})
+	sentinel := errors.New("stop legacy consumer")
+	if err := r.Find(context.Background(), "*", func(string) error {
+		if r.opts.Parts.Budget.Used() == 0 {
+			t.Fatal("legacy find callback escaped reservation")
+		}
+		return sentinel
+	}); !errors.Is(err, sentinel) {
+		t.Fatal(err)
+	}
+	if r.opts.Parts.Budget.Used() != 0 {
+		t.Fatal("find reservation leaked")
+	}
+	r.opts.Parts.WorkBytes = 1
+	if err := r.Find(context.Background(), "*", func(string) error { t.Fatal("find exceeded name byte reservation"); return nil }); !errors.Is(err, partsread.ErrAdmission) {
+		t.Fatal(err)
+	}
+}
