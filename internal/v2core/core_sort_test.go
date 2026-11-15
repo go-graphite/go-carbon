@@ -9,7 +9,7 @@ import (
 
 func TestCoreBucketSortMatchesOriginalBytes(t *testing.T) {
 	rng := rand.New(rand.NewPCG(41, 19))
-	var scratch []row
+	var scratch, work []row
 	for trial := range 48 {
 		rows := make([]row, 8192)
 		for i := range rows {
@@ -35,9 +35,15 @@ func TestCoreBucketSortMatchesOriginalBytes(t *testing.T) {
 		if trial == 1 {
 			rows = append(rows, row{Time: math.MinInt64}, row{Time: math.MaxInt64})
 		}
+		original := slices.Clone(rows)
 		want := slices.Clone(rows)
 		sortCoreRows(want, 3600)
 		scratch = sortCoreRowsBucketed(rows, 3600, scratch)
+		if !slices.Equal(rows, want) {
+			t.Fatalf("bucket trial %d differs", trial)
+		}
+		copy(rows, original)
+		scratch, work = sortCoreRowsRadix(rows, 3600, scratch, work)
 		if !slices.Equal(rows, want) {
 			t.Fatalf("trial %d differs", trial)
 		}
@@ -50,14 +56,16 @@ func BenchmarkCoreSortCandidates(b *testing.B) {
 	for i := range source {
 		source[i] = row{rng.Uint64N(16000000), 1800000000, rng.Uint64(), uint64(i)}
 	}
-	for _, bucketed := range []bool{false, true} {
-		b.Run(map[bool]string{false: "comparison", true: "bucketed"}[bucketed], func(b *testing.B) {
-			rows, scratch := make([]row, len(source)), make([]row, len(source))
+	for _, algorithm := range []string{"comparison", "bucketed", "radix"} {
+		b.Run(algorithm, func(b *testing.B) {
+			rows, scratch, work := make([]row, len(source)), make([]row, len(source)), make([]row, len(source))
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
 				copy(rows, source)
-				if bucketed {
+				if algorithm == "radix" {
+					scratch, work = sortCoreRowsRadix(rows, 3600, scratch, work)
+				} else if algorithm == "bucketed" {
 					scratch = sortCoreRowsBucketed(rows, 3600, scratch)
 				} else {
 					sortCoreRows(rows, 3600)

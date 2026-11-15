@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -54,6 +55,7 @@ type coreDispatch struct {
 	storage   []row
 	parts     [][]row
 	counts    []int
+	routes    []int
 	waitSince []time.Time
 	packets   []corePacket
 	router    *coreRouter
@@ -160,13 +162,16 @@ type coreOwner struct {
 	preallocateNS, fileWriteNS   atomic.Uint64
 	fileBuffer                   coreFileBuffer
 	bucketSort                   bool
+	radixSort                    bool
 	sortScratch                  []row
+	radixWork                    []row
 }
 type coreEngine struct {
-	owners  []*coreOwner
-	routers []coreRouter
-	cfg     coreConfig
-	stalls  atomic.Uint64
+	owners      []*coreOwner
+	routers     []coreRouter
+	cfg         coreConfig
+	stalls      atomic.Uint64
+	streamBytes uint64
 }
 
 // Hash only the canonical numeric ID, with stable distribution independent of
@@ -190,6 +195,14 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
 	hook := hooks.Publish
+	streamBytes := uint64(coreStreamBytes)
+	if value := os.Getenv("CORE_STREAM_BYTES"); value != "" {
+		n, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || n < corePacketBytes || n > 1<<30 {
+			return nil, errors.New("CORE_STREAM_BYTES must be bytes between packet size and 1 GiB")
+		}
+		streamBytes = n
+	}
 	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 {
 		return nil, os.ErrInvalid
 	}
@@ -198,7 +211,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	diskConfig := cfg
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
-	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers)}
+	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			_ = o.db.Close()
@@ -219,6 +232,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
 		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
 		o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
+		o.radixSort = os.Getenv("CORE_RADIX_SORT") == "1"
 		e.owners = append(e.owners, o)
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
@@ -282,13 +296,17 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 }
 func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
 	router := &e.routers[producer]
+	streamBytes := e.streamBytes
+	if streamBytes == 0 {
+		streamBytes = coreStreamBytes
+	}
 	// Count every original packet's data, including detached apply groups.
 	charge := uint64(len(e.owners))*corePacketBytes + uint64(len(rows))*uint64(unsafe.Sizeof(row{}))
 	for _, b := range batches {
 		charge += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
 	}
 	if len(router.slots) == 0 {
-		router.slots = make([]coreDispatch, max(1, coreStreamBytes/(uint64(len(e.owners))*corePacketBytes)))
+		router.slots = make([]coreDispatch, max(1, streamBytes/(uint64(len(e.owners))*corePacketBytes)))
 	}
 	var d *coreDispatch
 	var waitStart time.Time
@@ -300,7 +318,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	}()
 	for d == nil {
 		used := router.bytes.Load()
-		if used == 0 || (charge <= coreStreamBytes && used <= coreStreamBytes-charge) {
+		if used == 0 || (charge <= streamBytes && used <= streamBytes-charge) {
 			// Reuse free leases first, rather than allocating a fresh payload on
 			// every lap of a large ring. No slow lease blocks unrelated free ones.
 			for i := range router.slots {
@@ -340,8 +358,13 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	}
 	parts, counts := d.parts, d.counts
 	clear(counts)
-	for _, r := range rows {
+	if cap(d.routes) < len(rows) {
+		d.routes = make([]int, len(rows))
+	}
+	routes := d.routes[:len(rows)]
+	for i, r := range rows {
 		s := coreShard(r.ID, e.cfg.Shards)
+		routes[i] = s
 		counts[s]++
 	}
 	for _, count := range counts {
@@ -359,8 +382,8 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		parts[s] = storage[:0:count]
 		storage = storage[count:]
 	}
-	for _, r := range rows {
-		s := coreShard(r.ID, e.cfg.Shards)
+	for i, r := range rows {
+		s := routes[i]
 		parts[s] = append(parts[s], r)
 	}
 	var byOwner [][]coreBatch
@@ -641,7 +664,9 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}
 	phaseStart := time.Now()
-	if o.bucketSort {
+	if o.radixSort {
+		o.sortScratch, o.radixWork = sortCoreRowsRadix(head, o.cfg.PartitionSeconds, o.sortScratch, o.radixWork)
+	} else if o.bucketSort {
 		o.sortScratch = sortCoreRowsBucketed(head, o.cfg.PartitionSeconds, o.sortScratch)
 	} else {
 		sortCoreRows(head, o.cfg.PartitionSeconds)
