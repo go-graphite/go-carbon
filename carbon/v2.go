@@ -127,6 +127,7 @@ func (app *App) stopV2() {
 		v.failure("flush", err, false)
 	}
 	<-app.stopReadListeners()
+	v.stopReads()
 	if err := v.Backend.Close(); err != nil {
 		v.failure("close", err, false)
 	}
@@ -172,7 +173,35 @@ func (v *v2Runtime) queryFailure(op string, err error) {
 	}
 }
 
+// A protocol's Stop may cancel handlers without joining them. Track backend
+// calls here so Close cannot overtake one, including a carbonlink query whose
+// caller has no request context. Writers never acquire this mutex.
+func (v *v2Runtime) beginRead(parent context.Context) (context.Context, func(), error) {
+	v.readMu.Lock()
+	defer v.readMu.Unlock()
+	if v.readClosing {
+		return nil, nil, context.Canceled
+	}
+	v.readWG.Add(1)
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(v.readContext, cancel)
+	return ctx, func() { stop(); cancel(); v.readWG.Done() }, nil
+}
+
+func (v *v2Runtime) stopReads() {
+	v.readMu.Lock()
+	v.readClosing = true
+	v.cancelReads()
+	v.readMu.Unlock()
+	v.readWG.Wait()
+}
+
 func (v *v2Runtime) Fetch(ctx context.Context, name string, from, until int) (*daemonstore.Series, error) {
+	ctx, done, err := v.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	started := time.Now()
 	s, err := v.Backend.Fetch(ctx, name, from, until)
 	v.readLatency.Observe(time.Since(started).Seconds())
@@ -180,16 +209,31 @@ func (v *v2Runtime) Fetch(ctx context.Context, name string, from, until int) (*d
 	return s, err
 }
 func (v *v2Runtime) Info(ctx context.Context, name string) (daemonstore.Metric, error) {
+	ctx, done, err := v.beginRead(ctx)
+	if err != nil {
+		return daemonstore.Metric{}, err
+	}
+	defer done()
 	m, err := v.Backend.Info(ctx, name)
 	v.queryFailure("info", err)
 	return m, err
 }
 func (v *v2Runtime) Find(ctx context.Context, pattern string) ([]daemonstore.Match, error) {
+	ctx, done, err := v.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	m, err := v.Backend.Find(ctx, pattern)
 	v.queryFailure("find", err)
 	return m, err
 }
 func (v *v2Runtime) CacheQuery(ctx context.Context, name string) ([]points.Point, error) {
+	ctx, done, err := v.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	p, err := v.Backend.CacheQuery(ctx, name)
 	if errors.Is(err, daemonstore.ErrNotFound) {
 		return nil, nil

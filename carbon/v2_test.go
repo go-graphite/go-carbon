@@ -33,6 +33,9 @@ type oracleBackend struct {
 	w                             *whisper.Whisper
 	count                         uint64
 	accepted                      chan struct{}
+	cacheEntered                  chan struct{}
+	cacheCanceled                 chan struct{}
+	cacheReturn                   chan struct{}
 	errors                        chan daemonstore.Failure
 	appendErr, flushErr, closeErr error
 	closed                        bool
@@ -110,8 +113,79 @@ func (b *oracleBackend) Find(_ context.Context, pattern string) ([]daemonstore.M
 	}
 	return nil, nil
 }
-func (b *oracleBackend) CacheQuery(context.Context, string) ([]points.Point, error) {
+func (b *oracleBackend) CacheQuery(ctx context.Context, _ string) ([]points.Point, error) {
+	if b.cacheEntered != nil {
+		close(b.cacheEntered)
+		<-ctx.Done()
+		if b.cacheCanceled != nil {
+			close(b.cacheCanceled)
+			<-b.cacheReturn
+		}
+		return nil, ctx.Err()
+	}
 	return []points.Point{{Timestamp: 123, Value: math.Copysign(0, -1)}}, nil
+}
+
+func TestV2StopCancelsAndJoinsBackendReads(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	b := &oracleBackend{cacheEntered: make(chan struct{}), cacheCanceled: make(chan struct{}), cacheReturn: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(b.cacheReturn) })
+	defer release()
+	app := v2Fixture(t, b)
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reader := app.v2
+	done := make(chan error, 1)
+	go func() {
+		_, err := reader.CacheQuery(context.Background(), "routing.value")
+		done <- err
+	}()
+	select {
+	case <-b.cacheEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend query was not entered")
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- app.DumpStop() }()
+	select {
+	case <-b.cacheCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not cancel backend read")
+	}
+	b.mu.Lock()
+	closed := b.closed
+	b.mu.Unlock()
+	if closed {
+		t.Fatal("backend closed before read returned")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("stop did not wait for active read")
+	default:
+	}
+	release()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not join completed read")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal("stop did not cancel backend read", err)
+	}
+	if _, err := reader.Find(context.Background(), "routing.*"); !errors.Is(err, context.Canceled) {
+		t.Fatal("closed backend admitted another read", err)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closed {
+		t.Fatal("backend close was skipped")
+	}
 }
 
 func v2Fixture(t *testing.T, b *oracleBackend) *App {
@@ -385,7 +459,7 @@ func TestV2MetricRegistration(t *testing.T) {
 	b := &oracleBackend{}
 	app := New("")
 	v := newV2Runtime(app, b)
-	defer func() { close(v.stopErrors); <-v.errorsDone }()
+	defer func() { v.stopReads(); close(v.stopErrors); <-v.errorsDone }()
 	registry := prometheus.NewPedanticRegistry()
 	registry.MustRegister(v)
 	if _, err := registry.Gather(); err != nil {

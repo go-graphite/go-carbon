@@ -53,6 +53,8 @@ type Options struct {
 
 // Reader is shared by HTTP, carbonlink and gRPC. Find includes branch matches
 // and uses Graphite glob semantics. All returned memory belongs to the caller.
+// Calls must honor cancellation; shutdown cancels and joins all admitted calls
+// before closing the backend, including protocols without a request context.
 type Reader interface {
 	Fetch(context.Context, string, int, int) (*Series, error)
 	Info(context.Context, string) (Metric, error)

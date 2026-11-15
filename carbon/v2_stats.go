@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -20,11 +21,18 @@ type v2Runtime struct {
 	statMu      sync.Mutex
 	lastPoints  uint64
 	lastStat    time.Time
+	readMu      sync.Mutex
+	readWG      sync.WaitGroup
+	readClosing bool
+	readContext context.Context
+	cancelReads context.CancelFunc
 }
 
 func newV2Runtime(app *App, b daemonstore.Backend) *v2Runtime {
+	readContext, cancelReads := context.WithCancel(context.Background())
 	v := &v2Runtime{
 		Backend: b, app: app, lastStat: time.Now(),
+		readContext: readContext, cancelReads: cancelReads,
 		stopErrors: make(chan struct{}), errorsDone: make(chan struct{}),
 		failures:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "go_carbon_v2_errors_total", Help: "Immutable-parts operation failures."}, []string{"operation"}),
 		readLatency: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "go_carbon_v2_read_duration_seconds", Help: "Immutable-parts fetch duration.", Buckets: prometheus.DefBuckets}),
