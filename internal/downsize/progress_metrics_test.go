@@ -405,9 +405,36 @@ func TestProgressMetricsReadyObserved(t *testing.T) {
 }
 
 func TestProgressVersion(t *testing.T) {
-	for input, want := range map[string]string{"abcdef0123456789": "abcdef012345", "abcdef0123456789-dirty": "abcdef012345-dirty", "unknown": "unknown", "devel-dirty": "unknown-dirty", "bad.path": "unknown"} {
-		if got := progressVersion(input); got != want {
-			t.Fatalf("%q: %s != %s", input, got, want)
-		}
+	const sha = "abcdef0123456789abcdef0123456789abcdef01"
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"bare short", "abcdef012345", "abcdef012345"},
+		{"bare full", sha, "abcdef012345"},
+		{"bare dirty", sha + "-dirty", "abcdef012345-dirty"},
+		{"staging", "staging-build-" + sha, "abcdef012345"},
+		{"staging suffix", "staging-build-" + sha + "-release", "abcdef012345"},
+		{"staging dirty", "staging-build-" + sha + "-dirty", "abcdef012345-dirty"},
+		{"staging suffix dirty", "staging-build-" + sha + "-release-dirty", "abcdef012345-dirty"},
+		{"git describe", "v0.19.1-42-g" + sha, "abcdef012345"},
+		{"git describe short", "v0.19.1-42-gabcdef012345", "abcdef012345"},
+		{"git describe dirty", "v0.19.1-42-g" + sha + "-dirty", "abcdef012345-dirty"},
+		{"uppercase", "staging-build-ABCDEF0123456789", "abcdef012345"},
+		{"uppercase dirty", "ABCDEF0123456789-DIRTY", "abcdef012345-dirty"},
+		{"unsafe surrounding text", "some.path/" + sha + "\nother metric", "abcdef012345"},
+		{"empty", "", "unknown"},
+		{"unknown", "unknown", "unknown"},
+		{"development dirty", "devel-dirty", "unknown-dirty"},
+		{"too short", "staging-build-abcdef01234", "unknown"},
+		{"non hex", "staging-build-abcdef01234z", "unknown"},
+		{"discontinuous hex", "abcdef.012345", "unknown"},
+		{"tag only", "v0.19.1", "unknown"},
+		{"unsafe without sha", "bad.path\nother metric", "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := progressVersion(tc.input); got != tc.want {
+				t.Fatalf("progressVersion(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
