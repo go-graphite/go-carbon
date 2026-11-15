@@ -194,3 +194,11 @@ buffers and databases. This launcher exercises the offline numeric engine; it
 does not implement portable admission, log routing or cross-node live recovery.
 Per-second heap/GC, memtable, flush, L0 and phase counters accompany process I/O.
 The launcher retains measurement JSON and deletes its synthetic databases.
+
+Core samples distinguish cumulative external SST durability-sync seconds and
+maximum individual sync time from total encode time. Runtime counters include
+GC CPU, mark-assist CPU and scannable heap bytes; completed GC counts alone do
+not measure concurrent collector work. These measurements complement the L0,
+memtable, flush, compaction-debt and owner-phase counters. External stage files
+are created outside Pebble's object provider, so its `BytesPerSync` option does
+not apply to them.

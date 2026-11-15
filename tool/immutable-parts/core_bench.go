@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -128,6 +129,18 @@ func coreReplayWithHook(journal, out string, cfg coreConfig, hook func(int, *peb
 }
 
 func coreSample(engine *coreEngine, stage string, start time.Time, offered uint64) map[string]any {
+	runtimeSamples := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/gc/mark/assist:cpu-seconds"}, {Name: "/gc/scan/heap:bytes"}}
+	metrics.Read(runtimeSamples)
+	runtimeCounters := make(map[string]any, len(runtimeSamples))
+	for _, sample := range runtimeSamples {
+		switch sample.Value.Kind() {
+		case metrics.KindFloat64:
+			runtimeCounters[sample.Name] = sample.Value.Float64()
+		case metrics.KindUint64:
+			runtimeCounters[sample.Name] = sample.Value.Uint64()
+		}
+	}
+	var syncNS, syncMaxNS, syncCalls uint64
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	var points, parts, bytes, debt, compacted uint64
@@ -140,6 +153,9 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 		points += o.committed.Load()
 		parts += o.parts.Load()
 		bytes += o.bytes.Load()
+		syncNS += o.syncNS.Load()
+		syncMaxNS = max(syncMaxNS, o.syncMaxNS.Load())
+		syncCalls += o.syncCalls.Load()
 		m := o.db.Metrics()
 		debt += m.Compact.EstimatedDebt
 		for _, level := range m.Levels {
@@ -160,7 +176,7 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 		}
 		phases = append(phases, map[string]any{"owner": owner, "committed": o.committed.Load(), "sort_seconds": float64(o.sortNS.Load()) / 1e9, "encode_seconds": float64(o.encodeNS.Load()) / 1e9, "ingest_seconds": float64(o.ingestNS.Load()) / 1e9, "producer_queue_wait_seconds": float64(blocked) / 1e9})
 	}
-	return map[string]any{"l0_sublevels": l0Sublevels, "read_amp": readAmp, "memtables": memtables, "memtable_bytes": memtableBytes, "flushes": flushes, "heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse, "total_alloc": memory.TotalAlloc, "num_gc": memory.NumGC, "gc_pause_ns": memory.PauseTotalNs, "gc_cpu_fraction": memory.GCCPUFraction, "owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
+	return map[string]any{"runtime_counters": runtimeCounters, "sst_sync_seconds": float64(syncNS) / 1e9, "sst_sync_max_seconds": float64(syncMaxNS) / 1e9, "sst_sync_calls": syncCalls, "l0_sublevels": l0Sublevels, "read_amp": readAmp, "memtables": memtables, "memtable_bytes": memtableBytes, "flushes": flushes, "heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse, "total_alloc": memory.TotalAlloc, "num_gc": memory.NumGC, "gc_pause_ns": memory.PauseTotalNs, "gc_cpu_fraction": memory.GCCPUFraction, "owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
 }
 
 // A bounded synthetic durability/LSM workload, explicitly not captured traffic.

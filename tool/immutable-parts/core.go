@@ -53,6 +53,7 @@ type coreDispatch struct {
 	storage   []row
 	parts     [][]row
 	counts    []int
+	waitSince []time.Time
 	packets   []corePacket
 }
 type coreRouter struct {
@@ -72,6 +73,14 @@ func (q *coreQueue) pop() *corePacket {
 	}
 	return p
 }
+func (q *coreQueue) tryPush(p *corePacket) bool {
+	if !q.slots[q.write%2].CompareAndSwap(nil, p) {
+		return false
+	}
+	q.write++
+	return true
+}
+
 func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 	var blocked time.Time
 	for !q.slots[q.write%2].CompareAndSwap(nil, p) {
@@ -93,19 +102,21 @@ func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 }
 
 type coreOwner struct {
-	hook                       func(*pebble.Snapshot, []row) error
-	plan                       func(coreSealInput) (coreSealPlan, error)
-	frontier                   atomic.Pointer[coreFrontier]
-	db                         *pebble.DB
-	dir                        string
-	cfg                        coreConfig
-	meta                       coreFrontier
-	queues                     []*coreQueue
-	dead                       chan struct{}
-	done                       chan error
-	pub                        publication
-	committed, parts, bytes    atomic.Uint64
-	sortNS, encodeNS, ingestNS atomic.Uint64
+	hook                         func(*pebble.Snapshot, []row) error
+	plan                         func(coreSealInput) (coreSealPlan, error)
+	frontier                     atomic.Pointer[coreFrontier]
+	db                           *pebble.DB
+	dir                          string
+	cfg                          coreConfig
+	meta                         coreFrontier
+	queues                       []*coreQueue
+	dead                         chan struct{}
+	done                         chan error
+	pub                          publication
+	committed, parts, bytes      atomic.Uint64
+	sortNS, encodeNS, ingestNS   atomic.Uint64
+	syncNS, syncMaxNS, syncCalls atomic.Uint64
+	fileBuffer                   coreFileBuffer
 }
 type coreEngine struct {
 	owners  []*coreOwner
@@ -239,6 +250,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	if len(d.parts) == 0 {
 		d.parts = make([][]row, e.cfg.Shards)
 		d.counts = make([]int, e.cfg.Shards)
+		d.waitSince = make([]time.Time, e.cfg.Shards)
 		d.packets = make([]corePacket, e.cfg.Shards)
 	}
 	parts, counts := d.parts, d.counts
@@ -277,8 +289,11 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		byOwner[owner] = append(byOwner[owner], b)
 	}
 	var acks []chan error
+	if seal {
+		acks = make([]chan error, len(e.owners))
+	}
 	d.remaining.Store(int32(len(e.owners)))
-	for s, o := range e.owners {
+	for s := range e.owners {
 		p := &d.packets[s]
 		*p = corePacket{rows: parts[s], cursor: cursor, seal: seal, lease: d}
 		if byOwner != nil {
@@ -286,12 +301,48 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		}
 		if seal {
 			p.ack = make(chan error, 1)
-			acks = append(acks, p.ack)
+			acks[s] = p.ack
 		}
-		if err := o.queues[producer].push(p, o.dead); err != nil {
-			return err
+		counts[s] = 1 // routing counts are no longer needed; track unsent packets
+	}
+	// Never wait for one owner's I/O before offering packets to ready owners.
+	// Each producer finishes this fanout before its next batch, preserving FIFO.
+	left := len(e.owners)
+	for left > 0 {
+		progress := false
+		s := producer % len(e.owners)
+		for range e.owners {
+			if counts[s] != 0 {
+				o := e.owners[s]
+				if o.queues[producer].tryPush(&d.packets[s]) {
+					if !d.waitSince[s].IsZero() {
+						o.queues[producer].blockedNS.Add(uint64(time.Since(d.waitSince[s])))
+						d.waitSince[s] = time.Time{}
+					}
+					counts[s] = 0
+					left--
+					progress = true
+				} else {
+					if d.waitSince[s].IsZero() {
+						d.waitSince[s] = time.Now()
+					}
+					select {
+					case <-o.dead:
+						return errors.New("owner stopped during fanout")
+					default:
+					}
+				}
+			}
+			s++
+			if s == len(e.owners) {
+				s = 0
+			}
+		}
+		if left > 0 && !progress {
+			time.Sleep(10 * time.Microsecond)
 		}
 	}
+
 	for s, ack := range acks {
 		select {
 		case err := <-ack:
@@ -521,7 +572,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return nil, "", err
 		}
 		paths = append(paths, path)
-		return sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression}), path, nil
+		return sstable.NewWriter(objstorageprovider.NewFileWritable(o.stageFile(f)), sstable.WriterOptions{Compression: sstable.SnappyCompression}), path, nil
 	}
 	defer func() {
 		for _, p := range paths {
