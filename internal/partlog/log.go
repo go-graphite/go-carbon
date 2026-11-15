@@ -38,6 +38,9 @@ type Options struct {
 	Streams      int
 	SyncInterval time.Duration
 	SegmentBytes int64
+	// ReadAheadBytes bounds each of two sequential replay buffers per stream.
+	// Zero defaults to 4 MiB; negative disables read-ahead for comparisons.
+	ReadAheadBytes int
 	// Hook is a fault-injection observer. It runs on a stream owner and must not
 	// call back into that stream. A nil hook adds no point-level work.
 	Hook func(stream int, phase string)
@@ -107,6 +110,12 @@ func Open(dir string, opts Options) (_ *Log, err error) {
 	}
 	if opts.SegmentBytes <= 0 {
 		opts.SegmentBytes = 64 << 20
+	}
+	if opts.ReadAheadBytes == 0 {
+		opts.ReadAheadBytes = 4 << 20
+	}
+	if opts.ReadAheadBytes > 32<<20 {
+		return nil, os.ErrInvalid
 	}
 	if err = os.MkdirAll(dir, 0750); err != nil {
 		return nil, err
@@ -265,14 +274,16 @@ type replayFile struct {
 	segment segment
 }
 type replaySnapshot struct {
-	files    []replayFile
-	tail     uint64
-	identity []byte
+	files     []replayFile
+	tail      uint64
+	identity  []byte
+	readAhead int
 }
 type replayPosition struct {
-	path   string
-	offset int64
-	cursor uint64
+	path    string
+	offset  int64
+	cursor  uint64
+	buffers [2][]byte
 }
 
 func (l *Log) snapshot(id int, from uint64) (*replaySnapshot, error) {
@@ -291,6 +302,7 @@ func (s *stream) capture(from uint64, snap *replaySnapshot) (err error) {
 		return errors.New("parts frontier precedes retained journal")
 	}
 	snap.tail = s.last
+	snap.readAhead = s.log.opts.ReadAheadBytes
 	snap.identity, _ = hex.DecodeString(s.log.identity)
 	defer func() {
 		if err != nil {
@@ -322,6 +334,19 @@ func (snap *replaySnapshot) read(ctx context.Context, from uint64, position *rep
 	}()
 	last = from
 	var payload []byte
+	var ahead *readAhead
+	var buffers [2][]byte
+	if position != nil {
+		buffers = position.buffers
+	}
+	defer func() {
+		if ahead != nil {
+			ahead.Close()
+		}
+		if position != nil {
+			position.buffers = buffers
+		}
+	}()
 	for _, entry := range snap.files {
 		seg := entry.segment
 		var segmentHeader [headerSize]byte
@@ -335,7 +360,12 @@ func (snap *replaySnapshot) read(ctx context.Context, from uint64, position *rep
 		if position != nil && position.path == seg.path {
 			offset, previous = position.offset, position.cursor
 		}
-		reader := io.NewSectionReader(entry.file, offset, seg.size-offset)
+		var reader io.Reader = io.NewSectionReader(entry.file, offset, seg.size-offset)
+		if snap.readAhead > 0 {
+			ahead = newReadAhead(reader, int64(snap.readAhead), buffers)
+			buffers = ahead.buffers
+			reader = ahead
+		}
 		var h [headerSize]byte
 		for offset < seg.size {
 			if err = ctx.Err(); err != nil {
@@ -370,8 +400,15 @@ func (snap *replaySnapshot) read(ctx context.Context, from uint64, position *rep
 			previous = cursor
 			offset += int64(headerSize + length)
 			if position != nil {
-				*position = replayPosition{seg.path, offset, cursor}
+				position.path, position.offset, position.cursor = seg.path, offset, cursor
 			}
+		}
+		if ahead != nil {
+			ahead.Close()
+			ahead = nil
+		}
+		if previous != seg.last {
+			return last, errors.New("part log index cursor mismatch")
 		}
 	}
 	return last, nil
@@ -500,6 +537,9 @@ func (s *stream) run() {
 				e = s.trim(r.from)
 			case "close":
 				e = s.sync()
+				if e == nil && s.file != nil {
+					e = s.saveIndex(s.segments[len(s.segments)-1])
+				}
 				e = errors.Join(e, s.file.Close())
 				r.done <- answer{s.last, e}
 				return
@@ -514,6 +554,9 @@ func (s *stream) run() {
 func (s *stream) rotate() error {
 	if s.file != nil {
 		if e := s.sync(); e != nil {
+			return e
+		}
+		if e := s.saveIndex(s.segments[len(s.segments)-1]); e != nil {
 			return e
 		}
 		if e := s.file.Close(); e != nil {
@@ -653,9 +696,20 @@ func (s *stream) recover() error {
 		}
 	}
 	for i, p := range paths {
-		seg, e := s.scan(p, i == len(paths)-1, nil)
-		if e != nil {
-			return e
+		seg, ok := s.loadIndex(p)
+		if !ok {
+			s.hook("recover-scan")
+			var e error
+			seg, e = s.scan(p, i == len(paths)-1, nil)
+			if e != nil {
+				return e
+			}
+			// scan synced the tail; older files were synced before rotation.
+			if e = s.saveIndex(seg); e != nil {
+				return e
+			}
+		} else {
+			s.hook("recover-index")
 		}
 		if i > 0 && seg.first != s.last+1 {
 			return errors.New("part log sequence gap")
@@ -685,6 +739,9 @@ func (s *stream) trim(frontier uint64) error {
 		seg := s.segments[0]
 		s.hook("before-retire")
 		if e := inputlog.RetireSegment(seg.path, os.Remove, syncDir); e != nil {
+			return e
+		}
+		if e := os.Remove(seg.path + ".index"); e != nil && !errors.Is(e, os.ErrNotExist) {
 			return e
 		}
 		s.segments = s.segments[1:]
