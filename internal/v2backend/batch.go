@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/daemonstore"
+	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -262,4 +263,60 @@ func encodedFramesSize(fs []frame) int {
 		n += 12 + len(f.resolved.prefix) + 16 + len(f.name) + 16*len(f.points)
 	}
 	return n
+}
+
+func (o *owner) encodeReceipts(fs []frame) ([]byte, error) {
+	entries := make([]partlog.DictionaryFrame, len(fs))
+	for i, f := range fs {
+		if f.resolved == nil {
+			return nil, errors.New("unresolved receipt")
+		}
+		entries[i] = partlog.DictionaryFrame{Key: f.name, Definition: f.resolved.prefix, Clock: f.clock, Points: f.points}
+	}
+	return o.journalEncoder.Encode(entries)
+}
+
+type receiptDecoder struct {
+	dictionary partlog.DictionaryBlockDecoder
+	policies   map[string]*resolvedMetric
+}
+
+func (d *receiptDecoder) decode(b []byte) ([]frame, error) {
+	if !partlog.IsDictionaryBlockRecord(b) {
+		return decodeFrames(b)
+	}
+	entries, e := d.dictionary.Decode(b)
+	if e != nil {
+		return nil, e
+	}
+	if d.policies == nil {
+		d.policies = make(map[string]*resolvedMetric)
+	}
+	fs := make([]frame, len(entries))
+	for i, f := range entries {
+		r := d.policies[f.Key]
+		if r == nil || !bytes.Equal(r.prefix, f.Definition) {
+			p := f.Definition
+			if len(p) < 12 || !bytes.Equal(p[:4], []byte{'V', '2', 'B', 1}) {
+				return nil, errors.New("invalid dictionary policy")
+			}
+			n, g := uint64(binary.BigEndian.Uint32(p[4:8])), uint64(binary.BigEndian.Uint32(p[8:12]))
+			if n+g != uint64(len(p)-12) {
+				return nil, errors.New("invalid dictionary policy lengths")
+			}
+			r = &resolvedMetric{name: f.Key, group: partsformat.Group(string(p[12+n:])), prefix: p}
+			if e = json.Unmarshal(p[12:12+n], &r.policy); e != nil {
+				return nil, e
+			}
+			if _, e = rollupConfig(r.policy); e != nil {
+				return nil, e
+			}
+			if r.group == "" || len(r.group) > partsformat.MaxNameBytes {
+				return nil, errors.New("invalid dictionary group")
+			}
+			d.policies[f.Key] = r
+		}
+		fs[i] = frame{name: f.Key, resolved: r, group: r.group, policy: r.policy, clock: f.Clock, points: f.Points}
+	}
+	return fs, nil
 }

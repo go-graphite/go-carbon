@@ -132,9 +132,9 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	if os.Getenv("V2_BACKEND_THROUGHPUT") != "1" {
 		t.Skip("explicit native benchmark only")
 	}
-	if isolatedTestProcess(t) {
-		return
-	}
+	// The explicitly selected native benchmark owns this process. Wrapping it
+	// in isolatedTestProcess would hide successful receipts behind t.Log when
+	// the outer runner omits -test.v and would distort the exec-start clock.
 	defer zapwriter.Test()()
 	app := v2Fixture(t, &oracleBackend{})
 	app.v2Open = nil
@@ -157,6 +157,34 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Measure an actual TCP append, not just listener construction. The runner
+	// supplies its pre-exec wall clock; absent it this is not an exec-start gate.
+	address := app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
+	probe, e := net.Dial("tcp", address)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = fmt.Fprintf(probe, "startup.probe 1 %d\n", time.Now().Unix()-1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_ = probe.Close()
+	probeDeadline := time.Now().Add(5 * time.Second)
+	for app.v2.Backend.Stats().IngestedPoints < 1 {
+		if time.Now().After(probeDeadline) {
+			t.Fatal("startup probe not accepted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	startupMS := -1.0
+	if stamp := os.Getenv("V2_BACKEND_EXEC_NS"); stamp != "" {
+		n, e := strconv.ParseInt(stamp, 10, 64)
+		if e != nil {
+			t.Fatal(e)
+		}
+		startupMS = float64(time.Now().UnixNano()-n) / 1e6
+	}
+	fmt.Printf("V2_STARTUP first_tcp_append_ms=%.3f exec_stamp=%t\n", startupMS, startupMS >= 0)
 	var cpuFile *os.File
 	if dir := os.Getenv("V2_BACKEND_PROFILES"); dir != "" {
 		runtime.SetMutexProfileFraction(10)
@@ -177,7 +205,26 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &usage0)
 	io0 := nativeWriteBytes()
 	start := time.Now()
-	for producer := range 32 {
+	points0 := app.v2.Backend.Stats().IngestedPoints
+	journal0 := journalDiskBytes(app.Config.V2.DataDir)
+	var sender *exec.Cmd
+	stopFile := filepath.Join(t.TempDir(), "sender-stop")
+	if cpus := os.Getenv("V2_BACKEND_SENDER_CPUS"); cpus != "" {
+		sender = exec.Command("taskset", "-c", cpus, os.Args[0], "-test.run=^TestV2DaemonExternalSender$", "-test.v=true", "-test.timeout=150s")
+		sender.Env = append(os.Environ(), "V2_BACKEND_SENDER_ADDR="+address, "V2_BACKEND_SENDER_STOP="+stopFile)
+		sender.Stdout = os.Stdout
+		sender.Stderr = os.Stderr
+		if e := sender.Start(); e != nil {
+			t.Fatal(e)
+		}
+		defer func() {
+			if sender.Process != nil && sender.ProcessState == nil {
+				_ = sender.Process.Kill()
+				_ = sender.Wait()
+			}
+		}()
+	}
+	for producer := 0; sender == nil && producer < 32; producer++ {
 		wg.Add(1)
 		go func(p int) {
 			defer wg.Done()
@@ -225,7 +272,9 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	seconds := func(x syscall.Timeval) float64 { return float64(x.Sec) + float64(x.Usec)/1e6 }
 	cpu := seconds(usage1.Utime) + seconds(usage1.Stime) - seconds(usage0.Utime) - seconds(usage0.Stime)
 	// This explicit opt-in benchmark must emit its receipt even without -test.v.
-	fmt.Printf("V2_DAEMON_THROUGHPUT seconds=%.3f accepted=%d points_per_second=%.1f cpu_cores=%.3f maxrss_native_units=%d heap_bytes=%d device_write_bytes=%d device_MB_per_second=%.3f stats=%+v\n", elapsed, stats.IngestedPoints, float64(stats.IngestedPoints)/elapsed, cpu/elapsed, usage1.Maxrss, mem.HeapAlloc, io1-io0, float64(io1-io0)/elapsed/1e6, stats)
+	accepted := stats.IngestedPoints - points0
+	journalBytes := journalDiskBytes(app.Config.V2.DataDir) - journal0
+	fmt.Printf("V2_DAEMON_THROUGHPUT seconds=%.3f accepted=%d points_per_second=%.1f journal_bytes=%d journal_bytes_per_point=%.6f cpu_cores=%.3f cpu_ns_per_point=%.3f maxrss_native_units=%d heap_bytes=%d device_write_bytes=%d device_MB_per_second=%.3f startup_ms=%.3f external_senders=%t stats=%+v\n", elapsed, accepted, float64(accepted)/elapsed, journalBytes, float64(journalBytes)/float64(accepted), cpu/elapsed, cpu*1e9/float64(accepted), usage1.Maxrss, mem.HeapAlloc, io1-io0, float64(io1-io0)/elapsed/1e6, startupMS, sender != nil, stats)
 	if cpuFile != nil {
 		pprof.StopCPUProfile()
 		_ = cpuFile.Close()
@@ -239,10 +288,94 @@ func TestV2DaemonThroughput120(t *testing.T) {
 		}
 	}
 	stop.Store(true)
+	if sender != nil {
+		if e := os.WriteFile(stopFile, []byte("stop"), 0600); e != nil {
+			t.Fatal(e)
+		}
+		if e := sender.Wait(); e != nil {
+			t.Fatal(e)
+		}
+	}
 	wg.Wait()
+	settleStart := time.Now()
+	if e := app.v2.Backend.Flush(); e != nil {
+		t.Fatal(e)
+	}
+	fmt.Printf("V2_DAEMON_DRAIN final_accepted=%d flush_seconds=%.6f stats=%+v\n", app.v2.Backend.Stats().IngestedPoints, time.Since(settleStart).Seconds(), app.v2.Backend.Stats())
 	if err := app.DumpStop(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func journalDiskBytes(dir string) int64 {
+	var n int64
+	_ = filepath.WalkDir(filepath.Join(dir, "journal"), func(_ string, d os.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if !d.IsDir() {
+			if i, e := d.Info(); e == nil {
+				n += i.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
+
+// Separate process: its CPU and memory are excluded from daemon RUSAGE_SELF.
+func TestV2DaemonExternalSender(t *testing.T) {
+	addr := os.Getenv("V2_BACKEND_SENDER_ADDR")
+	if addr == "" {
+		t.Skip("external sender only")
+	}
+	var stop atomic.Bool
+	go func() {
+		for !stop.Load() {
+			if _, e := os.Stat(os.Getenv("V2_BACKEND_SENDER_STOP")); e == nil {
+				stop.Store(true)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	var wg sync.WaitGroup
+	var sent atomic.Uint64
+	for producer := range 32 {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			conn, e := net.Dial("tcp", addr)
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			defer conn.Close()
+			var packet bytes.Buffer
+			stamp := time.Now().Unix() - 30
+			for n := range 1024 {
+				fmt.Fprintf(&packet, "bench.namespace%d.cluster1.host%04d.component.requests.value %.17g %d\n", p%4, p*128+n%128, float64(n)+.125, stamp)
+			}
+			data := packet.Bytes()
+			next := time.Now()
+			for !stop.Load() {
+				_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+				if _, e = conn.Write(data); e != nil {
+					if !stop.Load() {
+						t.Error(e)
+					}
+					return
+				}
+				sent.Add(1024)
+				if os.Getenv("V2_BACKEND_OFFER_1M") == "1" {
+					next = next.Add(32768 * time.Microsecond)
+					time.Sleep(time.Until(next))
+				}
+			}
+		}(producer)
+	}
+	wg.Wait()
+	fmt.Printf("V2_TCP_SENDERS connections=32 full_write_points=%d\n", sent.Load())
 }
 
 func nativeWriteBytes() uint64 {

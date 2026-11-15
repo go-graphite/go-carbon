@@ -69,25 +69,28 @@ type answer struct {
 	frames []frame
 	points []points.Point
 	err    error
+	live   *liveCapture
 }
 type owner struct {
-	id            int
-	s             *Store
-	db            *pebble.DB
-	dir           string
-	requests      chan command
-	admission     *semaphore.Weighted
-	done          chan struct{}
-	active        []frame
-	pending       []frame
-	nextOrder     uint64
-	workspace     sealrollup.Workspace
-	batchScratch  []sealrollup.Batch
-	sampleScratch []sealrollup.Sample
-	meta          checkpoint
-	metrics       map[string]*metricState
-	pub           partsread.Publication
-	readCatalog   atomic.Pointer[catalog]
+	id             int
+	s              *Store
+	db             *pebble.DB
+	dir            string
+	requests       chan command
+	admission      *semaphore.Weighted
+	done           chan struct{}
+	active         []frame
+	pending        []frame
+	nextOrder      uint64
+	journalEncoder partlog.DictionaryBlockEncoder
+	workspace      sealrollup.Workspace
+	batchScratch   []sealrollup.Batch
+	sampleScratch  []sealrollup.Sample
+	meta           checkpoint
+	metrics        map[string]*metricState
+	pub            partsread.Publication
+	readCatalog    atomic.Pointer[catalog]
+	readBase       atomic.Pointer[liveBase]
 }
 type Store struct {
 	opts                          daemonstore.Options
@@ -204,10 +207,17 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	// replay callback would recursively wait on that same stream.
 	for _, o := range s.owners {
 		pendingPoints := 0
-		if e := s.log.Replay(o.id, o.meta.Cursor, func(r partlog.Record) error {
-			fs, e := decodeFrames(r.Payload)
+		var decoder receiptDecoder
+		defer decoder.dictionary.Close()
+		// Definitions can precede the durable apply frontier. Decode the retained
+		// epoch prefix but never reapply a checkpointed receipt.
+		if e := s.log.Replay(o.id, 0, func(r partlog.Record) error {
+			fs, e := decoder.decode(r.Payload)
 			if e != nil {
 				return e
+			}
+			if r.Cursor <= o.meta.Cursor {
+				return nil
 			}
 			for _, f := range fs {
 				f.cursor = r.Cursor
@@ -270,6 +280,9 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 func (s *Store) abortOpen() {
 	for _, o := range s.owners {
 		o.pub.Close()
+		if b := o.readBase.Swap(nil); b != nil {
+			b.pub.Close()
+		}
 	}
 	if s.log != nil {
 		_ = s.log.Close()
@@ -317,6 +330,7 @@ func (s *Store) Append(p *points.Points) error {
 }
 func (o *owner) run() {
 	defer close(o.done)
+	defer o.journalEncoder.Close()
 	var deferred *command
 	for {
 		var c command
@@ -342,6 +356,8 @@ func (o *owner) run() {
 					}
 				}
 			}
+		case 'v':
+			a.live, a.err = o.captureLive(c.frame.name)
 		case 'q':
 			c.answer <- a
 			return
@@ -383,7 +399,7 @@ func (o *owner) run() {
 			a.err = o.s.status()
 			if a.err == nil {
 				var payload []byte
-				payload, a.err = encodeFrames(fs)
+				payload, a.err = o.encodeReceipts(fs)
 				var cursor uint64
 				if a.err == nil {
 					cursor, a.err = o.s.log.Append(o.id, fs[0].clock, payload)
@@ -527,6 +543,9 @@ func (s *Store) Close() error {
 			<-a
 			<-o.done
 			o.pub.Close()
+			if b := o.readBase.Swap(nil); b != nil {
+				b.pub.Close()
+			}
 		}
 		close(s.watchStop)
 		<-s.watchDone

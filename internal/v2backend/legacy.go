@@ -96,7 +96,10 @@ func (s *Store) openMixed() error {
 	return nil
 }
 func (s *Store) fetchMixed(ctx context.Context, name string, from, until int) (*daemonstore.Series, error) {
-	h, e := s.owners[s.route(name)].pub.Pin(s.budget, 64<<20)
+	return s.fetchMixedPublication(ctx, name, from, until, &s.owners[s.route(name)].pub)
+}
+func (s *Store) fetchMixedPublication(ctx context.Context, name string, from, until int, p *partsread.Publication) (*daemonstore.Series, error) {
+	h, e := p.Pin(s.budget, 64<<20)
 	if e != nil {
 		return nil, e
 	}
@@ -104,7 +107,13 @@ func (s *Store) fetchMixed(ctx context.Context, name string, from, until int) (*
 	var once sync.Once
 	release := func() { once.Do(func() { h.Close(); s.pins.Add(-1) }) }
 	var result *daemonstore.Series
-	e = s.mixed.Fetch(ctx, name, int64(from), int64(until), func(x *partsread.Series) error {
+	a := partsread.Adapter{Select: func(string) *partsread.Publication { return p }, Catalog: p, Budget: s.budget, WorkBytes: 32 << 20, Now: s.now}
+	mixed, e := mixedread.New(mixedread.Options{Legacy: s.legacy, LegacyCatalog: s.legacyCatalog, Parts: a, Now: s.now})
+	if e != nil {
+		release()
+		return nil, e
+	}
+	e = mixed.Fetch(ctx, name, int64(from), int64(until), func(x *partsread.Series) error {
 		if x == nil {
 			return nil
 		}

@@ -92,6 +92,16 @@ func (o *owner) publish() error {
 	source := &diskSource{snap: snap, owner: o.id, catalog: c}
 	o.pub.Publish(partsread.View{Generation: o.meta.Cursor, Frontier: []uint64{o.meta.Cursor}, Catalog: c, Parts: []partsread.Source{source}, RetainedBytes: retained, Close: func() { _ = snap.Close() }})
 	o.readCatalog.Store(c)
+	base := &liveBase{catalog: c, cursor: o.meta.Cursor, frontiers: make(map[string]sealrollup.Frontier, len(o.metrics))}
+	for n, m := range o.metrics {
+		base.frontiers[n] = m.Frontier
+	}
+	bs := o.db.NewSnapshot()
+	base.source = &diskSource{snap: bs, owner: o.id, catalog: c}
+	base.pub.Publish(partsread.View{Generation: o.meta.Cursor, Catalog: c, Parts: []partsread.Source{base.source}, RetainedBytes: retained, Close: func() { _ = bs.Close() }})
+	if old := o.readBase.Swap(base); old != nil {
+		old.pub.Close()
+	}
 	return nil
 }
 
@@ -215,20 +225,23 @@ func (s *Store) Fetch(ctx context.Context, name string, from, until int) (*daemo
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
-	// A read barrier seals all previously accepted receipts. This is a correct
-	// temporary visibility path; replacing it with pinned heads avoids read I/O.
-	if e := s.flush(); e != nil {
+	p, closeView, e := s.livePublication(ctx, name)
+	if e != nil {
 		return nil, e
 	}
+	defer closeView()
 	if s.mixed != nil {
-		return s.fetchMixed(ctx, name, from, until)
+		return s.fetchMixedPublication(ctx, name, from, until, p)
 	}
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
-	o := s.owners[s.route(name)]
-	work := responseWork(o.readCatalog.Load(), name, int64(from), int64(until), s.now().Unix())
-	h, e := o.pub.Pin(s.budget, work)
+	work := responseWork(s.catalogFor(name), name, int64(from), int64(until), s.now().Unix())
+	if r, ok := s.resolved.Load(name); ok {
+		c := &catalog{names: map[string]partsread.Metric{name: toReadMetric(r.(*resolvedMetric).policy)}}
+		work = responseWork(c, name, int64(from), int64(until), s.now().Unix())
+	}
+	h, e := p.Pin(s.budget, work)
 	if e != nil {
 		return nil, e
 	}
@@ -283,8 +296,15 @@ func (s *Store) Info(ctx context.Context, name string) (daemonstore.Metric, erro
 	if e := ctx.Err(); e != nil {
 		return daemonstore.Metric{}, e
 	}
-	if e := s.flush(); e != nil {
+	live, e := s.capture(ctx, s.owners[s.route(name)], name)
+	if e != nil {
 		return daemonstore.Metric{}, e
+	}
+	defer live.close()
+	if len(live.frames) > 0 {
+		m := live.frames[len(live.frames)-1].policy
+		m.Archives = slices.Clone(m.Archives)
+		return m, nil
 	}
 	var result daemonstore.Metric
 	// Info uses the exact pinned policy; Render with an out-of-retention range
@@ -309,11 +329,34 @@ func (s *Store) Find(ctx context.Context, pattern string) ([]daemonstore.Match, 
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
-	if e := s.flush(); e != nil {
+	var liveMetadata []store.Metadata
+	for _, o := range s.owners {
+		a, e := s.capture(ctx, o, "")
+		if e != nil {
+			return nil, e
+		}
+		for _, f := range a.frames {
+			liveMetadata = append(liveMetadata, store.Metadata{MetricConfig: store.MetricConfig{Name: f.name}})
+		}
+		a.close()
+	}
+	liveIndex, e := carbonserver.NewPartsCatalogIndex(liveMetadata, carbonserver.PartsIndexOptions{Trie: true, ReportFrequency: time.Minute})
+	if e != nil {
 		return nil, e
 	}
 	seen := make(map[daemonstore.Match]struct{})
 	var out []daemonstore.Match
+	ln, ll, e := liveIndex.Find(pattern)
+	if e != nil {
+		return nil, e
+	}
+	for i, n := range ln {
+		m := daemonstore.Match{Name: n, Leaf: ll[i]}
+		if _, ok := seen[m]; !ok {
+			seen[m] = struct{}{}
+			out = append(out, m)
+		}
+	}
 	for _, o := range s.owners {
 		if e := ctx.Err(); e != nil {
 			return nil, e

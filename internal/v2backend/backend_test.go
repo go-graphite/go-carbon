@@ -31,6 +31,12 @@ func requireClose(t *testing.T, s *Store) {
 }
 
 func TestPortableBackendOracle1680(t *testing.T) {
+	testPortableBackendOracle1680(t, true)
+}
+func TestPortableBackendLiveOracle1680(t *testing.T) {
+	testPortableBackendOracle1680(t, false)
+}
+func testPortableBackendOracle1680(t *testing.T, sealed bool) {
 	ctx := context.Background()
 	clock := int64(1794700800)
 	policies := make(map[string]daemonstore.Metric)
@@ -86,8 +92,10 @@ func TestPortableBackendOracle1680(t *testing.T) {
 					t.Fatalf("%s %s: %v", name, def, e)
 				}
 			}
-			if e = s.Flush(); e != nil {
-				t.Fatal(e)
+			if sealed {
+				if e = s.Flush(); e != nil {
+					t.Fatal(e)
+				}
 			}
 			for _, width := range []int64{3600, 86400, 7 * 86400, 30 * 86400} {
 				got, e := s.Fetch(ctx, name, int(clock-width), int(clock))

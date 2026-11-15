@@ -23,8 +23,22 @@ keys contain placement group, virtual shard, partition, immutable part UUID and
 canonical name. Numeric read IDs exist only inside one immutable snapshot.
 
 The journal records exact original point bits, metric bytes, policy, placement,
-receipt clock and receipt boundaries. Startup replays after the atomically
-committed owner cursor before opening listeners. Flush first freezes the heads,
+receipt clock and receipt boundaries. Metric names and opaque policy/placement
+definitions appear once per stream/process dictionary epoch, before references
+in the same checksummed journal record. Applies contain varint metric references,
+clock/timestamp deltas and unchanged 64-bit value bits. Independent 64KiB-window
+zstd blocks compress each batched record, with a raw fallback when compression
+would grow it. Replay limits expansion to the journal's 8MiB payload limit and
+validates block checksums before decoding any applies. Record headers still cost
+32 bytes, so tiny scalar appends can exceed 20 bytes per point; batching amortizes
+that cost. Replay rebuilds dictionaries from the retained epoch prefix, skipping
+already committed applies. Old V2B1/V2M1 records remain readable. Dictionary
+checkpoints are required before journal trimming can be enabled.
+
+Startup still completes journal/database recovery and replay before opening
+listeners. It does not satisfy the 100ms first-live-append requirement. A durable
+admission epoch and process fencing must be available before historical recovery
+can safely move into the background. Flush first freezes the heads,
 syncs the nonempty streams once, then seals the owners concurrently. Admission
 continues into new active heads while the frozen heads seal. One frozen generation
 is allowed at a time; a 256 MiB credit budget per owner limits logical queued,
@@ -35,10 +49,16 @@ the daemon's existing fatal backend error boundary.
 Shutdown drains receivers and responses, flushes, then closes snapshots and DBs.
 
 CacheQuery copies both frozen and active accepted receipts, including original
-point bits and arrival order. Find, Info and Fetch currently force a seal before
-opening the immutable read view. This is a correctness bridge: a read can wait
-for journal sync, reduction and SST publication. A pinned immutable live-head
-reader remains necessary to remove that latency.
+point bits and arrival order. Find, Info and Fetch perform no seal or journal sync.
+An owner exchange pins one coherent sealed snapshot/frontier and copies immutable
+pending/active frame headers. It filters receipts already included in that pinned
+cursor. Render runs the exact reducer on the read side and combines its detached
+slot replacements with the pinned sealed source. The response pin retains both
+resources through serialization. No reader acquires a writer mutex. Read-side
+reduction and rebuilding find indexes still consume CPU; multiarchive heads may
+scan the complete lower-archive seed. Admission budgets reserve reducer input
+and replacement workspace before allocation, and reserve occupied seed-map slots
+in bounded chunks as they are encountered.
 
 Reads seek at most two physical ring ranges per referenced part. Original
 sample timestamps and occupied NaNs are retained, including physical overwrite
@@ -69,6 +89,14 @@ inside an externally imposed CPU and device IO limit. Optional
 control this isolated harness. `V2_BACKEND_OFFER_1M=1` paces its 32 TCP connections
 to approximately 1M points/s; omit it for an unpaced run.
 `V2_BACKEND_PROFILES=<directory>` records CPU, mutex and block profiles.
+`V2_BACKEND_SENDER_CPUS=<Linux CPU list>` starts the 32 TCP senders in a separate
+process on the specified CPUs, excluding them from daemon CPU/RSS accounting.
+`V2_BACKEND_EXEC_NS=<pre-exec Unix nanoseconds>` reports actual first TCP append
+latency from the runner timestamp. The benchmark always prints throughput,
+journal bytes/point, CPU/point, RSS and post-sender flush receipts.
+`TestPortableBackendLiveOracle1680` runs the same classic oracle without Flush;
+`TestLiveReadsNeverSealAndSurvivePublication` verifies frozen/active visibility
+while sealing is blocked and preserves pinned responses across publication.
 
 ## Qualification limits
 

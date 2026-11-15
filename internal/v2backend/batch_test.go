@@ -162,6 +162,65 @@ func TestMultiReceiptEnvelopeRejectsTruncation(t *testing.T) {
 	}
 }
 
+func TestLegacyReceiptsAndDictionaryEpochRestart(t *testing.T) {
+	clock := int64(1794700800)
+	opts := testOptions(t.TempDir(), simplePolicy())
+	open := func() *Store {
+		t.Helper()
+		s, e := openAt(opts, func() time.Time { return time.Unix(clock, 0) })
+		if e != nil {
+			t.Fatal(e)
+		}
+		return s
+	}
+	s := open()
+	name := "epoch.\xff.metric"
+	f, e := s.makeFrame(name, []points.Point{{Timestamp: clock - 10, Value: math.Copysign(0, -1)}}, clock)
+	if e != nil {
+		t.Fatal(e)
+	}
+	old, e := encodeFrame(f)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.log.Append(0, clock, old); e != nil {
+		t.Fatal(e)
+	}
+	multi, e := encodeFrames([]frame{f})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.log.Append(0, clock, multi); e != nil {
+		t.Fatal(e)
+	}
+	requireClose(t, s)
+	for epoch := range 3 {
+		s = open()
+		if got := s.Stats().IngestedPoints; got != uint64(2+epoch) {
+			t.Fatalf("epoch%d count=%d", epoch, got)
+		}
+		if e = s.Append(&points.Points{Metric: name, Data: []points.Point{{Timestamp: clock - 9 + int64(epoch), Value: math.Float64frombits(uint64(epoch) + 0x7ff8000000000042)}}}); e != nil {
+			t.Fatal(e)
+		}
+		requireClose(t, s)
+	}
+	s = open()
+	defer requireClose(t, s)
+	got, e := s.Fetch(context.Background(), name, int(clock-11), int(clock))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer got.Release()
+	if s.Stats().IngestedPoints != 5 || math.Float64bits(got.Values[0]) != 0x8000000000000000 {
+		t.Fatal("old receipt bits/count changed")
+	}
+	for i := range 3 {
+		if math.Float64bits(got.Values[i+1]) != uint64(i)+0x7ff8000000000042 {
+			t.Fatalf("epoch%d payload changed", i)
+		}
+	}
+}
+
 func BenchmarkResolvedMetricCache(b *testing.B) {
 	s := &Store{opts: testOptions("", simplePolicy())}
 	name := []byte("namespace.cluster.host.component.requests.value")
