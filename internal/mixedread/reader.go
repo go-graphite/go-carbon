@@ -23,12 +23,20 @@ var ErrPolicy = errors.New("mixed reader archive policy differs across cutover")
 // legacy binding requires publishing a new Reader and draining the old one.
 // Storage owners retain all handles and publications until Reader callers drain.
 type Options struct {
-	Legacy         *chunkstore.Store
-	LegacyCatalog  partsread.Catalog
+	Legacy        *chunkstore.Store
+	LegacyCatalog partsread.Catalog
+	// UnifiedCatalog declares Parts.Catalog authoritative for the complete name
+	// union, including legacy suppression, in the same immutable generation.
+	// The publisher builds it through the existing Graphite index.
+	UnifiedCatalog bool
 	Parts          partsread.Adapter
 	SuppressLegacy func(string) bool
 	// Converted is the persisted, verified name prefix already owned by v2.
 	Converted *Cursor
+	// LegacyHorizon is a verified inclusive upper bound on every stored legacy
+	// archive timestamp. Zero disables this optimization. It must account for
+	// all physical slots, not merely the log cutover time.
+	LegacyHorizon int64
 	// MaxFindNames bounds duplicate tracking for a wide find; zero selects 1M.
 	MaxFindNames int
 	Now          func() time.Time
@@ -36,6 +44,9 @@ type Options struct {
 type Reader struct{ opts Options }
 
 func New(opts Options) (*Reader, error) {
+	if opts.LegacyHorizon < 0 || opts.LegacyHorizon > math.MaxUint32 {
+		return nil, errors.New("invalid legacy timestamp horizon")
+	}
 	if opts.Legacy == nil || !opts.Legacy.ReadOnly() {
 		return nil, errors.New("mixed reader requires a read-only legacy store")
 	}
@@ -83,6 +94,15 @@ func (r *Reader) Find(ctx context.Context, pattern string, yield func(string) er
 		return err
 	}
 	defer h.Close()
+	if r.opts.UnifiedCatalog {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// The complete index already owns deduplication and bounded query work;
+		// MaxFindNames bounds only the fallback's temporary duplicate set.
+		return h.Find(ctx, pattern, yield)
+	}
+
 	seen := make(map[string]struct{})
 	var nameBytes int64
 	emit := func(name string) error {
@@ -122,86 +142,116 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	legacyMetric, hasLegacy := r.opts.LegacyCatalog.Lookup(name)
-	hasLegacy = hasLegacy && r.legacyAllowed(name)
-	delivered := false
-	err := r.opts.Parts.Fetch(ctx, name, from, until, func(current *partsread.Series) error {
-		delivered = true
-		if current != nil && int64(len(current.Values)) > r.opts.Parts.WorkBytes/64 {
-			return partsread.ErrAdmission
-		}
+	var legacyMetric partsread.Metric
+	var hasLegacy bool
+	if r.legacyAllowed(name) {
+		legacyMetric, hasLegacy = r.opts.LegacyCatalog.Lookup(name)
+	}
+	p := r.opts.Parts.Select(name)
+	if p == nil {
 		if !hasLegacy {
-			return consume(current)
+			return partsread.ErrNotFound
 		}
-		if current != nil && !samePolicy(legacyMetric, current.Metric) {
-			return ErrPolicy
-		}
-		if current != nil {
-			if len(current.Occupied) != len(current.Values) {
-				return errors.New("part reader omitted physical slot occupancy")
-			}
-			all := len(current.Values) > 0
-			for _, occupied := range current.Occupied {
-				all = all && occupied
-			}
-			if all {
-				return consume(current)
-			}
-		}
-		old, e := r.fetchLegacy(ctx, name, from, until)
-		if e != nil {
-			return e
-		}
-		if current == nil {
-			return consume(old)
-		}
-		if old == nil {
-			return consume(current)
-		}
-		// Whisper extends an aligned zero-width range by one slot only when
-		// that backend has a populated archive. The other side can be empty.
-		if len(current.Values) == 0 && len(old.Values) > 0 {
-			return consume(old)
-		}
-		if len(old.Values) == 0 && len(current.Values) > 0 {
-			return consume(current)
-		}
-		if current.From != old.From || current.Until != old.Until || current.Step != old.Step || len(current.Values) != len(old.Values) {
-			return fmt.Errorf("%w: render shapes differ", ErrPolicy)
-		}
-		// Render results belong to this reader, so filling holes does not change
-		// the published sources. Reuse legacy's slice; no third output allocation.
-		for i, occupied := range current.Occupied {
-			if occupied {
-				old.Values[i] = current.Values[i]
-			}
-		}
-		current.Values = old.Values
-		return consume(current)
-	})
-	if !delivered && errors.Is(err, partsread.ErrNotFound) && hasLegacy {
-		// A missing part publication/catalog entry must still reserve memory
-		// through the consumer. Pin the immutable catalog for this fallback.
-		h, e := r.opts.Parts.Catalog.Pin(r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
-		if e != nil {
-			return e
+		h, err := r.opts.Parts.Catalog.Pin(r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+		if err != nil {
+			return err
 		}
 		defer h.Close()
-		old, e := r.fetchLegacy(ctx, name, from, until)
-		if e != nil {
-			return e
+		old, err := r.fetchLegacy(ctx, name, legacyMetric, from, until)
+		if err != nil {
+			return err
 		}
 		return consume(old)
 	}
-	return err
+
+	h, err := p.Pin(r.opts.Parts.Budget, r.opts.Parts.WorkBytes)
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	var old *partsread.Series
+	skipLegacy := hasLegacy && r.afterLegacyHorizon(legacyMetric, from)
+	if hasLegacy && !skipLegacy {
+		old, err = r.fetchLegacy(ctx, name, legacyMetric, from, until)
+		if err != nil {
+			return err
+		}
+	}
+	var current *partsread.Series
+	// An existing legacy result supplies the only dense output. RenderInto
+	// replaces physical slots directly; no dense occupancy scan or merge follows.
+	// One-slot results keep the ordinary path because an empty opposite archive
+	// can select a zero-width shape instead of Whisper's populated extension.
+	if old != nil && len(old.Values) > 1 {
+		current, err = h.RenderInto(ctx, name, from, until, r.opts.Now().Unix(), old)
+	} else {
+		current, err = h.Render(ctx, name, from, until, r.opts.Now().Unix())
+	}
+	if errors.Is(err, partsread.ErrNotFound) && hasLegacy {
+		if skipLegacy {
+			old, err = r.fetchLegacy(ctx, name, legacyMetric, from, until)
+			if err != nil {
+				return err
+			}
+		}
+		return consume(old)
+	}
+	if errors.Is(err, partsread.ErrShape) {
+		return fmt.Errorf("%w: %w", ErrPolicy, err)
+	}
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return consume(old)
+	}
+	if hasLegacy && !samePolicy(legacyMetric, current.Metric) {
+		return ErrPolicy
+	}
+	if int64(len(current.Values)) > r.opts.Parts.WorkBytes/64 {
+		return partsread.ErrAdmission
+	}
+	if len(current.Occupied) != len(current.Values) {
+		return errors.New("part reader omitted physical slot occupancy")
+	}
+	if old == nil || len(old.Values) == 0 || len(old.Values) > 1 {
+		return consume(current)
+	}
+	if len(current.Values) == 0 {
+		return consume(old)
+	}
+	if current.From != old.From || current.Until != old.Until || current.Step != old.Step || len(current.Values) != len(old.Values) {
+		return fmt.Errorf("%w: render shapes differ", ErrPolicy)
+	}
+	for i, occupied := range current.Occupied {
+		if !occupied {
+			current.Values[i] = old.Values[i]
+		}
+	}
+	return consume(current)
 }
-func (r *Reader) fetchLegacy(ctx context.Context, name string, from, until int64) (*partsread.Series, error) {
+
+func (r *Reader) afterLegacyHorizon(metric partsread.Metric, from int64) bool {
+	horizon := r.opts.LegacyHorizon
+	if horizon == 0 {
+		return false
+	}
+	if from >= horizon {
+		return true
+	}
+	var retention int64
+	for _, a := range metric.Archives {
+		if a.Step <= 0 || a.Points <= 0 || a.Points > math.MaxUint32/a.Step {
+			return false
+		}
+		retention = max(retention, a.Step*a.Points)
+	}
+	return retention > 0 && r.opts.Now().Unix()-retention >= horizon
+}
+
+func (r *Reader) fetchLegacy(ctx context.Context, name string, metric partsread.Metric, from, until int64) (*partsread.Series, error) {
 	if int64(int(from)) != from || int64(int(until)) != until {
 		return nil, errors.New("legacy query timestamp overflows int")
-	}
-	metric, ok := r.opts.LegacyCatalog.Lookup(name)
-	if !ok {
-		return nil, partsread.ErrNotFound
 	}
 	if err := r.checkLegacyBudget(metric, from, until); err != nil {
 		return nil, err

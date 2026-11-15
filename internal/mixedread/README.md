@@ -10,6 +10,7 @@ reader, err := mixedread.New(mixedread.Options{
     Legacy: legacy,
     LegacyCatalog: legacyIndex,
     Parts: partsAdapter,
+    UnifiedCatalog: true, // partsAdapter.Catalog already indexes the visible union
     Converted: &mixedread.Cursor{Version: 1, Before: nextNameBytes},
     SuppressLegacy: isDeletedOrNewIncarnation,
 })
@@ -18,8 +19,13 @@ err = reader.Fetch(ctx, name, from, until, func(s *partsread.Series) error {
 })
 ```
 
-Find queries union both catalogs through their existing Graphite find indexes,
-with duplicate tracking bounded by name count and the pinned byte reservation. The package has no competing glob parser.
+With `UnifiedCatalog: true`, find queries the single published Graphite index.
+The owner must seed legacy names, include new v2 names, and apply suppression
+and tombstones before publishing that same immutable catalog generation.
+This removes the second index lookup and per-request deduplication map. The
+option defaults off; the compatibility path unions both existing indexes with
+duplicate tracking bounded by name count and the pinned byte reservation.
+Neither path implements a glob parser.
 Render uses the same complete query interval on both backends, preserving archive
 selection. An occupied v2 physical slot wins over legacy, including stored NaNs
 and replacements whose newer ring timestamp invalidates the requested old slot.
@@ -51,8 +57,18 @@ classic Whisper with legacy-only, v2-only and mixed renders across seventy
 schema shapes, six aggregation methods and 1h/1d/7d/30d queries.
 
 A mixed render reserves twice the part adapter's configured work budget before
-reading, accounting for both output workspaces. An all-occupied v2 result skips
-the legacy fetch. Results and their budgets live only through the callback.
+reading, accounting for the legacy output and bounded winner workspace. It
+resolves legacy metadata once and overlays occupied v2 slots directly into
+the legacy values through `partsread.Handle.RenderInto`. No second dense
+output, full occupancy scan, or dense merge is needed. Converted or suppressed
+names skip legacy lookup and fetching entirely. `LegacyHorizon` optionally
+skips legacy data reads for intervals strictly after its verified inclusive
+timestamp bound, or after all legacy archives have expired. That bound must
+cover every physical archive slot, including future timestamps; the log
+cutover clock alone is insufficient. A missing v2 catalog entry still falls
+back to legacy, preserving the legacy-only name shape. The one-slot compatibility
+path preserves Whisper's distinction between populated and empty zero-width
+archives. Results and their budgets live only through the callback.
 
 ## Qualification
 
@@ -62,5 +78,7 @@ private-directory diagnostic for cold block-cache and warm mixed overhead. It
 uses in-memory frozen v2 parts and a real legacy continuation store, so it is a
 best-case adapter comparison, not an SST or sustained-ingest qualification.
 The required production comparison still needs the same data, host and queries
-on actual persisted v2 sources, including concurrent ingestion. The per-query
-find union also needs comparison with a unified publication-time find index.
+on actual persisted v2 sources, including concurrent ingestion. The unified-index option requires the owner to publish that index; leaving it
+off retains the slower per-query union. The diagnostic enables it against the
+same immutable fixture catalog used by the native baseline. Warm classes take
+200 samples and fresh block-cache classes take 30, without dropping OS caches.

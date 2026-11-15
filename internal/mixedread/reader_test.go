@@ -233,3 +233,113 @@ func TestFindReservationCoversLegacyCallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUnifiedFindUsesOnePublishedIndex(t *testing.T) {
+	r, p, m := fixture(t, nil)
+	calls := 0
+	p.Publish(partsread.View{Catalog: partsread.CatalogFuncs{
+		LookupFunc: func(string) (partsread.Metric, bool) { return m, true },
+		FindFunc: func(ctx context.Context, pattern string, yield func(string) error) error {
+			calls++
+			if pattern != "existing-glob" {
+				t.Fatal(pattern)
+			}
+			for _, name := range []string{"legacy", "shared", "v2"} {
+				if err := yield(name); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}})
+	r.opts.LegacyCatalog = partsread.CatalogFuncs{LookupFunc: func(string) (partsread.Metric, bool) { t.Fatal("legacy lookup during unified find"); return m, false }, FindFunc: func(context.Context, string, func(string) error) error {
+		t.Fatal("legacy index queried twice")
+		return nil
+	}}
+	r.opts.UnifiedCatalog = true
+	var names []string
+	if err := r.Find(context.Background(), "existing-glob", func(name string) error {
+		if r.opts.Parts.Budget.Used() == 0 {
+			t.Fatal("unpinned catalog")
+		}
+		names = append(names, name)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !slices.Equal(names, []string{"legacy", "shared", "v2"}) {
+		t.Fatal(calls, names)
+	}
+	r.opts.MaxFindNames = 2
+	if err := r.Find(context.Background(), "existing-glob", func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if r.opts.Parts.Budget.Used() != 0 {
+		t.Fatal("leaked budget")
+	}
+}
+
+func TestMixedLookupOnceAndOverlayLifetime(t *testing.T) {
+	const now = 1794700800
+	r, _, m := fixture(t, []partsread.Record{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 99, Bits: math.Float64bits(99), Sequence: 1}}})
+	calls := 0
+	r.opts.LegacyCatalog = partsread.CatalogFuncs{LookupFunc: func(string) (partsread.Metric, bool) { calls++; return m, true }, FindFunc: func(context.Context, string, func(string) error) error { return nil }}
+	if err := r.Fetch(context.Background(), "metric", now-101, now-98, func(s *partsread.Series) error {
+		if s.Values[0] != 5 || s.Values[1] != 99 {
+			t.Fatal(s.Values)
+		}
+		if r.opts.Parts.Budget.Used() == 0 {
+			t.Fatal("overlay lost pin")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("legacy lookups", calls)
+	}
+	if r.opts.Parts.Budget.Used() != 0 {
+		t.Fatal("leaked budget")
+	}
+}
+
+func TestVerifiedLegacyHorizon(t *testing.T) {
+	const now = 1794700800
+	r, _, _ := fixture(t, []partsread.Record{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 98, Bits: math.Float64bits(99), Sequence: 1}}})
+	// The fixture's last legacy timestamp is now-99; from is exclusive.
+	r.opts.LegacyHorizon = now - 99
+	want := func(s *partsread.Series) error {
+		if len(s.Values) != 3 || s.Values[0] != 99 || !math.IsNaN(s.Values[1]) {
+			t.Fatal(s.Values)
+		}
+		return nil
+	}
+	legacy := r.opts.Legacy
+	r.opts.Legacy = nil // Any legacy data access in the verified range would panic.
+	if err := r.Fetch(context.Background(), "metric", now-99, now-96, want); err != nil {
+		t.Fatal(err)
+	}
+	r.opts.Legacy = legacy
+	// A historical query still reads legacy and overlays the correction.
+	if err := r.Fetch(context.Background(), "metric", now-101, now-97, func(s *partsread.Series) error {
+		if s.Values[0] != 5 || s.Values[1] != 7 || s.Values[2] != 99 {
+			t.Fatal(s.Values)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestMissingSelectionUsesLegacyOnly(t *testing.T) {
+	const now = 1794700800
+	r, _, _ := fixture(t, []partsread.Record{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 100, Bits: math.Float64bits(99), Sequence: 1}}})
+	r.opts.Parts.Select = func(string) *partsread.Publication { return nil }
+	if err := r.Fetch(context.Background(), "metric", now-101, now-98, func(s *partsread.Series) error {
+		if s.Values[0] != 5 || s.Values[1] != 7 {
+			t.Fatal(s.Values)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

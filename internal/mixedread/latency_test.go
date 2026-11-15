@@ -6,6 +6,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"slices"
 	"testing"
 	"time"
@@ -20,10 +22,16 @@ import (
 // It is deliberately not evidence for a production SST reader or ingest soak.
 func TestLatencyComparison(t *testing.T) {
 	root := os.Getenv("GO_CARBON_MIXED_LATENCY_DIR")
+	profile := os.Getenv("GO_CARBON_MIXED_PROFILE") != ""
+	path := os.Getenv("GO_CARBON_MIXED_COMPARE")
+	local := os.Getenv("GO_CARBON_MIXED_LATENCY_LOCAL") != ""
+	if profile || local {
+		root = t.TempDir()
+	}
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if filepath.Clean(root) != "/var/lib/carbon/v2-legacy" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy2" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	const clock int64 = 1794700800
@@ -110,7 +118,7 @@ func TestLatencyComparison(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		r, e := New(Options{Legacy: old, LegacyCatalog: cat, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(64 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
+		r, e := New(Options{Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(64 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -122,36 +130,86 @@ func TestLatencyComparison(t *testing.T) {
 	for _, warm := range []bool{true, false} {
 		for _, width := range []int64{3600, 86400, 7 * 86400, 30 * 86400} {
 			var base, mix []int64
+			var baseBytes, mixedBytes uint64
 			old, full, r := open()
-			count := 50
+			// Validate within the callback lifetime, outside measured samples.
+			want, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Fetch(ctx, cfg.Name, clock-width, clock, func(got *partsread.Series) error {
+				if got.From != int64(want.FromTime) || got.Until != int64(want.UntilTime) || got.Step != int64(want.Step) || len(got.Values) != len(want.Values) {
+					t.Fatal("latency fixture shape mismatch")
+				}
+				for j, v := range want.Values {
+					if math.Float64bits(v) != math.Float64bits(got.Values[j]) {
+						t.Fatal("latency fixture bits mismatch")
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_ = old.Close()
+			_ = full.Close()
+			old, full, r = open()
+			count := 200
+			if profile {
+				count = 2000
+			}
 			if !warm {
-				count = 20
+				count = 30
+			}
+			measure := func(mixed bool) {
+				var before, after runtime.MemStats
+				if profile {
+					kind := "native"
+					if mixed {
+						kind = "mixed"
+					}
+					pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", fmt.Sprintf("%t-%dh-%s", warm, width/3600, kind))))
+					runtime.ReadMemStats(&before)
+				}
+				a := time.Now()
+				var err error
+				if mixed {
+					if path == "legacy" {
+						_, err = old.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
+					} else {
+						err = r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
+					}
+				} else {
+					_, err = full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
+				}
+				elapsed := time.Since(a).Nanoseconds()
+				if mixed {
+					mix = append(mix, elapsed)
+				} else {
+					base = append(base, elapsed)
+				}
+				if profile {
+					runtime.ReadMemStats(&after)
+					if mixed {
+						mixedBytes += after.TotalAlloc - before.TotalAlloc
+					} else {
+						baseBytes += after.TotalAlloc - before.TotalAlloc
+					}
+					pprof.SetGoroutineLabels(ctx)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			for i := 0; i < count; i++ {
 				if !warm && i > 0 {
 					old, full, r = open()
 				}
-				var want *chunkstore.Series
-				var got []float64
-				a := time.Now()
-				want, e = full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
-				base = append(base, time.Since(a).Nanoseconds())
-				if e != nil {
-					t.Fatal(e)
-				}
-				a = time.Now()
-				e = r.Fetch(ctx, cfg.Name, clock-width, clock, func(s *partsread.Series) error { got = s.Values; return nil })
-				mix = append(mix, time.Since(a).Nanoseconds())
-				if e != nil {
-					t.Fatal(e)
-				}
-				if len(want.Values) != len(got) {
-					t.Fatal("latency fixture shape mismatch")
-				}
-				for j, v := range want.Values {
-					if math.Float64bits(v) != math.Float64bits(got[j]) {
-						t.Fatal("latency fixture bits mismatch")
-					}
+				if i%2 == 0 {
+					measure(false)
+					measure(true)
+				} else {
+					measure(true)
+					measure(false)
 				}
 				if !warm {
 					_ = old.Close()
@@ -162,6 +220,10 @@ func TestLatencyComparison(t *testing.T) {
 				_ = old.Close()
 				_ = full.Close()
 			}
+			if profile {
+				fmt.Printf("ALLOC warm=%t hours=%d native=%d mixed=%d bytes/op\n", warm, width/3600, baseBytes/uint64(count), mixedBytes/uint64(count))
+			}
+
 			bp, bq := quantiles(base)
 			mp, mq := quantiles(mix)
 			gate := "FAIL"
@@ -179,23 +241,49 @@ func TestLatencyComparison(t *testing.T) {
 	defer old.Close()
 	defer full.Close()
 	var base, mix []int64
+	var before, after runtime.MemStats
+	var baseBytes, mixedBytes uint64
 	for range 1000 {
+		if profile {
+			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", "find-native")))
+			runtime.ReadMemStats(&before)
+		}
 		a := time.Now()
 		e = cat.Find(ctx, "*", func(string) error { return nil })
 		base = append(base, time.Since(a).Nanoseconds())
+		if profile {
+			runtime.ReadMemStats(&after)
+			baseBytes += after.TotalAlloc - before.TotalAlloc
+		}
 		if e != nil {
 			t.Fatal(e)
+		}
+		if profile {
+			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("class", "find-mixed")))
+			runtime.ReadMemStats(&before)
 		}
 		a = time.Now()
 		e = r.Find(ctx, "*", func(string) error { return nil })
 		mix = append(mix, time.Since(a).Nanoseconds())
+		if profile {
+			runtime.ReadMemStats(&after)
+			mixedBytes += after.TotalAlloc - before.TotalAlloc
+			pprof.SetGoroutineLabels(ctx)
+		}
 		if e != nil {
 			t.Fatal(e)
 		}
 	}
+	if profile {
+		fmt.Printf("ALLOC find native=%d mixed=%d bytes/op\n", baseBytes/1000, mixedBytes/1000)
+	}
 	bp, bq := quantiles(base)
 	mp, mq := quantiles(mix)
-	fmt.Printf("| %s | warm find4096 | %.1f | %.1f | %.1f | %.1f | diagnostic |\n", when, float64(bp)/1000, float64(mp)/1000, float64(bq)/1000, float64(mq)/1000)
+	gate := "FAIL"
+	if mp <= bp && mq <= bq {
+		gate = "PASS"
+	}
+	fmt.Printf("| %s | warm find4096 | %.1f | %.1f | %.1f | %.1f | %s |\n", when, float64(bp)/1000, float64(mp)/1000, float64(bq)/1000, float64(mq)/1000, gate)
 }
 func quantiles(ns []int64) (int64, int64) {
 	slices.Sort(ns)
