@@ -696,7 +696,14 @@ func (s *stream) recover() error {
 		}
 	}
 	for i, p := range paths {
-		seg, ok := s.loadIndex(p)
+		var seg segment
+		var ok bool
+		// The newest segment may have been active at a crash, regardless of a
+		// surviving sidecar. Always validate its bytes, even when coarse file
+		// timestamps cannot distinguish an immediately following tail write.
+		if i < len(paths)-1 {
+			seg, ok = s.loadIndex(p)
+		}
 		if !ok {
 			s.hook("recover-scan")
 			var e error
