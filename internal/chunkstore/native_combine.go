@@ -642,6 +642,7 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 	// exceptional absent name; present names still combine without a cache gate.
 	if p.Old.ID == 0 && s.pendingTransfer(p.Meta.Name) {
 		p.Deferred = true
+		p.Skipped = &NativeSkip{Ordinal: p.Position, Name: p.Meta.Name, Reason: "target catalog absent with pending writes"}
 		data, err = json.Marshal(p.nativeCombinePiece)
 		if err != nil {
 			return false, err
