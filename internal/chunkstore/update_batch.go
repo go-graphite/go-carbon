@@ -103,18 +103,17 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 			}
 		}
 	}()
-	// Capture each committed state while holding the stripes. An exact-name
-	// reservation then excludes competing mutations without retaining any
-	// stripe across block reads, codec work, or WAL publication.
+	// Exact-name reservations preserve the latest committed states without
+	// retaining sibling stripes across cache decoding or database reads.
 	reserved := make([]string, 0, len(names))
+	for name := range names {
+		reserved = append(reserved, name)
+	}
+	unlock = s.releaseUpdateStripes(reserved)
+	timer.Enter(stagetime.Route)
 	for name := range names {
 		p := prepared{}
 		p.state, p.meta = s.lockedState(name)
-		states[name] = p
-		reserved = append(reserved, name)
-	}
-	unlock = s.releaseUpdateStripes(reserved, unlock)
-	for name, p := range states {
 		var err error
 		if p.meta.ID == 0 {
 			p.meta, err = metadataFrom(s.db, name)

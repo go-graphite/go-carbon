@@ -85,9 +85,10 @@ retryLock:
 	timer.Enter(stagetime.Route)
 	// The metadata cache holds the state the previous mutation committed,
 	// including the continuation keys this update starts by reading.
+	// Reserve only this name before decoding cached state, reading blocks,
+	// propagating, encoding or committing.
+	unlock = s.releaseUpdateStripes([]string{name})
 	state, m := s.lockedState(name)
-	// Reserve only this name through reads, propagation, encode and commit.
-	unlock = s.releaseUpdateStripes([]string{name}, unlock)
 	var err error
 	if state == nil {
 		if m, err = metadataFrom(s.db, name); err != nil {

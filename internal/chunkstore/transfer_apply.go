@@ -231,7 +231,7 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 		return out, nil
 	}
 	s.transferApply.recordHold(time.Since(locked))
-	unlock = s.releaseImportStripes(names, held, unlock)
+	unlock = s.releaseImportStripes(names, held)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}
@@ -327,7 +327,7 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 		}
 	}
 	s.transferApply.recordHold(time.Since(locked))
-	unlock = s.releaseImportStripes(names, nil, unlock)
+	unlock = s.releaseImportStripes(names, nil)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}

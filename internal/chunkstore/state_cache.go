@@ -197,8 +197,8 @@ func (c *stateCache) get(stripe uint64, name string, epoch uint64) *metricState 
 	return st
 }
 
-// locked returns name's latest committed state for a writer holding the
-// name's stripe in a mutation, or nil.
+// locked returns name's latest committed state for a writer owning the
+// name through its stripe or exact-name reservation, or nil.
 func (c *stateCache) locked(stripe uint64, name string) *metricState {
 	sh := &c.shards[stripe]
 	hash := c.hash(name)
@@ -270,7 +270,8 @@ func (c *stateCache) installMutation(stripe uint64, name string, st *metricState
 }
 
 // endMutation installs what installMutation recorded, or forgets name; call it
-// before releasing the stripe, whether the mutation committed or not.
+// while owning the name through its stripe or exact-name reservation, whether
+// the mutation committed or not.
 func (c *stateCache) endMutation(stripe uint64, name string) {
 	sh := &c.shards[stripe]
 	hash := c.hash(name)

@@ -682,7 +682,7 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 		return false, err
 	}
 	held = time.Since(locked)
-	unlock = s.releaseImportStripes([]string{p.Meta.Name}, nil, unlock)
+	unlock = s.releaseImportStripes([]string{p.Meta.Name}, nil)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}
