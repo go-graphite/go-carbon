@@ -238,6 +238,13 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 			continue
 		}
 		for i, n := range names {
+			skip, e := s.excludePolicy(n, "window missing")
+			if e != nil {
+				return e
+			}
+			if skip {
+				continue
+			}
 			if masks[i]&(1<<uint(src)) != 0 {
 				if err := chunkstore.ValidateMetricName(n); err == nil {
 					subsets[src] = append(subsets[src], n)

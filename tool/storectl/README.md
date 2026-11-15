@@ -899,3 +899,22 @@ Fill progress totals count distinct `(metric, source)` transfers. A metric with
 holes in multiple archives or windows is selected once per source; donor fan-out
 can legitimately make this count exceed the preceding distinct verified-name
 count. `sync_round.holes` separately retains archive/window hole observations.
+
+### Named sync exceptions
+
+`storectl sync` records names exceeding the store's 4,096-byte creation limit in
+`policy-skipped.json`. These names never reach copy, verification or READY reads
+and do not prevent READY. Names still unresolved after the existing bounded
+selection or repair retries are recorded in `quarantine.json`; the remaining
+names continue through every phase. Both files contain the name, reason, phase,
+and first/last observation time and survive `--resume`. Recovery jobs share their
+parent's lists, preserving the original journals and immutable copy selections.
+
+Each newly excluded name emits an ERROR event. Progress JSON and Graphite expose
+`quarantined` and `policy_skipped` counts under the existing sync metric prefix.
+An otherwise successful final attestation is `READY_EXCEPT` when quarantined
+names remain, with their count and list path in `ready.json` and exit code **3**.
+It does not certify coverage for those names or count them as copied. Exit **2**
+continues to mean incomplete readiness; process, scope and read-back gates still
+apply to every other name. Keep both lists with the unit's saved state; resume
+preserves the exceptions rather than repeatedly attempting their failed work.

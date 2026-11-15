@@ -197,7 +197,7 @@ func readSyncNames(path string) (string, error) {
 		if strings.HasPrefix(n, "[") || strings.HasPrefix(n, "{") || n <= previous {
 			return "", fmt.Errorf("--names: expected one metric name per line, byte-sorted unique (LC_ALL=C sort -u), not JSON; invalid name %q after %q", n, previous)
 		}
-		if err := chunkstore.ValidateMetricName(n); err != nil {
+		if err := chunkstore.ValidateMetricName(n); err != nil && len(n) <= chunkstore.MaxMetricNameBytes {
 			return "", fmt.Errorf("--names: one metric name per line, byte-sorted unique, not JSON: %w", err)
 		}
 		fmt.Fprintln(hash, n)
@@ -318,6 +318,9 @@ func SyncMain(ctx context.Context, args []string) error {
 		return nil
 	}, func() error { return c.run(ctx, backend) })
 	event("sync_io", map[string]any{"timings": backend.syncTimings()})
+	if errors.Is(err, ErrSyncQuarantined) {
+		return err
+	}
 	if errors.Is(err, ErrSyncResidual) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitSyncResidual)

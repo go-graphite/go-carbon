@@ -48,6 +48,10 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
+	Quarantined          int64              `json:"quarantined"`
+	PolicySkipped        int64              `json:"policy_skipped"`
+	QuarantinePath       string             `json:"quarantine_path,omitempty"`
+	PolicySkippedPath    string             `json:"policy_skipped_path,omitempty"`
 	HistoryVerifiedUntil int64              `json:"history_verified_until,omitempty"`
 	Repair               *windowRepairCount `json:"repair,omitempty"`
 	Scope                string             `json:"scope"`
@@ -91,6 +95,13 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 	}
 	if err = os.MkdirAll(o.state, 0755); err != nil {
 		return err
+	}
+	if o.issues == nil {
+		var e error
+		o.issues, e = openSyncIssues(o.state)
+		if e != nil {
+			return e
+		}
 	}
 	lock, err := lockResumeState(filepath.Join(o.state, "ready"))
 	if err != nil {
@@ -150,21 +161,32 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 				status = "interrupted"
 			}
 		}
-		if e := readyProgress(o.state, status, err); e != nil {
-			err = errors.Join(err, e)
-			report.Reasons = append(report.Reasons, e.Error())
-		}
+		report.Quarantined, report.PolicySkipped = o.issues.counts()
+		report.QuarantinePath = filepath.Join(o.issues.state, "quarantine.json")
+		report.PolicySkippedPath = filepath.Join(o.issues.state, "policy-skipped.json")
 		if len(report.Reasons) == 0 {
 			report.Verdict = "READY"
+			if report.Quarantined > 0 {
+				report.Verdict = "READY_EXCEPT"
+				err = fmt.Errorf("%w: %d names, %s", ErrSyncQuarantined, report.Quarantined, report.QuarantinePath)
+			}
 		} else {
 			report.Verdict = "NOT_READY"
 			err = errors.Join(err, ErrSyncNotReady)
+		}
+		if report.Verdict == "READY_EXCEPT" {
+			status = "ready_except"
+		}
+		if e := readyProgress(o.state, status, err); e != nil {
+			err = errors.Join(err, e)
+			report.Reasons = append(report.Reasons, e.Error())
+			report.Verdict = "NOT_READY"
 		}
 		if e := atomicStateJSON(path, report); e != nil {
 			err = errors.Join(err, e)
 			return
 		}
-		event("sync_ready", map[string]any{"verdict": report.Verdict, "reasons": report.Reasons, "path": path})
+		event("sync_ready", map[string]any{"verdict": report.Verdict, "reasons": report.Reasons, "path": path, "quarantined": report.Quarantined, "policy_skipped": report.PolicySkipped, "quarantine_path": report.QuarantinePath})
 	}()
 	report.Reasons = nil
 	previous := map[string]readyProcess{}
@@ -221,7 +243,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		return e
 	}
 	if resume == nil {
-		if e = initial(); e != nil {
+		if e = initial(); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return e
 		}
 	}
@@ -235,7 +257,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		return e
 	}
 	if resume != nil {
-		if e = runSync(ctx, resume.options(*o), b); e != nil {
+		if e = runSync(ctx, resume.options(*o), b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return fmt.Errorf("restart recovery: %w", e)
 		}
 		previous, state, unbound = resume.Processes, filepath.Join(o.state, resume.State), false
@@ -282,7 +304,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 				return e
 			}
 			previous = after
-			if e = runSync(ctx, recovery, b); e != nil {
+			if e = runSync(ctx, recovery, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 				return fmt.Errorf("restart recovery: %w", e)
 			}
 			state = recovery.state
@@ -316,7 +338,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 			recovery.sampleEvery = 1
 			recovery.settle = 0
 			recovery.windows = append(append(syncRanges(nil), o.windows...), report.Restarts...)
-			if e = runSync(ctx, recovery, b); e != nil {
+			if e = runSync(ctx, recovery, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 				return fmt.Errorf("final parity fill: %w", e)
 			}
 			repairedParity = true
@@ -520,7 +542,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		if e != nil {
 			return e
 		}
-		if mask == 0 {
+		if mask == 0 || o.issues.excluded(name) {
 			continue
 		}
 		batch = append(batch, name)
