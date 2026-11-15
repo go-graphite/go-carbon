@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -128,20 +129,44 @@ func coreReplayWithHook(journal, out string, cfg coreConfig, hook func(int, *peb
 }
 
 func coreSample(engine *coreEngine, stage string, start time.Time, offered uint64) map[string]any {
+	runtimeSamples := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/gc/mark/assist:cpu-seconds"}, {Name: "/gc/scan/heap:bytes"}}
+	metrics.Read(runtimeSamples)
+	runtimeCounters := make(map[string]any, len(runtimeSamples))
+	for _, sample := range runtimeSamples {
+		switch sample.Value.Kind() {
+		case metrics.KindFloat64:
+			runtimeCounters[sample.Name] = sample.Value.Float64()
+		case metrics.KindUint64:
+			runtimeCounters[sample.Name] = sample.Value.Uint64()
+		}
+	}
+	var syncNS, syncMaxNS, syncCalls uint64
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
 	var points, parts, bytes, debt, compacted uint64
-	var l0 int64
+	var l0, l0Sublevels, memtables, flushes int64
+	var readAmp int
+	var memtableBytes uint64
 	var phases []map[string]any
 	var liveBytes uint64
 	for owner, o := range engine.owners {
 		points += o.committed.Load()
 		parts += o.parts.Load()
 		bytes += o.bytes.Load()
+		syncNS += o.syncNS.Load()
+		syncMaxNS = max(syncMaxNS, o.syncMaxNS.Load())
+		syncCalls += o.syncCalls.Load()
 		m := o.db.Metrics()
 		debt += m.Compact.EstimatedDebt
 		for _, level := range m.Levels {
 			compacted += level.BytesCompacted
 		}
 		l0 += m.Levels[0].NumFiles
+		l0Sublevels += int64(m.Levels[0].Sublevels)
+		readAmp += m.ReadAmp()
+		memtables += m.MemTable.Count
+		memtableBytes += m.MemTable.Size
+		flushes += m.Flush.Count
 		for _, level := range m.Levels {
 			liveBytes += uint64(level.Size)
 		}
@@ -151,18 +176,30 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 		}
 		phases = append(phases, map[string]any{"owner": owner, "committed": o.committed.Load(), "sort_seconds": float64(o.sortNS.Load()) / 1e9, "encode_seconds": float64(o.encodeNS.Load()) / 1e9, "ingest_seconds": float64(o.ingestNS.Load()) / 1e9, "producer_queue_wait_seconds": float64(blocked) / 1e9})
 	}
-	return map[string]any{"owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
+	return map[string]any{"runtime_counters": runtimeCounters, "sst_sync_seconds": float64(syncNS) / 1e9, "sst_sync_max_seconds": float64(syncMaxNS) / 1e9, "sst_sync_calls": syncCalls, "l0_sublevels": l0Sublevels, "read_amp": readAmp, "memtables": memtables, "memtable_bytes": memtableBytes, "flushes": flushes, "heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse, "total_alloc": memory.TotalAlloc, "num_gc": memory.NumGC, "gc_pause_ns": memory.PauseTotalNs, "gc_cpu_fraction": memory.GCCPUFraction, "owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
 }
 
 // A bounded synthetic durability/LSM workload, explicitly not captured traffic.
 // Time advances with offered input. Producer backpressure is visible as a
 // shortfall against rate*elapsed; submitted batches are never silently dropped.
 func coreBenchmark(out string, cfg coreConfig, duration time.Duration, rate uint64, metrics uint64, settle time.Duration) error {
-	return coreBenchmarkWithHook(out, cfg, duration, rate, metrics, settle, nil)
+	return coreBenchmarkPipeline(out, cfg, duration, rate, metrics, settle, 0, 1)
+}
+
+// Independent pipelines generate disjoint canonical IDs. Routing happens before
+// entry to a pipeline; no producer sends a packet to a remote node's owners.
+func coreBenchmarkPipeline(out string, cfg coreConfig, duration time.Duration, rate, metrics uint64, settle time.Duration, index, count int) error {
+	if count < 1 || index < 0 || index >= count || metrics < uint64(count) {
+		return os.ErrInvalid
+	}
+	return coreBenchmarkWithIdentity(out, cfg, duration, rate, metrics, settle, nil, index, count)
 }
 
 // A hook(-1,nil,nil) call ends publication and must join readers/release pins.
 func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, rate uint64, metrics uint64, settle time.Duration, hook func(int, *pebble.Snapshot, []row) error) error {
+	return coreBenchmarkWithIdentity(out, cfg, duration, rate, metrics, settle, hook, 0, 1)
+}
+func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duration, rate uint64, metrics uint64, settle time.Duration, hook func(int, *pebble.Snapshot, []row) error, pipeline, pipelines int) error {
 	if duration <= 0 || rate == 0 || metrics == 0 {
 		return os.ErrInvalid
 	}
@@ -180,7 +217,7 @@ func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, r
 	}
 	start := time.Now()
 	baseline := procStats()
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
 	done := make(chan error, cfg.Producers)
 	var offered atomic.Uint64
 	cursors := make([]atomic.Uint64, cfg.Producers)
@@ -195,6 +232,7 @@ func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, r
 			defer unpin()
 			const batchSize = 32768
 			var sent uint64
+			buffer := make([]row, batchSize)
 			for {
 				global := sent*uint64(cfg.Producers) + uint64(p)
 				if global >= target || time.Since(start) >= duration {
@@ -206,10 +244,10 @@ func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, r
 				if delay := time.Until(due); delay > 0 {
 					time.Sleep(delay)
 				}
-				rows := make([]row, n)
+				rows := buffer[:n]
 				for i := range rows {
 					seq := (sent+uint64(i))*uint64(cfg.Producers) + uint64(p)
-					rows[i] = row{seq % metrics, 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
+					rows[i] = row{(seq%((metrics-1-uint64(pipeline))/uint64(pipelines)+1))*uint64(pipelines) + uint64(pipeline), 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
 				}
 				sent += n
 				offered.Add(n)

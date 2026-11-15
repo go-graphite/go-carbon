@@ -3,9 +3,13 @@ package main
 import (
 	"errors"
 	"github.com/cockroachdb/pebble"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestCoreOriginalBatchesAtomicExtension(t *testing.T) {
@@ -103,11 +107,13 @@ func TestCoreConcurrentDurableFrontier(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		last := make([]uint64, cfg.Producers)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-done:
 				return
-			default:
+			case <-ticker.C:
 			}
 			f := e.durableFrontiers()
 			for p := range last {
@@ -133,5 +139,126 @@ func TestCoreConcurrentDurableFrontier(t *testing.T) {
 	wg.Wait()
 	if err = e.close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoreSealExtensionCrash(t *testing.T) {
+	cfg := coreTestConfig()
+	cfg.Shards = 1
+	cfg.Producers = 1
+	root, phase := os.Getenv("CORE_SEAL_CRASH_ROOT"), os.Getenv("CORE_SEAL_CRASH_PHASE")
+	batch := []coreBatch{{ID: 7, Order: 11, Clock: 1234, Policy: []byte("policy"), Points: []row{{7, -1, 0x7ff8000000000042, 11}, {7, 19, 0x8000000000000000, 12}}}}
+	hooks := func(pause string) coreHooks {
+		return coreHooks{PlanSeal: func(int, coreSealInput) (coreSealPlan, error) {
+			stop := func() {
+				if err := os.WriteFile(filepath.Join(root, "ready"), []byte(pause), 0600); err != nil {
+					panic(err)
+				}
+				select {}
+			}
+			if pause == "before" {
+				stop()
+			}
+			return coreSealPlan{Files: [][]coreKV{{{[]byte{'R', 1}, []byte("same-transaction")}}}, Commit: func() {
+				if pause == "after" {
+					stop()
+				}
+			}}, nil
+		}}
+	}
+	if root != "" {
+		e, err := openCoreWithHooks(root, cfg, hooks(phase))
+		if err != nil {
+			panic(err)
+		}
+		if err = e.submitBatches(0, batch, 1, true); err != nil {
+			panic(err)
+		}
+		panic("crash point not reached")
+	}
+	for _, phase := range []string{"before", "after"} {
+		t.Run(phase, func(t *testing.T) {
+			root = t.TempDir()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCoreSealExtensionCrash$")
+			cmd.Env = append(os.Environ(), "CORE_SEAL_CRASH_ROOT="+root, "CORE_SEAL_CRASH_PHASE="+phase)
+			log, err := os.Create(filepath.Join(t.TempDir(), "child.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer log.Close()
+			cmd.Stdout = log
+			cmd.Stderr = log
+			if err = cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			until := time.Now().Add(30 * time.Second)
+			for {
+				if _, err = os.Stat(filepath.Join(root, "ready")); err == nil {
+					break
+				}
+				if time.Now().After(until) {
+					t.Fatal("child crash point timeout")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err = cmd.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			_ = cmd.Wait()
+			e, err := openCore(root, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := uint64(0)
+			if phase == "after" {
+				want = 1
+			}
+			if e.durableFrontiers()[0][0] != want {
+				t.Fatal("frontier disagrees with commit")
+			}
+			snap := e.owners[0].db.NewSnapshot()
+			rs, err := coreRead(snap, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rs) != int(want)*2 {
+				t.Fatal("raw rows disagree with frontier", rs)
+			}
+			if want == 1 && (rs[0].Bits != 0x7ff8000000000042 || rs[1].Bits != 0x8000000000000000) {
+				t.Fatal("float bits changed", rs)
+			}
+			v, c, err := snap.Get([]byte{'R', 1})
+			if want == 0 {
+				if !errors.Is(err, pebble.ErrNotFound) {
+					t.Fatal("extension committed without frontier", err)
+				}
+			} else {
+				if err != nil || string(v) != "same-transaction" {
+					t.Fatal("missing extension", err)
+				}
+				c.Close()
+			}
+			snap.Close()
+			if err = e.close(); err != nil {
+				t.Fatal(err)
+			}
+			e, err = openCoreWithHooks(root, cfg, hooks(""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = e.submitBatches(0, batch, 1, true); err != nil {
+				t.Fatal(err)
+			}
+			snap = e.owners[0].db.NewSnapshot()
+			rs, err = coreRead(snap, 7)
+			if err != nil || len(rs) != 2 {
+				t.Fatal("replay changed raw count", rs, err)
+			}
+			snap.Close()
+			if err = e.close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

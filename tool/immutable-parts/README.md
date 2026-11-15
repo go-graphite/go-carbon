@@ -88,8 +88,9 @@ immutable-parts -mode core-bench -out trial -shards 16 \
   -max-rows 2097152 -core-settle 60s
 ```
 
-Each producer owns a two-slot atomic queue per shard. One owner per shard
-collects bounded heads, sorts at one second or the byte bound, and publishes
+Each producer owns a single-producer atomic queue per shard with a 256 KiB
+accounted payload quota. Ready owners receive packets before a producer waits
+for full queues. One owner per shard collects bounded heads, sorts at one second or the byte bound, and publishes
 immutable Snappy SST blocks without reading existing data. Data and the producer
 frontier vector use separate, disjoint SSTs, ingested in one atomic manifest edit.
 Putting the global frontier key in each data SST would make their ranges overlap
@@ -157,3 +158,59 @@ Use an offered rate well above measured throughput when looking for a ceiling;
 sort/encode/ingest wall seconds and aggregate producer queue wait are reported,
 alongside current live SST bytes and process counters. Queue wait sums can exceed
 wall time and `/proc/self/io` syscall counts are not physical-device IOPS.
+
+Producer dispatch counts rows per owner before allocating one exact backing
+slice, then gives each owner a disjoint region with a fixed capacity. This
+avoids repeated geometric allocations while preserving caller-owned input:
+callers can reuse their rows immediately after `submit` returns. The owners
+still copy those private packets into their own heads before sorting.
+
+### NUMA-local pipelines and bounded dispatch
+
+`core-bench` reuses producer routing buffers under an 8 MiB in-flight payload
+quota per producer. Queue pointer capacity follows the smallest packet charge;
+lease capacity follows producer metadata charges, rather than a fixed packet
+count. An indivisible packet larger than a quota is admitted only when that
+queue or producer is empty. Retained backing capacity and owner heads are
+separate from these in-flight accounting limits. A lease lasts until all
+database consumers finish copying its disjoint regions. Producers can reuse
+their input immediately after submission. Apply-batch policies, order and points
+remain detached with their original boundaries. SST key/value scratch is reused
+after `Set` returns.
+
+`-core-owners` sets execution-owner count independently of `-shards` (database
+count) and `-core-producers`. An execution owner can poll several databases;
+routing, snapshots and durable frontiers remain per database. The execution-owner
+count can change on restart without changing persisted routing.
+
+For a Linux machine with two NUMA nodes, launch separate runtimes with CPU and
+memory binding for the entire pipeline, including Pebble background threads:
+
+```sh
+python3 tool/immutable-parts/numa_bench.py --binary /absolute/path/immutable-parts \
+  --out /scratch/new-trial --nodes '0:0-47,96-143;1:48-95,144-191' \
+  --producers 48 --owners 48 --dbs 48 --duration 120
+```
+
+Use CPU/node IDs discovered on the actual host. Counts are per node; offered
+rate is aggregate. Synthetic metric IDs are split before pipeline entry into
+disjoint subsets by `-core-pipeline`/`-core-pipelines`. There is no cross-node
+producer-to-owner queue. Each process has its own allocator, scheduler, head
+buffers and databases. This launcher exercises the offline numeric engine; it
+does not implement portable admission, log routing or cross-node live recovery.
+Per-second heap/GC, memtable, flush, L0 and phase counters accompany process I/O.
+The launcher retains measurement JSON and deletes its synthetic databases.
+
+Core samples distinguish cumulative external SST durability-sync seconds and
+maximum individual sync time from total encode time. Runtime counters include
+GC CPU, mark-assist CPU and scannable heap bytes; completed GC counts alone do
+not measure concurrent collector work. These measurements complement the L0,
+memtable, flush, compaction-debt and owner-phase counters. External stage files
+are created outside Pebble's object provider, so its `BytesPerSync` option does
+not apply to them.
+
+External SST output reuses a 1 MiB write buffer per owner. It drains before the
+original final durability sync and propagates both flush and sync failures. This
+batches small table writes without changing SST bytes or manifest publication.
+Queue tests cover ready-owner progress, FIFO, original apply groups, indexed
+seal acknowledgements, byte-credit refunds and indivisible oversized packets.
