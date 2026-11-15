@@ -491,7 +491,10 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 	}
 	defer b.recordTime("copy", source)()
 	progress, _ := ctx.Value(syncCopyDurableProgressKey{}).(func(int64, bool))
-	namesPath := journal[:len(journal)-len(".jsonl")] + ".names"
+	namesPath, err := syncCopyInput(journal, names)
+	if err != nil {
+		return syncCopyResult{}, err
+	}
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {
 		return syncCopyResult{}, err
