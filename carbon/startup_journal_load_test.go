@@ -56,6 +56,7 @@ func TestStartupJournalLoadGate(t *testing.T) {
 	evidence := json.NewEncoder(f)
 	stamp := time.Now().Unix() - 30
 	var reference string
+	completed := 0
 	for _, appendMode := range []bool{false, true} {
 		name := "capture"
 		if appendMode {
@@ -65,17 +66,20 @@ func TestStartupJournalLoadGate(t *testing.T) {
 			digest := runStartupLoad(t, fixture, config, appendMode, smoke, rate, seconds, connections, stamp, evidence)
 			if !appendMode {
 				reference = digest
-			} else if digest != reference {
+			} else if reference != "" && digest != reference {
 				t.Fatalf("stored archive bits differ: capture=%s inputlog=%s", reference, digest)
 			}
+			completed++
 		})
-		if t.Failed() {
-			return
-		}
 	}
 	verdict := "PASS"
 	if smoke {
 		verdict = "SMOKE_ONLY_NOT_QUALIFIED"
+	}
+	if t.Failed() {
+		verdict = "FAIL"
+	} else if completed != 2 {
+		verdict = "INCOMPLETE_NOT_QUALIFIED"
 	}
 	if err := evidence.Encode(map[string]any{"verdict": verdict, "archive_sha256": reference, "offered_points_per_second": rate, "seconds_per_path": seconds, "connections": connections, "goos": runtime.GOOS, "cpus": runtime.NumCPU(), "go_version": runtime.Version()}); err != nil {
 		t.Fatal(err)
@@ -188,6 +192,9 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 	}
 	if !smoke && historical.Points < 100_000_000 {
 		t.Fatalf("historical fixture too small: %d points", historical.Points)
+	}
+	if err := evidence.Encode(map[string]any{"append": appendMode, "phase": "inventory", "fixture_bytes": fixtureBytes, "historical_points": historical.Points}); err != nil {
+		t.Fatal(err)
 	}
 	writeSharedConfig(t, path, cfg)
 	app := New(path)
@@ -351,7 +358,9 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 		if log := app.inputLog.Load(); log != nil {
 			m = log.Metrics()
 		}
-		row := map[string]any{"append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes}
+		timings := s.ioTimings()
+		row := map[string]any{"append": appendMode, "second": second, "offered": rate * int64(second), "sent": sent.Load(), "intake": intake, "committed": committed, "direct": s.direct.Load(), "relogged": m.Relogged, "write_errors": m.WriteErrors, "receiver_errors": receiverErrors, "startup_points": s.points.Load(), "fixture_bytes": fixtureBytes,
+			"replayed": m.ReplayedPoints, "startup_replayed": s.replayedPoints.Load(), "journal_points": m.PointsWritten, "journal_bytes": m.BytesWritten, "journal_syncs": m.Syncs, "unlogged": m.Unlogged, "append_calls": timings[captureAppend].calls, "append_p99_upper_ns": timings[captureAppend].p99}
 		if err := evidence.Encode(row); err != nil {
 			t.Fatal(err)
 		}
@@ -469,5 +478,9 @@ func runStartupLoad(t *testing.T, fixture, config string, appendMode, smoke bool
 	if liveNames != int(min(rate/10, int64(connections)*256)) || livePoints == 0 {
 		t.Fatalf("incomplete live archive differential: names=%d want=%d points=%d", liveNames, int(min(rate/10, int64(connections)*256)), livePoints)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	digest := hex.EncodeToString(h.Sum(nil))
+	if err := evidence.Encode(map[string]any{"append": appendMode, "phase": "archive", "archive_sha256": digest, "live_names": liveNames, "live_points": livePoints}); err != nil {
+		t.Fatal(err)
+	}
+	return digest
 }

@@ -31,6 +31,8 @@ type startupJournal struct {
 	tags         bool
 	slots        chan struct{}
 	captureSlots chan struct{}
+	buffers      chan *startupJournalBuffer
+	appendTiming captureTiming
 	parts        [startupJournalPartitions]struct {
 		stream  cache.RecoveryStream
 		source  *cache.RecoverySource
@@ -42,8 +44,14 @@ type startupJournal struct {
 	released bool // monitor owner
 }
 
+type startupJournalBuffer struct {
+	batches [startupJournalPartitions]inputlog.Batch
+	refs    map[string]*inputlog.StreamRef
+	decoder points.FrameDecoder
+}
+
 func newStartupJournal(s *startupInput, l *inputlog.Log, dir string, tagged bool) *startupJournal {
-	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, slots: make(chan struct{}, 32), captureSlots: make(chan struct{}, 32)}
+	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, slots: make(chan struct{}, 32), captureSlots: make(chan struct{}, 32), buffers: make(chan *startupJournalBuffer, 32)}
 	for i := range j.parts {
 		j.parts[i].source = j.parts[i].stream.Next()
 	}
@@ -58,11 +66,24 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 		return inputlog.ErrClosed
 	}
 	defer func() { <-j.slots }()
-	var batches [startupJournalPartitions]inputlog.Batch
+	// Acknowledgement ends the writer's borrow. Reuse the bounded columns only
+	// after it returns, clearing references even on validation/write failures.
+	var buffer *startupJournalBuffer
+	select {
+	case buffer = <-j.buffers:
+	default:
+		buffer = &startupJournalBuffer{refs: make(map[string]*inputlog.StreamRef)}
+	}
+	defer func() {
+		for i := range buffer.batches {
+			buffer.batches[i].Reset()
+		}
+		clear(buffer.refs)
+		j.buffers <- buffer
+	}()
+	batches, refs := &buffer.batches, buffer.refs
 	count := 0
-	refs := make(map[string]*inputlog.StreamRef)
-	var decoder points.FrameDecoder
-	err := decoder.Read(raw, func(name []byte, data []points.Point) {
+	err := buffer.decoder.Read(raw, func(name []byte, data []points.Point) {
 		p := points.Points{Metric: string(name), Data: data}
 		if len(p.Metric) > points.MaxMetricNameBytes {
 			return
@@ -110,7 +131,10 @@ func (j *startupJournal) write(raw []byte, expected int) error {
 		}
 	}
 	if count > 0 {
-		if _, err := j.log.AppendGroup(group); err != nil {
+		started := time.Now()
+		_, err := j.log.AppendGroup(group)
+		j.appendTiming.observe(started)
+		if err != nil {
 			return err
 		}
 	}

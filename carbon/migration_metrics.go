@@ -492,6 +492,7 @@ var captureIODescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_operation_seconds_total", "Capture operation elapsed time, summed over independent owners.", []string{"operation"}, nil),
 	prometheus.NewDesc("startup_capture_operation_calls_total", "Capture operation calls.", []string{"operation"}, nil),
 	prometheus.NewDesc("startup_capture_operation_max_seconds", "Longest observed capture operation.", []string{"operation"}, nil),
+	prometheus.NewDesc("startup_capture_operation_p99_seconds", "Power-of-two bucket upper bound for the lifetime 99th percentile capture operation latency.", []string{"operation"}, nil),
 }
 
 func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -550,6 +551,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(captureIODescs[0], prometheus.CounterValue, float64(timing.total)/1e9, captureOperations[i])
 			ch <- prometheus.MustNewConstMetric(captureIODescs[1], prometheus.CounterValue, float64(timing.calls), captureOperations[i])
 			ch <- prometheus.MustNewConstMetric(captureIODescs[2], prometheus.GaugeValue, float64(timing.maximum)/1e9, captureOperations[i])
+			ch <- prometheus.MustNewConstMetric(captureIODescs[3], prometheus.GaugeValue, float64(timing.p99)/1e9, captureOperations[i])
 		}
 		live := 0
 		var pending int64

@@ -411,3 +411,84 @@ func TestStartupJournalFenceWaitsForLastAcknowledgedTail(t *testing.T) {
 		t.Fatal("direct published before journal fence")
 	}
 }
+
+// Reused submission storage must not retain points or borrowed names after a
+// failed decode or a durable acknowledgement, including special value bits.
+func TestStartupJournalReusedBuffersPreserveBits(t *testing.T) {
+	app := journalStartupFixture(t, t.TempDir())
+	j := app.startupInput.journal
+	want := releaseCrashPoints()
+	for round := range 8 {
+		if err := j.write([]byte{0xff}, 1); err == nil {
+			t.Fatal("malformed input accepted")
+		}
+		p := &points.Points{Metric: "reuse;z=last;a=first", Data: append([]points.Point(nil), want.Data...)}
+		for i := range p.Data {
+			p.Data[i].Timestamp += int64(round) * 1000
+		}
+		raw := p.AppendBinary(nil)
+		if err := j.write(raw, len(p.Data)); err != nil {
+			t.Fatal(err)
+		}
+		clear(raw)
+		if len(j.buffers) != 1 {
+			t.Fatal("sequential submissions did not reuse bounded buffer", len(j.buffers))
+		}
+		b := <-j.buffers
+		if len(b.refs) != 0 {
+			t.Fatal("name references retained after acknowledgement")
+		}
+		for _, batch := range b.batches {
+			if batch.Len() != 0 || len(batch.Refs) != 0 {
+				t.Fatal("pending batch retained")
+			}
+			for _, ref := range batch.Refs[:cap(batch.Refs)] {
+				if ref != nil {
+					t.Fatal("borrowed reference retained")
+				}
+			}
+		}
+		j.buffers <- b
+	}
+	closeJournalFixture(app)
+	l, err := inputlog.Open(app.Config.InputLog.Path, inputlog.Options{SegmentSize: 16 << 20, SyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	var got []points.Point
+	stats, err := l.Replay(func(p *points.Points) {
+		if p.Metric != "reuse;a=first;z=last" {
+			t.Errorf("name=%q", p.Metric)
+		}
+		got = append(got, p.Data...)
+	})
+	if err != nil || stats.Corrupt != 0 {
+		t.Fatal(stats, err)
+	}
+	var expected []points.Point
+	for round := range 8 {
+		for _, p := range want.Data {
+			p.Timestamp += int64(round) * 1000
+			expected = append(expected, p)
+		}
+	}
+	assertReleaseReplayBits(t, got, expected)
+}
+
+func TestStartupCaptureLatencyPercentileCombinesOwners(t *testing.T) {
+	s := &startupInput{shards: []*startupShard{{}, {}}}
+	for i := range 99 {
+		s.shards[i%2].timings[captureWrite].observeDuration(time.Microsecond)
+	}
+	s.shards[0].timings[captureWrite].observeDuration(time.Second)
+	got := s.ioTimings()[captureWrite]
+	if got.calls != 100 || got.maximum != int64(time.Second) || got.p99 < int64(time.Microsecond) || got.p99 >= int64(2*time.Microsecond) {
+		t.Fatal(got)
+	}
+	s.journal = &startupJournal{}
+	s.journal.appendTiming.observeDuration(10 * time.Millisecond)
+	if got := s.ioTimings()[captureAppend]; got.calls != 1 || got.p99 < int64(10*time.Millisecond) || got.p99 >= int64(20*time.Millisecond) {
+		t.Fatal(got)
+	}
+}
