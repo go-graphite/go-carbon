@@ -82,7 +82,7 @@ type owner struct {
 	active         []frame
 	pending        []frame
 	nextOrder      uint64
-	journalEncoder partlog.DictionaryBlockEncoder
+	journalEncoder partlog.DictionaryDeltaEncoder
 	workspace      sealrollup.Workspace
 	batchScratch   []sealrollup.Batch
 	sampleScratch  []sealrollup.Sample

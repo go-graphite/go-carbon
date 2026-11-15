@@ -277,12 +277,12 @@ func (o *owner) encodeReceipts(fs []frame) ([]byte, error) {
 }
 
 type receiptDecoder struct {
-	dictionary partlog.DictionaryBlockDecoder
+	dictionary partlog.DictionaryDeltaDecoder
 	policies   map[string]*resolvedMetric
 }
 
 func (d *receiptDecoder) decode(b []byte) ([]frame, error) {
-	if !partlog.IsDictionaryBlockRecord(b) {
+	if !partlog.IsDictionaryDeltaRecord(b) {
 		return decodeFrames(b)
 	}
 	entries, e := d.dictionary.Decode(b)
