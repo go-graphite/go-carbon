@@ -1,13 +1,16 @@
+//go:build unix
+
 package whisperio
 
 import (
 	"context"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"syscall"
 	"testing"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/stagetime"
 )
 
 func BenchmarkStageBatch(b *testing.B) {
