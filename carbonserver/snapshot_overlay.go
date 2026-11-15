@@ -385,7 +385,13 @@ func (l *CarbonserverListener) pendingMetricStorable(name string) bool {
 // exact snapshot generation (the caller matched its read-index ID), so the
 // snapshot lookup in insert, ~6µs per name on large hosts, is skipped.
 func (ti *trieIndex) insertPendingMetric(name string) error {
-	_, err := ti.insertMutable("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
+	node, err := ti.insertMutable("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
+	if node != nil {
+		// Like realtime arrivals, checkpoint-only names have not yet been
+		// observed on disk. A scan can miss their file before persistence
+		// removes their cached points; reconciliation must verify storage.
+		node.pending.Store(true)
+	}
 	return err
 }
 

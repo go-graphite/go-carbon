@@ -342,6 +342,30 @@ func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
 	}
 }
 
+func TestPendingNamePersistedAfterScanWalkSurvivesPruning(t *testing.T) {
+	t.Parallel()
+	l := savedIndex(t, "existing.metric")
+	l.WarmupIndexWithPending(func(_ string, visit, _ func(string) error) error {
+		return visit("wal.only")
+	})
+	l.WaitForWarmup()
+	if !l.MetricExists("wal.only") {
+		t.Fatal("pending name was not published")
+	}
+	u := newFileListUpdate(l, nil)
+	if !u.scanFiles(l.whisperData, nil) {
+		t.Fatal("scan failed")
+	}
+	// The walk missed this directory. Persistence then confirms the pending
+	// points and removes them from cache before reconciliation checks it.
+	writeScanFile(t, filepath.Join(l.whisperData, "wal", "only.wsp"), 0)
+	u.pruneRealtimeMetrics()
+	if !l.MetricExists("wal.only") {
+		t.Fatal("scan pruned a checkpoint name persisted after its walk")
+	}
+	u.closeFileListCaches()
+}
+
 func TestSavedMetricLookupUsesFrozenCatalogue(t *testing.T) {
 	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
