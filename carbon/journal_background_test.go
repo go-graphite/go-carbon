@@ -3,6 +3,7 @@ package carbon
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,6 +75,7 @@ func TestJournalOnlyStartDoesNotWaitForRecoveryCapacity(t *testing.T) {
 		t.Fatal("background readiness is still gated")
 	}
 	awaitCapture(t, func() bool { return app.Cache.Size() > 0 })
+	awaitCapture(t, func() bool { return app.Persister.CommittedPoints() > 0 })
 	if got := app.inputLog.Load().Metrics().ReplayedPoints; got >= 40 {
 		t.Fatal("Start returned only after draining the fixture", got)
 	}
@@ -86,7 +88,12 @@ func TestJournalOnlyStartDoesNotWaitForRecoveryCapacity(t *testing.T) {
 	}
 	defer log.Close()
 	got := map[string][]points.Point{}
-	stats, err := log.Replay(func(p *points.Points) { got[p.Metric] = append(got[p.Metric], p.Data...) })
+	var mu sync.Mutex
+	stats, err := log.Replay(func(p *points.Points) {
+		mu.Lock()
+		got[p.Metric] = append(got[p.Metric], p.Data...)
+		mu.Unlock()
+	})
 	if err != nil || stats.Points != 40 {
 		t.Fatal("partial background replay lost journal authority", stats, err)
 	}
