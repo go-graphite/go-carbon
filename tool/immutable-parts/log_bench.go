@@ -203,9 +203,12 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	stop := make(chan struct{})
 	done := make(chan error, cfg.Producers)
 	var live atomic.Uint64
+	var firstAccepted atomic.Bool
 	liveCounts := make([]atomic.Uint64, cfg.Producers)
 	liveStart := time.Now()
+	// Keep the oracle clock unchanged; pacing has headroom above 20M accepted/s.
 	const rate = 20000000
+	const offeredRate = 22000000
 	for p := range cfg.Producers {
 		go func() {
 			const batch = 32768
@@ -219,7 +222,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 					return
 				default:
 				}
-				deadline := liveStart.Add(time.Duration(float64(sent) * float64(cfg.Producers) / rate * float64(time.Second)))
+				deadline := liveStart.Add(time.Duration(float64(sent) * float64(cfg.Producers) / offeredRate * float64(time.Second)))
 				if wait := time.Until(deadline); wait > 0 {
 					timer := time.NewTimer(wait)
 					select {
@@ -238,6 +241,13 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 				if _, err := l.journal.Append(p, time.Now().Unix(), payload); err != nil {
 					done <- err
 					return
+				}
+				if firstAccepted.CompareAndSwap(false, true) {
+					receipt := map[string]any{"benchmark_first_accept_seconds": time.Since(start).Seconds()}
+					if execNS, parseErr := strconv.ParseInt(os.Getenv("PARTLOG_BENCH_EXEC_UNIX_NS"), 10, 64); parseErr == nil && execNS > 0 {
+						receipt["exec_to_first_accept_seconds"] = float64(time.Now().UnixNano()-execNS) / 1e9
+					}
+					emit("first_live_append_accepted", batch, receipt)
 				}
 				sent += batch
 				liveCounts[p].Store(sent)
