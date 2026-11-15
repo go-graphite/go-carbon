@@ -31,6 +31,7 @@ func TestLatencyComparison(t *testing.T) {
 	allocs := os.Getenv("GO_CARBON_MIXED_ALLOCS") != ""
 	ingest := os.Getenv("GO_CARBON_MIXED_INGEST") != ""
 	raw := os.Getenv("GO_CARBON_MIXED_RAW") != ""
+	persisted := os.Getenv("GO_CARBON_MIXED_PERSISTED") != ""
 	profile := os.Getenv("GO_CARBON_MIXED_PROFILE") != ""
 	traced := os.Getenv("GO_CARBON_MIXED_TRACE") != ""
 	class := os.Getenv("GO_CARBON_MIXED_CLASS")
@@ -42,7 +43,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced {
@@ -135,6 +136,11 @@ func TestLatencyComparison(t *testing.T) {
 		names[fmt.Sprintf("find.metric.%04d", i)] = m
 	}
 	cat := catalog(names)
+	var disk *persistedLatency
+	if persisted {
+		disk = newPersistedLatency(t, filepath.Join(dir, "persisted"), cat, m, records, ingest)
+		defer disk.close(t)
+	}
 	borrowedSnapshots := make(map[*chunkstore.Store]*partsread.Snapshot)
 	defer func() {
 		for _, s := range borrowedSnapshots {
@@ -173,20 +179,28 @@ func TestLatencyComparison(t *testing.T) {
 		}
 		entries[cfg.Name] = catalogEntry{metric: m, legacy: binding}
 		var boundPub partsread.Publication
-		boundPub.Publish(partsread.View{Catalog: entryCatalog{Catalog: cat, entries: entries}, Parts: []partsread.Source{partsread.Freeze(records)}})
+		view := partsread.View{Parts: []partsread.Source{partsread.Freeze(records)}}
+		if disk != nil {
+			view, e = disk.p.AcquireView()
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
+		view.Catalog = entryCatalog{Catalog: cat, entries: entries}
+		boundPub.Publish(view)
 		snapshot, e := boundPub.Snapshot()
 		if e != nil {
 			t.Fatal(e)
 		}
-		if !ingest {
+		if !ingest || disk != nil {
 			boundPub.Close()
 		}
 		borrowedSnapshots[old] = snapshot
-		r, e := New(Options{Snapshot: snapshot, Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(64 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
+		r, e := New(Options{Snapshot: snapshot, Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(128 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
 		if e != nil {
 			t.Fatal(e)
 		}
-		if ingest {
+		if ingest && disk == nil {
 			stop := make(chan struct{})
 			done := make(chan struct{})
 			ready := make(chan struct{})
@@ -260,6 +274,10 @@ func TestLatencyComparison(t *testing.T) {
 			if class != "" && class != className {
 				continue
 			}
+			var publishedBefore uint64
+			if disk != nil {
+				publishedBefore = disk.publications.Load()
+			}
 			var base, mix []int64
 			var baseBytes, mixedBytes, baseAllocs, mixedAllocs uint64
 			old, full, r := open()
@@ -283,12 +301,16 @@ func TestLatencyComparison(t *testing.T) {
 			}
 			closePair(old, full)
 			old, full, r = open()
-			count := 1000
-			if profile {
-				count = 2000
-			}
+			count := 10000
 			if !warm {
-				count = 100
+				count = 1000
+			}
+			// Footprint/profile runs are separate diagnostics, never gate samples.
+			if allocs || profile {
+				count = 1000
+				if !warm {
+					count = 100
+				}
 			}
 			// Both warm paths complete their native lazy initialization first.
 			// Cold samples still use fresh block caches; no OS cache flush.
@@ -383,6 +405,13 @@ func TestLatencyComparison(t *testing.T) {
 			if warm {
 				closePair(old, full)
 			}
+			if disk != nil && ingest {
+				delta := disk.publications.Load() - publishedBefore
+				fmt.Printf("PERSISTED_CLASS class=%s publications=%d\n", className, delta)
+				if delta == 0 {
+					t.Fatal("persisted publisher made no progress during class")
+				}
+			}
 			if profile || allocs {
 				fmt.Printf("ALLOC warm=%t hours=%d native=%d mixed=%d bytes/op\n", warm, width/3600, baseBytes/uint64(count), mixedBytes/uint64(count))
 			}
@@ -406,6 +435,10 @@ func TestLatencyComparison(t *testing.T) {
 	if path == "frozen" || (class != "" && class != "warm-find4096") {
 		return
 	}
+	var findPublishedBefore uint64
+	if disk != nil {
+		findPublishedBefore = disk.publications.Load()
+	}
 	old, full, r := open()
 	defer closePair(old, full)
 	var nativeNames, mixedNames []string
@@ -418,7 +451,11 @@ func TestLatencyComparison(t *testing.T) {
 	if !slices.Equal(nativeNames, mixedNames) {
 		t.Fatal("latency find fixture names mismatch")
 	}
-	base, mix := make([]int64, 0, 1000), make([]int64, 0, 1000)
+	findCount := 10000
+	if allocs || profile {
+		findCount = 1000
+	}
+	base, mix := make([]int64, 0, findCount), make([]int64, 0, findCount)
 	var before, after runtime.MemStats
 	var baseBytes, mixedBytes, baseAllocs, mixedAllocs uint64
 	measureFind := func(mixed bool, sample int) {
@@ -465,7 +502,7 @@ func TestLatencyComparison(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for sample := range 1000 {
+	for sample := range findCount {
 		if rng.Intn(2) == 0 {
 			measureFind(false, sample)
 			measureFind(true, sample)
@@ -475,11 +512,18 @@ func TestLatencyComparison(t *testing.T) {
 		}
 	}
 
+	if disk != nil && ingest {
+		delta := disk.publications.Load() - findPublishedBefore
+		fmt.Printf("PERSISTED_CLASS class=warm-find4096 publications=%d\n", delta)
+		if delta == 0 {
+			t.Fatal("persisted publisher made no progress during Find")
+		}
+	}
 	if profile {
-		fmt.Printf("ALLOC find native=%d mixed=%d bytes/op\n", baseBytes/1000, mixedBytes/1000)
+		fmt.Printf("ALLOC find native=%d mixed=%d bytes/op\n", baseBytes/uint64(findCount), mixedBytes/uint64(findCount))
 	}
 	if allocs {
-		fmt.Printf("ALLOCS class=warm-find4096 native_allocs=%.3f mixed_allocs=%.3f native_bytes=%.3f mixed_bytes=%.3f\n", float64(baseAllocs)/1000, float64(mixedAllocs)/1000, float64(baseBytes)/1000, float64(mixedBytes)/1000)
+		fmt.Printf("ALLOCS class=warm-find4096 native_allocs=%.3f mixed_allocs=%.3f native_bytes=%.3f mixed_bytes=%.3f\n", float64(baseAllocs)/float64(findCount), float64(mixedAllocs)/float64(findCount), float64(baseBytes)/float64(findCount), float64(mixedBytes)/float64(findCount))
 	}
 	if raw {
 		emitLatencyPairs(seed, "warm-find4096", comparison, ingest, base, mix)

@@ -52,12 +52,16 @@ type request struct {
 	current partsread.Series
 }
 type Reader struct {
-	opts     Options
-	requests sync.Pool
+	opts Options
 }
 
+// Request storage contains no generation-owned pointers after release. Share it
+// across immutable Readers so publication turnover and fresh cold handles do
+// not allocate a new pool and scratch object for each generation.
+var requests sync.Pool
+
 func (r *Reader) takeRequest() *request {
-	if q := r.requests.Get(); q != nil {
+	if q := requests.Get(); q != nil {
 		return q.(*request)
 	}
 	return new(request)
@@ -66,7 +70,7 @@ func (r *Reader) releaseRequest(q *request) {
 	q.handle.Close()
 	q.legacy = partsread.Series{}
 	q.current = partsread.Series{}
-	r.requests.Put(q)
+	requests.Put(q)
 }
 
 func New(opts Options) (*Reader, error) {

@@ -78,13 +78,15 @@ instead of modifying untouched slots in the pooled part workspace.
 The mixed reader is not wired to a production backend. Passing correctness does
 not establish the required latency gate. `TestLatencyComparison` is an opt-in,
 private-directory diagnostic for cold block-cache and warm mixed overhead. It
-uses in-memory frozen v2 parts and a real legacy continuation store, so it is a
-best-case adapter comparison, not an SST or sustained-ingest qualification.
+uses a real legacy continuation store. By default its v2 sources are frozen
+memory parts; `GO_CARBON_MIXED_PERSISTED=1` uses actual durable file sources
+through `partspublish` instead. Neither mode is an SST backend or sustained-ingest
+qualification.
 The required production comparison still needs the same data, host and queries
 on actual persisted v2 sources, including concurrent ingestion. The unified-index option requires the owner to publish that index; leaving it
 off retains the slower per-query union. The diagnostic enables it against the
 same immutable fixture catalog used by the native baseline. Warm and Find classes take
-1,000 paired samples; fresh block-cache classes take 100, without dropping OS
+10,000 paired samples per repeat; fresh block-cache classes take 1,000, without dropping OS
 caches. `GO_CARBON_MIXED_COMPARE=native` selects an independent native/native
 control with identical data and seeded shuffling. `GO_CARBON_MIXED_RAW=1` emits
 paired nanoseconds before percentile sorting. Run the three seeds 1409, 7321,
@@ -136,3 +138,19 @@ over frozen legacy fetching (14 mixed versus 15 frozen allocations/request). The
 decoder and the existing index can still
 allocate, and cold workspace/pool misses can allocate. These statements do not
 establish a latency improvement or a persisted-part production qualification.
+
+The persisted diagnostic uses the publisher's `PlanSeal`, `AcquireView`, and
+`Collect` APIs. Parts and their complete envelope/frontier file are fsynced before
+`Plan.Commit`. Ingestion seals a replacement generation every 10ms; every class
+reports completed publications. The reader retains one generation throughout each
+handle lifetime. This exercises real file-backed reads during durable publication;
+it does not exercise the daemon's raw/archive SST transaction, target-rate input,
+or coherent Reader turnover. Quiescent allocations use separate smaller diagnostic
+samples. All latency-gate repeats use the larger counts above.
+
+Request scratch is shared across immutable Reader generations after its handle,
+values and catalog pointers are cleared. The deterministic fixture measures zero
+warm adapter allocations above value-only legacy reads, and one Reader allocation
+when constructing a fresh generation; fresh generations need no private pool or
+scratch allocation. Complete reader/reducer and durable file-source prerequisites
+are included as ordinary source, so this branch builds without an overlay.
