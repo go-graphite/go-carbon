@@ -218,7 +218,7 @@ func TestCompactEngineDifferentialReopen(t *testing.T) {
 			t.Fatal("duplicate cursor committed")
 		}
 		for id := uint64(1); id <= 72; id++ {
-			if !reflect.DeepEqual(states[0].state[id].Slots, classic[0].state[id].Slots) || states[0].state[id].Frontier != classic[0].state[id].Frontier {
+			if !reflect.DeepEqual(states[0].state[id].snapshotSlots(), classic[0].state[id].snapshotSlots()) || states[0].state[id].Frontier != classic[0].state[id].Frontier {
 				t.Fatalf("seal%d metric%d archive mismatch", seal, id)
 			}
 			a := e.owners[0].db.NewSnapshot()
@@ -245,7 +245,7 @@ func TestCompactEngineDifferentialReopen(t *testing.T) {
 		}
 	}()
 	for id := uint64(1); id <= 72; id++ {
-		if !reflect.DeepEqual(states[0].state[id].Slots, classic[0].state[id].Slots) || states[0].state[id].Frontier != classic[0].state[id].Frontier {
+		if !reflect.DeepEqual(states[0].state[id].snapshotSlots(), classic[0].state[id].snapshotSlots()) || states[0].state[id].Frontier != classic[0].state[id].Frontier {
 			t.Fatalf("reopen metric%d mismatch", id)
 		}
 	}
@@ -336,7 +336,7 @@ func TestCompactEngineCrashReplay(t *testing.T) {
 			if err = e.submitCompactRollupGroup(0, &h, 2); err != nil {
 				t.Fatal(err)
 			}
-			if states[0].state[42].Frontier.Order != 2 || states[0].state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+			if states[0].state[42].Frontier.Order != 2 || states[0].state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 				t.Fatal("compact crash replay changed archive")
 			}
 			snap := e.owners[0].db.NewSnapshot()

@@ -49,7 +49,7 @@ func TestAtomicRollupCommitAndSnapshot(t *testing.T) {
 	if _, err := o.Seal(atomicTestInputs(2, 7)); err != nil {
 		t.Fatal(err)
 	}
-	if o.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+	if o.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 		t.Fatal("coarse correction incorrect")
 	}
 	// Old readers keep a complete prior raw/archive/frontier generation.
@@ -74,7 +74,7 @@ func TestAtomicRollupCommitAndSnapshot(t *testing.T) {
 	}
 	db, o = atomicOpen(t, root)
 	defer db.Close()
-	if o.state[42].Frontier != want || o.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+	if o.state[42].Frontier != want || o.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 		t.Fatal("recovery changed correction")
 	}
 	inputs := atomicTestInputs(3, 9)
@@ -122,7 +122,7 @@ func TestAtomicRollupCrash(t *testing.T) {
 				wantOrder = 1
 				wantValue = 5
 			}
-			if o.part != wantOrder || o.state[42].Frontier.Order != wantOrder || o.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(wantValue) {
+			if o.part != wantOrder || o.state[42].Frontier.Order != wantOrder || o.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(wantValue) {
 				t.Fatalf("torn crash recovery %+v", o.state[42])
 			}
 			// Whole input batches at/below frontier are deduplicated by replay before Seal.

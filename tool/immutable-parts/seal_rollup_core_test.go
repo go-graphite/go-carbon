@@ -44,7 +44,7 @@ func TestCoreRollupHook(t *testing.T) {
 		}
 	}
 	s := states[coreShard(42, cfg.Shards)]
-	if s.state[42].Frontier.Order != 2 || s.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+	if s.state[42].Frontier.Order != 2 || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 		t.Fatal("hook correction not published")
 	}
 	if got := e.durableFrontiers(); got[0][0] != 2 || got[1][0] != 2 {
@@ -58,13 +58,13 @@ func TestCoreRollupHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	s = states[coreShard(42, cfg.Shards)]
-	if s.state[42].Frontier.Order != 2 || s.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+	if s.state[42].Frontier.Order != 2 || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 		t.Fatal("restart lost rollup")
 	}
 	if err = e.submitBatches(0, coreRollupBatches(t, 3, 9), 3, true); err != nil {
 		t.Fatal(err)
 	}
-	if s.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(12) {
+	if s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(12) {
 		t.Fatal("restart correction lost prior bucket context")
 	}
 	if err = e.close(); err != nil {
@@ -135,7 +135,7 @@ func TestCoreRollupHookCrash(t *testing.T) {
 				want = 1
 				value = 5
 			}
-			if s.state[42].Frontier.Order != want || s.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(value) {
+			if s.state[42].Frontier.Order != want || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(value) {
 				t.Fatal("torn raw/archive/frontier crash recovery", s.state[42])
 			}
 			// A crash may leave different owner frontiers. Replay starts at their min,
@@ -143,7 +143,7 @@ func TestCoreRollupHookCrash(t *testing.T) {
 			if err = e.submitBatches(0, coreRollupBatches(t, 2, 7), 2, true); err != nil {
 				t.Fatal(err)
 			}
-			if s.state[42].Frontier.Order != 2 || s.state[42].Slots[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+			if s.state[42].Frontier.Order != 2 || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 				t.Fatal("replay changed correction")
 			}
 			if err = e.close(); err != nil {

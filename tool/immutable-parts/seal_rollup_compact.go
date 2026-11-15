@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
 
 	"github.com/cockroachdb/pebble"
@@ -118,30 +117,42 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 	if o.policies == nil {
 		o.policies = map[string]*sealrollup.Prepared{}
 	}
-	byID := make(map[uint64][]compactRollupBatch)
-	for _, m := range g.batches {
-		byID[m.id] = append(byID[m.id], m)
+	if o.policyConfigs == nil {
+		o.policyConfigs = make(map[string]sealrollup.Config)
 	}
-	ids := make([]uint64, 0, len(byID))
-	for id := range byID {
-		ids = append(ids, id)
+	descriptors := slices.Clone(g.batches)
+	slices.SortStableFunc(descriptors, func(a, b compactRollupBatch) int {
+		if a.id < b.id {
+			return -1
+		}
+		if a.id > b.id {
+			return 1
+		}
+		return 0
+	})
+	type pendingMetric struct {
+		id       uint64
+		config   sealrollup.Config
+		frontier sealrollup.Frontier
+		history  [][]byte
 	}
-	slices.Sort(ids)
-	var data, meta []coreKV
-	type plannedConfig struct {
-		config  sealrollup.Config
-		records int
-	}
-	configs := make(map[uint64]plannedConfig, len(ids))
-	frontiers := make(map[uint64]sealrollup.Frontier, len(ids))
+	pending := make([]pendingMetric, 0, len(descriptors))
+	data := make([]coreKV, 0, 5*len(descriptors))
+	meta := make([]coreKV, 0, 2*len(descriptors)+1)
 	var scratch []sealrollup.Sample
 	var decoder compactRollupHead
 	if g.head != nil {
 		decoder.data, decoder.policies = g.head.data, g.head.policies
 	}
 	// No expanded samples from an earlier metric survive into the next metric.
-	for _, id := range ids {
-		ms := byID[id]
+	for lo := 0; lo < len(descriptors); {
+		hi := lo + 1
+		for hi < len(descriptors) && descriptors[hi].id == descriptors[lo].id {
+			hi++
+		}
+		id := descriptors[lo].id
+		ms := descriptors[lo:hi]
+		lo = hi
 		if g.head == nil {
 			return plan, errors.New("missing compact arena")
 		}
@@ -155,8 +166,13 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 			}
 			key := string(g.head.policies[m.policy])
 			if prepared == nil {
-				if err = json.Unmarshal([]byte(key), &cfg); err != nil {
-					return plan, err
+				var ok bool
+				cfg, ok = o.policyConfigs[key]
+				if !ok {
+					if err = json.Unmarshal([]byte(key), &cfg); err != nil {
+						return plan, err
+					}
+					o.policyConfigs[key] = cfg
 				}
 				prepared = o.policies[key]
 				if prepared == nil {
@@ -209,11 +225,18 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		if old != nil {
 			prior = old.Frontier
 		}
-		p, e := prepared.PlanWithWorkspace(prior, rollupView(old), old.rangeView(), batches, &o.workspace)
+		if e := o.historyScratch.load(old, cfg); e != nil {
+			return plan, e
+		}
+		p, e := prepared.PlanWithWorkspace(prior, o.historyScratch.view, o.historyScratch.ranges, batches, &o.workspace)
 		if e != nil {
 			return plan, e
 		}
-		configs[id], frontiers[id] = plannedConfig{cfg, len(p.Records)}, p.Next
+		history, e := o.historyScratch.seal(p.Records)
+		if e != nil {
+			return plan, e
+		}
+		pending = append(pending, pendingMetric{id, cfg, p.Next, history})
 		// Records are ordered by archive/slot. Encode their timestamps, exact
 		// IEEE bits and individual source orders directly, without row slices.
 		for lo := 0; lo < len(p.Records); {
@@ -260,43 +283,20 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		}
 	}
 	plan.Commit = func() {
-		for _, id := range ids {
-			s := o.state[id]
+		for _, m := range pending {
+			s := o.state[m.id]
 			if s == nil {
-				cfg := configs[id]
-				s = &atomicRollupState{Config: cfg.config, Slots: make(map[[2]int64]sealrollup.Sample, cfg.records)}
-				s.index = sealrollup.NewSlots(s.Config.Archives)
-				o.state[id] = s
+				s = &atomicRollupState{Config: m.config}
+				o.state[m.id] = s
 			}
-			s.Frontier = frontiers[id]
-		}
-		for _, kv := range data {
-			if kv.Key[18] == 'b' {
-				id := binary.BigEndian.Uint64(kv.Key[10:])
-				archive := int(binary.BigEndian.Uint32(kv.Key[19:]))
-				if e := installCompactArchive(o.state[id], archive, kv.Value); e != nil {
-					panic(fmt.Sprintf("validated compact archive failed at commit: %v", e))
-				}
-			}
+			s.Frontier = m.frontier
+			s.history = m.history
+			s.Slots = nil
+			s.index = nil
 		}
 		o.part = in.Next.NextPart
 	}
 	return plan, nil
-}
-
-func installCompactArchive(s *atomicRollupState, archive int, value []byte) error {
-	if archive < 0 || archive >= len(s.Config.Archives) {
-		return errors.New("invalid compact archive")
-	}
-	b, err := decodeCompactRun(value, 0, 0, nil)
-	if err != nil {
-		return err
-	}
-	a := s.Config.Archives[archive]
-	for _, p := range b.Points {
-		s.install(sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: (p.Time / a.Step) % a.Count, Order: p.Sequence, Sample: p}})
-	}
-	return nil
 }
 
 // Numeric experiment read adapter. Both old raw blocks and newer compact

@@ -32,16 +32,20 @@ type atomicRollupInput struct {
 type atomicRollupState struct {
 	Frontier sealrollup.Frontier
 	Config   sealrollup.Config
-	Slots    map[[2]int64]sealrollup.Sample
-	index    *sealrollup.Slots
+	// Expanded state is retained only by the reference raw adapter.
+	Slots   map[[2]int64]sealrollup.Sample
+	index   *sealrollup.Slots
+	history [][]byte
 }
 type atomicRollupOwner struct {
-	db        *pebble.DB
-	dir       string
-	state     map[uint64]*atomicRollupState
-	policies  map[string]*sealrollup.Prepared
-	workspace sealrollup.Workspace
-	part      uint64
+	db             *pebble.DB
+	dir            string
+	state          map[uint64]*atomicRollupState
+	policies       map[string]*sealrollup.Prepared
+	workspace      sealrollup.Workspace
+	historyScratch rollupHistoryWorkspace
+	policyConfigs  map[string]sealrollup.Config
+	part           uint64
 	// Concurrently readable failure counter; daemon metric export is pending.
 	Errors atomic.Uint64
 	// Fault injection never publishes state before a successful atomic ingest.
@@ -94,6 +98,13 @@ func rollupView(s *atomicRollupState) sealrollup.View {
 	if s == nil {
 		return nil
 	}
+	if s.history != nil {
+		w := new(rollupHistoryWorkspace)
+		if err := w.load(s, s.Config); err != nil {
+			panic(err)
+		}
+		return w.view
+	}
 	if s.index != nil {
 		return s.index.View
 	}
@@ -109,6 +120,13 @@ func (s *atomicRollupState) rangeView() sealrollup.RangeView {
 	if s == nil {
 		return func(_ int, _, _ int64, dst []sealrollup.Sample) []sealrollup.Sample { return dst }
 	}
+	if s.history != nil {
+		w := new(rollupHistoryWorkspace)
+		if err := w.load(s, s.Config); err != nil {
+			panic(err)
+		}
+		return w.ranges
+	}
 	if s.index == nil {
 		index := sealrollup.NewSlots(s.Config.Archives)
 		for k, p := range s.Slots {
@@ -119,6 +137,11 @@ func (s *atomicRollupState) rangeView() sealrollup.RangeView {
 	return s.index.Range
 }
 func (s *atomicRollupState) install(r sealrollup.Record) {
+	if s.history != nil {
+		s.Slots = s.snapshotSlots()
+		s.history = nil
+		s.index = nil
+	}
 	if s.index != nil {
 		s.index.Install(r.Delta)
 	}
@@ -126,8 +149,8 @@ func (s *atomicRollupState) install(r sealrollup.Record) {
 }
 
 // openAtomicRollupOwner performs the only DB reads: reconstructing a committed
-// immutable owner view on restart. A production implementation needs a bounded
-// sealed-block cache; this experimental map retains every occupied ring slot.
+// owner view on restart. Recovery resolves physical replacements in temporary
+// maps, then retains compressed occupied-slot runs and one metric of scratch.
 func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error) {
 	o := &atomicRollupOwner{db: db, dir: dir, state: map[uint64]*atomicRollupState{}}
 	get := func(id uint64) *atomicRollupState {
@@ -229,10 +252,14 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 		if policy != s.Frontier.Policy {
 			return nil, errors.New("rollup policy/frontier mismatch")
 		}
-		s.index = sealrollup.NewSlots(s.Config.Archives)
-		for k, p := range s.Slots {
-			s.index.Install(sealrollup.Delta{Archive: int(k[0]), Slot: k[1], Sample: p})
+		if e = o.historyScratch.load(s, s.Config); e != nil {
+			return nil, e
 		}
+		s.history, e = o.historyScratch.seal(nil)
+		if e != nil {
+			return nil, e
+		}
+		s.Slots, s.index = nil, nil
 	}
 	return o, nil
 }
