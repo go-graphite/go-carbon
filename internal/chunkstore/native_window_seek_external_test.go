@@ -248,7 +248,16 @@ func TestNativeWindowStaleIndexImport(t *testing.T) {
 	}
 	defer pin.Close()
 	var wire bytes.Buffer
-	if err := pin.WriteWindow(ctx, []string{cfg.Name}, &wire, &store.NativeWindow{From: 1000, Until: 1010}); !errors.Is(err, store.ErrConflict) {
-		t.Fatal("stale bounds hid newer owner", err)
+	window := &store.NativeWindow{From: 1000, Until: 1010}
+	if err := pin.WriteWindow(ctx, []string{cfg.Name}, &wire, window); err != nil {
+		t.Fatal(err)
+	}
+	target := windowStore(t, true, clock)
+	if _, err := target.NativeImport(ctx, windowRange([]string{cfg.Name}, window), &wire); err != nil {
+		t.Fatal(err)
+	}
+	got, err := target.Snapshot(ctx, cfg.Name)
+	if err != nil || len(got.Archives[0].Points) != 0 {
+		t.Fatal("stale bounds exported an expired owner", got, err)
 	}
 }

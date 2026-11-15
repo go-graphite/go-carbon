@@ -59,8 +59,13 @@ func SelectNativeWindow(snapshot Snapshot, w NativeWindow, now int64) (Snapshot,
 			return Snapshot{}, nil, err
 		}
 		points = retainTransferSlots(points, a.Retention)
-		if len(points) > 0 && points[len(points)-1].Timestamp >= w.From+int64(a.Retention.Step)*int64(a.Retention.Count) {
-			return Snapshot{}, nil, fmt.Errorf("source archive %d has newer ring owners beyond window retention: %w", ai, ErrConflict)
+		// A fine archive must not veto history still held by a coarser one.
+		// Sparse rings may contain old, non-aliased cells: exclude those too,
+		// rather than resurrecting them after omitting the newer owners.
+		if len(points) > 0 {
+			cutoff := points[len(points)-1].Timestamp - int64(a.Retention.Step)*int64(a.Retention.Count)
+			first := slices.IndexFunc(points, func(p Point) bool { return p.Timestamp > cutoff })
+			points = points[first:]
 		}
 		normalized[ai] = Archive{a.Retention, points}
 	}

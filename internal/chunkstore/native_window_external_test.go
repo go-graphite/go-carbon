@@ -394,8 +394,8 @@ func TestNativeWindowRejectsRingEviction(t *testing.T) {
 			assertPointBits(t, pointBits(before.Archives[0].Points, w, false), pointBits(after.Archives[0].Points, w, false))
 			wire.Reset()
 			expired := &store.NativeWindow{From: 1100, Until: 1110}
-			if err := pin.WriteWindow(ctx, []string{cfg.Name}, &wire, expired); err == nil {
-				t.Fatal("omitted source ring owner could change full-copy result")
+			if err := pin.WriteWindow(ctx, []string{cfg.Name}, &wire, expired); err != nil {
+				t.Fatal("expired archive should export an empty selection", err)
 			}
 		})
 	}

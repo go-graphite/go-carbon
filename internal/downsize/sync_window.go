@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -566,7 +567,13 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 						return err
 					}
 				}
-				for _, skip := range t.Native.Receipt.WindowSkipped {
+				skips := slices.Clone(t.Native.Receipt.WindowSkipped)
+				for _, attempt := range t.Native.Combines {
+					if attempt.Receipt != nil {
+						skips = append(skips, attempt.Receipt.WindowSkipped...)
+					}
+				}
+				for _, skip := range skips {
 					if skip.Timestamp >= w.From && skip.Timestamp < w.Until && skip.Ordinal >= 0 && skip.Ordinal < end-start {
 						rangeFailed = true
 						markFailed(names[start+skip.Ordinal])

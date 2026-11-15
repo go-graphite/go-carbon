@@ -3,7 +3,6 @@ package whisperio
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"slices"
 	"time"
 
@@ -38,14 +37,19 @@ func (c *ContinuationCodec) NativeWindowSnapshot(ctx context.Context, kv store.C
 		if err != nil {
 			return store.Snapshot{}, nil, err
 		}
+		var latest int64
+		for _, part := range parts {
+			f := part.fragment
+			for i := part.ordinal; i < part.ordinal+part.count; i++ {
+				latest = max(latest, spliceOrdinalTime(&f, i, r.Step))
+			}
+		}
+		cutoff := latest - int64(r.Step)*int64(r.Count)
 		for _, part := range parts {
 			f := part.fragment
 			for i := part.ordinal; i < part.ordinal+part.count; i++ {
 				ts := spliceOrdinalTime(&f, i, r.Step)
-				if ts >= window.From+int64(r.Step)*int64(r.Count) {
-					return store.Snapshot{}, nil, fmt.Errorf("source archive %d has newer ring owners beyond window retention: %w", ai, store.ErrConflict)
-				}
-				if ts < from || ts >= until {
+				if ts <= cutoff || ts < from || ts >= until {
 					continue
 				}
 				point := store.Point{Timestamp: ts, Value: f.value}

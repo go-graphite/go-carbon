@@ -98,6 +98,14 @@ Windows are half-open `[FROM, UNTIL)` in Unix seconds.
   `--copy-streams`, `--max-batch-bytes` and other metric-engine-only settings are
   rejected. Explicit inactive `--sample-every` warns. `--transport-retries` has
   been removed and is an unknown flag.
+- Window retries resume deferred ordinals through chained native receipts, so a
+  name omitted by a pending source snapshot can progress after it becomes available.
+  Resume retains the initial receipt and recovers lost acknowledgements before
+  attempting another transfer. Incomplete boundary buckets remain named residuals.
+- Historical windows require a source server with archive-aware window export;
+  update the client as well to resume previously deferred window fills. Existing
+  clients can consume the new export format. Older source servers fail closed on
+  windows older than their finest archive's retention.
 - Use repeated/comma-separated `--source URL`; `--from URL` remains a compatibility
   alias in both spellings. This is distinct from legacy `run --from TIME`.
 - `--names FILE` means UTF-8 text, one metric name per line, byte-sorted and unique

@@ -69,7 +69,7 @@ func TestNativeExportCoalescedDifferential(t *testing.T) {
 	}
 
 	var before, after int
-	for _, window := range []store.NativeWindow{{From: 11000, Until: 29999}, {From: 29501, Until: 29999}, {From: 19001, Until: 19111}, {From: 1, Until: 1000}, {From: 29950, Until: 30001}} {
+	for _, window := range []store.NativeWindow{{From: 11000, Until: 29999}, {From: 29501, Until: 29999}, {From: 19001, Until: 19111}, {From: 29950, Until: 30001}} {
 		oldKV, newKV := &exportCountingIO{mapContinuationIO: data}, &exportCountingIO{mapContinuationIO: data}
 		want, ws, we := codec.legacyExportWindowSnapshot(ctx, oldKV, snapshot.Metadata, clock, window)
 		got, gs, ge := codec.NativeWindowSnapshot(ctx, newKV, snapshot.Metadata, clock, window)

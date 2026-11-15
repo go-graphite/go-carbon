@@ -68,7 +68,20 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 	}
 	deadline := time.Now().Add(wait)
 	for attempt := 0; ; attempt++ {
-		err := c.executeRange(ctx, t, names)
+		// Replaying the initial receipt cannot make deferred ordinals progress.
+		// Reuse the native deferred protocol, whose chained receipt identities
+		// retain lost-ack safety while allowing a fresh source snapshot.
+		c.stateMu.Lock()
+		if saved, ok := c.journal.tasks[taskKey(t)]; ok {
+			t = saved
+		}
+		c.stateMu.Unlock()
+		var err error
+		if t.Native != nil && !t.Native.Intent && !t.Native.complete() {
+			err = c.executeDeferred(ctx, t, names)
+		} else {
+			err = c.executeRange(ctx, t, names)
+		}
 		var api *apiError
 		if !errors.As(err, &api) || api.Status != http.StatusTooManyRequests {
 			return err
