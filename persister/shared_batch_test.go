@@ -304,3 +304,28 @@ func TestSharedBatchFallbackAccounting(t *testing.T) {
 		})
 	}
 }
+
+// Include cache pop and acknowledgement around the real continuation codec.
+func TestSharedBatchStagePartition(t *testing.T) {
+	update := sharedTimingWorkload(t, 210)
+	before := stagetime.Snapshot()
+	for i := range 128 {
+		update(i)
+	}
+	after := stagetime.Snapshot()
+	total := after[stagetime.Total].Seconds - before[stagetime.Total].Seconds
+	var sum float64
+	for s := stagetime.Route; s < stagetime.NumStages; s++ {
+		d := after[s].Seconds - before[s].Seconds
+		sum += d
+		t.Logf("%s %.6fs %.3f%%", s, d, 100*d/total)
+	}
+	if total <= 0 || math.Abs(sum-total) > total*.01 {
+		t.Fatalf("stages %.9f total %.9f", sum, total)
+	}
+	for _, s := range []stagetime.Stage{stagetime.CachePop, stagetime.Publish, stagetime.Acknowledge, stagetime.Other} {
+		if after[s].Calls == before[s].Calls {
+			t.Fatalf("stage %s absent", s)
+		}
+	}
+}

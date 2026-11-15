@@ -264,7 +264,7 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 			p.writeStats.shared.observe(len(values.Data), time.Since(start), err)
 		}
 	}
-	timer.Leave()
+	timer.Enter(stagetime.Acknowledge)
 	if err != nil {
 		p.mirrorFailed(metric)
 		if errors.Is(err, store.ErrImportPending) || errors.Is(err, store.ErrReanchorDeferred) {

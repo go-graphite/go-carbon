@@ -408,8 +408,8 @@ var storeRangeDeletesDesc = prometheus.NewDesc("store_range_deletes_total", "Peb
 // Persister stage timing: summed work per stage (stagetime), the update
 // duration histogram and the slowest update per scrape.
 var (
-	persisterStageSecondsDesc = prometheus.NewDesc("persister_stage_seconds_total", "Seconds persister updates spent in each stage, summed across workers (stages other than total are sampled and scaled).", []string{"stage"}, nil)
-	persisterStageCallsDesc   = prometheus.NewDesc("persister_stage_calls_total", "Calls of each persister update stage (stages other than total are sampled and scaled).", []string{"stage"}, nil)
+	persisterStageSecondsDesc = prometheus.NewDesc("persister_stage_seconds_total", "Seconds persister batches spent in each exclusive stage, including total, sampled and scaled across workers.", []string{"stage"}, nil)
+	persisterStageCallsDesc   = prometheus.NewDesc("persister_stage_calls_total", "Batch attempts for total; sampled and scaled batches visiting each exclusive stage otherwise.", []string{"stage"}, nil)
 	persisterUpdateDesc       = prometheus.NewDesc("persister_update_duration_seconds", "Wall time of persister updates (metric writeouts).", nil, nil)
 	persisterUpdateMaxDesc    = prometheus.NewDesc("persister_update_seconds_max", "Slowest persister update since the previous scrape.", nil, nil)
 )

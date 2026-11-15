@@ -42,7 +42,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 		}
 	}
 	timer := stagetime.FromContext(ctx)
-	timer.Enter(stagetime.LockWait)
+	timer.Enter(stagetime.Route)
 	stripes := make([]uint64, 0, len(updates))
 	names := make(map[string]bool, len(updates))
 	for _, update := range updates {
@@ -51,6 +51,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
+	timer.Enter(stagetime.LockWait)
 	for {
 		lockset.Lock(s.metricMu[:], stripes)
 		var pending pendingMutation
@@ -74,6 +75,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 		case <-pending.done:
 		}
 	}
+	timer.Enter(stagetime.Route)
 	for name := range names {
 		s.beginStateMutation(name)
 	}
@@ -103,6 +105,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 			}
 		}
 	}()
+	defer timer.Enter(stagetime.Publish)
 	// Exact-name reservations preserve the latest committed states without
 	// retaining sibling stripes across cache decoding or database reads.
 	reserved := make([]string, 0, len(names))
@@ -163,9 +166,9 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 			return err
 		}
 	}
+	timer.Enter(stagetime.Publish)
 	for _, p := range states {
 		s.installState(p.view, p.meta)
 	}
-	timer.Leave()
 	return nil
 }

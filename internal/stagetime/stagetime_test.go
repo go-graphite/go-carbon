@@ -185,3 +185,87 @@ func BenchmarkUpdateOverhead(b *testing.B) {
 		ObserveUpdate(time.Since(start))
 	}
 }
+
+// Deliberately leave gaps before, between and after stages. Nested time is
+// exclusive, repeated stages accumulate, and all gaps must appear in Other.
+func TestBatchPartitionIncludesEveryInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		before := Snapshot()
+		_, u := sampled(t)
+		time.Sleep(time.Millisecond)
+		u.Enter(Route)
+		time.Sleep(2 * time.Millisecond)
+		u.Enter(Decode)
+		time.Sleep(3 * time.Millisecond)
+		nested := u.Nested(TailRead)
+		time.Sleep(4 * time.Millisecond)
+		u.Unnest(TailRead, nested)
+		u.Leave()
+		time.Sleep(5 * time.Millisecond)
+		u.Enter(Route)
+		time.Sleep(6 * time.Millisecond)
+		u.Enter(Publish)
+		time.Sleep(7 * time.Millisecond)
+		u.Enter(Acknowledge)
+		time.Sleep(8 * time.Millisecond)
+		u.Finish()
+		after := Snapshot()
+		want := map[Stage]float64{Route: 8, Decode: 3, TailRead: 4, Publish: 7, Acknowledge: 8, Other: 6, Total: 36}
+		var parts float64
+		for s, ms := range want {
+			delta := after[s].Seconds - before[s].Seconds
+			expected := ms * .001 * SampleEvery
+			if math.Abs(delta-expected) > 1e-9 {
+				t.Errorf("%s=%gs, want %gs", s, delta, expected)
+			}
+			if s != Total {
+				parts += delta
+			}
+		}
+		total := after[Total].Seconds - before[Total].Seconds
+		if math.Abs(parts-total) > total*.01 {
+			t.Fatalf("parts=%g total=%g", parts, total)
+		}
+	})
+}
+
+func TestReusableTimerAllocations(t *testing.T) {
+	var scratch Update
+	ctx := context.Background()
+	start := time.Now()
+	allocs := testing.AllocsPerRun(80, func() {
+		_, u := StartReusable(ctx, start, &scratch)
+		u.Enter(Route)
+		u.Enter(Commit)
+		u.FinishUpdate(start)
+	})
+	if allocs != 0 {
+		t.Fatalf("instrumentation allocates %g times/batch", allocs)
+	}
+}
+
+func TestReusableContextPreservesParent(t *testing.T) {
+	type key struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "parent"))
+	defer cancel()
+	var scratch Update
+	for range SampleEvery {
+		ctx, u := StartReusable(parent, time.Now(), &scratch)
+		if u == nil {
+			continue
+		}
+		if ctx.Value(key{}) != "parent" {
+			t.Fatal("lost parent value")
+		}
+		cancel()
+		if ctx.Err() != context.Canceled {
+			t.Fatal("lost cancellation")
+		}
+		select {
+		case <-ctx.Done():
+		default:
+			t.Fatal("lost Done")
+		}
+		u.Finish()
+	}
+}

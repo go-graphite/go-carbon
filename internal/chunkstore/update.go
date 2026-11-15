@@ -98,7 +98,7 @@ retryLock:
 	if err := s.checkFileOwnership(m); err != nil {
 		return err
 	}
-	defer timer.Leave()
+	defer timer.Enter(stagetime.Publish)
 	if m.Continuation {
 		err = s.updateContinuationFrom(ctx, m, state, true, input, targetRetention, maintenance)
 	} else {

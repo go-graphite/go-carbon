@@ -44,13 +44,16 @@ func (p *Whisper) takeBatchToken() bool {
 	}
 }
 
-func (p *Whisper) storeSharedBatch(metrics []string) {
+func (p *Whisper) storeSharedBatch(metrics []string) { p.storeSharedBatchTimed(metrics, nil) }
+
+func (p *Whisper) storeSharedBatchTimed(metrics []string, scratch *stagetime.Update) {
 	settings := p.settings()
 	start := time.Now()
-	ctx, timer := stagetime.Start(context.Background())
-	defer timer.Finish()
+	ctx, timer := stagetime.StartReusable(context.Background(), start, scratch)
+
 	timer.Enter(stagetime.LockWait)
 	unlock := p.lockStoreMetrics(metrics)
+	timer.Enter(stagetime.CachePop)
 	// Release all name reservations before a missing/native metric uses the ordinary
 	// create/update route. Requeue retains the input log's original batch identity.
 	fallback := false
@@ -80,18 +83,18 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		}
 		// This worker spends the batch's wall time once, including retries and
 		// acknowledgement, regardless of how many metrics it contains.
-		defer func() { stagetime.ObserveUpdate(time.Since(start)) }()
 		var maintenance *store.ContinuationMaintenance
 		if settings.outOfOrder.enabled {
 			m := p.sharedMaintenance()
 			maintenance = &m
 		}
 		err := p.metricStore.(batchMetricStore).UpdateBatch(ctx, updates, maintenance)
-		timer.Leave()
+		updated := time.Now()
+		timer.EnterAt(stagetime.Acknowledge, updated)
 		reason := sharedBatchFallbackReason(err)
 		if reason < 0 {
 			for _, batch := range values {
-				p.writeStats.shared.observe(len(batch.Data), time.Since(start), err)
+				p.writeStats.shared.observe(len(batch.Data), updated.Sub(start), err)
 			}
 		}
 		if err != nil {
@@ -128,9 +131,11 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			}
 		}
 	}()
+	// Fallback attempts have their own timers; keep them outside this batch.
+	timer.FinishUpdate(start)
 	if fallback {
 		for _, metric := range metrics {
-			p.store(metric)
+			p.storeTimed(metric, scratch)
 		}
 	}
 }

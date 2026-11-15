@@ -68,6 +68,7 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 			return err
 		}
 	}
+	stagetime.FromContext(ctx).Enter(stagetime.Publish)
 	if cache {
 		s.installState(view, m)
 	}
