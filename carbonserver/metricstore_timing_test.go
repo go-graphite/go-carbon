@@ -20,7 +20,6 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
 	populateMetricStoreCatalog(context.Background(), t, db, now)
 	listener := newMetricStoreTestListener(t, cache.New(), db, false)
 	var capacityReads hostcapacity.Latency
@@ -31,6 +30,9 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	synctest.Test(t, func(t *testing.T) {
+		// Reads can lazily allocate a context Done channel in this bubble.
+		// Cancel those contexts before leaving their owning bubble.
+		defer db.Close()
 		calls := 0
 		listener.cacheGet = func(string) []points.Point {
 			calls++
