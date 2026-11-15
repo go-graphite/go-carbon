@@ -208,7 +208,7 @@ store-l0-compaction-concurrency = 0
 # iterator over the metric's keys instead of one lookup per read. Those reads
 # consult bloom filters; prefix walks, like any iterator's, cannot. Requires
 # restart.
-# store-fetch-shared-iterator = false
+# store-fetch-shared-iterator = true
 # Prune v9 sealed groups outside a fetch's time range using existing headers.
 # No format change; old blocks keep the full reader. Skipped payloads are not
 # decompressed or checked by the sealed CRC. Restart required.

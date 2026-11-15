@@ -489,6 +489,7 @@ func NewConfig() *Config {
 			StoreBytesPerSync:            64 << 20,
 			StoreBloomFilterBits:         10,
 			StoreMetadataCachePack:       true,
+			StoreFetchSharedIterator:     true,
 			StorageBackend:               "files",
 			StoreCacheSize:               256 << 20,
 			StoreMemTableSize:            64 << 20,

@@ -32,13 +32,10 @@ func (f *continuationFile) classicSnapshotGroup(archive int, a whisper.StorageAr
 	}
 	g.valid = false
 	key := continuationBodyKey(f.data.id, 'p', archive, 0, index)
-	var value []byte
-	var err error
-	if f.sidecar {
-		value, err = f.fs.probe(key)
-	} else {
-		value, err = f.fs.kv.Get(key)
-	}
+	// Range reads consume many immutable groups. Reuse the operation's
+	// iterator for main-file groups too, rather than reopening the same LSM
+	// tables for every group. Without a prober this retains the Get path.
+	value, err := f.fs.probe(key)
 	if errors.Is(err, store.ErrNotFound) {
 		g.block = store.PointBlock{}
 	} else if err != nil {
