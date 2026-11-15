@@ -38,3 +38,49 @@ actual intake remains above 25M/s, including rotation and a final forced sync.
 Its result is explicitly capture-only; startup replay capacity requires the
 separate full startup-load gate. `GROUP_COMMIT_SECONDS` shortens diagnostics and
 cannot qualify the 600-second requirement.
+
+## Memory accounting
+
+The active admission limit is `max(1MiB, min(128MiB, available_memory/32))`.
+Each submission reserves `4*raw_bytes + 128*points + 64KiB` until Stage has
+consumed it. At 128MiB this permits at most 2048 simultaneous minimum-size
+reservations, fewer than 1,048,576 points, or fewer than 32MiB of raw input;
+these are separate ceilings, not quantities that can all reach their maxima
+simultaneously. Reservations count conservative work, not measured heap bytes.
+Waiting connections retain their existing receiver buffers outside this charge.
+
+Idle buffers use a separate 32-slot pool with at most 1MiB charged per entry:
+actual column capacities plus 256 bytes per lifetime peak distinct name and
+2KiB for fixed state. The map allowance is conservative accounting, not a Go
+runtime allocation contract. References are cleared, multi-point decoder arenas
+are discarded, and a large map's high-water charge survives reuse. Allocator
+size classes, dead objects awaiting collection, goroutine stacks and runtime
+metadata remain additional heap costs.
+
+The ordinary input-log writer retains memory across Stage calls and is not
+covered by the admission limit:
+
+| Owner | Scaling / bound |
+| --- | --- |
+| Sort scratch | Per encoder worker: up to 262,144 rows, 32 bytes each, plus radix scratch that can reserve twice the row count (24MiB combined before slice growth slack). Default workers <=8. |
+| Raw / columns / new-name scratch | Per worker, reusable capacities at the largest frame/batch seen; raw frame target 4MiB, with one record of overshoot. Separate id, timestamp, value and name arrays coexist. |
+| Compression output and write buffer | Per-partition compressed cycle output plus a combined positioned-write buffer; capacities persist at the largest cycle, not the latest small submission. A cycle drains <=64 requests, targeting 8MiB estimated input and allowing the last <=4MiB request to overshoot. |
+| Stream dictionary | 16 partition maps retain metric strings and 16-byte previous-point state for every distinct name in the current segment. Rotation clears entries but retains map/slice high-water capacities. The configured segment size is a compressed disk limit, not a heap limit. |
+| Compression runtime | Shared zstd encoder with worker concurrency; internal workspaces are additional. |
+| TCP receiver | Per-connection wire buffers and stream dictionary; the normal global stream dictionary reservation is 3GiB, independent of startup admission. |
+| Replay / cache / storage | Independent decoder dictionaries, replay frames, cache entries, and storage buffers; concurrent replay adds these to capture memory. |
+
+Consequently there is **no total-heap or RSS bound of 128MiB or 160MiB**.
+At the admission ceiling, total memory still depends on cardinality, configured
+segment size, encoder and receiver concurrency, replay, and allocator/GC state.
+A high-cardinality segment can retain much more than the admission limit.
+Capacity planning must leave headroom for that full inventory. A strict total
+memory guarantee would require a separate encoder-dictionary and scratch policy;
+the admission budget alone does not provide one.
+
+`startup_capture_admission_{limit,used,peak}_bytes` expose reservation state.
+`startup_capture_admission_waits_total` counts submissions that actually block;
+`startup_capture_admission_rejections_total` counts oversized batches.
+Exhaustion logs WARN with used/requested/limit bytes, at most once per 30 seconds;
+an oversized batch logs ERROR and returns an error. The limit is logged at startup.
+`startup_capture_idle_buffer_bytes` reports the separate idle-pool charge.

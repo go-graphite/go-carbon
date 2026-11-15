@@ -485,6 +485,15 @@ var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_live_releasable_bytes", "Confirmed live spool prefix bytes awaiting durability or release.", nil, nil),
 }
 
+var captureAdmissionDescs = []*prometheus.Desc{
+	prometheus.NewDesc("startup_capture_admission_limit_bytes", "Active capture admission charge limit; excludes receiver dictionaries, input-log encoder state and allocator overhead.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_used_bytes", "Current active capture admission charge.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_peak_bytes", "Peak active capture admission charge.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_waits_total", "Capture submissions blocked by the admission byte budget.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_rejections_total", "Capture batches rejected for exceeding the admission byte budget.", nil, nil),
+	prometheus.NewDesc("startup_capture_idle_buffer_bytes", "Idle capture buffer accounting charge, including columns and a conservative map allowance.", nil, nil),
+}
+
 var captureHistoryBytesDesc = prometheus.NewDesc("startup_capture_history_pending_bytes", "Encoded startup spool and journal bytes still waiting for history replay.", nil, nil)
 var captureHistorySegmentsDesc = prometheus.NewDesc("startup_capture_history_pending_segments", "Nonempty startup spool files still waiting for history replay; excludes the input journal.", nil, nil)
 
@@ -496,6 +505,9 @@ var captureIODescs = []*prometheus.Desc{
 }
 
 func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, desc := range captureAdmissionDescs {
+		ch <- desc
+	}
 	ch <- captureHistoryBytesDesc
 	ch <- captureHistorySegmentsDesc
 	for _, desc := range captureIODescs {
@@ -547,6 +559,20 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(captureHistoryBytesDesc, prometheus.GaugeValue, float64(pendingHistory))
 	ch <- prometheus.MustNewConstMetric(captureHistorySegmentsDesc, prometheus.GaugeValue, float64(pendingSegments))
 	if capture := c.app.startupCaptureState.Load(); capture != nil {
+		if j := capture.journal; j != nil {
+			b := &j.budget
+			b.mu.Lock()
+			used := b.used
+			b.mu.Unlock()
+			values := []int64{b.limit, used, b.peak.Load(), b.waits.Load(), b.rejected.Load(), j.pooledBytes.Load()}
+			for i, value := range values {
+				kind := prometheus.GaugeValue
+				if i == 3 || i == 4 {
+					kind = prometheus.CounterValue
+				}
+				ch <- prometheus.MustNewConstMetric(captureAdmissionDescs[i], kind, float64(value))
+			}
+		}
 		for i, timing := range capture.ioTimings() {
 			ch <- prometheus.MustNewConstMetric(captureIODescs[0], prometheus.CounterValue, float64(timing.total)/1e9, captureOperations[i])
 			ch <- prometheus.MustNewConstMetric(captureIODescs[1], prometheus.CounterValue, float64(timing.calls), captureOperations[i])

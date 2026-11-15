@@ -34,6 +34,7 @@ type startupJournal struct {
 	appendTiming    captureTiming
 	encodingTiming  captureTiming
 	admissionTiming captureTiming
+	pooledBytes     atomic.Int64
 	parts           [startupJournalPartitions]struct {
 		stream  cache.RecoveryStream
 		source  *cache.RecoverySource
@@ -46,15 +47,18 @@ type startupJournal struct {
 }
 
 type startupJournalBuffer struct {
-	batches [startupJournalPartitions]inputlog.Batch
-	refs    map[string]*inputlog.StreamRef
-	decoder points.FrameDecoder
+	batches   [startupJournalPartitions]inputlog.Batch
+	refs      map[string]*inputlog.StreamRef
+	decoder   points.FrameDecoder
+	retained  int64
+	peakNames int
 }
 
 func newStartupJournal(s *startupInput, l *inputlog.Log, dir string, tagged bool) *startupJournal {
 	j := &startupJournal{owner: s, log: l, dir: dir, tags: tagged, buffers: make(chan *startupJournalBuffer, 32)}
 	j.budget.limit = max(1<<20, min(128<<20, s.policy.available/32))
 	j.budget.changed = make(chan struct{})
+	zapwriter.Logger("app").Info("startup capture admission byte budget selected", zap.Int64("limit_bytes", j.budget.limit), zap.Int64("idle_buffer_budget_bytes", 32<<20))
 	for i := range j.parts {
 		j.parts[i].source = j.parts[i].stream.Next()
 	}
@@ -76,6 +80,7 @@ func (j *startupJournal) writeAdmitted(raw []byte, expected int, stage bool) err
 	var buffer *startupJournalBuffer
 	select {
 	case buffer = <-j.buffers:
+		j.pooledBytes.Add(-buffer.retained)
 	default:
 		buffer = &startupJournalBuffer{refs: make(map[string]*inputlog.StreamRef)}
 	}
@@ -83,17 +88,24 @@ func (j *startupJournal) writeAdmitted(raw []byte, expected int, stage bool) err
 		for i := range buffer.batches {
 			buffer.batches[i].Reset()
 		}
-		pooledNames := len(buffer.refs)
+		buffer.peakNames = max(buffer.peakNames, len(buffer.refs))
 		clear(buffer.refs)
-		// Keep at most 32MiB of idle native columns outside active admission.
-		var retained int64
+		// A multi-point record may grow the decoder arena independently of columns.
+		// Release it at the ownership boundary instead of retaining it in the pool.
+		buffer.decoder = points.FrameDecoder{}
+		// Charge columns plus a conservative map/struct allowance to the 32MiB
+		// idle pool. Map capacity survives clear, so price its lifetime high water.
+		retained := int64(2048 + buffer.peakNames*256)
 		for i := range buffer.batches {
 			retained += buffer.batches[i].Bytes()
 		}
-		if retained <= 1<<20 && pooledNames <= 4096 {
+		buffer.retained = retained
+		if retained <= 1<<20 {
+			j.pooledBytes.Add(retained)
 			select {
 			case j.buffers <- buffer:
 			default:
+				j.pooledBytes.Add(-retained)
 			}
 		}
 	}()
