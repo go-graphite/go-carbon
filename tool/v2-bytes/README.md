@@ -26,8 +26,11 @@ It cannot establish an at-rest compression ratio.
 
 `-archives /path/to/exports` instead reads complete native transfer-v2 responses,
 decodes full physical archives, counts occupied points and configured capacity,
-and re-encodes the same slots with `EncodeSealedPoints` (the ordinary-domain
-primitive used by the packed-block encoder). Every decoded point is checked.
+and re-encodes the same slots with the exact packed-block encoder, including
+its raw IEEE fallback for ring images outside the ordinary codec domain. Every
+decoded timestamp and value bit is checked, including fallback blocks. The
+benchmark-local codec copy can be removed once the shared package is on the
+base branch. Output includes retention strata and packed-descriptor counts.
 Source KV bytes include each exported key and value; neither source KV bytes
 nor sealed payload bytes represent physical SST size. Policy/name/key overhead,
 SST compression, obsolete versions and compaction scratch require separate

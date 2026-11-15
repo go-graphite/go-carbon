@@ -22,6 +22,8 @@ func archiveProbe(dir string) {
 	must(e)
 	var names, occupied, capacity, kvBytes, sealedBytes, wireBytes int64
 	policies := map[string]int64{}
+	strata := map[string][5]int64{}
+	var fallbackBlocks, packedDescriptors, packedNames int64
 	var codec whisperio.ContinuationCodec
 	for _, path := range files {
 		f, e := os.Open(path)
@@ -44,7 +46,13 @@ func archiveProbe(dir string) {
 			must(e)
 			p, _ := json.Marshal(r.Config.Retentions)
 			policies[string(p)]++
+			beforeOccupied, beforeCapacity, beforeKV, beforeSealed := occupied, capacity, kvBytes, sealedBytes
+			var namePacked bool
 			for _, kv := range r.Keys {
+				if len(kv.Key) >= 10 && kv.Key[0] == 'f' && kv.Key[9] == 'b' && len(kv.Value) == 12 {
+					packedDescriptors++
+					namePacked = true
+				}
 				kvBytes += int64(len(kv.Key) + len(kv.Value))
 			}
 			for _, a := range snap.Archives {
@@ -55,9 +63,12 @@ func archiveProbe(dir string) {
 					end := min(start+chunkstore.MaxSealedPoints, len(a.Points))
 					ps := a.Points[start:end]
 					// This is the same ordinary-domain primitive used by partspack.EncodeBlock.
-					b, e := chunkstore.EncodeSealedPoints(ps, a.Retention.SecondsPerPoint())
+					b, e := EncodeBlock(ps, uint32(a.Retention.SecondsPerPoint()))
 					must(e)
-					back, e := chunkstore.DecodeSealedPoints(b)
+					if b[0] == 0 {
+						fallbackBlocks++
+					}
+					back, e := DecodeBlock(b)
 					must(e)
 					if len(back) != len(ps) {
 						panic("sealed count mismatch")
@@ -70,6 +81,16 @@ func archiveProbe(dir string) {
 					sealedBytes += int64(len(b))
 				}
 			}
+			if namePacked {
+				packedNames++
+			}
+			z := strata[string(p)]
+			z[0]++
+			z[1] += occupied - beforeOccupied
+			z[2] += capacity - beforeCapacity
+			z[3] += kvBytes - beforeKV
+			z[4] += sealedBytes - beforeSealed
+			strata[string(p)] = z
 			names++
 		}
 		_, _, e = stream.Finish()
@@ -81,5 +102,5 @@ func archiveProbe(dir string) {
 		panic("no archive records")
 	}
 	fmt.Fprintln(os.Stderr, "source KV bytes are logical; sealed bytes exclude keys/policy/SST/manifest")
-	emit(map[string]any{"stage": "archives_done", "names": names, "occupied_slots": occupied, "capacity_slots": capacity, "source_kv_bytes": kvBytes, "sealed_payload_bytes": sealedBytes, "wire_bytes": wireBytes, "policies": policies, "source_kv_per_occupied": float64(kvBytes) / float64(occupied), "sealed_payload_per_occupied": float64(sealedBytes) / float64(occupied), "source_kv_per_capacity": float64(kvBytes) / float64(capacity), "exact": true, "when_cet": time.Now().Format(time.RFC3339)})
+	emit(map[string]any{"stage": "archives_done", "names": names, "occupied_slots": occupied, "capacity_slots": capacity, "source_kv_bytes": kvBytes, "sealed_payload_bytes": sealedBytes, "wire_bytes": wireBytes, "policies": policies, "source_kv_per_occupied": float64(kvBytes) / float64(occupied), "sealed_payload_per_occupied": float64(sealedBytes) / float64(occupied), "source_kv_per_capacity": float64(kvBytes) / float64(capacity), "exact": true, "fallback_blocks": fallbackBlocks, "source_packed_descriptors": packedDescriptors, "names_with_packed_descriptors": packedNames, "strata_name_occupied_capacity_source_sealed": strata, "when_cet": time.Now().Format(time.RFC3339)})
 }
