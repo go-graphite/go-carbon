@@ -61,5 +61,5 @@ func run(args []string) error {
 			return inventoryMain(args[1:])
 		}
 	}
-	return downsize.MainWithMetrics(args)
+	return downsize.MainWithMetrics(args, version())
 }

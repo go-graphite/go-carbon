@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +20,7 @@ var progressObserver func(string, progressSnapshot)
 
 // MainWithMetrics exports controller progress through a local Graphite receiver.
 // Delivery is bounded and never changes the transfer result or retry policy.
-func MainWithMetrics(args []string) error {
+func MainWithMetrics(args []string, version string) error {
 	addr := os.Getenv("STORECTL_GRAPHITE_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:2003"
@@ -28,7 +30,13 @@ func MainWithMetrics(args []string) error {
 	if state == "" {
 		return Main(args)
 	}
-	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1}
+	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1, version: progressVersion(version)}
+	if root, err := os.UserCacheDir(); err == nil {
+		p.versionFile = filepath.Join(root, "storectl", "metric-versions", fmt.Sprintf("%x", sha256.Sum256([]byte(prefix))))
+		if data, err := os.ReadFile(p.versionFile); err == nil {
+			p.lastSentVersion = progressVersion(string(data))
+		}
+	}
 	if args[0] == "sync" {
 		// A legacy FILE resumes copying before its adjacent FILE.sync state.
 		// Both are the same controller; nested batch journals are excluded.
@@ -213,13 +221,16 @@ func metricToken(s string) string {
 }
 
 type progressMetrics struct {
-	mu                        sync.Mutex
-	sendMu                    sync.Mutex
-	addr, prefix, phase       string
-	active, done, total, rate float64
-	path, lastSentPhase       string
-	paths                     map[string]bool
-	warned                    bool
+	mu                                    sync.Mutex
+	sendMu                                sync.Mutex
+	addr, prefix, phase                   string
+	active, done, total, rate             float64
+	path, lastSentPhase                   string
+	paths                                 map[string]bool
+	warned                                bool
+	code, round                           int
+	samples                               []progressMetricSample
+	version, lastSentVersion, versionFile string
 }
 
 func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
@@ -239,12 +250,17 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 			return
 		}
 	}
+	oldPhase, oldRound := p.phase, p.round
 	p.phase = metricToken(snapshot.Phase)
 	if snapshot.WaitingForStore {
 		p.phase = "waiting_for_store"
 	}
 	if p.phase == "" {
 		p.phase = "starting"
+	}
+	p.code, p.round = progressPhase(snapshot)
+	if oldPhase != p.phase || oldRound != p.round || float64(snapshot.Done) < p.done {
+		p.samples = nil
 	}
 	p.done, p.total, p.rate = float64(snapshot.Done), float64(snapshot.Total), snapshot.Rate
 	p.active = 0
@@ -263,10 +279,13 @@ func (p *progressMetrics) send() {
 	defer p.sendMu.Unlock()
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
+	at := time.Now()
+	eta := p.eta(at)
+	code, round := p.code, p.round
 	p.mu.Unlock()
 	// Fixed metric names; the run identity distinguishes simultaneous controllers.
 	// A timestamp heartbeat lets dashboards exclude stopped/abandoned runs.
-	now := time.Now().Unix()
+	now := at.Unix()
 	var b strings.Builder
 	if p.lastSentPhase != "" && p.lastSentPhase != phase {
 		fmt.Fprintf(&b, "%s.%s.active 0 %d\n%s.%s.names_per_second 0 %d\n", p.prefix, p.lastSentPhase, now, p.prefix, p.lastSentPhase, now)
@@ -277,6 +296,18 @@ func (p *progressMetrics) send() {
 	}{{"active", active}, {"done", done}, {"total", total}, {"names_per_second", rate}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s.%s %g %d\n", p.prefix, phase, v.name, v.value, now)
 	}
+	for _, v := range []struct {
+		name  string
+		value float64
+	}{{"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
+		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
+	}
+	if p.version != "" {
+		if p.lastSentVersion != "" && p.lastSentVersion != p.version {
+			fmt.Fprintf(&b, "%s.client.%s.active 0 %d\n", p.prefix, p.lastSentVersion, now)
+		}
+		fmt.Fprintf(&b, "%s.client.%s.active %g %d\n", p.prefix, p.version, active, now)
+	}
 	conn, err := net.DialTimeout("tcp", p.addr, 500*time.Millisecond)
 	if err == nil {
 		_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
@@ -285,9 +316,106 @@ func (p *progressMetrics) send() {
 	}
 	if err == nil {
 		p.lastSentPhase = phase
+		if p.version != "" && p.lastSentVersion != p.version {
+			p.lastSentVersion = p.version
+			if p.versionFile != "" {
+				if os.MkdirAll(filepath.Dir(p.versionFile), 0700) == nil {
+					// One controller owns each run; atomically preserve its last revision.
+					temp := p.versionFile + ".tmp"
+					if os.WriteFile(temp, []byte(p.version), 0600) == nil {
+						_ = os.Rename(temp, p.versionFile)
+					}
+				}
+			}
+		}
 	}
 	if err != nil && !p.warned {
 		p.warned = true
 		fmt.Fprintln(os.Stderr, "storectl: progress metric delivery failed:", err)
 	}
+}
+
+// Stable phase codes let a single series follow a controller across rounds.
+// Unknown phases remain distinguishable from startup and terminal states.
+func progressPhase(s progressSnapshot) (code, round int) {
+	phase := metricToken(s.Phase)
+	if s.Status == "interrupted" {
+		return 7, 0
+	}
+	if s.Status == "failed" || s.Status == "incomplete" {
+		return 6, 0
+	}
+	if s.WaitingForStore {
+		return 9, 0
+	}
+	switch phase {
+	case "", "starting":
+		return 0, 0
+	case "discover":
+		return 1, 0
+	case "copy", "window_missing", "window_retry":
+		return 2, 0
+	case "verify":
+		return 3, s.Round
+	case "fill":
+		return 4, s.Round
+	case "ready":
+		return 5, 0
+	}
+	if value, ok := strings.CutPrefix(phase, "verify_round_"); ok {
+		n, err := strconv.Atoi(value)
+		if err == nil && n > 0 {
+			return 3, n
+		}
+	}
+	return -1, 0
+}
+
+type progressMetricSample struct {
+	at   time.Time
+	done float64
+}
+
+// eta uses the observed counter delta over the last three minutes. Keeping
+// idle samples makes a stalled phase lose its old rate. Phase/round changes
+// clear the window in observe; journal replay never becomes an initial rate.
+// Caller holds mu.
+func (p *progressMetrics) eta(now time.Time) float64 {
+	if p.code == 5 {
+		return 0
+	}
+	if p.active == 0 || p.code == 9 {
+		return -1
+	}
+	p.samples = append(p.samples, progressMetricSample{now, p.done})
+	cutoff := now.Add(-3 * time.Minute)
+	for len(p.samples) > 1 && p.samples[0].at.Before(cutoff) {
+		p.samples = p.samples[1:]
+	}
+	first := p.samples[0]
+	elapsed, completed := now.Sub(first.at).Seconds(), p.done-first.done
+	if elapsed <= 0 || completed <= 0 || p.total <= 0 {
+		return -1
+	}
+	eta := max(0, p.total-p.done) * elapsed / completed
+	if math.IsNaN(eta) || math.IsInf(eta, 0) {
+		return -1
+	}
+	return eta
+}
+
+// Public build revisions are bounded, safe Graphite path components.
+func progressVersion(version string) string {
+	dirty := strings.HasSuffix(version, "-dirty")
+	version = strings.TrimSuffix(strings.ToLower(version), "-dirty")
+	if len(version) > 12 {
+		version = version[:12]
+	}
+	if len(version) != 12 || strings.Trim(version, "0123456789abcdef") != "" {
+		version = "unknown"
+	}
+	if dirty {
+		version += "-dirty"
+	}
+	return version
 }

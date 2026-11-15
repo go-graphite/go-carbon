@@ -20,7 +20,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	lines := make(chan string, 30)
+	lines := make(chan string, 100)
 	go func() {
 		for {
 			c, e := listener.Accept()
@@ -35,13 +35,17 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		}
 	}()
 	p := &progressMetrics{addr: listener.Addr().String(), prefix: "tools.storectl.runner.run.sync", phase: "starting", active: 1}
+	p.version, p.lastSentVersion = "0123456789ab", "fedcba987654"
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
 		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running"})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 5
+		count := 13
+		if index == 0 {
+			count++
+		}
 		if index > 0 {
 			count += 2
 		}
@@ -54,13 +58,19 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 				t.Fatal("missing Graphite sample")
 			}
 		}
+		if got[p.prefix+".client.0123456789ab.active"] != "1" {
+			t.Fatal(got)
+		}
+		if index == 0 && got[p.prefix+".client.fedcba987654.active"] != "0" {
+			t.Fatal(got)
+		}
 		prefix := p.prefix + "." + metricToken(phase) + "."
 		if got[prefix+"done"] != "12" || got[prefix+"total"] != "20" || got[prefix+"names_per_second"] != "3.5" || got[prefix+"active"] != "1" {
 			t.Fatal(got)
 		}
 	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 13; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {
@@ -174,7 +184,7 @@ func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
 	defer func() { listener.Close(); <-stopped }()
 	invoke := func(args []string) map[string]bool {
 		t.Helper()
-		if err := MainWithMetrics(args); err != nil {
+		if err := MainWithMetrics(args, "0123456789abcdef"); err != nil {
 			t.Fatal(err)
 		}
 		// All synchronous sends precede this marker in the accept queue.
@@ -196,7 +206,7 @@ func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
 					t.Fatalf("unexpected series %q", line)
 				}
 				parts := strings.Split(fields[0], ".")
-				if len(parts) != 7 {
+				if len(parts) != 7 && len(parts) != 6 && len(parts) != 8 {
 					t.Fatalf("unexpected metric path %q", fields[0])
 				}
 				paths[strings.Join(parts[:5], ".")] = true
@@ -283,5 +293,104 @@ func TestProgressMetricHumanLabels(t *testing.T) {
 	got, canonical = progressMetricIdentity(host, []string{"sync", "--resume=" + resume})
 	if !strings.Contains(got, ".resume-state.sync") || canonical != "/legacy/journal" {
 		t.Fatal(got, canonical)
+	}
+}
+
+func TestProgressPhaseCodes(t *testing.T) {
+	for _, tc := range []struct {
+		phase, status          string
+		waiting                bool
+		round, code, wantRound int
+	}{
+		{"starting", "running", false, 0, 0, 0},
+		{"discover", "running", false, 0, 1, 0},
+		{"copy", "running", false, 0, 2, 0},
+		{"window retry", "running", false, 0, 2, 0},
+		{"verify round 12", "running", false, 11, 3, 12},
+		{"verify", "running", false, 2, 3, 2},
+		{"fill", "running", false, 3, 4, 3},
+		{"ready", "complete", false, 5, 5, 0},
+		{"copy", "running", true, 2, 9, 0},
+		{"fill", "failed", false, 2, 6, 0},
+		{"fill", "interrupted", false, 2, 7, 0},
+		{"future", "running", false, 0, -1, 0},
+	} {
+		code, round := progressPhase(progressSnapshot{Phase: tc.phase, Status: tc.status, WaitingForStore: tc.waiting, Round: tc.round})
+		if code != tc.code || round != tc.wantRound {
+			t.Fatalf("%+v: got %d/%d", tc, code, round)
+		}
+	}
+}
+
+func TestProgressMetricsETA(t *testing.T) {
+	now := time.Unix(1000, 0)
+	p := &progressMetrics{active: 1, code: 2, total: 1000, done: 100}
+	if got := p.eta(now); got != -1 {
+		t.Fatal(got)
+	}
+	p.done = 200
+	if got := p.eta(now.Add(time.Minute)); got != 480 {
+		t.Fatal(got)
+	}
+	p.done = 500
+	// Smooth 100/min then 300/min into 200/min, rather than the last rate.
+	if got := p.eta(now.Add(2 * time.Minute)); got != 150 {
+		t.Fatal(got)
+	}
+	if got := p.eta(now.Add(6 * time.Minute)); got != -1 {
+		t.Fatal("stalled", got)
+	}
+	p.code = 5
+	if got := p.eta(now.Add(7 * time.Minute)); got != 0 {
+		t.Fatal(got)
+	}
+}
+
+func TestProgressMetricsETAPhaseSwitch(t *testing.T) {
+	p := &progressMetrics{}
+	now := time.Now()
+	p.observe("progress.json", progressSnapshot{Phase: "verify round 1", Round: 1, Status: "running", Done: 100, Total: 1000})
+	p.eta(now)
+	p.done = 200
+	if got := p.eta(now.Add(time.Minute)); got != 480 {
+		t.Fatal(got)
+	}
+	for _, phase := range []string{"fill", "verify round 2", "waiting"} {
+		p.observe("progress.json", progressSnapshot{Phase: phase, Round: 2, Status: "running", Done: 10, Total: 20})
+		if got := p.eta(now.Add(2 * time.Minute)); got != -1 {
+			t.Fatal(phase, got)
+		}
+	}
+	p.observe("progress.json", progressSnapshot{Phase: "fill", Round: 3, Status: "running", Total: 20})
+	p.eta(now)
+	p.observe("progress.json", progressSnapshot{Phase: "fill", Round: 4, Status: "running", Done: 10, Total: 20})
+	if got := p.eta(now.Add(time.Minute)); got != -1 {
+		t.Fatal("round change", got)
+	}
+}
+
+func TestProgressMetricsReadyObserved(t *testing.T) {
+	state := t.TempDir()
+	if err := atomicStateJSON(filepath.Join(state, "progress.json"), progressSnapshot{Phase: "verify round 1"}); err != nil {
+		t.Fatal(err)
+	}
+	var got progressSnapshot
+	outputMu.Lock()
+	progressObserver = func(_ string, snapshot progressSnapshot) { got = snapshot }
+	outputMu.Unlock()
+	defer func() { outputMu.Lock(); progressObserver = nil; outputMu.Unlock() }()
+	if err := readyProgress(state, "complete", nil); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := progressPhase(got); code != 5 {
+		t.Fatal(got)
+	}
+}
+
+func TestProgressVersion(t *testing.T) {
+	for input, want := range map[string]string{"abcdef0123456789": "abcdef012345", "abcdef0123456789-dirty": "abcdef012345-dirty", "unknown": "unknown", "devel-dirty": "unknown-dirty", "bad.path": "unknown"} {
+		if got := progressVersion(input); got != want {
+			t.Fatalf("%q: %s != %s", input, got, want)
+		}
 	}
 }

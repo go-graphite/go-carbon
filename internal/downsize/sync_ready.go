@@ -673,5 +673,10 @@ func readyProgress(state, status string, checkErr error) error {
 	} else {
 		progress.Error = ""
 	}
+	outputMu.Lock()
+	if progressObserver != nil {
+		progressObserver(path, progress)
+	}
+	outputMu.Unlock()
 	return atomicStateJSON(path, progress)
 }
