@@ -8,9 +8,13 @@ import "context"
 func (s *Store) initReadContexts() {
 	var cancel context.CancelFunc
 	s.readCtx, cancel = context.WithCancel(context.Background())
+	// Bind Done channels to the store owner before reads can register from
+	// another synctest bubble. Shutdown closes them in the owner context.
+	_ = s.readCtx.Done()
 	cancels := []context.CancelFunc{cancel}
 	for i := range s.readParents {
 		s.readParents[i], cancel = context.WithCancel(context.Background())
+		_ = s.readParents[i].Done()
 		cancels = append(cancels, cancel)
 	}
 	s.readCancel = func() {
