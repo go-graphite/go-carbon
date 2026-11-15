@@ -34,6 +34,13 @@ func openLoggedCoreWithHooks(logDir, partDir string, cfg coreConfig, opts partlo
 	if err != nil {
 		return nil, err
 	}
+	return attachLoggedCore(log, partDir, cfg, hooks)
+}
+
+// attachLoggedCore transfers journal ownership to the adapter. Intake may use
+// OpenAdmission and append before this storage-open boundary; only followers
+// consume those records, after the validated historical prefix.
+func attachLoggedCore(log *partlog.Log, partDir string, cfg coreConfig, hooks coreHooks) (*loggedCore, error) {
 	cfg.JournalIdentity = log.Identity()
 	engine, err := openCoreWithHooks(partDir, cfg, hooks)
 	if err != nil {

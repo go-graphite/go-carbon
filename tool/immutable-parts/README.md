@@ -214,3 +214,26 @@ original final durability sync and propagates both flush and sync failures. This
 batches small table writes without changing SST bytes or manifest publication.
 Queue tests cover ready-owner progress, FIFO, original apply groups, indexed
 seal acknowledgements, byte-credit refunds and indivisible oversized packets.
+
+Journal admission can use `partlog.OpenAdmission` before opening the owner
+storage. It reserves a new monotonic cursor epoch with a synced fence and opens
+each fresh append file on its first append, without scanning historical payloads. `WaitReady(ctx)` joins
+historical validation; `Replay`, `Follow` and truncation wait for that boundary.
+Live records enter the new epoch, and ordered followers consume old epochs
+first. A validation failure surfaces on `Errors`, fails readiness and prevents
+further acceptance. Close joins recovery before releasing directory ownership.
+
+Frames and opaque payloads keep their encoding. New CRC-protected epoch fences
+and retained-frontier metadata are part of the journal's recovery state and must
+be copied with it. Cursors are monotonic opaque positions, not record counts;
+each epoch reserves 48 low bits for stream records. Fences are retained, and an
+exhausted epoch space fails closed. Older binaries cannot read fenced gaps; do
+not roll back to a reader without epoch support after enabling this experiment.
+
+The `replay-live` benchmark opens admission and starts live journal appends
+before opening Pebble. Its first-accept receipt uses the wrapper exec timestamp
+separately from recovery and storage-open receipts. `TestLogAdmissionExecBenchmark`
+is a journal-only startup probe: set `PARTLOG_ADMISSION_BENCH_ROOT`,
+`PARTLOG_BENCH_PRODUCERS` and `PARTLOG_BENCH_EXEC_UNIX_NS`. It deliberately holds
+historical validation until a successful append. This probe does not establish
+production listener latency, downstream visibility or sustained replay speed.
