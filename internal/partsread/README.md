@@ -195,6 +195,11 @@ the daemon or claiming writer-isolation qualification.
    part or the legacy overlay. Whole-part copy applies the same durable-reference
    protocol at the receiver before publication or journal retirement.
 
+Version1 data payloads are fixed 24-byte little-endian time/bits/sequence records.
+A compressed part codec needs an explicit persisted version/codec discriminator
+and its matching checked decoder; it cannot be substituted under version1.
+The current latency fixture qualifies only its declared payload format.
+
 The minimum integration tests cover crashes before/after part rename, before/after
 atomic envelope commit and before live publication; reopen with changed local
 catalog IDs; concurrent compaction with paused old readers; and failure to open a
