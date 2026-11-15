@@ -26,6 +26,7 @@ type coreConfig struct {
 	AppendParts                bool
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
+	Owners                     int
 	PartitionSeconds           int64
 	BlindBatch                 bool
 }
@@ -42,6 +43,21 @@ type corePacket struct {
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
+	lease      *coreDispatch
+}
+
+// Each producer owns a bounded ring. Owners release a lease after their last
+// access; the producer cannot overwrite a slice still in use by any owner.
+type coreDispatch struct {
+	remaining atomic.Int32
+	storage   []row
+	parts     [][]row
+	counts    []int
+	packets   []corePacket
+}
+type coreRouter struct {
+	next  uint64
+	slots [4]coreDispatch
 }
 type coreQueue struct {
 	slots       [2]atomic.Pointer[corePacket]
@@ -78,8 +94,6 @@ func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 
 type coreOwner struct {
 	hook                       func(*pebble.Snapshot, []row) error
-	ownerCPU                   []int
-	ownerIndex                 int
 	plan                       func(coreSealInput) (coreSealPlan, error)
 	frontier                   atomic.Pointer[coreFrontier]
 	db                         *pebble.DB
@@ -94,9 +108,10 @@ type coreOwner struct {
 	sortNS, encodeNS, ingestNS atomic.Uint64
 }
 type coreEngine struct {
-	owners []*coreOwner
-	cfg    coreConfig
-	stalls atomic.Uint64
+	owners  []*coreOwner
+	routers []coreRouter
+	cfg     coreConfig
+	stalls  atomic.Uint64
 }
 
 // Hash only the canonical numeric ID, with stable distribution independent of
@@ -120,13 +135,15 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
 	hook := hooks.Publish
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 {
 		return nil, os.ErrInvalid
 	}
 	if err := os.MkdirAll(root, 0750); err != nil {
 		return nil, err
 	}
-	e := &coreEngine{cfg: cfg}
+	diskConfig := cfg
+	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
+	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers)}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			_ = o.db.Close()
@@ -143,7 +160,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{ownerCPU: hooks.OwnerCPUs, ownerIndex: s, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
+		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
 		e.owners = append(e.owners, o)
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
@@ -151,7 +168,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if hooks.PlanSeal != nil {
 			o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
 		}
-		o.meta = coreFrontier{Version: 1, Config: cfg, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
+		o.meta = coreFrontier{Version: 1, Config: diskConfig, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
 		b, c, err := db.Get(coreMetaKey)
 		if err == nil {
 			err = json.Unmarshal(b, &o.meta)
@@ -162,7 +179,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if err != nil {
 			return fail(err)
 		}
-		if o.meta.Version != 1 || o.meta.Config != cfg || len(o.meta.Cursors) != cfg.Producers {
+		if o.meta.Version != 1 || o.meta.Config != diskConfig || len(o.meta.Cursors) != cfg.Producers {
 			return fail(errors.New("owner format/config mismatch"))
 		}
 		o.publishFrontier(o.meta)
@@ -180,9 +197,18 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			o.queues = append(o.queues, new(coreQueue))
 		}
 	}
-	for _, o := range e.owners {
+	workers := cfg.Owners
+	if workers == 0 {
+		workers = cfg.Shards
+	}
+	workers = min(workers, cfg.Shards)
+	groups := make([][]*coreOwner, workers)
+	for i, o := range e.owners {
 		o.pub.publish(o.db.NewSnapshot())
-		go o.run()
+		groups[i%workers] = append(groups[i%workers], o)
+	}
+	for i, group := range groups {
+		go runCoreOwnerGroup(group, hooks.OwnerCPUs, i)
 	}
 	return e, nil
 }
@@ -197,8 +223,26 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 	return e.submitPacket(producer, rows, nil, cursor, seal)
 }
 func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
-	parts := make([][]row, e.cfg.Shards)
-	counts := make([]int, e.cfg.Shards)
+	router := &e.routers[producer]
+	d := &router.slots[router.next%uint64(len(router.slots))]
+	for d.remaining.Load() != 0 {
+		for _, o := range e.owners {
+			select {
+			case <-o.dead:
+				return errors.New("owner stopped during buffer reuse")
+			default:
+			}
+		}
+		time.Sleep(10 * time.Microsecond)
+	}
+	router.next++
+	if len(d.parts) == 0 {
+		d.parts = make([][]row, e.cfg.Shards)
+		d.counts = make([]int, e.cfg.Shards)
+		d.packets = make([]corePacket, e.cfg.Shards)
+	}
+	parts, counts := d.parts, d.counts
+	clear(counts)
 	for _, r := range rows {
 		s := coreShard(r.ID, e.cfg.Shards)
 		counts[s]++
@@ -208,10 +252,12 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 			return errors.New("producer batch exceeds owner head bound")
 		}
 	}
-	// One exact allocation avoids geometric slice growth on every owner. Full
-	// slice capacities keep concurrent owner buffers disjoint while the shared
-	// backing allocation remains live until its last packet is consumed.
-	storage := make([]row, len(rows))
+	// The reusable backing slice is split into disjoint full-capacity regions.
+	// The lease prevents reuse until every owner has finished reading its packet.
+	if cap(d.storage) < len(rows) {
+		d.storage = make([]row, len(rows))
+	}
+	storage := d.storage[:len(rows)]
 	for s, count := range counts {
 		parts[s] = storage[:0:count]
 		storage = storage[count:]
@@ -220,7 +266,10 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		s := coreShard(r.ID, e.cfg.Shards)
 		parts[s] = append(parts[s], r)
 	}
-	byOwner := make([][]coreBatch, e.cfg.Shards)
+	var byOwner [][]coreBatch
+	if len(batches) > 0 {
+		byOwner = make([][]coreBatch, e.cfg.Shards)
+	}
 	for _, b := range batches {
 		owner := coreShard(b.ID, e.cfg.Shards)
 		b.Points = slices.Clone(b.Points)
@@ -228,8 +277,13 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		byOwner[owner] = append(byOwner[owner], b)
 	}
 	var acks []chan error
+	d.remaining.Store(int32(len(e.owners)))
 	for s, o := range e.owners {
-		p := &corePacket{rows: parts[s], batches: byOwner[s], cursor: cursor, seal: seal}
+		p := &d.packets[s]
+		*p = corePacket{rows: parts[s], cursor: cursor, seal: seal, lease: d}
+		if byOwner != nil {
+			p.batches = byOwner[s]
+		}
 		if seal {
 			p.ack = make(chan error, 1)
 			acks = append(acks, p.ack)
@@ -250,14 +304,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	}
 	return nil
 }
-func (o *coreOwner) run() {
-	defer close(o.dead)
-	unpin, err := coreAffinity(o.ownerCPU, o.ownerIndex)
-	if err != nil {
-		o.done <- err
-		return
-	}
-	defer unpin()
+func (o *coreOwner) poller() func() (bool, bool) {
 	head := make([]row, 0, o.cfg.MaxRows)
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
@@ -291,7 +338,15 @@ func (o *coreOwner) run() {
 		}
 		return nil
 	}
-	for left > 0 {
+	return func() (bool, bool) {
+		if left == 0 {
+			if failure == nil {
+				failure = flush()
+			}
+			o.done <- failure
+			close(o.dead)
+			return true, true
+		}
 		found := false
 		for producer, q := range o.queues {
 			if stopped[producer] {
@@ -330,19 +385,54 @@ func (o *coreOwner) run() {
 			if p.ack != nil {
 				p.ack <- failure
 			}
+			if p.lease != nil {
+				p.lease.remaining.Add(-1)
+			}
 		}
 		if !found {
 			if failure == nil && time.Now().After(deadline) {
 				failure = flush()
 				deadline = time.Now().Add(time.Second)
 			}
+		}
+		return false, found
+	}
+}
+
+// One execution owner polls several independent databases. Database count is a
+// storage geometry choice, independent of producer and execution-owner counts.
+func runCoreOwnerGroup(owners []*coreOwner, cpus []int, index int) {
+	unpin, err := coreAffinity(cpus, index)
+	if err != nil {
+		for _, o := range owners {
+			o.done <- err
+			close(o.dead)
+		}
+		return
+	}
+	defer unpin()
+	polls := make([]func() (bool, bool), len(owners))
+	for i, o := range owners {
+		polls[i] = o.poller()
+	}
+	left := len(polls)
+	for left > 0 {
+		found := false
+		for i, poll := range polls {
+			if poll == nil {
+				continue
+			}
+			done, work := poll()
+			found = found || work
+			if done {
+				polls[i] = nil
+				left--
+			}
+		}
+		if !found {
 			time.Sleep(100 * time.Microsecond)
 		}
 	}
-	if failure == nil {
-		failure = flush()
-	}
-	o.done <- failure
 }
 
 // key = data-prefix / time-partition / metric-ID / archive / block-start /
@@ -350,6 +440,10 @@ func (o *coreOwner) run() {
 // the tuple inside a partition has the requested metric/archive/block layout.
 func coreKey(r row, partition int64, part uint64, ordinal uint32) []byte {
 	b := make([]byte, 41)
+	coreKeyInto(b, r, partition, part, ordinal)
+	return b
+}
+func coreKeyInto(b []byte, r row, partition int64, part uint64, ordinal uint32) {
 	b[0] = 1
 	binary.BigEndian.PutUint64(b[1:9], uint64(partition)^(1<<63))
 	binary.BigEndian.PutUint64(b[9:17], r.ID)
@@ -357,7 +451,6 @@ func coreKey(r row, partition int64, part uint64, ordinal uint32) []byte {
 	binary.BigEndian.PutUint64(b[21:29], uint64(r.Time)^(1<<63))
 	binary.BigEndian.PutUint64(b[29:37], part)
 	binary.BigEndian.PutUint32(b[37:], ordinal)
-	return b
 }
 func corePartition(t, seconds int64) int64 {
 	q := t / seconds
@@ -448,6 +541,8 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		return batch.Set(k, v, nil)
 	}
+	var keyScratch [41]byte
+	var valueScratch [256 * 24]byte
 	for i := 0; i < len(head); {
 		partition := corePartition(head[i].Time, o.cfg.PartitionSeconds)
 		if partition < next.ExpiredBefore {
@@ -460,14 +555,15 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		for j < len(head) && j < i+256 && head[j].ID == head[i].ID && corePartition(head[j].Time, o.cfg.PartitionSeconds) == partition {
 			j++
 		}
-		value := make([]byte, (j-i)*24)
+		value := valueScratch[:(j-i)*24]
 		for k, r := range head[i:j] {
 			b := value[k*24:]
 			binary.LittleEndian.PutUint64(b, uint64(r.Time))
 			binary.LittleEndian.PutUint64(b[8:], r.Bits)
 			binary.LittleEndian.PutUint64(b[16:], r.Seq)
 		}
-		key := coreKey(head[i], partition, o.meta.NextPart, uint32(i))
+		key := keyScratch[:]
+		coreKeyInto(key, head[i], partition, o.meta.NextPart, uint32(i))
 		if o.cfg.AppendParts {
 			key[0] = 2
 			binary.BigEndian.PutUint64(key[9:17], o.meta.NextPart)

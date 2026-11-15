@@ -687,6 +687,9 @@ func main() {
 	coreDuration := flag.Duration("core-duration", time.Minute, "core benchmark offered duration")
 	coreRate := flag.Uint64("core-rate", 25000000, "aggregate offered points per second")
 	coreMetrics := flag.Uint64("core-metrics", 16000000, "synthetic canonical IDs")
+	coreOwners := flag.Int("core-owners", 0, "execution owners, default one per database")
+	corePipeline := flag.Int("core-pipeline", 0, "local pipeline index for disjoint synthetic IDs")
+	corePipelines := flag.Int("core-pipelines", 1, "number of isolated synthetic pipelines")
 	coreProducers := flag.Int("core-producers", 16, "independent producer streams")
 	coreSettle := flag.Duration("core-settle", 10*time.Second, "post-input compaction observation")
 	coreAppend := flag.Bool("core-append-parts", false, "put immutable part before metric and ingest frontier separately")
@@ -719,9 +722,9 @@ func main() {
 			must(pprof.Lookup("block").WriteTo(f, 0))
 		}()
 	}
-	cfg := coreConfig{AppendParts: *coreAppend, Shards: *shards, Producers: *coreProducers, MaxRows: *maxRows, PartitionSeconds: 3600, BlindBatch: *coreBlind}
+	cfg := coreConfig{Owners: *coreOwners, AppendParts: *coreAppend, Shards: *shards, Producers: *coreProducers, MaxRows: *maxRows, PartitionSeconds: 3600, BlindBatch: *coreBlind}
 	if *mode == "core-bench" {
-		must(coreBenchmark(*out, cfg, *coreDuration, *coreRate, *coreMetrics, *coreSettle))
+		must(coreBenchmarkPipeline(*out, cfg, *coreDuration, *coreRate, *coreMetrics, *coreSettle, *corePipeline, *corePipelines))
 		return
 	}
 	if *mode == "core-replay" {
