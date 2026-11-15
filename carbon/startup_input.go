@@ -263,6 +263,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			s.receiver.SetPointsOut(core.AddPoints)
 			s.receiver.SetPointBatchOut(core.AddPointBatch)
 			s.receiver.SetStreamPointOut(core.AddStreamPoint)
+			s.receiver.SetStreamPointsOut(core.AddStreamPoints)
 			s.receiver.SetStreamNameResolver(core.ResolveStreamName)
 		}
 	}

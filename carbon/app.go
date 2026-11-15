@@ -1674,6 +1674,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		}
 	}
 	addStreamPoint := core.AddStreamPoint
+	addStreamPoints := core.AddStreamPoints
 	// Start inherited handlers (including dictionary replay and bounded raw
 	// socket read-ahead) before replaying the tail. Gate every live sink, on
 	// every connection, so corrections in the tail always precede live rows.
@@ -1688,6 +1689,12 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		}()
 		oldAdd, oldPoint, oldPoints, oldStream := add, addPoint, addPoints, addStreamPoint
 		oldBatch := addPointBatch
+		oldStreamPoints := addStreamPoints
+		addStreamPoints = func(name []byte, data []points.Point, slot *any) {
+			if gate.pass() {
+				oldStreamPoints(name, data, slot)
+			}
+		}
 		addPointBatch = func(names [][]byte, data []points.Point) {
 			if gate.pass() {
 				oldBatch(names, data)
@@ -1775,6 +1782,11 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			SetStreamPointOut(func([]byte, float64, int64, *any))
 		}); ok && receiverStoreHook == nil {
 			r.SetStreamPointOut(addStreamPoint)
+			if batches, ok := rcv.(interface {
+				SetStreamPointsOut(func([]byte, []points.Point, *any))
+			}); ok {
+				batches.SetStreamPointsOut(addStreamPoints)
+			}
 			if names, ok := rcv.(interface{ SetStreamNameResolver(func([]byte) any) }); ok {
 				names.SetStreamNameResolver(core.ResolveStreamName)
 			}

@@ -151,6 +151,7 @@ type TCP struct {
 	pointsOut                atomic.Pointer[func(name []byte, data []points.Point)]
 	streamNameResolver       atomic.Pointer[func([]byte) any]
 	streamPointOut           atomic.Pointer[func(name []byte, value float64, timestamp int64, slot *any)]
+	streamPointsOut          atomic.Pointer[func([]byte, []points.Point, *any)]
 }
 
 // SetPointOut configures the point callback for unbuffered plain-text input.
