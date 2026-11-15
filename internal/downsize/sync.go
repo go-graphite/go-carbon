@@ -687,8 +687,10 @@ func (s *syncer) verifyAndFill(ctx context.Context) error {
 			if s.forbid[h.Source] || failedAttempts[k] >= 3 {
 				continue
 			}
-			fillable++
 			if !seen[k] {
+				// Transfers select a name once per source, even when several
+				// windows or archives report holes for the same pair.
+				fillable++
 				seen[k] = true
 				src := s.sourceIndex(h.Source)
 				bySource[src] = append(bySource[src], h.Name)

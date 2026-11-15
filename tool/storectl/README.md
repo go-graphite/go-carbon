@@ -894,3 +894,8 @@ logs rather than becoming Graphite series. The count is retained through parent
 READY finalization within that client invocation and starts at zero for a new
 invocation. `residual.json` retains the full terminal residual evidence. An
 accepted transfer alone never proves a repair.
+
+Fill progress totals count distinct `(metric, source)` transfers. A metric with
+holes in multiple archives or windows is selected once per source; donor fan-out
+can legitimately make this count exceed the preceding distinct verified-name
+count. `sync_round.holes` separately retains archive/window hole observations.
