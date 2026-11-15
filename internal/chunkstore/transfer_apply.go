@@ -198,6 +198,10 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return nil, err
 	}
+	// Reserve only the acquired names before any revision reads or batch
+	// assembly. Cold metadata reads must not hold unrelated sibling stripes.
+	s.transferApply.recordHold(time.Since(locked))
+	unlock = s.releaseImportStripes(names, held)
 	out := make([]partOutcome, len(pending))
 	batch := s.db.NewBatch()
 	defer batch.Close()
@@ -230,8 +234,6 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 	if batch.Empty() && len(sidecars) == 0 {
 		return out, nil
 	}
-	s.transferApply.recordHold(time.Since(locked))
-	unlock = s.releaseImportStripes(names, held)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}
@@ -252,11 +254,14 @@ func (s *Store) commitTransferParts(ctx context.Context, parts []*preparedTransf
 }
 
 // transferTargetCurrent reports whether name's target still matches the
-// metadata its preparation read. Call it holding name's stripe.
+// metadata its preparation read. Call it owning name's mutation reservation.
 func (s *Store) transferTargetCurrent(name string, expected Metadata, unchanged bool) (bool, error) {
 	if unchanged && !s.transferRereadMetadata {
 		s.transferApply.epochValidated.Add(1)
 		return true, nil
+	}
+	if s.transferReadTestHook != nil {
+		s.transferReadTestHook()
 	}
 	current, err := metadataFrom(s.db, name)
 	switch {
@@ -299,14 +304,17 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return false, err
 	}
-	// Each catalog/revision re-read probes every LSM level's filter block under
-	// these stripes. Under concurrent copies those probes queue on one hot
-	// block-cache shard, stretch stripe holds and split batches. An unchanged
-	// epoch already proves the view's metadata current, so skip the re-read.
+	// Exact-name reservations exclude competing mutations while a stale
+	// preparation is validated. Shared stripes are free during LSM reads.
+	s.transferApply.recordHold(time.Since(locked))
+	unlock = s.releaseImportStripes(names, nil)
 	for i, name := range names {
 		if !s.transferRereadMetadata && unchanged != nil && unchanged[i] {
 			s.transferApply.epochValidated.Add(1)
 			continue
+		}
+		if s.transferReadTestHook != nil {
+			s.transferReadTestHook()
 		}
 		current, err := metadataFrom(s.db, name)
 		switch {
@@ -326,8 +334,6 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 			return false, nil
 		}
 	}
-	s.transferApply.recordHold(time.Since(locked))
-	unlock = s.releaseImportStripes(names, nil)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}

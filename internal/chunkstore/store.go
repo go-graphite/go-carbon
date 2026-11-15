@@ -271,6 +271,7 @@ type Store struct {
 	transferApply          transferApplyCounters
 	transferApplyTestHook  func() // deterministic concurrent-publication tests only
 	transferCommitTestHook func() // after stripes are released, before import commit
+	transferReadTestHook   func() // before target revision revalidation
 	sidecars               sidecarCatalog
 	transferDeleteRanges   atomic.Uint64
 	compactOnce            compactOnceState
