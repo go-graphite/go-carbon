@@ -100,3 +100,33 @@ profile timings are diagnostic and must not be used as latency gate results.
 must copy before modifying either slice. Sparse cache reset relies on this
 contract. `RenderInto` writes caller-owned Values, while its Occupied stays
 read-only and handle-owned. Never use a live Render workspace as the overlay base.
+
+`BlockManifest` version1 persists each immutable block's complete key, physical
+span, archive, file, offset, length and IEEE CRC-32. `PublishBlockPart` writes and
+syncs data plus manifest in a staging directory, syncs that directory, then
+renames it and syncs the parent. Part names are unique and never reused. A failed
+parent sync can leave a complete part to reconcile by generation. This helper
+publishes one part; its owner must commit the shard catalog/frontier reference
+before exposing the corresponding `View` or trimming its journal.
+
+`OpenBlockPart` validates all extents and opens every referenced file before
+publication. The owner serializes this open against retirement. Attach the source
+to the view and put `source.Close` in `View.Close`; open descriptors then pin old
+inodes even after compaction unlinks their directory. `OpenBlockPartWithIDs`
+resolves read handles from full portable keys when catalog IDs differ after a
+copy or restart. Queries use the immutable directory, check a full block's CRC
+before emitting its samples, and retain every physical-slot version.
+
+Archive groups are limited by encoded bytes: 12KiB for sub-minute archives and
+4KiB for coarser archives. `ArchiveBlockBytes` exposes that writer policy;
+`PublishBlockPart` rejects oversized groups. Source admission reserves metadata,
+file resources and a maximum decode buffer per pinned reader. Scratch is local
+to the call and never shared with writers or another read.
+
+The latency comparison now defaults to this durable file/manifest source.
+`PARTS_READ_COMPARE_STORAGE=pebble` selects the older indexed-Pebble comparison.
+Manifest recovery/open and view construction occur before timed Render, while
+native Fetch includes its view construction; source publication cost and
+sustained ingest remain separate gates. Both sources retain OS page cache.
+The portable daemon backend and the numeric core writer benchmark still need
+writer-side manifest integration; standalone fixture passes do not qualify them.

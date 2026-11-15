@@ -78,7 +78,7 @@ func TestCombinedRenderDifferential(t *testing.T) {
 					}
 				}
 				state := map[[2]int64]sr.Sample{}
-				var sources []Source
+				var manifestData []BlockData
 				for bi, input := range [][]sr.Sample{dense, sparse, late, edge} {
 					ds, err := sr.Reduce(c, func(a int, slot int64) (sr.Sample, bool) { p, ok := state[[2]int64{int64(a), slot}]; return p, ok }, []sr.Batch{{Order: uint64(bi + 1), Now: clock, Points: input}})
 					if err != nil {
@@ -99,20 +99,12 @@ func TestCombinedRenderDifferential(t *testing.T) {
 							if slot < 0 {
 								slot += a.Points
 							}
-							blocks = append(blocks, SlotBlock{ID: r.ID, Archive: a, Slots: SlotRange{slot, slot + 1}, Key: []byte(fmt.Sprint(ri))})
+							blocks = append(blocks, SlotBlock{ID: r.ID, Archive: a, Slots: SlotRange{slot, slot + 1}, Key: []byte(fmt.Sprintf("pg/test/vshard/0/%s/%d/%d", name, bi, ri))})
 						}
 					}
-					index, err := NewSlotIndex(blocks, func(ctx context.Context, key []byte, _ []SlotRange, y func(Sample) error) error {
-						var ri int
-						if _, e := fmt.Sscan(string(key), &ri); e != nil {
-							return e
-						}
-						return y(records[ri].Sample)
-					})
-					if err != nil {
-						t.Fatal(err)
+					for i, b := range blocks {
+						manifestData = append(manifestData, BlockData{SlotBlock: b, Samples: []Sample{records[i].Sample}})
 					}
-					sources = append(sources, index)
 					var ps []chunkstore.Point
 					var ptrs []*whisper.TimeSeriesPoint
 					for _, p := range input {
@@ -129,9 +121,20 @@ func TestCombinedRenderDifferential(t *testing.T) {
 						}
 					}
 				}
+				// Publish all retained batch versions once. This keeps the oracle
+				// focused on the real disk codec without thousands of extra fsyncs.
+				part, err := PublishBlockPart(t.TempDir(), "sealed", 4, manifestData)
+				if err != nil {
+					t.Fatal(err)
+				}
+				index, err := OpenBlockPart(part)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer index.Close()
 				cat := CatalogFuncs{LookupFunc: func(n string) (Metric, bool) { return Metric{ID: 7, Archives: archives}, n == name }}
 				var pub Publication
-				pub.Publish(View{Catalog: cat, Blocks: sources[:1], Parts: sources[1:3], Head: sources[3:]})
+				pub.Publish(View{Catalog: cat, Parts: []Source{index}})
 				defer pub.Close()
 				for _, width := range []int64{3600, 86400, 7 * 86400, 30 * 86400} {
 					h, err := pub.Pin(NewBudget(256<<20), 128<<20)

@@ -102,10 +102,10 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 		t.Fatal(e)
 	}
 	ctx := context.Background()
-	direct := os.Getenv("PARTS_READ_COMPARE_STORAGE") == "direct"
+	direct := os.Getenv("PARTS_READ_COMPARE_STORAGE") != "pebble"
 	sourceName := "disk_fixture_indexed_slot_blocks"
 	if direct {
-		sourceName = "disk_fixture_direct_slot_blocks"
+		sourceName = "durable_manifest_direct_slot_blocks"
 	}
 	const clock int64 = 1794700800
 	for si, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y"} {
@@ -151,56 +151,44 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		// Fixture block identities contain PG, vshard, complete series name,
-		// archive step and block slot. Production sources supply their own codec.
-		type fixtureBlock struct {
-			spec  pr.SlotBlock
-			value []byte
-		}
-		blocks := map[string]*fixtureBlock{}
+		// Blocks are archive-local and bounded by encoded bytes, including all
+		// retained versions. Sorting affects physical layout, never slot winners.
+		sort.SliceStable(deltas, func(i, j int) bool {
+			if deltas[i].Archive != deltas[j].Archive {
+				return deltas[i].Archive < deltas[j].Archive
+			}
+			return deltas[i].Slot < deltas[j].Slot
+		})
+		var data []pr.BlockData
 		for _, d := range deltas {
 			a := archives[d.Archive]
-			slot := (d.Sample.Time / a.Step) % a.Points
-			if slot < 0 {
-				slot += a.Points
+			slot := d.Slot
+			if len(data) == 0 || data[len(data)-1].Archive != a || (len(data[len(data)-1].Samples)+1)*24 > pr.ArchiveBlockBytes(a) {
+				key := []byte("pg=fixture/vshard=0/series=sample/")
+				key = binary.BigEndian.AppendUint64(key, uint64(a.Step))
+				key = binary.BigEndian.AppendUint64(key, uint64(len(data)))
+				data = append(data, pr.BlockData{SlotBlock: pr.SlotBlock{ID: 7, Archive: a, Slots: pr.SlotRange{From: slot, Until: slot + 1}, Key: key}})
 			}
-			blockSlot := slot / 512 * 512
-			key := []byte("pg=fixture/vshard=0/series=sample/")
-			key = binary.BigEndian.AppendUint64(key, uint64(a.Step))
-			key = binary.BigEndian.AppendUint64(key, uint64(blockSlot))
-			b := blocks[string(key)]
-			if b == nil {
-				b = &fixtureBlock{spec: pr.SlotBlock{ID: 7, Archive: a, Slots: pr.SlotRange{From: slot, Until: slot + 1}, Key: key}}
-				blocks[string(key)] = b
-			}
-			b.spec.Slots.From = min(b.spec.Slots.From, slot)
-			b.spec.Slots.Until = max(b.spec.Slots.Until, slot+1)
-			b.value = binary.LittleEndian.AppendUint64(b.value, uint64(d.Sample.Time))
-			b.value = binary.LittleEndian.AppendUint64(b.value, d.Sample.Bits)
-			b.value = binary.LittleEndian.AppendUint64(b.value, d.Order)
+			b := &data[len(data)-1]
+			b.Slots.From = min(b.Slots.From, slot)
+			b.Slots.Until = max(b.Slots.Until, slot+1)
+			b.Samples = append(b.Samples, pr.Sample{Time: d.Sample.Time, Bits: d.Sample.Bits, Sequence: d.Order})
 		}
-		var partFile *os.File
-		if direct {
-			partFile, e = os.OpenFile(filepath.Join(dir, "immutable.part"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-			if e != nil {
-				t.Fatal(e)
-			}
+		partPath, e := pr.PublishBlockPart(dir, "sealed", 1, data)
+		if e != nil {
+			t.Fatal(e)
 		}
 		var directory []pr.SlotBlock
 		batch := pdb.NewBatch()
-		for _, b := range blocks {
-			if direct {
-				offset, err := partFile.Seek(0, 2)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err = partFile.Write(b.value); err != nil {
-					t.Fatal(err)
-				}
-				b.spec.Key = fixtureBlockLocator(b.spec.Key, offset, b.value)
+		for _, b := range data {
+			directory = append(directory, b.SlotBlock)
+			var value []byte
+			for _, p := range b.Samples {
+				value = binary.LittleEndian.AppendUint64(value, uint64(p.Time))
+				value = binary.LittleEndian.AppendUint64(value, p.Bits)
+				value = binary.LittleEndian.AppendUint64(value, p.Sequence)
 			}
-			directory = append(directory, b.spec)
-			if e = batch.Set(b.spec.Key, b.value, nil); e != nil {
+			if e = batch.Set(b.Key, value, nil); e != nil {
 				t.Fatal(e)
 			}
 		}
@@ -208,18 +196,6 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 			t.Fatal(e)
 		}
 		_ = batch.Close()
-		if direct {
-			if e = partFile.Sync(); e != nil {
-				t.Fatal(e)
-			}
-			if e = partFile.Close(); e != nil {
-				t.Fatal(e)
-			}
-			partFile, e = os.Open(filepath.Join(dir, "immutable.part"))
-			if e != nil {
-				t.Fatal(e)
-			}
-		}
 		if e = pdb.Flush(); e != nil {
 			t.Fatal(e)
 		}
@@ -249,15 +225,6 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 						if e != nil {
 							t.Fatal(e)
 						}
-						if direct {
-							if e = partFile.Close(); e != nil {
-								t.Fatal(e)
-							}
-							partFile, e = os.Open(filepath.Join(dir, "immutable.part"))
-							if e != nil {
-								t.Fatal(e)
-							}
-						}
 						pdb, e = pebble.Open(filepath.Join(dir, "parts"), &pebble.Options{})
 						if e != nil {
 							t.Fatal(e)
@@ -269,15 +236,26 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 					if profile {
 						sourceStages = &stages
 					}
-					reader := latencyBlockReader(snap, sourceStages)
+					var source pr.Source
+					var retained int64
+					closeSource := func() { _ = snap.Close() }
 					if direct {
-						reader = fixtureBlockFileReader(partFile, sourceStages)
+						located, err := pr.OpenBlockPart(partPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						source = located
+						retained = located.RetainedBytes()
+						closeSource = func() { located.Close(); _ = snap.Close() }
+					} else {
+						indexed, err := pr.NewSlotIndex(directory, latencyBlockReader(snap, sourceStages))
+						if err != nil {
+							t.Fatal(err)
+						}
+						source = indexed
+						retained = indexed.RetainedBytes()
 					}
-					source, err := pr.NewSlotIndex(directory, reader)
-					if err != nil {
-						t.Fatal(err)
-					}
-					pub.Publish(pr.View{Catalog: pr.CatalogFuncs{LookupFunc: func(name string) (pr.Metric, bool) { return pr.Metric{ID: 7, Archives: archives}, name == "sample" }}, Parts: []pr.Source{source}, RetainedBytes: source.RetainedBytes(), Close: func() { _ = snap.Close() }})
+					pub.Publish(pr.View{Generation: 1, Catalog: pr.CatalogFuncs{LookupFunc: func(name string) (pr.Metric, bool) { return pr.Metric{ID: 7, Archives: archives}, name == "sample" }}, Parts: []pr.Source{source}, RetainedBytes: retained, Close: closeSource})
 					pinStart := time.Now()
 					h, e := pub.Pin(pr.NewBudget(256<<20), 128<<20)
 					if e != nil {
@@ -352,11 +330,6 @@ func TestSnapshotLatencyComparison(t *testing.T) {
 				}
 				v50, v99, n50, n99 := latencyPercentile(vd, .5), latencyPercentile(vd, .99), latencyPercentile(nd, .5), latencyPercentile(nd, .99)
 				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "snapshot_latency_comparison", "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "schema": def, "range_seconds": width, "fresh_engine_cache": cold, "os_page_cache": "uncontrolled", "samples": repeats, "v2_p50_ns": v50, "v2_p99_ns": v99, "native_p50_ns": n50, "native_p99_ns": n99, "latency_gate": v50 <= n50 && v99 <= n99, "exact_bits": true, "source": sourceName, "sustained_ingest": false})
-			}
-		}
-		if direct {
-			if e = partFile.Close(); e != nil {
-				t.Fatal(e)
 			}
 		}
 		if e = native.Close(); e != nil {
