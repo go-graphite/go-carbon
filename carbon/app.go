@@ -1163,7 +1163,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 				maxDefer = d.Value()
 			}
 			app.reanchorPacer = whisperio.NewClassicReanchorPacer(conf.Whisper.StoreClassicReanchorRate, maxDefer)
-			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites, RangeReadsEnabled: func() bool { return app.readPolicyConfig.Load().Whisper.StoreRangeReads }, Reanchor: app.reanchorPacer}
+			continuation = &whisperio.ContinuationCodec{OwnerHeads: whisperio.NewOwnerHeads(conf.Whisper.StoreOwnerHeadOwners, conf.Whisper.StoreOwnerHeadBytes), ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites, RangeReadsEnabled: func() bool { return app.readPolicyConfig.Load().Whisper.StoreRangeReads }, Reanchor: app.reanchorPacer}
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{

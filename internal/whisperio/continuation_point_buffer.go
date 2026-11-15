@@ -90,7 +90,9 @@ func (b *continuationPointBuffer) Visit(prefix []byte, visit func([]byte, []byte
 func (b *continuationPointBuffer) set(key []byte, block *store.PointBlock) error {
 	delete(b.reads, string(key))
 	if b.writeThrough {
-		if err := b.Set(key, store.EncodePointBlock(block)); err != nil {
+		value := store.EncodePointBlock(block)
+		retainEncoded(b.ContinuationIO, key, value, block)
+		if err := b.Set(key, value); err != nil {
 			return err
 		}
 		b.remember(key, block)
@@ -156,7 +158,9 @@ func (b *continuationPointBuffer) flush(prefix []byte) error {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if err := b.ContinuationIO.Set([]byte(key), store.EncodePointBlock(b.blocks[key])); err != nil {
+		value := store.EncodePointBlock(b.blocks[key])
+		retainEncoded(b.ContinuationIO, []byte(key), value, b.blocks[key])
+		if err := b.ContinuationIO.Set([]byte(key), value); err != nil {
 			return err
 		}
 		delete(b.blocks, key)

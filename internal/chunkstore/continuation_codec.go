@@ -58,7 +58,7 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 	}
 	batch := s.db.NewIndexedBatch()
 	defer batch.Close()
-	m, view, sidecar, changed, err := s.prepareContinuationUpdate(ctx, batch, m, state, cache, input, retention, maintenance)
+	m, view, sidecar, changed, published, err := s.prepareContinuationUpdate(ctx, batch, m, state, cache, input, retention, maintenance)
 	if err != nil {
 		return err
 	}
@@ -69,6 +69,9 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 		}
 	}
 	stagetime.FromContext(ctx).Enter(stagetime.Publish)
+	if published != nil {
+		published(m)
+	}
 	if cache {
 		s.installState(view, m)
 	}
@@ -77,7 +80,7 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 
 // prepareContinuationUpdate stages one metric without publishing its cache
 // state. The caller reserves its name until the enclosing batch commits.
-func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) (Metadata, *stateView, *SidecarSummary, bool, error) {
+func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) (Metadata, *stateView, *SidecarSummary, bool, func(Metadata), error) {
 	io := s.newContinuationIO(ctx, batch, batch, m)
 	io.indexRevision = m.Revision + 1
 	if cache {
@@ -88,22 +91,22 @@ func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Bat
 		io.withIterator()
 	}
 	if err := s.continuation.Update(ctx, io, m, input, retention, s.now, maintenance); err != nil {
-		return m, nil, nil, false, err
+		return m, nil, nil, false, nil, err
 	}
 	if err := io.Close(); err != nil {
-		return m, nil, nil, false, err
+		return m, nil, nil, false, nil, err
 	}
 	if io.changed {
 		if m.Revision == math.MaxUint64 {
-			return m, nil, nil, false, errors.New("metric revision exhausted")
+			return m, nil, nil, false, nil, errors.New("metric revision exhausted")
 		}
 		m.Revision++
 		m.LastUpdate = s.nextActivity(m.LastUpdate)
 		if err := batch.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
-			return m, nil, nil, false, err
+			return m, nil, nil, false, nil, err
 		}
 	}
-	return m, io.state, io.sidecar, io.changed, nil
+	return m, io.state, io.sidecar, io.changed, io.afterCommit, nil
 }
 
 func (s *Store) continuationSnapshot(ctx context.Context, reader pebble.Reader, m Metadata) (Snapshot, error) {

@@ -23,6 +23,9 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// OwnerHeads is an experimental, bounded resumable-writer adapter. Nil
+	// disables ownership and retention.
+	OwnerHeads *OwnerHeads
 	// keepReferenceRetirementReads retains repeated alias probes as a test oracle.
 	keepReferenceRetirementReads bool
 	// keepDenseSumReads retains the canonical window reader as a test oracle.
@@ -646,7 +649,10 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
-	return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
+	if c.OwnerHeads == nil {
+		return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
+	}
+	return c.OwnerHeads.update(c, ctx, kv, m, input, retention, clock, maintenance)
 }
 
 // updateAttempt leaves compressed writes on their existing path. Classic writes
@@ -657,18 +663,35 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 		return err
 	}
 	base := kv
+	var head *ownerHeadSession
+	if owned, ok := kv.(*ownerHeadIO); ok {
+		head = owned.head
+		head.nextAttempt()
+	} else if overlay, ok := kv.(*continuationOverlay); ok {
+		// A repair overlay can contain different slot anchors and sibling
+		// archives than the failed attempt. Retire all speculative groups.
+		if owned, ok := overlay.base.(*ownerHeadIO); ok {
+			owned.head.clear()
+		}
+	}
 	var buffer *continuationPointBuffer
 	// Even a batch shorter than one rollup interval can repeatedly update the
 	// same 128-point group. Flushing each intermediate value multiplies encode
 	// and commit work precisely when writeout batches are small.
 	coalesce := coalescePointWrites && len(m.Retentions) > 1 && len(input) > 1
 	if coalesce || !c.keepTailReads {
-		buffer = &continuationPointBuffer{ContinuationIO: kv, cacheReads: !c.keepTailReads, writeThrough: !coalesce}
+		buffer = &continuationPointBuffer{ContinuationIO: kv, cacheReads: !c.keepTailReads && (head == nil || head.pool.budget == 0), writeThrough: !coalesce}
 		kv = buffer
 	}
 	timer := stagetime.FromContext(ctx)
 	timer.Enter(stagetime.Load)
-	fs := newContinuationFiles(kv, false).withClock(clock)
+	var fs *continuationFiles
+	if head != nil && head.resume != nil {
+		fs = head.resume.rebind(kv, clock)
+	} else {
+		fs = newContinuationFiles(kv, false).withClock(clock)
+	}
+	fs.head = head
 	fs.reuseBlockKeys = c.ReuseBlockKeys
 	fs.guardClassicWrites = true
 	fs.reuseReferenceRetirements = !c.keepReferenceRetirementReads
@@ -682,14 +705,22 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	}()
 	fs.keepDuplicatePlanning = c.keepDuplicatePlanning
 	fs.timer = timer
-	if err := fs.prefetchNames(); err != nil {
-		return err
-	}
-	options := continuationOptions(fs, clock)
-	options.OutOfOrderDirect = c.DirectLateWrites
-	w, err := whisper.OpenWithOptions(fs.main(), options)
-	if err != nil {
-		return err
+	var w *whisper.Whisper
+	if head != nil && head.resume != nil {
+		w = head.resume.writer
+	} else {
+		if err := fs.prefetchNames(); err != nil {
+			return err
+		}
+		options := continuationOptions(fs, func() time.Time { return fs.clock() })
+		options.OutOfOrderDirect = c.DirectLateWrites
+		if head != nil {
+			head.pool.opens.Add(1)
+		}
+		w, err = whisper.OpenWithOptions(fs.main(), options)
+		if err != nil {
+			return err
+		}
 	}
 	defer w.Close()
 	if !w.IsCompressed() {
@@ -702,7 +733,16 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 		}
 	}
 	timer.Enter(stagetime.Decode)
-	points := make([]*whisper.TimeSeriesPoint, 0, len(input))
+	var values []whisper.TimeSeriesPoint
+	var points []*whisper.TimeSeriesPoint
+	if head != nil && head.resume != nil {
+		values, points = head.resume.pointScratch(len(input))
+	} else {
+		points = make([]*whisper.TimeSeriesPoint, 0, len(input))
+		if head != nil && head.pool.budget > 0 {
+			values = make([]whisper.TimeSeriesPoint, len(input))
+		}
+	}
 	for _, point := range input {
 		// Whisper timestamps are 32-bit. Drop a point outside that range (often
 		// milliseconds sent as seconds) instead of failing the update: the
@@ -714,7 +754,12 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 			}
 			continue
 		}
-		points = append(points, &whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
+		if values != nil {
+			values[len(points)] = whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value}
+			points = append(points, &values[len(points)])
+		} else {
+			points = append(points, &whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
+		}
 	}
 	// An empty update may still request sidecar maintenance.
 	if len(points) == 0 && maintenance == nil {
@@ -752,7 +797,19 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 		return err
 	}
 	if buffer != nil {
-		return buffer.flush(nil)
+		if err := buffer.flush(nil); err != nil {
+			return err
+		}
+	}
+	if head != nil && w.IsCompressed() && w.OutOfOrderPath() == "" && len(w.NonFatalErrors) == 0 {
+		f, ok := w.StorageFile().(*continuationFile)
+		if ok && fs.files["main.wsp"] == f.data && len(fs.byID) == 1 {
+			head.resume = &continuationHead{writer: w, fs: fs, file: f, values: values, points: points[:0]}
+		} else {
+			head.resume = nil
+		}
+	} else if head != nil {
+		head.resume = nil
 	}
 	return nil
 }

@@ -44,6 +44,9 @@ func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.Po
 			return block, nil
 		}
 	}
+	if block := f.fs.head.point(key); block != nil {
+		return block, nil
+	}
 	var block store.PointBlock
 	read := f.fs.kv.Get
 	// Immutable history reads benefit from reusing open tables even for the
@@ -54,6 +57,9 @@ func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.Po
 	}
 	start := f.fs.timer.Nested(stagetime.TailRead)
 	value, err := read(key)
+	if f.fs.head != nil {
+		f.fs.head.pool.reads.Add(1)
+	}
 	f.fs.timer.Unnest(stagetime.TailRead, start)
 	if errors.Is(err, store.ErrNotFound) {
 		if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
@@ -64,12 +70,16 @@ func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.Po
 	if err != nil {
 		return nil, err
 	}
+	if f.fs.head != nil {
+		f.fs.head.pool.decodes.Add(1)
+	}
 	if err := store.DecodePointBlock(value, &block); err != nil {
 		return nil, err
 	}
 	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
 		buffer.remember(key, &block)
 	}
+	f.fs.head.remember(key, &block)
 	return &block, nil
 }
 
@@ -149,7 +159,9 @@ func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) er
 	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
 		return buffer.set(key, block)
 	}
-	return f.fs.kv.Set(key, store.EncodePointBlock(block))
+	value := store.EncodePointBlock(block)
+	retainEncoded(f.fs.kv, key, value, block)
+	return f.fs.kv.Set(key, value)
 }
 
 // A compressed block's descriptor holds its point count and, in format v7, the

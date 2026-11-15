@@ -89,11 +89,12 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	}
 	defer func() { unlock() }()
 	type prepared struct {
-		meta    Metadata
-		state   *metricState
-		view    *stateView
-		batch   *pebble.Batch
-		sidecar *SidecarSummary
+		published func(Metadata)
+		meta      Metadata
+		state     *metricState
+		view      *stateView
+		batch     *pebble.Batch
+		sidecar   *SidecarSummary
 	}
 	states := make(map[string]prepared, len(names))
 	batch := s.db.NewBatch()
@@ -140,11 +141,11 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 		if p.view != nil {
 			p.state = p.view.final(p.meta)
 		}
-		m, view, sidecar, wrote, err := s.prepareContinuationUpdate(ctx, p.batch, p.meta, p.state, true, update.Points, -1, maintenance)
+		m, view, sidecar, wrote, published, err := s.prepareContinuationUpdate(ctx, p.batch, p.meta, p.state, true, update.Points, -1, maintenance)
 		if err != nil {
 			return fmt.Errorf("prepare update %s: %w", update.Name, err)
 		}
-		p.meta, p.view = m, view
+		p.meta, p.view, p.published = m, view, published
 		if sidecar != nil {
 			p.sidecar = sidecar
 		}
@@ -168,6 +169,9 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	}
 	timer.Enter(stagetime.Publish)
 	for _, p := range states {
+		if p.published != nil {
+			p.published(p.meta)
+		}
 		s.installState(p.view, p.meta)
 	}
 	return nil

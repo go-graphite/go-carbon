@@ -232,6 +232,7 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
+	continuationScope     *byte
 	readSlots             *fifo.Semaphore
 	readQueued            atomic.Int64
 	blockLoadSlots        *fifo.Semaphore
@@ -522,7 +523,7 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.MemTableSize == 0 {
 		options.MemTableSize = 64 << 20
 	}
-	s := &Store{readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s := &Store{continuationScope: new(byte), readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
 	s.initReadContexts()
 	s.readDone = make(chan struct{})
 	s.maintenanceWait = options.MaintenanceWait
