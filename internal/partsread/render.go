@@ -190,7 +190,7 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 // Idle caches are bounded by size class, independently of active admission.
 // Each workspace allocates exactly its query length; a size class reuses only
 // exact matches, preserving the public 32B/slot active admission bound.
-// Total idle storage is below 32MiB. Queries above 131072 slots are uncached.
+// Total idle storage is below 112MiB. Queries above 131072 slots are uncached.
 type renderWorkspace struct {
 	values    []float64
 	sequences []uint64
@@ -204,9 +204,9 @@ var renderWorkspaces = func() [12]chan *renderWorkspace {
 	var pools [12]chan *renderWorkspace
 	for i := range pools {
 		// 64 .. 131072 slots, at most 1MiB per class, with a minimum
-		// of four entries at the largest sizes (about 13MiB for the last).
+		// of two entries at the largest sizes.
 		slots := 64 << i
-		depth := max(4, min(64, (1<<20)/(slots*25)))
+		depth := max(2, min(64, (1<<20)/(slots*25)))
 		pools[i] = make(chan *renderWorkspace, depth)
 	}
 	return pools
@@ -218,10 +218,28 @@ func renderWorkspaceClass(n int) int {
 	}
 	return max(0, bits.Len(uint(max(n, 1)-1))-6)
 }
-func takeRenderWorkspace(n int) *renderWorkspace {
+
+// Retain the original hour/day concurrency capacity while extending reuse to
+// minute/coarse query lengths. The generic classes have separate fixed bounds.
+var hourRenderWorkspaces = make(chan *renderWorkspace, 64)
+var dayRenderWorkspaces = make(chan *renderWorkspace, 32)
+
+func renderWorkspacePool(n int) chan *renderWorkspace {
+	if n == 3600 {
+		return hourRenderWorkspaces
+	}
+	if n == 86400 {
+		return dayRenderWorkspaces
+	}
 	if class := renderWorkspaceClass(n); class >= 0 {
+		return renderWorkspaces[class]
+	}
+	return nil
+}
+func takeRenderWorkspace(n int) *renderWorkspace {
+	if pool := renderWorkspacePool(n); pool != nil {
 		select {
-		case w := <-renderWorkspaces[class]:
+		case w := <-pool:
 			if len(w.values) == n {
 				return w
 			}
@@ -232,9 +250,9 @@ func takeRenderWorkspace(n int) *renderWorkspace {
 }
 func releaseRenderWorkspace(w *renderWorkspace) {
 	w.next = nil
-	if class := renderWorkspaceClass(cap(w.values)); class >= 0 {
+	if pool := renderWorkspacePool(len(w.values)); pool != nil {
 		select {
-		case renderWorkspaces[class] <- w:
+		case pool <- w:
 		default:
 		}
 	}

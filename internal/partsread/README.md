@@ -45,7 +45,7 @@ Render workspaces use bounded size-class channels, reusing only exact query
 lengths after the owning handle closes. Earlier results retain separate arrays.
 Values, winner sequences/timestamps, occupancy and sparse touched-slot indices
 use 29B/slot within the unchanged 32B/slot active reservation. Idle caches retain
-less than 32MiB across all size classes; requests above 131,072 slots are uncached.
+less than 112MiB across all size classes; requests above 131,072 slots are uncached.
 A cache size mismatch is discarded and allocates exactly the requested length.
 Reuse clears occupancy and initializes absent values to the original NaN bits.
 Only touched slots need the final timestamp validation pass.
