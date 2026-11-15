@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -277,6 +278,48 @@ func TestLogBacklogBenchmark(t *testing.T) {
 	}
 	if e = logBacklogBenchmark(root, os.Getenv("PARTLOG_BENCH_PHASE"), total, 36000000, producers, owners); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestLogBenchmarkFullOracle(t *testing.T) {
+	for _, mode := range []string{"valid", "duplicate", "missing", "bits"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := coreConfig{AppendParts: true, Shards: 2, Producers: 2, MaxRows: 64, PartitionSeconds: 3600}
+			l, err := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{Streams: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for p := range 2 {
+				var rows []row
+				for seq := uint64(p); seq < 100; seq += 2 {
+					if mode == "missing" && seq == 99 {
+						continue
+					}
+					r := row{seq % 11, 1800000000 + int64(seq/6000000), math.Float64bits(float64(seq % 100003)), seq}
+					if mode == "bits" && seq == 99 {
+						r.Bits ^= 1
+					}
+					rows = append(rows, r)
+					if mode == "duplicate" && seq == 99 {
+						rows = append(rows, r)
+					}
+				}
+				if err = l.append(p, 1800000000, rows, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = l.close(); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(root, "live-counts.json"), []byte("[0,0]"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err = verifyLogBenchmark(root, 100, 11, 2, 2, func(string, uint64, map[string]any) {})
+			if (err == nil) != (mode == "valid") {
+				t.Fatalf("mode%s err%v", mode, err)
+			}
+		})
 	}
 }
 

@@ -84,10 +84,10 @@ func TestSealedIndexRecoveryAndFallback(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer l.Close()
-			if mode == "valid" && (scans.Load() != 0 || indexed.Load() != int32(len(paths))) {
+			if mode == "valid" && (scans.Load() != 1 || indexed.Load() != int32(len(paths)-1)) {
 				t.Fatalf("scans=%d indexed=%d", scans.Load(), indexed.Load())
 			}
-			if mode != "valid" && scans.Load() != 1 {
+			if mode != "valid" && scans.Load() != 2 {
 				t.Fatalf("scans=%d", scans.Load())
 			}
 			var n uint64
@@ -106,12 +106,16 @@ func TestSealedIndexRecoveryAndFallback(t *testing.T) {
 
 func TestIndexedPayloadStillValidatedBeforeCallback(t *testing.T) {
 	dir := t.TempDir()
-	opts := Options{Streams: 1}
+	opts := Options{Streams: 1, SegmentBytes: 72}
 	l, err := Open(dir, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = l.Append(0, 17, []byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the corrupted segment historical. Newest tails are always scanned.
+	if _, err = l.Append(0, 18, []byte("next")); err != nil {
 		t.Fatal(err)
 	}
 	if err = l.Close(); err != nil {

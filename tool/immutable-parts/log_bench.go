@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/partlog"
 )
 
@@ -35,7 +38,17 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 		out["stage"] = stage
 		_ = json.NewEncoder(os.Stdout).Encode(out)
 	}
-	opts := partlog.Options{Streams: producers, SegmentBytes: 1 << 30, SyncInterval: time.Second}
+	opts := partlog.Options{Streams: producers, SegmentBytes: 64 << 20, SyncInterval: time.Second}
+	if raw := os.Getenv("PARTLOG_BENCH_READAHEAD"); raw != "" {
+		var err error
+		opts.ReadAheadBytes, err = strconv.Atoi(raw)
+		if err != nil {
+			return err
+		}
+	}
+	if phase == "verify" {
+		return verifyLogBenchmark(root, total, metrics, producers, owners, emit)
+	}
 	if phase == "scan" {
 		log, e := partlog.Open(filepath.Join(root, "log"), opts)
 		if e != nil {
@@ -63,6 +76,8 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 		for p := 0; p < producers; p++ {
 			go func(p int) {
 				const batch = 32768
+				storage := make([]row, batch)
+				var payload []byte
 				for sent := uint64(0); ; {
 					first := sent*uint64(producers) + uint64(p)
 					if first >= total {
@@ -70,12 +85,13 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 						return
 					}
 					n := min(uint64(batch), (total-first+uint64(producers)-1)/uint64(producers))
-					rows := make([]row, n)
+					rows := storage[:n]
 					for i := range rows {
 						seq := offset + (sent+uint64(i))*uint64(producers) + uint64(p)
 						rows[i] = row{seq % metrics, 1800000000 + int64(seq/6000000), math.Float64bits(float64(seq % 100003)), seq}
 					}
-					if _, e := log.Append(p, 1800000000+int64(first/6000000), encodeLogRows(rows)); e != nil {
+					payload = encodeLogRowsInto(payload, rows)
+					if _, e := log.Append(p, 1800000000+int64(first/6000000), payload); e != nil {
 						done <- e
 						return
 					}
@@ -187,11 +203,14 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	stop := make(chan struct{})
 	done := make(chan error, cfg.Producers)
 	var live atomic.Uint64
+	liveCounts := make([]atomic.Uint64, cfg.Producers)
 	liveStart := time.Now()
 	const rate = 20000000
 	for p := range cfg.Producers {
 		go func() {
 			const batch = 32768
+			rows := make([]row, batch)
+			var payload []byte
 			sent := uint64(0)
 			for {
 				select {
@@ -211,16 +230,17 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 					case <-timer.C:
 					}
 				}
-				rows := make([]row, batch)
 				for i := range rows {
 					seq := total + (sent+uint64(i))*uint64(cfg.Producers) + uint64(p)
 					rows[i] = row{seq % metrics, 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
 				}
-				if err := l.append(p, time.Now().Unix(), rows, false); err != nil {
+				payload = encodeLogRowsInto(payload, rows)
+				if _, err := l.journal.Append(p, time.Now().Unix(), payload); err != nil {
 					done <- err
 					return
 				}
 				sent += batch
+				liveCounts[p].Store(sent)
 				live.Add(batch)
 			}
 		}()
@@ -242,6 +262,15 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		err = errors.Join(err, <-done)
 	}
 	liveSeconds := time.Since(liveStart).Seconds()
+	counts := make([]uint64, len(liveCounts))
+	for p := range counts {
+		counts[p] = liveCounts[p].Load()
+	}
+	if data, e := json.Marshal(counts); e != nil {
+		err = errors.Join(err, e)
+	} else {
+		err = errors.Join(err, os.WriteFile(filepath.Join(root, "live-counts.json"), data, 0600))
+	}
 	emit("backlog_snapshot_consumed", total, map[string]any{"backlog_seconds": backlogSeconds, "backlog_mpoints_per_second": float64(total) / backlogSeconds / 1e6, "live_accepted": live.Load(), "live_seconds": liveSeconds, "live_mpoints_per_second": float64(live.Load()) / liveSeconds / 1e6})
 	err = errors.Join(err, l.stopReplay())
 	deadline := time.Now().Add(5 * time.Second)
@@ -269,6 +298,8 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	sample := coreSample(l.engine, "settled", start, total+live.Load())
 	sample["settled"] = settled
 	sample["live_accepted"] = live.Load()
+	sample["settled_replay_seconds"] = time.Since(replayStart).Seconds()
+	sample["settled_replay_mpoints_per_second"] = float64(total) / time.Since(replayStart).Seconds() / 1e6
 	emit("replay_live_settle", total+live.Load(), sample)
 	if !settled {
 		err = errors.Join(err, errors.New("compaction did not settle"))
@@ -283,5 +314,131 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		err = errors.Join(err, fmt.Errorf("committed %d != backlog+live %d", committed, total+live.Load()))
 	}
 	emit("replay_live_close_complete", committed, map[string]any{"error": fmt.Sprint(err), "backlog": total, "live_accepted": live.Load(), "whole_mpoints_per_second": float64(total+live.Load()) / time.Since(start).Seconds() / 1e6})
+	return err
+}
+
+// Validate every persisted row against the generator and prove no duplicates
+// with compact per-owner bitmaps. Membership + uniqueness + exact count proves
+// complete coverage; SHA256 receipts cover all name IDs, timestamps and bits.
+// This read-only phase is outside the replay throughput timing window.
+func verifyLogBenchmark(root string, total, metrics uint64, producers, owners int, emit func(string, uint64, map[string]any)) error {
+	raw, err := os.ReadFile(filepath.Join(root, "live-counts.json"))
+	if err != nil {
+		return err
+	}
+	var live []uint64
+	if err = json.Unmarshal(raw, &live); err != nil {
+		return err
+	}
+	if len(live) != producers {
+		return os.ErrInvalid
+	}
+	want, maxSeq := total, total
+	for p, n := range live {
+		want += n
+		if n > 0 {
+			maxSeq = max(maxSeq, total+(n-1)*uint64(producers)+uint64(p))
+		}
+	}
+	ranks := make([]uint32, metrics)
+	counts := make([]uint64, owners)
+	for id := range metrics {
+		owner := coreShard(id, owners)
+		ranks[id] = uint32(counts[owner])
+		counts[owner]++
+	}
+	type receipt struct {
+		Count          uint64
+		Actual, Oracle string
+		Err            error
+	}
+	done := make(chan receipt, owners)
+	for owner := range owners {
+		go func() {
+			r := receipt{}
+			defer func() { done <- r }()
+			db, e := pebble.Open(filepath.Join(root, "parts", fmt.Sprintf("owner-%03d", owner)), &pebble.Options{ReadOnly: true})
+			if e != nil {
+				r.Err = e
+				return
+			}
+			defer db.Close()
+			it, e := db.NewIter(&pebble.IterOptions{LowerBound: []byte{1}, UpperBound: []byte{3}})
+			if e != nil {
+				r.Err = e
+				return
+			}
+			defer it.Close()
+			seen := make([]uint64, ((maxSeq/metrics+1)*counts[owner]+63)/64)
+			actual, oracle := sha256.New(), sha256.New()
+			for it.First(); it.Valid(); it.Next() {
+				key, v := it.Key(), it.Value()
+				if len(key) != 41 || (key[0] != 1 && key[0] != 2) || len(v)%24 != 0 {
+					r.Err = errors.New("invalid persisted block")
+					return
+				}
+				offset := 9
+				if key[0] == 2 {
+					offset = 17
+				}
+				id := binary.BigEndian.Uint64(key[offset:])
+				if id >= metrics || coreShard(id, owners) != owner {
+					r.Err = errors.New("invalid persisted ID or route")
+					return
+				}
+				for len(v) > 0 {
+					ts, bits, seq := int64(binary.LittleEndian.Uint64(v)), binary.LittleEndian.Uint64(v[8:]), binary.LittleEndian.Uint64(v[16:])
+					v = v[24:]
+					if seq >= total {
+						index := seq - total
+						if index/uint64(producers) >= live[index%uint64(producers)] {
+							r.Err = errors.New("unexpected live sequence")
+							return
+						}
+					}
+					rate := uint64(6000000)
+					if seq >= total {
+						rate = 20000000
+					}
+					expected := row{seq % metrics, 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
+					if id != expected.ID || ts != expected.Time || bits != expected.Bits {
+						r.Err = fmt.Errorf("row bits differ seq%d", seq)
+						return
+					}
+					index := seq/metrics*counts[owner] + uint64(ranks[id])
+					mask := uint64(1) << (index % 64)
+					if seen[index/64]&mask != 0 {
+						r.Err = fmt.Errorf("duplicate seq%d", seq)
+						return
+					}
+					seen[index/64] |= mask
+					var a, b [32]byte
+					putRow(a[:], row{id, ts, bits, seq})
+					putRow(b[:], expected)
+					actual.Write(a[:])
+					oracle.Write(b[:])
+					r.Count++
+				}
+			}
+			r.Err = it.Error()
+			r.Actual = fmt.Sprintf("%x", actual.Sum(nil))
+			r.Oracle = fmt.Sprintf("%x", oracle.Sum(nil))
+		}()
+	}
+	var count uint64
+	digests := make([]receipt, 0, owners)
+	for range owners {
+		r := <-done
+		err = errors.Join(err, r.Err)
+		count += r.Count
+		digests = append(digests, r)
+		if r.Actual != r.Oracle {
+			err = errors.Join(err, errors.New("digest mismatch"))
+		}
+	}
+	if count != want {
+		err = errors.Join(err, fmt.Errorf("count%d != expected%d", count, want))
+	}
+	emit("full_persisted_oracle", count, map[string]any{"expected": want, "digests": digests, "error": fmt.Sprint(err)})
 	return err
 }

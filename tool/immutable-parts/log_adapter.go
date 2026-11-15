@@ -47,7 +47,16 @@ const logEnvelope = "NLOG0001"
 const logEnvelopeBytes = 16
 
 func encodeLogRows(rows []row) []byte {
-	b := make([]byte, logEnvelopeBytes+len(rows)*recordBytes)
+	return encodeLogRowsInto(nil, rows)
+}
+func encodeLogRowsInto(b []byte, rows []row) []byte {
+	n := logEnvelopeBytes + len(rows)*recordBytes
+	if cap(b) < n {
+		b = make([]byte, n)
+	} else {
+		b = b[:n]
+		clear(b[:logEnvelopeBytes])
+	}
 	copy(b, logEnvelope)
 	for i, r := range rows {
 		putRow(b[logEnvelopeBytes+i*recordBytes:], r)
