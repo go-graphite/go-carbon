@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
@@ -37,8 +38,8 @@ type atomicRollupOwner struct {
 	dir   string
 	state map[uint64]*atomicRollupState
 	part  uint64
-	// Owner-local, exported by the enclosing engine's metrics collector.
-	Errors uint64
+	// Concurrently readable failure counter; daemon metric export is pending.
+	Errors atomic.Uint64
 	// Fault injection never publishes state before a successful atomic ingest.
 	beforeIngest func() error
 	afterIngest  func() error
@@ -158,7 +159,7 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 func (o *atomicRollupOwner) Seal(inputs []atomicRollupInput) (written uint64, err error) {
 	defer func() {
 		if err != nil {
-			o.Errors++
+			o.Errors.Add(1)
 			log.Printf("ERROR immutable seal rollup failed: %v", err)
 		}
 	}()

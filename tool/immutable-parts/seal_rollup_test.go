@@ -42,7 +42,7 @@ func TestAtomicRollupCommitAndSnapshot(t *testing.T) {
 	snap := db.NewSnapshot()
 	before := o.state[42].Frontier
 	o.beforeIngest = func() error { return errors.New("injected staging failure") }
-	if _, err := o.Seal(atomicTestInputs(2, 7)); err == nil || o.state[42].Frontier != before || o.Errors != 1 {
+	if _, err := o.Seal(atomicTestInputs(2, 7)); err == nil || o.state[42].Frontier != before || o.Errors.Load() != 1 {
 		t.Fatal("failed seal published", err)
 	}
 	o.beforeIngest = nil
@@ -79,7 +79,7 @@ func TestAtomicRollupCommitAndSnapshot(t *testing.T) {
 	}
 	inputs := atomicTestInputs(3, 9)
 	inputs[0].Config.Method = 99
-	if _, err = o.Seal(inputs); err == nil || o.Errors != 1 {
+	if _, err = o.Seal(inputs); err == nil || o.Errors.Load() != 1 {
 		t.Fatal("invalid policy not fail closed")
 	}
 	if o.state[42].Frontier != want {

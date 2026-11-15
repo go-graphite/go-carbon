@@ -49,7 +49,7 @@ func openCoreRollups(root string, cfg coreConfig) (*coreEngine, []*atomicRollupO
 func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan, err error) {
 	defer func() {
 		if err != nil {
-			o.Errors++
+			o.Errors.Add(1)
 			log.Printf("ERROR immutable core rollup failed: %v", err)
 		}
 	}()

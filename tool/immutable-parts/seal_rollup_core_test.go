@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
 func coreRollupTestConfig() coreConfig {
@@ -146,5 +148,38 @@ func TestCoreRollupHookCrash(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestCoreRollupPolicyFailure(t *testing.T) {
+	cfg := coreRollupTestConfig()
+	e, states, err := openCoreRollups(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches := coreRollupBatches(t, 1, 2)
+	var policy sealrollup.Config
+	if err := json.Unmarshal(batches[0].Policy, &policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Method = 99
+	batches[0].Policy, err = json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.submitBatches(0, batches, 1, true); err == nil {
+		t.Fatal("unsupported policy accepted")
+	}
+	owner := states[coreShard(42, cfg.Shards)]
+	if owner.Errors.Load() != 1 || len(owner.state) != 0 {
+		t.Fatal("failure counter or detached plan")
+	}
+	for _, v := range e.durableFrontiers() {
+		if v[0] != 0 {
+			t.Fatal("failed policy advanced frontier")
+		}
+	}
+	if err := e.close(); err == nil {
+		t.Fatal("owner failure lost on close")
 	}
 }
