@@ -257,6 +257,7 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	lastAt, lastCopied, lastBytes, lastRetries, last429 := c.started, int64(0), int64(0), int64(0), int64(0)
+	var lastTarget429 copyBackpressure
 	for {
 		select {
 		case <-ctx.Done():
@@ -265,7 +266,9 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 		}
 		now := time.Now()
 		copied, bytes := c.stats.copied.Load(), c.stats.bytes.Load()
-		retries, backpressure := c.progress.retries.Load(), c.m.backpressure.Load()
+		retries := c.progress.retries.Load()
+		backpressure, target429 := c.m.backpressureSnapshot(c.o.to)
+		targetDelta := target429.since(lastTarget429)
 		seconds := now.Sub(lastAt).Seconds()
 		rate := float64(copied-lastCopied) / seconds
 		mbps := float64(bytes-lastBytes) / seconds / 1e6
@@ -278,7 +281,7 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 		busy := c.progress.inFlight.Load()
 		waits := c.progress.waits(roles)
 		fields := map[string]any{"copied": copied, "skipped": skipped, "done": done, "names_per_second": rate, "mb_per_second": mbps,
-			"avg_names_per_second": float64(copied) / now.Sub(c.started).Seconds(), "retries": retries - lastRetries, "target_429s": backpressure - last429,
+			"avg_names_per_second": float64(copied) / now.Sub(c.started).Seconds(), "retries": retries - lastRetries, "http_429s": backpressure - last429, "target_429s": targetDelta.total(), "source_429s": backpressure - last429 - targetDelta.total(), "target_429_reasons": targetDelta.reasons(),
 			"streams_busy": busy, "streams": c.o.streams, "waiting": waits, "elapsed": now.Sub(c.started).Round(time.Second).String()}
 		eta := "unknown"
 		totalText := "?"
@@ -303,11 +306,10 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 		switch {
 		case len(waits) > 0:
 			limiter = waits[0]
+		case targetDelta.total() > 0:
+			limiter = targetDelta.limiter()
 		case backpressure > last429:
-			limiter = "target 429 backpressure (storage guard)"
-			if statusErr == nil {
-				limiter = fmt.Sprintf("target 429 backpressure (debt %.1f GB, L0 %d, write stall %v)", float64(target.CompactionDebt)/1e9, target.L0Sublevels, target.WriteStallActive)
-			}
+			limiter = "source HTTP 429 backpressure"
 		case retries > lastRetries:
 			limiter = "transient errors, retrying"
 		case busy >= int64(c.o.streams):
@@ -319,6 +321,7 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 		fields["line"] = fmt.Sprintf("%d/%s names, %.0f names/s, %.1f MB/s, ETA %s, limiter: %s, retries %d, skipped %d", done, totalText, rate, mbps, eta, limiter, retries-lastRetries, skipped)
 		event("progress", fields)
 		lastAt, lastCopied, lastBytes, lastRetries, last429 = now, copied, bytes, retries, backpressure
+		lastTarget429 = target429
 		if stuck := c.progress.stuck(); stuck >= c.o.stallTimeout {
 			event("copy_stalled", map[string]any{"level": "error", "stuck_seconds": stuck.Seconds(), "stall_timeout": c.o.stallTimeout.String(), "streams_busy": busy, "note": "no batch succeeded while every source and the target answered"})
 			stall(fmt.Errorf("%w: no batch succeeded for %s with every host up (--stall-timeout %s)", errCopyStall, stuck.Round(time.Second), c.o.stallTimeout))
