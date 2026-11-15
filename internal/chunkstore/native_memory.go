@@ -14,7 +14,9 @@ import (
 // oversized legacy metadata fails closed rather than allocating without a limit.
 const (
 	// NativeMaxRangeNames bounds range metadata independently of history size.
-	NativeMaxRangeNames       = 4096
+	NativeMaxRangeNames = 4096
+	// NativeMaxRangeNameBytes bounds the sum of name bytes before import/export.
+	NativeMaxRangeNameBytes   = 1 << 20
 	nativeRangeMetadataBytes  = 16 << 20
 	nativeMetricBytes         = 128 << 20
 	nativeMetricPoints        = 32 << 20
@@ -106,7 +108,7 @@ func ValidateNativeNames(names []string) error {
 	var size int
 	for _, name := range names {
 		size += len(name)
-		if size > 1<<20 {
+		if size > NativeMaxRangeNameBytes {
 			return fmt.Errorf("native range names exceed 1 MiB: %w", ErrTransferLimit)
 		}
 	}
@@ -162,7 +164,8 @@ func nativeMetadataSize(c MetricConfig) int64 {
 	return int64(512 + 2*len(c.Name) + 32*len(c.Retentions))
 }
 
-// NativeSkip records a name left uncopied by size admission. Sizes are measured
+// NativeSkip records a name left uncopied by admission or a window conflict.
+// For size admission, sizes are measured
 // without decoding history. DeferredCount includes these ordinals; they must
 // never be mistaken for completed work or sent to the metric fallback silently.
 type NativeSkip struct {

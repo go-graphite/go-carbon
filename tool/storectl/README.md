@@ -648,6 +648,17 @@ storectl sync --source http://source:4242 --to http://target:4242 \
   --state ./gap-state --window incident:1794592020:1794592680
 ```
 
+Window ranges are planned against both the name-count and total name-byte
+limits before a pull or selection export. Planned splits retain the same child
+journal identities as older failure-driven splits, so resume reuses their receipts.
+A target-side window conflict leaves that name unchanged and records its name,
+ordinal and reason in the durable receipt's `Skipped` list. Other names in the
+range continue. Sparse compressed history can contain multiple timestamps for
+one circular slot; the combiner must retain such a conflict rather than rebuild
+it into a ring that loses outside points. These deferred names remain failed
+copies for exhaustive verification and prevent readiness until resolved. Older
+servers still return a range-level conflict and require client isolation retries.
+
 Existing target values and points outside the windows remain unchanged. The
 usual `--settle` cutoff and short-retention policy still apply. Full-history
 sampling is disabled in window-only mode. To request the previous full-history

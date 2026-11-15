@@ -379,11 +379,19 @@ func (b *syncLiveBackend) splitRejectedWindow(ctx context.Context, source, targe
 	if !errors.As(err, &api) || (api.Status != http.StatusRequestEntityTooLarge && api.Status != http.StatusConflict) {
 		return result, err
 	}
+	return b.splitWindowRange(ctx, source, target, names, journalPath, windows, err.Error(), false)
+}
+
+func (b *syncLiveBackend) splitWindowRange(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges, reason string, planned bool) (syncCopyResult, error) {
 	if len(names) <= 1 {
-		event("sync_window_copy_unresolved", map[string]any{"level": "error", "source": source, "target": target, "names": names, "reason": err.Error(), "retained": true})
+		event("sync_window_copy_unresolved", map[string]any{"level": "error", "source": source, "target": target, "names": names, "reason": reason, "retained": true})
 		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
 	}
-	event("sync_window_copy_split", map[string]any{"source": source, "target": target, "names": len(names), "reason": err.Error()})
+	kind := "sync_window_copy_split"
+	if planned {
+		kind = "sync_window_copy_plan"
+	}
+	event(kind, map[string]any{"source": source, "target": target, "names": len(names), "reason": reason})
 	mid := len(names) / 2
 	identity := sha256.Sum256([]byte(journalPath))
 	base := filepath.Join(filepath.Dir(journalPath), "window-split-"+hex.EncodeToString(identity[:16]))
@@ -468,11 +476,6 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 		for _, copy := range copies {
 			err := func() error {
 				w, id, m, j := copy.w, copy.id, copy.m, copy.m.journal
-				c, release, err := b.windowController(ctx, m, source)
-				if err != nil {
-					return err
-				}
-				defer func() { release() }()
 				t := task{Stream: id, Source: source, Target: target, Start: int64(start), End: int64(end)}
 				m.stateMu.Lock()
 				if saved, ok := j.tasks[taskKey(t)]; ok {
@@ -480,6 +483,38 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 				}
 				m.stateMu.Unlock()
 				pointPath := fmt.Sprintf("%s.range-%d-%d.window-points.json", copy.journalPath, start, end)
+				if err := chunkstore.ValidateNativeNames(names[start:end]); err != nil && (t.Native == nil || !t.Native.complete()) {
+					// Preserve the old binary split identities and any receipts already
+					// written by failure-driven splitting. Plan from known name bytes,
+					// before measuring or exporting a range the receiver cannot accept.
+					if copy.measure {
+						if _, err := prepareWindowRangeCounts(pointPath, windowPointCount{Source: source, Window: w}); err != nil {
+							return err
+						}
+					}
+					childCtx := context.WithValue(ctx, syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
+						if n > 0 && !replayed {
+							fresh = true
+						}
+					})
+					path := fmt.Sprintf("%s.range-%d-%d", copy.journalPath, start, end)
+					res, err := b.splitWindowRange(childCtx, source, target, names[start:end], path, syncRanges{w}, err.Error(), true)
+					if err != nil {
+						return err
+					}
+					if res.Forbidden {
+						return errors.New("window split source or target became forbidden")
+					}
+					for _, n := range res.Failed {
+						markFailed(n)
+					}
+					return nil
+				}
+				c, release, err := b.windowController(ctx, m, source)
+				if err != nil {
+					return err
+				}
+				defer func() { release() }()
 				var measurement windowPointCount
 				if copy.measure {
 					measurement, err = b.beginWindowRangeCount(ctx, target, names[start:end], w, pointPath, t.Native != nil, source)
@@ -647,6 +682,13 @@ func (b *syncLiveBackend) windowPresenceRangesOnce(ctx context.Context, source s
 	conflict := errors.New("window selection conflict")
 	var readSubset func([]string) error
 	readSubset = func(subset []string) error {
+		if err := chunkstore.ValidateNativeNames(subset); err != nil && len(subset) > 1 {
+			mid := len(subset) / 2
+			if err := readSubset(subset[:mid]); err != nil {
+				return err
+			}
+			return readSubset(subset[mid:])
+		}
 		body, _ := json.Marshal(struct {
 			Session string
 			Names   []string
