@@ -285,11 +285,20 @@ func (s *startupInput) waitCaptureUntil(cancel <-chan struct{}) error {
 	// Capture append queues already bound input buffering. Recovery admission
 	// bounds replay memory; pending appends are not a replay capacity signal.
 	// A global append threshold can park every reader behind one busy writer.
+	// These channels only close. Separate nonblocking receives avoid select's
+	// shared channel locks on the per-group replay path; every closed case has
+	// the same result, so there is no choice among distinct cancellation actions.
 	select {
 	case <-cancel:
 		return errStartupReplayStopped
+	default:
+	}
+	select {
 	case <-s.stop:
 		return errStartupReplayStopped
+	default:
+	}
+	select {
 	case <-s.replayStop:
 		return errStartupReplayStopped
 	default:
