@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -45,6 +46,26 @@ func (l *Log) WaitReady(ctx context.Context) error {
 	case <-l.recovered:
 		return l.recoverErr
 	}
+}
+
+// RecoveredTails returns the fixed historical prefix captured before admission,
+// excluding all appends in this open incarnation. Empty epochs do not invent a
+// record cursor. Consumers can measure backlog completion independently of live
+// acceptance, even when their first replay snapshot also contains new records.
+func (l *Log) RecoveredTails(ctx context.Context) ([]uint64, error) {
+	if err := l.WaitReady(ctx); err != nil {
+		return nil, err
+	}
+	return slices.Clone(l.recoveredTails), nil
+}
+
+func lastRecordCursor(segments []segment) uint64 {
+	for i := len(segments) - 1; i >= 0; i-- {
+		if segments[i].last >= segments[i].first {
+			return segments[i].last
+		}
+	}
+	return 0
 }
 
 func (l *Log) follows(previous, first uint64) bool {
@@ -157,6 +178,7 @@ func (l *Log) openAdmission() error {
 			go func() {
 				history := &stream{log: l, id: s.id}
 				e := history.recoverPaths(paths[i])
+				l.recoveredTails[i] = lastRecordCursor(history.segments)
 				_, e = l.call(s.id, request{op: "recovered", history: history.segments, from: history.retired, err: e})
 				results <- e
 			}()

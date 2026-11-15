@@ -259,6 +259,8 @@ Journal admission can use `partlog.OpenAdmission` before opening the owner
 storage. It reserves a new monotonic cursor epoch with a synced fence and opens
 each fresh append file on its first append, without scanning historical payloads. `WaitReady(ctx)` joins
 historical validation; `Replay`, `Follow` and truncation wait for that boundary.
+`RecoveredTails(ctx)` returns the fixed pre-admission cursor vector, excluding
+early live appends and empty epoch headers, for independent recovery timing.
 Live records enter the new epoch, and ordered followers consume old epochs
 first. A validation failure surfaces on `Errors`, fails readiness and prevents
 further acceptance. Close joins recovery before releasing directory ownership.

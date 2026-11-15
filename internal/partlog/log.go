@@ -84,17 +84,18 @@ type stream struct {
 	retired       uint64
 }
 type Log struct {
-	dir, identity string
-	opts          Options
-	streams       []*stream
-	unlock        func() error
-	closeOnce     sync.Once
-	errors        chan error
-	closeErr      error
-	recovered     chan struct{}
-	recoverErr    error
-	fences        map[uint64]bool
-	epoch         uint64
+	dir, identity  string
+	opts           Options
+	streams        []*stream
+	unlock         func() error
+	closeOnce      sync.Once
+	errors         chan error
+	closeErr       error
+	recovered      chan struct{}
+	recoverErr     error
+	recoveredTails []uint64
+	fences         map[uint64]bool
+	epoch          uint64
 }
 
 func syncDir(path string) error {
@@ -145,6 +146,7 @@ func open(dir string, opts Options, admission bool) (_ *Log, err error) {
 		return nil, e
 	}
 	l := &Log{dir: dir, opts: opts, unlock: release, errors: make(chan error, opts.Streams), recovered: make(chan struct{})}
+	l.recoveredTails = make([]uint64, opts.Streams)
 	defer func() {
 		if err != nil {
 			for _, s := range l.streams {
@@ -212,6 +214,9 @@ func open(dir string, opts Options, admission bool) (_ *Log, err error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	for id, s := range l.streams {
+		l.recoveredTails[id] = lastRecordCursor(s.segments)
 	}
 	close(l.recovered)
 	for _, s := range l.streams {

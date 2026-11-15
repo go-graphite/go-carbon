@@ -72,6 +72,14 @@ func TestAdmissionBeforeHistoricalValidation(t *testing.T) {
 	if err = l.WaitReady(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	tails, err := l.RecoveredTails(context.Background())
+	if err != nil || !slices.Equal(tails, []uint64{1, 1, 1, 1}) {
+		t.Fatal("live suffix changed historical tails", tails, err)
+	}
+	tails[0] = 999
+	if tails, err = l.RecoveredTails(context.Background()); err != nil || tails[0] != 1 {
+		t.Fatal("caller mutated historical tails", tails, err)
+	}
 	for p := range 4 {
 		var got []Record
 		err = l.Replay(p, 0, func(r Record) error {
@@ -234,6 +242,9 @@ func TestAdmissionEmptyEpochAndIdleStreams(t *testing.T) {
 	}
 	if cursor, e := l.Append(0, -1, []byte("first")); e != nil || cursor != 3*epochStride+1 {
 		t.Fatal(cursor, e)
+	}
+	if tails, e := l.RecoveredTails(context.Background()); e != nil || !slices.Equal(tails, []uint64{0, 0}) {
+		t.Fatal("empty epoch or new append invented a historical record", tails, e)
 	}
 	if err = l.Close(); err != nil {
 		t.Fatal(err)
