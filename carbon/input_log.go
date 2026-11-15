@@ -22,12 +22,13 @@ import (
 // exit lose about one sync interval of input instead of the whole cache. Its
 // settings take effect on restart only.
 type inputLogConfig struct {
-	Enabled      bool     `toml:"enabled"`
-	Path         string   `toml:"path"`
-	SyncInterval Duration `toml:"sync-interval"`
-	SegmentSize  int64    `toml:"segment-size"`
-	MaxAge       Duration `toml:"max-age"`
-	TruncateLag  Duration `toml:"truncate-lag"`
+	Enabled       bool     `toml:"enabled"`
+	StartupAppend bool     `toml:"startup-append"`
+	Path          string   `toml:"path"`
+	SyncInterval  Duration `toml:"sync-interval"`
+	SegmentSize   int64    `toml:"segment-size"`
+	MaxAge        Duration `toml:"max-age"`
+	TruncateLag   Duration `toml:"truncate-lag"`
 }
 
 func newInputLogConfig() inputLogConfig {
@@ -57,6 +58,9 @@ const minInputLogSegment = 16 << 20
 
 func validateInputLogConfig(cfg *Config) error {
 	c := cfg.InputLog
+	if c.StartupAppend && (!c.Enabled || !cfg.Dump.Enabled || !cfg.Dump.StoreInputHandoff || cfg.Whisper.StorageBackend != "pebble-chunk" || cfg.Whisper.StoreMirrorFiles || !cfg.Tcp.Enabled || cfg.Tcp.BufferSize != 0 || cfg.Tcp.Compression != "" || cfg.Udp.Enabled || cfg.Pickle.Enabled || len(cfg.Receiver) != 0) {
+		return errors.New("input-log.startup-append requires input logging and native TCP store input handoff")
+	}
 	if !c.Enabled {
 		return nil
 	}
@@ -137,8 +141,8 @@ func (app *App) ownInputLog() error {
 }
 
 // openInputLog attaches the cache to the already owned log. The historical
-// replay completes before cache group commit begins. Early journal appends
-// require a durable upgrade cut before this ordering can change.
+// replay completes before ordinary group commit. StartupAppend instead attaches
+// collection to its running writer while original-source retention protects replay.
 func (app *App) openInputLog(core *cache.Cache) error {
 	if err := app.ownInputLog(); err != nil {
 		return err
@@ -147,7 +151,7 @@ func (app *App) openInputLog(core *cache.Cache) error {
 	if l == nil {
 		return nil
 	}
-	if s := app.startupInput; s != nil {
+	if s := app.startupInput; s != nil && s.journal == nil {
 		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
 		if err != nil {
 			return err
@@ -158,6 +162,9 @@ func (app *App) openInputLog(core *cache.Cache) error {
 		}
 	}
 	core.EnableInputLog()
+	if s := app.startupInput; s != nil && s.journal != nil {
+		return l.AttachSource(core, cache.ShardCount)
+	}
 	if !l.NeedsReplay() {
 		l.Start(core, cache.ShardCount)
 		if _, err := os.Stat(filepath.Join(app.Config.InputLog.Path, inputlog.CopyMarkerName)); err == nil {
@@ -177,6 +184,9 @@ func (app *App) openInputLog(core *cache.Cache) error {
 // Replayed points precede live points in each cache item, so they need not
 // drain before receivers open, even for compressed whisper.
 func (app *App) replayInputLog(core *cache.Cache) error {
+	if app.startupInput != nil && app.startupInput.journal != nil {
+		return nil
+	}
 	if app.hasStartupResume() {
 		return nil
 	}
@@ -340,6 +350,8 @@ type inputLogCollector struct {
 	cycles prometheus.Histogram
 }
 
+var startupDiscardedDesc = prometheus.NewDesc("input_log_legacy_spools_moved_total", "Legacy startup spool groups moved aside with durable backfill windows.", nil, nil)
+
 var inputLogDescs = struct {
 	bytes, points, syncCount, segments, disk, oldest, relogged, unlogged, errors, replayed, replay, cycleCount, stages *prometheus.Desc
 }{
@@ -361,6 +373,7 @@ var inputLogDescs = struct {
 
 func (c *inputLogCollector) Describe(ch chan<- *prometheus.Desc) {
 	d := inputLogDescs
+	ch <- startupDiscardedDesc
 	for _, desc := range []*prometheus.Desc{d.bytes, d.points, d.syncCount, d.segments, d.disk, d.oldest, d.relogged, d.unlogged, d.errors, d.replayed, d.replay, d.cycleCount, d.stages} {
 		ch <- desc
 	}
@@ -371,6 +384,7 @@ func (c *inputLogCollector) Collect(ch chan<- prometheus.Metric) {
 	if l == nil {
 		return
 	}
+	ch <- prometheus.MustNewConstMetric(startupDiscardedDesc, prometheus.CounterValue, float64(c.app.startupDiscarded.Load()))
 	m, d := l.Metrics(), inputLogDescs
 	counter := func(desc *prometheus.Desc, v int64) {
 		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(v))

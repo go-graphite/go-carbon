@@ -40,6 +40,10 @@ func (s *startupInput) maybeDirect(now time.Time) {
 		return
 	}
 	sink := s.sink.Load()
+	if s.journal != nil {
+		s.journal.maybeDirect(sink, now)
+		return
+	}
 	if sink == nil || !s.historyReady.Load() {
 		s.refuseDirect(now, "history replay has not completed")
 		return

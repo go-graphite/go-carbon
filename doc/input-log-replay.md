@@ -60,102 +60,72 @@ Repeated points make this a compressed fixture workload, not a production
 throughput prediction. `JOURNAL_REPLAY_STACKS` optionally writes a goroutine snapshot;
 use that in a separate diagnostic run because sampling perturbs timing.
 
-## Proposed shared startup intake log
+## Shared startup intake log
 
-The following is a follow-up design, not behavior implemented by this PR.
+`[input-log] startup-append = true` enables journal intake before cache and storage
+construction. The default remains false. This mode requires native TCP store
+input handoff. The successor takes input sockets before acquiring the journal
+lock, so the predecessor can finish its durable handover.
 
-The input log should open before receivers are offered, independently of cache
-construction. A committed append is the acknowledgment boundary. Cache
-collection must not append a second copy of a record that already has a durable
-log position. Normal metric preparation must be shared with this earlier path:
-aliases need the same canonical partition and correction order before encoding,
-with the existing validation and admission semantics preserved.
+Connection buffers submit bounded native batches. Names are validated and, when
+tags are enabled, normalized before grouping and routing to the same sixteen
+partitions as cache collection: `(xxh3(name) & 1023) / 64`. Append acknowledgments
+follow data sync. The existing partition encoders, compression workers and
+positioned writes are reused. At most 32 startup submissions decode concurrently;
+each input-log request is additionally limited to the frame budget.
 
-Each partition has a durable committed tail, an applied frontier, and recovery
-coverage established by persistence or a committed cache snapshot. Applying a
-record advances only the applied frontier. Unread records pin their segments;
-applied but unpersisted records retain their original segment/generation through
-cache source ownership. Confirmations release those references. A minimum
-protected frontier with no uncovered holes controls retirement, rather than
-reader progress or the current cache generation. Dictionary prefixes remain
-available for every retained suffix.
-
-```text
-accepted input → append + sync → committed tail
-                                    ↓
-                         ordered partition reader
-                                    ↓
-                             applied frontier
-                                    ↓
-                         cache → confirmed persistence
-                                    ↓
-                           recovery-pin release
-```
-
-Replay must continue beyond the startup inventory to the committed live tail.
-When its remaining suffix fits a bounded admission reservation, a partition can
-fence new input assignments, finish that suffix, and switch its owner to direct
-application under the same partition fence. Incoming writers then append and
-sync before direct application. The fence must cover position assignment and
-the mode transition; a global log mutex must never be held while waiting for
-cache admission. If a bounded suffix cannot be admitted, ordinary replay
-continues. Other partitions keep progressing. Source references and no-relog
-insertion are required on both sides of this transition.
-
-An upgrade needs a durable cut before any new intake acknowledgment. Existing
-journal history and retained capture epochs already have a correction order,
-including direct-switch fences. Roll to a fresh journal segment/dictionary and
-commit an upgrade manifest that records the old journal cut and read-only
-legacy source order/cursors. A crash must recover this order:
+Each partition has one independent file reader, decoder and committed frontier.
+Readers follow growing, synced journal prefixes without holding the writer across
+cache admission. Already durable points enter cache with independent recovery
+source references, so they are never relogged at a new cache generation. Those
+references follow queued items, replacements, retries and in-flight identities.
+A conservative original-source pin retains the complete startup suffix until
+intake switches, every reader joins, every source confirms and the store syncs.
 
 ```text
-existing checkpoint + ordered legacy history → journal suffix after upgrade cut
+TCP → append + sync → committed partition frontier → reader → cache → store
+                            ↓                                  ↓
+                      retained source ← confirmation + store sync
 ```
 
-The manifest must survive segment retirement and partial replay, and its update
-must be committed with the cache snapshot/cursors that protect skipped records.
-Retained legacy sources replay once and retire after persistence. The upgrade
-path must never open another legacy capture writer. Segment identity includes
-salt as well as sequence because retired sequence numbers can be reused.
+The receiver's exclusive submission fence compares every reader with the
+committed tail. A mismatch retries while ordinary replay proceeds. A match freezes
+startup replay and enables ordinary cache/direct journal collection. Connection
+buffers that were not yet submitted take the direct sink exactly once. The seal
+does not wait for admission and creates no capture file or separate direct marker.
 
-The journal writer owns one disk-pressure decision, preserving the current 5%
-reserve pause semantics and still-meaningful metrics. Shutdown first fences
-partition intake/direct application, joins readers, and commits the complete
-cache-snapshot/cursor transaction. Only then can old source pins be released.
+The existing disk budget and five percent filesystem reserve protect startup
+appends on the journal filesystem. A reserve pause backpressures intake while
+replay and persistence continue. Input-log write/error counters cover the append
+path; startup intake/replay observations remain available.
 
-This design still requires implementation and crash proofs for the upgrade cut,
-partial partition switches, append/sync acknowledgment, original-generation
-retention, and shutdown. The existing 15-stage archive matrix should exercise
-those boundaries with both legacy capture formats, aliases, special float bits
-and same-timestamp corrections before the capture writer/catalog code is removed.
+Shutdown during replay joins readers before committing the existing cache
+snapshot/cursor transaction. Salted frame-end cursors skip only complete frames
+covered by that snapshot. Appends after its publication remain journalled for the
+successor. After the direct switch the ordinary durable dump path is authoritative.
 
-## Prepared append ownership (Draft)
+### Legacy startup spools
 
-The application now acquires the journal directory after the predecessor commits
-its socket transfer, before constructing cache/storage. Cache attachment reuses
-that owner. It still starts journal collection after historical replay and still
-uses capture spool writers for startup intake.
+This mode deliberately does not migrate legacy capture epochs. On first startup,
+it scans their point timestamps, records the capture start and a conservative
+backfill window in `startup-discard.<epoch>/window.json`, syncs that record and both
+directories, and renames the capture files and associated startup snapshots/cursor
+into that directory on the same filesystem. An interrupted move resumes before
+intake opens. Files are never deleted. An INFO event identifies the window, and
+`input_log_legacy_spools_moved_total` counts moved groups. Operators backfill from
+replicas where retention requires it, then remove the retained directory.
 
-The follow-up contains cache-independent primitives awaiting application wiring:
+The ordinary checkpoint and historical input log remain authoritative. The new
+journal writer starts a fresh segment/dictionary tail. There is no legacy ordering
+plan or upgrade-cut transaction. Turning the switch off restores the default
+capture behavior; retained shared-mode snapshots require completion with the new
+mode before rollback.
 
-- `StartRecovery` preserves Open's immutable inventory while the writer runs.
-  A dedicated pin protects unread frames. `CompleteRecovery` joins through the
-  writer and transfers retention to a conservative current-generation fence;
-  it restores the original tick even if earlier empty cycles removed it.
-- `StartAppend` and `Append` commit bounded native batches through the existing
-  partition encoders, compression workers, positioned writes and syncs. A receipt
-  carries the original append generation and salted committed tail. `AttachSource`
-  establishes cache collection without replacing the writer or history inventory.
-- `CommitUpgradeCut` commits a fresh segment/dictionary boundary and an immutable
-  ordered legacy-source plan with salted journal cursors. Segment sync, temporary
-  manifest sync, rename and directory sync precede success. Reopening uses the
-  committed plan, and retirement cannot reuse its sequence number.
+### Validation
 
-The append pin deliberately has no release operation yet. Original-generation
-source tracking, bounded live-tail readers, canonical routing, the shared disk
-reserve and the shutdown snapshot fence must be connected before activation.
-The application does not call these new append/cut primitives. This Draft must
-remain unmerged until their first real intake usage and the extended archive
-crash differential are included. The cut's five-stage process-exit test proves
-its file transaction; it does not prove the application's legacy ordering or the
-new startup path. The existing 15-stage matrix continues to cover capture spools.
+The shared path has a fifteen-stage process-exit differential comparing stored
+archive timestamps and exact float bits against uninterrupted input. Stages cover
+append, sync, replay/attachment, snapshot and cursor publication, direct fencing,
+confirmation, store sync and source-retention release. Separate tests exercise
+alias spellings, special floats, no relog, early durable ownership, legacy-window
+moves and a complete application dump/restart.

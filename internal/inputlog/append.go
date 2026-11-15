@@ -33,7 +33,7 @@ type sourceAttachment struct {
 // historical inventory stays immutable and replayable while new segments grow.
 // Appended generations stay pinned: the startup coordinator must establish
 // original-source persistence coverage before recycling can be enabled.
-// The application must commit its legacy upgrade cut before its first Append.
+// Legacy capture spools must be retired or moved aside before the first Append.
 func (l *Log) StartAppend() { l.StartRecovery(nil, partitions) }
 
 // AttachSource installs cache collection on the writer goroutine. A first cycle

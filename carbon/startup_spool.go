@@ -98,6 +98,7 @@ type startupSink struct {
 	drain       func(bool)
 }
 type startupInput struct {
+	journal                                                             *startupJournal
 	resume                                                              *startupResume
 	journalOnly                                                         bool         // No checkpoint/legacy dump; the continuous journal precedes capture.
 	diskWritten                                                         atomic.Int64 // Physical appends only; opening older sources consumes no new disk.
@@ -240,6 +241,9 @@ func (s *startupInput) CaptureShards() []tcp.Capture {
 
 // Direct legacy writes are used only by immutable-tail compatibility fixtures.
 func (s *startupInput) Write(raw []byte, n int) error {
+	if s.journal != nil {
+		return s.journal.write(raw, n)
+	}
 	written, err := s.file.Write(raw)
 	if err == nil && written != len(raw) {
 		err = io.ErrShortWrite
@@ -558,6 +562,9 @@ func (s *startupInput) diskDanger(n int64) bool {
 		return true
 	}
 	written := max(0, s.diskWritten.Load()-disk.written)
+	if s.journal != nil {
+		written = max(0, s.journal.log.Metrics().BytesWritten-disk.written)
+	}
 	return n > disk.free-disk.reserve-written
 }
 
@@ -579,8 +586,13 @@ func (s *startupInput) sampleDiskSpace() {
 	// Take the append frontier first: writes concurrent with statfs may already
 	// be reflected in Bavail, so double-counting them is conservative.
 	written := s.diskWritten.Load()
+	directory := filepath.Dir(s.path)
+	if s.journal != nil {
+		written = s.journal.log.Metrics().BytesWritten
+		directory = s.journal.dir
+	}
 	var info syscall.Statfs_t
-	if err := syscall.Statfs(filepath.Dir(s.path), &info); err != nil {
+	if err := syscall.Statfs(directory, &info); err != nil {
 		s.fallback.Store(true)
 		zapwriter.Logger("app").Error("startup input cannot sample disk safety reserve; keeping previous sample", zap.Error(err))
 		return
@@ -662,6 +674,9 @@ func (s *startupInput) startMonitor(maxBytes int64) {
 						wg.Wait()
 						s.maybeDirect(time.Now())
 						s.reclaim()
+						if s.journal != nil {
+							s.journal.releasePersisted()
+						}
 					})
 				}
 			}
@@ -754,7 +769,7 @@ func (s *startupInput) reclaimWith(remove func(string) error, syncDirectory func
 	// already live. Waiting for all partitions to switch to direct input lets
 	// ordinary batching keep source references (and disk space) pinned.
 	if sink.drain != nil {
-		sink.drain(!s.direct.Load() || s.size.Load() != s.retiredBytes.Load())
+		sink.drain(!s.direct.Load() || s.size.Load() != s.retiredBytes.Load() || s.journal != nil && !s.journal.released)
 	}
 	s.releasableBytes.Store(0)
 	s.historyReleasableBytes.Store(0)
@@ -837,7 +852,7 @@ func (s *startupInput) reclaimWith(remove func(string) error, syncDirectory func
 		}
 		s.releaseLog = nil
 	}
-	if sink.drain != nil && s.direct.Load() && s.size.Load() == s.retiredBytes.Load() {
+	if sink.drain != nil && s.direct.Load() && s.size.Load() == s.retiredBytes.Load() && (s.journal == nil || s.journal.released) {
 		sink.drain(false)
 	}
 }
@@ -867,6 +882,17 @@ func (s *startupInput) startReplay(sink *startupSink, legacy func() error) {
 			s.historyReady.Store(true)
 			close(s.legacyDone)
 			s.catching.Store(true)
+			if s.journal != nil {
+				if err := s.journal.replay(sink); err != nil {
+					select {
+					case <-s.replayStop:
+					default:
+						s.requestFallback()
+						zapwriter.Logger("app").Error("startup journal replay failed", zap.Error(err))
+					}
+				}
+				return
+			}
 			var wg sync.WaitGroup
 			for _, sh := range s.shards {
 				wg.Go(func() { sh.replay(sink) })

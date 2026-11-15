@@ -226,16 +226,17 @@ type Log struct {
 	copyPin  *Position
 	// replayPin protects the immutable Open inventory while the writer runs.
 	// Only the writer may release it, after all replay owners have joined.
-	replayPin  *Position
-	replayDone chan chan error
-	appends    chan appendRequest
-	appendPin  *Position
-	appendErr  error
-	attaches   chan sourceAttachment
-	stop       chan struct{}
-	done       chan struct{}
-	started    bool
-	closed     bool
+	replayPin    *Position
+	replayDone   chan chan error
+	appends      chan appendRequest
+	appendPin    *Position
+	appendErr    error
+	attaches     chan sourceAttachment
+	appendStates chan appendStateRequest
+	stop         chan struct{}
+	done         chan struct{}
+	started      bool
+	closed       bool
 
 	stat  stats
 	total totals
@@ -361,22 +362,6 @@ func Open(dir string, opts Options) (*Log, error) {
 		l.closeFiles()
 		_ = unlock()
 		return nil, err
-	}
-	if cut, err := ReadUpgradeCut(dir); err != nil {
-		l.closeFiles()
-		_ = unlock()
-		return nil, err
-	} else if cut != nil {
-		// Complete retirement can otherwise restart sequence numbering at
-		// one and make an old cut classify a new segment as legacy input.
-		l.nextSeq = max(l.nextSeq, cut.Segment+1)
-		for _, seg := range l.recovered {
-			if seg.seq == cut.Segment && seg.salt != cut.Salt {
-				l.closeFiles()
-				_ = unlock()
-				return nil, errors.New("input log upgrade cut segment incarnation changed")
-			}
-		}
 	}
 	for _, f := range l.pending {
 		l.replayPendingBytes.Add(int64(frameHeaderSize) + int64(f.h.length))
@@ -524,6 +509,7 @@ func (l *Log) start(src Source, shards int, preserveReplay bool) {
 	l.replayDone = make(chan chan error)
 	l.appends = make(chan appendRequest)
 	l.attaches = make(chan sourceAttachment)
+	l.appendStates = make(chan appendStateRequest)
 	l.started = true
 	go l.run()
 }
@@ -623,6 +609,9 @@ func (l *Log) run() {
 			continue
 		case first := <-l.appends:
 			l.appendCycle(first)
+			continue
+		case request := <-l.appendStates:
+			l.appendState(request)
 			continue
 		case attachment := <-l.attaches:
 			if l.src != nil {
