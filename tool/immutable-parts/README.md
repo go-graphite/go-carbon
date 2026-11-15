@@ -48,7 +48,9 @@ implemented. Pebble compacts physical KV blocks only. The experiment must retain
 raw blocks for correctness; it cannot estimate production steady-state retention
 space or fully settled write amplification.
 
-Concurrent readers acquire an atomic, refcounted published Pebble snapshot. The
+Concurrent readers acquire an atomic, refcounted published Pebble snapshot.
+Each metric owner publishes its own reference serially, including in the shared
+database layout, so concurrent publishers cannot move a reference backward. The
 last reference closes it, so a reader never uses a closed snapshot. They request
 random metric IDs over one-hour and seven-day ranges, merge raw parts and compute
 rollups. The mutable head is not query-visible until its SST is published. A

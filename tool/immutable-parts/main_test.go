@@ -189,7 +189,7 @@ func TestPrepareAndRun(t *testing.T) {
 	if e != nil || c.Points != 10 {
 		t.Fatalf("%+v %v", c, e)
 	}
-	if e = run(fixture, filepath.Join(dir, "out"), 16, 1, 64); e != nil {
+	if e = runReaders(fixture, filepath.Join(dir, "out"), 16, 1, 64, 4); e != nil {
 		t.Fatal(e)
 	}
 	if e = runLayout(fixture, filepath.Join(dir, "out-private"), 16, 1, 64, 4, "1", true); e != nil {

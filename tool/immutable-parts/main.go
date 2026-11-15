@@ -539,7 +539,7 @@ func runLayout(root, out string, shards, passes, maxRows, readers int, stepsOver
 		nDB = shards
 	}
 	dbs := make([]*pebble.DB, nDB)
-	pubs := make([]*publication, nDB)
+	pubs := make([]*publication, shards)
 	for i := range dbs {
 		dir := filepath.Join(out, "db")
 		opts := &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return min(shards, 16) }}
@@ -555,8 +555,13 @@ func runLayout(root, out string, shards, passes, maxRows, readers int, stepsOver
 			}
 			return e
 		}
+	}
+	// Each owner publishes serially, even when owners share a DB. Letting
+	// concurrent owners swap a single publication could expose an older
+	// snapshot after a newer one if snapshot creation and swapping interleave.
+	for i := range pubs {
 		pubs[i] = new(publication)
-		pubs[i].publish(dbs[i].NewSnapshot())
+		pubs[i].publish(dbs[i%nDB].NewSnapshot())
 	}
 	start := time.Now()
 	baseline := procStats()
@@ -592,7 +597,7 @@ func runLayout(root, out string, shards, passes, maxRows, readers int, stepsOver
 		go produce(q, root, s, shards, passes, cat)
 		go func(s int) {
 			i := s % nDB
-			done <- consume(q, dbs[i], out, s, cat, maxRows, pubs[i], &progress[s])
+			done <- consume(q, dbs[i], out, s, cat, maxRows, pubs[s], &progress[s])
 		}(s)
 	}
 	var total outcome
