@@ -14,7 +14,7 @@ runs elsewhere. The receiver must accept and route this namespace. No daemon
 or scrape configuration change is required when a local receiver already exists.
 
 Series are `tools.storectl.<runner>.<run>.<command>.<phase>.<metric>`:
-`done`, `total`, `names_per_second`, `active` and `heartbeat` (Unix seconds).
+`done`, `fresh_done`, `total`, `names_per_second`, `active` and `heartbeat` (Unix seconds).
 Runner punctuation becomes underscores. The run label is the `--block` filename
 without its extension, or the `--resume` state-directory basename (`--state`
 basename for direct launches), lowercased with punctuation replaced by `-` and
@@ -33,6 +33,16 @@ startup, every 15s and on exit. A phase transition clears the previous phase’s
 verification. Consult the command exit status and summary for success/residuals.
 Disconnected receivers produce a stderr warning and bounded retries at the next
 snapshot; telemetry never changes transfer admission or the command result.
+
+`fresh_done` counts only fresh work in the current controller phase, excluding
+journal replay, restored floors and discovery. Progress JSON also exposes
+`fresh_done_available`; a false value means the controller does not supply this
+counter. Graphite exports `phase_fresh_done`, `fresh_done_available` and
+`process_start_time_seconds` at the command root. Measure a fresh rate with
+`delta(phase_fresh_done)/elapsed` only when availability is 1 and the process
+epoch, phase and round stay constant across the entire interval. The counter
+resets on a new phase or process; it is not a lifetime counter. A waiting flag
+can coexist with fresh work from other requests.
 
 Sync uses the exact snapshot also written to progress JSON, including
 `done` and `total` for the current phase. The legacy missing-copy phase keeps

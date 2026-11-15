@@ -42,7 +42,7 @@ func TestCopyResumeProgressIsCumulative(t *testing.T) {
 	progress.resume(o.state, j.completedNames)
 	c := &planFreeCopier{o: o, journal: j, progress: progress}
 	p := c.progressSnapshot()
-	if p.Done != 75 || p.Total != 100 || p.rateDone != 0 {
+	if p.Done != 75 || p.Total != 100 || p.FreshDone != 0 {
 		t.Fatalf("resume lost durable progress: %+v", p)
 	}
 	// Workers may finish before the catalog counter. Those names must not be
@@ -53,7 +53,7 @@ func TestCopyResumeProgressIsCumulative(t *testing.T) {
 	c.stats.copied.Store(5)
 	c.countTotal(context.Background(), nil)
 	p = c.progressSnapshot()
-	if p.Done != 80 || p.Total != 100 || p.rateDone != 5 {
+	if p.Done != 80 || p.Total != 100 || p.FreshDone != 5 {
 		t.Fatalf("new work or total counted twice: %+v", p)
 	}
 	c.stats.copied.Store(25)
@@ -61,7 +61,7 @@ func TestCopyResumeProgressIsCumulative(t *testing.T) {
 		t.Fatal(err)
 	}
 	p = c.progressSnapshot()
-	if p.Done != 100 || p.Total != 100 || p.rateDone != 25 {
+	if p.Done != 100 || p.Total != 100 || p.FreshDone != 25 {
 		t.Fatalf("completion: %+v", p)
 	}
 }

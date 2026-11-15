@@ -67,7 +67,7 @@ func TestCopyBatchClosesConnections(t *testing.T) {
 func TestProgressRateUsesFreshWorkAndExpiresStalls(t *testing.T) {
 	now := time.Unix(1000, 0)
 	var rate progressRate
-	p := progressSnapshot{Phase: "copy", Done: 1000000, rateSet: true, rateDone: 0}
+	p := progressSnapshot{Phase: "copy", Done: 1000000, FreshDoneAvailable: true, FreshDone: 0}
 	if got := rate.observe(now, p); got != 0 {
 		t.Fatal(got)
 	}
@@ -79,7 +79,7 @@ func TestProgressRateUsesFreshWorkAndExpiresStalls(t *testing.T) {
 		t.Fatal(got)
 	}
 	p.Done += 600
-	p.rateDone = 600
+	p.FreshDone = 600
 	if got := rate.observe(now.Add(2*time.Minute), p); got != 5 {
 		t.Fatal(got)
 	}
@@ -91,11 +91,11 @@ func TestProgressRateUsesFreshWorkAndExpiresStalls(t *testing.T) {
 		t.Fatal(got)
 	}
 	p.Phase = "verify round 2"
-	p.rateDone = 50000
+	p.FreshDone = 50000
 	if got := rate.observe(now.Add(9*time.Minute), p); got != 0 {
 		t.Fatal("phase rate leaked", got)
 	}
-	p.rateDone = 0
+	p.FreshDone = 0
 	if got := rate.observe(now.Add(10*time.Minute), p); got != 0 {
 		t.Fatal("counter reset", got)
 	}
