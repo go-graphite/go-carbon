@@ -167,11 +167,11 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 		close(loadedDone)
 		loaded := time.Now()
 		app.setRestoreDuration(loaded.Sub(started))
-		// Metrics the saved read index held may wait for a spread writeout
-		// deadline (cache.writeout-restore-spread); the store already has
-		// them, so the first scan opens once the rest are on disk. The
-		// sources retire only when every saved metric is.
-		for core.PendingUrgentOutstanding() != 0 {
+		// Every saved name is now loaded. Only names absent from the saved
+		// read index must reach storage before a scan; existing names survive
+		// reconciliation regardless of their writeout deadline. Keep all point
+		// sources until every saved metric has been persisted below.
+		for core.PendingScanOutstanding() != 0 {
 			select {
 			case <-stop:
 				return
@@ -180,6 +180,10 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.Me
 		}
 		stopGateLimit()
 		openGate()
+		logger.Info("startup scan gate opened", zap.Duration("runtime", time.Since(started)),
+			zap.Duration("load_seconds", loaded.Sub(started)),
+			zap.Duration("new_names_drain_seconds", time.Since(loaded)),
+			zap.Uint64("pending_metrics", core.PendingOutstanding()))
 		for core.PendingOutstanding() != 0 {
 			select {
 			case <-stop:
