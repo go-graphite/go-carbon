@@ -56,13 +56,27 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 	if len(in.Rows) > 0 && len(in.Batches) == 0 {
 		return plan, errors.New("rollup seal lacks original batches")
 	}
+	if o.policies == nil {
+		o.policies = map[string]*sealrollup.Prepared{}
+	}
+	configs := map[string]sealrollup.Config{}
 	inputs := map[uint64]*atomicRollupInput{}
 	var ids []uint64
 	count := 0
 	for _, b := range in.Batches {
-		var c sealrollup.Config
-		if err = json.Unmarshal(b.Policy, &c); err != nil {
-			return plan, err
+		key := string(b.Policy)
+		c, exists := configs[key]
+		if !exists {
+			if err = json.Unmarshal(b.Policy, &c); err != nil {
+				return plan, err
+			}
+			configs[key] = c
+			if o.policies[key] == nil {
+				o.policies[key], err = sealrollup.Prepare(c)
+				if err != nil {
+					return plan, err
+				}
+			}
 		}
 		input := inputs[b.ID]
 		if input == nil {
@@ -97,6 +111,10 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 	}
 	var data, meta []coreKV
 	plans := make(map[uint64]sealrollup.SealPlan, len(ids))
+	preparedByID := make(map[uint64]*sealrollup.Prepared, len(ids))
+	for _, b := range in.Batches {
+		preparedByID[b.ID] = o.policies[string(b.Policy)]
+	}
 	for _, id := range ids {
 		input := inputs[id]
 		old := o.state[id]
@@ -104,7 +122,7 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 		if old != nil {
 			prior = old.Frontier
 		}
-		p, e := sealrollup.Plan(input.Config, prior, rollupView(old), input.Batches)
+		p, e := preparedByID[id].PlanWithWorkspace(prior, rollupView(old), old.rangeView(), input.Batches, &o.workspace)
 		if e != nil {
 			return plan, e
 		}
@@ -150,7 +168,7 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 				o.state[id] = s
 			}
 			for _, r := range p.Records {
-				s.Slots[[2]int64{int64(r.Archive), r.Slot}] = r.Sample
+				s.install(r)
 			}
 			s.Frontier = p.Next
 		}

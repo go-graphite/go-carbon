@@ -4,6 +4,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func TestSealPlanMatrix(t *testing.T) {
 					}
 					batch := Batch{Order: i, Now: clock, Points: points}
 					history = append(history, batch)
-					p, err := Plan(c, prior, view(state), []Batch{batch})
+					p, err := planBoth(t, c, prior, state, []Batch{batch})
 					if err != nil {
 						t.Fatalf("%s %d %g: %v", def, m, xff, err)
 					}
@@ -158,7 +159,7 @@ func TestSealPlanClassic(t *testing.T) {
 				batches = append(batches, Batch{Order: 3, Now: advanced, Points: []Sample{sample(start+step*c.Archives[0].Count, 17, 7)}}, Batch{Order: 4, Now: advanced, Points: []Sample{sample(start+step, 127, 8)}})
 				for bi, b := range batches {
 					clock = b.Now
-					p, e := Plan(c, prior, view(state), []Batch{b})
+					p, e := planBoth(t, c, prior, state, []Batch{b})
 					if e != nil {
 						t.Fatal(e)
 					}
@@ -188,4 +189,39 @@ func TestSealPlanClassic(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Compare both planning paths before the existing classic physical-slot oracle.
+func planBoth(t *testing.T, c Config, prior Frontier, state map[key]Sample, batches []Batch) (SealPlan, error) {
+	t.Helper()
+	want, err := Plan(c, prior, view(state), batches)
+	if err != nil {
+		return want, err
+	}
+	prepared, err := Prepare(c)
+	if err != nil {
+		return SealPlan{}, err
+	}
+	ranges := func(a int, start, end int64, dst []Sample) []Sample {
+		for k, p := range state {
+			if k.archive == a && p.Time >= start && p.Time < end {
+				dst = append(dst, p)
+			}
+		}
+		slices.SortFunc(dst, func(a, b Sample) int {
+			if a.Time < b.Time {
+				return -1
+			}
+			if a.Time > b.Time {
+				return 1
+			}
+			return 0
+		})
+		return dst
+	}
+	got, err := prepared.Plan(prior, view(state), ranges, batches)
+	if err == nil && !reflect.DeepEqual(want, got) {
+		t.Fatalf("sparse plan differs: got%+v want%+v", got, want)
+	}
+	return got, err
 }

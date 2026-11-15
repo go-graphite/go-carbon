@@ -55,6 +55,12 @@ type Delta struct {
 // View returns the latest physical slot, including its actual epoch timestamp.
 // It must be immutable for the entire Reduce call. nil means an empty history.
 type View func(archive int, slot int64) (Sample, bool)
+
+// RangeView appends all occupied samples in [start,end), in ascending Time.
+// It must resolve physical-slot versions before filtering timestamps, just as
+// View does. The returned storage belongs to dst; no snapshot slices may escape.
+// A sparse index avoids probing every absent slot in a coarse source bucket.
+type RangeView func(archive int, start, end int64, dst []Sample) []Sample
 type key struct {
 	archive int
 	slot    int64
@@ -94,6 +100,22 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
+	return reduce(c, view, nil, batches, nil)
+}
+
+// Workspace is reusable scratch for one serial owner. No returned SealPlan
+// aliases it. Keep independent workspaces for concurrent planning calls.
+type Workspace struct {
+	overlay                    map[key]Delta
+	points, current, neighbors []Sample
+	changed                    []int64
+	deltas                     []Delta
+}
+
+func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Delta, error) {
+	if w == nil {
+		w = &Workspace{}
+	}
 	for i, b := range batches {
 		if b.Now <= 0 || b.Now > math.MaxUint32 {
 			return nil, fmt.Errorf("invalid batch clock")
@@ -107,7 +129,12 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 			}
 		}
 	}
-	overlay := make(map[key]Delta)
+	if w.overlay == nil {
+		w.overlay = make(map[key]Delta)
+	} else {
+		clear(w.overlay)
+	}
+	overlay := w.overlay
 	get := func(a int, t int64) (Sample, bool) {
 		k := key{a, slot(t, c.Archives[a])}
 		if d, ok := overlay[k]; ok {
@@ -119,8 +146,11 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 		p, ok := view(a, k.slot)
 		return p, ok && p.Time == t
 	}
+	neighbors := w.neighbors
+	defer func() { w.neighbors = neighbors }()
 	for _, b := range batches {
-		points := slices.Clone(b.Points)
+		w.points = append(w.points[:0], b.Points...)
+		points := w.points
 		// Equivalent to Whisper's reverse, stable newest-first, reverse. For
 		// equal timestamps the final source sequence wins; within an aligned slot
 		// the latest timestamp wins, even when it arrived earlier in the batch.
@@ -145,7 +175,7 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 			overlay[k] = Delta{a, k.slot, b.Order, p}
 		}
 		for archive, a := range c.Archives {
-			var current []Sample
+			current := w.current[:0]
 			for _, p := range points {
 				target := -1
 				for j, r := range c.Archives {
@@ -158,15 +188,17 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 					current = append(current, p)
 				}
 			}
+			w.current = current
 			if len(current) == 0 {
 				continue
 			}
-			changed := make([]int64, 0, len(current))
+			changed := w.changed[:0]
 			for _, p := range current {
 				t := align(p.Time, a.Step)
 				set(archive, t, p.Bits)
 				changed = append(changed, t)
 			}
+			w.changed = changed
 			// Every original interval remains eligible at each level. Do not
 			// propagate only the successful child buckets: Whisper does not do that.
 			for lower := archive + 1; lower < len(c.Archives); lower++ {
@@ -179,16 +211,43 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 						continue
 					}
 					previous = start
-					values := make([]float64, 0, coarse.Step/higher.Step)
-					for ts := start; ts < start+coarse.Step; ts += higher.Step {
-						if p, ok := get(lower-1, ts); ok {
-							values = append(values, math.Float64frombits(p.Bits))
+					neighbors = neighbors[:0]
+					if ranges == nil {
+						for ts := start; ts < start+coarse.Step; ts += higher.Step {
+							if p, ok := get(lower-1, ts); ok {
+								neighbors = append(neighbors, p)
+							}
 						}
+					} else {
+						neighbors = ranges(lower-1, start, start+coarse.Step, neighbors)
+						kept := neighbors[:0]
+						for _, p := range neighbors {
+							// Even a replacement with a different epoch invalidates
+							// the older occupied physical slot in the snapshot.
+							if _, replaced := overlay[key{lower - 1, slot(p.Time, higher)}]; !replaced {
+								kept = append(kept, p)
+							}
+						}
+						neighbors = kept
+						for k, d := range overlay {
+							if k.archive == lower-1 && d.Sample.Time >= start && d.Sample.Time < start+coarse.Step {
+								neighbors = append(neighbors, d.Sample)
+							}
+						}
+						slices.SortFunc(neighbors, func(a, b Sample) int {
+							if a.Time < b.Time {
+								return -1
+							}
+							if a.Time > b.Time {
+								return 1
+							}
+							return 0
+						})
 					}
-					if len(values) == 0 || float32(len(values))/float32(coarse.Step/higher.Step) < c.XFilesFactor {
+					if len(neighbors) == 0 || float32(len(neighbors))/float32(coarse.Step/higher.Step) < c.XFilesFactor {
 						continue
 					}
-					set(lower, start, math.Float64bits(aggregate(c.Method, values)))
+					set(lower, start, math.Float64bits(aggregateSamples(c.Method, neighbors)))
 					wrote = true
 				}
 				if !wrote {
@@ -197,7 +256,7 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 			}
 		}
 	}
-	out := make([]Delta, 0, len(overlay))
+	out := w.deltas[:0]
 	for _, d := range overlay {
 		out = append(out, d)
 	}
@@ -216,6 +275,7 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 		}
 		return 0
 	})
+	w.deltas = out
 	return out, nil
 }
 func aggregate(method Method, values []float64) float64 {
@@ -246,6 +306,41 @@ func aggregate(method Method, values []float64) float64 {
 		for _, v := range values {
 			if v > result {
 				result = v
+			}
+		}
+		return result
+	}
+	panic("validated method")
+}
+
+func aggregateSamples(method Method, values []Sample) float64 {
+	switch method {
+	case Average, Sum:
+		result := 0.0
+		for _, v := range values {
+			result += math.Float64frombits(v.Bits)
+		}
+		if method == Average {
+			result /= float64(len(values))
+		}
+		return result
+	case First:
+		return math.Float64frombits(values[0].Bits)
+	case Last:
+		return math.Float64frombits(values[len(values)-1].Bits)
+	case Min:
+		result := math.Float64frombits(values[0].Bits)
+		for _, v := range values {
+			if value := math.Float64frombits(v.Bits); value < result {
+				result = value
+			}
+		}
+		return result
+	case Max:
+		result := math.Float64frombits(values[0].Bits)
+		for _, v := range values {
+			if value := math.Float64frombits(v.Bits); value > result {
+				result = value
 			}
 		}
 		return result

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"runtime"
 	"testing"
 )
@@ -57,4 +58,51 @@ func BenchmarkCoreRollupSeal(b *testing.B) {
 			})
 		}
 	}
+}
+
+// Fixed production-like sparse cardinality as cores change: 262144 metrics,
+// one original point per metric per seal, and all four archives. Large owner
+// files avoid shrinking the workload to a few metrics as owners increase.
+// Three finite seals include close; this is not sustained compaction proof.
+func BenchmarkCoreRollupSparse(b *testing.B) {
+	const metrics = 1 << 18
+	cores := runtime.GOMAXPROCS(0)
+	cfg := coreConfig{Shards: cores, Producers: 1, MaxRows: 1 << 18, PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "sparse-rollup-benchmark"}
+	e, _, err := openCoreRollups(b.TempDir(), cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inputs := atomicBenchInput(metrics, 1, 4)
+	policy, err := json.Marshal(inputs[0].Config)
+	if err != nil {
+		b.Fatal(err)
+	}
+	batches := make([]coreBatch, metrics)
+	for i := range batches {
+		batches[i] = coreBatch{ID: uint64(i), Policy: policy, Points: make([]row, 1)}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	start := atomicCPU()
+	for n := 0; n < b.N; n++ {
+		order := uint64(n + 1)
+		now := int64(1794700800 + n)
+		for i := range batches {
+			batch := &batches[i]
+			batch.Order = order
+			batch.Clock = now
+			batch.Points[0] = row{ID: uint64(i), Time: now, Bits: math.Float64bits(float64(n % 97)), Seq: order}
+		}
+		if err = e.submitBatches(0, batches, order, true); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err = e.close(); err != nil {
+		b.Fatal(err)
+	}
+	cpu := atomicCPU() - start
+	b.StopTimer()
+	points := float64(b.N * metrics)
+	b.ReportMetric(points/b.Elapsed().Seconds(), "points/s")
+	b.ReportMetric(float64(cpu)/points, "cpu-ns/point")
 }

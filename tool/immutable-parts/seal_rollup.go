@@ -32,12 +32,15 @@ type atomicRollupState struct {
 	Frontier sealrollup.Frontier
 	Config   sealrollup.Config
 	Slots    map[[2]int64]sealrollup.Sample
+	index    *sealrollup.Slots
 }
 type atomicRollupOwner struct {
-	db    *pebble.DB
-	dir   string
-	state map[uint64]*atomicRollupState
-	part  uint64
+	db        *pebble.DB
+	dir       string
+	state     map[uint64]*atomicRollupState
+	policies  map[string]*sealrollup.Prepared
+	workspace sealrollup.Workspace
+	part      uint64
 	// Concurrently readable failure counter; daemon metric export is pending.
 	Errors atomic.Uint64
 	// Fault injection never publishes state before a successful atomic ingest.
@@ -77,6 +80,27 @@ func rollupView(s *atomicRollupState) sealrollup.View {
 		p, ok := s.Slots[[2]int64{int64(a), slot}]
 		return p, ok
 	}
+}
+
+// rangeView is owner-local and immutable until the ingest succeeds. Building
+// the sparse index after recovery is CPU-only, with no hot-path database reads.
+func (s *atomicRollupState) rangeView() sealrollup.RangeView {
+	if s == nil {
+		return func(_ int, _, _ int64, dst []sealrollup.Sample) []sealrollup.Sample { return dst }
+	}
+	if s.index == nil {
+		s.index = sealrollup.NewSlots(s.Config.Archives)
+		for k, p := range s.Slots {
+			s.index.Install(sealrollup.Delta{Archive: int(k[0]), Slot: k[1], Sample: p})
+		}
+	}
+	return s.index.Range
+}
+func (s *atomicRollupState) install(r sealrollup.Record) {
+	if s.index != nil {
+		s.index.Install(r.Delta)
+	}
+	s.Slots[[2]int64{int64(r.Archive), r.Slot}] = r.Sample
 }
 
 // openAtomicRollupOwner performs the only DB reads: reconstructing a committed
@@ -271,7 +295,7 @@ func (o *atomicRollupOwner) Seal(inputs []atomicRollupInput) (written uint64, er
 			o.state[in.ID] = s
 		}
 		for _, r := range plans[i].Records {
-			s.Slots[[2]int64{int64(r.Archive), r.Slot}] = r.Sample
+			s.install(r)
 		}
 		s.Frontier = plans[i].Next
 	}
