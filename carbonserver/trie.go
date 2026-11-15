@@ -288,6 +288,8 @@ func isAlphanumeric(c byte) bool {
 }
 
 type trieIndex struct {
+	catalogCheckpoint string
+
 	// builder is owned exclusively by initial index construction and cleared before publication.
 	snapshot      *indexSnapshot
 	recoveryID    string

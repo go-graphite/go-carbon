@@ -2008,6 +2008,9 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 		index.trieIdx.builder = nil
 	}
 	u.listener.UpdateFileIndex(index)
+	if u.catalogRecovery && index.trieIdx != nil {
+		u.listener.reuseCatalogCheckpoint(index.trieIdx)
+	}
 	u.listener.realtimeNext = nil
 	// File-list caches omit sidecars, and incomplete scans can undercount them.
 	if !u.readFromCache && !u.scanFailed && !u.listener.legacyWhisperDisabled.Load() {
