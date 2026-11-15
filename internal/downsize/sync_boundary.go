@@ -34,7 +34,7 @@ func (b *syncLiveBackend) repairWindowBoundary(ctx context.Context, c *nativeCon
 		return false, nil
 	}
 	step := archives[skip.Archive].Step
-	if step <= 0 || skip.Timestamp%step != 0 || skip.Timestamp+2*step > time.Now().Unix() {
+	if step <= 0 || skip.Timestamp%step != 0 {
 		return false, nil
 	}
 	covered := func() (bool, error) {
@@ -52,11 +52,17 @@ func (b *syncLiveBackend) repairWindowBoundary(ctx context.Context, c *nativeCon
 	if ok, e := covered(); ok || e != nil {
 		return ok, e
 	}
+	// Target coverage requires no write, even for a recent bucket. Only a
+	// missing point needs the conservative historical-source proof below.
+	now := time.Now().Unix()
+	if skip.Timestamp+2*step > now {
+		return false, nil
+	}
 	id, err := c.session(ctx, source)
 	if err != nil {
 		return false, err
 	}
-	window := chunkstore.NativeWindow{From: skip.Timestamp, Until: skip.Timestamp + 2*step}
+	window := chunkstore.NativeWindow{From: skip.Timestamp, Until: now / step * step}
 	body, err := json.Marshal(struct {
 		Session string
 		Names   []string
@@ -116,7 +122,7 @@ func (b *syncLiveBackend) repairWindowBoundary(ctx context.Context, c *nativeCon
 			v := p
 			point = &v
 		}
-		if p.Timestamp == skip.Timestamp+step {
+		if p.Timestamp > skip.Timestamp && p.Timestamp+step <= now {
 			later = true
 		}
 	}
