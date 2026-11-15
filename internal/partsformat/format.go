@@ -9,12 +9,13 @@ import (
 	"errors"
 	"hash/crc32"
 	"slices"
+	"strings"
 )
 
 const VirtualShards = 4096
 const MaxNameBytes = 1 << 20
 
-var magic = []byte{'G', 'C', 'P', 2}
+var magic = []byte{'G', 'C', 'P', 3}
 var routingTable = crc32.MakeTable(crc32.Castagnoli)
 
 // ID is the exact normalized canonical name, not a host-local catalogue ordinal
@@ -22,6 +23,58 @@ var routingTable = crc32.MakeTable(crc32.Castagnoli)
 // Names cost more uncompressed key bytes; SST prefix compression amortizes that
 // cost. Compact IDs require an independently proved collision/catalogue protocol.
 type ID string
+
+// Group is the exact portable placement label persisted by the name catalogue.
+// It is not a hash or a host-local ordinal. Empty is reserved for legacy tests.
+type Group string
+type PlacementRule struct {
+	Prefix string
+	Group  Group
+}
+
+// AssignGroup applies only at admission. Persist the result: changing rules must
+// never silently reroute existing names. Rules match complete path components;
+// the longest prefix wins. Canonical tag suffixes do not change namespace.
+func AssignGroup(id ID, rules []PlacementRule) (Group, error) {
+	base, _, _ := strings.Cut(string(id), ";")
+	if base == "" {
+		return "", errors.New("empty canonical base name")
+	}
+	var group Group
+	longest := -1
+	for _, rule := range rules {
+		if rule.Prefix == "" || rule.Group == "" {
+			return "", errors.New("invalid placement rule")
+		}
+		if base == rule.Prefix || strings.HasPrefix(base, rule.Prefix+".") {
+			if len(rule.Prefix) == longest && group != rule.Group {
+				return "", errors.New("ambiguous placement rule")
+			}
+			if len(rule.Prefix) > longest {
+				group = rule.Group
+				longest = len(rule.Prefix)
+			}
+		}
+	}
+	if longest >= 0 {
+		return group, nil
+	}
+	first, _, _ := strings.Cut(base, ".")
+	if first == "" {
+		return "", errors.New("empty default namespace")
+	}
+	return Group(first), nil
+}
+func GroupRange(group Group) ([]byte, []byte, error) {
+	if len(group) > MaxNameBytes {
+		return nil, nil, errors.New("placement group too long")
+	}
+	lower := make([]byte, 8+len(group))
+	copy(lower, magic)
+	binary.BigEndian.PutUint32(lower[4:8], uint32(len(group)))
+	copy(lower[8:], group)
+	return lower, PrefixEnd(lower), nil
+}
 
 func Route(id ID) uint16 {
 	return uint16(crc32.Checksum([]byte(id), routingTable) & (VirtualShards - 1))
@@ -36,6 +89,7 @@ type PartID [16]byte
 // Part identity precedes metric identity so separate SSTs have disjoint ranges
 // and can be ingested together atomically without rewriting their keys.
 type Key struct {
+	Group      Group
 	VShard     uint16
 	Partition  int64
 	Metric     ID
@@ -46,13 +100,21 @@ type Key struct {
 }
 
 func PartitionPrefix(vshard uint16, partition int64) ([]byte, error) {
+	return PartitionPrefixForGroup("", vshard, partition)
+}
+func PartitionPrefixForGroup(group Group, vshard uint16, partition int64) ([]byte, error) {
 	if vshard >= VirtualShards {
 		return nil, errors.New("virtual shard out of range")
 	}
-	b := make([]byte, 14)
-	copy(b, magic)
-	binary.BigEndian.PutUint16(b[4:6], vshard)
-	binary.BigEndian.PutUint64(b[6:14], uint64(partition)^(1<<63))
+	lower, _, err := GroupRange(group)
+	if err != nil {
+		return nil, err
+	}
+	pos := len(lower)
+	b := make([]byte, pos+10)
+	copy(b, lower)
+	binary.BigEndian.PutUint16(b[pos:pos+2], vshard)
+	binary.BigEndian.PutUint64(b[pos+2:], uint64(partition)^(1<<63))
 	return b, nil
 }
 
@@ -68,12 +130,17 @@ func PrefixEnd(prefix []byte) []byte {
 	return nil
 }
 func VShardRange(vshard uint16) ([]byte, []byte, error) {
+	return VShardRangeForGroup("", vshard)
+}
+func VShardRangeForGroup(group Group, vshard uint16) ([]byte, []byte, error) {
 	if vshard >= VirtualShards {
 		return nil, nil, errors.New("virtual shard out of range")
 	}
-	lower := make([]byte, 6)
-	copy(lower, magic)
-	binary.BigEndian.PutUint16(lower[4:], vshard)
+	lower, _, err := GroupRange(group)
+	if err != nil {
+		return nil, nil, err
+	}
+	lower = binary.BigEndian.AppendUint16(lower, vshard)
 	return lower, PrefixEnd(lower), nil
 }
 func Encode(k Key) ([]byte, error) {
@@ -83,16 +150,19 @@ func Encode(k Key) ([]byte, error) {
 	if Route(k.Metric) != k.VShard {
 		return nil, errors.New("metric routes to another virtual shard")
 	}
-	prefix, err := PartitionPrefix(k.VShard, k.Partition)
+	prefix, err := PartitionPrefixForGroup(k.Group, k.VShard, k.Partition)
 	if err != nil {
 		return nil, err
 	}
-	b := make([]byte, 14+4+len(k.Metric)+4+8+16+4)
+	b := make([]byte, len(prefix)+36+len(k.Metric))
 	copy(b, prefix)
-	copy(b[14:30], k.Part[:])
-	binary.BigEndian.PutUint32(b[30:], uint32(len(k.Metric)))
-	copy(b[34:], k.Metric)
-	pos := 34 + len(k.Metric)
+	pos := len(prefix)
+	copy(b[pos:pos+16], k.Part[:])
+	pos += 16
+	binary.BigEndian.PutUint32(b[pos:], uint32(len(k.Metric)))
+	pos += 4
+	copy(b[pos:], k.Metric)
+	pos += len(k.Metric)
 	binary.BigEndian.PutUint32(b[pos:], k.Archive)
 	pos += 4
 	binary.BigEndian.PutUint64(b[pos:], uint64(k.BlockStart)^(1<<63))
@@ -102,18 +172,36 @@ func Encode(k Key) ([]byte, error) {
 }
 func Decode(b []byte) (Key, error) {
 	var k Key
-	if len(b) < 50 || !bytes.Equal(b[:4], magic) {
+	if len(b) < 54 || !bytes.Equal(b[:4], magic) {
 		return k, errors.New("invalid part key header")
 	}
-	n := int(binary.BigEndian.Uint32(b[30:34]))
-	if n == 0 || n > MaxNameBytes || len(b) != 50+n {
-		return k, errors.New("invalid part key length")
+	gn32 := binary.BigEndian.Uint32(b[4:8])
+	if gn32 > MaxNameBytes {
+		return k, errors.New("invalid placement group length")
 	}
-	k.VShard = binary.BigEndian.Uint16(b[4:6])
-	k.Partition = int64(binary.BigEndian.Uint64(b[6:14]) ^ (1 << 63))
-	copy(k.Part[:], b[14:30])
-	k.Metric = ID(string(b[34 : 34+n]))
-	pos := 34 + n
+	gn := int(gn32)
+	if gn > len(b)-54 {
+		return k, errors.New("invalid placement group length")
+	}
+	k.Group = Group(string(b[8 : 8+gn]))
+	pos := 8 + gn
+	k.VShard = binary.BigEndian.Uint16(b[pos : pos+2])
+	pos += 2
+	k.Partition = int64(binary.BigEndian.Uint64(b[pos:pos+8]) ^ (1 << 63))
+	pos += 8
+	copy(k.Part[:], b[pos:pos+16])
+	pos += 16
+	n32 := binary.BigEndian.Uint32(b[pos : pos+4])
+	pos += 4
+	if n32 == 0 || n32 > MaxNameBytes {
+		return Key{}, errors.New("invalid part key length")
+	}
+	n := int(n32)
+	if len(b) != 54+gn+n {
+		return Key{}, errors.New("invalid part key length")
+	}
+	k.Metric = ID(string(b[pos : pos+n]))
+	pos += n
 	k.Archive = binary.BigEndian.Uint32(b[pos:])
 	pos += 4
 	k.BlockStart = int64(binary.BigEndian.Uint64(b[pos:]) ^ (1 << 63))
@@ -131,6 +219,7 @@ type Part struct {
 	SHA256 [32]byte // computed while streaming the immutable file once
 }
 type Manifest struct {
+	Group     Group
 	VShard    uint16
 	Partition int64
 	Policy    [32]byte // exact schema/aggregation/encoding compatibility digest
@@ -147,8 +236,11 @@ func (m Manifest) Digest() ([32]byte, error) {
 	parts := slices.Clone(m.Parts)
 	slices.SortFunc(parts, func(a, b Part) int { return bytes.Compare(a.ID[:], b.ID[:]) })
 	h := sha256.New()
-	_, _ = h.Write([]byte("immutable-part-manifest-v2"))
-	prefix, _ := PartitionPrefix(m.VShard, m.Partition)
+	_, _ = h.Write([]byte("immutable-part-manifest-v3"))
+	prefix, err := PartitionPrefixForGroup(m.Group, m.VShard, m.Partition)
+	if err != nil {
+		return [32]byte{}, err
+	}
 	_, _ = h.Write(prefix)
 	_, _ = h.Write(m.Policy[:])
 	for i, p := range parts {
@@ -167,10 +259,10 @@ func (m Manifest) Digest() ([32]byte, error) {
 }
 
 // ValidateFileRange prevents accidental ingestion of an SST spanning ownership
-// or retention boundaries. Writers must emit one file per (vshard,partition).
+// or retention boundaries. Writers must emit one file per (group,vshard,partition).
 // Merely prefixing keys does not make arbitrary mixed-range SSTs portable.
 func ValidateFileRange(m Manifest, smallest, largest []byte) error {
-	lo, err := PartitionPrefix(m.VShard, m.Partition)
+	lo, err := PartitionPrefixForGroup(m.Group, m.VShard, m.Partition)
 	if err != nil {
 		return err
 	}

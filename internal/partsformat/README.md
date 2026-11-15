@@ -1,17 +1,28 @@
 This package is an unfrozen format contract for copy experiments. The running
-offline owner engine in `tool/immutable-parts/core.go` still uses format 1 and
+offline owner engine in `tool/immutable-parts/core.go` still uses numeric formats1/2 and
 host-local numeric IDs; it does not yet write this portable format.
 
 The proposed key order is:
 
 ```text
-GCP2 | virtual shard:u16 | signed time partition:u64 |
+GCP3 | placement group length:u32 | exact group bytes |
+virtual shard:u16 | signed time partition:u64 |
 part UUID:16 bytes | canonical name length:u32 | exact canonical name bytes |
 archive:u32 | signed block start:u64 | block ordinal:u32
 ```
 
 All integers use big endian encoding; signed fields flip the sign bit to keep
-time ordering. Routing is CRC32C of canonical name bytes modulo 4096. Ownership
+time ordering. `AssignGroup` chooses the longest configured complete path prefix,
+or the first base-name path component by default, ignoring canonical tag suffixes.
+The catalogue must persist the exact assignment at admission. Rule changes apply
+to new names; relocating existing data needs an explicit fenced group move.
+Group labels are exact portable bytes, not hashed or host-local ordinals.
+`GroupRange` bounds a namespace move, `VShardRangeForGroup` bounds a resize, and
+`PartitionPrefixForGroup` bounds repair/expiry. Original range helper signatures
+use the reserved empty group for existing experiments. Version3 rejects old
+version2 bytes rather than guessing their layout.
+
+Routing is CRC32C of canonical name bytes modulo 4096. Ownership
 maps sets of virtual shards onto physical Pebble owners. Routing hashes never
 replace exact identity. Replicas use the same normalized canonical name bytes,
 so copied keys need neither ID remapping nor a collision-resolution protocol.
@@ -38,3 +49,6 @@ apply batch/clock/policy metadata before integrating authoritative rollups.
 Reader publication, retained-file lifetime, snapshot/copy pins, garbage collection,
 write fencing during ownership changes, and log retirement remain integration
 requirements before this format can be frozen or enabled in a daemon.
+Per-name incarnation tombstones, legacy-vs-live priority, schema-aware retention
+horizons, and group catalogue atomicity are additional unfrozen contracts; this
+codec alone does not implement those lifecycle operations.

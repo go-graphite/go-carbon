@@ -130,3 +130,67 @@ func TestImmutablePartRangesDoNotOverlap(t *testing.T) {
 		previousLargest = keys[len(keys)-1]
 	}
 }
+
+func TestPlacementGroupsBoundNamespaceCopies(t *testing.T) {
+	rules := []PlacementRule{{"infra", "platform"}, {"infra.redis", "databases"}}
+	for _, tc := range []struct {
+		name ID
+		want Group
+	}{
+		{"containers.cpu;host=a", "containers"}, {"standalone;tag=with.dot", "standalone"},
+		{"infra.redis.reads", "databases"}, {"infra.redis;host=a", "databases"},
+		{"infra.rediscover.ops", "platform"},
+	} {
+		group, err := AssignGroup(tc.name, rules)
+		if err != nil || group != tc.want {
+			t.Fatalf("placement %q=%q,%v", tc.name, group, err)
+		}
+		k := Key{Group: group, VShard: Route(tc.name), Partition: -1, Metric: tc.name, Part: PartID{1}}
+		encoded, err := Encode(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := Decode(encoded)
+		if err != nil || decoded != k {
+			t.Fatalf("placement roundtrip %v %v", decoded, err)
+		}
+		lo, hi, err := GroupRange(group)
+		if err != nil || bytes.Compare(encoded, lo) < 0 || bytes.Compare(encoded, hi) >= 0 {
+			t.Fatal("group copy range excludes member")
+		}
+		lo, hi, err = VShardRangeForGroup(group, k.VShard)
+		if err != nil || bytes.Compare(encoded, lo) < 0 || bytes.Compare(encoded, hi) >= 0 {
+			t.Fatal("resize range excludes member")
+		}
+		if err = ValidateFileRange(Manifest{Group: group, VShard: k.VShard, Partition: -1}, encoded, encoded); err != nil {
+			t.Fatal(err)
+		}
+		other := k
+		other.Group += "-other"
+		foreign, _ := Encode(other)
+		if bytes.Compare(foreign, lo) >= 0 && bytes.Compare(foreign, hi) < 0 {
+			t.Fatal("placement group aliases another group")
+		}
+		if err = ValidateFileRange(Manifest{Group: other.Group, VShard: k.VShard, Partition: -1}, encoded, encoded); err == nil {
+			t.Fatal("foreign group accepted")
+		}
+		m := Manifest{Group: group, VShard: k.VShard, Partition: -1}
+		a, _ := m.Digest()
+		m.Group = other.Group
+		b, _ := m.Digest()
+		if a == b {
+			t.Fatal("placement omitted from inventory digest")
+		}
+		for n := 0; n < len(encoded); n++ {
+			if _, err = Decode(encoded[:n]); err == nil {
+				t.Fatalf("truncated placement key%d accepted", n)
+			}
+		}
+	}
+	if _, err := AssignGroup("infra.x", []PlacementRule{{"infra", "a"}, {"infra", "b"}}); err == nil {
+		t.Fatal("ambiguous assignment accepted")
+	}
+	if _, err := AssignGroup(";x=y", nil); err == nil {
+		t.Fatal("empty base accepted")
+	}
+}
