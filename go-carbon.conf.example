@@ -93,8 +93,10 @@ store-native-combine-memory = 2147483648
 # throughput at the cost of slower debt reduction.
 store-compaction-workers = 0
 # Store-wide uncached SST block loads, shared by reads, writeout and compaction.
-# 0 keeps 16; range 0..1024. Reloadable; lowering lets active loads finish.
-# Increase only when profiles show admission waits and the device has headroom.
+# 0 uses GOMAXPROCS, clamped to 16..256; explicit values 1..1024 override it.
+# Slots cover disk reads, checksum, decompression and cache insertion.
+# SIGHUP recomputes the default; lowering lets active loads finish.
+# Tune using pebble_block_load_capacity/pebble_block_loads_in_progress and memory.
 store-block-load-concurrency = 0
 # Foreground store reads (render, metadata, digest and history fetch) share this
 # budget. 0 uses 4 * GOMAXPROCS, bounded to 32..1024; range 0..1024.

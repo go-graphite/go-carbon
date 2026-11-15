@@ -248,6 +248,25 @@ func (b unresolvedWindowBackend) WindowPresence(ctx context.Context, source stri
 	return got, err
 }
 
+// Cancel only after the healthy group has committed and the pending-only
+// second retry starts, after pending evidence is rebuilt. Discovery and durable copying have no wall-clock deadline.
+type cancelUnresolvedWindowBackend struct {
+	unresolvedWindowBackend
+	cancel       context.CancelCauseFunc
+	pendingCalls int
+}
+
+func (b *cancelUnresolvedWindowBackend) WindowPresence(ctx context.Context, source string, names []string, w syncRange) (map[string][]syncDigest, error) {
+	if len(names) == 1 && names[0] == "pending" {
+		b.pendingCalls++
+		if b.pendingCalls == 2 {
+			b.cancel(context.DeadlineExceeded)
+			return nil, ctx.Err()
+		}
+	}
+	return b.unresolvedWindowBackend.WindowPresence(ctx, source, names, w)
+}
+
 func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
 	f := newFakeSync()
 	w := syncRange{Name: "gap", From: syncTestNow - 600, Until: syncTestNow - 120}
@@ -257,13 +276,15 @@ func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
 	}
 	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), batch: 2, streams: 1, maxRounds: 1, windows: syncRanges{w}, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
 	for range 2 {
-		if err := runSync(context.Background(), o, unresolvedWindowBackend{f}); !errors.Is(err, ErrSyncResidual) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		if err := runSync(ctx, o, &cancelUnresolvedWindowBackend{unresolvedWindowBackend: unresolvedWindowBackend{f}, cancel: cancel}); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal("unresolved coverage reported success", err)
 		}
 		if f.store(syncT).points["healthy"][60][w.From] != 42 {
 			t.Fatal("healthy peer was not copied")
 		}
-		data, err := os.ReadFile(filepath.Join(o.state, "residual.json"))
+		data, err := os.ReadFile(filepath.Join(o.state, "pending-selections.json"))
 		if err != nil || !bytes.Contains(data, []byte("source window selection unresolved")) {
 			t.Fatal("selection residual lost on resume", string(data), err)
 		}

@@ -40,12 +40,12 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 	p.observeStoreWait(0, true)
 	p.storeWaitStarted = time.Now().Add(-time.Second)
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
-		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true})
+		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true, Quarantined: 2, PolicySkipped: 1})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 20
+		count := 27
 		if index == 0 {
 			count++
 		}
@@ -60,6 +60,9 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("missing Graphite sample")
 			}
+		}
+		if got[p.prefix+".quarantined"] != "2" || got[p.prefix+".policy_skipped"] != "1" {
+			t.Fatal("missing issue counts", got)
 		}
 		if got[p.prefix+".store_retries"] != "2" || got[p.prefix+".waiting_for_store"] != "1" || got[p.prefix+".store_wait_seconds"] == "0" {
 			t.Fatal("missing restart metrics", got)
@@ -79,16 +82,26 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 	if p.storeWaiting != 0 || p.storeWaitSeconds < 1 {
 		t.Fatal("wait duration lost", p.storeWaitSeconds)
 	}
-	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 20; i++ {
+	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete", RepairFailedNames: 7})
+	for i := 0; i < 27; i++ {
 		select {
 		case line := <-lines:
+			if strings.Contains(line, ".repair_failed_names ") && !strings.Contains(line, ".repair_failed_names 7 ") {
+				t.Fatal(line)
+			}
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {
 				t.Fatal(line)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("missing final sample")
 		}
+	}
+	p.observe("state/progress.json", progressSnapshot{Phase: "ready", Status: "running"})
+	if p.quarantined != 2 || p.policySkipped != 1 {
+		t.Fatal("parent finalization erased issue counts")
+	}
+	if p.repairFailedNames != 7 {
+		t.Fatal("parent finalization erased repair failure metric")
 	}
 }
 
@@ -398,9 +411,36 @@ func TestProgressMetricsReadyObserved(t *testing.T) {
 }
 
 func TestProgressVersion(t *testing.T) {
-	for input, want := range map[string]string{"abcdef0123456789": "abcdef012345", "abcdef0123456789-dirty": "abcdef012345-dirty", "unknown": "unknown", "devel-dirty": "unknown-dirty", "bad.path": "unknown"} {
-		if got := progressVersion(input); got != want {
-			t.Fatalf("%q: %s != %s", input, got, want)
-		}
+	const sha = "abcdef0123456789abcdef0123456789abcdef01"
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"bare short", "abcdef012345", "abcdef012345"},
+		{"bare full", sha, "abcdef012345"},
+		{"bare dirty", sha + "-dirty", "abcdef012345-dirty"},
+		{"staging", "staging-build-" + sha, "abcdef012345"},
+		{"staging suffix", "staging-build-" + sha + "-release", "abcdef012345"},
+		{"staging dirty", "staging-build-" + sha + "-dirty", "abcdef012345-dirty"},
+		{"staging suffix dirty", "staging-build-" + sha + "-release-dirty", "abcdef012345-dirty"},
+		{"git describe", "v0.19.1-42-g" + sha, "abcdef012345"},
+		{"git describe short", "v0.19.1-42-gabcdef012345", "abcdef012345"},
+		{"git describe dirty", "v0.19.1-42-g" + sha + "-dirty", "abcdef012345-dirty"},
+		{"uppercase", "staging-build-ABCDEF0123456789", "abcdef012345"},
+		{"uppercase dirty", "ABCDEF0123456789-DIRTY", "abcdef012345-dirty"},
+		{"unsafe surrounding text", "some.path/" + sha + "\nother metric", "abcdef012345"},
+		{"empty", "", "unknown"},
+		{"unknown", "unknown", "unknown"},
+		{"development dirty", "devel-dirty", "unknown-dirty"},
+		{"too short", "staging-build-abcdef01234", "unknown"},
+		{"non hex", "staging-build-abcdef01234z", "unknown"},
+		{"discontinuous hex", "abcdef.012345", "unknown"},
+		{"tag only", "v0.19.1", "unknown"},
+		{"unsafe without sha", "bad.path\nother metric", "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := progressVersion(tc.input); got != tc.want {
+				t.Fatalf("progressVersion(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }

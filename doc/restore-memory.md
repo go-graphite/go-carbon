@@ -13,19 +13,21 @@ even if the total cache budget is large. Many readers can therefore hold private
 copies of the same index, without increasing the block-cache size metric or the
 Go heap profile.
 
-The chunk store admits at most 32 foreground Fetch/Metadata calls together.
+The chunk store bounds foreground Fetch/Metadata calls with
+`store-read-concurrency` (automatic: 4 × GOMAXPROCS, clamped to 32..1024).
 Metadata prewarm keeps its existing bounded worker pool. Admission precedes
 opening the foreground read view;
 release follows iterator/value-handle and view closure. Waiting callers can
 cancel without allocating Pebble buffers. Pebble's existing `LoadBlockSema`
-additionally limits concurrent block loads to 16 across foreground and background
-work. The view limit matters because limiting block loads alone does not bound
+additionally limits concurrent block loads to GOMAXPROCS (clamped to 16..256)
+across foreground and background work. The view limit matters because limiting block loads alone does not bound
 blocks already pinned by iterators waiting for their next block.
 
 This bounds the foreground multiplier, not an individual SST block's size:
 resident native memory still includes the configured cache and memtables,
-bounded background workers, and the blocks held by 32 active foreground
-operations. A lookup may visit multiple tables/levels. The change uses Pebble's
+bounded background workers, and the blocks held by admitted foreground
+operations. The memory regression test uses explicit budgets of 32 foreground
+reads and 16 block loads. A lookup may visit multiple tables/levels. The change uses Pebble's
 public options and adds no vendored patch or on-disk format change. Heavy cold
 fan-out queues at the store, so latency under overload can increase.
 

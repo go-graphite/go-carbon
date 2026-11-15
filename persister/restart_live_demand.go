@@ -8,6 +8,7 @@ import (
 )
 
 // restartLiveDemand separates continuing input from the finite restored backlog.
+// Its sampling lifetime is independent of temporary restart CPU admission.
 // All observations use cumulative counters, independently of periodic Stat resets.
 type restartLiveDemand struct {
 	at                    time.Time
@@ -55,9 +56,6 @@ func (p *Whisper) restartLiveRate() float64 {
 // Caller holds autoUpdate.mu. The same demand drives token and CPU-floor
 // admission, so CPU headroom cannot leave live input waiting on a lower ticker.
 func (p *Whisper) sampleRestartLiveDemandLocked(now time.Time, s cache.WriteoutState) {
-	if p.restartBudget == nil || !p.restartBudget.Active() {
-		return
-	}
 	shared, original := p.WriteStats()
 	rate := p.autoUpdate.liveDemand.step(now, s, shared.Points+original.Points, shared.Updates+original.Updates)
 	p.autoUpdate.liveRate.Store(math.Float64bits(rate))

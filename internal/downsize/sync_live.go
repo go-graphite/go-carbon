@@ -238,6 +238,14 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 	}
 }
 
+// EmptyTarget proves global emptiness with a single native catalogue key. It
+// never walks the catalogue or reads history. Backends without this bounded
+// capability retain the explicit-name metadata path.
+func (b *syncLiveBackend) EmptyTarget(ctx context.Context, store string) (bool, error) {
+	page, err := b.List(ctx, store, "", "", 1)
+	return len(page) == 0, err
+}
+
 func (b *syncLiveBackend) List(ctx context.Context, store, prefix, after string, limit int) ([]string, error) {
 	if learned := b.listLimit.Load(); learned > 0 {
 		limit = min(limit, int(learned))
@@ -320,6 +328,39 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 		if r.Found {
 			out[r.Name] = r.Archives
 		}
+	}
+	return out, nil
+}
+
+// Proofs returns metadata-only mutation fences, including explicit absence.
+// Empty tokens mean unknown ownership. Old endpoints cannot authorize reuse.
+func (b *syncLiveBackend) Proofs(ctx context.Context, store string, names []string) ([]string, error) {
+	request := struct {
+		Names []string
+		Mode  string
+	}{names, "proof-v1"}
+	var reply []struct{ Name, Mode, Proof string }
+	err := b.wait(ctx, "proof", store, func() error {
+		reply = nil
+		_, err := b.m.requestOnce(ctx, store, "/v1/transfer/digest", request, &reply)
+		return err
+	})
+	var api *apiError
+	if errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusMethodNotAllowed || api.Status == http.StatusBadRequest) {
+		return nil, errSyncNoProof
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) != len(names) {
+		return nil, errSyncNoProof
+	}
+	out := make([]string, len(names))
+	for i, r := range reply {
+		if r.Mode != "proof-v1" || r.Name != names[i] {
+			return nil, errSyncNoProof
+		}
+		out[i] = r.Proof
 	}
 	return out, nil
 }
