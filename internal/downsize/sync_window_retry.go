@@ -48,7 +48,10 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			return err
 		}
 		if s.windowRetryCopyError != nil {
-			return s.windowRetryCopyError
+			if s.o.issues == nil {
+				return s.windowRetryCopyError
+			}
+			return s.quarantineResiduals("window retry")
 		}
 		pending := 0
 		for _, r := range s.sum.residual {
@@ -75,7 +78,10 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			}
 			sort.Strings(frontier)
 			event("sync_window_selection_stalled", map[string]any{"pending_selections": pending, "frontier": frontier, "reason": syncWindowSelectionReason})
-			return fmt.Errorf("%w: window selection made no progress for %s: %s: %v", ErrSyncResidual, syncWindowSelectionStall, syncWindowSelectionReason, frontier)
+			if s.o.issues == nil {
+				return fmt.Errorf("%w: window selection made no progress for %s: %s: %v", ErrSyncResidual, syncWindowSelectionStall, syncWindowSelectionReason, frontier)
+			}
+			return s.quarantineResiduals("window retry")
 		}
 		event("sync_window_selection_wait", map[string]any{"pending_selections": pending, "retry_seconds": delay.Seconds()})
 		if err := sleepContext(ctx, delay); err != nil {
@@ -105,7 +111,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	for _, r := range rows {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		for _, skip := range r.Skipped {
-			if !resolved[k][skip.Name] {
+			if !resolved[k][skip.Name] && !s.o.issues.excluded(skip.Name) {
 				total++
 			}
 		}
@@ -120,7 +126,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		var names []string
 		seen := map[string]bool{}
 		for _, skip := range r.Skipped {
-			if !resolved[k][skip.Name] && !seen[skip.Name] {
+			if !resolved[k][skip.Name] && !s.o.issues.excluded(skip.Name) && !seen[skip.Name] {
 				seen[skip.Name] = true
 				names = append(names, skip.Name)
 			}
@@ -330,7 +336,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		for _, skip := range r.Skipped {
 			key := syncKey{skip.Name, r.Source}
-			if !resolved[k][skip.Name] && !pendingSeen[key] {
+			if !resolved[k][skip.Name] && !s.o.issues.excluded(skip.Name) && !pendingSeen[key] {
 				pendingSeen[key] = true
 				s.addResidual(syncHole{Name: skip.Name, Source: r.Source}, syncWindowSelectionReason)
 			}

@@ -242,6 +242,7 @@ type progressMetrics struct {
 	sendMu                                sync.Mutex
 	addr, prefix, phase                   string
 	active, done, total, rate             float64
+	quarantined, policySkipped            float64
 	repairFailedNames                     float64
 	freshDone                             float64
 	freshDoneAvailable                    float64
@@ -290,6 +291,8 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 		}
 	}
 	p.repairFailedNames = max(p.repairFailedNames, float64(snapshot.RepairFailedNames))
+	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
+	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
 	p.snapshot = snapshot
 	oldPhase, oldRound := p.phase, p.round
 	p.phase = metricToken(snapshot.Phase)
@@ -326,6 +329,7 @@ func (p *progressMetrics) send() {
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
 	repairFailedNames := p.repairFailedNames
+	quarantined, policySkipped := p.quarantined, p.policySkipped
 	at := time.Now()
 	eta := p.eta(at)
 	ready := p.ready.estimate(at, p.path, p.snapshot)
@@ -353,7 +357,7 @@ func (p *progressMetrics) send() {
 	for _, v := range []struct {
 		name  string
 		value float64
-	}{{"repair_failed_names", repairFailedNames}, {"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"eta_ready_seconds", ready.seconds}, {"eta_ready_known_seconds", ready.known}, {"eta_ready_unknown_parts", float64(ready.unknown)}, {"phases_left", float64(ready.phases)}, {"active", active}, {"heartbeat", float64(now)}} {
+	}{{"quarantined", quarantined}, {"policy_skipped", policySkipped}, {"repair_failed_names", repairFailedNames}, {"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"eta_ready_seconds", ready.seconds}, {"eta_ready_known_seconds", ready.known}, {"eta_ready_unknown_parts", float64(ready.unknown)}, {"phases_left", float64(ready.phases)}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
 	}
 	if p.version != "" {

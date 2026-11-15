@@ -85,6 +85,7 @@ type syncBackend interface {
 }
 
 type syncOptions struct {
+	issues           *syncIssues
 	noCopy, noVerify bool
 	restartWindow    bool // known restart: prior history is already proven
 	verifyStreams    int
@@ -356,6 +357,13 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	if err := os.MkdirAll(o.state, 0o755); err != nil {
 		return err
 	}
+	if o.issues == nil {
+		var err error
+		o.issues, err = openSyncIssues(o.state)
+		if err != nil {
+			return err
+		}
+	}
 	identity, err := syncIdentity(o)
 	if err != nil {
 		return err
@@ -409,6 +417,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		if live, ok := s.b.(*syncLiveBackend); ok {
 			snap.WaitingForStore = live.waiting.Load() > 0
 		}
+		snap.Quarantined, snap.PolicySkipped = o.issues.counts()
 		snap.Effective = o.policy
 		return snap
 	}, cancelFile)
@@ -417,8 +426,17 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		err = cause
 	}
 	stopProgress()
+	if err == nil && !o.noCopy {
+		err = s.quarantineResiduals("verify")
+	}
+	j.mu.Lock()
+	j.progress.Quarantined, j.progress.PolicySkipped = o.issues.counts()
+	j.mu.Unlock()
 	progressErr := err
-	if progressErr == nil && len(s.sum.residual) > 0 {
+	if n, _ := o.issues.counts(); progressErr == nil && n > 0 {
+		progressErr = ErrSyncQuarantined
+	}
+	if err == nil && len(s.sum.residual) > 0 {
 		failedNames := s.reportRepairFailures()
 		j.mu.Lock()
 		j.progress.RepairFailedNames = int64(failedNames)
@@ -440,7 +458,14 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		return err
 	}
 	if s.sum.Residual > 0 {
-		return fmt.Errorf("%w: %d residual (names or holes), see sync_done", ErrSyncResidual, s.sum.Residual)
+		verdict := ErrSyncResidual
+		if n, _ := o.issues.counts(); n > 0 {
+			verdict = ErrSyncQuarantined
+		}
+		return fmt.Errorf("%w: %d residual (names or holes), see sync_done", verdict, s.sum.Residual)
+	}
+	if n, _ := o.issues.counts(); n > 0 {
+		return ErrSyncQuarantined
 	}
 	return nil
 }
@@ -603,14 +628,30 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	}
 	source := s.o.from[src]
 	original := append([]string(nil), names...)
-	excluded, err := s.expectedAbsent(ctx, names)
+	eligible := make([]string, 0, len(names))
+	for _, n := range names {
+		skip, e := s.excludePolicy(n, phase)
+		if e != nil {
+			return syncCopyResult{}, e
+		}
+		if !skip {
+			eligible = append(eligible, n)
+		}
+	}
+	excluded, err := s.expectedAbsent(ctx, eligible)
 	if err != nil {
 		return syncCopyResult{}, err
 	}
 	var resolved []syncSkip
 	var selected []string
 	for _, n := range names {
-		if excluded[n] {
+		skip, e := s.excludePolicy(n, phase)
+		if e != nil {
+			return syncCopyResult{}, e
+		}
+		if skip {
+			resolved = append(resolved, syncSkip{n, "quarantined_or_policy_skipped"})
+		} else if excluded[n] {
 			resolved = append(resolved, syncSkip{n, "expected_absent_target_expiration"})
 		} else {
 			selected = append(selected, n)
@@ -1034,6 +1075,14 @@ feed:
 				feedErr = err
 				break feed
 			}
+			skip, e := s.excludePolicy(name, "verify")
+			if e != nil {
+				feedErr = e
+				break feed
+			}
+			if skip {
+				continue
+			}
 			chunk.names = append(chunk.names, name)
 			if set.id != nil {
 				chunk.ids = append(chunk.ids, set.id())
@@ -1179,11 +1228,16 @@ func (s *syncer) summary(err error) {
 		"rounds": s.sum.Rounds, "residual": s.sum.Residual, "residual_names": s.sum.ResidualNames, "residual_points": points,
 		"pending_selections": pendingSelections, "residual_detail": residual, "forbidden_sources": forbidden, "phases": phases, "seconds": time.Since(s.started).Seconds(),
 	}
+	fields["quarantined"], fields["policy_skipped"] = s.o.issues.counts()
 	if err != nil {
 		fields["error"] = err.Error()
 	}
 	if err == nil && s.sum.Residual == 0 && pendingSelections == 0 {
 		fields["verdict"] = "COMPLETE"
+		if n, _ := s.o.issues.counts(); n > 0 {
+			fields["verdict"] = "COMPLETE_EXCEPT"
+			fields["level"] = "ERROR"
+		}
 	} else {
 		fields["verdict"] = "INCOMPLETE"
 		fields["level"] = "ERROR"

@@ -100,6 +100,8 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	Quarantined        int64                `json:"quarantined"`
+	PolicySkipped      int64                `json:"policy_skipped"`
 	RepairFailedNames  int64                `json:"repair_failed_names"`         // distinct names still missing after an accepted fill
 	NextVerifyNames    *int64               `json:"next_verify_names,omitempty"` // distinct names after this fill; nil until planned
 	WaitingForStore    bool                 `json:"waiting_for_store"`

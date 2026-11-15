@@ -430,6 +430,13 @@ func (s *syncer) readMissing() ([]syncMissing, error) {
 		if err != nil {
 			return nil, err
 		}
+		skip, e := s.excludePolicy(name, "missing")
+		if e != nil {
+			return nil, e
+		}
+		if skip {
+			continue
+		}
 		out = append(out, syncMissing{name, mask})
 	}
 	return out, scanner.Err()
@@ -768,7 +775,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		process := func(chunk []string, group int, prepared bool) error {
 			unfinished := false
 			for _, n := range chunk {
-				unfinished = unfinished || (!s.copied[n] && !short[n] && !s.failedCp[n])
+				unfinished = unfinished || (!s.copied[n] && !short[n] && !s.failedCp[n] && !s.o.issues.excluded(n))
 			}
 			if !unfinished {
 				return nil
@@ -792,7 +799,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			event("sync_prechecked", map[string]any{"source": source, "names": len(chunk), "keep": len(keep), "short": len(shortNames), "absent": len(absent), "group": group, "seconds": time.Since(checkedAt).Seconds(), "names_per_second": float64(len(chunk)) / time.Since(checkedAt).Seconds()})
 			allDone := true
 			for _, n := range keep {
-				allDone = allDone && (s.copied[n] || s.failedCp[n])
+				allDone = allDone && (s.copied[n] || s.failedCp[n] || s.o.issues.excluded(n))
 			}
 			completed := int64(len(s.copied) + len(short) + len(s.failedCp))
 			s.prog.advance(completed)
@@ -897,7 +904,7 @@ func (s *syncer) applyCopy(names, short []string, copied int, failed []string, f
 	}
 	newlyCopied := 0
 	for _, n := range names {
-		if !skip[n] && !s.copied[n] {
+		if !skip[n] && !s.copied[n] && !s.o.issues.excluded(n) {
 			s.copied[n] = true
 			newlyCopied++
 		}
