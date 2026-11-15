@@ -740,6 +740,14 @@ points, including observations repeated in later rounds. The rate counts newly
 checkpointed work per second since this invocation started. Journals remain
 the source of truth; the snapshot is for monitoring. No tokens enter these files.
 
+Copy progress events and the final summary separate `http_429s` across all
+peers from `target_429s` and `source_429s`. `target_429_reasons` counts observed
+`transfer_slots`, `storage_pressure`, and `unknown` responses. Each backpressure
+event includes its rejecting `host`, request `via_endpoint`, and `reason`.
+Recognized forwarded source-export rejections belong to the source; unrecognized
+responses remain unclassified. A later debt sample does not establish why an
+earlier request was rejected. Retry and admission behavior is unchanged.
+
 Resume verification with more parallel reads while keeping copy batch receipts stable:
 
 ```sh

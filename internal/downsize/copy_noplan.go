@@ -666,7 +666,8 @@ func (c *planFreeCopier) rowSource(source string) string {
 func (c *planFreeCopier) summary(err error, skippedFile string) {
 	seconds := time.Since(c.started).Seconds()
 	skipped := c.skippedCount()
-	fields := map[string]any{"discovered": c.stats.discovered.Load(), "resumed_skipped": c.stats.resumed.Load(), "not_owned": c.stats.notOwned.Load(), "copied": c.stats.copied.Load(), "skip_events": c.stats.failed.Load(), "skipped": skipped, "batches": c.stats.batches.Load(), "bytes": c.stats.bytes.Load(), "seconds": seconds, "retries": c.progress.retries.Load(), "target_429s": c.m.backpressure.Load()}
+	backpressure, target429 := c.m.backpressureSnapshot(c.o.to)
+	fields := map[string]any{"discovered": c.stats.discovered.Load(), "resumed_skipped": c.stats.resumed.Load(), "not_owned": c.stats.notOwned.Load(), "copied": c.stats.copied.Load(), "skip_events": c.stats.failed.Load(), "skipped": skipped, "batches": c.stats.batches.Load(), "bytes": c.stats.bytes.Load(), "seconds": seconds, "retries": c.progress.retries.Load(), "http_429s": backpressure, "target_429s": target429.total(), "source_429s": backpressure - target429.total(), "target_429_reasons": target429.reasons()}
 	if skippedFile != "" {
 		fields["skipped_file"] = skippedFile
 		c.skipMu.Lock()
