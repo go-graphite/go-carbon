@@ -59,10 +59,10 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete":
+		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
-			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete) may override it (use a new --state for a different run)", name)
+			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --timeout, --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete) may override it (use a new --state for a different run)", name)
 		}
 	}
 	// Repeated flags append, so clear their CLI/default values before restoring.

@@ -39,6 +39,7 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 	waiting := false
 	defer func() {
 		if waiting {
+			observeStoreWait(-1, false)
 			if w.progress != nil {
 				w.progress.restartWaiting.Add(-1)
 			}
@@ -88,7 +89,9 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 			event("copy_stalled", map[string]any{"level": "error", "path": path, "hosts": hosts, "attempts": attempt, "stuck_seconds": stuck.Seconds(), "stall_timeout": w.stallTimeout.String(), "error": err.Error()})
 			return fmt.Errorf("%w: %s: no progress for %s with every host up (--stall-timeout %s): %w", errCopyStall, path, stuck.Round(time.Second), w.stallTimeout, err)
 		}
+		delta := int64(0)
 		if !waiting && restartCopyError(err) {
+			delta = 1
 			waiting = true
 			if w.progress != nil {
 				w.progress.restartWaiting.Add(1)
@@ -97,10 +100,11 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 				w.observeWait(true)
 			}
 		}
+		observeStoreWait(delta, true)
 		w.logMu.Lock()
 		if time.Since(w.lastLog) >= time.Minute {
 			w.lastLog = time.Now()
-			event("guard_retry", map[string]any{"path": path, "attempt": attempt, "delay_seconds": delay.Seconds(), "host_down": down, "retry_seconds": time.Since(first).Seconds(), "error": err.Error()})
+			event("guard_retry", map[string]any{"level": "warn", "path": path, "attempt": attempt, "delay_seconds": delay.Seconds(), "host_down": down, "retry_seconds": time.Since(first).Seconds(), "error": err.Error()})
 		}
 		w.logMu.Unlock()
 		if attempt == 1 && restartCopyError(err) {
@@ -109,9 +113,7 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 		if err := sleepContext(ctx, delay/2+rand.N(delay/2+1)); err != nil {
 			return err
 		}
-		if !restartCopyError(err) {
-			delay = min(2*delay, w.maxBackoff)
-		}
+		delay = min(2*delay, w.maxBackoff)
 	}
 }
 
@@ -138,6 +140,9 @@ func transientCopyError(err error) bool {
 		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusRequestTimeout:
 			return true
 		case http.StatusInternalServerError:
+			if nativeSourceUnavailable(api.Message) {
+				return true
+			}
 			// Native readiness takes the application lifecycle lock. Other
 			// concurrent imports can hold it briefly without a host restart.
 			if strings.HasSuffix(strings.TrimSpace(api.Message), "HTTP 500 application lifecycle is busy; retry native copy") {
@@ -222,6 +227,9 @@ func restartCopyError(err error) bool {
 			return true
 		}
 		if api.Status == 500 || api.Status == 410 {
+			if api.Status == 500 && nativeSourceUnavailable(api.Message) {
+				return true
+			}
 			msg := strings.ToLower(api.Message)
 			for _, cause := range restartCause {
 				if strings.Contains(msg, strings.ToLower(cause)) {
@@ -237,4 +245,16 @@ func restartCopyError(err error) bool {
 	}
 	var ne net.Error
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.As(err, &ne)
+}
+
+// Native pull forwards source export errors as target HTTP 500. Match the
+// protocol envelope, never arbitrary status digits in a storage error.
+func nativeSourceUnavailable(message string) bool {
+	message = strings.ToLower(message)
+	for _, status := range []string{"502", "503", "504"} {
+		if strings.Contains(message, "native source export http"+status+":") {
+			return true
+		}
+	}
+	return false
 }

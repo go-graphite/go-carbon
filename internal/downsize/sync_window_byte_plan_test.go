@@ -1,18 +1,19 @@
 package downsize
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/cockroachdb/pebble/vfs"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestSyncWindowNameBytesPlanDifferentialResume(t *testing.T) {
@@ -83,9 +84,23 @@ func TestSyncWindowNameBytesPlanDifferentialResume(t *testing.T) {
 	}
 }
 
-func TestSyncWindowConflictReceiptKeepsNamedResidual(t *testing.T) {
+func TestSyncWindowFutureSlotRecoveredOnResume(t *testing.T) {
 	ctx := context.Background()
-	source, target := nativeControllerStore(t), nativeControllerStore(t)
+	// Keep future-slot classification independent of the rest of the suite's
+	// runtime: its seeded package timestamp may be many minutes old by now.
+	open := func() *store.Store {
+		s, err := store.Open("/db", store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(testMetricNow, 0) }}.WithFS(vfs.NewMem()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := s.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		return s
+	}
+	source, target := open(), open()
 	names := []string{"a.healthy", "b.conflict", "c.healthy"}
 	from := testMetricNow - 20
 	for _, name := range names {
@@ -115,32 +130,24 @@ func TestSyncWindowConflictReceiptKeepsNamedResidual(t *testing.T) {
 	stop := b.beginWindowCopy()
 	defer stop()
 	state := filepath.Join(t.TempDir(), "copy")
+	// A future owner of the same circular slot cannot hide retained history.
+	// The server already reclaims that slot; the client must credit the receipt
+	// and leave no residual or repeated pull when the same journal is resumed.
 	for range 2 {
 		result, err := b.CopyWindow(ctx, donor.URL, receiver.URL, names, state, syncRanges{{From: from, Until: from + 10}})
-		if err != nil || result.Copied != 2 || len(result.Failed) != 1 || result.Failed[0] != names[1] {
+		if err != nil || result.Copied != len(names) || len(result.Failed) != 0 {
 			t.Fatal(result, err)
 		}
-	}
-	// The unresolved ordinal can be recovered through the same receipt; it never
-	// triggers recursive range splitting or becomes a copied name on resume.
-	if pulls.Load() != 2 {
-		t.Fatal("recursive or per-name pulls", pulls.Load())
-	}
-	files, err := filepath.Glob(state + ".window-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	retained := false
-	for _, path := range files {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			continue
+		got, err := target.Snapshot(ctx, names[1])
+		if err != nil || len(got.Archives) != 1 || len(got.Archives[0].Points) != 1 {
+			t.Fatal(got, err)
 		}
-		if bytes.Contains(raw, []byte("window combine conflict")) && bytes.Contains(raw, []byte(names[1])) {
-			retained = true
+		point := got.Archives[0].Points[0]
+		if point.Timestamp != from || math.Float64bits(point.Value) != math.Float64bits(math.Copysign(0, -1)) {
+			t.Fatal("retained point was not restored bit-exactly", point)
 		}
 	}
-	if !retained {
-		t.Fatal("missing named durable residual")
+	if pulls.Load() != 1 {
+		t.Fatal("journal replay repeated the pull", pulls.Load())
 	}
 }

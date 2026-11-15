@@ -46,7 +46,7 @@ func TestSyncRestartWaitNeverExpiresAndRealErrorsFail(t *testing.T) {
 // Each operation must finish within one invocation and match an uninterrupted
 // run, including signed zero and existing target values.
 func TestSyncRestartWindowDifferential(t *testing.T) {
-	for _, stage := range []string{"capabilities", "source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin", "handover"} {
+	for _, stage := range []string{"capabilities", "source-pin", "selection-stream", "pull-before", "pull-lost-ack", "expired-pin", "handover", "source-export-503"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -59,6 +59,8 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 			addPoints(t, oracle, "b.existing", 42)
 			var injected atomic.Bool
 			var handedOver atomic.Bool
+			var copying atomic.Bool
+			var unavailable atomic.Int64
 			cut := func(w http.ResponseWriter) {
 				conn, _, err := w.(http.Hijacker).Hijack()
 				if err != nil {
@@ -82,6 +84,11 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/v1/native/export" {
+					if stage == "source-export-503" && copying.Load() && unavailable.Add(1) <= 3 {
+						injected.Store(true)
+						http.Error(w, "buckyd is stopping; retry after restart", 503)
+						return
+					}
 					if stage == "expired-pin" && injected.CompareAndSwap(false, true) {
 						http.Error(w, "native source session expired or daemon restarted", 410)
 						return
@@ -147,6 +154,7 @@ func TestSyncRestartWindowDifferential(t *testing.T) {
 				replaceStoreServer(t, dst, nativeControllerService(t, target))
 				injected.Store(true)
 			}
+			copying.Store(true)
 			journal := filepath.Join(t.TempDir(), "copy")
 			if res, err := b.CopyWindow(ctx, donor.URL, dst.URL, names, journal, windows); err != nil || res.Copied != len(names) {
 				t.Fatal(res, err)

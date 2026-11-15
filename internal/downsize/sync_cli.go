@@ -47,6 +47,7 @@ type syncCommand struct {
 	config        savedSyncConfig
 	jwtSecret     string
 	rate          int64
+	timeout       time.Duration
 }
 
 func parseSyncCommand(args []string) (syncCommand, error) {
@@ -58,8 +59,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
+	flags.DurationVar(&c.timeout, "timeout", 0, "overall sync deadline including store restart waits; 0 waits without limit")
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
-	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only streams, rate and READY inputs may override it")
+	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only timeout, streams, rate and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
 	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")
@@ -95,6 +97,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.Visit(func(f *flag.Flag) { c.explicit[f.Name] = true })
 	if err := c.restoreConfig(flags, *resume); err != nil {
 		return c, err
+	}
+	if c.timeout < 0 {
+		return c, errors.New("--timeout must be nonnegative")
 	}
 	if *noFullHistory {
 		c.sync.fullHistory = false
@@ -224,6 +229,11 @@ func SyncMain(ctx context.Context, args []string) error {
 	c, err := parseSyncCommand(args)
 	if err != nil {
 		return err
+	}
+	if c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
 	}
 	if c.explicit["sample-every"] && (len(c.sync.windows) == 0 || !c.sync.fullHistory) {
 		event("inactive_flag", map[string]any{"level": "warn", "flag": "--sample-every", "reason": "active only with --window --full-history; every name is verified in the selected scope"})

@@ -173,6 +173,7 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 	defer func() {
 		if waiting {
 			b.waiting.Add(-1)
+			observeStoreWait(-1, false)
 		}
 	}()
 	var since time.Time
@@ -214,14 +215,17 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 			b.expireWindowPins()
 		}
 		b.waits.Add(1)
+		delta := int64(0)
 		if !waiting {
 			waiting = true
 			b.waiting.Add(1)
+			delta = 1
 		}
+		observeStoreWait(delta, true)
 		b.waitLogMu.Lock()
 		if time.Since(b.waitLog) >= time.Minute {
 			b.waitLog = time.Now()
-			event("sync_host_wait", map[string]any{"state": "waiting for store", "what": what, "store": store, "attempt": attempt, "delay_seconds": delay.Seconds(), "error": err.Error()})
+			event("sync_host_wait", map[string]any{"level": "warn", "waiting_seconds": time.Since(since).Seconds(), "state": "waiting for store", "what": what, "store": store, "attempt": attempt, "delay_seconds": delay.Seconds(), "error": err.Error()})
 		}
 		b.waitLogMu.Unlock()
 		if attempt == 1 && restartCopyError(err) {
@@ -230,9 +234,7 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 		if err := sleepContext(ctx, delay/2+rand.N(delay/2+1)); err != nil {
 			return err
 		}
-		if !restartCopyError(err) {
-			delay = min(2*delay, 30*time.Second)
-		}
+		delay = min(2*delay, 30*time.Second)
 	}
 }
 
