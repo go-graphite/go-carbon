@@ -279,3 +279,17 @@ is a journal-only startup probe: set `PARTLOG_ADMISSION_BENCH_ROOT`,
 `PARTLOG_BENCH_PRODUCERS` and `PARTLOG_BENCH_EXEC_UNIX_NS`. It deliberately holds
 historical validation until a successful append. This probe does not establish
 production listener latency, downstream visibility or sustained replay speed.
+
+### Isolating journal replay stages
+
+The log backlog harness also accepts `PARTLOG_BENCH_PHASE=read` (framed
+read and CRC validation) and `decode` (the same work plus numeric-row decode).
+Run these against a freshly generated journal before adding concurrent live
+records, with the same producer count and expected point total. They reject
+incomplete coverage. Their `read_MB_per_second` counts payload bytes and excludes
+open/recovery and final close; these are stage ceilings, not storage throughput.
+`PARTLOG_BENCH_READAHEAD` selects the per-stream read buffer in bytes (default
+4MiB, maximum32MiB); each stream overlaps one sequential read with consumption.
+The replay-live settled rate includes journal open, historical replay, accepted
+live suffix draining, compaction waiting and final flush/close. Compaction debt
+is sampled immediately before close, while the databases remain open.

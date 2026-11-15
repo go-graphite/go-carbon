@@ -58,6 +58,14 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 		emit("log_recovery_scan_complete", 0, map[string]any{"error": fmt.Sprint(e)})
 		return e
 	}
+	if phase == "read" || phase == "decode" {
+		journal, err := partlog.Open(filepath.Join(root, "log"), opts)
+		if err != nil {
+			return err
+		}
+		emit("log_recovery_scan_complete", 0, nil)
+		return logReadBenchmark(journal, phase, total, producers, emit)
+	}
 	if phase == "write" {
 		offset := uint64(0)
 		if raw := os.Getenv("PARTLOG_BENCH_OFFSET"); raw != "" {
@@ -320,13 +328,17 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	sample := coreSample(l.engine, "settled", start, total+live.Load())
 	sample["settled"] = settled
 	sample["live_accepted"] = live.Load()
-	sample["settled_replay_seconds"] = time.Since(replayStart).Seconds()
-	sample["settled_replay_mpoints_per_second"] = float64(total) / time.Since(replayStart).Seconds() / 1e6
-	emit("replay_live_settle", total+live.Load(), sample)
+	sample["preclose_seconds"] = time.Since(replayStart).Seconds()
 	if !settled {
 		err = errors.Join(err, errors.New("compaction did not settle"))
 	}
 	err = errors.Join(err, l.close())
+	// Include final owner flushes, database close and journal sync in the rate.
+	// The debt sample is taken while the databases are still open.
+	sample["settled_replay_seconds"] = time.Since(replayStart).Seconds()
+	sample["settled_replay_mpoints_per_second"] = float64(total) / time.Since(replayStart).Seconds() / 1e6
+	sample["error"] = fmt.Sprint(err)
+	emit("replay_live_settle", total+live.Load(), sample)
 	// All accepted live rows and backlog rows must pass the same core path.
 	var committed uint64
 	for _, owner := range l.engine.owners {
@@ -463,4 +475,49 @@ func verifyLogBenchmark(root string, total, metrics uint64, producers, owners in
 	}
 	emit("full_persisted_oracle", count, map[string]any{"expected": want, "digests": digests, "error": fmt.Sprint(err)})
 	return err
+}
+
+// logReadBenchmark isolates framed read/CRC and optional numeric decode from
+// routing and storage. Open/recovery and final close are reported separately.
+// These are stage ceilings, never settled storage throughput claims.
+func logReadBenchmark(journal *partlog.Log, phase string, total uint64, producers int, emit func(string, uint64, map[string]any)) error {
+	start := time.Now()
+	done := make(chan error, producers)
+	var count, payloadBytes atomic.Uint64
+	for stream := range producers {
+		go func() {
+			var rows []row
+			err := journal.Replay(stream, 0, func(record partlog.Record) error {
+				if len(record.Payload) <= logEnvelopeBytes || (len(record.Payload)-logEnvelopeBytes)%recordBytes != 0 {
+					return errors.New("invalid numeric benchmark record")
+				}
+				if phase == "decode" {
+					var err error
+					rows, err = decodeLogRowsInto(rows, record.Payload)
+					if err != nil {
+						return err
+					}
+				}
+				count.Add(uint64((len(record.Payload) - logEnvelopeBytes) / recordBytes))
+				payloadBytes.Add(uint64(len(record.Payload)))
+				return nil
+			})
+			done <- err
+		}()
+	}
+	var err error
+	for range producers {
+		err = errors.Join(err, <-done)
+	}
+	seconds := time.Since(start).Seconds()
+	if count.Load() != total {
+		err = errors.Join(err, fmt.Errorf("read %d != expected %d", count.Load(), total))
+	}
+	emit("log_"+phase+"_complete", count.Load(), map[string]any{
+		"read_seconds": seconds, "payload_bytes": payloadBytes.Load(),
+		"read_MB_per_second":      float64(payloadBytes.Load()) / seconds / 1e6,
+		"read_mpoints_per_second": float64(count.Load()) / seconds / 1e6,
+		"error":                   fmt.Sprint(err),
+	})
+	return errors.Join(err, journal.Close())
 }
