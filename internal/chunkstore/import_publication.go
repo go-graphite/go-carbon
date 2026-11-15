@@ -26,17 +26,19 @@ type pendingMutation struct {
 // mutator checks reservations under the stripe before reading its target. Live
 // TryUpdateMany and UpdateBatch return ErrImportPending for imports and wait
 // without stripes for another ordinary update. No mutation overtakes publication.
-// The returned cleanup reacquires the original stripes and invokes unlock.
-func (s *Store) releaseImportStripes(names []string, held []bool, unlock func()) func() {
-	return s.releaseMutationStripes(names, held, unlock, false)
+// Cleanup finishes each stripe independently; unrelated names never wait for
+// the cache publication of a sibling stripe.
+func (s *Store) releaseImportStripes(names []string, held []bool) func() {
+	return s.releaseMutationStripes(names, held, false)
 }
 
-func (s *Store) releaseUpdateStripes(names []string, unlock func()) func() {
-	return s.releaseMutationStripes(names, nil, unlock, true)
+func (s *Store) releaseUpdateStripes(names []string) func() {
+	return s.releaseMutationStripes(names, nil, true)
 }
 
-func (s *Store) releaseMutationStripes(names []string, held []bool, unlock func(), update bool) func() {
+func (s *Store) releaseMutationStripes(names []string, held []bool, update bool) func() {
 	owned := make([]string, 0, len(names))
+	byStripe := make(map[uint64][]string)
 	done := make(chan struct{})
 	for i, name := range names {
 		if held != nil && !held[i] {
@@ -48,17 +50,21 @@ func (s *Store) releaseMutationStripes(names []string, held []bool, unlock func(
 		}
 		s.importPublishing[stripe][name] = pendingMutation{done: done, update: update}
 		owned = append(owned, name)
+		byStripe[stripe] = append(byStripe[stripe], name)
 	}
 	stripes := s.transferStripes(owned)
 	for i := len(stripes) - 1; i >= 0; i-- {
 		s.metricMu[stripes[i]].Unlock()
 	}
 	return func() {
-		lockset.Lock(s.metricMu[:], stripes)
-		for _, name := range owned {
-			delete(s.importPublishing[s.metricStripe(name)], name)
+		for _, stripe := range stripes {
+			s.metricMu[stripe].Lock()
+			for _, name := range byStripe[stripe] {
+				s.finishStateMutation(name)
+				delete(s.importPublishing[stripe], name)
+			}
+			s.metricMu[stripe].Unlock()
 		}
-		unlock()
 		close(done)
 	}
 }

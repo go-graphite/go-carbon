@@ -677,7 +677,7 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 		return err
 	}
 	held := uint64(time.Since(lockedBegan))
-	unlockNames = s.releaseImportStripes(names, nil, unlockNames)
+	unlockNames = s.releaseImportStripes(names, nil)
 	if s.transferCommitTestHook != nil {
 		s.transferCommitTestHook()
 	}

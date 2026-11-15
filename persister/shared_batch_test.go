@@ -13,6 +13,7 @@ import (
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"github.com/go-graphite/go-carbon/points"
 	whisper "github.com/go-graphite/go-whisper"
@@ -66,6 +67,7 @@ func TestSharedBatchWorkerCommitAndInputLog(t *testing.T) {
 			p.SetBacklogged(func() bool { return true })
 			p.SetStoreUpdateBatchSize(8)
 			p.SetWriteoutBatchReceiver(func() string { result := next; next = ""; return result })
+			beforeCalls := stagetime.Snapshot()[stagetime.Total].Calls
 			done := make(chan struct{})
 			go func() { p.worker(exit); close(done) }()
 			select {
@@ -114,6 +116,9 @@ func TestSharedBatchWorkerCommitAndInputLog(t *testing.T) {
 			case <-done:
 			case <-time.After(5 * time.Second):
 				t.Fatal("worker did not stop")
+			}
+			if calls := stagetime.Snapshot()[stagetime.Total].Calls - beforeCalls; calls != 1 {
+				t.Fatalf("one worker batch recorded %d total durations", calls)
 			}
 			if fail {
 				if c.LogLowWater() != initial {

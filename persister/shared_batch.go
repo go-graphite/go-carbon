@@ -78,6 +78,9 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		if len(values) == 0 {
 			return
 		}
+		// This worker spends the batch's wall time once, including retries and
+		// acknowledgement, regardless of how many metrics it contains.
+		defer func() { stagetime.ObserveUpdate(time.Since(start)) }()
 		var maintenance *store.ContinuationMaintenance
 		if settings.outOfOrder.enabled {
 			m := p.sharedMaintenance()
@@ -123,7 +126,6 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			if settings.tagsEnabled && settings.taggedFn != nil && strings.Contains(batch.Metric, ";") {
 				settings.taggedFn(batch.Metric, false)
 			}
-			stagetime.ObserveUpdate(time.Since(start))
 		}
 	}()
 	if fallback {

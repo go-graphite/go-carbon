@@ -98,8 +98,8 @@ func (s *Store) advanceMutationEpoch(stripe uint64) {
 	}
 }
 
-// lockedState returns name's latest committed state for a mutation holding its
-// stripe, with metadata the caller may modify, or nil.
+// lockedState returns name's latest committed state for a mutation owning its
+// stripe or exact-name reservation, with metadata the caller may modify, or nil.
 func (s *Store) lockedState(name string) (*metricState, Metadata) {
 	c := s.stateCache
 	if c == nil {
