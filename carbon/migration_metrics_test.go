@@ -564,3 +564,28 @@ func TestMigrationCollectorKeepsStoreMetricsWhileStateBusy(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrationCollectorKeepsBackendCountersWithoutStoreSnapshot(t *testing.T) {
+	// A store whose first telemetry sample is unavailable follows the same
+	// collector exit as a busy control lock. Its independent write counters
+	// must still be readable; absence must never look like a healthy zero.
+	app := &App{MetricStore: &store.Store{}, Persister: persister.NewWhisper(t.TempDir(), nil, nil, nil, nil, nil, nil)}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: app})
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range families {
+		if f.GetName() == "persister_pebble_write_failures_total" {
+			found = true
+			if f.Metric[0].GetCounter().GetValue() != 0 {
+				t.Fatal("fabricated failures")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("backend failures unavailable with optional store snapshot")
+	}
+}
