@@ -683,7 +683,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		return err
 	}
 	done := map[string]syncRow{}
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "copied" && r.Phase == "missing" }) {
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "copied" && !r.Forbidden && r.Phase == "missing" }) {
 		done[r.Source] = r
 	}
 	s.phase("copy")
@@ -713,7 +713,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		// Batch widths depend on the stream budget, which may change on resume.
 		// Recover old receipts by their sorted name bounds before making new waves.
 		for _, r := range s.j.find(func(r syncRow) bool {
-			return r.Kind == "copied" && r.Phase == "missing-batch" && r.Source == source
+			return r.Kind == "copied" && !r.Forbidden && r.Phase == "missing-batch" && r.Source == source
 		}) {
 			first := sort.SearchStrings(names, r.First)
 			last := sort.Search(len(names), func(i int) bool { return names[i] > r.Last })
