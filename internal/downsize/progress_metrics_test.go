@@ -35,13 +35,17 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		}
 	}()
 	p := &progressMetrics{addr: listener.Addr().String(), prefix: "tools.storectl.runner.run.sync", phase: "starting", active: 1}
+	p.version, p.lastSentVersion = "0123456789ab", "fedcba987654"
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
 		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running"})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 12
+		count := 13
+		if index == 0 {
+			count++
+		}
 		if index > 0 {
 			count += 2
 		}
@@ -54,13 +58,19 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 				t.Fatal("missing Graphite sample")
 			}
 		}
+		if got[p.prefix+".client.0123456789ab.active"] != "1" {
+			t.Fatal(got)
+		}
+		if index == 0 && got[p.prefix+".client.fedcba987654.active"] != "0" {
+			t.Fatal(got)
+		}
 		prefix := p.prefix + "." + metricToken(phase) + "."
 		if got[prefix+"done"] != "12" || got[prefix+"total"] != "20" || got[prefix+"names_per_second"] != "3.5" || got[prefix+"active"] != "1" {
 			t.Fatal(got)
 		}
 	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete"})
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 13; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".active ") && !strings.Contains(line, ".active 0 ") {
@@ -174,7 +184,7 @@ func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
 	defer func() { listener.Close(); <-stopped }()
 	invoke := func(args []string) map[string]bool {
 		t.Helper()
-		if err := MainWithMetrics(args); err != nil {
+		if err := MainWithMetrics(args, "0123456789abcdef"); err != nil {
 			t.Fatal(err)
 		}
 		// All synchronous sends precede this marker in the accept queue.
@@ -196,7 +206,7 @@ func TestProgressMetricsLegacyResumeKeepsIdentity(t *testing.T) {
 					t.Fatalf("unexpected series %q", line)
 				}
 				parts := strings.Split(fields[0], ".")
-				if len(parts) != 7 && len(parts) != 6 {
+				if len(parts) != 7 && len(parts) != 6 && len(parts) != 8 {
 					t.Fatalf("unexpected metric path %q", fields[0])
 				}
 				paths[strings.Join(parts[:5], ".")] = true
@@ -374,5 +384,13 @@ func TestProgressMetricsReadyObserved(t *testing.T) {
 	}
 	if code, _ := progressPhase(got); code != 5 {
 		t.Fatal(got)
+	}
+}
+
+func TestProgressVersion(t *testing.T) {
+	for input, want := range map[string]string{"abcdef0123456789": "abcdef012345", "abcdef0123456789-dirty": "abcdef012345-dirty", "unknown": "unknown", "devel-dirty": "unknown-dirty", "bad.path": "unknown"} {
+		if got := progressVersion(input); got != want {
+			t.Fatalf("%q: %s != %s", input, got, want)
+		}
 	}
 }

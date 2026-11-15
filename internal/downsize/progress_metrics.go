@@ -20,7 +20,7 @@ var progressObserver func(string, progressSnapshot)
 
 // MainWithMetrics exports controller progress through a local Graphite receiver.
 // Delivery is bounded and never changes the transfer result or retry policy.
-func MainWithMetrics(args []string) error {
+func MainWithMetrics(args []string, version string) error {
 	addr := os.Getenv("STORECTL_GRAPHITE_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:2003"
@@ -30,7 +30,13 @@ func MainWithMetrics(args []string) error {
 	if state == "" {
 		return Main(args)
 	}
-	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1}
+	p := &progressMetrics{addr: addr, prefix: prefix, phase: "starting", active: 1, version: progressVersion(version)}
+	if root, err := os.UserCacheDir(); err == nil {
+		p.versionFile = filepath.Join(root, "storectl", "metric-versions", fmt.Sprintf("%x", sha256.Sum256([]byte(prefix))))
+		if data, err := os.ReadFile(p.versionFile); err == nil {
+			p.lastSentVersion = progressVersion(string(data))
+		}
+	}
 	if args[0] == "sync" {
 		// A legacy FILE resumes copying before its adjacent FILE.sync state.
 		// Both are the same controller; nested batch journals are excluded.
@@ -215,15 +221,16 @@ func metricToken(s string) string {
 }
 
 type progressMetrics struct {
-	mu                        sync.Mutex
-	sendMu                    sync.Mutex
-	addr, prefix, phase       string
-	active, done, total, rate float64
-	path, lastSentPhase       string
-	paths                     map[string]bool
-	warned                    bool
-	code, round               int
-	samples                   []progressMetricSample
+	mu                                    sync.Mutex
+	sendMu                                sync.Mutex
+	addr, prefix, phase                   string
+	active, done, total, rate             float64
+	path, lastSentPhase                   string
+	paths                                 map[string]bool
+	warned                                bool
+	code, round                           int
+	samples                               []progressMetricSample
+	version, lastSentVersion, versionFile string
 }
 
 func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
@@ -295,6 +302,12 @@ func (p *progressMetrics) send() {
 	}{{"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
 	}
+	if p.version != "" {
+		if p.lastSentVersion != "" && p.lastSentVersion != p.version {
+			fmt.Fprintf(&b, "%s.client.%s.active 0 %d\n", p.prefix, p.lastSentVersion, now)
+		}
+		fmt.Fprintf(&b, "%s.client.%s.active %g %d\n", p.prefix, p.version, active, now)
+	}
 	conn, err := net.DialTimeout("tcp", p.addr, 500*time.Millisecond)
 	if err == nil {
 		_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
@@ -303,6 +316,18 @@ func (p *progressMetrics) send() {
 	}
 	if err == nil {
 		p.lastSentPhase = phase
+		if p.version != "" && p.lastSentVersion != p.version {
+			p.lastSentVersion = p.version
+			if p.versionFile != "" {
+				if os.MkdirAll(filepath.Dir(p.versionFile), 0700) == nil {
+					// One controller owns each run; atomically preserve its last revision.
+					temp := p.versionFile + ".tmp"
+					if os.WriteFile(temp, []byte(p.version), 0600) == nil {
+						_ = os.Rename(temp, p.versionFile)
+					}
+				}
+			}
+		}
 	}
 	if err != nil && !p.warned {
 		p.warned = true
@@ -377,4 +402,20 @@ func (p *progressMetrics) eta(now time.Time) float64 {
 		return -1
 	}
 	return eta
+}
+
+// Public build revisions are bounded, safe Graphite path components.
+func progressVersion(version string) string {
+	dirty := strings.HasSuffix(version, "-dirty")
+	version = strings.TrimSuffix(strings.ToLower(version), "-dirty")
+	if len(version) > 12 {
+		version = version[:12]
+	}
+	if len(version) != 12 || strings.Trim(version, "0123456789abcdef") != "" {
+		version = "unknown"
+	}
+	if dirty {
+		version += "-dirty"
+	}
+	return version
 }
