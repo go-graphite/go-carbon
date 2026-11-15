@@ -51,10 +51,11 @@ func PolicyDigest(c Config) ([32]byte, error) {
 // batches at or below prior.Order must be removed by the input-log owner before
 // calling; accepting them here could apply an old correction twice.
 func Plan(c Config, prior Frontier, view View, batches []Batch) (SealPlan, error) {
-	p, err := Prepare(c)
+	policy, err := PolicyDigest(c)
 	if err != nil {
 		return SealPlan{}, err
 	}
+	p := Prepared{config: c, policy: policy}
 	return p.Plan(prior, view, nil, batches)
 }
 

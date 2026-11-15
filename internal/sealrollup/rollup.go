@@ -106,10 +106,52 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 // Workspace is reusable scratch for one serial owner. No returned SealPlan
 // aliases it. Keep independent workspaces for concurrent planning calls.
 type Workspace struct {
-	overlay                    map[key]Delta
+	positions                  map[key]int
+	updates                    []Delta
 	points, current, neighbors []Sample
 	changed                    []int64
-	deltas                     []Delta
+}
+
+func (w *Workspace) lookup(k key) (Delta, bool) {
+	if len(w.updates) <= 8 {
+		for _, d := range w.updates {
+			if d.Archive == k.archive && d.Slot == k.slot {
+				return d, true
+			}
+		}
+		return Delta{}, false
+	}
+	i, ok := w.positions[k]
+	if !ok {
+		return Delta{}, false
+	}
+	return w.updates[i], true
+}
+func (w *Workspace) replace(k key, d Delta) {
+	if len(w.updates) <= 8 {
+		for i, old := range w.updates {
+			if old.Archive == k.archive && old.Slot == k.slot {
+				w.updates[i] = d
+				return
+			}
+		}
+	} else if i, ok := w.positions[k]; ok {
+		w.updates[i] = d
+		return
+	}
+	w.updates = append(w.updates, d)
+	if len(w.updates) == 9 {
+		if w.positions == nil {
+			w.positions = make(map[key]int)
+		} else {
+			clear(w.positions)
+		}
+		for i, d := range w.updates {
+			w.positions[key{d.Archive, d.Slot}] = i
+		}
+	} else if len(w.updates) > 9 {
+		w.positions[k] = len(w.updates) - 1
+	}
 }
 
 func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Delta, error) {
@@ -129,15 +171,10 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 			}
 		}
 	}
-	if w.overlay == nil {
-		w.overlay = make(map[key]Delta)
-	} else {
-		clear(w.overlay)
-	}
-	overlay := w.overlay
+	w.updates = w.updates[:0]
 	get := func(a int, t int64) (Sample, bool) {
 		k := key{a, slot(t, c.Archives[a])}
-		if d, ok := overlay[k]; ok {
+		if d, ok := w.lookup(k); ok {
 			return d.Sample, d.Sample.Time == t
 		}
 		if view == nil {
@@ -172,7 +209,7 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 		set := func(a int, t int64, bits uint64) {
 			p := Sample{Time: t, Bits: bits, Sequence: b.Order}
 			k := key{a, slot(t, c.Archives[a])}
-			overlay[k] = Delta{a, k.slot, b.Order, p}
+			w.replace(k, Delta{a, k.slot, b.Order, p})
 		}
 		for archive, a := range c.Archives {
 			current := w.current[:0]
@@ -224,13 +261,13 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 						for _, p := range neighbors {
 							// Even a replacement with a different epoch invalidates
 							// the older occupied physical slot in the snapshot.
-							if _, replaced := overlay[key{lower - 1, slot(p.Time, higher)}]; !replaced {
+							if _, replaced := w.lookup(key{lower - 1, slot(p.Time, higher)}); !replaced {
 								kept = append(kept, p)
 							}
 						}
 						neighbors = kept
-						for k, d := range overlay {
-							if k.archive == lower-1 && d.Sample.Time >= start && d.Sample.Time < start+coarse.Step {
+						for _, d := range w.updates {
+							if d.Archive == lower-1 && d.Sample.Time >= start && d.Sample.Time < start+coarse.Step {
 								neighbors = append(neighbors, d.Sample)
 							}
 						}
@@ -256,10 +293,7 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 			}
 		}
 	}
-	out := w.deltas[:0]
-	for _, d := range overlay {
-		out = append(out, d)
-	}
+	out := w.updates
 	slices.SortFunc(out, func(a, b Delta) int {
 		if a.Archive < b.Archive {
 			return -1
@@ -275,7 +309,6 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 		}
 		return 0
 	})
-	w.deltas = out
 	return out, nil
 }
 func aggregate(method Method, values []float64) float64 {

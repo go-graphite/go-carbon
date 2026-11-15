@@ -16,6 +16,7 @@ type slotSample struct {
 	sample Sample
 }
 
+// NewSlots requires archives from a validated Config.
 func NewSlots(archives []Archive) *Slots {
 	return &Slots{archives: slices.Clone(archives), data: make([][]slotSample, len(archives))}
 }
@@ -47,6 +48,8 @@ func (s *Slots) View(a int, physical int64) (Sample, bool) {
 	}
 	return ps[i].sample, true
 }
+
+// Range requires aligned bounds spanning at most one archive retention.
 func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 	ar := s.archives[a]
 	lo := slot(start, ar)
