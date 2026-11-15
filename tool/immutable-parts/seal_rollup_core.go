@@ -165,6 +165,7 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 			if s == nil {
 				s = &atomicRollupState{Config: input.Config, Slots: map[[2]int64]sealrollup.Sample{}}
 				s.Config.Archives = slices.Clone(input.Config.Archives)
+				s.index = sealrollup.NewSlots(s.Config.Archives)
 				o.state[id] = s
 			}
 			for _, r := range p.Records {

@@ -89,10 +89,11 @@ func (s *atomicRollupState) rangeView() sealrollup.RangeView {
 		return func(_ int, _, _ int64, dst []sealrollup.Sample) []sealrollup.Sample { return dst }
 	}
 	if s.index == nil {
-		s.index = sealrollup.NewSlots(s.Config.Archives)
+		index := sealrollup.NewSlots(s.Config.Archives)
 		for k, p := range s.Slots {
-			s.index.Install(sealrollup.Delta{Archive: int(k[0]), Slot: k[1], Sample: p})
+			index.Install(sealrollup.Delta{Archive: int(k[0]), Slot: k[1], Sample: p})
 		}
+		return index.Range
 	}
 	return s.index.Range
 }
@@ -170,6 +171,10 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 		}
 		if policy != s.Frontier.Policy {
 			return nil, errors.New("rollup policy/frontier mismatch")
+		}
+		s.index = sealrollup.NewSlots(s.Config.Archives)
+		for k, p := range s.Slots {
+			s.index.Install(sealrollup.Delta{Archive: int(k[0]), Slot: k[1], Sample: p})
 		}
 	}
 	return o, nil
@@ -292,6 +297,7 @@ func (o *atomicRollupOwner) Seal(inputs []atomicRollupInput) (written uint64, er
 		if s == nil {
 			s = &atomicRollupState{Config: in.Config, Slots: map[[2]int64]sealrollup.Sample{}}
 			s.Config.Archives = slices.Clone(in.Config.Archives)
+			s.index = sealrollup.NewSlots(s.Config.Archives)
 			o.state[in.ID] = s
 		}
 		for _, r := range plans[i].Records {
