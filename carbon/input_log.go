@@ -159,7 +159,9 @@ func (app *App) openInputLog(core *cache.Cache) error {
 // live receiver sinks and legacy dump restore. With a pending checkpoint it
 // runs after the handoff tail: the log can contain corrections accepted after
 // capture was sealed, so replaying the older tail last would revert them.
-// Without a checkpoint it precedes ordinary ordered dump restoration.
+// Without a checkpoint it precedes ordinary ordered dump restoration. Captured
+// journal-only recovery defers this work to the background history reader in
+// finishStartupInput, after startup releases the worker readiness gates.
 // Replayed points precede live points in each cache item, so they need not
 // drain before receivers open, even for compressed whisper.
 func (app *App) replayInputLog(core *cache.Cache) error {
@@ -167,6 +169,12 @@ func (app *App) replayInputLog(core *cache.Cache) error {
 		return nil
 	}
 	if s := app.startupInput; s != nil {
+		if s.journalOnly {
+			// Capture fences newer input. The background history reader replays
+			// this journal before capture, with cancellation and source tracking.
+			// Waiting here can fill the cache before Start releases worker gates.
+			return nil
+		}
 		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
 		if err != nil {
 			return err

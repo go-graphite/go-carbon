@@ -1273,6 +1273,7 @@ func (whisper *Whisper) archiveUpdateManyDataPoints(archive *archiveInfo, aligne
 		for _, point := range alignedPoints {
 			interval := point.interval - mod(point.interval, lower.secondsPerPoint)
 			if !seen[interval] {
+				seen[interval] = true
 				if propagated, err := whisper.propagate(interval, higher, lower); err != nil {
 					panic("Failed to propagate")
 				} else if propagated {
