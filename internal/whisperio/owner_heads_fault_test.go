@@ -25,7 +25,7 @@ func TestOwnerHeadsCrashReplay(t *testing.T) {
 	if root := os.Getenv(env); root != "" {
 		phase := os.Getenv("GO_CARBON_OWNER_HEAD_CRASH_PHASE")
 		ctx := context.Background()
-		codec := &ownerCrashCodec{ContinuationCodec: &ContinuationCodec{OwnerHeads: NewOwnerHeads(2, 128<<10), ReuseBlockKeys: true}, phase: phase}
+		codec := &ownerCrashCodec{ContinuationCodec: &ContinuationCodec{OwnerHeads: NewOwnerHeads(2, 128<<10), ReuseBlockKeys: true}, phase: "warmup"}
 		opts := coldOptions(codec)
 		opts.Now = classicTestClock
 		db, err := store.Open(filepath.Join(root, "db"), opts)
@@ -33,6 +33,13 @@ func TestOwnerHeadsCrashReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		db.StopBackground()
+		if err := db.UpdateMany(ctx, "durable", ownerWarmPoints()); err != nil {
+			t.Fatal(err)
+		}
+		if codec.OwnerHeads.Opens() != 1 {
+			t.Fatal("warmup did not open writer")
+		}
+		codec.phase = phase
 		journal, err := inputlog.Open(filepath.Join(root, "input"), inputlog.Options{SyncInterval: time.Hour, SegmentSize: 1 << 20, Workers: 1})
 		if err != nil {
 			t.Fatal(err)
@@ -76,6 +83,9 @@ func TestOwnerHeadsCrashReplay(t *testing.T) {
 			}
 			cfg := store.MetricConfig{Name: "durable", Retentions: []store.Retention{{Step: 1, Count: 3600}, {Step: 60, Count: 1440}}, AggregationMethod: store.Last}
 			if _, err := db.Create(t.Context(), cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpdateMany(t.Context(), "durable", ownerWarmPoints()); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Close(); err != nil {
@@ -131,6 +141,9 @@ func TestOwnerHeadsCrashReplay(t *testing.T) {
 			if _, err := oracle.Create(t.Context(), cfg); err != nil {
 				t.Fatal(err)
 			}
+			if err := oracle.UpdateMany(t.Context(), "durable", ownerWarmPoints()); err != nil {
+				t.Fatal(err)
+			}
 			committed := phase == "before-publish" || phase == "after-publish" || phase == "before-ack" || phase == "after-ack"
 			if committed {
 				if err := oracle.UpdateMany(t.Context(), "durable", ownerFaultPoints()); err != nil {
@@ -163,6 +176,9 @@ type ownerCrashCodec struct {
 
 func (c *ownerCrashCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, p []store.Point, r int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
 	err := c.ContinuationCodec.Update(ctx, ownerCrashIO{ContinuationIO: kv, phase: c.phase}, m, p, r, clock, maintenance)
+	if err == nil && c.phase != "warmup" && c.OwnerHeads.Opens() != 1 {
+		return fmt.Errorf("fault update failed to resume warmed writer: opens=%d", c.OwnerHeads.Opens())
+	}
 	if err == nil && c.phase == "before-db-commit" {
 		os.Exit(73)
 	}
@@ -242,4 +258,8 @@ func ownerFaultPoints() []store.Point {
 		out[i] = store.Point{Timestamp: 999970 + int64(i), Value: math.Float64frombits(v)}
 	}
 	return out
+}
+
+func ownerWarmPoints() []store.Point {
+	return []store.Point{{Timestamp: 999969, Value: 42}}
 }

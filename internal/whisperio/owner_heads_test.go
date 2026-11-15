@@ -274,6 +274,7 @@ func BenchmarkOwnerHeads(b *testing.B) {
 				}
 				b.StopTimer()
 				if pool != nil {
+					b.ReportMetric(float64(pool.Opens())/float64(b.N), "opens/write")
 					hits, reads, decodes := pool.Counts()
 					b.ReportMetric(float64(hits)/float64(b.N), "group-hits/write")
 					b.ReportMetric(float64(reads)/float64(b.N), "group-reads/write")
