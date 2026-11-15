@@ -28,6 +28,8 @@ parts-convert -convert-copy /private/offline-copy \
   -dir /private/converted -copy-batch-metrics 32 -copy-batch-mib 128
 ```
 
+Capture also records each legacy Fetch duration. Verification reports legacy and converted p99 on the same saved queries. These are sequential single-pass measurements: legacy before deletion, converted afterward, with uncontrolled engine and OS cache state. Converted timing includes the exact comparison; index construction is outside the timed renders. Old oracle files without timings report legacy p99 as zero, which means unavailable.
+
 The oracle file is created exclusively. Capture does not modify the legacy
 store. Conversion can be resumed with identical source/output paths after a
 process crash; preserve its name cursor, plans, receipts, and target together.

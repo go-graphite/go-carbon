@@ -42,6 +42,7 @@ type realQuery struct {
 	Metric                         partsread.Metric
 	From, Until, Start, Stop, Step int64
 	Bits                           []uint64
+	LegacyFetchNS                  int64 `json:",omitempty"`
 }
 
 func realOptions(path string, now int64) (chunkstore.Options, chunkstore.TransferSourceOptions, error) {
@@ -138,11 +139,14 @@ func captureRealAt(ctx context.Context, path, oraclePath string, now int64) erro
 		age := int64(a.Step) + rng.Int63n(max(int64(1), horizon-int64(a.Step)))
 		from := r.Now - age
 		until := min(r.Now-1, from+int64(a.Step)*min(int64(a.Count), 4096))
+		started := time.Now()
 		series, e := legacy.Fetch(ctx, m.Name, int(from), int(until))
+		fetchNS := time.Since(started).Nanoseconds()
 		if e != nil {
 			return fmt.Errorf("offline oracle %s: %w", m.Name, e)
 		}
 		q := realQuery{Name: m.Name, From: from, Until: until, Start: int64(series.FromTime), Stop: int64(series.UntilTime), Step: int64(series.Step), Metric: partsread.Metric{ID: uint64(i + 1), AggregationMethod: m.AggregationMethod.String(), XFilesFactor: m.XFilesFactor}}
+		q.LegacyFetchNS = fetchNS
 		for _, a := range m.Retentions {
 			q.Metric.Archives = append(q.Metric.Archives, partsread.Archive{Step: int64(a.Step), Points: int64(a.Count)})
 		}
@@ -334,9 +338,15 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	if err != nil {
 		return err
 	}
+	var legacyNS, convertedNS []int64
 	for _, q := range oracle.Queries {
+		started := time.Now()
 		if err = reader.Fetch(ctx, q.Name, q.From, q.Until, func(s *partsread.Series) error { return compareRealSeries(q, s.From, s.Until, s.Step, s.Values) }); err != nil {
 			return err
+		}
+		convertedNS = append(convertedNS, time.Since(started).Nanoseconds())
+		if q.LegacyFetchNS > 0 {
+			legacyNS = append(legacyNS, q.LegacyFetchNS)
 		}
 		if sourceURL != "" {
 			if err = sourceReal(ctx, sourceURL, q); err != nil {
@@ -344,9 +354,18 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 			}
 		}
 	}
+	percentile := func(values []int64, percent int) int64 {
+		if len(values) == 0 {
+			return 0
+		}
+		slices.Sort(values)
+		return values[(len(values)*percent+99)/100-1]
+	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
 		Names                       int
 		Seed                        int64
 		MixedExact, LiveSourceExact bool
-	}{len(oracle.Queries), oracle.Seed, true, sourceURL != ""})
+		LegacyP99NS, ConvertedP99NS int64
+		LatencyComparison           string
+	}{len(oracle.Queries), oracle.Seed, true, sourceURL != "", percentile(legacyNS, 99), percentile(convertedNS, 99), "sequential single-pass; legacy before deletion, converted after; engine cache and OS cache uncontrolled; converted includes exact comparison"})
 }
