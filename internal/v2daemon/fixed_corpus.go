@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -92,18 +94,28 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 	}
 	// Name allocation and identical reusable generator buffers are outside timing.
 	names := make([]string, f.Names)
+	policies := make([][]byte, f.Names)
 	for i := range names {
 		names[i] = fixtureName(i)
+		if layer == 3 {
+			p := v2core.RollupPolicy{Name: partsformat.ID(names[i]), Group: "bench", Config: fixturePolicy(i)}
+			policies[i], err = v2core.EncodeRollupPolicy(p)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	type input struct {
 		names []string
 		data  []points.Point
 		seq   []uint64
 		rows  []v2core.Row
+		apps  []Application
+		order uint64
 	}
 	inputs := make([]input, f.Producers)
 	for p := range inputs {
-		inputs[p] = input{make([]string, 0, f.BatchSize), make([]points.Point, 0, f.BatchSize), make([]uint64, 0, f.BatchSize), make([]v2core.Row, 0, f.BatchSize)}
+		inputs[p] = input{names: make([]string, 0, f.BatchSize), data: make([]points.Point, 0, f.BatchSize), seq: make([]uint64, 0, f.BatchSize), rows: make([]v2core.Row, 0, f.BatchSize), apps: make([]Application, 0, f.BatchSize)}
 	}
 	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards}
 	var block *os.File
@@ -172,6 +184,14 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 				var x error
 				if layer == 0 {
 					x = producer.AppendNumeric(in.rows)
+				} else if layer == 3 {
+					in.apps = in.apps[:0]
+					for i, row := range in.rows {
+						in.order++
+						in.apps = append(in.apps, Application{Name: in.names[i], Policy: policies[int(row.ID-1)], Order: in.order, Clock: 1794700800 + int64((seal+1)*4), Points: in.data[i : i+1 : i+1], Sequence: in.seq[i : i+1 : i+1]})
+					}
+					x = producer.AppendApplications(in.apps)
+					clear(in.apps)
 				} else {
 					x = producer.Append(in.names, in.data, in.seq, 1794700800+int64((seal+1)*4))
 				}
@@ -375,15 +395,35 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 			}
 		}
 	}
-	if layer == 2 {
-		if e = verifyJournal(root, f, names); e != nil {
+	if layer >= 2 {
+		if e = verifyJournal(root, f, names, policies); e != nil {
 			return result, e
 		}
 		result["exact_journal_points"] = f.Names * f.Rounds
+	}
+	if layer == 3 {
+		checkedNames, checkedSlots, x := verifyFixedRollups(reader, f, names)
+		if x != nil {
+			return result, x
+		}
+		result["exact_archive_names"] = checkedNames
+		result["exact_archive_slots"] = checkedSlots
 	}
 	result["exact_sample_names"] = f.SampleNames
 	result["exact_sample_points"] = f.SampleNames * f.Rounds
 	result["readback"] = "exact after close/reopen; outside measured interval"
 	err = json.NewEncoder(out).Encode(result)
 	return
+}
+
+// fixturePolicy assigns the published single/2/3/4 archive shapes by name,
+// leaving every original input tuple, clock and singleton group unchanged.
+func fixturePolicy(id int) sealrollup.Config {
+	shapes := [][]sealrollup.Archive{
+		{{Step: 1, Count: 86400}},
+		{{Step: 1, Count: 86400}, {Step: 60, Count: 43200}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}},
+		{{Step: 60, Count: 43200}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}},
+		{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}},
+	}
+	return sealrollup.Config{Method: sealrollup.Average, XFilesFactor: .5, Archives: shapes[id%len(shapes)]}
 }

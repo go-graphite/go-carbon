@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	layer := flag.Int("layer", 0, "0=core, 1=catalog, 2=journal")
+	layer := flag.Int("layer", 0, "0=core, 1=catalog, 2=journal, 3=canonical rollups")
 	root := flag.String("root", "", "fresh output directory")
 	profile := flag.String("cpuprofile", "", "optional timed intake/close CPU profile")
 	block := flag.String("blockprofile", "", "optional timed intake/close blocking profile")

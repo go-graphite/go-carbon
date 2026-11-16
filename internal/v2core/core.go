@@ -25,6 +25,7 @@ import (
 var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
+	Rollups                    bool
 	AppendParts                bool
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
@@ -229,6 +230,9 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 	return openCoreWithHooks(root, cfg, coreHooks{Publish: hook})
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
+	if cfg.Rollups && hooks.PlanSeal != nil {
+		return nil, errors.New("core rollups already own the seal planner")
+	}
 	hook := hooks.Publish
 	if cfg.RawCodec == "" {
 		cfg.RawCodec = os.Getenv("CORE_RAW_CODEC")
@@ -322,6 +326,13 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			return fail(errors.New("owner format/config mismatch"))
 		}
 		o.publishFrontier(o.meta)
+		if cfg.Rollups {
+			r, err := recoverCoreRollups(db)
+			if err != nil {
+				return fail(err)
+			}
+			o.plan = r.plan
+		}
 		// Only uncommitted staging files remain after successful atomic ingestion.
 		files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
 		if err != nil {

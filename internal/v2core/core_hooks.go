@@ -77,6 +77,10 @@ func validateCoreSealPlan(p coreSealPlan) error {
 // submitBatches preserves metric grouping, policy bytes, clocks and ordering.
 // Each producer calls serially, as for submit. No implicit regrouping is safe.
 func (e *coreEngine) submitBatches(producer int, batches []coreBatch, cursor uint64, seal bool) error {
+	return e.submitBatchesMode(producer, batches, cursor, seal, true)
+}
+
+func (e *coreEngine) submitBatchesMode(producer int, batches []coreBatch, cursor uint64, seal, waitSeal bool) error {
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return errors.New("invalid batch producer/cursor")
 	}
@@ -89,7 +93,7 @@ func (e *coreEngine) submitBatches(producer int, batches []coreBatch, cursor uin
 			rows = append(rows, r)
 		}
 	}
-	return e.submitPacket(producer, rows, batches, cursor, seal)
+	return e.submitPacketMode(producer, rows, batches, cursor, seal, waitSeal)
 }
 func (o *coreOwner) publishFrontier(f coreFrontier) {
 	f.Cursors = slices.Clone(f.Cursors)

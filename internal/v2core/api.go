@@ -79,6 +79,13 @@ func (e *coreEngine) AppendBatches(producer int, batches []Batch, cursor uint64,
 	return e.submitBatches(producer, batches, cursor, seal)
 }
 
+// AppendBatchesPipelined preserves the original applications with the bounded
+// admission and durability semantics of AppendPipelined. A synchronous batch
+// seal or Close fences prior pipelined applications in the same producer FIFO.
+func (e *coreEngine) AppendBatchesPipelined(producer int, batches []Batch, cursor uint64, seal bool) error {
+	return e.submitBatchesMode(producer, batches, cursor, seal, false)
+}
+
 // DurableFrontiers returns conservative owner snapshots safe during intake.
 // Log retirement must also respect the journal's own fsync frontier.
 func (e *coreEngine) DurableFrontiers() [][]uint64 { return e.durableFrontiers() }

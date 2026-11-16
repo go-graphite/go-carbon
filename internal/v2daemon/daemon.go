@@ -33,9 +33,10 @@ type Store struct {
 	cfg       Config
 }
 type packet struct {
-	rows   []v2core.Row
-	cursor uint64
-	seal   bool
+	rows    []v2core.Row
+	batches []v2core.Batch
+	cursor  uint64
+	seal    bool
 }
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
@@ -50,6 +51,7 @@ type Producer struct {
 	records                                                      [][]byte
 	spareRows                                                    [][]v2core.Row
 	cursor                                                       uint64
+	applyOrder                                                   uint64
 	pendingRows                                                  int
 	nextSync                                                     time.Time
 	interval                                                     time.Duration
@@ -59,13 +61,13 @@ type Producer struct {
 }
 
 func coreConfig(c Config) v2core.Config {
-	return v2core.Config{JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	return v2core.Config{Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open requires a fresh experiment root. Reopening writable journals without
 // replay is deliberately refused. Core alone may be reopened for read-back.
 func Open(root string, c Config) (*Store, error) {
-	if c.Layer < 0 || c.Layer > 2 || c.Producers < 1 || c.Shards < 1 {
+	if c.Layer < 0 || c.Layer > 3 || c.Producers < 1 || c.Shards < 1 {
 		return nil, errors.New("invalid layer or geometry")
 	}
 	if c.MaxPendingRows == 0 {
@@ -110,7 +112,7 @@ func Open(root string, c Config) (*Store, error) {
 			return nil, err
 		}
 		p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
-		if c.Layer == 2 {
+		if c.Layer >= 2 {
 			p.journal, err = os.OpenFile(filepath.Join(dir, "segment.pdc4"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 			if err == nil {
 				err = syncDir(dir)
@@ -163,6 +165,9 @@ func (p *Producer) Append(names []string, data []points.Point, sequence []uint64
 	if p.failed != nil {
 		return p.failed
 	}
+	if p.layer == 3 {
+		return p.fail(errors.New("rollups require original AppendApplications groups"))
+	}
 	if p.layer == 0 || len(names) != len(data) || len(names) != len(sequence) || len(names) == 0 || len(names) > 32768 {
 		return p.fail(errors.New("invalid named batch"))
 	}
@@ -180,7 +185,7 @@ func (p *Producer) Append(names []string, data []points.Point, sequence []uint64
 	for i, id := range ids {
 		rows[i] = v2core.Row{ID: NumericID(id, p.index, p.count), Time: data[i].Timestamp, Bits: math.Float64bits(data[i].Value), Seq: sequence[i]}
 	}
-	if p.layer == 2 {
+	if p.layer >= 2 {
 		start := time.Now()
 		record, err := p.encoder.EncodePoints(ids, data, clock)
 		p.EncodeTime += time.Since(start)
@@ -235,7 +240,7 @@ func (p *Producer) Drain() error {
 		return p.fail(err)
 	}
 	p.CatalogSyncTime += time.Since(start)
-	if p.layer == 2 {
+	if p.layer >= 2 {
 		for _, record := range p.records {
 			var h [4]byte
 			binary.LittleEndian.PutUint32(h[:], uint32(len(record)))
@@ -261,7 +266,13 @@ func (p *Producer) Drain() error {
 	}
 	start = time.Now()
 	for _, packet := range p.packets {
-		if err := p.engine.AppendPipelined(p.index, packet.rows, packet.cursor, packet.seal); err != nil {
+		var err error
+		if packet.batches != nil || p.layer == 3 {
+			err = p.engine.AppendBatchesPipelined(p.index, packet.batches, packet.cursor, packet.seal)
+		} else {
+			err = p.engine.AppendPipelined(p.index, packet.rows, packet.cursor, packet.seal)
+		}
+		if err != nil {
 			return p.fail(err)
 		}
 		if packet.rows != nil {
