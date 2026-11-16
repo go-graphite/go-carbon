@@ -374,7 +374,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	cmd := exec.Command("taskset", "-c", "96-191", exe, "-catalog-sender", listener.Addr().String(), "-catalog-fixture", fixture, "-catalog-send-seconds", fmt.Sprint(seconds), "-catalog-send-streams", fmt.Sprint(streams))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	var count, encoded atomic.Int64
+	var count, encoded, unseenPoints atomic.Int64
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var syncNS []int64
@@ -438,6 +438,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 				}
 			}
 			syncGroup()
+			unseenPoints.Add(int64(ordinal / 10))
 		}(i, conn)
 	}
 	wg.Wait()
@@ -456,7 +457,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	for i := range streams {
 		durableBytes += catalogDisk(filepath.Join(root, fmt.Sprint(i)))
 	}
-	emit(map[string]any{"stage": "capture_storage", "points": count.Load(), "durable_bytes": durableBytes, "bpp": float64(durableBytes) / float64(count.Load()), "catalog_fsync_p99_ms": float64(catalogP99) / 1e6, "catalog_syncs": len(catalogSyncNS), "unseen": *captureUnseen})
+	emit(map[string]any{"stage": "capture_storage", "points": count.Load(), "unseen_points": unseenPoints.Load(), "durable_bytes": durableBytes, "bpp": float64(durableBytes) / float64(count.Load()), "catalog_fsync_p99_ms": float64(catalogP99) / 1e6, "catalog_syncs": len(catalogSyncNS), "unseen": *captureUnseen})
 	emit(map[string]any{"stage": "capture", "streams": streams, "seconds_including_final_sync": wall, "points": count.Load(), "m_points_per_second": float64(count.Load()) / wall / 1e6, "cores": cores, "record_bpp": float64(encoded.Load()) / float64(count.Load()), "seed_catalog_bytes_per_stream": len(cp), "fsync_group_p99_ms": float64(p99) / 1e6, "group_syncs": len(syncNS), "exact": "tuple codec differential before run; sustained replay verification follows", "sender": "separate taskset96-191 process, raw TCP, repeated complete real cohort; capture taskset0-95"})
 	verified := catalogVerify(root, streams)
 	if verified != count.Load() {
@@ -468,6 +469,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 func uvarintBytes(n uint64) int { var b [10]byte; return binary.PutUvarint(b[:], n) }
 
 func catalogVerify(root string, streams int) int64 {
+	start := time.Now()
 	runtime.GOMAXPROCS(96)
 	fixture := filepath.Join(root, "sender.fixture")
 	_, unseenErr := os.Stat(filepath.Join(root, "unseen"))
@@ -518,5 +520,7 @@ func catalogVerify(root string, streams int) int64 {
 		}(i)
 	}
 	wg.Wait()
+	wall := time.Since(start).Seconds()
+	emit(map[string]any{"stage": "catalog_verify", "points": verified.Load(), "seconds": wall, "m_points_per_second": float64(verified.Load()) / wall / 1e6, "exact": true})
 	return verified.Load()
 }
