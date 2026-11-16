@@ -10,7 +10,12 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 }
 
 func TestStoreInputFallbackKeepsEveryPoint(t *testing.T) {
-	parallelTestMatrix(t) // Its serial subprocesses share the bounded storage pool.
+	parallelTestMatrix(t)
+	// Own the storage pool across the whole matrix: unrelated fixtures must not
+	// consume the bounded sender buffer between its successive restart cases.
+	if isolatedTestProcessSerial(t) {
+		return
+	}
 	testStoreInputFallbackKeepsEveryPoint(t)
 }
 
