@@ -3,8 +3,10 @@
 `v2part` is the common SST/identity/inventory boundary for core archive seals,
 offline conversion and whole-file transfer. It preserves the published
 `partsformat` GCP3 key bytes through type aliases and delegation, rather than
-introducing an incompatible second key codec. The core rollup planner uses this
-boundary now; `v2core.WritePortableRollupPart` adapts its existing seal records.
+introducing an incompatible second key codec. Core seals and native checkpoint
+conversion both write their stored archive parts through
+`v2core.WriteDenseRollupPart`; there is no runtime export/re-encoding step.
+`WritePortableRollupPart` remains a compatibility adapter for singleton parts.
 
 | Layer | Version / contract |
 | --- | --- |
@@ -83,8 +85,16 @@ It is not an authenticated transport protocol or a declaration of READY.
 
 ## Remaining integration boundaries
 
-The package does not retain authoritative seal originals through Pebble
-compaction, create/pin snapshots, install into a running engine, coordinate
+The package itself does not retain originals or own snapshot lifetimes. The
+core retains checksum-addressed original parts and descriptors under each
+owner's `parts/` directory. Descriptor bindings are ingested atomically with
+archive data and the owner frontier. `SealedSnapshotReader` enumerates only
+bindings visible in a caller-retained immutable owner snapshot; unpublished
+crash leftovers are removed at exclusive startup. These originals survive
+Pebble compaction. Reclaiming published originals needs a separate retention
+and coverage policy; this change does not authorize their deletion.
+
+The package does not install into a running engine, coordinate
 cross-DB publication, fence placement epochs, implement deletion/reset
 incarnations, authorize sources, or certify all historical donor coverage.
 Those owners must bind their catalogs, policies, tombstones and frontiers into
@@ -120,8 +130,14 @@ compatibility mode stays strict. Manifests reject overlapping group-wide and
 single-vshard descriptors for the same original part/partition.
 
 `v2core.WriteDenseRollupPart` derives coverage and archive policies from complete
-core metadata, and `ScanRollups` resolves dense and singleton replacements by
-original order. Offline conversion is the first dense writer consumer. Repacking
+core metadata, and core readers resolve dense and singleton replacements by
+original order. Every new runtime rollup seal uses the shared dense writer.
+The native converter reads a coherent, exclusively owned checkpoint through
+the existing native reader. It requires an explicit caller-certified baseline
+order and catch-up fence because native archives do not retain original point
+orders. Existing coarse archive values are preserved without reaggregation.
+This produces staged baseline parts, not a live installed/caught-up engine.
+Repacking
 preserves original IDs: combining unrelated singleton parts requires a certified
 materialized source/compaction contract and is not inferred from filenames.
 The synthetic byte gate covers encoded SST bytes against native exact point
