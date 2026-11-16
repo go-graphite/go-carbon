@@ -288,6 +288,19 @@ func (b *syncLiveBackend) post(ctx context.Context, url string, body []byte) ([]
 	return data, nil
 }
 
+// Older info handlers report a request-body read timeout as HTTP 400 with
+// this format error. Our request is a locally marshaled v3 protobuf, so retry
+// that exact legacy response as a truncated read, within the current batch.
+// Keep other validation errors terminal and never interpret it as absence.
+func (b *syncLiveBackend) postInfo(ctx context.Context, base string, body []byte) ([]byte, error) {
+	data, err := b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
+	var h *syncHTTPError
+	if errors.As(err, &h) && h.status == http.StatusBadRequest && h.body == "Bad request (unsupported format)" {
+		return nil, fmt.Errorf("info body read failed (%v): %w", err, io.ErrUnexpectedEOF)
+	}
+	return data, err
+}
+
 // syncDigestWire mirrors buckyd's /v1/transfer/digest response.
 type syncDigestWire struct {
 	Name     string
@@ -420,7 +433,7 @@ func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string
 					if err != nil {
 						return err
 					}
-					data, err = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
+					data, err = b.postInfo(ctx, base, body)
 					if ctx.Err() != nil || count <= 1 || !syncInfoTooLarge(err) {
 						return err
 					}
