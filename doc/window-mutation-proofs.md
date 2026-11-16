@@ -34,6 +34,12 @@ Only comparisons promoted to a stable v2 seal increment this count; journal
 replay does not. It is separate from `redo_names` and does not claim zero backend
 work for the first migration. There is no new catalog or frontier file format.
 Same-round hole observation reuse retains the original batch boundaries.
+Completed holes additionally store optional per-name `hole_proofs_v2` seals in
+the existing journal row, so an unknown neighbor does not reopen known names.
+Each name still requires stable proofs from every holder; partial holder proof
+is insufficient. This additive row field does not change the frontier layout.
+Legacy-file ownership remains unknown until a durable absence/mutation fence
+covers the original files as well as the native catalog.
 
 ## Storage continuity
 

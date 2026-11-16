@@ -81,3 +81,53 @@ func TestLegacyRevalidationProgressIsDurableAndSeparate(t *testing.T) {
 		t.Fatalf("migration/replay/redo conflated: %+v", p)
 	}
 }
+
+// One unknown holder must not reopen an unrelated completed hole observation.
+func TestSyncMixedKnownAndUnknownHoleProofs(t *testing.T) {
+	f, o := newRedoHarness(t)
+	o.noCopy = true
+	f.unknown["metric.01"] = true
+	delete(f.store(syncT).points["metric.00"][3600], syncTestNow-7200)
+	b := &legacyRevalidationFixture{f, &boundedProofFixture{proofFixture: f.proofFixture, incarnation: "durable"}}
+	f.kill = func(op string, names []string) bool {
+		return op == "digest" && len(names) > 0 && names[0] >= "metric.02"
+	}
+	run := func() {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.cancel = cancel
+		if err := runSync(ctx, o, b); !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	}
+	run()
+	before := f.snapshot()
+	f.epoch = "restarted"
+	run()
+	after := f.snapshot()
+	unknownRepeated := false
+	for call, n := range before {
+		if call.Name == "metric.00" && after[call] != n {
+			t.Fatalf("known hole repeated: %+v", call)
+		}
+		if call.Name == "metric.01" && after[call] > n {
+			unknownRepeated = true
+		}
+	}
+	if !unknownRepeated {
+		t.Fatal("unknown holder was trusted")
+	}
+	f.store(syncD1).points["metric.00"][3600][syncTestNow-10800] = 42
+	before = after
+	run()
+	changedRepeated := false
+	for call, n := range before {
+		if call.Name == "metric.00" && f.snapshot()[call] > n {
+			changedRepeated = true
+		}
+	}
+	if !changedRepeated {
+		t.Fatal("mutated hole proof reused")
+	}
+}
