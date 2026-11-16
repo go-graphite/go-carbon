@@ -83,7 +83,7 @@ func startupResumeGracefulPartialHistory(t *testing.T, newFormat bool) {
 	defer zapwriter.Test()()
 	s, _ := captureFixture(t)
 	want := releaseCrashPoints()
-	enc, err := zstd.NewWriter(nil)
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestStartupHistoryDurabilityCrashProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := releaseCrashPoints()
-	enc, err := zstd.NewWriter(nil)
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,16 +340,19 @@ func TestStartupHistoryDurabilityCrashProcess(t *testing.T) {
 }
 
 func TestStartupHistoryDurabilityCrashBitDifferential(t *testing.T) {
-	parallelTestMatrix(t) // Each crash stage owns independent files and globals.
+	// One fixture process owns the matrix; every stage still crashes a fresh
+	// child and recovers independent files. Avoid an extra wrapper per stage.
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, stage := range []string{"before_replay", "after_replay", "after_confirm", "before_store_sync", "after_store_sync", "after_unlink", "after_directory_sync", "after_unlock", "after_prefix_advance", "snapshot_synced", "cursor_synced", "cursor_renamed", "cursor_committed"} {
 		t.Run(stage, func(t *testing.T) {
 			if isolatedTestProcess(t) {
 				return
 			}
 			root := t.TempDir()
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartupHistoryDurabilityCrashProcess$")
+			ctx := t.Context()
+			cmd := testCommand(t, "-test.run=^TestStartupHistoryDurabilityCrashProcess$")
 			cmd.Env = append(os.Environ(), "HISTORY_RELEASE_CRASH_STAGE="+stage, "HISTORY_RELEASE_CRASH_ROOT="+root)
 			out, err := cmd.CombinedOutput()
 			var exit *exec.ExitError

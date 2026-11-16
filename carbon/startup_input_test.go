@@ -99,8 +99,10 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	if spool == nil || next.Cache != nil || next.MetricStore != nil {
 		t.Fatal("capture waited for storage")
 	}
-	// At least 171 bytes per line: each stream still exceeds 8MiB.
-	const clients, records = 2, 50000
+	// Longer valid metric segments keep each stream above the default 8MiB
+	// RAM allowance with fewer points and durable capture batches.
+	const clients, records = 2, 8000
+	metricPath := strings.Repeat(strings.Repeat("longsegment", 8)+".", 12)
 	stamp := time.Now().Unix() - 5
 	// Drive the actual plaintext receiver in process. The socket transfer is
 	// exercised above; kernel loopback throughput must not decide whether the
@@ -109,7 +111,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	var writers sync.WaitGroup
 	for client := range clients {
 		writers.Go(func() {
-			name := fmt.Sprintf("client%d.%svalue", client, strings.Repeat("longsegment.", 12))
+			name := fmt.Sprintf("client%d.%svalue", client, metricPath)
 			reader := &startupPointReader{name: name, stamp: stamp, records: records}
 			next.startupInput.receiver.HandleConnection(&startupReaderConn{Reader: reader})
 			if reader.bytes <= 8<<20 {
@@ -141,6 +143,9 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	if len(counts) != clients {
 		t.Fatal(counts)
 	}
+	// This case restarts the continuous queue, even when replay finishes
+	// quickly. Keep the automatic direct switch from changing that path.
+	spool.stopDirectSwitch()
 	release()
 	if err := awaitTestResult(t, "startup", started, testLogProgress); err != nil {
 		t.Fatal(err, zapwriter.TestString())
@@ -159,7 +164,9 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	thirdRelease := sync.OnceFunc(func() { close(thirdStart) })
 	defer thirdRelease()
 	thirdReady := make(chan error, 1)
+	thirdReleased := make(chan struct{})
 	next.SetReadHandoff(storeHandoffSuccessor(t, true), func() {
+		close(thirdReleased)
 		go func() {
 			third.RegisterReadHandoff()
 			third.beginRestart()
@@ -173,7 +180,20 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		}()
 	})
 	stoppedAgain := make(chan error, 1)
-	go func() { stoppedAgain <- next.DumpStop() }()
+	go func() {
+		err := next.DumpStop()
+		if err == nil {
+			select {
+			case <-thirdReleased:
+			default:
+				err = fmt.Errorf("second stop did not request input handoff")
+			}
+		}
+		if err != nil {
+			thirdReady <- err
+		}
+		stoppedAgain <- err
+	}()
 	var thirdSpool *startupInput
 	select {
 	case thirdSpool = <-thirdCaptured:
@@ -185,7 +205,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	if thirdSpool == nil {
 		t.Fatal("streaming restart fell back to closed input")
 	}
-	name := "client0." + strings.Repeat("longsegment.", 12) + "value"
+	name := "client0." + metricPath + "value"
 	thirdSpool.receiver.HandleConnection(&startupReaderConn{Reader: strings.NewReader(fmt.Sprintf("%s 100001 %d\n", name, stamp))})
 	if thirdSpool.points.Load() != 1 {
 		t.Fatal("correction did not drain before checkpoint")
