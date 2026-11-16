@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -123,29 +124,35 @@ func (s *syncer) verificationHorizon() int64 {
 // proofStamps reads only metadata. The serving-index schema participates too:
 // a native metric without its serving-index entry is not a clean read proof.
 func (s *syncer) proofStamps(ctx context.Context, names []string) ([]syncProof, error) {
+	stamps, _, err := s.proofStampsVersion(ctx, names)
+	return stamps, err
+}
+
+func (s *syncer) proofStampsVersion(ctx context.Context, names []string) ([]syncProof, bool, error) {
 	stores := append([]string{s.o.to}, s.o.from...)
 	tokens := make([][]string, len(stores))
 	errs := make([]error, len(stores))
 	infos := make([]map[string][]syncArchive, len(stores))
 	infoErrs := make([]error, len(stores))
+	bounded := make([]bool, len(stores))
 	var wg sync.WaitGroup
 	for i, store := range stores {
 		wg.Add(2)
 		go func() { defer wg.Done(); infos[i], infoErrs[i] = s.b.Info(ctx, store, names) }()
-		go func() { defer wg.Done(); tokens[i], errs[i] = s.windowProofs(ctx, store, names) }()
+		go func() { defer wg.Done(); tokens[i], bounded[i], errs[i] = s.windowProofsVersion(ctx, store, names) }()
 	}
 	wg.Wait()
 	for _, err := range infoErrs {
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	for i, err := range errs {
 		if err != nil && !errors.Is(err, errSyncNoProof) {
-			return nil, err
+			return nil, false, err
 		}
 		if err == nil && len(tokens[i]) != len(names) {
-			return nil, errors.New("invalid mutation proof response")
+			return nil, false, errors.New("invalid mutation proof response")
 		}
 	}
 	out := make([]syncProof, len(names))
@@ -181,7 +188,11 @@ func (s *syncer) proofStamps(ctx context.Context, names []string) ([]syncProof, 
 			copy(out[i][:], hash.Sum(nil))
 		}
 	}
-	return out, nil
+	v2 := true
+	for _, b := range bounded {
+		v2 = v2 && b
+	}
+	return out, v2, nil
 }
 
 func (f *syncFrontier) record(name string, stamp syncProof) [32]byte {
@@ -214,14 +225,22 @@ func observationProof(names []string, ids []int64, stamps []syncProof) string {
 }
 
 func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []string, ids []int64, prior syncRow) (syncRow, error) {
-	before, err := s.proofStamps(ctx, names)
+	before, v2, err := s.proofStampsVersion(ctx, names)
 	if err != nil {
 		return syncRow{}, err
 	}
 	proof := observationProof(names, ids, before)
-	if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] && proof != "" && prior.ObservationProof == proof {
+	if proof != "" && v2 {
+		proof = "v2:" + proof
+	}
+	// The first v2 client used an unprefixed seal. Exact matching metadata
+	// authenticates those observations too, without forcing another migration.
+	matchingProof := prior.ObservationProof == proof || v2 && prior.ObservationProof == strings.TrimPrefix(proof, "v2:")
+	if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] && proof != "" && matchingProof {
+		prior.ObservationProof = proof
 		prior.Reused = len(names)
-		prior.Work = nil // no backend data operation was performed by this replay
+		prior.Work = nil            // no backend data operation was performed by this replay
+		prior.LegacyRevalidated = 0 // this append records reuse, not a second migration
 		return prior, nil
 	}
 	// Catalog batches are contiguous. Read/write their compact records together
@@ -279,9 +298,12 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 		if err != nil {
 			return row, err
 		}
-		after, err := s.proofStamps(ctx, selected)
+		after, afterV2, err := s.proofStampsVersion(ctx, selected)
 		if err != nil {
 			return row, err
+		}
+		if v2 != afterV2 {
+			proof = ""
 		}
 		dirty := map[string]bool{}
 		for _, h := range row.Holes {
@@ -331,6 +353,10 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 	if len(row.Unindexed) == 0 && len(row.Skipped) == 0 && len(row.Resolved) == 0 && len(row.Short) == 0 {
 		row.ObservationProof = proof
 	}
+	if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] && !strings.HasPrefix(prior.ObservationProof, "v2:") && strings.HasPrefix(row.ObservationProof, "v2:") && len(selected) > 0 {
+		row.LegacyRevalidated = len(selected)
+		event("sync_legacy_revalidated", map[string]any{"round": round, "names": len(selected), "first": names[0], "last": names[len(names)-1], "proof": "v2", "windows": s.o.windows, "full_history": !s.windowOnly()})
+	}
 	row.First, row.Last, row.Names = names[0], names[len(names)-1], len(names)
 	row.Reused = len(names) - len(selected)
 	return row, nil
@@ -365,9 +391,15 @@ func frontierReadyBounds(o syncOptions, r syncReadyOptions, report *readyReport)
 // Freeze each requested range at the verified horizon. Older endpoints retain
 // the whole-revision fence; a clean v2 lineage can retain historical proofs.
 func (s *syncer) windowProofs(ctx context.Context, host string, names []string) ([]string, error) {
+	proofs, _, err := s.windowProofsVersion(ctx, host, names)
+	return proofs, err
+}
+
+func (s *syncer) windowProofsVersion(ctx context.Context, host string, names []string) ([]string, bool, error) {
 	b, ok := s.b.(syncWindowProofBackend)
 	if !ok {
-		return s.b.(syncProofBackend).Proofs(ctx, host, names)
+		proofs, err := s.b.(syncProofBackend).Proofs(ctx, host, names)
+		return proofs, false, err
 	}
 	hash := make([]hash.Hash, len(names))
 	known := make([]bool, len(names))
@@ -398,13 +430,14 @@ func (s *syncer) windowProofs(ctx context.Context, host string, names []string) 
 		}
 		proofs, err := b.WindowProofs(ctx, host, requested, w.From, until)
 		if errors.Is(err, errSyncNoProof) {
-			return s.b.(syncProofBackend).Proofs(ctx, host, names)
+			proofs, err := s.b.(syncProofBackend).Proofs(ctx, host, names)
+			return proofs, false, err
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(proofs) != len(requested) {
-			return nil, errors.New("invalid window mutation proof response")
+			return nil, false, errors.New("invalid window mutation proof response")
 		}
 		for j, p := range proofs {
 			i := positions[j]
@@ -421,5 +454,5 @@ func (s *syncer) windowProofs(ctx context.Context, host string, names []string) 
 			out[i] = fmt.Sprintf("%x", hash[i].Sum(nil))
 		}
 	}
-	return out, nil
+	return out, true, nil
 }
