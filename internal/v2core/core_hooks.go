@@ -36,6 +36,9 @@ type coreSealPlan struct {
 	// Prefixes 0..2 are reserved for raw data. Prefix ff is reserved except
 	// ff V 2: this checkpoint namespace sorts strictly before frontier ff f.
 	Files [][]coreKV
+	// PartSpecs is optional trusted coverage prepared by the rollup planner.
+	// It avoids reconstructing immutable policies from every metadata row.
+	PartSpecs []v2part.Spec
 	// Commit publishes staged owner-local state after durable atomic ingestion.
 	// It cannot fail and must not retain mutable input buffers.
 	Commit func()
@@ -77,6 +80,9 @@ type coreHooks struct {
 }
 
 func validateCoreSealPlan(p coreSealPlan) error {
+	if len(p.PartSpecs) != 0 && len(p.PartSpecs) != len(p.Files) {
+		return errors.New("seal part specs/files mismatch")
+	}
 	var last []byte
 	for _, file := range p.Files {
 		if len(file) == 0 {

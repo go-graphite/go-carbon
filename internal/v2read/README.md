@@ -41,8 +41,13 @@ reader, finish in-flight fetches, then close core; later core handoffs are close
 immediately. Do not close the underlying databases under an in-flight fetch.
 
 A reader lazily builds `v2core.RollupSnapshot`, a directory of immutable part
-metadata. It seeks over archive values rather than scanning all points. Later
-sealed generations reuse existing part metadata. Sealed reads seek directly to
+metadata. The core's atomic descriptor bindings enumerate the current part set.
+Later sealed generations reuse descriptor scopes and metadata, decode only added
+parts, and copy only affected per-name entries. Removed parts rebuild only the
+affected names. A core frontier makes the binding inventory authoritative even
+when empty after final-part retirement. Bare GCP3 snapshots without a core
+frontier or bindings retain the scan path.
+No old snapshot is retained by the directory or its inventory. Sealed reads seek directly to
 the requested name, archive and one or two physical ring-slot ranges in each
 relevant part. A predecessor seek includes a dense run beginning before the
 range. Singleton decoding uses stack values; dense decoding uses the shared
@@ -92,3 +97,26 @@ every completed request's latency and uses actual reader completion time for
 query throughput. The fixture has four names, four producers and four owners,
 with repeated timestamp corrections; it does not qualify representative
 high-cardinality/history workloads.
+
+Pending reductions use the canonical reducer with original application boundaries
+and clocks. Read-side caches compare complete scalar sample sequences before
+reusing a prefix or a stable point ordering. A reused prefix supplies both its
+physical-slot state and canonical frontier; different clocks, orders, policies,
+identities or sealed generations force a new reduction. Physical-slot replacements
+merge directly into the immutable read source, including occupied NaNs and wrapped
+slots, instead of freezing and sorting timestamp records again.
+
+Each owner has three scalar caches (sealed state, pending reductions, and stable
+point ordering), each capped at 64 entries and the smaller of 4MiB or one thirty-second
+of the owner's reader budget. Together with the archive-range cache they share
+the original maximum 16MiB per-owner cache allowance. They retain no snapshots or writer arenas. The
+existing bounded archive-range cache is separate. Reader scratch uses a pool with
+at most one entry per owner; oversized canonical workspaces are discarded after
+use, and each retained entry is at most WorkBytes. Concurrent reductions may use
+disposable scratch. Publication never takes these read-side cache locks.
+
+Snapshot directories precompute immutable part membership. Unchanged part sets
+share directory metadata, while each snapshot keeps its own lifetime. Named fetches
+look up metadata lazily; discovery still enumerates the pinned directory. Original
+part-directory enumeration remains necessary when the sealed generation changes;
+this is not an archive-file manifest or a change to persisted part authority.

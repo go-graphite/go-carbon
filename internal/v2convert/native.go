@@ -3,7 +3,6 @@ package v2convert
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -98,10 +97,7 @@ func NativeRecords(snapshot chunkstore.Snapshot, baseline NativeBaseline) ([]Rec
 			}
 		}
 	}
-	encoded, err = json.Marshal(meta)
-	if err != nil {
-		return nil, err
-	}
+	encoded = v2core.AppendRollupMetadata(nil, meta)
 	if err := put(v2part.MetadataArchive, 0, encoded); err != nil {
 		return nil, err
 	}

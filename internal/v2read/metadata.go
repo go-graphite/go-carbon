@@ -2,9 +2,8 @@ package v2read
 
 import (
 	"context"
-	"slices"
-
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"slices"
 )
 
 // Metadata pins exactly the same publication used by render. It does not need
@@ -38,7 +37,7 @@ func (r *Reader) MetadataWithMask(ctx context.Context, name string) (Metric, boo
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metric(name)
+				m = g.sealed.lookup(name)
 			}
 			if m != nil {
 				masked = masked || m.meta.Expired || m.meta.ResetOrder > 0
@@ -95,9 +94,8 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 				return nil, nil, g.err
 			}
 			g.sealed.index.Metadata(func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
-				// Pending state is visited below.
-				if g.metrics[n] != nil {
-					return
+				if pending := g.metrics[n]; pending != nil {
+					meta = pending.meta
 				}
 				if meta.Expired || meta.ResetOrder > 0 {
 					masks[n] = true
@@ -145,7 +143,7 @@ func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metric(name)
+				m = g.sealed.lookup(name)
 			}
 			masked := m != nil && (m.meta.Expired || m.meta.ResetOrder > 0)
 			g.release()

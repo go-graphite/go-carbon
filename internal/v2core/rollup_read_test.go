@@ -106,6 +106,17 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 					t.Fatal("immutable part metadata was not reused")
 				}
 			}
+
+			same, err := NewRollupSnapshot(ctx, current, index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if same.metrics[string(policy.Name)] != index.metrics[string(policy.Name)] {
+				t.Fatal("unchanged inventory rebuilt metric directory")
+			}
+			if len(same.metrics[string(policy.Name)].partIDs) != len(same.metrics[string(policy.Name)].parts) {
+				t.Fatal("snapshot part membership is incomplete")
+			}
 			all, err := index.Records(ctx, string(policy.Name))
 			if err != nil {
 				t.Fatal(err)
