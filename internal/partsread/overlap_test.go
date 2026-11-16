@@ -140,3 +140,89 @@ func TestJoinLegacyPrefixPreservesPartBitsAndSparseCleanup(t *testing.T) {
 		t.Fatal("join made cleanup dense")
 	}
 }
+
+func TestCoverageHintUsesPinnedManifestWithoutIO(t *testing.T) {
+	ctx := context.Background()
+	a := Archive{1, 1000}
+	samples := make([]Sample, 25)
+	for i := range samples {
+		samples[i] = Sample{Time: int64(100 + i), Bits: math.Float64bits(float64(i))}
+	}
+	path, err := PublishBlockPart(t.TempDir(), "part", 1, []BlockData{{SlotBlock: SlotBlock{ID: 7, Archive: a, Slots: SlotRange{0, 1000}, Key: []byte("block")}, Samples: samples}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p Publication
+	p.Publish(View{Catalog: testCatalog([]Archive{a}), Parts: []Source{source}, Close: source.Close})
+	defer p.Close()
+	h, err := p.Pin(NewBudget(1<<20), 1<<18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	token, err := h.Resolve("sample")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Closing only the OS descriptor proves that hint routing cannot read it.
+	// This source's Close remains idempotent and the actual render is not used.
+	for _, file := range source.files {
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if allocations := testing.AllocsPerRun(1000, func() {
+		if _, _, err := h.OverlayCoverageResolved(ctx, token, 1, 100, 200); err != nil {
+			t.Fatal(err)
+		}
+	}); allocations != 0 {
+		t.Fatalf("coverage hint allocated %g times/query", allocations)
+	}
+	yes, slots, err := h.OverlayCoverageResolved(ctx, token, 1, 100, 200)
+	if err != nil || !yes || slots != 25 {
+		t.Fatal(yes, slots, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := h.OverlayCoverageResolved(canceled, token, 1, 100, 200); err != context.Canceled {
+		t.Fatal(err)
+	}
+	if _, _, err := h.OverlayCoverageResolved(ctx, ResolvedMetric{}, 1, 100, 200); err != ErrMetadataGeneration {
+		t.Fatal(err)
+	}
+}
+
+func TestReusableLegacyJoinBitExactAndWorkspaceCleanup(t *testing.T) {
+	ctx := context.Background()
+	var p Publication
+	p.Publish(View{Catalog: testCatalog([]Archive{{1, 1000}}), Parts: []Source{Freeze([]Record{
+		{ID: 7, Step: 1, Sample: Sample{Time: 102, Bits: 0x8000000000000000}},
+		{ID: 7, Step: 1, Sample: Sample{Time: 108, Bits: 0x7ff8000000000042}},
+	})}})
+	defer p.Close()
+	scratch := make([]float64, 9)
+	for run := 0; run < 10; run++ {
+		h, err := p.Pin(NewBudget(1<<20), 1<<18)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := h.Render(ctx, "sample", 100, 109, 110)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.JoinLegacyPrefixInto(ctx, out, []float64{1, 2, 3, 4, 5}, scratch); err != nil {
+			t.Fatal(err)
+		}
+		if math.Float64bits(out.Values[1]) != 0x8000000000000000 || math.Float64bits(out.Values[7]) != 0x7ff8000000000042 || out.Values[4] != 5 || !math.IsNaN(out.Values[5]) {
+			t.Fatal(out.Values)
+		}
+		if len(h.workspaces.touched) != 2 {
+			t.Fatal("cleanup grew dense")
+		}
+		h.Close()
+	}
+}

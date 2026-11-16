@@ -43,10 +43,10 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
-	if class != "" && !profile && !traced && !(os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" && class == "warm-1h") {
+	if class != "" && !profile && !traced && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
 		t.Fatal("class selection is for diagnostics only; the latency gate must run every class")
 	}
 	if class != "" && !slices.Contains([]string{"warm-1h", "warm-24h", "warm-168h", "warm-720h", "cold-blockcache-1h", "cold-blockcache-24h", "cold-blockcache-168h", "cold-blockcache-720h", "warm-find4096"}, class) {
@@ -101,10 +101,16 @@ func TestLatencyComparison(t *testing.T) {
 		if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" {
 			to = clock - 2400
 		}
+		if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter" {
+			to = clock - 900
+		}
 		if bi == 1 {
 			from, to = to, clock
 			if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" {
 				from = clock - 2400
+			}
+			if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter" {
+				from = clock - 900
 			}
 		}
 		for ts := from; ts < to; ts++ {
@@ -153,6 +159,9 @@ func TestLatencyComparison(t *testing.T) {
 	legacyHorizon := int64(clock - 61)
 	if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" {
 		legacyHorizon = clock - 2401
+	}
+	if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter" {
+		legacyHorizon = clock - 901
 	}
 	borrowedSnapshots := make(map[*chunkstore.Store]*partsread.Snapshot)
 	defer func() {

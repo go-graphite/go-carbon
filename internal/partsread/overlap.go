@@ -170,3 +170,102 @@ func (h *Handle) JoinLegacyPrefix(ctx context.Context, out *Series, values []flo
 	out.Values = joined
 	return ctx.Err()
 }
+
+// OverlayCoverageResolved estimates replacement density using only pinned
+// metadata. It is a routing hint, never an ownership proof: duplicate versions
+// and conservative block spans can overestimate coverage. Unknown sources keep
+// the plain legacy path. All replacements are still resolved by Render.
+func (h *Handle) OverlayCoverageResolved(ctx context.Context, token ResolvedMetric, step, from, until int64) (overlap bool, slots int64, err error) {
+	if h.v == nil || h.closed.Load() {
+		return false, 0, ErrClosed
+	}
+	if token.generation != h.v {
+		return false, 0, ErrMetadataGeneration
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	var a Archive
+	for _, candidate := range token.metric.Archives {
+		if candidate.Step == step {
+			a = candidate
+			break
+		}
+	}
+	if a.Points <= 0 || until <= from {
+		return true, 0, nil
+	}
+	n := (until - from) / step
+	for _, group := range [][]Source{h.v.view.Head, h.v.view.Parts, h.v.view.Blocks} {
+		for _, source := range group {
+			may, ok := source.(interface {
+				MayOverlap(context.Context, uint64, Archive, int64, int64) (bool, error)
+			})
+			if !ok {
+				overlap = true
+				continue
+			}
+			yes, e := may.MayOverlap(ctx, token.metric.ID, a, from, until)
+			if e != nil {
+				return false, 0, e
+			}
+			if !yes {
+				continue
+			}
+			overlap = true
+			switch s := source.(type) {
+			case *Frozen:
+				slots = min(n, slots+int64(len(s.metric(token.metric.ID, step))))
+			case *BlockFileSource:
+				ranges, count := SlotRanges(a, from, until)
+				for i := s.first(token.metric.ID, step); i < len(s.blocks); i++ {
+					b := &s.blocks[i]
+					if b.ID != token.metric.ID || b.Archive.Step != step {
+						break
+					}
+					if b.Archive != a {
+						continue
+					}
+					var selected int64
+					for _, q := range ranges[:count] {
+						selected += max(0, min(q.Until, b.Slots.Until)-max(q.From, b.Slots.From))
+					}
+					if selected > 0 {
+						slots = min(n, slots+min(selected, int64(s.refs[string(b.Key)].ref.Length)/sampleBytes))
+					}
+				}
+			}
+		}
+	}
+	return
+}
+
+// JoinLegacyPrefixInto uses caller scratch for the combined output. Scratch is
+// borrowed through the consumer callback and must not alias either input.
+// Pooled render values and sparse cleanup remain untouched.
+func (h *Handle) JoinLegacyPrefixInto(ctx context.Context, out *Series, values, scratch []float64) error {
+	if h.v == nil || h.closed.Load() {
+		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	w := h.workspaces
+	if w == nil || w.out != out || len(out.Values) != len(w.values) || len(values) > len(out.Values) || len(scratch) != len(out.Values) {
+		return errors.New("legacy prefix does not belong to render handle")
+	}
+	bytes := int64(len(scratch)) * 8
+	if bytes > h.work {
+		return ErrAdmission
+	}
+	h.work -= bytes
+	copy(scratch, values)
+	copy(scratch[len(values):], out.Values[len(values):])
+	for _, i := range w.touched {
+		if int(i) < len(values) {
+			scratch[i] = out.Values[i]
+		}
+	}
+	out.Values = scratch
+	return ctx.Err()
+}

@@ -170,3 +170,21 @@ separate fixture whose published suffix covers 2,400 of 3,600 query slots. It
 does not replace any original gate class. `GO_CARBON_MIXED_BYTES=1` enables a
 separate continuation value-byte and decoded-output counter diagnostic; the
 unwrapped codec remains active in all timing gates.
+
+
+Bound queries use a pinned-manifest density hint to choose their legacy path.
+Below 12.5% estimated part coverage they fetch legacy once and overlay directly;
+queries with no physical overlap bypass part rendering. Denser queries resolve
+physical occupancy first, fetch through the last uncovered slot and join into
+request scratch reused across immutable Reader generations. The hint uses only
+manifest extents/sample counts (or frozen record counts), allocates nothing and
+performs no file IO. Conservative spans and duplicate versions can overestimate
+density; they affect cost only, because physical-slot resolution remains the
+source of replacement ownership, including NaNs, late corrections and wrap.
+
+The split preserves the original query start for native archive selection.
+Interior holes remain in its enclosing legacy prefix. This adapter does not yet
+provide forced-archive selective decoding into one caller-owned output; that
+requires the legacy decoder API. Existing continuation block decoding remains
+unchanged. The request-owned join scratch is borrowed until Fetch's consumer
+returns and is covered by the handle's render byte reservation.

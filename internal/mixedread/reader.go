@@ -50,6 +50,7 @@ type request struct {
 	handle  partsread.Handle
 	legacy  partsread.Series
 	current partsread.Series
+	joined  []float64
 }
 type Reader struct {
 	opts Options
@@ -413,7 +414,7 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 	if hasLegacy {
 		step, start, end, ok := queryShape(legacyMetric, from, until, r.opts.Now().Unix())
 		if ok && (end-start)/step > 1 {
-			yes, e := h.HasOverlayRangeResolved(ctx, resolved, step, start, end)
+			yes, covered, e := h.OverlayCoverageResolved(ctx, resolved, step, start, end)
 			if e != nil {
 				return e
 			}
@@ -423,6 +424,20 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 					return e
 				}
 				return consume(old)
+			}
+			// Sparse coverage cannot repay a second render/output setup. Use the
+			// legacy-owned result and overlay directly, as on the ordinary path.
+			// Density is only a cost hint; Render still resolves physical slots.
+			if covered < ((end-start)/step+7)/8 {
+				old, e := r.fetchFrozen(ctx, q, binding, from, until)
+				if e != nil {
+					return e
+				}
+				current, e := h.RenderResolvedTo(ctx, resolved, from, until, r.opts.Now().Unix(), old, &q.current)
+				if e != nil {
+					return e
+				}
+				return consume(current)
 			}
 			// Parts determine exact occupancy, including wrapped winners and NaNs.
 			// Fetch only through the last uncovered slot, preserving original from
@@ -450,7 +465,11 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 					if old.From != current.From || old.Step != current.Step || len(old.Values) != prefix {
 						return ErrPolicy
 					}
-					if e := h.JoinLegacyPrefix(ctx, current, old.Values); e != nil {
+					if cap(q.joined) < len(current.Values) {
+						q.joined = make([]float64, len(current.Values))
+					}
+					q.joined = q.joined[:len(current.Values)]
+					if e := h.JoinLegacyPrefixInto(ctx, current, old.Values, q.joined); e != nil {
 						return e
 					}
 				}
