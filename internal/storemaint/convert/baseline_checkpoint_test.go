@@ -132,6 +132,12 @@ func TestBaselineCheckpointRejectsChangedCaptureAndDestination(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// The checkpoint intentionally uses file identity. Make the change visible
+	// even when a tmpfs reports both writes in the same timestamp tick.
+	changedTime := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, changedTime, changedTime); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := c.convert(ctx, e); err == nil {
 		t.Fatal("modified retained history was trusted")
 	}

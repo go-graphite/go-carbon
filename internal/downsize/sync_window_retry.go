@@ -153,6 +153,28 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-retry-floor" }) {
 		floor = max(floor, int64(r.Names))
 	}
+	// Resume unfinished groups before revisiting earlier uncertainty. A legacy
+	// attempted counter is only a scheduling hint; it never retires a name.
+	var fresh, revisit []int
+	prefix := int64(0)
+	for _, group := range order {
+		unfinished := false
+		for _, row := range groups[group] {
+			prefix += int64(len(row.Skipped))
+			k := syncWindowSelectionKey{row.Round, row.Source}
+			if !visited[k] {
+				for _, skip := range row.Skipped {
+					unfinished = unfinished || !resolved[k][skip.Name]
+				}
+			}
+		}
+		if unfinished && (len(visited) > 0 || prefix > floor) {
+			fresh = append(fresh, group)
+		} else {
+			revisit = append(revisit, group)
+		}
+	}
+	order = append(fresh, revisit...)
 	s.prog.beginReplay("window retry", total, min(int64(total), floor))
 	s.prog.done.Store(int64(durable))
 	s.prog.replayed.Store(int64(durable))

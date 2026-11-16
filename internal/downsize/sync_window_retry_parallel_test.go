@@ -179,3 +179,44 @@ func TestWindowRetryLegacyProgressIsObservationOnly(t *testing.T) {
 		t.Fatal("checkpoint dropped retry cursor", floor, visits)
 	}
 }
+
+func TestWindowRetryResumesUnvisitedGroupsFirst(t *testing.T) {
+	t.Parallel()
+	b, o := pipelineFixture(t, 1)
+	s := pendingRetryPipeline(t, b, o)
+	for _, source := range o.from {
+		if err := s.j.append(syncRow{Kind: "window-retry-visited", Round: 1, Source: source, Names: 2}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.arrived = make(chan string, 64)
+	b.release = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.retryWindowSelections(ctx) }()
+	select {
+	case name := <-b.arrived:
+		if name != "metric.002" {
+			cancel()
+			<-done
+			t.Fatal("resume started with visited uncertainty", name)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("retry stalled")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	close(b.release)
+	b.arrived = nil
+	if err := s.retryWindowSelections(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.copies) != 24 || s.prog.done.Load() != 48 {
+		t.Fatal("resume skipped old uncertainty", len(b.copies), s.prog.done.Load())
+	}
+}
