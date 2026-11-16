@@ -35,7 +35,7 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 		}
 	}
 	var scopes []string
-	var data *pebble.Iterator
+	var data *archiveIter
 	defer func() {
 		if data != nil {
 			_ = data.Close()
@@ -75,7 +75,7 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 			return nil, nil, err
 		}
 		if data == nil {
-			data, err = snapshot.NewIter(nil)
+			data, err = newArchiveIter(ctx, snapshot, nil)
 			if err != nil {
 				return nil, nil, err
 			}

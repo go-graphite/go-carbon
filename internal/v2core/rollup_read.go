@@ -477,7 +477,7 @@ func (s *RollupSnapshot) Records(ctx context.Context, name string) ([]sealrollup
 }
 
 // readRollupPart decodes metadata only for one newly visible routed part.
-func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*readPart, error) {
+func readRollupPart(ctx context.Context, it *archiveIter, scope []byte) (*readPart, error) {
 	if !it.SeekGE(scope) || !bytes.HasPrefix(it.Key(), scope) {
 		return nil, fmt.Errorf("missing rollup part %x", scope)
 	}
