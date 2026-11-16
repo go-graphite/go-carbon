@@ -231,7 +231,7 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 	}
 	start := time.Now()
 	baseline := procStats()
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "sst_preallocate": engine.owners[0].fileBuffer.preallocate, "sst_direct": engine.owners[0].fileBuffer.direct, "bucket_sort": engine.owners[0].bucketSort, "radix_sort": engine.owners[0].radixSort, "stream_credit_bytes_per_producer": engine.streamBytes, "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "index_scatter": engine.indexScatter, "notify_wait": engine.notifyWait, "sst_preallocate": engine.owners[0].fileBuffer.preallocate, "sst_direct": engine.owners[0].fileBuffer.direct, "bucket_sort": engine.owners[0].bucketSort, "radix_sort": engine.owners[0].radixSort, "stream_credit_bytes_per_producer": engine.streamBytes, "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
 	done := make(chan error, cfg.Producers)
 	var offered atomic.Uint64
 	cursors := make([]atomic.Uint64, cfg.Producers)
@@ -282,7 +282,7 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 			left--
 			err = errors.Join(err, e)
 		case <-tick.C:
-			_ = json.NewEncoder(os.Stdout).Encode(coreSample(engine, "core_sample", start, offered.Load()))
+			_ = json.NewEncoder(os.Stdout).Encode(Sample(engine, "core_sample", start, offered.Load()))
 		}
 	}
 	// Producers have stopped, so the caller may issue final barriers on their queues.
@@ -293,13 +293,13 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 		}
 		err = errors.Join(err, engine.submit(p, nil, cursor, true))
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(coreSample(engine, "core_ingest_complete", start, offered.Load()))
+	_ = json.NewEncoder(os.Stdout).Encode(Sample(engine, "core_ingest_complete", start, offered.Load()))
 	until := time.Now().Add(settle)
 	for time.Now().Before(until) {
 		time.Sleep(time.Second)
-		_ = json.NewEncoder(os.Stdout).Encode(coreSample(engine, "core_settle", start, offered.Load()))
+		_ = json.NewEncoder(os.Stdout).Encode(Sample(engine, "core_settle", start, offered.Load()))
 	}
-	final := coreSample(engine, "core_complete", start, offered.Load())
+	final := Sample(engine, "core_complete", start, offered.Load())
 	final["baseline_proc"] = baseline
 	final["scheduled_points"] = target
 	final["target_met"] = offered.Load() >= target

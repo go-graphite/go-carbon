@@ -10,6 +10,9 @@ func TestCoreCreditBudgetIsRuntimeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if e.owners[0].queues[0].limit != 32<<20 {
+		t.Fatal("edge quota did not follow aggregate credit")
+	}
 	if e.streamBytes != 32<<20 {
 		t.Fatal("byte credit ignored")
 	}

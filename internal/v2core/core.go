@@ -73,6 +73,7 @@ type coreRouter struct {
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
 	leaseWaiting                atomic.Bool
+	wake                        chan struct{}
 }
 
 // The producer and consumer own write/read respectively. A byte quota limits
@@ -83,6 +84,7 @@ type coreQueue struct {
 	written     uint64
 	released    atomic.Uint64
 	blockedNS   atomic.Uint64
+	wake        chan struct{}
 	write, read uint64
 }
 
@@ -101,6 +103,7 @@ func (d *coreDispatch) release() {
 	router, n := d.router, d.bytes
 	if d.remaining.Add(-1) == 0 && router != nil {
 		router.bytes.Add(-n)
+		coreWake(router.wake)
 	}
 }
 func (q *coreQueue) pop() *corePacket {
@@ -108,6 +111,7 @@ func (q *coreQueue) pop() *corePacket {
 	if p != nil {
 		q.released.Add(p.size())
 		q.read++
+		coreWake(q.wake)
 	}
 	return p
 }
@@ -144,6 +148,27 @@ func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
 	return nil
 }
 
+// Notifications are hints: the byte/lease counters remain the source of truth.
+func coreWake(wake chan struct{}) {
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+func coreWait(wake chan struct{}) {
+	if wake == nil {
+		time.Sleep(10 * time.Microsecond)
+		return
+	}
+	// Retry periodically to observe owner failure even without a release.
+	timer := time.NewTimer(time.Millisecond)
+	select {
+	case <-wake:
+	case <-timer.C:
+	}
+	timer.Stop()
+}
+
 type coreOwner struct {
 	hook                         func(*pebble.Snapshot, []row) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
@@ -167,11 +192,13 @@ type coreOwner struct {
 	radixWork                    []row
 }
 type coreEngine struct {
-	owners      []*coreOwner
-	routers     []coreRouter
-	cfg         coreConfig
-	stalls      atomic.Uint64
-	streamBytes uint64
+	owners       []*coreOwner
+	routers      []coreRouter
+	cfg          coreConfig
+	stalls       atomic.Uint64
+	streamBytes  uint64
+	indexScatter bool
+	notifyWait   bool
 }
 
 // Hash only the canonical numeric ID, with stable distribution independent of
@@ -211,7 +238,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	diskConfig := cfg
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
-	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes}
+	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			_ = o.db.Close()
@@ -266,7 +293,10 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			}
 		}
 		for range cfg.Producers {
-			o.queues = append(o.queues, newCoreQueue(coreQueueBytes))
+			// The producer lease budget bounds total admitted bytes. Let each
+			// edge hold its fair share when larger credit is requested.
+			queueBytes := max(uint64(coreQueueBytes), streamBytes/uint64(cfg.Shards))
+			o.queues = append(o.queues, newCoreQueue(queueBytes))
 		}
 	}
 	workers := cfg.Owners
@@ -275,6 +305,15 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	workers = min(workers, cfg.Shards)
 	groups := make([][]*coreOwner, workers)
+	if e.notifyWait {
+		for p := range e.routers {
+			wake := make(chan struct{}, 1)
+			e.routers[p].wake = wake
+			for _, o := range e.owners {
+				o.queues[p].wake = wake
+			}
+		}
+	}
 	for i, o := range e.owners {
 		o.pub.publish(o.db.NewSnapshot())
 		groups[i%workers] = append(groups[i%workers], o)
@@ -343,7 +382,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 			default:
 			}
 		}
-		time.Sleep(10 * time.Microsecond)
+		coreWait(router.wake)
 	}
 	if !waitStart.IsZero() {
 		router.leaseWaitNS.Add(uint64(time.Since(waitStart)))
@@ -378,13 +417,27 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		d.storage = make([]row, len(rows))
 	}
 	storage := d.storage[:len(rows)]
-	for s, count := range counts {
-		parts[s] = storage[:0:count]
-		storage = storage[count:]
-	}
-	for i, r := range rows {
-		s := routes[i]
-		parts[s] = append(parts[s], r)
+	if e.indexScatter {
+		offset := 0
+		for s, count := range counts {
+			parts[s] = storage[offset : offset+count : offset+count]
+			counts[s] = offset
+			offset += count
+		}
+		for i := range rows {
+			s := routes[i]
+			storage[counts[s]] = rows[i]
+			counts[s]++
+		}
+	} else {
+		for s, count := range counts {
+			parts[s] = storage[:0:count]
+			storage = storage[count:]
+		}
+		for i, r := range rows {
+			s := routes[i]
+			parts[s] = append(parts[s], r)
+		}
 	}
 	var byOwner [][]coreBatch
 	if len(batches) > 0 {
@@ -449,7 +502,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 			}
 		}
 		if left > 0 && !progress {
-			time.Sleep(10 * time.Microsecond)
+			coreWait(router.wake)
 		}
 	}
 
