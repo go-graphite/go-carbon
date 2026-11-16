@@ -19,6 +19,7 @@ import (
 )
 
 func main() {
+	nativeAll := flag.Bool("native-all", false, "convert all catalog pages from a certified checkpoint")
 	nativePlan := flag.String("native-plan", "", "certified coherent checkpoint plan JSON; enables native baseline materialization")
 	nativeWorkers := flag.Int("native-workers", 1, "native snapshot materializer workers (1..64)")
 	nativePrefix := flag.String("native-prefix", "", "catalog prefix if the native plan omits its bounded name selection")
@@ -31,6 +32,9 @@ func main() {
 	incarnation := flag.String("source-incarnation", "", "original source incarnation, 32 hex digits; required for output")
 	stream := flag.String("source-stream", "", "original ordering stream; required for output")
 	flag.Parse()
+	if *nativeAll && *nativePlan == "" {
+		fail(fmt.Errorf("native-all requires native-plan"))
+	}
 	if *workers < 1 || (*output != "" && *workers != 1) {
 		fail(fmt.Errorf("scan-workers must be positive and may exceed one only in scan-only mode"))
 	}
@@ -64,6 +68,26 @@ func main() {
 		reader, err := v2convert.OpenNativeCheckpoint(ctx, *source, plan)
 		if err != nil {
 			fail(err)
+		}
+		if *nativeAll {
+			encoder := json.NewEncoder(os.Stdout)
+			var names, entries uint64
+			err := v2convert.ConvertNativeCatalog(ctx, reader, plan, *output, *nativePrefix, *nativeLimit, *memory<<20, *nativeWorkers, func(r v2convert.NativeReceipt) error {
+				names += uint64(len(r.Names))
+				entries += r.Entries
+				return encoder.Encode(map[string]any{"native_page": true, "names": names, "entries": entries, "seconds": time.Since(begin).Seconds(), "receipt": r})
+			})
+			closeErr := reader.Close()
+			if err != nil {
+				fail(err)
+			}
+			if closeErr != nil {
+				fail(closeErr)
+			}
+			if err := encoder.Encode(map[string]any{"native_complete": true, "names": names, "entries": entries, "seconds": time.Since(begin).Seconds()}); err != nil {
+				fail(err)
+			}
+			return
 		}
 		if len(plan.Names) == 0 {
 			if *nativeLimit < 1 || *nativeLimit > 10000 {
