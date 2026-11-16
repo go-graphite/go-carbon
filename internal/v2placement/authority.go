@@ -18,21 +18,31 @@ var ErrUnversioned = errors.New("placement stamp required")
 // Stamp is immutable admission metadata. Receivers must authenticate Lane;
 // this contract does not treat a caller-provided producer name as authentication.
 type Stamp struct {
-	Group     string `json:"group"`
-	Replica   string `json:"replica"`
-	MapDigest string `json:"map_digest"`
-	Epoch     uint64 `json:"epoch"`
-	Lane      Lane   `json:"lane"`
+	RelaySequence uint64 `json:"relay_sequence,omitempty"`
+	RelayDigest   string `json:"relay_digest,omitempty"`
+	Group         string `json:"group"`
+	Replica       string `json:"replica"`
+	MapDigest     string `json:"map_digest"`
+	Epoch         uint64 `json:"epoch"`
+	Lane          Lane   `json:"lane"`
+}
+
+// ReplayHistory retains previously admitted maps and their validated successor
+// receipts for journal recovery only. It never reopens live old-epoch intake.
+type ReplayHistory struct {
+	Document    Document     `json:"document"`
+	Activations []Activation `json:"activations"`
 }
 type durableState struct {
-	Group       string       `json:"group"`
-	Replica     string       `json:"replica"`
-	Store       string       `json:"store"`
-	Claim       string       `json:"claim"`
-	Document    Document     `json:"document"`
-	ClosedEpoch uint64       `json:"closed_epoch"`
-	Fence       *Fence       `json:"fence,omitempty"`
-	Activations []Activation `json:"activations"`
+	History     []ReplayHistory `json:"replay_history,omitempty"`
+	Group       string          `json:"group"`
+	Replica     string          `json:"replica"`
+	Store       string          `json:"store"`
+	Claim       string          `json:"claim"`
+	Document    Document        `json:"document"`
+	ClosedEpoch uint64          `json:"closed_epoch"`
+	Fence       *Fence          `json:"fence,omitempty"`
+	Activations []Activation    `json:"activations"`
 }
 type admissionState struct {
 	durableState
@@ -91,6 +101,15 @@ func OpenAuthority(root string, d Document, group, replica, store string) (*Auth
 		}
 		if e = state.Document.Validate(); e != nil {
 			return nil, e
+		}
+		for i, h := range state.History {
+			successor := state.Document
+			if i+1 < len(state.History) {
+				successor = state.History[i+1].Document
+			}
+			if e = h.Document.ValidateTransition(successor, h.Activations); e != nil {
+				return nil, fmt.Errorf("invalid replay authority history: %w", e)
+			}
 		}
 		if state.Document.Digest() != d.Digest() {
 			return nil, fmt.Errorf("persisted placement differs: need %s", state.Document.Digest())
@@ -180,16 +199,30 @@ func (a *Authority) CheckNames(names []string) error {
 // are deliberately refused here rather than restamping an old record.
 func (a *Authority) Replay(s Stamp) error {
 	state := a.current.Load()
-	r := state.replicaState
-	if s.Group != a.group || s.Replica != a.replica || s.MapDigest != state.mapDigest || s.Epoch != r.Epoch || r.Writer != a.store {
-		return ErrStaleEpoch
+	permits := func(d Document) bool {
+		if s.Group != a.group || s.Replica != a.replica || s.MapDigest != d.Digest() {
+			return false
+		}
+		r, e := d.Lookup(a.group, a.replica)
+		if e != nil || s.Epoch != r.Epoch || r.Writer != a.store {
+			return false
+		}
+		for _, lane := range r.Producers {
+			if lane == s.Lane {
+				return true
+			}
+		}
+		return false
 	}
-	for _, lane := range r.Producers {
-		if lane == s.Lane {
+	if permits(state.Document) {
+		return nil
+	}
+	for _, h := range state.History {
+		if permits(h.Document) {
 			return nil
 		}
 	}
-	return fmt.Errorf("unregistered producer lane")
+	return ErrStaleEpoch
 }
 func (a *Authority) save(s durableState) error {
 	b, e := json.Marshal(s)
@@ -323,6 +356,7 @@ func (a *Authority) Adopt(next Document, receipts []Activation) error {
 		}
 	}
 	n := state.durableState
+	n.History = append(append([]ReplayHistory(nil), n.History...), ReplayHistory{Document: state.Document, Activations: append([]Activation(nil), receipts...)})
 	n.Document = cloneDocument(next)
 	n.Activations = append(append([]Activation(nil), n.Activations...), receipts...)
 	if e := a.save(n); e != nil {
@@ -347,3 +381,7 @@ func cloneFence(f Fence) Fence {
 	_ = json.Unmarshal(b, &out)
 	return out
 }
+
+// Scope is the immutable journal authority identity, independent of who owns
+// the current epoch after a move.
+func (a *Authority) Scope() (group, replica, store string) { return a.group, a.replica, a.store }

@@ -69,3 +69,65 @@ CPU attribution; process CPU alone is not decoder CPU. Encoded socket bytes per
 point exclude TCP/IP headers and are a synthetic fixture ratio, not measured NIC
 bytes or production compression. Report co-tenant load and CPU placement with
 every host measurement; shared-host numbers remain provisional.
+
+## Epoch-tagged acknowledged placement input
+
+`Store.ReceivePlacedTCP` is the opt-in L2/L3 receiver for the shared `V2A1`
+protocol. It uses the existing placement authority, catalog, original-application
+journal and restart machinery. Plaintext and the unversioned stream codec remain
+on the existing unplaced receiver. A placed endpoint accepts only authenticated
+placement frames; it never falls back to unversioned input.
+
+```go
+server, err := store.ReceivePlacedTCP(listener, v2recv.Config{
+    PlacementKeys: map[string][]byte{"relay-a/inc-1": producerSecret},
+}, policyResolver) // nil resolver for raw journaled L2
+```
+
+Keys contain 32..4096 bytes and are unique per persistent producer incarnation.
+The singleton `PlacementProducer`/`PlacementKey` form is also accepted. The
+receiver detaches configured keys. HMAC-SHA256 covers the header and canonical
+bounded frame, including group, replica, store incarnation, map digest/revision,
+epoch, vshard, producer/lane, sequence, name, timestamp and IEEE value bits. The
+store authenticates the producer, checks its registered lane and the complete
+placement selection, then appends with the original stamp. Each stream is pinned
+to one serial storage producer; store geometry must stay fixed across reopen.
+
+A positive ACK is emitted only after catalog and stamped data journal sync.
+The same journal packet retains the original relay position and payload digest;
+restart rebuilds duplicate frontiers from that packet. There is no separate
+receipt file whose commit could race data durability. A retry of the latest
+accepted position with the exact payload returns its ACK without another append,
+even after a fence. Conflicting retries, gaps, older positions and novel stale
+writes fail. Older-than-latest retransmission is conservatively rejected; the
+paired relay persists each ACK before dispatching a stream's next record.
+
+Multiple authenticated producers have independent frontiers and credentials.
+Producer calls serialize per owner, and one receiver owns a Store's producer
+lifecycle. Stop and `Wait` for it before reading `DurableRelayEnds`, fencing,
+closing or directly invoking producer methods. `FenceRelayPlacement` compares
+every supplied final position with those recovered durable ends, including zero
+lanes from the map census, before invoking the existing durable authority/core
+fence. Its coverage callback must still certify coherent pinned roots. A drain,
+connection close, journal sync or this protocol's ACK cannot attest target copy
+coverage. One daemon root currently owns one PG; several PG roots on one endpoint
+require a host dispatcher implementing `v2recv.PlacedSink`.
+
+Authority adoption now retains validated predecessor documents and their exact
+successor activation receipts for original journal replay. This permits restart
+of acknowledged data after metadata revisions and owner changes. Live admission
+continues to require the current map and open epoch. Old runtimes cannot silently
+ignore the extra persisted authority/journal fields.
+
+The wire source and independent golden fixture are byte-identical to the relay's
+`internal/v2wire`. Tests cover blocked/failed durability before ACK, authentication,
+independent producers, lost response replay, store SIGKILL/reopen, conflicting
+payloads, stale/vshard rejection, checked real-core fencing and historical-map
+replay. The loopback relay/store probe uses the test-only
+`V2_STORE_ACK_CRASH_ROOT` helper together with the relay's
+`TestExternalStoreACK`, preserving both roots across SIGKILL and reconnect.
+
+This is a correctness-first experimental path. Frames drain individually; there
+is no group-commit throughput qualification or complete cutover controller.
+HMAC does not encrypt payloads; use a trusted network or TLS listener as needed.
+No production receiver configuration or automatic startup path is changed.

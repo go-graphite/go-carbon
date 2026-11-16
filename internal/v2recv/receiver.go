@@ -29,6 +29,12 @@ type Owner interface {
 }
 
 type Config struct {
+	OnStopped func() // called once after Wait drains handlers and owners
+
+	PlacementKeys                                       map[string][]byte
+	Placement                                           PlacedSink
+	PlacementKey                                        []byte
+	PlacementProducer                                   string
 	BatchSize, QueueDepth, MaxConnections, MaxLineBytes int
 	SyncInterval                                        time.Duration
 	Stream                                              codec.Options
@@ -63,7 +69,7 @@ type Server struct {
 }
 
 func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
-	if l == nil || len(owners) == 0 {
+	if l == nil || (len(owners) == 0 && cfg.Placement == nil) {
 		return nil, errors.New("receiver requires owners")
 	}
 	if cfg.BatchSize == 0 {
@@ -86,6 +92,29 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	}
 	if cfg.BatchSize < 1 || cfg.BatchSize > 32768 || cfg.QueueDepth < 1 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.SyncInterval < 0 {
 		return nil, errors.New("invalid receiver bounds")
+	}
+	if cfg.Placement != nil {
+		if len(owners) != 0 {
+			return nil, errors.New("placed endpoint requires exclusive placed sink")
+		}
+		keys := make(map[string][]byte)
+		for producer, key := range cfg.PlacementKeys {
+			if producer == "" || len(key) < 32 || len(key) > 4096 {
+				return nil, errors.New("invalid placement producer key")
+			}
+			keys[producer] = append([]byte(nil), key...)
+		}
+		if len(cfg.PlacementKey) != 0 || cfg.PlacementProducer != "" {
+			if len(keys) != 0 || len(cfg.PlacementKey) < 32 || len(cfg.PlacementKey) > 4096 || cfg.PlacementProducer == "" {
+				return nil, errors.New("placed endpoint requires producer and exclusive credential configuration")
+			}
+			keys[cfg.PlacementProducer] = append([]byte(nil), cfg.PlacementKey...)
+		}
+		if len(keys) == 0 {
+			return nil, errors.New("placed endpoint requires producer keys")
+		}
+		cfg.PlacementKeys = keys
+		cfg.PlacementKey = nil
 	}
 	d, err := codec.NewDecoder(cfg.Stream)
 	if err != nil {
@@ -268,6 +297,9 @@ func (s *Server) Wait(ctx context.Context) error {
 				close(q)
 			}
 			s.workers.Wait()
+			if s.cfg.OnStopped != nil {
+				s.cfg.OnStopped()
+			}
 			close(s.finished)
 		}()
 	})
@@ -310,6 +342,9 @@ func ownerFor(name string, n int) int {
 	return int(h % uint64(n))
 }
 func (s *Server) read(c net.Conn) error {
+	if s.cfg.Placement != nil {
+		return s.readPlaced(c)
+	}
 	r := bufio.NewReaderSize(countedReader{c, &s.stats.wire}, 64<<10)
 	// Both protocols are selected on the same endpoint, as in receiver/tcp.
 	head, err := r.Peek(1)
@@ -459,3 +494,6 @@ func (s *Server) read(c net.Conn) error {
 
 // Addr reports the bound listener address, including an allocated ephemeral port.
 func (s *Server) Addr() net.Addr { return s.listener.Addr() }
+
+// Done closes after Wait has stopped handlers and drained owners.
+func (s *Server) Done() <-chan struct{} { return s.finished }
