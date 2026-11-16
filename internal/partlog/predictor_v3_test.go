@@ -95,7 +95,7 @@ func TestPredictorV3Corruption(t *testing.T) {
 }
 
 func TestPredictorV3SegmentEpoch(t *testing.T) {
-	var e PredictorV3Encoder
+	e := PredictorV3Encoder{SeriesClocks: true}
 	defer e.Close()
 	var d PredictorV3Decoder
 	defer d.Close()
@@ -197,7 +197,7 @@ func FuzzPredictorV3Roundtrip(f *testing.F) {
 		if len(fs) == 0 {
 			return
 		}
-		var e PredictorV3Encoder
+		e := PredictorV3Encoder{SeriesClocks: len(b) > 0 && b[0]&1 != 0, Independent: len(b) > 0 && b[0]&2 != 0}
 		defer e.Close()
 		var d PredictorV3Decoder
 		defer d.Close()

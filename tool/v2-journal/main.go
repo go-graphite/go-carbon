@@ -33,6 +33,7 @@ type measurement struct {
 	size                                      int
 	encoder                                   codec
 	decoder                                   decoder
+	seriesClocks                              bool
 }
 
 func cpu() int64 {
@@ -92,6 +93,8 @@ func main() {
 	partition := flag.Int("partition", 0, "one independent source partition, 0-15")
 	nsegments := flag.Int("segments", 7, "oldest complete segments; newest excluded")
 	rate := flag.Float64("read-mbps", 20, "selected source read limit MB/s")
+	compareClocks := flag.Bool("compare-series-clocks", false, "measure both global and per-series arrival clock prediction on the same input")
+	seriesClocks := flag.Bool("series-clocks", false, "predict arrival clock from the previous apply for the same series")
 	independent := flag.Bool("independent-blocks", false, "reset all state per block rather than per segment")
 	manifest := flag.Bool("manifest", false, "headers/selection only")
 	flag.Parse()
@@ -117,13 +120,18 @@ func main() {
 		defer s.f.Close()
 		segs = append(segs, s)
 	}
-	emit(map[string]any{"stage": "manifest", "segments": segs, "partition": *partition, "coverage_lower_bound_seconds": float64(segs[len(segs)-1].Created-segs[0].Created) / 1e9, "full_arrival_nanoseconds": true})
+	emit(map[string]any{"stage": "manifest", "segments": segs, "partition": *partition, "coverage_lower_bound_seconds": float64(segs[len(segs)-1].Created-segs[0].Created) / 1e9, "full_arrival_nanoseconds": true, "series_clock_prediction": *seriesClocks})
 	var pdc2 measurement
 	pdc2.Codec = "PDC2"
 	pdc2.BlockMiB = 4
 	ms := []*measurement{&pdc2}
 	for _, sz := range []int{1, 4, 16} {
 		ms = append(ms, &measurement{Codec: "PDC3", BlockMiB: sz, encoder: &partlog.PredictorV3Encoder{}, decoder: &partlog.PredictorV3Decoder{}})
+	}
+	if *compareClocks {
+		for _, sz := range []int{1, 4, 16} {
+			ms = append(ms, &measurement{Codec: "PDC3-series-clock", BlockMiB: sz, encoder: &partlog.PredictorV3Encoder{}, decoder: &partlog.PredictorV3Decoder{}, seriesClocks: true})
+		}
 	}
 	defer func() {
 		for _, m := range ms {
@@ -153,7 +161,7 @@ func main() {
 		for _, m := range ms[1:] {
 			m.encoder.Close()
 			m.decoder.Close()
-			m.encoder = &partlog.PredictorV3Encoder{Independent: *independent}
+			m.encoder = &partlog.PredictorV3Encoder{Independent: *independent, SeriesClocks: *seriesClocks || m.seriesClocks}
 			m.decoder = &partlog.PredictorV3Decoder{}
 		}
 		pdc2.encoder = &partlog.DictionaryBlockEncoder{}

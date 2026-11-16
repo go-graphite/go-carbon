@@ -23,6 +23,7 @@ var errPredictorV3 = errors.New("invalid PDC3 journal block")
 
 type predictorV3State struct {
 	timestamp, delta  int64
+	clock             int64
 	value             uint64
 	leading, trailing uint8
 	valid, window     bool
@@ -36,15 +37,17 @@ type predictorV3Entry struct {
 
 // PredictorV3Encoder belongs to one stream owner. Encode preserves arbitrary
 // int64 timestamps/clocks, exact IEEE bits, metadata and apply order. Close
-// releases compressor memory. The input is never modified or retained.
+// releases compressor memory. Point slices are not retained; dictionary metadata
+// is copied and retained for the epoch. The input is never modified.
 type PredictorV3Encoder struct {
-	Independent bool
-	encoder     *zstd.Encoder
-	ids         map[string]int
-	entries     []predictorV3Entry
-	clock       int64
-	sequence    uint64
-	previousCRC uint32
+	Independent  bool
+	SeriesClocks bool
+	encoder      *zstd.Encoder
+	ids          map[string]int
+	entries      []predictorV3Entry
+	clock        int64
+	sequence     uint64
+	previousCRC  uint32
 }
 
 func IsPredictorV3Record(b []byte) bool { return bytes.HasPrefix(b, predictorV3Magic) }
@@ -85,10 +88,15 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 			}
 			meta = binary.AppendUvarint(meta, uint64(id)<<1)
 		}
-		meta = binary.AppendVarint(meta, f.Clock-clock)
+		s := &entries[id].predictorV3State
+		predictedClock := clock
+		if e.SeriesClocks {
+			predictedClock = s.clock
+		}
+		meta = binary.AppendVarint(meta, f.Clock-predictedClock)
+		s.clock = f.Clock
 		clock = f.Clock
 		meta = binary.AppendUvarint(meta, uint64(len(f.Points)))
-		s := &entries[id].predictorV3State
 		for _, p := range f.Points {
 			delta := p.Timestamp - s.timestamp
 			meta = binary.AppendVarint(meta, delta-s.delta)
@@ -145,6 +153,9 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	} else {
 		b = append(b, 0)
 	}
+	if e.SeriesClocks {
+		b[4] |= 2
+	}
 	b = binary.LittleEndian.AppendUint64(b, e.sequence)
 	b = binary.LittleEndian.AppendUint32(b, e.previousCRC)
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(raw)))
@@ -173,7 +184,7 @@ type PredictorV3Decoder struct {
 }
 
 func (d *PredictorV3Decoder) Decode(b []byte) ([]DictionaryFrame, error) {
-	if len(b) < 25 || len(b) > predictorV3MaxRaw+1<<20 || !IsPredictorV3Record(b) || b[4] > 1 {
+	if len(b) < 25 || len(b) > predictorV3MaxRaw+1<<20 || !IsPredictorV3Record(b) || b[4] > 3 {
 		return nil, errPredictorV3
 	}
 	n := int(binary.LittleEndian.Uint32(b[17:]))
@@ -181,7 +192,7 @@ func (d *PredictorV3Decoder) Decode(b []byte) ([]DictionaryFrame, error) {
 		return nil, errPredictorV3
 	}
 	sequence, previousCRC := binary.LittleEndian.Uint64(b[5:]), binary.LittleEndian.Uint32(b[13:])
-	if b[4] == 1 {
+	if b[4]&1 != 0 {
 		if sequence != 0 || previousCRC != 0 {
 			return nil, errPredictorV3
 		}
@@ -215,7 +226,7 @@ func (d *PredictorV3Decoder) Decode(b []byte) ([]DictionaryFrame, error) {
 		return nil, errPredictorV3
 	}
 	fs := make([]DictionaryFrame, 0, int(count))
-	if b[4] == 1 {
+	if b[4]&1 != 0 {
 		d.entries = []predictorV3Entry{{}}
 		d.clock = 0
 	} else if len(d.entries) == 0 {
@@ -237,7 +248,11 @@ func (d *PredictorV3Decoder) Decode(b []byte) ([]DictionaryFrame, error) {
 			return nil, errPredictorV3
 		}
 		s := &entries[id]
+		if b[4]&2 != 0 {
+			clock = s.clock
+		}
 		clock += r.i()
+		s.clock = clock
 		np := r.u()
 		// At least one timestamp byte and one value bit exist per point.
 		if r.err != nil || np == 0 || np > uint64(len(r.b)) || np > v.n-v.off {
