@@ -413,7 +413,9 @@ func copyReceiveHoles(t *testing.T, root string, source []copyPartition) {
 	}
 	var before, after syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &before)
+	transferStart := time.Now()
 	st, e := copyTransfer(context.Background(), address, source, holes, streams, dbs, dir)
+	transferEnd := time.Now()
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -484,5 +486,5 @@ func copyReceiveHoles(t *testing.T, root string, source []copyPartition) {
 			t.Fatal("missing/extra union blocks", pi, bi)
 		}
 	}
-	copyPrint(map[string]any{"phase": "hole_receive", "streams": streams, "stats": st, "MBps": float64(st.Bytes) / st.Seconds / 1e6, "receiver_cores": cpu / st.Seconds, "exact": true, "blocks_checked": checked, "sample_decode": false})
+	copyPrint(map[string]any{"phase": "hole_receive", "streams": streams, "stats": st, "MBps": float64(st.Bytes) / st.Seconds / 1e6, "receiver_cores": cpu / st.Seconds, "exact": true, "blocks_checked": checked, "sample_decode": false, "transfer_start_epoch": float64(transferStart.UnixNano()) / 1e9, "transfer_end_epoch": float64(transferEnd.UnixNano()) / 1e9})
 }
