@@ -106,6 +106,8 @@ and the common journal throughout the hold. Never edit a finalization receipt to
 reopen a stale classic store. The initial implementation rejects buckyd, tags,
 classic migration, metadata prewarm and expiry during dual write. Any such live
 setting is a launch blocker, not permission to disable an existing capability.
+Serving-dual also rejects unseeded historical multiarchive overlap before opening
+its read listener; a passing single-archive rehearsal does not qualify that case.
 
 Preflight commands, with manifest values supplied explicitly:
 
@@ -184,7 +186,7 @@ no ad-hoc data re-import, no backfill and no deletion of either store. Normal
 restart recovery through the candidate's own mandatory common journal is the
 qualified storage path; it is distinct from feeding an old classic spool.
 
-If a later phase ever stops classic writes or makes v2 authoritative, this simple
+If a later phase stops classic writes and makes v2 the sole write authority, this simple
 rollback no longer proves preservation of the v2-only interval. That phase needs
 its own verified recovery/catch-up and read-union plan before starting. A classic-only old
 binary cannot be used to hide retained v2 history.
@@ -216,7 +218,7 @@ Initial operator metric names proposed by the metrics owner include
 series must be verified against the final binary. An always-zero dual-write gauge
 from the sole-writer path is not evidence of implemented shadow mode.
 
-## Isolated DQS rehearsal and receipts
+## Isolated rehearsal and receipts
 
 Run on the currently approved rehearsal host, only within its own scratch
 directory (or `build-<unique-name>` when using the remote-build wrapper).
