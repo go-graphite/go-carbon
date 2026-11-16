@@ -238,7 +238,8 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
-	readOnly bool
+	proofLineage proofLineage
+	readOnly     bool
 
 	readSlots             *fifo.Semaphore
 	readQueued            atomic.Int64
@@ -719,6 +720,11 @@ func Open(dir string, options Options) (*Store, error) {
 		if err := s.openMetadataCheckpoint(); err != nil {
 			return nil, s.openFailure(db, err)
 		}
+	}
+	// Consume the metadata checkpoint before publishing the process marker: the
+	// marker changes Pebble sequence without changing any metric.
+	if err := s.openProofLineage(); err != nil {
+		return nil, s.openFailure(db, fmt.Errorf("open proof lineage: %w", err))
 	}
 	s.startSnapshotRelease()
 	s.startWALSyncer()
@@ -1259,6 +1265,7 @@ func (s *Store) close(forExit bool) error {
 	<-s.readDone
 	// Writers must be stopped before Close. Pebble flushes and syncs the WAL
 	// on close, including mutations made after the final periodic sync.
+	lineageErr := s.sealProofLineage()
 	var err error
 	if forExit {
 		err = s.db.CloseForExit()
@@ -1280,7 +1287,7 @@ func (s *Store) close(forExit bool) error {
 	if s.rangeDelCache != nil {
 		s.rangeDelCache.Unref()
 	}
-	return errors.Join(err, coldPackErr)
+	return errors.Join(err, coldPackErr, lineageErr)
 }
 
 // Sync makes completed mutations durable without flushing the memtables.

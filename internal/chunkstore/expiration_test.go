@@ -82,6 +82,9 @@ func TestExpirationPointDeletesMatchAdministrativeDelete(t *testing.T) {
 				}
 				state := make(map[string]string)
 				for it.First(); it.Valid(); it.Next() {
+					if string(it.Key()) == string(proofIdentityKey) {
+						continue // Per-store identity is intentionally random; metric bytes must match.
+					}
 					state[string(it.Key())] = string(it.Value())
 				}
 				if err := errors.Join(it.Error(), it.Close()); err != nil {

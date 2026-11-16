@@ -64,6 +64,7 @@ func (c *writeChunk) mergeDelta() chunk {
 }
 
 type chunkWriter struct {
+	mutationRanges         []MutationRange
 	store                  *Store
 	metadata               Metadata
 	chunks                 map[chunkAddress]*writeChunk
@@ -95,6 +96,7 @@ func (w *chunkWriter) release() {
 	} else {
 		clear(w.chunks)
 	}
+	w.mutationRanges = w.mutationRanges[:0]
 	w.store, w.metadata = nil, Metadata{}
 	w.materialized, w.operands, w.dirty, w.protectFutureSlots = 0, 0, false, false
 	chunkWriters.Put(w)
@@ -144,6 +146,15 @@ func (w *chunkWriter) setPoint(archive, timestamp int, value float64) error {
 	if now > 0 && c.current.has(chunkSlot) && p.Timestamp > now &&
 		!PreferArchiveTimestamp(p.Timestamp, c.current.Points[chunkSlot].Timestamp, r, now) {
 		return nil
+	}
+	if c.current.has(chunkSlot) {
+		old := c.current.Points[chunkSlot]
+		if old.Timestamp != p.Timestamp || math.Float64bits(old.Value) != math.Float64bits(p.Value) {
+			w.recordMutation(archive, old.Timestamp, r.Step)
+			w.recordMutation(archive, p.Timestamp, r.Step)
+		}
+	} else {
+		w.recordMutation(archive, p.Timestamp, r.Step)
 	}
 	c.current.set(chunkSlot, p)
 	c.changed[chunkSlot/64] |= uint64(1) << uint(chunkSlot%64)
@@ -273,4 +284,10 @@ func applyEpochZeroSentinel(reader pebble.Reader, m Metadata, archive, from, ste
 		values[-from/step] = 0
 	}
 	return nil
+}
+
+func (w *chunkWriter) recordMutation(archive int, ts int64, _ int) {
+	if len(w.mutationRanges) <= mutationRangeLimit {
+		w.mutationRanges = append(w.mutationRanges, MutationRange{archive, ts, ts + 1})
+	}
 }
