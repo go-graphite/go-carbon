@@ -5,6 +5,7 @@ Each child synthesizes a disjoint metric-ID subset. This is an offline numeric
 experiment, not an adapter for the portable production backend or live intake.
 """
 import argparse
+import bisect
 import datetime
 import json
 import os
@@ -129,11 +130,16 @@ def summarize(rows):
     start_times = [datetime.datetime.fromisoformat(re.sub(r'(\.\d{6})\d+', r'\1', x['when_cet'])).timestamp() for x in starts]
     seconds = max(x['seconds'] for x in ends)
     n = sum(x['committed'] for x in ends)
+    sample_times = {id(series): [t for t, _ in series] for series in samples}
     def at(series, t):
-        for (a, x), (b, y) in zip(series, series[1:]):
-            if a <= t <= b:
-                return x + (y-x) * (t-a) / (b-a)
-        raise ValueError('missing sample interval')
+        times = sample_times[id(series)]
+        i = max(0, bisect.bisect_left(times, t) - 1)
+        if i + 1 >= len(series):
+            raise ValueError('missing sample interval')
+        (a, x), (b, y) = series[i:i+2]
+        if not a <= t <= b:
+            raise ValueError('missing sample interval')
+        return x + (y-x) * (t-a) / (b-a)
     windows = []
     end = min(x['seconds'] for x in ends)
     for t in range(10, int(end) + 1, 10):
