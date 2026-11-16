@@ -266,6 +266,9 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		return e
 	}
 	if resume != nil {
+		if e = seedReadyRecoveryCatalog(ctx, *o, resume.options(*o)); e != nil {
+			return fmt.Errorf("restart catalog: %w", e)
+		}
 		if e = runSync(ctx, resume.options(*o), b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return fmt.Errorf("restart recovery: %w", e)
 		}
@@ -313,6 +316,9 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 				return e
 			}
 			previous = after
+			if e = seedReadyRecoveryCatalog(ctx, *o, recovery); e != nil {
+				return fmt.Errorf("restart catalog: %w", e)
+			}
 			if e = runSync(ctx, recovery, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 				return fmt.Errorf("restart recovery: %w", e)
 			}
@@ -551,7 +557,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		if e != nil {
 			return e
 		}
-		if mask == 0 || o.issues.excluded(name) {
+		if mask == 0 && o.namesFile == "" || o.issues.excluded(name) {
 			continue
 		}
 		batch = append(batch, name)
