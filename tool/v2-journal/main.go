@@ -112,7 +112,11 @@ func main() {
 		paths = paths[:len(paths)-1]
 	}
 	if len(paths) > *nsegments {
-		paths = paths[:*nsegments]
+		if *analysis {
+			paths = paths[len(paths)-*nsegments:]
+		} else {
+			paths = paths[:*nsegments]
+		}
 	}
 	if len(paths) == 0 {
 		panic("no complete segments")
