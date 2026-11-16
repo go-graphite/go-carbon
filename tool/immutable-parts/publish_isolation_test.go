@@ -65,6 +65,48 @@ func isolationCounterBarrier(root, name string) error {
 	return fmt.Errorf("external counter barrier %s timed out", name)
 }
 
+type isolationCompactionBoundary struct {
+	DebtBytes   uint64  `json:"debt_bytes"`
+	Compacting  int64   `json:"compacting"`
+	Flushing    int64   `json:"flushing"`
+	Completions int64   `json:"completions"`
+	WaitSeconds float64 `json:"wait_seconds"`
+}
+
+// This only observes the experiment's private databases. Stable estimated debt
+// may retain subthreshold tables; this does not prove sustained capacity.
+func isolationSettledBoundary(e *coreEngine, quiet time.Duration) (isolationCompactionBoundary, error) {
+	var state isolationCompactionBoundary
+	if quiet == 0 {
+		return state, nil
+	}
+	start := time.Now()
+	var idleSince time.Time
+	var previous int64 = -1
+	var previousDebt uint64
+	for {
+		state = isolationCompactionBoundary{WaitSeconds: time.Since(start).Seconds()}
+		for _, o := range e.owners {
+			m := o.db.Metrics()
+			state.DebtBytes += m.Compact.EstimatedDebt
+			state.Compacting += m.Compact.NumInProgress
+			state.Flushing += m.Flush.NumInProgress
+			state.Completions += m.Compact.Count + m.Flush.Count
+		}
+		if state.DebtBytes != previousDebt || state.Compacting != 0 || state.Flushing != 0 || state.Completions != previous {
+			idleSince = time.Now()
+		} else if time.Since(idleSince) >= quiet {
+			return state, nil
+		}
+		previous = state.Completions
+		previousDebt = state.DebtBytes
+		if time.Since(start) >= 120*time.Second {
+			return state, fmt.Errorf("private compaction boundary did not settle: %+v", state)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // This deliberately composes the actual core transaction with the durable
 // publisher, as a continuation of TestCoreDurablePartPublisher. It qualifies
 // that composition only, not the separate production daemon's policy adapter.
@@ -237,6 +279,14 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		settle = time.Duration(n) * time.Millisecond
 	}
 	var batchesPerProducer int
+	var boundaryQuiet time.Duration
+	if raw := os.Getenv("PARTS_PUBLISH_SETTLED_BOUNDARY_MS"); raw != "" {
+		n, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || n < 1 || n > 10000 {
+			t.Fatal("invalid settled boundary milliseconds")
+		}
+		boundaryQuiet = time.Duration(n) * time.Millisecond
+	}
 	if raw := os.Getenv("PARTS_PUBLISH_BATCHES_PER_PRODUCER"); raw != "" {
 		var parseErr error
 		batchesPerProducer, parseErr = strconv.Atoi(raw)
@@ -284,6 +334,10 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		if err = e.submitBatches(p, batches, 1, true); err != nil {
 			t.Fatal(err)
 		}
+	}
+	beforeBoundary, err := isolationSettledBoundary(e, boundaryQuiet)
+	if err != nil {
+		t.Fatal(err)
 	}
 	var process *isolationProcess
 	localReaders := readers
@@ -424,6 +478,8 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	sample := coreSample(e, "publisher_isolation", start, 0)
+	sample["settled_boundary_ms"] = boundaryQuiet.Milliseconds()
+	sample["before_boundary"] = beforeBoundary
 	sample["gc_assist_seconds"] = gcMetrics[0].Value.Float64() - assistStart
 	sample["gc_cpu_seconds"] = gcMetrics[1].Value.Float64() - gcCPUStart
 	sample["runtime_cpu_seconds"] = gcMetrics[2].Value.Float64() - cpuStart
@@ -480,6 +536,9 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	// Readers stay active for the specified settle period; no input is offered.
 	sample["settle_seconds"] = settle.Seconds()
 	time.Sleep(settle)
+	afterBoundary, boundaryErr := isolationSettledBoundary(e, boundaryQuiet)
+	err = errors.Join(err, boundaryErr)
+	sample["after_boundary"] = afterBoundary
 	cancelAll()
 	readerWG.Wait()
 	if process != nil {

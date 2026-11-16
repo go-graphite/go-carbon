@@ -192,3 +192,19 @@ catch-up time separately. Those times include scheduling and I/O waits; query
 counts span the child's lifetime, not just the writer interval. Final-generation
 acknowledgement is a correctness check and does not establish a freshness bound
 during load.
+
+For a drained-boundary comparison, set `PARTS_PUBLISH_SETTLED_BOUNDARY_MS=500`.
+After the seed and again after measured intake, the experiment observes every
+private core database until active compactions and flushes are zero for that interval, with
+estimated compaction debt and completed compaction/flush counts unchanged. Polls are 100ms apart and the wait fails after 120 seconds. Both waits
+are outside writer throughput timing and their receipts are reported. No manual
+compaction, flush or system cache eviction is performed. Residual estimated debt is reported: the estimator includes subthreshold L0 data
+that automatic compaction may leave idle. This boundary does not prove sustained
+capacity.
+
+Use fresh seven-arm curves (`0, count, 0, count, 0, count, 0`) and randomize the
+first loaded count across at least five curves on each socket. Pair only within
+each curve and retain every arm, including the first loaded arm. Collect private
+file page-cache residency and system disk/VM counters at both timing barriers,
+alongside writer PMU, scheduler and NUMA receipts. Report finite writer throughput
+and the extra compaction-drain time separately.
