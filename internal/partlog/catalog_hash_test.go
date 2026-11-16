@@ -32,6 +32,7 @@ func TestCatalogIndexCollisionsAndGrowth(t *testing.T) {
 }
 
 func TestCatalogHashedRecoveryOracle(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, err := OpenNameCatalog(dir)
 	if err != nil {
@@ -92,6 +93,7 @@ func TestCatalogHashedRecoveryOracle(t *testing.T) {
 }
 
 func TestCatalogInternBatchOracle(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, err := OpenNameCatalog(dir)
 	if err != nil {

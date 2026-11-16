@@ -12,6 +12,7 @@ import (
 )
 
 func TestCorePipelinedSealCreditOrderAndDurability(t *testing.T) {
+	t.Parallel()
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var releaseOnce sync.Once
@@ -90,6 +91,7 @@ func TestCorePipelinedSealCreditOrderAndDurability(t *testing.T) {
 }
 
 func TestCorePipelinedMatchesSynchronous(t *testing.T) {
+	t.Parallel()
 	bits := []uint64{0, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042, 0x7ff0000000000001}
 	var engines []*coreEngine
 	for range 2 {
@@ -100,7 +102,10 @@ func TestCorePipelinedMatchesSynchronous(t *testing.T) {
 		engines = append(engines, e)
 		defer e.close()
 	}
-	for round := range 32 {
+	// Two complete timestamp cycles include repeated slots and all IEEE cases.
+	// Each of the four producers still crosses every owner in both API modes.
+	const rounds = 10
+	for round := range rounds {
 		for p := range 4 {
 			var rows []row
 			for name := range 7 {
@@ -117,7 +122,7 @@ func TestCorePipelinedMatchesSynchronous(t *testing.T) {
 	}
 	for _, e := range engines {
 		for p := range 4 {
-			if err := e.Append(p, nil, 32, true); err != nil {
+			if err := e.Append(p, nil, rounds, true); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -140,6 +145,7 @@ func TestCorePipelinedMatchesSynchronous(t *testing.T) {
 }
 
 func TestCorePipelinedSealFailureIsSticky(t *testing.T) {
+	t.Parallel()
 	failure := errors.New("injected seal failure")
 	entered, release := make(chan struct{}), make(chan struct{})
 	e, err := openCoreWithHooks(t.TempDir(), coreConfig{Shards: 1, Producers: 1, MaxRows: 16, PartitionSeconds: 3600}, coreHooks{PlanSeal: func(_ int, _ coreSealInput) (coreSealPlan, error) {
@@ -173,6 +179,7 @@ func TestCorePipelinedSealFailureIsSticky(t *testing.T) {
 // All producers ready in one owner poll share one atomic ingest. A slow planner
 // must withhold every acknowledgment and pipelined credit until that ingest.
 func TestCoreSealPollCoalescesDurably(t *testing.T) {
+	t.Parallel()
 	for _, fail := range []bool{false, true} {
 		t.Run(map[bool]string{false: "success", true: "failure"}[fail], func(t *testing.T) {
 			dir := t.TempDir()

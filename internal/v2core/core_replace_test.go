@@ -9,6 +9,7 @@ import (
 )
 
 func TestCoreReplacementAtomic(t *testing.T) {
+	t.Parallel()
 	for _, blind := range []bool{false, true} {
 		t.Run(map[bool]string{false: "sst", true: "batch"}[blind], func(t *testing.T) {
 			cfg := coreTestConfig()
@@ -94,6 +95,7 @@ func TestCoreReplacementAtomic(t *testing.T) {
 }
 
 func TestCoreReplacementAbort(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"planner", "reserved", "missing"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := coreTestConfig()

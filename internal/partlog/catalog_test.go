@@ -21,6 +21,7 @@ func newTestCatalog(t testing.TB) *NameCatalog {
 	return c
 }
 func TestCatalogSegmentsExact(t *testing.T) {
+	t.Parallel()
 	c := newTestCatalog(t)
 	fs := v3Fixture()
 	for _, sparse := range []bool{false, true} {
@@ -57,6 +58,7 @@ func TestCatalogSegmentsExact(t *testing.T) {
 	}
 }
 func TestCatalogCodecCorrupt(t *testing.T) {
+	t.Parallel()
 	c := newTestCatalog(t)
 	e := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
 	defer e.Close()
@@ -91,6 +93,7 @@ func TestCatalogCodecCorrupt(t *testing.T) {
 	}
 }
 func TestCatalogWALTruncationAndCorrupt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, e := OpenNameCatalog(dir)
 	if e != nil {
@@ -137,6 +140,7 @@ func TestCatalogWALTruncationAndCorrupt(t *testing.T) {
 	}
 }
 func TestCatalogCheckpointSIGKILL(t *testing.T) {
+	t.Parallel()
 	if dir := os.Getenv("CATALOG_KILL_DIR"); dir != "" {
 		c, e := OpenNameCatalog(dir)
 		if e != nil {
@@ -241,6 +245,7 @@ func FuzzCatalogDecode(f *testing.F) {
 }
 
 func TestCatalogCheckpointReopen(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, e := OpenNameCatalog(dir)
 	if e != nil {
@@ -329,6 +334,7 @@ func FuzzCatalogRoundtrip(f *testing.F) {
 }
 
 func TestCatalogFieldAccounting(t *testing.T) {
+	t.Parallel()
 	for _, sparse := range []bool{false, true} {
 		c := newTestCatalog(t)
 		var a PredictorV3Accounting
@@ -349,6 +355,7 @@ func TestCatalogFieldAccounting(t *testing.T) {
 // Exercise recovery across compressed blocks without materialising decoded
 // checkpoint bytes. Binary keys and metadata survive checkpoint + suffix replay.
 func TestCatalogStreamingCheckpointSuffix(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, e := OpenNameCatalog(dir)
 	if e != nil {

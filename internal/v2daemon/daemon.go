@@ -25,8 +25,9 @@ type Config struct {
 	Layer, Producers, Shards, MaxPendingRows int
 	GroupInterval                            time.Duration
 	// Placement requires stamped intake; one daemon root owns one PG.
-	Placement Placement
-	Hooks     v2core.Hooks
+	Placement   Placement
+	Hooks       v2core.Hooks
+	coreMaxRows int // private fixture bound; zero retains the experiment buffer size
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -69,7 +70,11 @@ type Producer struct {
 }
 
 func coreConfig(c Config) v2core.Config {
-	return v2core.Config{Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	maxRows := c.coreMaxRows
+	if maxRows == 0 {
+		maxRows = 2 << 20
+	}
+	return v2core.Config{Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open recovers durable journal layers through the normal core write queues.

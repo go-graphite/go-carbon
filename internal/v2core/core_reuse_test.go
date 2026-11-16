@@ -8,8 +8,10 @@ import (
 // Wrap every dispatch lease many times with changing batch sizes and overwrite
 // the caller's buffer immediately. Also exercise multiple DBs per execution owner.
 func TestCoreRoutingLeaseWrapAndIndependentOwners(t *testing.T) {
+	t.Parallel()
 	for _, owners := range []int{1, 2, 4} {
 		t.Run(string(rune('0'+owners)), func(t *testing.T) {
+			t.Parallel()
 			cfg := coreTestConfig()
 			cfg.Owners = owners
 			e, err := openCore(t.TempDir(), cfg)
@@ -54,6 +56,7 @@ func TestCoreRoutingLeaseWrapAndIndependentOwners(t *testing.T) {
 }
 
 func TestCoreOwnerGeometryMayChangeOnReopen(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	root := t.TempDir()
 	e, err := openCore(root, cfg)

@@ -194,6 +194,7 @@ func (e *referenceCatalogEncoder) Close() {
 
 // referenceCatalogEncoder freezes the pre-optimization PDC4 wire format.
 func TestCatalogEncoderByteOracle(t *testing.T) {
+	t.Parallel()
 	for _, independent := range []bool{false, true} {
 		for _, series := range []bool{false, true} {
 			for _, sparse := range []bool{false, true} {
@@ -294,6 +295,7 @@ func BenchmarkCatalogEncoderRealShape(b *testing.B) {
 }
 
 func TestCatalogEncoderRejectsWrongIDs(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"length", "missing", "key", "definition", "failed"} {
 		t.Run(kind, func(t *testing.T) {
 			c := newTestCatalog(t)
@@ -327,6 +329,7 @@ func TestCatalogEncoderRejectsWrongIDs(t *testing.T) {
 }
 
 func TestCatalogEncodePointsByteOracle(t *testing.T) {
+	t.Parallel()
 	for _, independent := range []bool{false, true} {
 		for _, series := range []bool{false, true} {
 			for _, sparse := range []bool{false, true} {
@@ -383,6 +386,7 @@ func TestCatalogEncodePointsByteOracle(t *testing.T) {
 }
 
 func TestCatalogEncodePointsRejectsInvalid(t *testing.T) {
+	t.Parallel()
 	c := newTestCatalog(t)
 	id, err := c.Intern("one", nil)
 	if err != nil {

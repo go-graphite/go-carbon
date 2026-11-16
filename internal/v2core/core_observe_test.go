@@ -7,6 +7,7 @@ import (
 )
 
 func TestCoreObservationUsesImmutableSnapshot(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	e, err := Open(t.TempDir(), cfg, Hooks{})
 	if err != nil {

@@ -52,10 +52,12 @@ func readRaw(db *pebble.DB) ([]row, error) {
 	return rs, it.Error()
 }
 func TestSealedPartsRawBitsAndWhisperDifferential(t *testing.T) {
+	t.Parallel()
 	now := int64(1800000000)
 	now -= now % 3600
 	for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Min, whisper.Max, whisper.Last} {
 		t.Run(method.String(), func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			cat := catalogue{Metrics: []metric{{"sample", []int{1, 60, 3600}, method, .5}}}
 			var rs []row
@@ -162,6 +164,7 @@ func TestSealedPartsRawBitsAndWhisperDifferential(t *testing.T) {
 	}
 }
 func TestPrepareAndRun(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "journal")
 	f, e := os.Create(path)
@@ -240,6 +243,7 @@ func TestQueueOwnership(t *testing.T) {
 }
 
 func TestPublishedSnapshotLifetime(t *testing.T) {
+	t.Parallel()
 	db, e := pebble.Open(filepath.Join(t.TempDir(), "db"), &pebble.Options{})
 	if e != nil {
 		t.Fatal(e)
@@ -302,6 +306,7 @@ func TestRollupSignedZeroAndFloat32Occupancy(t *testing.T) {
 }
 
 func TestOwnerDrainsAfterSealFailure(t *testing.T) {
+	t.Parallel()
 	q := new(queue)
 	go func() {
 		q.push(&packet{Rows: []row{{ID: 0}, {ID: 0}, {ID: 0}}})

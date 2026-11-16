@@ -11,6 +11,7 @@ import (
 )
 
 func TestCatalogGroupedMixedRecovery(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, e := OpenNameCatalog(dir)
 	if e != nil {
@@ -69,6 +70,7 @@ func TestCatalogGroupedMixedRecovery(t *testing.T) {
 }
 
 func TestCatalogGroupedTornAndCorrupt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	c, e := OpenNameCatalog(dir)
 	if e != nil {
@@ -116,6 +118,7 @@ func TestCatalogGroupedTornAndCorrupt(t *testing.T) {
 }
 
 func TestCatalogGroupMemoryBound(t *testing.T) {
+	t.Parallel()
 	c := newTestCatalog(t)
 	for i := range 10000 {
 		if _, e := c.Intern(fmt.Sprintf("%08d.%s", i, bytes.Repeat([]byte{'x'}, 512)), nil); e != nil {
@@ -146,6 +149,7 @@ func TestCatalogGroupMemoryBound(t *testing.T) {
 }
 
 func TestCatalogGroupRejectsPrefixAmplification(t *testing.T) {
+	t.Parallel()
 	c := newTestCatalog(t)
 	raw := binary.AppendUvarint(nil, 100)
 	key := bytes.Repeat([]byte{'x'}, 100000)

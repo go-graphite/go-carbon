@@ -30,6 +30,7 @@ type Fixture struct {
 	CPUProfile                                               string
 	BlockProfile                                             string
 	Names, Rounds, Producers, Shards, BatchSize, SampleNames int
+	coreMaxRows                                              int // optional private bound for small correctness fixtures
 }
 
 func DefaultFixture() Fixture {
@@ -88,7 +89,14 @@ func parallel(producers int, fn func(int) error) error {
 
 // RunFixed writes one finite corpus, closes all resources, then verifies reopened
 // snapshots. Read-back is outside timed intake/close and process CPU accounting.
-func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[string]any, err error) {
+func RunFixed(root string, layer int, f Fixture, out io.Writer) (map[string]any, error) {
+	return runFixed(root, layer, f, out, procWritten)
+}
+
+// runFixed accepts the write-accounting sampler so portable correctness tests
+// can exercise the full fixture without Linux /proc. RunFixed always uses the
+// real counter and propagates errors rather than reporting invented measurements.
+func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (uint64, error)) (result map[string]any, err error) {
 	if f.Names < 1 || f.Rounds < 4 || f.Rounds%4 != 0 || f.Producers < 1 || f.Shards < 1 || f.BatchSize < 1 || f.BatchSize > 32768 || f.SampleNames < 1 {
 		return nil, errors.New("invalid fixture")
 	}
@@ -117,7 +125,7 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 	for p := range inputs {
 		inputs[p] = input{names: make([]string, 0, f.BatchSize), data: make([]points.Point, 0, f.BatchSize), seq: make([]uint64, 0, f.BatchSize), rows: make([]v2core.Row, 0, f.BatchSize), apps: make([]Application, 0, f.BatchSize)}
 	}
-	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards}
+	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards, coreMaxRows: f.coreMaxRows}
 	var block *os.File
 	stopBlock := func() error {
 		if block == nil {
@@ -159,7 +167,7 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 	if e != nil {
 		return nil, e
 	}
-	startWrite, e := procWritten()
+	startWrite, e := written()
 	if e != nil {
 		return nil, e
 	}
@@ -269,7 +277,7 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 	if e != nil {
 		return nil, e
 	}
-	endWrite, e := procWritten()
+	endWrite, e := written()
 	if e != nil {
 		return nil, e
 	}
@@ -340,13 +348,24 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		return result, fmt.Errorf("stored fixture count %d, want %d", checked, f.Names*f.Rounds)
 	}
 	result["exact_core_points"] = checked
+	// Pin one reopened catalog per producer for both full and sampled checks.
+	// SampleNames may select every name in correctness fixtures; reopening and
+	// syncing that same catalog per name adds no independent recovery coverage.
+	catalogs := make([]*partlog.NameCatalog, f.Producers)
+	defer func() {
+		for _, catalog := range catalogs {
+			if catalog != nil {
+				err = errors.Join(err, catalog.Close())
+			}
+		}
+	}()
 	if layer > 0 {
 		if e = parallel(f.Producers, func(p int) (err error) {
 			catalog, err := partlog.OpenNameCatalog(filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", p), "catalog"))
 			if err != nil {
 				return err
 			}
-			defer func() { err = errors.Join(err, catalog.Close()) }()
+			catalogs[p] = catalog
 			for id := p; id < f.Names; id += f.Producers {
 				local := uint64(id/f.Producers + 1)
 				name, _, ok := catalog.Lookup(local)
@@ -365,15 +384,7 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		if layer > 0 {
 			p := id % f.Producers
 			local := uint64(id/f.Producers + 1)
-			catalog, x := partlog.OpenNameCatalog(filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", p), "catalog"))
-			if x != nil {
-				return result, x
-			}
-			name, _, ok := catalog.Lookup(local)
-			x = catalog.Close()
-			if x != nil {
-				return result, x
-			}
+			name, _, ok := catalogs[p].Lookup(local)
 			if !ok || name != names[id] || NumericID(local, p, f.Producers) != uint64(id+1) {
 				return result, fmt.Errorf("persisted sample name/ID mismatch %s", names[id])
 			}
