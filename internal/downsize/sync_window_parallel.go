@@ -11,6 +11,7 @@ import (
 )
 
 type syncWindowProgressKey struct{}
+type syncWindowAttemptKey struct{}
 
 // A backend can retry a donor from its receipts within the same invocation.
 // Publish each completed range once across those attempts.
@@ -28,9 +29,15 @@ func syncWindowProgressContext(ctx context.Context, report func(int, bool)) cont
 func runSyncWindowRanges(ctx context.Context, names, streams int, run func(context.Context, int, int) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	// The outer CopyWindow owns restart retries. Nested splits and optional
+	// accounting must return unavailable ranges to this pass, releasing their
+	// pins and worker slots so unrelated ranges can finish first.
+	ctx = context.WithValue(ctx, syncWindowAttemptKey{}, true)
 	rangeNames := min(chunkstore.NativeMaxRangeNames, max(1, int(nativeRangeNames)))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
+	var retryMu sync.Mutex
+	var retry error
 	for range min(max(1, streams), (names+rangeNames-1)/rangeNames) {
 		wg.Add(1)
 		go func() {
@@ -40,7 +47,15 @@ func runSyncWindowRanges(ctx context.Context, names, streams int, run func(conte
 					continue
 				}
 				if err := run(ctx, start, min(start+rangeNames, names)); err != nil {
-					cancel(err)
+					if ctx.Err() == nil && restartCopyError(err) {
+						retryMu.Lock()
+						if retry == nil {
+							retry = err
+						}
+						retryMu.Unlock()
+					} else {
+						cancel(err)
+					}
 				}
 			}
 		}()
@@ -55,7 +70,10 @@ feed:
 	}
 	close(jobs)
 	wg.Wait()
-	return context.Cause(ctx)
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	return retry
 }
 
 // Admission rejection applies no data. Retry the same durable identity, within

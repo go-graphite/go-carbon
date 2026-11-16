@@ -166,6 +166,9 @@ func (e *syncHTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.sta
 // Jittered backoff caps at 30s and wait logs are limited to once per minute.
 func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call func() error) error {
 	defer b.recordTime(what, store)()
+	if once, _ := ctx.Value(syncWindowAttemptKey{}).(bool); once {
+		return call()
+	}
 	delay := b.retryTick
 	if delay <= 0 {
 		delay = 2 * time.Second

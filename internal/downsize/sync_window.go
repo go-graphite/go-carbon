@@ -408,10 +408,13 @@ func (b *syncLiveBackend) splitWindowRange(ctx context.Context, source, target s
 	identity := sha256.Sum256([]byte(journalPath))
 	base := filepath.Join(filepath.Dir(journalPath), "window-split-"+hex.EncodeToString(identity[:16]))
 	left, err := b.CopyWindow(ctx, source, target, names[:mid], base+".left", windows)
-	if err != nil {
+	if err != nil && !restartCopyError(err) {
 		return left, err
 	}
-	right, err := b.CopyWindow(ctx, source, target, names[mid:], base+".right", windows)
+	right, rightErr := b.CopyWindow(ctx, source, target, names[mid:], base+".right", windows)
+	if rightErr != nil && (err == nil || !restartCopyError(rightErr)) {
+		err = rightErr
+	}
 	return syncCopyResult{Copied: left.Copied + right.Copied, Failed: append(left.Failed, right.Failed...), Forbidden: left.Forbidden || right.Forbidden}, err
 }
 
@@ -485,6 +488,7 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 	// exposes fully processed names without waiting for a whole donor/window.
 	err := runSyncWindowRanges(ctx, len(names), b.o.copyStreams, func(ctx context.Context, start, end int) error {
 		fresh := false
+		var retry error
 		for _, copy := range copies {
 			err := func() error {
 				w, id, m, j := copy.w, copy.id, copy.m, copy.m.journal
@@ -609,8 +613,15 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 				return finishCount()
 			}()
 			if err != nil {
+				if ctx.Err() == nil && restartCopyError(err) {
+					retry = err
+					continue // other windows retain independent receipts
+				}
 				return err
 			}
+		}
+		if retry != nil {
+			return retry
 		}
 		if progress != nil {
 			progress(fmt.Sprintf("%s:%d:%d", journalPath, start, end), end-start, !fresh)
