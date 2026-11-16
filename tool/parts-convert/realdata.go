@@ -397,11 +397,23 @@ func verifyRealPaired(ctx context.Context, legacyPath, targetPath, oraclePath, s
 		if e != nil {
 			return e
 		}
-		paired, e = chunkstore.Open(pairedPath, opts)
+		originalInfo, e := os.Stat(legacyPath)
 		if e != nil {
 			return e
 		}
-		defer paired.Close()
+		pairedInfo, e := os.Stat(pairedPath)
+		if e != nil {
+			return e
+		}
+		if os.SameFile(originalInfo, pairedInfo) {
+			paired = legacy
+		} else {
+			paired, e = chunkstore.Open(pairedPath, opts)
+			if e != nil {
+				return e
+			}
+			defer paired.Close()
+		}
 	}
 	var legacyNS, capturedNS, convertedNS []int64
 	var convertedOnlyNS, nativeConvertedOnlyNS []int64

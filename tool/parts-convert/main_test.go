@@ -45,6 +45,9 @@ func TestCompareRealConvertedSameSlots(t *testing.T) {
 	if err = os.Mkdir(target, 0750); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = durableIdentity(filepath.Join(target, "CONVERSION-TARGET")); err != nil {
+		t.Fatal(err)
+	}
 	if err = os.Rename(filepath.Join(c.dir, "converted"), filepath.Join(target, "parts")); err != nil {
 		t.Fatal(err)
 	}
