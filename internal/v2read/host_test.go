@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,10 +28,21 @@ func TestHostConcurrent(t *testing.T) {
 	if os.Getenv("V2READ_HOST") != "1" {
 		t.Skip("explicit host qualification only")
 	}
+	duration := 4 * time.Second
+	if value := os.Getenv("V2READ_SECONDS"); value != "" {
+		seconds, err := strconv.Atoi(value)
+		if err != nil || seconds < 1 || seconds > 60 {
+			t.Fatal("V2READ_SECONDS must be between 1 and 60")
+		}
+		duration = time.Duration(seconds) * time.Second
+	}
 	for arm, readers := range []int{0, 4, 0, 4, 0, 4} {
 		beforeLoad, _ := os.ReadFile("/proc/loadavg")
 		beforeProcesses, _ := exec.Command("ps", "-eo", "pid,pcpu,comm,args", "--sort=-pcpu").Output()
-		reader, _ := New(4, 1<<30, 1<<20)
+		reader, err := New(4, 1<<30, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
 		cfg := testConfig()
 		cfg.Producers = 4
 		cfg.Shards = 4
@@ -62,8 +74,10 @@ func TestHostConcurrent(t *testing.T) {
 		var written, queries, readErrors atomic.Uint64
 		var writers, readersWG sync.WaitGroup
 		start := time.Now()
-		deadline := start.Add(4 * time.Second)
+		deadline := start.Add(duration)
+		fmt.Printf("V2READ_ARM arm=%d readers=%d duration=%s\n", arm, readers, duration)
 		samples := make([][]int64, readers)
+		readEnds := make([]time.Duration, readers)
 		for id := range readers {
 			readersWG.Add(1)
 			go func(id int) {
@@ -80,11 +94,10 @@ func TestHostConcurrent(t *testing.T) {
 						readErrors.Add(1)
 					}
 					queries.Add(1)
-					if len(local) < cap(local) {
-						local = append(local, time.Since(q).Nanoseconds())
-					}
+					local = append(local, time.Since(q).Nanoseconds())
 				}
 				samples[id] = local
+				readEnds[id] = time.Since(start)
 			}(id)
 		}
 		errs := make([]error, 4)
@@ -110,8 +123,12 @@ func TestHostConcurrent(t *testing.T) {
 			}(p)
 		}
 		writers.Wait()
-		readersWG.Wait()
 		intake := time.Since(start)
+		readersWG.Wait()
+		readDuration := duration
+		if readers > 0 {
+			readDuration = slices.Max(readEnds)
+		}
 		reader.Close()
 		if err = engine.Close(); err != nil {
 			t.Fatal(err)
@@ -137,7 +154,7 @@ func TestHostConcurrent(t *testing.T) {
 		}
 		afterLoad, _ := os.ReadFile("/proc/loadavg")
 		afterProcesses, _ := exec.Command("ps", "-eo", "pid,pcpu,comm,args", "--sort=-pcpu").Output()
-		output := map[string]any{"load_before": strings.TrimSpace(string(beforeLoad)), "load_after": strings.TrimSpace(string(afterLoad)), "processes_before": string(beforeProcesses[:min(len(beforeProcesses), 8192)]), "processes_after": string(afterProcesses[:min(len(afterProcesses), 8192)]), "arm": arm, "readers": readers, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "points": written.Load(), "intake_seconds": intake.Seconds(), "complete_seconds": complete.Seconds(), "complete_points_s": float64(written.Load()) / complete.Seconds(), "queries": queries.Load(), "queries_s": float64(queries.Load()) / 4, "p50_ns": p50, "p99_ns": p99, "read_errors": readErrors.Load(), "gomaxprocs": runtime.GOMAXPROCS(0)}
+		output := map[string]any{"load_before": strings.TrimSpace(string(beforeLoad)), "load_after": strings.TrimSpace(string(afterLoad)), "processes_before": string(beforeProcesses[:min(len(beforeProcesses), 8192)]), "processes_after": string(afterProcesses[:min(len(afterProcesses), 8192)]), "arm": arm, "readers": readers, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "points": written.Load(), "intake_seconds": intake.Seconds(), "complete_seconds": complete.Seconds(), "complete_points_s": float64(written.Load()) / complete.Seconds(), "queries": queries.Load(), "queries_s": float64(queries.Load()) / readDuration.Seconds(), "read_seconds": readDuration.Seconds(), "requested_seconds": duration.Seconds(), "latency_samples": len(latency), "p50_ns": p50, "p99_ns": p99, "read_errors": readErrors.Load(), "gomaxprocs": runtime.GOMAXPROCS(0), "metrics": len(names), "producers": 4, "rows_per_batch": 4096}
 		b, _ := json.Marshal(output)
 		fmt.Printf("V2READ_RESULT %s\n", b)
 	}
