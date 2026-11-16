@@ -131,3 +131,44 @@ allocation afterward; the reported potential release is not source throughput.
 ```sh
 parts-convert -prune-reclaimed-copy /private/converted
 ```
+
+## Pack an offline converted target
+
+Small name batches may leave many tiny ingested SSTs. The packing diagnostic
+streams the complete existing target in key order into new SSTs, combining
+records across name batches within each exact placement-group/vshard/partition.
+Every logical key (including immutable Part ID) and value stays unchanged.
+`-pack-mib` is an uncompressed payload target, not a minimum file size: a boundary
+tail must stay smaller when that entire boundary contains little data. Inventory
+reports the number of distinct boundaries, which is a lower bound on file count.
+
+```sh
+# Read-only data inventory; the maintenance lock/recovery metadata is writable.
+parts-convert -pack-copy /private/converted -copy-io-mbps 8
+
+# Admission uses the same original allocation as conversion, never a reset base.
+parts-convert -pack-copy /private/converted -pack-apply -pack-mib 32 \
+  -pack-source /private/offline-copy \
+  -copy-original-allocated-bytes 8267907072 -copy-io-mbps 8
+```
+
+The source remains untouched. Output is built in `packing-next` with automatic
+compactions disabled, then read back completely. Canonical key/value SHA-256,
+record/occupied-slot counts and metadata must agree. Actual output SST bounds
+are checked against the transfer boundary. A destination-bound `PACKING.json`
+journal records verification before the directory swap. Conversion and oracle
+verification recover that journal under the same maintenance lock before opening
+`parts`. Recovery handles both renames and retains the old DB until the verified
+replacement is installed durably. This is an offline directory replacement; it
+does not provide online reader pinning or shared-SST publication.
+
+Admission first runs the identical SST encoder into a counting sink, charges
+those compressed lengths rounded to 4 KiB per file and a 16 MiB DB allowance
+before creating the replacement. Packing
+needs both generations until verification completes. This is conservative
+accounting, not a certified filesystem allocation maximum; original-conversion
+source-compaction scratch, directory blocks, metadata and open-deleted files
+still require qualification. `DiskCapQualified` remains false. Inspect the full
+owned-root peak, including preparation, rather than calling final savings a
+whole-run disk bound. Packing leaves all existing coverage and recovery receipts
+unchanged and does not itself resume or delete any legacy batch.

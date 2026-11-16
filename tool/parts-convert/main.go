@@ -46,6 +46,10 @@ type result struct {
 
 func main() {
 	c := config{}
+	packTarget := flag.String("pack-copy", "", "offline converted target: inventory or repack physical SSTs within exact transfer boundaries")
+	packSource := flag.String("pack-source", "", "offline legacy source path used only for original-allocation admission")
+	packApply := flag.Bool("pack-apply", false, "apply verified offline SST packing (default inventories only)")
+	packMiB := flag.Uint64("pack-mib", 32, "maximum uncompressed packed SST payload in MiB; boundary tails remain smaller")
 	pruneCopy := flag.String("prune-reclaimed-copy", "", "offline converted directory: remove redundant unit receipts only after exact comparison with durable reclaimed batch authority")
 	realCapture := flag.String("capture-real-copy", "", "offline COPY: save a seeded 2000-name pre-conversion render oracle")
 	realVerify := flag.String("verify-real-copy", "", "offline legacy COPY: verify completed mixed renders against the saved oracle")
@@ -69,6 +73,20 @@ func main() {
 	flag.Int64Var(&c.partitionSeconds, "partition-seconds", 86400, "synthetic time partition width; larger widths trade expiry granularity for compression")
 	flag.Uint64Var(&c.minFreeGiB, "min-free-gib", 8, "free space left for other users")
 	flag.Parse()
+	if *packTarget != "" {
+		if *legacyIO == 0 || *legacyIO > 10000 || *packMiB < 1 || *packMiB > 64 {
+			fmt.Fprintln(os.Stderr, "ERROR: invalid packing IO cap or SST target")
+			os.Exit(1)
+		}
+		vfs.Default = newPacedFS(vfs.Default, *legacyIO*1_000_000)
+		r, err := packCopy(context.Background(), *packSource, *packTarget, *legacyOriginal, *packMiB<<20, *packApply, nil)
+		encodeErr := json.NewEncoder(os.Stdout).Encode(r)
+		if err = errors.Join(err, encodeErr); err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *pruneCopy != "" {
 		r, err := pruneReclaimedReceipts(*pruneCopy, true)
 		if err == nil {

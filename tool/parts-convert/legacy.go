@@ -115,6 +115,14 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 		return r, err
 	}
 	r.Source, r.Destination = sourceID, targetID
+	unlockPacking, err := packingLock(targetPath)
+	if err != nil {
+		return r, err
+	}
+	defer unlockPacking()
+	if err = recoverPacking(ctx, targetPath); err != nil {
+		return r, err
+	}
 	r.LegacySSTBefore, err = sstBytes(sourcePath)
 	if err != nil {
 		return r, err

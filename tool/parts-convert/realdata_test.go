@@ -104,6 +104,10 @@ func realOracleRoundTrip(t *testing.T, rangeOrder bool) {
 	if _, err = convertLegacyCopy(ctx, legacyPath, output, 4096, 256<<20, copyOptions{RangeOrder: rangeOrder}); err != nil {
 		t.Fatal(err)
 	}
+	packed, err := packCopy(ctx, legacyPath, output, 0, 32<<20, true, nil)
+	if err != nil || !packed.BitExact {
+		t.Fatalf("packing before frozen oracle: %+v %v", packed, err)
+	}
 	queries := make(map[string]realQuery, len(oracle.Queries))
 	for _, q := range oracle.Queries {
 		queries[q.Name] = q

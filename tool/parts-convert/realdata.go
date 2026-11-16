@@ -212,6 +212,14 @@ func sourceReal(ctx context.Context, base string, q realQuery) error {
 }
 
 func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceURL string) error {
+	unlockPacking, err := packingLock(targetPath)
+	if err != nil {
+		return err
+	}
+	defer unlockPacking()
+	if err = recoverPacking(ctx, targetPath); err != nil {
+		return err
+	}
 	b, err := os.ReadFile(oraclePath)
 	if err != nil {
 		return err
