@@ -51,6 +51,8 @@ type readyCount struct {
 }
 type readyReport struct {
 	RedoNames            map[string]int64   `json:"redo_names"`
+	PendingRecovery      string             `json:"pending_recovery,omitempty"`
+	PendingWindows       syncRanges         `json:"pending_windows,omitempty"`
 	Quarantined          int64              `json:"quarantined"`
 	PolicySkipped        int64              `json:"policy_skipped"`
 	QuarantinePath       string             `json:"quarantine_path,omitempty"`
@@ -248,19 +250,49 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		}
 	}
 	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
-	if e = repairLegacyWindowQuarantine(ctx, *o, b); e != nil {
-		return e
-	}
 	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
 	if e != nil {
+		return e
+	}
+	validation := readyPrerequisites(*o, r)
+	// Missing operator inputs cannot be repaired by another digest/copy pass.
+	// A completed observation is sufficient to stop NOT_READY; it is never
+	// sufficient to bypass mutation fences when publishing READY.
+	if len(validation) > 0 {
+		completed, e := completedReadyObservation(*o)
+		if e != nil {
+			return e
+		}
+		if completed != "" {
+			report.Reasons = append(report.Reasons, validation...)
+			report.ProofState, report.Processes = completed, before
+			report.PendingWindows = readyRestartWindows(previous, before)
+			if resume != nil {
+				report.PendingWindows = readyRestartWindows(resume.Processes, before)
+				if filepath.Join(o.state, resume.State) != completed {
+					report.PendingRecovery = resume.State
+					report.PendingWindows = append(append(syncRanges(nil), resume.Windows...), report.PendingWindows...)
+				}
+			}
+			invalidation := ""
+			if len(report.PendingWindows) > 0 {
+				invalidation = "store_restart"
+			}
+			event("sync_ready_inputs_blocked", map[string]any{"state": completed, "reasons": validation, "pending_recovery": report.PendingRecovery, "pending_windows": report.PendingWindows, "pending_invalidation": invalidation, "verification_repeated": false})
+			return nil
+		}
+	}
+	if e = repairLegacyWindowQuarantine(ctx, *o, b); e != nil {
 		return e
 	}
 	if resume == nil {
 		if e = initial(); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return e
 		}
+		if e = saveReadyObservation(*o, o.state); e != nil {
+			return e
+		}
 	}
-	validation := readyPrerequisites(*o, r)
 	if o.noVerify || (len(o.windows) > 0 && !o.fullHistory && r.scope != "windows") {
 		report.Reasons = append(report.Reasons, validation...)
 		return nil
@@ -276,9 +308,25 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		if e = runSync(ctx, resume.options(*o), b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return fmt.Errorf("restart recovery: %w", e)
 		}
+		if e = saveReadyObservation(*o, filepath.Join(o.state, resume.State)); e != nil {
+			return e
+		}
 		previous, state, unbound = resume.Processes, filepath.Join(o.state, resume.State), false
 		report.Restarts = append(report.Restarts, resume.Restarts...)
 		report.Windows = append(report.Windows, resume.Restarts...)
+	}
+	// Check prerequisites immediately after work completes, before allocating
+	// another recovery generation for a restart observed during that work.
+	if len(validation) > 0 {
+		current, e := capture()
+		if e != nil {
+			return e
+		}
+		report.Reasons = append(report.Reasons, validation...)
+		report.Processes, report.ProofState = current, state
+		report.PendingWindows = readyRestartWindows(previous, current)
+		event("sync_ready_inputs_blocked", map[string]any{"state": state, "reasons": validation, "pending_windows": report.PendingWindows, "verification_repeated": false})
+		return nil
 	}
 	repairedParity := false
 	for generation := 0; ; generation++ {
@@ -326,7 +374,15 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 			if e = runSync(ctx, recovery, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 				return fmt.Errorf("restart recovery: %w", e)
 			}
+			if e = saveReadyObservation(*o, recovery.state); e != nil {
+				return e
+			}
 			state = recovery.state
+			if validation = readyPrerequisites(*o, r); len(validation) > 0 {
+				report.Reasons = append(report.Reasons, validation...)
+				report.Processes, report.ProofState = previous, state
+				return nil
+			}
 			continue
 		}
 		if len(validation) > 0 {
