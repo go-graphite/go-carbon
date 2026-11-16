@@ -3,6 +3,7 @@ package carbon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -365,6 +366,13 @@ measure:
 		t.Fatal(e)
 	}
 	fmt.Printf("V2_DAEMON_DRAIN final_accepted=%d flush_seconds=%.6f stats=%+v\n", app.v2.Backend.Stats().IngestedPoints, time.Since(settleStart).Seconds(), app.v2.Backend.Stats())
+	if staged, ok := app.v2.Backend.(interface{ StageStats() map[string]any }); ok {
+		b, err := json.Marshal(staged.StageStats())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("V2_DAEMON_STAGES %s\n", b)
+	}
 	completedBackend := app.v2.Backend
 	if err := app.DumpStop(); err != nil {
 		t.Fatal(err)

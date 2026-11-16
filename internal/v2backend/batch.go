@@ -107,6 +107,7 @@ func (s *Store) AppendBatch(names [][]byte, data []points.Point) error {
 	frames := make([]frame, len(data))
 	counts := make([]int, len(s.owners))
 	resolved := make([]*resolvedMetric, len(owned))
+	stageStart := s.stages.start()
 	for i := range owned {
 		r, e := s.resolveBytes(names[i])
 		if e != nil {
@@ -115,6 +116,7 @@ func (s *Store) AppendBatch(names [][]byte, data []points.Point) error {
 		resolved[i] = r
 		counts[r.owner]++
 	}
+	s.stages.finish(&s.stages.resolve, stageStart)
 	offset := 0
 	for i, n := range counts {
 		groups[i] = frames[offset : offset : offset+n]

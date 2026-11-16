@@ -12,7 +12,7 @@ import (
 
 // A canonical series key is the dictionary entry for a bounded archive run.
 // Names, placement and physical-slot keys are never repeated in its rows.
-// The outer GCP3 prefix still scopes every file to one PG/vshard/partition.
+// The outer GCP3 prefix still scopes each record to one PG/vshard/partition.
 const compactArchive = math.MaxUint32 - 1
 const compactRecords = 4096
 

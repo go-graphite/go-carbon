@@ -297,7 +297,8 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 			tx.abort()
 		}
 	}()
-	// Every data file covers exactly one portable (PG,vshard,partition) range.
+	// Stage logical (PG,vshard,partition) ranges independently. The core
+	// coalesces these sorted ranges into a database publication before IO.
 	dataFiles := make(map[string][]kv)
 	refs := make([]kv, 0, len(byName))
 	var ops []kv

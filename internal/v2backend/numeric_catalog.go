@@ -102,6 +102,8 @@ func numericPolicyPrefix(policy []byte, group partsformat.Group) []byte {
 }
 
 func (c *numericCatalog) intern(s *Store, r *resolvedMetric) (*resolvedMetric, error) {
+	started := s.stages.start()
+	defer s.stages.finish(&s.stages.identity, started)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {

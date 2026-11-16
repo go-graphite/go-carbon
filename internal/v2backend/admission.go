@@ -52,6 +52,7 @@ func openAdmissionWithHook(opts daemonstore.Options, now func() time.Time, async
 		budget: partsread.NewBudget(256 << 20), stop: make(chan struct{}), done: make(chan struct{}),
 		watchStop: make(chan struct{}), watchDone: make(chan struct{}), ready: make(chan struct{}), firstAccepted: make(chan struct{})}
 	s.admissionContext, s.cancelAdmission = context.WithCancel(context.Background())
+	s.stages.enabled = os.Getenv("V2_BACKEND_STAGES") == "1"
 	var e error
 	s.log, e = partlog.OpenAdmission(filepath.Join(opts.DataDir, "journal"), partlog.Options{Streams: opts.Owners, SyncInterval: time.Second})
 	if e != nil {

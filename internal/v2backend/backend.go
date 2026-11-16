@@ -105,6 +105,7 @@ type owner struct {
 	readBase       atomic.Pointer[liveBase]
 }
 type Store struct {
+	stages                        stageCounters
 	ready                         chan struct{}
 	readyOK                       atomic.Bool
 	firstAccepted                 chan struct{}
@@ -397,11 +398,13 @@ func (o *owner) run() {
 			a.err = o.s.status()
 			if a.err == nil {
 				var payload []byte
+				stageStart := o.s.stages.start()
 				payload, a.err = o.encodeReceipts(fs)
 				var cursor uint64
 				if a.err == nil {
 					cursor, a.err = o.s.log.Append(o.id, fs[0].clock, payload)
 				}
+				o.s.stages.finish(&o.s.stages.journal, stageStart)
 				if a.err == nil && o.s.firstAcceptNS.Load() == 0 {
 					a.err = o.s.log.Sync()
 					if a.err == nil && o.s.firstAcceptNS.CompareAndSwap(0, time.Now().UnixNano()) {

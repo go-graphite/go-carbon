@@ -186,6 +186,8 @@ func (o *owner) publishCatalog() (*catalog, error) {
 	return c, e
 }
 func (o *owner) publish() error {
+	started := o.s.stages.start()
+	defer o.s.stages.finish(&o.s.stages.publish, started)
 	c, e := o.publishCatalog()
 	if e != nil {
 		return e

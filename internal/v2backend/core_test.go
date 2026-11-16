@@ -118,6 +118,34 @@ func TestCoreBackendSIGKILL(t *testing.T) {
 	TestBackendSIGKILL(t)
 }
 
+func TestCoreSealFileCountDoesNotScaleWithRoutingRanges(t *testing.T) {
+	t.Setenv("V2_BACKEND_STAGES", "1")
+	opts := testOptions(t.TempDir(), simplePolicy())
+	opts.WriteEngine, opts.Owners, opts.Shards = "core", 3, 1
+	s, err := openAt(opts, func() time.Time { return time.Unix(1794700800, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requireClose(t, s)
+	var names [][]byte
+	var data []points.Point
+	for i := range 1024 {
+		names = append(names, []byte(fmt.Sprintf("routing.series%d", i)))
+		data = append(data, points.Point{Timestamp: 1794700799, Value: float64(i)})
+	}
+	if err := s.AppendBatch(names, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// A routing range remains a portable logical identity, but must not impose
+	// one file create/sync/manifest entry per range on the daemon write path.
+	if ranges, files := s.parts.Load(), s.stages.files.Load(); ranges < 100 || files == 0 || files*10 >= ranges {
+		t.Fatalf("publication fanout: logical ranges=%d staged files=%d", ranges, files)
+	}
+}
+
 func TestCoreDecoupledGeometry(t *testing.T) {
 	clock := int64(1794700800)
 	opts := testOptions(t.TempDir(), simplePolicy())

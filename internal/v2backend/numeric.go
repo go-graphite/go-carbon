@@ -43,7 +43,9 @@ func (o *owner) appendCore(fs []frame) error {
 			rows = append(rows, v2core.Row{ID: f.resolved.globalID, Time: p.Timestamp, Bits: math.Float64bits(p.Value), Seq: uint64(i + 1)})
 		}
 	}
+	started := o.s.stages.start()
 	err := o.s.core.AppendNumeric(o.id, rows, applies, cursor, false)
+	o.s.stages.finish(&o.s.stages.append, started)
 	o.numericRows, o.numericApplies = rows[:0], applies[:0]
 	if err == nil {
 		o.coreCursor = cursor
@@ -52,6 +54,8 @@ func (o *owner) appendCore(fs []frame) error {
 }
 
 func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, error) {
+	started := s.stages.start()
+	defer s.stages.finish(&s.stages.plan, started)
 	if len(in.Batches) != 0 {
 		return v2core.SealPlan{}, errors.New("unexpected opaque core receipt")
 	}
@@ -66,6 +70,7 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 	if err := s.log.Sync(); err != nil {
 		return v2core.SealPlan{}, err
 	}
+	s.stages.finish(&s.stages.sync, started)
 	// One flat sample allocation, regardless of original apply count.
 	samples := make([]sealrollup.Sample, len(in.Rows))
 	for i, p := range in.Rows {
@@ -119,7 +124,11 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 			tx.commit()
 		}
 	}
-	metadata := make(map[string][]v2core.KV)
+	// File boundaries are publication batches, not routing identities. Copy
+	// selects logical PG/vshard ranges from the immutable snapshot; Pebble may
+	// already combine those ranges during compaction. Coalesce each namespace
+	// across journal owners before staging to avoid thousands of tiny SSTs.
+	files := make(map[string][]v2core.KV)
 	for ownerID, series := range byOwner {
 		r := receipts[ownerID]
 		tx, err := s.owners[ownerID].prepareSeries(series, r.cursor, r.order, r.count)
@@ -133,18 +142,30 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 			for i, row := range rows {
 				file[i] = v2core.KV{Key: row.key, Value: row.value}
 			}
-			if bytes.HasPrefix(rows[0].key, []byte{'G', 'C', 'P', 3}) {
-				plan.Files = append(plan.Files, file)
-			} else {
-				ns := string(rows[0].key[:4])
-				metadata[ns] = append(metadata[ns], file...)
-			}
+			ns := string(rows[0].key[:4])
+			files[ns] = append(files[ns], file...)
 		}
 	}
-	for _, file := range metadata {
+	for _, file := range files {
 		slices.SortFunc(file, func(a, b v2core.KV) int { return bytes.Compare(a.Key, b.Key) })
 		plan.Files = append(plan.Files, file)
 	}
 	sort.Slice(plan.Files, func(i, j int) bool { return bytes.Compare(plan.Files[i][0].Key, plan.Files[j][0].Key) < 0 })
+	if s.stages.enabled {
+		s.stages.files.Add(uint64(len(plan.Files)))
+		var dataBytes, metadataBytes uint64
+		for _, file := range plan.Files {
+			for _, row := range file {
+				n := uint64(len(row.Key) + len(row.Value))
+				if bytes.HasPrefix(row.Key, []byte{'G', 'C', 'P', 3}) {
+					dataBytes += n
+				} else {
+					metadataBytes += n
+				}
+			}
+		}
+		s.stages.dataBytes.Add(dataBytes)
+		s.stages.metadataBytes.Add(metadataBytes)
+	}
 	return plan, nil
 }
