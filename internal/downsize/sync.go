@@ -407,6 +407,9 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 
 	defer func() { result = errors.Join(result, o.issues.checkpoint()) }()
 	s := &syncer{o: o, b: b, j: j, forbid: map[string]bool{}, failedCp: map[string]bool{}, copied: map[string]bool{}, started: time.Now()}
+	if err := s.preserveWindowRetryProgress(); err != nil {
+		return err
+	}
 	s.redo = newSyncRedoGuard(j)
 	s.sum.phases = map[string]*syncPhase{}
 	if err := s.prepareVerificationRetry(); err != nil {
