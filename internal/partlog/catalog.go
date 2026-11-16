@@ -67,6 +67,29 @@ func syncCatalogDir(dir string) error {
 	defer f.Close()
 	return f.Sync()
 }
+
+// Publish each new directory entry before a referencing journal may become
+// durable. Syncing only the new directory does not persist its parent's entry.
+func makeCatalogDir(dir string) error {
+	st, err := os.Stat(dir)
+	if err == nil {
+		if !st.IsDir() {
+			return fmt.Errorf("%w: catalog path is not a directory", errCatalog)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	parent := filepath.Dir(dir)
+	if err = makeCatalogDir(parent); err != nil {
+		return err
+	}
+	if err = os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return err
+	}
+	return syncCatalogDir(parent)
+}
 func writeCatalogBytes(f *os.File, b []byte) error {
 	n, e := f.Write(b)
 	if e == nil && n != len(b) {
@@ -79,7 +102,7 @@ func writeCatalogBytes(f *os.File, b []byte) error {
 // Only a physically incomplete final WAL record is discarded. CRC failures,
 // ID holes, conflicting definitions and epoch mismatches fail closed.
 func OpenNameCatalog(dir string) (*NameCatalog, error) {
-	if e := os.MkdirAll(dir, 0700); e != nil {
+	if e := makeCatalogDir(filepath.Clean(dir)); e != nil {
 		return nil, e
 	}
 	c := &NameCatalog{dir: dir, ids: make(map[string]uint64), entries: []predictorV3Entry{{}}}
