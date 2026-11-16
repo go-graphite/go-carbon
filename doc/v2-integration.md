@@ -1,7 +1,7 @@
 # Experimental v2 daemon integration
 
-The experimental v2 work is integrated on `atimofieiev/v2-integrated` in
-[Draft #1487](https://github.com/go-graphite/go-carbon/pull/1487), based on master.
+The experimental v2 work is integrated on `atimofieiev/v2` in
+[Draft #1488](https://github.com/go-graphite/go-carbon/pull/1488), based on master.
 It joins the component Drafts through real merge commits and connects TCP intake,
 the mandatory journal, canonical rollups, immutable read snapshots, discovery,
 logical inactivity expiry and host-wide quota admission.
