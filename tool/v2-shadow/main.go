@@ -424,12 +424,16 @@ func run() (retErr error) {
 		if e != nil {
 			return e
 		}
-		var raw map[string]json.RawMessage
+		var raw map[string]v2core.RollupPolicy
 		if e = json.Unmarshal(b, &raw); e != nil {
 			return e
 		}
 		for n, p := range raw {
-			policies[n] = p
+			encoded, e := v2core.EncodeRollupPolicy(p)
+			if e != nil {
+				return e
+			}
+			policies[n] = encoded
 		}
 	}
 	policyClient := &http.Client{Timeout: 5 * time.Second}
