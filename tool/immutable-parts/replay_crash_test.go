@@ -87,7 +87,7 @@ func TestFullScaleReplayCrashes(t *testing.T) {
 		t.Fatal("invalid owners", e)
 	}
 	const metrics = 36000000
-	cfg := coreConfig{AppendParts: true, Shards: owners, Producers: producers, MaxRows: 1 << 20, PartitionSeconds: 3600}
+	cfg := coreConfig{AppendParts: true, Shards: owners, Producers: producers, MaxRows: 1 << 20, PartitionSeconds: 3600, RawCodec: os.Getenv("CORE_RAW_CODEC")}
 	if os.Getenv("PARTLOG_CRASH_CHILD") == "yes" {
 		start := time.Now()
 		e := logReplayLive(root, cfg, partlog.Options{Streams: producers, SegmentBytes: 64 << 20, SyncInterval: time.Second, ReadAheadBytes: 4 << 20}, total, metrics, func(stage string, points uint64, extra map[string]any) {

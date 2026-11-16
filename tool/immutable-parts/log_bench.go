@@ -19,6 +19,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/partlog"
+	"github.com/go-graphite/go-carbon/internal/v2core"
 )
 
 // logBacklogBenchmark uses a fixed synthetic name-ID catalogue and timestamps
@@ -30,7 +31,7 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 	}
 	start := time.Now()
 	baseline := procStats()
-	cfg := coreConfig{AppendParts: true, Shards: owners, Producers: producers, MaxRows: 1 << 20, PartitionSeconds: 3600}
+	cfg := coreConfig{AppendParts: true, Shards: owners, Producers: producers, MaxRows: 1 << 20, PartitionSeconds: 3600, RawCodec: os.Getenv("CORE_RAW_CODEC")}
 	emit := func(stage string, points uint64, extra map[string]any) {
 		out := map[string]any{"stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "points": points, "seconds": time.Since(start).Seconds(), "phase": phase, "gomaxprocs": runtime.GOMAXPROCS(0), "producers": producers, "owners": owners, "metrics": metrics, "proc": procStats(), "proc_start": baseline}
 		for k, v := range extra {
@@ -534,53 +535,44 @@ func verifyLogBenchmark(root string, total, metrics uint64, producers, owners in
 			defer it.Close()
 			seen := make([]uint64, ((maxSeq/metrics+1)*counts[owner]+63)/64)
 			actual, oracle := sha256.New(), sha256.New()
-			for it.First(); it.Valid(); it.Next() {
-				key, v := it.Key(), it.Value()
-				if len(key) != 41 || (key[0] != 1 && key[0] != 2) || len(v)%24 != 0 {
-					r.Err = errors.New("invalid persisted block")
-					return
-				}
-				offset := 9
-				if key[0] == 2 {
-					offset = 17
-				}
-				id := binary.BigEndian.Uint64(key[offset:])
+			var decoder v2core.RawDecoder
+			visit := func(got row) error {
+				id, ts, bits, seq := got.ID, got.Time, got.Bits, got.Seq
 				if id >= metrics || coreShard(id, owners) != owner {
-					r.Err = errors.New("invalid persisted ID or route")
-					return
+					return errors.New("invalid persisted ID or route")
 				}
-				for len(v) > 0 {
-					ts, bits, seq := int64(binary.LittleEndian.Uint64(v)), binary.LittleEndian.Uint64(v[8:]), binary.LittleEndian.Uint64(v[16:])
-					v = v[24:]
-					if seq >= total {
-						index := seq - total
-						if index/uint64(producers) >= live[index%uint64(producers)] {
-							r.Err = errors.New("unexpected live sequence")
-							return
-						}
+				if seq >= total {
+					index := seq - total
+					if index/uint64(producers) >= live[index%uint64(producers)] {
+						return errors.New("unexpected live sequence")
 					}
-					rate := uint64(6000000)
-					if seq >= total {
-						rate = 20000000
-					}
-					expected := row{ID: seq % metrics, Time: 1800000000 + int64(seq/rate), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
-					if id != expected.ID || ts != expected.Time || bits != expected.Bits {
-						r.Err = fmt.Errorf("row bits differ seq%d", seq)
-						return
-					}
-					index := seq/metrics*counts[owner] + uint64(ranks[id])
-					mask := uint64(1) << (index % 64)
-					if seen[index/64]&mask != 0 {
-						r.Err = fmt.Errorf("duplicate seq%d", seq)
-						return
-					}
-					seen[index/64] |= mask
-					var a, b [32]byte
-					putRow(a[:], row{ID: id, Time: ts, Bits: bits, Seq: seq})
-					putRow(b[:], expected)
-					actual.Write(a[:])
-					oracle.Write(b[:])
-					r.Count++
+				}
+				rate := uint64(6000000)
+				if seq >= total {
+					rate = 20000000
+				}
+				expected := row{ID: seq % metrics, Time: 1800000000 + int64(seq/rate), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
+				if got != expected {
+					return fmt.Errorf("row bits differ seq%d ts%d bits%x", seq, ts, bits)
+				}
+				index := seq/metrics*counts[owner] + uint64(ranks[id])
+				mask := uint64(1) << (index % 64)
+				if seen[index/64]&mask != 0 {
+					return fmt.Errorf("duplicate seq%d", seq)
+				}
+				seen[index/64] |= mask
+				var a, b [32]byte
+				putRow(a[:], got)
+				putRow(b[:], expected)
+				actual.Write(a[:])
+				oracle.Write(b[:])
+				r.Count++
+				return nil
+			}
+			for it.First(); it.Valid(); it.Next() {
+				if e = decoder.Visit(it.Key(), it.Value(), visit); e != nil {
+					r.Err = e
+					return
 				}
 			}
 			r.Err = it.Error()
