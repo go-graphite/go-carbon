@@ -238,6 +238,18 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 	matchingProof := prior.ObservationProof == proof || v2 && prior.ObservationProof == strings.TrimPrefix(proof, "v2:")
 	if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] && proof != "" && matchingProof {
 		prior.ObservationProof = proof
+		if v2 && len(prior.Holes) > 0 {
+			stamps := make(map[string]string, len(names))
+			for i, name := range names {
+				stamps[name] = hex.EncodeToString(before[i][:])
+			}
+			if prior.HoleProofs == nil {
+				prior.HoleProofs = map[string]string{}
+			}
+			for _, hole := range prior.Holes {
+				prior.HoleProofs[hole.Name] = stamps[hole.Name]
+			}
+		}
 		prior.Reused = len(names)
 		prior.Work = nil            // no backend data operation was performed by this replay
 		prior.LegacyRevalidated = 0 // this append records reuse, not a second migration
@@ -252,9 +264,25 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 			return syncRow{}, err
 		}
 	}
+	sameObservation := prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1]
+	var preservedHoles []syncHole
+	preservedProofs := map[string]string{}
+	priorHoles := map[string][]syncHole{}
+	if sameObservation {
+		for _, h := range prior.Holes {
+			priorHoles[h.Name] = append(priorHoles[h.Name], h)
+		}
+	}
 	selected := make([]string, 0, len(names))
 	positions := make([]int, 0, len(names))
 	for i, n := range names {
+		if sameObservation && v2 && before[i] != (syncProof{}) && prior.HoleProofs[n] == hex.EncodeToString(before[i][:]) {
+			if holes := priorHoles[n]; len(holes) > 0 {
+				preservedHoles = append(preservedHoles, holes...)
+				preservedProofs[n] = prior.HoleProofs[n]
+				continue
+			}
+		}
 		var saved [32]byte
 		if block != nil {
 			copy(saved[:], block[(ids[i]-ids[0])*32:])
@@ -306,36 +334,53 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 			proof = ""
 		}
 		dirty := map[string]bool{}
+		excluded := map[string]bool{}
 		for _, h := range row.Holes {
 			dirty[h.Name] = true
 		}
 		for _, n := range row.Unindexed {
 			dirty[n] = true
+			excluded[n] = true
 		}
 		for _, k := range row.Skipped {
 			dirty[k.Name] = true
+			excluded[k.Name] = true
 		}
 		// Eligibility/absence exclusions may depend on policy outside the native
 		// metric config. Re-resolve them instead of persisting a clean data proof.
 		for _, k := range row.Resolved {
 			dirty[k.Name] = true
+			excluded[k.Name] = true
 		}
 		for _, n := range row.Short {
 			dirty[n] = true
+			excluded[n] = true
 		}
 		for j, i := range positions {
 			stamp := syncProof{}
 			if before[i] != (syncProof{}) && before[i] != after[j] {
 				row.Skipped = append(row.Skipped, syncSkip{names[i], "store changed during verification"})
 				dirty[names[i]] = true
+				excluded[names[i]] = true
 			}
 			if !dirty[names[i]] && before[i] == after[j] {
 				stamp = after[j]
 			}
-			// Seal observations with holes too, only when the entire comparison
-			// saw one unchanged mutation fence. Zero clears an unstable seal.
+			// The whole-batch seal requires every mutation fence to stay stable.
+			// Individual known hole observations below survive unknown neighbors.
 			if before[i] != after[j] {
 				proof = ""
+			}
+			if v2 && afterV2 && !excluded[names[i]] && before[i] != (syncProof{}) && before[i] == after[j] {
+				if dirty[names[i]] {
+					if row.HoleProofs == nil {
+						row.HoleProofs = map[string]string{}
+					}
+					row.HoleProofs[names[i]] = hex.EncodeToString(after[j][:])
+				}
+				if sameObservation && !strings.HasPrefix(prior.ObservationProof, "v2:") {
+					row.LegacyRevalidated++
+				}
 			}
 			record := s.frontier.record(names[i], stamp)
 			if block != nil {
@@ -353,9 +398,17 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 	if len(row.Unindexed) == 0 && len(row.Skipped) == 0 && len(row.Resolved) == 0 && len(row.Short) == 0 {
 		row.ObservationProof = proof
 	}
-	if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] && !strings.HasPrefix(prior.ObservationProof, "v2:") && strings.HasPrefix(row.ObservationProof, "v2:") && len(selected) > 0 {
-		row.LegacyRevalidated = len(selected)
-		event("sync_legacy_revalidated", map[string]any{"round": round, "names": len(selected), "first": names[0], "last": names[len(names)-1], "proof": "v2", "windows": s.o.windows, "full_history": !s.windowOnly()})
+	if row.LegacyRevalidated > 0 {
+		event("sync_legacy_revalidated", map[string]any{"round": round, "names": row.LegacyRevalidated, "first": names[0], "last": names[len(names)-1], "proof": "v2", "windows": s.o.windows, "full_history": !s.windowOnly()})
+	}
+	row.Holes = append(row.Holes, preservedHoles...)
+	if len(preservedProofs) > 0 {
+		if row.HoleProofs == nil {
+			row.HoleProofs = map[string]string{}
+		}
+		for name, stamp := range preservedProofs {
+			row.HoleProofs[name] = stamp
+		}
 	}
 	row.First, row.Last, row.Names = names[0], names[len(names)-1], len(names)
 	row.Reused = len(names) - len(selected)

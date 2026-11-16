@@ -163,6 +163,7 @@ type syncHole struct {
 }
 
 type syncRow struct {
+	HoleProofs         map[string]string        `json:"hole_proofs_v2,omitempty"`
 	LegacyRevalidated  int                      `json:"legacy_revalidated_names,omitempty"`
 	ObservationProof   string                   `json:"observation_proof,omitempty"`
 	InvalidationReason string                   `json:"invalidation_reason,omitempty"`
