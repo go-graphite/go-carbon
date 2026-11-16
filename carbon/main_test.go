@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -15,9 +17,28 @@ import (
 
 const testHandoffSuccessorDir = "GRAPHITE_TEST_HANDOFF_SUCCESSOR_DIR"
 
-// Use persistent immutable stubs so macOS need not assess new executables
-// during a handoff. Isolated cases inherit the warmed paths and protocols.
+// Capability probes execute the already running test binary. This avoids shell
+// startup/assessment consuming a handoff deadline on a busy host.
 func TestMain(m *testing.M) {
+	if protocol, ok := map[string]string{
+		"-handoff-protocol":              handoff.Protocol,
+		"-input-handoff-protocol":        handoff.InputProtocol,
+		"-shared-store-handoff-protocol": handoff.SharedStoreProtocol,
+		"-store-input-handoff-protocol":  handoff.StoreInputProtocol,
+	}[firstTestArgument()]; ok {
+		capability := map[string]string{
+			"-handoff-protocol": "read", "-input-handoff-protocol": "input",
+			"-shared-store-handoff-protocol": "shared", "-store-input-handoff-protocol": "store-input",
+		}[os.Args[1]]
+		if !strings.Contains(","+filepath.Base(os.Args[0])+",", ","+capability+",") {
+			syscall.Exit(2)
+		}
+		fmt.Println(protocol)
+		// This one-shot helper starts no test goroutines. Bypass the race runtime's
+		// exit grace period: the real daemon's capability response has no such delay.
+		syscall.Exit(0)
+	}
+
 	// Integration fixtures write only a few MiB. Production's percentage-based
 	// reserve can exceed all remaining space on a shared development machine,
 	// intentionally blocking capture forever. Give fixtures stable headroom,
@@ -31,36 +52,34 @@ func TestMain(m *testing.M) {
 
 	cpus := min(runtime.GOMAXPROCS(0), 4)
 	if os.Getenv(isolatedTestCase) != "" {
-		// Four storage processes share the host with other builds. Keep their
+		// Storage subprocesses share the host with other builds. Keep their
 		// GC and worker schedulers from each claiming every available CPU.
 		cpus = min(cpus, 2)
 	}
 	runtime.GOMAXPROCS(cpus)
 	_ = os.Setenv("GOMAXPROCS", strconv.Itoa(cpus))
-	for key, value := range map[string]string{
-		"GRAPHITE_TEST_READ_PROTOCOL":        handoff.Protocol,
-		"GRAPHITE_TEST_INPUT_PROTOCOL":       handoff.InputProtocol,
-		"GRAPHITE_TEST_SHARED_PROTOCOL":      handoff.SharedStoreProtocol,
-		"GRAPHITE_TEST_STORE_INPUT_PROTOCOL": handoff.StoreInputProtocol,
-	} {
-		_ = os.Setenv(key, value)
-	}
+
+	var probeDir string
 	if os.Getenv(testHandoffSuccessorDir) == "" {
-		dir := filepath.Join("testdata", "handoff-probes")
-		if _, err := os.Stat(dir); err != nil {
-			// Standalone test binaries may be invoked from the repository root.
-			dir = filepath.Join("carbon", dir)
+		var err error
+		probeDir, err = os.MkdirTemp("", "carbon-test-probes-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
-		dir, err := filepath.Abs(dir)
+		binary, err := os.Executable()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		for _, capabilities := range []string{"read,shared", "read,shared,input", "read,input", "read,input,store-input"} {
+			path := filepath.Join(probeDir, capabilities)
+			if err := os.Symlink(binary, path); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 			for _, flag := range []string{"-handoff-protocol", "-input-handoff-protocol", "-shared-store-handoff-protocol", "-store-input-handoff-protocol"} {
-				// Warm the rejection paths too: macOS executable assessment
-				// must not consume a timed rollback handoff's input window.
-				if err := exec.Command(filepath.Join(dir, capabilities), flag).Run(); err != nil {
+				if err := exec.Command(path, flag).Run(); err != nil {
 					var exit *exec.ExitError
 					if !errors.As(err, &exit) || exit.ExitCode() != 2 {
 						fmt.Fprintln(os.Stderr, err)
@@ -69,8 +88,9 @@ func TestMain(m *testing.M) {
 				}
 			}
 		}
-		_ = os.Setenv(testHandoffSuccessorDir, dir)
+		_ = os.Setenv(testHandoffSuccessorDir, probeDir)
 	}
+
 	var seedDir string
 	if os.Getenv(incrementalSeedEnv) == "" {
 		var err error
@@ -89,8 +109,18 @@ func TestMain(m *testing.M) {
 		}
 	}
 	code := m.Run()
+	if probeDir != "" {
+		_ = os.RemoveAll(probeDir)
+	}
 	if seedDir != "" {
 		_ = os.RemoveAll(seedDir)
 	}
 	os.Exit(code)
+}
+
+func firstTestArgument() string {
+	if len(os.Args) > 1 {
+		return os.Args[1]
+	}
+	return ""
 }

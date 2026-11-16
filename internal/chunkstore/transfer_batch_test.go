@@ -10,7 +10,7 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-// Compare SST ingestion with the preceding WAL path at different batch bounds:
+// Compare the preceding SST path with bounded WAL staging:
 // target-wins merges and durable receipts must preserve identical stored points.
 func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 	for _, mode := range []struct {
@@ -40,14 +40,20 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 			for _, limit := range []struct {
 				name  string
 				bytes int
-			}{{"batch", 64 << 20}, {"default", 0}, {"oversize", 1}} {
+			}{{"sst-oracle", 0}, {"batch", 1 << 10}, {"default", 0}, {"oversize", 1}} {
 				target := transferStore(t, mode.continuation, mode.buckets)
 				target.SetTransferBatchBytesForTest(limit.bytes)
 				// Half the names are live on the target: the merge keeps its points.
 				for _, name := range names[:3] {
 					putTransferPoints(t, target, name, []store.Point{{Timestamp: 999880, Value: 3}, {Timestamp: 999910, Value: 4}})
 				}
-				proofs, err := target.ImportTransfer(ctx, records)
+				var proofs []store.TransferProof
+				var err error
+				if limit.name == "sst-oracle" {
+					proofs, err = target.ImportTransferSSTForTest(ctx, records)
+				} else {
+					proofs, err = target.ImportTransfer(ctx, records)
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -58,8 +64,7 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 				if st.IngestMemtableOverlaps != 0 {
 					t.Fatalf("private staging overlapped live memtables: %d", st.IngestMemtableOverlaps)
 				}
-				if limit.bytes == 0 && (st.IngestTables == 0 || st.IngestEntries != uint64(len(names)) || st.TransferBatchBytes != 0) ||
-					limit.bytes > 0 && (st.TransferBatchCommits == 0 || st.TransferBatchEntries != uint64(len(names)) || st.TransferBatchBytes == 0 || st.IngestTables != 0) {
+				if limit.name != "sst-oracle" && (st.TransferBatchCommits == 0 || st.TransferBatchEntries != uint64(len(names)) || st.TransferBatchBytes == 0 || st.IngestTables != 0) {
 					t.Fatalf("%s path: commits=%d entries=%d bytes=%d ingest tables=%d", limit.name, st.TransferBatchCommits, st.TransferBatchEntries, st.TransferBatchBytes, st.IngestTables)
 				}
 
@@ -88,7 +93,7 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, other := range []string{"batch", "oversize"} {
+				for _, other := range []string{"sst-oracle", "batch", "oversize"} {
 					got, err := targets[other].Snapshot(ctx, name)
 					if err != nil {
 						t.Fatal(err)
@@ -105,7 +110,7 @@ func TestTransferBatchBoundariesPreserveMerge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, other := range []string{"batch", "oversize"} {
+			for _, other := range []string{"sst-oracle", "batch", "oversize"} {
 				got, err := targets[other].RawKeyValuesForTest()
 				if err != nil || !reflect.DeepEqual(got, want) {
 					t.Fatalf("%s: encoded keys/values, metadata or receipts differ: %v", other, err)

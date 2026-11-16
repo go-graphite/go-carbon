@@ -53,6 +53,9 @@ func TestBlockCacheShardParity(t *testing.T) {
 			var size [8]byte
 			count := 0
 			for it.First(); it.Valid(); it.Next() {
+				if string(it.Key()) == string(proofIdentityKey) {
+					continue // Per-store identity is intentionally random; metric bytes must match.
+				}
 				value, err := it.ValueAndErr()
 				if err != nil {
 					t.Fatal(err)

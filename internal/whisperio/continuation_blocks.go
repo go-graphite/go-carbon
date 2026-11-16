@@ -907,7 +907,7 @@ func (f *continuationFile) writeAt(data []byte, offset int64) (int, error) {
 				if f.fs.guardClassicWrites && timestamp != 0 && group.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0 {
 					old := group.Points[slot].Timestamp
 					now := f.fs.clock().Unix()
-					if int64(timestamp) > now && !store.PreferArchiveTimestamp(int64(timestamp), old, store.Retention{Step: a.Step, Count: a.Count}, now) {
+					if f.fs.protectFutureSlots && int64(timestamp) > now && !store.PreferArchiveTimestamp(int64(timestamp), old, store.Retention{Step: a.Step, Count: a.Count}, now) {
 						position, used = position+count, used+count
 						continue
 					}

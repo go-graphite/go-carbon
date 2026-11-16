@@ -248,6 +248,9 @@ func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
 				err = b.Delete(catalogKey(r.name), nil)
 			}
 			if err == nil && decodeErr == nil {
+				err = b.Delete(mutationKey(m), nil)
+			}
+			if err == nil && decodeErr == nil {
 				err = b.Delete(revisionKey(m), nil)
 			}
 			if err == nil {
@@ -534,6 +537,9 @@ func (s *Store) commitReplacement(m Metadata, chunks []map[int][]byte, old *Meta
 		}
 		oldChunks := chunkPrefix(old.ID, old.Generation)
 		if err := deleteRange(b, rangeDeleteReplaceChunks, oldChunks, prefixEnd(oldChunks)); err != nil {
+			return Metadata{}, err
+		}
+		if err := b.Delete(mutationKey(*old), nil); err != nil {
 			return Metadata{}, err
 		}
 		if err := b.Delete(revisionKey(*old), nil); err != nil {

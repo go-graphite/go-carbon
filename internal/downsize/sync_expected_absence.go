@@ -3,8 +3,10 @@ package downsize
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/go-graphite/go-carbon/buckyd"
+	"golang.org/x/sync/errgroup"
 )
 
 type expirationEvidenceBackend interface {
@@ -94,24 +96,42 @@ func expectedAbsent(ctx context.Context, b syncBackend, o syncOptions, names []s
 
 func (b *syncLiveBackend) ExpirationEvidence(ctx context.Context, store string, names []string, receiptsOnly bool) (map[string]buckyd.ExpirationEvidence, error) {
 	out := map[string]buckyd.ExpirationEvidence{}
+	var mu sync.Mutex
+	group, work := errgroup.WithContext(ctx)
+	group.SetLimit(min(16, max(1, b.o.copyStreams)))
+	unavailable := errors.New("expiration evidence unavailable")
 	for start := 0; start < len(names); start += 128 {
+		if work.Err() != nil {
+			break
+		}
 		subset := names[start:min(start+128, len(names))]
-		var response map[string]buckyd.ExpirationEvidence
-		err := b.wait(ctx, "expiration evidence", store, func() error {
-			_, err := b.m.requestOnce(ctx, store, "/v1/expiration/evidence", map[string]any{"Names": subset, "ReceiptsOnly": receiptsOnly}, &response)
-			return err
+		group.Go(func() error {
+			var response map[string]buckyd.ExpirationEvidence
+			err := b.wait(work, "expiration evidence", store, func() error {
+				_, err := b.m.requestOnce(work, store, "/v1/expiration/evidence", map[string]any{"Names": subset, "ReceiptsOnly": receiptsOnly}, &response)
+				return err
+			})
+			var api *apiError
+			if errors.As(err, &api) && (api.Status == 404 || api.Status == 501) {
+				return unavailable
+			}
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			for name, e := range response {
+				out[name] = e
+			}
+			mu.Unlock()
+			return nil
 		})
-		// Older daemons have no evidence: retain their ordinary strict parity.
-		var api *apiError
-		if errors.As(err, &api) && (api.Status == 404 || api.Status == 501) {
-			return out, nil
+	}
+	if err := group.Wait(); err != nil {
+		// Older daemons have no evidence: retain ordinary strict parity.
+		if errors.Is(err, unavailable) && ctx.Err() == nil {
+			return map[string]buckyd.ExpirationEvidence{}, nil
 		}
-		if err != nil {
-			return nil, err
-		}
-		for name, e := range response {
-			out[name] = e
-		}
+		return nil, err
 	}
 	return out, nil
 }

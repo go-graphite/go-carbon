@@ -59,10 +59,16 @@ func TestLiveDemandOrdinaryLimits(t *testing.T) {
 // Exercise the cache, eligibility queue, real worker/token driver and automatic
 // sampler together. Only the storage syscall is replaced by a confirmed write.
 func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
+	// Preserve every demand/floor ratio and the high-rate (>1000/s) token
+	// path while avoiding millions of distinct names under the race detector.
+	const scale = 20
+	// Admission counts metric writes; retain the 3:2 surge in points per
+	// write without copying 960 identical values into every cache entry.
+	const batchPoints = 16
 	synctest.Test(t, func(t *testing.T) {
 		c := cache.New()
-		c.SetMaxSize(40_000_000_000)
-		if err := c.SetWriteoutBatching(960, 960*time.Second); err != nil {
+		c.SetMaxSize(40_000_000_000 / scale)
+		if err := c.SetWriteoutBatching(batchPoints, 960*time.Second); err != nil {
 			t.Fatal(err)
 		}
 		if err := c.SetWriteoutSpread(.25); err != nil {
@@ -74,7 +80,7 @@ func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
 		p := &Whisper{recv: c.WriteoutQueue().Get}
 		p.SetWorkers(96)
 		p.SetMaxUpdatesPerSecond(-1)
-		p.SetAutoUpdateRate(c.WriteoutState, 25000, 75000)
+		p.SetAutoUpdateRate(c.WriteoutState, 25000/scale, 75000/scale)
 		p.SetWriteoutReady(c.WriteoutReady)
 		p.SetRestartBudget(budget, nil)
 		p.SetMockStore(func() (StoreFunc, func()) {
@@ -98,13 +104,13 @@ func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
 		var accepted uint64
 		var name int
 		for second := range 60 {
-			batchSize := 960
+			batchSize := batchPoints
 			if second >= 25 && second < 40 {
-				batchSize = 1440
+				batchSize = batchPoints * 3 / 2
 			}
-			count := 40000
+			count := 40000 / scale
 			if second >= 45 { // Falling demand must release its learned floor.
-				count = 3000
+				count = 3000 / scale
 			}
 			data := make([]points.Point, batchSize)
 			for i := range data {
@@ -123,14 +129,14 @@ func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
 			}
 			if second%5 == 4 {
 				// Include a quiet second so queue refresh latency cannot masquerade
-				// as a throughput deficit. Offered load still exceeds 25k/s.
+				// as a throughput deficit. Offered load still exceeds the configured floor.
 				time.Sleep(time.Second)
 				synctest.Wait()
 				s = c.WriteoutState()
 			}
 			if second >= 10 && second%5 == 4 && second < 45 {
 				rate, _, reason := p.autoUpdateObservation()
-				if !budget.Active() && rate > 75000 {
+				if !budget.Active() && rate > 75000/scale {
 					t.Fatalf("live demand escaped auto maximum: %.0f", rate)
 				}
 				t.Logf("elapsed=%s accepted=%d committed=%d cache=%d oldest=%s rate=%.0f reason=%s", time.Since(started), accepted, p.CommittedPoints(), s.Points, s.OldestAge, rate, reason)
@@ -144,7 +150,7 @@ func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
 		}
 		time.Sleep(15 * time.Minute)
 		synctest.Wait()
-		if rate, _, _ := p.autoUpdateObservation(); rate > 25250 {
+		if rate, _, _ := p.autoUpdateObservation(); rate > 25250.0/scale {
 			t.Fatalf("falling input retained excessive admission: %.0f", rate)
 		}
 		if p.CommittedPoints() != accepted || !c.IsEmpty() {

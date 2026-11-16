@@ -11,6 +11,7 @@ import (
 )
 
 func TestSyncMutationProofNegotiation(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"", "sum-v1", "proof-v1"} {
 		t.Run(mode, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

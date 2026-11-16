@@ -27,9 +27,13 @@ func (b *missingRetryBackend) Copy(ctx context.Context, source, target string, n
 // after two names must keep both prechecks and partial transfers, even when the
 // next process changes its metadata batch size and concurrency budget.
 func TestSyncMissingRetryRetainsPrecheckAndPartialTransfers(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		for _, failure := range []bool{false, true} {
-			t.Run(fmt.Sprintf("legacy=%v/failure=%v", legacy, failure), func(t *testing.T) { testSyncMissingRetry(t, legacy, failure) })
+			t.Run(fmt.Sprintf("legacy=%v/failure=%v", legacy, failure), func(t *testing.T) {
+				t.Parallel()
+				testSyncMissingRetry(t, legacy, failure)
+			})
 		}
 	}
 }
@@ -171,6 +175,7 @@ func testSyncMissingRetry(t *testing.T, legacy, failure bool) {
 }
 
 func TestCopyRetryDurableProgressNeverDecreases(t *testing.T) {
+	t.Parallel()
 	names := []string{"a", "b", "c"}
 	f, source, target := newFakeCopy(t, names)
 	o := copyTestOptions(t, source, target)
@@ -225,6 +230,7 @@ func TestCopyRetryDurableProgressNeverDecreases(t *testing.T) {
 }
 
 func TestSyncPrecheckErrorRetainsCompletedNames(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	checked := map[string]int{}
 	fail := true

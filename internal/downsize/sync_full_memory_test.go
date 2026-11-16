@@ -35,6 +35,7 @@ func (b *boundedFullSync) Fetch(ctx context.Context, source string, names []stri
 }
 
 func TestSyncFullHistoryMemoryBudgetParity(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	// All stores disagree, so every name takes the materialized fallback.
 	// A week at one-minute resolution must not be fetched as one 500-name
@@ -47,8 +48,14 @@ func TestSyncFullHistoryMemoryBudgetParity(t *testing.T) {
 		n := fmt.Sprintf("memory.%04d", i)
 		names[i] = n
 		schemas[n] = schema
+		// Fetch still materializes every point in the full week. Seed sparse
+		// finite anchors instead of retaining four additional dense map copies;
+		// the missing middle point forces the same fallback for every name.
+		from, until := syncWindow(syncTestNow, schema[0], 0)
 		for _, source := range []string{syncT, syncD1, syncD2, syncP} {
-			f.put(source, n, schema)
+			st := f.store(source)
+			st.archives[n] = schema
+			st.points[n] = map[int64]map[int64]float64{60: {from: 1, syncTestNow - 86400: 42, until - 60: 2}}
 		}
 		delete(f.store(syncT).points[n][60], syncTestNow-86400)
 	}

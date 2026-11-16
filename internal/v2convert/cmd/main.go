@@ -26,10 +26,14 @@ func main() {
 	source := flag.String("source", "", "owned immutable SST directory")
 	output := flag.String("output", "", "repack materialized GCP3 SSTs to this directory; omit for scan only")
 	limit := flag.Int("limit", 0, "maximum number of source SSTs (0 = all)")
+	workers := flag.Int("scan-workers", 1, "parallel forward SST readers in scan-only mode")
 	memory := flag.Int("part-mib", 256, "maximum decoded input table size in MiB")
 	incarnation := flag.String("source-incarnation", "", "original source incarnation, 32 hex digits; required for output")
 	stream := flag.String("source-stream", "", "original ordering stream; required for output")
 	flag.Parse()
+	if *workers < 1 || (*output != "" && *workers != 1) {
+		fail(fmt.Errorf("scan-workers must be positive and may exceed one only in scan-only mode"))
+	}
 	var provenance v2part.Provenance
 	if *output != "" && *nativePlan == "" {
 		b, e := hex.DecodeString(*incarnation)
@@ -109,18 +113,29 @@ func main() {
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	var total int64
-	for _, path := range paths {
+	var scans []v2convert.ScanResult
+	if *output == "" {
+		scans, err = v2convert.ScanFiles(ctx, paths, *workers)
+		if err != nil {
+			fail(err)
+		}
+	}
+	failed := false
+	for i, path := range paths {
 		start := time.Now()
 		r := result{File: filepath.Base(path)}
 		if *output == "" {
-			r.Stats, err = v2convert.ScanSST(ctx, path, nil)
+			r.Stats, err = scans[i].Stats, scans[i].Err
+			r.Seconds = scans[i].Seconds
 		} else {
 			receipt, e := v2convert.ConvertSST(ctx, path, v2convert.Options{Directory: *output, PartBytes: *memory << 20, Adapter: v2convert.CoreRecords{}, Writer: v2convert.CoreWriter{Source: provenance}})
 			err = e
 			r.Receipt = &receipt
 			r.Stats.Bytes = receipt.InputBytes
 		}
-		r.Seconds = time.Since(start).Seconds()
+		if *output != "" {
+			r.Seconds = time.Since(start).Seconds()
+		}
 		total += r.Stats.Bytes
 		if err != nil {
 			r.Error = err.Error()
@@ -129,11 +144,17 @@ func main() {
 			fail(e)
 		}
 		if err != nil {
-			os.Exit(1)
+			if *output != "" {
+				os.Exit(1)
+			}
+			failed = true
 		}
 	}
-	if err := encoder.Encode(map[string]any{"summary": true, "files": len(paths), "bytes": total, "seconds": time.Since(begin).Seconds(), "gomaxprocs": runtime.GOMAXPROCS(0)}); err != nil {
+	if err := encoder.Encode(map[string]any{"summary": true, "files": len(paths), "bytes": total, "seconds": time.Since(begin).Seconds(), "gomaxprocs": runtime.GOMAXPROCS(0), "scan_workers": *workers, "failed": failed}); err != nil {
 		fail(err)
+	}
+	if failed {
+		os.Exit(1)
 	}
 }
 func fail(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }

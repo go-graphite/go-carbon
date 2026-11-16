@@ -1,7 +1,6 @@
 package chunkstore
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -12,8 +11,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
-	"github.com/cockroachdb/pebble/sstable"
 )
 
 // transferStage holds a transfer's keys under its reserved IDs, sorted, and
@@ -107,30 +104,17 @@ func (s *Store) stageTransfer(first uint64, records []TransferMetric, metas []Me
 	return &transferStage{keys: keys, bytes: size, capture: capture, verify: verify}
 }
 
-// transferBatchLimit lets tests reduce the WAL batch bound. Production and
-// oversized overrides always retain the byte cap used by publication.
+// Keep immutable staging commits short enough to interleave with foreground
+// commits. Publication has its own, larger atomic metadata bound. A single
+// validated value can exceed the staging target and is kept indivisible.
+const transferStageBatchBytes = 8 << 10
+
+// transferBatchLimit lets tests reduce the staging bound.
 func (s *Store) transferBatchLimit() int {
 	if s.transferBatchBytes > 0 {
-		return min(transferPublicationBytes, s.transferBatchBytes)
+		return min(transferStageBatchBytes, s.transferBatchBytes)
 	}
-	return transferPublicationBytes
-}
-
-// writeTransferBatch stages the keys in one batch and verifies an
-// independent read-back of its encoded representation, as the SST path
-// verifies its written tables. The keys sit under reserved, unpublished IDs,
-// so committing them before publication exposes nothing.
-func (s *Store) writeTransferBatch(ctx context.Context, stage *transferStage) (*pebble.Batch, error) {
-	b := s.db.NewBatchWithSize(stage.bytes + 16*len(stage.keys) + 64)
-	for _, kv := range stage.keys {
-		if err := b.Set(kv.Key, kv.Value, nil); err != nil {
-			return nil, errors.Join(err, b.Close())
-		}
-	}
-	if err := errors.Join(s.verifyTransferBatch(ctx, b, stage), ctx.Err()); err != nil {
-		return nil, errors.Join(err, b.Close())
-	}
-	return b, nil
+	return transferStageBatchBytes
 }
 
 func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage *transferStage) error {
@@ -159,10 +143,6 @@ func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage 
 	return stage.verify(ctx)
 }
 
-// A single validated key/value may exceed this payload target and is kept
-// intact. Table boundaries never change the stored key/value bytes.
-const transferTableBytes = 8 << 20
-
 // A process crash may leave staged files that were never ingested. The ID
 // reservation is durable and will not be reused; only Pebble's own numbered
 // files can back published data. Called before listeners under process ownership.
@@ -190,138 +170,11 @@ func (s *Store) recoverTransferTables() error {
 }
 
 // Reserved IDs have no visible catalog entry and cannot be written by live
-// writers. Ingest their immutable history directly, avoiding the WAL,
-// memtables and flush work. Publication still validates live targets and
-// commits catalogs, revisions and proofs through the existing WAL barrier.
-func (s *Store) stageTransferData(ctx context.Context, first uint64, stage *transferStage, entries int) error {
-	// Only tests set this override, retaining the preceding implementation as
-	// a differential oracle for the complete import/merge/publication path.
-	if s.transferBatchBytes > 0 {
-		return s.stageTransferWAL(ctx, stage, entries)
-	}
-	paths, err := s.writeTransferTables(ctx, first, stage)
-	defer func() {
-		for _, path := range paths {
-			_ = s.fs.Remove(path)
-		}
-	}()
-	if err != nil {
-		return err
-	}
-	// Use native copy's bounded synchronous ingest, including cancellation
-	// between groups. Never detach an ingest that outlives its caller.
-	if err := s.ingestNativeFiles(ctx, paths); err != nil {
-		return err
-	}
-	s.ingestStats.entries.Add(uint64(entries))
-	return nil
-}
-
-func (s *Store) writeTransferTables(ctx context.Context, first uint64, stage *transferStage) (paths []string, err error) {
-	keys := stage.keys
-	// Keep each namespace/time bucket in a separate table, so its bounds cover
-	// only the reserved IDs and cannot overlap unrelated foreground writes.
-	for len(keys) > 0 {
-		n := 1
-		size := len(keys[0].Key) + len(keys[0].Value) + 16
-		prefix := keys[0].Key[:1]
-		if prefix[0] == continuationBucketKeyPrefix {
-			prefix = keys[0].Key[:5]
-		}
-		for n < len(keys) && bytes.HasPrefix(keys[n].Key, prefix) {
-			next := len(keys[n].Key) + len(keys[n].Value) + 16
-			if size+next > transferTableBytes {
-				break
-			}
-			size += next
-			n++
-		}
-		path := s.fs.PathJoin(s.dir, fmt.Sprintf("transfer-%020d-%d.sst", first, len(paths)))
-		paths = append(paths, path)
-		if err := s.writeTransferTable(ctx, path, keys[:n], stage.capture); err != nil {
-			return paths, err
-		}
-		keys = keys[n:]
-	}
-	return paths, stage.verify(ctx)
-}
-
-func (s *Store) writeTransferTable(ctx context.Context, path string, keys []RelayoutKV, observers ...func([]byte, []byte) error) error {
-	f, err := s.fs.Create(path)
-	if err != nil {
-		return err
-	}
-	bytes := 0
-	for _, kv := range keys {
-		bytes += len(kv.Key) + len(kv.Value) + 16
-	}
-	buffered := &transferWriteFile{File: f, buffer: bufio.NewWriterSize(f, min(256<<10, max(4096, bytes)))}
-	w := sstable.NewWriter(objstorageprovider.NewFileWritable(buffered), s.pebbleOptions.MakeWriterOptions(numLevels-1, s.db.FormatMajorVersion().MaxTableFormat()))
-	for _, kv := range keys {
-		if err := errors.Join(ctx.Err(), w.Set(kv.Key, kv.Value)); err != nil {
-			return errors.Join(err, w.Close())
-		}
-	}
-	if err := w.Close(); err != nil {
-		return err
-	}
-	return s.verifyTransferTable(ctx, path, keys, observers...)
-}
-
-// Verify every staged byte in table order before ingestion. Re-reading each
-// metric through the live LSM repeats unrelated block reads and allocations.
-// Ingest preserves these immutable files; receipts publish only after it and
-// the sampled point checks/overlap merges succeed, followed by a WAL barrier.
-func (s *Store) verifyTransferTable(ctx context.Context, path string, keys []RelayoutKV, observers ...func([]byte, []byte) error) (err error) {
-	f, err := s.fs.Open(path)
-	if err != nil {
-		return err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return errors.Join(err, f.Close())
-	}
-	buffered := &transferReadFile{File: f, buffer: make([]byte, min(256<<10, info.Size())), size: info.Size()}
-	readable, err := sstable.NewSimpleReadable(buffered)
-	if err != nil {
-		return errors.Join(err, f.Close())
-	}
-	r, err := sstable.NewReader(readable, sstable.ReaderOptions{MergerName: s.pebbleOptions.Merger.Name})
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, r.Close()) }()
-	it, err := r.NewIter(nil, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, it.Close()) }()
-	key, value := it.First()
-	for _, expected := range keys {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if key == nil || !bytes.Equal(key.UserKey, expected.Key) {
-			return errors.New("staged transfer key verification failed")
-		}
-		data, _, err := value.Value(nil)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(data, expected.Value) {
-			return errors.New("staged transfer value verification failed")
-		}
-		for _, observe := range observers {
-			if err := observe(key.UserKey, data); err != nil {
-				return err
-			}
-		}
-		key, value = it.Next()
-	}
-	if key != nil {
-		return errors.New("unexpected staged transfer key")
-	}
-	return it.Error()
+// writers. Stage them in bounded WAL batches: SST placement scans all files
+// without range keys under Pebble's DB mutex, even for disjoint point-only
+// tables. The final publication barrier syncs these private writes as before.
+func (s *Store) stageTransferData(ctx context.Context, stage *transferStage, entries int) error {
+	return s.stageTransferWAL(ctx, stage, entries)
 }
 
 // stageTransferWAL avoids SST target-level selection under Pebble's DB mutex.
@@ -350,7 +203,7 @@ func (s *Store) stageTransferWAL(ctx context.Context, stage *transferStage, entr
 		s.transferBatchStats.bytes.Add(size)
 		b.Reset()
 		start = end
-		return nil
+		return s.nativeStep("transfer-stage-batch")
 	}
 	for i, kv := range stage.keys {
 		if err := ctx.Err(); err != nil {

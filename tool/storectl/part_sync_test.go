@@ -287,3 +287,68 @@ func TestPartSyncPortableDenseFormat(t *testing.T) {
 		t.Fatal("descriptor checksum mismatch accepted")
 	}
 }
+
+// A re-snapshot must retain its own inodes after the producer retires the
+// original files. Copy only newly introduced IDs and keep unrelated target data.
+func TestPartSyncResnapshotAfterSourceRetirement(t *testing.T) {
+	original, inventory := partFixture(t, 3)
+	makeSnapshot := func(count int) (string, v2core.PartSnapshot) {
+		t.Helper()
+		var files []v2core.SnapshotPart
+		for _, p := range inventory.Parts[:count] {
+			p.Path = filepath.Join(original, p.ID+".part")
+			files = append(files, p)
+		}
+		dir := filepath.Join(t.TempDir(), "snapshot")
+		snapshot, err := v2core.LinkPartSnapshot(context.Background(), dir, partManifestReader{files})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dir, snapshot
+	}
+	firstDir, first := makeSnapshot(2)
+	nextDir, next := makeSnapshot(3)
+	if err := os.RemoveAll(filepath.Dir(original)); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	unrelated := []byte("another snapshot owns this part")
+	id := fmt.Sprintf("%x", sha256.Sum256(unrelated))
+	retained := filepath.Join(target, id+".part")
+	if err := os.WriteFile(retained, unrelated, 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(partSnapshotHandler(firstDir, first, ""))
+	defer server.Close()
+	result, err := receivePartSnapshot(context.Background(), server.Client(), server.URL, "", target, 2)
+	if err != nil || result.Parts != 2 {
+		t.Fatalf("first: %+v %v", result, err)
+	}
+	var mu sync.Mutex
+	requests := map[string]int{}
+	handler := partSnapshotHandler(nextDir, next, "")
+	nextServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests[r.URL.Path]++
+		mu.Unlock()
+		handler.ServeHTTP(w, r)
+	}))
+	defer nextServer.Close()
+	result, err = receivePartSnapshot(context.Background(), nextServer.Client(), nextServer.URL, "", target, 2)
+	if err != nil || result.Parts != 1 || result.Skipped != 2 || result.Bytes != 1<<20 {
+		t.Fatalf("resnapshot: %+v %v", result, err)
+	}
+	for _, p := range first.Parts {
+		if requests["/parts/"+p.ID] != 0 {
+			t.Fatal("retained part requested again")
+		}
+	}
+	data, err := os.ReadFile(retained)
+	if err != nil || !bytes.Equal(data, unrelated) {
+		t.Fatalf("target-only part changed: %v", err)
+	}
+	published, err := readPartSnapshot(filepath.Join(target, "snapshot.json"))
+	if err != nil || len(published.Parts) != 3 {
+		t.Fatalf("published: %+v %v", published, err)
+	}
+}

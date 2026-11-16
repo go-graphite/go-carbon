@@ -1,8 +1,10 @@
 # Experimental v2 daemon integration
 
-This Draft joins nine component Drafts through real merge commits and connects
-TCP intake, the mandatory journal, canonical rollups, immutable read snapshots,
-discovery, logical inactivity expiry and host-wide quota admission.
+The experimental v2 work is integrated on `atimofieiev/v2` in
+[Draft #1488](https://github.com/go-graphite/go-carbon/pull/1488), based on master.
+It joins the component Drafts through real merge commits and connects TCP intake,
+the mandatory journal, canonical rollups, immutable read snapshots, discovery,
+logical inactivity expiry and host-wide quota admission.
 
 ```toml
 [v2]
@@ -104,6 +106,14 @@ Portable dense exports, manifest snapshots and whole-file copy helpers are joine
 but live install/copy endpoints, authenticated adoption and historical coverage
 are not wired. Copies retain immutable files and use complete part checksums;
 there is no per-name digest path.
+
+The [part-copy commands](../tool/storectl/README.md) stage retained files and
+resume by whole-part checksums. The [shadow harness](../tool/v2-shadow/README.md)
+is an explicit diagnostic command; it does not enable daemon shadowing. The
+[converter](../internal/v2convert/README.md) has bounded parallel scan workers;
+verified conversion remains serial by input transaction. These tools do not
+qualify live adoption, rollup parity or disk-speed conversion. New v2 changes
+target the integration branch.
 
 ## Local verification
 

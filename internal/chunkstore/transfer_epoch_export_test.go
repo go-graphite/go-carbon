@@ -18,7 +18,7 @@ func (s *Store) SetTransferSplitSinglesForTest(on bool) { s.transferSplitSingles
 // FlushForTest flushes the memtable so reads probe sstable filter blocks.
 func (s *Store) FlushForTest() error { return s.db.Flush() }
 
-// RawKeyValuesForTest returns every live key and value in key order.
+// RawKeyValuesForTest returns logical keys in order, excluding random store identity.
 func (s *Store) RawKeyValuesForTest() ([][2][]byte, error) {
 	it, err := s.db.NewIter(&pebble.IterOptions{})
 	if err != nil {
@@ -26,6 +26,9 @@ func (s *Store) RawKeyValuesForTest() ([][2][]byte, error) {
 	}
 	var out [][2][]byte
 	for ok := it.First(); ok; ok = it.Next() {
+		if bytes.Equal(it.Key(), proofIdentityKey) {
+			continue
+		}
 		out = append(out, [2][]byte{bytes.Clone(it.Key()), bytes.Clone(it.Value())})
 	}
 	return out, errors.Join(it.Error(), it.Close())

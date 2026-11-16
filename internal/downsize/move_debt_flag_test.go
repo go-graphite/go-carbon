@@ -11,6 +11,7 @@ import (
 // --debt-guard=false removes the compaction-debt governor (soft pause and the
 // baseline requirement) but keeps hard storage stops.
 func TestDebtGuardOffSkipsDebtPauseKeepsHardStops(t *testing.T) {
+	t.Parallel()
 	run := func(off bool) (*tuner, error) {
 		tune := newTestTuner([]string{"a"}, capacity{64, 8192, 64 << 20, 65536}, false, 0, 0)
 		tune.debtGuardOff = off
@@ -61,6 +62,7 @@ func TestDebtGuardOffSkipsDebtPauseKeepsHardStops(t *testing.T) {
 }
 
 func TestDebtGuardOffSendsHeader(t *testing.T) {
+	t.Parallel()
 	for _, off := range []bool{false, true} {
 		var got string
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -12,6 +12,7 @@ import (
 )
 
 func TestSyncWindowSelectionQueueDoesNotReachDonor(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	source := nativeControllerStore(t)
@@ -22,6 +23,13 @@ func TestSyncWindowSelectionQueueDoesNotReachDonor(t *testing.T) {
 	var once sync.Once
 	var requests atomic.Int32
 	donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Queue admission must be deterministic even on hosts whose automatic
+		// native export capacity is larger than one.
+		if r.URL.Path == "/v1/native/capabilities" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"NativeExportConcurrency":1}`))
+			return
+		}
 		if r.URL.Path == "/v1/native/export" {
 			requests.Add(1)
 			entered <- struct{}{}

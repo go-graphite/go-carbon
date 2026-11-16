@@ -646,7 +646,7 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
-	return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
+	return c.updateWithMutationProof(ctx, kv, m, input, retention, clock, maintenance)
 }
 
 // updateAttempt leaves compressed writes on their existing path. Classic writes
@@ -671,6 +671,7 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	fs := newContinuationFiles(kv, false).withClock(clock)
 	fs.reuseBlockKeys = c.ReuseBlockKeys
 	fs.guardClassicWrites = true
+	fs.protectFutureSlots = retention >= 0
 	fs.reuseReferenceRetirements = !c.keepReferenceRetirementReads
 	// Whisper replaces propagation errors with a recovered panic string.
 	// Keep the typed conflict on this private filesystem so coarse-archive

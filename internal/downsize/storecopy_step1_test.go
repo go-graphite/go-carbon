@@ -221,11 +221,42 @@ func idleFixture(t *testing.T, names []string, hang func(request []string) bool)
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(data))
+			// Whitespace progress is valid JSON; select that negotiated response.
+			r.Header.Set("Accept", "application/json")
+			serveActiveTransfer(t, handler, w, r)
+			return
 		}
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(dst.Close)
 	return target, fixturePlan(t, src.URL, dst.URL, names), &pulls
+}
+
+// Keep successful nested imports active independently of disk latency. JSON
+// permits leading whitespace; only the explicit hang branch withholds all bytes.
+func serveActiveTransfer(t *testing.T, handler http.Handler, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(rec, r)
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			if rec.Code != http.StatusOK {
+				t.Errorf("active transfer: %d %s", rec.Code, rec.Body.String())
+			}
+			_, _ = w.Write(rec.Body.Bytes())
+			return
+		case <-ticker.C:
+			_, _ = io.WriteString(w, " ")
+			w.(http.Flusher).Flush()
+		}
+	}
 }
 
 func pullCount(pulls *sync.Map, name string) int64 {

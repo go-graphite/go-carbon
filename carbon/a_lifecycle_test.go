@@ -10,17 +10,32 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 }
 
 func TestStoreInputFallbackKeepsEveryPoint(t *testing.T) {
+	parallelTestMatrix(t)
+	// Own the storage pool across the whole matrix: unrelated fixtures must not
+	// consume the bounded sender buffer between its successive restart cases.
+	if isolatedTestProcessSerial(t) {
+		return
+	}
 	testStoreInputFallbackKeepsEveryPoint(t)
 }
 
 func TestSharedStoreRestartHandsInputOver(t *testing.T) {
-	if isolatedTestProcess(t) {
+	parallelTestMatrix(t)
+	// Keep one exclusive fixture across the matrix, including the intervals
+	// between cases, instead of reacquiring it behind unrelated startups.
+	if isolatedTestProcessSerial(t) {
 		return
 	}
 	testSharedStoreRestartHandsInputOver(t)
 }
 
 func TestRestartHandsInputOver(t *testing.T) {
+	parallelTestMatrix(t)
+	// Capability probes and connected senders share a wall-clock outage
+	// budget. Keep unrelated process startups outside the complete matrix.
+	if isolatedTestProcessSerial(t) {
+		return
+	}
 	testRestartHandsInputOver(t)
 }
 
@@ -39,8 +54,6 @@ func TestDumpStopStopsPersisterAlongsideWarmup(t *testing.T) {
 }
 
 func TestIncrementalBuckydPreservesOwnershipAndMixedIndex(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
+	parallelTestMatrix(t)
 	testIncrementalBuckydPreservesOwnershipAndMixedIndex(t)
 }

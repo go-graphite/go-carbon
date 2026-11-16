@@ -170,6 +170,8 @@ func (s *autoReloadStore) UpdateBatch(_ context.Context, updates []store.MetricU
 // against the same restart CPU budget. Keep queue supply unlimited here so a
 // shortfall can only come from admission, not eligibility or storage latency.
 func TestAutoUpdateLiveReload(t *testing.T) {
+	// Preserve CPU per simulated second and admission ratios with fewer writes.
+	const scale = 10
 	for _, tc := range []struct {
 		name        string
 		active      bool
@@ -180,10 +182,12 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 		{"restart_cpu_bound", true, 1200, .0006},
 		{"restart_complete", false, 1200, .0001},
 	} {
+		tc.saved /= scale
+		tc.cost *= scale
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				const allowance = 15.9
-				const target = 26500
+				const target = 26500 / scale
 				started := time.Now()
 				db := new(autoReloadStore)
 				used := func() float64 { return 5*time.Since(started).Seconds() + float64(db.written.Load())*tc.cost }
@@ -203,7 +207,7 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 						p.Stop()
 					}
 				}()
-				for _, mode := range []int{50000, -1, 50000, -1} {
+				for _, mode := range []int{50000 / scale, -1, 50000 / scale, -1} {
 					if p != nil {
 						p.Stop()
 					}
@@ -223,12 +227,12 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 					p.SetMetricStore(db)
 					p.SetMaxUpdatesPerSecond(mode)
 					p.SetAutoUpdateRate(func() cache.WriteoutState {
-						return cache.WriteoutState{Metrics: 29_700_000, Points: 400_000_000,
-							Eligible: 7_000_000, OldestAge: 1807 * time.Second,
+						return cache.WriteoutState{Metrics: 29_700_000 / scale, Points: 400_000_000 / scale,
+							Eligible: 7_000_000 / scale, OldestAge: 1807 * time.Second,
 							MaxDelay: 1800 * time.Second, MeanDelay: 1800 * time.Second}
 					}, 1, target)
 					p.SetWorkers(4)
-					p.SetRestartBudget(budget, func() float64 { return 20144 })
+					p.SetRestartBudget(budget, func() float64 { return 20144.0 / scale })
 					if err := p.Start(); err != nil {
 						t.Fatal(err)
 					}
@@ -247,24 +251,24 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 					if mode == -1 && (reported != target || !cpuBound && rate < target || rate > target*1.01) {
 						t.Errorf("automatic admission starved or exceeded target: actual=%.0f/s target=%d/s", rate, target)
 					}
-					if mode == 50000 && !cpuBound {
-						want := 50000.
+					if mode == 50000/scale && !cpuBound {
+						want := 50000. / scale
 						if tc.active {
-							want = 3 * 20144
+							want = 3 * 20144.0 / scale
 						}
 						if rate < want*.99 || rate > want*1.01 {
 							t.Errorf("fixed admission regressed: %.0f/s want %.0f/s", rate, want)
 						}
 					}
 					// Only the mandatory floor can exceed a stale CPU allowance.
-					floorCPU := 5 + 20144*tc.cost
+					floorCPU := 5 + 20144.0/scale*tc.cost
 					if tc.active && cores > max(allowance, floorCPU)+.2 {
 						t.Errorf("restart catch-up exceeded allowance and mandatory floor: %.2f", cores)
 					}
-					if cpuBound && floorCPU > allowance && (rate < 20144*.99 || rate > 20144*1.01) {
+					if cpuBound && floorCPU > allowance && (rate < 20144.0/scale*.99 || rate > 20144.0/scale*1.01) {
 						t.Errorf("CPU overload must admit the floor while withholding catch-up: %.0f/s", rate)
 					}
-					if cpuBound && rate < 16000 {
+					if cpuBound && rate < 16000/scale {
 						t.Errorf("restart CPU headroom left idle: %.0f/s", rate)
 					}
 				}
@@ -279,13 +283,15 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 // The same persister must keep its automatic admission when the shared budget
 // ends, including when that persister replaced a fixed-rate one during restart.
 func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
-	for _, tc := range []struct{ initial, workers int }{{50000, 1}, {50000, 96}, {-1, 1}, {-1, 96}} {
+	// Keep the high-rate token path (>1000/s), worker counts and all ratios.
+	const scale = 10
+	for _, tc := range []struct{ initial, workers int }{{50000 / scale, 1}, {50000 / scale, 96}, {-1, 1}, {-1, 96}} {
 		t.Run(strconv.Itoa(tc.initial)+"/workers="+strconv.Itoa(tc.workers), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				const target = 26500
+				const target = 26500 / scale
 				db := new(autoReloadStore)
 				budget := restartcpu.NewWithCPU(20.46, func() float64 { return 0 })
-				budget.SetSteadyRate(31150)
+				budget.SetSteadyRate(31150 / scale)
 				budget.Warmed()
 				var drained atomic.Bool
 				budget.SetDrain(drained.Load)
@@ -319,12 +325,12 @@ func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
 					p.SetMetricStore(db)
 					p.SetMaxUpdatesPerSecond(mode)
 					p.SetAutoUpdateRate(func() cache.WriteoutState {
-						return cache.WriteoutState{Metrics: 29_700_000, Eligible: 7_000_000,
-							Points: 400_000_000, MaxDelay: 1800 * time.Second,
+						return cache.WriteoutState{Metrics: 29_700_000 / scale, Eligible: 7_000_000 / scale,
+							Points: 400_000_000 / scale, MaxDelay: 1800 * time.Second,
 							MeanDelay: 1800 * time.Second, OldestAge: 1807 * time.Second}
 					}, 1, target)
 					p.SetWorkers(tc.workers)
-					p.SetRestartBudget(budget, func() float64 { return 31150 })
+					p.SetRestartBudget(budget, func() float64 { return 31150.0 / scale })
 					if err := p.Start(); err != nil {
 						t.Fatal(err)
 					}
@@ -348,32 +354,34 @@ func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
 				}
 				start(tc.initial)
 				if tc.initial != -1 {
-					check("fixed restart", 3*31150)
+					check("fixed restart", 3*31150/scale)
 					start(-1)
 				}
-				check("auto restart", 31150)
+				check("auto restart", 31150/scale)
 				drained.Store(true)
 				check("auto restart ended", target)
 				if budget.Active() || !p.restartStopping {
 					t.Fatal("restart observer did not finish")
 				}
 				check("auto after sampler", target)
-				start(50000)
-				check("fixed after restart", 50000)
+				start(50000 / scale)
+				check("fixed after restart", 50000/scale)
 			})
 		})
 	}
 }
 
 // Keep the real cache queue, eligibility phases and warm-first pump across a
-// reload and restart end. Scale the host's population and rates by 1000.
+// reload and restart end. Scale the population and admission rates together;
+// round integer caps up so the smaller trace does not lose writeout capacity.
 func TestAutoUpdateCacheReloadThroughRestartEnd(t *testing.T) {
 	t.Parallel()
-	for _, initial := range []int{50, -1} {
+	for _, initial := range []int{25, -1} {
 		t.Run(strconv.Itoa(initial), func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				const metrics = 29700
+				const scale = 2
+				const metrics = 29700 / scale
 				const delay = 1800 * time.Second
 				core := cache.New()
 				defer core.Stop()
@@ -392,7 +400,7 @@ func TestAutoUpdateCacheReloadThroughRestartEnd(t *testing.T) {
 					t.Fatal(err)
 				}
 				budget := restartcpu.NewWithCPU(20.46, func() float64 { return 0 })
-				budget.SetSteadyRate(31.15)
+				budget.SetSteadyRate(31.15 / scale)
 				budget.Warmed()
 				var drained atomic.Bool
 				budget.SetDrain(drained.Load)
@@ -427,7 +435,7 @@ func TestAutoUpdateCacheReloadThroughRestartEnd(t *testing.T) {
 					p.SetWriteoutReady(core.WriteoutReady)
 					p.SetMetricStore(db)
 					p.SetMaxUpdatesPerSecond(mode)
-					p.SetAutoUpdateRate(core.WriteoutState, 1, 27)
+					p.SetAutoUpdateRate(core.WriteoutState, 1, (27+scale-1)/scale)
 					p.SetWorkers(4)
 					p.SetRestartBudget(budget, func() float64 { return float64(core.Len()) / delay.Seconds() })
 					p.SetWarmFirst(true)

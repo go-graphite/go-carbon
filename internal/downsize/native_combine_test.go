@@ -12,6 +12,7 @@ import (
 )
 
 func TestNativeCombineControllerUsesSameJournalWithoutMetricRPCs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	var names []string

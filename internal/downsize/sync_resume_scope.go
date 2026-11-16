@@ -6,6 +6,8 @@ import (
 	"sort"
 )
 
+var errSyncWindowIncompleteProof = errors.New("window verification checkpoint has no complete catalog pass")
+
 // A terminal window retry invalidates residuals and later repairs, not every
 // clean closed window. Recover the latest complete pass against the immutable
 // catalog, then replay exact sparse membership. Never treat First/Last alone as
@@ -38,7 +40,7 @@ func (s *syncer) windowResumeSet() ([]string, bool, error) {
 			bounds[row.First], bounds[row.Last] = -1, -1
 		}
 		if len(rows) == 0 {
-			return nil, false, errors.New("window verification checkpoint has no verified batches")
+			return nil, false, errSyncWindowIncompleteProof
 		}
 		source := s.unionSource()
 		defer source.close()
@@ -78,7 +80,7 @@ func (s *syncer) windowResumeSet() ([]string, bool, error) {
 			}
 		}
 		if complete == 0 {
-			return nil, false, errors.New("window verification checkpoint has no complete catalog pass")
+			return nil, false, errSyncWindowIncompleteProof
 		}
 		for i, row := range s.j.rows {
 			if row.Kind == "verified" && row.Round == complete {
@@ -177,4 +179,63 @@ func (s *syncer) windowResumeSet() ([]string, bool, error) {
 		}
 	}
 	return names, true, nil
+}
+
+// Verification and selection retry have independent journals. Seal a completed
+// pass before repairing, so a crash after a later import cannot replay the old
+// observation of that name or restart an entire data pass.
+func (s *syncer) prepareWindowRepairVerification() error {
+	if !s.windowOnly() {
+		return nil
+	}
+	boundary, retryBoundary := -1, -1
+	var pass syncRow
+	for i, row := range s.j.rows {
+		if row.Kind == "verification-retry" {
+			retryBoundary = i
+		}
+		if row.Kind == "verification-pass" && row.SelectionComplete {
+			boundary, pass = i, row
+		}
+	}
+	if boundary < 0 {
+		if s.verificationBase != 0 {
+			return nil // an existing retry already owns this generation
+		}
+		// Adopt old completed journals only after checking exact catalog coverage.
+		// An interrupted first pass keeps its original per-batch resume path.
+		for _, row := range s.j.rows {
+			if row.Kind == "verified" {
+				s.verificationBase = max(s.verificationBase, row.Round)
+			}
+		}
+		if s.verificationBase == 0 {
+			return nil
+		}
+		_, _, err := s.windowResumeSet()
+		if errors.Is(err, errSyncWindowIncompleteProof) {
+			s.verificationBase = 0
+			return nil
+		}
+		return err
+	}
+	if retryBoundary > boundary {
+		return nil
+	} // first pass/new scope still needs its proof
+	dirty := map[string]bool{}
+	for _, n := range pass.Selected {
+		dirty[n] = true
+	}
+	for _, row := range s.j.rows[boundary+1:] {
+		if row.Kind == "window-resolved" || row.Kind == "copied" {
+			if row.Kind == "copied" && len(row.Selected) != row.Names {
+				return errors.New("post-verification repair has no exact name membership")
+			}
+			for _, n := range row.Selected {
+				dirty[n] = true
+			}
+		}
+	}
+	s.verificationBase = pass.Round
+	return s.j.append(syncRow{Kind: "verification-retry", Round: pass.Round, Selected: sortedKeys(dirty), SelectionComplete: true})
 }

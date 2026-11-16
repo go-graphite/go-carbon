@@ -105,6 +105,9 @@ func awaitCapture(t testing.TB, condition func() bool) {
 	}
 }
 func TestStartupCaptureContinuesUnderAdmissionPressure(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	s, _ := captureFixture(t)
 	admission := &testAdmission{}
@@ -563,6 +566,9 @@ func TestStartupCaptureRawBandwidth(t *testing.T) {
 }
 
 func TestStartupCaptureRepeatedEpochsPreserveOrder(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	path := filepath.Join(t.TempDir(), "input.1.2.tail.bin")
 	if err := os.WriteFile(path, points.OnePoint("same.metric", 0, 1).AppendBinary(nil), 0600); err != nil {

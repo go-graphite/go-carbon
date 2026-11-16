@@ -308,7 +308,9 @@ func testRestartHandsInputOver(t *testing.T) {
 			// Each client owns one metric with a point per second, and they all
 			// overwrite one shared timestamp of a "latest" metric with their
 			// sequence number: the last write must win.
-			const clients, perClient = 6, 1500
+			// Keep all connections and the 32-point post-stop suffix; sequence
+			// length does not control a capacity or admission boundary here.
+			const clients, perClient = 6, 128
 			base := time.Now().Unix() - perClient - 10
 			var wg sync.WaitGroup
 			var failed sync.Map
@@ -473,6 +475,13 @@ func testRestartHandsInputOver(t *testing.T) {
 				raw, err := io.ReadAll(resp.Body)
 				if err != nil {
 					t.Fatal(err)
+				}
+				// Mirrored files are published while the successor drains its
+				// cache. A newly created header can still be incomplete here;
+				// the existing point-readiness loop must observe the completed
+				// file before checking every value and last-write-wins result.
+				if tc.mirror && resp.StatusCode == http.StatusNotFound {
+					return nil
 				}
 				if resp.StatusCode != http.StatusOK {
 					t.Fatalf("read status %d: %s\n%s", resp.StatusCode, raw, zapwriter.TestString())

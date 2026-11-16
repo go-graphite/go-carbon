@@ -42,6 +42,7 @@ func (f *absenceProbeFixture) Fetch(ctx context.Context, store string, names []s
 }
 
 func TestSyncAbsenceStopsOnlyAfterStorePresence(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "digest", true: "fetch"}[legacy], func(t *testing.T) {
 			f := newFakeSync()
@@ -99,6 +100,7 @@ func TestSyncAbsenceStopsOnlyAfterStorePresence(t *testing.T) {
 }
 
 func TestSyncPresenceShortcutStillVerifiesOlderHoles(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	schema := []syncArchive{{Step: 60, Points: 360}, {Step: 3600, Points: 100}}
 	for _, store := range []string{syncT, syncP} {

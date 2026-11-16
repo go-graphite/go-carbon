@@ -16,6 +16,7 @@ import (
 )
 
 func TestNativeWindowControllerResume(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	names := []string{"window.client"}
@@ -93,6 +94,7 @@ func TestNativeWindowControllerResume(t *testing.T) {
 }
 
 func TestNativeWindowParsingAndPlanBinding(t *testing.T) {
+	t.Parallel()
 	for _, v := range [][2]string{{"1", ""}, {"2", "1"}, {"-1", "1"}, {"2026-01-01T00:00:00.1Z", "2026-01-02T00:00:00Z"}} {
 		if _, err := parseNativeWindow(v[0], v[1]); err == nil {
 			t.Fatal(v)
@@ -115,6 +117,7 @@ func TestNativeWindowParsingAndPlanBinding(t *testing.T) {
 }
 
 func TestNativeWindowCommittedPlan(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	names := filepath.Join(root, "names.txt")
 	if err := os.WriteFile(names, []byte("window.plan\n"), 0600); err != nil {
@@ -169,6 +172,7 @@ func TestNativeWindowCommittedPlan(t *testing.T) {
 }
 
 func TestNativeWindowRefusesPinnedMergeSession(t *testing.T) {
+	t.Parallel()
 	names := []string{"window.merge.refusal"}
 	plan := nativeMergeGeneratedPlan(t, "http://127.0.0.1:4242", "http://127.0.0.1:4243", names)
 	o := testOptions(plan)

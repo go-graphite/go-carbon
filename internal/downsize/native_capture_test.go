@@ -14,6 +14,7 @@ import (
 )
 
 func TestNativeCaptureAndDifferentialEvaluator(t *testing.T) {
+	t.Parallel()
 	fs := vfs.NewMem()
 	source, err := store.Open("/db", store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20}.WithFS(fs))
 	if err != nil {

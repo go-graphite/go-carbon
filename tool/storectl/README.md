@@ -217,11 +217,14 @@ storectl sync --resume /var/lib/carbon/sync-state \
 ```
 
 The replacement period replaces the saved period; it does not append to it or
-extend copied windows. All READY checks run again: an uncovered period or an
+extend copied windows. READY checks run for changed inputs: an uncovered period or an
 incomplete gap ledger still blocks READY. Set the ledger attestation true only
 when every known input gap has been backfilled and verified. Overrides are saved
-for later resumes. Sources, target, copy windows, phase opt-outs and authentication
-remain frozen; use a new state directory to change them. An old state without `config.json` needs its
+for later resumes. Changes to `--source`/`--from`, `--to`, `--ring`, `--names`, or `--window`
+select a deterministic `scope-*` child state and log the invalidating journal
+record. The original journal remains intact. Extending completed windows opens
+only uncovered intervals with full-history copying disabled. Phase opt-outs and
+authentication remain frozen. An old state without `config.json` needs its
 original flags once alongside `--resume`; the tool checks the journal identity
 and saves the configuration for subsequent resumes.
 
@@ -334,6 +337,15 @@ to a sorted inventory; omission means full discovery, not a sample.
 Use absolute input/state paths on the controller. Draft or open windows and an
 incomplete ledger must remain blocking until reviewed against the actual writer
 and restart ledger; never clear a flag just to pass validation.
+
+Starting an unchanged finished block again, with either `--block` or `--resume`,
+validates its saved scope, process identities, serving schemas and metadata-only
+mutation fences. It preserves `ready.json` and the journal, publishes phase
+`ready`, and exits zero for both READY and READY_EXCEPT. It performs no copy,
+data digest, render, or read-back work. Missing or unauthenticated saved proof
+fails closed. Completed verification with a blocked READY step resumes at READY.
+Changed metric fences reopen only affected names; a process restart opens only
+its new interval. A new attestation retains its prior attestation as provenance.
 
 `storectl sync --block /absolute/path/to/block.json --help` expands the block
 before displaying help without starting sync. It checks strict schema and block
@@ -730,8 +742,8 @@ missing-name copies, fills and `--sample-every` behavior, add `--full-history`.
 Without `--window`, behavior is unchanged.
 
 The saved configuration fixes the full-history/window-only scope, windows,
-verification batches and settle cutoff. Changing that configuration requires a
-fresh state directory; `--resume` only allows stream-count and rate overrides.
+verification batches and settle cutoff. Changed donor, target, ownership or window
+inputs select a named child scope as described under resume above.
 
 A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. Skipped selections are retried on fresh native pins when resuming and again after the missing-name scan. Only a complete window selection, followed by a successful window-only copy when points exist, writes a durable resolution. Original selection and native copy intents stay unchanged. Unresolved source coverage still prevents a successful exit even if another replica or serving-archive verification finds no holes; it is never treated as empty history.
 
@@ -910,6 +922,14 @@ names continue through every phase. Both files contain the name, reason, phase,
 and first/last observation time and survive `--resume`. Recovery jobs share their
 parent's lists, preserving the original journals and immutable copy selections.
 
+Each issue update is durably appended to `quarantine.json.jsonl` or
+`policy-skipped.json.jsonl` before a phase can acknowledge the exclusion.
+Phase completion and exit checkpoint these journals into the same sorted JSON
+arrays using atomic rename. Resume replays pending transactions; a torn final
+append is discarded, while complete corrupt records fail loudly. Keep journals
+with their snapshots. Before downgrading to an older client, let the new client
+checkpoint so the legacy arrays include every acknowledged exception.
+
 Each newly excluded name emits an ERROR event. Progress JSON and Graphite expose
 `quarantined` and `policy_skipped` counts under the existing sync metric prefix.
 An otherwise successful final attestation is `READY_EXCEPT` when quarantined
@@ -972,3 +992,77 @@ transfers use the existing `--snapshot-dir` / `--part-from` interface and resume
 by whole-file checksums. This stages portable files; external authority files,
 retention leases, authenticated live installation and complete coverage remain
 the retained snapshot owner's responsibility.
+
+For qualification, time snapshot creation separately from transfer: snapshot
+creation reads and hashes every retained file before publishing hard links.
+The receiver's JSON `Bytes` counts newly downloaded parts, `Skipped` counts
+locally revalidated parts, and `GBps` is decimal GB/s over the entire receive
+operation, including checksum verification, file syncs and manifest publication.
+A zero-payload resume still reads completed target files to validate their hashes.
+
+Measure loopback before cross-host transfer using the same retained inventory.
+Record the stream count, elapsed time, process CPU, physical disk and NIC byte
+deltas, cache state and concurrent workload for each run. Loopback throughput
+cannot establish physical NIC capacity. Evict only owned fixture files when
+qualifying cold reads; never clear the host's shared page cache. For an abrupt
+resume check, record completed IDs while a different part is in flight, SIGKILL
+only the fixture receiver, then repeat its exact command and target directory.
+The resumed result must skip every recorded verified ID; unfinished files may
+restart from their beginning. Repeat once more to confirm zero payload.
+
+### Widen final readiness without changing a saved copy
+
+A legacy copy may have selected one donor or only restart windows. Attach an
+independent block definition to the same command:
+
+```sh
+storectl sync --resume ./existing-copy --ready-block ./complete-readiness.json
+```
+
+`complete-readiness.json` uses the block schema (`target`, `donors`, `peers`,
+`ring` or `names` if ownership requires them, `period`, `gaps`,
+`gap_ledger_complete`, `carbonapi_url`); `state` is optional and ignored here.
+Its target must match the saved copy. List every required donor and peer and
+all closed gap windows. Omitted names/ring fields mean the entire source union,
+not the original copy's restricted cohort: provide the authoritative target
+ownership ring when only part of that union belongs on the receiver.
+
+The copy keeps its original journal identity. After all gap receipts and the
+complete-ledger attestation are present, READY resumes that copy and runs
+exhaustive retained-history and period/gap verification with
+sample-every=1, including short retentions, in `ready-proof-<scope hash>/`.
+Changing the descriptor or ownership inputs creates a new proof journal;
+unchanged scope resumes the same proof. The descriptor is saved with the copy,
+its exact bytes are retained in the proof directory, and `ready-proof.json`
+points to that proof. Accepted quarantine/policy exclusions remain in the
+original ledger and are never counted as repaired. READY/READY_EXCEPT still
+requires policy checks, donor/peer parity, read-back and a true complete-gap
+attestation. The tool does not infer closure of unknown input gaps.
+
+Closed gaps can be filled while the READY block still contains open gaps:
+
+```sh
+storectl sync --resume ./existing-copy --ready-block ./readiness.json \
+  --gapfill-window outage-a --gapfill-window outage-b
+```
+
+`--gapfill-window` selects gap IDs, without changing the saved copy scope. Omit
+it to fill every closed gap without a receipt. Open gaps are never assigned an
+estimated end. Each completed window has its own receipt under
+`gapfill-window-*/receipt-*.json`, recording the target, all donors and peers,
+processed names, source-name fill transfers, measured point additions and retention
+samples. Point additions remain explicitly unknown if an interrupted measurement
+cannot establish the original baseline. Identical bounds share the fill work.
+
+The gap phase shares one durable discovery snapshot across windows. It never
+runs the original copy or full-history proof while gaps are open, the ledger is
+incomplete, or any window lacks a receipt. After interruption, completed windows
+are skipped; `filled.json` also preserves a finished native fill while
+`samples.json` resumes its bounded retention samples. Receipts are bound to the
+source list and ownership/name inputs, independently of other ledger entries.
+
+The command finishes `NOT_READY` and lists every open gap and pending receipt.
+READY still requires all windows closed with receipts, an explicitly complete
+ledger, and the independent all-donor proof and read-back. That final proof also
+covers names created after the gap inventory snapshot. Keep the existing state
+directory and provide the updated `--ready-block` when end evidence arrives.

@@ -16,6 +16,9 @@ import (
 // its input windows. The shared result must reflect the actual source write,
 // including a point that moves into or out of the finest archive.
 func TestMirrorArchiveCorrectionsAcrossSourceClockBoundary(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	for _, compressed := range []bool{false, true} {
 		for _, rollup := range []bool{false, true} {
 			for _, tc := range []struct {

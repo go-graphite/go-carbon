@@ -18,6 +18,7 @@ import (
 // The merge launcher adopts this original journal domain and supplies precisely
 // engine=bulk, bulk-only, delete=false: existing archives must remain untouched.
 func TestMergeLauncher100ExistingNamesAndInterruptedResume(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	names := make([]string, 100)
