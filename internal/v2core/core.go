@@ -977,7 +977,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	var path string
-	if !plan.ReplaceRaw && !o.cfg.BlindBatch && len(head) > 0 {
+	if !plan.ReplaceRaw && (!o.cfg.BlindBatch || o.cfg.Rollups) && len(head) > 0 {
 		writer, path, err = stage("data")
 		if err != nil {
 			return 0, err

@@ -86,14 +86,13 @@ func openPartSource(root, journal string, source v2part.Provenance) (v2part.Prov
 		return source, err
 	}
 	if source.Incarnation == (v2part.PartID{}) && source.Stream == "" {
-		if journal != "" {
-			h := sha256.Sum256([]byte("go-carbon-v2-part-source\x00" + journal))
-			copy(source.Incarnation[:], h[:16])
-			source.Stream = journal
-		} else {
-			if _, err := rand.Read(source.Incarnation[:]); err != nil {
-				return source, err
-			}
+		// JournalIdentity can be a shared configuration label. It must never
+		// make two independent roots claim the same original ordering stream.
+		if _, err := rand.Read(source.Incarnation[:]); err != nil {
+			return source, err
+		}
+		source.Stream = journal
+		if source.Stream == "" {
 			source.Stream = "offline"
 		}
 	}
