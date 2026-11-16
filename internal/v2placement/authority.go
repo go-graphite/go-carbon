@@ -172,6 +172,25 @@ func (a *Authority) CheckNames(names []string) error {
 	}
 	return nil
 }
+
+// Replay authorizes an already admitted durable journal record. A closed epoch
+// can recover its own accepted prefix without reopening intake. The original
+// map, epoch, writer incarnation and authenticated lane must still match the
+// persisted authority. Historical maps require separate certified coverage and
+// are deliberately refused here rather than restamping an old record.
+func (a *Authority) Replay(s Stamp) error {
+	state := a.current.Load()
+	r := state.replicaState
+	if s.Group != a.group || s.Replica != a.replica || s.MapDigest != state.mapDigest || s.Epoch != r.Epoch || r.Writer != a.store {
+		return ErrStaleEpoch
+	}
+	for _, lane := range r.Producers {
+		if lane == s.Lane {
+			return nil
+		}
+	}
+	return fmt.Errorf("unregistered producer lane")
+}
 func (a *Authority) save(s durableState) error {
 	b, e := json.Marshal(s)
 	if e != nil {

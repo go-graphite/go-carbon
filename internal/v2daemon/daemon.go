@@ -103,13 +103,9 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	lock, reopened, err := lockRoot(root, c)
+	lock, _, err := lockRoot(root, c)
 	if err != nil {
 		return nil, err
-	}
-	if reopened && c.Placement != nil {
-		_ = lock.Close()
-		return nil, errors.New("placed journal replay requires persisted placement stamps; not implemented")
 	}
 	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), hooks)
 	if err != nil {

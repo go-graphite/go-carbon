@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2placement"
+	"github.com/go-graphite/go-carbon/internal/v2replay"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -31,6 +33,10 @@ type Application struct {
 // pending journal group. Drain syncs definitions before the journal, then
 // pipelines the same detached groups to core. No additional sender queue exists.
 func (p *Producer) appendApplications(apps []Application) error {
+	return p.appendApplicationsStamped(apps, nil)
+}
+
+func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placement.Stamp) error {
 	if p.failed != nil {
 		return p.failed
 	}
@@ -94,6 +100,12 @@ func (p *Producer) appendApplications(apps []Application) error {
 	}
 	cursor := p.cursor + uint64(n)
 	record := encodeApplications(cursor, ids, batches, encoded)
+	if stamp != nil {
+		record = encodePlacementEnvelope(*stamp, record)
+	}
+	if len(record) > v2replay.MaxRecord {
+		return p.fail(errors.New("application journal record exceeds replay bound"))
+	}
 	p.EncodeTime += time.Since(start)
 	p.records = append(p.records, record)
 	p.packets = append(p.packets, packet{rows: rows, batches: batches, cursor: cursor})
@@ -136,6 +148,11 @@ func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc
 // catalog and returns detached original groups. It does not mutate core state.
 // The decoder retains PDC4 segment predictor state and must be reused in order.
 func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, catalog *partlog.NameCatalog, producer, producers int) ([]v2core.Batch, uint64, error) {
+	var err error
+	record, _, err = decodePlacementEnvelope(record)
+	if err != nil {
+		return nil, 0, err
+	}
 	invalid := errors.New("invalid original application envelope")
 	if producer < 0 || producers < 1 || producer >= producers || len(record) < 8 || !bytes.Equal(record[:4], applicationMagic) || crc32.Checksum(record[:len(record)-4], applicationCRC) != binary.LittleEndian.Uint32(record[len(record)-4:]) {
 		return nil, 0, invalid

@@ -13,6 +13,7 @@ import (
 type Placement interface {
 	Register() v2placement.Sink
 	CheckNames([]string) error
+	Replay(v2placement.Stamp) error
 	Fence(context.Context, string, []v2placement.EndMarker, func() (v2placement.Frontier, v2placement.Roots, error)) (v2placement.Fence, error)
 }
 
@@ -42,7 +43,14 @@ func (p *Producer) AppendPlaced(stamp v2placement.Stamp, names []string, data []
 	if e = p.placement.CheckNames(names); e != nil {
 		return e
 	}
-	return p.appendNamed(names, data, sequence, clock)
+	if p.layer != 2 || len(names) == 0 || len(names) != len(data) || len(names) != len(sequence) || len(names) > 32768 {
+		return p.fail(fmt.Errorf("invalid placed named batch"))
+	}
+	apps := make([]Application, len(names))
+	for i, name := range names {
+		apps[i] = Application{Name: name, Order: p.applyOrder + uint64(i) + 1, Clock: clock, Points: data[i : i+1], Sequence: sequence[i : i+1]}
+	}
+	return p.appendApplicationsStamped(apps, &stamp)
 }
 func (p *Producer) AppendApplicationsPlaced(stamp v2placement.Stamp, apps []Application) error {
 	if p.admission == nil {
@@ -58,7 +66,7 @@ func (p *Producer) AppendApplicationsPlaced(stamp v2placement.Stamp, apps []Appl
 			return e
 		}
 	}
-	return p.appendApplications(apps)
+	return p.appendApplicationsStamped(apps, &stamp)
 }
 
 // FencePlacement closes intake and waits for admitted batches before draining

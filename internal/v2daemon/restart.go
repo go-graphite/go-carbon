@@ -77,9 +77,37 @@ func (p *Producer) recoverProducer(dir string) error {
 	for i, path := range paths {
 		decoder := partlog.CatalogDecoder{Catalog: p.catalog}
 		_, err = v2replay.Scan(path, i == len(paths)-1, func(record []byte) error {
-			batches, cursor, err := DecodeApplications(record, &decoder, p.catalog, p.index, p.count)
+			inner, stamp, err := decodePlacementEnvelope(record)
 			if err != nil {
 				return err
+			}
+			if p.placement != nil {
+				if stamp == nil {
+					return errors.New("placement stamp missing from retained journal")
+				}
+				if err = p.placement.Replay(*stamp); err != nil {
+					return fmt.Errorf("journal placement authority: %w", err)
+				}
+			} else if stamp != nil {
+				return errors.New("placed journal requires placement authority")
+			}
+			batches, cursor, err := DecodeApplications(inner, &decoder, p.catalog, p.index, p.count)
+			if err != nil {
+				return err
+			}
+			if p.placement != nil {
+				names := make([]string, len(batches))
+				for j, batch := range batches {
+					id := (batch.ID-uint64(p.index)-1)/uint64(p.count) + 1
+					name, _, ok := p.catalog.Lookup(id)
+					if !ok {
+						return errors.New("journal placement name missing")
+					}
+					names[j] = name
+				}
+				if err = p.placement.CheckNames(names); err != nil {
+					return fmt.Errorf("journal placement names: %w", err)
+				}
 			}
 			var n uint64
 			for _, b := range batches {

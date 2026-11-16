@@ -96,12 +96,20 @@ pin a coherent immutable manifest, and return roots. A nil/failed certifier emit
 no receipt and leaves intake closed. Producer lifecycle calls must be quiescent
 during this control operation. Direct core APIs remain trusted internal APIs.
 
-The current journal envelopes do not retain placement stamps and the base daemon
-is not a qualified restart/receiver/copy pipeline. A replay adapter must use the
-persisted authority and original stream identity rather than replay as a new
-unversioned write. Duplicate receipt/ACK storage, actual transport authentication,
-whole-part coverage attestation and ordered-tail integration are remaining seams;
-this package does not fabricate them or authorize online moves without them.
+Placed journal application envelopes retain the original group, replica, map
+digest, epoch and authenticated lane under the record checksum. Startup validates
+each retained record against the persisted authority and checks that its names
+belong to the group before submitting the original applications to core. Reopen
+requires placement for placed records; enabling placement on legacy unstamped
+records is rejected. Replay can recover the accepted prefix of a closed current
+epoch while fresh intake stays fenced. A changed map, epoch or writer incarnation
+is rejected; historical replay through certified activation coverage remains a
+separate integration seam. Replay never restamps a record with the current map.
+
+Duplicate receipt/ACK storage, actual transport authentication, whole-part
+coverage attestation and ordered-tail integration are remaining seams. Plain TCP
+does not authenticate a producer lane and remains unavailable for placed L3
+intake. This package does not fabricate those proofs or authorize online moves.
 
 ## Storectl use
 
