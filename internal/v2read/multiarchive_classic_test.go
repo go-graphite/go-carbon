@@ -19,7 +19,6 @@ import (
 // Full retention definitions, including generated single-resolution policies.
 // Keep names generic: only archive geometry participates in the oracle.
 var boundarySchemas = []string{
-	"0644",
 	"10m:1y,1d:10y",
 	"10m:2d,1h:9d,1d:3y",
 	"10m:30d",
