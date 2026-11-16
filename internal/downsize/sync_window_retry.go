@@ -43,17 +43,14 @@ func (s *syncer) resolvedWindowSelections() map[syncWindowSelectionKey]map[strin
 // repair loop. Each pass reopens source pins and reuses durable resolutions;
 // cancellation preserves the unresolved frontier for a later invocation.
 func (s *syncer) waitWindowSelections(ctx context.Context) error {
+	if err := s.savedWindowSelectionFailure(); err != nil {
+		return err
+	}
 	lastPending := -1
 	lastProgress := s.o.now()
 	for delay := time.Second; ; delay = min(30*time.Second, delay*2) {
 		if err := s.retryWindowSelections(ctx); err != nil {
 			return err
-		}
-		if s.windowRetryCopyError != nil {
-			if s.o.issues == nil {
-				return s.windowRetryCopyError
-			}
-			return s.quarantineWindowSelections()
 		}
 		pending := 0
 		for _, r := range s.sum.residual {
@@ -63,6 +60,9 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 		}
 		if pending == 0 {
 			return nil
+		}
+		if s.windowRetryCopyError != nil {
+			return s.windowSelectionFailure(s.sum.residual, true)
 		}
 		if s.o.noCopy {
 			return fmt.Errorf("%w: %d pending window selections (--no-copy)", ErrSyncResidual, pending)
@@ -80,10 +80,7 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			}
 			sort.Strings(frontier)
 			event("sync_window_selection_stalled", map[string]any{"pending_selections": pending, "frontier": frontier, "reason": syncWindowSelectionReason})
-			if s.o.issues == nil {
-				return fmt.Errorf("%w: window selection made no progress for %s: %s: %v", ErrSyncResidual, syncWindowSelectionStall, syncWindowSelectionReason, frontier)
-			}
-			return s.quarantineWindowSelections()
+			return s.windowSelectionFailure(s.sum.residual, true)
 		}
 		event("sync_window_selection_wait", map[string]any{"pending_selections": pending, "retry_seconds": delay.Seconds()})
 		if err := sleepContext(ctx, delay); err != nil {
@@ -282,7 +279,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		for _, skip := range r.Skipped {
 			key := syncKey{skip.Name, r.Source}
-			if !resolved[k][skip.Name] && !s.o.issues.excluded(skip.Name) && !pendingSeen[key] {
+			if !resolved[k][skip.Name] && !s.o.issues.policyExcluded(skip.Name) && !pendingSeen[key] {
 				pendingSeen[key] = true
 				s.addResidual(syncHole{Name: skip.Name, Source: r.Source}, syncWindowSelectionReason)
 			}

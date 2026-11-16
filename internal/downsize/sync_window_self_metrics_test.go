@@ -2,6 +2,7 @@ package downsize
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -63,10 +64,10 @@ func TestWindowSelectionSelfMetricsAreNotPrefixExcluded(t *testing.T) {
 			for _, name := range names {
 				s.addResidual(syncHole{Name: name, Source: syncD1}, syncWindowSelectionReason)
 			}
-			if err := s.waitWindowSelections(context.Background()); err != nil {
+			if err := s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) {
 				t.Fatal(err)
 			}
-			if n, _ := q.counts(); n != 1 || !q.excluded(failed) {
+			if n, _ := q.counts(); n != 0 || q.excluded(failed) {
 				t.Fatalf("wrong failed-name quarantine: %+v", q.quarantined)
 			}
 			want := map[string]bool{names[1]: true, names[2]: true}
@@ -79,7 +80,7 @@ func TestWindowSelectionSelfMetricsAreNotPrefixExcluded(t *testing.T) {
 				}
 			}
 			copies := len(b.copies)
-			if err := s.waitWindowSelections(context.Background()); err != nil || len(b.copies) != copies {
+			if err := s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) || len(b.copies) != copies {
 				t.Fatal("replayed completed or quarantined selection", err)
 			}
 		})
