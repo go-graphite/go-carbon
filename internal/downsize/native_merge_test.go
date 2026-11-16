@@ -18,6 +18,7 @@ import (
 )
 
 func TestNativeMergeController100PinnedAndDurableBoundary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	names := make([]string, 100)
@@ -153,6 +154,7 @@ func nativeMergeGeneratedPlan(t *testing.T, source, target string, names []strin
 }
 
 func TestNativeMergeRefusesUnsafeModes(t *testing.T) {
+	t.Parallel()
 	for _, o := range []options{
 		{mergeSession: "merge", engine: "metric", bulkOnly: true},
 		{mergeSession: "merge", engine: "bulk"},
@@ -168,6 +170,7 @@ func TestNativeMergeRefusesUnsafeModes(t *testing.T) {
 // Waiters must not reuse an ID retained only for cleanup after boundary
 // validation or fsync fails. Otherwise another range can import without a ledger.
 func TestNativeMergeFailedBoundaryIsNeverReusable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, stage := range []string{"invalid-boundary", "journal-write"} {
 		t.Run(stage, func(t *testing.T) {

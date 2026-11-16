@@ -19,6 +19,7 @@ import (
 // Exercise real checksum-validated exporters with concurrent selection and compare
 // every digest and copied point bit with the serial client.
 func TestSyncWindowSelectionCapacityDifferential(t *testing.T) {
+	t.Parallel()
 	for _, advertised := range []int{0, 1, 2, 8, 1000} {
 		t.Run(fmt.Sprint(advertised), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

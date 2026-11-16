@@ -13,6 +13,7 @@ import (
 )
 
 func TestTransferProofNegotiationAndDowngrade(t *testing.T) {
+	t.Parallel()
 	proofs := []chunkstore.TransferProof{{Source: chunkstore.TransferVersion{Name: "metric"}, Target: chunkstore.TransferVersion{Name: "metric"}, Digest: "digest"}}
 	for _, binary := range []bool{false, true} {
 		t.Run(map[bool]string{false: "json", true: "binary"}[binary], func(t *testing.T) {

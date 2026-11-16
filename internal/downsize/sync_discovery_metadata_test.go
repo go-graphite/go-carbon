@@ -47,6 +47,7 @@ func (b *metadataDiscovery) Digest(context.Context, string, []string, int64, int
 // Compare the emitted prefix, ordering and absent-name filtering with the
 // catalog oracle across multiple batches. Empty archives still mean present.
 func TestScopedDiscoveryUsesMetadata(t *testing.T) {
+	t.Parallel()
 	for _, after := range []string{"", "scope.0500"} {
 		t.Run(after, func(t *testing.T) {
 			f := newFakeSync()
@@ -96,6 +97,7 @@ func TestScopedDiscoveryUsesMetadata(t *testing.T) {
 }
 
 func TestScopedDiscoveryMetadataError(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "scope.names")
 	if err := os.WriteFile(path, []byte("name\n"), 0600); err != nil {
 		t.Fatal(err)

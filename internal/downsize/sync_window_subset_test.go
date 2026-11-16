@@ -160,6 +160,7 @@ func (s *syncer) checkWindowReference(ctx context.Context, row *syncRow, names [
 }
 
 func TestSyncWindowSubsetDifferential(t *testing.T) {
+	t.Parallel()
 	for _, fallback := range []string{"none", "target", "source"} {
 		for _, variant := range []string{"holes", "clean", "bits", "retentions", "missing", "unheld"} {
 			t.Run(fallback+"/"+variant, func(t *testing.T) {
@@ -228,6 +229,7 @@ func (b *windowSubsetSync) Fetch(ctx context.Context, store string, names []stri
 	return b.fakeSync.Fetch(ctx, store, names, from, until)
 }
 func TestSyncWindowSubsetReads(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	for _, store := range f.stores {
 		for n, a := range store.archives {
@@ -280,6 +282,7 @@ func (b windowWireSync) Digest(ctx context.Context, store string, names []string
 }
 
 func TestSyncWindowLegacyReads(t *testing.T) {
+	t.Parallel()
 	for _, empty := range []bool{false, true} {
 		f, o, holes := threeSources(t)
 		o.from = []string{syncD1}
@@ -320,6 +323,7 @@ func (b legacyWindowSync) Fetch(ctx context.Context, store string, names []strin
 }
 
 func TestSyncWindowCoveredWire(t *testing.T) {
+	t.Parallel()
 	source := syncSeries{Start: 60, Step: 60, Values: []float64{123, 0, math.Copysign(0, -1), math.SmallestNonzeroFloat64, math.MaxFloat64, math.NaN(), math.Inf(1), math.Inf(-1), 456}}
 	w := syncRange{"wire", 120, 540}
 	target := []syncDigest{{Step: 60, Count: 4, Hash: "13a8319ea3e369b3"}}

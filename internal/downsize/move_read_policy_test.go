@@ -11,6 +11,7 @@ import (
 )
 
 func TestReadPolicyFloorAndRatio(t *testing.T) {
+	t.Parallel()
 	p := defaultReadPolicy()
 	for _, tc := range []struct {
 		name     string
@@ -63,6 +64,7 @@ func TestReadPolicyFloorAndRatio(t *testing.T) {
 }
 
 func TestReadBaselineUsesObservationMedian(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a"}, capacity{8, 8192, 64 << 20, 65536}, true, 0, 0)
 	tune.collecting = true
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100}
@@ -97,6 +99,7 @@ func TestReadBaselineUsesObservationMedian(t *testing.T) {
 }
 
 func TestResumePolicyLegacyAndInvalidOverrides(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1794570000, 0)
 	saved := admissionState{Policy: backlogPolicy{3 * time.Minute, 4, 8, 30, 64}}
 	// A journal written before the read policy was saved adopts this run's
@@ -131,6 +134,7 @@ func TestResumePolicyLegacyAndInvalidOverrides(t *testing.T) {
 }
 
 func TestResumeOverridesSavedGovernorPolicy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	addPoints(t, source, "resume.policy", 2)

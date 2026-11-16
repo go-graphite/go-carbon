@@ -3,6 +3,7 @@ package downsize
 import "testing"
 
 func TestLatencyIdleEnvelope(t *testing.T) {
+	t.Parallel()
 	h := hostLimit{latencyBaseline: &backlogBaseline{Min: 100, Median: 500, Max: 12691}}
 	for _, await := range []float64{.5, 12.690667, 3, 12.690667} {
 		if s := h.observeLatency(hostSample{DiskAwaitMS: await, DiskUtil: 1.2}, false); s.Soft != "" {

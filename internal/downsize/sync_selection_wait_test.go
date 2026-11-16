@@ -25,6 +25,7 @@ func (b *eventuallySelectedBackend) WindowPresence(ctx context.Context, source s
 }
 
 func TestSelectionWaitNarrowRetiresSuperseded(t *testing.T) {
+	t.Parallel()
 	b := &eventuallySelectedBackend{fakeSync: newFakeSync()}
 	w := syncRange{From: syncTestNow - 600, Until: syncTestNow - 120}
 	for _, n := range []string{"pending", "clean"} {
@@ -69,6 +70,7 @@ func (b rejectedSelectionRepair) CopyWindow(context.Context, string, string, []s
 	return syncCopyResult{Failed: []string{"pending"}}, nil
 }
 func TestSelectionWaitRejectedRepairFailsLoudly(t *testing.T) {
+	t.Parallel()
 	path := t.TempDir()
 	j, err := openSyncJournal(filepath.Join(path, "sync.jsonl"), "rejected")
 	if err != nil {
@@ -101,6 +103,7 @@ func (b stalledSelectionBackend) WindowPresence(context.Context, string, []strin
 	return map[string][]syncDigest{"pending": {{Hash: syncWindowUnresolved}}}, nil
 }
 func TestSelectionWaitStalledFrontierFailsWithNames(t *testing.T) {
+	t.Parallel()
 	path := t.TempDir()
 	j, err := openSyncJournal(filepath.Join(path, "sync.jsonl"), "stalled")
 	if err != nil {

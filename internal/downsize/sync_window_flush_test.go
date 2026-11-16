@@ -14,6 +14,7 @@ import (
 )
 
 func TestWindowRetryFlushesOnlySavedPendingNames(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	addPoints(t, source, "pending", 1)

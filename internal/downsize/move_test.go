@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/buckyd"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
@@ -75,7 +76,7 @@ var testMetricNow = time.Now().Unix() / 10 * 10
 
 func localStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour})
+	s, err := store.Open("/db", store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(testMetricNow, 0) }}.WithFS(vfs.NewMem()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +89,7 @@ func localService(t *testing.T, s *store.Store) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = service.Stop() })
 	return service.Handler()
 }
 func addPoints(t *testing.T, s *store.Store, name string, value float64) {
@@ -104,6 +106,7 @@ func addPoints(t *testing.T, s *store.Store, name string, value float64) {
 }
 
 func TestMoverEndToEndResumeLostDeleteResponse(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	var names []string
@@ -159,6 +162,7 @@ func TestMoverEndToEndResumeLostDeleteResponse(t *testing.T) {
 }
 
 func TestMoverResumeRechecksTargetBeforeCleanup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	name := "resume.target"
@@ -190,6 +194,7 @@ func TestMoverResumeRechecksTargetBeforeCleanup(t *testing.T) {
 	}
 }
 func TestPlanRejectsTamperingTraversalAndIncomplete(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"checksum", "truncated", "version", "traversal", "symlink", "missing manifest"} {
 		t.Run(kind, func(t *testing.T) {
 			root := fixturePlan(t, "http://127.0.0.1:1", "http://127.0.0.1:2", []string{"a"})
@@ -244,6 +249,7 @@ func TestPlanRejectsTamperingTraversalAndIncomplete(t *testing.T) {
 	}
 }
 func TestDryRunNeverContactsHosts(t *testing.T) {
+	t.Parallel()
 	root := fixturePlan(t, "http://127.0.0.1:1", "http://127.0.0.1:2", []string{"dry"})
 	o := testOptions(root)
 	o.apply = false
@@ -256,6 +262,7 @@ func TestDryRunNeverContactsHosts(t *testing.T) {
 }
 
 func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a", "b"}, capacity{Streams: 16, Batch: 8192, BatchBytes: 64 << 20, DeleteRate: 10000}, false, 0, 100)
 	tune.collecting = true
 	tune.hosts["a"].baseline = nil
@@ -329,6 +336,7 @@ func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
 	}
 }
 func TestJournalLockTruncationAndCompaction(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "state")
 	j, err := openJournal(path, "plan")
 	if err != nil {
@@ -337,10 +345,37 @@ func TestJournalLockTruncationAndCompaction(t *testing.T) {
 	if _, err := openJournal(path, "plan"); err == nil {
 		t.Fatal("concurrent journal opened")
 	}
-	for i := range 300 {
-		if err := j.save(task{Stream: "stream", Start: int64(i), End: int64(i + 1), Phase: "done"}); err != nil {
+	// Seed the historical prefix with one sync. Compaction must replay all
+	// 300 distinct ranges, but only the boundary and tail need live saves.
+	encoder := json.NewEncoder(j.file)
+	for i := range 298 {
+		if err := encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, Task: task{Stream: "stream", Start: int64(i), End: int64(i + 1), Phase: "done"}}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := j.file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	j.close()
+	j, err = openJournal(path, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.sinceCompact = 254
+	for i, phase := range []string{"verified", "done"} {
+		if err := j.save(task{Stream: "stream", Start: 298, End: 299, Phase: phase}); err != nil {
+			t.Fatal(err)
+		}
+		want := 255
+		if i == 1 {
+			want = 0
+		}
+		if j.sinceCompact != want {
+			t.Fatalf("compaction counter = %d, want %d", j.sinceCompact, want)
+		}
+	}
+	if err := j.save(task{Stream: "stream", Start: 299, End: 300, Phase: "done"}); err != nil {
+		t.Fatal(err)
 	}
 	j.close()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
@@ -362,6 +397,7 @@ func TestJournalLockTruncationAndCompaction(t *testing.T) {
 	}
 }
 func TestTunerRampBackoffAndHardStop(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a", "b"}, capacity{8, 2048, 64 << 20, 65536}, true, 0, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100}
 	for range 4 {
@@ -396,6 +432,7 @@ func TestTunerRampBackoffAndHardStop(t *testing.T) {
 }
 
 func TestMoverRetireAndRefreshLateSourceDelta(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	names := []string{"retire.a", "retire.b"}
@@ -437,6 +474,7 @@ func TestMoverRetireAndRefreshLateSourceDelta(t *testing.T) {
 }
 
 func TestMoverBatchesSparseDeltasAndResumesLostRetirement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	var names []string
@@ -521,6 +559,7 @@ func TestMoverBatchesSparseDeltasAndResumesLostRetirement(t *testing.T) {
 }
 
 func TestCopyOnlyReconciliationFencesAndRetainsHistory(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	names := []string{"copy.a", "copy.b", "copy.c"}
@@ -574,6 +613,7 @@ func TestCopyOnlyReconciliationFencesAndRetainsHistory(t *testing.T) {
 }
 
 func TestCopyOnlyReconciliationRejectsRetainedSourcesBeforeContact(t *testing.T) {
+	t.Parallel()
 	for _, endpoint := range []string{"http://127.0.0.1:1", "http://127.0.0.1:3"} {
 		root := fixturePlan(t, "http://127.0.0.1:1", "http://127.0.0.1:2", []string{"copy.only"})
 		path := filepath.Join(root, "manifest.json")
@@ -605,6 +645,7 @@ func TestCopyOnlyReconciliationRejectsRetainedSourcesBeforeContact(t *testing.T)
 }
 
 func TestMoverSplitsOversizedBatches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	var names []string
@@ -657,6 +698,7 @@ func TestMoverSplitsOversizedBatches(t *testing.T) {
 }
 
 func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a", "b"}, capacity{8, 8192, 64 << 20, 65536}, true, 0, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100, ReadP99MS: 2}
 	sample.Time += .01
@@ -691,6 +733,7 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 }
 
 func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a", "b", "c"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 24, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, DiskWriteCapacity: 2e9}
 	for range 30 {
@@ -754,6 +797,7 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 }
 
 func TestTunerReadIsolationReleasesCPUCeiling(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 75, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9}
 	for range 30 {

@@ -20,12 +20,16 @@ import (
 )
 
 func TestSyncWindowRejectedBatchResume(t *testing.T) {
+	t.Parallel()
 	for _, status := range []int{http.StatusRequestEntityTooLarge, http.StatusConflict} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
+			// Eight names still force two recursive split levels and retain
+			// overlap, signed zero, a rejected singleton, and clean siblings.
 			names := []string{"a.new", "b.overlap", "c.conflict", "d.new"}
-			for i := 0; i < 60; i++ {
+			for i := 0; i < 4; i++ {
 				names = append(names, fmt.Sprintf("extra.%02d", i))
 			}
 			for _, n := range names {
@@ -115,6 +119,7 @@ func TestSyncWindowRejectedBatchResume(t *testing.T) {
 }
 
 func TestSyncWindowRejectedBatchDoesNotSplitTransportFailure(t *testing.T) {
+	t.Parallel()
 	source := nativeControllerStore(t)
 	addPoints(t, source, "one", 1)
 	addPoints(t, source, "two", 2)

@@ -15,6 +15,7 @@ import (
 // Each sync batch owns a short copy invocation. Its transport must release
 // sockets on both successful completion and preflight failure.
 func TestCopyBatchClosesConnections(t *testing.T) {
+	t.Parallel()
 	for _, denied := range []bool{false, true} {
 		t.Run(map[bool]string{false: "complete", true: "preflight-error"}[denied], func(t *testing.T) {
 			var open atomic.Int64
@@ -65,6 +66,7 @@ func TestCopyBatchClosesConnections(t *testing.T) {
 }
 
 func TestProgressRateUsesFreshWorkAndExpiresStalls(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1000, 0)
 	var rate progressRate
 	p := progressSnapshot{Phase: "copy", Done: 1000000, FreshDoneAvailable: true, FreshDone: 0}
@@ -102,6 +104,7 @@ func TestProgressRateUsesFreshWorkAndExpiresStalls(t *testing.T) {
 }
 
 func TestProgressMetricsIncludesReadyRecoveryOnly(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "progress.json")
 	p := &progressMetrics{paths: map[string]bool{path: true}}

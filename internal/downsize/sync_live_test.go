@@ -22,6 +22,7 @@ import (
 // TestSyncLiveCarbonserver: v3 info fails a whole request with 404 when one
 // name is unknown; recursive splitting preserves known names.
 func TestSyncLiveCarbonserver(t *testing.T) {
+	t.Parallel()
 	known := map[string]bool{"a": true, "c": true}
 	var requests [][]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +96,7 @@ func mustAtoi(t *testing.T, s string) int {
 // copy journal) is reported as forbidden after the one-name probe, without
 // running the full list.
 func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	journal := filepath.Join(dir, "fill-r1-s0.jsonl")
 	if err := os.WriteFile(filepath.Join(dir, "fill-r1-s0.names"), []byte("a\nb\n"), 0o644); err != nil {
@@ -149,6 +151,7 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 // A long-name page can be truncated by the shared decoder byte budget even
 // when the server returns HTTP 200. Retry the cursor and remember the cap.
 func TestSyncListTruncatedPage(t *testing.T) {
+	t.Parallel()
 	var limits []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limits = append(limits, r.URL.Query().Get("limit"))
@@ -175,6 +178,7 @@ func TestSyncListTruncatedPage(t *testing.T) {
 }
 
 func TestSyncCopyTransferControls(t *testing.T) {
+	t.Parallel()
 	b := newSyncLiveBackend(syncLiveOptions{copyBytes: 16 << 20, copyIdle: 80 * time.Second})
 	dir := t.TempDir()
 	journal := filepath.Join(dir, "fill-r1-s0.jsonl")
@@ -208,6 +212,7 @@ func TestSyncCopyTransferControls(t *testing.T) {
 // Exercise the real engine so new required engine options cannot silently
 // turn every sync probe and fill into validation retries.
 func TestSyncCopyRealEngine(t *testing.T) {
+	t.Parallel()
 	_, src, dst := newFakeCopy(t, []string{"a", "b"})
 	b := newSyncLiveBackend(syncLiveOptions{copyBytes: 16 << 20, copyIdle: 80 * time.Second, copyAttempts: 1, copyStreams: 1})
 	dir := t.TempDir()
@@ -222,6 +227,7 @@ func TestSyncCopyRealEngine(t *testing.T) {
 }
 
 func TestSyncLiveCopyFinalSkipsAreNotEngineAborts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	journal := filepath.Join(dir, "copy.jsonl")
 	if err := os.WriteFile(filepath.Join(dir, "copy.names"), []byte("a\nb\n"), 0600); err != nil {
@@ -258,6 +264,7 @@ func TestSyncLiveCopyFinalSkipsAreNotEngineAborts(t *testing.T) {
 }
 
 func TestSyncIOTimings(t *testing.T) {
+	t.Parallel()
 	b := newSyncLiveBackend(syncLiveOptions{hostWait: time.Second})
 	if err := b.wait(context.Background(), "fetch", "source", func() error { return nil }); err != nil {
 		t.Fatal(err)
@@ -279,6 +286,7 @@ func TestSyncIOTimings(t *testing.T) {
 // Oversized metadata requests retry at the same cursor, and future calls to
 // that store reuse the cap. A different store retains its own request size.
 func TestSyncInfoAdaptiveBatch(t *testing.T) {
+	t.Parallel()
 	for _, failure := range []error{io.EOF, io.ErrUnexpectedEOF, context.DeadlineExceeded} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			var requests [][]string
@@ -343,6 +351,7 @@ type syncInfoRoundTrip func(*http.Request) (*http.Response, error)
 func (f syncInfoRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestSyncInfoAdaptiveSingleAndCancel(t *testing.T) {
+	t.Parallel()
 	for _, canceled := range []bool{false, true} {
 		b := newSyncLiveBackend(syncLiveOptions{hostWait: -time.Second, carbonPort: 8080})
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)

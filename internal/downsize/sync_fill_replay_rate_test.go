@@ -21,6 +21,7 @@ func (b inspectFillReplay) Copy(_ context.Context, source, _ string, _ []string,
 // Resume a completed donor's fill, then block before another donor does new
 // work. Replayed receipts must advance Done without creating a throughput burst.
 func TestSyncFillReplayDoesNotAdvertiseFreshWork(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	o.from = []string{syncD1, syncD2}

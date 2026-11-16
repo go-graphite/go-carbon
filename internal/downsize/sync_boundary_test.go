@@ -15,12 +15,24 @@ import (
 )
 
 func TestSyncClosedSparseBoundaryRepair(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ existing, later, recent, gap bool }{{false, true, false, false}, {true, true, false, false}, {false, false, false, false}, {true, false, false, false}, {true, true, true, false}, {false, true, true, false}, {false, true, false, true}} {
 		existing := tc.existing
 		t.Run(map[bool]string{false: "hole", true: "target-wins"}[existing]+map[bool]string{false: "/trailing", true: "/historical"}[tc.later]+map[bool]string{false: "", true: "/recent"}[tc.recent]+map[bool]string{false: "", true: "/gap"}[tc.gap], func(t *testing.T) {
 			ctx := context.Background()
+			// The repair path intentionally uses real time. Put the recent
+			// source clock beyond the test deadline so its incomplete bucket
+			// cannot become historical while unrelated fixtures are running.
+			fixtureNow := time.Unix(testMetricNow, 0)
+			if tc.recent {
+				fixtureNow = time.Now().Add(time.Hour)
+				if deadline, ok := t.Deadline(); ok {
+					fixtureNow = deadline.Add(time.Minute)
+				}
+			}
+			clock := func() time.Time { return fixtureNow }
 			open := func() *store.Store {
-				db, e := store.Open("/db", store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20}.WithFS(vfs.NewMem()))
+				db, e := store.Open("/db", store.Options{Now: clock, ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20}.WithFS(vfs.NewMem()))
 				if e != nil {
 					t.Fatal(e)
 				}
@@ -31,7 +43,7 @@ func TestSyncClosedSparseBoundaryRepair(t *testing.T) {
 			seed := func(db *store.Store, snap store.Snapshot) {
 				snap.Metadata.Continuation = true
 				mem := policyMemory{}
-				if e := (&whisperio.ContinuationCodec{}).RestoreArchives(ctx, mem, snap, time.Now); e != nil {
+				if e := (&whisperio.ContinuationCodec{}).RestoreArchives(ctx, mem, snap, clock); e != nil {
 					t.Fatal(e)
 				}
 				record := store.TransferMetric{Config: snap.Metadata.MetricConfig, Version: store.TransferVersion{Name: snap.Metadata.Name, ID: 1, Generation: 1, Revision: 1}, Continuation: true}
@@ -47,7 +59,7 @@ func TestSyncClosedSparseBoundaryRepair(t *testing.T) {
 			}
 			base := testMetricNow/60*60 - 240
 			if tc.recent {
-				base = time.Now().Unix()/60*60 - 60
+				base = clock().Unix()/60*60 - 60
 			}
 			ret := []store.Retention{{Step: 10, Count: 128}, {Step: 60, Count: 128}}
 			snap := store.Snapshot{Metadata: store.Metadata{MetricConfig: store.MetricConfig{Name: "sparse", AggregationMethod: store.Average, Retentions: ret, XFilesFactor: 0}}, Archives: []store.Archive{
