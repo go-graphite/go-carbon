@@ -74,3 +74,9 @@ machine may benefit from the filesystem cache.
 `BenchmarkCatalogRefreshCompare` compares the previous discovery equality
 check with `Snapshot.EqualNames`. The latter avoids materializing a second
 string-header array on each refresh and preserves pinned immutable views.
+
+Sealed-part retirement also exports `v2_part_gc_pending_parts`,
+`v2_part_gc_removed_parts_total`, and `v2_part_gc_unlinked_bytes_total`.
+The byte counter measures removed original links, not physical disk reclaimed:
+hard-link copies and reader pins can retain those blocks. Move progress and
+physical allocation reclamation remain outside this metric contract.

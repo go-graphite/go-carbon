@@ -10,6 +10,12 @@ import (
 // lock, name scan or data read is needed, even with a large catalog.
 type v2Collector struct{ app *App }
 
+var v2GCDescs = struct{ pending, removed, unlinked *prometheus.Desc }{
+	prometheus.NewDesc("v2_part_gc_pending_parts", "Retired sealed parts awaiting original-link removal.", nil, nil),
+	prometheus.NewDesc("v2_part_gc_removed_parts_total", "Retired parts whose original links were removed in this process.", nil, nil),
+	prometheus.NewDesc("v2_part_gc_unlinked_bytes_total", "Bytes in removed original part links; hardlinks and pinned SSTs can retain physical space.", nil, nil),
+}
+
 var v2Descs = struct {
 	ingest, committed, buffered, dispatch, seals, sealTime, sealLag       *prometheus.Desc
 	parts, debt, compacted, obsolete, live, dual, reads, names, rollupLag *prometheus.Desc
@@ -33,6 +39,9 @@ var v2Descs = struct {
 }
 
 func (*v2Collector) Describe(ch chan<- *prometheus.Desc) {
+	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked} {
+		ch <- d
+	}
 	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.names, v2Descs.rollupLag} {
 		ch <- d
 	}
@@ -49,6 +58,15 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	emit := func(d *prometheus.Desc, kind prometheus.ValueType, value float64) {
 		ch <- prometheus.MustNewConstMetric(d, kind, value)
 	}
+	var pendingGC, removedGC, unlinkedGC uint64
+	for _, gc := range v.store.Core.PartGCStats() {
+		pendingGC += gc.PendingParts
+		removedGC += gc.RemovedParts
+		unlinkedGC += gc.UnlinkedFileBytes
+	}
+	emit(v2GCDescs.pending, prometheus.GaugeValue, float64(pendingGC))
+	emit(v2GCDescs.removed, prometheus.CounterValue, float64(removedGC))
+	emit(v2GCDescs.unlinked, prometheus.CounterValue, float64(unlinkedGC))
 	emit(v2Descs.ingest, prometheus.CounterValue, float64(v.server.Stats().Accepted))
 	emit(v2Descs.committed, prometheus.CounterValue, float64(s.CommittedPoints))
 	emit(v2Descs.buffered, prometheus.GaugeValue, float64(s.BufferedPoints))

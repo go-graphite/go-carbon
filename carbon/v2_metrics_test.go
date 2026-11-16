@@ -52,7 +52,7 @@ func TestV2PrometheusOptInAndLifecycle(t *testing.T) {
 				}
 			}
 			if enabled {
-				for _, name := range []string{"v2_ingest_points_total", "v2_committed_points_total", "v2_parts", "v2_seal_lag_seconds", "v2_rollup_lag_seconds", "v2_read_duration_seconds", "v2_dual_write_enabled"} {
+				for _, name := range []string{"v2_ingest_points_total", "v2_committed_points_total", "v2_parts", "v2_seal_lag_seconds", "v2_rollup_lag_seconds", "v2_read_duration_seconds", "v2_dual_write_enabled", "v2_part_gc_pending_parts", "v2_part_gc_removed_parts_total", "v2_part_gc_unlinked_bytes_total"} {
 					if !seen[name] {
 						t.Errorf("missing %s", name)
 					}

@@ -52,7 +52,6 @@ type sealedData struct {
 	number   uint64
 	snapshot *pebble.Snapshot
 	once     sync.Once
-	metrics  map[string]*metricState
 	err      error
 }
 
@@ -149,11 +148,18 @@ func (s *sealedData) load() {
 		return
 	}
 	s.cache.index = s.index
-	s.metrics = make(map[string]*metricState)
-	s.index.Metadata(func(name string, p v2core.RollupPolicy, m v2core.RollupMetadata) {
-		s.metrics[name] = &metricState{policy: p, meta: m, sealed: s.index, name: name}
-	})
 }
+
+// metric constructs only request-local sealed state. Discovery and metadata
+// reads share the immutable directory instead of retaining a second name map.
+func (s *sealedData) metric(name string) *metricState {
+	p, m, ok := s.index.LookupMetadata(name)
+	if !ok {
+		return nil
+	}
+	return &metricState{policy: p, meta: m, sealed: s.index, name: name}
+}
+
 func (g *generation) load() {
 	g.sealed.once.Do(g.sealed.load)
 	if g.sealed.err != nil {
@@ -178,7 +184,7 @@ func (g *generation) load() {
 		name := string(p.Name)
 		m := g.metrics[name]
 		if m == nil {
-			if base := g.sealed.metrics[name]; base != nil {
+			if base := g.sealed.metric(name); base != nil {
 				m = &metricState{policy: base.policy, meta: base.meta, sealed: base.sealed, name: name}
 				g.metrics[name] = m
 			}
@@ -285,7 +291,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metrics[name]
+				m = g.sealed.metric(name)
 			}
 			if m != nil {
 				if metric != nil {

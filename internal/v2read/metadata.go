@@ -3,6 +3,8 @@ package v2read
 import (
 	"context"
 	"slices"
+
+	"github.com/go-graphite/go-carbon/internal/v2core"
 )
 
 // Metadata pins exactly the same publication used by render. It does not need
@@ -36,7 +38,7 @@ func (r *Reader) MetadataWithMask(ctx context.Context, name string) (Metric, boo
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metrics[name]
+				m = g.sealed.metric(name)
 			}
 			if m != nil {
 				masked = masked || m.meta.Expired || m.meta.ResetOrder > 0
@@ -92,17 +94,18 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 				g.release()
 				return nil, nil, g.err
 			}
-			for n, m := range g.sealed.metrics {
-				if p := g.metrics[n]; p != nil {
-					m = p
+			g.sealed.index.Metadata(func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
+				// Pending state is visited below.
+				if g.metrics[n] != nil {
+					return
 				}
-				if m.meta.Expired || m.meta.ResetOrder > 0 {
+				if meta.Expired || meta.ResetOrder > 0 {
 					masks[n] = true
 				}
-				if !m.meta.Expired {
+				if !meta.Expired {
 					names = append(names, n)
 				}
-			}
+			})
 			for n, m := range g.metrics {
 				if m.meta.Expired || m.meta.ResetOrder > 0 {
 					masks[n] = true
@@ -142,7 +145,7 @@ func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metrics[name]
+				m = g.sealed.metric(name)
 			}
 			masked := m != nil && (m.meta.Expired || m.meta.ResetOrder > 0)
 			g.release()

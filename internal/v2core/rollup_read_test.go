@@ -89,6 +89,18 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			for _, view := range []struct {
+				index *RollupSnapshot
+				order uint64
+			}{{prior, 1}, {index, 2}} {
+				p, m, ok := view.index.LookupMetadata(string(policy.Name))
+				if !ok || p.Name != policy.Name || m.ID != 1 || m.Frontier.Order != view.order || string(m.Policy) != string(encoded) {
+					t.Fatal("metadata lookup differs from its pinned publication")
+				}
+				if _, _, ok := view.index.LookupMetadata("absent"); ok {
+					t.Fatal("absent metadata exists")
+				}
+			}
 			for key, part := range prior.parts {
 				if index.parts[key] != part {
 					t.Fatal("immutable part metadata was not reused")
