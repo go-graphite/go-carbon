@@ -67,8 +67,6 @@ type rollupMetric struct {
 	partOffset  int
 }
 type coreRollups struct {
-	dense bool
-
 	expire func(RollupPolicy, RollupMetadata, time.Time) bool
 	now    func() time.Time
 
@@ -266,6 +264,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
 		group := string(m.policy.Group)
 		files[group] = append(files[group], coreKV{Key: encoded, Value: value})
+
 		return nil
 	}
 	for i := range stages {
@@ -317,40 +316,10 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 			s.next.Revision++
 		}
-		if !r.dense {
-			for _, record := range s.records {
-				if err := put(m, uint32(record.Archive), record.Slot, r.appendRecord(record)); err != nil {
-					return coreSealPlan{}, err
-				}
-			}
-		} else {
-			// Runs keep the immutable metric/archive boundary and original orders.
-			slices.SortFunc(s.records, func(a, b sealrollup.Record) int {
-				if a.Archive != b.Archive {
-					return a.Archive - b.Archive
-				}
-				if a.Slot < b.Slot {
-					return -1
-				}
-				if a.Slot > b.Slot {
-					return 1
-				}
-				return 0
-			})
-			for start := 0; start < len(s.records); {
-				end := start + 1
-				for end < len(s.records) && end-start < partsformat.MaxDenseSlots && s.records[end].Archive == s.records[start].Archive {
-					end++
-				}
-				value, err := partsformat.EncodeSlots(s.records[start:end])
-				if err != nil {
-					return coreSealPlan{}, err
-				}
-				record := s.records[start]
-				if err := put(m, uint32(record.Archive), record.Slot, value); err != nil {
-					return coreSealPlan{}, err
-				}
-				start = end
+		// Physical dense packing belongs exclusively to the shared v2part writer.
+		for _, record := range s.records {
+			if err := put(m, uint32(record.Archive), record.Slot, r.appendRecord(record)); err != nil {
+				return coreSealPlan{}, err
 			}
 		}
 		start := len(r.arena)

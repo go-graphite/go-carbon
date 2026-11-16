@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 var coreMetaKey = []byte{0xff, 'f'}
@@ -187,6 +188,7 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	partSource  v2part.Provenance
 	maintenance bool
 
 	stage func(string)
@@ -312,6 +314,14 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		return nil, err
 	}
+	var partSource v2part.Provenance
+	if cfg.Rollups {
+		var err error
+		partSource, err = openPartSource(root, cfg.JournalIdentity, hooks.PartSource)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for s := 0; s < cfg.Shards; s++ {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
 		opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
@@ -331,7 +341,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{partSource: partSource, stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -376,7 +386,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				return fail(err)
 			}
 			r.stage = hooks.Stage
-			r.dense = hooks.DenseRollups
 			r.expire = hooks.Expire
 			r.now = hooks.Now
 			o.maintenance = hooks.Expire != nil
@@ -389,6 +398,11 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		for _, p := range files {
 			if err = os.Remove(p); err != nil {
+				return fail(err)
+			}
+		}
+		if cfg.Rollups {
+			if err = removeUnpublishedParts(db, dir); err != nil {
 				return fail(err)
 			}
 		}
@@ -1028,7 +1042,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	var path string
-	if !plan.ReplaceRaw && !o.cfg.BlindBatch && len(head) > 0 {
+	if !plan.ReplaceRaw && (!o.cfg.BlindBatch || o.cfg.Rollups) && len(head) > 0 {
 		writer, path, err = stage("data")
 		if err != nil {
 			return 0, err
@@ -1110,7 +1124,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	if err != nil {
 		return 0, err
 	}
-	if o.cfg.BlindBatch {
+	if o.cfg.BlindBatch && !o.cfg.Rollups {
 		for _, file := range plan.Files {
 			for _, kv := range file {
 				if err = batch.Set(kv.Key, kv.Value, nil); err != nil {
@@ -1134,7 +1148,35 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		return n, nil
 	}
+	var descriptors []coreKV
+	var retained []string
+	defer func() {
+		if !durable {
+			for _, p := range retained {
+				_ = os.Remove(p)
+			}
+		}
+	}()
 	for i, file := range plan.Files {
+		if isRollupFile(file) {
+			xp := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
+			paths = append(paths, xp)
+			d, e := WriteDenseRollupPart(xp, file, o.partSource)
+			if e != nil {
+				return 0, e
+			}
+			kv, saved, e := retainSealedPart(o.dir, xp, d)
+			retained = append(retained, saved...)
+			if e != nil {
+				return 0, e
+			}
+			descriptors = append(descriptors, kv)
+			total += d.Bytes
+			if o.stage != nil {
+				o.stage("part-retained")
+			}
+			continue
+		}
 		extra, xp, e := stage(fmt.Sprintf("extra-%03d", i))
 		if e != nil {
 			return 0, e
@@ -1154,6 +1196,23 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		total += uint64(st.Size())
 	}
+	if len(descriptors) > 0 {
+		slices.SortFunc(descriptors, func(a, b coreKV) int { return bytes.Compare(a.Key, b.Key) })
+		w, _, e := stage("parts")
+		if e != nil {
+			return 0, e
+		}
+		for _, kv := range descriptors {
+			if e = w.Set(kv.Key, kv.Value); e != nil {
+				break
+			}
+		}
+		e = errors.Join(e, w.Close())
+		if e != nil {
+			return 0, e
+		}
+	}
+
 	metadata, mp, err := stage("frontier")
 	if err != nil {
 		return 0, err
