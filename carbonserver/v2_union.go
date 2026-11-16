@@ -98,8 +98,7 @@ func validateUnionPolicy(classic metricInfo, newer v2read.Metric) error {
 }
 
 // ValidateV2UnionPolicy is called once when admitting an existing classic name.
-// Multiarchive cutover needs a reducer seeded with classic boundary slots;
-// accepting such writes before that integration would produce partial rollups.
+// Multiarchive admission requires an installed, immutable classic baseline.
 func (l *CarbonserverListener) ValidateV2UnionPolicy(name string, newer v2read.Metric) error {
 	classic, err := l.getClassicMetricInfo(name)
 	if classicMissing(err) {
@@ -112,6 +111,15 @@ func (l *CarbonserverListener) ValidateV2UnionPolicy(name string, newer v2read.M
 		return err
 	}
 	if len(newer.Archives) > 1 {
+		if l.v2Reader != nil {
+			baseline, err := l.v2Reader.BaselineMetadata(context.Background(), name)
+			if err == nil {
+				return validateUnionPolicy(classic, baseline)
+			}
+			if !errors.Is(err, v2read.ErrNotFound) {
+				return err
+			}
+		}
 		return fmt.Errorf("classic/v2 cutover for %q requires seeded rollup archives", name)
 	}
 	return nil

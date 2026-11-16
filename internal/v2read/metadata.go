@@ -14,6 +14,20 @@ func (r *Reader) Metadata(ctx context.Context, name string) (Metric, error) {
 
 // MetadataWithMask reads discovery policy and reset authority from the same pins.
 func (r *Reader) MetadataWithMask(ctx context.Context, name string) (Metric, bool, error) {
+	return r.metadataWithMask(ctx, name, false)
+}
+
+// BaselineMetadata also returns expired policy so readmission keeps the installed
+// baseline authority while the reset barrier prevents historical resurrection.
+func (r *Reader) BaselineMetadata(ctx context.Context, name string) (Metric, error) {
+	m, _, err := r.metadataWithMask(ctx, name, true)
+	if err == nil && m.BaselineOrder == 0 {
+		return Metric{}, ErrNotFound
+	}
+	return m, err
+}
+
+func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpired bool) (Metric, bool, error) {
 	masked := false
 	var result Metric
 	found := false
@@ -39,15 +53,15 @@ func (r *Reader) MetadataWithMask(ctx context.Context, name string) (Metric, boo
 				m = g.sealed.metrics[name]
 			}
 			if m != nil {
-				masked = masked || m.meta.Expired || m.meta.ResetOrder > 0
+				masked = masked || m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0
 			}
-			if m != nil && !m.meta.Expired {
+			if m != nil && (includeExpired || !m.meta.Expired) {
 				if found {
 					g.release()
 					return Metric{}, masked, ErrNotFound
 				}
 				found = true
-				result = Metric{ID: m.meta.ID, XFilesFactor: m.policy.Config.XFilesFactor, AggregationMethod: aggregationName(m.policy.Config.Method)}
+				result = Metric{BaselineOrder: m.meta.BaselineOrder, ID: m.meta.ID, XFilesFactor: m.policy.Config.XFilesFactor, AggregationMethod: aggregationName(m.policy.Config.Method)}
 				for _, a := range m.policy.Config.Archives {
 					result.Archives = append(result.Archives, Archive{Step: a.Step, Points: a.Count})
 				}
@@ -96,7 +110,7 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 				if p := g.metrics[n]; p != nil {
 					m = p
 				}
-				if m.meta.Expired || m.meta.ResetOrder > 0 {
+				if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
 					masks[n] = true
 				}
 				if !m.meta.Expired {
@@ -104,7 +118,7 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 				}
 			}
 			for n, m := range g.metrics {
-				if m.meta.Expired || m.meta.ResetOrder > 0 {
+				if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
 					masks[n] = true
 				}
 				if !m.meta.Expired {
@@ -144,7 +158,7 @@ func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 			if m == nil {
 				m = g.sealed.metrics[name]
 			}
-			masked := m != nil && (m.meta.Expired || m.meta.ResetOrder > 0)
+			masked := m != nil && (m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0)
 			g.release()
 			if masked {
 				return true, nil

@@ -1518,6 +1518,10 @@ encoding-duration = "seconds"
 # refuses mixed classic roots, quota/expiry settings and other ingestion sinks.
 # Keep disabled until full lifecycle, placement and classic grouping qualification.
 [v2]
+# Verified immutable native conversion receipt directory. Installed atomically
+# before first admission; the installed root is self-contained on restart.
+# The fenced conversion plan must use Group="local".
+baseline-path = ""
 enabled = false
 path = ""
 producers = 0                     # 0: one serial producer per current Go CPU
