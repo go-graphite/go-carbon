@@ -7,11 +7,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/klauspost/compress/zstd"
 	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // NameCatalog is single-owner, including its codecs. Each journal stream owns a
