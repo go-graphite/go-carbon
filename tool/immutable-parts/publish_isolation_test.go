@@ -30,12 +30,39 @@ type isolationMetric struct {
 	Name string
 }
 type isolationOwner struct {
-	pub                             *pp.Publisher
-	handoff                         string
-	catalog                         []byte
-	names                           map[uint64]string
-	refs                            []pp.Ref
-	planNS, commitNS, seals, points atomic.Uint64
+	pub                                                     *pp.Publisher
+	handoff                                                 string
+	catalog                                                 []byte
+	names                                                   map[uint64]string
+	refs                                                    []pp.Ref
+	planNS, commitNS, seals, points                         atomic.Uint64
+	sortNS, prepareNS, maxPlanNS, maxPrepareNS, maxCommitNS atomic.Uint64
+}
+
+func isolationMaximum(dst *atomic.Uint64, value uint64) {
+	for old := dst.Load(); value > old; old = dst.Load() {
+		if dst.CompareAndSwap(old, value) {
+			return
+		}
+	}
+}
+
+// An external profiler may attach after the reader child exists and release
+// these barriers once its counters are ready/stopped. The throughput clock
+// excludes waiting. Ordinary invocations need no external coordinator.
+func isolationCounterBarrier(root, name string) error {
+	if os.Getenv("PARTS_PUBLISH_EXTERNAL_COUNTERS") != "1" {
+		return nil
+	}
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fmt.Errorf("external counter barrier %s timed out", name)
 }
 
 // This deliberately composes the actual core transaction with the durable
@@ -114,6 +141,7 @@ func (o *isolationOwner) plan(owner int, in coreSealInput) (coreSealPlan, error)
 	// group a detached row view for the immutable block encoder.
 	in.Rows = slices.Clone(in.Rows)
 	sortCoreRows(in.Rows, 86400)
+	o.sortNS.Add(uint64(time.Since(start)))
 	generation := in.Next.NextPart
 	var part pf.PartID
 	if _, err := rand.Read(part[:]); err != nil {
@@ -152,11 +180,17 @@ func (o *isolationOwner) plan(owner int, in coreSealInput) (coreSealPlan, error)
 	}
 	ref := pp.Ref{Name: name, Generation: generation, Version: 1, Codec: pp.CodecV1, Scope: scope}
 	refs := append(append([]pp.Ref(nil), o.refs...), ref)
+	prepareStart := time.Now()
 	plan, err := o.pub.PlanSeal(pp.Request{Envelope: pp.Envelope{Version: 1, Generation: generation, Catalog: o.catalog, Frontier: in.Next.Cursors, Parts: refs}, Added: map[string][]pr.BlockData{name: blocks}})
 	if err != nil {
 		return coreSealPlan{}, err
 	}
-	o.planNS.Add(uint64(time.Since(start)))
+	prepareNS := uint64(time.Since(prepareStart))
+	planNS := uint64(time.Since(start))
+	o.prepareNS.Add(prepareNS)
+	isolationMaximum(&o.maxPrepareNS, prepareNS)
+	o.planNS.Add(planNS)
+	isolationMaximum(&o.maxPlanNS, planNS)
 	o.seals.Add(1)
 	o.points.Add(uint64(len(in.Rows)))
 	return coreSealPlan{Files: [][]coreKV{{{Key: []byte{0x70, 'v'}, Value: plan.Value}}}, Commit: func() {
@@ -171,7 +205,9 @@ func (o *isolationOwner) plan(owner int, in coreSealInput) (coreSealPlan, error)
 				panic(err)
 			}
 		}
-		o.commitNS.Add(uint64(time.Since(start)))
+		commitNS := uint64(time.Since(start))
+		o.commitNS.Add(commitNS)
+		isolationMaximum(&o.maxCommitNS, commitNS)
 	}}, nil
 }
 
@@ -191,6 +227,14 @@ func TestPublisherWriterIsolation(t *testing.T) {
 			t.Fatal("invalid duration")
 		}
 		duration = time.Duration(n) * time.Second
+	}
+	settle := 3 * time.Second
+	if raw := os.Getenv("PARTS_PUBLISH_SETTLE_MS"); raw != "" {
+		n, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || n < 0 {
+			t.Fatal("invalid settle milliseconds")
+		}
+		settle = time.Duration(n) * time.Millisecond
 	}
 	if _, err = os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("benchmark directory must not exist")
@@ -307,6 +351,12 @@ func TestPublisherWriterIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err = os.WriteFile(filepath.Join(root, "writer-ready"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = isolationCounterBarrier(root, "writer-go"); err != nil {
+		t.Fatal(err)
+	}
 	gcMetrics := []rmetrics.Sample{
 		{Name: "/cpu/classes/gc/mark/assist:cpu-seconds"},
 		{Name: "/cpu/classes/gc/total:cpu-seconds"},
@@ -324,9 +374,6 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	allocStart := gcMetrics[4].Value.Uint64()
 	pauseStart := gcMetrics[5].Value.Float64()
 	markStart := gcMetrics[6].Value.Float64()
-	if err = os.WriteFile(filepath.Join(root, "writer-ready"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
-		t.Fatal(err)
-	}
 	start := time.Now()
 	done := make(chan error, cfg.Producers)
 	for p := 0; p < cfg.Producers; p++ {
@@ -358,10 +405,13 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		err = errors.Join(err, <-done)
 	}
 	elapsed := time.Since(start).Seconds()
+	rmetrics.Read(gcMetrics)
 	if writeErr := os.WriteFile(filepath.Join(root, "writer-done"), []byte("done"), 0600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	rmetrics.Read(gcMetrics)
+	if err = errors.Join(err, isolationCounterBarrier(root, "writer-counters-stopped")); err != nil {
+		t.Fatal(err)
+	}
 	sample := coreSample(e, "publisher_isolation", start, 0)
 	sample["gc_assist_seconds"] = gcMetrics[0].Value.Float64() - assistStart
 	sample["gc_cpu_seconds"] = gcMetrics[1].Value.Float64() - gcCPUStart
@@ -386,19 +436,31 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	sample["metrics"] = len(metrics)
 	sample["workload"] = "core_apply_batches_with_fixed24_durable_publisher"
 	sample["writer_mps"] = float64(sample["committed"].(uint64)-uint64(len(metrics))) / elapsed / 1e6
-	var planNS, commitNS, seals, points uint64
+	var planNS, commitNS, seals, points, sortNS, prepareNS uint64
+	var maxPlanNS, maxPrepareNS, maxCommitNS uint64
 	for _, o := range owners {
 		planNS += o.planNS.Load()
 		commitNS += o.commitNS.Load()
 		seals += o.seals.Load()
 		points += o.points.Load()
+		sortNS += o.sortNS.Load()
+		prepareNS += o.prepareNS.Load()
+		maxPlanNS = max(maxPlanNS, o.maxPlanNS.Load())
+		maxPrepareNS = max(maxPrepareNS, o.maxPrepareNS.Load())
+		maxCommitNS = max(maxCommitNS, o.maxCommitNS.Load())
 	}
 	sample["publication_plan_ns"] = planNS
 	sample["publication_commit_ns"] = commitNS
 	sample["publication_seals"] = seals
 	sample["publication_points"] = points
+	sample["publication_sort_clone_ns"] = sortNS
+	sample["publication_prepare_ns"] = prepareNS
+	sample["publication_max_plan_ns"] = maxPlanNS
+	sample["publication_max_prepare_ns"] = maxPrepareNS
+	sample["publication_max_commit_ns"] = maxCommitNS
 	// Readers stay active for the specified settle period; no input is offered.
-	time.Sleep(3 * time.Second)
+	sample["settle_seconds"] = settle.Seconds()
+	time.Sleep(settle)
 	cancelAll()
 	readerWG.Wait()
 	if process != nil {

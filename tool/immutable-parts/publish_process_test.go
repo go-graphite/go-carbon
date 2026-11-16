@@ -27,11 +27,15 @@ import (
 // child has joined. This is a benchmark transport, not a production deletion or
 // crash-recovery protocol. Envelopes become visible only after core commit.
 type isolationProcessResult struct {
-	Queries     uint64
-	Errors      uint64
-	Generations uint64
-	Latest      [16]uint64
-	GOMAXPROCS  int
+	Queries             uint64
+	Errors              uint64
+	Generations         uint64
+	Latest              [16]uint64
+	GOMAXPROCS          int
+	QuerySeconds        float64
+	RefreshSeconds      float64
+	MaxRefreshSeconds   float64
+	FinalRefreshSeconds float64
 }
 
 type isolationProcess struct {
@@ -54,6 +58,14 @@ func startIsolationProcess(root string, readers int) (*isolationProcess, error) 
 	if runtime.GOOS == "linux" {
 		command = "taskset"
 		args = append([]string{"-c", os.Getenv("PARTS_READ_BENCH_CPUS"), exe}, args...)
+		if node := os.Getenv("PARTS_PUBLISH_READER_NODE"); node != "" {
+			n, parseErr := strconv.Atoi(node)
+			if parseErr != nil || n < 0 {
+				return nil, errors.New("invalid reader NUMA node")
+			}
+			command = "numactl"
+			args = append([]string{"--membind=" + node, "taskset"}, args...)
+		}
 	}
 	p := &isolationProcess{root: root}
 	p.cmd = exec.Command(command, args...)
@@ -128,7 +140,14 @@ func TestPublisherReaderProcess(t *testing.T) {
 	var last [16][]byte
 	var generations uint64
 	var latest [16]uint64
+	var refreshSeconds, maxRefreshSeconds float64
 	refresh := func() error {
+		start := time.Now()
+		defer func() {
+			elapsed := time.Since(start).Seconds()
+			refreshSeconds += elapsed
+			maxRefreshSeconds = max(maxRefreshSeconds, elapsed)
+		}()
 		for i, o := range owners {
 			b, err := os.ReadFile(filepath.Join(root, fmt.Sprintf("snapshot-%02d.json", i)))
 			if err != nil {
@@ -159,6 +178,7 @@ func TestPublisherReaderProcess(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, os.Stdin); close(stop) }()
 	var wg sync.WaitGroup
 	var queries, failures atomic.Uint64
+	queryStart := time.Now()
 	budget := pr.NewBudget(64 << 30)
 	for n := 0; n < readers; n++ {
 		wg.Add(1)
@@ -217,8 +237,11 @@ loop:
 		}
 	}
 	wg.Wait()
+	querySeconds := time.Since(queryStart).Seconds()
+	finalRefreshStart := time.Now()
 	refreshErr = errors.Join(refreshErr, refresh())
-	result := isolationProcessResult{Queries: queries.Load(), Errors: failures.Load(), Generations: generations, Latest: latest, GOMAXPROCS: runtime.GOMAXPROCS(0)}
+	finalRefreshSeconds := time.Since(finalRefreshStart).Seconds()
+	result := isolationProcessResult{Queries: queries.Load(), Errors: failures.Load(), Generations: generations, Latest: latest, GOMAXPROCS: runtime.GOMAXPROCS(0), QuerySeconds: querySeconds, RefreshSeconds: refreshSeconds, MaxRefreshSeconds: maxRefreshSeconds, FinalRefreshSeconds: finalRefreshSeconds}
 	b, err := json.Marshal(result)
 	if err == nil {
 		err = os.WriteFile(filepath.Join(root, "reader-result.json"), b, 0600)

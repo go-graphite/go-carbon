@@ -102,12 +102,19 @@ The default does not impose an offered-rate ceiling. On Linux, launch under a
 fixed writer `taskset` mask and set `PARTS_READ_BENCH_CPUS` to a disjoint reader
 mask. Keep `GOMAXPROCS`, masks, memory limit and profiles identical across arms.
 
-Preregistered seed `202611154` yields reader order
-`64,32,32,0,8,64,64,0,0,8,8,32`. Use a fresh process and directory per arm, record
-CPU/mutex/block profiles and compare each reader-count mean with the mean of all
-three zero-reader arms. The gate is at most 2% writer loss. Never qualify from a
-static source or a memory-only publication. Publication nanoseconds in the
-receipt sum owner work, rather than measuring elapsed wall time.
+Preregister the random seed, order, equal durations and analysis before running.
+Use at least five independently randomized repeats of every loaded count on
+each topology, with zero-reader baselines between loaded arms. A fresh process
+and directory per arm gives each arm the same initial state. Keep every repeat.
+For each loaded arm, pair its rate with the mean of its immediately bracketing
+zero-reader rates on the same topology. Report the mean loss with a paired
+bootstrap confidence interval, resampling complete randomized rounds to retain
+shared-baseline dependence. The at-most-2% gate passes only when the confidence
+interval's upper bound is at most 2%; an interval crossing 2% is inconclusive.
+Also report writer rate intervals, baseline variation, query throughput and
+publication refresh time. Never qualify from a static source or a memory-only
+publication. Publication nanoseconds sum owner work, rather than measuring
+elapsed wall time.
 
 Each reader has an independent cancellation context with a background parent;
 sharing a cancellation context introduces a reader-only contention point. Save
@@ -142,6 +149,23 @@ block caches. `PARTS_PUBLISH_READER_PROCS` bounds that runtime (default 64), whi
 inherits the disjoint reader CPU mask from `PARTS_READ_BENCH_CPUS`; writer CPU
 placement and runtime settings are independent.
 
+On Linux, `PARTS_PUBLISH_READER_NODE` optionally launches the child through
+`numactl --membind=<node>`; use an explicit writer memory policy as well when
+comparing sockets. Record actual NUMA placement, CPU frequency, daemon load and
+disk/compaction activity. Affinity alone does not fix page placement or eliminate
+shared hardware contention. `PARTS_PUBLISH_SETTLE_MS` overrides the default
+three-second settle period equally across a registered curve.
+
+For an external PMU coordinator, `PARTS_PUBLISH_EXTERNAL_COUNTERS=1` adds two
+bounded handshakes. After `writer-ready` appears (containing the parent PID),
+attach writer counters and create `writer-go`. After `writer-done` appears,
+stop counters and create `writer-counters-stopped`. Both waits time out after
+30 seconds. The writer throughput clock excludes both waits. Polling markers
+still gives the PMU a small boundary uncertainty: record it explicitly. Attach
+after child startup so the separate reader runtime is excluded; verify the
+counter tool's thread inheritance behavior. These markers only coordinate the
+opt-in experiment and never change daemon operation.
+
 The first real consumer is this opt-in core/publication benchmark: each successful
 core commit atomically renames its committed envelope into a per-owner handoff
 file. The child polls these files and incrementally installs references through
@@ -155,3 +179,8 @@ CPU profiles label in-process readers and writers separately. Results additional
 report allocation bytes, GC assists, dedicated marking and pause CPU over the
 writer interval; process-wide GC values cannot assign assists to a particular
 writer goroutine. Compare complete within-topology curves and retain all repeats.
+The child reports query-loop wall time, total/max refresh wall time and final
+catch-up time separately. Those times include scheduling and I/O waits; query
+counts span the child's lifetime, not just the writer interval. Final-generation
+acknowledgement is a correctness check and does not establish a freshness bound
+during load.
