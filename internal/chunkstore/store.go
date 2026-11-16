@@ -1256,8 +1256,10 @@ func (s *Store) close(forExit bool) error {
 		if !s.checkpoint.prepared && !forExit {
 			_ = s.PrepareMetadataCheckpoint(context.Background())
 		}
-		if s.checkpoint.prepared && s.db.VisibleSequence() != s.checkpoint.sequence {
-			s.checkpoint.saveErr = errors.New("store changed after metadata checkpoint")
+		// Every store writer has stopped: fence what changed since the save
+		// instead of discarding it (reads and stop-time tails write then).
+		if s.checkpoint.prepared && s.checkpoint.saveErr == nil {
+			s.checkpoint.saveErr = s.finishMetadataCheckpoint()
 		}
 	}
 	// All admitted reads release their views before Pebble closes. New calls
