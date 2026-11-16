@@ -36,6 +36,29 @@ type archiveIter struct {
 	keyScratch []byte
 }
 
+// archiveFile also detects a failed table open in any external level. The
+// vendored external iterator may overwrite an earlier level-open error.
+type archiveFile struct {
+	*os.File
+	closed  bool
+	statErr error
+}
+
+func (f *archiveFile) Close() error {
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+	return f.File.Close()
+}
+func (f *archiveFile) Stat() (os.FileInfo, error) {
+	info, err := f.File.Stat()
+	if err != nil {
+		f.statErr = err
+	}
+	return info, err
+}
+
 type archivePartIdentity struct {
 	group v2part.Group
 	part  v2part.PartID
@@ -76,6 +99,7 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 	}
 	defer manifests.Close()
 	var files [][]sstable.ReadableFile
+	var opened []*archiveFile
 	defer func() {
 		if err != nil {
 			for _, level := range files {
@@ -104,10 +128,12 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 			continue
 		}
 		path := filepath.Join(directory, "parts", hex.EncodeToString(d.SHA256[:])+".sst")
-		f, e := os.Open(path)
+		original, e := os.Open(path)
 		if e != nil {
 			return nil, e
 		}
+		f := &archiveFile{File: original}
+		opened = append(opened, f)
 		stat, e := f.Stat()
 		if e != nil || uint64(stat.Size()) != d.Bytes {
 			_ = f.Close()
@@ -123,11 +149,24 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 	}
 	if len(files) > 0 {
 		external, e := pebble.NewExternalIterWithContext(ctx, (&pebble.Options{}).EnsureDefaults(), opts, files)
-		// NewExternalIter takes ownership, including on failure.
-		files = nil
+		// A failed reader closes its file. Check every level even if the
+		// external constructor returned success, and retain cleanup ownership
+		// until every input has been accepted.
+		if e == nil {
+			for _, f := range opened {
+				if f.closed || f.statErr != nil {
+					e = errors.New("archive table initialization failed")
+					break
+				}
+			}
+		}
 		if e != nil {
+			if external != nil {
+				_ = external.Close()
+			}
 			return nil, e
 		}
+		files = nil
 		out.iterators = append(out.iterators, external)
 	}
 	return out, nil

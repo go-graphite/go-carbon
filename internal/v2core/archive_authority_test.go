@@ -112,3 +112,44 @@ func TestArchivesAuthoritativeSnapshotRecoveryAndRelocation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestArchiveCorruptEarlierExternalLevelFailsClosed(t *testing.T) {
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.Rollups = 1, 1, true
+	_, policy := rollupTestPolicy(t, "corrupt.metric", "1s:120,1m:1d", sealrollup.Last, 0)
+	root := t.TempDir()
+	e, err := openCore(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for order := uint64(1); order <= 3; order++ {
+		if err = e.submitBatches(0, []coreBatch{{ID: 7, Order: order, Clock: 10000, Policy: policy, Points: []row{{ID: 7, Time: 9990, Bits: order, Seq: order}}}}, order, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = e.close(); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(root, "owner-000", "parts", "*.sst"))
+	if err != nil || len(files) < 3 {
+		t.Fatal(files, err)
+	}
+	f, err := os.OpenFile(files[0], os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.WriteAt([]byte{0}, st.Size()-1); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if broken, err := openCore(root, cfg); err == nil {
+		broken.close()
+		t.Fatal("corrupt earlier archive level silently skipped")
+	}
+}
