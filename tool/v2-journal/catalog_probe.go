@@ -62,6 +62,7 @@ func catalogDisk(dir string) int64 {
 	return n
 }
 func catalogProbe(segs []segment, partition int, rate float64) {
+	runtime.GOMAXPROCS(8)
 	must(os.MkdirAll(*catalogDir, 0700))
 	var accounts [4]partlog.PredictorV3Accounting
 	cats := make([]*partlog.NameCatalog, 2)
@@ -105,11 +106,19 @@ func catalogProbe(segs []segment, partition int, rate float64) {
 				break
 			}
 			must(err)
+			var variants sync.WaitGroup
+			for _, m := range ms {
+				variants.Add(1)
+				go func(m *measurement) {
+					defer variants.Done()
+					for _, p := range ps {
+						m.add(partlog.DictionaryFrame{Key: p.Metric, Clock: p.FirstArrival, Points: p.Data})
+					}
+				}(m)
+			}
+			variants.Wait()
 			for _, p := range ps {
 				f := partlog.DictionaryFrame{Key: p.Metric, Clock: p.FirstArrival, Points: p.Data}
-				for _, m := range ms {
-					m.add(f)
-				}
 				if samplePoints < 30000000 {
 					sample = append(sample, f)
 					samplePoints += len(f.Points)
@@ -123,7 +132,7 @@ func catalogProbe(segs []segment, partition int, rate float64) {
 		r.Close()
 		for _, m := range ms {
 			m.flush()
-			m.report()
+			emit(map[string]any{"stage": "matched_codec", "codec": m.Codec, "points": m.Points, "bytes_including_32B_headers": m.Bytes, "bpp": float64(m.Bytes) / float64(m.Points), "exact": true, "cpu_scope": "variants concurrent; no per-variant CPU attribution"})
 			m.encoder.Close()
 			m.decoder.Close()
 		}

@@ -1,6 +1,7 @@
 package partlog
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
@@ -19,6 +20,7 @@ import (
 // Checkpoint durably replaces the catalog prefix before reclaiming its WAL.
 // Predictor epochs must start at every independently retained segment boundary.
 type NameCatalog struct {
+	buffer         *bufio.Writer
 	dirty          bool
 	checkpointHook func(string) // test-only fault injection; nil in normal operation
 	dir            string
@@ -179,6 +181,7 @@ func OpenNameCatalog(dir string) (*NameCatalog, error) {
 	if _, err = c.wal.Seek(0, io.SeekEnd); err != nil {
 		return fail(err)
 	}
+	c.buffer = bufio.NewWriterSize(c.wal, 1<<20)
 	return c, nil
 }
 func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
@@ -240,7 +243,7 @@ func (c *NameCatalog) Intern(key string, definition []byte) (uint64, error) {
 	}
 	id := uint64(len(c.entries))
 	b := catalogRecord(id, key, definition)
-	if e := writeCatalogBytes(c.wal, b); e != nil {
+	if _, e := c.buffer.Write(b); e != nil {
 		c.failed = e
 		return 0, e
 	}
@@ -266,6 +269,10 @@ func (c *NameCatalog) Sync() error {
 	}
 	if !c.dirty {
 		return nil
+	}
+	c.failed = c.buffer.Flush()
+	if c.failed != nil {
+		return c.failed
 	}
 	c.failed = c.wal.Sync()
 	if c.failed == nil {
@@ -346,6 +353,7 @@ func (c *NameCatalog) checkpoint() error {
 	ok = true
 	hook("published")
 	// Keep the epoch header. Durable checkpoint precedes WAL reclamation.
+	c.buffer.Reset(c.wal)
 	if e = c.wal.Truncate(28); e != nil {
 		return e
 	}
