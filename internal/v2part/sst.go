@@ -19,10 +19,11 @@ import (
 // a new, exclusively created staging path; Close syncs it, Abort removes it.
 // The caller owns directory syncing, pinning, installation and publication.
 type Writer struct {
-	path string
-	spec Spec
-	out  *hashedOutput
-	sst  interface {
+	path    string
+	decoder keyDecoder
+	spec    Spec
+	out     *hashedOutput
+	sst     interface {
 		Set([]byte, []byte) error
 		Close() error
 	}
@@ -125,8 +126,18 @@ func (w *Writer) SetEncoded(key, value []byte) error {
 	if w.err != nil {
 		return w.err
 	}
-	k, err := Decode(key)
-	if err == nil && (!w.spec.Scope.contains(k) || (w.records > 0 && bytes.Compare(w.last, key) >= 0)) {
+	k, err := w.decoder.decode(key)
+	if err != nil {
+		w.err = err
+		return err
+	}
+	return w.setDecoded(key, k, value)
+}
+
+// setDecoded is internal: key must have been validated by the owning writer.
+func (w *Writer) setDecoded(key []byte, k Key, value []byte) error {
+	var err error
+	if !w.spec.Scope.contains(k) || (w.records > 0 && bytes.Compare(w.last, key) >= 0) {
 		err = errors.New("unsorted or foreign part key")
 	}
 	if err == nil && !hasArchive(w.spec.Policies, k.Archive) {

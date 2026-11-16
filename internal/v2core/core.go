@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync/atomic"
@@ -75,11 +76,13 @@ const (
 )
 
 type rollupRoute struct {
-	owner  int
-	policy []byte
+	owner      int
+	policy     []byte
+	registered *ApplicationPolicy
 }
 type coreRouter struct {
 	rollupRoutes                map[uint64]rollupRoute
+	batchRows                   []row
 	slots                       []coreDispatch
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
@@ -408,6 +411,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return fail(err)
 			}
+			r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
 			r.stage = hooks.Stage
 			r.expire = hooks.Expire
 			r.now = hooks.Now
@@ -506,6 +510,22 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			router.rollupRoutes = make(map[uint64]rollupRoute)
 		}
 		for _, b := range batches {
+			if b.Registered != nil {
+				if len(b.Registered.policy) == 0 {
+					return errors.New("uninitialized application policy")
+				}
+				if len(b.Policy) != 0 {
+					return errors.New("registered policy with mutable definition")
+				}
+				if route, ok := router.rollupRoutes[b.ID]; ok {
+					if route.registered != b.Registered && !bytes.Equal(route.policy, b.Registered.policy) {
+						return errors.New("stored rollup policy changed")
+					}
+				} else {
+					router.rollupRoutes[b.ID] = rollupRoute{owner: int(b.Registered.vshard) % e.cfg.Shards, policy: b.Registered.policy, registered: b.Registered}
+				}
+				continue
+			}
 			if route, ok := router.rollupRoutes[b.ID]; ok {
 				if !bytes.Equal(route.policy, b.Policy) {
 					return errors.New("stored rollup policy changed")
@@ -685,6 +705,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			if e.cfg.Rollups {
 				// The producer-local route owns its validated canonical bytes.
 				b.Policy = router.rollupRoutes[b.ID].policy
+				b.Registered = router.rollupRoutes[b.ID].registered
 			} else {
 				n = copy(policyArena[policyOffset:], b.Policy)
 				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]

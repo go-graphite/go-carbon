@@ -11,7 +11,12 @@ func writePlannedRollupPart(path string, file []coreKV, spec v2part.Spec) (v2par
 	}
 	defer w.Abort()
 	for _, kv := range file {
-		if err = w.SetEncoded(kv.Key, kv.Value); err != nil {
+		if kv.Record != nil {
+			err = w.SetRecordEncoded(kv.Key, *kv.Record)
+		} else {
+			err = w.SetEncoded(kv.Key, kv.Value)
+		}
+		if err != nil {
 			return v2part.Descriptor{}, err
 		}
 	}
