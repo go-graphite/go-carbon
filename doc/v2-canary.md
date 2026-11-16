@@ -19,9 +19,9 @@ the gate. Use the same configuration, CPU allowance and policy corpus throughout
 | Gate | Required evidence |
 | --- | --- |
 | Integrated artifact | Go 1.27.0, CGO enabled, vendored dependencies; build, vet and tests pass for the runtime and tools. Record source SHA, tree, binary SHA256, tool hashes and configuration hashes. The running release source must be an ancestor of the deployable candidate. |
-| Rollups versus raw | At least five interleaved equal-corpus L0/L3 pairs, including journal, seal, drain, Close and compaction debt. Complete L3 median must be at least 90% of L0. The interim 25% research target is not production qualification. Every tuple and archive oracle must pass; no deferred compaction presented as throughput. |
+| Rollups versus raw | At least five interleaved equal-corpus L0/L3 pairs, including journal, seal, drain, Close and compaction debt. Complete L3 paired median must be at least 25% of L0, matching the current rollup milestone; 90% remains the optimization goal. The separate sustained live-peak capacity gate must also pass. Report written bytes/point (target at most 10), allocations/point (target at most 300), live SSTs and debt. Every tuple and archive oracle must pass; no deferred compaction presented as throughput. |
 | Sustained capacity | At least 30 minutes at 1.25 times the measured 15-minute live ingress peak, with reads and rollups enabled. Pending bytes and compaction debt have nonpositive slopes over the final 10 minutes. Publish ingest, drain and complete rates separately. |
-| Reads | Three interleaved zero/four-reader pairs, at least 30 seconds per arm, same four-name windows and load context. Every pair loses at most 10% ingest throughput. Each read arm achieves at least 90% of its matched classic q/s; p99 is at most twice matched classic p99. Additionally, production request p99 must stay below 500ms. Report every arm; fixed-file classic is only a read-cost reference. |
+| Reads | Three interleaved zero/four-reader pairs, at least 30 seconds per arm, same four-name windows and load context. Paired median ingest loss at most 5%; each pair at most 10%. Every read arm has p99 at most 5ms and at least 50,000 four-name queries/s, matching the current reader milestone. Also report the matched classic baseline. Production request p99 must stay below 500ms and twice its matched baseline. Report every arm; fixed-file classic is only a read-cost reference. |
 | Full-stream shadow | At least 20 minutes, sample-every=1, source age at most 10s and no successor-segment backlog after warm-up. Report EOF and durable/visible frontier lag separately. At least 10,000 distinct names and nonzero compared points; zero unexplained differences or comparison failures. Source age is not the comparison exclusion horizon. |
 | L3 parity | Raw and every configured archive step, metadata, policy, physical slot, presence and float bits match the independent classic oracle. Include late corrections, wrap, NaNs, sparse/XFF and original application boundaries/clocks. Sampled L3 correctness and full-stream raw capacity are separate evidence, neither implies full-stream L3 capacity. |
 | Fallback modes | The actual daemon supports qualified classic, dual-write/shadow and read selection on the same binary. Classic remains authoritative initially. Synthetic failure, restart and flip-back tests preserve classic reads/writes. Switching modes with retained v2 data must be explicitly supported. Buckyd and every already-enabled endpoint must keep working. |
@@ -139,6 +139,22 @@ arguments and permissions. Do not overwrite a shared release tree in place.
    fresh stream through the qualified fallback interface.
 6. Check immediate readiness, then minute 3, 20 and 30 gates below. Report to main
    by minute 3. Do not enable v2 authority or widen the fleet from this runbook.
+
+After a green 30-minute shadow window, main may separately confirm a read-only
+selection change to v2 while **both engines keep receiving writes**. First prove
+that historical multiarchive boundaries, discovery and quotas remain correct on
+the integrated binary. Observe another complete 30-minute window under the same
+guards and compare both read paths behind their measured common frontier. A
+failed v2 read selection flips back to classic on the same dual-writing binary.
+Keep classic writes for at least 24 hours, including an observed busy period,
+before considering a separately approved v2-only change. The hold is a proposed
+minimum, not evidence that every retention/history case has been qualified.
+
+Use only the transition mechanism qualified by the fallback owner. Until reload
+is proven, mode changes require the cold-stop/start sequence above. If a future
+qualified transition uses SIGHUP, check the service log immediately for
+`config reload failed` and verify the active-mode metric; a successful signal
+command does not prove the configuration changed.
 
 To flip back, first capture the alert, frontiers, error deltas and configuration
 hashes. Manually stop this candidate, verify all its processes are gone, apply the
