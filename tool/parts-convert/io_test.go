@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestPacedFSSharedBudgetAndExactBytes(t *testing.T) {
@@ -100,5 +101,26 @@ func TestPacerRetainsPaidTimerOversleep(t *testing.T) {
 	p.charge(24_000)
 	if clock.Sub(before) != time.Millisecond {
 		t.Fatal("idle time retained pacing credit", clock.Sub(before))
+	}
+}
+
+func TestPacedFSReadOnlyStoreLock(t *testing.T) {
+	path := t.TempDir()
+	store, err := chunkstore.Open(path, chunkstore.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original := vfs.Default
+	vfs.Default = newPacedFS(original, 100_000_000)
+	defer func() { vfs.Default = original }()
+	store, err = chunkstore.Open(path, chunkstore.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

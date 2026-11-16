@@ -64,6 +64,11 @@ func (fs *pacedFS) wrap(f vfs.File, err error) (vfs.File, error) {
 }
 func (fs *pacedFS) Create(name string) (vfs.File, error) { return fs.wrap(fs.FS.Create(name)) }
 func (fs *pacedFS) Open(name string, opts ...vfs.OpenOption) (vfs.File, error) {
+	// Existing read-only stores acquire a shared POSIX lock through this
+	// descriptor. LOCK is metadata, never a data path or read-ahead bypass.
+	if fs.PathBase(name) == "LOCK" {
+		return fs.FS.Open(name, opts...)
+	}
 	return fs.wrap(fs.FS.Open(name, opts...))
 }
 func (fs *pacedFS) OpenReadWrite(name string, opts ...vfs.OpenOption) (vfs.File, error) {
