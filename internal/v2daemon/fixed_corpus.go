@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 // not imported from the adapter. Geometry is identical in every layer.
 type Fixture struct {
 	CPUProfile                                               string
+	BlockProfile                                             string
 	Names, Rounds, Producers, Shards, BatchSize, SampleNames int
 }
 
@@ -104,6 +106,25 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		inputs[p] = input{make([]string, 0, f.BatchSize), make([]points.Point, 0, f.BatchSize), make([]uint64, 0, f.BatchSize), make([]v2core.Row, 0, f.BatchSize)}
 	}
 	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards}
+	var block *os.File
+	stopBlock := func() error {
+		if block == nil {
+			return nil
+		}
+		runtime.SetBlockProfileRate(0)
+		x := pprof.Lookup("block").WriteTo(block, 0)
+		x = errors.Join(x, block.Close())
+		block = nil
+		return x
+	}
+	if f.BlockProfile != "" {
+		block, err = os.Create(f.BlockProfile)
+		if err != nil {
+			return nil, err
+		}
+		runtime.SetBlockProfileRate(1000000)
+		defer func() { err = errors.Join(err, stopBlock()) }()
+	}
 	var profile *os.File
 	if f.CPUProfile != "" {
 		var x error
@@ -195,6 +216,7 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 	}
 	var ingest, compact, flushed, debt, groups, forced, encoded uint64
 	var active int64
+	var encodeTime, catalogSyncTime, journalSyncTime, coreSubmitTime time.Duration
 	for _, db := range s.Core.DBs() {
 		m := db.Metrics()
 		for _, l := range m.Levels {
@@ -209,6 +231,10 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		groups += p.SyncGroups
 		forced += p.ForcedGroups
 		encoded += p.JournalBytes
+		encodeTime += p.EncodeTime
+		catalogSyncTime += p.CatalogSyncTime
+		journalSyncTime += p.JournalSyncTime
+		coreSubmitTime += p.CoreSubmitTime
 	}
 	if e = s.Close(); e != nil {
 		return nil, e
@@ -230,12 +256,19 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		}
 		profile = nil
 	}
+	if e = stopBlock(); e != nil {
+		return nil, e
+	}
 	rest, catalog, journal, e := sizes(root)
 	if e != nil {
 		return nil, e
 	}
 	count := float64(f.Names) * float64(f.Rounds)
 	result = map[string]any{"layer": layer, "names": f.Names, "rounds": f.Rounds, "producers": f.Producers, "shards": f.Shards, "barriers": f.Rounds / 4, "points": uint64(count), "intake_seconds": intake, "complete_seconds": complete, "intake_points_per_second": count / intake, "complete_points_per_second": count / complete, "cpu_ns_per_point": (endCPU - startCPU) * 1e9 / count, "written_B_per_point": float64(endWrite-startWrite) / count, "ingested_SST_before_close_B_per_point": float64(ingest) / count, "compaction_before_close_B_per_point": float64(compact) / count, "flush_before_close_B_per_point": float64(flushed) / count, "catalog_B_per_point": float64(catalog) / count, "journal_B_per_point": float64(journal) / count, "at_rest_B_per_point": float64(rest) / count, "estimated_debt_before_close": debt, "active_compactions_before_close": active, "journal_sync_groups": groups, "forced_groups": forced, "encoded_journal_bytes": encoded, "sync_groups_per_stream_second": float64(groups) / float64(f.Producers) / complete}
+	result["stream_encode_seconds"] = encodeTime.Seconds()
+	result["stream_catalog_sync_seconds"] = catalogSyncTime.Seconds()
+	result["stream_journal_sync_seconds"] = journalSyncTime.Seconds()
+	result["stream_core_submit_seconds"] = coreSubmitTime.Seconds()
 	// Reopen the same core API; no second reader or key translation is introduced.
 	reader, e := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg), v2core.Hooks{})
 	if e != nil {

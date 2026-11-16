@@ -325,3 +325,84 @@ func TestCatalogEncoderRejectsWrongIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestCatalogEncodePointsByteOracle(t *testing.T) {
+	for _, independent := range []bool{false, true} {
+		for _, series := range []bool{false, true} {
+			for _, sparse := range []bool{false, true} {
+				t.Run(fmt.Sprint(independent, series, sparse), func(t *testing.T) {
+					c := newTestCatalog(t)
+					var wa, ga PredictorV3Accounting
+					want := referenceCatalogEncoder{Catalog: c, Independent: independent, SeriesClocks: series, SparseClocks: sparse, Accounting: &wa}
+					got := CatalogEncoder{Catalog: c, Independent: independent, SeriesClocks: series, SparseClocks: sparse, Accounting: &ga}
+					defer want.Close()
+					defer got.Close()
+					rng := rand.New(rand.NewSource(7118))
+					var retained, saved [][]byte
+					for record := range 23 {
+						clock := int64(rng.Uint64())
+						fs := make([]DictionaryFrame, 513)
+						ids := make([]uint64, len(fs))
+						data := make([]points.Point, len(fs))
+						for i := range fs {
+							name := fmt.Sprintf("series.%d\x00", rng.Intn(3100))
+							bits := rng.Uint64()
+							if i%11 == 0 {
+								bits = []uint64{0, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000001}[record%6]
+							}
+							data[i] = points.Point{Timestamp: int64(rng.Uint64()), Value: math.Float64frombits(bits)}
+							fs[i] = DictionaryFrame{Key: name, Definition: []byte{0, 255}, Clock: clock, Points: data[i : i+1]}
+							var err error
+							ids[i], err = c.Intern(name, fs[i].Definition)
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+						w, err := want.Encode(fs)
+						if err != nil {
+							t.Fatal(err)
+						}
+						g, err := got.EncodePoints(ids, data, clock)
+						if err != nil || !bytes.Equal(w, g) || wa != ga {
+							t.Fatalf("record %d: bytes/accounting differ: %v", record, err)
+						}
+						retained = append(retained, g)
+						saved = append(saved, bytes.Clone(g))
+						clear(ids)
+						clear(data)
+					}
+					for i := range retained {
+						if !bytes.Equal(retained[i], saved[i]) {
+							t.Fatal("borrowed storage retained", i)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCatalogEncodePointsRejectsInvalid(t *testing.T) {
+	c := newTestCatalog(t)
+	id, err := c.Intern("one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ids := range [][]uint64{nil, {0}, {id + 1}, {id, id}} {
+		e := CatalogEncoder{Catalog: c}
+		if _, err := e.EncodePoints(ids, []points.Point{{Timestamp: -1}}, -2); err == nil {
+			t.Fatal("invalid IDs accepted", ids)
+		}
+		e.Close()
+	}
+	e := CatalogEncoder{Catalog: c}
+	defer e.Close()
+	if _, err := e.EncodePoints(nil, nil, 0); err == nil {
+		t.Fatal("empty batch accepted")
+	}
+	c.failed = errCatalog
+	if _, err := e.EncodePoints([]uint64{id}, []points.Point{{}}, 0); err == nil {
+		t.Fatal("failed catalog accepted")
+	}
+	c.failed = nil
+}

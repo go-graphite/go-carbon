@@ -15,6 +15,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+type catalogEntry struct {
+	key        string
+	definition []byte
+}
+
 // NameCatalog is single-owner, including its codecs. Each journal stream owns a
 // separate catalog. IDs are local to the random persisted epoch, never routing
 // or replica metric IDs. Sync the catalog BEFORE syncing referencing segments.
@@ -26,8 +31,10 @@ type NameCatalog struct {
 	checkpointHook func(string) // test-only fault injection; nil in normal operation
 	dir            string
 	epoch          [16]byte
-	entries        []predictorV3Entry
-	ids            map[string]uint64
+	entries        []catalogEntry
+	ids            catalogIndex
+	batchHashes    []uint64
+	batchIDs       []uint64
 	wal            *os.File
 	failed         error
 	pending        []uint64
@@ -109,7 +116,7 @@ func OpenNameCatalog(dir string) (*NameCatalog, error) {
 	if e := makeCatalogDir(filepath.Clean(dir)); e != nil {
 		return nil, e
 	}
-	c := &NameCatalog{dir: dir, ids: make(map[string]uint64), entries: []predictorV3Entry{{}}}
+	c := &NameCatalog{dir: dir, entries: []catalogEntry{{}}}
 	checkpoint, err := os.Open(filepath.Join(dir, "catalog.checkpoint"))
 	hasCheckpoint := err == nil
 	if err != nil && !os.IsNotExist(err) {
@@ -280,19 +287,26 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 			return 0, errCatalog
 		}
 	} else {
-		if _, ok := c.ids[key]; ok {
+		hash := NameHash(key)
+		if c.ids.lookup(key, hash, c.entries) != 0 {
 			return 0, errCatalog
 		}
-		c.ids[key] = id
-		c.entries = append(c.entries, predictorV3Entry{key: key, definition: bytes.Clone(def)})
+		c.ids.insert(hash, id)
+		c.entries = append(c.entries, catalogEntry{key: key, definition: bytes.Clone(def)})
 	}
 	return int64(size) + 12, nil
 }
 func (c *NameCatalog) Intern(key string, definition []byte) (uint64, error) {
+	return c.InternHashed(key, definition, NameHash(key))
+}
+
+// InternHashed reuses NameHash(key) from routing without a second name index.
+// Callers must supply that exact hash. Hash collisions retain distinct IDs.
+func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (uint64, error) {
 	if c.failed != nil {
 		return 0, c.failed
 	}
-	if id, ok := c.ids[key]; ok {
+	if id := c.ids.lookup(key, hash, c.entries); id != 0 {
 		if !bytes.Equal(c.entries[id].definition, definition) {
 			return 0, fmt.Errorf("%w: changed definition", errCatalog)
 		}
@@ -320,8 +334,8 @@ func (c *NameCatalog) Intern(key string, definition []byte) (uint64, error) {
 		c.pendingBytes += len(key) + len(definition) + 64
 	}
 	c.dirty = true
-	c.ids[key] = id
-	c.entries = append(c.entries, predictorV3Entry{key: key, definition: bytes.Clone(definition)})
+	c.ids.insert(hash, id)
+	c.entries = append(c.entries, catalogEntry{key: key, definition: bytes.Clone(definition)})
 	return id, nil
 }
 

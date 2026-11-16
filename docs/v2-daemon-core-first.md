@@ -12,10 +12,17 @@ shared by producers. `internal/v2core.Engine.Append` copies numeric rows into th
 existing bounded owner queues. The core retains its own sorting, immutable SST
 creation, monotonic parts, snapshots and durability frontiers.
 
-`internal/partlog` is reused unchanged from the catalog journal experiment.
-`NameCatalog.Intern` performs the per-point name lookup; it appends metadata only
-for unseen names and rejects changed definitions. `CatalogEncoder.EncodeIDs`
-uses those resolved IDs without a second hash. Stream-local catalog IDs are
+`internal/partlog` owns the durable catalog and the existing PDC4 codec.
+`NameCatalog.InternBatch` hashes each name once before probing its single
+collision-safe index. Hash slots refer to canonical catalog metadata; complete
+name equality decides identity even on full-hash collisions. Compact catalog
+entries contain names and definitions, without unused predictor state.
+`InternHashed` also accepts a hash already computed by a routing caller. The
+current harness routes by numeric ID and does not hash names for core routing.
+Metadata is appended only for unseen names; changed definitions are rejected.
+`CatalogEncoder.EncodePoints` borrows the resolved IDs and input points at a
+common arrival clock. It removes temporary singleton name frames while using
+the same PDC4 encoder, predictor state, record framing and exact bytes. Stream-local catalog IDs are
 mapped bijectively to core IDs as `(localID-1)*producers + producer + 1`.
 Producer count and name-to-producer ownership must remain stable. IDs are scoped
 to this experiment, not portable replica identities. A future receiver must
@@ -76,7 +83,7 @@ reader modules; this harness does not claim classic render parity yet.
 | Layer | Addition | Acceptance |
 | --- | --- | --- |
 | L0 | Core only | Same-run numeric baseline |
-| L1 | Durable catalog IDs | Cumulative throughput >=90% of L0 |
+| L1 | Durable catalog IDs | Cumulative throughput >=95% of L0 in two consecutive pairs |
 | L2 | PDC4 journal | Cumulative >=90%; journal <=4 B/point |
 | L3 | Exact seal rollups | Existing reducer, exact classic behavior |
 | L4 | Immutable reader publication | Existing snapshot reader/publisher |
@@ -90,6 +97,10 @@ run diagnostically after an L1 failure, but must be labeled unqualified.
 Process writes, SST bytes ingested and compaction bytes before close, catalog/journal sizes,
 at-rest size, intake throughput and complete CPU are reported separately.
 A finite fixed-corpus run does not establish settled sustained throughput.
+CPU and blocking profiles cover admission, intake, drain and close, excluding
+read-back and the journal oracle. Reported stream stage times are summed elapsed
+times across producers, not CPU time or additive process wall time. In particular,
+core submission can include queue-credit waits and synchronous seal acknowledgments.
 
 ## Usage
 
@@ -97,6 +108,8 @@ A finite fixed-corpus run does not establish settled sustained throughput.
 go run ./tool/v2-daemon -layer 0 -root /scratch/l0
 go run ./tool/v2-daemon -layer 1 -root /scratch/l1
 go run ./tool/v2-daemon -layer 2 -root /scratch/l2
+go run ./tool/v2-daemon -layer 2 -root /scratch/l2-profile \
+  -cpuprofile /scratch/l2.cpu -blockprofile /scratch/l2.block
 ```
 
 Each command runs the fixed corpus and verifies sampled names through

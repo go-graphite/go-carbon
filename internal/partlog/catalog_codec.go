@@ -39,7 +39,7 @@ type CatalogEncoder struct {
 func IsCatalogRecord(b []byte) bool { return bytes.HasPrefix(b, catalogCodecMagic) }
 
 func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
-	return e.encode(fs, nil)
+	return e.encode(fs, nil, nil, 0)
 }
 
 // EncodeIDs accepts IDs already resolved in this encoder's catalog. It validates
@@ -51,11 +51,27 @@ func (e *CatalogEncoder) EncodeIDs(fs []DictionaryFrame, ids []uint64) ([]byte, 
 	if len(ids) != len(fs) {
 		return nil, errPredictorV3
 	}
-	return e.encode(fs, ids)
+	return e.encode(fs, ids, nil, 0)
 }
 
-func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64) ([]byte, error) {
-	if len(fs) == 0 || len(fs) > predictorV3MaxRaw/3 {
+// EncodePoints journals one point per already-resolved catalog ID at a common
+// arrival clock. It borrows the input arrays for the call, avoiding transient
+// name/definition/point-slice frames. It uses the same PDC4 encoder and produces
+// the same bytes as equivalent singleton DictionaryFrames passed to EncodeIDs.
+// IDs must belong to Catalog; catalog sync must precede journal durability.
+func (e *CatalogEncoder) EncodePoints(ids []uint64, data []points.Point, clock int64) ([]byte, error) {
+	if len(ids) != len(data) || len(data) == 0 {
+		return nil, errPredictorV3
+	}
+	return e.encode(nil, ids, data, clock)
+}
+
+func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []points.Point, arrivalClock int64) ([]byte, error) {
+	count := len(fs)
+	if data != nil {
+		count = len(data)
+	}
+	if count == 0 || count > predictorV3MaxRaw/3 {
 		return nil, errPredictorV3
 	}
 	if e.Catalog == nil {
@@ -72,30 +88,40 @@ func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64) ([]byte, err
 		e.previousCRC = 0
 	}
 	var previousID int64
-	meta := binary.AppendUvarint(e.meta[:0], uint64(len(fs)))
+	meta := binary.AppendUvarint(e.meta[:0], uint64(count))
 	var account PredictorV3Accounting
 	account.Framing += int64(len(meta))
 	values := predictorV3Writer{b: e.values[:0]}
 	clocks := predictorV3Writer{b: e.clocks[:0]}
 	clock := e.clock
-	for frame, f := range fs {
-		if f.Key == "" || len(f.Key) > predictorV3MaxRaw || len(f.Definition) > predictorV3MaxRaw || len(f.Points) == 0 || len(f.Points) > predictorV3MaxRaw {
-			return nil, errPredictorV3
-		}
+	for frame := 0; frame < count; frame++ {
+		var f DictionaryFrame
 		var id uint64
-		if ids != nil {
+		if data != nil {
 			id = ids[frame]
-		}
-		if id == 0 {
-			var err error
-			id, err = e.Catalog.Intern(f.Key, f.Definition)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			key, definition, ok := e.Catalog.Lookup(id)
-			if !ok || key != f.Key || !bytes.Equal(definition, f.Definition) {
+			if _, _, ok := e.Catalog.Lookup(id); !ok {
 				return nil, errCatalog
+			}
+			f.Clock, f.Points = arrivalClock, data[frame:frame+1]
+		} else {
+			f = fs[frame]
+			if f.Key == "" || len(f.Key) > predictorV3MaxRaw || len(f.Definition) > predictorV3MaxRaw || len(f.Points) == 0 || len(f.Points) > predictorV3MaxRaw {
+				return nil, errPredictorV3
+			}
+			if ids != nil {
+				id = ids[frame]
+			}
+			if id == 0 {
+				var err error
+				id, err = e.Catalog.Intern(f.Key, f.Definition)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				key, definition, ok := e.Catalog.Lookup(id)
+				if !ok || key != f.Key || !bytes.Equal(definition, f.Definition) {
+					return nil, errCatalog
+				}
 			}
 		}
 		start := len(meta)

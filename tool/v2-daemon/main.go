@@ -13,6 +13,7 @@ func main() {
 	layer := flag.Int("layer", 0, "0=core, 1=catalog, 2=journal")
 	root := flag.String("root", "", "fresh output directory")
 	profile := flag.String("cpuprofile", "", "optional timed intake/close CPU profile")
+	block := flag.String("blockprofile", "", "optional timed intake/close blocking profile")
 	flag.Parse()
 	if *root == "" {
 		fmt.Fprintln(os.Stderr, "-root is required")
@@ -20,6 +21,7 @@ func main() {
 	}
 	fixture := v2daemon.DefaultFixture()
 	fixture.CPUProfile = *profile
+	fixture.BlockProfile = *block
 	if _, err := v2daemon.RunFixed(*root, *layer, fixture, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

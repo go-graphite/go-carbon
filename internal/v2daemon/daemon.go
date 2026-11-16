@@ -40,23 +40,22 @@ type packet struct {
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
 type Producer struct {
-	engine                                 *v2core.Engine
-	index, count, layer, maxPending        int
-	catalog                                *partlog.NameCatalog
-	encoder                                partlog.CatalogEncoder
-	journal                                *os.File
-	writer                                 *bufio.Writer
-	packets                                []packet
-	records                                [][]byte
-	spareRows                              [][]v2core.Row
-	frames                                 []partlog.DictionaryFrame
-	ids                                    []uint64
-	cursor                                 uint64
-	pendingRows                            int
-	nextSync                               time.Time
-	interval                               time.Duration
-	failed                                 error
-	JournalBytes, SyncGroups, ForcedGroups uint64
+	engine                                                       *v2core.Engine
+	index, count, layer, maxPending                              int
+	catalog                                                      *partlog.NameCatalog
+	encoder                                                      partlog.CatalogEncoder
+	journal                                                      *os.File
+	writer                                                       *bufio.Writer
+	packets                                                      []packet
+	records                                                      [][]byte
+	spareRows                                                    [][]v2core.Row
+	cursor                                                       uint64
+	pendingRows                                                  int
+	nextSync                                                     time.Time
+	interval                                                     time.Duration
+	failed                                                       error
+	JournalBytes, SyncGroups, ForcedGroups                       uint64
+	EncodeTime, CatalogSyncTime, JournalSyncTime, CoreSubmitTime time.Duration
 }
 
 func coreConfig(c Config) v2core.Config {
@@ -174,29 +173,21 @@ func (p *Producer) Append(names []string, data []points.Point, sequence []uint64
 		p.spareRows = p.spareRows[:n-1]
 	}
 	rows = slices.Grow(rows[:0], len(names))[:len(names)]
-	if p.layer == 2 {
-		p.frames = slices.Grow(p.frames[:0], len(names))
-		p.ids = slices.Grow(p.ids[:0], len(names))
+	ids, err := p.catalog.InternBatch(names, nil)
+	if err != nil {
+		return p.fail(err)
 	}
-	for i, name := range names {
-		id, err := p.catalog.Intern(name, nil)
-		if err != nil {
-			return p.fail(err)
-		}
+	for i, id := range ids {
 		rows[i] = v2core.Row{ID: NumericID(id, p.index, p.count), Time: data[i].Timestamp, Bits: math.Float64bits(data[i].Value), Seq: sequence[i]}
-		if p.layer == 2 {
-			p.frames = append(p.frames, partlog.DictionaryFrame{Key: name, Clock: clock, Points: data[i : i+1]})
-			p.ids = append(p.ids, id)
-		}
 	}
 	if p.layer == 2 {
-		record, err := p.encoder.EncodeIDs(p.frames, p.ids)
+		start := time.Now()
+		record, err := p.encoder.EncodePoints(ids, data, clock)
+		p.EncodeTime += time.Since(start)
 		if err != nil {
 			return p.fail(err)
 		}
 		p.records = append(p.records, record)
-		clear(p.frames)
-		p.frames = p.frames[:0]
 	}
 	p.cursor += uint64(len(data))
 	p.pendingRows += len(data)
@@ -239,9 +230,11 @@ func (p *Producer) Drain() error {
 	if p.layer == 0 || len(p.packets) == 0 {
 		return nil
 	}
+	start := time.Now()
 	if err := p.catalog.Sync(); err != nil {
 		return p.fail(err)
 	}
+	p.CatalogSyncTime += time.Since(start)
 	if p.layer == 2 {
 		for _, record := range p.records {
 			var h [4]byte
@@ -254,16 +247,19 @@ func (p *Producer) Drain() error {
 			}
 			p.JournalBytes += uint64(4 + len(record))
 		}
+		start = time.Now()
 		if err := p.writer.Flush(); err != nil {
 			return p.fail(err)
 		}
 		if err := p.journal.Sync(); err != nil {
 			return p.fail(err)
 		}
+		p.JournalSyncTime += time.Since(start)
 		p.SyncGroups++
 		clear(p.records)
 		p.records = p.records[:0]
 	}
+	start = time.Now()
 	for _, packet := range p.packets {
 		if err := p.engine.Append(p.index, packet.rows, packet.cursor, packet.seal); err != nil {
 			return p.fail(err)
@@ -272,6 +268,7 @@ func (p *Producer) Drain() error {
 			p.spareRows = append(p.spareRows, packet.rows[:0])
 		}
 	}
+	p.CoreSubmitTime += time.Since(start)
 	clear(p.packets)
 	p.packets = p.packets[:0]
 	p.pendingRows = 0

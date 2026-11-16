@@ -21,8 +21,8 @@ func TestCatalogGroupedMixedRecovery(t *testing.T) {
 	if _, e = c.buffer.Write(catalogRecord(1, "legacy", []byte{0, 255})); e != nil {
 		t.Fatal(e)
 	}
-	c.ids["legacy"] = 1
-	c.entries = append(c.entries, predictorV3Entry{key: "legacy", definition: []byte{0, 255}})
+	c.ids.insert(NameHash("legacy"), 1)
+	c.entries = append(c.entries, catalogEntry{key: "legacy", definition: []byte{0, 255}})
 	for group := range 2 {
 		for i := 999; i >= 0; i-- {
 			if _, e = c.Intern(fmt.Sprintf("series.%d.%04d\x00", group, i), []byte{0, byte(i), 255}); e != nil {

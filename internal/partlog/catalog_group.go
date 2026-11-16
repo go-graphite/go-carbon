@@ -130,11 +130,12 @@ func (c *NameCatalog) readGroup(body []byte) error {
 				return errCatalog
 			}
 		} else {
-			if _, ok := c.ids[b.key]; ok {
+			hash := NameHash(b.key)
+			if c.ids.lookup(b.key, hash, c.entries) != 0 {
 				return errCatalog
 			}
-			c.ids[b.key] = b.id
-			c.entries = append(c.entries, predictorV3Entry{key: b.key, definition: bytes.Clone(b.def)})
+			c.ids.insert(hash, b.id)
+			c.entries = append(c.entries, catalogEntry{key: b.key, definition: bytes.Clone(b.def)})
 		}
 	}
 	return nil
