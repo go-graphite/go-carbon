@@ -13,11 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
+	"golang.org/x/sync/errgroup"
 )
 
 // NativeCheckpointPlan is a caller-certified immutable checkpoint inventory and

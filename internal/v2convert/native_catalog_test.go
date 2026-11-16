@@ -3,17 +3,19 @@ package v2convert
 import (
 	"context"
 	"errors"
-	"github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/v2part"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 type catalogFixture struct {
 	names     []string
 	calls     []string
-	snapshots int
+	snapshots atomic.Int64
 	repeat    bool
 }
 
@@ -28,7 +30,7 @@ func (f *catalogFixture) ListCatalogPage(_ context.Context, _, after string, lim
 	return out, nil
 }
 func (f *catalogFixture) Snapshot(_ context.Context, name string) (chunkstore.Snapshot, error) {
-	f.snapshots++
+	f.snapshots.Add(1)
 	s := nativeTestSnapshot(name)
 	return s, nil
 }
@@ -65,14 +67,14 @@ func TestNativeCatalogCoverageAndResume(t *testing.T) {
 		t.Fatalf("page part IDs collide: %v", parts)
 	}
 	first := append([]v2part.PartID(nil), parts...)
-	before := f.snapshots
+	before := f.snapshots.Load()
 	if err := walk(); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(parts[len(first):], first) {
 		t.Fatal("resume changed page part IDs")
 	}
-	if f.snapshots != before {
+	if f.snapshots.Load() != before {
 		t.Fatal("resume rematerialized completed pages")
 	}
 }

@@ -13,9 +13,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/v2part"
-
 	"github.com/go-graphite/go-carbon/internal/v2convert"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 func main() {
