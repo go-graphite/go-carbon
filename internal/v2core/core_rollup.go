@@ -59,39 +59,35 @@ type RollupMetadata struct {
 }
 
 type rollupMetric struct {
-	policy      RollupPolicy
-	meta        RollupMetadata
-	slots       *sealrollup.Slots
-	prepared    *sealrollup.Prepared
-	keyTemplate []byte
-	prefix      string
-	partOffset  int
+	*PolicyIdentity
+	meta  metricMetadata
+	slots *sealrollup.Slots
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
 	seen map[[32]byte]bool
 }
 type coreRollups struct {
+	identities *PolicyCatalog
+
 	expire func(RollupPolicy, RollupMetadata, time.Time) bool
 	now    func() time.Time
 
-	stage          func(string)
-	metrics        map[uint64]*rollupMetric
-	names          map[partsformat.ID]uint64
-	prepared       map[[32]byte]*sealrollup.Prepared
-	workspace      sealrollup.Workspace
-	records        []sealrollup.Record
-	stages         []rollupStage
-	positions      map[uint64]int
-	pendingNames   map[partsformat.ID]uint64
-	stagedPolicies map[[32]byte]*sealrollup.Prepared
-	samples        []sealrollup.Sample
-	batches        []sealrollup.Batch
-	files          map[string][]coreKV
-	arena          []byte
-	pending        bool
-	definitions    map[[32]byte][]partsformat.ArchivePolicy
-	coverage       map[string]*rollupCoverage
+	stage        func(string)
+	metrics      map[uint64]*rollupMetric
+	names        map[partsformat.ID]uint64
+	workspace    sealrollup.Workspace
+	records      []sealrollup.Record
+	stages       []rollupStage
+	positions    map[uint64]int
+	pendingNames map[partsformat.ID]uint64
+	samples      []sealrollup.Sample
+	batches      []sealrollup.Batch
+	files        map[string][]coreKV
+	arena        []byte
+	pending      bool
+	definitions  map[[32]byte][]partsformat.ArchivePolicy
+	coverage     map[string]*rollupCoverage
 }
 
 // Archive max-u32 is reserved within the core's GCP3 rollup experiment for the
@@ -101,46 +97,14 @@ type coreRollups struct {
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{metrics: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}, prepared: map[[32]byte]*sealrollup.Prepared{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}}
 }
-func (r *coreRollups) metric(id uint64, policy []byte, staged map[[32]byte]*sealrollup.Prepared) (*rollupMetric, error) {
-	var p RollupPolicy
-	if err := json.Unmarshal(policy, &p); err != nil {
-		return nil, err
-	}
-	encoded, err := EncodeRollupPolicy(p)
+func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
+	h, err := r.identities.intern(id, "", policy)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(encoded, policy) {
-		return nil, errors.New("noncanonical rollup policy")
-	}
-	digest, err := sealrollup.PolicyDigest(p.Config)
-	if err != nil {
-		return nil, err
-	}
-	prepared := r.prepared[digest]
-	if prepared == nil {
-		prepared = staged[digest]
-	}
-	if prepared == nil {
-		prepared, err = sealrollup.Prepare(p.Config)
-		if err != nil {
-			return nil, err
-		}
-	}
-	staged[digest] = prepared
-	// Identity/routing is immutable. Validate and encode it once, then only
-	// fill the part/archive/slot fields of each detached output key.
-	template, err := partsformat.Encode(partsformat.Key{Group: p.Group, VShard: partsformat.Route(p.Name), Metric: p.Name})
-	if err != nil {
-		return nil, err
-	}
-	prefix, err := partsformat.PartitionPrefixForGroup(p.Group, partsformat.Route(p.Name), 0)
-	if err != nil {
-		return nil, err
-	}
-	return &rollupMetric{policy: p, meta: RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(policy)}, slots: sealrollup.NewSlots(p.Config.Archives), prepared: prepared, keyTemplate: template, prefix: string(prefix), partOffset: len(prefix)}, nil
+	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: h.prepared.NewSlots()}, nil
 }
 
 type rollupStage struct {
@@ -174,11 +138,6 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		names = map[partsformat.ID]uint64{}
 		r.pendingNames = names
 	}
-	stagedPolicies := r.stagedPolicies
-	if stagedPolicies == nil {
-		stagedPolicies = map[[32]byte]*sealrollup.Prepared{}
-		r.stagedPolicies = stagedPolicies
-	}
 	// At most one stage per input application. Retain capacity between seals.
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
@@ -189,7 +148,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			fresh := m == nil
 			if fresh {
 				var err error
-				m, err = r.metric(b.ID, b.Policy, stagedPolicies)
+				m, err = r.metric(b.ID, b.Policy)
 				if err != nil {
 					return coreSealPlan{}, err
 				}
@@ -201,13 +160,13 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
 			}
 			names[m.policy.Name] = b.ID
-			stages = append(stages, rollupStage{metric: m, next: m.meta, fresh: fresh})
+			stages = append(stages, rollupStage{metric: m, next: m.metadata(), fresh: fresh})
 			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
 			positions[b.ID] = i
 		}
 		s := &stages[i]
-		if !bytes.Equal(b.Policy, s.metric.meta.Policy) {
+		if !bytes.Equal(b.Policy, s.metric.definition) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
 		stages[i].batchCount++
@@ -245,8 +204,8 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil {
 		for id, m := range r.metrics {
-			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.policy, m.meta, now) {
-				stages = append(stages, rollupStage{metric: m, next: m.meta})
+			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.rollupPolicy(), m.metadata(), now) {
+				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
 			}
 		}
 	}
@@ -257,7 +216,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		r.coverage = map[string]*rollupCoverage{}
 	}
 	// Sorting identities is cheaper than sorting every archive replacement key.
-	slices.SortFunc(stages, func(a, b rollupStage) int { return bytes.Compare(a.metric.keyTemplate, b.metric.keyTemplate) })
+	slices.SortFunc(stages, func(a, b rollupStage) int { return compareRollupIdentity(a.metric, b.metric) })
 	files := r.files
 	if files == nil {
 		files = map[string][]coreKV{}
@@ -269,11 +228,22 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			return coreSealPlan{}, err
 		}
 	}
+	var keyMetric *rollupMetric
+	var keyTemplate []byte
 	put := func(m *rollupMetric, archive uint32, slot int64, value []byte) error {
 		start := len(r.arena)
-		r.arena = append(r.arena, m.keyTemplate...)
+		if keyMetric != m {
+			var err error
+			keyTemplate, err = partsformat.Encode(partsformat.Key{Group: m.policy.Group, VShard: partsformat.Route(m.policy.Name), Metric: m.policy.Name})
+			if err != nil {
+				return err
+			}
+			keyMetric = m
+		}
+		r.arena = append(r.arena, keyTemplate...)
 		encoded := r.arena[start:len(r.arena):len(r.arena)]
-		copy(encoded[m.partOffset:m.partOffset+16], part[:])
+		partOffset := len(encoded) - len(m.policy.Name) - 36
+		copy(encoded[partOffset:partOffset+16], part[:])
 		tail := len(encoded) - 16
 		binary.BigEndian.PutUint32(encoded[tail:], archive)
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
@@ -285,7 +255,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	for i := range stages {
 		s := &stages[i]
 		m := s.metric
-		plan, err := m.prepared.PlanInto(r.records[len(r.records):], m.meta.Frontier, m.slots.View, m.slots.Range, s.batches, &r.workspace)
+		plan, err := m.prepared.PlanInto(r.records[len(r.records):], m.metadata().Frontier, m.slots.View, m.slots.Range, s.batches, &r.workspace)
 		if err != nil {
 			return coreSealPlan{}, err
 		}
@@ -307,7 +277,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 			changed := false
 			for _, p := range b.Points {
-				if p.Time >= b.Now-m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Step*m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Count {
+				if p.Time >= b.Now-m.schema().Archives[len(m.schema().Archives)-1].Step*m.schema().Archives[len(m.schema().Archives)-1].Count {
 					changed = true
 					break
 				}
@@ -320,7 +290,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
 			}
 		}
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.policy, s.next, now) {
+		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = 2
@@ -351,12 +321,12 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if !coverage.seen[digest] {
 			policies := r.definitions[digest]
 			if policies == nil {
-				definition, err := json.Marshal(m.policy.Config)
+				definition, err := json.Marshal(m.schema())
 				if err != nil {
 					return coreSealPlan{}, err
 				}
 				hash := sha256.Sum256(definition)
-				for archive := range m.policy.Config.Archives {
+				for archive := range m.schema().Archives {
 					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
 				}
 				r.definitions[digest] = policies
@@ -413,13 +383,12 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				m.slots.Install(record.Delta)
 			}
 			if s.next.Expired {
-				m.slots = sealrollup.NewSlots(m.policy.Config.Archives)
+				m.slots = m.prepared.NewSlots()
 			}
-			m.meta = s.next
+			m.meta = compactMetadata(s.next)
 			if s.fresh {
-				r.metrics[m.meta.ID] = m
-				r.names[m.policy.Name] = m.meta.ID
-				r.prepared[m.meta.Frontier.Policy] = m.prepared
+				r.metrics[m.id] = m
+				r.names[m.policy.Name] = m.id
 			}
 		}
 	}
@@ -431,6 +400,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 // replacement order for each physical slot before callers apply time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	return scanRollups(snapshot, nil, visit)
+}
+func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	type entry struct {
 		group   partsformat.Group
 		policy  RollupPolicy
@@ -464,7 +436,14 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			}
 			if m.Frontier.Order > e.meta.Frontier.Order || (m.Frontier.Order == e.meta.Frontier.Order && m.Revision > e.meta.Revision) {
 				e.meta = m
-				if err = json.Unmarshal(m.Policy, &e.policy); err != nil {
+				if identities != nil {
+					h, err := identities.intern(m.ID, string(k.Metric), m.Policy)
+					if err != nil {
+						return err
+					}
+					e.policy = h.rollupPolicy()
+					e.meta.Policy = h.definition
+				} else if err = json.Unmarshal(m.Policy, &e.policy); err != nil {
 					return err
 				}
 			}
@@ -528,19 +507,23 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 	}
 	return nil
 }
-func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
+func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups, error) {
 	r := newCoreRollups()
+	if len(catalogs) > 0 {
+		r.identities = catalogs[0]
+	}
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
-	err := ScanRollups(snapshot, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
-		m, err := r.metric(meta.ID, meta.Policy, r.prepared)
+	err := scanRollups(snapshot, r.identities, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
+		m, err := r.metric(meta.ID, meta.Policy)
 		if err != nil {
 			return err
 		}
 		if r.metrics[meta.ID] != nil {
 			return errors.New("duplicate recovered rollup ID")
 		}
-		m.meta = meta
+		meta.Policy = m.definition
+		m.meta = compactMetadata(meta)
 		for _, record := range records {
 			m.slots.Install(record.Delta)
 		}
@@ -548,8 +531,27 @@ func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.
 		r.names[m.policy.Name] = meta.ID
-		r.prepared[meta.Frontier.Policy] = m.prepared
 		return nil
 	})
 	return r, err
+}
+
+// Match GCP3 key ordering without retaining a complete key for every name.
+func compareRollupIdentity(a, b *rollupMetric) int {
+	if len(a.policy.Group) != len(b.policy.Group) {
+		return len(a.policy.Group) - len(b.policy.Group)
+	}
+	if c := bytes.Compare([]byte(a.policy.Group), []byte(b.policy.Group)); c != 0 {
+		return c
+	}
+	if c := int(partsformat.Route(a.policy.Name)) - int(partsformat.Route(b.policy.Name)); c != 0 {
+		return c
+	}
+	if len(a.policy.Name) < len(b.policy.Name) {
+		return -1
+	}
+	if len(a.policy.Name) > len(b.policy.Name) {
+		return 1
+	}
+	return bytes.Compare([]byte(a.policy.Name), []byte(b.policy.Name))
 }

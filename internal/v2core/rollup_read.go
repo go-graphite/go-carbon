@@ -3,7 +3,6 @@ package v2core
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -21,6 +20,8 @@ import (
 // A prior directory shares immutable per-part metadata; it never shares a snapshot or a writer-owned object.
 // The caller retains snapshot until all directory consumers have returned.
 type RollupSnapshot struct {
+	identities *PolicyCatalog
+
 	snapshot       *pebble.Snapshot
 	parts          map[string]*readPart
 	metrics        map[string]*snapshotMetric
@@ -63,22 +64,34 @@ type readPart struct {
 	bytes   int64
 }
 type readPartMetric struct {
-	part   *readPart
-	policy RollupPolicy
-	meta   RollupMetadata
+	part *readPart
+	*PolicyIdentity
+	meta metricMetadata
 }
 type snapshotMetric struct {
+	single [1]*readPartMetric
+
 	latest  *readPartMetric
 	parts   []*readPartMetric
 	partIDs map[string]struct{}
 }
 
 func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
+	return NewRollupSnapshotWithCatalog(ctx, snapshot, prior, nil, cacheLimit...)
+}
+
+func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, cacheLimit ...int64) (*RollupSnapshot, error) {
+	if identities == nil && prior != nil {
+		identities = prior.identities
+	}
+	if identities == nil {
+		identities = &PolicyCatalog{}
+	}
 	limit := int64(rollupReadCacheBytes)
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
-	out := &RollupSnapshot{snapshot: snapshot, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	out := &RollupSnapshot{identities: identities, snapshot: snapshot, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -132,7 +145,7 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 			part = prior.parts[id]
 		}
 		if part == nil {
-			part, err = readRollupPart(ctx, it, []byte(id))
+			part, err = readRollupPart(ctx, it, []byte(id), identities)
 			if err != nil {
 				return nil, err
 			}
@@ -189,9 +202,10 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 			m := out.metrics[name]
 			if m == nil {
 				m = &snapshotMetric{latest: pm, partIDs: part.ids}
+				m.parts = m.single[:0]
 				out.metrics[name] = m
 			}
-			if m.latest.policy.Group != pm.policy.Group || m.latest.meta.ID != pm.meta.ID || !bytes.Equal(m.latest.meta.Policy, pm.meta.Policy) {
+			if m.latest.PolicyIdentity != pm.PolicyIdentity {
 				return errors.New("inconsistent rollup identity/policy")
 			}
 			if pm.meta.Frontier.Order > m.latest.meta.Frontier.Order || (pm.meta.Frontier.Order == m.latest.meta.Frontier.Order && pm.meta.Revision > m.latest.meta.Revision) {
@@ -239,7 +253,7 @@ func (s *RollupSnapshot) RetainedBytes() int64 { return s.directoryBytes + s.cac
 // Metadata visits only the directory, never archive values.
 func (s *RollupSnapshot) Metadata(visit func(string, RollupPolicy, RollupMetadata)) {
 	for name, m := range s.metrics {
-		visit(name, m.latest.policy, m.latest.meta)
+		visit(name, m.latest.rollupPolicy(), m.latest.metadata())
 	}
 }
 
@@ -250,7 +264,7 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 	if m == nil {
 		return RollupPolicy{}, RollupMetadata{}, false
 	}
-	return m.latest.policy, m.latest.meta, true
+	return m.latest.rollupPolicy(), m.latest.metadata(), true
 }
 
 // ScanArchive seeks only the named archive's physical interval in each part.
@@ -264,7 +278,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if m == nil || m.latest.meta.Expired || first >= last {
 		return ctx.Err()
 	}
-	if archive < 0 || archive >= len(m.latest.policy.Config.Archives) || first < 0 || last > m.latest.policy.Config.Archives[archive].Count {
+	if archive < 0 || archive >= len(m.latest.schema().Archives) || first < 0 || last > m.latest.schema().Archives[archive].Count {
 		return errors.New("invalid archive range")
 	}
 	cacheKey := archiveRange{name, archive, first, last}
@@ -355,7 +369,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 				return errors.New("unexpected rollup ordinal")
 			}
 			emit := func(record sealrollup.Record) error {
-				if record.Slot >= m.latest.policy.Config.Archives[archive].Count || record.Order > m.latest.meta.Frontier.Order {
+				if record.Slot >= m.latest.schema().Archives[archive].Count || record.Order > m.latest.meta.Frontier.Order {
 					return errors.New("invalid rollup slot/frontier")
 				}
 				if record.Slot >= first && record.Slot < last && record.Order > m.latest.meta.ResetOrder {
@@ -476,7 +490,7 @@ func (s *RollupSnapshot) Records(ctx context.Context, name string) ([]sealrollup
 		return nil, nil
 	}
 	var records []sealrollup.Record
-	for archive, a := range m.latest.policy.Config.Archives {
+	for archive, a := range m.latest.schema().Archives {
 		err := s.ScanArchive(ctx, name, archive, 0, a.Count, func(r sealrollup.Record) error { records = append(records, r); return nil })
 		if err != nil {
 			return nil, err
@@ -486,7 +500,7 @@ func (s *RollupSnapshot) Records(ctx context.Context, name string) ([]sealrollup
 }
 
 // readRollupPart decodes metadata only for one newly visible routed part.
-func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*readPart, error) {
+func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte, identities *PolicyCatalog) (*readPart, error) {
 	if !it.SeekGE(scope) || !bytes.HasPrefix(it.Key(), scope) {
 		return nil, fmt.Errorf("missing rollup part %x", scope)
 	}
@@ -510,7 +524,12 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*re
 		if err != nil {
 			return nil, err
 		}
-		if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
+		// Most new metrics have one archive row immediately before metadata.
+		// One Next avoids rebuilding the merging iterator for that common case.
+		if !bytes.Equal(it.Key(), encoded) {
+			it.Next()
+		}
+		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
 			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 		}
 		meta, decodeErr := DecodeRollupMetadata(it.Value())
@@ -518,10 +537,12 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*re
 			err = decodeErr
 			return nil, err
 		}
-		var policy RollupPolicy
-		if err = json.Unmarshal(meta.Policy, &policy); err != nil {
+		h, err := identities.intern(meta.ID, string(key.Metric), meta.Policy)
+		if err != nil {
 			return nil, err
 		}
+		policy := h.rollupPolicy()
+		meta.Policy = h.definition
 		if (meta.Version != 1 && meta.Version != 2) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 			return nil, errors.New("invalid rollup metadata")
 		}
@@ -544,14 +565,17 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*re
 		} else if len(configs) < 64 {
 			configs[digest] = policy.Config
 		}
-		policy.Name, policy.Group = key.Metric, part.key.Group
-		part.metrics[string(key.Metric)] = &readPartMetric{part: part, policy: policy, meta: meta}
+		policy.Group = part.key.Group
+		part.metrics[string(policy.Name)] = &readPartMetric{part: part, PolicyIdentity: h, meta: compactMetadata(meta)}
 		// The last 16 bytes are archive, physical slot and ordinal.
-		it.SeekGE(v2part.PrefixEnd(encoded[:len(encoded)-16]))
+		it.Next()
+		if it.Valid() && bytes.HasPrefix(it.Key(), encoded[:len(encoded)-16]) {
+			return nil, errors.New("unexpected keys after rollup metadata")
+		}
 	}
 	part.bytes = int64(128 + len(scope))
 	for name, pm := range part.metrics {
-		part.bytes += int64(512 + len(name)*2 + len(pm.meta.Policy)*2 + len(pm.policy.Group)*2 + len(pm.policy.Config.Archives)*32)
+		part.bytes += int64(512 + len(name)*2 + len(pm.definition)*2 + len(pm.policy.Group)*2 + len(pm.schema().Archives)*32)
 	}
 	return part, it.Error()
 }

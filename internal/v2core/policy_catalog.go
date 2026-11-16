@@ -1,0 +1,149 @@
+package v2core
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"sync"
+	"unsafe"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
+)
+
+// PolicyIdentity owns one immutable canonical name/schema/definition. Its bytes
+// may be borrowed by catalogs, dispatches and pinned read generations. Callers
+// must never modify the returned definition or schema slices.
+type PolicyIdentity struct {
+	id         uint64
+	policy     policyName
+	definition []byte
+	prepared   *sealrollup.Prepared
+}
+
+// PolicyCatalog is scoped to one journal epoch/engine, never process global.
+// Numeric IDs are allocated by the journal; this directory adds no name index.
+// It replaces the router's separate all-ID policy copies.
+type PolicyCatalog struct {
+	mu      sync.RWMutex
+	ids     map[uint64]*PolicyIdentity
+	schemas map[[32]byte]*PolicyIdentity
+}
+
+func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
+	c.mu.RLock()
+	old := c.ids[id]
+	c.mu.RUnlock()
+	if old != nil {
+		if (name != "" && string(old.policy.Name) != name) || !bytes.Equal(old.definition, definition) {
+			return nil, errors.New("stored rollup policy changed")
+		}
+		return old, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old := c.ids[id]; old != nil {
+		if (name != "" && string(old.policy.Name) != name) || !bytes.Equal(old.definition, definition) {
+			return nil, errors.New("stored rollup policy changed")
+		}
+		return old, nil
+	}
+	var p RollupPolicy
+	if err := json.Unmarshal(definition, &p); err != nil {
+		return nil, err
+	}
+	canonical, err := EncodeRollupPolicy(p)
+	if err != nil {
+		return nil, err
+	}
+	if id == 0 || (name != "" && name != string(p.Name)) || !bytes.Equal(canonical, definition) {
+		return nil, errors.New("noncanonical rollup policy")
+	}
+	digest, err := sealrollup.PolicyDigest(p.Config)
+	if err != nil {
+		return nil, err
+	}
+	var prepared *sealrollup.Prepared
+	if old := c.schemas[digest]; old != nil {
+		p.Config = old.schema()
+		prepared = old.prepared
+	} else {
+		prepared, err = sealrollup.Prepare(p.Config)
+		if err != nil {
+			return nil, err
+		}
+	}
+	canonical = bytes.Clone(canonical)
+	// Canonical JSON starts with Name. For an unescaped name, borrow the
+	// immutable definition bytes rather than retaining another name allocation.
+	const nameStart = len(`{"Name":"`)
+	if len(canonical) > nameStart+len(p.Name) && bytes.Equal(canonical[:nameStart], []byte(`{"Name":"`)) && bytes.Equal(canonical[nameStart:nameStart+len(p.Name)], []byte(p.Name)) && canonical[nameStart+len(p.Name)] == '"' {
+		p.Name = partsformat.ID(unsafe.String(&canonical[nameStart], len(p.Name)))
+	}
+	h := &PolicyIdentity{id: id, policy: policyName{Name: p.Name, Group: p.Group}, definition: canonical[:len(canonical):len(canonical)], prepared: prepared}
+	if c.ids == nil {
+		c.ids = make(map[uint64]*PolicyIdentity)
+		c.schemas = make(map[[32]byte]*PolicyIdentity)
+	}
+	c.ids[id] = h
+	// Schema reuse is bounded; it does not keep a second all-name directory.
+	if len(c.schemas) < 64 {
+		c.schemas[digest] = h
+	}
+	return h, nil
+}
+func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ids[id]
+}
+
+// BindDefinition lets the journal borrow the engine's canonical identity.
+func (e *coreEngine) BindDefinition(id uint64, name string, definition []byte) (string, []byte, error) {
+	h, err := e.identities.intern(id, name, definition)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(h.policy.Name), h.definition, nil
+}
+
+// Only mutable lifecycle/frontier scalars belong in each owner/part directory.
+// Identity, raw policy and schema digest are reconstructed from the shared handle.
+type metricMetadata struct {
+	ResetOrder uint64
+	LastUpdate int64
+	Revision   uint64
+	Frontier   struct {
+		Order   uint64
+		MaxTime int64
+	}
+	Version uint8
+	Expired bool
+}
+
+func compactMetadata(m RollupMetadata) metricMetadata {
+	var out metricMetadata
+	out.ResetOrder = m.ResetOrder
+	out.LastUpdate = m.LastUpdate
+	out.Revision = m.Revision
+	out.Frontier.Order = m.Frontier.Order
+	out.Frontier.MaxTime = m.Frontier.MaxTime
+	out.Version = m.Version
+	out.Expired = m.Expired
+	return out
+}
+func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
+	return RollupMetadata{ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Policy: h.definition, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
+}
+func (m *rollupMetric) metadata() RollupMetadata   { return m.PolicyIdentity.metadata(m.meta) }
+func (m *readPartMetric) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
+
+type policyName struct {
+	Name  partsformat.ID
+	Group partsformat.Group
+}
+
+func (h *PolicyIdentity) schema() sealrollup.Config { return h.prepared.Config() }
+func (h *PolicyIdentity) rollupPolicy() RollupPolicy {
+	return RollupPolicy{Name: h.policy.Name, Group: h.policy.Group, Config: h.schema()}
+}

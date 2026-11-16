@@ -74,12 +74,7 @@ const (
 	corePacketBytes = uint64(unsafe.Sizeof(corePacket{}))
 )
 
-type rollupRoute struct {
-	owner  int
-	policy []byte
-}
 type coreRouter struct {
-	rollupRoutes                map[uint64]rollupRoute
 	slots                       []coreDispatch
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
@@ -229,6 +224,8 @@ type coreOwner struct {
 }
 type coreFailure struct{ err error }
 type coreEngine struct {
+	identities *PolicyCatalog
+
 	gcStop    chan struct{}
 	gcDone    chan struct{}
 	gcFailure atomic.Pointer[coreFailure]
@@ -317,7 +314,11 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	}
 	diskConfig := cfg
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
-	e := &coreEngine{readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
+	identities := hooks.Identities
+	if identities == nil {
+		identities = &PolicyCatalog{}
+	}
+	e := &coreEngine{identities: identities, readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			_ = o.db.Close()
@@ -401,7 +402,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		o.publishFrontier(o.meta)
 		if cfg.Rollups && !readOnly {
-			r, err := recoverCoreRollups(db)
+			r, err := recoverCoreRollups(db, identities)
 			if err != nil {
 				return fail(err)
 			}
@@ -502,27 +503,9 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	router := &e.routers[producer]
 	if e.cfg.Rollups {
-		if router.rollupRoutes == nil {
-			router.rollupRoutes = make(map[uint64]rollupRoute)
-		}
 		for _, b := range batches {
-			if route, ok := router.rollupRoutes[b.ID]; ok {
-				if !bytes.Equal(route.policy, b.Policy) {
-					return errors.New("stored rollup policy changed")
-				}
-			} else {
-				var p RollupPolicy
-				if err := json.Unmarshal(b.Policy, &p); err != nil {
-					return err
-				}
-				canonical, err := EncodeRollupPolicy(p)
-				if err != nil {
-					return err
-				}
-				if !bytes.Equal(canonical, b.Policy) {
-					return errors.New("noncanonical rollup policy")
-				}
-				router.rollupRoutes[b.ID] = rollupRoute{owner: int(partsformat.Route(p.Name)) % e.cfg.Shards, policy: canonical}
+			if _, err := e.identities.intern(b.ID, "", b.Policy); err != nil {
+				return err
 			}
 		}
 	}
@@ -530,11 +513,11 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		if !e.cfg.Rollups {
 			return coreShard(id, e.cfg.Shards), nil
 		}
-		route, ok := router.rollupRoutes[id]
-		if !ok {
+		h := e.identities.lookup(id)
+		if h == nil {
 			return 0, errors.New("rollup row requires original application policy")
 		}
-		return route.owner, nil
+		return int(partsformat.Route(h.policy.Name)) % e.cfg.Shards, nil
 	}
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
@@ -684,7 +667,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			pointOffset += n
 			if e.cfg.Rollups {
 				// The producer-local route owns its validated canonical bytes.
-				b.Policy = router.rollupRoutes[b.ID].policy
+				b.Policy = e.identities.lookup(b.ID).definition
 			} else {
 				n = copy(policyArena[policyOffset:], b.Policy)
 				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]
