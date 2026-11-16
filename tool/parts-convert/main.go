@@ -47,6 +47,7 @@ type result struct {
 
 func main() {
 	c := config{}
+	density := flag.String("packing-density", "", "read-only physical SST and archive encoding attribution for an offline target")
 	packTarget := flag.String("pack-copy", "", "offline converted target: inventory or repack SSTs with indexed transfer key ranges")
 	packSource := flag.String("pack-source", "", "offline legacy source path used only for original-allocation admission")
 	packApply := flag.Bool("pack-apply", false, "apply verified offline SST packing (default inventories only)")
@@ -77,6 +78,17 @@ func main() {
 	flag.Int64Var(&c.partitionSeconds, "partition-seconds", 86400, "synthetic time partition width; larger widths trade expiry granularity for compression")
 	flag.Uint64Var(&c.minFreeGiB, "min-free-gib", 8, "free space left for other users")
 	flag.Parse()
+	if *density != "" {
+		r, err := inspectPackingDensity(context.Background(), *density)
+		if err == nil {
+			err = json.NewEncoder(os.Stdout).Encode(r)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *packTarget != "" {
 		if *legacyIO == 0 || *legacyIO > 10000 || *packMiB < 1 || *packMiB > 64 {
 			fmt.Fprintln(os.Stderr, "ERROR: invalid packing IO cap or SST target")

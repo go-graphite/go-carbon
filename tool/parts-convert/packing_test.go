@@ -106,6 +106,10 @@ func TestPackingPreservesLogicalReceiptsAndBoundaries(t *testing.T) {
 	if r.After.SSTBytes != r.Before.PlannedSSTBytes {
 		t.Fatalf("dry encoding differs from actual SST bytes: %+v", r)
 	}
+	density, err := inspectPackingDensity(context.Background(), dir)
+	if err != nil || density.Compressions["ZSTD"] != density.SSTs {
+		t.Fatalf("packed compression: %+v %v", density, err)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "packing-old")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("old generation retained", err)
 	}

@@ -67,6 +67,14 @@ func packingOptions(readOnly bool) *pebble.Options {
 		Levels: []pebble.LevelOptions{{TargetFileSize: 32 << 20}}}
 }
 
+// Keep logical keys and values intact: recovery receipts hash those bytes.
+// A large compression window amortizes repeated archive schemas and names
+// across daily singleton records without changing ownership or expiry ranges.
+func packingWriterOptions() sstable.WriterOptions {
+	return sstable.WriterOptions{Compression: sstable.ZstdCompression,
+		BlockSize: 256 << 10, BlockRestartInterval: 64}
+}
+
 func packingPrefix(key []byte) ([]byte, error) {
 	k, err := partsformat.Decode(key)
 	if err != nil {
@@ -136,7 +144,7 @@ func inventoryPacking(ctx context.Context, db *pebble.DB, path string, target ui
 			out.MinimumOutputFiles++
 			used = 0
 			sink = new(packingSizeSink)
-			writer = sstable.NewWriter(sink, sstable.WriterOptions{Compression: sstable.SnappyCompression})
+			writer = sstable.NewWriter(sink, packingWriterOptions())
 		}
 		if err = writer.Set(it.Key(), it.Value()); err != nil {
 			break
@@ -473,7 +481,7 @@ func packCopy(ctx context.Context, source, target string, original, targetBytes 
 				err = e
 				break
 			}
-			w = sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
+			w = sstable.NewWriter(objstorageprovider.NewFileWritable(f), packingWriterOptions())
 			shardPrefix = bytes.Clone(shard)
 		}
 		if err = w.Set(it.Key(), it.Value()); err != nil {
