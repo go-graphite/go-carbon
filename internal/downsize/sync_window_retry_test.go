@@ -211,6 +211,9 @@ func TestSyncWindowRetryDifferentialBatches(t *testing.T) {
 	if count != len(names) {
 		t.Fatal("unresolved names", count)
 	}
+	if s.prog.done.Load() != int64(len(names)) {
+		t.Fatal("partial resume lost durable retry progress", s.prog.done.Load())
+	}
 	before := len(j.rows)
 	if err := s.retryWindowSelections(ctx); err != nil {
 		t.Fatal(err)

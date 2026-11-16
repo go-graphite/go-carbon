@@ -120,10 +120,22 @@ func TestBaselineCheckpointRejectsChangedCaptureAndDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: int(time.Now().Unix()) - 20, Value: 99}}); err != nil {
+	// Mutate a point already retained by the capture. An older new timestamp
+	// can legitimately be omitted by the live capture boundary.
+	retained, err := c.db.Snapshot(ctx, e.Metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: int(retained.Archives[0].Points[0].Timestamp), Value: 99}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The checkpoint intentionally uses file identity. Make the change visible
+	// even when a tmpfs reports both writes in the same timestamp tick.
+	changedTime := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, changedTime, changedTime); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := c.convert(ctx, e); err == nil {
