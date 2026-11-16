@@ -367,7 +367,7 @@ func TestTypedStateOperatorSQL(t *testing.T) {
 	s := newTypedState(t, 10)
 	var count int
 	err := s.db.QueryRow("SELECT count(*) FROM sqlite_schema WHERE type='table'").Scan(&count)
-	if err != nil || count != 14+len(stateSemanticDigestQueries)+len(stateTransferDigestQueries)+len(stateIssuesDigestQueries)+len(stateSelectionDigestQueries) {
+	if err != nil || count != 14+len(stateSemanticDigestQueries)+len(stateTransferDigestQueries)+len(stateIssuesDigestQueries)+len(stateSelectionDigestQueries)+len(stateDiscoveryDigestQueries) {
 		t.Fatalf("schema inventory: %d %v", count, err)
 	}
 	var journal string

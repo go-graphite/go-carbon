@@ -119,7 +119,7 @@ func (t *stateTx) putCatalog(first int64, names []syncName) error {
 }
 
 func (s *stateStore) catalogName(id int64) (syncName, error) {
-	if id < 1 || id > s.unit.CatalogNames {
+	if id < 1 || id > s.currentUnit().CatalogNames {
 		return syncName{}, errors.New("name ID outside catalog")
 	}
 	first := (id-1)/statePageNames*statePageNames + 1
@@ -142,7 +142,7 @@ func (s *stateStore) catalogPage(where string, arg any) ([]syncName, error) {
 		return nil, err
 	}
 	sum := sha256.Sum256(data)
-	if generation != s.unit.CatalogGeneration || !bytes.Equal(sum[:], digest) {
+	if generation != s.currentUnit().CatalogGeneration || !bytes.Equal(sum[:], digest) {
 		return nil, errors.New("catalog generation or page checksum mismatch")
 	}
 	names, err := decodeStateCatalog(data)

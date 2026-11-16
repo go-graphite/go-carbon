@@ -294,35 +294,39 @@ func TestTypedStateRedoRunsUnsignedKeys(t *testing.T) {
 }
 
 func TestTypedStateRejectsPreviousCandidateSchema(t *testing.T) {
-	s := newTypedState(t, 1)
-	if err := s.close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := connectStateDB(s.path, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec("PRAGMA user_version=1"); err != nil {
-		t.Fatal(err)
-	}
-	if err = db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(s.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = openStateStore(s.path, stateUnit{}, true); err == nil {
-		t.Fatal("accepted old candidate database")
-	}
-	after, err := os.ReadFile(s.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("modified old candidate database")
-	}
-	if _, err = os.Stat(filepath.Join(filepath.Dir(s.path), "config.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("published configuration")
+	for version := 1; version < stateSchema; version++ {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			s := newTypedState(t, 1)
+			if err := s.close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := connectStateDB(s.path, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(s.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = openStateStore(s.path, stateUnit{}, true); err == nil {
+				t.Fatal("accepted old candidate database")
+			}
+			after, err := os.ReadFile(s.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("modified old candidate database")
+			}
+			if _, err = os.Stat(filepath.Join(filepath.Dir(s.path), "config.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("published configuration")
+			}
+		})
 	}
 }

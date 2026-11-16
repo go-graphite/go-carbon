@@ -19,15 +19,16 @@ func StateMain(ctx context.Context, args []string) error {
 }
 
 type stateInspection struct {
-	Version    int                            `json:"version"`
-	Unit       stateUnit                      `json:"unit"`
-	Phases     []statePhase                   `json:"phases"`
-	Windows    []stateWindow                  `json:"windows"`
-	NameID     int64                          `json:"name_id,omitempty"`
-	Name       *syncName                      `json:"name,omitempty"`
-	Issues     []stateIssue                   `json:"issues,omitempty"`
-	Exclusions []stateNamedLedgerIssue        `json:"exclusions,omitempty"`
-	Digests    map[string]stateRelationDigest `json:"relation_digests,omitempty"`
+	Version     int                            `json:"version"`
+	Unit        stateUnit                      `json:"unit"`
+	Phases      []statePhase                   `json:"phases"`
+	Discoveries []stateDiscovery               `json:"discoveries,omitempty"`
+	Windows     []stateWindow                  `json:"windows"`
+	NameID      int64                          `json:"name_id,omitempty"`
+	Name        *syncName                      `json:"name,omitempty"`
+	Issues      []stateIssue                   `json:"issues,omitempty"`
+	Exclusions  []stateNamedLedgerIssue        `json:"exclusions,omitempty"`
+	Digests     map[string]stateRelationDigest `json:"relation_digests,omitempty"`
 }
 
 func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
@@ -50,7 +51,7 @@ func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
 		return fmt.Errorf("ERROR indexed state inspection: %w", err)
 	}
 	defer func() { err = errors.Join(err, s.close()) }()
-	result := stateInspection{Version: stateSchema, Unit: s.unit, Phases: []statePhase{}, Windows: []stateWindow{}}
+	result := stateInspection{Version: stateSchema, Unit: s.currentUnit(), Phases: []statePhase{}, Windows: []stateWindow{}}
 	if *name != "" {
 		found := false
 		err = s.db.QueryRowContext(ctx, "SELECT first_id FROM catalog_page WHERE first_name<=? ORDER BY first_name DESC LIMIT 1", *name).Scan(id)
@@ -103,6 +104,24 @@ func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
 	}
 	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 		return err
+	}
+	var discoveryScopes []string
+	if err = stateTaskRows(tx, "SELECT scope FROM discovery ORDER BY scope", nil, func(rows *sql.Rows) error {
+		var scope string
+		if err := rows.Scan(&scope); err != nil {
+			return err
+		}
+		discoveryScopes = append(discoveryScopes, scope)
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, scope := range discoveryScopes {
+		d, err := readStateDiscovery(tx, scope)
+		if err != nil {
+			return err
+		}
+		result.Discoveries = append(result.Discoveries, d)
 	}
 	rows, err = tx.QueryContext(ctx, "SELECT id,scope,holder,start,until,selection,transfer,verification FROM window ORDER BY id")
 	if err != nil {

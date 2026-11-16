@@ -23,13 +23,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const stateSchema = 3
+const stateSchema = 4
 const stateApplicationID = 0x5343544c // SCTL, distinct from the offline benchmark
 const statePageNames = 4096
 
 type stateUnit struct {
 	Identity, Options, CatalogGeneration string
-	CatalogNames                         int64
+	// A writer may expect -1 while discovery owns the final size. Stored units
+	// always have a nonnegative count, bound to the discovery seal on reopen.
+	CatalogNames int64
 }
 
 type statePhase struct {
@@ -151,7 +153,7 @@ func createStateStore(path string, unit stateUnit) (_ *stateStore, err error) {
 		return nil, err
 	}
 	defer t.Rollback()
-	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL + stateIssuesDDL + stateSelectionDDL); err == nil {
+	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL + stateIssuesDDL + stateSelectionDDL + stateDiscoveryDDL); err == nil {
 		_, err = t.Exec("INSERT INTO unit VALUES(1,1,?,?,?,?)", unit.Identity, unit.Options, unit.CatalogGeneration, unit.CatalogNames)
 	}
 	if err == nil {
@@ -208,7 +210,21 @@ func openStateStore(path string, expected stateUnit, readOnly bool) (_ *stateSto
 		return nil, err
 	}
 	if expected != (stateUnit{}) && unit != expected {
-		return nil, errors.New("indexed state identity, options or catalog generation changed")
+		if expected.CatalogNames != -1 {
+			return nil, errors.New("indexed state identity, options or catalog generation changed")
+		}
+		expected.CatalogNames = unit.CatalogNames
+		if unit != expected {
+			return nil, errors.New("indexed discovery identity, options or catalog generation changed")
+		}
+		var names int64
+		var complete bool
+		if err = db.QueryRow("SELECT names,complete FROM discovery WHERE generation=?", unit.CatalogGeneration).Scan(&names, &complete); err != nil {
+			return nil, fmt.Errorf("unknown final catalog size requires discovery state: %w", err)
+		}
+		if complete && names != unit.CatalogNames || !complete && unit.CatalogNames != 0 {
+			return nil, errors.New("indexed discovery seal differs from final catalog size")
+		}
 	}
 	if !readOnly {
 		if err = db.Close(); err != nil {
@@ -277,14 +293,24 @@ func (s *stateStore) update(fn func(*stateTx) error) (err error) {
 			err = errors.Join(err, s.failure)
 		}
 	}()
-	if err = fn(&stateTx{t, s.unit}); err != nil {
+	next := &stateTx{t, s.unit}
+	if err = fn(next); err != nil {
 		return err
 	}
 	if err = t.Commit(); err != nil {
 		s.failure = fmt.Errorf("indexed state commit failed; reopen and reconcile before continuing: %w", err)
 		return s.failure
 	}
+	if next.unit != s.unit {
+		s.unit = next.unit
+	}
 	return nil
+}
+
+func (s *stateStore) currentUnit() stateUnit {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unit
 }
 
 func (t *stateTx) beginScope(id, parent, reason string) error {
@@ -576,6 +602,9 @@ func stateRelationDigests(t *sql.Tx) (map[string]stateRelationDigest, error) {
 		"ready":      "SELECT * FROM ready ORDER BY scope",
 	}
 	for name, query := range stateSelectionDigestQueries {
+		queries[name] = query
+	}
+	for name, query := range stateDiscoveryDigestQueries {
 		queries[name] = query
 	}
 	for name, query := range stateIssuesDigestQueries {

@@ -368,7 +368,8 @@ type syncResidual struct {
 }
 
 type syncer struct {
-	phaseMu              sync.Mutex // phase entry and progress publication are one transition
+	discoveryState       syncDiscoveryPersistence // nil selects the legacy files; no runtime SQLite activation yet
+	phaseMu              sync.Mutex               // phase entry and progress publication are one transition
 	resume               syncPhasePosition
 	phaseJournal         bool
 	newScope             []string

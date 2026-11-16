@@ -203,7 +203,7 @@ func TestTypedStateInspectCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 		var got stateInspection
-		if err := json.Unmarshal(output.Bytes(), &got); err != nil || got.NameID != 3 || got.Name == nil || *got.Name != names[2] || got.Phases[0].Phase != "window retry" || len(got.Digests) != 12+len(stateSemanticDigestQueries)+len(stateTransferDigestQueries)+len(stateIssuesDigestQueries)+len(stateSelectionDigestQueries) {
+		if err := json.Unmarshal(output.Bytes(), &got); err != nil || got.NameID != 3 || got.Name == nil || *got.Name != names[2] || got.Phases[0].Phase != "window retry" || len(got.Digests) != 12+len(stateSemanticDigestQueries)+len(stateTransferDigestQueries)+len(stateIssuesDigestQueries)+len(stateSelectionDigestQueries)+len(stateDiscoveryDigestQueries) {
 			t.Fatalf("inspection: %s %v", output.String(), err)
 		}
 	}

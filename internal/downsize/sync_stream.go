@@ -154,11 +154,19 @@ type syncTSV struct {
 // discover durably merges consumed catalog prefixes. A journal checkpoint binds
 // per-source cursors to exact offsets in both output files; recovery drops only
 // the tail written after the last committed checkpoint.
-func (s *syncer) discover(ctx context.Context) error {
-	if rows := s.j.find(func(r syncRow) bool { return r.Kind == "discovered" }); len(rows) > 0 {
-		r := rows[0]
-		s.sum.Discovered, s.sum.Missing, s.sum.NotOwned, s.sum.OnTarget, s.both = r.Names, r.Missing, r.NotOwned, r.OnTarget, r.Both
-		event("sync_discover_resumed", map[string]any{"names": r.Names, "missing": r.Missing})
+func (s *syncer) discover(ctx context.Context) (result error) {
+	state := s.discoveryState
+	if state == nil {
+		state = &legacySyncDiscovery{s: s}
+	}
+	defer func() { result = errors.Join(result, state.close()) }()
+	cp, complete, err := state.load()
+	if err != nil {
+		return err
+	}
+	if complete {
+		s.sum.Discovered, s.sum.Missing, s.sum.NotOwned, s.sum.OnTarget, s.both = cp.Names, cp.Missing, cp.NotOwned, cp.OnTarget, cp.Both
+		event("sync_discover_resumed", map[string]any{"names": cp.Names, "missing": cp.Missing})
 		return nil
 	}
 	if s.phaseBeforeResume("discover", 0) {
@@ -174,41 +182,18 @@ func (s *syncer) discover(ctx context.Context) error {
 	if s.o.namesFile != "" {
 		stores = append(stores, "@names")
 	}
-	cp := syncDiscoveryCheckpoint{Cursors: map[string]string{}}
-	if rows := s.j.find(func(r syncRow) bool { return r.Kind == "discover_checkpoint" }); len(rows) > 0 {
-		cp = *rows[len(rows)-1].Discovery
-		cp.Cursors = cloneCursors(cp.Cursors)
+	if cp.Names > 0 || len(cp.Cursors) > 0 {
 		event("sync_discovery_resumed", map[string]any{"names": cp.Names, "cursors": cp.Cursors})
 	}
-	union, err := openDurableTSV(s.unionPath(), cp.UnionBytes)
-	if err != nil {
+	if err := state.open(cp); err != nil {
 		return err
 	}
-	defer union.file.Close()
-	missing, err := openDurableTSV(s.missingPath(), cp.MissingBytes)
-	if err != nil {
-		return err
-	}
-	defer missing.file.Close()
 	names, nMissing, notOwned, onTarget, both := cp.Names, cp.Missing, cp.NotOwned, cp.OnTarget, cp.Both
 	s.prog.done.Store(int64(names))
-	checkpoint := func() error {
-		u, err := union.durableOffset()
-		if err != nil {
-			return err
-		}
-		m, err := missing.durableOffset()
-		if err != nil {
-			return err
-		}
-		cp.UnionBytes, cp.MissingBytes = u, m
+	checkpoint := func(complete bool) error {
 		cp.Names, cp.Missing, cp.NotOwned, cp.OnTarget, cp.Both = names, nMissing, notOwned, onTarget, both
-		saved := cp
-		saved.Cursors = cloneCursors(cp.Cursors)
-		return s.j.append(syncRow{Kind: "discover_checkpoint", Discovery: &saved})
-	}
-	// Commit newly-created directory entries before any cursor can reference them.
-	if err := syncDirectory(s.o.state); err != nil {
+		var err error
+		cp, err = state.commit(cp, complete)
 		return err
 	}
 	listers := make([]*syncLister, len(stores))
@@ -233,7 +218,7 @@ func (s *syncer) discover(ctx context.Context) error {
 		}
 	}
 	lastCheckpoint, processed := time.Now(), 0
-	fail := func(err error) error { return errors.Join(err, checkpoint()) }
+	fail := func(err error) error { return errors.Join(err, checkpoint(false)) }
 	for {
 		head, found := "", false
 		for _, l := range listers {
@@ -248,7 +233,7 @@ func (s *syncer) discover(ctx context.Context) error {
 			return fail(err)
 		}
 		if processed >= syncListPage || time.Since(lastCheckpoint) >= 3*time.Second {
-			if err := checkpoint(); err != nil {
+			if err := checkpoint(false); err != nil {
 				return err
 			}
 			lastCheckpoint, processed = time.Now(), 0
@@ -271,18 +256,17 @@ func (s *syncer) discover(ctx context.Context) error {
 		} else {
 			names++
 			s.prog.done.Add(1)
-			t := 0
 			if inTarget {
-				t = 1
 				onTarget++
 				if mask != 0 {
 					both++
 				}
 			} else {
 				nMissing++
-				fmt.Fprintf(missing.w, "%s\t%x\n", head, mask)
 			}
-			fmt.Fprintf(union.w, "%s\t%x\t%d\n", head, mask, t)
+			if err := state.append(syncName{Name: head, Sources: mask, OnTarget: inTarget}); err != nil {
+				return err
+			}
 		}
 		processed++
 		for i, l := range listers {
@@ -299,13 +283,10 @@ func (s *syncer) discover(ctx context.Context) error {
 			}
 		}
 	}
-	if err := checkpoint(); err != nil {
+	if err := checkpoint(true); err != nil {
 		return err
 	}
 	s.sum.Discovered, s.sum.Missing, s.sum.NotOwned, s.sum.OnTarget, s.both = names, nMissing, notOwned, onTarget, both
-	if err := s.j.append(syncRow{Kind: "discovered", Names: names, Missing: nMissing, NotOwned: notOwned, OnTarget: onTarget, Both: both}); err != nil {
-		return err
-	}
 	event("sync_discovered", map[string]any{"names": names, "on_target": onTarget, "on_target_and_source": both, "missing": nMissing, "not_owned": notOwned})
 	return s.endPhase("discover", names)
 }

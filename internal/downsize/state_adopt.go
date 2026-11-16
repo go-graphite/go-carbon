@@ -233,8 +233,8 @@ func (s *stateStore) adoptCatalog(relative string) (stats stateAdoptStats, err e
 		}
 		next.Complete = next.Offset == next.Source.Size
 		copy(next.PrefixSHA256[:], f.prefix.Sum(nil))
-		if next.Complete && next.Records != s.unit.CatalogNames {
-			return stats, fmt.Errorf("catalog reducer count mismatch: expected %d, imported %d", s.unit.CatalogNames, next.Records)
+		if names := s.currentUnit().CatalogNames; next.Complete && next.Records != names {
+			return stats, fmt.Errorf("catalog reducer count mismatch: expected %d, imported %d", names, next.Records)
 		}
 		if next.Complete && next.PrefixSHA256 != next.Source.SHA256 {
 			return stats, errors.New("catalog changed after initial authentication")
