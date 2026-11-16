@@ -265,7 +265,7 @@ github.com/googleapis/gax-go/v2/internallog
 github.com/googleapis/gax-go/v2/internallog/grpclog
 github.com/googleapis/gax-go/v2/internallog/internal
 github.com/googleapis/gax-go/v2/iterator
-# github.com/grafana/pyroscope-go v1.4.3
+# github.com/grafana/pyroscope-go v1.5.0
 ## explicit; go 1.25.0
 github.com/grafana/pyroscope-go
 github.com/grafana/pyroscope-go/internal/labelset
@@ -273,7 +273,7 @@ github.com/grafana/pyroscope-go/internal/pprof
 github.com/grafana/pyroscope-go/internal/semconv
 github.com/grafana/pyroscope-go/upstream
 github.com/grafana/pyroscope-go/upstream/remote
-# github.com/grafana/pyroscope-go/godeltaprof v0.1.11
+# github.com/grafana/pyroscope-go/godeltaprof v0.1.12
 ## explicit; go 1.25.0
 github.com/grafana/pyroscope-go/godeltaprof
 github.com/grafana/pyroscope-go/godeltaprof/internal/pprof

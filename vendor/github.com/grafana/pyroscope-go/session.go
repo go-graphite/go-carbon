@@ -274,7 +274,7 @@ func (ps *Session) uploadData(startTime, endTime time.Time) {
 				Profile:         copyBuf(ps.goroutinesBuf.Bytes()),
 				SampleTypeConfig: map[string]*upstream.SampleType{
 					"goroutine": {
-						DisplayName: "goroutines",
+						DisplayName: "goroutine",
 						Units:       "goroutines",
 						Aggregation: "average",
 					},
