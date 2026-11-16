@@ -111,6 +111,7 @@ type compareJob struct {
 	SourceCaughtUp bool
 	Attempt        int
 	FirstSnapshot  time.Time
+	PostClose      bool
 }
 type slot struct{ Bits, Seq uint64 }
 type difference struct {
@@ -222,6 +223,7 @@ func compare(job compareJob, base string, sums *totals) bool {
 		}
 	}
 	result := map[string]any{"stage": "comparison", "context": contextLoad(), "from": job.From, "until": job.Until, "source_path": job.SourcePath, "source_offset": job.SourceOffset, "source_caught_up_at_snapshot": job.SourceCaughtUp, "requested_names": len(job.Names), "names": job.Names, "attempt": job.Attempt, "since_first_snapshot_seconds": time.Since(job.FirstSnapshot).Seconds(), "scan_seconds": time.Since(start).Seconds()}
+	result["post_close_recheck"] = job.PostClose
 	if scanErr != nil {
 		sums.Failures++
 		result["error"] = scanErr.Error()
@@ -272,7 +274,11 @@ func run() (retErr error) {
 	interval := flag.Duration("compare-interval", time.Minute, "comparison cadence")
 	sample := flag.Int("sample", 16, "rotating names per comparison")
 	lag := flag.Duration("lag", 120*time.Second, "fixed measured/exposed exclusion, not a parity waiver")
+	recheck := flag.String("recheck", "", "one saved comparison JSON object to check against a stopped existing out root, opened read-only")
 	flag.Parse()
+	if *recheck != "" {
+		return recheckFrozen(*out, *recheck, *base, *shards)
+	}
 	if *source == "" || *out == "" || *duration <= 0 || *sample < 1 || *interval <= 0 || *lag < 0 {
 		return errors.New("source, fresh out and positive limits required")
 	}
