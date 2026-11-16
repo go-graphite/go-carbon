@@ -1,0 +1,137 @@
+{
+  "routing": {
+    "name_version": "post-rewrite-bytes-v1",
+    "jump_sizes": [
+      3,
+      4,
+      7
+    ],
+    "span": 64,
+    "namespaces": [
+      {
+        "id": "metrics",
+        "prefix": ""
+      },
+      {
+        "id": "alias",
+        "prefix": "alias."
+      },
+      {
+        "id": "tagged",
+        "prefix": "tagged;"
+      }
+    ]
+  },
+  "vectors": [
+    {
+      "name": "a",
+      "cell": [
+        2,
+        2,
+        2
+      ],
+      "vshard": 816,
+      "group": "bWV0cmljcw/cell-2-2-2/v768-832"
+    },
+    {
+      "name": "foo.bar",
+      "cell": [
+        1,
+        1,
+        1
+      ],
+      "vshard": 1095,
+      "group": "bWV0cmljcw/cell-1-1-1/v1088-1152"
+    },
+    {
+      "name": "probe.metric.273",
+      "cell": [
+        1,
+        1,
+        4
+      ],
+      "vshard": 2519,
+      "group": "bWV0cmljcw/cell-1-1-4/v2496-2560"
+    },
+    {
+      "name": "probe.metric.308",
+      "cell": [
+        2,
+        2,
+        2
+      ],
+      "vshard": 2519,
+      "group": "bWV0cmljcw/cell-2-2-2/v2496-2560"
+    },
+    {
+      "name": "alias.foo.bar",
+      "cell": [
+        0,
+        0,
+        0
+      ],
+      "vshard": 3115,
+      "group": "YWxpYXM/cell-0-0-0/v3072-3136"
+    },
+    {
+      "name": "foo.bar;tag=x",
+      "cell": [
+        2,
+        2,
+        5
+      ],
+      "vshard": 2750,
+      "group": "bWV0cmljcw/cell-2-2-5/v2688-2752"
+    },
+    {
+      "name": "tagged;k=v",
+      "cell": [
+        2,
+        3,
+        3
+      ],
+      "vshard": 2583,
+      "group": "dGFnZ2Vk/cell-2-3-3/v2560-2624"
+    },
+    {
+      "name": "metric.µ.東京",
+      "cell": [
+        0,
+        0,
+        6
+      ],
+      "vshard": 4076,
+      "group": "bWV0cmljcw/cell-0-0-6/v4032-4096"
+    },
+    {
+      "name": "metric.-0",
+      "cell": [
+        2,
+        2,
+        2
+      ],
+      "vshard": 3393,
+      "group": "bWV0cmljcw/cell-2-2-2/v3392-3456"
+    },
+    {
+      "name": "_internal.stats",
+      "cell": [
+        1,
+        1,
+        6
+      ],
+      "vshard": 741,
+      "group": "bWV0cmljcw/cell-1-1-6/v704-768"
+    },
+    {
+      "name": "metrics.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "cell": [
+        1,
+        1,
+        1
+      ],
+      "vshard": 3514,
+      "group": "bWV0cmljcw/cell-1-1-1/v3456-3520"
+    }
+  ]
+}
