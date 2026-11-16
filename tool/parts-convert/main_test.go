@@ -24,7 +24,7 @@ func TestSyntheticRunsRealIngestAndVerification(t *testing.T) {
 }
 
 func TestCompareActualColdPackSameStoredSlots(t *testing.T) {
-	c := config{dir: filepath.Join(t.TempDir(), "comparison"), workers: 1, shards: 1, metrics: 2, points: 512, archives: 1, chunkMiB: 1}
+	c := config{dir: filepath.Join(t.TempDir(), "comparison"), workers: 1, shards: 1, metrics: 65, points: 64, archives: 1, chunkMiB: 1}
 	r, err := compare(context.Background(), c)
 	if err != nil {
 		t.Fatal(err)
