@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -30,5 +31,30 @@ func TestCompareActualColdPackSameStoredSlots(t *testing.T) {
 	}
 	if !r.BitExact || r.Points == 0 || r.LegacySSTBytes == 0 || r.ConvertedSSTBytes == 0 || r.ColdPackBlocks == 0 {
 		t.Fatalf("incomplete comparison: %+v", r)
+	}
+}
+
+func TestCompareRealConvertedSameSlots(t *testing.T) {
+	root := t.TempDir()
+	c := config{dir: filepath.Join(root, "synthetic"), workers: 1, shards: 1, metrics: 2, points: 512, archives: 1, chunkMiB: 1}
+	original, err := compare(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "target")
+	if err = os.Mkdir(target, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(filepath.Join(c.dir, "converted"), filepath.Join(target, "parts")); err != nil {
+		t.Fatal(err)
+	}
+	c.dir = filepath.Join(root, "real")
+	c.realConverted = target
+	real, err := compare(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !real.RealStoredSlots || !real.BitExact || real.Points != original.Points || real.Metrics != original.Metrics || real.ColdPackBlocks == 0 {
+		t.Fatalf("real slots comparison: %+v original %+v", real, original)
 	}
 }

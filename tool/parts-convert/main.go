@@ -30,6 +30,7 @@ import (
 
 type config struct {
 	dir                                                               string
+	realConverted                                                     string
 	workers, shards, metrics, points, archives, chunkMiB, blockPoints int
 	minFreeGiB                                                        uint64
 	partitionSeconds                                                  int64
@@ -56,7 +57,9 @@ func main() {
 	realPartial := flag.Bool("verify-partial-real-copy", false, "verify frozen queries across published parts and remaining legacy; report incomplete coverage explicitly")
 	realOraclePath := flag.String("real-oracle", "", "pre-conversion real render oracle path")
 	realSource := flag.String("real-source-render", "", "optional read-only source render origin for exact differential verification")
+	realPaired := flag.String("real-paired-legacy", "", "optional offline cold-pack comparator legacy directory for paired in-process reads")
 	baseline := flag.Bool("compare-coldpack", false, "compare actual legacy cold-pack and converted SST bytes on identical stored slots")
+	flag.StringVar(&c.realConverted, "compare-real-parts", "", "read an offline converted target as the same-slot cold-pack comparison input")
 	legacyCopy := flag.String("convert-copy", "", "EXPERIMENTAL: exclusively owned offline legacy COPY to convert and delete batch by batch")
 	legacyBatch := flag.Int("copy-batch-metrics", 32, "maximum metrics per offline copy name batch")
 	legacyOrder := flag.Bool("copy-id-order", false, "convert archive payloads in numeric legacy ID order using independent coverage receipts")
@@ -111,7 +114,7 @@ func main() {
 		} else if *realCapture != "" {
 			err = captureReal(context.Background(), *realCapture, *realOraclePath)
 		} else {
-			err = verifyReal(context.Background(), *realVerify, c.dir, *realOraclePath, *realSource, *realPartial)
+			err = verifyRealPaired(context.Background(), *realVerify, c.dir, *realOraclePath, *realSource, *realPaired, *realPartial)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ERROR:", err)
@@ -146,6 +149,11 @@ func main() {
 		return
 	}
 	if *baseline {
+		if *legacyIO == 0 || *legacyIO > 10000 {
+			fmt.Fprintln(os.Stderr, "ERROR: invalid comparison IO cap")
+			os.Exit(1)
+		}
+		vfs.Default = newPacedFS(vfs.Default, *legacyIO*1_000_000)
 		if c.dir == "" || c.shards < 1 || c.metrics < 1 || c.points < 1 || c.archives < 1 || c.archives > 4 {
 			fmt.Fprintln(os.Stderr, "ERROR: invalid comparison configuration")
 			os.Exit(1)

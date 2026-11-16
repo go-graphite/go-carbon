@@ -212,6 +212,13 @@ func sourceReal(ctx context.Context, base string, q realQuery) error {
 }
 
 func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceURL string, partial ...bool) error {
+	return verifyRealPaired(ctx, legacyPath, targetPath, oraclePath, sourceURL, "", partial...)
+}
+
+func verifyRealPaired(ctx context.Context, legacyPath, targetPath, oraclePath, sourceURL, pairedPath string, partial ...bool) error {
+	if sourceURL != "" && pairedPath != "" {
+		return errors.New("select live HTTP or offline paired legacy, not both")
+	}
 	allowPartial := len(partial) > 0 && partial[0]
 	unlockPacking, err := packingLock(targetPath)
 	if err != nil {
@@ -384,18 +391,56 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	if err != nil {
 		return err
 	}
+	var paired *chunkstore.Store
+	if pairedPath != "" {
+		opts, _, e := realOptions(pairedPath, oracle.Now)
+		if e != nil {
+			return e
+		}
+		paired, e = chunkstore.Open(pairedPath, opts)
+		if e != nil {
+			return e
+		}
+		defer paired.Close()
+	}
 	var legacyNS, capturedNS, convertedNS []int64
+	var convertedOnlyNS, nativeConvertedOnlyNS []int64
 	for i, q := range oracle.Queries {
 		converted := func() error {
 			started := time.Now()
 			err := reader.Fetch(ctx, q.Name, q.From, q.Until, func(s *partsread.Series) error { return compareRealSeries(q, s.From, s.Until, s.Step, s.Values) })
-			convertedNS = append(convertedNS, time.Since(started).Nanoseconds())
+			ns := time.Since(started).Nanoseconds()
+			convertedNS = append(convertedNS, ns)
+			if covered[q.Name] {
+				convertedOnlyNS = append(convertedOnlyNS, ns)
+			}
 			return err
 		}
 		live := func() error {
 			started := time.Now()
-			err := sourceReal(ctx, sourceURL, q)
-			legacyNS = append(legacyNS, time.Since(started).Nanoseconds())
+			var err error
+			if paired != nil {
+				native := legacy
+				if covered[q.Name] {
+					native = paired
+				}
+				series, e := native.Fetch(ctx, q.Name, int(q.From), int(q.Until))
+				err = e
+				if err == nil {
+					if series == nil {
+						err = errors.New("nil paired legacy series")
+					} else {
+						err = compareRealSeries(q, int64(series.FromTime), int64(series.UntilTime), int64(series.Step), series.Values)
+					}
+				}
+			} else {
+				err = sourceReal(ctx, sourceURL, q)
+			}
+			ns := time.Since(started).Nanoseconds()
+			legacyNS = append(legacyNS, ns)
+			if paired != nil && covered[q.Name] {
+				nativeConvertedOnlyNS = append(nativeConvertedOnlyNS, ns)
+			}
 			return err
 		}
 		if q.LegacyFetchNS > 0 {
@@ -403,7 +448,7 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 		}
 		// Alternate which arm runs first. Both arms include their exact bit
 		// comparison; the live arm additionally includes HTTP/protobuf work.
-		if sourceURL != "" && i%2 == 0 {
+		if (sourceURL != "" || paired != nil) && i%2 == 0 {
 			if err = live(); err != nil {
 				return err
 			}
@@ -411,14 +456,16 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 		if err = converted(); err != nil {
 			return err
 		}
-		if sourceURL != "" && i%2 != 0 {
+		if (sourceURL != "" || paired != nil) && i%2 != 0 {
 			if err = live(); err != nil {
 				return err
 			}
 		}
 	}
 	comparison := "sequential single-pass; legacy before deletion, converted after; engine cache and OS cache uncontrolled; converted includes exact comparison"
-	if sourceURL == "" {
+	if paired != nil {
+		comparison = "paired same-query alternating order; native cold-packed stored image for converted names and original legacy for remaining names versus mixed parts; both in-process Fetch plus exact comparison; engine and OS caches uncontrolled"
+	} else if sourceURL == "" {
 		legacyNS = capturedNS
 	} else {
 		comparison = "paired same-query alternating order; live legacy HTTP/protobuf versus offline converted in-process; both include exact comparison; engine and OS caches uncontrolled; not an equal-transport engine latency comparison"
@@ -431,21 +478,23 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 		return values[(len(values)*percent+99)/100-1]
 	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
-		Names                       int
-		ConvertedNames, LegacyNames int
-		Partial                     bool
-		Seed                        int64
-		MixedExact, LiveSourceExact bool
-		LegacyP99NS, ConvertedP99NS int64
-		CapturedLegacyP99NS         int64
-		PairedQueries               int
-		LatencyComparison           string
+		Names                                        int
+		ConvertedNames, LegacyNames                  int
+		Partial                                      bool
+		Seed                                         int64
+		MixedExact, LiveSourceExact                  bool
+		LegacyP99NS, ConvertedP99NS                  int64
+		CapturedLegacyP99NS                          int64
+		PairedQueries                                int
+		NativePaired                                 bool
+		ConvertedOnlyP99NS, NativeConvertedOnlyP99NS int64
+		LatencyComparison                            string
 	}{len(oracle.Queries), convertedCount, len(oracle.Queries) - convertedCount, !cursor.Done && !rangeComplete, oracle.Seed, true, sourceURL != "", percentile(legacyNS, 99), percentile(convertedNS, 99), percentile(capturedNS, 99), func() int {
-		if sourceURL != "" {
+		if sourceURL != "" || paired != nil {
 			return len(oracle.Queries)
 		}
 		return 0
-	}(), comparison})
+	}(), paired != nil, percentile(convertedOnlyNS, 99), percentile(nativeConvertedOnlyNS, 99), comparison})
 }
 
 // Only durable publication authority chooses v2; staged target keys never do.

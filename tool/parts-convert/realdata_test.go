@@ -118,6 +118,9 @@ func realOracleRoundTrip(t *testing.T, rangeOrder bool) {
 	if err = verifyReal(ctx, legacyPath, output, oraclePath, "", true); err != nil {
 		t.Fatal("partial frozen oracle", err)
 	}
+	if err = verifyRealPaired(ctx, legacyPath, output, oraclePath, "", legacyPath, true); err != nil {
+		t.Fatal("paired partial frozen oracle", err)
+	}
 	if _, err = convertLegacyCopy(ctx, legacyPath, output, 4096, 256<<20, copyOptions{RangeOrder: rangeOrder}); err != nil {
 		t.Fatal(err)
 	}

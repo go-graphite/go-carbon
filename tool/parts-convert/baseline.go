@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,10 @@ import (
 
 type comparison struct {
 	Points, LegacySSTBytes, ConvertedSSTBytes          uint64
+	RealStoredSlots                                    bool
+	Metrics                                            uint64
+	ActualConvertedSSTBytes                            uint64
+	ActualConvertedBytesPerPoint, ActualRatio          float64
 	LegacyBytesPerPoint, ConvertedBytesPerPoint, Ratio float64
 	ColdPackPoints, ColdPackBlocks                     uint64
 	BitExact                                           bool
@@ -40,6 +45,17 @@ func (c *importCodec) Create(ctx context.Context, kv chunkstore.ContinuationIO, 
 // small and sequential; it measures storage equality, not live writer CPU.
 func compare(ctx context.Context, c config) (comparison, error) {
 	var out comparison
+	if c.realConverted != "" {
+		unlock, err := packingLock(c.realConverted)
+		if err != nil {
+			return out, err
+		}
+		defer unlock()
+		out.ActualConvertedSSTBytes, err = sstBytes(filepath.Join(c.realConverted, "parts"))
+		if err != nil {
+			return out, err
+		}
+	}
 	if err := os.Mkdir(c.dir, 0750); err != nil {
 		return out, err
 	}
@@ -56,9 +72,32 @@ func compare(ctx context.Context, c config) (comparison, error) {
 	}()
 	legacy.StopBackground()
 	images := make(map[partsconvert.Unit][]partsconvert.StoredMetric)
-	for shard := 0; shard < c.shards; shard++ {
-		u := partsconvert.Unit{Group: "synthetic", VShard: uint16(shard)}
+	inputs := make(map[partsconvert.Unit][]partsconvert.StoredMetric)
+	if c.realConverted != "" {
+		inputs, err = storedComparisonInput(ctx, c.realConverted)
+		if err != nil {
+			return out, err
+		}
+		out.RealStoredSlots = true
+	} else {
+		for shard := 0; shard < c.shards; shard++ {
+			u := partsconvert.Unit{Group: "synthetic", VShard: uint16(shard)}
+			source := synthetic(c, u, "comparison-stored-v2")
+			if err := source.ScanMetrics(ctx, u, func(m partsconvert.StoredMetric) error { inputs[u] = append(inputs[u], m); return nil }); err != nil {
+				return out, err
+			}
+		}
+	}
+	for u, input := range inputs {
 		source := synthetic(c, u, "comparison-stored-v2")
+		source.ScanMetrics = func(_ context.Context, _ partsconvert.Unit, y func(partsconvert.StoredMetric) error) error {
+			for _, m := range input {
+				if err := y(m); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		err = source.ScanMetrics(ctx, u, func(m partsconvert.StoredMetric) error {
 			path := filepath.Join(c.dir, "source.wsp")
 			defs := make(whisper.Retentions, len(m.Archives))
@@ -67,11 +106,14 @@ func compare(ctx context.Context, c config) (comparison, error) {
 				defs[i] = &r
 			}
 			seedNow := time.Unix(1728000000, 0)
-			w, err := whisper.CreateWithOptions(path, defs, whisper.Average, .5, &whisper.Options{Compressed: true, Now: func() time.Time { return seedNow }})
+			w, err := whisper.CreateWithOptions(path, defs, whisper.AggregationMethod(m.Method), math.Float32frombits(m.XFilesFactorBits), &whisper.Options{Compressed: true, Now: func() time.Time { return seedNow }})
 			if err != nil {
 				return err
 			}
 			for _, a := range m.Archives {
+				if len(a.Points) == 0 {
+					continue
+				}
 				points := make([]whisper.TimeSeriesPoint, len(a.Points))
 				ptr := make([]*whisper.TimeSeriesPoint, len(points))
 				for i, p := range a.Points {
@@ -92,16 +134,21 @@ func compare(ctx context.Context, c config) (comparison, error) {
 			if err != nil {
 				return err
 			}
-			cfg := chunkstore.MetricConfig{Name: string(m.Name), AggregationMethod: chunkstore.Average, XFilesFactor: .5}
+			cfg := chunkstore.MetricConfig{Name: string(m.Name), AggregationMethod: chunkstore.AggregationMethod(m.Method), XFilesFactor: math.Float32frombits(m.XFilesFactorBits)}
 			for ai, a := range m.Archives {
 				stored, err := w.ArchivePoints(ai)
 				if err != nil {
 					_ = w.Close()
 					return err
 				}
+				original := m.Archives[ai].Points
 				m.Archives[ai].Points = make([]partsconvert.StoredPoint, len(stored))
 				for i, p := range stored {
 					m.Archives[ai].Points[i] = partsconvert.StoredPoint{Timestamp: int64(p.Time), ValueBits: math.Float64bits(p.Value)}
+				}
+				if c.realConverted != "" && !slices.Equal(original, m.Archives[ai].Points) {
+					_ = w.Close()
+					return fmt.Errorf("cold-pack import changed stored slots for %s archive%d", m.Name, ai)
 				}
 				cfg.Retentions = append(cfg.Retentions, chunkstore.Retention{Step: int(a.Step), Count: int(a.Slots)})
 				out.Points += uint64(len(stored))
@@ -113,6 +160,7 @@ func compare(ctx context.Context, c config) (comparison, error) {
 			if _, err = legacy.Create(ctx, cfg); err != nil {
 				return err
 			}
+			out.Metrics++
 			images[u] = append(images[u], m)
 			return os.Remove(path)
 		})
@@ -139,6 +187,40 @@ func compare(ctx context.Context, c config) (comparison, error) {
 		return out, err
 	}
 	legacy = nil
+	if c.realConverted != "" {
+		frozen, err := chunkstore.OpenTransferSource(filepath.Join(c.dir, "legacy"), chunkstore.TransferSourceOptions{Continuation: &whisperio.ContinuationCodec{}, CacheBytes: 8 << 20})
+		if err != nil {
+			return out, err
+		}
+		check := func() error {
+			for _, ms := range images {
+				for _, m := range ms {
+					snapshot, err := frozen.StoredSnapshot(ctx, string(m.Name))
+					if err != nil {
+						return err
+					}
+					if len(snapshot.Archives) != len(m.Archives) {
+						return errors.New("cold-pack changed archive count")
+					}
+					for ai, a := range m.Archives {
+						ps := snapshot.Archives[ai].Points
+						if len(ps) != len(a.Points) {
+							return errors.New("cold-pack changed occupied-slot count")
+						}
+						for i, p := range ps {
+							if p.Timestamp != a.Points[i].Timestamp || math.Float64bits(p.Value) != a.Points[i].ValueBits {
+								return fmt.Errorf("cold-pack changed stored bits for %s archive%d", m.Name, ai)
+							}
+						}
+					}
+				}
+			}
+			return nil
+		}
+		if err := errors.Join(check(), frozen.Close()); err != nil {
+			return out, err
+		}
+	}
 	out.LegacySSTBytes, err = sstBytes(filepath.Join(c.dir, "legacy"))
 	if err != nil {
 		return out, err
@@ -232,6 +314,10 @@ func compare(ctx context.Context, c config) (comparison, error) {
 	out.LegacyBytesPerPoint = float64(out.LegacySSTBytes) / float64(out.Points)
 	out.ConvertedBytesPerPoint = float64(out.ConvertedSSTBytes) / float64(out.Points)
 	out.Ratio = float64(out.ConvertedSSTBytes) / float64(out.LegacySSTBytes)
+	if c.realConverted != "" {
+		out.ActualConvertedBytesPerPoint = float64(out.ActualConvertedSSTBytes) / float64(out.Points)
+		out.ActualRatio = float64(out.ActualConvertedSSTBytes) / float64(out.LegacySSTBytes)
+	}
 	return out, nil
 }
 func sstBytes(root string) (uint64, error) {
