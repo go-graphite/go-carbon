@@ -63,8 +63,6 @@ type rollupMetric struct {
 	prepared *sealrollup.Prepared
 }
 type coreRollups struct {
-	dense bool
-
 	expire func(RollupPolicy, RollupMetadata, time.Time) bool
 	now    func() time.Time
 
@@ -190,11 +188,8 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if err != nil {
 			return err
 		}
-		prefix, err := partsformat.PartitionPrefixForGroup(key.Group, key.VShard, 0)
-		if err != nil {
-			return err
-		}
-		files[string(prefix)] = append(files[string(prefix)], coreKV{Key: encoded, Value: value})
+
+		files[string(key.Group)] = append(files[string(key.Group)], coreKV{Key: encoded, Value: value})
 		return nil
 	}
 	for i := range stages {
@@ -242,42 +237,13 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 			s.next.Revision++
 		}
-		if !r.dense {
-			for _, record := range s.records {
-				if err := put(m, uint32(record.Archive), record.Slot, sealrollup.EncodeRecord(record)); err != nil {
-					return coreSealPlan{}, err
-				}
-			}
-		} else {
-			// Runs keep the immutable metric/archive boundary and original orders.
-			slices.SortFunc(s.records, func(a, b sealrollup.Record) int {
-				if a.Archive != b.Archive {
-					return a.Archive - b.Archive
-				}
-				if a.Slot < b.Slot {
-					return -1
-				}
-				if a.Slot > b.Slot {
-					return 1
-				}
-				return 0
-			})
-			for start := 0; start < len(s.records); {
-				end := start + 1
-				for end < len(s.records) && end-start < partsformat.MaxDenseSlots && s.records[end].Archive == s.records[start].Archive {
-					end++
-				}
-				value, err := partsformat.EncodeSlots(s.records[start:end])
-				if err != nil {
-					return coreSealPlan{}, err
-				}
-				record := s.records[start]
-				if err := put(m, uint32(record.Archive), record.Slot, value); err != nil {
-					return coreSealPlan{}, err
-				}
-				start = end
+		// The shared part writer alone owns physical packing and SST encoding.
+		for _, record := range s.records {
+			if err := put(m, uint32(record.Archive), record.Slot, sealrollup.EncodeRecord(record)); err != nil {
+				return coreSealPlan{}, err
 			}
 		}
+
 		metadata, err := json.Marshal(s.next)
 		if err != nil {
 			return coreSealPlan{}, err
@@ -299,7 +265,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if err != nil {
 			return coreSealPlan{}, err
 		}
-		if err = (partsformat.Scope{Group: first.Group, VShard: first.VShard, Partition: 0, Part: first.Part}).ValidateRange(file[0].Key, file[len(file)-1].Key); err != nil {
+		if err = (partsformat.Scope{Group: first.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: first.Part}).ValidateRange(file[0].Key, file[len(file)-1].Key); err != nil {
 			return coreSealPlan{}, err
 		}
 		out.Files = append(out.Files, file)
