@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	rmetrics "runtime/metrics"
 	"slices"
 	"strconv"
 	"sync"
@@ -212,8 +213,19 @@ func TestPublisherWriterIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Background parents keep cancelCtx.Err reader-local. A shared cancelCtx
+	// introduces reader-only mutex contention unrelated to publication.
+	contexts := make([]context.Context, readers)
+	cancels := make([]context.CancelFunc, readers)
+	for n := range readers {
+		contexts[n], cancels[n] = context.WithCancel(context.Background())
+	}
+	cancelAll := func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}
+	defer cancelAll()
 	var readerWG sync.WaitGroup
 	var queries, readErrors atomic.Uint64
 	ready := make(chan error, readers)
@@ -222,6 +234,7 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		readerWG.Add(1)
 		go func(n int) {
 			defer readerWG.Done()
+			ctx := contexts[n]
 			unpin, err := pinSnapshotReader()
 			ready <- err
 			if err != nil {
@@ -258,11 +271,22 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	}
 	for range readers {
 		if err = <-ready; err != nil {
-			cancel()
+			cancelAll()
 			readerWG.Wait()
 			t.Fatal(err)
 		}
 	}
+	gcMetrics := []rmetrics.Sample{
+		{Name: "/cpu/classes/gc/mark/assist:cpu-seconds"},
+		{Name: "/cpu/classes/gc/total:cpu-seconds"},
+		{Name: "/cpu/classes/total:cpu-seconds"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+	}
+	rmetrics.Read(gcMetrics)
+	assistStart := gcMetrics[0].Value.Float64()
+	gcCPUStart := gcMetrics[1].Value.Float64()
+	cpuStart := gcMetrics[2].Value.Float64()
+	cyclesStart := gcMetrics[3].Value.Uint64()
 	start := time.Now()
 	done := make(chan error, cfg.Producers)
 	for p := 0; p < cfg.Producers; p++ {
@@ -294,7 +318,18 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		err = errors.Join(err, <-done)
 	}
 	elapsed := time.Since(start).Seconds()
+	rmetrics.Read(gcMetrics)
 	sample := coreSample(e, "publisher_isolation", start, 0)
+	sample["gc_assist_seconds"] = gcMetrics[0].Value.Float64() - assistStart
+	sample["gc_cpu_seconds"] = gcMetrics[1].Value.Float64() - gcCPUStart
+	sample["runtime_cpu_seconds"] = gcMetrics[2].Value.Float64() - cpuStart
+	sample["writer_interval_gc_cycles"] = gcMetrics[3].Value.Uint64() - cyclesStart
+	// Runtime total CPU is available processor capacity, including idle time.
+	// This percentage is process-wide; it does not attribute assists to writers.
+	sample["gc_assist_pct_capacity"] = 100 * sample["gc_assist_seconds"].(float64) / (elapsed * float64(runtime.GOMAXPROCS(0)))
+	sample["gogc"] = os.Getenv("GOGC")
+	sample["gomemlimit"] = os.Getenv("GOMEMLIMIT")
+	sample["reader_context"] = "independent_cancel_contexts"
 	sample["writer_seconds"] = elapsed
 	sample["readers"] = readers
 	sample["gomaxprocs"] = runtime.GOMAXPROCS(0)
@@ -316,7 +351,7 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	sample["publication_points"] = points
 	// Readers stay active for the specified settle period; no input is offered.
 	time.Sleep(3 * time.Second)
-	cancel()
+	cancelAll()
 	readerWG.Wait()
 	err = errors.Join(err, e.close())
 	closed = true
