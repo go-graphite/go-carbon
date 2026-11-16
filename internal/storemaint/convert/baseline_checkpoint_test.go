@@ -200,3 +200,119 @@ func TestBaselineCheckpointSidecarChangeAndTornReceipt(t *testing.T) {
 		t.Fatal("unverified converter accepted checkpoint mode")
 	}
 }
+
+// Freeze all stat fields, including ctime, to model a write within a filesystem
+// timestamp tick deterministically. Resetting mtime alone cannot model this.
+func TestBaselineCheckpointRejectsChangedBytesWithIdenticalStat(t *testing.T) {
+	for _, sidecar := range []bool{false, true} {
+		t.Run(map[bool]string{false: "main", true: "sidecar"}[sidecar], func(t *testing.T) {
+			c, e, id := checkpointFixture(t)
+			ctx := context.Background()
+			if _, _, err := c.convert(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(id.Copy, e.Path)
+			changedPath := path
+			if sidecar {
+				changedPath = whisper.OutOfOrderSidecarPath(path)
+				if err := os.WriteFile(changedPath, []byte("original sidecar"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			infos := map[string]os.FileInfo{}
+			for _, name := range []string{path, whisper.OutOfOrderSidecarPath(path)} {
+				info, err := os.Lstat(name)
+				if err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				infos[name] = info
+			}
+			frozenStat := func(name string) (os.FileInfo, error) {
+				if info := infos[name]; info != nil {
+					return info, nil
+				}
+				return nil, os.ErrNotExist
+			}
+			before, err := baselineCaptureStampWithStat(path, frozenStat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := openBaselineCheckpoint(id.Destination, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer proof.close()
+			m, err := c.db.Metadata(ctx, e.Metric)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := proof.verified(e.Metric, m, before, 2); err != nil {
+				t.Fatal(err)
+			}
+			if _, matched, err := proof.match(e.Metric, m, before); err != nil || !matched {
+				t.Fatalf("unchanged receipt: %v %v", matched, err)
+			}
+			f, err := os.OpenFile(changedPath, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := []byte{0}
+			if _, err := f.ReadAt(b, 0); err != nil {
+				t.Fatal(err)
+			}
+			b[0] ^= 1
+			if _, err := f.WriteAt(b, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := baselineCaptureStampWithStat(path, frozenStat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before == after {
+				t.Fatal("changed bytes with identical stat were trusted")
+			}
+			if _, matched, err := proof.match(e.Metric, m, after); err != nil || matched {
+				t.Fatalf("changed content reused receipt: %v %v", matched, err)
+			}
+		})
+	}
+}
+
+func TestBaselineCheckpointRejectsStatOnlyReceipt(t *testing.T) {
+	c, e, id := checkpointFixture(t)
+	if _, _, err := c.convert(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := openBaselineCheckpoint(id.Destination, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proof.close()
+	m, err := c.db.Metadata(context.Background(), e.Metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp, err := baselineCaptureStamp(filepath.Join(id.Copy, e.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proof.verified(e.Metric, m, stamp, 2); err != nil {
+		t.Fatal(err)
+	}
+	data, closer, err := proof.db.Get([]byte(e.Metric))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := append([]byte(nil), data...)
+	closer.Close()
+	old[0] = 1
+	if err := proof.db.Set([]byte(e.Metric), old, pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if _, matched, err := proof.match(e.Metric, m, stamp); err != nil || matched {
+		t.Fatalf("stat-only receipt reused: %v %v", matched, err)
+	}
+}
