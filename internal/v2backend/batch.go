@@ -46,8 +46,8 @@ func (s *Store) resolve(name string) (*resolvedMetric, error) {
 	if _, e = rollupConfig(p); e != nil {
 		return nil, e
 	}
-	if s.legacyCatalog != nil {
-		if old, ok := s.legacyCatalog.Lookup(name); ok {
+	if legacy := s.legacyReady.Load(); legacy != nil {
+		if old, ok := legacy.Lookup(name); ok {
 			if !reflect.DeepEqual(toDaemonMetric(old), p) {
 				return nil, errors.New("legacy policy differs from live policy")
 			}

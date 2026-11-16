@@ -353,6 +353,9 @@ func (d *diskSource) HasArchive(ctx context.Context, id uint64, step int64) (boo
 	return false, nil
 }
 func (s *Store) Fetch(ctx context.Context, name string, from, until int) (*daemonstore.Series, error) {
+	if e := s.readStatus(); e != nil {
+		return nil, e
+	}
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -427,6 +430,9 @@ func responseWork(c *catalog, name string, from, until, now int64) int64 {
 	return ((until-from)/a.Step+2)*40 + 1024
 }
 func (s *Store) Info(ctx context.Context, name string) (daemonstore.Metric, error) {
+	if e := s.readStatus(); e != nil {
+		return daemonstore.Metric{}, e
+	}
 	if e := ctx.Err(); e != nil {
 		return daemonstore.Metric{}, e
 	}
@@ -460,6 +466,9 @@ func (s *Store) Info(ctx context.Context, name string) (daemonstore.Metric, erro
 	return toDaemonMetric(m), nil
 }
 func (s *Store) Find(ctx context.Context, pattern string) ([]daemonstore.Match, error) {
+	if e := s.readStatus(); e != nil {
+		return nil, e
+	}
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}

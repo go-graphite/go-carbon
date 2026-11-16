@@ -60,10 +60,18 @@ continues to use the complete PG/vshard/name key. Scratch retains at most 16MiB 
 key/value chunks per owner; oversized grouping/frame/sample buffers are released
 after sealing. This limits retained scratch, not total process RSS or live heads.
 
-Startup still completes journal/database recovery and replay before opening
-listeners. It does not satisfy the 100ms first-live-append requirement. A durable
-admission epoch and process fencing must be available before historical recovery
-can safely move into the background. Flush first freezes the heads,
+Startup durably fences a new journal epoch before opening receivers. Historical
+catalog/database recovery then runs in the background; reads return an explicit
+recovering error until every owner is ready. During recovery each owner journals
+self-contained PDX1 records, including when PDC4 is selected for steady state.
+The first accepted record is explicitly synced and timestamped before reporting
+durable acceptance. Subsequent records retain the one-second group-sync contract.
+An ordered owner barrier replays its remaining suffix, publishes it, then switches
+that owner to the configured encoder and normal parts admission. This preserves
+original receipt clocks and ordering without retaining a recovery backlog in RAM.
+`Open` still waits for recovery for direct callers; the daemon uses `OpenAdmission`.
+The 100ms acceptance target is a measured qualification gate, not an API guarantee.
+Flush waits for recovery, then freezes the heads,
 syncs the nonempty streams once, then seals the owners concurrently. Admission
 continues into new active heads while the frozen heads seal. One frozen generation
 is allowed at a time; a 256 MiB credit budget per owner limits logical queued,
@@ -215,3 +223,10 @@ The throughput harness verifies the external sender count against receiver admis
 then flushes and closes before printing `V2_DAEMON_COMPLETE`. Use that receipt for
 completed throughput. The matched numeric control emits complete elapsed time and
 CPU after close, verifies its committed count, and writes a CPU profile when enabled.
+
+Admission qualification includes 100 consecutive standalone process kills,
+16 core/PDC4 process kills, and a deterministic partial-activation test with live
+writes to one owner while another owner is blocked before replay. Core snapshot
+callbacks remain disabled until all borrowed database handles and initial views
+are installed. Live seals always sync the journal, including while another owner
+is recovering.

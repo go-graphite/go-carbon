@@ -42,6 +42,7 @@ func TestV2PortableDaemonTCPHTTP(t *testing.T) {
 	if e := app.Start(); e != nil {
 		t.Fatal(e)
 	}
+	waitV2BackendReady(t, app)
 	name := "routing.value"
 	schema, ok := app.Config.Whisper.Schemas.Match(name)
 	if !ok {
@@ -188,7 +189,7 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	}
 	_ = probe.Close()
 	probeDeadline := time.Now().Add(5 * time.Second)
-	for app.v2.Backend.Stats().IngestedPoints < 1 {
+	for app.v2.Backend.(interface{ FirstAcceptedUnixNano() int64 }).FirstAcceptedUnixNano() == 0 {
 		if time.Now().After(probeDeadline) {
 			t.Fatal("startup probe not accepted")
 		}
@@ -200,9 +201,10 @@ func TestV2DaemonThroughput120(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		startupMS = float64(time.Now().UnixNano()-n) / 1e6
+		startupMS = float64(app.v2.Backend.(interface{ FirstAcceptedUnixNano() int64 }).FirstAcceptedUnixNano()-n) / 1e6
 	}
 	fmt.Printf("V2_STARTUP first_tcp_append_ms=%.3f exec_stamp=%t\n", startupMS, startupMS >= 0)
+	waitV2BackendReady(t, app)
 	var cpuFile *os.File
 	if dir := os.Getenv("V2_BACKEND_PROFILES"); dir != "" {
 		runtime.SetMutexProfileFraction(10)
@@ -385,6 +387,21 @@ measure:
 	elapsed = time.Since(start).Seconds()
 	final := completedBackend.Stats().IngestedPoints - points0
 	fmt.Printf("V2_DAEMON_COMPLETE seconds=%.6f points=%d sender_points=%d points_per_second=%.3f cpu_ns_per_point=%.3f journal_bytes_per_point=%.6f maxrss_native_units=%d drain_and_close_seconds=%.6f\n", elapsed, final, written, float64(final)/elapsed, cpu*1e9/float64(final), float64(journalDiskBytes(app.Config.V2.DataDir)-journal0)/float64(final), usage1.Maxrss, time.Since(settleStart).Seconds())
+	var atRest int64
+	if err := filepath.WalkDir(app.Config.V2.DataDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		info, err := d.Info()
+		if err == nil {
+			atRest += info.Size()
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writtenBytes := nativeWriteBytes() - io0
+	fmt.Printf("V2_DAEMON_STORAGE points=%d device_write_bytes=%d device_bytes_per_point=%.6f logical_at_rest_bytes=%d\n", final, writtenBytes, float64(writtenBytes)/float64(final), atRest)
 }
 
 func journalDiskBytes(dir string) int64 {
@@ -611,6 +628,7 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 		if err := app.Start(); err != nil {
 			t.Fatal(err)
 		}
+		waitV2BackendReady(t, app)
 		stamp := time.Now().Unix()/step*step - 5*step
 		conn, err := net.Dial("tcp", app.Receivers[0].Receiver.(*tcp.TCP).Addr().String())
 		if err != nil {
@@ -672,6 +690,7 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
+	waitV2BackendReady(t, app)
 	stats := app.v2.Backend.Stats()
 	if stats.IngestedPoints != 4 {
 		t.Fatalf("recovery counts %+v", stats)
@@ -700,4 +719,16 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 		}
 	}
 	t.Log("real TCP daemon SIGKILL: four synced unsealed journal records recovered with exact count and bits")
+}
+
+// Intake readiness precedes historical query readiness on the admission path.
+func waitV2BackendReady(t *testing.T, app *App) {
+	t.Helper()
+	if ready, ok := app.v2.Backend.(interface{ WaitReady(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := ready.WaitReady(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

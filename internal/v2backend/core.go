@@ -26,7 +26,7 @@ func (s *Store) openCore() error {
 		Owners: s.opts.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1",
 	}, v2core.Hooks{PlanSeal: s.planCoreSeal, Publish: func(id int, snap *pebble.Snapshot, _ []v2core.Row) error {
 		_ = snap.Close()
-		if s.coreViewsClosed.Load() {
+		if !s.coreViewsReady.Load() || s.coreViewsClosed.Load() {
 			return nil
 		}
 		for _, o := range s.owners {
@@ -123,12 +123,11 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 	if len(fs) == 0 {
 		return v2core.SealPlan{ReplaceRaw: true}, nil
 	}
-	// During startup the complete journal is already synced and intake is
-	// closed. A replay callback must never recursively Sync its own stream.
-	if !s.coreReplay.Load() {
-		if err := s.log.Sync(); err != nil {
-			return v2core.SealPlan{}, err
-		}
+	// Replay snapshots release the journal owner before invoking callbacks.
+	// Always sync: another producer may already admit live writes while this
+	// producer is replaying its historical prefix.
+	if err := s.log.Sync(); err != nil {
+		return v2core.SealPlan{}, err
 	}
 	byOwner := make(map[int][]frame)
 	for _, f := range fs {
