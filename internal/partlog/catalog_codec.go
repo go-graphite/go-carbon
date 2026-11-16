@@ -27,12 +27,13 @@ type CatalogEncoder struct {
 	// SparseClocks uses a presence bitmap for zero arrival-clock deltas.
 	SparseClocks bool
 	// Accounting optionally collects exact pre-zstd field bytes.
-	Accounting  *PredictorV3Accounting
-	encoder     *zstd.Encoder
-	entries     map[uint64]*predictorV3Entry
-	clock       int64
-	sequence    uint64
-	previousCRC uint32
+	Accounting                *PredictorV3Accounting
+	encoder                   *zstd.Encoder
+	pages                     []*[1024]predictorV3State
+	meta, raw, values, clocks []byte
+	clock                     int64
+	sequence                  uint64
+	previousCRC               uint32
 }
 
 func IsCatalogRecord(b []byte) bool { return bytes.HasPrefix(b, catalogCodecMagic) }
@@ -44,19 +45,19 @@ func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	if e.Catalog == nil {
 		return nil, errPredictorV3
 	}
-	reset := e.entries == nil || e.Independent
+	reset := e.pages == nil || e.Independent
 	if reset {
-		e.entries = make(map[uint64]*predictorV3Entry)
+		e.pages = make([]*[1024]predictorV3State, 1)
 		e.clock = 0
 		e.sequence = 0
 		e.previousCRC = 0
 	}
-	entries := e.entries
 	var previousID int64
-	meta := binary.AppendUvarint(nil, uint64(len(fs)))
+	meta := binary.AppendUvarint(e.meta[:0], uint64(len(fs)))
 	var account PredictorV3Accounting
 	account.Framing += int64(len(meta))
-	var values, clocks predictorV3Writer
+	values := predictorV3Writer{b: e.values[:0]}
+	clocks := predictorV3Writer{b: e.clocks[:0]}
 	clock := e.clock
 	for _, f := range fs {
 		if f.Key == "" || len(f.Key) > predictorV3MaxRaw || len(f.Definition) > predictorV3MaxRaw || len(f.Points) == 0 || len(f.Points) > predictorV3MaxRaw {
@@ -70,12 +71,16 @@ func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 		meta = binary.AppendVarint(meta, int64(id)-previousID)
 		previousID = int64(id)
 		account.IDs += int64(len(meta) - start)
-		entry := entries[id]
-		if entry == nil {
-			entry = &predictorV3Entry{}
-			entries[id] = entry
+		// Catalog IDs are dense and stream-local. Pointer-free pages avoid one
+		// map lookup and heap object per series without allocating untouched pages.
+		page := int(id / 1024)
+		for len(e.pages) <= page {
+			e.pages = append(e.pages, nil)
 		}
-		s := &entry.predictorV3State
+		if e.pages[page] == nil {
+			e.pages[page] = new([1024]predictorV3State)
+		}
+		s := &e.pages[page][id%1024]
 		predictedClock := clock
 		if e.SeriesClocks {
 			predictedClock = s.clock
@@ -139,9 +144,8 @@ func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 			return nil, errPredictorV3
 		}
 	}
-	e.entries = entries
 	e.clock = clock
-	raw := binary.AppendUvarint(nil, uint64(len(meta)))
+	raw := binary.AppendUvarint(e.raw[:0], uint64(len(meta)))
 	raw = append(raw, meta...)
 	if e.SparseClocks {
 		raw = binary.AppendUvarint(raw, clocks.n)
@@ -150,6 +154,7 @@ func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	}
 	raw = binary.AppendUvarint(raw, values.n)
 	raw = append(raw, values.b...)
+	e.meta, e.raw, e.values, e.clocks = meta, raw, values.b, clocks.b
 	account.Values = int64(len(values.b))
 	account.Framing += int64(len(raw) - len(meta) - len(values.b) - len(clocks.b))
 	var err error

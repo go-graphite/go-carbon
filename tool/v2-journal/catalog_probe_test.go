@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/partlog"
-	"github.com/go-graphite/go-carbon/points"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/partlog"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestCatalogWireExact(t *testing.T) {
@@ -185,5 +186,72 @@ func TestChurnRateAcrossPackets(t *testing.T) {
 		if uint64(count) != ordinal/every || ordinal != 17*87 {
 			t.Fatal(every, count, ordinal)
 		}
+	}
+}
+
+func TestCatalogWireReaderReuse(t *testing.T) {
+	c, e := partlog.OpenNameCatalog(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer c.Close()
+	var fs []partlog.DictionaryFrame
+	for i := 0; i < 2300; i++ {
+		f := partlog.DictionaryFrame{Key: fmt.Sprintf("binary/%d/\x00\xff", i), Definition: []byte{byte(i), 0, 255}, Clock: int64(uint64(i) << 61)}
+		for j := 0; j < 1+i%11; j++ {
+			f.Points = append(f.Points, points.Point{Timestamp: int64(uint64(i+j) << 62), Value: math.Float64frombits(0x7ff0000000000001 + uint64(i+j))})
+		}
+		fs = append(fs, f)
+	}
+	blocks := catalogWire(fs, c)
+	var wire catalogWireReader
+	for range 3 {
+		offset := 0
+		for _, block := range blocks {
+			want, n := catalogUnwire(block, c)
+			got, m := wire.decode(block, c)
+			if n != m {
+				t.Fatal(n, m)
+			}
+			catalogExact(want, got)
+			catalogExact(fs[offset:offset+len(got)], got)
+			offset += len(got)
+		}
+	}
+	// Disabled churn may return the same backing frames on consecutive reads.
+	got, _ := wire.decode(blocks[0], c)
+	var ordinal uint64
+	same := churnFramesInto(got, &ordinal, 0, nil)
+	got, _ = wire.decode(blocks[0], c)
+	same = churnFramesInto(got, &ordinal, 0, same)
+	want, _ := catalogUnwire(blocks[0], c)
+	catalogExact(want, same)
+}
+
+func BenchmarkCatalogWireDecode(b *testing.B) {
+	c, e := partlog.OpenNameCatalog(b.TempDir())
+	if e != nil {
+		b.Fatal(e)
+	}
+	defer c.Close()
+	fs := make([]partlog.DictionaryFrame, 8192)
+	for i := range fs {
+		fs[i] = partlog.DictionaryFrame{Key: fmt.Sprintf("metrics/component/%d/requests", i), Clock: 1794800000123456789, Points: []points.Point{{Timestamp: 1794800000, Value: float64(i) / 7}}}
+	}
+	blocks := catalogWire(fs, c)
+	for _, reuse := range []bool{false, true} {
+		b.Run(fmt.Sprint("reuse=", reuse), func(b *testing.B) {
+			var w catalogWireReader
+			w.decode(blocks[0], c)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if reuse {
+					w.decode(blocks[0], c)
+				} else {
+					catalogUnwire(blocks[0], c)
+				}
+			}
+		})
 	}
 }
