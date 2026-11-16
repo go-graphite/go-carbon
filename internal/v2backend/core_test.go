@@ -280,6 +280,8 @@ func TestCoreFixtureThroughput120(t *testing.T) {
 	}()
 	var profile *os.File
 	if dir := os.Getenv("V2_BACKEND_PROFILES"); dir != "" {
+		runtime.SetMutexProfileFraction(10)
+		runtime.SetBlockProfileRate(1000000)
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}

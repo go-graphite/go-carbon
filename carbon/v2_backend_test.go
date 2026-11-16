@@ -140,6 +140,9 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	app := v2Fixture(t, &oracleBackend{})
 	app.v2Open = nil
 	app.Config.V2.WriteEngine = os.Getenv("V2_BACKEND_WRITE_ENGINE")
+	if codec := os.Getenv("V2_JOURNAL_CODEC"); codec != "" {
+		app.Config.V2.JournalCodec = codec
+	}
 	app.Config.Common.MaxCPU = 32
 	// The ordinary fixture has a minute/hour policy. Use the single-archive
 	// intake shape explicitly here; repeated timestamps within a minute would
@@ -171,7 +174,7 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
-	fmt.Printf("V2_DAEMON_CONFIG gomaxprocs=%d owners=%d dbs=%d\n", runtime.GOMAXPROCS(0), app.Config.V2.Owners, app.Config.V2.Shards)
+	fmt.Printf("V2_DAEMON_CONFIG gomaxprocs=%d owners=%d dbs=%d journal_codec=%s\n", runtime.GOMAXPROCS(0), app.Config.V2.Owners, app.Config.V2.Shards, app.Config.V2.JournalCodec)
 	// Measure an actual TCP append, not just listener construction. The runner
 	// supplies its pre-exec wall clock; absent it this is not an exec-start gate.
 	address := app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
@@ -379,17 +382,22 @@ measure:
 
 func journalDiskBytes(dir string) int64 {
 	var n int64
-	_ = filepath.WalkDir(filepath.Join(dir, "journal"), func(_ string, d os.DirEntry, e error) error {
-		if e != nil {
-			return e
-		}
-		if !d.IsDir() {
-			if i, e := d.Info(); e == nil {
-				n += i.Size()
+	// Durable catalog definitions are part of the replay input, including WALs.
+	roots, _ := filepath.Glob(filepath.Join(dir, "owner-*", "name-catalog"))
+	roots = append(roots, filepath.Join(dir, "journal"))
+	for _, root := range roots {
+		_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, e error) error {
+			if e != nil {
+				return e
 			}
-		}
-		return nil
-	})
+			if !d.IsDir() {
+				if i, e := d.Info(); e == nil {
+					n += i.Size()
+				}
+			}
+			return nil
+		})
+	}
 	return n
 }
 
