@@ -582,3 +582,62 @@ func TestCoreSortMatchesOriginalComparator(t *testing.T) {
 		}
 	}
 }
+
+// A seal owns detached input. Its producer lease must be reusable even while
+// durable planning blocks; the next packet must not overwrite the sealed rows.
+func TestCoreSealReturnsCopiedPacketLease(t *testing.T) {
+	t.Setenv("CORE_STREAM_BYTES", "256")
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.MaxRows = 1, 1, 1
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var calls int
+	e, err := openCoreWithHooks(t.TempDir(), cfg, coreHooks{PlanSeal: func(_ int, in coreSealInput) (coreSealPlan, error) {
+		calls++
+		if calls == 1 {
+			close(entered)
+			<-resume
+			if len(in.Rows) != 1 || in.Rows[0].Bits != 42 || in.Batches[0].Points[0].Bits != 42 {
+				return coreSealPlan{}, fmt.Errorf("leased input overwritten")
+			}
+		}
+		return coreSealPlan{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = e.AppendBatches(0, []Batch{{ID: 9, Points: []Row{{ID: 9, Bits: 42}}}}, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("seal not entered")
+	}
+	next := make(chan error, 1)
+	go func() { next <- e.AppendBatches(0, []Batch{{ID: 9, Points: []Row{{ID: 9, Bits: 99}}}}, 2, false) }()
+	var nextErr error
+	select {
+	case nextErr = <-next:
+	case <-time.After(5 * time.Second):
+		nextErr = fmt.Errorf("seal retained producer lease")
+	}
+	close(resume)
+	if err = e.Close(); err != nil {
+		t.Error(err)
+	}
+	if nextErr != nil {
+		t.Fatal(nextErr)
+	}
+}
+
+func TestCoreDefaultCompactCodec(t *testing.T) {
+	t.Setenv("CORE_RAW_CODEC", "")
+	e, err := openCore(t.TempDir(), coreTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if e.cfg.RawCodec != "run1" {
+		t.Fatalf("default codec %q", e.cfg.RawCodec)
+	}
+}

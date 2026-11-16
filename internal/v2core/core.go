@@ -192,6 +192,7 @@ type coreOwner struct {
 	sortScratch                  []row
 	radixWork                    []row
 	compact                      coreCompactWorkspace
+	sealRows                     int
 }
 type coreEngine struct {
 	owners       []*coreOwner
@@ -226,6 +227,12 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	hook := hooks.Publish
 	if cfg.RawCodec == "" {
 		cfg.RawCodec = os.Getenv("CORE_RAW_CODEC")
+	}
+	if cfg.RawCodec == "" {
+		cfg.RawCodec = "run1"
+	} else if cfg.RawCodec == "legacy" {
+		// Preserve the original on-disk config for explicit legacy reopen.
+		cfg.RawCodec = ""
 	}
 	if cfg.RawCodec != "" && cfg.RawCodec != "run1" {
 		return nil, errors.New("unknown raw codec")
@@ -264,6 +271,12 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			return fail(err)
 		}
 		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
+		o.sealRows = cfg.MaxRows
+		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
+			// Vary bounded head sizes across owners to spread synchronous seals.
+			// This changes execution boundaries, never the persisted format.
+			o.sealRows -= (cfg.MaxRows / 4) * s / cfg.Shards
+		}
 		o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
 		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
 		o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
@@ -597,18 +610,22 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					pending[producer] = p.cursor
 				}
 			}
-			if failure == nil && (p.seal || len(head) >= o.cfg.MaxRows || time.Now().After(deadline)) {
+			// The head owns copied rows and detached batch descriptors now.
+			// Capture everything still needed before returning the packet: its
+			// producer can immediately reuse and overwrite the leased storage.
+			seal, ack := p.seal, p.ack
+			if p.lease != nil {
+				p.lease.release()
+			}
+			if failure == nil && (seal || len(head) >= o.sealRows || time.Now().After(deadline)) {
 				failure = flush()
 			}
-			if failure == nil && o.hook != nil && (p.seal || time.Since(headPublication) >= time.Second) {
+			if failure == nil && o.hook != nil && (seal || time.Since(headPublication) >= time.Second) {
 				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 				headPublication = time.Now()
 			}
-			if p.ack != nil {
-				p.ack <- failure
-			}
-			if p.lease != nil {
-				p.lease.release()
+			if ack != nil {
+				ack <- failure
 			}
 		}
 		if !found {
