@@ -6,6 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"path/filepath"
+	"testing"
+	"time"
+
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/partlog"
@@ -13,10 +18,6 @@ import (
 	sr "github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 	whisper "github.com/go-graphite/go-whisper"
-	"math"
-	"path/filepath"
-	"testing"
-	"time"
 )
 
 func TestReplayedRenderDifferential(t *testing.T) {
@@ -211,47 +212,6 @@ func TestReplayedRenderDifferential(t *testing.T) {
 		t.Fatalf("queries=%d, want 1680", queries)
 	}
 	t.Logf("replayed numeric store + journal dictionary: queries=%d slots=%d schemas=%d methods=6 oracles=classic,native,continuation", queries, slots, len(combinedSchemas))
-}
-
-var combinedSchemas = []string{
-	"1s:1d", "10s:3d", "1s:2d", "1m:35d", "5m:90d", "15m:180d", "30m:1y", "1h:2y", "1d:10y",
-	"1s:1d,1m:30d,1h:1y,1d:10y", "1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y", "1s:3d,1m:14d,30m:2y",
-	"10s:2d,1m:14d,30m:2y", "10m:1y,1d:10y", "1s:2d,1m:28d,1h:2y", "1s:2d,1m:62d,10m:5y",
-	"10m:2d,1h:9d,1d:3y", "10s:4d,1m:31d,30m:4y", "1m:7d,5m:60d,1h:2y", "1m:14d,5m:60d,1h:2y",
-	"1m:62d,30m:2y", "1h:90d,1d:2y", "1s:7d,1m:14d,30m:2y", "1s:1d,1m:30d,1h:2y",
-	"1s:3d,1m:14d,30m:2y", "5m:60d,30m:2y", "10m:7d,1h:5y,1d:10y", "1m:14d,1h:5y",
-	"10s:15d,1m:100d,15m:2y", "1m:200d,1h:5y", "1m:400d,1d:10y", "1m:400d,1h:5y",
-	"1m:100d,30m:2y", "5m:400d,1h:2y", "1m:30d,15m:400d,1h:5y", "5m:400d,1h:5y",
-	"5s:15d,1m:100d,15m:5y", "2s:7d,1m:100d,15m:2y", "1s:40d,1m:100d,15m:2y",
-	"5m:14d,1d:10y", "1h:90d,1d:10y",
-	"10m:30d",
-	"12h:10y",
-	"15m:1y",
-	"15m:840d",
-	"1d:2y",
-	"1d:3y",
-	"1d:5y",
-	"1d:90d",
-	"1h:10y",
-	"1h:15y",
-	"1h:1y",
-	"1h:30d",
-	"1h:5y",
-	"1m:14d",
-	"1m:14d,5m:60d,60m:2y",
-	"1m:25y",
-	"1m:2d,1h:1y,1d:10y",
-	"1m:30d",
-	"1m:7d,5m:60d,60m:2y",
-	"1m:90d",
-	"1s:7d",
-	"1w:10y",
-	"2h:10y",
-	"30m:30d",
-	"30m:3y",
-	"5m:1y",
-	"5m:30d",
-	"5m:420d",
 }
 
 func TestReplayRenderRejectsMissingDictionary(t *testing.T) {

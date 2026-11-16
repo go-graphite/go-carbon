@@ -80,6 +80,12 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 		if e != nil {
 			return e
 		}
+		if os.Getenv("PARTLOG_BENCH_METADATA") == "1" {
+			if e = writeReplayCorpus(root, log.Identity(), total, metrics, producers); e != nil {
+				_ = log.Close()
+				return e
+			}
+		}
 		done := make(chan error, producers)
 		var count atomic.Uint64
 		for p := 0; p < producers; p++ {
@@ -187,6 +193,17 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 // replay. Live rows have disjoint sequence numbers but the same metric catalogue.
 func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, metrics uint64, emit func(string, uint64, map[string]any), start time.Time) error {
 	writeStart := procStats()
+	continuous := time.Duration(0)
+	if raw := os.Getenv("PARTLOG_BENCH_LIVE_SECONDS"); raw != "" {
+		seconds, e := strconv.Atoi(raw)
+		if e != nil || seconds < 0 {
+			return os.ErrInvalid
+		}
+		continuous = time.Duration(seconds) * time.Second
+	}
+	if continuous > 0 && os.Getenv("PARTLOG_BENCH_FINAL_COMPACT") == "1" {
+		return errors.New("continuous natural settlement cannot use offline final compaction")
+	}
 	journalStart := map[string]any{}
 	if err := replayWriteStages(root, journalStart); err != nil {
 		return err
@@ -204,10 +221,40 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	emit("journal_admission_open", 0, nil)
 	stop := make(chan struct{})
 	done := make(chan error, cfg.Producers)
+	var receipts sync.WaitGroup
 	var live atomic.Uint64
 	var firstAccepted atomic.Bool
 	liveCounts := make([]atomic.Uint64, cfg.Producers)
 	liveStart := time.Now()
+	// The receipt is sampled before an explicit journal barrier. Every point in
+	// this conservative vector therefore precedes the successful barrier, even
+	// while producers keep appending. Emit only after Sync returns successfully;
+	// a parent process stores the receipt before choosing its SIGKILL point.
+	ackStop := make(chan struct{})
+	ackErrors := make(chan error, 1)
+	receipts.Add(1)
+	go func() {
+		defer receipts.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ackStop:
+				return
+			case <-ticker.C:
+				counts := make([]uint64, cfg.Producers)
+				for p := range counts {
+					counts[p] = liveCounts[p].Load()
+				}
+				if e := journal.Sync(); e != nil {
+					ackErrors <- e
+					emit("durable_ack_error", 0, map[string]any{"error": e.Error()})
+					return
+				}
+				emit("durable_ack_frontier", 0, map[string]any{"identity": journal.Identity(), "live_counts": counts})
+			}
+		}
+	}()
 	// Keep the oracle clock unchanged; pacing has headroom above 20M accepted/s.
 	const rate = 20000000
 	const offeredRate = 22000000
@@ -263,6 +310,8 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		for range cfg.Producers {
 			err = errors.Join(err, <-done)
 		}
+		close(ackStop)
+		receipts.Wait()
 		return err // attachLoggedCore closed the journal on failure.
 	}
 	emit("storage_open_complete", 0, nil)
@@ -279,9 +328,33 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		}
 	}
 	backlogSeconds := time.Since(replayStart).Seconds()
+	boundaryLive := live.Load()
+	emit("historical_boundary", total, map[string]any{"backlog_seconds": backlogSeconds, "backlog_mpoints_per_second": float64(total) / backlogSeconds / 1e6, "live_accepted": boundaryLive})
+	if err == nil && continuous > 0 {
+		until := time.NewTimer(continuous)
+		observing := true
+		for observing {
+			select {
+			case <-until.C:
+				observing = false
+			case <-tick.C:
+				sample := coreSample(l.engine, "natural_live", start, total+live.Load())
+				sample["post_boundary_seconds"] = time.Since(replayStart).Seconds() - backlogSeconds
+				sample["live_accepted"] = live.Load()
+				emit("replay_live_background_sample", total+live.Load(), sample)
+			}
+		}
+	}
 	close(stop)
 	for range cfg.Producers {
 		err = errors.Join(err, <-done)
+	}
+	close(ackStop)
+	receipts.Wait()
+	select {
+	case e := <-ackErrors:
+		err = errors.Join(err, e)
+	default:
 	}
 	liveSeconds := time.Since(liveStart).Seconds()
 	counts := make([]uint64, len(liveCounts))

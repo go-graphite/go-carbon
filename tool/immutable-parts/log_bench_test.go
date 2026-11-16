@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -259,5 +260,51 @@ func TestFinalReplayCompactionPreservesRows(t *testing.T) {
 	after, err := coreDigest(filepath.Join(root, "parts"), cfg)
 	if err != nil || before != after {
 		t.Fatal("final compaction changed persisted rows", before, after, err)
+	}
+}
+
+func TestReplayCorpusIdentityAndPolicyValidation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PARTLOG_BENCH_METADATA", "1")
+	if err := logBacklogBenchmark(root, "write", 4200, 420, 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	c, err := readReplayCorpus(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(filepath.Join(root, "corpus.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []string{"identity", "policy", "clock"} {
+		changed := c
+		switch mutation {
+		case "identity":
+			changed.Identity = "ffffffffffffffffffffffffffffffff"
+		case "policy":
+			changed.PolicyRule = "schema=0"
+		case "clock":
+			changed.ApplyRule = "clock=replay-time"
+		}
+		data, err := json.Marshal(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(root, "corpus.json"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = readReplayCorpus(root); err == nil {
+			t.Fatalf("accepted mutated%s", mutation)
+		}
+	}
+	if err = os.WriteFile(filepath.Join(root, "corpus.json"), original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = readReplayCorpus(root); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeReplayCorpus(root, c.Identity, c.Historical, c.Metrics, c.Producers); err == nil {
+		t.Fatal("overwrote original catalog")
 	}
 }

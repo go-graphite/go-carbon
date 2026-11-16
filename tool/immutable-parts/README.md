@@ -351,3 +351,33 @@ zero-debt/zero-active observations, then close again. Its reported rate and
 process writes include every reopen, compaction and close. Label this as explicit
 offline final compaction; it does not establish natural background settlement or
 continuous steady-state behavior. The default natural-settlement gate is unchanged.
+
+### Full-corpus replay qualification
+
+The offline log benchmark can prepare a synthetic metadata-bearing corpus by
+setting `PARTLOG_BENCH_METADATA=1` during its `write` phase. A synced `corpus.json`
+precedes every row and binds the canonical generated names, 70 schema policies,
+six methods, original one-point apply order and clocks to the journal identity.
+Copy this file with the journal. This is a deterministic synthetic catalog, not
+reconstructed production names or a capture-codec benchmark.
+
+Build the test binary with `-tags=sealrollup_integration`.
+`PARTLOG_RENDER_ROOT` and `PARTLOG_BENCH_OWNERS` activate
+`TestFullScaleRenderedCorpus`: it reads 420 metrics spread across the actual
+persisted corpus and compares 1,680 renders with classic Whisper, native exact
+and native continuation. The independent raw oracle still checks every row;
+the render sample does not cover every metric or integrate production rollups.
+
+`PARTLOG_BENCH_LIVE_SECONDS=600` keeps live acceptance and ordinary background
+compaction running for ten minutes after the historical boundary. It rejects
+`PARTLOG_BENCH_FINAL_COMPACT=1`; observation samples report debt and activity.
+The boundary replay rate and whole elapsed rate remain separate. The terminal
+settled rate includes the observation interval and final drain/close; do not
+interpret the deliberately longer observation as historical replay CPU time.
+
+`TestFullScaleReplayCrashes` retains pre-kill sync-barrier receipts in the parent
+process, checks every acknowledged producer prefix after restart and then runs
+both raw and metadata-backed rendered oracles. Receipts include the journal
+identity; recovered unsynced suffixes may extend them. They prove process-kill
+recovery after successful `Sync`, not storage power-loss behavior. Recovered
+prefix scans use at most eight workers with one reusable row buffer per worker.

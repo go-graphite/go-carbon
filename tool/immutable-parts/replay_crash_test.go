@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,19 +29,21 @@ func retainedLiveCounts(root string, total uint64, producers int) ([]uint64, err
 	}
 	defer log.Close()
 	counts := make([]uint64, producers)
-	for p := range producers {
+	check := func(p int) error {
+		historical := uint64(0)
+		if total > uint64(p) {
+			historical = (total - uint64(p) + uint64(producers) - 1) / uint64(producers)
+		}
 		var seen uint64
-		e = log.Replay(p, 0, func(r partlog.Record) error {
-			rows, e := decodeLogRows(r.Payload)
+		var buffer []row
+		e := log.Replay(p, 0, func(r partlog.Record) error {
+			rows, e := decodeLogRowsInto(buffer, r.Payload)
+			buffer = rows
 			if e != nil {
 				return e
 			}
 			for _, point := range rows {
 				var want uint64
-				historical := uint64(0)
-				if total > uint64(p) {
-					historical = (total - uint64(p) + uint64(producers) - 1) / uint64(producers)
-				}
 				if seen < historical {
 					want = seen*uint64(producers) + uint64(p)
 				} else {
@@ -52,23 +58,48 @@ func retainedLiveCounts(root string, total uint64, producers int) ([]uint64, err
 			return nil
 		})
 		if e != nil {
-			return nil, e
-		}
-		historical := uint64(0)
-		if total > uint64(p) {
-			historical = (total - uint64(p) + uint64(producers) - 1) / uint64(producers)
+			return e
 		}
 		if seen < historical {
-			return nil, fmt.Errorf("stream%d lost historical prefix", p)
+			return fmt.Errorf("stream%d lost historical prefix", p)
 		}
+		return nil
 	}
+	jobs := make(chan int)
+	results := make(chan error, producers)
+	var workers sync.WaitGroup
+	for range min(producers, max(1, min(8, runtime.GOMAXPROCS(0)))) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for p := range jobs {
+				results <- check(p)
+			}
+		}()
+	}
+	go func() {
+		for p := range producers {
+			jobs <- p
+		}
+		close(jobs)
+		workers.Wait()
+		close(results)
+	}()
+	var result error
+	for e := range results {
+		result = errors.Join(result, e)
+	}
+	if result != nil {
+		return nil, result
+	}
+
 	return counts, nil
 }
 
 // The source fixture is prepared once. Each trial clones its immutable journal,
 // starts replay with live acceptance, kills at a seeded committed-point prefix,
-// then reopens, drains and verifies every retained row. The numeric corpus has
-// no render policy; the rendered differential is a separate tagged fixture.
+// then reopens, drains and verifies every retained row. Metadata-bearing corpora
+// additionally query420 sampled metrics from this actual recovered store.
 func TestFullScaleReplayCrashes(t *testing.T) {
 	root := os.Getenv("PARTLOG_CRASH_ROOT")
 	if root == "" {
@@ -108,6 +139,14 @@ func TestFullScaleReplayCrashes(t *testing.T) {
 				t.Fatal(e)
 			}
 			defer os.RemoveAll(trialRoot)
+			if data, e := os.ReadFile(filepath.Join(root, "fixture", "corpus.json")); e == nil {
+				if e = os.WriteFile(filepath.Join(trialRoot, "corpus.json"), data, 0600); e != nil {
+					t.Fatal(e)
+				}
+			} else if !os.IsNotExist(e) {
+				t.Fatal(e)
+			}
+			stageStart := time.Now()
 			cmd := exec.Command("cp", "-a", "--reflink=auto", filepath.Join(root, "fixture", "log"), filepath.Join(trialRoot, "log"))
 			if out, e := cmd.CombinedOutput(); e != nil {
 				t.Fatalf("journal clone: %v %s", e, out)
@@ -129,41 +168,90 @@ func TestFullScaleReplayCrashes(t *testing.T) {
 				t.Fatal(e)
 			}
 			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-			reached := make(chan uint64, 1)
+			type ackReceipt struct {
+				Identity string
+				Counts   []uint64
+			}
+			type killTarget struct {
+				Committed uint64
+				Ack       ackReceipt
+			}
+			reached := make(chan killTarget, 1)
 			go func() {
+				var ack ackReceipt
 				scan := bufio.NewScanner(pipe)
 				scan.Buffer(make([]byte, 65536), 4<<20)
 				for scan.Scan() {
 					line := append([]byte(nil), scan.Bytes()...)
 					_, _ = output.Write(append(line, '\n'))
 					var sample map[string]any
-					if json.Unmarshal(line, &sample) == nil && sample["stage"] == "concurrent_live_replay" {
+					if json.Unmarshal(line, &sample) != nil {
+						continue
+					}
+					if sample["stage"] == "durable_ack_frontier" {
+						data, _ := json.Marshal(sample["live_counts"])
+						if e := json.Unmarshal(data, &ack.Counts); e != nil {
+							continue
+						}
+						ack.Identity, _ = sample["identity"].(string)
+					}
+					if sample["stage"] == "concurrent_live_replay" && ack.Identity != "" && len(ack.Counts) == producers {
 						if n, ok := sample["committed"].(float64); ok && uint64(n) >= target {
-							reached <- uint64(n)
+							reached <- killTarget{uint64(n), ack}
 							return
 						}
 					}
 				}
-				reached <- 0
+				reached <- killTarget{}
 			}()
-			var killedAt uint64
+			var killed killTarget
 			select {
-			case killedAt = <-reached:
+			case killed = <-reached:
 			case <-time.After(180 * time.Second):
 				t.Fatal("crash prefix timeout")
 			}
-			if killedAt == 0 {
+			if killed.Committed == 0 {
 				t.Fatal("child ended before crash target")
+			}
+			// Parent persists the pre-kill receipt; recovery cannot fabricate it.
+			ackPath := filepath.Join(root, fmt.Sprintf("crash-%d-ack.json", trial))
+			ackFile, e := os.OpenFile(ackPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			if e != nil {
+				t.Fatal(e)
+			}
+			data, e := json.Marshal(killed)
+			if e == nil {
+				_, e = ackFile.Write(data)
+			}
+			e = errors.Join(e, ackFile.Sync(), ackFile.Close())
+			if e != nil {
+				t.Fatal(e)
 			}
 			if e = cmd.Process.Kill(); e != nil {
 				t.Fatal(e)
 			}
 			_ = cmd.Wait()
+			t.Logf("SIGKILL trial%d target%d killed_committed%d elapsed%s prekill_ack=%v", trial, target, killed.Committed, time.Since(stageStart), killed.Ack.Counts)
+			prefixStart := time.Now()
 			counts, e := retainedLiveCounts(trialRoot, total, producers)
 			if e != nil {
 				t.Fatal(e)
 			}
-			data, e := json.Marshal(counts)
+			for p, n := range killed.Ack.Counts {
+				if counts[p] < n {
+					t.Fatalf("acknowledged stream%d lost%d points", p, n-counts[p])
+				}
+			}
+			c, e := os.ReadFile(filepath.Join(trialRoot, "log", "IDENTITY"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var identity struct{ ID string }
+			if e = json.Unmarshal(c, &identity); e != nil || identity.ID != killed.Ack.Identity {
+				t.Fatal("ACK journal identity mismatch", e)
+			}
+			t.Logf("trial%d retained_prefix_seconds=%.3f durable_ack_exact=true", trial, time.Since(prefixStart).Seconds())
+			data, e = json.Marshal(counts)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -190,7 +278,18 @@ func TestFullScaleReplayCrashes(t *testing.T) {
 			for _, n := range counts {
 				live += n
 			}
-			t.Logf("SIGKILL trial%d target%d killed_committed%d historical%d retained_live%d raw_exact=true rendered=unrun", trial, target, killedAt, total, live)
+			rendered := "unrun"
+			if _, e := os.Stat(filepath.Join(trialRoot, "corpus.json")); e == nil {
+				render := exec.Command(os.Args[0], "-test.v", "-test.run=^TestFullScaleRenderedCorpus$", "-test.timeout=180s")
+				render.Env = append(os.Environ(), "PARTLOG_RENDER_ROOT="+trialRoot)
+				out, e := render.CombinedOutput()
+				if e != nil || !bytes.Contains(out, []byte("full_corpus_render_exact")) {
+					t.Fatalf("full corpus render: %v %s", e, out)
+				}
+				t.Logf("%s", out)
+				rendered = "1680_queries_exact"
+			}
+			t.Logf("SIGKILL trial%d target%d killed_committed%d historical%d retained_live%d raw_exact=true rendered=%s durable_ack_exact=true elapsed_seconds=%.3f", trial, target, killed.Committed, total, live, rendered, time.Since(stageStart).Seconds())
 		})
 	}
 }
