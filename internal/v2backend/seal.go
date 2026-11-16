@@ -136,25 +136,28 @@ func (o *owner) commit(frames []frame) error {
 	if _, e := rand.Read(part[:]); e != nil {
 		return e
 	}
-	byName := make(map[string][]frame)
+	scratch := &o.commitScratch
+	byName := scratch.group(frames)
+	defer scratch.reset()
 	var count uint64
 	for _, f := range frames {
 		if f.cursor <= o.meta.Cursor {
 			return errors.New("replayed committed batch in live seal")
 		}
-		byName[f.name] = append(byName[f.name], f)
 		count += uint64(len(f.points))
 	}
 	// Every data file covers exactly one portable (PG,vshard,partition) range.
 	dataFiles := make(map[string][]kv)
-	var refs, ops []kv
+	refs := make([]kv, 0, len(byName))
+	var ops []kv
 	scopes := make(map[string]*partsops.Batch)
 	next := make(map[string]*metricState, len(o.metrics)+len(byName))
 	for n, m := range o.metrics {
 		next[n] = m
 	}
 	plans := make(map[string]sealrollup.SealPlan)
-	for name, fs := range byName {
+	for name, span := range byName {
+		fs := scratch.frames[span.start:span.end]
 		last := fs[len(fs)-1]
 		m := o.metrics[name]
 		if m == nil {
@@ -165,17 +168,21 @@ func (o *owner) commit(frames []frame) error {
 				}
 			}
 		}
-		if string(m.Group) != string(last.group) || !reflect.DeepEqual(m.Policy, last.policy) {
+		if string(m.Group) != string(last.group) || !samePolicy(m.Policy, last.policy) {
 			return errors.New("metric placement/policy changed")
 		}
-		cfg, e := rollupConfig(m.Policy)
-		if e != nil {
-			return e
+		if m.prepared == nil {
+			var e error
+			m.config, e = rollupConfig(m.Policy)
+			if e != nil {
+				return e
+			}
+			m.prepared, e = sealrollup.Prepare(m.config)
+			if e != nil {
+				return e
+			}
 		}
-		prepared, e := sealrollup.Prepare(cfg)
-		if e != nil {
-			return e
-		}
+		cfg, prepared := m.config, m.prepared
 		total := 0
 		for _, f := range fs {
 			total += len(f.points)
@@ -186,9 +193,9 @@ func (o *owner) commit(frames []frame) error {
 			o.sampleScratch = o.sampleScratch[:total]
 		}
 		samples := o.sampleScratch
-		batches := o.batchScratch[:0]
+		batches := slices.Grow(o.batchScratch[:0], len(fs))
 		for _, f := range fs {
-			if string(f.group) != string(m.Group) || !reflect.DeepEqual(f.policy, m.Policy) {
+			if string(f.group) != string(m.Group) || (f.resolved != last.resolved || f.resolved == nil) && !samePolicy(f.policy, m.Policy) {
 				return errors.New("batch policy or placement changed inside seal")
 			}
 			b := sealrollup.Batch{Order: f.order, Now: f.clock, Points: samples[:len(f.points):len(f.points)]}
@@ -216,23 +223,20 @@ func (o *owner) commit(frames []frame) error {
 			return e
 		}
 		file := string(prefix)
-		for _, r := range plan.Records {
-			k := base
-			k.Archive = uint32(r.Archive)
-			k.BlockStart = r.Slot
-			key, e := partsformat.Encode(k)
-			if e != nil {
-				return e
-			}
-			dataFiles[file] = append(dataFiles[file], kv{key, sealrollup.EncodeRecord(r)})
-		}
-		// Original receipts remain in the retained durable journal. Archive rows,
-		// catalogue and its replay cursor/order publish atomically below; duplicating
-		// each receipt as another SST row would repeat policy/name/point bytes.
 		key, e := partsformat.Encode(base)
 		if e != nil {
 			return e
 		}
+		for _, r := range plan.Records {
+			encodedKey := scratch.bytes.copy(key)
+			// GCP3's final 16 bytes are archive, signed physical slot, ordinal.
+			tail := encodedKey[len(encodedKey)-16:]
+			binary.BigEndian.PutUint32(tail, uint32(r.Archive))
+			binary.BigEndian.PutUint64(tail[4:], uint64(r.Slot)^(1<<63))
+			dataFiles[file] = append(dataFiles[file], kv{encodedKey, scratch.bytes.copy(sealrollup.EncodeRecord(r))})
+		}
+		// Receipts remain in the retained durable journal. Data, catalogue and
+		// replay cursor/order still publish in a single atomic ingest.
 		rkey := append(refPrefix(o.id, name), part[:]...)
 		refs = append(refs, kv{rkey, slices.Clone(key[:len(key)-16])})
 		// Generation 1 denotes this store's initial single origin only. This
@@ -271,7 +275,7 @@ func (o *owner) commit(frames []frame) error {
 	meta.Cursor = frames[len(frames)-1].cursor
 	meta.Order = frames[len(frames)-1].order
 	meta.Points += count
-	meta.Metrics = nil
+	meta.Metrics = make([]*metricState, 0, len(next))
 	for _, m := range next {
 		meta.Metrics = append(meta.Metrics, m)
 	}

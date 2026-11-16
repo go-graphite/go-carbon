@@ -266,7 +266,9 @@ func encodedFramesSize(fs []frame) int {
 }
 
 func (o *owner) encodeReceipts(fs []frame) ([]byte, error) {
-	entries := make([]partlog.DictionaryFrame, len(fs))
+	o.receiptScratch = slices.Grow(o.receiptScratch[:0], len(fs))[:len(fs)]
+	entries := o.receiptScratch
+	defer clear(entries)
 	for i, f := range fs {
 		if f.resolved == nil {
 			return nil, errors.New("unresolved receipt")

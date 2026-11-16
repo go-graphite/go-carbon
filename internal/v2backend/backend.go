@@ -49,6 +49,8 @@ type metricState struct {
 	Policy   daemonstore.Metric
 	Frontier sealrollup.Frontier
 	slots    []map[int64]sealrollup.Sample
+	prepared *sealrollup.Prepared
+	config   sealrollup.Config
 }
 type checkpoint struct {
 	Version        int
@@ -86,6 +88,9 @@ type owner struct {
 	workspace      sealrollup.Workspace
 	batchScratch   []sealrollup.Batch
 	sampleScratch  []sealrollup.Sample
+	receiptScratch []partlog.DictionaryFrame
+	commitScratch  sealScratch
+	spare          []frame
 	meta           checkpoint
 	metrics        map[string]*metricState
 	pub            partsread.Publication
@@ -332,6 +337,8 @@ func (o *owner) run() {
 	defer close(o.done)
 	defer o.journalEncoder.Close()
 	var deferred *command
+	var commands []command
+	var frameScratch []frame
 	for {
 		var c command
 		if deferred != nil {
@@ -344,9 +351,12 @@ func (o *owner) run() {
 		switch c.op {
 		case 'f':
 			a.frames = o.active
-			o.active = nil
+			o.active = o.spare[:0]
+			o.spare = nil
 			o.pending = a.frames
 		case 'd':
+			clear(o.pending)
+			o.spare = o.pending[:0]
 			o.pending = nil
 		case 'r':
 			for _, fs := range [][]frame{o.pending, o.active} {
@@ -362,10 +372,10 @@ func (o *owner) run() {
 			c.answer <- a
 			return
 		default:
-			commands := []command{c}
-			fs := c.batch
+			commands = append(commands[:0], c)
+			fs := append(frameScratch[:0], c.batch...)
 			if c.frame != nil {
-				fs = []frame{*c.frame}
+				fs = append(fs, *c.frame)
 			}
 			wireBytes := encodedFramesSize(fs)
 		drain:
@@ -420,6 +430,9 @@ func (o *owner) run() {
 			for _, cc := range commands {
 				cc.answer <- a
 			}
+			clear(commands)
+			clear(fs)
+			frameScratch = fs[:0]
 			if a.err != nil && !errors.Is(a.err, ErrClosed) {
 				o.s.fail("owner", a.err)
 			}
