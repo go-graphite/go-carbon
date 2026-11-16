@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/partlog"
 )
 
@@ -63,8 +65,8 @@ func TestLogOriginalBatchReplay(t *testing.T) {
 	cfg := loggedConfig()
 	cfg.MaxRows = 1 << 20
 	want := []coreBatch{
-		{ID: 1, Order: 7, Clock: -123, Policy: []byte("exact-policy-a"), Points: []row{{1, 991, 0x7ff8000000000042, 4}, {1, 991, 0x8000000000000000, 5}}},
-		{ID: 1, Order: 8, Clock: 17, Policy: []byte("exact-policy-b"), Points: []row{{1, 992, 1, 6}}},
+		{ID: 1, Order: 7, Clock: -123, Policy: []byte("exact-policy-a"), Points: []row{{ID: 1, Time: 991, Bits: 0x7ff8000000000042, Seq: 4}, {ID: 1, Time: 991, Bits: 0x8000000000000000, Seq: 5}}},
+		{ID: 1, Order: 8, Clock: 17, Policy: []byte("exact-policy-b"), Points: []row{{ID: 1, Time: 992, Bits: 1, Seq: 6}}},
 	}
 	var got []coreBatch
 	hooks := coreHooks{PlanSeal: func(_ int, in coreSealInput) (coreSealPlan, error) {
@@ -118,7 +120,24 @@ func TestLogOriginalBatchReplay(t *testing.T) {
 func TestLogSIGKILLRecovery(t *testing.T) {
 	openCrashCore := func(logDir, partDir string, cfg coreConfig, opts partlog.Options) (*loggedCore, error) {
 		if os.Getenv("PARTLOG_CRASH_ADMISSION") != "1" {
-			return openLoggedCore(logDir, partDir, cfg, opts)
+			hooks := coreHooks{}
+			if os.Getenv("PARTLOG_CRASH_ROOT") != "" && os.Getenv("PARTLOG_CRASH_TRIAL") != "" {
+				trial, _ := strconv.Atoi(os.Getenv("PARTLOG_CRASH_TRIAL"))
+				if trial%3 == 1 {
+					hooks.PlanSeal = func(owner int, in coreSealInput) (coreSealPlan, error) {
+						if in.Next.Cursors[0] >= 9 {
+							if owner != 0 {
+								select {}
+							}
+							return coreSealPlan{Commit: func() {
+								_ = os.WriteFile(filepath.Join(os.Getenv("PARTLOG_CRASH_ROOT"), "ready"), []byte("mid-owner-seal"), 0600)
+							}}, nil
+						}
+						return coreSealPlan{}, nil
+					}
+				}
+			}
+			return openLoggedCoreWithHooks(logDir, partDir, cfg, opts, hooks)
 		}
 		opts.Streams = cfg.Producers
 		journal, err := partlog.OpenAdmission(logDir, opts)
@@ -141,39 +160,24 @@ func TestLogSIGKILLRecovery(t *testing.T) {
 		}
 		for i := 1; ; i++ {
 			// Seed a stable durable prefix; remaining callbacks race the kill.
-			if e = l.append(0, int64(1800000000+i), coreRows(0, i), i%7 == 0); e != nil {
+			if trial%3 == 1 {
+				var groups []coreBatch
+				for _, r := range coreRows(0, i) {
+					groups = append(groups, coreBatch{ID: r.ID, Order: uint64(i), Clock: int64(1800000000 + i), Policy: []byte("crash-test"), Points: []row{r}})
+				}
+				e = l.appendBatches(0, groups, i%7 == 0 || i == 9)
+			} else {
+				e = l.append(0, int64(1800000000+i), coreRows(0, i), i%7 == 0)
+			}
+			if e != nil {
 				panic(e)
 			}
 			if i == 8 {
 				if e = l.journal.Sync(); e != nil {
 					panic(e)
 				}
-				// Explicitly pause one owner after it has committed the next record,
-				// before other owners see it: crash inside a multi-owner seal.
 				if trial%3 == 1 {
-					rows := coreRows(0, 9)
-					cursor, e := l.journal.Append(0, 1800000009, encodeLogRows(rows))
-					if e != nil {
-						panic(e)
-					}
-					owner := l.engine.owners[0]
-					var ahead []row
-					for _, r := range rows {
-						if coreShard(r.ID, cfg.Shards) == 0 {
-							ahead = append(ahead, r)
-						}
-					}
-					ack := make(chan error, 1)
-					if e = owner.queues[0].push(&corePacket{rows: ahead, cursor: cursor, seal: true, ack: ack}, owner.dead); e != nil {
-						panic(e)
-					}
-					if e = <-ack; e != nil {
-						panic(e)
-					}
-					if e = os.WriteFile(filepath.Join(root, "ready"), []byte("mid-owner-seal"), 0600); e != nil {
-						panic(e)
-					}
-					select {}
+					continue
 				}
 				if e = os.WriteFile(filepath.Join(root, "ready"), []byte("ingesting"), 0600); e != nil {
 					panic(e)
@@ -249,6 +253,13 @@ func TestLogSIGKILLRecovery(t *testing.T) {
 			}
 			for _, r := range retained {
 				rows, e := decodeLogRows(r.Payload)
+				if len(r.Payload) >= logEnvelopeBytes && r.Payload[8] == 1 {
+					var groups []coreBatch
+					groups, e = decodeLogBatches(r.Payload)
+					for _, g := range groups {
+						rows = append(rows, g.Points...)
+					}
+				}
 				if e != nil {
 					t.Fatal(e)
 				}
@@ -319,7 +330,7 @@ func TestLogAdmissionExecBenchmark(t *testing.T) {
 		close(release)
 		t.Fatal(err)
 	}
-	_, err = journal.Append(0, -123, encodeLogRows([]row{{1, -3, 0x7ff8000000000042, 99}}))
+	_, err = journal.Append(0, -123, encodeLogRows([]row{{ID: 1, Time: -3, Bits: 0x7ff8000000000042, Seq: 99}}))
 	accepted := time.Now()
 	close(release)
 	if err != nil {
@@ -361,7 +372,7 @@ func TestLogBenchmarkFullOracle(t *testing.T) {
 					if mode == "missing" && seq == 99 {
 						continue
 					}
-					r := row{seq % 11, 1800000000 + int64(seq/6000000), math.Float64bits(float64(seq % 100003)), seq}
+					r := row{ID: seq % 11, Time: 1800000000 + int64(seq/6000000), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
 					if mode == "bits" && seq == 99 {
 						r.Bits ^= 1
 					}
@@ -454,4 +465,56 @@ func TestLogConcurrentReplayLiveExact(t *testing.T) {
 	if err != nil || got != want {
 		t.Fatalf("concurrent replay/live differs: want%s got%s err%v", want, got, err)
 	}
+}
+
+func coreTestConfig() coreConfig {
+	return coreConfig{AppendParts: true, Shards: 4, Producers: 2, MaxRows: 64, PartitionSeconds: 60}
+}
+func coreRows(producer, batch int) []row {
+	var out []row
+	for i := 0; i < 43; i++ {
+		seq := uint64(batch*1000 + producer*100 + i)
+		bits := math.Float64bits(float64(seq))
+		switch i % 9 {
+		case 0:
+			bits = 0x8000000000000000
+		case 1:
+			bits = 0x7ff8000000000042
+		case 2:
+			bits = 1
+		case 3:
+			bits = 0xfff0000000000000
+		}
+		out = append(out, row{ID: uint64(i % 11), Time: int64(-90 + batch*13 + i%7), Bits: bits, Seq: seq})
+	}
+	return out
+}
+func coreDigest(root string, cfg coreConfig) (string, error) {
+	h := sha256.New()
+	for s := 0; s < cfg.Shards; s++ {
+		db, e := pebble.Open(filepath.Join(root, fmt.Sprintf("owner-%03d", s)), &pebble.Options{})
+		if e != nil {
+			return "", e
+		}
+		snap := db.NewSnapshot()
+		for id := uint64(0); id < 11; id++ {
+			if coreShard(id, cfg.Shards) != s {
+				continue
+			}
+			rs, e := coreRead(snap, id)
+			if e != nil {
+				return "", e
+			}
+			for _, r := range rs {
+				var b [32]byte
+				putRow(b[:], r)
+				_, _ = h.Write(b[:])
+			}
+		}
+		_ = snap.Close()
+		if e = db.Close(); e != nil {
+			return "", e
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }

@@ -97,7 +97,7 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 					rows := storage[:n]
 					for i := range rows {
 						seq := offset + (sent+uint64(i))*uint64(producers) + uint64(p)
-						rows[i] = row{seq % metrics, 1800000000 + int64(seq/6000000), math.Float64bits(float64(seq % 100003)), seq}
+						rows[i] = row{ID: seq % metrics, Time: 1800000000 + int64(seq/6000000), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
 					}
 					payload = encodeLogRowsInto(payload, rows)
 					if _, e := log.Append(p, 1800000000+int64((offset+first)/6000000), payload); e != nil {
@@ -168,22 +168,6 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 			result = errors.Join(result, e)
 		case <-tick.C:
 			extra := coreSample(l.engine, "replay", start, count.Load())
-			queues := make([]map[string]any, producers)
-			for producer := range producers {
-				depth := 0
-				var wait uint64
-				for _, owner := range l.engine.owners {
-					q := owner.queues[producer]
-					for i := range q.slots {
-						if q.slots[i].Load() != nil {
-							depth++
-						}
-					}
-					wait += q.blockedNS.Load()
-				}
-				queues[producer] = map[string]any{"stream": producer, "queue_depth": depth, "queue_wait_seconds": float64(wait) / 1e9}
-			}
-			extra["streams"] = queues
 			emit("log_replay_sample", count.Load(), extra)
 			if path := os.Getenv("PARTLOG_BENCH_GOROUTINES"); path != "" {
 				if f, err := os.Create(path); err == nil {
@@ -248,7 +232,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 				}
 				for i := range rows {
 					seq := total + (sent+uint64(i))*uint64(cfg.Producers) + uint64(p)
-					rows[i] = row{seq % metrics, 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
+					rows[i] = row{ID: seq % metrics, Time: 1800000000 + int64(seq/rate), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
 				}
 				payload = encodeLogRowsInto(payload, rows)
 				if _, err := journal.Append(p, time.Now().Unix(), payload); err != nil {
@@ -278,7 +262,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	}
 	emit("storage_open_complete", 0, nil)
 	ready := l.startReplay(context.Background())
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	running := true
 	for running {
@@ -305,7 +289,19 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		err = errors.Join(err, os.WriteFile(filepath.Join(root, "live-counts.json"), data, 0600))
 	}
 	emit("backlog_snapshot_consumed", total, map[string]any{"backlog_seconds": backlogSeconds, "backlog_mpoints_per_second": float64(total) / backlogSeconds / 1e6, "live_accepted": live.Load(), "live_seconds": liveSeconds, "live_mpoints_per_second": float64(live.Load()) / liveSeconds / 1e6})
-	err = errors.Join(err, l.stopReplay())
+	drained := make(chan error, 1)
+	go func() { drained <- l.stopReplay() }()
+	draining := true
+	for draining {
+		select {
+		case drainErr := <-drained:
+			err = errors.Join(err, drainErr)
+			draining = false
+		case <-tick.C:
+			emit("replay_live_drain_sample", total+live.Load(), coreSample(l.engine, "drain", start, total+live.Load()))
+		}
+	}
+	emit("replay_live_drain_complete", total+live.Load(), coreSample(l.engine, "drained", start, total+live.Load()))
 	// Settlement is timed, not hidden behind a five-second early failure.
 	// A longer wait lowers the reported settled rate and cannot pass the
 	// throughput gate by excluding outstanding compaction work.
@@ -314,12 +310,14 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	quiet := 0
 	for time.Now().Before(deadline) {
 		busy := false
-		for _, owner := range l.engine.owners {
-			m := owner.db.Metrics()
-			if m.Compact.EstimatedDebt > 0 || m.Compact.NumInProgress > 0 {
-				busy = true
-			}
+		snapshot := coreSample(l.engine, "settling", start, total+live.Load())
+		busy = snapshot["estimated_debt_bytes"].(uint64) > 0 || snapshot["compactions_in_progress"].(int64) > 0 || snapshot["flushes_in_progress"].(int64) > 0
+		select {
+		case <-tick.C:
+			emit("replay_live_settle_sample", total+live.Load(), snapshot)
+		default:
 		}
+
 		if busy {
 			quiet = 0
 		} else {
@@ -338,7 +336,18 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	if !settled {
 		err = errors.Join(err, errors.New("compaction did not settle"))
 	}
-	err = errors.Join(err, l.close())
+	closed := make(chan error, 1)
+	go func() { closed <- l.close() }()
+	closing := true
+	for closing {
+		select {
+		case closeErr := <-closed:
+			err = errors.Join(err, closeErr)
+			closing = false
+		case <-tick.C:
+			emit("replay_live_close_sample", total+live.Load(), map[string]any{"proc": procStats(), "last_preclose_sample": sample})
+		}
+	}
 	// Include final owner flushes, database close and journal sync in the rate.
 	// The debt sample is taken while the databases are still open.
 	sample["settled_replay_seconds"] = time.Since(replayStart).Seconds()
@@ -346,10 +355,8 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	sample["error"] = fmt.Sprint(err)
 	emit("replay_live_settle", total+live.Load(), sample)
 	// All accepted live rows and backlog rows must pass the same core path.
-	var committed uint64
-	for _, owner := range l.engine.owners {
-		committed += owner.committed.Load()
-	}
+	committed := sample["committed"].(uint64)
+
 	if committed != total+live.Load() {
 		err = errors.Join(err, fmt.Errorf("committed %d != backlog+live %d", committed, total+live.Load()))
 	}
@@ -469,7 +476,7 @@ func verifyLogBenchmark(root string, total, metrics uint64, producers, owners in
 					if seq >= total {
 						rate = 20000000
 					}
-					expected := row{seq % metrics, 1800000000 + int64(seq/rate), math.Float64bits(float64(seq % 100003)), seq}
+					expected := row{ID: seq % metrics, Time: 1800000000 + int64(seq/rate), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
 					if id != expected.ID || ts != expected.Time || bits != expected.Bits {
 						r.Err = fmt.Errorf("row bits differ seq%d", seq)
 						return
@@ -482,7 +489,7 @@ func verifyLogBenchmark(root string, total, metrics uint64, producers, owners in
 					}
 					seen[index/64] |= mask
 					var a, b [32]byte
-					putRow(a[:], row{id, ts, bits, seq})
+					putRow(a[:], row{ID: id, Time: ts, Bits: bits, Seq: seq})
 					putRow(b[:], expected)
 					actual.Write(a[:])
 					oracle.Write(b[:])

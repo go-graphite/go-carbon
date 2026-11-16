@@ -1,9 +1,11 @@
 package main
 
 import (
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -123,5 +125,106 @@ func TestLogSIGKILLMidReplay(t *testing.T) {
 			}
 			t.Logf("SIGKILL mid-replay sealed=%s: all %d persisted rows exact, no duplicates", seal, total)
 		})
+	}
+}
+
+// Faults are chosen by seeded journal-record offsets, so the test is repeatable
+// while killing three distinct incomplete prefixes on a real child process.
+func TestLogSIGKILLRandomReplay(t *testing.T) {
+	total := uint64(262147)
+	if raw := os.Getenv("PARTLOG_RANDOM_POINTS"); raw != "" {
+		var err error
+		total, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil || total < 131073 {
+			t.Fatal("invalid random replay size")
+		}
+	}
+	const metricCount = 100003
+	cfg := coreConfig{AppendParts: true, Shards: 4, Producers: 1, MaxRows: 65536, PartitionSeconds: 3600}
+	if root := os.Getenv("PARTLOG_RANDOM_ROOT"); root != "" {
+		target, err := strconv.Atoi(os.Getenv("PARTLOG_RANDOM_RECORD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		err = l.journal.Replay(0, 0, func(r partlog.Record) error {
+			seen++
+			if err := l.apply(0, r, seen%3 == 0); err != nil {
+				return err
+			}
+			if seen == target {
+				if err := os.WriteFile(filepath.Join(root, "ready"), []byte(strconv.Itoa(seen)), 0600); err != nil {
+					return err
+				}
+				select {}
+			}
+			return nil
+		})
+		t.Fatal("child unexpectedly finished", err)
+	}
+	rng := rand.New(rand.NewPCG(20261116, 6))
+	used := map[int]bool{}
+	for trial := 0; trial < 3; trial++ {
+		root := t.TempDir()
+		if err := logBacklogBenchmark(root, "write", total, metricCount, 1, cfg.Shards); err != nil {
+			t.Fatal(err)
+		}
+		records := int((total + 32767) / 32768)
+		target := 1 + rng.IntN(records-2)
+		for used[target] {
+			target = 1 + rng.IntN(records-2)
+		}
+		used[target] = true
+		output, err := os.Create(filepath.Join(root, "child.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLogSIGKILLRandomReplay$")
+		cmd.Env = append(os.Environ(), "PARTLOG_RANDOM_ROOT="+root, "PARTLOG_RANDOM_RECORD="+strconv.Itoa(target), "PARTLOG_RANDOM_POINTS="+strconv.FormatUint(total, 10))
+		cmd.Stdout, cmd.Stderr = output, output
+		if err = cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(45 * time.Second)
+		for {
+			if _, err = os.Stat(filepath.Join(root, "ready")); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.Fatal("random replay barrier not reached")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if err = cmd.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		_ = cmd.Wait()
+		_ = output.Close()
+		l, err := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = l.replay(); err != nil {
+			_ = l.close()
+			t.Fatal(err)
+		}
+		if err = l.close(); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(root, "live-counts.json"), []byte("[0]"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err = verifyLogBenchmark(root, total, metricCount, 1, cfg.Shards, func(stage string, points uint64, extra map[string]any) {
+			t.Logf("trial%d stage%s points%d %v", trial, stage, points, extra)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("random SIGKILL trial%d record%d/%d: %d rows bit exact, no lost/duplicate points", trial, target, records, total)
 	}
 }

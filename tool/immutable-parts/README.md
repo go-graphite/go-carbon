@@ -300,3 +300,18 @@ combine it with `-test.cpuprofile`. It completes the capture even while a slow
 replay continues, preserving a usable profile if the external IO guard later
 stops the process. Fixture extension via `PARTLOG_BENCH_OFFSET` preserves the
 original apply clock of the generated rows.
+
+
+The journal harness imports `internal/v2core`; it does not retain its own copy
+of the owner engine. Five-second samples cover historical replay, accepted live
+suffix drain, compaction settlement and final close. The close phase reports
+process progress and the last preclose debt snapshot, because closed databases
+cannot be sampled. Settlement requires five consecutive 200ms observations with
+zero estimated compaction debt, active compactions and active flushes, after
+all stream durability barriers complete. The settled rate includes close.
+
+`TestLogSIGKILLRandomReplay` kills a child at three distinct seeded journal-record
+offsets and verifies every recovered persisted row for coverage, uniqueness,
+timestamp and float64 bits. Set `PARTLOG_RANDOM_POINTS` to raise its default
+262147-point fixture on a benchmark host; it must be at least131073. These raw-row
+checks do not establish rendered-query parity or production backend integration.
