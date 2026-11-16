@@ -218,8 +218,8 @@ immutable decoded copy after successful CRC validation. A failed fill refunds
 its reservation and publishes no samples. Reopening verifies disk bytes again;
 immutable files must never be modified in place.
 
-Uncached blocks check CRC on every read. Payload scratch belongs to the render
-workspace, with at most 64KiB lazily allocated for its worker; direct source scans
+Uncached blocks check CRC on every read. Payload scratch belongs to the active render
+call, with at most 64KiB lazily allocated for its worker; direct source scans
 use private scratch. There is no shared payload pool or idle payload retention.
 The existing per-source active-pin reservation covers scratch. Cold fill
 synchronizes only readers of that block; hot reads load an atomic pointer and

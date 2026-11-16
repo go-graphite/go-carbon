@@ -297,15 +297,15 @@ type fileBlock struct {
 // callers get private scratch too; no payload buffer crosses worker boundaries.
 type blockReadContext struct {
 	context.Context
-	workspace *renderWorkspace
+	payload []byte
 }
 
 func blockPayload(ctx context.Context, length int) []byte {
 	if c, ok := ctx.(*blockReadContext); ok {
-		if cap(c.workspace.payload) < length {
-			c.workspace.payload = make([]byte, MaxBlockBytes)
+		if cap(c.payload) < length {
+			c.payload = make([]byte, MaxBlockBytes)
 		}
-		return c.workspace.payload[:length]
+		return c.payload[:length]
 	}
 	return make([]byte, length)
 }

@@ -164,7 +164,7 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 		}
 		return nil
 	}
-	readCtx := &blockReadContext{Context: ctx, workspace: workspace}
+	readCtx := &blockReadContext{Context: ctx}
 	for _, sources := range groups {
 		for _, s := range sources {
 			if err := ctx.Err(); err != nil {
@@ -188,7 +188,6 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 // exact matches, preserving the public 32B/slot active admission bound.
 // Total idle storage is below 112MiB. Queries above 131072 slots are uncached.
 type renderWorkspace struct {
-	payload   []byte
 	values    []float64
 	sequences []uint64
 	times     []int64
@@ -259,8 +258,6 @@ func releaseRenderWorkspace(w *renderWorkspace) {
 	}
 	w.touched = w.touched[:0]
 	w.next = nil
-	// Payload scratch belongs to the active worker only, outside idle pools.
-	w.payload = nil
 	if pool := renderWorkspacePool(len(w.values)); pool != nil {
 		select {
 		case pool <- w:
