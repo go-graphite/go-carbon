@@ -206,3 +206,22 @@ catalog IDs; concurrent compaction with paused old readers; and failure to open 
 referenced part. Compare recovered and uninterrupted renders bit for bit. Reader
 load trials must consume those published parts with the same writer publication
 work enabled for every zero-reader and reader arm.
+
+
+Immutable file blocks retain a lazy decoded cache capped at 64KiB per source.
+The complete possible cache capacity and its metadata are included in
+`RetainedBytes` before publication, so the existing pinned-generation byte
+budget covers concurrent readers and publication turnover. Admission follows
+first touch; a full cache leaves other blocks on the checked streaming path.
+Hot blocks reuse an immutable decoded copy after its first successful CRC check.
+Initial fill errors return the reserved capacity and publish no samples. Reopening
+a generation verifies the disk bytes again. A pinned verified copy is unchanged
+by later disk corruption; immutable files must never be modified in place.
+
+Reusable payload scratch has a separate fixed process-wide idle ceiling of
+4MiB (64 buffers of 64KiB), outside the active-pin budget, just as idle render
+workspaces have their own bounds. Active payload scratch remains charged at
+64KiB per pinned reader/source. Uncached blocks check CRC on every read. Cold
+fill synchronizes only readers of that block; the hot path loads an atomic
+pointer and holds no mutex while decoding or invoking a consumer. Close follows
+the existing publication lifetime and rejects subsequent cached reads.

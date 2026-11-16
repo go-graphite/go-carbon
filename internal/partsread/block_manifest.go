@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 const MaxBlockBytes = 64 << 10
@@ -163,11 +164,13 @@ func slotBlocks(blocks []LocatedBlock) []SlotBlock {
 // once all descriptors are open, directory paths are no longer used for reads.
 type BlockFileSource struct {
 	*SlotIndex
-	files      map[string]*os.File
-	refs       map[string]BlockRef
-	closeOnce  sync.Once
-	retained   int64
-	Generation uint64
+	files          map[string]*os.File
+	refs           map[string]*fileBlock
+	closeOnce      sync.Once
+	closed         atomic.Bool
+	cacheRemaining atomic.Int64
+	retained       int64
+	Generation     uint64
 }
 
 func OpenBlockPart(path string) (*BlockFileSource, error) {
@@ -206,7 +209,7 @@ func OpenBlockPartWithIDs(path string, resolve func([]byte) (uint64, error)) (*B
 			m.Blocks[i].ID = id
 		}
 	}
-	s := &BlockFileSource{files: map[string]*os.File{}, refs: map[string]BlockRef{}, Generation: m.Generation}
+	s := &BlockFileSource{files: map[string]*os.File{}, refs: map[string]*fileBlock{}, Generation: m.Generation}
 	fail := func(err error) (*BlockFileSource, error) { s.Close(); return nil, err }
 	for _, b := range m.Blocks {
 		r := b.Ref
@@ -237,13 +240,22 @@ func OpenBlockPartWithIDs(path string, resolve func([]byte) (uint64, error)) (*B
 		if r.Offset+int64(r.Length) > info.Size() {
 			return fail(io.ErrUnexpectedEOF)
 		}
-		s.refs[string(b.Key)] = r
-		s.retained += int64(2*len(b.Key) + 2*len(r.File) + 192)
+		s.refs[string(b.Key)] = &fileBlock{ref: r}
+		s.retained += int64(2*len(b.Key) + 2*len(r.File) + 256)
 	}
 	s.SlotIndex, err = NewSlotIndex(slotBlocks(m.Blocks), s.readBlock)
 	if err != nil {
 		return fail(err)
 	}
+	// Reserve the entire lazy cache capacity before publication. Each source
+	// admits at most 64KiB of decoded samples, shared by its pinned generation.
+	var payloadBytes int64
+	for _, b := range s.refs {
+		payloadBytes += int64(b.ref.Length)
+	}
+	cacheBytes := min(payloadBytes, int64(MaxBlockBytes))
+	s.cacheRemaining.Store(cacheBytes)
+	s.retained += cacheBytes
 	// Also reserve one maximum decode buffer for each pinned reader.
 	s.retained += s.SlotIndex.RetainedBytes() + int64(len(s.files))*256 + MaxBlockBytes
 	return s, nil
@@ -252,33 +264,124 @@ func OpenBlockPartWithIDs(path string, resolve func([]byte) (uint64, error)) (*B
 func (s *BlockFileSource) RetainedBytes() int64 { return s.retained }
 func (s *BlockFileSource) Close() {
 	s.closeOnce.Do(func() {
+		s.closed.Store(true)
 		for _, f := range s.files {
 			_ = f.Close()
 		}
 	})
 }
+
+// fileBlock publishes only immutable, CRC-verified decoded samples. Its mutex
+// covers a cold fill only; readers never hold it while calling a consumer.
+type fileBlock struct {
+	ref     BlockRef
+	mu      sync.Mutex
+	decoded atomic.Pointer[[]Sample]
+}
+
+// Idle payload scratch has a process-wide 4MiB bound. Active calls are already
+// charged one MaxBlockBytes buffer by the pinned view's RetainedBytes.
+var blockPayloads = make(chan []byte, 64)
+
+func takeBlockPayload() []byte {
+	select {
+	case b := <-blockPayloads:
+		return b
+	default:
+		return make([]byte, MaxBlockBytes)
+	}
+}
+func releaseBlockPayload(b []byte) {
+	select {
+	case blockPayloads <- b[:MaxBlockBytes]:
+	default:
+	}
+}
+func decodeBlockSample(b []byte) Sample {
+	return Sample{Time: int64(binary.LittleEndian.Uint64(b)), Bits: binary.LittleEndian.Uint64(b[8:]), Sequence: binary.LittleEndian.Uint64(b[16:])}
+}
+func (s *BlockFileSource) payload(ref BlockRef, b []byte) ([]byte, error) {
+	b = b[:ref.Length]
+	if _, err := s.files[ref.File].ReadAt(b, ref.Offset); err != nil {
+		return nil, err
+	}
+	if crc32.ChecksumIEEE(b) != ref.CRC32 {
+		return nil, fmt.Errorf("immutable block checksum mismatch: %s@%d", ref.File, ref.Offset)
+	}
+	return b, nil
+}
+func (s *BlockFileSource) cached(b *fileBlock) ([]Sample, error) {
+	if p := b.decoded.Load(); p != nil {
+		return *p, nil
+	}
+	if s.cacheRemaining.Load() < int64(b.ref.Length) {
+		return nil, nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if p := b.decoded.Load(); p != nil {
+		return *p, nil
+	}
+	n := int64(b.ref.Length)
+	for remaining := s.cacheRemaining.Load(); remaining >= n; remaining = s.cacheRemaining.Load() {
+		if !s.cacheRemaining.CompareAndSwap(remaining, remaining-n) {
+			continue
+		}
+		scratch := takeBlockPayload()
+		payload, err := s.payload(b.ref, scratch)
+		if err != nil {
+			releaseBlockPayload(scratch)
+			s.cacheRemaining.Add(n)
+			return nil, err
+		}
+		samples := make([]Sample, len(payload)/sampleBytes)
+		for i := range samples {
+			samples[i] = decodeBlockSample(payload[i*sampleBytes:])
+		}
+		releaseBlockPayload(scratch)
+		b.decoded.Store(&samples)
+		return samples, nil
+	}
+	return nil, nil
+}
 func (s *BlockFileSource) readBlock(ctx context.Context, key []byte, _ []SlotRange, yield func(Sample) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ref, ok := s.refs[string(key)]
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	b, ok := s.refs[string(key)]
 	if !ok {
 		return errors.New("immutable block missing from manifest")
 	}
-	// Scratch belongs to this call; concurrent readers never share its bytes.
-	payload := make([]byte, ref.Length)
-	if _, err := s.files[ref.File].ReadAt(payload, ref.Offset); err != nil {
+	samples, err := s.cached(b)
+	if err != nil {
 		return err
 	}
-	if crc32.ChecksumIEEE(payload) != ref.CRC32 {
-		return fmt.Errorf("immutable block checksum mismatch: %s@%d", ref.File, ref.Offset)
+	if samples != nil {
+		for _, p := range samples {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := yield(p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Blocks outside the generation's cache budget retain per-read CRC checking.
+	scratch := takeBlockPayload()
+	defer releaseBlockPayload(scratch)
+	payload, err := s.payload(b.ref, scratch)
+	if err != nil {
+		return err
 	}
 	for len(payload) > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		p := Sample{Time: int64(binary.LittleEndian.Uint64(payload)), Bits: binary.LittleEndian.Uint64(payload[8:]), Sequence: binary.LittleEndian.Uint64(payload[16:])}
-		if err := yield(p); err != nil {
+		if err := yield(decodeBlockSample(payload)); err != nil {
 			return err
 		}
 		payload = payload[sampleBytes:]

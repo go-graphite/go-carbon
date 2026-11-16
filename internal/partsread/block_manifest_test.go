@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -200,5 +202,145 @@ func TestBlockManifestArchiveByteLimit(t *testing.T) {
 	_, err := PublishBlockPart(t.TempDir(), "oversized", 1, []BlockData{{SlotBlock: SlotBlock{ID: 7, Archive: a, Slots: SlotRange{0, 1}, Key: []byte("full-identity")}, Samples: samples}})
 	if err == nil {
 		t.Fatal("archive byte limit ignored")
+	}
+}
+
+// A cached block is an immutable verified copy. Reopening a generation must
+// still reject on-disk corruption, before any corrupt sample reaches a reader.
+func TestBlockManifestVerifiedCacheAndReopen(t *testing.T) {
+	path, want := manifestFixture(t)
+	s, err := OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := scanManifest(s)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal(got, err)
+	}
+	for _, b := range s.refs {
+		if b.decoded.Load() == nil {
+			t.Fatal("hot block was not cached")
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(path, "blocks"), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.WriteAt([]byte{0xff}, 8); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	got, err = scanManifest(s)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal("pinned bytes changed", got, err)
+	}
+	s.Close()
+	if _, err = scanManifest(s); !errors.Is(err, ErrClosed) {
+		t.Fatal("closed cached source readable", err)
+	}
+	s, err = OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got, err = scanManifest(s); err == nil || len(got) != 0 {
+		t.Fatal("reopen missed corruption", got, err)
+	}
+}
+func TestBlockManifestCacheBudgetAndConcurrent(t *testing.T) {
+	a := Archive{1, 86400}
+	var blocks []BlockData
+	for i := 0; i < 20; i++ {
+		var samples []Sample
+		for j := 0; j < 512; j++ {
+			samples = append(samples, Sample{Time: int64(i*512 + j), Bits: uint64(i*512 + j), Sequence: 1})
+		}
+		blocks = append(blocks, BlockData{SlotBlock: SlotBlock{ID: 7, Archive: a, Slots: SlotRange{int64(i * 512), int64((i + 1) * 512)}, Key: []byte(fmt.Sprintf("complete-block-%d", i))}, Samples: samples})
+	}
+	path, err := PublishBlockPart(t.TempDir(), "budgeted", 1, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	charged := s.RetainedBytes()
+	var wg sync.WaitGroup
+	failures := make(chan error, 32)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := 0
+			err := s.Scan(context.Background(), 7, a, 0, 20*512, func(p Sample) error {
+				if p.Bits != uint64(p.Time) {
+					return errors.New("changed bits")
+				}
+				n++
+				return nil
+			})
+			if err == nil && n != 20*512 {
+				err = fmt.Errorf("count %d", n)
+			}
+			if err != nil {
+				failures <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+	var cached int64
+	for _, b := range s.refs {
+		if p := b.decoded.Load(); p != nil {
+			cached += int64(cap(*p) * sampleBytes)
+		}
+	}
+	if cached == 0 || cached > MaxBlockBytes || cached+s.cacheRemaining.Load() != MaxBlockBytes {
+		t.Fatal("unbounded cache", cached, s.cacheRemaining.Load())
+	}
+	if s.RetainedBytes() != charged {
+		t.Fatal("cache was not reserved before publication")
+	}
+}
+
+func TestBlockManifestCacheCRCFailureRefund(t *testing.T) {
+	path, want := manifestFixture(t)
+	original, err := os.ReadFile(filepath.Join(path, "blocks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	reserved := s.cacheRemaining.Load()
+	broken := append([]byte(nil), original...)
+	broken[8] ^= 0xff
+	if err = os.WriteFile(filepath.Join(path, "blocks"), broken, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := scanManifest(s); err == nil || len(got) != 0 {
+		t.Fatal("corruption emitted", got, err)
+	}
+	if s.cacheRemaining.Load() != reserved {
+		t.Fatal("failed fill leaked capacity")
+	}
+	for _, b := range s.refs {
+		if b.decoded.Load() != nil {
+			t.Fatal("failed fill published")
+		}
+	}
+	if err = os.WriteFile(filepath.Join(path, "blocks"), original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := scanManifest(s)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal("retry did not verify", got, err)
 	}
 }
