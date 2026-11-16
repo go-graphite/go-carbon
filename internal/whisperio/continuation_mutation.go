@@ -48,6 +48,12 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 		if until > from {
 			for _, scope := range recorder.MutationWindows() {
 				lo, hi := max(from, int(scope.From)), min(until, int(scope.Until))
+				// Proof scopes are arbitrary half-open seconds, while Whisper
+				// reads aligned slots. Match DigestBounds: include exactly the
+				// slot timestamps in the intersection, including lower rollups.
+				step := m.Retentions[ai].Step
+				lo = (lo + step - 1) / step * step
+				hi = (hi + step - 1) / step * step
 				if hi > lo {
 					windows[ai] = append(windows[ai], whisper.ArchiveWindow{Archive: ai, From: lo, Until: hi})
 				}
@@ -106,6 +112,11 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 		}
 		windows[ai] = merged
 		for _, w := range merged {
+			// Discontinuous owners can span more than one circular archive.
+			// Keep the revision fence unknown instead of rejecting the write.
+			if w.Until-w.From > m.Retentions[ai].MaxRetention() {
+				return nil
+			}
 			slots += (w.Until-w.From)/m.Retentions[ai].Step + 1
 			if slots > mutationCompareSlots {
 				return nil
