@@ -1,0 +1,335 @@
+package downsize
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func phaseResumeFixture(t *testing.T) (*syncer, *syncJournal) {
+	t.Helper()
+	o := convergeOptions(t)
+	o.from = []string{syncD1}
+	o.batch = 1
+	identity, err := syncIdentity(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(j.close)
+	s := &syncer{o: o, j: j, b: newFakeSync(), copied: map[string]bool{}, forbid: map[string]bool{}, failedCp: map[string]bool{}}
+	s.sum.phases = map[string]*syncPhase{}
+	return s, j
+}
+
+func TestSyncPhaseResumeEveryPosition(t *testing.T) {
+	for _, phase := range []string{"discover", "copy", "window missing", "window retry", "verify", "fill", "complete"} {
+		for _, complete := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/complete=%v", phase, complete), func(t *testing.T) {
+				s, j := phaseResumeFixture(t)
+				round := 0
+				if phase == "verify" || phase == "fill" {
+					round = 16
+				}
+				p := syncPhasePosition{Phase: phase, Round: round, Done: 7, Total: 11, Complete: complete, Options: syncCheckpointOptions(s.o)}
+				if err := j.append(syncRow{Kind: "phase-position", Position: &p}); err != nil {
+					t.Fatal(err)
+				}
+				// Model a kill, with a stale progress file from before the transition.
+				if err := atomicStateJSON(filepath.Join(s.o.state, "progress.json"), progressSnapshot{Phase: "discover", Done: 1, Total: 11}); err != nil {
+					t.Fatal(err)
+				}
+				// Drop every in-memory field as a killed client would. Reopen the
+				// actual journal and lock, rather than testing the live writer's rows.
+				s = restartPhaseFixture(t, s)
+				if err := s.restorePhase(); err != nil {
+					t.Fatal(err)
+				}
+				got, _ := json.Marshal(s.resume)
+				want, _ := json.Marshal(p)
+				if string(got) != string(want) {
+					t.Fatalf("position lost: %s != %s", got, want)
+				}
+				if s.prog.durableFloor != 7 {
+					t.Fatalf("initial counter reset: %d", s.prog.durableFloor)
+				}
+				if !complete {
+					if err := s.beginPhase(phase, round, 11); err != nil {
+						t.Fatal(err)
+					}
+					if s.prog.durableFloor != 7 {
+						t.Fatal("phase entry lost saved count")
+					}
+				}
+			})
+		}
+	}
+}
+
+func restartPhaseFixture(t *testing.T, prior *syncer) *syncer {
+	t.Helper()
+	prior.j.file.Close()
+	prior.j.lock.Close()
+	identity, err := syncIdentity(prior.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := openSyncJournal(filepath.Join(prior.o.state, "sync.jsonl"), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(j.close)
+	s := &syncer{o: prior.o, j: j, b: newFakeSync(), copied: map[string]bool{}, forbid: map[string]bool{}, failedCp: map[string]bool{}}
+	s.sum.phases = map[string]*syncPhase{}
+	return s
+}
+
+func TestSyncPhaseResumeLegacyProgressFloor(t *testing.T) {
+	for _, label := range []string{"copy", "window missing", "window retry", "verify round 16", "fill"} {
+		t.Run(label, func(t *testing.T) {
+			s, j := phaseResumeFixture(t)
+			if err := j.append(syncRow{Kind: "discovered", Names: 271248522, Missing: 137041866}); err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicStateJSON(filepath.Join(s.o.state, "progress.json"), progressSnapshot{Phase: label, Round: 16, Done: 146847, Total: 43830096}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.restorePhase(); err != nil {
+				t.Fatal(err)
+			}
+			if s.prog.phase != label || s.prog.durableFloor != 146847 || s.prog.total != 43830096 {
+				t.Fatalf("legacy startup reset %+v", s.resume)
+			}
+		})
+	}
+}
+
+type phaseResumeRetryBackend struct {
+	*fakeSync
+	t      *testing.T
+	cancel context.CancelFunc
+	state  string
+	infos  int
+}
+
+func (b *phaseResumeRetryBackend) List(context.Context, string, string, string, int) ([]string, error) {
+	return nil, errors.New("completed discovery called backend")
+}
+func (b *phaseResumeRetryBackend) WindowPresenceRanges(ctx context.Context, store string, names []string, _ syncRanges) (map[string][]syncDigest, error) {
+	_, err := b.Info(ctx, store, names)
+	return nil, err
+}
+func (b *phaseResumeRetryBackend) Info(context.Context, string, []string) (map[string][]syncArchive, error) {
+	b.infos++
+	data, err := os.ReadFile(filepath.Join(b.state, "progress.json"))
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	var p progressSnapshot
+	if err = json.Unmarshal(data, &p); err != nil {
+		b.t.Fatal(err)
+	}
+	if p.Phase != "window retry" || p.Done < 7 {
+		b.t.Errorf("first published progress regressed: %+v", p)
+	}
+	b.cancel()
+	return nil, context.Canceled
+}
+
+func TestSyncPhaseResumePendingWindowSkipsMissing(t *testing.T) {
+	s, j := phaseResumeFixture(t)
+	s.o.windows = syncRanges{{Name: "gap", From: syncTestNow - 600, Until: syncTestNow - 120}}
+	s.o.fullHistory = false
+	// Recreate header with the real window identity before adding any work.
+	identity, _ := syncIdentity(s.o)
+	j.rows[0].Identity = identity
+	if err := j.file.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.file.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(j.rows[0])
+	if _, err := j.file.Write(append(raw, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.append(syncRow{Kind: "discovered", Names: 20, Missing: 10}); err != nil {
+		t.Fatal(err)
+	}
+	row := syncRow{Kind: "window-selected", Source: syncD1, Round: 1, SelectionComplete: true}
+	for i := 0; i < 10; i++ {
+		row.Skipped = append(row.Skipped, syncSkip{fmt.Sprintf("pending.%02d", i), syncWindowSelectionReason})
+	}
+	if err := j.append(row); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicStateJSON(filepath.Join(s.o.state, "progress.json"), progressSnapshot{Phase: "window retry", Done: 7, Total: 10}); err != nil {
+		t.Fatal(err)
+	}
+	// No missing.tsv exists: entering completed missing copy fails this test even
+	// before it could issue a selection or transfer.
+	j.file.Close()
+	j.lock.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &phaseResumeRetryBackend{fakeSync: newFakeSync(), t: t, cancel: cancel, state: s.o.state}
+	if err := runSync(ctx, s.o, b); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wanted current retry cancellation: %v", err)
+	}
+	if b.infos == 0 {
+		t.Fatal("did not enter the saved retry frontier")
+	}
+}
+
+func TestSyncPhaseResumeCompletedRoundsUseOnlyReceipts(t *testing.T) {
+	for _, phase := range []string{"verify", "fill"} {
+		t.Run(phase, func(t *testing.T) {
+			s, j := phaseResumeFixture(t)
+			if err := os.WriteFile(s.unionPath(), []byte("a\t1\t1\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s.sum.Discovered = 1
+			for round := 1; round <= 16; round++ {
+				if err := j.append(syncRow{Kind: "verified", Round: round, First: "a", Last: "a", Names: 1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.resume = syncPhasePosition{Phase: phase, Round: 16, Done: 1, Total: 1}
+			s.prog.beginReplay(phase, 1, 1)
+			for round := 1; round <= 15; round++ {
+				if _, _, _, err := s.verifyRound(context.Background(), round, s.unionSource()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "fill" {
+				if _, _, _, err := s.verifyRound(context.Background(), 16, s.unionSource()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if s.prog.phase != phase || s.prog.durableFloor != 1 || s.prog.done.Load() != 0 {
+				t.Fatal("completed rounds changed live position")
+			}
+		})
+	}
+}
+
+func TestSyncPhaseResumeAmbiguousFailsBeforeBackend(t *testing.T) {
+	s, j := phaseResumeFixture(t)
+	s.sum.Discovered = 2
+	if err := os.WriteFile(s.unionPath(), []byte("a\t1\t1\nb\t1\t1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.append(syncRow{Kind: "verified", Round: 1, First: "a", Last: "a", Names: 1}); err != nil {
+		t.Fatal(err)
+	}
+	s.resume = syncPhasePosition{Phase: "fill", Round: 1}
+	if _, _, _, err := s.verifyRound(context.Background(), 1, s.unionSource()); err == nil || !strings.Contains(err.Error(), "refusing backend replay") {
+		t.Fatalf("ambiguous phase restarted: %v", err)
+	}
+}
+
+func TestSyncPhaseResumeScopeChangeFails(t *testing.T) {
+	s, j := phaseResumeFixture(t)
+	if err := s.savePhase("fill", 16, 7, 11); err != nil {
+		t.Fatal(err)
+	}
+	s.o.settle++
+	if err := s.restorePhase(); err == nil || !strings.Contains(err.Error(), "scope changed") {
+		t.Fatal("changed scope silently reused", err)
+	}
+	if len(j.rows) != 2 {
+		t.Fatal("scope error mutated journal")
+	}
+}
+
+func TestSyncPhaseResumeJournalProgressSurvivesLostJSON(t *testing.T) {
+	s, j := phaseResumeFixture(t)
+	if err := s.savePhase("fill", 16, 0, 43830096); err != nil {
+		t.Fatal(err)
+	}
+	p := syncPhasePosition{Phase: "fill", Round: 16, Done: 2840000, Total: 43830096}
+	if err := j.append(syncRow{Kind: "phase-progress", Position: &p}); err != nil {
+		t.Fatal(err)
+	}
+	// A delayed old-phase publisher cannot rewind the latest transition.
+	stale := syncPhasePosition{Phase: "verify", Round: 16, Done: 99, Total: 100}
+	if err := j.append(syncRow{Kind: "phase-progress", Position: &stale}); err == nil {
+		t.Fatal("delayed old-phase publication was accepted")
+	}
+	if err := s.restorePhase(); err != nil {
+		t.Fatal(err)
+	}
+	if s.resume.Phase != "fill" || s.resume.Round != 16 || s.resume.Done != 2840000 {
+		t.Fatalf("lost journal-only position: %+v", s.resume)
+	}
+	if err := s.beginPhase("fill", 16, 43830096); err != nil {
+		t.Fatal(err)
+	}
+	// Kill between writing phase entry and the next progress-file publication.
+	s = restartPhaseFixture(t, s)
+	if err := s.restorePhase(); err != nil {
+		t.Fatal(err)
+	}
+	if s.resume.Done != 2840000 {
+		t.Fatalf("phase entry crash lost counter: %+v", s.resume)
+	}
+}
+
+func TestSyncPhaseResumeLegacyReceiptsWithoutProgress(t *testing.T) {
+	for _, phase := range []string{"verify", "fill", "window retry"} {
+		t.Run(phase, func(t *testing.T) {
+			s, j := phaseResumeFixture(t)
+			r := syncRow{Kind: "verified", Round: 16, First: "a", Last: "z", Names: 2840000}
+			if phase == "fill" {
+				r.Kind, r.Phase = "copied", "fill"
+			}
+			if phase == "window retry" {
+				r.Kind, r.Names = "window-retry-floor", 146847
+			}
+			if err := j.append(r); err != nil {
+				t.Fatal(err)
+			}
+			s = restartPhaseFixture(t, s)
+			if err := s.restorePhase(); err != nil {
+				t.Fatal(err)
+			}
+			if s.resume.Phase != phase || s.resume.Done != int64(r.Names) {
+				t.Fatalf("lost legacy journal cursor: %+v", s.resume)
+			}
+		})
+	}
+}
+
+func TestSyncPhaseResumeRejectsDurableRegression(t *testing.T) {
+	for _, next := range []syncPhasePosition{{Phase: "copy", Done: 7}, {Phase: "fill", Round: 16, Done: 6}, {Phase: "verify", Round: 15, Done: 99}} {
+		t.Run(fmt.Sprintf("%s/%d/%d", next.Phase, next.Round, next.Done), func(t *testing.T) {
+			s, j := phaseResumeFixture(t)
+			if err := s.savePhase("fill", 16, 7, 11); err != nil {
+				t.Fatal(err)
+			}
+			s = restartPhaseFixture(t, s)
+			j = s.j
+			if err := j.append(syncRow{Kind: "phase-progress", Position: &next}); err == nil || !strings.Contains(err.Error(), "record 2 saved fill round 16 done 7") {
+				t.Fatalf("regression was not refused against named record: %v", err)
+			}
+			if j.progress.PhaseRegressions != 1 {
+				t.Fatal("missing regression metric", j.progress)
+			}
+			s = restartPhaseFixture(t, s)
+			if err := s.restorePhase(); err != nil {
+				t.Fatal(err)
+			}
+			if s.resume.Done != 7 || s.resume.Phase != "fill" || s.j.progress.PhaseRegressions != 1 {
+				t.Fatal("denied publication changed durable position", s.resume)
+			}
+		})
+	}
+}

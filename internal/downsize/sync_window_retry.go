@@ -172,7 +172,12 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		}
 	}
 	order = append(fresh, revisit...)
-	s.prog.beginReplay("window retry", total, min(int64(total), floor))
+	if err := s.beginPhase("window retry", 0, total); err != nil {
+		return err
+	}
+	s.prog.mu.Lock()
+	s.prog.durableFloor = max(s.prog.durableFloor, min(int64(total), floor))
+	s.prog.mu.Unlock()
 	s.prog.done.Store(int64(durable))
 	s.prog.replayed.Store(int64(durable))
 	if !s.legacyCopyReceipts {

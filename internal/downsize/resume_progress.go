@@ -100,6 +100,7 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	PhaseRegressions   int64                `json:"phase_regressions"`
 	LegacyRevalidated  int64                `json:"legacy_revalidated_names"`
 	RedoNames          map[string]int64     `json:"redo_names,omitempty"`
 	Quarantined        int64                `json:"quarantined"`
@@ -132,6 +133,12 @@ func (p *progressSnapshot) apply(r syncRow) {
 		p.Discovered = int64(r.Discovery.Names)
 	}
 	switch r.Kind {
+	case "phase-regression":
+		p.PhaseRegressions++
+	case "phase-position":
+		if r.Position != nil {
+			p.Round = r.Position.Round
+		}
 	case "redo":
 		if p.RedoNames == nil {
 			p.RedoNames = map[string]int64{}
