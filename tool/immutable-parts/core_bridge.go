@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -86,4 +87,31 @@ func procStats() map[string]float64 {
 
 func coreSample(e *coreEngine, stage string, start time.Time, offered uint64) map[string]any {
 	return v2core.Sample(e.engine, stage, start, offered)
+}
+
+// Replay writes include the concurrently admitted live journal, generated SSTs
+// (data and frontier), and Pebble compaction output. These are separate logical
+// file-byte counters, not a decomposition of Linux's block-rounded write_bytes.
+func replayWriteStages(root string, sample map[string]any) error {
+	var journal uint64
+	err := filepath.WalkDir(filepath.Join(root, "log"), func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err == nil {
+			journal += uint64(info.Size())
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	sample["journal_file_bytes"] = journal
+	sample["raw_and_frontier_sst_file_bytes"] = sample["sink_bytes"]
+	sample["compaction_output_file_bytes"] = sample["compacted_bytes"]
+	return nil
 }

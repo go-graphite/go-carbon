@@ -315,3 +315,31 @@ offsets and verifies every recovered persisted row for coverage, uniqueness,
 timestamp and float64 bits. Set `PARTLOG_RANDOM_POINTS` to raise its default
 262147-point fixture on a benchmark host; it must be at least131073. These raw-row
 checks do not establish rendered-query parity or production backend integration.
+
+### Replayed render and crash qualification
+
+`go test -tags=sealrollup_integration ./tool/immutable-parts -run '^TestReplayedRenderDifferential$'`
+checks 1,680 renders (70 schemas, six aggregation methods, four query widths)
+against classic Whisper, native exact blocks, and continuation. Before replay,
+the journal records the canonical name, archive policy, original clock, order,
+and original apply boundary in each batch envelope. The offline adapter reads
+persisted numeric rows, checks coverage and exact bits against those envelopes,
+then runs `sealrollup` and publishes immutable archive blocks through `partsread`.
+This is a reconstruction oracle; it does not qualify production sealing or add
+missing policies to the older numeric throughput corpus.
+
+The opt-in `TestFullScaleReplayCrashes` takes `PARTLOG_CRASH_ROOT`, whose
+`fixture/log` contains a historical-only benchmark journal, plus
+`PARTLOG_BENCH_POINTS`, `PARTLOG_BENCH_PRODUCERS`, and `PARTLOG_BENCH_OWNERS`.
+On Linux it clones that journal into three fresh trial directories, uses seeded
+committed-row prefixes to SIGKILL real replay+live child processes, reopens the
+retained journal, finishes replay and checks every persisted raw row. It reports
+the retained live prefix separately: one-second group commit permits losing an
+unsynced tail. It does not claim a rendered oracle for the numeric corpus.
+
+Replay receipts include journal logical file bytes at start/end, generated raw
+and frontier SST file bytes, Pebble compaction-output file bytes, and the process
+`write_bytes` delta divided by historical plus accepted live points. File sizes
+and process block writes are distinct counters; their difference includes
+allocation, rounding, manifest and other write effects. Final estimated debt is
+reported verbatim; a nonzero residual still fails the strict settlement gate.

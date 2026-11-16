@@ -186,6 +186,11 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 // This exercises acceptance into the durable journal concurrently with ordered
 // replay. Live rows have disjoint sequence numbers but the same metric catalogue.
 func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, metrics uint64, emit func(string, uint64, map[string]any), start time.Time) error {
+	writeStart := procStats()
+	journalStart := map[string]any{}
+	if err := replayWriteStages(root, journalStart); err != nil {
+		return err
+	}
 	stopProfile, err := boundedReplayCPUProfile()
 	if err != nil {
 		return err
@@ -330,6 +335,10 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		time.Sleep(200 * time.Millisecond)
 	}
 	sample := coreSample(l.engine, "settled", start, total+live.Load())
+	if e := replayWriteStages(root, sample); e != nil {
+		err = errors.Join(err, e)
+	}
+	sample["journal_file_bytes_at_replay_start"] = journalStart["journal_file_bytes"]
 	sample["settled"] = settled
 	sample["live_accepted"] = live.Load()
 	sample["preclose_seconds"] = time.Since(replayStart).Seconds()
@@ -351,6 +360,8 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	// Include final owner flushes, database close and journal sync in the rate.
 	// The debt sample is taken while the databases are still open.
 	sample["settled_replay_seconds"] = time.Since(replayStart).Seconds()
+	sample["process_write_bytes_during_replay"] = procStats()["write_bytes"] - writeStart["write_bytes"]
+	sample["process_written_bytes_per_input_point"] = (procStats()["write_bytes"] - writeStart["write_bytes"]) / float64(total+live.Load())
 	sample["settled_replay_mpoints_per_second"] = float64(total) / time.Since(replayStart).Seconds() / 1e6
 	sample["error"] = fmt.Sprint(err)
 	emit("replay_live_settle", total+live.Load(), sample)
