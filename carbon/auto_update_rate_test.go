@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -81,9 +82,11 @@ func TestAutoUpdateAppReloadThroughRestartEnd(t *testing.T) {
 				}
 				app.Cache.SetWriteoutPacing(initial == -1)
 				var err error
-				app.MetricStore, err = store.Open(cfg.Whisper.StoreDir, store.Options{
+				// This checks admission and reload against the real store, without
+				// making each metadata create wait for a device flush.
+				app.MetricStore, err = store.Open(cfg.Whisper.StoreDir, (store.Options{
 					CacheSize: 1 << 20, MemTableSize: 1 << 20, MetadataCacheSize: 1 << 20,
-				})
+				}).WithFS(vfs.NewMem()))
 				if err != nil {
 					t.Fatal(err)
 				}

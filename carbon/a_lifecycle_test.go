@@ -49,8 +49,6 @@ func TestDumpStopStopsPersisterAlongsideWarmup(t *testing.T) {
 }
 
 func TestIncrementalBuckydPreservesOwnershipAndMixedIndex(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
+	parallelTestMatrix(t)
 	testIncrementalBuckydPreservesOwnershipAndMixedIndex(t)
 }

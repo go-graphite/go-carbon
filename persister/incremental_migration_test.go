@@ -60,6 +60,9 @@ func incrementalPersisterFixtureWith(t *testing.T, codec *whisperio.Continuation
 // publish (verifying the folded physical state against the source) and keep
 // every value, and a later write must land as on the original file.
 func TestIncrementalMigrationFoldsSidecarAcrossCrashBoundaries(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	codec := func() *whisperio.ContinuationCodec { return &whisperio.ContinuationCodec{DirectLateWrites: true} }
 	for _, boundary := range []string{"staged", "owned", "unlink-0", "directory-synced"} {
 		t.Run(boundary, func(t *testing.T) {
@@ -280,6 +283,9 @@ func TestIncrementalMigrationKeepsLegacyWritesUntilPublication(t *testing.T) {
 }
 
 func TestIncrementalMigrationWritesAfterReclamationMatchCWhisper(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	now := storageTestClock(t)
 	root := t.TempDir()
 	leftCache, rightCache := &fakeCache{}, &fakeCache{}

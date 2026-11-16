@@ -16,6 +16,9 @@ import (
 )
 
 func TestIncrementalCaptureShardsKeepRootIdleDuringConcurrentConversions(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	p, _, db, _ := incrementalPersisterFixture(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -155,6 +158,9 @@ func TestIncrementalCaptureShardsKeepRootIdleDuringConcurrentConversions(t *test
 // without interpreting its entries. Flat and sharded leftovers are therefore
 // disposable in both versions, regardless of the durable ownership boundary.
 func TestIncrementalCaptureScratchRecoveryAndR21Layout(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	for _, boundary := range []string{"staged", "owned"} {
 		t.Run(boundary, func(t *testing.T) {
 			p, _, db, destination := incrementalPersisterFixture(t)

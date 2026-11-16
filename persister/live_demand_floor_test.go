@@ -62,10 +62,13 @@ func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
 	// Preserve every demand/floor ratio and the high-rate (>1000/s) token
 	// path while avoiding millions of distinct names under the race detector.
 	const scale = 20
+	// Admission counts metric writes; retain the 3:2 surge in points per
+	// write without copying 960 identical values into every cache entry.
+	const batchPoints = 16
 	synctest.Test(t, func(t *testing.T) {
 		c := cache.New()
 		c.SetMaxSize(40_000_000_000 / scale)
-		if err := c.SetWriteoutBatching(960, 960*time.Second); err != nil {
+		if err := c.SetWriteoutBatching(batchPoints, 960*time.Second); err != nil {
 			t.Fatal(err)
 		}
 		if err := c.SetWriteoutSpread(.25); err != nil {
@@ -101,9 +104,9 @@ func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
 		var accepted uint64
 		var name int
 		for second := range 60 {
-			batchSize := 960
+			batchSize := batchPoints
 			if second >= 25 && second < 40 {
-				batchSize = 1440
+				batchSize = batchPoints * 3 / 2
 			}
 			count := 40000 / scale
 			if second >= 45 { // Falling demand must release its learned floor.
