@@ -3,6 +3,7 @@ package v2core
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,10 +58,13 @@ type RollupMetadata struct {
 }
 
 type rollupMetric struct {
-	policy   RollupPolicy
-	meta     RollupMetadata
-	slots    *sealrollup.Slots
-	prepared *sealrollup.Prepared
+	policy      RollupPolicy
+	meta        RollupMetadata
+	slots       *sealrollup.Slots
+	prepared    *sealrollup.Prepared
+	keyTemplate []byte
+	prefix      string
+	partOffset  int
 }
 type coreRollups struct {
 	dense bool
@@ -112,16 +116,26 @@ func (r *coreRollups) metric(id uint64, policy []byte, staged map[[32]byte]*seal
 		}
 	}
 	staged[digest] = prepared
-	// Planning only populates its private policy cache; failure remains pure.
-	return &rollupMetric{policy: p, meta: RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(policy)}, slots: sealrollup.NewSlots(p.Config.Archives), prepared: prepared}, nil
+	// Identity/routing is immutable. Validate and encode it once, then only
+	// fill the part/archive/slot fields of each detached output key.
+	template, err := partsformat.Encode(partsformat.Key{Group: p.Group, VShard: partsformat.Route(p.Name), Metric: p.Name})
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := partsformat.PartitionPrefixForGroup(p.Group, partsformat.Route(p.Name), 0)
+	if err != nil {
+		return nil, err
+	}
+	return &rollupMetric{policy: p, meta: RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(policy)}, slots: sealrollup.NewSlots(p.Config.Archives), prepared: prepared, keyTemplate: template, prefix: string(prefix), partOffset: len(prefix)}, nil
 }
 
 type rollupStage struct {
-	metric  *rollupMetric
-	next    RollupMetadata
-	batches []sealrollup.Batch
-	records []sealrollup.Record
-	fresh   bool
+	metric     *rollupMetric
+	next       RollupMetadata
+	batches    []sealrollup.Batch
+	records    []sealrollup.Record
+	fresh      bool
+	batchCount int
 }
 
 func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
@@ -157,13 +171,31 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if !bytes.Equal(b.Policy, s.metric.meta.Policy) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
-		// Cursor replay filtering belongs to core's owner before PlanSeal. Never
-		// silently suppress a repeated order within an otherwise new journal packet.
-		batch := sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: make([]sealrollup.Sample, len(b.Points))}
+		stages[i].batchCount++
+	}
+	// One allocation per sealed part for samples and application descriptors.
+	// Every original boundary/order/clock remains distinct.
+	sampleCount := 0
+	for _, b := range in.Batches {
+		sampleCount += len(b.Points)
+	}
+	samples := make([]sealrollup.Sample, sampleCount)
+	batchStorage := make([]sealrollup.Batch, len(in.Batches))
+	offset := 0
+	for i := range stages {
+		n := stages[i].batchCount
+		stages[i].batches = batchStorage[offset : offset : offset+n]
+		offset += n
+	}
+	offset = 0
+	for _, b := range in.Batches {
+		s := &stages[positions[b.ID]]
+		ps := samples[offset : offset+len(b.Points) : offset+len(b.Points)]
 		for j, p := range b.Points {
-			batch.Points[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
+			ps[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
-		s.batches = append(s.batches, batch)
+		offset += len(b.Points)
+		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
 	}
 	// Idle maintenance visits only live metadata; no point/store reads occur.
 	now := time.Now()
@@ -185,16 +217,12 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 	}
 	put := func(m *rollupMetric, archive uint32, slot int64, value []byte) error {
-		key := partsformat.Key{Group: m.policy.Group, VShard: partsformat.Route(m.policy.Name), Partition: 0, Part: part, Metric: m.policy.Name, Archive: archive, BlockStart: slot}
-		encoded, err := partsformat.Encode(key)
-		if err != nil {
-			return err
-		}
-		prefix, err := partsformat.PartitionPrefixForGroup(key.Group, key.VShard, 0)
-		if err != nil {
-			return err
-		}
-		files[string(prefix)] = append(files[string(prefix)], coreKV{Key: encoded, Value: value})
+		encoded := bytes.Clone(m.keyTemplate)
+		copy(encoded[m.partOffset:m.partOffset+16], part[:])
+		tail := len(encoded) - 16
+		binary.BigEndian.PutUint32(encoded[tail:], archive)
+		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
+		files[m.prefix] = append(files[m.prefix], coreKV{Key: encoded, Value: value})
 		return nil
 	}
 	for i := range stages {
