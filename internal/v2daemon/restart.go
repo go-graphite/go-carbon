@@ -91,6 +91,11 @@ func (p *Producer) recoverProducer(dir string) error {
 			} else if stamp != nil {
 				return errors.New("placed journal requires placement authority")
 			}
+			if stamp != nil && stamp.RelaySequence != 0 {
+				if err := p.rememberRelay(*stamp); err != nil {
+					return err
+				}
+			}
 			batches, cursor, err := DecodeApplications(inner, &decoder, p.catalog, p.index, p.count)
 			if err != nil {
 				return err
