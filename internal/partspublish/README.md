@@ -132,3 +132,26 @@ Where tracing is unavailable, a separate untimed build can instrument actual
 `os.File.Sync` calls in both the block writer and publisher. Preserve the exact
 instrumentation diff and original source hashes, report failed calls separately,
 and keep its timings separate from the uninstrumented cost measurement.
+
+### Reader process isolation experiment
+
+`TestPublisherWriterIsolation` accepts `PARTS_PUBLISH_PROCESS=1` to launch the
+same render workload in a child process with its own Go runtime, publication and
+block caches. `PARTS_PUBLISH_READER_PROCS` bounds that runtime (default 64), while
+`PARTS_PUBLISH_READERS` still sets concurrent query loops. On Linux the child
+inherits the disjoint reader CPU mask from `PARTS_READ_BENCH_CPUS`; writer CPU
+placement and runtime settings are independent.
+
+The first real consumer is this opt-in core/publication benchmark: each successful
+core commit atomically renames its committed envelope into a per-owner handoff
+file. The child polls these files and incrementally installs references through
+`PlanSeal` with no added blocks. Writer baselines in process mode perform the same
+handoff with zero query loops. The fixture is append-only and retains every part
+until the child joins; the child must acknowledge every final generation. This is
+an experiment transport, not a production cross-process retirement or recovery
+protocol. Neither daemon operation nor the on-disk publication format changes.
+
+CPU profiles label in-process readers and writers separately. Results additionally
+report allocation bytes, GC assists, dedicated marking and pause CPU over the
+writer interval; process-wide GC values cannot assign assists to a particular
+writer goroutine. Compare complete within-topology curves and retain all repeats.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	rmetrics "runtime/metrics"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"sync"
@@ -30,6 +31,7 @@ type isolationMetric struct {
 }
 type isolationOwner struct {
 	pub                             *pp.Publisher
+	handoff                         string
 	catalog                         []byte
 	names                           map[uint64]string
 	refs                            []pp.Ref
@@ -45,6 +47,9 @@ func newIsolationOwners(root string, shards int) ([]*isolationOwner, []isolation
 	for owner := range owners {
 		o := &isolationOwner{names: map[uint64]string{}}
 		owners[owner] = o
+		if os.Getenv("PARTS_PUBLISH_PROCESS") == "1" {
+			o.handoff = filepath.Join(root, fmt.Sprintf("snapshot-%02d.json", owner))
+		}
 		var entries []isolationMetric
 		// Real portable names in one routing scope per owner. Numeric core routing
 		// remains the explicit adapter boundary; no name hash is used as identity.
@@ -154,7 +159,20 @@ func (o *isolationOwner) plan(owner int, in coreSealInput) (coreSealPlan, error)
 	o.planNS.Add(uint64(time.Since(start)))
 	o.seals.Add(1)
 	o.points.Add(uint64(len(in.Rows)))
-	return coreSealPlan{Files: [][]coreKV{{{Key: []byte{0x70, 'v'}, Value: plan.Value}}}, Commit: func() { start := time.Now(); plan.Commit(); o.refs = refs; o.commitNS.Add(uint64(time.Since(start))) }}, nil
+	return coreSealPlan{Files: [][]coreKV{{{Key: []byte{0x70, 'v'}, Value: plan.Value}}}, Commit: func() {
+		start := time.Now()
+		plan.Commit()
+		o.refs = refs
+		if o.handoff != "" {
+			if err := os.WriteFile(o.handoff+".tmp", plan.Value, 0600); err != nil {
+				panic(err)
+			}
+			if err := os.Rename(o.handoff+".tmp", o.handoff); err != nil {
+				panic(err)
+			}
+		}
+		o.commitNS.Add(uint64(time.Since(start)))
+	}}, nil
 }
 
 func TestPublisherWriterIsolation(t *testing.T) {
@@ -180,6 +198,8 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	if err = os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
+	pprof.SetGoroutineLabels(pprof.WithLabels(context.Background(), pprof.Labels("role", "writer")))
+	defer pprof.SetGoroutineLabels(context.Background())
 	const shards = 16
 	owners, metrics, err := newIsolationOwners(root, shards)
 	if err != nil {
@@ -213,11 +233,21 @@ func TestPublisherWriterIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var process *isolationProcess
+	localReaders := readers
+	if os.Getenv("PARTS_PUBLISH_PROCESS") == "1" {
+		process, err = startIsolationProcess(root, readers)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer process.stop()
+		localReaders = 0
+	}
 	// Background parents keep cancelCtx.Err reader-local. A shared cancelCtx
 	// introduces reader-only mutex contention unrelated to publication.
-	contexts := make([]context.Context, readers)
-	cancels := make([]context.CancelFunc, readers)
-	for n := range readers {
+	contexts := make([]context.Context, localReaders)
+	cancels := make([]context.CancelFunc, localReaders)
+	for n := range localReaders {
 		contexts[n], cancels[n] = context.WithCancel(context.Background())
 	}
 	cancelAll := func() {
@@ -228,13 +258,14 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	defer cancelAll()
 	var readerWG sync.WaitGroup
 	var queries, readErrors atomic.Uint64
-	ready := make(chan error, readers)
+	ready := make(chan error, localReaders)
 	budget := pr.NewBudget(64 << 30)
-	for n := 0; n < readers; n++ {
+	for n := 0; n < localReaders; n++ {
 		readerWG.Add(1)
 		go func(n int) {
 			defer readerWG.Done()
 			ctx := contexts[n]
+			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("role", "reader")))
 			unpin, err := pinSnapshotReader()
 			ready <- err
 			if err != nil {
@@ -269,7 +300,7 @@ func TestPublisherWriterIsolation(t *testing.T) {
 			}
 		}(n)
 	}
-	for range readers {
+	for range localReaders {
 		if err = <-ready; err != nil {
 			cancelAll()
 			readerWG.Wait()
@@ -281,12 +312,21 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		{Name: "/cpu/classes/gc/total:cpu-seconds"},
 		{Name: "/cpu/classes/total:cpu-seconds"},
 		{Name: "/gc/cycles/total:gc-cycles"},
+		{Name: "/gc/heap/allocs:bytes"},
+		{Name: "/cpu/classes/gc/pause:cpu-seconds"},
+		{Name: "/cpu/classes/gc/mark/dedicated:cpu-seconds"},
 	}
 	rmetrics.Read(gcMetrics)
 	assistStart := gcMetrics[0].Value.Float64()
 	gcCPUStart := gcMetrics[1].Value.Float64()
 	cpuStart := gcMetrics[2].Value.Float64()
 	cyclesStart := gcMetrics[3].Value.Uint64()
+	allocStart := gcMetrics[4].Value.Uint64()
+	pauseStart := gcMetrics[5].Value.Float64()
+	markStart := gcMetrics[6].Value.Float64()
+	if err = os.WriteFile(filepath.Join(root, "writer-ready"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
 	start := time.Now()
 	done := make(chan error, cfg.Producers)
 	for p := 0; p < cfg.Producers; p++ {
@@ -318,6 +358,9 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		err = errors.Join(err, <-done)
 	}
 	elapsed := time.Since(start).Seconds()
+	if writeErr := os.WriteFile(filepath.Join(root, "writer-done"), []byte("done"), 0600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
 	rmetrics.Read(gcMetrics)
 	sample := coreSample(e, "publisher_isolation", start, 0)
 	sample["gc_assist_seconds"] = gcMetrics[0].Value.Float64() - assistStart
@@ -327,6 +370,11 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	// Runtime total CPU is available processor capacity, including idle time.
 	// This percentage is process-wide; it does not attribute assists to writers.
 	sample["gc_assist_pct_capacity"] = 100 * sample["gc_assist_seconds"].(float64) / (elapsed * float64(runtime.GOMAXPROCS(0)))
+	sample["allocated_bytes"] = gcMetrics[4].Value.Uint64() - allocStart
+	sample["gc_pause_cpu_seconds"] = gcMetrics[5].Value.Float64() - pauseStart
+	sample["gc_mark_dedicated_seconds"] = gcMetrics[6].Value.Float64() - markStart
+	sample["reader_process"] = process != nil
+	sample["reader_process_procs"] = os.Getenv("PARTS_PUBLISH_READER_PROCS")
 	sample["gogc"] = os.Getenv("GOGC")
 	sample["gomemlimit"] = os.Getenv("GOMEMLIMIT")
 	sample["reader_context"] = "independent_cancel_contexts"
@@ -353,6 +401,26 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	cancelAll()
 	readerWG.Wait()
+	if process != nil {
+		result, processErr := process.stop()
+		err = errors.Join(err, processErr)
+		queries.Add(result.Queries)
+		readErrors.Add(result.Errors)
+		sample["reader_process_result"] = result
+		for i, o := range owners {
+			pin, pinErr := o.pub.PinEnvelope()
+			if pinErr != nil {
+				err = errors.Join(err, pinErr)
+				continue
+			}
+			var envelope pp.Envelope
+			decodeErr := json.Unmarshal(pin.Value, &envelope)
+			pin.Close()
+			if decodeErr != nil || result.Latest[i] != envelope.Generation {
+				err = errors.Join(err, fmt.Errorf("child final generation mismatch owner %d", i), decodeErr)
+			}
+		}
+	}
 	err = errors.Join(err, e.close())
 	closed = true
 	sample["final_queries"] = queries.Load()
