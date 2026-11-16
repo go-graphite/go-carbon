@@ -3,6 +3,7 @@ package downsize
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -189,10 +190,34 @@ func (f *syncFrontier) record(name string, stamp syncProof) [32]byte {
 	return record
 }
 
-func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []string, ids []int64) (syncRow, error) {
+// An observation can contain holes and still be completed work. Unlike the
+// clean frontier, this seal preserves its result for this exact batch/round.
+// Unknown proofs never authorize replay. All holders, schema, archive choice,
+// catalog IDs and names participate, including the whole-metric revision guard.
+func observationProof(names []string, ids []int64, stamps []syncProof) string {
+	if len(names) != len(ids) || len(names) != len(stamps) {
+		return ""
+	}
+	h := sha256.New()
+	for i, name := range names {
+		if stamps[i] == (syncProof{}) {
+			return ""
+		}
+		fmt.Fprintf(h, "%d\x00%s\x00%x\n", ids[i], name, stamps[i])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []string, ids []int64, prior syncRow) (syncRow, error) {
 	before, err := s.proofStamps(ctx, names)
 	if err != nil {
 		return syncRow{}, err
+	}
+	proof := observationProof(names, ids, before)
+	if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] && proof != "" && prior.ObservationProof == proof {
+		prior.Reused = len(names)
+		prior.Work = nil // no backend data operation was performed by this replay
+		return prior, nil
 	}
 	// Catalog batches are contiguous. Read/write their compact records together
 	// rather than issuing one filesystem operation per metric at catalog scale.
@@ -235,6 +260,16 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 	}
 	row := syncRow{Kind: "verified", Round: round}
 	if len(selected) > 0 {
+		if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] {
+			reason := "completed_observation_has_no_mutation_seal"
+			if prior.ObservationProof != "" {
+				reason = "observation_mutation_proof_changed"
+				for _, name := range selected {
+					redoReason(ctx, name, reason)
+				}
+			}
+			event("sync_verification_reopened", map[string]any{"round": round, "reason": reason, "names": len(selected), "first": selected[0], "last": selected[len(selected)-1], "windows": s.o.windows, "full_history": !s.windowOnly()})
+		}
 		row, err = s.verifyBatch(ctx, round, selected)
 		if err != nil {
 			return row, err
@@ -270,6 +305,11 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 			if !dirty[names[i]] && before[i] == after[j] {
 				stamp = after[j]
 			}
+			// Seal observations with holes too, only when the entire comparison
+			// saw one unchanged mutation fence. Zero clears an unstable seal.
+			if before[i] != after[j] {
+				proof = ""
+			}
 			record := s.frontier.record(names[i], stamp)
 			if block != nil {
 				copy(block[(ids[i]-ids[0])*32:], record[:])
@@ -282,6 +322,9 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 				return row, err
 			}
 		}
+	}
+	if len(row.Unindexed) == 0 && len(row.Skipped) == 0 && len(row.Resolved) == 0 && len(row.Short) == 0 {
+		row.ObservationProof = proof
 	}
 	row.First, row.Last, row.Names = names[0], names[len(names)-1], len(names)
 	row.Reused = len(names) - len(selected)

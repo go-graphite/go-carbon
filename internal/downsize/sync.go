@@ -163,6 +163,7 @@ type syncHole struct {
 }
 
 type syncRow struct {
+	ObservationProof   string                   `json:"observation_proof,omitempty"`
 	InvalidationReason string                   `json:"invalidation_reason,omitempty"`
 	Work               []syncRedoWork           `json:"backend_work,omitempty"`
 	Reused             int                      `json:"proof_reused,omitempty"`
@@ -1107,7 +1108,8 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 				var row syncRow
 				var err error
 				if s.frontier != nil {
-					row, err = s.verifyFrontierBatch(workCtx, journalRound, jb.names, jb.ids)
+					prior := done[jb.names[0]]
+					row, err = s.verifyFrontierBatch(workCtx, journalRound, jb.names, jb.ids, prior)
 				} else {
 					row, err = s.verifyBatch(workCtx, journalRound, jb.names)
 				}
