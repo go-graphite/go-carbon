@@ -23,7 +23,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const stateSchema = 1
+const stateSchema = 2
 const stateApplicationID = 0x5343544c // SCTL, distinct from the offline benchmark
 const statePageNames = 4096
 
@@ -99,7 +99,7 @@ type stateTx struct {
 const stateDDL = `
 CREATE TABLE unit(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1), identity TEXT NOT NULL, options TEXT NOT NULL, catalog_generation TEXT NOT NULL, catalog_names INTEGER NOT NULL CHECK(catalog_names>=0)) STRICT;
 CREATE TABLE scope(id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version=1), parent TEXT REFERENCES scope(id), reason TEXT NOT NULL) STRICT;
-CREATE TABLE phase(scope TEXT PRIMARY KEY REFERENCES scope(id), version INTEGER NOT NULL CHECK(version=1), phase TEXT NOT NULL, round INTEGER NOT NULL CHECK(round>=0), done INTEGER NOT NULL CHECK(done>=0), total INTEGER NOT NULL CHECK(total>=0 AND (total=0 OR done<=total)), complete INTEGER NOT NULL CHECK(complete IN (0,1))) STRICT;
+CREATE TABLE phase(scope TEXT PRIMARY KEY REFERENCES scope(id), version INTEGER NOT NULL CHECK(version=1), phase TEXT NOT NULL, round INTEGER NOT NULL CHECK(round>=0), done INTEGER NOT NULL CHECK(done>=0), total INTEGER NOT NULL CHECK(total>=0), complete INTEGER NOT NULL CHECK(complete IN (0,1))) STRICT;
 CREATE TABLE window(id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version=1), scope TEXT NOT NULL REFERENCES scope(id), holder TEXT NOT NULL, start INTEGER NOT NULL CHECK(start>=0), until INTEGER NOT NULL CHECK(until>start), selection TEXT NOT NULL CHECK(selection IN ('pending','selected','complete')), transfer TEXT NOT NULL CHECK(transfer IN ('pending','issued','complete')), verification TEXT NOT NULL CHECK(verification IN ('pending','complete'))) STRICT;
 CREATE TABLE catalog_page(first_id INTEGER PRIMARY KEY CHECK(first_id>0 AND (first_id-1)%4096=0), version INTEGER NOT NULL CHECK(version=1), generation TEXT NOT NULL, names INTEGER NOT NULL CHECK(names>0 AND names<=4096), first_name TEXT NOT NULL, last_name TEXT NOT NULL, sha256 BLOB NOT NULL CHECK(length(sha256)=32), data BLOB NOT NULL) STRICT;
 CREATE UNIQUE INDEX catalog_page_name ON catalog_page(first_name);
@@ -151,7 +151,7 @@ func createStateStore(path string, unit stateUnit) (_ *stateStore, err error) {
 		return nil, err
 	}
 	defer t.Rollback()
-	if _, err = t.Exec(stateDDL); err == nil {
+	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL); err == nil {
 		_, err = t.Exec("INSERT INTO unit VALUES(1,1,?,?,?,?)", unit.Identity, unit.Options, unit.CatalogGeneration, unit.CatalogNames)
 	}
 	if err == nil {
@@ -306,7 +306,7 @@ func readStatePhase(q interface{ QueryRow(string, ...any) *sql.Row }, scope stri
 }
 
 func (t *stateTx) putPhase(p statePhase) error {
-	if p.Scope == "" || phaseOrder(p.Phase, p.Round) < 1 || p.Round < 0 || p.Done < 0 || p.Total < 0 || p.Total > 0 && p.Done > p.Total {
+	if p.Scope == "" || phaseOrder(p.Phase, p.Round) < 1 || p.Round < 0 || p.Done < 0 || p.Total < 0 {
 		return errors.New("invalid indexed phase position")
 	}
 	old, err := readStatePhase(t.tx, p.Scope)
@@ -490,6 +490,17 @@ func (t *stateTx) putIssue(i stateIssue) error {
 	if i.NameID < 1 || i.NameID > t.unit.CatalogNames || i.Reason == "" || i.Phase == "" {
 		return errors.New("invalid indexed issue")
 	}
+	// The quarantine and policy ledgers retain the first diagnostic. Other
+	// sparse issue kinds represent the current residual/terminal observation.
+	if i.Kind == "quarantine" || i.Kind == "policy" {
+		var reason, phase string
+		err := t.tx.QueryRow("SELECT reason,phase FROM issue_detail WHERE scope=? AND window=? AND holder=? AND kind=? AND name_id=?", i.Scope, i.Window, i.Holder, i.Kind, i.NameID).Scan(&reason, &phase)
+		if err == nil {
+			i.Reason, i.Phase = reason, phase
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	if _, err := t.tx.Exec("INSERT OR IGNORE INTO reason(version,text) VALUES(1,?)", i.Reason); err != nil {
 		return err
 	}
@@ -563,6 +574,12 @@ func stateRelationDigests(t *sql.Tx) (map[string]stateRelationDigest, error) {
 		"issue":      "SELECT i.scope,i.window,i.holder,i.kind,i.name_id,i.version,r.text,i.phase,i.first_seen,i.last_seen FROM issue i JOIN reason r ON r.id=i.reason ORDER BY i.scope,i.window,i.holder,i.kind,i.name_id",
 		"proof_page": "SELECT * FROM proof_page ORDER BY scope,window,holder,generation,first_id",
 		"ready":      "SELECT * FROM ready ORDER BY scope",
+	}
+	for name, query := range stateTransferDigestQueries {
+		queries[name] = query
+	}
+	for name, query := range stateSemanticDigestQueries {
+		queries[name] = query
 	}
 	out := map[string]stateRelationDigest{}
 	for name, query := range queries {

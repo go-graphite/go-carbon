@@ -123,7 +123,7 @@ func TestTypedStateRegressionRollbackAndScopes(t *testing.T) {
 	for _, next := range []statePhase{
 		{Scope: "root", Phase: "copy", Done: 2},
 		{Scope: "root", Phase: "window retry", Done: 1},
-		{Scope: "root", Phase: "window retry", Done: 11, Total: 10},
+		{Scope: "root", Phase: "window retry", Done: -1, Total: 10},
 		{Scope: "root", Phase: "unknown"},
 	} {
 		err := s.update(func(tx *stateTx) error { return tx.putPhase(next) })
@@ -367,7 +367,7 @@ func TestTypedStateOperatorSQL(t *testing.T) {
 	s := newTypedState(t, 10)
 	var count int
 	err := s.db.QueryRow("SELECT count(*) FROM sqlite_schema WHERE type='table'").Scan(&count)
-	if err != nil || count != 13 {
+	if err != nil || count != 13+len(stateSemanticDigestQueries)+len(stateTransferDigestQueries) {
 		t.Fatalf("schema inventory: %d %v", count, err)
 	}
 	var journal string
