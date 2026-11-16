@@ -270,6 +270,12 @@ func (e *coreEngine) RetireSealedParts(owner int, ids []v2part.Digest, authorize
 // stay intact. Call after publishing retention/reset metadata, never from intake.
 func (e *coreEngine) ExpireSealedParts(owner int, ids []v2part.Digest, before int64) error {
 	return e.RetireSealedParts(owner, ids, func(d v2part.Descriptor) error {
+		// Metadata-only reset parts carry deletion authority even when their
+		// event-time frontier is old. Only an explicit replacement authorizer
+		// may retire them after that authority is retained elsewhere.
+		if d.Encoding == v2part.DenseEncoding && d.Coverage.Records == d.Coverage.Names {
+			return errors.New("metadata-only part requires retained reset authority")
+		}
 		if d.Coverage.MaxTime >= before {
 			return errors.New("part overlaps retained time")
 		}
