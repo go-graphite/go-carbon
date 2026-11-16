@@ -238,6 +238,19 @@ func TestBoundDisjointOverlayUsesLegacyResult(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := r.Fetch(ctx, "metric", now-101, now-98, func(got *partsread.Series) error {
+		if len(got.Occupied) != 0 || len(got.Values) != len(want.Values) {
+			t.Fatal("unbound disjoint query did not preserve native output", got)
+		}
+		for i, v := range want.Values {
+			if math.Float64bits(v) != math.Float64bits(got.Values[i]) {
+				t.Fatal("unbound disjoint query changed native bits")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if bound.opts.Parts.Budget.Used() != 0 {
 		t.Fatal("admission leaked")
 	}

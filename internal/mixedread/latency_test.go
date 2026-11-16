@@ -43,7 +43,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
@@ -322,7 +322,7 @@ func TestLatencyComparison(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			route := "plain-overlay"
+			route := "sparse-window-overlay"
 			if !yes {
 				route = "legacy-only"
 			} else if coverage >= ((hi-lo)/step+7)/8 {
@@ -400,12 +400,13 @@ func TestLatencyComparison(t *testing.T) {
 					t.Fatal("dense diagnostics require a class, profile mode and >=5s per arm")
 				}
 				for _, arm := range []string{"native", "mixed"} {
-					pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("arm", arm, "class", className)))
+					fetchContext := pprof.WithLabels(ctx, pprof.Labels("arm", arm, "class", className))
 					started, calls, nanos := time.Now(), 0, int64(0)
-					for time.Since(started) < d {
+					for nanos < d.Nanoseconds() {
 						if !warm && calls > 0 {
 							old, full, r = open()
 						}
+						pprof.SetGoroutineLabels(fetchContext)
 						region := trace.StartRegion(ctx, arm+"-fetch")
 						a := time.Now()
 						if arm == "native" {
@@ -415,6 +416,7 @@ func TestLatencyComparison(t *testing.T) {
 						}
 						nanos += time.Since(a).Nanoseconds()
 						region.End()
+						pprof.SetGoroutineLabels(ctx)
 						if err != nil {
 							t.Fatal(err)
 						}

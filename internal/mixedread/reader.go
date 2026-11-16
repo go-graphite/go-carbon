@@ -223,6 +223,22 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 			return err
 		}
 	}
+	if old != nil && len(old.Values) > 1 {
+		resolved, e := h.Resolve(name)
+		if errors.Is(e, partsread.ErrNotFound) {
+			return consume(old)
+		}
+		if e != nil {
+			return e
+		}
+		overlap, e := h.HasOverlayResolved(ctx, resolved, old)
+		if e != nil {
+			return e
+		}
+		if !overlap {
+			return consume(old)
+		}
+	}
 	var current *partsread.Series
 	// An existing legacy result supplies the only dense output. RenderInto
 	// replaces physical slots directly; no dense occupancy scan or merge follows.
@@ -388,6 +404,41 @@ func (r *Reader) fetchFrozen(ctx context.Context, q *request, b *LegacyBinding, 
 	})
 	return result, err
 }
+
+// fetchSparseWindow reuses caller-owned output and range-decode scratch even
+// when parts cover too few slots to justify rendering them before legacy. The
+// archive and shape come from the original query; degenerate or unsupported
+// windows keep the ordinary native fetch semantics.
+func (r *Reader) fetchSparseWindow(ctx context.Context, q *request, b *LegacyBinding, from, until, step, start, end int64) (*partsread.Series, error) {
+	if start < 0 || int64(int(start)) != start || int64(int(end)) != end {
+		return r.fetchFrozen(ctx, q, b, from, until)
+	}
+	if err := r.checkLegacyBudget(b.metric, from, until); err != nil {
+		return nil, err
+	}
+	n := int((end - start) / step)
+	if cap(q.joined) < n {
+		q.joined = make([]float64, n)
+	}
+	q.joined = q.joined[:n]
+	archive := -1
+	for i, a := range b.metric.Archives {
+		if a.Step == step {
+			archive = i
+			break
+		}
+	}
+	err := r.opts.Legacy.FetchFrozenWindowInto(ctx, b.frozen, archive, int(start), int(end), q.joined, nil)
+	if errors.Is(err, chunkstore.ErrFrozenWindowUnsupported) {
+		return r.fetchFrozen(ctx, q, b, from, until)
+	}
+	if err != nil {
+		return nil, err
+	}
+	q.legacy = partsread.Series{Metric: b.metric, From: start, Until: end, Step: step, Values: q.joined}
+	return &q.legacy, nil
+}
+
 func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64, consume func(*partsread.Series) error) error {
 	q := r.takeRequest()
 	defer r.releaseRequest(q)
@@ -429,7 +480,7 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 			// legacy-owned result and overlay directly, as on the ordinary path.
 			// Density is only a cost hint; Render still resolves physical slots.
 			if covered < ((end-start)/step+7)/8 {
-				old, e := r.fetchFrozen(ctx, q, binding, from, until)
+				old, e := r.fetchSparseWindow(ctx, q, binding, from, until, step, start, end)
 				if e != nil {
 					return e
 				}
