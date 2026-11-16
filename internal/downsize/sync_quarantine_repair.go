@@ -20,7 +20,16 @@ func repairLegacyWindowQuarantine(ctx context.Context, o syncOptions, b syncBack
 	if o.issues == nil || o.noCopy || o.noVerify || !o.fullHistory {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	q := o.issues
+	// Repair replaces the root snapshot and can remove resolved exclusions.
+	// Retire prior deltas first so a crash cannot replay them over that new
+	// snapshot and resurrect names whose fresh proof has resolved them.
+	if err := q.checkpoint(); err != nil {
+		return err
+	}
 	q.mu.Lock()
 	var names []string
 	for n, issue := range q.quarantined {
