@@ -59,9 +59,10 @@ func (r *restartable) stop() {
 }
 
 // restart takes the server away for down, then rebinds the same port.
-func (r *restartable) restart(down time.Duration) {
+func (r *restartable) restart(down time.Duration, stopped chan<- struct{}) {
 	r.down.Store(true)
 	r.stop()
+	close(stopped)
 	time.Sleep(down)
 	for i := 0; ; i++ {
 		ln, err := net.Listen("tcp", r.addr)
@@ -177,7 +178,7 @@ func newRestartFixture(t *testing.T, catalogs ...[]string) (*restartFixture, []s
 // connections refused for longer than --stall-timeout), then a donor goes away
 // (the target answers 500 "connection refused"). The copy waits, re-pulls and
 // finishes with every name copied, no failure and no abort; a rerun resumes.
-// This real-network watchdog case must not compete with in-process journal I/O.
+// Network and journal scheduling must not consume the synthetic stall budget.
 func TestPlanFreeCopyRidesThroughSourceAndTargetRestarts(t *testing.T) {
 	a, b := copyNames("a.", 1500), copyNames("b.", 1500)
 	f, froms, dst := newRestartFixture(t, a, b)
@@ -188,19 +189,22 @@ func TestPlanFreeCopyRidesThroughSourceAndTargetRestarts(t *testing.T) {
 		case 5:
 			targetRestarted.Store(true)
 			wg.Add(1)
-			go func() { defer wg.Done(); dst.restart(600 * time.Millisecond) }()
-			time.Sleep(50 * time.Millisecond) // the restart cuts this in-flight pull
+			stopped := make(chan struct{})
+			go func() { defer wg.Done(); dst.restart(600*time.Millisecond, stopped) }()
+			<-stopped // the restart has cut this in-flight pull
 		case 15:
 			sourceRestarted.Store(true)
 			wg.Add(1)
-			go func() { defer wg.Done(); f.sources[froms[0]].restart(600 * time.Millisecond) }()
-			time.Sleep(20 * time.Millisecond)
+			stopped := make(chan struct{})
+			go func() { defer wg.Done(); f.sources[froms[0]].restart(600*time.Millisecond, stopped) }()
+			<-stopped
 		}
 	}
 	o := copyTestOptions(t, froms[0], dst.url())
 	o.froms = froms
 	o.maxNames = 100
 	o.tick, o.maxBackoff = 10*time.Millisecond, 50*time.Millisecond
+	o.stallNow = newStallClock().now           // only explicit clock advances count as stalls
 	o.stallTimeout = 200 * time.Millisecond    // shorter than each outage: down hosts mean wait
 	o.progressInterval = 20 * time.Millisecond // the watchdog runs through both outages
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -250,6 +254,7 @@ func TestPlanFreeCopyRestartWaitsWithStatusUp(t *testing.T) {
 	f.pullCode = func() int { return http.StatusServiceUnavailable }
 	o := copyTestOptions(t, froms[0], dst.url())
 	o.tick, o.maxBackoff = 5*time.Millisecond, 20*time.Millisecond
+	o.stallNow = newStallClock().now
 	o.stallTimeout = 150 * time.Millisecond
 	o.progressInterval = 10 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
@@ -435,8 +440,15 @@ func TestPlanFreeCopyRetriesSkippedNameAtEnd(t *testing.T) {
 func TestPlanFreeCopyWatchdogFailsWhenStuckWithHostsUp(t *testing.T) {
 	t.Parallel()
 	f, src, dst := newFakeCopy(t, copyNames("a.", 20))
-	f.block = func(int) bool { return true }
+	clock := newStallClock()
+	var blocked sync.Once
+	f.block = func(int) bool {
+		// Advance only once a transfer really is in flight and stuck.
+		blocked.Do(func() { clock.advance(150 * time.Millisecond) })
+		return true
+	}
 	o := copyTestOptions(t, src, dst)
+	o.stallNow = clock.now
 	o.progressInterval, o.stallTimeout = 10*time.Millisecond, 150*time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

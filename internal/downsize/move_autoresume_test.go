@@ -251,10 +251,20 @@ func TestExecuteResilientRidesThroughTargetRestart(t *testing.T) {
 // loudly with errCopyStalled.
 func TestExecuteResilientStallsOnlyWhileHostsUp(t *testing.T) {
 	t.Parallel()
+	clock := newStallClock()
+	downAttempts := make(chan struct{})
+	up := make(chan struct{})
+	defer close(up)
 	r := newResilientRig(t, 2, func(w http.ResponseWriter, attempt int32) bool {
+		clock.advance(20 * time.Millisecond)
+		if attempt == 4 {
+			close(downAttempts)
+			<-up
+		}
 		http.Error(w, "broken", 503)
 		return true
 	})
+	r.m.stallNow = clock.now
 	r.m.stallTimeout = 20 * time.Millisecond
 	target := r.m.tuner.hosts[r.dst.URL]
 	r.m.tuner.hostUnavailable(r.dst.URL, errors.New("refused"))
@@ -269,11 +279,12 @@ func TestExecuteResilientStallsOnlyWhileHostsUp(t *testing.T) {
 	select {
 	case err := <-done:
 		t.Fatalf("down host counted as a stall: %v", err)
-	case <-time.After(300 * time.Millisecond):
+	case <-downAttempts:
 	}
 	r.m.tuner.mu.Lock()
 	target.downSince = time.Time{}
 	r.m.tuner.mu.Unlock()
+	up <- struct{}{}
 	select {
 	case err := <-done:
 		if !errors.Is(err, errCopyStalled) {

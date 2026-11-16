@@ -334,6 +334,10 @@ func (m *mover) executeResilient(ctx context.Context, t task) error {
 	if delay <= 0 {
 		delay = 2 * time.Second
 	}
+	now := m.stallNow
+	if now == nil {
+		now = time.Now
+	}
 	var since time.Time
 	for attempt := 1; ; attempt++ {
 		t = m.pendingNative(t)
@@ -352,10 +356,10 @@ func (m *mover) executeResilient(ctx context.Context, t task) error {
 		case !up:
 			since = time.Time{}
 		case since.IsZero():
-			since = time.Now()
-		case m.stallTimeout > 0 && time.Since(since) >= m.stallTimeout:
-			event("copy_stalled", map[string]any{"level": "error", "source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End, "attempts": attempt, "stalled_seconds": time.Since(since).Seconds(), "stall_timeout": m.stallTimeout.String(), "error": err.Error()})
-			return fmt.Errorf("%w: %s -> %s: no progress for %s with both hosts up (--stall-timeout %s): %w", errCopyStalled, t.Source, t.Target, time.Since(since).Round(time.Second), m.stallTimeout, err)
+			since = now()
+		case m.stallTimeout > 0 && now().Sub(since) >= m.stallTimeout:
+			event("copy_stalled", map[string]any{"level": "error", "source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End, "attempts": attempt, "stalled_seconds": now().Sub(since).Seconds(), "stall_timeout": m.stallTimeout.String(), "error": err.Error()})
+			return fmt.Errorf("%w: %s -> %s: no progress for %s with both hosts up (--stall-timeout %s): %w", errCopyStalled, t.Source, t.Target, now().Sub(since).Round(time.Second), m.stallTimeout, err)
 		}
 		event("transfer_retry", map[string]any{"source": t.Source, "target": t.Target, "stream": t.Stream, "start": t.Start, "end": t.End, "attempt": attempt, "hosts_up": up, "delay_seconds": delay.Seconds(), "error": err.Error()})
 		if err := sleepContext(ctx, delay); err != nil {
