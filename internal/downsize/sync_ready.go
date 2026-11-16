@@ -238,6 +238,9 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		}
 	}
 	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
+	if e = repairLegacyWindowQuarantine(ctx, *o, b); e != nil {
+		return e
+	}
 	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
 	if e != nil {
 		return e

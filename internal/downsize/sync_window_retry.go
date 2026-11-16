@@ -51,7 +51,7 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			if s.o.issues == nil {
 				return s.windowRetryCopyError
 			}
-			return s.quarantineResiduals("window retry")
+			return s.quarantineWindowSelections()
 		}
 		pending := 0
 		for _, r := range s.sum.residual {
@@ -81,13 +81,26 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			if s.o.issues == nil {
 				return fmt.Errorf("%w: window selection made no progress for %s: %s: %v", ErrSyncResidual, syncWindowSelectionStall, syncWindowSelectionReason, frontier)
 			}
-			return s.quarantineResiduals("window retry")
+			return s.quarantineWindowSelections()
 		}
 		event("sync_window_selection_wait", map[string]any{"pending_selections": pending, "retry_seconds": delay.Seconds()})
 		if err := sleepContext(ctx, delay); err != nil {
 			return err
 		}
 	}
+}
+
+// Copy failures are provisional until verification has checked every donor.
+// A stalled selection must not exclude unrelated, previously failed copies
+// from that verification (their boundary receipts may already be satisfied).
+func (s *syncer) quarantineWindowSelections() error {
+	var rows []syncResidual
+	for _, r := range s.sum.residual {
+		if r.Reason == syncWindowSelectionReason {
+			rows = append(rows, r)
+		}
+	}
+	return s.o.issues.record(rows, "window retry", false)
 }
 
 func (s *syncer) retryWindowSelections(ctx context.Context) error {
