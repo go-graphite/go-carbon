@@ -2,10 +2,14 @@ package v2daemon
 
 import (
 	"io"
+	"runtime"
 	"testing"
 )
 
 func TestFixedCorpusAllLayers(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fixed throughput harness requires Linux /proc/self/io; portable correctness tests run separately")
+	}
 	for _, f := range []Fixture{
 		{Names: 29, Rounds: 8, Producers: 3, Shards: 2, BatchSize: 7, SampleNames: 29},
 		{Names: 240, Rounds: 8, Producers: 48, Shards: 12, BatchSize: 7, SampleNames: 240},

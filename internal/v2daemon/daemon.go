@@ -1,5 +1,5 @@
 // Package v2daemon wires producer-local catalogs and journals to the numeric core.
-// It is an offline experiment; receiver ownership and crash replay are separate work.
+// It is an offline experiment; receiver ownership is separate work.
 package v2daemon
 
 import (
@@ -31,6 +31,7 @@ type Store struct {
 	Core      *v2core.Engine
 	Producers []*Producer
 	cfg       Config
+	lock      *os.File
 }
 type packet struct {
 	rows    []v2core.Row
@@ -56,6 +57,7 @@ type Producer struct {
 	nextSync                                                     time.Time
 	interval                                                     time.Duration
 	failed                                                       error
+	stage                                                        func(string)
 	JournalBytes, SyncGroups, ForcedGroups                       uint64
 	EncodeTime, CatalogSyncTime, JournalSyncTime, CoreSubmitTime time.Duration
 }
@@ -64,9 +66,11 @@ func coreConfig(c Config) v2core.Config {
 	return v2core.Config{Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
-// Open requires a fresh experiment root. Reopening writable journals without
-// replay is deliberately refused. Core alone may be reopened for read-back.
-func Open(root string, c Config) (*Store, error) {
+// Open recovers durable journal layers through the normal core write queues.
+// Existing numeric/name-only experiments remain non-restartable.
+func Open(root string, c Config) (*Store, error) { return openWithHooks(root, c, v2core.Hooks{}) }
+
+func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 	if c.Layer < 0 || c.Layer > 3 || c.Producers < 1 || c.Shards < 1 {
 		return nil, errors.New("invalid layer or geometry")
 	}
@@ -85,20 +89,16 @@ func Open(root string, c Config) (*Store, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	// An exclusive marker prevents accidentally appending a fresh predictor epoch
-	// or reusing IDs/cursors on an existing store. Recovery is not implemented here.
-	f, err := os.OpenFile(filepath.Join(root, "experiment.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	lock, _, err := lockRoot(root, c)
 	if err != nil {
 		return nil, err
 	}
-	if err = f.Close(); err != nil {
-		return nil, err
-	}
-	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), v2core.Hooks{})
+	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), hooks)
 	if err != nil {
+		_ = lock.Close()
 		return nil, err
 	}
-	s := &Store{Core: e, cfg: c}
+	s := &Store{Core: e, cfg: c, lock: lock}
 	for i := 0; i < c.Producers; i++ {
 		p := &Producer{engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
 		s.Producers = append(s.Producers, p)
@@ -113,15 +113,12 @@ func Open(root string, c Config) (*Store, error) {
 		}
 		p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
 		if c.Layer >= 2 {
-			p.journal, err = os.OpenFile(filepath.Join(dir, "segment.pdc4"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-			if err == nil {
-				err = syncDir(dir)
-			}
+			err = p.recoverProducer(dir)
 			if err != nil {
+				p.failed = err
 				_ = s.Close()
 				return nil, err
 			}
-			p.writer = bufio.NewWriterSize(p.journal, 1<<20)
 		}
 	}
 	return s, nil
@@ -170,6 +167,13 @@ func (p *Producer) Append(names []string, data []points.Point, sequence []uint64
 	}
 	if p.layer == 0 || len(names) != len(data) || len(names) != len(sequence) || len(names) == 0 || len(names) > 32768 {
 		return p.fail(errors.New("invalid named batch"))
+	}
+	if p.layer == 2 {
+		apps := make([]Application, len(names))
+		for i, name := range names {
+			apps[i] = Application{Name: name, Order: p.applyOrder + uint64(i) + 1, Clock: clock, Points: data[i : i+1], Sequence: sequence[i : i+1]}
+		}
+		return p.AppendApplications(apps)
 	}
 	var rows []v2core.Row
 	if n := len(p.spareRows); n > 0 {
@@ -247,6 +251,12 @@ func (p *Producer) Drain() error {
 			if _, err := p.writer.Write(h[:]); err != nil {
 				return p.fail(err)
 			}
+			if p.stage != nil {
+				if err := p.writer.Flush(); err != nil {
+					return p.fail(err)
+				}
+				p.stage("append")
+			}
 			if _, err := p.writer.Write(record); err != nil {
 				return p.fail(err)
 			}
@@ -305,6 +315,10 @@ func (s *Store) Close() error {
 	if s.Core != nil {
 		result = errors.Join(result, s.Core.Close())
 		s.Core = nil
+	}
+	if s.lock != nil {
+		result = errors.Join(result, s.lock.Close())
+		s.lock = nil
 	}
 	return result
 }

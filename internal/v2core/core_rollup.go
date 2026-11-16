@@ -57,6 +57,7 @@ type rollupMetric struct {
 	prepared *sealrollup.Prepared
 }
 type coreRollups struct {
+	stage     func(string)
 	metrics   map[uint64]*rollupMetric
 	names     map[partsformat.ID]uint64
 	prepared  map[[32]byte]*sealrollup.Prepared
@@ -178,6 +179,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		plan, err := m.prepared.PlanInto(r.records, m.meta.Frontier, m.slots.View, m.slots.Range, s.batches, &r.workspace)
 		if err != nil {
 			return coreSealPlan{}, err
+		}
+		if r.stage != nil {
+			r.stage("rollup")
 		}
 		// Detach before the workspace/output arena is reused for the next metric.
 		s.records = slices.Clone(plan.Records)
