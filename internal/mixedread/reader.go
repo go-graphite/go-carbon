@@ -47,18 +47,19 @@ type Options struct {
 	Now          func() time.Time
 }
 type request struct {
-	handle  partsread.Handle
-	legacy  partsread.Series
-	current partsread.Series
-	joined  []float64
+	handle          partsread.Handle
+	legacy          partsread.Series
+	current         partsread.Series
+	joined          []float64
+	frozenWorkspace chunkstore.FrozenReadWorkspace
 }
 type Reader struct {
 	opts Options
 }
 
-// Request storage contains no generation-owned pointers after release. Share it
-// across immutable Readers so publication turnover and fresh cold handles do
-// not allocate a new pool and scratch object for each generation.
+// Request storage retains no active storage handles after release. The frozen
+// decoder uses a weak metric identity, so its cache cannot pin an old store.
+// Share scratch across Readers to avoid a fresh pool at each publication.
 var requests sync.Pool
 
 func (r *Reader) takeRequest() *request {
@@ -400,7 +401,7 @@ func (r *Reader) fetchFrozen(ctx context.Context, q *request, b *LegacyBinding, 
 		return nil, err
 	}
 	var result *partsread.Series
-	err := r.opts.Legacy.FetchFrozenValues(ctx, b.frozen, int(from), int(until), func(from, until, step int, values []float64) error {
+	err := r.opts.Legacy.FetchFrozenValuesWithWorkspace(ctx, b.frozen, int(from), int(until), &q.frozenWorkspace, func(from, until, step int, values []float64) error {
 		q.legacy = partsread.Series{Metric: b.metric, From: int64(from), Until: int64(until), Step: int64(step), Values: values}
 		result = &q.legacy
 		return nil

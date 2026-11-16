@@ -29,6 +29,7 @@ import (
 func TestLatencyComparison(t *testing.T) {
 	root := os.Getenv("GO_CARBON_MIXED_LATENCY_DIR")
 	allocs := os.Getenv("GO_CARBON_MIXED_ALLOCS") != ""
+	coldIO := os.Getenv("GO_CARBON_MIXED_COLD_IO") != ""
 	ingest := os.Getenv("GO_CARBON_MIXED_INGEST") != ""
 	raw := os.Getenv("GO_CARBON_MIXED_RAW") != ""
 	persisted := os.Getenv("GO_CARBON_MIXED_PERSISTED") != ""
@@ -43,10 +44,10 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy13" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
-	if class != "" && !profile && !traced && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
+	if class != "" && !profile && !traced && !coldIO && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
 		t.Fatal("class selection is for diagnostics only; the latency gate must run every class")
 	}
 	if class != "" && !slices.Contains([]string{"warm-1h", "warm-24h", "warm-168h", "warm-720h", "cold-blockcache-1h", "cold-blockcache-24h", "cold-blockcache-168h", "cold-blockcache-720h", "warm-find4096"}, class) {
@@ -300,6 +301,25 @@ func TestLatencyComparison(t *testing.T) {
 			if disk != nil {
 				publishedBefore = disk.publications.Load()
 			}
+			if coldIO {
+				if warm {
+					continue
+				}
+				if ingest {
+					t.Fatal("fresh cold IO attribution requires idle publication")
+				}
+				for sample := range 20 {
+					old, full, r := open()
+					latencyColdIO(t, className, sample, full, old, func() error {
+						_, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
+						return err
+					}, func() error {
+						return r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
+					}, rng.Intn(2) == 0)
+					closePair(old, full)
+				}
+				continue
+			}
 			var base, mix []int64
 			var baseBytes, mixedBytes, baseAllocs, mixedAllocs uint64
 			old, full, r := open()
@@ -538,7 +558,7 @@ func TestLatencyComparison(t *testing.T) {
 			fmt.Printf("LATENCY seed=%d class=%s comparison=%s samples=%d native_p50_ns=%d native_p99_ns=%d mixed_p50_ns=%d mixed_p99_ns=%d gate=%s\n", seed, className, comparison, count, bp, bq, mp, mq, gate)
 		}
 	}
-	if path == "frozen" || (class != "" && class != "warm-find4096") {
+	if coldIO || path == "frozen" || (class != "" && class != "warm-find4096") {
 		return
 	}
 	var findPublishedBefore uint64
