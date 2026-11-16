@@ -106,6 +106,13 @@ func (ti *trieIndex) query(expr string, limit int, expand func([]string) ([]stri
 	if err != nil {
 		return nil, nil, nil, lookups, err
 	}
+	names, leaves, nodes = ti.combineSnapshotResults(names, leaves, nodes, extra, el, en, limit)
+	return names, leaves, nodes, lookups, nil
+}
+
+// combineSnapshotResults merges the snapshot rows with the mutable trie rows
+// of the same query into the trie's result order and applies the limit.
+func (ti *trieIndex) combineSnapshotResults(names []string, leaves []bool, nodes []*trieNode, extra []string, el []bool, en []*trieNode, limit int) ([]string, []bool, []*trieNode) {
 	if snapshotResultsOrdered(names, leaves) && snapshotResultsOrdered(extra, el) {
 		// Each source is already in result order: return the snapshot rows
 		// directly, or merge, instead of sorting a copy of every match.
@@ -117,11 +124,10 @@ func (ti *trieIndex) query(expr string, limit int, expand func([]string) ([]stri
 					break
 				}
 			}
-			return names[:n], leaves[:n], nodes[:n], lookups, nil
+			return names[:n], leaves[:n], nodes[:n]
 		}
 		if rows, ok := ti.mergeSnapshotResults(names, leaves, nodes, extra, el, en); ok {
-			names, leaves, nodes = collectSnapshotResults(rows, limit)
-			return names, leaves, nodes, lookups, nil
+			return collectSnapshotResults(rows, limit)
 		}
 	}
 	rows := make([]snapshotResult, 0, len(names)+len(extra))
@@ -138,8 +144,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func([]string) ([]stri
 	sort.Slice(rows, func(i, j int) bool {
 		return snapshotResultLess(rows[i].name, rows[i].leaf, rows[j].name, rows[j].leaf)
 	})
-	names, leaves, nodes = collectSnapshotResults(rows, limit)
-	return names, leaves, nodes, lookups, nil
+	return collectSnapshotResults(rows, limit)
 }
 
 // snapshotResultLess orders query results by name, a metric before the
