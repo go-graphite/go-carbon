@@ -175,6 +175,9 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	for _, i := range workspace.touched {
 		if times[i] != start+int64(i)*a.Step {
 			out.Values[i] = math.NaN()
