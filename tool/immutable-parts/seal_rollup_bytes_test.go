@@ -69,4 +69,7 @@ func TestCompactStoredLogicalBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Printf("COMPACT_LOGICAL_BYTES entries=%d sha256=%x\n", count, digest.Sum(nil))
+	if count != 410 || fmt.Sprintf("%x", digest.Sum(nil)) != "9446c95d19ac1cbdb25b0d73e16867d92c04040e7288b23c2d91a91bb9a55fd4" {
+		t.Fatal("persisted keys/values differ from the preceding adapter")
+	}
 }

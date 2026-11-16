@@ -19,6 +19,7 @@ type rollupHistoryWorkspace struct {
 	archives []sealrollup.Archive
 	samples  [][]rollupHistorySample
 	merged   []sealrollup.Sample
+	codec    partsrun.Workspace
 }
 
 func historySlot(p sealrollup.Sample, a sealrollup.Archive) int64 { return (p.Time / a.Step) % a.Count }
@@ -51,11 +52,11 @@ func (w *rollupHistoryWorkspace) load(s *atomicRollupState, cfg sealrollup.Confi
 			if cap(ps) < h.Count {
 				ps = make([]rollupHistorySample, 0, h.Count)
 			}
-			err = partsrun.Visit(value, int(min(ar.Count, 1<<26)), func(p partsrun.Sample) error {
+			err = partsrun.VisitWithWorkspace(value, int(min(ar.Count, 1<<26)), func(p partsrun.Sample) error {
 				sample := sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Sequence}
 				ps = append(ps, rollupHistorySample{historySlot(sample, ar), sample})
 				return nil
-			})
+			}, &w.codec)
 			if err != nil {
 				return err
 			}
@@ -139,10 +140,10 @@ func (w *rollupHistoryWorkspace) seal(records []sealrollup.Record) ([][]byte, er
 			return nil, errors.New("history exceeds physical archive")
 		}
 		w.merged = merged
-		v, err := partsrun.Append(nil, 0, len(merged), func(i int) partsrun.Sample {
+		v, err := partsrun.AppendWithWorkspace(nil, 0, len(merged), func(i int) partsrun.Sample {
 			p := merged[i]
 			return partsrun.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Sequence}
-		})
+		}, &w.codec)
 		if err != nil {
 			return nil, err
 		}

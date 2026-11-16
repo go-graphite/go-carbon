@@ -220,7 +220,7 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 			}
 			batches = append(batches, batch)
 		}
-		old := o.state[id]
+		old := o.state.get(id)
 		var prior sealrollup.Frontier
 		if old != nil {
 			prior = old.Frontier
@@ -245,10 +245,10 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 				hi++
 			}
 			records := p.Records[lo:hi]
-			value, e := partsrun.Append(nil, 0, len(records), func(i int) partsrun.Sample {
+			value, e := partsrun.AppendWithWorkspace(nil, 0, len(records), func(i int) partsrun.Sample {
 				r := records[i]
 				return partsrun.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order}
-			})
+			}, &o.historyScratch.codec)
 			if e != nil {
 				return plan, e
 			}
@@ -284,10 +284,10 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 	}
 	plan.Commit = func() {
 		for _, m := range pending {
-			s := o.state[m.id]
+			s := o.state.get(m.id)
 			if s == nil {
 				s = &atomicRollupState{Config: m.config}
-				o.state[m.id] = s
+				o.state.set(m.id, s)
 			}
 			s.Frontier = m.frontier
 			s.history = m.history

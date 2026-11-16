@@ -106,59 +106,95 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 // Workspace is reusable scratch for one serial owner. No returned SealPlan
 // aliases it. Keep independent workspaces for concurrent planning calls.
 type Workspace struct {
-	positions                  map[key]int
+	positions                  []uint32
+	offsets                    []int
+	dense                      bool
+	sparseOnly                 bool
 	updates                    []Delta
 	points, current, neighbors []Sample
 	changed                    []int64
 }
 
-func (w *Workspace) lookup(k key) (Delta, bool) {
-	if len(w.updates) <= 8 {
-		for _, d := range w.updates {
-			if d.Archive == k.archive && d.Slot == k.slot {
-				return d, true
-			}
+// preparePositions allocates once per owner/high-water mark, before point work.
+// Dense updates use direct physical-slot indices. Sparse updates use an
+// open-addressed array bounded by input size, never the retention length.
+func (w *Workspace) preparePositions(c Config, points int) {
+	w.offsets = slices.Grow(w.offsets[:0], len(c.Archives)+1)
+	total := int64(0)
+	for _, a := range c.Archives {
+		w.offsets = append(w.offsets, int(total))
+		total += a.Count
+	}
+	w.offsets = append(w.offsets, int(total))
+	bound := min(total, int64(points)*int64(len(c.Archives)))
+	w.dense = !w.sparseOnly && total <= 1<<18 && total <= 4*bound
+	size := int(total)
+	if !w.dense {
+		size = 16
+		for int64(size) < 2*bound {
+			size *= 2
 		}
+	}
+	if cap(w.positions) < size {
+		w.positions = make([]uint32, size)
+	} else {
+		w.positions = w.positions[:size]
+	}
+	// A direct entry is validated against the current updates, so it needs no
+	// retention-sized clear. Sparse probe chains must start empty each call.
+	if !w.dense {
+		clear(w.positions)
+	}
+}
+func (w *Workspace) position(k key) int {
+	if w.dense {
+		return w.offsets[k.archive] + int(k.slot)
+	}
+	h := uint64(k.slot)*0x9e3779b97f4a7c15 ^ uint64(k.archive)*0xc2b2ae3d27d4eb4f
+	h ^= h >> 32
+	i := int(h) & (len(w.positions) - 1)
+	for {
+		n := w.positions[i]
+		if n == 0 {
+			return i
+		}
+		d := w.updates[int(n)-1]
+		if d.Archive == k.archive && d.Slot == k.slot {
+			return i
+		}
+		i = (i + 1) & (len(w.positions) - 1)
+	}
+}
+func (w *Workspace) lookup(k key) (Delta, bool) {
+	i := w.positions[w.position(k)]
+	if i == 0 || int(i) > len(w.updates) {
 		return Delta{}, false
 	}
-	i, ok := w.positions[k]
-	if !ok {
-		return Delta{}, false
-	}
-	return w.updates[i], true
+	d := w.updates[int(i)-1]
+	return d, d.Archive == k.archive && d.Slot == k.slot
 }
 func (w *Workspace) replace(k key, d Delta) {
-	if len(w.updates) <= 8 {
-		for i, old := range w.updates {
-			if old.Archive == k.archive && old.Slot == k.slot {
-				w.updates[i] = d
-				return
-			}
+	pos := w.position(k)
+	i := w.positions[pos]
+	if i != 0 && int(i) <= len(w.updates) {
+		old := w.updates[int(i)-1]
+		if old.Archive == k.archive && old.Slot == k.slot {
+			w.updates[int(i)-1] = d
+			return
 		}
-	} else if i, ok := w.positions[k]; ok {
-		w.updates[i] = d
-		return
 	}
 	w.updates = append(w.updates, d)
-	if len(w.updates) == 9 {
-		if w.positions == nil {
-			w.positions = make(map[key]int)
-		} else {
-			clear(w.positions)
-		}
-		for i, d := range w.updates {
-			w.positions[key{d.Archive, d.Slot}] = i
-		}
-	} else if len(w.updates) > 9 {
-		w.positions[k] = len(w.updates) - 1
-	}
+	w.positions[pos] = uint32(len(w.updates))
 }
 
 func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Delta, error) {
 	if w == nil {
-		w = &Workspace{}
+		// One-shot callers cannot amortize a direct retention-sized array.
+		w = &Workspace{sparseOnly: true}
 	}
+	pointCount := 0
 	for i, b := range batches {
+		pointCount += len(b.Points)
 		if b.Now <= 0 || b.Now > math.MaxUint32 {
 			return nil, fmt.Errorf("invalid batch clock")
 		}
@@ -172,6 +208,7 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 		}
 	}
 	w.updates = w.updates[:0]
+	w.preparePositions(c, pointCount)
 	get := func(a int, t int64) (Sample, bool) {
 		k := key{a, slot(t, c.Archives[a])}
 		if d, ok := w.lookup(k); ok {

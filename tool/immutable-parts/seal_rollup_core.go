@@ -35,7 +35,7 @@ func openCoreRollups(root string, cfg coreConfig) (*coreEngine, []*atomicRollupO
 	for i := range states {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", i))
 		if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-			states[i] = &atomicRollupOwner{state: map[uint64]*atomicRollupState{}}
+			states[i] = &atomicRollupOwner{state: rollupMetricStates{}}
 			continue
 		} else if err != nil {
 			return nil, nil, err
@@ -141,7 +141,7 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 	}
 	for _, id := range ids {
 		input := inputs[id]
-		old := o.state[id]
+		old := o.state.get(id)
 		var prior sealrollup.Frontier
 		if old != nil {
 			prior = old.Frontier
@@ -198,12 +198,12 @@ func planCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan,
 		for _, id := range ids {
 			input := inputs[id]
 			p := plans[id]
-			s := o.state[id]
+			s := o.state.get(id)
 			if s == nil {
 				s = &atomicRollupState{Config: input.Config, Slots: map[[2]int64]sealrollup.Sample{}}
 				s.Config.Archives = slices.Clone(input.Config.Archives)
 				s.index = sealrollup.NewSlots(s.Config.Archives)
-				o.state[id] = s
+				o.state.set(id, s)
 			}
 			for _, r := range p.Records {
 				s.install(r)

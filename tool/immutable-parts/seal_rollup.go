@@ -40,7 +40,7 @@ type atomicRollupState struct {
 type atomicRollupOwner struct {
 	db             *pebble.DB
 	dir            string
-	state          map[uint64]*atomicRollupState
+	state          rollupMetricStates
 	policies       map[string]*sealrollup.Prepared
 	workspace      sealrollup.Workspace
 	historyScratch rollupHistoryWorkspace
@@ -152,12 +152,12 @@ func (s *atomicRollupState) install(r sealrollup.Record) {
 // owner view on restart. Recovery resolves physical replacements in temporary
 // maps, then retains compressed occupied-slot runs and one metric of scratch.
 func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error) {
-	o := &atomicRollupOwner{db: db, dir: dir, state: map[uint64]*atomicRollupState{}}
+	o := &atomicRollupOwner{db: db, dir: dir, state: rollupMetricStates{}}
 	get := func(id uint64) *atomicRollupState {
-		s := o.state[id]
+		s := o.state.get(id)
 		if s == nil {
 			s = &atomicRollupState{Slots: map[[2]int64]sealrollup.Sample{}}
-			o.state[id] = s
+			o.state.set(id, s)
 		}
 		return s
 	}
@@ -244,7 +244,7 @@ func openAtomicRollupOwner(db *pebble.DB, dir string) (*atomicRollupOwner, error
 			}
 		}
 	}
-	for _, s := range o.state {
+	for _, s := range o.state.values {
 		policy, e := sealrollup.PolicyDigest(s.Config)
 		if e != nil {
 			return nil, e
@@ -291,7 +291,7 @@ func (o *atomicRollupOwner) Seal(inputs []atomicRollupInput) (written uint64, er
 			return 0, errors.New("duplicate metric in rollup seal")
 		}
 		seen[in.ID] = true
-		old := o.state[in.ID]
+		old := o.state.get(in.ID)
 		var prior sealrollup.Frontier
 		if old != nil {
 			prior = old.Frontier
@@ -377,12 +377,12 @@ func (o *atomicRollupOwner) Seal(inputs []atomicRollupInput) (written uint64, er
 	}
 	// No retained mutable input slices: configs and samples belong to this owner.
 	for i, in := range inputs {
-		s := o.state[in.ID]
+		s := o.state.get(in.ID)
 		if s == nil {
 			s = &atomicRollupState{Config: in.Config, Slots: map[[2]int64]sealrollup.Sample{}}
 			s.Config.Archives = slices.Clone(in.Config.Archives)
 			s.index = sealrollup.NewSlots(s.Config.Archives)
-			o.state[in.ID] = s
+			o.state.set(in.ID, s)
 		}
 		for _, r := range plans[i].Records {
 			s.install(r)

@@ -20,13 +20,27 @@ type Header struct {
 	Compressed bool
 }
 
+// Workspace reuses bounded codec scratch on one serial owner. Encoded output
+// belongs to dst and never aliases this scratch. Use one workspace per owner.
+type Workspace struct {
+	payload, compressed, decoded []byte
+}
+
 // Append reads the accessor repeatedly and appends one complete version-1 run. The accessor must
 // remain stable until Append returns. No expanded sample slice is allocated.
 func Append(dst []byte, clock int64, count int, at func(int) Sample) ([]byte, error) {
+	return AppendWithWorkspace(dst, clock, count, at, nil)
+}
+
+// AppendWithWorkspace is byte-identical to Append, with reusable temporary bytes.
+func AppendWithWorkspace(dst []byte, clock int64, count int, at func(int) Sample, w *Workspace) ([]byte, error) {
 	if count < 0 || count > 1<<26 || at == nil {
 		return dst, errors.New("invalid run input")
 	}
-	var payload []byte
+	if w == nil {
+		w = &Workspace{}
+	}
+	payload := w.payload[:0]
 	regularTime, regularSequence := true, true
 	var timeStep int64
 	var sequenceStep uint64
@@ -34,12 +48,14 @@ func Append(dst []byte, clock int64, count int, at func(int) Sample) ([]byte, er
 		timeStep = at(1).Time - at(0).Time
 		sequenceStep = at(1).Sequence - at(0).Sequence
 	}
+	var previous Sample
 	for i := range count {
 		p := at(i)
 		if i > 0 {
-			regularTime = regularTime && p.Time-at(i-1).Time == timeStep
-			regularSequence = regularSequence && p.Sequence-at(i-1).Sequence == sequenceStep
+			regularTime = regularTime && p.Time-previous.Time == timeStep
+			regularSequence = regularSequence && p.Sequence-previous.Sequence == sequenceStep
 		}
+		previous = p
 	}
 
 	timestamp, sequence, value := clock, uint64(0), uint64(0)
@@ -84,7 +100,9 @@ func Append(dst []byte, clock int64, count int, at func(int) Sample) ([]byte, er
 		timestamp, sequence, value = p.Time, p.Sequence, p.Bits
 	}
 
-	compressed := snappy.Encode(nil, payload)
+	w.payload = payload
+	compressed := snappy.Encode(w.compressed[:cap(w.compressed)], payload)
+	w.compressed = compressed
 	flag := byte(0)
 	if len(compressed) < len(payload) {
 		payload = compressed
@@ -126,6 +144,12 @@ func Inspect(value []byte, maxPoints int) (Header, error) {
 // Visit decodes straight into the consumer. The only temporary allocation is
 // the bounded compressed payload; there is no expanded row allocation.
 func Visit(encoded []byte, maxPoints int, visit func(Sample) error) error {
+	return VisitWithWorkspace(encoded, maxPoints, visit, nil)
+}
+
+// VisitWithWorkspace reuses compressed-payload scratch; samples are copied to
+// the visitor by value, and no input or scratch byte slice escapes the call.
+func VisitWithWorkspace(encoded []byte, maxPoints int, visit func(Sample) error, w *Workspace) error {
 	header, err := Inspect(encoded, maxPoints)
 	if err != nil {
 		return err
@@ -135,10 +159,14 @@ func Visit(encoded []byte, maxPoints int, visit func(Sample) error) error {
 	}
 	data := encoded[18:]
 	if header.Compressed {
-		data, err = snappy.Decode(nil, data)
+		if w == nil {
+			w = &Workspace{}
+		}
+		data, err = snappy.Decode(w.decoded[:cap(w.decoded)], data)
 		if err != nil {
 			return err
 		}
+		w.decoded = data
 	}
 	timestamp, sequence, value := header.Clock, uint64(0), uint64(0)
 	if len(data) == 0 {

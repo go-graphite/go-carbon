@@ -85,3 +85,38 @@ func TestPreparedSparseDifferential(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkspacePositionReuse(t *testing.T) {
+	var w Workspace
+	for _, count := range []int64{4096, 1 << 30, 120, 1 << 29, 4096} {
+		c := Config{Archives: []Archive{{1, count}}, Method: Last}
+		w.preparePositions(c, 1000)
+		for round := range 3 {
+			w.updates = w.updates[:0]
+			w.preparePositions(c, 1000)
+			for i := range 1000 {
+				k := key{0, int64(i) % count}
+				d := Delta{Archive: 0, Slot: k.slot, Order: uint64(round + 1), Sample: Sample{Bits: uint64(i)}}
+				w.replace(k, d)
+				got, ok := w.lookup(k)
+				if !ok || got != d {
+					t.Fatalf("count%d round%d slot%d: got%v", count, round, i, got)
+				}
+			}
+		}
+		if count > 1<<18 && cap(w.positions) > 8192 {
+			t.Fatal("sparse retention allocated by slot count", cap(w.positions))
+		}
+		if n := testing.AllocsPerRun(100, func() {
+			w.updates = w.updates[:0]
+			w.preparePositions(c, 1000)
+			for i := range 1000 {
+				k := key{0, int64(i) % count}
+				w.replace(k, Delta{Archive: 0, Slot: k.slot})
+				w.lookup(k)
+			}
+		}); n != 0 {
+			t.Fatalf("hot positions allocate: %g", n)
+		}
+	}
+}

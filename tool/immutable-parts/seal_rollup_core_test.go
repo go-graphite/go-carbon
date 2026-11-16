@@ -44,7 +44,7 @@ func TestCoreRollupHook(t *testing.T) {
 		}
 	}
 	s := states[coreShard(42, cfg.Shards)]
-	if s.state[42].Frontier.Order != 2 || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+	if s.state.get(42).Frontier.Order != 2 || s.state.get(42).snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 		t.Fatal("hook correction not published")
 	}
 	if got := e.durableFrontiers(); got[0][0] != 2 || got[1][0] != 2 {
@@ -58,13 +58,13 @@ func TestCoreRollupHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	s = states[coreShard(42, cfg.Shards)]
-	if s.state[42].Frontier.Order != 2 || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+	if s.state.get(42).Frontier.Order != 2 || s.state.get(42).snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 		t.Fatal("restart lost rollup")
 	}
 	if err = e.submitBatches(0, coreRollupBatches(t, 3, 9), 3, true); err != nil {
 		t.Fatal(err)
 	}
-	if s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(12) {
+	if s.state.get(42).snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(12) {
 		t.Fatal("restart correction lost prior bucket context")
 	}
 	if err = e.close(); err != nil {
@@ -135,15 +135,15 @@ func TestCoreRollupHookCrash(t *testing.T) {
 				want = 1
 				value = 5
 			}
-			if s.state[42].Frontier.Order != want || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(value) {
-				t.Fatal("torn raw/archive/frontier crash recovery", s.state[42])
+			if s.state.get(42).Frontier.Order != want || s.state.get(42).snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(value) {
+				t.Fatal("torn raw/archive/frontier crash recovery", s.state.get(42))
 			}
 			// A crash may leave different owner frontiers. Replay starts at their min,
 			// and submitBatches deduplicates each owner by its durable source cursor.
 			if err = e.submitBatches(0, coreRollupBatches(t, 2, 7), 2, true); err != nil {
 				t.Fatal(err)
 			}
-			if s.state[42].Frontier.Order != 2 || s.state[42].snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
+			if s.state.get(42).Frontier.Order != 2 || s.state.get(42).snapshotSlots()[[2]int64{1, 480}].Bits != math.Float64bits(10) {
 				t.Fatal("replay changed correction")
 			}
 			if err = e.close(); err != nil {
@@ -173,7 +173,7 @@ func TestCoreRollupPolicyFailure(t *testing.T) {
 		t.Fatal("unsupported policy accepted")
 	}
 	owner := states[coreShard(42, cfg.Shards)]
-	if owner.Errors.Load() != 1 || len(owner.state) != 0 {
+	if owner.Errors.Load() != 1 || len(owner.state.values) != 0 {
 		t.Fatal("failure counter or detached plan")
 	}
 	// Atomicity is per owner: an empty peer owner may safely acknowledge its
@@ -254,7 +254,7 @@ func TestCoreRollupUnsortedMetricKeys(t *testing.T) {
 		t.Fatal("ordered append rejected unsorted metric admission", err)
 	}
 	for _, id := range []uint64{900, 2, 42, 1} {
-		if states[0].state[id].Frontier.Order != 2 {
+		if states[0].state.get(id).Frontier.Order != 2 {
 			t.Fatal("metric frontier lost", id)
 		}
 	}

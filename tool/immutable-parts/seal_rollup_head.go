@@ -109,7 +109,7 @@ func (h *compactRollupHead) appendValues(b coreBatch, count int, valueAt func(in
 	}
 	// Compress a complete original batch only when it saves owned bytes. The
 	// bounded reusable scratch is one batch, independent of the head's point count.
-	h.scratch = snappy.Encode(h.scratch[:0], h.data[meta.start:])
+	h.scratch = snappy.Encode(h.scratch[:cap(h.scratch)], h.data[meta.start:])
 	if len(h.scratch) < len(h.data)-meta.start {
 		h.data = append(h.data[:meta.start], h.scratch...)
 		meta.compressed = true
@@ -133,7 +133,7 @@ func (h *compactRollupHead) decodeBatch(m compactRollupBatch, dst []sealrollup.S
 		if e != nil || n > 30*m.count+64 {
 			return sealrollup.Batch{}, errors.New("invalid compact decoded size")
 		}
-		h.scratch, err = snappy.Decode(h.scratch[:0], data)
+		h.scratch, err = snappy.Decode(h.scratch[:cap(h.scratch)], data)
 		data = h.scratch
 		if err != nil {
 			return sealrollup.Batch{}, err

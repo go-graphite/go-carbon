@@ -2,8 +2,10 @@ package partsrun
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -68,5 +70,60 @@ func TestInvalidAndVisitorFailure(t *testing.T) {
 	}
 	if _, err = Append(nil, 0, -1, nil); err == nil {
 		t.Fatal("negative count")
+	}
+}
+
+// Golden bytes come from the pre-workspace encoder, independently executed
+// with this seeded corpus. Cover irregular IEEE/timestamp/sequence bits and
+// regular compressed runs, including empty and singleton values.
+func TestWorkspacePriorBytesAndOwnership(t *testing.T) {
+	r := rand.New(rand.NewSource(14))
+	h := sha256.New()
+	var w Workspace
+	for _, n := range []int{0, 1, 24, 118, 513} {
+		for _, regular := range []bool{false, true} {
+			ps := make([]Sample, n)
+			for i := range ps {
+				ps[i] = Sample{int64(r.Uint64()), r.Uint64(), r.Uint64()}
+				if regular {
+					ps[i].Time, ps[i].Sequence, ps[i].Bits = 1794700800+int64(i*60), uint64(i+1), uint64(i%3)
+				}
+			}
+			b, err := AppendWithWorkspace(nil, 1794701000, n, func(i int) Sample { return ps[i] }, &w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.Write(binary.BigEndian.AppendUint64(nil, uint64(len(b))))
+			h.Write(b)
+			owned := bytes.Clone(b)
+			decoded := make([]Sample, 0, n)
+			if err := VisitWithWorkspace(b, n, func(p Sample) error { decoded = append(decoded, p); return nil }, &w); err != nil || !reflect.DeepEqual(decoded, ps) {
+				t.Fatal("workspace decode differs", err)
+			}
+			if _, err := AppendWithWorkspace(nil, 0, 1000, func(i int) Sample { return Sample{Bits: uint64(i)} }, &w); err != nil || !bytes.Equal(b, owned) {
+				t.Fatal("scratch escaped into output", err)
+			}
+		}
+	}
+	if got := fmt.Sprintf("%x", h.Sum(nil)); got != "96d33205947361cf0b19a77afc07e6037d0a0b15d5e87b3e34f38b7282983407" {
+		t.Fatal("preceding codec bytes changed", got)
+	}
+}
+
+func TestWorkspaceNoHotAllocations(t *testing.T) {
+	var w Workspace
+	dst := make([]byte, 0, 1<<16)
+	at := func(i int) Sample { return Sample{Time: int64(i), Bits: uint64(i % 3), Sequence: uint64(i)} }
+	visit := func(Sample) error { return nil }
+	if n := testing.AllocsPerRun(100, func() {
+		b, err := AppendWithWorkspace(dst[:0], 0, 513, at, &w)
+		if err != nil {
+			panic(err)
+		}
+		if err = VisitWithWorkspace(b, 513, visit, &w); err != nil {
+			panic(err)
+		}
+	}); n != 0 {
+		t.Fatalf("warm codec allocations: %g", n)
 	}
 }
