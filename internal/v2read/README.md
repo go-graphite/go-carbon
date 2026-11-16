@@ -44,7 +44,9 @@ A reader lazily builds `v2core.RollupSnapshot`, a directory of immutable part
 metadata. The core's atomic descriptor bindings enumerate the current part set.
 Later sealed generations reuse descriptor scopes and metadata, decode only added
 parts, and copy only affected per-name entries. Removed parts rebuild only the
-affected names; snapshots with no bindings retain the bare-GCP3 scan path.
+affected names. A core frontier makes the binding inventory authoritative even
+when empty after final-part retirement. Bare GCP3 snapshots without a core
+frontier or bindings retain the scan path.
 No old snapshot is retained by the directory or its inventory. Sealed reads seek directly to
 the requested name, archive and one or two physical ring-slot ranges in each
 relevant part. A predecessor seek includes a dense run beginning before the

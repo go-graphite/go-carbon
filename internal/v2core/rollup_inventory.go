@@ -19,6 +19,21 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 	}
 	defer it.Close()
 	var inventory map[string][]string
+	if prior != nil && prior.inventory != nil {
+		inventory = map[string][]string{}
+	} else {
+		// A core frontier establishes the atomic binding contract even when the
+		// last part has retired. GCP3 data may remain in the LSM after retirement.
+		_, closer, err := snapshot.Get(coreMetaKey)
+		if err == nil {
+			if err := closer.Close(); err != nil {
+				return nil, nil, err
+			}
+			inventory = map[string][]string{}
+		} else if !errors.Is(err, pebble.ErrNotFound) {
+			return nil, nil, err
+		}
+	}
 	var scopes []string
 	var data *pebble.Iterator
 	defer func() {
@@ -89,12 +104,4 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 		scopes = append(scopes, added...)
 	}
 	return inventory, scopes, it.Error()
-}
-
-func rollupScopeCount(inventory map[string][]string) int {
-	n := 0
-	for _, scopes := range inventory {
-		n += len(scopes)
-	}
-	return n
 }

@@ -97,11 +97,8 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 		return nil, err
 	}
 	defer it.Close()
-	if inventory == nil || prior == nil || prior.inventory == nil {
-		// Establish completeness once, including pre-binding GCP3 parts in an
-		// upgraded store. Such mixed stores keep the compatibility scan until all
-		// unbound parts have retired. Core publications always bind new parts.
-		scopes = nil
+	if inventory == nil {
+		// Bare GCP3 fixtures have no core frontier or atomic inventory bindings.
 		for valid := it.First(); valid; {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -123,26 +120,6 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 		}
 		if err := it.Error(); err != nil {
 			return nil, err
-		}
-	}
-	if inventory != nil && (prior == nil || prior.inventory == nil) {
-		complete := len(scopes) == rollupScopeCount(inventory)
-		if complete {
-			known := map[string]bool{}
-			for _, ss := range inventory {
-				for _, id := range ss {
-					known[id] = true
-				}
-			}
-			for _, id := range scopes {
-				if !known[id] {
-					complete = false
-					break
-				}
-			}
-		}
-		if !complete {
-			out.inventory = nil
 		}
 	}
 
