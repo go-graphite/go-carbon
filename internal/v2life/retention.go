@@ -71,7 +71,19 @@ func LongestRetention(retentions []store.Retention) (int64, error) {
 // deletion API. Publication and file unlink/pin release belong to the engine.
 func ExpiredPartitions(partitions []Partition, now time.Time) ([]Partition, error) {
 	var out []Partition
+	seen := make(map[struct {
+		Scope Scope
+		Key   int64
+	}]bool)
 	for _, p := range partitions {
+		unit := struct {
+			Scope Scope
+			Key   int64
+		}{p.Scope, p.Key}
+		if seen[unit] {
+			return nil, errors.New("duplicate physical deletion unit; aggregate all stored policies first")
+		}
+		seen[unit] = true
 		if p.ID == "" || p.End <= p.Start || p.LongestSeconds <= 0 {
 			return nil, errors.New("invalid partition manifest")
 		}

@@ -6,7 +6,7 @@ It never reads a point before writing or deleting, and never changes vendor code
 
 | Operation | Current semantics | v2 operation |
 | --- | --- | --- |
-| Retention age-out | Each stored archive has its own step × count horizon; sample time controls query visibility. Reloading schemas does not shorten already stored history. | `ExpiredPartitions` selects only sealed, complete deletion units after exclusive block end + the longest **stored** horizon. `Owner.Reclaim` atomically records retirement and range-deletes the entire scoped partition. Mixed policies wait for the longest; exact physical reclamation needs homogeneous units. |
+| Retention age-out | Each stored archive has its own step × count horizon; sample time controls query visibility. Reloading schemas does not shorten already stored history. | `ExpiredPartitions` selects only sealed, complete deletion units after exclusive block end + the longest **stored** horizon. `Owner.Reclaim` atomically records retirement and range-deletes the entire scoped partition. Mixed policies wait for the longest; duplicate deletion-unit manifests are rejected; exact physical reclamation needs homogeneous units. |
 | Inactivity expiry | Admission/activity clock, not newest sample time. First active regex wins; exclusion skips a rule; grace adds to nonzero TTL; zero exempts; `until` is exclusive. Equality with the TTL expires. Unknown activity initializes before later expiration. Pending input and dry-run prevent removal. | `PlanExpiration` reuses the current parser/matcher. A serial owner checks generation/revision and commits catalog removal plus an incarnation tombstone. No per-name point deletion. |
 | Resumed names | A new write can recreate a deleted metric; stale copies must not restore deleted history. | The portable incarnation authority must issue a generation greater than the tombstone. `Visible` masks every covered generation, including unstamped legacy history. The old incarnation is rejected on catalog replay/import. |
 | Folded namespaces | Moving a cluster must preserve source prefix expiry and stored retention. | Use the same ordered prefix rules on the destination; retain actual stored policies in manifests. The target fallback must not replace the source overrides. Differential fixtures cover two source TTLs plus destination fallback. |
@@ -54,7 +54,8 @@ replacements. Their files are **not** valid time-retention deletion units. The
 core seal extension API supports point records but not whole-range tombstones.
 `CoreCatalog.Plan` therefore supports catalog/inactivity operations only;
 whole-partition `Reclaim` is restricted to the standalone stopped-owner adapter
-and real policy/time-partition manifests. It must never be run against the live
+and real policy/time-partition manifests. The standalone adapter has its own
+metadata representation and must never be run against a running or stopped
 core or assume a rollup partition-zero file is old history. Physical file
 reclamation follows snapshot release and compaction, not the logical drop.
 

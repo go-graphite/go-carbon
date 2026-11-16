@@ -46,7 +46,8 @@ func (c *CoreCatalog) Snapshot() Snapshot { return c.owner.Snapshot() }
 // Neither failed planning nor Abort changes the visible catalog. Plan must run
 // in the same serial owner as core's other seal planners. A caller composing
 // plans must preserve all Commit/Abort callbacks and sorted, disjoint file ranges.
-// Whole-part Reclaim uses the stopped-owner OpenCatalog adapter instead: the
+// Whole-part Reclaim uses the standalone OpenCatalog adapter instead (never
+// on a core database, even when stopped): the
 // current core extension API has no range-deletion primitive, and its rollup
 // partition zero must never be treated as an expired time partition.
 func (c *CoreCatalog) Plan(upserts []Metric, policy *ExpirationPolicy, now time.Time, pending func(string) bool) (v2core.SealPlan, ExpirationPlan, error) {

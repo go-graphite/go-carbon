@@ -88,3 +88,16 @@ func TestRetentionNeverDeletesOpenOrOverflows(t *testing.T) {
 		t.Fatal("invalid manifest accepted")
 	}
 }
+
+// A partition range may contain multiple parts. A caller must aggregate the
+// longest policy before presenting that deletion unit, never delete the range
+// merely because its short-lived part has expired.
+func TestRetentionRejectsUnaggregatedDeletionUnits(t *testing.T) {
+	units := []Partition{
+		{ID: "short", Key: 7, Start: 0, End: 100, LongestSeconds: 10, Sealed: true},
+		{ID: "long", Key: 7, Start: 0, End: 100, LongestSeconds: 10000, Sealed: true},
+	}
+	if drops, err := ExpiredPartitions(units, time.Unix(200, 0)); err == nil || len(drops) != 0 {
+		t.Fatal("ambiguous unit could delete retained history", drops, err)
+	}
+}
