@@ -23,7 +23,9 @@ func TestStartupDirectDrainsEarlierSourcesAtZeroInput(t *testing.T) {
 	}
 	defer zapwriter.Test()()
 	s, app, core, _ := directCaptureFixture(t)
-	const metrics = 128
+	// This checks an earlier nonempty source, not admission capacity. Keep
+	// more names than workers and repeat every special value pattern.
+	const metrics = 32
 	bits := []uint64{0, 1 << 63, 0x7ff8000000000042, 0x3ff0000000000001}
 	for i := range metrics {
 		core.Add(points.OnePoint(fmt.Sprintf("earlier.%d", i), math.Float64frombits(bits[i%len(bits)]), 1700000000))
