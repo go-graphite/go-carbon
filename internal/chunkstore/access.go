@@ -69,6 +69,7 @@ type chunkWriter struct {
 	chunks                 map[chunkAddress]*writeChunk
 	materialized, operands uint64
 	dirty                  bool
+	protectFutureSlots     bool
 }
 
 var chunkWriters = sync.Pool{New: func() any { return new(chunkWriter) }}
@@ -95,7 +96,7 @@ func (w *chunkWriter) release() {
 		clear(w.chunks)
 	}
 	w.store, w.metadata = nil, Metadata{}
-	w.materialized, w.operands, w.dirty = 0, 0, false
+	w.materialized, w.operands, w.dirty, w.protectFutureSlots = 0, 0, false, false
 	chunkWriters.Put(w)
 }
 func (w *chunkWriter) load(archive, slot int) (*writeChunk, error) {
@@ -133,10 +134,11 @@ func (w *chunkWriter) setPoint(archive, timestamp int, value float64) error {
 	}
 	p := Point{Timestamp: int64(timestamp), Value: value}
 	chunkSlot := slot % chunkSlots
-	// Ordinary late writes retain their existing last-write semantics. Only
-	// refuse a future epoch that would replace a currently retained owner.
+	// Direct archive imports/repairs protect currently retained owners.
+	// Automatic writes follow classic UpdateMany's circular overwrite order,
+	// including accepted future points.
 	now := int64(0)
-	if w.store != nil && w.store.now != nil {
+	if w.protectFutureSlots && w.store != nil && w.store.now != nil {
 		now = w.store.now().Unix()
 	}
 	if now > 0 && c.current.has(chunkSlot) && p.Timestamp > now &&
