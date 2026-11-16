@@ -491,8 +491,8 @@ func (p *progressMetrics) accepts(path string) bool {
 	}
 	parent := filepath.Dir(path)
 	name := filepath.Base(parent)
-	if !strings.HasPrefix(name, "ready-recovery-") && !strings.HasPrefix(name, "ready-fill-") {
+	if !strings.HasPrefix(name, "ready-recovery-") && !strings.HasPrefix(name, "ready-fill-") && !strings.HasPrefix(name, "ready-proof-") {
 		return false
 	}
-	return p.paths[filepath.Join(filepath.Dir(parent), "progress.json")]
+	return p.accepts(filepath.Join(filepath.Dir(parent), "progress.json"))
 }
