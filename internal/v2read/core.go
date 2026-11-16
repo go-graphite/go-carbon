@@ -22,6 +22,8 @@ import (
 // Stop producers, close Reader, wait for Fetch consumers, then close the engine.
 // The engine owns the underlying Pebble databases; Close rejects later handoffs.
 type Reader struct {
+	reads readCounters
+
 	closed    atomic.Bool
 	owners    []atomic.Pointer[generation]
 	caches    []sealedCache
@@ -246,6 +248,8 @@ func (r *Reader) FetchMany(ctx context.Context, names []string, from, until, now
 }
 
 func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now int64, consume func(string, *Series) error, mask func(bool)) error {
+	started := time.Now()
+	defer func() { r.reads.observe(time.Since(started)) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}

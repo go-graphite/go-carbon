@@ -146,7 +146,7 @@ func (app *App) startV2() error {
 			return err
 		}
 		old := v.catalog.Snapshot()
-		if old.Revision() > 0 && slices.Equal(slices.Collect(old.Names()), names) {
+		if old.Revision() > 0 && old.EqualNames(names) {
 			return nil
 		}
 		return v.catalog.Publish(old.Revision()+1, names)
@@ -200,6 +200,9 @@ func (app *App) startV2() error {
 		return err
 	}
 	intake.Store(v.server)
+	if c.Prometheus.Enabled {
+		app.v2CollectorOnce.Do(func() { app.PromRegisterer.MustRegister(&v2Collector{app: app}) })
+	}
 	recovered.Store(true)
 	v.wg.Add(1)
 	go func() {

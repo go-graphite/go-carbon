@@ -135,7 +135,7 @@ func (c *NameCatalog) readGroup(body []byte) error {
 				return errCatalog
 			}
 			c.ids.insert(hash, b.id)
-			c.entries = append(c.entries, catalogEntry{key: b.key, definition: bytes.Clone(b.def)})
+			c.entries = append(c.entries, catalogEntry{key: b.key, definition: c.copyDefinition(b.def)})
 		}
 	}
 	return nil

@@ -26,6 +26,8 @@ type catalogEntry struct {
 // Checkpoint durably replaces the catalog prefix before reclaiming its WAL.
 // Predictor epochs must start at every independently retained segment boundary.
 type NameCatalog struct {
+	definitionArena []byte
+
 	buffer         *bufio.Writer
 	dirty          bool
 	checkpointHook func(string) // test-only fault injection; nil in normal operation
@@ -292,7 +294,7 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 			return 0, errCatalog
 		}
 		c.ids.insert(hash, id)
-		c.entries = append(c.entries, catalogEntry{key: key, definition: bytes.Clone(def)})
+		c.entries = append(c.entries, catalogEntry{key: key, definition: c.copyDefinition(def)})
 	}
 	return int64(size) + 12, nil
 }
@@ -335,7 +337,7 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 	}
 	c.dirty = true
 	c.ids.insert(hash, id)
-	c.entries = append(c.entries, catalogEntry{key: key, definition: bytes.Clone(definition)})
+	c.entries = append(c.entries, catalogEntry{key: key, definition: c.copyDefinition(definition)})
 	return id, nil
 }
 
