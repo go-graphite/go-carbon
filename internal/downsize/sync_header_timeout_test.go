@@ -16,7 +16,8 @@ import (
 )
 
 func TestSyncDigestAllowsDelayedHeaders(t *testing.T) {
-	t.Parallel()
+	// Exercise the real transport clock before parallel fixture I/O can
+	// consume the unchanged one-second parent request budget.
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/legacy" {

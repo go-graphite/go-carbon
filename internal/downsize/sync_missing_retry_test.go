@@ -30,7 +30,10 @@ func TestSyncMissingRetryRetainsPrecheckAndPartialTransfers(t *testing.T) {
 	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		for _, failure := range []bool{false, true} {
-			t.Run(fmt.Sprintf("legacy=%v/failure=%v", legacy, failure), func(t *testing.T) { testSyncMissingRetry(t, legacy, failure) })
+			t.Run(fmt.Sprintf("legacy=%v/failure=%v", legacy, failure), func(t *testing.T) {
+				t.Parallel()
+				testSyncMissingRetry(t, legacy, failure)
+			})
 		}
 	}
 }

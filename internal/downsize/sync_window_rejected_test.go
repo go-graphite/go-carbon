@@ -23,6 +23,7 @@ func TestSyncWindowRejectedBatchResume(t *testing.T) {
 	t.Parallel()
 	for _, status := range []int{http.StatusRequestEntityTooLarge, http.StatusConflict} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 			// Eight names still force two recursive split levels and retain
