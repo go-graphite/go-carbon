@@ -30,7 +30,7 @@ type Application struct {
 // AppendApplications retains explicit original applications in the existing
 // pending journal group. Drain syncs definitions before the journal, then
 // pipelines the same detached groups to core. No additional sender queue exists.
-func (p *Producer) AppendApplications(apps []Application) error {
+func (p *Producer) appendApplications(apps []Application) error {
 	if p.failed != nil {
 		return p.failed
 	}

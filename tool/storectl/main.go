@@ -58,6 +58,8 @@ func main() {
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "placement":
+			return placement(args[1:], os.Stdout)
 		case "maintain":
 			return maintain(args[1:])
 		case "inventory":

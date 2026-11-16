@@ -15,14 +15,17 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2placement"
 	"github.com/go-graphite/go-carbon/points"
 )
 
 // Config is fixed for the lifetime of a store. Layer is 0 (numeric), 1 (names),
-// or 2 (journal). Each producer must have exactly one caller, including Drain.
+// 2 (journal), or 3 (rollups). Each producer has one caller, including Drain.
 type Config struct {
 	Layer, Producers, Shards, MaxPendingRows int
 	GroupInterval                            time.Duration
+	// Placement requires stamped intake; one daemon root owns one PG.
+	Placement *v2placement.Authority
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -41,6 +44,8 @@ type packet struct {
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
 type Producer struct {
+	admission                                                    *v2placement.Admission
+	placement                                                    *v2placement.Authority
 	engine                                                       *v2core.Engine
 	index, count, layer, maxPending                              int
 	catalog                                                      *partlog.NameCatalog
@@ -67,6 +72,9 @@ func coreConfig(c Config) v2core.Config {
 // Open requires a fresh experiment root. Reopening writable journals without
 // replay is deliberately refused. Core alone may be reopened for read-back.
 func Open(root string, c Config) (*Store, error) {
+	if c.Placement != nil && c.Layer < 2 {
+		return nil, errors.New("placement requires a durable journal layer")
+	}
 	if c.Layer < 0 || c.Layer > 3 || c.Producers < 1 || c.Shards < 1 {
 		return nil, errors.New("invalid layer or geometry")
 	}
@@ -101,6 +109,10 @@ func Open(root string, c Config) (*Store, error) {
 	s := &Store{Core: e, cfg: c}
 	for i := 0; i < c.Producers; i++ {
 		p := &Producer{engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
+		if c.Placement != nil {
+			p.placement = c.Placement
+			p.admission = c.Placement.Register()
+		}
 		s.Producers = append(s.Producers, p)
 		if c.Layer == 0 {
 			continue
@@ -148,6 +160,9 @@ func NumericID(local uint64, producer, producers int) uint64 {
 
 // AppendNumeric is the L0 control and does not admit names or journal input.
 func (p *Producer) AppendNumeric(rows []v2core.Row) error {
+	if p.admission != nil {
+		return v2placement.ErrUnversioned
+	}
 	if p.failed != nil {
 		return p.failed
 	}
@@ -161,7 +176,7 @@ func (p *Producer) AppendNumeric(rows []v2core.Row) error {
 // Append resolves every name through the durable catalog. Returned success only
 // accepts memory: Drain is the durability acknowledgment. Inputs are borrowed
 // for this call only. Sequence is the exact per-name input order supplied by caller.
-func (p *Producer) Append(names []string, data []points.Point, sequence []uint64, clock int64) error {
+func (p *Producer) appendNamed(names []string, data []points.Point, sequence []uint64, clock int64) error {
 	if p.failed != nil {
 		return p.failed
 	}
