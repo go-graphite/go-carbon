@@ -100,9 +100,6 @@ func (s *SlotIndex) Scan(ctx context.Context, id uint64, a Archive, from, until 
 			return err
 		}
 		if err := s.read(ctx, b.Key, selected[:count], func(p Sample) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			slot := (p.Time / a.Step) % a.Points
 			if slot < 0 {
 				slot += a.Points
@@ -117,5 +114,5 @@ func (s *SlotIndex) Scan(ctx context.Context, id uint64, a Archive, from, until 
 			return err
 		}
 	}
-	return nil
+	return ctx.Err()
 }

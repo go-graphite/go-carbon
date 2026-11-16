@@ -15,6 +15,10 @@ import (
 )
 
 const MaxBlockBytes = 64 << 10
+
+// DefaultBlockCacheBytes covers a normal sealed part, while pin admission
+// reserves its complete possible decoded footprint before publication.
+const DefaultBlockCacheBytes = 8 << 20
 const sampleBytes = 24
 
 // BlockRef addresses an immutable file, never a mutable database table. File is
@@ -181,6 +185,16 @@ func OpenBlockPart(path string) (*BlockFileSource, error) {
 // Use this when the current catalog assigns different IDs after restart/copy.
 // The resolver is called only while opening a generation, never during a query.
 func OpenBlockPartWithIDs(path string, resolve func([]byte) (uint64, error)) (*BlockFileSource, error) {
+	return OpenBlockPartWithCache(path, resolve, DefaultBlockCacheBytes)
+}
+
+// OpenBlockPartWithCache bounds this generation's lazy verified decoded cache.
+// The complete capacity is charged by RetainedBytes even before first touch.
+// Zero disables caching; uncached blocks retain per-read CRC verification.
+func OpenBlockPartWithCache(path string, resolve func([]byte) (uint64, error), cacheBytes int64) (*BlockFileSource, error) {
+	if cacheBytes < 0 {
+		return nil, errors.New("negative immutable block cache budget")
+	}
 	f, err := os.Open(filepath.Join(path, "manifest.json"))
 	if err != nil {
 		return nil, err
@@ -247,13 +261,13 @@ func OpenBlockPartWithIDs(path string, resolve func([]byte) (uint64, error)) (*B
 	if err != nil {
 		return fail(err)
 	}
-	// Reserve the entire lazy cache capacity before publication. Each source
-	// admits at most 64KiB of decoded samples, shared by its pinned generation.
+	// Reserve the entire lazy cache capacity before publication, shared by
+	// every reader pinning this immutable generation.
 	var payloadBytes int64
 	for _, b := range s.refs {
 		payloadBytes += int64(b.ref.Length)
 	}
-	cacheBytes := min(payloadBytes, int64(MaxBlockBytes))
+	cacheBytes = min(payloadBytes, cacheBytes)
 	s.cacheRemaining.Store(cacheBytes)
 	s.retained += cacheBytes
 	// Also reserve one maximum decode buffer for each pinned reader.
@@ -279,23 +293,21 @@ type fileBlock struct {
 	decoded atomic.Pointer[[]Sample]
 }
 
-// Idle payload scratch has a process-wide 4MiB bound. Active calls are already
-// charged one MaxBlockBytes buffer by the pinned view's RetainedBytes.
-var blockPayloads = make(chan []byte, 64)
-
-func takeBlockPayload() []byte {
-	select {
-	case b := <-blockPayloads:
-		return b
-	default:
-		return make([]byte, MaxBlockBytes)
-	}
+// A render owns its scratch for the duration of the query. Direct Source.Scan
+// callers get private scratch too; no payload buffer crosses worker boundaries.
+type blockReadContext struct {
+	context.Context
+	workspace *renderWorkspace
 }
-func releaseBlockPayload(b []byte) {
-	select {
-	case blockPayloads <- b[:MaxBlockBytes]:
-	default:
+
+func blockPayload(ctx context.Context, length int) []byte {
+	if c, ok := ctx.(*blockReadContext); ok {
+		if cap(c.workspace.payload) < length {
+			c.workspace.payload = make([]byte, MaxBlockBytes)
+		}
+		return c.workspace.payload[:length]
 	}
+	return make([]byte, length)
 }
 func decodeBlockSample(b []byte) Sample {
 	return Sample{Time: int64(binary.LittleEndian.Uint64(b)), Bits: binary.LittleEndian.Uint64(b[8:]), Sequence: binary.LittleEndian.Uint64(b[16:])}
@@ -310,7 +322,7 @@ func (s *BlockFileSource) payload(ref BlockRef, b []byte) ([]byte, error) {
 	}
 	return b, nil
 }
-func (s *BlockFileSource) cached(b *fileBlock) ([]Sample, error) {
+func (s *BlockFileSource) cached(ctx context.Context, b *fileBlock) ([]Sample, error) {
 	if p := b.decoded.Load(); p != nil {
 		return *p, nil
 	}
@@ -327,10 +339,8 @@ func (s *BlockFileSource) cached(b *fileBlock) ([]Sample, error) {
 		if !s.cacheRemaining.CompareAndSwap(remaining, remaining-n) {
 			continue
 		}
-		scratch := takeBlockPayload()
-		payload, err := s.payload(b.ref, scratch)
+		payload, err := s.payload(b.ref, blockPayload(ctx, int(b.ref.Length)))
 		if err != nil {
-			releaseBlockPayload(scratch)
 			s.cacheRemaining.Add(n)
 			return nil, err
 		}
@@ -338,7 +348,6 @@ func (s *BlockFileSource) cached(b *fileBlock) ([]Sample, error) {
 		for i := range samples {
 			samples[i] = decodeBlockSample(payload[i*sampleBytes:])
 		}
-		releaseBlockPayload(scratch)
 		b.decoded.Store(&samples)
 		return samples, nil
 	}
@@ -355,36 +364,28 @@ func (s *BlockFileSource) readBlock(ctx context.Context, key []byte, _ []SlotRan
 	if !ok {
 		return errors.New("immutable block missing from manifest")
 	}
-	samples, err := s.cached(b)
+	samples, err := s.cached(ctx, b)
 	if err != nil {
 		return err
 	}
 	if samples != nil {
 		for _, p := range samples {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			if err := yield(p); err != nil {
 				return err
 			}
 		}
-		return nil
+		return ctx.Err()
 	}
 	// Blocks outside the generation's cache budget retain per-read CRC checking.
-	scratch := takeBlockPayload()
-	defer releaseBlockPayload(scratch)
-	payload, err := s.payload(b.ref, scratch)
+	payload, err := s.payload(b.ref, blockPayload(ctx, int(b.ref.Length)))
 	if err != nil {
 		return err
 	}
 	for len(payload) > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		if err := yield(decodeBlockSample(payload)); err != nil {
 			return err
 		}
 		payload = payload[sampleBytes:]
 	}
-	return nil
+	return ctx.Err()
 }

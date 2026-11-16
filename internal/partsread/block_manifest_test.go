@@ -261,11 +261,24 @@ func TestBlockManifestCacheBudgetAndConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := OpenBlockPart(path)
+	s, err := OpenBlockPartWithCache(path, nil, MaxBlockBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	full, err := OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := full.Scan(context.Background(), 7, a, 0, 20*512, func(Sample) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range full.refs {
+		if b.decoded.Load() == nil {
+			t.Fatal("default cache did not cover sealed working set")
+		}
+	}
+	full.Close()
 	charged := s.RetainedBytes()
 	var wg sync.WaitGroup
 	failures := make(chan error, 32)
@@ -342,5 +355,56 @@ func TestBlockManifestCacheCRCFailureRefund(t *testing.T) {
 	got, err := scanManifest(s)
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatal("retry did not verify", got, err)
+	}
+}
+
+// A cancellation during a block is observed before Scan returns, and no next
+// block is decoded. The number of delivered samples is bounded by one block.
+func TestBlockManifestCancelAtBlockBoundary(t *testing.T) {
+	path, _ := manifestFixture(t)
+	s, err := OpenBlockPart(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	n := 0
+	err = s.Scan(ctx, 7, Archive{60, 10}, 0, 120, func(Sample) error { n++; cancel(); return nil })
+	if !errors.Is(err, context.Canceled) || n == 0 || n > MaxBlockBytes/sampleBytes {
+		t.Fatal(n, err)
+	}
+}
+
+func TestBlockManifestCacheDisabledAndInvalid(t *testing.T) {
+	path, want := manifestFixture(t)
+	if s, err := OpenBlockPartWithCache(path, nil, -1); err == nil {
+		s.Close()
+		t.Fatal("negative budget accepted")
+	}
+	s, err := OpenBlockPartWithCache(path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := scanManifest(s)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal(got, err)
+	}
+	for _, b := range s.refs {
+		if b.decoded.Load() != nil {
+			t.Fatal("disabled cache filled")
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(path, "blocks"), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteAt([]byte{0xff}, 8)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err = scanManifest(s); err == nil || len(got) != 0 {
+		t.Fatal("uncached read missed corruption", got, err)
 	}
 }
