@@ -21,10 +21,7 @@ func TestReloadConfigUpdatesQuotasWithoutRestart(t *testing.T) {
 		return
 	}
 	defer zapwriter.Test()()
-	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
-		// Quota usage is sampled independently of realtime name publication.
-		cfg.Carbonserver.QuotaUsageReportFrequency = &Duration{25 * time.Millisecond}
-	})
+	app, quota := newQuotaReloadApp(t)
 	defer app.Stop()
 	server := app.Carbonserver
 	cache := app.Cache
@@ -91,6 +88,9 @@ func newQuotaReloadApp(t *testing.T, configure ...func(*Config)) (*App, func(str
 	cfg.Carbonserver.ConcurrentIndex = true
 	cfg.Carbonserver.RealtimeIndex = 100
 	cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
+	// Realtime name publication and quota usage are independent. Every test
+	// using this fixture waits at most 5s for a sampled usage change.
+	cfg.Carbonserver.QuotaUsageReportFrequency = &Duration{25 * time.Millisecond}
 	cfg.Whisper.QuotasFilename = filepath.Join(root, "quotas.conf")
 	quota := func(body string) {
 		t.Helper()
