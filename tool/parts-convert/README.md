@@ -63,3 +63,11 @@ physical source size, all retained point counts, one-second disk samples
 and resume, and final settled sizes separately. The existing
 `-compare-coldpack` mode creates a **synthetic** fixture; it is not a cold-pack
 baseline of an acquired real copy.
+
+When `-real-source-render` is set, verification times both arms on the same
+saved queries, alternating their order. Both arms compare against the frozen
+oracle; any source drift fails the run. `PairedQueries` counts successful pairs,
+and `CapturedLegacyP99NS` retains the original pre-deletion diagnostic separately.
+The paired legacy arm includes HTTP and protobuf decoding, while the converted
+arm runs in-process. Cache state is uncontrolled, so this is an explicitly
+unequal-transport diagnostic, not an engine latency qualification.

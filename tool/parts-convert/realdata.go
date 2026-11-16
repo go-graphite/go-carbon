@@ -338,21 +338,44 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	if err != nil {
 		return err
 	}
-	var legacyNS, convertedNS []int64
-	for _, q := range oracle.Queries {
-		started := time.Now()
-		if err = reader.Fetch(ctx, q.Name, q.From, q.Until, func(s *partsread.Series) error { return compareRealSeries(q, s.From, s.Until, s.Step, s.Values) }); err != nil {
+	var legacyNS, capturedNS, convertedNS []int64
+	for i, q := range oracle.Queries {
+		converted := func() error {
+			started := time.Now()
+			err := reader.Fetch(ctx, q.Name, q.From, q.Until, func(s *partsread.Series) error { return compareRealSeries(q, s.From, s.Until, s.Step, s.Values) })
+			convertedNS = append(convertedNS, time.Since(started).Nanoseconds())
 			return err
 		}
-		convertedNS = append(convertedNS, time.Since(started).Nanoseconds())
-		if q.LegacyFetchNS > 0 {
-			legacyNS = append(legacyNS, q.LegacyFetchNS)
+		live := func() error {
+			started := time.Now()
+			err := sourceReal(ctx, sourceURL, q)
+			legacyNS = append(legacyNS, time.Since(started).Nanoseconds())
+			return err
 		}
-		if sourceURL != "" {
-			if err = sourceReal(ctx, sourceURL, q); err != nil {
+		if q.LegacyFetchNS > 0 {
+			capturedNS = append(capturedNS, q.LegacyFetchNS)
+		}
+		// Alternate which arm runs first. Both arms include their exact bit
+		// comparison; the live arm additionally includes HTTP/protobuf work.
+		if sourceURL != "" && i%2 == 0 {
+			if err = live(); err != nil {
 				return err
 			}
 		}
+		if err = converted(); err != nil {
+			return err
+		}
+		if sourceURL != "" && i%2 != 0 {
+			if err = live(); err != nil {
+				return err
+			}
+		}
+	}
+	comparison := "sequential single-pass; legacy before deletion, converted after; engine cache and OS cache uncontrolled; converted includes exact comparison"
+	if sourceURL == "" {
+		legacyNS = capturedNS
+	} else {
+		comparison = "paired same-query alternating order; live legacy HTTP/protobuf versus offline converted in-process; both include exact comparison; engine and OS caches uncontrolled; not an equal-transport engine latency comparison"
 	}
 	percentile := func(values []int64, percent int) int64 {
 		if len(values) == 0 {
@@ -366,6 +389,13 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 		Seed                        int64
 		MixedExact, LiveSourceExact bool
 		LegacyP99NS, ConvertedP99NS int64
+		CapturedLegacyP99NS         int64
+		PairedQueries               int
 		LatencyComparison           string
-	}{len(oracle.Queries), oracle.Seed, true, sourceURL != "", percentile(legacyNS, 99), percentile(convertedNS, 99), "sequential single-pass; legacy before deletion, converted after; engine cache and OS cache uncontrolled; converted includes exact comparison"})
+	}{len(oracle.Queries), oracle.Seed, true, sourceURL != "", percentile(legacyNS, 99), percentile(convertedNS, 99), percentile(capturedNS, 99), func() int {
+		if sourceURL != "" {
+			return len(oracle.Queries)
+		}
+		return 0
+	}(), comparison})
 }
