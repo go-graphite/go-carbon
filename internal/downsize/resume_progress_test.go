@@ -179,6 +179,9 @@ func semanticSyncRows(t *testing.T, state string) []string {
 			continue
 		}
 		row.Time = ""
+		// Independent runs have distinct durable observation generations;
+		// compare their repair effects rather than those opaque identities.
+		row.Identity = ""
 		blob, _ := json.Marshal(row)
 		result = append(result, string(blob))
 	}

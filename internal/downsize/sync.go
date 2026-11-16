@@ -3,6 +3,7 @@ package downsize
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -267,6 +268,11 @@ func openSyncJournal(path, identity string, checkpointOptions ...string) (*syncJ
 }
 
 func (j *syncJournal) append(row syncRow) error {
+	if row.Kind == "verified" && row.Identity == "" {
+		// A fresh observation can require a fresh repair even in the same
+		// round and with identical holes. Persist its generation before use.
+		row.Identity = rand.Text()
+	}
 	row.Time = time.Now().UTC().Format(time.RFC3339Nano)
 	data, err := json.Marshal(row)
 	if err != nil {
@@ -649,7 +655,13 @@ func (s *syncer) namesFile(kind string, round int, source int, names []string) (
 // copyFrom copies names from one source, recording the outcome. A source the
 // target refuses (403: not in transfer-sources) is marked forbidden.
 func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, names []string, short ...string) (syncCopyResult, error) {
+	var repair string
 	if phase == "fill" {
+		var err error
+		repair, err = s.fillIdentity(round, src, names)
+		if err != nil {
+			return syncCopyResult{}, err
+		}
 		round += s.verificationBase
 	}
 	source := s.o.from[src]
@@ -685,13 +697,18 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	}
 	names = selected
 	copyPhase := phase
+	if repair != "" {
+		// Both the parent receipt and the child transport journal belong to
+		// this observation. A new hole must not replay an older import.
+		copyPhase += "-" + repair
+	}
 	if len(excluded) > 0 {
 		data, _ := json.Marshal(names)
 		hash := sha256.Sum256(data)
-		copyPhase = fmt.Sprintf("%s-policy-%x", phase, hash[:8])
+		copyPhase = fmt.Sprintf("%s-policy-%x", copyPhase, hash[:8])
 	}
 	if len(names) == 0 {
-		if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Selected: original, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
+		if err := s.j.append(syncRow{Kind: "copied", Identity: repair, Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Selected: original, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
 			return syncCopyResult{}, err
 		}
 		return syncCopyResult{ExpectedAbsent: original}, nil
@@ -736,7 +753,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		res.ExpectedAbsent = append(res.ExpectedAbsent, item.Name)
 	}
 	journalStarted := time.Now()
-	if err := s.j.append(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
+	if err := s.j.append(syncRow{Kind: "copied", Identity: repair, Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
 		return res, err
 	}
 	event("sync_copy_journal", map[string]any{"phase": phase, "round": round, "source": source, "seconds": time.Since(journalStarted).Seconds()})
@@ -883,11 +900,18 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 			}
 			var res syncCopyResult
 			replayed := false
+			repair, err := s.fillIdentity(round, src, names)
+			if err != nil {
+				return err
+			}
 			if rows := s.j.find(func(r syncRow) bool {
-				return r.Kind == "copied" && !r.Forbidden && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src]
+				return r.Kind == "copied" && !r.Forbidden && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src] && r.Identity == repair
 			}); len(rows) > 0 {
 				replayed = true
 				res = syncCopyResult{Copied: rows[0].Copied, Failed: rows[0].Failed, Forbidden: rows[0].Forbidden}
+				for _, item := range rows[0].Resolved {
+					res.ExpectedAbsent = append(res.ExpectedAbsent, item.Name)
+				}
 			} else {
 				res, err = s.copyFrom(ctx, "fill", round, src, names)
 				if err != nil {
