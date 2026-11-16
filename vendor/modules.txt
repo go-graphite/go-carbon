@@ -371,6 +371,9 @@ github.com/lomik/stop
 # github.com/lomik/zapwriter v0.0.0-20210624082824-c1161d1eb463
 ## explicit; go 1.16
 github.com/lomik/zapwriter
+# github.com/mattn/go-sqlite3 v1.14.53
+## explicit; go 1.21
+github.com/mattn/go-sqlite3
 # github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 ## explicit
 github.com/munnerz/goautoneg

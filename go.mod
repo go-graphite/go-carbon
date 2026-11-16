@@ -45,6 +45,8 @@ require (
 	google.golang.org/protobuf v1.36.12
 )
 
+require github.com/mattn/go-sqlite3 v1.14.53
+
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
 	github.com/bits-and-blooms/bitset v1.24.2 // indirect
