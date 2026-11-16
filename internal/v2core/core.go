@@ -174,6 +174,7 @@ func coreWait(wake chan struct{}) {
 type coreOwner struct {
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
+	batchHook                    func(*pebble.Snapshot, []coreBatch, uint64) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
 	frontier                     atomic.Pointer[coreFrontier]
 	db                           *pebble.DB
@@ -308,6 +309,11 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 		}
+		if hooks.PublishBatches != nil {
+			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
+				return hooks.PublishBatches(s, snap, batches, generation)
+			}
+		}
 		if hooks.PlanSeal != nil {
 			o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
 		}
@@ -367,6 +373,11 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	for i, o := range e.owners {
 		o.pub.publish(o.db.NewSnapshot())
+		if o.batchHook != nil {
+			if err := o.batchHook(o.db.NewSnapshot(), nil, o.meta.NextPart); err != nil {
+				return fail(err)
+			}
+		}
 		groups[i%workers] = append(groups[i%workers], o)
 	}
 	for i, group := range groups {
@@ -599,6 +610,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	var batches []coreBatch
 	deadline := time.Now().Add(time.Second)
 	var headPublication time.Time
+	publishBatches := func() error {
+		if o.batchHook == nil {
+			return nil
+		}
+		// submitPacketMode already detached Points and Policy. Owners never mutate
+		// those arenas; only the descriptor slice grows. Retain their immutable
+		// storage instead of copying the full head for every publication.
+		return o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.meta.NextPart)
+	}
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
 	var failure error
@@ -629,6 +649,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		head = head[:0]
 		deadline = time.Now().Add(time.Second)
 		o.pub.publish(o.db.NewSnapshot())
+		if err := publishBatches(); err != nil {
+			return err
+		}
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}
@@ -709,6 +732,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 				headPublication = time.Now()
 			}
+		}
+		if failure == nil && found && !sealPending {
+			failure = publishBatches()
 		}
 		if failure != nil {
 			o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
