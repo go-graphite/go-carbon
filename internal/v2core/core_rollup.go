@@ -72,12 +72,21 @@ type coreRollups struct {
 	expire func(RollupPolicy, RollupMetadata, time.Time) bool
 	now    func() time.Time
 
-	stage     func(string)
-	metrics   map[uint64]*rollupMetric
-	names     map[partsformat.ID]uint64
-	prepared  map[[32]byte]*sealrollup.Prepared
-	workspace sealrollup.Workspace
-	records   []sealrollup.Record
+	stage          func(string)
+	metrics        map[uint64]*rollupMetric
+	names          map[partsformat.ID]uint64
+	prepared       map[[32]byte]*sealrollup.Prepared
+	workspace      sealrollup.Workspace
+	records        []sealrollup.Record
+	stages         []rollupStage
+	positions      map[uint64]int
+	pendingNames   map[partsformat.ID]uint64
+	stagedPolicies map[[32]byte]*sealrollup.Prepared
+	samples        []sealrollup.Sample
+	batches        []sealrollup.Batch
+	files          map[string][]coreKV
+	arena          []byte
+	pending        bool
 }
 
 // Archive max-u32 is reserved within the core's GCP3 rollup experiment for the
@@ -139,10 +148,35 @@ type rollupStage struct {
 }
 
 func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
-	var stages []rollupStage
-	positions := map[uint64]int{}
-	names := map[partsformat.ID]uint64{}
-	stagedPolicies := map[[32]byte]*sealrollup.Prepared{}
+	if r.pending {
+		return coreSealPlan{}, errors.New("rollup plan still owns seal arenas")
+	}
+	r.pending = true
+	returned := false
+	defer func() {
+		if !returned {
+			r.release()
+		}
+	}()
+	stages := r.stages[:0]
+	positions := r.positions
+	if positions == nil {
+		positions = map[uint64]int{}
+		r.positions = positions
+	}
+	names := r.pendingNames
+	if names == nil {
+		names = map[partsformat.ID]uint64{}
+		r.pendingNames = names
+	}
+	stagedPolicies := r.stagedPolicies
+	if stagedPolicies == nil {
+		stagedPolicies = map[[32]byte]*sealrollup.Prepared{}
+		r.stagedPolicies = stagedPolicies
+	}
+	// At most one stage per input application. Retain capacity between seals.
+	stages = slices.Grow(stages, len(in.Batches))
+	r.stages = stages
 	for _, b := range in.Batches {
 		i, ok := positions[b.ID]
 		if !ok {
@@ -179,8 +213,10 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	for _, b := range in.Batches {
 		sampleCount += len(b.Points)
 	}
-	samples := make([]sealrollup.Sample, sampleCount)
-	batchStorage := make([]sealrollup.Batch, len(in.Batches))
+	r.samples = slices.Grow(r.samples[:0], sampleCount)[:sampleCount]
+	samples := r.samples
+	r.batches = slices.Grow(r.batches[:0], len(in.Batches))[:len(in.Batches)]
+	batchStorage := r.batches
 	offset := 0
 	for i := range stages {
 		n := stages[i].batchCount
@@ -209,7 +245,11 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 		}
 	}
-	files := map[string][]coreKV{}
+	files := r.files
+	if files == nil {
+		files = map[string][]coreKV{}
+		r.files = files
+	}
 	var part partsformat.PartID
 	if len(stages) > 0 {
 		if _, err := rand.Read(part[:]); err != nil {
@@ -217,27 +257,34 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 	}
 	put := func(m *rollupMetric, archive uint32, slot int64, value []byte) error {
-		encoded := bytes.Clone(m.keyTemplate)
+		start := len(r.arena)
+		r.arena = append(r.arena, m.keyTemplate...)
+		encoded := r.arena[start:len(r.arena):len(r.arena)]
 		copy(encoded[m.partOffset:m.partOffset+16], part[:])
 		tail := len(encoded) - 16
 		binary.BigEndian.PutUint32(encoded[tail:], archive)
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
-		files[m.prefix] = append(files[m.prefix], coreKV{Key: encoded, Value: value})
+		group := string(m.policy.Group)
+		files[group] = append(files[group], coreKV{Key: encoded, Value: value})
 		return nil
 	}
 	for i := range stages {
 		s := &stages[i]
 		m := s.metric
-		plan, err := m.prepared.PlanInto(r.records, m.meta.Frontier, m.slots.View, m.slots.Range, s.batches, &r.workspace)
+		plan, err := m.prepared.PlanInto(r.records[len(r.records):], m.meta.Frontier, m.slots.View, m.slots.Range, s.batches, &r.workspace)
 		if err != nil {
 			return coreSealPlan{}, err
 		}
 		if r.stage != nil {
 			r.stage("rollup")
 		}
-		// Detach before the workspace/output arena is reused for the next metric.
-		s.records = slices.Clone(plan.Records)
-		r.records = plan.Records[:0]
+		// Each metric owns a disjoint tail until Commit/Abort; no record clones.
+		s.records = plan.Records
+		if len(plan.Records) <= cap(r.records)-len(r.records) {
+			r.records = r.records[:len(r.records)+len(plan.Records)]
+		} else {
+			r.records = append(r.records, plan.Records...)
+		}
 		s.next.Frontier = plan.Next
 		for _, b := range s.batches {
 			if s.next.Revision == 0 {
@@ -272,7 +319,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 		if !r.dense {
 			for _, record := range s.records {
-				if err := put(m, uint32(record.Archive), record.Slot, sealrollup.EncodeRecord(record)); err != nil {
+				if err := put(m, uint32(record.Archive), record.Slot, r.appendRecord(record)); err != nil {
 					return coreSealPlan{}, err
 				}
 			}
@@ -306,16 +353,18 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				start = end
 			}
 		}
-		metadata, err := json.Marshal(s.next)
-		if err != nil {
-			return coreSealPlan{}, err
-		}
-		if err = put(m, rollupMetadataArchive, 0, metadata); err != nil {
+		start := len(r.arena)
+		r.arena = AppendRollupMetadata(r.arena, s.next)
+		metadata := r.arena[start:len(r.arena):len(r.arena)]
+		if err := put(m, rollupMetadataArchive, 0, metadata); err != nil {
 			return coreSealPlan{}, err
 		}
 	}
 	keys := make([]string, 0, len(files))
-	for k := range files {
+	for k, file := range files {
+		if len(file) == 0 {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
@@ -327,12 +376,15 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if err != nil {
 			return coreSealPlan{}, err
 		}
-		if err = (partsformat.Scope{Group: first.Group, VShard: first.VShard, Partition: 0, Part: first.Part}).ValidateRange(file[0].Key, file[len(file)-1].Key); err != nil {
+		if err = (partsformat.Scope{Group: first.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: first.Part}).ValidateRange(file[0].Key, file[len(file)-1].Key); err != nil {
 			return coreSealPlan{}, err
 		}
 		out.Files = append(out.Files, file)
 	}
+	r.stages = stages
+	out.Abort = r.release
 	out.Commit = func() {
+		defer r.release()
 		for _, s := range stages {
 			m := s.metric
 			for _, record := range s.records {
@@ -349,6 +401,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 		}
 	}
+	returned = true
 	return out, nil
 }
 
@@ -382,8 +435,9 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {
-			var m RollupMetadata
-			if err = json.Unmarshal(iter.Value(), &m); err != nil {
+			m, decodeErr := DecodeRollupMetadata(iter.Value())
+			if decodeErr != nil {
+				err = decodeErr
 				return err
 			}
 			if m.Frontier.Order > e.meta.Frontier.Order || (m.Frontier.Order == e.meta.Frontier.Order && m.Revision > e.meta.Revision) {
