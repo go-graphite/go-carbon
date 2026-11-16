@@ -96,6 +96,7 @@ func main() {
 	compareClocks := flag.Bool("compare-series-clocks", false, "measure both global and per-series arrival clock prediction on the same input")
 	seriesClocks := flag.Bool("series-clocks", false, "predict arrival clock from the previous apply for the same series")
 	independent := flag.Bool("independent-blocks", false, "reset all state per block rather than per segment")
+	parallelOnly := flag.Bool("parallel-only", false, "load selected source and benchmark each stream on the complete original corpus")
 	analysis := flag.Bool("analysis", false, "field accounting and exact clock delta-of-delta comparison")
 	streams := flag.String("streams", "", "analysis parallel codec stream counts, comma separated")
 	sample := flag.Int("sample-points", 250000, "real points retained for parallel codec benchmark")
@@ -112,7 +113,7 @@ func main() {
 		paths = paths[:len(paths)-1]
 	}
 	if len(paths) > *nsegments {
-		if *analysis {
+		if *analysis || *parallelOnly {
 			paths = paths[len(paths)-*nsegments:]
 		} else {
 			paths = paths[:*nsegments]
@@ -129,8 +130,8 @@ func main() {
 		segs = append(segs, s)
 	}
 	emit(map[string]any{"stage": "manifest", "segments": segs, "partition": *partition, "coverage_lower_bound_seconds": float64(segs[len(segs)-1].Created-segs[0].Created) / 1e9, "full_arrival_nanoseconds": true, "series_clock_prediction": *seriesClocks})
-	if *analysis {
-		analyze(segs, *partition, *rate, *streams, *sample, *repeats)
+	if *analysis || *parallelOnly {
+		analyze(segs, *partition, *rate, *streams, *sample, *repeats, *parallelOnly)
 		return
 	}
 	var pdc2 measurement

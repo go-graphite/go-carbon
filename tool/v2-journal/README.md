@@ -63,3 +63,17 @@ include allocations/GC and output retention; decode rates include full exact
 comparisons. The corpus is shared read-only. These finite CPU measurements exclude
 admission, writes/fsync and backend replay. They do not establish end-to-end
 capture throughput, sustained performance or a particular process-wide core cap.
+
+For a representative parallel comparison, load a **complete original segment**
+and encode it **once** per stream:
+
+```sh
+go run ./tool/v2-journal -input /path/to/input-log -segments 1 \
+  -parallel-only -sample-points 2000000000 -repeats 1 -streams 8,16,32
+```
+
+Verify `analysis_done.sample_points == analysis_done.points`. Repeating a small
+corpus can make every name's value match its preceding pass and artificially
+improve XOR prediction; those warm curves are diagnostics, not capture evidence.
+`-analysis` and `-parallel-only` select the newest requested complete segments to
+reduce recycling risk. Source descriptors and headers are checked before/after.

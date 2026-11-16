@@ -18,9 +18,12 @@ import (
 // analyze keeps the same complete source selections as the ordinary comparison.
 // It reports exact serialized field bytes before joint zstd, never a fabricated
 // attribution of compressed bytes to fields.
-func analyze(segs []segment, partition int, rate float64, streamList string, sampleLimit, repeats int) {
+func analyze(segs []segment, partition int, rate float64, streamList string, sampleLimit, repeats int, parallelOnly bool) {
 	var accounts [2]partlog.PredictorV3Accounting
 	ms := []*measurement{{Codec: "PDC3-series-clock", BlockMiB: 4}, {Codec: "PDC3-sparse-clock", BlockMiB: 4}}
+	if parallelOnly {
+		ms = nil
+	}
 	var sample []partlog.DictionaryFrame
 	samplePoints := 0
 	var sourceBytes, total int64
