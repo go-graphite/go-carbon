@@ -386,10 +386,6 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 		refs = append(refs, kv{rkey, slices.Clone(key[:len(key)-16])})
 		// Generation 1 denotes this store's initial single origin only. This
 		// backend has no import/recreate/delete API and grants no replica epoch.
-		metadata := store.Metadata{MetricConfig: store.MetricConfig{Name: name, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}, Generation: 1, Revision: input.cursor, LastUpdate: time.Unix(input.clock, 0)}
-		for _, a := range m.Policy.Archives {
-			metadata.Retentions = append(metadata.Retentions, store.Retention{Step: a.Step, Count: a.Points})
-		}
 		scope := partsops.Scope{PlacementGroup: partsformat.Group(m.Group), VShard: vs}
 		keyScope := fmt.Sprintf("%x/%d", []byte(m.Group), vs)
 		b := scopes[keyScope]
@@ -399,9 +395,13 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 			scopes[keyScope] = b
 		}
 		if newName {
+			metadata := store.Metadata{MetricConfig: store.MetricConfig{Name: name, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}, Generation: 1, Revision: input.cursor, LastUpdate: time.Unix(input.clock, 0)}
+			for _, a := range m.Policy.Archives {
+				metadata.Retentions = append(metadata.Retentions, store.Retention{Step: a.Step, Count: a.Points})
+			}
 			b.Upserts = append(b.Upserts, partsops.Metric{Scope: scope, Metadata: metadata})
 		} else {
-			b.Activity = append(b.Activity, partsops.Activity{Name: name, Generation: metadata.Generation, Revision: metadata.Revision, LastUpdate: metadata.LastUpdate})
+			b.Activity = append(b.Activity, partsops.Activity{Name: name, Generation: 1, Revision: input.cursor, LastUpdate: time.Unix(input.clock, 0)})
 		}
 	}
 	for _, b := range scopes {
