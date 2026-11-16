@@ -79,6 +79,17 @@ func (q *syncIssues) excluded(name string) bool {
 	_, b := q.policy[name]
 	return a || b
 }
+
+// Policy exclusions are explicit eligibility decisions, not unknown coverage.
+func (q *syncIssues) policyExcluded(name string) bool {
+	if q == nil {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_, excluded := q.policy[name]
+	return excluded
+}
 func (q *syncIssues) record(rows []syncResidual, phase string, policy bool) error {
 	if len(rows) == 0 {
 		return nil

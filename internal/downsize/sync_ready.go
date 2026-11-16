@@ -52,6 +52,7 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
+	PendingSelections    []syncResidual     `json:"pending_selections,omitempty"`
 	RedoNames            map[string]int64   `json:"redo_names"`
 	PendingRecovery      string             `json:"pending_recovery,omitempty"`
 	PendingWindows       syncRanges         `json:"pending_windows,omitempty"`
@@ -167,6 +168,10 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		}
 		if err != nil {
 			report.Reasons = append(report.Reasons, err.Error())
+			var selection *syncWindowSelectionError
+			if errors.As(err, &selection) {
+				report.PendingSelections = selection.Residuals
+			}
 		}
 		report.Finished = o.now().Unix()
 		status := "complete"

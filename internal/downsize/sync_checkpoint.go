@@ -149,7 +149,15 @@ func verificationCheckpointRows(rows []syncRow) ([]syncRow, error) {
 	var kept []syncRow
 	size := 0
 	for _, row := range rows {
-		keep := row.Kind == "header" || row.Kind == "verified" || row.Kind == "verification-retry" || row.Kind == "verification-incomplete" || row.Kind == "window-resolved" || row.Kind == "window-retry-visited" || row.Kind == "window-retry-floor" || row.Kind == "window-policy" || row.Kind == "copied" && row.Phase == "fill" || len(row.Resolved) > 0
+		keep := len(row.Resolved) > 0
+		switch row.Kind {
+		case "header", "verified", "verification-retry", "verification-incomplete", "verification-pass", "window-resolved", "window-retry-visited", "window-retry-floor", "window-retry-terminal", "window-policy":
+			keep = true
+		case "window-selected":
+			keep = keep || len(row.Skipped) > 0
+		case "copied":
+			keep = keep || row.Phase == "fill"
+		}
 		if !keep {
 			continue
 		}

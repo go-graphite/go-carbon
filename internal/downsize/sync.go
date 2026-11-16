@@ -578,7 +578,11 @@ func (s *syncer) endPhase(name string, names int) error {
 }
 
 func (s *syncer) run(ctx context.Context) error {
-	if !s.restoreVerificationCheckpoint() {
+	if err := s.savedWindowSelectionFailure(); err != nil {
+		return err
+	}
+	restored := s.restoreVerificationCheckpoint()
+	if !restored {
 		if err := s.discover(ctx); err != nil {
 			return fmt.Errorf("discover: %w", err)
 		}
@@ -587,9 +591,12 @@ func (s *syncer) run(ctx context.Context) error {
 				return fmt.Errorf("copy missing: %w", err)
 			}
 		}
-		if err := s.waitWindowSelections(ctx); err != nil {
-			return fmt.Errorf("retry window selections: %w", err)
-		}
+	}
+	// A checkpoint authenticates its prefix, not later selection/import rows.
+	if err := s.waitWindowSelections(ctx); err != nil {
+		return fmt.Errorf("retry window selections: %w", err)
+	}
+	if !restored {
 		s.startVerificationCheckpoint()
 	}
 	if s.o.noVerify {
@@ -802,9 +809,12 @@ type syncKey struct{ name, source string }
 // verifyAndFill runs verify/fill rounds. Round 1 verifies every name present
 // on the target and on at least one source; later rounds only names filled
 // or not yet indexed in the previous round. A mutation frontier checks metadata
-// for the whole catalog each full-history round, reading data only for dirty
-// names. Closed windows retain their completed proof and only recheck repairs.
+// for the whole catalog, reading data only for dirty names. Closed windows
+// retain clean data proofs while rechecking repairs and changed mutation fences.
 func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
+	if err := s.prepareWindowRepairVerification(); err != nil {
+		return err
+	}
 	set, scopedResume, err := s.windowResumeSet()
 	if err != nil {
 		return err
@@ -827,7 +837,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	for round := 1; ; round++ {
 		s.sum.Rounds = round
 		names := s.unionSource()
-		if (round > 1 && (s.frontier == nil || s.windowOnly())) || (round == 1 && scopedResume) {
+		if s.frontier == nil && (round > 1 || round == 1 && scopedResume) {
 			if names, err = s.setSource(set); err != nil {
 				return err
 			}
@@ -849,6 +859,23 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		}
 		for _, k := range skipped {
 			skippedLast[k.Name] = k.Reason
+		}
+		// This is cumulative proof of this exact scope, including sparse repair
+		// rounds. A later window import invalidates only its named members.
+		if s.windowOnly() {
+			dirty := map[string]bool{}
+			for n := range latest {
+				dirty[n] = true
+			}
+			for n := range pending {
+				dirty[n] = true
+			}
+			for n := range skippedLast {
+				dirty[n] = true
+			}
+			if err := s.j.append(syncRow{Kind: "verification-pass", Round: round + s.verificationBase, Selected: sortedKeys(dirty), SelectionComplete: true}); err != nil {
+				return err
+			}
 		}
 		// Fillable: a reachable source has the points and this pair was not
 		// already filled without effect.
