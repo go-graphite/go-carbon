@@ -24,6 +24,7 @@ import (
 type Reader struct {
 	closed    atomic.Bool
 	owners    []atomic.Pointer[generation]
+	caches    []sealedCache
 	Budget    *Budget
 	WorkBytes int64
 	// Now is fixed by the caller before intake; nil uses time.Now.
@@ -37,7 +38,14 @@ type generation struct {
 	metrics map[string]*metricState
 	err     error
 }
+type sealedCache struct {
+	mu    sync.Mutex // read-side only; Publish never acquires this lock
+	index *v2core.RollupSnapshot
+	limit int64
+}
 type sealedData struct {
+	cache    *sealedCache
+	index    *v2core.RollupSnapshot
 	refs     atomic.Int64
 	number   uint64
 	snapshot *pebble.Snapshot
@@ -47,6 +55,8 @@ type sealedData struct {
 }
 
 type metricState struct {
+	sealed  *v2core.RollupSnapshot
+	name    string
 	policy  v2core.RollupPolicy
 	meta    v2core.RollupMetadata
 	records []sealrollup.Record
@@ -60,7 +70,11 @@ func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
 	if owners < 1 || budgetBytes < 1 || workBytes < 0 {
 		return nil, errors.New("invalid read geometry/budget")
 	}
-	return &Reader{owners: make([]atomic.Pointer[generation], owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes}, nil
+	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes}
+	for i := range r.caches {
+		r.caches[i].limit = min(16<<20, budgetBytes/int64(owners)/8)
+	}
+	return r, nil
 }
 
 // Publish is the first consumer of v2core.Hooks.PublishBatches. Ownership of
@@ -88,7 +102,7 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 	if g.sealed != nil {
 		_ = snapshot.Close()
 	} else {
-		g.sealed = &sealedData{snapshot: snapshot, number: number}
+		g.sealed = &sealedData{snapshot: snapshot, number: number, cache: &r.caches[owner]}
 		g.sealed.refs.Store(1)
 	}
 	g.refs.Store(1)
@@ -126,10 +140,16 @@ func (r *Reader) Close() {
 	}
 }
 func (s *sealedData) load() {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	s.index, s.err = v2core.NewRollupSnapshot(context.Background(), s.snapshot, s.cache.index, s.cache.limit)
+	if s.err != nil {
+		return
+	}
+	s.cache.index = s.index
 	s.metrics = make(map[string]*metricState)
-	s.err = v2core.ScanRollups(s.snapshot, func(p v2core.RollupPolicy, m v2core.RollupMetadata, records []sealrollup.Record) error {
-		s.metrics[string(p.Name)] = &metricState{policy: p, meta: m, records: records}
-		return nil
+	s.index.Metadata(func(name string, p v2core.RollupPolicy, m v2core.RollupMetadata) {
+		s.metrics[name] = &metricState{policy: p, meta: m, sealed: s.index, name: name}
 	})
 }
 func (g *generation) load() {
@@ -157,7 +177,7 @@ func (g *generation) load() {
 		m := g.metrics[name]
 		if m == nil {
 			if base := g.sealed.metrics[name]; base != nil {
-				m = &metricState{policy: base.policy, meta: base.meta, records: base.records}
+				m = &metricState{policy: base.policy, meta: base.meta, sealed: base.sealed, name: name}
 				g.metrics[name] = m
 			}
 		}
@@ -183,6 +203,12 @@ func (g *generation) load() {
 }
 func (m *metricState) resolve() {
 	records := m.records
+	if m.sealed != nil {
+		records, m.err = m.sealed.Records(context.Background(), m.name)
+		if m.err != nil {
+			return
+		}
+	}
 	if len(m.pending) > 0 {
 		slots := sealrollup.NewSlots(m.policy.Config.Archives)
 		for _, record := range records {
@@ -193,7 +219,11 @@ func (m *metricState) resolve() {
 			m.err = err
 			return
 		}
-		plan, err := prepared.Plan(m.meta.Frontier, slots.View, slots.Range, m.pending)
+		// An explicit workspace lets the canonical reducer choose its direct
+		// physical-slot index when the archive geometry is small enough.
+		// It remains private to this resolution and cannot retain writer state.
+		var workspace sealrollup.Workspace
+		plan, err := prepared.PlanWithWorkspace(m.meta.Frontier, slots.View, slots.Range, m.pending, &workspace)
 		if err != nil {
 			m.err = err
 			return
@@ -269,9 +299,15 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		if metric.meta.Expired {
 			return ErrNotFound
 		}
-		metric.once.Do(metric.resolve)
-		if metric.err != nil {
-			return metric.err
+		var source Source
+		if len(metric.pending) > 0 || metric.sealed == nil {
+			metric.once.Do(metric.resolve)
+			if metric.err != nil {
+				return metric.err
+			}
+			source = metric.frozen
+		} else {
+			source = &sealedSource{metric: metric}
 		}
 		archives := make([]Archive, len(metric.policy.Config.Archives))
 		for i, a := range metric.policy.Config.Archives {
@@ -280,7 +316,14 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		m := Metric{ID: metric.meta.ID, Archives: archives, XFilesFactor: metric.policy.Config.XFilesFactor, AggregationMethod: aggregationName(metric.policy.Config.Method)}
 		catalog := CatalogFuncs{LookupFunc: func(n string) (Metric, bool) { return m, n == name }}
 		var p Publication
-		p.Publish(View{Catalog: catalog, Blocks: []Source{metric.frozen}, RetainedBytes: metric.frozen.RetainedBytes()})
+		retained := int64(0)
+		if metric.sealed != nil {
+			retained = metric.sealed.RetainedBytes()
+		}
+		if metric.frozen != nil {
+			retained += metric.frozen.RetainedBytes()
+		}
+		p.Publish(View{Catalog: catalog, Blocks: []Source{source}, RetainedBytes: retained})
 		h, err := p.Pin(r.Budget, r.WorkBytes)
 		p.Close()
 		if err != nil {

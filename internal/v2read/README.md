@@ -40,22 +40,37 @@ when all such generations and reader pins drain. Stop producers, close the
 reader, finish in-flight fetches, then close core; later core handoffs are closed
 immediately. Do not close the underlying databases under an in-flight fetch.
 
-A reader lazily resolves L3 records through `v2core.ScanRollups`. For a metric
-with pending applications it applies the existing canonical reducer against a
-private sealed slot view, then resolves greatest replacement order **before**
-time filtering. Original application boundaries and admission clocks are never
-inferred from point timestamps. This preserves occupied NaNs, signed zero,
-wrapped invalidations, exact XFF edges and archive choice. Pending reduction is
-read work; it never changes durable reducer state or runs per input point on the
-writer. No L3 stub, partial sums or legacy arithmetic replacement is used.
+A reader lazily builds `v2core.RollupSnapshot`, a directory of immutable part
+metadata. It seeks over archive values rather than scanning all points. Later
+sealed generations reuse existing part metadata. Sealed reads seek directly to
+the requested name, archive and one or two physical ring-slot ranges in each
+relevant part. A predecessor seek includes a dense run beginning before the
+range. Singleton decoding uses stack values; dense decoding uses the shared
+`v2part` reader without changing its format or interfaces.
 
-The ported byte budget bounds active render work and selected frozen series.
-It does **not** bound the lazy full-owner index, all pending materialization or
-the disk files retained by pinned Pebble snapshots. `ScanRollups` scans the whole
-owner at the first read of a sealed generation; this needs a bounded native
-part directory/cache before high-cardinality production qualification. Expiry
-and incarnation masking are not connected; do not enable expiry on this path.
-Legacy Whisper overlays and online fallback remain outside this adapter.
+An immutable range-result cache carries resolved slots and part identities
+across generations. Only added parts are decoded; absent parts invalidate cached
+results. It retains at most eight concurrent generations per range and 64 entries
+total, with a conservative byte limit of the smaller of 16MiB and one eighth of
+the reader budget per owner. Generations share this cache without retaining old
+snapshots or metadata objects. All cache locks are read-side only. The writer publication callback never acquires them.
+The read budget conservatively charges the whole directory and maximum cache
+capacity while rendering; shared objects can be charged more than once.
+
+For a metric with pending applications, the reader loads the sealed state of
+that name's archives for the existing canonical reducer, then resolves greatest
+replacement order **before** time filtering. The same bounded cache avoids
+rescanning historical parts for this state. Original application boundaries and
+admission clocks are never inferred from point timestamps. This preserves
+occupied NaNs, signed zero, wrapped invalidations, exact XFF edges and archive
+choice. Pending reduction is read work and never changes durable reducer state.
+Expiry and incarnation reset authority come from the same pinned metadata.
+
+Directory construction and retained metadata still scale with the number of
+parts and names. Pending materialization and disk files retained by pinned
+Pebble snapshots need independent accounting before high-cardinality production
+qualification. Legacy Whisper overlays and online fallback are handled by the
+application's adapter rather than this package.
 
 `TestClassicPendingAndSealed` drives actual core plus actual classic Whisper,
 54 schema/method/XFF combinations and 6,480 pending/sealed queries. It covers
@@ -71,4 +86,9 @@ full core completion timing, raw/archive-capable policies, per-arm read p50/p99,
 process census and load averages. The timed query workers alternate fine and
 coarse archive ranges. Set TMPDIR to a private host root, constrain
 CPU affinity and retain every row; shared results remain provisional. This
-harness has not established the <=10% ingest-loss gate.
+harness measures core ingestion rather than application TCP/journal capacity.
+Set `V2READ_SECONDS` to 1–60 to select each arm's duration (default 4). It records
+every completed request's latency and uses actual reader completion time for
+query throughput. The fixture has four names, four producers and four owners,
+with repeated timestamp corrections; it does not qualify representative
+high-cardinality/history workloads.
