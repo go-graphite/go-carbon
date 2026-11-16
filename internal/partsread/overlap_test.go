@@ -101,12 +101,42 @@ func TestLegacyPrefixWorkspaceReset(t *testing.T) {
 				t.Fatal("legacy prefix leaked across handle reuse")
 			}
 		}
-		if e := h.FillLegacyPrefix(ctx, out, []float64{1, 2, 3}); e != nil {
+		if e := h.JoinLegacyPrefix(ctx, out, []float64{1, 2, 3}); e != nil {
 			t.Fatal(e)
 		}
 		if out.Values[0] != 1 || out.Occupied[0] {
 			t.Fatal("prefix fill changed occupancy")
 		}
 		h.Close()
+	}
+}
+
+func TestJoinLegacyPrefixPreservesPartBitsAndSparseCleanup(t *testing.T) {
+	ctx := context.Background()
+	var p Publication
+	bits := []uint64{0x8000000000000000, 0x7ff8000000000042}
+	p.Publish(View{Catalog: testCatalog([]Archive{{1, 1000}}), Parts: []Source{Freeze([]Record{
+		{ID: 7, Step: 1, Sample: Sample{Time: 102, Bits: bits[0]}},
+		{ID: 7, Step: 1, Sample: Sample{Time: 108, Bits: bits[1]}},
+	})}})
+	defer p.Close()
+	h, err := p.Pin(NewBudget(1<<20), 1<<18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	out, err := h.Render(ctx, "sample", 100, 109, 110)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := []float64{1, 2, 3, 4, 5}
+	if err := h.JoinLegacyPrefix(ctx, out, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if math.Float64bits(out.Values[1]) != bits[0] || math.Float64bits(out.Values[7]) != bits[1] || out.Values[4] != 5 || !math.IsNaN(out.Values[5]) {
+		t.Fatal("sparse join changed values", out.Values)
+	}
+	if len(h.workspaces.touched) != 2 {
+		t.Fatal("join made cleanup dense")
 	}
 }

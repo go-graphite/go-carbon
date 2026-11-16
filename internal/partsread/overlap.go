@@ -136,10 +136,10 @@ func (f *Frozen) MayOverlap(ctx context.Context, id uint64, a Archive, from, unt
 	return false, nil
 }
 
-// FillLegacyPrefix fills the unoccupied prefix of this handle's last render.
-// Record every filled slot for cleanup so legacy values cannot survive pooled
-// workspace reuse in a later reader generation. Occupancy remains part-only.
-func (h *Handle) FillLegacyPrefix(ctx context.Context, out *Series, values []float64) error {
+// JoinLegacyPrefix merges into the legacy reader's owned values, visiting only
+// occupied part slots. Pooled workspace values remain untouched so release stays
+// proportional to part occupancy rather than the dense legacy prefix.
+func (h *Handle) JoinLegacyPrefix(ctx context.Context, out *Series, values []float64) error {
 	if h.v == nil || h.closed.Load() {
 		return ErrClosed
 	}
@@ -150,14 +150,23 @@ func (h *Handle) FillLegacyPrefix(ctx context.Context, out *Series, values []flo
 	if w == nil || w.out != out || len(out.Values) != len(w.values) || len(values) > len(out.Values) {
 		return errors.New("legacy prefix does not belong to render handle")
 	}
-	for i, v := range values {
-		if !out.Occupied[i] {
-			if len(w.touched) == cap(w.touched) {
-				return ErrAdmission
-			}
-			out.Values[i] = v
-			w.touched = append(w.touched, uint32(i))
+	prefix := len(values)
+	joined := values
+	if prefix < len(out.Values) {
+		bytes := int64(len(out.Values)) * 8
+		if bytes > h.work {
+			return ErrAdmission
+		}
+		h.work -= bytes
+		joined = make([]float64, len(out.Values))
+		copy(joined, values)
+		copy(joined[prefix:], out.Values[prefix:])
+	}
+	for _, i := range w.touched {
+		if int(i) < prefix {
+			joined[i] = out.Values[i]
 		}
 	}
-	return nil
+	out.Values = joined
+	return ctx.Err()
 }

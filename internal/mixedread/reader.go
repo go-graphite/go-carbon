@@ -450,7 +450,7 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 					if old.From != current.From || old.Step != current.Step || len(old.Values) != prefix {
 						return ErrPolicy
 					}
-					if e := h.FillLegacyPrefix(ctx, current, old.Values); e != nil {
+					if e := h.JoinLegacyPrefix(ctx, current, old.Values); e != nil {
 						return e
 					}
 				}
