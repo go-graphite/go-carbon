@@ -152,6 +152,28 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 					t.Fatal("old snapshot observed new part")
 				}
 			}
+			// A request pinned to the old generation must coexist with the new
+			// generation in the shared cache rather than replacing its authority.
+			index.cache.mu.Lock()
+			if index.cache.count < 2 {
+				t.Fatal("cache did not retain concurrent generations")
+			}
+			index.cache.mu.Unlock()
+			for first := int64(0); first < 80; first++ {
+				if err := index.ScanArchive(ctx, string(policy.Name), 0, first, first+1, func(sealrollup.Record) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			index.cache.mu.Lock()
+			if index.cache.count > rollupReadCacheEntries || index.cache.bytes > index.cache.limit {
+				t.Fatal("unbounded range cache")
+			}
+			for _, entries := range index.cache.entries {
+				if len(entries) > 8 {
+					t.Fatal("unbounded generation history")
+				}
+			}
+			index.cache.mu.Unlock()
 			// Unrequested archive values must not be decoded by the range path or
 			// metadata construction (the recovery/full scan correctly rejects them).
 			put(2, 1, 10, []byte("bad unrequested value"))

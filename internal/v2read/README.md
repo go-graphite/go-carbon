@@ -50,10 +50,10 @@ range. Singleton decoding uses stack values; dense decoding uses the shared
 
 An immutable range-result cache carries resolved slots and part identities
 across generations. Only added parts are decoded; absent parts invalidate cached
-results. It has at most 64 entries and a conservative byte limit of the smaller
-of 16MiB and one eighth of the reader budget per owner. Generations share this cache without
-retaining old snapshots or metadata objects. All cache
-locks are read-side only. The writer publication callback never acquires them.
+results. It retains at most eight concurrent generations per range and 64 entries
+total, with a conservative byte limit of the smaller of 16MiB and one eighth of
+the reader budget per owner. Generations share this cache without retaining old
+snapshots or metadata objects. All cache locks are read-side only. The writer publication callback never acquires them.
 The read budget conservatively charges the whole directory and maximum cache
 capacity while rendering; shared objects can be charged more than once.
 

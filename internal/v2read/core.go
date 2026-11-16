@@ -219,7 +219,11 @@ func (m *metricState) resolve() {
 			m.err = err
 			return
 		}
-		plan, err := prepared.Plan(m.meta.Frontier, slots.View, slots.Range, m.pending)
+		// An explicit workspace lets the canonical reducer choose its direct
+		// physical-slot index when the archive geometry is small enough.
+		// It remains private to this resolution and cannot retain writer state.
+		var workspace sealrollup.Workspace
+		plan, err := prepared.PlanWithWorkspace(m.meta.Frontier, slots.View, slots.Range, m.pending, &workspace)
 		if err != nil {
 			m.err = err
 			return

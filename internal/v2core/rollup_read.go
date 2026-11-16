@@ -30,8 +30,10 @@ type RollupSnapshot struct {
 // snapshots, metadata objects, writer arenas or an earlier cache generation.
 type rollupRangeCache struct {
 	mu           sync.Mutex
-	entries      map[archiveRange]*archiveResult
+	entries      map[archiveRange][]*archiveResult
 	bytes, limit int64
+	clock        uint64
+	count        int
 }
 
 const rollupReadCacheBytes = 16 << 20
@@ -47,6 +49,7 @@ type archiveResult struct {
 	parts              map[string]struct{}
 	bytes              int64
 	frontier, revision uint64
+	age                uint64
 }
 
 type readPart struct{ metrics map[string]*readPartMetric }
@@ -71,7 +74,7 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 	if prior != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
-		out.cache = &rollupRangeCache{entries: map[archiveRange]*archiveResult{}, limit: limit}
+		out.cache = &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
 	}
 	prefix := []byte{'G', 'C', 'P', 3}
 	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
@@ -201,42 +204,46 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 		return errors.New("invalid archive range")
 	}
 	cacheKey := archiveRange{name, archive, first, last}
+	// Keep a small bounded history: concurrent requests can pin different
+	// generations. A single latest entry forces older pins into full rescans.
+	var candidates [8]*archiveResult
 	s.cache.mu.Lock()
-	cached := s.cache.entries[cacheKey]
+	count := copy(candidates[:], s.cache.entries[cacheKey])
 	s.cache.mu.Unlock()
-	// Exact cached coverage is common for multiple readers of one publication.
-	if cached != nil && len(cached.parts) == len(m.parts) {
-		exact := true
-		for _, part := range m.parts {
-			if _, ok := cached.parts[part.id]; !ok {
-				exact = false
-				break
-			}
-		}
-		if exact {
-			for _, record := range cached.records {
-				if record.Order > m.meta.ResetOrder {
-					if err := yield(record); err != nil {
-						return err
-					}
-				}
-			}
-			return ctx.Err()
-		}
-	}
-	winners := map[int64]sealrollup.Record{}
+	var cached *archiveResult
 	parts := make(map[string]struct{}, len(m.parts))
 	for _, part := range m.parts {
 		parts[part.id] = struct{}{}
 	}
-	if cached != nil {
-		for part := range cached.parts {
-			if _, ok := parts[part]; !ok {
-				cached = nil
+	for _, candidate := range candidates[:count] {
+		if candidate.frontier > m.meta.Frontier.Order || len(candidate.parts) > len(parts) {
+			continue
+		}
+		if cached != nil && candidate.frontier < cached.frontier {
+			continue
+		}
+		valid := true
+		for id := range candidate.parts {
+			if _, ok := parts[id]; !ok {
+				valid = false
 				break
 			}
 		}
+		if valid {
+			cached = candidate
+		}
 	}
+	if cached != nil && len(cached.parts) == len(parts) {
+		for _, record := range cached.records {
+			if record.Order > m.meta.ResetOrder {
+				if err := yield(record); err != nil {
+					return err
+				}
+			}
+		}
+		return ctx.Err()
+	}
+	winners := map[int64]sealrollup.Record{}
 	if cached != nil {
 		for _, record := range cached.records {
 			if record.Order > m.meta.ResetOrder {
@@ -334,21 +341,60 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 		result.bytes += int64(64 + len(id))
 	}
 	s.cache.mu.Lock()
-	old := s.cache.entries[cacheKey]
-	// A slow old-snapshot query must not evict a more recent result. Scope
-	// membership still validates reuse after removals and compaction.
-	if old == nil || result.frontier > old.frontier || (result.frontier == old.frontier && result.revision >= old.revision) {
-		if old != nil {
-			delete(s.cache.entries, cacheKey)
-			s.cache.bytes -= old.bytes
-		}
-		if result.bytes <= s.cache.limit {
-			if len(s.cache.entries) >= rollupReadCacheEntries || s.cache.bytes+result.bytes > s.cache.limit {
-				clear(s.cache.entries)
-				s.cache.bytes = 0
+	if result.bytes <= s.cache.limit {
+		entries := s.cache.entries[cacheKey]
+		duplicate := false
+		for _, old := range entries {
+			if old.frontier == result.frontier && old.revision == result.revision && len(old.parts) == len(parts) {
+				duplicate = true
+				for id := range old.parts {
+					if _, ok := parts[id]; !ok {
+						duplicate = false
+						break
+					}
+				}
+				if duplicate {
+					break
+				}
 			}
-			s.cache.entries[cacheKey] = result
+		}
+		if !duplicate {
+			if len(entries) == len(candidates) {
+				s.cache.bytes -= entries[0].bytes
+				s.cache.count--
+				entries = entries[1:]
+				s.cache.entries[cacheKey] = entries
+			}
+			// FIFO over at most 64 entries; no unbounded LRU or generation chain.
+			for s.cache.count >= rollupReadCacheEntries || s.cache.bytes+result.bytes > s.cache.limit {
+				var oldestKey archiveRange
+				oldestIndex := -1
+				oldestAge := ^uint64(0)
+				for k, es := range s.cache.entries {
+					for i, e := range es {
+						if e.age < oldestAge {
+							oldestKey, oldestIndex, oldestAge = k, i, e.age
+						}
+					}
+				}
+				if oldestIndex < 0 {
+					break
+				}
+				es := s.cache.entries[oldestKey]
+				s.cache.bytes -= es[oldestIndex].bytes
+				s.cache.count--
+				es = append(es[:oldestIndex:oldestIndex], es[oldestIndex+1:]...)
+				if len(es) == 0 {
+					delete(s.cache.entries, oldestKey)
+				} else {
+					s.cache.entries[oldestKey] = es
+				}
+			}
+			s.cache.clock++
+			result.age = s.cache.clock
+			s.cache.entries[cacheKey] = append(s.cache.entries[cacheKey], result)
 			s.cache.bytes += result.bytes
+			s.cache.count++
 		}
 	}
 	s.cache.mu.Unlock()
