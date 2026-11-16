@@ -287,18 +287,21 @@ func (o *owner) encodeReceipts(fs []frame) ([]byte, error) {
 }
 
 type receiptDecoder struct {
+	catalog    partlog.CatalogDecoder
 	dictionary partlog.DictionaryDeltaDecoder
 	predictor  partlog.PredictorV3Decoder
 	policies   map[string]*resolvedMetric
 }
 
 func (d *receiptDecoder) decode(b []byte) ([]frame, error) {
-	if !partlog.IsDictionaryDeltaRecord(b) && !partlog.IsPredictorV3Record(b) {
+	if !partlog.IsDictionaryDeltaRecord(b) && !partlog.IsPredictorV3Record(b) && !partlog.IsCatalogRecord(b) {
 		return decodeFrames(b)
 	}
 	var entries []partlog.DictionaryFrame
 	var e error
-	if partlog.IsPredictorV3Record(b) {
+	if partlog.IsCatalogRecord(b) {
+		entries, e = d.catalog.Decode(b)
+	} else if partlog.IsPredictorV3Record(b) {
 		entries, e = d.predictor.Decode(b)
 	} else {
 		entries, e = d.dictionary.Decode(b)

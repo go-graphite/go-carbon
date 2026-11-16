@@ -86,6 +86,7 @@ type owner struct {
 	pending        []frame
 	coreCursor     uint64
 	nextOrder      uint64
+	journalCatalog *partlog.NameCatalog
 	journalEncoder receiptEncoder
 	workspace      sealrollup.Workspace
 	batchScratch   []sealrollup.Batch
@@ -223,6 +224,16 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 			return nil, e
 		}
 		s.owners = append(s.owners, o)
+		catDir := filepath.Join(o.dir, "name-catalog")
+		_, catErr := os.Stat(catDir)
+		if opts.JournalCodec == "pdc4" || catErr == nil {
+			o.journalCatalog, err = partlog.OpenNameCatalog(catDir)
+			if err != nil {
+				return nil, err
+			}
+		} else if !os.IsNotExist(catErr) {
+			return nil, catErr
+		}
 		if e := o.recover(); e != nil {
 			return nil, fmt.Errorf("owner %d: %w", i, e)
 		}
@@ -230,6 +241,16 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 		o.coreCursor = o.meta.Cursor
 		if s.core != nil && s.core.DurableFrontiers()[i][i] != o.meta.Cursor {
 			return nil, errors.New("core/backend atomic frontier mismatch")
+		}
+	}
+	if opts.JournalCodec == "pdc4" {
+		d, e := os.Open(opts.DataDir)
+		if e != nil {
+			return nil, e
+		}
+		e = errors.Join(d.Sync(), d.Close())
+		if e != nil {
+			return nil, e
 		}
 	}
 	if err = s.openLegacy(); err != nil {
@@ -244,7 +265,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	for _, o := range s.owners {
 		pendingPoints := 0
 		replayCursor := o.meta.Cursor
-		var decoder receiptDecoder
+		decoder := receiptDecoder{catalog: partlog.CatalogDecoder{Catalog: o.journalCatalog}}
 		defer decoder.close()
 		// Definitions can precede the durable apply frontier. Decode the retained
 		// epoch prefix but never reapply a checkpointed receipt.
@@ -338,6 +359,9 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 func (s *Store) abortOpen() {
 	s.coreViewsClosed.Store(true)
 	for _, o := range s.owners {
+		if o.journalCatalog != nil {
+			_ = o.journalCatalog.Close()
+		}
 		o.pub.Close()
 		if b := o.readBase.Swap(nil); b != nil {
 			b.pub.Close()
@@ -393,7 +417,7 @@ func (s *Store) Append(p *points.Points) error {
 	return s.admit([][]frame{{f}}, []int{s.route(p.Metric)})
 }
 func (o *owner) run() {
-	o.journalEncoder = newReceiptEncoder(o.s.opts.JournalCodec)
+	o.journalEncoder = newReceiptEncoder(o.s.opts.JournalCodec, o.journalCatalog)
 	defer close(o.done)
 	defer o.journalEncoder.Close()
 	var deferred *command
@@ -635,6 +659,9 @@ func (s *Store) Close() error {
 		}
 		s.coreViewsClosed.Store(true)
 		for _, o := range s.owners {
+			if o.journalCatalog != nil {
+				s.closeErr = errors.Join(s.closeErr, o.journalCatalog.Close())
+			}
 			o.pub.Close()
 			if b := o.readBase.Swap(nil); b != nil {
 				b.pub.Close()
