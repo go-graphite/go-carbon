@@ -64,3 +64,36 @@ func storageClockMatrix(t *testing.T) bool {
 	cases.Wait()
 	return true
 }
+
+// Independent storage fixtures can overlap only across process boundaries:
+// several install whisper.Now. Reuse the clock matrix pool to bound memory and
+// filesystem pressure across both kinds of tests. Coverage and subtest filters
+// retain the ordinary in-process execution path.
+func isolatedStorageTest(t *testing.T) bool {
+	t.Helper()
+	const child = "GO_CARBON_STORAGE_TEST"
+	if os.Getenv(child) == t.Name() || testing.CoverMode() != "" || strings.Contains(flag.Lookup("test.run").Value.String(), "/") {
+		return false
+	}
+	t.Parallel()
+	processes := storageClockProcesses()
+	processes <- struct{}{}
+	defer func() { <-processes }()
+	args := []string{"-test.run=^" + regexp.QuoteMeta(t.Name()) + "$", "-test.count=1", "-test.v"}
+	if deadline, ok := t.Deadline(); ok {
+		args = append(args, "-test.timeout="+time.Until(deadline).String())
+	}
+	for _, name := range []string{"test.parallel", "test.short", "test.skip"} {
+		args = append(args, "-"+name+"="+flag.Lookup(name).Value.String())
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
+	cmd.Env = append(os.Environ(), child+"="+t.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated storage test: %v\n%s", err, output)
+	}
+	if testing.Verbose() {
+		t.Logf("%s", output)
+	}
+	return true
+}

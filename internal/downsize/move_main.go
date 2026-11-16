@@ -26,6 +26,7 @@ import (
 )
 
 type options struct {
+	stallNow func() time.Time // optional clock for resilient-copy stall accounting
 	// debtGuardOff drops the compaction-debt governor: the tuner's debt pause
 	// and baseline requirement, and (via chunkstore.TransferDebtGuardHeader) the
 	// target's transfer-max-compaction-debt 429. Hard limits stay.

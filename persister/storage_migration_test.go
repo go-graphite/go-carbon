@@ -11,6 +11,9 @@ import (
 )
 
 func TestStorageExactMigrationOOOAndBufferedRollups(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	now := storageTestClock(t)
 	for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.First, whisper.Last, whisper.Min, whisper.Max} {
 		t.Run(method.String(), func(t *testing.T) {

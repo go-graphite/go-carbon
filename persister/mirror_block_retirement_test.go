@@ -14,6 +14,9 @@ import (
 )
 
 func TestMirrorRetiresCompressedSourceBlocks(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	for _, test := range []struct {
 		name     string
 		rollup   bool

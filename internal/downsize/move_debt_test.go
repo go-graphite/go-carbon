@@ -12,6 +12,7 @@ import (
 )
 
 func TestDebtTuningEnvelope(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		values []uint64
@@ -49,6 +50,7 @@ func TestDebtTuningEnvelope(t *testing.T) {
 }
 
 func TestDebtAbsoluteFloorAndHardStops(t *testing.T) {
+	t.Parallel()
 	h := hostLimit{debtBaseline: &backlogBaseline{Min: 1e9, Median: 2e9, Max: 3e9}}
 	for range 3 {
 		if s := h.observeDebt(hostSample{}, storageSample{CompactionDebt: 8 << 30}, 5, false); s.Soft != "" {
@@ -68,6 +70,7 @@ func TestDebtAbsoluteFloorAndHardStops(t *testing.T) {
 }
 
 func TestDebtJournalResumeAndLegacyObservation(t *testing.T) {
+	t.Parallel()
 	tune := newTestTuner([]string{"a"}, capacity{8, 32, 1 << 20, 100}, true, 0, 0)
 	sample := backlogTestSample(240e6)
 	tune.hosts["a"].baseline = &backlogBaseline{Min: 236e6, Median: 242e6, Max: 248e6, Samples: 10, Start: sample.Time - 300, End: sample.Time}
@@ -123,6 +126,7 @@ func TestDebtJournalResumeAndLegacyObservation(t *testing.T) {
 }
 
 func TestObserveOnlyIssuesNoTransferRequests(t *testing.T) {
+	t.Parallel()
 	source, target := localStore(t), localStore(t)
 	var transfers atomic.Int32
 	wrap := func(h http.Handler) http.Handler {

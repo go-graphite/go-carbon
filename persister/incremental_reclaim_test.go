@@ -317,6 +317,9 @@ func TestDeferredReclaimWorkersFollowIOSlots(t *testing.T) {
 }
 
 func TestDeferredReclaimKeepsUpWith10KProducer(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	const count = 20000
 	const dirs = 256
 	root := t.TempDir()

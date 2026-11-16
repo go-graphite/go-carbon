@@ -9,6 +9,7 @@ import (
 )
 
 func TestSyncCompareScanOracle(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewPCG(1, 2))
 	vals := []float64{math.NaN(), math.Inf(1), math.Inf(-1), 0, math.Copysign(0, -1), math.SmallestNonzeroFloat64, math.MaxFloat64, 42}
 	for trial := 0; trial < 10000; trial++ {

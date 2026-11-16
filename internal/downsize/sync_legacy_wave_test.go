@@ -4,16 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/go-graphite/go-carbon/buckyd"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestLegacyWaveMembership(t *testing.T) {
+	t.Parallel()
 	for _, variant := range []string{"format", "enlarged", "replaced", "selected", "unknown", "wrong-source", "wrong-target", "extra-identity", "absent-input"} {
 		t.Run(variant, func(t *testing.T) {
 			dir := t.TempDir()
@@ -70,6 +76,7 @@ func TestLegacyWaveMembership(t *testing.T) {
 }
 
 func TestLegacyRecoveredPartialWaveKeepsReceipts(t *testing.T) {
+	t.Parallel()
 	f, source, target := newFakeCopy(t, []string{"a", "b", "c"})
 	dir := t.TempDir()
 	journal := filepath.Join(dir, "missing-batch-r1-s0.jsonl")
@@ -150,6 +157,7 @@ func TestLegacyRecoveredPartialWaveKeepsReceipts(t *testing.T) {
 // Each subdirectory contains the unmodified child journals/inputs, parent
 // receipt excerpts and a source-filtered missing.tsv excerpt from discovery.
 func TestLegacyWaveCapturedFixtures(t *testing.T) {
+	t.Parallel()
 	root := os.Getenv("STORECTL_LEGACY_FIXTURES")
 	if root == "" {
 		t.Skip("set STORECTL_LEGACY_FIXTURES to local read-only capture directories")
@@ -243,4 +251,187 @@ func TestLegacyWaveCapturedFixtures(t *testing.T) {
 		t.Fatal("no captured fixtures tested")
 	}
 	t.Logf("authenticated %d captured legacy waves and retained every child receipt", tested)
+}
+
+// Compare with the original string-set scheduling oracle: reservations are
+// exact even for overlapping, stale, duplicate or unsorted historical inputs.
+func TestMissingWaveReservations(t *testing.T) {
+	t.Parallel()
+	for _, size := range []int{0, 1, 63, 64, 65, 10000} {
+		names := make([]string, size)
+		for i := range names {
+			names[i] = fmt.Sprintf("name.%08d", i*2)
+		}
+		waves := []syncRow{{Selected: []string{"absent", "name.00000000", "name.00000001", "zzzz"}}, {}}
+		for start := 0; start < size; start += 101 {
+			var selected []string
+			for i := start; i < min(start+100, size); i += 3 {
+				selected = append(selected, names[i])
+			}
+			waves = append(waves, syncRow{Selected: selected})
+		}
+		if size > 64 {
+			waves = append(waves, syncRow{Selected: []string{names[size-1], names[64], names[0], names[64]}})
+		}
+		oracle := map[string]bool{}
+		for _, wave := range waves {
+			for _, n := range wave.Selected {
+				oracle[n] = true
+			}
+		}
+		got := reserveMissingWaves(names, waves)
+		if len(got)*8 > (size+7)/8+7 {
+			t.Fatalf("unbounded reservation storage: %d bytes", len(got)*8)
+		}
+		for i, n := range names {
+			if reserved := got[i/64]&(uint64(1)<<uint(i%64)) != 0; reserved != oracle[n] {
+				t.Fatalf("size=%d name=%s got=%v want=%v", size, n, reserved, oracle[n])
+			}
+		}
+	}
+}
+
+func BenchmarkMissingWaveReservations(b *testing.B) {
+	names := make([]string, 1000000)
+	for i := range names {
+		names[i] = fmt.Sprintf("metric.%08d.%s", i, strings.Repeat("x", 128))
+	}
+	var waves []syncRow
+	for i := 0; i < len(names); i += 10000 {
+		waves = append(waves, syncRow{Selected: names[i:min(i+10000, len(names))]})
+	}
+	// Historical waves may also contain names absent from today's candidate set.
+	candidates := names[100000:900000]
+	for _, bitmap := range []bool{false, true} {
+		b.Run(fmt.Sprintf("bitmap=%v", bitmap), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if bitmap {
+					reserved := reserveMissingWaves(candidates, waves)
+					if reserved[0]&1 == 0 {
+						b.Fatal("missing reservation")
+					}
+				} else {
+					reserved := map[string]bool{}
+					for _, wave := range waves {
+						for _, n := range wave.Selected {
+							reserved[n] = true
+						}
+					}
+					if !reserved[candidates[0]] {
+						b.Fatal("missing reservation")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyResumeAbsentSourceRetainsFailures(t *testing.T) {
+	t.Parallel()
+	for _, variant := range []string{"absent", "pending", "present", "missing-evidence", "missing-policy", "unsupported", "forbidden", "wrong-identity", "complete"} {
+		t.Run(variant, func(t *testing.T) {
+			t.Parallel()
+			var evidenceCalls atomic.Int64
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/expiration/evidence" {
+					t.Errorf("unexpected request %s", r.URL.Path)
+					http.Error(w, "unexpected", 400)
+					return
+				}
+				evidenceCalls.Add(1)
+				if variant == "unsupported" {
+					http.Error(w, "unsupported", 501)
+					return
+				}
+				if variant == "forbidden" {
+					http.Error(w, "forbidden", 403)
+					return
+				}
+				var req struct {
+					Names        []string
+					ReceiptsOnly bool
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !req.ReceiptsOnly || !reflect.DeepEqual(req.Names, []string{"d"}) {
+					t.Errorf("evidence must cover only unresolved names: %+v %v", req, err)
+				}
+				evidence := map[string]buckyd.ExpirationEvidence{"d": {Policy: "policy"}}
+				switch variant {
+				case "pending":
+					evidence["d"] = buckyd.ExpirationEvidence{Policy: "policy", Pending: true}
+				case "present":
+					evidence["d"] = buckyd.ExpirationEvidence{Policy: "policy", Latest: 1}
+				case "missing-evidence":
+					delete(evidence, "d")
+				case "missing-policy":
+					evidence["d"] = buckyd.ExpirationEvidence{}
+				}
+				_ = json.NewEncoder(w).Encode(evidence)
+			}))
+			defer source.Close()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "missing-batch-r1-s0.jsonl")
+			input := strings.TrimSuffix(path, ".jsonl") + ".names"
+			names := []string{"a", "b", "c", "d"}
+			if err := os.WriteFile(input, syncNamesBytes(names), 0600); err != nil {
+				t.Fatal(err)
+			}
+			identity, err := copyIdentity(copyOptions{froms: []string{source.URL}, to: syncT, names: input})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if variant == "wrong-identity" {
+				identity = "different copy"
+			}
+			j, err := openCopyJournal(path, identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, last := 3, "c"
+			if variant == "complete" {
+				count, last = 4, "d"
+			}
+			if err := j.done(source.URL, "a", last, count, 100, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			j.close()
+			before, _ := os.ReadFile(path)
+			b := newSyncLiveBackend(syncLiveOptions{copyStreams: 1, copyAttempts: 1, hostWait: time.Second})
+			copyCalls := 0
+			b.copy = func(context.Context, copyOptions) error { copyCalls++; return errors.New("ordinary copy attempted") }
+			var replayed int64
+			ctx := context.WithValue(context.Background(), syncCopyDurableProgressKey{}, func(n int64, replay bool) {
+				if replay {
+					replayed = n
+				}
+			})
+			result, err := b.Copy(ctx, source.URL, syncT, names, path)
+			if variant == "wrong-identity" || variant == "forbidden" {
+				if err == nil || copyCalls != 0 {
+					t.Fatalf("must fail closed: result=%+v err=%v copies=%d", result, err, copyCalls)
+				}
+			} else {
+				if err != nil || result.Copied != count {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				if variant == "absent" || variant == "complete" {
+					if copyCalls != 0 || replayed != int64(count) {
+						t.Fatalf("repeated transfer or lost replay: copies=%d replay=%d", copyCalls, replayed)
+					}
+				} else if copyCalls == 0 {
+					t.Fatal("incomplete/pending/present evidence suppressed ordinary copy")
+				}
+				if variant != "complete" && !reflect.DeepEqual(result.Failed, []string{"d"}) {
+					t.Fatalf("absent name must remain failed: %+v", result)
+				}
+			}
+			after, _ := os.ReadFile(path)
+			if string(before) != string(after) {
+				t.Fatal("durable header or completion receipts changed")
+			}
+			if (variant == "wrong-identity" || variant == "complete") && evidenceCalls.Load() != 0 {
+				t.Fatal("unexpected evidence read")
+			}
+		})
+	}
 }

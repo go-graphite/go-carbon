@@ -10,6 +10,9 @@ import (
 )
 
 func TestRuntimeProfilingReload(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	previous := runtime.SetMutexProfileFraction(-1)
 	defer runtime.SetMutexProfileFraction(previous)
 	defer runtime.SetBlockProfileRate(0)

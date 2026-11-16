@@ -79,6 +79,14 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 // state. The caller reserves its name until the enclosing batch commits.
 func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) (Metadata, *stateView, *SidecarSummary, bool, error) {
 	io := s.newContinuationIO(ctx, batch, batch, m)
+	history, err := readMutationHistory(batch, m)
+	if err != nil {
+		return m, nil, nil, false, err
+	}
+	io.mutationTracked = history.Version == 1
+	for _, scope := range history.Scopes {
+		io.mutationWindows = append(io.mutationWindows, MutationRange{From: scope.From, Until: scope.Until})
+	}
 	io.indexRevision = m.Revision + 1
 	if cache {
 		io.state = s.newStateView(state, m)
@@ -96,6 +104,9 @@ func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Bat
 	if io.changed {
 		if m.Revision == math.MaxUint64 {
 			return m, nil, nil, false, errors.New("metric revision exhausted")
+		}
+		if err := s.stageMutationHistory(batch, m, io.mutationRanges, io.mutationComplete); err != nil {
+			return m, nil, nil, false, err
 		}
 		m.Revision++
 		m.LastUpdate = s.nextActivity(m.LastUpdate)

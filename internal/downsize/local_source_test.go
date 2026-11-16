@@ -15,6 +15,7 @@ import (
 )
 
 func TestLocalSourceCrashAndSharedJournal(t *testing.T) {
+	t.Parallel()
 	for _, lost := range []string{"import", "verify", "none"} {
 		t.Run(lost, func(t *testing.T) {
 			ctx := context.Background()

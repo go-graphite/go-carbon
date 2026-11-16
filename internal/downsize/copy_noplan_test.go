@@ -143,6 +143,7 @@ func copyNames(prefix string, n int) []string {
 }
 
 func TestPlanFreeCopyRejectsLegacyLongNamesLocally(t *testing.T) {
+	t.Parallel()
 	boundary := "b" + strings.Repeat("x", store.MaxMetricNameBytes-1)
 	invalid := "c" + strings.Repeat("x", store.MaxMetricNameBytes)
 	// UTF-8 limits are bytes, not runes.
@@ -182,6 +183,7 @@ func TestPlanFreeCopyRejectsLegacyLongNamesLocally(t *testing.T) {
 }
 
 func TestPlanFreeCopyDiscoversPagedPrefixAndBatchesByBytes(t *testing.T) {
+	t.Parallel()
 	wanted := copyNames("a.", 3000)
 	catalog := append(append([]string{}, wanted...), copyNames("b.", 500)...)
 	sort.Strings(catalog)
@@ -215,6 +217,7 @@ func TestPlanFreeCopyDiscoversPagedPrefixAndBatchesByBytes(t *testing.T) {
 }
 
 func TestPlanFreeCopyNamesFileMustBeSorted(t *testing.T) {
+	t.Parallel()
 	_, src, dst := newFakeCopy(t, nil)
 	o := copyTestOptions(t, src, dst)
 	o.names = filepath.Join(t.TempDir(), "names")
@@ -227,6 +230,7 @@ func TestPlanFreeCopyNamesFileMustBeSorted(t *testing.T) {
 }
 
 func TestPlanFreeCopyRingKeepsOnlyTargetOwnedNames(t *testing.T) {
+	t.Parallel()
 	all := copyNames("ring.", 900)
 	f, src, dst := newFakeCopy(t, all)
 	ring := filepath.Join(t.TempDir(), "ring.json")
@@ -282,6 +286,7 @@ func TestPlanFreeCopyRingKeepsOnlyTargetOwnedNames(t *testing.T) {
 }
 
 func TestPlanFreeCopySendsOversizedNameAloneAndSkipsImpossibleOne(t *testing.T) {
+	t.Parallel()
 	all := copyNames("x.", 20)
 	f, src, dst := newFakeCopy(t, all)
 	f.maxBody = 4 << 20
@@ -346,6 +351,7 @@ func TestPlanFreeCopySendsOversizedNameAloneAndSkipsImpossibleOne(t *testing.T) 
 }
 
 func TestPlanFreeCopyResumesAfterKillWithoutLosingOrDuplicating(t *testing.T) {
+	t.Parallel()
 	all := copyNames("r.", 600)
 	f, src, dst := newFakeCopy(t, all)
 	f.maxBody = 64 << 20
@@ -399,6 +405,7 @@ func TestPlanFreeCopyResumesAfterKillWithoutLosingOrDuplicating(t *testing.T) {
 }
 
 func TestPlanFreeCopyRetriesTransientGuards(t *testing.T) {
+	t.Parallel()
 	all := copyNames("g.", 200)
 	f, src, dst := newFakeCopy(t, all)
 	f.inject = func(attempt int, _ []string) int {
@@ -428,6 +435,7 @@ func TestPlanFreeCopyRetriesTransientGuards(t *testing.T) {
 }
 
 func TestPlanFreeCopyEndToEndTargetWins(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := localStore(t), localStore(t)
 	all := copyNames("e2e.", 40)
@@ -465,6 +473,7 @@ func TestPlanFreeCopyEndToEndTargetWins(t *testing.T) {
 // storectl fills the transfer slots both ends advertise instead of a fixed
 // guess: the old 64 ceiling held copies at a fraction of the hosts' caps.
 func TestDefaultCopyStreams(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ source, target, want int }{
 		{128, 128, 128}, {128, 192, 128}, {192, 128, 128}, {59, 128, 59},
 		{0, 160, 160}, {160, 0, 160}, {0, 0, 64},

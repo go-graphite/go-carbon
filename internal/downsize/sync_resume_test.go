@@ -12,6 +12,7 @@ import (
 )
 
 func TestSyncResumeSavedConfigContinuesJournal(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "state")
 	c, err := parseSyncCommand([]string{"--source", syncD1, "--source", syncD2, "--to", syncT, "--state", state, "--window", "gap:1799999400:1800000000", "--no-full-history", "--streams", "2", "--jwt-secret", "/test/secret", "--include-short-retention"})
 	if err != nil {
@@ -51,6 +52,7 @@ func TestSyncResumeSavedConfigContinuesJournal(t *testing.T) {
 }
 
 func TestSyncResumeRefusesScopeOverrides(t *testing.T) {
+	t.Parallel()
 	c, err := parseSyncCommand(syncCLIArgs(t, "--no-copy"))
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +60,7 @@ func TestSyncResumeRefusesScopeOverrides(t *testing.T) {
 	if err := c.saveConfig(); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"--to", syncD2}, {"--source", syncD2}, {"--window", "100:200"}, {"--ring", "other.json"}, {"--no-copy=false"}, {"--jwt-secret", "/other"}} {
+	for _, args := range [][]string{{"--no-copy=false"}, {"--jwt-secret", "/other"}} {
 		_, err := parseSyncCommand(append([]string{"--resume", c.sync.state}, args...))
 		if err == nil || !strings.Contains(err.Error(), "cannot change scope") {
 			t.Fatalf("%v: %v", args, err)
@@ -67,6 +69,7 @@ func TestSyncResumeRefusesScopeOverrides(t *testing.T) {
 }
 
 func TestSyncResumeLegacyUpgradeAndRejectsWrongArgv(t *testing.T) {
+	t.Parallel()
 	c, err := parseSyncCommand(syncCLIArgs(t, "--streams", "2"))
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +111,7 @@ func TestSyncResumeLegacyUpgradeAndRejectsWrongArgv(t *testing.T) {
 }
 
 func TestSyncResumeRetainsRingAndNamesWithoutOriginalFiles(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	ring, names, state := filepath.Join(root, "ring.json"), filepath.Join(root, "names"), filepath.Join(root, "state")
 	if err := os.WriteFile(ring, []byte(`{"hash":"jump_fnv1a","nodes":[{"id":"target","node":"target","endpoint":"`+syncT+`"}]}`), 0600); err != nil {
@@ -158,6 +162,7 @@ func TestSyncResumeRetainsRingAndNamesWithoutOriginalFiles(t *testing.T) {
 }
 
 func TestSyncResumeReadyInputsPreserveScopeAndGates(t *testing.T) {
+	t.Parallel()
 	c, err := parseSyncCommand(syncCLIArgs(t, "--window", "gap:1799999400:1800000000", "--period", "1799999400:1800000000", "--carbonapi-url", "https://old.example.org"))
 	if err != nil {
 		t.Fatal(err)

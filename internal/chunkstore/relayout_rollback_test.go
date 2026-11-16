@@ -140,6 +140,9 @@ func TestRelayoutSerialOutputOracle(t *testing.T) {
 	defer it.Close()
 	h := sha256.New()
 	for it.First(); it.Valid(); it.Next() {
+		if string(it.Key()) == string(proofIdentityKey) {
+			continue // Per-store identity is intentionally random; metric bytes must match.
+		}
 		for _, data := range [][]byte{it.Key(), it.Value()} {
 			_, _ = h.Write(binary.BigEndian.AppendUint64(nil, uint64(len(data))))
 			_, _ = h.Write(data)

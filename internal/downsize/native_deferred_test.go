@@ -16,6 +16,7 @@ import (
 )
 
 func TestNativeDeferredSameJournalRecovery(t *testing.T) {
+	t.Parallel()
 	for _, fault := range []string{"none", "before-pull", "lost-ack"} {
 		t.Run(fault, func(t *testing.T) {
 			ctx := context.Background()
@@ -189,6 +190,7 @@ func TestNativeDeferredSameJournalRecovery(t *testing.T) {
 }
 
 func TestNativeDeferredFreshAttemptAfterCacheFenceClears(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	name := "deferred.cache-only"

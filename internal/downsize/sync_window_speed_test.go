@@ -18,6 +18,7 @@ import (
 // Both pin callbacks must start before either completes. This exercises the
 // shared-controller lifetime, rather than merely running an HTTP mock in parallel.
 func TestSyncWindowConcurrentDonorPins(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	arrived := make(chan struct{}, 2)
@@ -31,13 +32,13 @@ func TestSyncWindowConcurrentDonorPins(t *testing.T) {
 	for range 2 {
 		source := nativeControllerStore(t)
 		addPoints(t, source, "metric", 1)
-		source.SetNativePendingSnapshot(func() (map[string]struct{}, error) {
+		source.SetNativeReady(func() error {
 			arrived <- struct{}{}
 			select {
 			case <-release:
-				return nil, nil
+				return nil
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return ctx.Err()
 			}
 		})
 		donor := httptest.NewServer(nativeControllerService(t, source))
@@ -69,12 +70,15 @@ func TestSyncWindowConcurrentDonorPins(t *testing.T) {
 // Gaps, exact float bits, independently populated coarse archives, pending
 // names, target overlap and reused receipts all go through the deployed exporter.
 func TestSyncWindowEnvelopeSelectionDifferential(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
 	base := testMetricNow/60*60 - 180
 	windows := syncRanges{{From: base, Until: base + 10}, {From: base + 120, Until: base + 130}}
-	names := make([]string, 64)
+	// Sixteen names retain all four timestamp positions, both special float
+	// values, overlap, the pending name and empty windows.
+	names := make([]string, 16)
 	for i := range names {
 		n := fmt.Sprintf("envelope.%02d", i)
 		names[i] = n
@@ -195,6 +199,7 @@ func (b *concurrentWindowSelection) WindowPresenceRanges(ctx context.Context, so
 	return b.Digest(ctx, source, names, windows[0].From, windows[0].Until)
 }
 func TestSyncWindowDriverConcurrentSelectionOrderedCopy(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	b := &concurrentWindowSelection{fakeSync: newFakeSync(), arrived: make(chan string, 4), release: make(chan struct{})}

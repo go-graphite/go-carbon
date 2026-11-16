@@ -12,6 +12,7 @@ import (
 )
 
 func TestNativeControllerJournalsSizeSkipsAndResumes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	names := []string{"skip.a", "skip.large", "skip.z"}

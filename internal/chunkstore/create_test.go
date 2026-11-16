@@ -175,6 +175,9 @@ func TestCreateMatchesCatalogReadReference(t *testing.T) {
 				if !av {
 					break
 				}
+				if bytes.Equal(a.Key(), proofIdentityKey) && bytes.Equal(z.Key(), proofIdentityKey) {
+					continue
+				}
 				if !bytes.Equal(a.Key(), z.Key()) || !bytes.Equal(a.Value(), z.Value()) {
 					t.Fatalf("different persisted bytes: %q != %q", a.Key(), z.Key())
 				}

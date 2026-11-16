@@ -95,6 +95,9 @@ func TestStorageRandomizedParity(t *testing.T) {
 }
 
 func TestStorageCircularSlotWriteOrder(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	now := storageTestClock(t)
 	for _, kind := range storageBackends[1:] {
 		for _, schema := range []string{"1s:1m", "1s:10s,10s:1m,60s:1h"} {
@@ -225,6 +228,9 @@ func TestStorageCrashRecovery(t *testing.T) {
 }
 
 func TestStorageConcurrentMetrics(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	now := storageTestClock(t)
 	for _, kind := range storageBackends {
 		t.Run(kind, func(t *testing.T) {

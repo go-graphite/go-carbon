@@ -97,6 +97,9 @@ func TestBoundedTransferIngestDifferential(t *testing.T) {
 	if err := wal.stageTransferWAL(ctx, stage, 1); err != nil {
 		t.Fatal(err)
 	}
+	if wal.db.Metrics().Ingest.Count != 0 {
+		t.Fatal("private staging used SST placement")
+	}
 	for _, candidate := range []*Store{bounded, wal} {
 		a, err := old.db.NewIter(nil)
 		if err != nil {
@@ -108,7 +111,7 @@ func TestBoundedTransferIngestDifferential(t *testing.T) {
 		}
 		av, bv := a.First(), b.First()
 		for av && bv {
-			if !bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value()) {
+			if !(bytes.Equal(a.Key(), proofIdentityKey) && bytes.Equal(b.Key(), proofIdentityKey)) && (!bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value())) {
 				t.Fatalf("stored bytes differ at %x", a.Key())
 			}
 			av, bv = a.Next(), b.Next()

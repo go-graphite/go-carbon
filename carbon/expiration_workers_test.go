@@ -51,6 +51,9 @@ func (s *partitionedExpirationStore) DeleteBatchIfUnchanged(ctx context.Context,
 }
 
 func TestExpirationPartitionedLimitsAndTails(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, workers := range []int{1, 8, 32} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			now := time.Unix(100000, 0)

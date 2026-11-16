@@ -53,6 +53,9 @@ func (f *readyFixture) Readback(ctx context.Context, _, name string, from, until
 func newReadyFixture(t *testing.T, n int) (*readyFixture, syncOptions, syncReadyOptions) {
 	t.Helper()
 	f := &readyFixture{fakeSync: newFakeSync(), starts: map[string]float64{}}
+	// Keep discovery pages distinct from the 50-name verification batches,
+	// without repeating tiny-page journal coverage for every readiness gate.
+	f.listPageSize = 37
 	schema := []syncArchive{{Step: 3600, Points: 24 * 10}}
 	for _, host := range []string{syncT, syncD1, syncD2, syncP} {
 		f.starts[host] = float64(syncTestNow - 86400)
@@ -77,6 +80,7 @@ func readReadyReport(t *testing.T, state string) readyReport {
 	return r
 }
 func TestReadyGates(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name, want string
 		change     func(*readyFixture, *syncOptions, *syncReadyOptions)
@@ -157,6 +161,7 @@ func TestReadyGates(t *testing.T) {
 	}
 }
 func TestReadyRestartDuringRunFillsAndAccepts(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	// Model a target restart in the initial sync: new input points are absent on
 	// target even though the pre-restart journal says verification is complete.
@@ -207,6 +212,7 @@ func TestReadyRestartDuringRunFillsAndAccepts(t *testing.T) {
 	}
 }
 func TestReadyRestartSourceAndResumedProof(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	if err := runSyncReady(context.Background(), &o, r, f, func() error { return runSync(context.Background(), o, f) }); err != nil {
 		t.Fatal(err)
@@ -222,6 +228,7 @@ func TestReadyRestartSourceAndResumedProof(t *testing.T) {
 	}
 }
 func TestReadyNoReadyAndFailureInvalidate(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	r.noReady = true
 	called := false
@@ -240,6 +247,7 @@ func TestReadyNoReadyAndFailureInvalidate(t *testing.T) {
 	}
 }
 func TestReadyProcessAndReadbackHTTP(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/metrics" {
 			fmt.Fprintln(w, `process_start_time_seconds{cluster="test",location="west"} 123.5`)
@@ -264,6 +272,7 @@ func TestReadyProcessAndReadbackHTTP(t *testing.T) {
 	}
 }
 func TestSyncBlockExpandsScope(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "block.json")
 	data := `{"target":"http://target:4242","donors":["http://donor:4242"],"peers":["http://peer:4242"],"state":"state","period":{"from":100,"until":200},"gaps":[{"name":"gap","from":110,"until":120}],"carbonapi_url":"https://read.example","gap_ledger_complete":true}`
 	if e := os.WriteFile(path, []byte(data), 0600); e != nil {
@@ -291,6 +300,7 @@ func TestSyncBlockExpandsScope(t *testing.T) {
 }
 
 func TestReadyFreshChecksFillUnreceiptedHole(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	// A clean old journal exists, but fresh reads see a late hole without a
 	// process restart. READY must repair it rather than ask for another command.
@@ -310,6 +320,7 @@ func TestReadyFreshChecksFillUnreceiptedHole(t *testing.T) {
 	}
 }
 func TestReadyUnboundResumeRevalidates(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	if e := runSync(context.Background(), o, f); e != nil {
 		t.Fatal(e)
@@ -323,6 +334,7 @@ func TestReadyUnboundResumeRevalidates(t *testing.T) {
 	}
 }
 func TestReadyCompareMissingAndStep(t *testing.T) {
+	t.Parallel()
 	f, o, _ := newReadyFixture(t, 1)
 	name := "metric.000"
 	ts := syncTestNow - 7200
@@ -338,6 +350,7 @@ func TestReadyCompareMissingAndStep(t *testing.T) {
 }
 
 func TestReadyPrerequisiteGates(t *testing.T) {
+	t.Parallel()
 	_, base, rbase := newReadyFixture(t, 0)
 	for _, tt := range []struct {
 		name, want string
@@ -371,6 +384,7 @@ func TestReadyPrerequisiteGates(t *testing.T) {
 	}
 }
 func TestReadyUnavailableProcessPreventsCopyAndInvalidates(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 0)
 	f.starts[syncP] = 0
 	if e := atomicStateJSON(filepath.Join(o.state, "ready.json"), readyReport{Verdict: "READY"}); e != nil {
@@ -384,6 +398,7 @@ func TestReadyUnavailableProcessPreventsCopyAndInvalidates(t *testing.T) {
 }
 
 func TestReadyWindowScopeRepairsEveryPeerAndPreservesOtherTimes(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	o.fullHistory = false
 	o.windows = syncRanges{{"early", syncTestNow - 8*3600, syncTestNow - 6*3600}, {"late", syncTestNow - 4*3600, syncTestNow - 2*3600}}
@@ -420,6 +435,7 @@ func TestReadyWindowScopeRepairsEveryPeerAndPreservesOtherTimes(t *testing.T) {
 }
 
 func TestReadyWindowScopePrerequisites(t *testing.T) {
+	t.Parallel()
 	_, base, options := newReadyFixture(t, 0)
 	base.fullHistory = false
 	base.windows = syncRanges{{"gap", syncTestNow - 600, syncTestNow - 60}}
@@ -446,6 +462,7 @@ func TestReadyWindowScopePrerequisites(t *testing.T) {
 }
 
 func TestReadyDisjointDonorCohortsMeetEachSourceMinimum(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 0)
 	for sourceIndex, source := range o.from {
 		for i := 0; i < 100; i++ {
@@ -470,6 +487,7 @@ func TestReadyDisjointDonorCohortsMeetEachSourceMinimum(t *testing.T) {
 }
 
 func TestSyncReadyBlockResumeWithoutOriginalDescriptor(t *testing.T) {
+	t.Parallel()
 	for _, noReady := range []bool{false, true} {
 		t.Run(fmt.Sprint(noReady), func(t *testing.T) {
 			root := t.TempDir()
@@ -504,6 +522,7 @@ func TestSyncReadyBlockResumeWithoutOriginalDescriptor(t *testing.T) {
 }
 
 func TestReadyCancellationKeepsProgress(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 1)
 	r.scope = "windows"
 	path := filepath.Join(o.state, "progress.json")

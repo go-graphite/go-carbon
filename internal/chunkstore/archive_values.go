@@ -99,6 +99,7 @@ func (w *chunkWriter) removePoint(archive, timestamp int) error {
 	if !c.current.has(offset) || c.current.Points[offset].Timestamp != int64(timestamp) {
 		return nil
 	}
+	w.recordMutation(archive, int64(timestamp), r.Step)
 	c.current.Present[offset/64] &^= uint64(1) << uint(offset%64)
 	c.current.Points[offset] = Point{}
 	// The merge format has no tombstone operand. Materialize this chunk in the

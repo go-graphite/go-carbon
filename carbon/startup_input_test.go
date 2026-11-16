@@ -99,7 +99,8 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	if spool == nil || next.Cache != nil || next.MetricStore != nil {
 		t.Fatal("capture waited for storage")
 	}
-	const clients, records = 2, 100000
+	// At least 171 bytes per line: each stream still exceeds 8MiB.
+	const clients, records = 2, 50000
 	stamp := time.Now().Unix() - 5
 	// Drive the actual plaintext receiver in process. The socket transfer is
 	// exercised above; kernel loopback throughput must not decide whether the
@@ -381,11 +382,12 @@ func TestPredecessorCrashProcess(t *testing.T) {
 }
 
 func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
+	parallelTestMatrix(t) // Crash stages own independent stores and process globals.
 	for _, stage := range []string{"before_dump", "during_warm", "during_dump", "after_dump"} {
 		t.Run(stage, func(t *testing.T) {
+			if isolatedTestProcess(t) {
+				return
+			}
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
 			cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format = true, t.TempDir(), "legacy"
@@ -473,13 +475,14 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 }
 
 func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
-	// One isolated matrix owns its globals. Only the process that actually
-	// crashes needs a fresh executable for each stage.
+	parallelTestMatrix(t) // Crash stages own independent stores and process globals.
+	// Isolate stages individually so their store I/O can overlap within the
+	// shared process limit, including the subprocess that actually crashes.
 	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement", "direct_before_switch", "direct_during_seal", "direct_after_fence", "direct_after_switch", "direct_partial_retirement", "direct_full_retirement", "direct_next_epoch"} {
 		t.Run(stage, func(t *testing.T) {
+			if isolatedTestProcess(t) {
+				return
+			}
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
 			cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format = true, t.TempDir(), "compact"

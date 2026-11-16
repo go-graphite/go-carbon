@@ -6,6 +6,7 @@ import (
 )
 
 func TestReadyETAIncludesConvergenceAndKeepsUnknownWork(t *testing.T) {
+	t.Parallel()
 	var m readyETAModel
 	now := time.Unix(1000, 0)
 	s := progressSnapshot{Phase: "verify round 1", Round: 1, Status: "running", Total: 1000, FreshDoneAvailable: true}
@@ -32,6 +33,7 @@ func TestReadyETAIncludesConvergenceAndKeepsUnknownWork(t *testing.T) {
 }
 
 func TestReadyETADoesNotTreatFinalChecksAsReady(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		status  string
 		seconds float64
@@ -45,6 +47,7 @@ func TestReadyETADoesNotTreatFinalChecksAsReady(t *testing.T) {
 }
 
 func TestReadyETAFreshRatesResetOnReplayRoundPathAndStall(t *testing.T) {
+	t.Parallel()
 	for _, change := range []string{"replay", "round", "path", "waiting", "stall"} {
 		t.Run(change, func(t *testing.T) {
 			var m readyETAModel
@@ -81,6 +84,7 @@ func TestReadyETAFreshRatesResetOnReplayRoundPathAndStall(t *testing.T) {
 }
 
 func TestReadyETAPlannedVerificationAfterCopy(t *testing.T) {
+	t.Parallel()
 	var m readyETAModel
 	now := time.Unix(1000, 0)
 	verify := progressSnapshot{Phase: "verify round 1", Round: 1, Status: "running", Total: 100, FreshDoneAvailable: true}
@@ -96,6 +100,7 @@ func TestReadyETAPlannedVerificationAfterCopy(t *testing.T) {
 }
 
 func TestReadyETADoesNotReuseRateForDifferentScope(t *testing.T) {
+	t.Parallel()
 	var m readyETAModel
 	now := time.Unix(1000, 0)
 	s := progressSnapshot{Phase: "verify round 1", Round: 1, Status: "running", Total: 100, FreshDoneAvailable: true, Effective: &effectiveSyncPolicy{Engine: "metric", Scope: "full-history"}}

@@ -121,6 +121,9 @@ func TestRestartCPUAllowanceLogging(t *testing.T) {
 }
 
 func TestMetadataCheckpointLoadsAlongsideWriteout(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	// The checkpoint accelerates the cold writes that keep writeout below its
 	// floor; deferring it behind them kept a production restart below the floor.
 	for _, pressure := range []string{"writer", "prefetch", "floor"} {

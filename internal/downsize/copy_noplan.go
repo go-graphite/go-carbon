@@ -32,6 +32,7 @@ import (
 // points win in the importer, so redoing a batch is harmless.
 
 type copyOptions struct {
+	stallNow                                         func() time.Time // optional clock for stall accounting; nil uses time.Now
 	onWaiting                                        func(bool)
 	onCommitted                                      func(int)         // optional observer, called after a durable new batch receipt
 	onProgress                                       func(int64, bool) // completed journal names, after fsync; includes replay
@@ -214,6 +215,10 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	defer m.client.CloseIdleConnections()
 	withSyncJWT(m.client, o.auth, append(append([]string(nil), o.froms...), o.to)...)
 	progress := newCopyProgress()
+	if o.stallNow != nil {
+		progress.now = o.stallNow
+		progress.lastSuccess = progress.now()
+	}
 	c := &planFreeCopier{hostWaiter: &hostWaiter{m: m, tick: o.tick, maxBackoff: o.maxBackoff, stallTimeout: o.stallTimeout, progress: progress, observeWait: o.onWaiting}, progress: progress, o: o, started: time.Now(), multi: len(o.froms) > 1}
 	var target copyStatus
 	sourceTransfers := 0
