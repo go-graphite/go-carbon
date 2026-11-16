@@ -62,6 +62,10 @@ func (r *coreRollups) appendRecord(record sealrollup.Record) []byte {
 
 // One serial owner exclusively holds these arenas until its ingest resolves.
 func (r *coreRollups) release() {
+	for _, coverage := range r.coverage {
+		clear(coverage.seen)
+		coverage.spec.Policies = nil
+	}
 	clear(r.stages)
 	r.stages = r.stages[:0]
 	clear(r.batches)

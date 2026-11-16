@@ -3,6 +3,7 @@ package v2core
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,10 @@ type rollupMetric struct {
 	prefix      string
 	partOffset  int
 }
+type rollupCoverage struct {
+	spec partsformat.Spec
+	seen map[[32]byte]bool
+}
 type coreRollups struct {
 	expire func(RollupPolicy, RollupMetadata, time.Time) bool
 	now    func() time.Time
@@ -85,6 +90,8 @@ type coreRollups struct {
 	files          map[string][]coreKV
 	arena          []byte
 	pending        bool
+	definitions    map[[32]byte][]partsformat.ArchivePolicy
+	coverage       map[string]*rollupCoverage
 }
 
 // Archive max-u32 is reserved within the core's GCP3 rollup experiment for the
@@ -243,6 +250,12 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 		}
 	}
+	if r.definitions == nil {
+		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
+	}
+	if r.coverage == nil {
+		r.coverage = map[string]*rollupCoverage{}
+	}
 	files := r.files
 	if files == nil {
 		files = map[string][]coreKV{}
@@ -322,6 +335,43 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				return coreSealPlan{}, err
 			}
 		}
+		group := string(m.policy.Group)
+		coverage := r.coverage[group]
+		if coverage == nil {
+			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
+			r.coverage[group] = coverage
+		}
+		if len(coverage.seen) == 0 {
+			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: part}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+			coverage.spec.Source.MinOrder = math.MaxUint64
+		}
+		digest := s.next.Frontier.Policy
+		if !coverage.seen[digest] {
+			policies := r.definitions[digest]
+			if policies == nil {
+				definition, err := json.Marshal(m.policy.Config)
+				if err != nil {
+					return coreSealPlan{}, err
+				}
+				hash := sha256.Sum256(definition)
+				for archive := range m.policy.Config.Archives {
+					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
+				}
+				r.definitions[digest] = policies
+			}
+			coverage.spec.Policies = append(coverage.spec.Policies, policies...)
+			coverage.seen[digest] = true
+		}
+		coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
+		coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
+		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
+		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
+		for _, record := range s.records {
+			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
+			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
+			coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
+			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
+		}
 		start := len(r.arena)
 		r.arena = AppendRollupMetadata(r.arena, s.next)
 		metadata := r.arena[start:len(r.arena):len(r.arena)]
@@ -349,6 +399,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			return coreSealPlan{}, err
 		}
 		out.Files = append(out.Files, file)
+		out.PartSpecs = append(out.PartSpecs, r.coverage[k].spec)
 	}
 	r.stages = stages
 	out.Abort = r.release

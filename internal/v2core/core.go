@@ -1161,10 +1161,21 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		if isRollupFile(file) {
 			xp := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
 			paths = append(paths, xp)
-			d, e := WriteDenseRollupPart(xp, file, o.partSource)
+			var d v2part.Descriptor
+			var e error
+			if len(plan.PartSpecs) == len(plan.Files) {
+				spec := plan.PartSpecs[i]
+				spec.Source.Incarnation = o.partSource.Incarnation
+				spec.Source.Stream = o.partSource.Stream
+				d, e = writePlannedRollupPart(xp, file, spec)
+			} else {
+				d, e = WriteDenseRollupPart(xp, file, o.partSource)
+			}
 			if e != nil {
 				return 0, e
 			}
+			// The shared writer closes and syncs its SST exactly once before return.
+			o.syncCalls.Add(1)
 			kv, saved, e := retainSealedPart(o.dir, xp, d)
 			retained = append(retained, saved...)
 			if e != nil {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -74,7 +76,27 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		t.Fatal(e)
 	}
 	var saved [][]byte
-	for _, file := range plan.Files {
+	for i, file := range plan.Files {
+		source := v2part.Provenance{Incarnation: v2part.PartID{9}, Stream: "original"}
+		spec := plan.PartSpecs[i]
+		spec.Source.Incarnation = source.Incarnation
+		spec.Source.Stream = source.Stream
+		dir := t.TempDir()
+		fast := filepath.Join(dir, "fast.sst")
+		slow := filepath.Join(dir, "slow.sst")
+		fd, err := writePlannedRollupPart(fast, file, spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sd, err := WriteDenseRollupPart(slow, file, source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fb, _ := os.ReadFile(fast)
+		sb, _ := os.ReadFile(slow)
+		if !reflect.DeepEqual(fd, sd) || !bytes.Equal(fb, sb) {
+			t.Fatal("planned spec changed portable part bytes/descriptor")
+		}
 		first, _ := v2part.Decode(file[0].Key)
 		shards := map[uint16]bool{}
 		for _, kv := range file {
