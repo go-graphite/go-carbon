@@ -89,9 +89,6 @@ func compare(ctx context.Context, c config) (comparison, error) {
 			}
 		}
 	}
-	if err = legacy.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: "exact", PackTails: true, Workers: 1, WriteWindow: time.Second, CPUFraction: 1, BytesPerSecond: 1 << 40, MinFreeBytes: 1, MaxCompactionDebt: 1 << 40}); err != nil {
-		return out, err
-	}
 	for u, input := range inputs {
 		source := synthetic(c, u, "comparison-stored-v2")
 		source.ScanMetrics = func(_ context.Context, _ partsconvert.Unit, y func(partsconvert.StoredMetric) error) error {
@@ -166,22 +163,14 @@ func compare(ctx context.Context, c config) (comparison, error) {
 			}
 			out.Metrics++
 			images[u] = append(images[u], m)
-			if err := os.Remove(path); err != nil {
-				return err
-			}
-			// Imported continuation images can dwarf their occupied slots.
-			// Retire them in bounded batches before importing the whole corpus.
-			if out.Metrics%32 == 0 {
-				if err := legacy.RunColdPack(ctx); err != nil {
-					return err
-				}
-				return legacy.Compact()
-			}
-			return nil
+			return os.Remove(path)
 		})
 		if err != nil {
 			return out, err
 		}
+	}
+	if err = legacy.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: "exact", PackTails: true, Workers: 1, WriteWindow: time.Second, CPUFraction: 1, BytesPerSecond: 1 << 40, MinFreeBytes: 1, MaxCompactionDebt: 1 << 40}); err != nil {
+		return out, err
 	}
 	if err = legacy.RunColdPack(ctx); err != nil {
 		return out, err
