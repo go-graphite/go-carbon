@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ import (
 // Missing modern metadata is not an invalidation. The journal identity already
 // binds donors, target, inventory and windows; changing that identity is refused.
 // Only recorded destructive changes or restart intervals can reopen this work.
-func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []string, ids []int64, prior syncRow, before, donorBefore []syncProof, proof string) (syncRow, bool, error) {
+func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []string, ids []int64, prior syncRow, before, donorBefore []syncProof, proof string, targetInfos ...map[string][]syncArchive) (syncRow, bool, error) {
 	if prior.Kind != "verified" || prior.Round != round || prior.Names != len(names) || prior.First != names[0] || prior.Last != names[len(names)-1] || !prior.LegacyObservation && (prior.MutationObserved || prior.ObservationProof != "" || len(prior.HoleProofs) != 0) {
 		return syncRow{}, false, nil
 	}
@@ -60,9 +61,15 @@ func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []
 	}
 	// Once adopted, donor fences remain selective while target writes are
 	// monotonic for hole coverage. Target disappearance is destructive.
-	targetInfo, err := s.b.Info(ctx, s.o.to, names)
-	if err != nil {
-		return syncRow{}, true, err
+	var targetInfo map[string][]syncArchive
+	var err error
+	if len(targetInfos) > 0 {
+		targetInfo = targetInfos[0]
+	} else {
+		targetInfo, err = s.b.Info(ctx, s.o.to, names)
+		if err != nil {
+			return syncRow{}, true, err
+		}
 	}
 	restartRecorded := false
 	for _, r := range invalidations {
@@ -312,9 +319,25 @@ func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []
 	}
 	after := before
 	if s.frontier != nil {
-		after, _, err = s.proofStampsVersion(ctx, names)
-		if err != nil {
-			return row, true, err
+		// A missing before fence cannot be sealed by any after value. Do not
+		// repeat metadata work for names whose observation remains unsealed.
+		after = make([]syncProof, len(names))
+		var sealNames []string
+		var sealPositions []int
+		for i, stamp := range before {
+			if stamp != (syncProof{}) {
+				sealNames = append(sealNames, names[i])
+				sealPositions = append(sealPositions, i)
+			}
+		}
+		if len(sealNames) > 0 {
+			stamps, _, err := s.proofStampsVersion(ctx, sealNames)
+			if err != nil {
+				return row, true, err
+			}
+			for i, stamp := range stamps {
+				after[sealPositions[i]] = stamp
+			}
 		}
 	}
 	// Seal only stable metadata. Unknown holders retain the adopted observation,
@@ -337,6 +360,18 @@ func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []
 	for _, k := range row.Resolved {
 		dirty[k.Name] = true
 	}
+	var records []byte
+	contiguous := len(ids) == len(names) && len(ids) > 0
+	for i, id := range ids {
+		contiguous = contiguous && id == ids[0]+int64(i)
+	}
+	if s.frontier != nil && contiguous {
+		records = make([]byte, len(ids)*32)
+		if _, err := s.frontier.file.ReadAt(records, ids[0]*32); err != nil && !errors.Is(err, io.EOF) {
+			return row, true, err
+		}
+	}
+	changedRecords := false
 	for i, n := range names {
 		if s.frontier == nil {
 			break
@@ -349,7 +384,18 @@ func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []
 			continue
 		}
 		record := s.frontier.record(n, after[i])
-		if _, err := s.frontier.file.WriteAt(record[:], ids[i]*32); err != nil {
+		if records != nil {
+			copy(records[i*32:], record[:])
+			changedRecords = true
+		} else {
+			if _, err := s.frontier.file.WriteAt(record[:], ids[i]*32); err != nil {
+				return row, true, err
+			}
+			changedRecords = true
+		}
+	}
+	if records != nil && changedRecords {
+		if _, err := s.frontier.file.WriteAt(records, ids[0]*32); err != nil {
 			return row, true, err
 		}
 	}
@@ -367,7 +413,7 @@ func (s *syncer) adoptLegacyObservation(ctx context.Context, round int, names []
 		}
 	}
 	// Persist proof bytes before the observation which claims their adoption.
-	if s.frontier != nil {
+	if s.frontier != nil && changedRecords {
 		if err := s.frontier.file.Sync(); err != nil {
 			return row, true, err
 		}

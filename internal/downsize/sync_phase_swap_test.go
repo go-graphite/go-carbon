@@ -30,17 +30,29 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 	if old == "" || next == "" {
 		t.Skip("set STORECTL_SWAP_OLD and STORECTL_SWAP_NEW to run executable upgrade acceptance")
 	}
-	for _, phase := range []string{"window retry", "verify round 1", "legacy verify"} {
+	for _, phase := range []string{"window retry", "verify round 1", "legacy verify", "large legacy verify"} {
 		t.Run(phase, func(t *testing.T) {
-			legacy := phase == "legacy verify"
+			large := phase == "large legacy verify"
+			legacy := phase == "legacy verify" || large
 			if legacy {
 				phase = "verify round 1"
 			}
 			var oldProcess atomic.Bool
 			oldProcess.Store(true)
+			var crashAdoption atomic.Bool
+			crashAdoption.Store(large)
 			state := filepath.Join(t.TempDir(), "state")
 			source, target := nativeControllerStore(t), nativeControllerStore(t)
 			names := []string{"swap.a", "swap.b", "swap.c", "swap.d"}
+			batch, completed := 2, 2
+			if large {
+				names = make([]string, 2048)
+				for i := range names {
+					names[i] = fmt.Sprintf("swap.%06d", i)
+				}
+				batch, completed = 128, 1024
+			}
+			boundary := names[completed]
 			for i, n := range names {
 				addPoints(t, source, n, float64(i+1))
 				if phase == "verify round 1" {
@@ -67,7 +79,7 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 					r.Body = io.NopCloser(bytes.NewReader(raw))
 					var req struct{ Names []string }
 					_ = json.Unmarshal(raw, &req)
-					if len(req.Names) > 0 && req.Names[0] >= "swap.c" && !wait(r) {
+					if len(req.Names) > 0 && req.Names[0] >= boundary && !wait(r) {
 						return
 					}
 				}
@@ -88,7 +100,10 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 						http.NotFound(w, r)
 						return
 					}
-					if len(req.Names) > 0 && req.Names[0] >= "swap.c" && !wait(r) {
+					if large && !oldProcess.Load() && crashAdoption.Load() && strings.HasPrefix(req.Mode, "proof") && len(req.Names) > 0 && req.Names[0] >= names[completed/2] && req.Names[0] < boundary && !wait(r) {
+						return
+					}
+					if len(req.Names) > 0 && req.Names[0] >= boundary && !wait(r) {
 						return
 					}
 				}
@@ -114,7 +129,7 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 				}
 			}()
 			u, _ := url.Parse(carbon.URL)
-			args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port(), "--transfer-idle-timeout=1m"}
+			args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", fmt.Sprintf("--verify-batch=%d", batch), "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port(), "--transfer-idle-timeout=1m"}
 			if phase == "window retry" {
 				// A real-shaped old journal: missing selection finished with uncertainty.
 				// The old executable resumes it, resolves group one and is killed in two.
@@ -197,12 +212,23 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 				t.Fatal("old executable did not stop")
 			}
 			prior := redoProgress(t, state)
-			if prior.Phase != phase || prior.Done < 2 {
+			if prior.Phase != phase || prior.Done < int64(completed) {
 				t.Fatalf("old process did not save a real mid-phase cursor: %+v", prior)
 			}
 			oldProcess.Store(false)
-			_, done, path = start(next, []string{"--resume", state})
+			cmd, done, path = start(next, []string{"--resume", state})
 			await(done, path)
+			if large {
+				// Kill in adoption, after durable batches but before the old
+				// completed floor. No state is edited before the next executable.
+				if err := cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+				<-done
+				crashAdoption.Store(false)
+				_, done, path = start(next, []string{"--resume", state})
+				await(done, path)
+			}
 			saved := redoProgress(t, state)
 			if saved.Phase != phase || saved.Done < prior.Done {
 				t.Fatalf("binary swap regressed %+v -> %+v", prior, saved)
@@ -219,6 +245,9 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 				t.Fatal("new executable did not finish")
 			}
 			final := redoProgress(t, state)
+			if large && (final.LegacyAdopted != int64(completed) || final.LegacyReverified != 0) {
+				t.Fatalf("adoption crash changed completed sets: %+v", final)
+			}
 			for op, count := range final.RedoNames {
 				if count != 0 {
 					t.Fatalf("%s redo_names=%d", op, count)
