@@ -42,6 +42,8 @@ Proposed production relations:
 | `batch` | unique logical batch token and membership digest; counters/outcomes committed atomically |
 | `adoption` | source stamps, consumed byte offsets and last committed import position per legacy file |
 
+The prototype uses `mattn/go-sqlite3` with cgo. The repository public release workflow currently sets `CGO_ENABLED=0` for package builds and overrides it to1 only for tests; its Makefile cross-builds386/amd64/arm64. The offline package is not imported by production storectl, so this Draft does not change those binaries. Before production wiring, either provide and test a cgo cross-toolchain matrix for supported packages or use a pure-Go SQLite driver and rerun this same comparison. The measured engine recommendation does not decide that packaging tradeoff.
+
 SQLite uses WAL, `synchronous=FULL`, prepared statements, bounded transactions, a single writer and a busy timeout. NORMAL is insufficient for acknowledged-commit durability after power loss. Database, WAL and shared-memory files are one operational unit; use the backup API or a clean closed copy, never copy just the live main file. The database must be on a local filesystem with working fsync semantics. Pebble uses synchronous WAL commits and indexed batches. Its block cache and memtables are bounded. Do not disable the WAL or fsync for import measurements.
 
 The benchmark deliberately retains historical journal evidence as compressed, ID-normalized records. It is a conservative size measurement, not a claim that an audit archive constitutes a production state reducer. Production will materialize the relations above and retire obsolete audit rows only after equivalence tests. The prototype's generic `records` table and `done/<window>` rows stress one synchronous transaction per 8,192 names; the production representation will pack these into ID pages.
@@ -60,7 +62,7 @@ The prototype imports `union.tsv`, `missing.tsv`, `sync.jsonl`, pending selectio
 
 ## Usage
 
-Build with cgo, matching release builds:
+Build this benchmark with cgo:
 
 ```sh
 go build -o storestatebench ./tool/storestatebench
