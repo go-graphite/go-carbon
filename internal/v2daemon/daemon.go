@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
@@ -33,10 +34,11 @@ type Config struct {
 // Store owns core and its serial producers. Stop all producers before Close.
 // Producer methods share no daemon mutex. Core owns all physical data layout.
 type Store struct {
-	Core      *v2core.Engine
-	Producers []*Producer
-	cfg       Config
-	lock      *os.File
+	relayActive atomic.Bool
+	Core        *v2core.Engine
+	Producers   []*Producer
+	cfg         Config
+	lock        *os.File
 }
 type packet struct {
 	rows    []v2core.Row
@@ -47,6 +49,7 @@ type packet struct {
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
 type Producer struct {
+	relayPositions                                               map[v2placement.Stamp]relayPosition
 	admission                                                    v2placement.Sink
 	placement                                                    Placement
 	engine                                                       *v2core.Engine
