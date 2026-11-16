@@ -19,7 +19,7 @@ func TestSyncInfoLegacyBodyTimeoutKeepsBatch(t *testing.T) {
 	b.retryTick = time.Millisecond
 	var requests [][]string
 	b.client.Transport = syncInfoRoundTrip(func(r *http.Request) (*http.Response, error) {
-		if r.URL.RequestURI() != "/info/?format=carbonapi_v3_pb" || r.Method != http.MethodPost {
+		if r.URL.RequestURI() != "/info/?format=carbonapi_v3_pb&allowPartial=1" || r.Method != http.MethodPost {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL)
 		}
 		body, _ := io.ReadAll(r.Body)

@@ -293,7 +293,9 @@ func (b *syncLiveBackend) post(ctx context.Context, url string, body []byte) ([]
 // that exact legacy response as a truncated read, within the current batch.
 // Keep other validation errors terminal and never interpret it as absence.
 func (b *syncLiveBackend) postInfo(ctx context.Context, base string, body []byte) ([]byte, error) {
-	data, err := b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
+	// New servers omit absent names in one response. Older servers ignore the
+	// option and retain the existing 404 bisection below.
+	data, err := b.post(ctx, base+"/info/?format=carbonapi_v3_pb&allowPartial=1", body)
 	var h *syncHTTPError
 	if errors.As(err, &h) && h.status == http.StatusBadRequest && h.body == "Bad request (unsupported format)" {
 		return nil, fmt.Errorf("info body read failed (%v): %w", err, io.ErrUnexpectedEOF)
