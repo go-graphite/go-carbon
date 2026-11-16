@@ -236,6 +236,14 @@ func TestPublisherWriterIsolation(t *testing.T) {
 		}
 		settle = time.Duration(n) * time.Millisecond
 	}
+	var batchesPerProducer int
+	if raw := os.Getenv("PARTS_PUBLISH_BATCHES_PER_PRODUCER"); raw != "" {
+		var parseErr error
+		batchesPerProducer, parseErr = strconv.Atoi(raw)
+		if parseErr != nil || batchesPerProducer < 1 {
+			t.Fatal("invalid fixed batch count")
+		}
+	}
 	if _, err = os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("benchmark directory must not exist")
 	}
@@ -379,7 +387,10 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	for p := 0; p < cfg.Producers; p++ {
 		go func(p int) {
 			var sequence uint64 = 2
-			for time.Since(start) < duration {
+			for batch := 0; ; batch++ {
+				if (batchesPerProducer > 0 && batch >= batchesPerProducer) || (batchesPerProducer == 0 && time.Since(start) >= duration) {
+					break
+				}
 				batches := make([]coreBatch, 0, len(metrics)/cfg.Producers)
 				for i, m := range metrics {
 					if i%cfg.Producers != p {
@@ -436,6 +447,14 @@ func TestPublisherWriterIsolation(t *testing.T) {
 	sample["metrics"] = len(metrics)
 	sample["workload"] = "core_apply_batches_with_fixed24_durable_publisher"
 	sample["writer_mps"] = float64(sample["committed"].(uint64)-uint64(len(metrics))) / elapsed / 1e6
+	sample["batches_per_producer"] = batchesPerProducer
+	if batchesPerProducer > 0 {
+		expected := uint64(batchesPerProducer) * uint64(len(metrics)) * 32
+		sample["expected_committed_points"] = expected
+		if sample["committed"].(uint64)-uint64(len(metrics)) != expected {
+			err = errors.Join(err, errors.New("fixed input committed count differs"))
+		}
+	}
 	var planNS, commitNS, seals, points, sortNS, prepareNS uint64
 	var maxPlanNS, maxPrepareNS, maxCommitNS uint64
 	for _, o := range owners {

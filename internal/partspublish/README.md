@@ -125,6 +125,14 @@ by writer elapsed seconds times `GOMAXPROCS`; it includes assists by readers
 and does not attribute that time to writers. Compare runtime settings in
 separate exploratory arms, keeping the registered curve unchanged.
 
+`PARTS_PUBLISH_BATCHES_PER_PRODUCER` selects fixed input instead of a timed
+offering interval. Each producer submits that many 8,192-point batches; the
+receipt checks the total committed count excluding seed points. For example,
+`2560` submits exactly 83,886,080 points over the four producers. This holds
+input and history growth constant across loaded and control arms; throughput
+still includes the final durable barriers. Register this choice before the
+first arm. It does not establish settled compaction or eliminate daemon noise.
+
 `PARTS_PUBLISH_COST_DIR=<nonexistent-directory> go test -v
 ./internal/partspublish -run '^TestPublicationCosts$' -count=1` measures 16 seals
 of 4,096 points and compares a catalog-stable publication with a catalog-byte
