@@ -43,10 +43,10 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
-	if class != "" && !profile && !traced {
+	if class != "" && !profile && !traced && !(os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" && class == "warm-1h") {
 		t.Fatal("class selection is for diagnostics only; the latency gate must run every class")
 	}
 	if class != "" && !slices.Contains([]string{"warm-1h", "warm-24h", "warm-168h", "warm-720h", "cold-blockcache-1h", "cold-blockcache-24h", "cold-blockcache-168h", "cold-blockcache-720h", "warm-find4096"}, class) {
@@ -70,6 +70,9 @@ func TestLatencyComparison(t *testing.T) {
 	defer os.RemoveAll(dir)
 	ctx := context.Background()
 	opts := chunkstore.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}, CacheSize: 32 << 20, Now: func() time.Time { return time.Unix(clock, 0) }}
+	if os.Getenv("GO_CARBON_MIXED_BYTES") == "1" {
+		opts.Continuation = &latencyByteCodec{opts.Continuation.(*whisperio.ContinuationCodec)}
+	}
 	cfg := chunkstore.MetricConfig{Name: "bench.metric", Retentions: []chunkstore.Retention{{Step: 1, Count: 86400}, {Step: 60, Count: 43200}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}}, AggregationMethod: chunkstore.Average, XFilesFactor: .5}
 	m := partsread.Metric{ID: 42, AggregationMethod: "average", XFilesFactor: .5}
 	c := sr.Config{Method: sr.Average, XFilesFactor: .5}
@@ -95,8 +98,14 @@ func TestLatencyComparison(t *testing.T) {
 		var samples []sr.Sample
 		var ps []chunkstore.Point
 		from, to := clock-7200, clock-60
+		if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" {
+			to = clock - 2400
+		}
 		if bi == 1 {
 			from, to = to, clock
+			if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" {
+				from = clock - 2400
+			}
 		}
 		for ts := from; ts < to; ts++ {
 			v := float64(ts%19) - 9
@@ -140,6 +149,10 @@ func TestLatencyComparison(t *testing.T) {
 	if persisted {
 		disk = newPersistedLatency(t, filepath.Join(dir, "persisted"), cat, m, records, ingest)
 		defer disk.close(t)
+	}
+	legacyHorizon := int64(clock - 61)
+	if os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" {
+		legacyHorizon = clock - 2401
 	}
 	borrowedSnapshots := make(map[*chunkstore.Store]*partsread.Snapshot)
 	defer func() {
@@ -196,7 +209,7 @@ func TestLatencyComparison(t *testing.T) {
 			boundPub.Close()
 		}
 		borrowedSnapshots[old] = snapshot
-		r, e := New(Options{Snapshot: snapshot, Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: clock - 61, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(128 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
+		r, e := New(Options{Snapshot: snapshot, Legacy: old, LegacyCatalog: cat, UnifiedCatalog: true, LegacyHorizon: legacyHorizon, Parts: partsread.Adapter{Select: func(string) *partsread.Publication { return &pub }, Catalog: &pub, Budget: partsread.NewBudget(128 << 20), WorkBytes: 32 << 20, Now: opts.Now}})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -298,6 +311,22 @@ func TestLatencyComparison(t *testing.T) {
 				return nil
 			}); err != nil {
 				t.Fatal(err)
+			}
+			if os.Getenv("GO_CARBON_MIXED_BYTES") == "1" {
+				// Read counters are sampled only in this separate diagnostic.
+				nativeBefore, mixedBefore := full.Stats().FS, old.Stats().FS
+				var nb, mb latencyBytes
+				nativeCtx := context.WithValue(ctx, latencyByteKey{}, &nb)
+				mixedCtx := context.WithValue(ctx, latencyByteKey{}, &mb)
+				_, err := full.Fetch(nativeCtx, cfg.Name, int(clock-width), int(clock))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := r.Fetch(mixedCtx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				fmt.Printf("LEGACY_BYTES class=%s native_kv=%d mixed_kv=%d native_decoded=%d mixed_decoded=%d native_calls=%d mixed_calls=%d\n", className, nb.KV, mb.KV, nb.Decoded, mb.Decoded, nb.Calls, mb.Calls)
+				fmt.Printf("LEGACY_FS class=%s native_before=%+v native_after=%+v mixed_before=%+v mixed_after=%+v\n", className, nativeBefore, full.Stats().FS, mixedBefore, old.Stats().FS)
 			}
 			closePair(old, full)
 			old, full, r = open()

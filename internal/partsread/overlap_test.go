@@ -2,6 +2,7 @@ package partsread
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -47,6 +48,9 @@ func TestOverlayGenerationUnknownAndCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := &Series{From: 60, Until: 180, Step: 60, Values: make([]float64, 2)}
+	if yes, err := h.HasOverlayRangeResolved(ctx, token, 60, 60, 180); err != nil || yes {
+		t.Fatal(yes, err)
+	}
 	if yes, err := h.HasOverlayResolved(ctx, token, base); err != nil || yes {
 		t.Fatal(yes, err)
 	}
@@ -62,7 +66,7 @@ func TestOverlayGenerationUnknownAndCancellation(t *testing.T) {
 	}
 	defer next.Close()
 	defer p.Close()
-	if _, err := next.HasOverlayResolved(ctx, token, base); err != ErrMetadataGeneration {
+	if _, err := next.HasOverlayRangeResolved(ctx, token, 60, 60, 180); err != ErrMetadataGeneration {
 		t.Fatal(err)
 	}
 	other, err := next.Resolve("sample")
@@ -75,5 +79,34 @@ func TestOverlayGenerationUnknownAndCancellation(t *testing.T) {
 	h.Close()
 	if _, err := h.HasOverlayResolved(ctx, token, base); err != ErrClosed {
 		t.Fatal(err)
+	}
+}
+
+func TestLegacyPrefixWorkspaceReset(t *testing.T) {
+	ctx := context.Background()
+	var p Publication
+	p.Publish(View{Catalog: testCatalog([]Archive{{1, 1000}}), Parts: []Source{Freeze(nil)}})
+	defer p.Close()
+	for run := 0; run < 20; run++ {
+		h, e := p.Pin(NewBudget(1<<20), 1<<18)
+		if e != nil {
+			t.Fatal(e)
+		}
+		out, e := h.Render(ctx, "sample", 100, 109, 110)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, v := range out.Values {
+			if !math.IsNaN(v) {
+				t.Fatal("legacy prefix leaked across handle reuse")
+			}
+		}
+		if e := h.FillLegacyPrefix(ctx, out, []float64{1, 2, 3}); e != nil {
+			t.Fatal(e)
+		}
+		if out.Values[0] != 1 || out.Occupied[0] {
+			t.Fatal("prefix fill changed occupancy")
+		}
+		h.Close()
 	}
 }

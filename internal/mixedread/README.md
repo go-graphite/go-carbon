@@ -26,8 +26,12 @@ This removes the second index lookup and per-request deduplication map. The
 option defaults off; the compatibility path unions both existing indexes with
 duplicate tracking bounded by name count and the pinned byte reservation.
 Neither path implements a glob parser.
-Render uses the same complete query interval on both backends, preserving archive
-selection. An occupied v2 physical slot wins over legacy, including stored NaNs
+The bound reader renders published parts for the complete query interval and
+fetches legacy only through the last uncovered physical slot. It preserves the
+original query start when shortening the legacy end, so archive selection stays
+identical. A verified `LegacyHorizon` also excludes trailing slots beyond every
+stored legacy timestamp. Disjoint physical ranges fetch legacy directly. The
+unbound compatibility path uses the complete interval on both backends. An occupied v2 physical slot wins over legacy, including stored NaNs
 and replacements whose newer ring timestamp invalidates the requested old slot.
 Untouched slots retain the legacy render. Applying that priority across all time
 also preserves late post-cutover corrections to earlier timestamps. A simple
@@ -58,9 +62,10 @@ schema shapes, six aggregation methods and 1h/1d/7d/30d queries.
 
 A mixed render reserves twice the part adapter's configured work budget before
 reading, accounting for the legacy output and bounded winner workspace. It
-resolves legacy metadata once and overlays occupied v2 slots directly into
-the legacy values through `partsread.Handle.RenderInto`. No second dense
-output, full occupancy scan, or dense merge is needed. Converted or suppressed
+resolves legacy metadata once. Bound queries scan the occupied suffix, fetch
+the uncovered legacy prefix, and fill only unoccupied output slots. A suffix
+covered entirely by parts therefore avoids decoding that legacy data. The
+unbound compatibility path overlays into legacy values through `RenderInto`. Converted or suppressed
 names skip legacy lookup and fetching entirely. `LegacyHorizon` optionally
 skips legacy data reads for intervals strictly after its verified inclusive
 timestamp bound, or after all legacy archives have expired. That bound must
@@ -154,3 +159,9 @@ warm adapter allocations above value-only legacy reads, and one Reader allocatio
 when constructing a fresh generation; fresh generations need no private pool or
 scratch allocation. Complete reader/reducer and durable file-source prerequisites
 are included as ordinary source, so this branch builds without an overlay.
+
+`GO_CARBON_MIXED_COVERAGE=half GO_CARBON_MIXED_CLASS=warm-1h` selects a
+separate fixture whose published suffix covers 2,400 of 3,600 query slots. It
+does not replace any original gate class. `GO_CARBON_MIXED_BYTES=1` enables a
+separate continuation value-byte and decoded-output counter diagnostic; the
+unwrapped codec remains active in all timing gates.

@@ -77,11 +77,16 @@ func newPersistedLatency(t *testing.T, root string, cat pr.Catalog, metric pr.Me
 			if len(samples) == 0 {
 				continue
 			}
-			key, err := pf.Encode(pf.Key{Group: "benchmark", VShard: pf.Route(id), Metric: id, Part: partID, Archive: uint32(ai)})
-			if err != nil {
-				return err
+			// The original minute fixture retains the same single block. Larger
+			// coverage fixtures split at the existing archive payload limit.
+			limit := pr.ArchiveBlockBytes(a) / 24
+			for offset := 0; offset < len(samples); offset += limit {
+				key, err := pf.Encode(pf.Key{Group: "benchmark", VShard: pf.Route(id), Metric: id, Part: partID, Archive: uint32(ai), Ordinal: uint32(offset / limit)})
+				if err != nil {
+					return err
+				}
+				blocks = append(blocks, pr.BlockData{SlotBlock: pr.SlotBlock{ID: metric.ID, Archive: a, Slots: pr.SlotRange{From: 0, Until: a.Points}, Key: key}, Samples: samples[offset:min(offset+limit, len(samples))]})
 			}
-			blocks = append(blocks, pr.BlockData{SlotBlock: pr.SlotBlock{ID: metric.ID, Archive: a, Slots: pr.SlotRange{From: 0, Until: a.Points}, Key: key}, Samples: samples})
 		}
 		plan, err := r.p.PlanSeal(pp.Request{Envelope: pp.Envelope{Version: 1, Generation: n, Catalog: json.RawMessage(`{"fixture":1}`), Frontier: []uint64{n}, Parts: []pp.Ref{{Name: partName, Generation: n, Version: 1, Codec: pp.CodecV1, Scope: scope}}}, Added: map[string][]pr.BlockData{partName: blocks}})
 		if err != nil {

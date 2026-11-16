@@ -3,7 +3,9 @@ package mixedread
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"testing"
 
@@ -238,5 +240,75 @@ func TestBoundDisjointOverlayUsesLegacyResult(t *testing.T) {
 	}
 	if bound.opts.Parts.Budget.Used() != 0 {
 		t.Fatal("admission leaked")
+	}
+}
+
+// Compare the frontier path to the original full-legacy overlay for physical
+// wrap, occupied NaNs, late corrections, holes and zero/one-slot boundaries.
+func TestBoundFrontierBitExact(t *testing.T) {
+	const now int64 = 1794700800
+	cases := [][]partsread.Record{
+		nil,
+		{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 99, Bits: 0x8000000000000000, Sequence: 1}}},
+		{{ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 100, Bits: 0x7ff8000000000042, Sequence: 2}}, {ID: 42, Step: 1, Sample: partsread.Sample{Time: now - 99 + 1000, Bits: math.Float64bits(9), Sequence: 3}}},
+	}
+	for ci, records := range cases {
+		t.Run(fmt.Sprint(ci), func(t *testing.T) {
+			r, p, m := fixture(t, records)
+			frozen, e := r.opts.Legacy.ResolveFrozen(context.Background(), "metric")
+			if e != nil {
+				t.Fatal(e)
+			}
+			binding, e := BindLegacy(frozen, m)
+			if e != nil {
+				t.Fatal(e)
+			}
+			cat := entryCatalog{Catalog: r.opts.LegacyCatalog, entries: map[string]catalogEntry{"metric": {m, binding}}}
+			p.Publish(partsread.View{Catalog: cat, Parts: []partsread.Source{partsread.Freeze(records)}})
+			snap, e := p.Snapshot()
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer snap.Close()
+			opts := r.opts
+			opts.Snapshot = snap
+			opts.UnifiedCatalog = true
+			bound, e := New(opts)
+			if e != nil {
+				t.Fatal(e)
+			}
+			for _, span := range [][2]int64{{now - 105, now - 98}, {now - 101, now - 99}, {now - 100, now - 99}, {now - 99, now - 99}, {now - 999, now}, {now - 2000, now - 1001}} {
+				var want *partsread.Series
+				if e := r.Fetch(context.Background(), "metric", span[0], span[1], func(s *partsread.Series) error {
+					if s != nil {
+						c := *s
+						c.Values = slices.Clone(s.Values)
+						want = &c
+					}
+					return nil
+				}); e != nil {
+					t.Fatal(e)
+				}
+				if e := bound.Fetch(context.Background(), "metric", span[0], span[1], func(got *partsread.Series) error {
+					if (got == nil) != (want == nil) {
+						t.Fatalf("nil span%v", span)
+					}
+					if got == nil {
+						return nil
+					}
+					if got.From != want.From || got.Until != want.Until || got.Step != want.Step || len(got.Values) != len(want.Values) {
+						t.Fatalf("shape span%v", span)
+					}
+					for i, v := range want.Values {
+						if math.Float64bits(v) != math.Float64bits(got.Values[i]) {
+							t.Fatalf("bits span%v slot%d: %x != %x", span, i, math.Float64bits(got.Values[i]), math.Float64bits(v))
+						}
+					}
+					return nil
+				}); e != nil {
+					t.Fatal(e)
+				}
+			}
+		})
 	}
 }

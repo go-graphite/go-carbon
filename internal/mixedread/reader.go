@@ -408,6 +408,56 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 	}
 	legacyMetric := resolved.Metric()
 	hasLegacy := binding != nil
+	// Resolve physical overlap before allocating or decoding legacy output.
+	// Zero/one-slot shapes retain the existing reconciliation below.
+	if hasLegacy {
+		step, start, end, ok := queryShape(legacyMetric, from, until, r.opts.Now().Unix())
+		if ok && (end-start)/step > 1 {
+			yes, e := h.HasOverlayRangeResolved(ctx, resolved, step, start, end)
+			if e != nil {
+				return e
+			}
+			if !yes {
+				old, e := r.fetchFrozen(ctx, q, binding, from, until)
+				if e != nil {
+					return e
+				}
+				return consume(old)
+			}
+			// Parts determine exact occupancy, including wrapped winners and NaNs.
+			// Fetch only through the last uncovered slot, preserving original from
+			// so the legacy engine selects exactly the same archive as native.
+			current, e := h.RenderResolvedTo(ctx, resolved, from, until, r.opts.Now().Unix(), nil, &q.current)
+			if e != nil {
+				return e
+			}
+			if current != nil && len(current.Values) > 1 {
+				if int64(len(current.Values)) > r.opts.Parts.WorkBytes/64 {
+					return partsread.ErrAdmission
+				}
+				prefix := len(current.Values)
+				for prefix > 0 && (current.Occupied[prefix-1] || r.opts.LegacyHorizon > 0 && current.From+int64(prefix-1)*current.Step > r.opts.LegacyHorizon) {
+					prefix--
+				}
+				if prefix == 0 {
+					return consume(current)
+				}
+				old, e := r.fetchFrozen(ctx, q, binding, from, current.From+int64(prefix-1)*current.Step)
+				if e != nil {
+					return e
+				}
+				if old != nil {
+					if old.From != current.From || old.Step != current.Step || len(old.Values) != prefix {
+						return ErrPolicy
+					}
+					if e := h.FillLegacyPrefix(ctx, current, old.Values); e != nil {
+						return e
+					}
+				}
+				return consume(current)
+			}
+		}
+	}
 	var old *partsread.Series
 	skipLegacy := hasLegacy && r.afterLegacyHorizon(legacyMetric, from)
 	if hasLegacy && !skipLegacy {
@@ -480,4 +530,38 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 	}
 	current.Values = old.Values
 	return consume(current)
+}
+
+// queryShape matches archive selection and next-slot alignment. Degenerate
+// ranges use the normal backend because archive population affects their shape.
+func queryShape(m partsread.Metric, from, until, now int64) (step, start, end int64, ok bool) {
+	if from > until || len(m.Archives) == 0 || now < 0 || now > math.MaxUint32 {
+		return
+	}
+	var retention int64
+	for _, a := range m.Archives {
+		if a.Step <= 0 || a.Points <= 0 || a.Points > math.MaxUint32/a.Step {
+			return
+		}
+		retention = max(retention, a.Step*a.Points)
+	}
+	if from > now || until < now-retention {
+		return
+	}
+	from, until = max(from, now-retention), min(until, now)
+	a := m.Archives[len(m.Archives)-1]
+	for _, candidate := range m.Archives {
+		if candidate.Step*candidate.Points >= now-from {
+			a = candidate
+			break
+		}
+	}
+	align := func(t int64) int64 {
+		rem := t % a.Step
+		if rem < 0 {
+			rem += a.Step
+		}
+		return t - rem + a.Step
+	}
+	return a.Step, align(from), align(until), true
 }
