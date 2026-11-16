@@ -353,7 +353,12 @@ func (s *Server) read(c net.Conn) error {
 		}
 	}
 	var source io.Reader = r
+	compressedPlain := false
 	if head[0] == 0x28 {
+		magic, peekErr := r.Peek(4)
+		compressedPlain = peekErr == nil && string(magic) == "\x28\xb5\x2f\xfd"
+	}
+	if compressedPlain {
 		z, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(64<<20))
 		if err != nil {
 			return err

@@ -287,7 +287,7 @@ func TestMalformedInputsAreCounted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			payload := []byte("bad\ngood 1 123\n")
+			payload := []byte("bad\n(metric 1 123\n")
 			if binary {
 				payload = wire(t, "binary-zstd", 0, 5)
 				payload[len(payload)-1] ^= 0x80
