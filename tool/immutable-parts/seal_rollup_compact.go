@@ -51,8 +51,8 @@ type compactSealWorkspace struct {
 // Idle scratch is bounded per workspace. Large one-off heads must not retain
 // their full materialized SST output indefinitely. Small steady heads retain
 // their buffers and remain allocation-free; oversized heads regrow on reuse.
-const compactIdleArenaBytes = 1 << 20
-const compactIdleKVs = 4096
+const compactIdleArenaBytes = 64 << 20
+const compactIdleKVs = 1 << 20
 
 func compactOutputClass(n int) int {
 	if n <= 1 {
