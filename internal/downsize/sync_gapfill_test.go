@@ -196,6 +196,26 @@ func TestGapfillSamplesAllRetentionsAndResume(t *testing.T) {
 	}
 }
 
+func TestGapfillDistinctSampleCandidates(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "union.tsv")
+	var lines strings.Builder
+	for i := range 110 {
+		name := fmt.Sprintf("m%03d", i)
+		if i == 50 {
+			name += strings.Repeat("x", 10000)
+		}
+		fmt.Fprintf(&lines, "%s\t1\t0\n", name)
+	}
+	if err := os.WriteFile(path, []byte(lines.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	names, err := gapfillSampleNames(path)
+	if err != nil || len(names) != 100 {
+		t.Fatal("expected 100 distinct candidates", len(names), err)
+	}
+}
+
 func TestReadyGapfillDifferentialPointBits(t *testing.T) {
 	t.Parallel()
 	f, o, r := newReadyFixture(t, 110)

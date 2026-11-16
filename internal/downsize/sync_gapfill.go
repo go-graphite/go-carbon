@@ -303,6 +303,25 @@ func gapfillSampleNames(path string) ([]string, error) {
 		}
 		selected[name] = true
 	}
+	// Uneven line lengths can make offsets select the same name. Top up from
+	// the beginning with a bounded read, retaining 100 distinct candidates when
+	// the inventory has that many names, and all names for smaller inventories.
+	if len(selected) < 100 {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		scan := bufio.NewScanner(f)
+		for len(selected) < 100 && scan.Scan() {
+			name, _, _, err := parseUnionLine(scan.Text())
+			if err != nil {
+				return nil, err
+			}
+			selected[name] = true
+		}
+		if err := scan.Err(); err != nil {
+			return nil, err
+		}
+	}
 	names := make([]string, 0, len(selected))
 	for name := range selected {
 		names = append(names, name)
