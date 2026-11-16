@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -19,49 +19,6 @@ import (
 // Descriptor bindings live in the same atomic manifest edit as data/frontier.
 // Files created before a failed ingest are never visible through this namespace.
 var sealedPartPrefix = []byte{255, 'V', '2', 'P', 0}
-
-// Startup holds the exclusive owner lock. Only bindings in the atomic data /
-// frontier ingest publish an original; a crash before ingest may leave links
-// or sidecars, which must not accumulate on repeated replay attempts.
-func removeUnpublishedParts(db *pebble.DB, dir string) error {
-	parts := filepath.Join(dir, "parts")
-	entries, err := os.ReadDir(parts)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	removed := false
-	for _, entry := range entries {
-		name := strings.TrimSuffix(entry.Name(), ".descriptor")
-		if !strings.HasSuffix(name, ".sst") || entry.IsDir() {
-			continue
-		}
-		digest, e := hex.DecodeString(strings.TrimSuffix(name, ".sst"))
-		if e != nil || len(digest) != sha256.Size {
-			continue
-		}
-		_, closer, e := db.Get(append(bytes.Clone(sealedPartPrefix), digest...))
-		if e == nil {
-			if e = closer.Close(); e != nil {
-				return e
-			}
-			continue
-		}
-		if !errors.Is(e, pebble.ErrNotFound) {
-			return e
-		}
-		if err := os.Remove(filepath.Join(parts, entry.Name())); err != nil {
-			return err
-		}
-		removed = true
-	}
-	if removed {
-		return SyncPartDirectory(parts)
-	}
-	return nil
-}
 
 func isRollupFile(file []coreKV) bool {
 	return len(file) > 0 && bytes.HasPrefix(file[0].Key, []byte{'G', 'C', 'P', 3})
@@ -136,12 +93,43 @@ func retainSealedPart(dir, path string, d v2part.Descriptor) (coreKV, []string, 
 	}
 	id := hex.EncodeToString(d.SHA256[:])
 	target := filepath.Join(parts, id+".sst")
-	if err = os.Link(path, target); err != nil {
+	if err = os.Link(path, target); errors.Is(err, os.ErrExist) {
+		// Replay can encounter an unpublished original still in its GC grace.
+		// The filename binds complete bytes; verify before reusing the link.
+		old, e := os.Open(target)
+		if e != nil {
+			return coreKV{}, saved, e
+		}
+		e = errors.Join(v2part.VerifyStream(context.Background(), io.Discard, old, d), old.Close())
+		if e != nil {
+			return coreKV{}, saved, e
+		}
+	} else if err != nil {
 		return coreKV{}, saved, err
+	} else {
+		saved = append(saved, target)
 	}
-	saved = append(saved, target)
 	sidecar := target + ".descriptor"
 	f, err := os.OpenFile(sidecar, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if errors.Is(err, os.ErrExist) {
+		old, e := os.ReadFile(sidecar)
+		if e != nil {
+			return coreKV{}, saved, e
+		}
+		if !bytes.Equal(old, b) {
+			return coreKV{}, saved, errors.New("existing descriptor mismatch")
+		}
+		// The sidecar can outlive an interrupted data-link deletion. A
+		// newly recreated link still needs directory durability before binding.
+		if e = SyncPartDirectory(parts); e != nil {
+			return coreKV{}, saved, e
+		}
+		if e = SyncPartDirectory(dir); e != nil {
+			return coreKV{}, saved, e
+		}
+		key := append(bytes.Clone(sealedPartPrefix), d.SHA256[:]...)
+		return coreKV{Key: key, Value: b}, saved, nil
+	}
 	if err != nil {
 		return coreKV{}, saved, err
 	}
