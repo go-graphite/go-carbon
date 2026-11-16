@@ -23,7 +23,7 @@ var errPredictorV3 = errors.New("invalid PDC3 journal block")
 
 type predictorV3State struct {
 	timestamp, delta  int64
-	clock             int64
+	clock, clockDelta int64
 	value             uint64
 	leading, trailing uint8
 	valid, window     bool
@@ -42,17 +42,24 @@ type predictorV3Entry struct {
 type PredictorV3Encoder struct {
 	Independent  bool
 	SeriesClocks bool
-	encoder      *zstd.Encoder
-	ids          map[string]int
-	entries      []predictorV3Entry
-	clock        int64
-	sequence     uint64
-	previousCRC  uint32
+	// ClockDeltaOfDelta retains every clock bit; requires SeriesClocks.
+	ClockDeltaOfDelta bool
+	// Accounting optionally collects exact pre-zstd field bytes.
+	Accounting  *PredictorV3Accounting
+	encoder     *zstd.Encoder
+	ids         map[string]int
+	entries     []predictorV3Entry
+	clock       int64
+	sequence    uint64
+	previousCRC uint32
 }
 
 func IsPredictorV3Record(b []byte) bool { return bytes.HasPrefix(b, predictorV3Magic) }
 
 func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
+	if e.ClockDeltaOfDelta && !e.SeriesClocks {
+		return nil, errPredictorV3
+	}
 	if len(fs) == 0 || len(fs) > predictorV3MaxRaw/3 {
 		return nil, errPredictorV3
 	}
@@ -66,6 +73,8 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	}
 	ids, entries := e.ids, e.entries
 	meta := binary.AppendUvarint(nil, uint64(len(fs)))
+	var account PredictorV3Accounting
+	account.Framing += int64(len(meta))
 	var values predictorV3Writer
 	clock := e.clock
 	for _, f := range fs {
@@ -77,29 +86,50 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 			id = len(entries)
 			ids[f.Key] = id
 			entries = append(entries, predictorV3Entry{key: f.Key, definition: bytes.Clone(f.Definition)})
+			start := len(meta)
 			meta = binary.AppendUvarint(meta, uint64(id)<<1|1)
+			account.IDs += int64(len(meta) - start)
+			start = len(meta)
 			meta = binary.AppendUvarint(meta, uint64(len(f.Key)))
 			meta = append(meta, f.Key...)
+			account.Names += int64(len(meta) - start)
+			start = len(meta)
 			meta = binary.AppendUvarint(meta, uint64(len(f.Definition)))
 			meta = append(meta, f.Definition...)
+			account.Definitions += int64(len(meta) - start)
 		} else {
 			if !bytes.Equal(entries[id].definition, f.Definition) {
 				return nil, errPredictorV3
 			}
+			start := len(meta)
 			meta = binary.AppendUvarint(meta, uint64(id)<<1)
+			account.IDs += int64(len(meta) - start)
 		}
 		s := &entries[id].predictorV3State
 		predictedClock := clock
 		if e.SeriesClocks {
 			predictedClock = s.clock
 		}
-		meta = binary.AppendVarint(meta, f.Clock-predictedClock)
+		clockDelta := f.Clock - predictedClock
+		encodedClock := clockDelta
+		if e.ClockDeltaOfDelta {
+			encodedClock -= s.clockDelta
+		}
+		s.clockDelta = clockDelta
+		start := len(meta)
+		meta = binary.AppendVarint(meta, encodedClock)
+		account.Clocks += int64(len(meta) - start)
 		s.clock = f.Clock
 		clock = f.Clock
+		start = len(meta)
 		meta = binary.AppendUvarint(meta, uint64(len(f.Points)))
+		account.Framing += int64(len(meta) - start)
+		account.Points += int64(len(f.Points))
 		for _, p := range f.Points {
 			delta := p.Timestamp - s.timestamp
+			start = len(meta)
 			meta = binary.AppendVarint(meta, delta-s.delta)
+			account.Timestamps += int64(len(meta) - start)
 			s.timestamp = p.Timestamp
 			s.delta = delta
 			v := math.Float64bits(p.Value)
@@ -140,6 +170,8 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	raw = append(raw, meta...)
 	raw = binary.AppendUvarint(raw, values.n)
 	raw = append(raw, values.b...)
+	account.Values = int64(len(values.b))
+	account.Framing += int64(len(raw) - len(meta) - len(values.b))
 	var err error
 	if e.encoder == nil {
 		e.encoder, err = zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithWindowSize(1<<20), zstd.WithEncoderCRC(true))
@@ -156,12 +188,20 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	if e.SeriesClocks {
 		b[4] |= 2
 	}
+	if e.ClockDeltaOfDelta {
+		b[4] |= 4
+	}
 	b = binary.LittleEndian.AppendUint64(b, e.sequence)
 	b = binary.LittleEndian.AppendUint32(b, e.previousCRC)
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(raw)))
 	b = e.encoder.EncodeAll(raw, b)
 	e.previousCRC = crc32.Checksum(b, predictorV3CRC)
 	e.sequence++
+	account.Headers = 25 + 32 // PDC3 header/checksum plus outer journal header.
+	account.Encoded = int64(len(b) + 4 + 32)
+	if e.Accounting != nil {
+		e.Accounting.add(account)
+	}
 	return binary.LittleEndian.AppendUint32(b, e.previousCRC), nil
 }
 
@@ -184,7 +224,7 @@ type PredictorV3Decoder struct {
 }
 
 func (d *PredictorV3Decoder) Decode(b []byte) ([]DictionaryFrame, error) {
-	if len(b) < 25 || len(b) > predictorV3MaxRaw+1<<20 || !IsPredictorV3Record(b) || b[4] > 3 {
+	if len(b) < 25 || len(b) > predictorV3MaxRaw+1<<20 || !IsPredictorV3Record(b) || b[4] > 7 || b[4]&4 != 0 && b[4]&2 == 0 {
 		return nil, errPredictorV3
 	}
 	n := int(binary.LittleEndian.Uint32(b[17:]))
@@ -251,7 +291,12 @@ func (d *PredictorV3Decoder) Decode(b []byte) ([]DictionaryFrame, error) {
 		if b[4]&2 != 0 {
 			clock = s.clock
 		}
-		clock += r.i()
+		clockDelta := r.i()
+		if b[4]&4 != 0 {
+			clockDelta += s.clockDelta
+		}
+		s.clockDelta = clockDelta
+		clock += clockDelta
 		s.clock = clock
 		np := r.u()
 		// At least one timestamp byte and one value bit exist per point.

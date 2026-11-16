@@ -46,3 +46,20 @@ arrival nanosecond and float bit is compared on each block. Policy definitions
 are empty because the source input-log record has no v2 policy definitions.
 This is a codec experiment and its first real consumer, not a daemon integration
 or a crash/replay qualification of the production journal.
+
+`-analysis` compares full-nanosecond same-series clocks and the reversible
+`ClockDeltaOfDelta` predictor at 4MiB decoded cuts, checking every tuple, frame
+boundary and definition. `fields.pre_zstd` counts exact serialized names, IDs,
+timestamps, value bytes (including final bit padding), clocks, definitions and
+framing. These sum to the raw zstd input; `Headers` adds the 25B PDC3 and 32B outer
+record headers. `Encoded` is the actual compressed total including headers.
+Individual compressed field sizes are undefined because fields share one zstd
+stream. No proportional allocation is presented as an exact compressed size.
+
+Add `-streams 1,4,8,16,32,64 -sample-points 250000 -repeats 8` to measure independent
+stream encoders on a repeated real corpus retained during analysis. Each stream
+has its own dictionary, predictors and single-thread zstd instance. Encode rates
+include allocations/GC and output retention; decode rates include full exact
+comparisons. The corpus is shared read-only. These finite CPU measurements exclude
+admission, writes/fsync and backend replay. They do not establish end-to-end
+capture throughput, sustained performance or a particular process-wide core cap.
