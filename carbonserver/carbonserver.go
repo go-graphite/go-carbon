@@ -359,6 +359,7 @@ type CarbonserverListener struct {
 	newMetricsQueue *helper.MetricQueue
 
 	v2Reader     *v2read.Reader
+	v2Union      bool
 	v2Catalog    atomic.Pointer[v2CatalogBinding]
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex

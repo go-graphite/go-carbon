@@ -63,16 +63,12 @@ func guardedStoreRead(parent context.Context, metricStore *store.Store, metric s
 
 func (listener *CarbonserverListener) fetchFromDisk(ctx context.Context, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
 	if listener.v2Reader != nil {
-		started := time.Now()
-		series, err := listener.v2Reader.Fetch(ctx, metric, int(fromTime), int(untilTime))
-		if err != nil {
-			return nil, err
-		}
-		if series == nil {
-			return nil, errors.New("time range not found")
-		}
-		return &metricFromDisk{DiskStartTime: started, Timeseries: series, Metadata: Metadata{ConsolidationFunc: titleizeAggrMethod(series.Metric.AggregationMethod), XFilesFactor: series.Metric.XFilesFactor}}, nil
+		return listener.fetchV2Union(ctx, metric, fromTime, untilTime)
 	}
+	return listener.fetchClassicFromDisk(ctx, metric, fromTime, untilTime)
+}
+
+func (listener *CarbonserverListener) fetchClassicFromDisk(ctx context.Context, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
 	metricStore := listener.getMetricStore()
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()
