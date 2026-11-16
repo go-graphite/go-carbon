@@ -57,6 +57,12 @@ func TestCompareRealConvertedSameSlots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(filepath.Join(c.dir, "converted")); !os.IsNotExist(err) {
+		t.Fatalf("real comparison rebuilt an existing target: %v", err)
+	}
+	if real.RebuiltConverted || real.ConvertedSSTBytes != 0 || real.ActualConvertedSSTBytes == 0 || real.ActualRatio <= 0 {
+		t.Fatalf("real target density confused with rebuild: %+v", real)
+	}
 	if !real.RealStoredSlots || !real.BitExact || real.Points != original.Points || real.Metrics != original.Metrics || real.ColdPackBlocks == 0 {
 		t.Fatalf("real slots comparison: %+v original %+v", real, original)
 	}

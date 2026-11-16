@@ -22,6 +22,7 @@ import (
 )
 
 type comparison struct {
+	RebuiltConverted                                   bool
 	Points, LegacySSTBytes, ConvertedSSTBytes          uint64
 	RealStoredSlots                                    bool
 	Metrics                                            uint64
@@ -236,6 +237,18 @@ func compare(ctx context.Context, c config) (comparison, error) {
 	if err != nil {
 		return out, err
 	}
+	if c.realConverted != "" {
+		if out.Points == 0 || out.LegacySSTBytes == 0 {
+			return out, errors.New("empty real compression comparison")
+		}
+		// The actual immutable target is already the comparison arm. Rebuilding
+		// it would create a second corpus of partition SSTs and staging receipts.
+		out.BitExact = true
+		out.LegacyBytesPerPoint = float64(out.LegacySSTBytes) / float64(out.Points)
+		out.ActualConvertedBytesPerPoint = float64(out.ActualConvertedSSTBytes) / float64(out.Points)
+		out.ActualRatio = float64(out.ActualConvertedSSTBytes) / float64(out.LegacySSTBytes)
+		return out, nil
+	}
 	db, err := pebble.Open(filepath.Join(c.dir, "converted"), &pebble.Options{})
 	if err != nil {
 		return out, err
@@ -314,6 +327,7 @@ func compare(ctx context.Context, c config) (comparison, error) {
 		return out, err
 	}
 	db = nil
+	out.RebuiltConverted = true
 	out.ConvertedSSTBytes, err = sstBytes(filepath.Join(c.dir, "converted"))
 	if err != nil {
 		return out, err
