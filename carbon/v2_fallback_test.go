@@ -106,9 +106,10 @@ func TestV2FallbackReadsClassicDuringShadow(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Give classic a deliberately different value: shadow must actually serve it.
+	committed := a.Persister.CommittedPoints()
 	a.Cache.AddRestoredBeforeInput(points.OnePoint("fallback.metric", 99, stamp))
 	deadline = time.Now().Add(5 * time.Second)
-	for !a.Cache.IsEmpty() {
+	for !a.Cache.IsEmpty() || a.Persister.CommittedPoints() <= committed {
 		if time.Now().After(deadline) {
 			t.Fatal("classic update did not drain")
 		}
