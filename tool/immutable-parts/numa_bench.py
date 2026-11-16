@@ -50,6 +50,9 @@ def main():
         for index, (node, mask) in enumerate(nodes):
             env = os.environ.copy()
             env['GOMAXPROCS'] = str(len(cpus(mask)))
+            # A shared phase origin also spreads one-owner processes.
+            if env.get('CORE_STAGGER_SEAL') == '1':
+                env['CORE_SEAL_PHASE'] = str(1024 * index // len(nodes))
             env.pop('CORE_OWNER_CPUS', None)
             env.pop('CORE_PRODUCER_CPUS', None)
             cmd = ['numactl', '--physcpubind=' + mask, '--membind=' + node,
