@@ -345,3 +345,51 @@ func TestCatalogFieldAccounting(t *testing.T) {
 		}
 	}
 }
+
+// Exercise recovery across compressed blocks without materialising decoded
+// checkpoint bytes. Binary keys and metadata survive checkpoint + suffix replay.
+func TestCatalogStreamingCheckpointSuffix(t *testing.T) {
+	dir := t.TempDir()
+	c, e := OpenNameCatalog(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	const count = 8192
+	definition := bytes.Repeat([]byte{0, 255, 17}, 100)
+	for i := 0; i < count; i++ {
+		key := string(binary.LittleEndian.AppendUint64([]byte("binary\x00"), uint64(i)))
+		if _, e = c.Intern(key, definition); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e = c.Checkpoint(); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = c.Intern("suffix", []byte{255}); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Sync(); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Close(); e != nil {
+		t.Fatal(e)
+	}
+	c, e = OpenNameCatalog(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer c.Close()
+	if c.Count() != count+1 {
+		t.Fatal(c.Count())
+	}
+	for i := 0; i < count; i++ {
+		key, def, ok := c.Lookup(uint64(i + 1))
+		want := string(binary.LittleEndian.AppendUint64([]byte("binary\x00"), uint64(i)))
+		if !ok || key != want || !bytes.Equal(def, definition) {
+			t.Fatal("entry", i)
+		}
+	}
+	if key, def, ok := c.Lookup(count + 1); !ok || key != "suffix" || !bytes.Equal(def, []byte{255}) {
+		t.Fatal("suffix")
+	}
+}

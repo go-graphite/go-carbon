@@ -83,41 +83,19 @@ func OpenNameCatalog(dir string) (*NameCatalog, error) {
 		return nil, e
 	}
 	c := &NameCatalog{dir: dir, ids: make(map[string]uint64), entries: []predictorV3Entry{{}}}
-	checkpoint, err := os.ReadFile(filepath.Join(dir, "catalog.checkpoint"))
+	checkpoint, err := os.Open(filepath.Join(dir, "catalog.checkpoint"))
 	hasCheckpoint := err == nil
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	if hasCheckpoint {
-		if len(checkpoint) < 40 {
-			return nil, errCatalog
-		}
-		c.epoch, err = parseCatalogHeader(checkpoint[:28])
+		err = c.recoverCheckpoint(checkpoint)
+		closeErr := checkpoint.Close()
 		if err != nil {
 			return nil, err
 		}
-		// A committed checkpoint has an explicit entry count and a whole-file CRC.
-		if crc32.Checksum(checkpoint[:len(checkpoint)-4], predictorV3CRC) != binary.LittleEndian.Uint32(checkpoint[len(checkpoint)-4:]) {
-			return nil, errCatalog
-		}
-		count := binary.LittleEndian.Uint64(checkpoint[28:36])
-		decoder, e := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(1<<30))
-		if e != nil {
-			return nil, e
-		}
-		raw, e := decoder.DecodeAll(checkpoint[36:len(checkpoint)-4], nil)
-		decoder.Close()
-		if e != nil {
-			return nil, e
-		}
-		r := bytes.NewReader(raw)
-		for range count {
-			if _, err = c.readRecord(r); err != nil {
-				return nil, err
-			}
-		}
-		if r.Len() != 0 {
-			return nil, errCatalog
+		if closeErr != nil {
+			return nil, closeErr
 		}
 	}
 	path := filepath.Join(dir, "catalog.wal")
@@ -184,6 +162,55 @@ func OpenNameCatalog(dir string) (*NameCatalog, error) {
 	}
 	c.buffer = bufio.NewWriterSize(c.wal, 1<<20)
 	return c, nil
+}
+
+// Recovery streams both compressed and decoded bytes. Memory beyond the live
+// catalog is bounded by the zstd window and one catalog record, not the total
+// checkpoint size. Check the whole-file CRC before publishing any entries.
+func (c *NameCatalog) recoverCheckpoint(f *os.File) error {
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() < 40 {
+		return errCatalog
+	}
+	crc := crc32.New(predictorV3CRC)
+	if _, err = io.Copy(crc, io.NewSectionReader(f, 0, st.Size()-4)); err != nil {
+		return err
+	}
+	var tail [4]byte
+	if _, err = f.ReadAt(tail[:], st.Size()-4); err != nil {
+		return err
+	}
+	if crc.Sum32() != binary.LittleEndian.Uint32(tail[:]) {
+		return errCatalog
+	}
+	var h [36]byte
+	if _, err = f.ReadAt(h[:], 0); err != nil {
+		return err
+	}
+	if c.epoch, err = parseCatalogHeader(h[:28]); err != nil {
+		return err
+	}
+	decoder, err := zstd.NewReader(io.NewSectionReader(f, 36, st.Size()-40), zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(64<<20))
+	if err != nil {
+		return err
+	}
+	defer decoder.Close()
+	for range binary.LittleEndian.Uint64(h[28:]) {
+		if _, err = c.readRecord(decoder); err != nil {
+			return err
+		}
+	}
+	var extra [1]byte
+	if n, err := decoder.Read(extra[:]); n != 0 || err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return errCatalog
+	}
+	return nil
 }
 func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 	var h [8]byte
