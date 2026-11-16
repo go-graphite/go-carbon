@@ -188,5 +188,9 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 		s.stages.dataBytes.Add(dataBytes)
 		s.stages.metadataBytes.Add(metadataBytes)
 	}
+	if err := s.appendSeal(id, in.Next.NextPart, &plan); err != nil {
+		plan.Abort()
+		return v2core.SealPlan{}, err
+	}
 	return plan, nil
 }

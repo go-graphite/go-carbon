@@ -1,17 +1,23 @@
 package v2backend
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/pebble"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/points"
@@ -146,6 +152,11 @@ func TestFixedAcceptedCorpus(t *testing.T) {
 		}
 	}
 	intake := time.Since(start).Seconds()
+	if coreOnly {
+		dumpFixedLevels(e.DBs(), "intake")
+	} else {
+		dumpFixedLevels(s.dbs, "intake")
+	}
 	settle := time.Now()
 	quiet := 0
 	for time.Since(settle) < 90*time.Second {
@@ -175,6 +186,12 @@ func TestFixedAcceptedCorpus(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 	}
+	if coreOnly {
+		dumpFixedLevels(e.DBs(), "after90s")
+	} else {
+		dumpFixedLevels(s.dbs, "after90s")
+		probeFixedReads(t, s, clock)
+	}
 	var rest, journal int64
 	_ = filepath.Walk(root, func(p string, info os.FileInfo, x error) error {
 		if x == nil && !info.IsDir() {
@@ -203,4 +220,52 @@ func TestFixedAcceptedCorpus(t *testing.T) {
 	elapsed := time.Since(start).Seconds()
 	count := float64(names * rounds)
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"fixed_corpus": "v2", "core_only": coreOnly, "points": names * rounds, "names": names, "rounds": rounds, "seals": rounds / perSeal, "intake_seconds": intake, "intake_points_per_second": float64(names*rounds) / intake, "complete_seconds": elapsed, "points_per_second": count / elapsed, "cpu_ns_per_point": cpu * 1e9 / count, "written_bytes": numericProcWriteBytes(t) - w0, "written_B_per_point": float64(numericProcWriteBytes(t)-w0) / count, "at_rest_B_per_point": float64(rest) / count, "journal_B_per_point": float64(journal) / count, "settled": quiet >= 5})
+}
+
+func dumpFixedLevels(dbs []*pebble.DB, phase string) {
+	for id, db := range dbs {
+		m := db.Metrics()
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"level_diagnostic": true, "phase": phase, "db": id, "levels": m.Levels})
+		tables, err := db.SSTables()
+		if err != nil {
+			panic(err)
+		}
+		for level, ts := range tables {
+			for _, table := range ts {
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"table_diagnostic": true, "phase": phase, "db": id, "level": level, "size": table.Size, "smallest": fmt.Sprintf("%x", table.Smallest.UserKey), "largest": fmt.Sprintf("%x", table.Largest.UserKey)})
+			}
+		}
+	}
+}
+func probeFixedReads(t *testing.T, s *Store, clock int64) {
+	t.Helper()
+	var latencies []int64
+	hash := sha256.New()
+	started := time.Now()
+	for round := 0; round < 5; round++ {
+		for i := 0; i < 64; i++ {
+			id := (i * 7919) % (1 << 20)
+			name := fmt.Sprintf("bench.namespace%d.cluster1.host%07d.component.requests.value", id%4, id)
+			begin := time.Now()
+			r, err := s.Fetch(context.Background(), name, int(clock-300), int(clock))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if round > 0 {
+				latencies = append(latencies, time.Since(begin).Nanoseconds())
+			}
+			var b [8]byte
+			for _, v := range []int{r.From, r.Until, r.Step, len(r.Values)} {
+				binary.LittleEndian.PutUint64(b[:], uint64(v))
+				_, _ = hash.Write(b[:])
+			}
+			for _, v := range r.Values {
+				binary.LittleEndian.PutUint64(b[:], math.Float64bits(v))
+				_, _ = hash.Write(b[:])
+			}
+			r.Release()
+		}
+	}
+	slices.Sort(latencies)
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"read_probe": true, "queries": len(latencies), "p50_us": float64(latencies[len(latencies)/2]) / 1e3, "p99_us": float64(latencies[len(latencies)*99/100]) / 1e3, "render_sha256": fmt.Sprintf("%x", hash.Sum(nil)), "seconds": time.Since(started).Seconds()})
 }

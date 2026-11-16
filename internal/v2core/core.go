@@ -26,6 +26,7 @@ var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
 	AppendParts                bool
+	AppendFrontiers            bool
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
 	Owners                     int
@@ -315,10 +316,30 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
 		}
 		o.meta = coreFrontier{Version: 1, Config: diskConfig, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
-		b, c, err := db.Get(coreMetaKey)
+		var b []byte
+		var c interface{ Close() error }
+		if cfg.AppendFrontiers {
+			it, e := db.NewIter(&pebble.IterOptions{LowerBound: coreMetaKey, UpperBound: []byte{255, 'g'}})
+			if e != nil {
+				return fail(e)
+			}
+			defer it.Close()
+			if it.Last() {
+				b = slices.Clone(it.Value())
+			} else {
+				err = pebble.ErrNotFound
+			}
+			if e = it.Error(); e != nil {
+				return fail(e)
+			}
+		} else {
+			b, c, err = db.Get(coreMetaKey)
+		}
 		if err == nil {
 			err = json.Unmarshal(b, &o.meta)
-			_ = c.Close()
+			if c != nil {
+				_ = c.Close()
+			}
 		} else if errors.Is(err, pebble.ErrNotFound) {
 			err = nil
 		}
@@ -978,8 +999,22 @@ func (o *coreOwner) sealNumeric(head []row, batches []coreBatch, applies []coreA
 				}
 			}
 		}
-		if err = batch.Set(coreMetaKey, meta, nil); err != nil {
+		for _, span := range plan.RangeDeletes {
+			if err = batch.DeleteRange(span[0], span[1], nil); err != nil {
+				return 0, err
+			}
+		}
+		frontierKey := coreMetaKey
+		if o.cfg.AppendFrontiers {
+			frontierKey = binary.BigEndian.AppendUint64(slices.Clone(coreMetaKey), next.NextPart)
+		}
+		if err = batch.Set(frontierKey, meta, nil); err != nil {
 			return 0, err
+		}
+		if o.cfg.AppendFrontiers && next.NextPart%64 == 0 {
+			if err = batch.DeleteRange(coreMetaKey, frontierKey, nil); err != nil {
+				return 0, err
+			}
 		}
 		n := uint64(len(batch.Repr()))
 		o.encodeNS.Add(uint64(time.Since(phaseStart)))
@@ -1014,11 +1049,37 @@ func (o *coreOwner) sealNumeric(head []row, batches []coreBatch, applies []coreA
 		}
 		total += uint64(st.Size())
 	}
+	if len(plan.RangeDeletes) > 0 {
+		retired, retiredPath, e := stage("retire")
+		if e != nil {
+			return 0, e
+		}
+		for _, span := range plan.RangeDeletes {
+			if e = retired.DeleteRange(span[0], span[1]); e != nil {
+				break
+			}
+		}
+		if e = errors.Join(e, retired.Close()); e != nil {
+			return 0, e
+		}
+		st, e := os.Stat(retiredPath)
+		if e != nil {
+			return 0, e
+		}
+		total += uint64(st.Size())
+	}
 	metadata, mp, err := stage("frontier")
 	if err != nil {
 		return 0, err
 	}
-	err = metadata.Set(coreMetaKey, meta)
+	frontierKey := coreMetaKey
+	if o.cfg.AppendFrontiers {
+		frontierKey = binary.BigEndian.AppendUint64(slices.Clone(coreMetaKey), next.NextPart)
+	}
+	err = metadata.Set(frontierKey, meta)
+	if err == nil && o.cfg.AppendFrontiers && next.NextPart%64 == 0 {
+		err = metadata.DeleteRange(coreMetaKey, frontierKey)
+	}
 	err = errors.Join(err, metadata.Close())
 	if err != nil {
 		return 0, err
@@ -1131,7 +1192,9 @@ func coreExpire(db *pebble.DB, before int64) error {
 	}
 	var meta coreFrontier
 	err = json.Unmarshal(b, &meta)
-	_ = c.Close()
+	if c != nil {
+		_ = c.Close()
+	}
 	if err != nil {
 		return err
 	}

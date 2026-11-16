@@ -10,7 +10,7 @@ import (
 func (s *Store) openCore() error {
 	engine, err := v2core.Open(filepath.Join(s.opts.DataDir, "core"), v2core.Config{
 		JournalIdentity: s.log.Identity(), Shards: s.opts.Shards, Producers: s.opts.Owners,
-		Owners: s.opts.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1",
+		Owners: s.opts.Shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, AppendFrontiers: true, RawCodec: "run1",
 	}, v2core.Hooks{PlanSeal: s.planCoreSeal, Publish: func(id int, snap *pebble.Snapshot, _ []v2core.Row) error {
 		_ = snap.Close()
 		if !s.coreViewsReady.Load() || s.coreViewsClosed.Load() {

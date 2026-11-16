@@ -38,9 +38,23 @@ func refPrefix(id int, name string) []byte {
 func (o *owner) recover() error {
 	o.meta = checkpoint{Version: 2, Journal: o.s.log.Identity()}
 	data, c, e := o.db.Get(metaKey(o.id))
+	if o.appendState != nil {
+		if c != nil {
+			_ = c.Close()
+			c = nil
+		}
+		data = o.appendState.metadata[string(metaKey(o.id))]
+		if data == nil {
+			e = pebble.ErrNotFound
+		} else {
+			e = nil
+		}
+	}
 	if e == nil {
 		e = o.readCheckpoint(data)
-		e = errors.Join(e, c.Close())
+		if c != nil {
+			e = errors.Join(e, c.Close())
+		}
 	} else if errors.Is(e, pebble.ErrNotFound) {
 		e = nil
 	}
@@ -86,13 +100,13 @@ func (o *owner) recover() error {
 	}
 	// Recover the reducer's physical slot view once, before any intake. Normal
 	// Append and seal never perform a Get/read-before-write against the database.
-	it, e := o.db.NewIter(&pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: []byte{'G', 'C', 'P', 4}})
+	it, e := o.db.NewIter(&pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', dataVersion(o)}, UpperBound: []byte{'G', 'C', 'P', dataVersion(o) + 1}})
 	if e != nil {
 		return e
 	}
 	defer it.Close()
 	for it.First(); it.Valid(); it.Next() {
-		k, e := partsformat.Decode(it.Key())
+		k, e := decodeDataKey(it.Key())
 		if e != nil {
 			return e
 		}

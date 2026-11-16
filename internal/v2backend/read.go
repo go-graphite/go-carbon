@@ -194,7 +194,14 @@ func (o *owner) publish() error {
 	}
 	retained := c.retained
 	snap := o.db.NewSnapshot()
-	source := &diskSource{snap: snap, owner: o.id, catalog: c}
+	var parts []*appendPart
+	if o.appendState != nil {
+		parts = slices.Clone(o.appendState.parts)
+		for _, part := range parts {
+			retained += int64(len(part.Prefix) + len(part.Filter)*8 + 48)
+		}
+	}
+	source := &diskSource{snap: snap, owner: o.id, catalog: c, parts: parts}
 	o.pub.Publish(partsread.View{Generation: o.meta.Cursor, Frontier: []uint64{o.meta.Cursor}, Catalog: c, Parts: []partsread.Source{source}, RetainedBytes: retained, Close: func() { _ = snap.Close() }})
 	o.readCatalog.Store(c)
 	base := &liveBase{catalog: c, cursor: o.meta.Cursor, frontiers: make(map[string]sealrollup.Frontier, len(o.metrics))}
@@ -202,7 +209,7 @@ func (o *owner) publish() error {
 		base.frontiers[n] = m.Frontier
 	}
 	bs := o.db.NewSnapshot()
-	base.source = &diskSource{snap: bs, owner: o.id, catalog: c}
+	base.source = &diskSource{snap: bs, owner: o.id, catalog: c, parts: parts}
 	base.pub.Publish(partsread.View{Generation: o.meta.Cursor, Catalog: c, Parts: []partsread.Source{base.source}, RetainedBytes: retained, Close: func() { _ = bs.Close() }})
 	if old := o.readBase.Swap(base); old != nil {
 		old.pub.Close()
@@ -214,6 +221,7 @@ type diskSource struct {
 	snap    *pebble.Snapshot
 	owner   int
 	catalog *catalog
+	parts   []*appendPart
 }
 
 func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, from, until int64, yield func(partsread.Sample) error) error {
@@ -232,12 +240,27 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 	if archive < 0 {
 		return errors.New("unknown archive")
 	}
-	prefix := refPrefix(d.owner, name)
-	refs, e := d.snap.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: partsformat.PrefixEnd(prefix)})
-	if e != nil {
-		return e
+	var prefixes [][]byte
+	if d.parts != nil {
+		for _, part := range d.parts {
+			if p := part.metricPrefix(name); p != nil {
+				prefixes = append(prefixes, p)
+			}
+		}
+	} else {
+		prefix := refPrefix(d.owner, name)
+		refs, e := d.snap.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: partsformat.PrefixEnd(prefix)})
+		if e != nil {
+			return e
+		}
+		for refs.First(); refs.Valid(); refs.Next() {
+			prefixes = append(prefixes, slices.Clone(refs.Value()))
+		}
+		if e = errors.Join(refs.Error(), refs.Close()); e != nil {
+			return e
+		}
 	}
-	defer refs.Close()
+	var e error
 	n := (until - from) / a.Step
 	var workspace partsrun.Workspace
 	policy := toDaemonMetric(m)
@@ -251,11 +274,11 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 		}
 		return nil
 	}
-	for refs.First(); refs.Valid(); refs.Next() {
+	for _, prefix := range prefixes {
 		if e = ctx.Err(); e != nil {
 			return e
 		}
-		p := slices.Clone(refs.Value())
+		p := slices.Clone(prefix)
 		compactPrefix := binary.BigEndian.AppendUint32(slices.Clone(p), compactArchive)
 		compact, err := d.snap.NewIter(&pebble.IterOptions{LowerBound: compactPrefix, UpperBound: partsformat.PrefixEnd(compactPrefix)})
 		if err != nil {
@@ -265,7 +288,7 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 			if e = ctx.Err(); e != nil {
 				break
 			}
-			if _, e = partsformat.Decode(compact.Key()); e != nil {
+			if _, e = decodeDataKey(compact.Key()); e != nil {
 				break
 			}
 			e = visitCompactRecords(compact.Value(), policy, &workspace, emit)
@@ -290,7 +313,7 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 				if e = ctx.Err(); e != nil {
 					break
 				}
-				k, err := partsformat.Decode(it.Key())
+				k, err := decodeDataKey(it.Key())
 				if err != nil {
 					e = err
 					break
@@ -310,7 +333,7 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 			}
 		}
 	}
-	return refs.Error()
+	return nil
 }
 
 // physicalRanges bounds archive reads to at most two physical ring intervals.

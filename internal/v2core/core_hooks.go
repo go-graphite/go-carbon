@@ -35,6 +35,8 @@ type coreSealPlan struct {
 	// Prefixes 0..2 are reserved for raw data. Prefix ff is reserved except
 	// ff V 2: this checkpoint namespace sorts strictly before frontier ff f.
 	Files [][]coreKV
+	// RangeDeletes are staged atomically with Files. Callers may only retire their own namespaces.
+	RangeDeletes [][2][]byte
 	// Commit publishes staged owner-local state after durable atomic ingestion.
 	// It cannot fail and must not retain mutable input buffers.
 	Commit func()
@@ -54,6 +56,11 @@ type coreHooks struct {
 }
 
 func validateCoreSealPlan(p coreSealPlan) error {
+	for _, span := range p.RangeDeletes {
+		if len(span[0]) == 0 || span[0][0] < 3 || span[0][0] == 255 || len(span[1]) == 0 || span[1][0] != span[0][0] || bytes.Compare(span[0], span[1]) >= 0 {
+			return errors.New("invalid extension retirement range")
+		}
+	}
 	var last []byte
 	for _, file := range p.Files {
 		if len(file) == 0 {

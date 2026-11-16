@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/daemonstore"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/partsops"
@@ -48,8 +50,33 @@ func TestPointUpdatesKeepDefinitionAndAdvanceExactActivity(t *testing.T) {
 				}
 			}
 			appendPoint()
+
+			// Inspect the logical catalog reconstructed from durable seal records. The
+			// core layout no longer stores replacement GCOP keys in the LSM.
+			logicalDB := func() *pebble.DB {
+				if engine != "core" {
+					return s.dbs[0]
+				}
+				db, e := pebble.Open("catalog", &pebble.Options{FS: vfs.NewMem()})
+				if e != nil {
+					t.Fatal(e)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				b := db.NewBatch()
+				defer b.Close()
+				for key, value := range s.owners[0].appendState.metadata {
+					if e = b.Set([]byte(key), value, nil); e != nil {
+						t.Fatal(e)
+					}
+				}
+				if e = b.Commit(pebble.Sync); e != nil {
+					t.Fatal(e)
+				}
+				return db
+			}
+			db := logicalDB()
 			var definitionKey, definition []byte
-			it, err := s.dbs[0].NewIter(nil)
+			it, err := db.NewIter(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +94,8 @@ func TestPointUpdatesKeepDefinitionAndAdvanceExactActivity(t *testing.T) {
 			}
 			clock += 10
 			appendPoint()
-			got, closer, err := s.dbs[0].Get(definitionKey)
+			db = logicalDB()
+			got, closer, err := db.Get(definitionKey)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,7 +104,7 @@ func TestPointUpdatesKeepDefinitionAndAdvanceExactActivity(t *testing.T) {
 			if !equal {
 				t.Fatal("ordinary points rewrote policy definition")
 			}
-			catalog, err := partsops.OpenCatalog(s.dbs[0], partsops.Scope{PlacementGroup: "service", VShard: partsformat.Route(partsformat.ID(name))})
+			catalog, err := partsops.OpenCatalog(db, partsops.Scope{PlacementGroup: "service", VShard: partsformat.Route(partsformat.ID(name))})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -330,7 +358,7 @@ func TestCorePortableRoutingAndRestartFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(marker, bytes.Replace(current, []byte("core-v2"), []byte("core-v1"), 1), 0600); err != nil {
+	if err := os.WriteFile(marker, bytes.Replace(current, []byte("core-v3-append"), []byte("core-v2"), 1), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if other, err := openAt(opts, time.Now); err == nil {

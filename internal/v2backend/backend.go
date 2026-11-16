@@ -100,6 +100,7 @@ type owner struct {
 	spare          []frame
 	meta           checkpoint
 	metrics        map[string]*metricState
+	appendState    *appendState
 	pub            partsread.Publication
 	readCatalog    atomic.Pointer[catalog]
 	readBase       atomic.Pointer[liveBase]
@@ -166,7 +167,7 @@ func (s *Store) initialize(beforeOwner func(int)) (err error) {
 	// Geometry and origin are restart invariants, never inferred from local IDs.
 	format := []byte(fmt.Sprintf("experimental-v2-single-origin-v1\nowners=%d\nshards=%d\n", opts.Owners, opts.Shards))
 	if opts.WriteEngine == "core" {
-		format = append(format, "write-engine=core-v2\n"...)
+		format = append(format, "write-engine=core-v3-append\n"...)
 	}
 	marker := filepath.Join(opts.DataDir, "V2FORMAT")
 	if old, e := os.ReadFile(marker); e == nil {
@@ -207,6 +208,9 @@ func (s *Store) initialize(beforeOwner func(int)) (err error) {
 			return err
 		}
 		s.numeric.Store(catalog)
+		if err = s.recoverAppendStates(); err != nil {
+			return err
+		}
 	}
 	for _, o := range s.owners {
 		i := o.id

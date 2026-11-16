@@ -109,6 +109,33 @@ func (o *owner) readCheckpoint(data []byte) error {
 	if err := d.end(); err != nil {
 		return err
 	}
+	if o.appendState != nil {
+		for key, value := range o.appendState.metadata {
+			for _, kind := range []byte{'M', 'R'} {
+				p := checkpointPrefix(o.id, kind)
+				if !bytes.HasPrefix([]byte(key), p) {
+					continue
+				}
+				name := key[len(p):]
+				if kind == 'M' {
+					m, e := decodeMetric(value)
+					if e != nil {
+						return e
+					}
+					if string(m.Name) != name {
+						return errors.New("checkpoint metric key mismatch")
+					}
+					o.meta.Metrics = append(o.meta.Metrics, m)
+				} else {
+					if len(value) != 8 {
+						return errors.New("invalid scope revision")
+					}
+					o.meta.Revisions[name] = binary.BigEndian.Uint64(value)
+				}
+			}
+		}
+		return nil
+	}
 	for _, kind := range []byte{'M', 'R'} {
 		p := checkpointPrefix(o.id, kind)
 		it, err := o.db.NewIter(&pebble.IterOptions{LowerBound: p, UpperBound: partsformat.PrefixEnd(p)})
