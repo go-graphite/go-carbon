@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/buckyd"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 )
 
@@ -522,4 +525,200 @@ func TestSyncReceiptResumeExecutableSwap(t *testing.T) {
 		t.Fatalf("bad recovery counters: %+v\n%s", p, after)
 	}
 	t.Logf("old refusal -> new fill16 done3854336 preserved; data names=%v ambiguous_receipt_names=2 redo_names.verify=2 phase_regressions=0", calls)
+}
+
+// A real old executable completes the first donor's fill and stops while the
+// second donor is gated. The replacement must retain that fill cursor and never
+// submit any already acknowledged name, without an agent editing saved state.
+func TestSyncFillExecutableSwap(t *testing.T) {
+	old, next := os.Getenv("STORECTL_SWAP_OLD"), os.Getenv("STORECTL_SWAP_NEW")
+	if old == "" || next == "" {
+		t.Skip("set STORECTL_SWAP_OLD and STORECTL_SWAP_NEW")
+	}
+	state := filepath.Join(t.TempDir(), "state")
+	source1, source2, target := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
+	names := []string{"fill.a", "fill.b", "fill.c", "fill.d"}
+	for i, n := range names {
+		addPoints(t, source1, n, float64(i+1))
+		addPoints(t, source2, n, float64(i+1))
+		// Retain the schema while leaving the fixed window empty on the receiver.
+		if _, err := target.Create(t.Context(), store.MetricConfig{Name: n, Retentions: []store.Retention{{Step: 10, Count: 128}}, AggregationMethod: store.Sum}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	donor1 := httptest.NewServer(nativeControllerService(t, source1))
+	defer donor1.Close()
+	donor1.URL = strings.Replace(donor1.URL, "127.0.0.1", "localhost", 1)
+	donor2 := httptest.NewServer(nativeControllerService(t, source2))
+	defer donor2.Close()
+	donor2.URL = strings.Replace(donor2.URL, "127.0.0.1", "localhost", 1)
+	entered, release := make(chan struct{}, 4), make(chan struct{})
+	var released atomic.Bool
+	defer func() {
+		if !released.Swap(true) {
+			close(release)
+		}
+	}()
+	var mu sync.Mutex
+	pulls := map[string]int{}
+	service, err := buckyd.New(buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 2, MaxBodyBytes: 1 << 20, TransferSources: []string{"127.0.0.1", "localhost"}}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Stop() })
+	h := service.Handler()
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/native/pull" {
+			raw, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			var req struct {
+				Range struct {
+					Source string
+					Names  []string
+				}
+			}
+			_ = json.Unmarshal(raw, &req)
+			if req.Range.Source == donor2.URL && !released.Load() {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			mu.Lock()
+			for _, n := range req.Range.Names {
+				pulls[req.Range.Source+"/"+n]++
+			}
+			mu.Unlock()
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer receiver.Close()
+	carbon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimRight(r.URL.Path, "/") == "/render" {
+			var req protov3.MultiFetchRequest
+			raw, _ := io.ReadAll(r.Body)
+			_ = req.UnmarshalVT(raw)
+			var out protov3.MultiFetchResponse
+			for _, m := range req.Metrics {
+				values := make([]float64, max(0, (m.StopTime-m.StartTime)/10))
+				for i := range values {
+					values[i] = math.NaN()
+				}
+				holder := target
+				if strings.HasPrefix(r.Host, "localhost:") {
+					holder = source1
+				}
+				snapshot, err := holder.Snapshot(r.Context(), m.Name)
+				if err == nil {
+					for _, a := range snapshot.Archives {
+						for _, p := range a.Points {
+							i := (p.Timestamp - m.StartTime) / 10
+							if p.Timestamp >= m.StartTime && i < int64(len(values)) {
+								values[i] = p.Value
+							}
+						}
+					}
+				}
+				out.Metrics = append(out.Metrics, &protov3.FetchResponse{Name: m.Name, StartTime: m.StartTime, StopTime: m.StopTime, StepTime: 10, Values: values})
+			}
+			raw, _ = out.MarshalVT()
+			_, _ = w.Write(raw)
+			return
+		}
+		var req protov3.MultiGlobRequest
+		raw, _ := io.ReadAll(r.Body)
+		_ = req.UnmarshalVT(raw)
+		var out protov3.MultiMetricsInfoResponse
+		for _, n := range req.Metrics {
+			out.Metrics = append(out.Metrics, &protov3.MetricsInfoResponse{Name: n, Retentions: []*protov3.Retention{{SecondsPerPoint: 10, NumberOfPoints: 128}}})
+		}
+		raw, _ = out.MarshalVT()
+		_, _ = w.Write(raw)
+	}))
+	defer carbon.Close()
+	u, _ := url.Parse(carbon.URL)
+	args := []string{"--source", donor1.URL, "--source", donor2.URL, "--to", receiver.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
+	start := func(binary string, args []string) (*exec.Cmd, <-chan error, *bytes.Buffer) {
+		cmd := exec.Command(binary, append([]string{"sync"}, args...)...)
+		cmd.Env = append(os.Environ(), "STORECTL_GRAPHITE_ADDR=127.0.0.1:0", "NO_PROXY=*", "no_proxy=*")
+		// Read this buffer only after the process exits.
+		log := new(bytes.Buffer)
+		cmd.Stdout, cmd.Stderr = log, log
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait(); close(done) }()
+		t.Cleanup(func() { _ = cmd.Process.Kill(); <-done })
+		return cmd, done, log
+	}
+	await := func(done <-chan error, log *bytes.Buffer) {
+		select {
+		case <-entered:
+		case err := <-done:
+			t.Fatalf("client exited: %v\n%s", err, log)
+		case <-time.After(20 * time.Second):
+			t.Fatal("fill gate not reached")
+		}
+	}
+	cmd, done, log := start(old, args)
+	await(done, log)
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("old executable did not stop")
+	}
+	prior := redoProgress(t, state)
+	if prior.Phase != "fill" || prior.Done != 4 {
+		t.Fatalf("not mid fill: %+v\n%s", prior, log)
+	}
+	_, done, log = start(next, []string{"--resume", state})
+	released.Store(true)
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("replacement failed: %v\n%s", err, log)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("replacement did not finish")
+	}
+	var saved struct {
+		Phase string
+		Done  int64
+	}
+	for _, line := range bytes.Split(log.Bytes(), []byte("\n")) {
+		var e struct {
+			Event, Phase string
+			Done         int64
+		}
+		if json.Unmarshal(line, &e) == nil && e.Event == "sync_phase_resumed" {
+			saved.Phase = e.Phase
+			saved.Done = e.Done
+			break
+		}
+	}
+	if saved.Phase != "fill" || saved.Done < prior.Done {
+		t.Fatalf("fill regressed: %+v -> %+v\n%s", prior, saved, log)
+	}
+	final := redoProgress(t, state)
+	for op, n := range final.RedoNames {
+		if n != 0 {
+			t.Fatalf("redo %s=%d", op, n)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, n := range names {
+		if pulls[donor1.URL+"/"+n] != 1 || pulls[donor2.URL+"/"+n] != 0 {
+			t.Fatalf("completed name imported again: %s pulls=%v", n, pulls)
+		}
+	}
+	t.Logf("old->new executable: fill done=%d->%d, completed names imported once; unnecessary second-donor fill omitted, redo_names=%v", prior.Done, saved.Done, final.RedoNames)
 }
