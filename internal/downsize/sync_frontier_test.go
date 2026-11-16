@@ -74,6 +74,7 @@ func (f *proofFixture) Digest(ctx context.Context, store string, names []string,
 func frontierFixture(t *testing.T) (*proofFixture, syncOptions) {
 	t.Helper()
 	f := &proofFixture{fakeSync: newFakeSync(), epoch: "one", unknown: map[string]bool{}, seen: map[string]bool{}}
+	f.listPageSize = 11 // two pages, distinct from the seven-name verification batches
 	for _, host := range []string{syncT, syncD1, syncD2} {
 		for i := range 20 {
 			f.put(host, fmt.Sprintf("metric.%02d", i), []syncArchive{{3600, 240}})

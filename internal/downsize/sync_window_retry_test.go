@@ -85,16 +85,17 @@ func TestSyncWindowRetryDifferentialBatches(t *testing.T) {
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
-	names := make([]string, 64)
+	const batchSize = 4
+	names := make([]string, 4*batchSize)
 	base := testMetricNow/60*60 - 120
 	for i := range names {
 		n := fmt.Sprintf("retry.%04d", i)
 		names[i] = n
 		value := float64(i) + 0.125
-		if i%17 == 0 {
+		if i%5 == 0 {
 			value = math.Copysign(0, -1)
 		}
-		if i%19 == 0 {
+		if i%7 == 0 {
 			value = math.SmallestNonzeroFloat64
 		}
 		ret := []store.Retention{{Step: 10, Count: 128}, {Step: 60, Count: 128}}
@@ -135,7 +136,7 @@ func TestSyncWindowRetryDifferentialBatches(t *testing.T) {
 			if err := json.Unmarshal(body, &request); err != nil {
 				t.Error(err)
 			}
-			if stage.Load() < 3 && len(request.Names) == 16 {
+			if stage.Load() < 3 && len(request.Names) == batchSize {
 				oversized.Add(1)
 				w.WriteHeader(http.StatusRequestEntityTooLarge)
 				return
@@ -154,12 +155,12 @@ func TestSyncWindowRetryDifferentialBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for start := 0; start < len(names); start += 16 {
+	for start := 0; start < len(names); start += batchSize {
 		var skipped []syncSkip
-		for _, n := range names[start : start+16] {
+		for _, n := range names[start : start+batchSize] {
 			skipped = append(skipped, syncSkip{n, syncWindowSelectionReason})
 		}
-		if err := j.append(syncRow{Kind: "window-selected", Round: start/16 + 1, Source: donor.URL, Skipped: skipped, SelectionComplete: true}); err != nil {
+		if err := j.append(syncRow{Kind: "window-selected", Round: start/batchSize + 1, Source: donor.URL, Skipped: skipped, SelectionComplete: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -223,9 +224,9 @@ func TestSyncWindowRetryDifferentialBatches(t *testing.T) {
 	}
 	stage.Store(3) // The independent oracle does not use the selection transport.
 	oracle := newSyncLiveBackend(syncLiveOptions{})
-	for start := 0; start < len(names); start += 16 {
-		result, err := oracle.CopyWindow(ctx, donor.URL, servers[1].URL, names[start:start+16], filepath.Join(t.TempDir(), "copy"), o.windows)
-		if err != nil || result.Copied != 16 {
+	for start := 0; start < len(names); start += batchSize {
+		result, err := oracle.CopyWindow(ctx, donor.URL, servers[1].URL, names[start:start+batchSize], filepath.Join(t.TempDir(), "copy"), o.windows)
+		if err != nil || result.Copied != batchSize {
 			t.Fatal(result, err)
 		}
 	}

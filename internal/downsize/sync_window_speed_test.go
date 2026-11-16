@@ -76,7 +76,9 @@ func TestSyncWindowEnvelopeSelectionDifferential(t *testing.T) {
 	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
 	base := testMetricNow/60*60 - 180
 	windows := syncRanges{{From: base, Until: base + 10}, {From: base + 120, Until: base + 130}}
-	names := make([]string, 64)
+	// Sixteen names retain all four timestamp positions, both special float
+	// values, overlap, the pending name and empty windows.
+	names := make([]string, 16)
 	for i := range names {
 		n := fmt.Sprintf("envelope.%02d", i)
 		names[i] = n

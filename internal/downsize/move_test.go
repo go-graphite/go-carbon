@@ -345,10 +345,37 @@ func TestJournalLockTruncationAndCompaction(t *testing.T) {
 	if _, err := openJournal(path, "plan"); err == nil {
 		t.Fatal("concurrent journal opened")
 	}
-	for i := range 300 {
-		if err := j.save(task{Stream: "stream", Start: int64(i), End: int64(i + 1), Phase: "done"}); err != nil {
+	// Seed the historical prefix with one sync. Compaction must replay all
+	// 300 distinct ranges, but only the boundary and tail need live saves.
+	encoder := json.NewEncoder(j.file)
+	for i := range 298 {
+		if err := encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, Task: task{Stream: "stream", Start: int64(i), End: int64(i + 1), Phase: "done"}}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := j.file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	j.close()
+	j, err = openJournal(path, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.sinceCompact = 254
+	for i, phase := range []string{"verified", "done"} {
+		if err := j.save(task{Stream: "stream", Start: 298, End: 299, Phase: phase}); err != nil {
+			t.Fatal(err)
+		}
+		want := 255
+		if i == 1 {
+			want = 0
+		}
+		if j.sinceCompact != want {
+			t.Fatalf("compaction counter = %d, want %d", j.sinceCompact, want)
+		}
+	}
+	if err := j.save(task{Stream: "stream", Start: 299, End: 300, Phase: "done"}); err != nil {
+		t.Fatal(err)
 	}
 	j.close()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
