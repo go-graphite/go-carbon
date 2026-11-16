@@ -13,7 +13,8 @@ import (
 )
 
 func TestNativeBoundedRetryCountsPendingIntentBeforeNewGap(t *testing.T) {
-	t.Parallel()
+	// This real-network recovery test has an eight-second operation budget.
+	// Keep fixture journal I/O out of the parallel integration-test burst.
 	for _, lostAck := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lost_ack=%t", lostAck), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
