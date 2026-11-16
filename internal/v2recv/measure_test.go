@@ -224,7 +224,13 @@ func TestMeasureTCP(t *testing.T) {
 		pprof.StopCPUProfile()
 		_ = profile.Close()
 	}
-	result := map[string]any{"mode": mode, "points": total, "connections": connections, "workers": workers, "shards": shards, "sent_seconds": sentSeconds, "complete_seconds": seconds, "points_per_second": float64(total) / seconds, "cpu_seconds": cpuSeconds, "cpu_ns_per_point": cpuSeconds * 1e9 / float64(total), "wire_bytes": wireBytes, "wire_bytes_per_point": float64(wireBytes) / float64(total), "sender_cpu_included": true}
+	result := map[string]any{"started_unix_nano": start.UnixNano(), "completed_unix_nano": start.Add(time.Duration(seconds * float64(time.Second))).UnixNano(), "mode": mode, "points": total, "connections": connections, "workers": workers, "shards": shards, "sent_seconds": sentSeconds, "complete_seconds": seconds, "points_per_second": float64(total) / seconds, "cpu_seconds": cpuSeconds, "cpu_ns_per_point": cpuSeconds * 1e9 / float64(total), "wire_bytes": wireBytes, "wire_bytes_per_point": float64(wireBytes) / float64(total), "sender_cpu_included": true}
+	if srv != nil {
+		result["receiver_stats"] = srv.Stats()
+		if srv.Stats().WireBytes != wireBytes {
+			t.Fatalf("socket byte mismatch: got %d want %d", srv.Stats().WireBytes, wireBytes)
+		}
+	}
 	if store != nil {
 		reader, e := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), v2core.Config{JournalIdentity: "core-first-fixed-v1", Producers: workers, Shards: shards, Owners: shards, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}, v2core.Hooks{})
 		if e != nil {
