@@ -75,3 +75,38 @@ func TestCatalogParallelCaptureVerification(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestUnseenNamesAcrossPackets(t *testing.T) {
+	fs := []partlog.DictionaryFrame{{Key: "binary\x00\xff", Definition: []byte{0, 255}, Clock: math.MinInt64}}
+	for i := 0; i < 37; i++ {
+		fs[0].Points = append(fs[0].Points, points.Point{Timestamp: int64(i) - 17, Value: math.Float64frombits(uint64(i))})
+	}
+	var ordinal uint64
+	var got []partlog.DictionaryFrame
+	for _, span := range [][2]int{{0, 7}, {7, 11}, {11, 37}} {
+		f := fs[0]
+		f.Points = f.Points[span[0]:span[1]]
+		got = append(got, unseenFrames([]partlog.DictionaryFrame{f}, &ordinal)...)
+	}
+	unseen := 0
+	position := 0
+	for _, f := range got {
+		for _, p := range f.Points {
+			if position%10 == 9 {
+				unseen++
+				if f.Key != fmt.Sprintf("\x00unseen/%d/%s", position, fs[0].Key) {
+					t.Fatal("unseen name", position, f.Key)
+				}
+			} else if f.Key != fs[0].Key {
+				t.Fatal("changed mature name")
+			}
+			if p.Timestamp != fs[0].Points[position].Timestamp || math.Float64bits(p.Value) != math.Float64bits(fs[0].Points[position].Value) || f.Clock != fs[0].Clock {
+				t.Fatal("tuple changed")
+			}
+			position++
+		}
+	}
+	if unseen != 3 || ordinal != 37 || position != 37 {
+		t.Fatal(unseen, ordinal, position)
+	}
+}

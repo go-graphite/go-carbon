@@ -31,6 +31,49 @@ var catalogSender = flag.String("catalog-sender", "", "internal disjoint sender:
 var catalogFixture = flag.String("catalog-fixture", "", "internal sender fixture")
 var catalogSendDuration = flag.Int("catalog-send-seconds", 120, "internal sender duration")
 var catalogSendStreams = flag.Int("catalog-send-streams", 32, "internal sender streams")
+var catalogRecapture = flag.String("catalog-recapture", "", "load a completed capture fixture instead of rereading the input log")
+var captureUnseen = flag.Bool("capture-unseen", false, "give every tenth point a new never-repeated name before durable encoding")
+
+// unseenFrames is deterministic across packet boundaries and fixture repeats.
+// It preserves every tuple and order, changing only every tenth point's name.
+func unseenFrames(fs []partlog.DictionaryFrame, ordinal *uint64) []partlog.DictionaryFrame {
+	var out []partlog.DictionaryFrame
+	for _, f := range fs {
+		for start := 0; start < len(f.Points); {
+			n := min(len(f.Points)-start, int(9-*ordinal%10))
+			g := f
+			if n == 0 {
+				n = 1
+				g.Key = fmt.Sprintf("\x00unseen/%d/%s", *ordinal, f.Key)
+			}
+			g.Points = f.Points[start : start+n]
+			out = append(out, g)
+			start += n
+			*ordinal += uint64(n)
+		}
+	}
+	return out
+}
+
+func catalogRecaptureMain() {
+	c, e := partlog.OpenNameCatalog(filepath.Join(*catalogRecapture, "template"))
+	must(e)
+	defer c.Close()
+	f, e := os.Open(filepath.Join(*catalogRecapture, "sender.fixture"))
+	must(e)
+	defer f.Close()
+	var fs []partlog.DictionaryFrame
+	for {
+		b, e := readPacket(f)
+		if e == io.EOF {
+			break
+		}
+		must(e)
+		frames, _ := catalogUnwire(b, c)
+		fs = append(fs, frames...)
+	}
+	catalogCapture(fs, *captureStreams, *captureSeconds)
+}
 
 func catalogExact(a, b []partlog.DictionaryFrame) {
 	if len(a) != len(b) {
@@ -335,6 +378,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var syncNS []int64
+	var catalogSyncNS []int64
 	start := time.Now()
 	startCPU := cpu()
 	must(cmd.Start())
@@ -354,6 +398,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 			file, e := os.Create(filepath.Join(dir, "segment"))
 			must(e)
 			defer file.Close()
+			var ordinal uint64
 			next := time.Now().Add(time.Second)
 			syncGroup := func() {
 				t := time.Now()
@@ -370,8 +415,20 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 				}
 				must(e)
 				frames, n := catalogUnwire(b, cat)
-				record, e := enc.EncodeDurable(frames)
+				if *captureUnseen {
+					frames = unseenFrames(frames, &ordinal)
+				}
+				record, e := enc.Encode(frames)
 				must(e)
+				// Catalog definitions must be durable before their journal record
+				// can be appended and eventually acknowledged by group sync.
+				t := time.Now()
+				must(cat.Sync())
+				if *captureUnseen {
+					mu.Lock()
+					catalogSyncNS = append(catalogSyncNS, time.Since(t).Nanoseconds())
+					mu.Unlock()
+				}
 				writePacket(file, record)
 				count.Add(n)
 				encoded.Add(int64(len(record) + 4))
@@ -389,6 +446,17 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	cores := float64(cpu()-startCPU) / 1e9 / wall
 	sort.Slice(syncNS, func(i, j int) bool { return syncNS[i] < syncNS[j] })
 	p99 := syncNS[min(len(syncNS)-1, len(syncNS)*99/100)]
+	var catalogP99 int64
+	if len(catalogSyncNS) > 0 {
+		sort.Slice(catalogSyncNS, func(i, j int) bool { return catalogSyncNS[i] < catalogSyncNS[j] })
+		catalogP99 = catalogSyncNS[len(catalogSyncNS)*99/100]
+		must(os.WriteFile(filepath.Join(root, "unseen"), []byte("every tenth point; per-stream ordinal\n"), 0600))
+	}
+	var durableBytes int64
+	for i := range streams {
+		durableBytes += catalogDisk(filepath.Join(root, fmt.Sprint(i)))
+	}
+	emit(map[string]any{"stage": "capture_storage", "points": count.Load(), "durable_bytes": durableBytes, "bpp": float64(durableBytes) / float64(count.Load()), "catalog_fsync_p99_ms": float64(catalogP99) / 1e6, "catalog_syncs": len(catalogSyncNS), "unseen": *captureUnseen})
 	emit(map[string]any{"stage": "capture", "streams": streams, "seconds_including_final_sync": wall, "points": count.Load(), "m_points_per_second": float64(count.Load()) / wall / 1e6, "cores": cores, "record_bpp": float64(encoded.Load()) / float64(count.Load()), "seed_catalog_bytes_per_stream": len(cp), "fsync_group_p99_ms": float64(p99) / 1e6, "group_syncs": len(syncNS), "exact": "tuple codec differential before run; sustained replay verification follows", "sender": "separate taskset96-191 process, raw TCP, repeated complete real cohort; capture taskset0-95"})
 	verified := catalogVerify(root, streams)
 	if verified != count.Load() {
@@ -402,6 +470,10 @@ func uvarintBytes(n uint64) int { var b [10]byte; return binary.PutUvarint(b[:],
 func catalogVerify(root string, streams int) int64 {
 	runtime.GOMAXPROCS(96)
 	fixture := filepath.Join(root, "sender.fixture")
+	_, unseenErr := os.Stat(filepath.Join(root, "unseen"))
+	if unseenErr != nil && !os.IsNotExist(unseenErr) {
+		must(unseenErr)
+	}
 	var wg sync.WaitGroup
 	var verified atomic.Int64
 	for i := range streams {
@@ -416,6 +488,7 @@ func catalogVerify(root string, streams int) int64 {
 			must(e)
 			source, e := os.Open(fixture)
 			must(e)
+			var ordinal uint64
 			for {
 				b, e := readPacket(file)
 				if e == io.EOF {
@@ -430,6 +503,9 @@ func catalogVerify(root string, streams int) int64 {
 				}
 				must(e)
 				expected, n := catalogUnwire(want, cat)
+				if unseenErr == nil {
+					expected = unseenFrames(expected, &ordinal)
+				}
 				verified.Add(n)
 				got, e := d.Decode(b)
 				must(e)

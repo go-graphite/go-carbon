@@ -103,6 +103,10 @@ func main() {
 	repeats := flag.Int("repeats", 8, "parallel real-corpus repetitions per stream")
 	manifest := flag.Bool("manifest", false, "headers/selection only")
 	flag.Parse()
+	if *catalogRecapture != "" {
+		catalogRecaptureMain()
+		return
+	}
 	if *catalogVerifyDir != "" {
 		n := catalogVerify(*catalogVerifyDir, *captureStreams)
 		emit(map[string]any{"stage": "capture_replay", "points": n, "exact": true})
