@@ -46,3 +46,28 @@ bytes, classic render windows, and the existing engine's controlled activity and
 revision metadata. The finite fixture additionally checks every reopened raw
 row, catalog entry, journal application, archive slot and metadata record.
 Throughput includes final Drain and Close; correctness read-back is outside time.
+
+Canonical rollups use persisted `RollupRoutingVersion: 1`: physical owner is
+`CRC32C(canonical name) % 4096 % owners`. All names in a portable virtual shard
+therefore share one physical owner. Numeric raw-only layers retain their original
+ID routing. The marker is part of the durable core configuration; old rollup roots
+without this marker fail configuration validation rather than silently changing
+ownership. Read consumers must use name routing for canonical layers. Placement
+group remains above virtual shard in every GCP3 key; no SST crosses either a
+placement-group or virtual-shard/partition boundary.
+
+The producer caches validated immutable identity routes without a shared lock.
+Each seal allocates sample and original-application descriptor arenas together;
+it preserves every original batch boundary and order. Per-metric key templates
+cache validated immutable identity bytes; output keys remain detached, with only
+part UUID, archive and physical slot filled during the seal. Archive, metadata,
+raw rows and owner frontier still publish in the same atomic ingest.
+
+`OpenReadOnly` opens Pebble in read-only mode and refuses core admission. It
+publishes persisted snapshots without reconstructing writable reducer state.
+The finite fixture uses it for complete raw and journal verification after the
+original timed Drain/Close; writable reopen/reducer recovery remains covered by
+the existing restart differential tests. `DefaultFixture.DeferArchiveOracle`
+explicitly defers the production-size classic archive scan. Literal small
+fixtures keep their complete archive/metadata oracle. The result labels this
+deferral and never reports an archive-oracle pass for that run.

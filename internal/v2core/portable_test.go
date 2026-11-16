@@ -230,9 +230,9 @@ func TestPortableDenseNewestSingletonWins(t *testing.T) {
 		k.Part = v2part.PartID{8}
 		value := bytes.Clone(kv.Value)
 		if k.Archive == v2part.MetadataArchive {
-			var m RollupMetadata
-			if e = json.Unmarshal(value, &m); e != nil {
-				t.Fatal(e)
+			m, err := DecodeRollupMetadata(value)
+			if err != nil {
+				t.Fatal(err)
 			}
 			m.Frontier.Order = 2
 			m.Revision++
@@ -295,7 +295,6 @@ func TestPortableDenseNewestSingletonWins(t *testing.T) {
 func TestDenseRuntimeSealExport(t *testing.T) {
 	_, policy := rollupTestPolicy(t, "test.runtime.dense", "1s:1d,1m:30d", sealrollup.Last, .5)
 	r := newCoreRollups()
-	r.dense = true
 	rows := []Row{{ID: 7, Time: 1700000000, Bits: 0x7ff8000000000042, Seq: 1}, {ID: 7, Time: 1700000001, Bits: 1 << 63, Seq: 2}, {ID: 7, Time: 1700000002, Bits: 1, Seq: 3}}
 	plan, err := r.plan(SealInput{Batches: []Batch{{ID: 7, Order: 1, Clock: 1700000003, Policy: policy, Points: rows}}})
 	if err != nil {

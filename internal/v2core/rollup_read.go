@@ -124,8 +124,9 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 				if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 					return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 				}
-				var meta RollupMetadata
-				if err = json.Unmarshal(it.Value(), &meta); err != nil {
+				meta, decodeErr := DecodeRollupMetadata(it.Value())
+				if decodeErr != nil {
+					err = decodeErr
 					return nil, err
 				}
 				var policy RollupPolicy

@@ -1,5 +1,5 @@
-// v2convert is an offline SST diagnostic and current-core repacker. Native
-// daemon SSTs are scan-only until a certified source adapter is installed.
+// v2convert repacks materialized core parts or an exclusively owned coherent
+// native checkpoint. Loose native SSTs support physical scan diagnostics only.
 package main
 
 import (
@@ -19,6 +19,10 @@ import (
 )
 
 func main() {
+	nativePlan := flag.String("native-plan", "", "certified coherent checkpoint plan JSON; enables native baseline materialization")
+	nativeWorkers := flag.Int("native-workers", 1, "native snapshot materializer workers (1..64)")
+	nativePrefix := flag.String("native-prefix", "", "catalog prefix if the native plan omits its bounded name selection")
+	nativeLimit := flag.Int("native-limit", 128, "maximum names to discover when the native plan omits names (1..10000)")
 	source := flag.String("source", "", "owned immutable SST directory")
 	output := flag.String("output", "", "repack materialized GCP3 SSTs to this directory; omit for scan only")
 	limit := flag.Int("limit", 0, "maximum number of source SSTs (0 = all)")
@@ -27,7 +31,7 @@ func main() {
 	stream := flag.String("source-stream", "", "original ordering stream; required for output")
 	flag.Parse()
 	var provenance v2part.Provenance
-	if *output != "" {
+	if *output != "" && *nativePlan == "" {
 		b, e := hex.DecodeString(*incarnation)
 		if e != nil || len(b) != 16 || *stream == "" {
 			fail(fmt.Errorf("original source-incarnation and source-stream required"))
@@ -38,6 +42,51 @@ func main() {
 	if *source == "" {
 		fmt.Fprintln(os.Stderr, "-source is required")
 		os.Exit(2)
+	}
+	if *nativePlan != "" {
+		if *output == "" {
+			fail(fmt.Errorf("native materialization requires -output"))
+		}
+		data, err := os.ReadFile(*nativePlan)
+		if err != nil {
+			fail(err)
+		}
+		var plan v2convert.NativeCheckpointPlan
+		if err := json.Unmarshal(data, &plan); err != nil {
+			fail(err)
+		}
+		begin := time.Now()
+		ctx := context.Background()
+		reader, err := v2convert.OpenNativeCheckpoint(ctx, *source, plan)
+		if err != nil {
+			fail(err)
+		}
+		if len(plan.Names) == 0 {
+			if *nativeLimit < 1 || *nativeLimit > 10000 {
+				reader.Close()
+				fail(fmt.Errorf("native-limit must be 1..10000"))
+			}
+			page, e := reader.ListCatalogPage(ctx, *nativePrefix, "", *nativeLimit)
+			if e != nil {
+				reader.Close()
+				fail(e)
+			}
+			for _, m := range page {
+				plan.Names = append(plan.Names, m.Name)
+			}
+		}
+		receipt, err := v2convert.ConvertNativeCheckpoint(ctx, reader, plan, *output, *memory<<20, *nativeWorkers)
+		closeErr := reader.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			fail(err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"native": true, "workers": *nativeWorkers, "seconds": time.Since(begin).Seconds(), "names": len(plan.Names), "receipt": receipt}); err != nil {
+			fail(err)
+		}
+		return
 	}
 	paths, err := filepath.Glob(filepath.Join(*source, "*.sst"))
 	if err != nil {

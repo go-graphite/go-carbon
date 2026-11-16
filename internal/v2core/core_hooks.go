@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // coreBatch retains an original apply boundary. Policy is an opaque, durable
@@ -35,6 +36,9 @@ type coreSealPlan struct {
 	// Prefixes 0..2 are reserved for raw data. Prefix ff is reserved except
 	// ff V 2: this checkpoint namespace sorts strictly before frontier ff f.
 	Files [][]coreKV
+	// PartSpecs is optional trusted coverage prepared by the rollup planner.
+	// It avoids reconstructing immutable policies from every metadata row.
+	PartSpecs []v2part.Spec
 	// Commit publishes staged owner-local state after durable atomic ingestion.
 	// It cannot fail and must not retain mutable input buffers.
 	Commit func()
@@ -45,7 +49,11 @@ type coreSealPlan struct {
 	Abort func()
 }
 type coreHooks struct {
-	// DenseRollups selects the versioned multi-slot codec for new seal files.
+	// PartSource identifies the durable original ordering stream for sealed parts.
+	// Zero uses the persisted journal identity (or an offline incarnation).
+	PartSource v2part.Provenance
+
+	// DenseRollups is retained for source compatibility; all rollup seals are dense.
 	DenseRollups bool
 
 	// Expire runs on the serial seal owner, after admitted batches are applied.
@@ -72,6 +80,9 @@ type coreHooks struct {
 }
 
 func validateCoreSealPlan(p coreSealPlan) error {
+	if len(p.PartSpecs) != 0 && len(p.PartSpecs) != len(p.Files) {
+		return errors.New("seal part specs/files mismatch")
+	}
 	var last []byte
 	for _, file := range p.Files {
 		if len(file) == 0 {

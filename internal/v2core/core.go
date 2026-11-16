@@ -4,6 +4,7 @@ package v2core
 // allocation and the durable input log. An ID is an identity, never a name hash;
 // only routing hashes the ID, so hash collisions cannot combine metric values.
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -20,12 +21,15 @@ import (
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
 	Rollups                    bool
+	RollupRoutingVersion       uint8
 	AppendParts                bool
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
@@ -70,7 +74,12 @@ const (
 	corePacketBytes = uint64(unsafe.Sizeof(corePacket{}))
 )
 
+type rollupRoute struct {
+	owner  int
+	policy []byte
+}
 type coreRouter struct {
+	rollupRoutes                map[uint64]rollupRoute
 	slots                       []coreDispatch
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
@@ -179,6 +188,7 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	partSource  v2part.Provenance
 	maintenance bool
 
 	stage func(string)
@@ -220,6 +230,7 @@ type coreEngine struct {
 	streamBytes  uint64
 	indexScatter bool
 	notifyWait   bool
+	readOnly     bool
 }
 
 // Hash only the canonical numeric ID, with stable distribution independent of
@@ -242,8 +253,21 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 	return openCoreWithHooks(root, cfg, coreHooks{Publish: hook})
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
+	return openCoreMode(root, cfg, hooks, false)
+}
+func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (*coreEngine, error) {
 	if cfg.Rollups && hooks.PlanSeal != nil {
 		return nil, errors.New("core rollups already own the seal planner")
+	}
+	if cfg.Rollups {
+		if cfg.RollupRoutingVersion == 0 {
+			cfg.RollupRoutingVersion = 1
+		}
+		if cfg.RollupRoutingVersion != 1 {
+			return nil, errors.New("unknown rollup routing version")
+		}
+	} else if cfg.RollupRoutingVersion != 0 {
+		return nil, errors.New("rollup routing requires rollups")
 	}
 	hook := hooks.Publish
 	if cfg.RawCodec == "" {
@@ -283,16 +307,34 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	diskConfig := cfg
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
-	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
+	e := &coreEngine{readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			_ = o.db.Close()
 		}
 		return nil, err
 	}
+	var partSource v2part.Provenance
+	if cfg.Rollups {
+		var err error
+		partSource, err = openPartSource(root, cfg.JournalIdentity, hooks.PartSource)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for s := 0; s < cfg.Shards; s++ {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
-		opts := &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+		opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+		if cfg.Rollups {
+			// Preserve dense part compression when the LSM rewrites group-wide
+			// ranges; default small Snappy blocks undo most of the SST byte saving.
+			opts.Levels = make([]pebble.LevelOptions, 7)
+			for i := range opts.Levels {
+				opts.Levels[i].Compression = pebble.ZstdCompression
+				opts.Levels[i].BlockSize = 256 << 10
+				opts.Levels[i].BlockRestartInterval = 64
+			}
+		}
 		opts.Experimental.TableCacheShards = 1
 		opts.BytesPerSync = 64 << 20
 		opts.EventListener = &pebble.EventListener{
@@ -309,7 +351,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{partSource: partSource, stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -348,13 +390,12 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			return fail(errors.New("owner format/config mismatch"))
 		}
 		o.publishFrontier(o.meta)
-		if cfg.Rollups {
+		if cfg.Rollups && !readOnly {
 			r, err := recoverCoreRollups(db)
 			if err != nil {
 				return fail(err)
 			}
 			r.stage = hooks.Stage
-			r.dense = hooks.DenseRollups
 			r.expire = hooks.Expire
 			r.now = hooks.Now
 			o.maintenance = hooks.Expire != nil
@@ -367,6 +408,11 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		}
 		for _, p := range files {
 			if err = os.Remove(p); err != nil {
+				return fail(err)
+			}
+		}
+		if cfg.Rollups {
+			if err = removeUnpublishedParts(db, dir); err != nil {
 				return fail(err)
 			}
 		}
@@ -421,6 +467,9 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 }
 
 func (e *coreEngine) submissionError() error {
+	if e.readOnly {
+		return os.ErrPermission
+	}
 	for _, o := range e.owners {
 		if failure := o.failure.Load(); failure != nil {
 			return failure.err
@@ -439,6 +488,41 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		return err
 	}
 	router := &e.routers[producer]
+	if e.cfg.Rollups {
+		if router.rollupRoutes == nil {
+			router.rollupRoutes = make(map[uint64]rollupRoute)
+		}
+		for _, b := range batches {
+			if route, ok := router.rollupRoutes[b.ID]; ok {
+				if !bytes.Equal(route.policy, b.Policy) {
+					return errors.New("stored rollup policy changed")
+				}
+			} else {
+				var p RollupPolicy
+				if err := json.Unmarshal(b.Policy, &p); err != nil {
+					return err
+				}
+				canonical, err := EncodeRollupPolicy(p)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(canonical, b.Policy) {
+					return errors.New("noncanonical rollup policy")
+				}
+				router.rollupRoutes[b.ID] = rollupRoute{owner: int(partsformat.Route(p.Name)) % e.cfg.Shards, policy: canonical}
+			}
+		}
+	}
+	routeID := func(id uint64) (int, error) {
+		if !e.cfg.Rollups {
+			return coreShard(id, e.cfg.Shards), nil
+		}
+		route, ok := router.rollupRoutes[id]
+		if !ok {
+			return 0, errors.New("rollup row requires original application policy")
+		}
+		return route.owner, nil
+	}
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
 		streamBytes = coreStreamBytes
@@ -509,7 +593,10 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	routes := d.routes[:len(rows)]
 	for i, r := range rows {
-		s := coreShard(r.ID, e.cfg.Shards)
+		s, err := routeID(r.ID)
+		if err != nil {
+			return err
+		}
 		routes[i] = s
 		counts[s]++
 	}
@@ -548,13 +635,50 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	var byOwner [][]coreBatch
 	if len(batches) > 0 {
+		// One immutable application and point arena per submitted packet. Owners
+		// retain these after releasing the dispatch lease; no caller slices or
+		// reusable routing storage escape into a seal or read snapshot.
 		byOwner = make([][]coreBatch, e.cfg.Shards)
-	}
-	for _, b := range batches {
-		owner := coreShard(b.ID, e.cfg.Shards)
-		b.Points = slices.Clone(b.Points)
-		b.Policy = slices.Clone(b.Policy)
-		byOwner[owner] = append(byOwner[owner], b)
+		clear(counts)
+		pointCount, policyBytes := 0, 0
+		for _, b := range batches {
+			owner, err := routeID(b.ID)
+			if err != nil {
+				return err
+			}
+			counts[owner]++
+			pointCount += len(b.Points)
+			if !e.cfg.Rollups {
+				policyBytes += len(b.Policy)
+			}
+		}
+		descriptors := make([]coreBatch, len(batches))
+		pointArena := make([]row, pointCount)
+		policyArena := make([]byte, policyBytes)
+		offset := 0
+		for owner, n := range counts {
+			byOwner[owner] = descriptors[offset : offset : offset+n]
+			offset += n
+		}
+		pointOffset, policyOffset := 0, 0
+		for _, b := range batches {
+			owner, err := routeID(b.ID)
+			if err != nil {
+				return err
+			}
+			n := copy(pointArena[pointOffset:], b.Points)
+			b.Points = pointArena[pointOffset : pointOffset+n : pointOffset+n]
+			pointOffset += n
+			if e.cfg.Rollups {
+				// The producer-local route owns its validated canonical bytes.
+				b.Policy = router.rollupRoutes[b.ID].policy
+			} else {
+				n = copy(policyArena[policyOffset:], b.Policy)
+				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]
+				policyOffset += n
+			}
+			byOwner[owner] = append(byOwner[owner], b)
+		}
 	}
 	var acks []chan error
 	if seal && waitSeal {
@@ -668,7 +792,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		o.meta = next
 		o.publishFrontier(next)
-		batches = nil
+		clear(batches)
+		batches = batches[:0]
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
 		o.bytes.Add(n)
@@ -962,7 +1087,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	var path string
-	if !plan.ReplaceRaw && !o.cfg.BlindBatch && len(head) > 0 {
+	if !plan.ReplaceRaw && (!o.cfg.BlindBatch || o.cfg.Rollups) && len(head) > 0 {
 		writer, path, err = stage("data")
 		if err != nil {
 			return 0, err
@@ -1044,7 +1169,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	if err != nil {
 		return 0, err
 	}
-	if o.cfg.BlindBatch {
+	if o.cfg.BlindBatch && !o.cfg.Rollups {
 		for _, file := range plan.Files {
 			for _, kv := range file {
 				if err = batch.Set(kv.Key, kv.Value, nil); err != nil {
@@ -1068,7 +1193,46 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		return n, nil
 	}
+	var descriptors []coreKV
+	var retained []string
+	defer func() {
+		if !durable {
+			for _, p := range retained {
+				_ = os.Remove(p)
+			}
+		}
+	}()
 	for i, file := range plan.Files {
+		if isRollupFile(file) {
+			xp := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
+			paths = append(paths, xp)
+			var d v2part.Descriptor
+			var e error
+			if len(plan.PartSpecs) == len(plan.Files) {
+				spec := plan.PartSpecs[i]
+				spec.Source.Incarnation = o.partSource.Incarnation
+				spec.Source.Stream = o.partSource.Stream
+				d, e = writePlannedRollupPart(xp, file, spec)
+			} else {
+				d, e = WriteDenseRollupPart(xp, file, o.partSource)
+			}
+			if e != nil {
+				return 0, e
+			}
+			// The shared writer closes and syncs its SST exactly once before return.
+			o.syncCalls.Add(1)
+			kv, saved, e := retainSealedPart(o.dir, xp, d)
+			retained = append(retained, saved...)
+			if e != nil {
+				return 0, e
+			}
+			descriptors = append(descriptors, kv)
+			total += d.Bytes
+			if o.stage != nil {
+				o.stage("part-retained")
+			}
+			continue
+		}
 		extra, xp, e := stage(fmt.Sprintf("extra-%03d", i))
 		if e != nil {
 			return 0, e
@@ -1088,6 +1252,23 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		total += uint64(st.Size())
 	}
+	if len(descriptors) > 0 {
+		slices.SortFunc(descriptors, func(a, b coreKV) int { return bytes.Compare(a.Key, b.Key) })
+		w, _, e := stage("parts")
+		if e != nil {
+			return 0, e
+		}
+		for _, kv := range descriptors {
+			if e = w.Set(kv.Key, kv.Value); e != nil {
+				break
+			}
+		}
+		e = errors.Join(e, w.Close())
+		if e != nil {
+			return 0, e
+		}
+	}
+
 	metadata, mp, err := stage("frontier")
 	if err != nil {
 		return 0, err
