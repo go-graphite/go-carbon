@@ -254,13 +254,14 @@ func OpenBlockPartWithCache(path string, resolve func([]byte) (uint64, error), c
 		if r.Offset+int64(r.Length) > info.Size() {
 			return fail(io.ErrUnexpectedEOF)
 		}
-		s.refs[string(b.Key)] = &fileBlock{ref: r}
+		s.refs[string(b.Key)] = &fileBlock{ref: r, archive: b.Archive}
 		s.retained += int64(2*len(b.Key) + 2*len(r.File) + 256)
 	}
 	s.SlotIndex, err = NewSlotIndex(slotBlocks(m.Blocks), s.readBlock)
 	if err != nil {
 		return fail(err)
 	}
+	s.SlotIndex.rangeFiltered = true
 	// Reserve the entire lazy cache capacity before publication, shared by
 	// every reader pinning this immutable generation.
 	var payloadBytes int64
@@ -289,6 +290,9 @@ func (s *BlockFileSource) Close() {
 // covers a cold fill only; readers never hold it while calling a consumer.
 type fileBlock struct {
 	ref     BlockRef
+	archive Archive
+	// slots is initialized before decoded.Store and immutable after that release.
+	slots   SlotRange
 	mu      sync.Mutex
 	decoded atomic.Pointer[[]Sample]
 }
@@ -345,15 +349,20 @@ func (s *BlockFileSource) cached(ctx context.Context, b *fileBlock) ([]Sample, e
 			return nil, err
 		}
 		samples := make([]Sample, len(payload)/sampleBytes)
+		span := SlotRange{From: b.archive.Points}
 		for i := range samples {
 			samples[i] = decodeBlockSample(payload[i*sampleBytes:])
+			slot := archiveSlot(samples[i].Time, b.archive)
+			span.From = min(span.From, slot)
+			span.Until = max(span.Until, slot+1)
 		}
+		b.slots = span
 		b.decoded.Store(&samples)
 		return samples, nil
 	}
 	return nil, nil
 }
-func (s *BlockFileSource) readBlock(ctx context.Context, key []byte, _ []SlotRange, yield func(Sample) error) error {
+func (s *BlockFileSource) readBlock(ctx context.Context, key []byte, ranges []SlotRange, yield func(Sample) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -369,9 +378,17 @@ func (s *BlockFileSource) readBlock(ctx context.Context, key []byte, _ []SlotRan
 		return err
 	}
 	if samples != nil {
-		for _, p := range samples {
-			if err := yield(p); err != nil {
-				return err
+		covered := false
+		for _, r := range ranges {
+			covered = covered || r.From <= b.slots.From && r.Until >= b.slots.Until
+		}
+		// A verified block wholly inside a selected span needs no per-version
+		// slot calculation or second callback. Samples stay borrowed in place.
+		for i := range samples {
+			if covered || selectedSlot(archiveSlot(samples[i].Time, b.archive), ranges) {
+				if err := yield(samples[i]); err != nil {
+					return err
+				}
 			}
 		}
 		return ctx.Err()
@@ -382,8 +399,13 @@ func (s *BlockFileSource) readBlock(ctx context.Context, key []byte, _ []SlotRan
 		return err
 	}
 	for len(payload) > 0 {
-		if err := yield(decodeBlockSample(payload)); err != nil {
-			return err
+		// CRC covers the complete block, but value/sequence decoding only
+		// touches requested physical slots, including every wrapped version.
+		timestamp := int64(binary.LittleEndian.Uint64(payload))
+		if selectedSlot(archiveSlot(timestamp, b.archive), ranges) {
+			if err := yield(decodeBlockSample(payload)); err != nil {
+				return err
+			}
 		}
 		payload = payload[sampleBytes:]
 	}

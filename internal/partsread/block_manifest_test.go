@@ -435,3 +435,88 @@ func TestRenderCancellationAtFinalSource(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBlockManifestRangeFilterDifferential(t *testing.T) {
+	for _, step := range []int64{1, 7, 60} {
+		a := Archive{Step: step, Points: 10}
+		var samples []Sample
+		for i := int64(-30); i < 30; i++ {
+			timestamp := i * step
+			if i%5 == 0 {
+				timestamp++
+			} // Preserve generic Scan's handling of unaligned data.
+			bits := []uint64{0x8000000000000000, 0x7ff8000000000042, 1, 0x7ff0000000000000, 0xfff0000000000000}[int(i+30)%5]
+			samples = append(samples, Sample{Time: timestamp, Bits: bits, Sequence: uint64(i + 31)})
+		}
+		block := SlotBlock{ID: 7, Archive: a, Slots: SlotRange{0, a.Points}, Key: []byte("complete/portable/range-block")}
+		path, err := PublishBlockPart(t.TempDir(), "ranges", 1, []BlockData{{SlotBlock: block, Samples: samples}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reference, err := NewSlotIndex([]SlotBlock{block}, func(_ context.Context, _ []byte, _ []SlotRange, yield func(Sample) error) error {
+			for _, p := range samples {
+				if err := yield(p); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, budget := range []int64{0, 1, DefaultBlockCacheBytes} {
+			s, err := OpenBlockPartWithCache(path, nil, budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for from := int64(-12); from < 12; from++ {
+				for _, width := range []int64{0, 1, 3, 9, 10, 14} {
+					var got, want []Sample
+					lo, hi := from*step, (from+width)*step
+					if err := reference.Scan(context.Background(), 7, a, lo, hi, func(p Sample) error { want = append(want, p); return nil }); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.Scan(context.Background(), 7, a, lo, hi, func(p Sample) error { got = append(got, p); return nil }); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("step%d cache%d [%d,%d) got%v want%v", step, budget, lo, hi, got, want)
+					}
+				}
+			}
+			s.Close()
+		}
+	}
+}
+
+func BenchmarkBlockManifestShortScan(b *testing.B) {
+	a := Archive{Step: 1, Points: 86400}
+	var blocks []BlockData
+	for n := 0; n < 64; n++ {
+		var samples []Sample
+		for i := 0; i < 512; i++ {
+			samples = append(samples, Sample{Time: int64(100 + i%60), Bits: uint64(i), Sequence: uint64(i + 1)})
+		}
+		blocks = append(blocks, BlockData{SlotBlock: SlotBlock{ID: 7, Archive: a, Slots: SlotRange{0, a.Points}, Key: []byte(fmt.Sprintf("block-%d", n))}, Samples: samples})
+	}
+	path, err := PublishBlockPart(b.TempDir(), "bench", 1, blocks)
+	if err != nil {
+		b.Fatal(err)
+	}
+	s, err := OpenBlockPart(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer s.Close()
+	yield := func(Sample) error { return nil }
+	if err = s.Scan(context.Background(), 7, a, 99, 161, yield); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err = s.Scan(context.Background(), 7, a, 99, 161, yield); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
