@@ -401,6 +401,18 @@ validated fixture resume and the post-run raw/rendered oracles are separate
 phases, outside both replay denominators.
 
 
+### Shared-host measurement safety
+
+A coalescing daemon may commit in bursts across its configured writeout delay.
+A short commit-rate window is unsuitable as an automatic stop condition. Declare
+host-health limits before starting IO and record the entire observation: write
+errors or dropped points, process epoch changes, cache growth above two billion
+points over baseline, or cache above three billion points stop only the private
+benchmark process group. Retry missing scrapes three times and enforce an
+absolute IO deadline. Judge commit/intake over at least the configured writeout
+delay, retaining device and daemon samples alongside the benchmark receipts.
+These experiment limits do not change daemon configuration.
+
 ### Continuous settlement and PDC4 live intake
 
 On shared benchmark hosts, `PARTLOG_BENCH_HISTORY_RATE=30000000` and
