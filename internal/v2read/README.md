@@ -71,4 +71,9 @@ full core completion timing, raw/archive-capable policies, per-arm read p50/p99,
 process census and load averages. The timed query workers alternate fine and
 coarse archive ranges. Set TMPDIR to a private host root, constrain
 CPU affinity and retain every row; shared results remain provisional. This
-harness has not established the <=10% ingest-loss gate.
+harness has not established the <=10% ingest-loss gate. Set `V2READ_SECONDS`
+to 1–60 to select each arm's duration (default 4). The result records every
+completed request's latency and divides request count by the actual reader
+completion interval. The fixture has four names, four producers and four owners;
+it measures unrestricted core ingestion with repeated corrections, rather than
+application TCP/journal throughput or a representative high-cardinality workload.
