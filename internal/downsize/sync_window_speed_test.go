@@ -32,13 +32,13 @@ func TestSyncWindowConcurrentDonorPins(t *testing.T) {
 	for range 2 {
 		source := nativeControllerStore(t)
 		addPoints(t, source, "metric", 1)
-		source.SetNativePendingSnapshot(func() (map[string]struct{}, error) {
+		source.SetNativeReady(func() error {
 			arrived <- struct{}{}
 			select {
 			case <-release:
-				return nil, nil
+				return nil
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return ctx.Err()
 			}
 		})
 		donor := httptest.NewServer(nativeControllerService(t, source))

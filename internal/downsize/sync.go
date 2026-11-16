@@ -818,7 +818,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		fillable := 0
 		for _, h := range holes {
 			k := syncKey{h.Name, h.Source}
-			if s.forbid[h.Source] || failedAttempts[k] >= 3 {
+			if s.forbid[h.Source] || failedAttempts[k] >= 3 || (s.windowOnly() && filledBefore[k]) {
 				continue
 			}
 			if !seen[k] {

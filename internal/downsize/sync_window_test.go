@@ -326,10 +326,8 @@ func TestSyncWindowSharedPinDifferentialBatches(t *testing.T) {
 		}
 	}
 	var pins atomic.Int64
-	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) {
-		pins.Add(1)
-		return map[string]struct{}{names[0]: {}}, nil
-	})
+	source.SetNativeReady(func() error { pins.Add(1); return nil })
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { return map[string]struct{}{names[0]: {}}, nil })
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
 	w := syncRange{From: testMetricNow - 10, Until: testMetricNow}
@@ -369,7 +367,7 @@ func TestSyncWindowSharedPinDifferentialBatches(t *testing.T) {
 		survivor.Close()
 		wantPins := int64(8)
 		if mode == 1 {
-			wantPins = 1
+			wantPins = 2 // selection proof and committed repair have separate pins
 		}
 		if got := pins.Load() - before; got != wantPins {
 			t.Fatalf("mode %d: pins %d, want %d", mode, got, wantPins)
@@ -402,7 +400,8 @@ func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
 	source := nativeControllerStore(t)
 	addPoints(t, source, "changing", 1)
 	var pins atomic.Int64
-	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { pins.Add(1); return nil, nil })
+	source.SetNativeReady(func() error { pins.Add(1); return nil })
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { return nil, nil })
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
 	backend := newSyncLiveBackend(syncLiveOptions{})
@@ -420,7 +419,7 @@ func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
 	if err := source.UpdateMany(ctx, "changing", []store.Point{{Timestamp: testMetricNow - 5, Value: 2}}); err != nil {
 		t.Fatal(err)
 	}
-	check(true)
+	check(true) // selection still rejects a revised source snapshot
 	backend.windowPinned = time.Now().Add(-syncWindowPinAge - time.Minute)
 	check(false)
 	if pins.Load() != 2 {

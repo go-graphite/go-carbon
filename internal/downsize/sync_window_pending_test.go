@@ -56,8 +56,7 @@ func TestSyncWindowRetriesDeferredWithinCall(t *testing.T) {
 				if n == 1 && mode != "stuck" && mode != "deadline" {
 					pending.Store(false)
 					if mode == "source" {
-						// The borrowed scan pin now has a stale revision. Retrying
-						// through that same pin would omit this name forever.
+						// Later live revisions must not invalidate the historical pin.
 						if err := source.UpdateMany(ctx, names[0], []store.Point{{Timestamp: testMetricNow - 2, Value: 7}}); err != nil {
 							t.Error(err)
 						}
@@ -111,7 +110,11 @@ func TestSyncWindowRetriesDeferredWithinCall(t *testing.T) {
 				}
 				return
 			}
-			if result.Copied != 2 || len(result.Failed) != 0 || pulls.Load() != 2 {
+			wantPulls := int32(2)
+			if mode == "source" {
+				wantPulls = 1 // queued and later revisions do not fence committed window history
+			}
+			if result.Copied != 2 || len(result.Failed) != 0 || pulls.Load() != wantPulls {
 				t.Fatal("did not resolve deferral within call", result, pulls.Load())
 			}
 			snap, err := target.Snapshot(ctx, names[0])
@@ -120,7 +123,7 @@ func TestSyncWindowRetriesDeferredWithinCall(t *testing.T) {
 			}
 			want := float64(42)
 			if mode == "source" {
-				want = 7
+				want = 1 // the first committed snapshot, not the later donor update
 			}
 			found := false
 			for _, a := range snap.Archives {
@@ -131,7 +134,7 @@ func TestSyncWindowRetriesDeferredWithinCall(t *testing.T) {
 			if !found {
 				t.Fatal("missing refreshed source or target-wins value", snap)
 			}
-			if result, err = b.CopyWindow(ctx, donor.URL, dst.URL, names, path, windows); err != nil || result.Copied != 2 || pulls.Load() != 2 {
+			if result, err = b.CopyWindow(ctx, donor.URL, dst.URL, names, path, windows); err != nil || result.Copied != 2 || pulls.Load() != wantPulls {
 				t.Fatal("completed receipt replayed", result, err, pulls.Load())
 			}
 		})

@@ -11,9 +11,9 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-// Real exporter/importer receipts reproduce a name omitted by a pending source
-// snapshot. Reusing the original pull would return its all-deferred receipt
-// forever, even after that source name becomes available.
+// Real exporter/importer receipts reproduce an absent target with pending
+// writes. Reusing the original pull would return its deferred receipt forever,
+// even after the target becomes available.
 func TestSyncWindowDeferredResume(t *testing.T) {
 	t.Parallel()
 	for _, lostAck := range []bool{false, true} {
@@ -26,12 +26,7 @@ func TestSyncWindowDeferredResume(t *testing.T) {
 			addPoints(t, target, names[1], 42)
 			var pending atomic.Bool
 			pending.Store(true)
-			source.SetNativePendingSnapshot(func() (map[string]struct{}, error) {
-				if pending.Load() {
-					return map[string]struct{}{names[0]: {}}, nil
-				}
-				return nil, nil
-			})
+			target.SetTransferPending(func(name string) bool { return name == names[0] && pending.Load() })
 			donor := httptest.NewServer(nativeControllerService(t, source))
 			defer donor.Close()
 			handler := nativeControllerService(t, target)
