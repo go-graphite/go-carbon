@@ -251,8 +251,11 @@ unknown configuration keys. A deliberately wrong expected mode raised ALERT
 without changing the process. Signed-zero verification used the binary response;
 the JSON response emitted integer zero and could not establish its sign bit.
 
-This exercises transition mechanics only. A separate classic-shadow override test
-still failed in that candidate; its owner must resolve it before qualification.
+This exercises transition mechanics only. An earlier classic-shadow override test
+failed because its fixture reused the query cache. With fixture query caches
+disabled, independent native build/vet, fallback/journal tests and focused races
+passed, followed by a second successful transition rehearsal. This test-only
+correction does not change production cache settings.
 The rehearsal does not establish full-stream/L3 parity, multiarchive historical
 cutover, production endpoint compatibility, sustained capacity or full operator
 guards. Repeat on the final integrated release artifact after every blocking
