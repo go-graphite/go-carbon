@@ -3,7 +3,7 @@
 package main
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -106,7 +106,7 @@ func storedComparisonInput(ctx context.Context, target string) (map[partsconvert
 		out[u] = append(out[u], *m)
 	}
 	for u := range out {
-		slices.SortFunc(out[u], func(a, b partsconvert.StoredMetric) int { return bytes.Compare(a.Name, b.Name) })
+		slices.SortFunc(out[u], func(a, b partsconvert.StoredMetric) int { return cmp.Compare(a.Name, b.Name) })
 	}
 	if len(out) == 0 {
 		return nil, errors.New("no real converted slots to compare")
