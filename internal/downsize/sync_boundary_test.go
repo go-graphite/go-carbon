@@ -20,8 +20,17 @@ func TestSyncClosedSparseBoundaryRepair(t *testing.T) {
 		existing := tc.existing
 		t.Run(map[bool]string{false: "hole", true: "target-wins"}[existing]+map[bool]string{false: "/trailing", true: "/historical"}[tc.later]+map[bool]string{false: "", true: "/recent"}[tc.recent]+map[bool]string{false: "", true: "/gap"}[tc.gap], func(t *testing.T) {
 			ctx := context.Background()
-			// Keep recent bucket closure independent of a wall-clock minute rollover.
-			clock := func() time.Time { return time.Unix(testMetricNow, 0) }
+			// The repair path intentionally uses real time. Put the recent
+			// source clock beyond the test deadline so its incomplete bucket
+			// cannot become historical while unrelated fixtures are running.
+			fixtureNow := time.Unix(testMetricNow, 0)
+			if tc.recent {
+				fixtureNow = time.Now().Add(time.Hour)
+				if deadline, ok := t.Deadline(); ok {
+					fixtureNow = deadline.Add(time.Minute)
+				}
+			}
+			clock := func() time.Time { return fixtureNow }
 			open := func() *store.Store {
 				db, e := store.Open("/db", store.Options{Now: clock, ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20}.WithFS(vfs.NewMem()))
 				if e != nil {
