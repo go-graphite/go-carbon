@@ -89,6 +89,9 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if len(prior.metrics[string(policy.Name)].partIDs) != 1 || len(index.metrics[string(policy.Name)].partIDs) != 2 {
+				t.Fatal("extending a directory changed an older pin's part authority")
+			}
 			for _, view := range []struct {
 				index *RollupSnapshot
 				order uint64

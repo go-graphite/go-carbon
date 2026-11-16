@@ -40,6 +40,7 @@ func TestClassicNameScale(t *testing.T) {
 	cfg.Common.MaxCPU = 4
 	cfg.Whisper.StoreDir = filepath.Join(root, "store")
 	cfg.Whisper.StoreEncoding = "exact"
+	cfg.Whisper.StoreSyncInterval = &Duration{time.Second}
 	cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
 	cfg.Buckyd.Enabled = false
 	writeSharedConfig(t, path, cfg)
