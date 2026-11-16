@@ -47,13 +47,13 @@ are empty because the source input-log record has no v2 policy definitions.
 This is a codec experiment and its first real consumer, not a daemon integration
 or a crash/replay qualification of the production journal.
 
-`-analysis` compares full-nanosecond same-series clocks and the reversible
-`ClockDeltaOfDelta` predictor at 4MiB decoded cuts, checking every tuple, frame
+`-analysis` compares full-nanosecond same-series clocks and the lossless
+`SparseClocks` bitmap at 4MiB decoded cuts, checking every tuple, frame
 boundary and definition. `fields.pre_zstd` counts exact serialized names, IDs,
 timestamps, value bytes (including final bit padding), clocks, definitions and
 framing. These sum to the raw zstd input; `Headers` adds the 25B PDC3 and 32B outer
 record headers. `Encoded` is the actual compressed total including headers.
-Individual compressed field sizes are undefined because fields share one zstd
+SparseClocks charges its presence bitmap to clock bytes. Individual compressed field sizes are undefined because fields share one zstd
 stream. No proportional allocation is presented as an exact compressed size.
 
 Add `-streams 1,4,8,16,32,64 -sample-points 250000 -repeats 8` to measure independent

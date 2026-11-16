@@ -20,7 +20,7 @@ import (
 // attribution of compressed bytes to fields.
 func analyze(segs []segment, partition int, rate float64, streamList string, sampleLimit, repeats int) {
 	var accounts [2]partlog.PredictorV3Accounting
-	ms := []*measurement{{Codec: "PDC3-series-clock", BlockMiB: 4}, {Codec: "PDC3-clock-dod", BlockMiB: 4}}
+	ms := []*measurement{{Codec: "PDC3-series-clock", BlockMiB: 4}, {Codec: "PDC3-sparse-clock", BlockMiB: 4}}
 	var sample []partlog.DictionaryFrame
 	samplePoints := 0
 	var sourceBytes, total int64
@@ -36,7 +36,7 @@ func analyze(segs []segment, partition int, rate float64, streamList string, sam
 		must(err)
 		emit(map[string]any{"stage": "analysis_source", "path": s.Path, "points": selected, "bytes": frontier, "created_ns": s.Created})
 		for i, m := range ms {
-			m.encoder = &partlog.PredictorV3Encoder{SeriesClocks: true, ClockDeltaOfDelta: i == 1, Accounting: &accounts[i]}
+			m.encoder = &partlog.PredictorV3Encoder{SeriesClocks: true, SparseClocks: i == 1, Accounting: &accounts[i]}
 			m.decoder = &partlog.PredictorV3Decoder{}
 		}
 		r, err := inputlog.NewSegmentReplay(view)
@@ -87,12 +87,17 @@ func analyze(segs []segment, partition int, rate float64, streamList string, sam
 			if n < 1 || n > 192 {
 				panic("streams out of range")
 			}
-			parallel(sample, n, repeats)
+			parallelCodec(sample, n, repeats, false)
+			parallelCodec(sample, n, repeats, true)
 		}
 	}
 }
 
 func parallel(fs []partlog.DictionaryFrame, streams, repeats int) {
+	parallelCodec(fs, streams, repeats, false)
+}
+
+func parallelCodec(fs []partlog.DictionaryFrame, streams, repeats int, sparse bool) {
 	if repeats < 1 {
 		panic("invalid repeats")
 	}
@@ -124,7 +129,7 @@ func parallel(fs []partlog.DictionaryFrame, streams, repeats int) {
 		go func(w int) {
 			defer wg.Done()
 			<-ready
-			e := partlog.PredictorV3Encoder{SeriesClocks: true}
+			e := partlog.PredictorV3Encoder{SeriesClocks: true, SparseClocks: sparse}
 			defer e.Close()
 			for range repeats {
 				for _, block := range blocks {
@@ -178,5 +183,5 @@ func parallel(fs []partlog.DictionaryFrame, streams, repeats int) {
 	decWall := time.Since(t).Seconds()
 	decCPU := cpu() - cpuStart
 	n := points * int64(streams) * int64(repeats)
-	emit(map[string]any{"stage": "parallel", "streams": streams, "gomaxprocs": streams, "points": n, "sample_points": points, "repeats": repeats, "encode_points_per_second": float64(n) / encWall, "decode_and_exact_compare_points_per_second": float64(n) / decWall, "encode_cpu_ns_per_point": float64(encCPU) / float64(n), "decode_compare_cpu_ns_per_point": float64(decCPU) / float64(n), "encode_wall_seconds": encWall, "decode_compare_wall_seconds": decWall, "exact": true, "scope": fmt.Sprintf("%d independent stream instances on repeated real immutable source; codec CPU+alloc, no admission/fsync/IO", streams)})
+	emit(map[string]any{"stage": "parallel", "sparse_clocks": sparse, "streams": streams, "gomaxprocs": streams, "points": n, "sample_points": points, "repeats": repeats, "encode_points_per_second": float64(n) / encWall, "decode_and_exact_compare_points_per_second": float64(n) / decWall, "encode_cpu_ns_per_point": float64(encCPU) / float64(n), "decode_compare_cpu_ns_per_point": float64(decCPU) / float64(n), "encode_wall_seconds": encWall, "decode_compare_wall_seconds": decWall, "exact": true, "scope": fmt.Sprintf("%d independent stream instances on repeated real immutable source; codec CPU+alloc, no admission/fsync/IO", streams)})
 }

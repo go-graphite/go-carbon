@@ -197,7 +197,7 @@ func FuzzPredictorV3Roundtrip(f *testing.F) {
 		if len(fs) == 0 {
 			return
 		}
-		e := PredictorV3Encoder{SeriesClocks: len(b) > 0 && b[0]&1 != 0, Independent: len(b) > 0 && b[0]&2 != 0, ClockDeltaOfDelta: len(b) > 0 && b[0]&5 == 5}
+		e := PredictorV3Encoder{SeriesClocks: len(b) > 0 && b[0]&1 != 0, Independent: len(b) > 0 && b[0]&2 != 0, SparseClocks: len(b) > 0 && b[0]&8 != 0}
 		defer e.Close()
 		var d PredictorV3Decoder
 		defer d.Close()

@@ -6,38 +6,36 @@ import (
 	"testing"
 )
 
-func TestPredictorV3ClockDeltaOfDeltaAndAccounting(t *testing.T) {
+func TestPredictorV3SparseClocksAndAccounting(t *testing.T) {
 	for _, independent := range []bool{false, true} {
-		var a PredictorV3Accounting
-		e := PredictorV3Encoder{SeriesClocks: true, ClockDeltaOfDelta: true, Independent: independent, Accounting: &a}
-		var d PredictorV3Decoder
-		fs := v3Fixture() // random signed clocks, overflow and special IEEE bits
-		var raw, encoded, count int64
-		for _, f := range [][]DictionaryFrame{fs[:800], fs[800:], fs} {
-			b, err := e.Encode(f)
-			if err != nil {
-				t.Fatal(err)
+		for _, sparse := range []bool{false, true} {
+			var a PredictorV3Accounting
+			e := PredictorV3Encoder{SeriesClocks: true, SparseClocks: sparse, Independent: independent, Accounting: &a}
+			var d PredictorV3Decoder
+			fs := v3Fixture() // random signed clocks, overflow and special IEEE bits
+			var raw, encoded, count int64
+			for _, f := range [][]DictionaryFrame{fs[:800], fs[800:], fs} {
+				b, err := e.Encode(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw += int64(binary.LittleEndian.Uint32(b[17:]))
+				encoded += int64(len(b) + 32)
+				got, err := d.Decode(b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				exactV3(t, f, got)
+				for _, x := range f {
+					count += int64(len(x.Points))
+				}
 			}
-			raw += int64(binary.LittleEndian.Uint32(b[17:]))
-			encoded += int64(len(b) + 32)
-			got, err := d.Decode(b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			exactV3(t, f, got)
-			for _, x := range f {
-				count += int64(len(x.Points))
+			e.Close()
+			d.Close()
+			if a.Points != count || a.Encoded != encoded || a.Names+a.IDs+a.Definitions+a.Clocks+a.Timestamps+a.Values+a.Framing != raw || a.Headers != 3*57 {
+				t.Fatalf("accounting %+v raw=%d encoded=%d points=%d", a, raw, encoded, count)
 			}
 		}
-		e.Close()
-		d.Close()
-		if a.Points != count || a.Encoded != encoded || a.Names+a.IDs+a.Definitions+a.Clocks+a.Timestamps+a.Values+a.Framing != raw || a.Headers != 3*57 {
-			t.Fatalf("accounting %+v raw=%d encoded=%d points=%d", a, raw, encoded, count)
-		}
-	}
-	e := PredictorV3Encoder{ClockDeltaOfDelta: true}
-	if _, err := e.Encode(v3Fixture()[:1]); err == nil {
-		t.Fatal("ambiguous predictor accepted")
 	}
 }
 
