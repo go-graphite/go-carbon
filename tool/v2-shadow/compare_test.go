@@ -40,6 +40,19 @@ func TestComparisonPresenceBitsAndCorrections(t *testing.T) {
 	}
 }
 
+func TestClassicFetchExcludedFromBoundary(t *testing.T) {
+	rows := []v2core.Row{{Time: 60, Bits: math.Float64bits(1)}, {Time: 61, Bits: math.Float64bits(2)}, {Time: 62, Bits: math.Float64bits(3)}, {Time: 63, Bits: math.Float64bits(4)}}
+	classic := &pb.FetchResponse{StartTime: 61, StepTime: 1, Values: []float64{2, 3, 4}, IsAbsent: []bool{false, false, false}}
+	n, bad, _, err := compareRaw("a", rows, classic, 60, 63)
+	if err != nil || n != 2 || bad != 0 {
+		t.Fatalf("excluded endpoints counted: n=%d bad=%d err=%v", n, bad, err)
+	}
+	n, bad, examples, err := compareRaw("a", rows[2:], classic, 60, 63)
+	if err != nil || n != 2 || bad != 1 || len(examples) != 1 || examples[0].Time != 61 {
+		t.Fatalf("lost an interior missing slot: n=%d bad=%d examples=%v err=%v", n, bad, examples, err)
+	}
+}
+
 func TestFrozenComparisonFreshSnapshotConvergence(t *testing.T) {
 	store, err := v2daemon.Open(t.TempDir(), v2daemon.Config{Layer: 2, Producers: 1, Shards: 1, GroupInterval: time.Second})
 	if err != nil {

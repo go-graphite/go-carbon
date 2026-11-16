@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math"
 	"net/http"
@@ -103,15 +104,17 @@ type candidate struct {
 	Name string
 }
 type compareJob struct {
-	Names          []candidate
-	Snapshots      []*pebble.Snapshot
-	From, Until    int64
-	SourcePath     string
-	SourceOffset   int64
-	SourceCaughtUp bool
-	Attempt        int
-	FirstSnapshot  time.Time
-	PostClose      bool
+	SourceLagSeconds     float64
+	SourceSegmentsBehind int
+	Names                []candidate
+	Snapshots            []*pebble.Snapshot
+	From, Until          int64
+	SourcePath           string
+	SourceOffset         int64
+	SourceCaughtUp       bool
+	Attempt              int
+	FirstSnapshot        time.Time
+	PostClose            bool
 }
 type slot struct{ Bits, Seq uint64 }
 type difference struct {
@@ -152,6 +155,11 @@ func compareRaw(name string, rows []v2core.Row, classic *pb.FetchResponse, from,
 	if step <= 0 || len(classic.IsAbsent) != len(classic.Values) {
 		return 0, 0, nil, errors.New("invalid classic response geometry")
 	}
+	// Whisper fetch starts at the next slot after from. Compare the actual
+	// returned slot coverage intersected with our frozen window; a raw point
+	// exactly at the excluded API boundary is not a missing classic slot.
+	from = max(from, int64(classic.StartTime))
+	until = min(until, int64(classic.StartTime)+int64(len(classic.Values))*step)
 	// Fine archives may have steps above one second. Restrict to exact timestamps;
 	// unaligned input needs original classic slot/apply semantics, not a raw oracle.
 	raw := map[int64]slot{}
@@ -224,6 +232,8 @@ func compare(job compareJob, base string, sums *totals) bool {
 	}
 	result := map[string]any{"stage": "comparison", "context": contextLoad(), "from": job.From, "until": job.Until, "source_path": job.SourcePath, "source_offset": job.SourceOffset, "source_caught_up_at_snapshot": job.SourceCaughtUp, "requested_names": len(job.Names), "names": job.Names, "attempt": job.Attempt, "since_first_snapshot_seconds": time.Since(job.FirstSnapshot).Seconds(), "scan_seconds": time.Since(start).Seconds()}
 	result["post_close_recheck"] = job.PostClose
+	result["source_lag_seconds"] = job.SourceLagSeconds
+	result["source_segments_behind"] = job.SourceSegmentsBehind
 	if scanErr != nil {
 		sums.Failures++
 		result["error"] = scanErr.Error()
@@ -274,12 +284,13 @@ func run() (retErr error) {
 	interval := flag.Duration("compare-interval", time.Minute, "comparison cadence")
 	sample := flag.Int("sample", 16, "rotating names per comparison")
 	lag := flag.Duration("lag", 120*time.Second, "fixed measured/exposed exclusion, not a parity waiver")
+	sampleEvery := flag.Uint64("sample-every", 1, "admit all points only for names whose FNV64a hash modulo this value is zero; 1 admits all")
 	recheck := flag.String("recheck", "", "one saved comparison JSON object to check against a stopped existing out root, opened read-only")
 	flag.Parse()
 	if *recheck != "" {
 		return recheckFrozen(*out, *recheck, *base, *shards)
 	}
-	if *source == "" || *out == "" || *duration <= 0 || *sample < 1 || *interval <= 0 || *lag < 0 {
+	if *source == "" || *out == "" || *duration <= 0 || *sample < 1 || *interval <= 0 || *lag < 0 || *sampleEvery < 1 {
 		return errors.New("source, fresh out and positive limits required")
 	}
 	sourceAbs, err := filepath.Abs(*source)
@@ -317,6 +328,45 @@ func run() (retErr error) {
 		return err
 	}
 	defer func() { tail.close() }()
+	// Decode the newest segment dictionary to its live edge before admitting.
+	// Historical frames are needed for decoder state, never submitted to the core.
+	warmup := time.Now()
+	var skipped uint64
+	for {
+		groups, _, e := tail.next()
+		if errors.Is(e, io.EOF) {
+			seq := binary.LittleEndian.Uint64(tail.header[8:])
+			nextPath := filepath.Join(*source, fmt.Sprintf("%016x.log", seq+1))
+			if _, e = os.Stat(nextPath); e == nil {
+				next, e := readyShadowTail(nextPath)
+				if e != nil {
+					return e
+				}
+				tail.close()
+				tail = next
+				path = nextPath
+				continue
+			}
+			if !errors.Is(e, os.ErrNotExist) {
+				return e
+			}
+			break
+		}
+		if errors.Is(e, io.ErrUnexpectedEOF) && time.Since(warmup) < time.Minute {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		if e != nil {
+			return fmt.Errorf("live-tail warmup: %w", e)
+		}
+		for _, g := range groups {
+			skipped += uint64(len(g.Data))
+		}
+		if time.Since(warmup) > time.Minute {
+			return errors.New("cannot reach live tail within one minute")
+		}
+	}
+	emit(map[string]any{"stage": "live_tail", "context": contextLoad(), "source_path": path, "source_offset": tail.offset, "skipped_history_points": skipped, "warmup_seconds": time.Since(warmup).Seconds()})
 	if err = os.Mkdir(*out, 0700); err != nil {
 		return fmt.Errorf("fresh output directory required: %w", err)
 	}
@@ -366,6 +416,8 @@ func run() (retErr error) {
 	var sequence, decodedBytes uint64
 	var partialSince time.Time
 	var caughtUp bool
+	lastCaughtUp := time.Now()
+	var decodedPoints uint64
 	batchNames := make([]string, 0, 32768)
 	batchData := make([]points.Point, 0, 32768)
 	batchSeq := make([]uint64, 0, 32768)
@@ -379,7 +431,7 @@ func run() (retErr error) {
 		batchSeq = batchSeq[:0]
 		return e
 	}
-	emit(map[string]any{"stage": "start", "context": contextLoad(), "source_path": path, "duration_seconds": duration.Seconds(), "raw_only": true, "fresh_history_from": from})
+	emit(map[string]any{"stage": "start", "context": contextLoad(), "source_path": path, "duration_seconds": duration.Seconds(), "raw_only": true, "sample_every": *sampleEvery, "fresh_history_from": from})
 	for time.Now().Before(deadline) {
 		now := time.Now()
 		if !now.Before(sealAt) {
@@ -402,9 +454,12 @@ func run() (retErr error) {
 			stats["source_caught_up"] = caughtUp
 			stats["source_bytes"] = decodedBytes
 			stats["names"] = len(names)
+			stats["decoded_points"] = decodedPoints
+			stats["sample_every"] = *sampleEvery
+			stats["source_lag_seconds"] = time.Since(lastCaughtUp).Seconds()
 			stats["journal_sync_groups"] = producer.SyncGroups
 			emit(stats)
-			until := now.Add(-*lag).Unix()
+			until := lastCaughtUp.Add(-*lag).Unix()
 			if until > from && len(candidates) > 0 && len(jobs) == 0 {
 				job := compareJob{From: from, Until: until, FirstSnapshot: now}
 				select {
@@ -430,6 +485,25 @@ func run() (retErr error) {
 					return err
 				}
 				job.SourcePath, job.SourceOffset, job.SourceCaughtUp = path, tail.offset, caughtUp
+				job.SourceLagSeconds = time.Since(lastCaughtUp).Seconds()
+				available, e := filepath.Glob(filepath.Join(*source, "*.log"))
+				if e != nil {
+					return e
+				}
+				if len(available) > 0 {
+					newest, e := strconv.ParseUint(strings.TrimSuffix(filepath.Base(available[len(available)-1]), ".log"), 16, 64)
+					if e != nil {
+						return e
+					}
+					current := binary.LittleEndian.Uint64(tail.header[8:])
+					if newest < current {
+						return errors.New("source epoch regressed")
+					}
+					job.SourceSegmentsBehind = int(newest - current)
+				}
+				if job.SourceLagSeconds > 10 || job.SourceSegmentsBehind != 0 {
+					return errors.New("comparison source backlog exceeds bound")
+				}
 				for _, db := range store.Core.DBs() {
 					job.Snapshots = append(job.Snapshots, db.NewSnapshot())
 				}
@@ -474,6 +548,7 @@ func run() (retErr error) {
 					}
 				}
 				caughtUp = true
+				lastCaughtUp = time.Now()
 			}
 			time.Sleep(25 * time.Millisecond)
 			continue
@@ -485,6 +560,10 @@ func run() (retErr error) {
 		partialSince = time.Time{}
 		decodedBytes += uint64(n)
 		for _, group := range groups {
+			decodedPoints += uint64(len(group.Data))
+			if !selectedName(group.Metric, *sampleEvery) {
+				continue
+			}
 			name, e := tags.Normalize(group.Metric)
 			if e != nil {
 				return e
@@ -493,7 +572,7 @@ func run() (retErr error) {
 			if !ok {
 				id = uint64(len(names) + 1)
 				names[name] = id
-				if id%8192 == 1 && len(candidates) < 4096 {
+				if (*sampleEvery > 1 || id%8192 == 1) && len(candidates) < 4096 {
 					candidates = append(candidates, candidate{id, name})
 				}
 			}
@@ -528,4 +607,14 @@ func main() {
 		os.Exit(1)
 	}
 	emit(map[string]any{"stage": "closed", "context": contextLoad()})
+}
+
+// Stable name selection retains every group/point for an admitted identity.
+func selectedName(name string, every uint64) bool {
+	if every == 1 {
+		return true
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return h.Sum64()%every == 0
 }
