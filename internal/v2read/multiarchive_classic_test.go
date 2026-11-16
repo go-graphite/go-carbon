@@ -166,6 +166,7 @@ func boundaryClassicSlots(t *testing.T, path string, c sealrollup.Config, candid
 }
 
 func TestClassicArchiveBoundaries(t *testing.T) {
+	dir := t.TempDir()
 	for _, def := range boundarySchemas {
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			for _, xff := range []float32{0, .5, math.Nextafter32(.5, 1), 1} {
@@ -178,13 +179,16 @@ func TestClassicArchiveBoundaries(t *testing.T) {
 						archives = append(archives, Archive{Step: int64(r.SecondsPerPoint()), Points: int64(r.NumberOfPoints())})
 					}
 					clock := int64(1794700837)
-					path := filepath.Join(t.TempDir(), "classic.wsp")
+					path := filepath.Join(dir, "classic.wsp")
 					w, err := whisper.CreateWithOptions(path, retentions, whisper.AggregationMethod(method), xff, &whisper.Options{Sparse: true, Now: func() time.Time { return time.Unix(clock, 0) }})
 					if err != nil {
 						t.Fatal(err)
 					}
 					defer func() {
 						if err := w.Close(); err != nil {
+							t.Error(err)
+						}
+						if err := os.Remove(path); err != nil {
 							t.Error(err)
 						}
 					}()
