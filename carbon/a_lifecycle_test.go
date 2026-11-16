@@ -20,7 +20,12 @@ func TestStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 }
 
 func TestSharedStoreRestartHandsInputOver(t *testing.T) {
-	parallelTestMatrix(t) // Each subtest owns an isolated process.
+	parallelTestMatrix(t)
+	// Keep one exclusive fixture across the matrix, including the intervals
+	// between cases, instead of reacquiring it behind unrelated startups.
+	if isolatedTestProcessSerial(t) {
+		return
+	}
 	testSharedStoreRestartHandsInputOver(t)
 }
 
