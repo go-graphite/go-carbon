@@ -36,9 +36,6 @@ func TestSyncFillReplayDoesNotAdvertiseFreshWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer j.close()
-	if err := j.append(syncRow{Kind: "copied", Phase: "fill", Round: 1, Source: syncD1, Names: 1, Copied: 1}); err != nil {
-		t.Fatal(err)
-	}
 	s := &syncer{o: o, j: j, started: time.Now(), copied: map[string]bool{}, forbid: map[string]bool{}}
 	s.sum.phases = map[string]*syncPhase{}
 	inspected := false
@@ -52,6 +49,16 @@ func TestSyncFillReplayDoesNotAdvertiseFreshWork(t *testing.T) {
 		}
 	}}
 	if err := s.discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.verifyRound(context.Background(), 1, s.unionSource()); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := s.fillIdentity(1, 0, []string{"first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.append(syncRow{Kind: "copied", Identity: identity, Phase: "fill", Round: 1, Source: syncD1, Names: 1, Copied: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.verifyAndFill(context.Background()); !errors.Is(err, context.Canceled) {
