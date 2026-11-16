@@ -76,13 +76,18 @@ func (e *coreEngine) submitCompactRollupGroup(producer int, h *compactRollupHead
 // Compact run value: version, compression flag, count, original clock, payload.
 // Identity/order/archive live in the immutable key; policy is persisted once.
 func compactRunValue(h *compactRollupHead, m compactRollupBatch) []byte {
-	out := make([]byte, 18, 18+m.end-m.start)
-	out[0] = 1
+	return appendCompactRunValue(make([]byte, 0, 18+m.end-m.start), h, m)
+}
+
+func appendCompactRunValue(out []byte, h *compactRollupHead, m compactRollupBatch) []byte {
+	at := len(out)
+	out = append(out, make([]byte, 18)...)
+	out[at] = 1
 	if m.compressed {
-		out[1] = 1
+		out[at+1] = 1
 	}
-	binary.BigEndian.PutUint64(out[2:], uint64(m.count))
-	binary.BigEndian.PutUint64(out[10:], uint64(m.clock))
+	binary.BigEndian.PutUint64(out[at+2:], uint64(m.count))
+	binary.BigEndian.PutUint64(out[at+10:], uint64(m.clock))
 	return append(out, h.data[m.start:m.end]...)
 }
 
@@ -139,7 +144,17 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 	pending := make([]pendingMetric, 0, len(descriptors))
 	data := make([]coreKV, 0, 5*len(descriptors))
 	meta := make([]coreKV, 0, 2*len(descriptors)+1)
+	// One pointer-free arena owns the planned SST bytes until synchronous ingest
+	// completes. Thousands of tiny key/value objects otherwise feed the shared
+	// runtime mark queues as owner count grows. Growth preserves earlier slices;
+	// no arena survives through committed history or is shared with another owner.
+	rawBytes := 0
+	for _, m := range descriptors {
+		rawBytes += 49 + m.end - m.start
+	}
+	arena := make([]byte, 0, 2*rawBytes+512*len(descriptors))
 	var scratch []sealrollup.Sample
+	var batches []sealrollup.Batch
 	var decoder compactRollupHead
 	if g.head != nil {
 		decoder.data, decoder.policies = g.head.data, g.head.policies
@@ -206,7 +221,7 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 			scratch = make([]sealrollup.Sample, total)
 		}
 		rows := scratch[:total]
-		batches := make([]sealrollup.Batch, 0, len(ms))
+		batches = batches[:0]
 		for _, m := range ms {
 			batch, e := decoder.decodeBatch(m, rows[:m.count])
 			if e != nil {
@@ -245,34 +260,45 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 				hi++
 			}
 			records := p.Records[lo:hi]
-			value, e := partsrun.AppendWithWorkspace(nil, 0, len(records), func(i int) partsrun.Sample {
+			at := len(arena)
+			arena = appendRollupDataKey(arena, in.Next.NextPart, id, 'b', uint32(records[0].Archive), 0)
+			mid := len(arena)
+			arena, e = partsrun.AppendWithWorkspace(arena, 0, len(records), func(i int) partsrun.Sample {
 				r := records[i]
 				return partsrun.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order}
 			}, &o.historyScratch.codec)
 			if e != nil {
 				return plan, e
 			}
-			data = append(data, coreKV{Key: rollupDataKey(in.Next.NextPart, id, 'b', uint32(records[0].Archive), 0), Value: value})
+			data = append(data, coreKV{Key: arena[at:mid:mid], Value: arena[mid:len(arena):len(arena)]})
 			lo = hi
 		}
 		for _, m := range ms {
-			data = append(data, coreKV{Key: rollupDataKey(in.Next.NextPart, id, 'c', 0, m.order), Value: compactRunValue(g.head, m)})
+			at := len(arena)
+			arena = appendRollupDataKey(arena, in.Next.NextPart, id, 'c', 0, m.order)
+			mid := len(arena)
+			arena = appendCompactRunValue(arena, g.head, m)
+			data = append(data, coreKV{Key: arena[at:mid:mid], Value: arena[mid:len(arena):len(arena)]})
 		}
 		v, e := json.Marshal(p.Next)
 		if e != nil {
 			return plan, e
 		}
-		k := rollupMetaKey('s', id)
-		k[0] = 'T'
-		meta = append(meta, coreKV{k, v})
+		addMeta := func(kind byte, value []byte) {
+			at := len(arena)
+			arena = append(arena, 'T', kind)
+			arena = binary.BigEndian.AppendUint64(arena, id)
+			mid := len(arena)
+			arena = append(arena, value...)
+			meta = append(meta, coreKV{arena[at:mid:mid], arena[mid:len(arena):len(arena)]})
+		}
+		addMeta('s', v)
 		if old == nil {
 			v, e = json.Marshal(cfg)
 			if e != nil {
 				return plan, e
 			}
-			k = rollupMetaKey('p', id)
-			k[0] = 'T'
-			meta = append(meta, coreKV{k, v})
+			addMeta('p', v)
 		}
 	}
 	meta = append(meta, coreKV{[]byte{'T', 'r'}, binary.BigEndian.AppendUint64(nil, in.Next.NextPart)})

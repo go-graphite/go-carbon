@@ -87,7 +87,8 @@ func TestCompactWholeEngineMemory(t *testing.T) {
 		t.Fatal("whole-engine qualification requires >=1024 rendered metrics")
 	}
 	cores := runtime.GOMAXPROCS(0)
-	producers := max(1, cores/8)
+	shards, owners, producers := sealBenchmarkGeometry(t, cores)
+	offset := sealBenchmarkIDOffset(t)
 	metrics := (n + density - 1) / density
 	runtime.GC()
 	var baseline runtime.MemStats
@@ -97,8 +98,9 @@ func TestCompactWholeEngineMemory(t *testing.T) {
 	names := make([]string, metrics)
 	catalogue := make(map[string]uint64, metrics)
 	for i := range names {
-		names[i] = fmt.Sprintf("%s.fixture.%d", distribution[i%len(distribution)].Name, i)
-		catalogue[names[i]] = uint64(i)
+		id := offset + uint64(i)
+		names[i] = fmt.Sprintf("%s.fixture.%d", distribution[id%uint64(len(distribution))].Name, id)
+		catalogue[names[i]] = id
 	}
 	measure := func(stage string) {
 		runtime.GC()
@@ -115,7 +117,7 @@ func TestCompactWholeEngineMemory(t *testing.T) {
 		for added := 0; added < n; {
 			count := min(density, n-added)
 			id := added / density
-			fillSealRows(scratch[:count], uint64(id), 1794700800, 0, distribution)
+			fillSealRows(scratch[:count], offset+uint64(id), 1794700800, 0, distribution)
 			for i, p := range scratch[:count] {
 				batch[i] = points.Point{Timestamp: p.Time, Value: math.Float64frombits(p.Bits)}
 			}
@@ -128,7 +130,7 @@ func TestCompactWholeEngineMemory(t *testing.T) {
 		runtime.KeepAlive(names)
 		return
 	}
-	cfg := coreConfig{Shards: cores, Producers: producers, MaxRows: max(density, 2*n/cores), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "compact-whole-memory"}
+	cfg := coreConfig{Shards: shards, Owners: owners, Producers: producers, MaxRows: max(density, 2*n/shards), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "compact-whole-memory"}
 	e, _, err := openCoreRollups(t.TempDir(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -138,9 +140,9 @@ func TestCompactWholeEngineMemory(t *testing.T) {
 	policy, _ := json.Marshal(atomicBenchInput(1, 1, 4)[0].Config)
 	for added := 0; added < n; {
 		count := min(density, n-added)
-		id := uint64(added / density)
+		id := offset + uint64(added/density)
 		fillSealRows(scratch[:count], id, 1794700800, 0, distribution)
-		p := coreShard(id, cores) % producers
+		p := coreShard(id, shards) % producers
 		if err = heads[p].append(coreBatch{ID: id, Order: 1, Clock: 1794700800, Policy: policy, Points: scratch[:count]}); err != nil {
 			t.Fatal(err)
 		}

@@ -89,10 +89,10 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 		}
 	}
 	cores := runtime.GOMAXPROCS(0)
-	producers := max(1, cores/8)
+	shards, owners, producers := sealBenchmarkGeometry(b, cores)
 	compact := os.Getenv("SEAL_BENCH_COMPACT") != "0"
-	cfg := coreConfig{Shards: cores, Producers: producers, MaxRows: max(density, 2*metrics*density/cores), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "production-density-cost"}
-	policyLimit, err := sealrollup.NewHeadPolicy(20_000_000, uint64(cfg.MaxRows)*uint64(cores)*96, 96, cores)
+	cfg := coreConfig{Shards: shards, Owners: owners, Producers: producers, MaxRows: max(density, 2*metrics*density/shards), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "production-density-cost"}
+	policyLimit, err := sealrollup.NewHeadPolicy(20_000_000, uint64(cfg.MaxRows)*uint64(shards)*96, 96, shards)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -108,9 +108,11 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 		b.Fatal(err)
 	}
 	ids := make([][]uint64, producers)
-	for id := range metrics {
-		p := coreShard(uint64(id), cores) % producers
-		ids[p] = append(ids[p], uint64(id))
+	offset := sealBenchmarkIDOffset(b)
+	for i := range metrics {
+		id := offset + uint64(i)
+		p := coreShard(id, shards) % producers
+		ids[p] = append(ids[p], id)
 	}
 	jobs := make([]chan int, producers)
 	errs := make(chan error, producers)
@@ -163,6 +165,9 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 		})
 	}
 	b.ReportAllocs()
+	sealBenchmarkBarrier(b)
+	stopProfile := sealBenchmarkProfile(b)
+	gcStart := sealBenchmarkGCCPU()
 	b.ResetTimer()
 	ioStart := sealProcessWritten()
 	start := atomicCPU()
@@ -188,11 +193,16 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 			compaction += l.BytesCompacted
 		}
 	}
+	closeStart, closeCPU := time.Now(), atomicCPU()
 	if err = e.close(); err != nil {
 		b.Fatal(err)
 	}
+	closeCPU = atomicCPU() - closeCPU
+	closeWall := time.Since(closeStart)
 	cpu := atomicCPU() - start
 	b.StopTimer()
+	gcCPU := sealBenchmarkGCCPU() - gcStart
+	stopProfile()
 	points := float64(b.N * metrics * density)
 	written := sealProcessWritten() - ioStart
 	var disk int64
@@ -226,6 +236,11 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	}
 	b.ReportMetric(points/b.Elapsed().Seconds(), "points/s")
 	b.ReportMetric(float64(cpu)/points, "cpu-ns/point")
+	b.ReportMetric(gcCPU*1e9/points, "gc-cpu-ns/point")
+	b.ReportMetric(float64(closeCPU)/points, "close-cpu-ns/point")
+	b.ReportMetric(float64(closeWall.Nanoseconds())/points, "close-wall-ns/point")
+	b.ReportMetric(float64(shards), "physical-DBs")
+	b.ReportMetric(float64(owners), "execution-owners")
 	b.ReportMetric(float64(held)/float64(metrics*density), "head-B/point")
 	b.ReportMetric(float64(memory.HeapAlloc), "postseal-heap-bytes")
 	b.ReportMetric(float64(memory.HeapAlloc)/float64(metrics*density), "engine-heap-B/point")
