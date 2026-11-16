@@ -591,6 +591,13 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
 	var failure error
+	// One poll consumes at most one packet per producer. These are completion
+	// handles only: rows remain in the existing bounded head and dispatch ring.
+	type completion struct {
+		ack   chan error
+		lease *coreDispatch
+	}
+	completions := make([]completion, o.cfg.Producers)
 	flush := func() error {
 		if slices.Equal(pending, o.meta.Cursors) {
 			return nil
@@ -628,7 +635,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			close(o.dead)
 			return true, true
 		}
-		found := false
+		found, sealPending := false, false
 		for producer, q := range o.queues {
 			if stopped[producer] {
 				continue
@@ -666,22 +673,43 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if lease != nil && !holdLease {
 				lease.release()
 			}
-			if failure == nil && (seal || len(head) >= o.sealRows || time.Now().After(deadline)) {
+			sealPending = sealPending || seal
+			if failure == nil && (len(head) >= o.sealRows || time.Now().After(deadline)) {
 				failure = flush()
 			}
-			if failure == nil && o.hook != nil && (seal || time.Since(headPublication) >= time.Second) {
+			if failure == nil && o.hook != nil && !sealPending && time.Since(headPublication) >= time.Second {
 				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 				headPublication = time.Now()
 			}
 			if failure != nil {
 				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 			}
-			if ack != nil {
-				ack <- failure
+			completions[producer].ack = ack
+			if holdLease {
+				completions[producer].lease = lease
 			}
-			if lease != nil && holdLease {
-				lease.release()
+		}
+		// Concurrent producers may have a seal ready in the same poll. Ingest
+		// their shared head once before acknowledging any of them. Per-stream
+		// FIFO, original apply batches and the dispatch byte budget are unchanged.
+		if failure == nil && sealPending {
+			failure = flush()
+			if failure == nil && o.hook != nil {
+				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
+				headPublication = time.Now()
 			}
+		}
+		if failure != nil {
+			o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+		}
+		for i, c := range completions {
+			if c.ack != nil {
+				c.ack <- failure
+			}
+			if c.lease != nil {
+				c.lease.release()
+			}
+			completions[i] = completion{}
 		}
 		if !found {
 			if failure == nil && time.Now().After(deadline) {

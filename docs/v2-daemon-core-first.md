@@ -52,14 +52,19 @@ through the same core API after their journal group is durable. Named-layer
 submission returns after bounded admission, while core seal completion returns
 the existing dispatch credit asynchronously. No receipt queue or background
 daemon sender is added. Each producer completes fanout before its next packet,
-so seals retain per-stream order. The owner keeps original row bits, sequence,
+so seals retain per-stream order. An owner consumes at most one packet per
+producer in a poll and combines seals already available in that poll into one
+atomic ingest. Completion handles contain no queued data; pipelined seal credit
+and synchronous acknowledgments stay held until the combined ingest completes.
+Size and timer limits still flush the same bounded head. The owner keeps original row bits, sequence,
 apply clocks and policies; its existing planner remains the only owner of
 LastUpdate/revision state. Core durability is separate from the journal ACK and
 is observed through committed frontiers, synchronous seals, or Close. Owner
 failures are sticky and are returned by subsequent admission and Close. The
 one-second journal grouping deadline and pending-row/credit limits are unchanged.
 The harness
-reports intake and complete/drained throughput separately. Sync rates and forced
+reports intake and complete/drained throughput separately, with final Drain and
+Close wall times reported individually. Sync rates and forced
 groups are reported rather than assuming one sync per second.
 
 L1 holds rows until its seal marker, syncs changed names once, and submits rows

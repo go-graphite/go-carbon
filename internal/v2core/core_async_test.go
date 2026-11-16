@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/cockroachdb/pebble"
 )
 
 func TestCorePipelinedSealCreditOrderAndDurability(t *testing.T) {
@@ -165,5 +167,102 @@ func TestCorePipelinedSealFailureIsSticky(t *testing.T) {
 	}
 	if err = e.close(); !errors.Is(err, failure) {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+// All producers ready in one owner poll share one atomic ingest. A slow planner
+// must withhold every acknowledgment and pipelined credit until that ingest.
+func TestCoreSealPollCoalescesDurably(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[fail], func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := pebble.Open(dir, &pebble.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := coreConfig{Producers: 3, Shards: 1, MaxRows: 16, PartitionSeconds: 60, AppendParts: true, RawCodec: "run1"}
+			o := &coreOwner{db: db, dir: dir, cfg: cfg, sealRows: 16}
+			o.meta = coreFrontier{Version: 1, Config: cfg, Cursors: make([]uint64, 3), ExpiredBefore: -1 << 63}
+			o.publishFrontier(o.meta)
+			defer func() { o.pub.clear(); _ = db.Close() }()
+			entered, release := make(chan struct{}), make(chan struct{})
+			failure := errors.New("coalesced planner failure")
+			calls := 0
+			o.plan = func(in coreSealInput) (coreSealPlan, error) {
+				calls++
+				if len(in.Rows) != 3 || len(in.Batches) != 3 {
+					return coreSealPlan{}, errors.New("poll did not preserve all original groups")
+				}
+				for i, b := range in.Batches {
+					if b.ID != uint64(i+1) || b.Clock != int64(i-7) || b.Order != 9 || string(b.Policy) != "exact" {
+						return coreSealPlan{}, errors.New("original apply metadata changed")
+					}
+				}
+				close(entered)
+				<-release
+				if fail {
+					return coreSealPlan{}, failure
+				}
+				return coreSealPlan{}, nil
+			}
+			acks := []chan error{make(chan error, 1), make(chan error, 1)}
+			router := &coreRouter{}
+			router.bytes.Store(corePacketBytes)
+			lease := &coreDispatch{router: router, bytes: corePacketBytes}
+			lease.remaining.Store(1)
+			for i := range 3 {
+				rows := []row{{ID: uint64(i + 1), Time: -2, Bits: uint64(i)<<63 | 1, Seq: 1}}
+				p := &corePacket{rows: rows, batches: []coreBatch{{ID: uint64(i + 1), Order: 9, Clock: int64(i - 7), Policy: []byte("exact"), Points: rows}}, cursor: 1, seal: true}
+				if i < 2 {
+					p.ack = acks[i]
+				} else {
+					p.lease = lease
+				}
+				q := newCoreQueue(coreQueueBytes)
+				if !q.tryPush(p) {
+					t.Fatal("cannot preload poll")
+				}
+				o.queues = append(o.queues, q)
+			}
+			poll := o.poller()
+			done := make(chan struct{})
+			go func() { poll(); close(done) }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("planner not entered")
+			}
+			for _, ack := range acks {
+				select {
+				case <-ack:
+					t.Fatal("acknowledged before atomic ingestion")
+				default:
+				}
+			}
+			if router.bytes.Load() != corePacketBytes || !slices.Equal(o.frontier.Load().Cursors, []uint64{0, 0, 0}) {
+				t.Fatal("released credit or frontier while planner blocked")
+			}
+			close(release)
+			<-done
+			for _, ack := range acks {
+				err := <-ack
+				if fail != errors.Is(err, failure) || !fail && err != nil {
+					t.Fatal("wrong acknowledgment", err)
+				}
+			}
+			if calls != 1 || router.bytes.Load() != 0 {
+				t.Fatal("extra ingest or leaked credit", calls, router.bytes.Load())
+			}
+			want := []uint64{1, 1, 1}
+			if fail {
+				want = []uint64{0, 0, 0}
+				if o.failure.Load() == nil || !errors.Is(o.failure.Load().err, failure) {
+					t.Fatal("planner failure not sticky")
+				}
+			}
+			if !slices.Equal(o.frontier.Load().Cursors, want) {
+				t.Fatal("incorrect atomic frontier")
+			}
+		})
 	}
 }

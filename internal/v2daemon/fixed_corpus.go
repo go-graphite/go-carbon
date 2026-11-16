@@ -211,9 +211,11 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		}
 	}
 	intake := time.Since(start).Seconds()
+	drainStart := time.Now()
 	if e = parallel(f.Producers, func(p int) error { return s.Producers[p].Drain() }); e != nil {
 		return nil, e
 	}
+	drainSeconds := time.Since(drainStart).Seconds()
 	var ingest, compact, flushed, debt, groups, forced, encoded uint64
 	var active int64
 	var encodeTime, catalogSyncTime, journalSyncTime, coreSubmitTime time.Duration
@@ -236,9 +238,11 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		journalSyncTime += p.JournalSyncTime
 		coreSubmitTime += p.CoreSubmitTime
 	}
+	closeStart := time.Now()
 	if e = s.Close(); e != nil {
 		return nil, e
 	}
+	closeSeconds := time.Since(closeStart).Seconds()
 	s = nil
 	complete := time.Since(start).Seconds()
 	endCPU, e := processCPU()
@@ -265,6 +269,8 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 	}
 	count := float64(f.Names) * float64(f.Rounds)
 	result = map[string]any{"layer": layer, "names": f.Names, "rounds": f.Rounds, "producers": f.Producers, "shards": f.Shards, "barriers": f.Rounds / 4, "points": uint64(count), "intake_seconds": intake, "complete_seconds": complete, "intake_points_per_second": count / intake, "complete_points_per_second": count / complete, "cpu_ns_per_point": (endCPU - startCPU) * 1e9 / count, "written_B_per_point": float64(endWrite-startWrite) / count, "ingested_SST_before_close_B_per_point": float64(ingest) / count, "compaction_before_close_B_per_point": float64(compact) / count, "flush_before_close_B_per_point": float64(flushed) / count, "catalog_B_per_point": float64(catalog) / count, "journal_B_per_point": float64(journal) / count, "at_rest_B_per_point": float64(rest) / count, "estimated_debt_before_close": debt, "active_compactions_before_close": active, "journal_sync_groups": groups, "forced_groups": forced, "encoded_journal_bytes": encoded, "sync_groups_per_stream_second": float64(groups) / float64(f.Producers) / complete}
+	result["final_drain_seconds"] = drainSeconds
+	result["close_seconds"] = closeSeconds
 	result["stream_encode_seconds"] = encodeTime.Seconds()
 	result["stream_catalog_sync_seconds"] = catalogSyncTime.Seconds()
 	result["stream_journal_sync_seconds"] = journalSyncTime.Seconds()
