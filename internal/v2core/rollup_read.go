@@ -20,6 +20,7 @@ import (
 // The caller retains snapshot until all directory consumers have returned.
 type RollupSnapshot struct {
 	snapshot       *pebble.Snapshot
+	directory      string
 	parts          map[string]*readPart
 	metrics        map[string]*snapshotMetric
 	cache          *rollupRangeCache
@@ -70,14 +71,15 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
-	out := &RollupSnapshot{snapshot: snapshot, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
+	out := &RollupSnapshot{snapshot: snapshot, directory: directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
 		out.cache = &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
 	}
 	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +254,14 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 			}
 		}
 	}
-	it, err := s.snapshot.NewIter(nil)
+	if s.directory != "" {
+		ctx = WithRollupDirectory(ctx, s.directory)
+	}
+	selected := make(map[archivePartIdentity]bool, len(m.parts))
+	for _, part := range m.parts {
+		selected[archivePartIdentity{part.key.Group, part.key.Part}] = true
+	}
+	it, err := newArchiveIterSelected(ctx, s.snapshot, nil, selected)
 	if err != nil {
 		return err
 	}

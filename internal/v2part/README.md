@@ -114,7 +114,15 @@ physical slots of one metric/archive. Slot deltas encode sparse archives without
 padding; timestamp delta-of-deltas retain physical ring wrap; XOR varints retain
 original replacement orders; a bitmap retains correction flags. Values use
 bit-checked integer deltas or eight exact byte planes. Zstd/256KiB SST blocks
-compress these columns. No floating-point arithmetic changes noninteger bits.
+compress these columns. The dense container uses a small SET-only RocksDBv2
+writer so one exclusive pooled workspace can retain its Zstd encoder, data/index
+blocks and compressed output across files. Release builds reuse a native
+`ZSTD_CCtx` at level 3; non-cgo builds reuse a Go encoder. Native contexts have a
+finalizer so an idle workspace discarded by `sync.Pool` releases C memory.
+Pebble's ordinary reader still reads every file, and the original cgo/non-cgo
+stored vectors remain compatibility gates. This local writer exists because the
+vendored public SST writer offers no reusable compressor hook; it can be removed
+when that API supports one. No floating-point arithmetic changes noninteger bits.
 `DecodeSlots` accepts both dense and singleton values. `ReadExpanded` reconstructs
 the exact original singleton keys/values and rejects overlapping runs. Coverage
 record counts refer to physical SST records, not expanded slot counts.

@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -438,7 +439,7 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 		records map[[2]int64]sealrollup.Record
 	}
 	series := map[partsformat.ID]*entry{}
-	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})})
+	iter, err := newArchiveIter(context.Background(), snapshot, &pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})})
 	if err != nil {
 		return err
 	}

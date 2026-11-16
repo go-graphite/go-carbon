@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/sstable"
@@ -18,10 +19,13 @@ import (
 // a new, exclusively created staging path; Close syncs it, Abort removes it.
 // The caller owns directory syncing, pinning, installation and publication.
 type Writer struct {
-	path           string
-	spec           Spec
-	out            *hashedOutput
-	sst            *sstable.Writer
+	path string
+	spec Spec
+	out  *hashedOutput
+	sst  interface {
+		Set([]byte, []byte) error
+		Close() error
+	}
 	first, last    []byte
 	lastName       ID
 	names, records uint64
@@ -29,11 +33,22 @@ type Writer struct {
 	closed         bool
 }
 type hashedOutput struct {
-	f       *os.File
-	buf     *bufio.Writer
-	h       hash.Hash
-	n       uint64
-	aborted bool
+	f        *os.File
+	buf      *bufio.Writer
+	h        hash.Hash
+	n        uint64
+	aborted  bool
+	released bool
+}
+
+var partOutputBuffers = sync.Pool{New: func() any { return bufio.NewWriterSize(io.Discard, 256<<10) }}
+
+func (o *hashedOutput) release() {
+	if !o.released {
+		o.released = true
+		o.buf.Reset(io.Discard)
+		partOutputBuffers.Put(o.buf)
+	}
 }
 
 func (o *hashedOutput) Write(b []byte) error {
@@ -46,6 +61,7 @@ func (o *hashedOutput) Write(b []byte) error {
 	return err
 }
 func (o *hashedOutput) Finish() error {
+	defer o.release()
 	if o.aborted {
 		return io.ErrClosedPipe
 	}
@@ -59,6 +75,7 @@ func (o *hashedOutput) Abort() {
 	if !o.aborted {
 		o.aborted = true
 		_ = o.f.Close()
+		o.release()
 	}
 }
 
@@ -75,15 +92,21 @@ func NewWriter(path string, spec Spec) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := &hashedOutput{f: f, buf: bufio.NewWriterSize(f, 256<<10), h: sha256.New()}
+	buffer := partOutputBuffers.Get().(*bufio.Writer)
+	buffer.Reset(f)
+	out := &hashedOutput{f: f, buf: buffer, h: sha256.New()}
+	if spec.Encoding == DenseEncoding {
+		table, err := newDenseSSTWriter(out)
+		if err != nil {
+			out.Abort()
+			_ = os.Remove(path)
+			return nil, err
+		}
+		return &Writer{path: path, spec: spec, out: out, sst: table}, nil
+	}
 	// Match core's current default SST container, so ingestion needs no DB
 	// format ratchet. GCP3 is the key schema, independent of SST container.
 	opts := sstable.WriterOptions{Compression: sstable.SnappyCompression, TableFormat: sstable.TableFormatRocksDBv2}
-	if spec.Encoding == DenseEncoding {
-		opts.Compression = sstable.ZstdCompression
-		opts.BlockSize = 256 << 10
-		opts.BlockRestartInterval = 64
-	}
 	return &Writer{path: path, spec: spec, out: out, sst: sstable.NewWriter(out, opts)}, nil
 }
 
