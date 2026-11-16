@@ -20,6 +20,12 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 	if !cfg.Rollups || cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || len(rows) == 0 {
 		return errors.New("invalid baseline geometry or empty records")
 	}
+	if cfg.RollupRoutingVersion == 0 {
+		cfg.RollupRoutingVersion = 1
+	}
+	if cfg.RollupRoutingVersion != 1 {
+		return errors.New("unsupported baseline rollup routing version")
+	}
 	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("baseline core already exists")
 	}
@@ -55,7 +61,7 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 		if id == 0 {
 			return errors.New("baseline slots lack metadata")
 		}
-		owner := coreShard(id, cfg.Shards)
+		owner := int(v2part.Route(k.Metric)) % cfg.Shards
 		files[owner] = append(files[owner], kv)
 	}
 	cfg.Owners = 0
