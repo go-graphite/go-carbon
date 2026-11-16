@@ -254,3 +254,46 @@ original final durability sync and propagates both flush and sync failures. This
 batches small table writes without changing SST bytes or manifest publication.
 Queue tests cover ready-owner progress, FIFO, original apply groups, indexed
 seal acknowledgements, byte-credit refunds and indivisible oversized packets.
+
+### Endurance qualification status
+
+The 1800-second qualification is incomplete. The latest attempt was held before
+build or benchmark IO: over a read-only 120-second window, the co-resident service
+received 3.398946M points/s and committed 0.000826M points/s, a ratio of 0.000243.
+Cache grew from 636.0M to 1043.8M points. This tripped the required minimum 0.5
+commit/intake ratio; no arm or retry was launched. The service incarnation stayed
+unchanged and write errors/drops were zero on every scrape.
+
+Service-accounted writes were 33.841MB/s and physical-device writes 33.864MB/s in
+that window; device write await was 2.171ms, weighted queue 0.608 and busy time
+5.624%. These observations precede engine IO and do not measure engine throughput
+or attribute the service's slowdown to this prototype. All 38 read-only observation
+samples contained the required counters. No new raw/filtered worst-ten-second,
+CPU/point, written bytes/point, final-ten-minute debt or exact/replay result exists.
+Earlier native exact/SIGKILL results remain prior evidence only.
+
+A new trial needs its own booked window and fresh 60-second baseline; wait while
+cache is rising. Stop only benchmark IO on write errors/drops, service-incarnation
+change, cache above 3B points, cache growth above 2B from baseline, or committed
+points below half of input points averaged over 120 seconds. Retry a missing
+scrape three times; do not turn missing counters into zero. Input-log age is not
+a health signal for this workload and is not a stop condition. A guard stop ends
+the attempt; do not retry within the same booked window.
+
+Predeclare the external-writer rule before measurement: report every raw window,
+and separately exclude a sliding ten-second window only when the service's
+integrated accounted-write rate exceeds twice its own fresh baseline. Match PID
+and process start time, reject permission gaps, use the raw mean denominator for
+both gates, show eligible coverage, and retain all debt samples. The reporter
+consumes the monitor's baseline and trace:
+
+```sh
+python3 tool/immutable-parts/endurance_report.py \
+  --trial /scratch/trial --system /scratch/system.jsonl \
+  --baseline /scratch/baseline.json --factor 2 --out /scratch/endurance.json
+```
+
+This documentation update changes no executable code. No new build or tests ran.
+Full-engine admission/journal/rollup/retention budgets, portable copies,
+hardware-only scaling and production readiness remain unqualified. Keep the PR
+Draft.
