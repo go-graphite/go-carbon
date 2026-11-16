@@ -37,7 +37,10 @@ type continuationFiles struct {
 	reuseReferenceRetirements bool
 	// Ordinary updates must not overwrite a timestamp from a different ring
 	// position in an old, incorrectly anchored classic image.
-	guardClassicWrites    bool
+	guardClassicWrites bool
+	// Only explicit archive imports/repairs prefer a retained epoch over a
+	// future one. Automatic writes preserve classic UpdateMany's slot order.
+	protectFutureSlots    bool
 	classicConflict       *classicSlotConflict
 	keepDuplicatePlanning bool
 	sidecarDirty          bool

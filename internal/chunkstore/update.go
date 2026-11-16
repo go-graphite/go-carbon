@@ -124,6 +124,7 @@ func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRet
 	defer b.Close()
 	w := newChunkWriter(s, m)
 	defer w.release()
+	w.protectFutureSlots = targetRetention >= 0
 	now, err := storageTimestamp(s.now().Unix())
 	if err != nil {
 		return fmt.Errorf("clock timestamp: %w", err)
