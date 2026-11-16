@@ -695,13 +695,21 @@ func (p *Whisper) createWhisper(metric, path string) *whisper.Whisper {
 	if schema.Compressed != nil {
 		compressed = *schema.Compressed
 	}
+	var obsolete []string
+	if compressed {
+		// Preserve CreateWithOptions' removal of an old incarnation's sidecar
+		// when initialization uses a private name instead of the final path.
+		obsolete = []string{path + ".ooo"}
+	}
 	w, err := whisperpath.Create(filepath.Dir(path), os.ModePerm, func() (*whisper.Whisper, error) {
-		return whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
-			Sparse:     settings.sparse,
-			FLock:      settings.flock,
-			Compressed: compressed,
-			OutOfOrder: settings.outOfOrder.enabled,
-		})
+		return whisperpath.CreateAtomic(path, func(tmp string) (*whisper.Whisper, error) {
+			return whisper.CreateWithOptions(tmp, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
+				Sparse:     settings.sparse,
+				FLock:      settings.flock,
+				Compressed: compressed,
+				OutOfOrder: settings.outOfOrder.enabled,
+			})
+		}, func(path string) (*whisper.Whisper, error) { return p.openWhisper(path, false) }, obsolete...)
 	})
 	if err != nil {
 		p.logger.Error("create new whisper file failed",
