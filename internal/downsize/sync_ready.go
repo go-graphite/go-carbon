@@ -19,6 +19,8 @@ import (
 var ErrSyncNotReady = errors.New("sync NOT_READY; see ready.json")
 
 type syncReadyOptions struct {
+	gapSelection []string
+	openGaps     []string
 	proofBlock   string
 	proofInput   json.RawMessage
 	scope        string
@@ -53,6 +55,7 @@ type readyReport struct {
 	RedoNames            map[string]int64   `json:"redo_names"`
 	PendingRecovery      string             `json:"pending_recovery,omitempty"`
 	PendingWindows       syncRanges         `json:"pending_windows,omitempty"`
+	GapReceipts          []string           `json:"gap_receipts,omitempty"`
 	Quarantined          int64              `json:"quarantined"`
 	PolicySkipped        int64              `json:"policy_skipped"`
 	QuarantinePath       string             `json:"quarantine_path,omitempty"`

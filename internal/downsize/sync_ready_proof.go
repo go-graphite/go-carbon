@@ -54,15 +54,24 @@ func loadReadyProof(copy syncOptions, r syncReadyOptions) (syncOptions, syncRead
 		if gap.Name == "" || strings.ContainsAny(gap.Name, ": ,") {
 			return copy, r, errors.New("invalid READY gap name")
 		}
-		if gap.Open {
-			return copy, r, fmt.Errorf("READY gap still open: %s", gap.Name)
-		}
 		if seen[gap.Name] {
 			return copy, r, fmt.Errorf("duplicate READY gap: %s", gap.Name)
 		}
 		seen[gap.Name] = true
+		if gap.From < 0 {
+			return copy, r, fmt.Errorf("invalid READY gap start: %s", gap.Name)
+		}
+		if gap.Open {
+			r.openGaps = append(r.openGaps, gap.Name)
+			continue
+		}
 		if err := proof.windows.Set(fmt.Sprintf("%s:%d:%d", gap.Name, gap.From, gap.Until)); err != nil {
 			return copy, r, err
+		}
+	}
+	for _, id := range r.gapSelection {
+		if !seen[id] || id == "period" {
+			return copy, r, fmt.Errorf("unknown gapfill window: %s", id)
 		}
 	}
 	if err := proof.normalize(); err != nil {
@@ -128,12 +137,29 @@ func runSeparateReadyProof(ctx context.Context, copy *syncOptions, r syncReadyOp
 			return err
 		}
 	}
-	// Preserve the copy's own discovery, repairs and exception decisions first.
-	if err = initial(); err != nil && !errors.Is(err, ErrSyncQuarantined) {
-		return err
-	}
 	proof, ready, err := loadReadyProof(*copy, r)
 	if err != nil {
+		return err
+	}
+	report.Sources, report.Windows = proof.from, proof.windows
+	report.GapLedgerComplete = ready.gapsComplete
+	report.Quarantined, report.PolicySkipped = copy.issues.counts()
+	report.QuarantinePath = filepath.Join(copy.issues.state, "quarantine.json")
+	report.PolicySkippedPath = filepath.Join(copy.issues.state, "policy-skipped.json")
+	report.Reasons = nil
+	for _, name := range ready.openGaps {
+		report.Reasons = append(report.Reasons, "READY gap still open: "+name)
+	}
+	report.GapReceipts, err = fillReadyGaps(ctx, *copy, proof, ready.gapSelection, b)
+	if !ready.gapsComplete {
+		report.Reasons = append(report.Reasons, "--gap-ledger-complete is required")
+	}
+	if err != nil || len(ready.openGaps) > 0 || !ready.gapsComplete {
+		return errors.Join(err, ErrSyncNotReady)
+	}
+	// Closed-window work never invokes the old copy or exhaustive proof while
+	// other windows are open. Final READY retains both existing proof gates.
+	if err = initial(); err != nil && !errors.Is(err, ErrSyncQuarantined) {
 		return err
 	}
 	if err = os.MkdirAll(proof.state, 0700); err != nil {
