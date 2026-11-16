@@ -41,8 +41,11 @@ reader, finish in-flight fetches, then close core; later core handoffs are close
 immediately. Do not close the underlying databases under an in-flight fetch.
 
 A reader lazily builds `v2core.RollupSnapshot`, a directory of immutable part
-metadata. It seeks over archive values rather than scanning all points. Later
-sealed generations reuse existing part metadata. Sealed reads seek directly to
+metadata. The core's atomic descriptor bindings enumerate the current part set.
+Later sealed generations reuse descriptor scopes and metadata, decode only added
+parts, and copy only affected per-name entries. Removed parts rebuild only the
+affected names; snapshots with no bindings retain the bare-GCP3 scan path.
+No old snapshot is retained by the directory or its inventory. Sealed reads seek directly to
 the requested name, archive and one or two physical ring-slot ranges in each
 relevant part. A predecessor seek includes a dense run beginning before the
 range. Singleton decoding uses stack values; dense decoding uses the shared
