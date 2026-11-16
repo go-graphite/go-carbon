@@ -21,6 +21,9 @@ func v2FallbackTestApp(t *testing.T, root string) *App {
 	a.Config.Carbonserver.ScanFrequency = &Duration{20 * time.Millisecond}
 	a.Config.Carbonserver.RealtimeIndex = 1024
 	a.Config.Carbonserver.ConcurrentIndex = true
+	a.Config.Carbonserver.QueryCacheEnabled = false
+	a.Config.Carbonserver.QueryRangeCacheEnabled = false
+	a.Config.Carbonserver.StreamingQueryCacheEnabled = false
 	return a
 }
 
@@ -260,8 +263,12 @@ func TestV2FallbackCostFixture(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
+			committed, cached := uint64(0), a.Cache.Size()
+			if a.Persister != nil {
+				committed = a.Persister.CommittedPoints()
+			}
 			a.Stop()
-			t.Fatalf("fixture did not drain: committed=%d cache=%d", a.Persister.CommittedPoints(), a.Cache.Size())
+			t.Fatalf("fixture did not drain: committed=%d cache=%d", committed, cached)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
