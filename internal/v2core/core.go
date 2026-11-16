@@ -188,8 +188,8 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
-	gc      *sealedPartGC
-	gcDirty atomic.Bool
+	gc             *sealedPartGC
+	gcDirty        atomic.Bool
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
@@ -375,7 +375,20 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 		}
-		if hooks.PublishBatches != nil {
+		if hooks.PublishBatchesWithInventory != nil {
+			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
+				// Replace the provisional pin with one captured under the GC binding
+				// fence. No reader acquires this owner/GC mutex.
+				_ = snap.Close()
+				if o.gc == nil {
+					return hooks.PublishBatchesWithInventory(s, o.db.NewSnapshot(), batches, generation, nil)
+				}
+				o.gc.mu.Lock()
+				pin, inventory := o.db.NewSnapshot(), o.gc.inventory
+				o.gc.mu.Unlock()
+				return hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+			}
+		} else if hooks.PublishBatches != nil {
 			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
 				return hooks.PublishBatches(s, snap, batches, generation)
 			}
@@ -1315,7 +1328,17 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	o.encodeNS.Add(uint64(time.Since(phaseStart)))
 	ingestStart := time.Now()
 	defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
-	if err = o.db.Ingest(paths); err != nil {
+	if o.gc != nil {
+		o.gc.mu.Lock()
+	}
+	err = o.db.Ingest(paths)
+	if o.gc != nil {
+		if err == nil {
+			o.gc.inventory = o.gc.inventory.with(descriptors, nil)
+		}
+		o.gc.mu.Unlock()
+	}
+	if err != nil {
 		return 0, err
 	}
 	durable = true

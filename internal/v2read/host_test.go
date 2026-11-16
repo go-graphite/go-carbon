@@ -48,7 +48,7 @@ func TestHostConcurrent(t *testing.T) {
 		cfg.Shards = 4
 		cfg.Owners = 4
 		cfg.MaxRows = 32768
-		engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{PublishBatches: reader.Publish})
+		engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
 		if err != nil {
 			t.Fatal(err)
 		}
