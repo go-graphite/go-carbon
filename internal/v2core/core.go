@@ -43,6 +43,7 @@ type coreFrontier struct {
 type corePacket struct {
 	rows       []row
 	batches    []coreBatch
+	applies    []coreApply
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
@@ -94,6 +95,7 @@ func newCoreQueue(limit uint64) *coreQueue {
 }
 func (p *corePacket) size() uint64 {
 	n := corePacketBytes + uint64(len(p.rows))*uint64(unsafe.Sizeof(row{}))
+	n += uint64(len(p.applies)) * uint64(unsafe.Sizeof(coreApply{}))
 	for _, b := range p.batches {
 		n += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
 	}
@@ -369,16 +371,16 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return os.ErrInvalid
 	}
-	return e.submitPacket(producer, rows, nil, cursor, seal)
+	return e.submitPacket(producer, rows, nil, nil, cursor, seal)
 }
-func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
+func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, applies []coreApply, cursor uint64, seal bool) error {
 	router := &e.routers[producer]
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
 		streamBytes = coreStreamBytes
 	}
 	// Count every original packet's data, including detached apply groups.
-	charge := uint64(len(e.owners))*corePacketBytes + uint64(len(rows))*uint64(unsafe.Sizeof(row{}))
+	charge := uint64(len(e.owners))*corePacketBytes + uint64(len(rows))*uint64(unsafe.Sizeof(row{})) + uint64(len(applies))*uint64(unsafe.Sizeof(coreApply{}))
 	for _, b := range batches {
 		charge += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
 	}
@@ -487,6 +489,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		b.Policy = slices.Clone(b.Policy)
 		byOwner[owner] = append(byOwner[owner], b)
 	}
+	byNumeric := routeCoreApplies(applies, e.cfg.Shards, producer, cursor)
 	var acks []chan error
 	if seal {
 		acks = make([]chan error, len(e.owners))
@@ -497,6 +500,9 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 	for s := range e.owners {
 		p := &d.packets[s]
 		*p = corePacket{rows: parts[s], cursor: cursor, seal: seal, lease: d}
+		if byNumeric != nil {
+			p.applies = byNumeric[s]
+		}
 		if byOwner != nil {
 			p.batches = byOwner[s]
 		}
@@ -560,6 +566,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	head := make([]row, 0, o.cfg.MaxRows)
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
+	var applies []coreApply
 	deadline := time.Now().Add(time.Second)
 	var headPublication time.Time
 	stopped := make([]bool, o.cfg.Producers)
@@ -572,13 +579,14 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		next := o.meta
 		next.Cursors = slices.Clone(pending)
 		next.NextPart++
-		n, err := o.sealBatches(head, batches, next)
+		n, err := o.sealNumeric(head, batches, applies, next)
 		if err != nil {
 			return err
 		}
 		o.meta = next
 		o.publishFrontier(next)
 		batches = nil
+		applies = applies[:0]
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
 		o.bytes.Add(n)
@@ -614,7 +622,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				left--
 				continue
 			}
-			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 {
+			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 && len(p.applies) == 0 {
 				failure = errors.New("seal planner requires original apply batches")
 			}
 			if failure == nil && p.cursor > pending[producer] {
@@ -622,6 +630,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					failure = flush()
 				}
 				if failure == nil {
+					for _, a := range p.applies {
+						a.Offset += len(head)
+						applies = append(applies, a)
+					}
 					head = append(head, p.rows...)
 					batches = append(batches, p.batches...)
 					pending[producer] = p.cursor
@@ -747,6 +759,10 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 	return o.sealBatches(head, nil, next)
 }
 func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
+	return o.sealNumeric(head, batches, nil, next)
+}
+
+func (o *coreOwner) sealNumeric(head []row, batches []coreBatch, applies []coreApply, next coreFrontier) (uint64, error) {
 	sealStart := time.Now()
 	coreTrace(o.trace, "seal_begin", o.dir, 0)
 	o.sealing.Store(true)
@@ -765,7 +781,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	if o.plan != nil {
-		plan, err = o.plan(coreSealInput{Rows: head, Batches: batches, Next: next})
+		plan, err = o.plan(coreSealInput{Rows: head, Batches: batches, Applies: applies, Next: next})
 		if err != nil {
 			return 0, err
 		}

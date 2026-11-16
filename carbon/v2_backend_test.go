@@ -408,7 +408,7 @@ func journalDiskBytes(dir string) int64 {
 	var n int64
 	// Durable catalog definitions are part of the replay input, including WALs.
 	roots, _ := filepath.Glob(filepath.Join(dir, "owner-*", "name-catalog"))
-	roots = append(roots, filepath.Join(dir, "journal"))
+	roots = append(roots, filepath.Join(dir, "journal"), filepath.Join(dir, "global-catalog"))
 	for _, root := range roots {
 		_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, e error) error {
 			if e != nil {

@@ -84,6 +84,8 @@ type owner struct {
 	done           chan struct{}
 	active         []frame
 	pending        []frame
+	numericRows    []v2core.Row
+	numericApplies []v2core.Apply
 	coreCursor     uint64
 	nextOrder      uint64
 	recovering     bool
@@ -109,9 +111,8 @@ type Store struct {
 	firstAcceptNS                 atomic.Int64
 	accepted                      atomic.Uint64
 	legacyReady                   atomic.Pointer[catalog]
+	numeric                       atomic.Pointer[numericCatalog]
 	core                          *v2core.Engine
-	coreRoutes                    []uint64
-	coreEnvelopes                 sync.Map
 	coreViewsReady                atomic.Bool
 	coreViewsClosed               atomic.Bool
 	opts                          daemonstore.Options
@@ -199,6 +200,12 @@ func (s *Store) initialize(beforeOwner func(int)) (err error) {
 		if err = s.openCore(); err != nil {
 			return err
 		}
+		// Core database locks fence the catalog before it recovers/truncates WAL.
+		catalog, err := openNumericCatalog(s)
+		if err != nil {
+			return err
+		}
+		s.numeric.Store(catalog)
 	}
 	for _, o := range s.owners {
 		i := o.id
@@ -576,6 +583,9 @@ func (s *Store) Close() error {
 		}
 		if s.core != nil {
 			s.closeErr = errors.Join(s.closeErr, s.core.Close())
+		}
+		if numeric := s.numeric.Load(); numeric != nil {
+			s.closeErr = errors.Join(s.closeErr, numeric.close())
 		}
 		close(s.watchStop)
 		<-s.watchDone

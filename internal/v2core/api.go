@@ -14,6 +14,10 @@ type Config = coreConfig
 // Batch preserves one original apply boundary, policy and ingest clock.
 type Batch = coreBatch
 
+// Apply describes one original application in a flat numeric row buffer.
+// Producer and Cursor are filled by AppendNumeric, never supplied by callers.
+type Apply = coreApply
+
 // Frontier is an owner's durable replay position.
 type Frontier = coreFrontier
 

@@ -1,6 +1,7 @@
 package v2backend
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -297,6 +298,7 @@ func TestCoreFixtureThroughput120(t *testing.T) {
 	var u0, u1 syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u0)
 	start := time.Now()
+	writeStart := numericProcWriteBytes(t)
 	baseline := v2core.Sample(e, "baseline", start, 0)
 	deadline := start.Add(duration)
 	var offered atomic.Uint64
@@ -341,6 +343,8 @@ func TestCoreFixtureThroughput120(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed = true
+	final["complete_written_bytes"] = numericProcWriteBytes(t) - writeStart
+	final["complete_written_bytes_per_point"] = float64(final["complete_written_bytes"].(uint64)) / float64(offered.Load())
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u1)
 	seconds := func(x syscall.Timeval) float64 { return float64(x.Sec) + float64(x.Usec)/1e6 }
 	elapsed := time.Since(start).Seconds()
@@ -371,4 +375,28 @@ func TestCoreCloseSealsAcceptedSuffix(t *testing.T) {
 	if s.Stats().IngestedPoints != 1 {
 		t.Fatal("lost or duplicated accepted suffix")
 	}
+}
+
+// Read through Close: ingest/manifest/compaction writes charged after intake
+// remain in the complete-engine receipt. Linux write_bytes is process-accounted
+// dirtied bytes, not a whole-device physical-writeback measurement.
+func numericProcWriteBytes(t *testing.T) uint64 {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	f, err := os.Open("/proc/self/io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	scan := bufio.NewScanner(f)
+	for scan.Scan() {
+		var n uint64
+		if _, err := fmt.Sscanf(scan.Text(), "write_bytes: %d", &n); err == nil {
+			return n
+		}
+	}
+	t.Fatal("missing process write_bytes", scan.Err())
+	return 0
 }

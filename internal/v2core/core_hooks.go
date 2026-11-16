@@ -22,6 +22,7 @@ type coreBatch struct {
 type coreSealInput struct {
 	Rows    []row
 	Batches []coreBatch
+	Applies []coreApply
 	Next    coreFrontier
 }
 type coreKV struct{ Key, Value []byte }
@@ -89,7 +90,7 @@ func (e *coreEngine) submitBatches(producer int, batches []coreBatch, cursor uin
 			rows = append(rows, r)
 		}
 	}
-	return e.submitPacket(producer, rows, batches, cursor, seal)
+	return e.submitPacket(producer, rows, batches, nil, cursor, seal)
 }
 func (o *coreOwner) publishFrontier(f coreFrontier) {
 	f.Cursors = slices.Clone(f.Cursors)

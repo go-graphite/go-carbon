@@ -17,11 +17,12 @@ import (
 )
 
 type resolvedMetric struct {
-	name   string
-	owner  int
-	group  partsformat.Group
-	policy daemonstore.Metric
-	prefix []byte
+	globalID uint64
+	name     string
+	owner    int
+	group    partsformat.Group
+	policy   daemonstore.Metric
+	prefix   []byte
 }
 
 // The first lookup borrows name bytes for hashing. Only a catalogue miss
@@ -70,6 +71,9 @@ func (s *Store) resolve(name string) (*resolvedMetric, error) {
 	prefix = append(prefix, b...)
 	prefix = append(prefix, []byte(g)...)
 	r := &resolvedMetric{name: name, owner: s.route(name), group: g, policy: p, prefix: prefix}
+	if numeric := s.numeric.Load(); numeric != nil {
+		return numeric.intern(s, r)
+	}
 	actual, _ := s.resolved.LoadOrStore(name, r)
 	return actual.(*resolvedMetric), nil
 }

@@ -4,6 +4,25 @@ This package is the first real backend for the restart-only `[v2]` daemon
 boundary. It is intended for isolated qualification. It is **not ready for a
 production cutover**.
 
+The `write-engine = "core"` path resolves each canonical name to one daemon-wide
+uint64 ID in `global-catalog/`. It sends a flat numeric row buffer plus compact
+original-apply spans (clock, order, point range) into the core; it carries no
+portable keys, policy bytes or opaque receipt handles per point. Stream-local
+PDC4 dictionary IDs remain journal encoding details. Numeric IDs are selected
+once to retain the existing journal-owner/database boundary, including uneven
+owner/shard geometry; core routing remains `hashID % shards`.
+
+Seal maps each numeric ID to canonical name, placement group and virtual shard
+once per series and feeds the original applies directly to the classic reducer.
+The global catalog recovers in the background after journal admission opens,
+and syncs before parts and frontiers become durable. Journal
+records still contain canonical identities, so replay can safely reconstruct
+private, unsealed catalog suffixes after a crash. A clean close syncs the catalog
+as well. Part UUIDs and time partitions belong to immutable seals, not permanent
+metric identities. Portable GCP3 keys and exact archive records remain unchanged.
+This removes opaque envelope reconstruction; it does not qualify throughput,
+compaction settlement, file-size targets or complete-engine byte budgets.
+
 ## Data flow
 
 ```text

@@ -238,8 +238,47 @@ func (o *owner) commit(frames []frame) error {
 	return o.publish()
 }
 
-func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
+// prepareSeal is the compatibility adapter for standalone receipts. Core intake
+// supplies numeric sealSeries directly and never reconstructs these frames.
+func (o *owner) prepareSeal(frames []frame) (*sealTransaction, error) {
 	if len(frames) == 0 {
+		return &sealTransaction{}, nil
+	}
+	series := make(map[string]*sealSeries)
+	var count uint64
+	for _, f := range frames {
+		if f.cursor <= o.meta.Cursor {
+			return nil, errors.New("replayed committed batch in live seal")
+		}
+		r := f.resolved
+		if r != nil && (r.name != f.name || r.group != f.group || !samePolicy(r.policy, f.policy)) {
+			return nil, errors.New("receipt identity differs from resolved metric")
+		}
+		if r == nil {
+			r = &resolvedMetric{name: f.name, group: f.group, policy: f.policy}
+		}
+		v := series[f.name]
+		if v == nil {
+			v = &sealSeries{metric: r}
+			series[f.name] = v
+		}
+		if r.group != v.metric.group || !samePolicy(r.policy, v.metric.policy) {
+			return nil, errors.New("batch policy or placement changed inside seal")
+		}
+		samples := make([]sealrollup.Sample, len(f.points))
+		for i, p := range f.points {
+			samples[i] = sealrollup.Sample{Time: p.Timestamp, Bits: math.Float64bits(p.Value), Sequence: uint64(i + 1)}
+		}
+		v.batches = append(v.batches, sealrollup.Batch{Order: f.order, Now: f.clock, Points: samples})
+		v.clock, v.cursor, v.order = f.clock, f.cursor, f.order
+		count += uint64(len(f.points))
+	}
+	last := frames[len(frames)-1]
+	return o.prepareSeries(series, last.cursor, last.order, count)
+}
+
+func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, count uint64) (_ *sealTransaction, err error) {
+	if len(byName) == 0 {
 		return &sealTransaction{}, nil
 	}
 	if o.sealPending {
@@ -251,7 +290,6 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 		return nil, e
 	}
 	scratch := &o.commitScratch
-	byName := scratch.group(frames)
 	tx := &sealTransaction{owner: o}
 	o.sealPending = true
 	defer func() {
@@ -259,13 +297,6 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 			tx.abort()
 		}
 	}()
-	var count uint64
-	for _, f := range frames {
-		if f.cursor <= o.meta.Cursor {
-			return nil, errors.New("replayed committed batch in live seal")
-		}
-		count += uint64(len(f.points))
-	}
 	// Every data file covers exactly one portable (PG,vshard,partition) range.
 	dataFiles := make(map[string][]kv)
 	refs := make([]kv, 0, len(byName))
@@ -274,9 +305,8 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 	next := make(map[string]*metricState, len(byName))
 	plans := make(map[string]sealrollup.SealPlan)
 	var runWorkspace partsrun.Workspace
-	for name, span := range byName {
-		fs := scratch.frames[span.start:span.end]
-		last := fs[len(fs)-1]
+	for name, input := range byName {
+		last := input.metric
 		m := o.metrics[name]
 		if m == nil {
 			m = &metricState{Name: []byte(name), Group: []byte(last.group), Policy: last.policy, slots: make([]map[int64]sealrollup.Sample, len(last.policy.Archives))}
@@ -303,31 +333,8 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 			}
 		}
 		cfg, prepared := m.config, m.prepared
-		total := 0
-		for _, f := range fs {
-			total += len(f.points)
-		}
-		if cap(o.sampleScratch) < total {
-			o.sampleScratch = make([]sealrollup.Sample, total)
-		} else {
-			o.sampleScratch = o.sampleScratch[:total]
-		}
-		samples := o.sampleScratch
-		batches := slices.Grow(o.batchScratch[:0], len(fs))
-		for _, f := range fs {
-			if string(f.group) != string(m.Group) || (f.resolved != last.resolved || f.resolved == nil) && !samePolicy(f.policy, m.Policy) {
-				return nil, errors.New("batch policy or placement changed inside seal")
-			}
-			b := sealrollup.Batch{Order: f.order, Now: f.clock, Points: samples[:len(f.points):len(f.points)]}
-			for i, p := range f.points {
-				b.Points[i] = sealrollup.Sample{Time: p.Timestamp, Bits: math.Float64bits(p.Value), Sequence: uint64(i + 1)}
-			}
-			batches = append(batches, b)
-			samples = samples[len(f.points):]
-		}
+		batches := input.batches
 		plan, e := prepared.PlanWithWorkspace(m.Frontier, func(a int, slot int64) (sealrollup.Sample, bool) { p, ok := m.slots[a][slot]; return p, ok }, nil, batches, &o.workspace)
-		clear(batches)
-		o.batchScratch = batches[:0]
 		if e != nil {
 			return nil, e
 		}
@@ -336,7 +343,7 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 		copyMetric.Frontier = plan.Next
 		next[name] = &copyMetric
 		vs := partsformat.Route(partsformat.ID(name))
-		partition := last.clock / 86400
+		partition := input.clock / 86400
 		base := partsformat.Key{Group: partsformat.Group(m.Group), VShard: vs, Partition: partition, Metric: partsformat.ID(name), Part: part}
 		prefix, e := partsformat.PartitionPrefixForGroup(partsformat.Group(m.Group), vs, partition)
 		if e != nil {
@@ -376,7 +383,7 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 		refs = append(refs, kv{rkey, slices.Clone(key[:len(key)-16])})
 		// Generation 1 denotes this store's initial single origin only. This
 		// backend has no import/recreate/delete API and grants no replica epoch.
-		metadata := store.Metadata{MetricConfig: store.MetricConfig{Name: name, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}, Generation: 1, Revision: last.cursor, LastUpdate: time.Unix(last.clock, 0)}
+		metadata := store.Metadata{MetricConfig: store.MetricConfig{Name: name, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}, Generation: 1, Revision: input.cursor, LastUpdate: time.Unix(input.clock, 0)}
 		for _, a := range m.Policy.Archives {
 			metadata.Retentions = append(metadata.Retentions, store.Retention{Step: a.Step, Count: a.Points})
 		}
@@ -407,8 +414,8 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 	for k, b := range scopes {
 		meta.Revisions[k] = b.Revision
 	}
-	meta.Cursor = frames[len(frames)-1].cursor
-	meta.Order = frames[len(frames)-1].order
+	meta.Cursor = cursor
+	meta.Order = order
 	meta.Points += count
 	// Upgrade a legacy full JSON checkpoint once. Thereafter only changed
 	// metrics and touched scope revisions are replaced alongside the small header.
