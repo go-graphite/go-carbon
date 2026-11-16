@@ -230,7 +230,9 @@ func copyAssembleBlocks(p copyPartition, selected []int, dir string) (_ copyPart
 	}
 	sort.Slice(blocks, func(i, j int) bool { return bytes.Compare(blocks[i].Key, blocks[j].Key) < 0 })
 	if len(blocks) == 0 {
-		return copyPartition{Manifest: p.Manifest, Additive: true}, 0, nil
+		m := p.Manifest
+		m.Parts = nil
+		return copyPartition{Manifest: m, Additive: true}, 0, nil
 	}
 	f, err := os.CreateTemp(dir, "holes-*.sst")
 	if err != nil {
@@ -386,12 +388,21 @@ func copyRepairPartition(source copyPartition, target copyBlockManifest, dir str
 	if source.Blocks == nil {
 		return copyPartition{}, copyHolePlan{}, errors.New("missing source seal metadata")
 	}
+	prefix, err := partsformat.PartitionPrefixForGroup(source.Manifest.Group, source.Manifest.VShard, source.Manifest.Partition)
+	if err != nil {
+		return copyPartition{}, copyHolePlan{}, err
+	}
+	if source.Manifest.Policy != source.Blocks.Policy || !bytes.Equal(prefix, source.Blocks.Prefix) {
+		return copyPartition{}, copyHolePlan{}, errors.New("seal metadata does not describe source partition")
+	}
 	plan, err := copyPlanBlocks(*source.Blocks, target)
 	if err != nil {
 		return copyPartition{}, plan, err
 	}
 	if len(plan.Missing) == 0 {
-		return copyPartition{Manifest: source.Manifest, Additive: true}, plan, nil
+		m := source.Manifest
+		m.Parts = nil
+		return copyPartition{Manifest: m, Additive: true}, plan, nil
 	}
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return copyPartition{}, plan, err

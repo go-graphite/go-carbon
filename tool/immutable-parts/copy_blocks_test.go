@@ -134,7 +134,7 @@ func TestCopyLogicalDigestDifferentSealHistories(t *testing.T) {
 		}
 	}
 	p, plan, err := copyRepairPartition(source, *target.Blocks, t.TempDir())
-	if err != nil || len(plan.Missing) != 0 || len(p.Files) != 0 || plan.RawBytes != 0 {
+	if err != nil || len(plan.Missing) != 0 || len(p.Files) != 0 || len(p.Manifest.Parts) != 0 || plan.RawBytes != 0 {
 		t.Fatalf("expected zero-byte logical repair: %+v %v", plan, err)
 	}
 	t.Logf("different histories: logical equal; raw payload=0 bytes, values decoded=0")
@@ -195,6 +195,11 @@ func TestCopyBlockConflictsAndInvalidMetadata(t *testing.T) {
 	full := copyFixture(t, t.TempDir(), 1, 6, 1024, nil)[0]
 	source := copySealedFixture(t, copySubsetFixture(t, full, t.TempDir(), []int{0, 1, 2, 4}, 0, -1, 4096))
 	target := copySealedFixture(t, copySubsetFixture(t, full, t.TempDir(), []int{1, 3, 4, 5}, 0, 4, 4096))
+	source.Manifest.Policy[0] ^= 1
+	if _, _, err := copyRepairPartition(source, *target.Blocks, t.TempDir()); err == nil {
+		t.Fatal("accepted source seal metadata mismatch")
+	}
+	source.Manifest.Policy[0] ^= 1
 	plan, err := copyPlanBlocks(*source.Blocks, *target.Blocks)
 	if err != nil || plan.Conflicts != 1 || len(plan.Missing) != 2 || plan.Shared != 1 {
 		t.Fatalf("conflicts %+v %v", plan, err)
