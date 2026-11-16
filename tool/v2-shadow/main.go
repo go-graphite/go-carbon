@@ -109,6 +109,8 @@ type compareJob struct {
 	SourcePath     string
 	SourceOffset   int64
 	SourceCaughtUp bool
+	Attempt        int
+	FirstSnapshot  time.Time
 }
 type slot struct{ Bits, Seq uint64 }
 type difference struct {
@@ -196,7 +198,7 @@ func compareRaw(name string, rows []v2core.Row, classic *pb.FetchResponse, from,
 
 type totals struct{ Names, Points, Mismatches, Failures uint64 }
 
-func compare(job compareJob, base string, sums *totals) {
+func compare(job compareJob, base string, sums *totals) bool {
 	start := time.Now()
 	defer func() {
 		for _, s := range job.Snapshots {
@@ -219,12 +221,12 @@ func compare(job compareJob, base string, sums *totals) {
 			break
 		}
 	}
-	result := map[string]any{"stage": "comparison", "context": contextLoad(), "from": job.From, "until": job.Until, "source_path": job.SourcePath, "source_offset": job.SourceOffset, "source_caught_up_at_snapshot": job.SourceCaughtUp, "requested_names": len(job.Names), "scan_seconds": time.Since(start).Seconds()}
+	result := map[string]any{"stage": "comparison", "context": contextLoad(), "from": job.From, "until": job.Until, "source_path": job.SourcePath, "source_offset": job.SourceOffset, "source_caught_up_at_snapshot": job.SourceCaughtUp, "requested_names": len(job.Names), "names": job.Names, "attempt": job.Attempt, "since_first_snapshot_seconds": time.Since(job.FirstSnapshot).Seconds(), "scan_seconds": time.Since(start).Seconds()}
 	if scanErr != nil {
 		sums.Failures++
 		result["error"] = scanErr.Error()
 		emit(result)
-		return
+		return true
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	pairs, total, bad := 0, 0, 0
@@ -258,6 +260,7 @@ func compare(job compareJob, base string, sums *totals) {
 	result["seconds"] = time.Since(start).Seconds()
 	result["rollups_qualified"] = false
 	emit(result)
+	return bad > 0 || len(failures) > 0
 }
 
 func run() (retErr error) {
@@ -328,11 +331,19 @@ func run() (retErr error) {
 	from := start.Unix() + 60
 	sums := &totals{}
 	jobs := make(chan compareJob, 1)
+	retries := make(chan compareJob, 2)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for job := range jobs {
-			compare(job, *base, sums)
+			if compare(job, *base, sums) && job.Attempt < 2 {
+				job.Snapshots = nil
+				job.Attempt++
+				select {
+				case retries <- job:
+				default:
+				}
+			}
 		}
 	}()
 	defer func() {
@@ -389,11 +400,30 @@ func run() (retErr error) {
 			emit(stats)
 			until := now.Add(-*lag).Unix()
 			if until > from && len(candidates) > 0 && len(jobs) == 0 {
-				job := compareJob{From: from, Until: until, SourcePath: path, SourceOffset: tail.offset, SourceCaughtUp: caughtUp}
-				for i := 0; i < *sample && i < len(candidates); i++ {
-					job.Names = append(job.Names, candidates[rotation%len(candidates)])
-					rotation++
+				job := compareJob{From: from, Until: until, FirstSnapshot: now}
+				select {
+				case job = <-retries:
+				default:
+					for i := 0; i < *sample && i < len(candidates); i++ {
+						job.Names = append(job.Names, candidates[rotation%len(candidates)])
+						rotation++
+					}
 				}
+				// Fence this producer before pinning; retries keep the exact names
+				// and numeric window while observing a new immutable publication.
+				if err = flush(); err != nil {
+					return err
+				}
+				if err = producer.Seal(); err != nil {
+					return err
+				}
+				if err = producer.Drain(); err != nil {
+					return err
+				}
+				if err = store.Core.Append(0, nil, sequence, true); err != nil {
+					return err
+				}
+				job.SourcePath, job.SourceOffset, job.SourceCaughtUp = path, tail.offset, caughtUp
 				for _, db := range store.Core.DBs() {
 					job.Snapshots = append(job.Snapshots, db.NewSnapshot())
 				}

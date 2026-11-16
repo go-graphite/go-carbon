@@ -6,8 +6,13 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 )
 
 func TestComparisonPresenceBitsAndCorrections(t *testing.T) {
@@ -32,6 +37,50 @@ func TestComparisonPresenceBitsAndCorrections(t *testing.T) {
 	rows = append(rows, v2core.Row{Time: 61, Seq: 4})
 	if _, _, _, err = compareRaw("a", rows, classic, 60, 240); err == nil {
 		t.Fatal("accepted unaligned input")
+	}
+}
+
+func TestFrozenComparisonFreshSnapshotConvergence(t *testing.T) {
+	store, err := v2daemon.Open(t.TempDir(), v2daemon.Config{Layer: 2, Producers: 1, Shards: 1, GroupInterval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("from") != strconv.Itoa(60) || r.URL.Query().Get("until") != strconv.Itoa(120) || r.URL.Query().Get("target") != "a" {
+			t.Error("retry changed frozen query", r.URL.RawQuery)
+		}
+		b, _ := proto.Marshal(&pb.MultiFetchResponse{Metrics: []*pb.FetchResponse{{Name: "a", StartTime: 60, StepTime: 60, Values: []float64{2}, IsAbsent: []bool{false}}}})
+		_, _ = w.Write(b)
+	}))
+	defer server.Close()
+	sums := &totals{}
+	job := compareJob{Names: []candidate{{ID: 1, Name: "a"}}, From: 60, Until: 120, FirstSnapshot: time.Now()}
+	for seq := uint64(1); seq <= 2; seq++ {
+		p := store.Producers[0]
+		if err = p.Append([]string{"a"}, []points.Point{{Timestamp: 60, Value: float64(seq)}}, []uint64{seq}, 120); err != nil {
+			t.Fatal(err)
+		}
+		if err = p.Seal(); err != nil {
+			t.Fatal(err)
+		}
+		if err = p.Drain(); err != nil {
+			t.Fatal(err)
+		}
+		if err = store.Core.Append(0, nil, seq, true); err != nil {
+			t.Fatal(err)
+		}
+		job.Snapshots = nil
+		for _, db := range store.Core.DBs() {
+			job.Snapshots = append(job.Snapshots, db.NewSnapshot())
+		}
+		job.Attempt = int(seq - 1)
+		if retry := compare(job, server.URL, sums); retry != (seq == 1) {
+			t.Fatalf("attempt %d retry=%v", seq-1, retry)
+		}
+	}
+	if sums.Names != 2 || sums.Points != 2 || sums.Mismatches != 1 || sums.Failures != 0 {
+		t.Fatalf("incorrect totals: %+v", sums)
 	}
 }
 
