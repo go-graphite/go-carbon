@@ -184,3 +184,59 @@ func TestBoundLegacyOnlyAndSuppression(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundDisjointOverlayUsesLegacyResult(t *testing.T) {
+	ctx := context.Background()
+	const now = 1794700800
+	r, p, m := fixture(t, nil)
+	frozen, err := r.opts.Legacy.ResolveFrozen(ctx, "metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := BindLegacy(frozen, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := entryCatalog{Catalog: r.opts.LegacyCatalog, entries: map[string]catalogEntry{"metric": {m, binding}}}
+	index, err := partsread.NewSlotIndex([]partsread.SlotBlock{{ID: m.ID, Archive: m.Archives[0], Slots: partsread.SlotRange{From: 1, Until: 2}, Key: []byte("disjoint")}}, func(context.Context, []byte, []partsread.SlotRange, func(partsread.Sample) error) error {
+		t.Fatal("disjoint file read")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Publish(partsread.View{Catalog: cat, Parts: []partsread.Source{index}})
+	snap, err := p.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	opts := r.opts
+	opts.Snapshot = snap
+	opts.UnifiedCatalog = true
+	opts.Parts.Budget = partsread.NewBudget(8 << 20)
+	bound, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := r.opts.Legacy.Fetch(ctx, "metric", now-101, now-98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bound.Fetch(ctx, "metric", now-101, now-98, func(got *partsread.Series) error {
+		if len(got.Values) != len(want.Values) || len(got.Values) <= 1 || len(got.Occupied) != 0 {
+			t.Fatal("did not keep legacy result", got)
+		}
+		for i, v := range want.Values {
+			if math.Float64bits(v) != math.Float64bits(got.Values[i]) {
+				t.Fatal("changed legacy bits")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if bound.opts.Parts.Budget.Used() != 0 {
+		t.Fatal("admission leaked")
+	}
+}

@@ -43,7 +43,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced {
@@ -327,6 +327,46 @@ func TestLatencyComparison(t *testing.T) {
 			frozen, err := old.ResolveFrozen(ctx, cfg.Name)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// Dense profiling is separate from the predeclared paired gate. Keep
+			// CPU sampling dense without per-call MemStats or allocation tracing.
+			if duration := os.Getenv("GO_CARBON_MIXED_DENSE"); duration != "" {
+				d, err := time.ParseDuration(duration)
+				if err != nil || d < 30*time.Second || class == "" || !profile {
+					t.Fatal("dense diagnostics require a class, profile mode and >=30s per arm")
+				}
+				for _, arm := range []string{"native", "mixed"} {
+					pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("arm", arm, "class", className)))
+					started, calls, nanos := time.Now(), 0, int64(0)
+					for time.Since(started) < d {
+						if !warm && calls > 0 {
+							old, full, r = open()
+						}
+						region := trace.StartRegion(ctx, arm+"-fetch")
+						a := time.Now()
+						if arm == "native" {
+							_, err = full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
+						} else {
+							err = r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
+						}
+						nanos += time.Since(a).Nanoseconds()
+						region.End()
+						if err != nil {
+							t.Fatal(err)
+						}
+						calls++
+						if !warm {
+							closePair(old, full)
+						}
+					}
+					fmt.Printf("DENSE class=%s arm=%s calls=%d fetch_ns=%d elapsed_ns=%d\n", className, arm, calls, nanos, time.Since(started).Nanoseconds())
+					if !warm {
+						old, full, r = open()
+					}
+				}
+				pprof.SetGoroutineLabels(ctx)
+				closePair(old, full)
+				continue
 			}
 			base = make([]int64, 0, count)
 			mix = make([]int64, 0, count)

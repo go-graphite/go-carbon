@@ -416,6 +416,15 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 			return err
 		}
 	}
+	if old != nil && len(old.Values) > 1 {
+		overlaps, err := h.HasOverlayResolved(ctx, resolved, old)
+		if err != nil {
+			return err
+		}
+		if !overlaps {
+			return consume(old)
+		}
+	}
 	var current *partsread.Series
 	// An existing legacy result supplies the only dense output. RenderInto
 	// replaces physical slots directly; no dense occupancy scan or merge follows.
