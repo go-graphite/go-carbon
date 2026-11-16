@@ -66,8 +66,8 @@ func (f *fakeSync) put(origin, name string, schema []syncArchive, skip ...int64)
 		gaps[ts] = true
 	}
 	for _, a := range schema {
-		pts := map[int64]float64{}
 		from, until := syncWindow(syncTestNow, a, 0)
+		pts := make(map[int64]float64, (until-from)/a.Step+2)
 		for ts := from - a.Step; ts < until+a.Step; ts += a.Step {
 			if !gaps[ts] {
 				pts[ts] = float64(ts % 997)
@@ -134,7 +134,7 @@ func (f *fakeSync) Fetch(ctx context.Context, store string, names []string, from
 			continue
 		}
 		start := (from + step - 1) / step * step
-		var values []float64
+		values := make([]float64, 0, max(0, (until-start+step-1)/step))
 		for ts := start; ts < until; ts += step {
 			v, ok := s.points[n][step][ts]
 			if !ok {
@@ -167,7 +167,7 @@ func (f *fakeSync) Digest(_ context.Context, store string, names []string, from,
 			continue
 		}
 		for _, a := range schema {
-			var ts []int64
+			ts := make([]int64, 0, len(s.points[n][a.Step]))
 			for t := range s.points[n][a.Step] {
 				if t >= from && t < until {
 					ts = append(ts, t)
