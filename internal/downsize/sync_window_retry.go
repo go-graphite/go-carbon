@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -30,6 +32,47 @@ func (s *syncer) resolvedWindowSelections() map[syncWindowSelectionKey]map[strin
 		}
 		for _, n := range r.Selected {
 			out[k][n] = true
+		}
+	}
+	// Selection uncertainty can outlive a successful import: old selections
+	// may overlap copied names, or a process may stop between copied and
+	// window-resolved. Reconcile those receipts before probing or copying again.
+	// Keep only pending membership here, never a second full name catalog.
+	pending := map[syncWindowSelectionKey]map[string]bool{}
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-selected" && len(r.Skipped) > 0 }) {
+		k := syncWindowSelectionKey{r.Round, r.Source}
+		if pending[k] == nil {
+			pending[k] = map[string]bool{}
+		}
+		for _, skip := range r.Skipped {
+			if !out[k][skip.Name] {
+				pending[k][skip.Name] = true
+			}
+		}
+	}
+	for _, r := range s.j.find(func(r syncRow) bool {
+		return r.Kind == "copied" && !r.Forbidden && r.Copied > 0 &&
+			(r.Phase == "window-missing" || strings.HasPrefix(r.Phase, "window-retry-"))
+	}) {
+		k := syncWindowSelectionKey{r.Round, r.Source}
+		for name := range pending[k] {
+			at := sort.SearchStrings(r.Selected, name)
+			if !(at < len(r.Selected) && r.Selected[at] == name) &&
+				!(r.Names == 1 && r.First == name && r.Last == name) {
+				continue
+			}
+			failed := slices.Contains(r.Failed, name) || slices.Contains(r.Short, name)
+			for _, item := range r.Resolved {
+				failed = failed || item.Name == name
+			}
+			if failed {
+				continue
+			}
+			if out[k] == nil {
+				out[k] = map[string]bool{}
+			}
+			out[k][name] = true
+			delete(pending[k], name)
 		}
 	}
 	return out
