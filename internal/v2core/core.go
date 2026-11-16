@@ -715,6 +715,12 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
 	var plan coreSealPlan
 	var err error
+	durable := false
+	defer func() {
+		if !durable && plan.Abort != nil {
+			plan.Abort()
+		}
+	}()
 	if o.plan != nil {
 		plan, err = o.plan(coreSealInput{Rows: head, Batches: batches, Next: next})
 		if err != nil {
@@ -723,9 +729,14 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		if err = validateCoreSealPlan(plan); err != nil {
 			return 0, err
 		}
+		if plan.ReplaceRaw && len(head) > 0 && len(plan.Files) == 0 {
+			return 0, errors.New("raw replacement requires output for nonempty input")
+		}
 	}
 	phaseStart := time.Now()
-	if o.radixSort {
+	if plan.ReplaceRaw {
+		// The replacement planner owns ordering and retention in its format.
+	} else if o.radixSort {
 		o.sortScratch, o.radixWork = sortCoreRowsRadix(head, o.cfg.PartitionSeconds, o.sortScratch, o.radixWork)
 	} else if o.bucketSort {
 		o.sortScratch = sortCoreRowsBucketed(head, o.cfg.PartitionSeconds, o.sortScratch)
@@ -757,7 +768,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	var path string
-	if !o.cfg.BlindBatch && len(head) > 0 {
+	if !plan.ReplaceRaw && !o.cfg.BlindBatch && len(head) > 0 {
 		writer, path, err = stage("data")
 		if err != nil {
 			return 0, err
@@ -771,7 +782,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	}
 	var keyScratch [41]byte
 	var valueScratch [256 * 24]byte
-	for i := 0; i < len(head); {
+	for i := 0; !plan.ReplaceRaw && i < len(head); {
 		partition := corePartition(head[i].Time, o.cfg.PartitionSeconds)
 		if partition < next.ExpiredBefore {
 			if writer != nil {
@@ -857,6 +868,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		if err = batch.Commit(pebble.Sync); err != nil {
 			return 0, err
 		}
+		durable = true
 		if plan.Commit != nil {
 			plan.Commit()
 		}
@@ -904,6 +916,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	if err = o.db.Ingest(paths); err != nil {
 		return 0, err
 	}
+	durable = true
 	if plan.Commit != nil {
 		plan.Commit()
 	}

@@ -3,6 +3,8 @@
 // This experimental format is not the portable production parts format.
 package v2core
 
+import "github.com/cockroachdb/pebble"
+
 // Row preserves value bits and original input sequence exactly.
 type Row = row
 
@@ -21,7 +23,8 @@ type SealInput = coreSealInput
 // KV is one extension record, ordered by key.
 type KV = coreKV
 
-// SealPlan stages additional SSTs and a nonfailing post-durability publication.
+// SealPlan stages additional or replacement SSTs, post-durability publication
+// and pre-durability cleanup. Replacement callers own the persisted data format.
 type SealPlan = coreSealPlan
 
 // Hooks connects seal planning and immutable snapshot publication.
@@ -33,6 +36,19 @@ type Engine = coreEngine
 
 func Open(root string, cfg Config, hooks Hooks) (*Engine, error) {
 	return openCoreWithHooks(root, cfg, hooks)
+}
+
+// DBs borrows the engine-owned databases in owner order. A caller may recover
+// or initialize its own namespaces before the first Append/AppendBatches call.
+// After intake starts, publish writes only through PlanSeal. Never close these
+// handles, replace their files or modify the engine's reserved raw/frontier keys.
+// The returned slice is detached; handles remain valid only until Engine.Close.
+func (e *coreEngine) DBs() []*pebble.DB {
+	out := make([]*pebble.DB, len(e.owners))
+	for i, o := range e.owners {
+		out[i] = o.db
+	}
+	return out
 }
 
 // Append copies rows before returning; cursor strictly increases per producer.
