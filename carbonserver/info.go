@@ -185,6 +185,11 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	)
 
 	response := protov3.MultiMetricsInfoResponse{}
+	// Replica verification asks every holder about the union catalog. Missing
+	// names are normal there; failing the entire batch forces a client to bisect
+	// it down to individual names. Keep the legacy all-or-nothing response unless
+	// a v3 caller explicitly requests partial metadata.
+	allowPartial := formatCode == protoV3Format && req.FormValue("allowPartial") == "1"
 	var retentionsV2 []*protov2.Retention
 	for i, metric := range metrics {
 		info, err := listener.getMetricInfo(metric)
@@ -193,6 +198,9 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		}
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.NotFound, 1)
+			if allowPartial && (errors.Is(err, store.ErrNotFound) || errors.Is(err, os.ErrNotExist)) {
+				continue
+			}
 			accessLogger.Error("info served",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "metric not found"),
@@ -229,7 +237,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		})
 	}
 
-	if len(response.Metrics) == 0 {
+	if len(response.Metrics) == 0 && !allowPartial {
 		accessLogger.Error("info failed",
 			zap.String("reason", "Not Found"),
 			zap.Int("http_code", http.StatusNotFound),
