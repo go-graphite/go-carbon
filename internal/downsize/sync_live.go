@@ -566,6 +566,9 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 	if err != nil {
 		return syncCopyResult{}, err
 	}
+	if result, handled, err := b.resumeAbsentCopy(ctx, source, target, names, namesPath, journal, progress); handled || err != nil {
+		return result, err
+	}
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {
 		return syncCopyResult{}, err

@@ -753,21 +753,18 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		// Keep a pending wave's exact input stable across retries and changes to
 		// concurrency. Its precheck rows and transfer journal remain reusable.
 		pending := s.j.find(func(r syncRow) bool { return r.Kind == "missing-wave" && r.Source == source })
-		reserved := map[string]bool{}
+		reserved := reserveMissingWaves(names, pending)
 		nextGroup := 1
 		for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "copied" && r.Source == source }) {
 			nextGroup = max(nextGroup, r.Round+1)
 		}
 		for _, r := range pending {
 			nextGroup = max(nextGroup, r.Round+1)
-			for _, n := range r.Selected {
-				reserved[n] = true
-			}
 		}
 		wave := s.o.batch * s.o.streams
 		var fresh []string
-		for _, n := range names {
-			if !reserved[n] && !s.copied[n] && !short[n] && !s.failedCp[n] {
+		for i, n := range names {
+			if reserved[i/64]&(uint64(1)<<uint(i%64)) == 0 && !s.copied[n] && !short[n] && !s.failedCp[n] {
 				fresh = append(fresh, n)
 			}
 		}
