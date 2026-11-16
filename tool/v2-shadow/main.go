@@ -293,6 +293,7 @@ func run() (retErr error) {
 	policyFile := flag.String("policies", "", "fixed JSON name-to-policy map; L3 admits only this population and performs no policy lookups")
 	capacityOnly := flag.Bool("capacity-only", false, "measure admission without expensive parity scans")
 	layer := flag.Int("layer", 2, "2 raw or 3 rollup; L3 reconstructs receiver applications, not original classic applications")
+	fullL3 := flag.Bool("full-l3", false, "admit every name with its exact policy from classic info; fail on missing metadata")
 	workers := flag.Int("workers", 0, "partition-parallel decoder/catalog workers (1..16); requires capacity-only or fixed L3 policies")
 	receipts := flag.String("classic-receipts", "", "JSON array of frozen differences to reobserve through classic read API")
 	recheckQuiet := flag.Bool("recheck-quiet", false, "retain all differences but omit equal-slot observations during a frozen recheck")
@@ -302,7 +303,7 @@ func run() (retErr error) {
 		return reobserveClassic(*receipts, *base)
 	}
 	if *workers > 0 {
-		return runParallel(*source, *out, *base, *policyFile, *duration, *interval, *lag, *workers, *shards, *sample, *layer, *capacityOnly)
+		return runParallel(*source, *out, *base, *policyFile, *duration, *interval, *lag, *workers, *shards, *sample, *layer, *capacityOnly, *fullL3)
 	}
 	if *recheck != "" {
 		return recheckFrozen(*out, *recheck, *base, *shards, *recheckQuiet)

@@ -93,3 +93,27 @@ shared-host measurements require CPU affinity and co-tenant context.
 
 Use `-recheck-quiet` for large frozen cohorts: all differences remain, while
 equal-slot observations are omitted from the receipt to bound output size.
+
+Full-stream L3 admission is explicit: `-workers 16 -layer 3 -full-l3
+-capacity-only`. Optional `-policies` seeds the exact-name cache; every other
+name requires its stored policy from batched read-only `/info` requests. Missing
+or invalid metadata fails admission; there is no inferred or default policy.
+Policy discovery is part of the measured cost. This mode qualifies admission
+only; rotating parity comparisons remain a separate deliberate cohort.
+
+Parallel runs independently observe complete source frames, validating header
+and payload CRCs without decoding or writing the source. The journal contains
+no per-frame append clock. Each frame's append-completion time is conservatively
+bounded by the last unsuccessful read (while no successor exists) and the first
+CRC-valid read. Across rollover the earlier lower bound is preserved. A bounded
+stamp table fails rather than silently dropping observations. The point-weighted
+`append_to_visible` histogram reports lower and upper p50/p99 bounds in 10ms
+buckets, through a synchronous core publication fence after producer sync.
+Only an upper p99 below the target with zero unbounded points can qualify the
+latency gate. The overflow bucket means greater than 120s; it is not an exact
+latency. The source observer has its own point census and EOF frontier in every
+sample. `source_lag_seconds` remains the older scanner-EOF proxy.
+
+`skipped_points` is separate from `admission_pending_points`; fixed-policy
+filtering no longer appears as producer debt. All reported shared-host results
+remain provisional and include co-tenant load.
