@@ -34,6 +34,19 @@ func ConvertNativeCheckpoint(ctx context.Context, source NativeSnapshotReader, p
 	if err != nil || digest != plan.Baseline.Snapshot {
 		return receipt, errors.New("native checkpoint inventory authority mismatch")
 	}
+	var inputBytes int64
+	for _, file := range plan.Files {
+		inputBytes += file.Bytes
+	}
+	return convertNativeCheckpoint(ctx, source, plan, output, maxBytes, workers, digest, inputBytes)
+}
+
+// The catalog path validates and totals the immutable inventory once, rather
+// than sorting and hashing a multi-terabyte store's file list for every page.
+func convertNativeCheckpoint(ctx context.Context, source NativeSnapshotReader, plan NativeCheckpointPlan, output string, maxBytes, workers int, digest [32]byte, inputBytes int64) (receipt NativeReceipt, err error) {
+	if digest != plan.Baseline.Snapshot {
+		return receipt, errors.New("native checkpoint inventory authority mismatch")
+	}
 	plan.Names = slices.Clone(plan.Names)
 	slices.Sort(plan.Names)
 	identity, err := json.Marshal(struct {
@@ -75,9 +88,7 @@ func ConvertNativeCheckpoint(ctx context.Context, source NativeSnapshotReader, p
 		return receipt, err
 	}
 	receipt = NativeReceipt{Receipt: Receipt{Version: 1, Source: "native-checkpoint", SourceSHA: hex.EncodeToString(plan.Baseline.Snapshot[:]), Adapter: "native-baseline-v1", Writer: writer.Format(), Entries: uint64(len(rows))}, Baseline: plan.Baseline, Now: plan.Now, Names: plan.Names}
-	for _, file := range plan.Files {
-		receipt.InputBytes += file.Bytes
-	}
+	receipt.InputBytes = inputBytes
 	h := sha256.New()
 	for _, row := range rows {
 		hashEntry(h, Entry{Key: row.Key, Value: row.Value})

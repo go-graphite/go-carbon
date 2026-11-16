@@ -16,6 +16,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
+	"golang.org/x/sync/errgroup"
 )
 
 // NativeCheckpointPlan is a caller-certified immutable checkpoint inventory and
@@ -91,6 +92,7 @@ func OpenNativeCheckpoint(ctx context.Context, directory string, plan NativeChec
 	for _, f := range plan.Files {
 		seen[f.Name] = f
 	}
+	var bound []File
 	for _, entry := range entries {
 		if err = ctx.Err(); err != nil {
 			return nil, err
@@ -102,17 +104,31 @@ func OpenNativeCheckpoint(ctx context.Context, directory string, plan NativeChec
 		if !ok || entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
 			return nil, fmt.Errorf("unbound native checkpoint entry %q", entry.Name())
 		}
-		sum, size, e := FileSum(filepath.Join(directory, entry.Name()))
-		if e != nil {
-			return nil, e
-		}
-		if sum != file.SHA256 || size != file.Bytes {
-			return nil, fmt.Errorf("native checkpoint checksum mismatch: %s", file.Name)
-		}
+		bound = append(bound, file)
 		delete(seen, entry.Name())
 	}
 	if len(seen) != 0 {
 		return nil, errors.New("native checkpoint file missing")
+	}
+	group, verifyContext := errgroup.WithContext(ctx)
+	group.SetLimit(16)
+	for _, file := range bound {
+		group.Go(func() error {
+			if e := verifyContext.Err(); e != nil {
+				return e
+			}
+			sum, size, e := FileSum(filepath.Join(directory, file.Name))
+			if e != nil {
+				return e
+			}
+			if sum != file.SHA256 || size != file.Bytes {
+				return fmt.Errorf("native checkpoint checksum mismatch: %s", file.Name)
+			}
+			return nil
+		})
+	}
+	if err = group.Wait(); err != nil {
+		return nil, err
 	}
 	return source, nil
 }

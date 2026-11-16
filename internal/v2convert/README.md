@@ -124,3 +124,13 @@ When measuring, distinguish physical direct-I/O byte reads, warm decoded scans,
 and complete conversion plus verified publication. Record concurrent host load,
 physical-read counters, CPU time and exact per-file digest parity. A decoded
 scan rate does not qualify native conversion density or whole-name readback.
+
+For an entire certified checkpoint, add `-native-all -native-limit 128` to the
+native command above. The plan must omit `Names`. This walks every catalog page,
+reuses one verified checkpoint reader, and emits `native_page` progress records
+followed by `native_complete` only after catalog exhaustion. Each page uses the
+existing bounded transaction and exact dense-part readback; an oversized page
+fails closed, so reduce `-native-limit` or increase `-part-mib` before retrying.
+Completed page receipts are verified and reused on restart with the same plan,
+page size and prefix. File inventory validation and byte totals are computed
+once per walk. No live installation or source deletion is enabled.
