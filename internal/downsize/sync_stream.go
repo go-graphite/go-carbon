@@ -302,8 +302,7 @@ func (s *syncer) discover(ctx context.Context) error {
 		return err
 	}
 	event("sync_discovered", map[string]any{"names": names, "on_target": onTarget, "on_target_and_source": both, "missing": nMissing, "not_owned": notOwned})
-	s.endPhase("discover", names)
-	return nil
+	return s.endPhase("discover", names)
 }
 
 func parseUnionLine(line string) (name string, mask uint64, onTarget bool, err error) {
@@ -869,8 +868,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			s.addResidual(syncHole{Name: m.name, Source: s.sourcesOf(m.mask)}, reason)
 		}
 	}
-	s.endPhase("copy", work)
-	return nil
+	return s.endPhase("copy", work)
 }
 
 // Failed names remain eligible on resume; only successful receipts suppress

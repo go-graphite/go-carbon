@@ -96,6 +96,11 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 	if err = os.MkdirAll(o.state, 0755); err != nil {
 		return err
 	}
+	lock, err := lockResumeState(filepath.Join(o.state, "ready"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if o.issues == nil {
 		var e error
 		o.issues, e = openSyncIssues(o.state)
@@ -103,11 +108,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 			return e
 		}
 	}
-	lock, err := lockResumeState(filepath.Join(o.state, "ready"))
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
+
 	if r.noReady {
 		path := filepath.Join(o.state, "ready.json")
 		if _, e := os.Stat(path); e == nil {
