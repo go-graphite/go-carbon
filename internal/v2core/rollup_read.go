@@ -167,50 +167,59 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 		}
 		out.metrics = maps.Clone(prior.metrics)
 	}
-	// Copy only the names touched by the delta. An append extends the old
-	// directory; removals rebuild affected names from the pinned current set.
+	// Detach only affected entries before extending the immutable directory.
 	for name := range changed {
-		var m *snapshotMetric
 		if prior != nil && !removed[name] {
 			if old := prior.metrics[name]; old != nil {
 				copy := *old
 				copy.parts = slices.Clone(old.parts)
 				copy.partIDs = maps.Clone(old.partIDs)
-				m = &copy
-			}
-		}
-		candidates := added
-		if removed[name] {
-			candidates = out.parts
-		}
-		for id, part := range candidates {
-			pm := part.metrics[name]
-			if pm == nil {
+				out.metrics[name] = &copy
 				continue
 			}
+		}
+		delete(out.metrics, name)
+	}
+	// Walk actual entries once, rather than probing every part for each name.
+	addPart := func(part *readPart, onlyRemoved bool) error {
+		for name, pm := range part.metrics {
+			if onlyRemoved && !removed[name] {
+				continue
+			}
+			m := out.metrics[name]
 			if m == nil {
 				m = &snapshotMetric{latest: pm, partIDs: part.ids}
+				out.metrics[name] = m
 			}
 			if m.latest.policy.Group != pm.policy.Group || m.latest.meta.ID != pm.meta.ID || !bytes.Equal(m.latest.meta.Policy, pm.meta.Policy) {
-				return nil, errors.New("inconsistent rollup identity/policy")
+				return errors.New("inconsistent rollup identity/policy")
 			}
 			if pm.meta.Frontier.Order > m.latest.meta.Frontier.Order || (pm.meta.Frontier.Order == m.latest.meta.Frontier.Order && pm.meta.Revision > m.latest.meta.Revision) {
 				m.latest = pm
 			}
 			if len(m.parts) > 0 {
-				// A one-part directory borrows the part's immutable singleton.
-				// Detach before extending it, including across old reader pins.
+				// Detach the immutable singleton before adding a second part.
 				if len(m.parts) == 1 {
 					m.partIDs = maps.Clone(m.partIDs)
 				}
-				m.partIDs[id] = struct{}{}
+				m.partIDs[part.id] = struct{}{}
 			}
 			m.parts = append(m.parts, pm)
 		}
-		if m == nil {
-			delete(out.metrics, name)
-		} else {
-			out.metrics[name] = m
+		return nil
+	}
+	for _, part := range added {
+		if err := addPart(part, false); err != nil {
+			return nil, err
+		}
+	}
+	if len(removed) > 0 {
+		for id, part := range out.parts {
+			if added[id] == nil {
+				if err := addPart(part, true); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	for _, m := range out.metrics {
