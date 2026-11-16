@@ -231,6 +231,9 @@ func (r *Reader) Fetch(ctx context.Context, name string, from, until int64, cons
 		if e != nil {
 			return e
 		}
+		if !samePolicy(legacyMetric, resolved.Metric()) {
+			return ErrPolicy
+		}
 		overlap, e := h.HasOverlayResolved(ctx, resolved, old)
 		if e != nil {
 			return e

@@ -251,6 +251,16 @@ func TestBoundDisjointOverlayUsesLegacyResult(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Disjointness cannot hide an incompatible archive policy.
+	bad := m
+	bad.AggregationMethod = "sum"
+	p.Publish(partsread.View{Catalog: catalog(map[string]partsread.Metric{"metric": bad}), Parts: []partsread.Source{index}})
+	if err := r.Fetch(ctx, "metric", now-101, now-98, func(*partsread.Series) error {
+		t.Fatal("incompatible disjoint policy reached consumer")
+		return nil
+	}); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("disjoint policy mismatch=%v", err)
+	}
 	if bound.opts.Parts.Budget.Used() != 0 {
 		t.Fatal("admission leaked")
 	}
