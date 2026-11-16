@@ -46,7 +46,8 @@ func TestStorectlSignalStopAndResume(t *testing.T) {
 	for _, stage := range []string{"copy", "lost-ack", "verify", "backoff"} {
 		for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
 			t.Run(fmt.Sprintf("%s/%s", stage, sig), func(t *testing.T) {
-				t.Parallel()
+				// Sibling subprocesses also own live journal locks: launch one
+				// signal/resume scenario at a time.
 				source, target := nativeControllerStore(t), nativeControllerStore(t)
 				names := []string{"stop.a", "stop.b", "stop.c", "stop.d"}
 				for i, name := range names {
