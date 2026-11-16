@@ -228,3 +228,36 @@ func TestLogSIGKILLRandomReplay(t *testing.T) {
 		t.Logf("random SIGKILL trial%d record%d/%d: %d rows bit exact, no lost/duplicate points", trial, target, records, total)
 	}
 }
+
+func TestFinalReplayCompactionPreservesRows(t *testing.T) {
+	root := t.TempDir()
+	cfg := coreConfig{AppendParts: true, Shards: 2, Producers: 1, MaxRows: 64, PartitionSeconds: 60}
+	log, err := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < 5; i++ {
+		if err = log.append(0, int64(i), coreRows(0, i), true); err != nil {
+			_ = log.close()
+			t.Fatal(err)
+		}
+	}
+	if err = log.close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := coreDigest(filepath.Join(root, "parts"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := compactClosedReplay(filepath.Join(root, "parts"), cfg.Shards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample["estimated_debt_bytes"].(uint64) != 0 || sample["compactions_in_progress"].(int64) != 0 || sample["flushes_in_progress"].(int64) != 0 {
+		t.Fatal(sample)
+	}
+	after, err := coreDigest(filepath.Join(root, "parts"), cfg)
+	if err != nil || before != after {
+		t.Fatal("final compaction changed persisted rows", before, after, err)
+	}
+}

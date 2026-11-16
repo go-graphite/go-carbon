@@ -311,6 +311,10 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	// A longer wait lowers the reported settled rate and cannot pass the
 	// throughput gate by excluding outstanding compaction work.
 	deadline := time.Now().Add(60 * time.Second)
+	finalCompact := os.Getenv("PARTLOG_BENCH_FINAL_COMPACT") == "1"
+	if finalCompact {
+		deadline = time.Now()
+	}
 	settled := false
 	quiet := 0
 	for time.Now().Before(deadline) {
@@ -342,7 +346,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	sample["settled"] = settled
 	sample["live_accepted"] = live.Load()
 	sample["preclose_seconds"] = time.Since(replayStart).Seconds()
-	if !settled {
+	if !settled && !finalCompact {
 		err = errors.Join(err, errors.New("compaction did not settle"))
 	}
 	closed := make(chan error, 1)
@@ -356,6 +360,19 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		case <-tick.C:
 			emit("replay_live_close_sample", total+live.Load(), map[string]any{"proc": procStats(), "last_preclose_sample": sample})
 		}
+	}
+	if finalCompact {
+		// This explicitly pays final compaction; it is not natural background
+		// settlement. Reopening is legal only after the owner engine closes.
+		extra, compactErr := compactClosedReplay(filepath.Join(root, "parts"), cfg.Shards)
+		err = errors.Join(err, compactErr)
+		for k, v := range extra {
+			sample[k] = v
+		}
+		sample["compacted_bytes"] = sample["compacted_bytes"].(uint64) + extra["final_compaction_output_file_bytes"].(uint64)
+		sample["compaction_output_file_bytes"] = sample["compacted_bytes"]
+		sample["settled"] = compactErr == nil
+		sample["settlement"] = "explicit_offline_full_range_compaction"
 	}
 	// Include final owner flushes, database close and journal sync in the rate.
 	// The debt sample is taken while the databases are still open.
@@ -373,6 +390,65 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	}
 	emit("replay_live_close_complete", committed, map[string]any{"error": fmt.Sprint(err), "backlog": total, "live_accepted": live.Load(), "whole_mpoints_per_second": float64(total+live.Load()) / time.Since(start).Seconds() / 1e6})
 	return err
+}
+
+// compactClosedReplay is a benchmark-only terminal phase. It compacts raw data
+// and frontier keys, observes actual zero debt/activity repeatedly, and closes
+// all databases before returning. The caller times and accounts for all of it.
+func compactClosedReplay(root string, owners int) (map[string]any, error) {
+	dbs := make([]*pebble.DB, owners)
+	done := make(chan error, owners)
+	for owner := range owners {
+		go func() {
+			db, err := pebble.Open(filepath.Join(root, fmt.Sprintf("owner-%03d", owner)), &pebble.Options{})
+			if err == nil {
+				dbs[owner] = db
+				err = db.Compact([]byte{0}, []byte{255, 255}, true)
+			}
+			done <- err
+		}()
+	}
+	var err error
+	for range owners {
+		err = errors.Join(err, <-done)
+	}
+	out := map[string]any{"final_compaction_output_file_bytes": uint64(0)}
+	quiet := 0
+	deadline := time.Now().Add(60 * time.Second)
+	for err == nil && time.Now().Before(deadline) {
+		var debt, bytes uint64
+		var active, flushes, l0 int64
+		for _, db := range dbs {
+			m := db.Metrics()
+			debt += m.Compact.EstimatedDebt
+			active += m.Compact.NumInProgress
+			flushes += m.Flush.NumInProgress
+			l0 += m.Levels[0].NumFiles
+			for _, level := range m.Levels {
+				bytes += level.BytesCompacted
+			}
+		}
+		out["estimated_debt_bytes"], out["compactions_in_progress"], out["flushes_in_progress"], out["l0_files"] = debt, active, flushes, l0
+		out["final_compaction_output_file_bytes"] = bytes
+		if debt == 0 && active == 0 && flushes == 0 {
+			quiet++
+		} else {
+			quiet = 0
+		}
+		if quiet == 5 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err == nil && quiet != 5 {
+		err = errors.New("explicit final compaction did not settle")
+	}
+	for _, db := range dbs {
+		if db != nil {
+			err = errors.Join(err, db.Close())
+		}
+	}
+	return out, err
 }
 
 // Finish a diagnostic profile before a slow replay can exhaust its IO slot.

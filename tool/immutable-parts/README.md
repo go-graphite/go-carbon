@@ -343,3 +343,11 @@ and frontier SST file bytes, Pebble compaction-output file bytes, and the proces
 and process block writes are distinct counters; their difference includes
 allocation, rounding, manifest and other write effects. Final estimated debt is
 reported verbatim; a nonzero residual still fails the strict settlement gate.
+
+`PARTLOG_BENCH_FINAL_COMPACT=1` selects a separate terminal measurement: close
+the owner engine after the live suffix drains, reopen the disposable databases,
+explicitly compact the entire raw/frontier key range, require five consecutive
+zero-debt/zero-active observations, then close again. Its reported rate and
+process writes include every reopen, compaction and close. Label this as explicit
+offline final compaction; it does not establish natural background settlement or
+continuous steady-state behavior. The default natural-settlement gate is unchanged.
