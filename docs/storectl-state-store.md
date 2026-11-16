@@ -1,6 +1,26 @@
 # Indexed sync state: offline prototype and integration plan
 
-Status: experimental benchmark. The production sync command still uses its existing state files. This change adds an offline consumer so both engines can be assessed on the same input before choosing a production format.
+Status: Draft typed state boundary and offline benchmark. The production sync command still uses its existing state files. The typed boundary, direct catalog adoption primitives and read-only inspection command are implemented; whole-unit automatic adoption and runtime cutover are not implemented. Keep this change Draft until all runtime reducers use the new boundary and complete-state equivalence is qualified.
+
+## Typed boundary implemented in this Draft
+
+`internal/downsize/state_store.go` defines versioned SQLite STRICT relations for unit identity, explicit work scopes, phase positions, windows, immutable catalog pages, bitmap membership, native operation identities and receipt bytes, idempotent batches, interned reasons, issues, proof pages, READY reports and per-file adoption cursors. This database is distinct from the benchmark's generic `records` format; opening either format with the other reader fails. Writers share the legacy `sync.jsonl` unit lock. Unknown schema versions are rejected before schema creation or journal-mode changes.
+
+Completion batches bind scope, phase, round, window, holder, exact unique membership and the requested native receipt to a token. One transaction retires pending IDs, adds unique completed IDs, advances the durable counter and commits the receipt and token. Replayed tokens add zero work; a changed outcome, phase regression, native receipt change or failed transaction cannot publish partial progress. A failed commit latches the writer until close/reopen and reconciliation. A new explicit child scope retains historical floors.
+
+`state_catalog.go` encodes sorted names with prefix compression and all 63 source bits in pages of at most 4,096 entries. Page identities and ordering are immutable and generation-bound. Lookup decodes one checksummed page. `state_adopt.go` streams a **complete** `union.tsv` directly into those pages, with full source SHA256 and inode/size/time authentication, prefix-bound per-file offsets and compare-and-swap cursor updates in the same transaction. Repeating a completed catalog import adds zero names. No whole-catalog map or intermediate spool is used. Partial-discovery prefixes and the remaining legacy files still need their own adapters.
+
+The new read-only consumer is:
+
+```sh
+storectl state inspect --database /offline/state.sqlite.adopting
+storectl state inspect --database /offline/state.sqlite.adopting --name example.metric
+storectl state inspect --database /offline/state.sqlite.adopting --id 42 --hashes
+```
+
+Inspection reads indexed phase/window state and named issues. `--hashes` streams a typed, ordered count/SHA256 inventory of every semantic relation for an independent legacy reducer to compare. Catalog importer tests compare against independently constructed semantic fixtures. This is **not** a full legacy reducer oracle, and catalog adoption alone cannot authorize copy work or a READY verdict. No operator flag activates an incomplete format.
+
+The boundary explicitly checkpoints before closing and returns checkpoint, main-file sync, directory sync, close and rollback errors. Errors suppressed inside the SQLite VFS, particularly its own directory fsync, remain an activation gate. Do not interpret a successful explicit sync as evidence that every earlier driver syscall error was surfaced.
 
 ## Why
 
