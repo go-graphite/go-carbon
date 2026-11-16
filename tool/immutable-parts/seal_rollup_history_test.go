@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -69,7 +70,14 @@ func TestCompressedHistoryPhysicalReplacementAndBound(t *testing.T) {
 }
 
 func TestHistoryTilesPlannerDifferential(t *testing.T) {
-	cfg := sealrollup.Config{Method: sealrollup.Average, Archives: []sealrollup.Archive{{Step: 1, Count: 4096}, {Step: 8, Count: 1024}, {Step: 64, Count: 256}}}
+	for method := sealrollup.Average; method <= sealrollup.First; method++ {
+		for _, xff := range []float32{0, .5, 1} {
+			t.Run(fmt.Sprintf("method%d/xff%g", method, xff), func(t *testing.T) { historyTilesPlannerDifferential(t, method, xff) })
+		}
+	}
+}
+func historyTilesPlannerDifferential(t *testing.T, method sealrollup.Method, xff float32) {
+	cfg := sealrollup.Config{Method: method, XFilesFactor: xff, Archives: []sealrollup.Archive{{Step: 1, Count: 4096}, {Step: 8, Count: 1024}, {Step: 64, Count: 256}}}
 	policy, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -256,5 +264,65 @@ func TestCompressedHistorySparseLargeRetention(t *testing.T) {
 	}
 	if len(h) != 1 || len(h[0]) > 128 || cap(w.merged) > 8 {
 		t.Fatal("retention-sized allocation", len(h[0]), cap(w.merged))
+	}
+}
+
+func TestHistoryTilesDecodeOnceAcrossTiersAndSeal(t *testing.T) {
+	cfg := sealrollup.Config{Archives: []sealrollup.Archive{{Step: 1, Count: 4096}, {Step: 8, Count: 1024}}}
+	s := &atomicRollupState{Config: cfg}
+	var w rollupHistoryWorkspace
+	var records []sealrollup.Record
+	for a, ar := range cfg.Archives {
+		for slot := int64(0); slot < ar.Count; slot++ {
+			records = append(records, sealrollup.Record{Delta: sealrollup.Delta{Archive: a, Slot: slot, Order: 1, Sample: sealrollup.Sample{Time: slot * ar.Step, Bits: uint64(slot), Sequence: 1}}})
+		}
+	}
+	if err := w.load(s, cfg); err != nil {
+		t.Fatal(err)
+	}
+	h, err := w.seal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.history = h
+	if err = w.load(s, cfg); err != nil {
+		t.Fatal(err)
+	}
+	// Alternate distant tiles and archives, revisit through ranges, then encode
+	// physical replacements. All three consumers share the same decoded tiles.
+	for repeat := 0; repeat < 4; repeat++ {
+		for _, a := range []int{0, 1} {
+			for _, slot := range []int64{17, 600, 17, 800, 600} {
+				got, ok := w.view(a, slot)
+				if !ok || got.Time != slot*cfg.Archives[a].Step {
+					t.Fatal(a, slot, got, ok)
+				}
+			}
+			step := cfg.Archives[a].Step
+			_ = w.ranges(a, 0, 900*step, nil)
+		}
+	}
+	if w.decodedTiles != 8 {
+		t.Fatal("tile decoded repeatedly", w.decodedTiles)
+	}
+	replacements := []sealrollup.Record{records[17], records[600], records[4096+17], records[4096+600]}
+	next, err := w.seal(replacements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.decodedTiles != 8 {
+		t.Fatal("publication decoded tile again", w.decodedTiles)
+	}
+	for a := range h {
+		if !bytes.Equal(h[a], next[a]) {
+			t.Fatal("no-op seal changed bytes", a)
+		}
+	}
+	// A different metric must reset offsets without retaining old tile contents.
+	if err = w.load(nil, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := w.view(0, 17); ok {
+		t.Fatal("previous metric escaped scratch")
 	}
 }

@@ -16,13 +16,18 @@ type rollupHistorySample struct {
 	sample sealrollup.Sample
 }
 
+type historyDecodedTile struct {
+	start, end int
+	ready      bool
+}
+
 type rollupHistoryWorkspace struct {
 	archives     []sealrollup.Archive
 	samples      [][]rollupHistorySample
 	merged       []sealrollup.Sample
 	codec        partsrun.Workspace
 	values       [][]byte
-	loaded       []int64
+	tiles        [][]historyDecodedTile
 	err          error
 	decodedTiles int
 }
@@ -58,7 +63,7 @@ func historyTileFind(v []byte, id int64) (int, bool) {
 }
 func (w *rollupHistoryWorkspace) decode(a int, value []byte) error {
 	ar := w.archives[a]
-	ps := w.samples[a][:0]
+	ps := w.samples[a]
 	err := partsrun.VisitWithWorkspace(value, int(min(ar.Count, 1<<26)), func(p partsrun.Sample) error {
 		s := sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Sequence}
 		ps = append(ps, rollupHistorySample{historySlot(s, ar), s})
@@ -67,18 +72,24 @@ func (w *rollupHistoryWorkspace) decode(a int, value []byte) error {
 	w.samples[a] = ps
 	return err
 }
+
+// tile decodes each occupied physical tile at most once for this metric/seal.
+// Offsets survive arena growth; returned slices are consumed before the next call.
 func (w *rollupHistoryWorkspace) tile(a int, id int64) []rollupHistorySample {
-	if w.loaded[a] == id {
-		return w.samples[a]
-	}
-	w.loaded[a] = id
-	w.samples[a] = w.samples[a][:0]
 	i, ok := historyTileFind(w.values[a], id)
-	if ok {
-		w.decodedTiles++
-		w.err = errors.Join(w.err, w.decode(a, historyTileValue(w.values[a], i)))
+	if !ok {
+		return nil
 	}
-	return w.samples[a]
+	t := &w.tiles[a][i]
+	if !t.ready {
+		t.start = len(w.samples[a])
+		w.decodedTiles++
+		if err := w.decode(a, historyTileValue(w.values[a], i)); err != nil {
+			w.err = errors.Join(w.err, err)
+		}
+		t.end, t.ready = len(w.samples[a]), true
+	}
+	return w.samples[a][t.start:t.end]
 }
 
 func historySlot(p sealrollup.Sample, a sealrollup.Archive) int64 { return (p.Time / a.Step) % a.Count }
@@ -101,14 +112,14 @@ func (w *rollupHistoryWorkspace) load(s *atomicRollupState, cfg sealrollup.Confi
 	if cap(w.samples) < len(cfg.Archives) {
 		w.samples = make([][]rollupHistorySample, len(cfg.Archives))
 		w.values = make([][]byte, len(cfg.Archives))
-		w.loaded = make([]int64, len(cfg.Archives))
+		w.tiles = make([][]historyDecodedTile, len(cfg.Archives))
 	}
 	w.samples = w.samples[:len(cfg.Archives)]
 	w.values = w.values[:len(cfg.Archives)]
-	w.loaded = w.loaded[:len(cfg.Archives)]
+	w.tiles = w.tiles[:len(cfg.Archives)]
 	for a, ar := range cfg.Archives {
 		w.values[a] = nil
-		w.loaded[a] = -1
+		w.tiles[a] = w.tiles[a][:0]
 		ps := w.samples[a][:0]
 		if s != nil && s.history != nil && a < len(s.history) && len(s.history[a]) != 0 {
 			value := s.history[a]
@@ -139,6 +150,8 @@ func (w *rollupHistoryWorkspace) load(s *atomicRollupState, cfg sealrollup.Confi
 					return errors.New("trailing history tile bytes")
 				}
 				w.values[a] = value
+				w.tiles[a] = slices.Grow(w.tiles[a], n)[:n]
+				clear(w.tiles[a])
 				w.samples[a] = ps
 				continue
 			}
