@@ -34,7 +34,7 @@ func TestV2MultiarchiveBaselineTCPRestart(t *testing.T) {
 	setup := func() *App {
 		app := v2TestApp(t, root)
 		var err error
-		app.Config.Whisper.Schemas[0].Retentions, err = persister.ParseRetentionDefs("1s:2m,1m:2h")
+		app.Config.Whisper.Schemas[0].Retentions, err = persister.ParseRetentionDefs("1s:15m,1m:2h")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,7 @@ func TestV2MultiarchiveBaselineTCPRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"union.multi", "union.unseeded"} {
-		if _, err := native.Create(t.Context(), chunkstore.MetricConfig{Name: name, Retentions: []chunkstore.Retention{{Step: 1, Count: 120}, {Step: 60, Count: 120}}, AggregationMethod: chunkstore.Average}); err != nil {
+		if _, err := native.Create(t.Context(), chunkstore.MetricConfig{Name: name, Retentions: []chunkstore.Retention{{Step: 1, Count: 900}, {Step: 60, Count: 120}}, AggregationMethod: chunkstore.Average}); err != nil {
 			t.Fatal(err)
 		}
 		if err := native.UpdateMany(t.Context(), name, []chunkstore.Point{{Timestamp: now - 59, Value: 2}, {Timestamp: now - 58, Value: 4}}); err != nil {
@@ -105,7 +105,7 @@ func TestV2MultiarchiveBaselineTCPRestart(t *testing.T) {
 			app.Stop()
 		}
 	}()
-	policy := v2read.Metric{AggregationMethod: "average", Archives: []v2read.Archive{{Step: 1, Points: 120}, {Step: 60, Points: 120}}}
+	policy := v2read.Metric{AggregationMethod: "average", Archives: []v2read.Archive{{Step: 1, Points: 900}, {Step: 60, Points: 120}}}
 	if err := app.Carbonserver.ValidateV2UnionPolicy("union.unseeded", policy); err == nil {
 		t.Fatal("unseeded classic multiarchive admitted")
 	}
@@ -129,9 +129,12 @@ func TestV2MultiarchiveBaselineTCPRestart(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(8 * time.Second)
 		for {
-			series, masked, err := app.v2.reader.FetchWithMask(t.Context(), "union.multi", int(now-121), int(now))
-			if err == nil && masked && series != nil && series.Step() == 60 && len(series.Values()) >= 2 && series.Values()[1] == 6 {
-				return
+			series, masked, err := app.v2.reader.FetchWithMask(t.Context(), "union.multi", int(now-901), int(now))
+			if err == nil && masked && series != nil && series.Step() == 60 {
+				i := int((now - 60 - int64(series.FromTime())) / 60)
+				if i >= 0 && i < len(series.Values()) && series.Values()[i] == 6 {
+					return
+				}
 			}
 			if time.Now().After(deadline) {
 				t.Fatalf("converted baseline + TCP did not produce classic 6: %+v mask=%t err=%v", series, masked, err)

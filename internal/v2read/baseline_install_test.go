@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2convert"
@@ -132,6 +134,7 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 	cfg := v2daemon.Config{Layer: 3, Producers: 3, Shards: 2, GroupInterval: time.Hour, BaselinePath: filepath.Dir(receipts[0])}
 	var store *v2daemon.Store
 	var reader *Reader
+	var pendingObserved atomic.Bool
 	open := func() {
 		t.Helper()
 		reader, err = New(2, 512<<20, 64<<20)
@@ -139,7 +142,12 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 			t.Fatal(err)
 		}
 		reader.Now = func() time.Time { return time.Unix(now, 0) }
-		cfg.Hooks = v2core.Hooks{PublishBatches: reader.Publish}
+		cfg.Hooks = v2core.Hooks{PublishBatches: func(owner int, snapshot *pebble.Snapshot, pending []v2core.Batch, number uint64) error {
+			if len(pending) > 0 {
+				pendingObserved.Store(true)
+			}
+			return reader.Publish(owner, snapshot, pending, number)
+		}}
 		store, err = v2daemon.Open(root, cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -242,16 +250,34 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// Observe every submitted application through ordinary pending publications.
+		// The one-second seal can run while this large inventory is admitted.
+		// Observe every order in the published pending tail or sealed frontier;
+		// requiring all applications to remain pending at once races that seal.
 		await(t, func() bool {
-			n := 0
-			for i := range reader.owners {
-				p := reader.owners[i].Load()
-				if p != nil {
-					n += len(p.pending)
+			visible := map[uint64]bool{}
+			first := 101 + uint64(round*len(fixtures))
+			last := first + uint64(len(fixtures))
+			add := func(order uint64) {
+				if order >= first && order < last {
+					visible[order] = true
 				}
 			}
-			return n == len(fixtures)
+			for i := range reader.owners {
+				g := reader.owners[i].Load()
+				if g != nil && g.retain() {
+					g.once.Do(g.load)
+					if g.err != nil {
+						g.release()
+						return false
+					}
+					g.sealed.index.Metadata(func(_ string, _ v2core.RollupPolicy, m v2core.RollupMetadata) { add(m.Frontier.Order) })
+					for _, b := range g.pending {
+						add(b.Order)
+					}
+					g.release()
+				}
+			}
+			return len(visible) == len(fixtures)
 		})
 		compare(fmt.Sprintf("pending%d", round))
 		closeStore()
@@ -259,5 +285,8 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 		compare(fmt.Sprintf("replayed%d", round))
 	}
 	closeStore()
+	if !pendingObserved.Load() {
+		t.Fatal("inventory never exercised a pending publication")
+	}
 	t.Logf("converted/installed/admitted/replayed %d classic policies", len(fixtures))
 }
