@@ -80,6 +80,30 @@ func moveSample(time int64, value float64) sealrollup.Sample {
 	return sealrollup.Sample{Time: time, Bits: math.Float64bits(value)}
 }
 
+func TestMoveCachedCopiedOnlyBecomesLive(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	donor := movePart(t, 1, 99, 100, moveSample(1000, 1))
+	if _, err = InstallCopiedPart(context.Background(), db, dir, donor.path, donor.descriptor); err != nil {
+		t.Fatal(err)
+	}
+	before := moveIndex(t, db, nil)
+	if moveRaw(t, before)[1000] != math.Float64bits(1) {
+		t.Fatal("missing donor-only cache fixture")
+	}
+	ingestLiveMovePart(t, db, movePart(t, 2, 7, 1, moveSample(1000, 2)))
+	if moveRaw(t, moveIndex(t, db, before))[1000] != math.Float64bits(2) {
+		t.Fatal("copied-only cached generation masked live intake")
+	}
+	if moveRaw(t, before)[1000] != math.Float64bits(1) {
+		t.Fatal("old copied-only snapshot changed")
+	}
+}
+
 func TestMoveCatalogCopiedPrecedenceAndRepair(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

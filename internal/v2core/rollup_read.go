@@ -51,6 +51,7 @@ type archiveRange struct {
 type archiveResult struct {
 	records            []sealrollup.Record
 	origins            map[int64]partOrigin
+	origin             partOrigin
 	parts              map[string]struct{}
 	bytes              int64
 	frontier, revision uint64
@@ -277,6 +278,11 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	var cached *archiveResult
 	parts := m.partIDs
 	for _, candidate := range candidates[:count] {
+		// Cache aging uses an order only inside the same original stream.
+		// Changing the winning class/source invalidates that age comparison.
+		if candidate.origin != m.origin {
+			continue
+		}
 		if candidate.frontier > m.meta.Frontier.Order || len(candidate.parts) > len(parts) {
 			continue
 		}
@@ -412,7 +418,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if err = it.Error(); err != nil {
 		return err
 	}
-	result := &archiveResult{frontier: m.meta.Frontier.Order, revision: m.meta.Revision, parts: parts, origins: origins, records: make([]sealrollup.Record, 0, len(winners))}
+	result := &archiveResult{origin: m.origin, frontier: m.meta.Frontier.Order, revision: m.meta.Revision, parts: parts, origins: origins, records: make([]sealrollup.Record, 0, len(winners))}
 	for _, record := range winners {
 		result.records = append(result.records, record)
 	}
@@ -428,7 +434,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 		entries := s.cache.entries[cacheKey]
 		duplicate := false
 		for _, old := range entries {
-			if old.frontier == result.frontier && old.revision == result.revision && len(old.parts) == len(parts) {
+			if old.origin == result.origin && old.frontier == result.frontier && old.revision == result.revision && len(old.parts) == len(parts) {
 				duplicate = true
 				for id := range old.parts {
 					if _, ok := parts[id]; !ok {
