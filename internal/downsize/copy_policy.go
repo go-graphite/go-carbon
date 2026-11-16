@@ -27,7 +27,7 @@ func (m *mover) copyPolicyConflict(ctx context.Context, t task, name string, bud
 	}{{t.Source, &source}, {t.Target, &target}} {
 		_, err := m.request(ctx, side.endpoint, "/v1/transfer/export?wire=2&store_format=12&max_bytes="+strconv.FormatInt(budget, 10), []string{name}, side.out)
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(original, fmt.Errorf("policy conflict export from %s: %w", side.endpoint, err))
 		}
 	}
 	if len(source) != 1 || len(target) != 1 {
@@ -39,7 +39,7 @@ func (m *mover) copyPolicyConflict(ctx context.Context, t task, name string, bud
 	}
 	var wire bytes.Buffer
 	if err := store.WriteTransfer2(&wire, []store.TransferMetric{record}); err != nil {
-		return nil, err
+		return nil, errors.Join(original, fmt.Errorf("policy conflict encoding: %w", err))
 	}
 	if int64(wire.Len()) > budget {
 		return nil, original
@@ -48,6 +48,8 @@ func (m *mover) copyPolicyConflict(ctx context.Context, t task, name string, bud
 	if err == nil {
 		headers.Set("X-Transfer-Bytes", strconv.Itoa(wire.Len()))
 		event("copy_policy_resolved", map[string]any{"name": name, "source_xff": source[0].Config.XFilesFactor, "target_xff": target[0].Config.XFilesFactor})
+	} else {
+		err = errors.Join(original, fmt.Errorf("policy conflict import: %w", err))
 	}
 	return headers, err
 }
