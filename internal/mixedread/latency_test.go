@@ -322,7 +322,7 @@ func TestLatencyComparison(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			route := "sparse-window-overlay"
+			route := "plain-overlay"
 			if !yes {
 				route = "legacy-only"
 			} else if coverage >= ((hi-lo)/step+7)/8 {
