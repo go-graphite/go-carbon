@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -115,6 +116,7 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 	client := &http.Client{Timeout: 10 * time.Second}
 	pairs, total, bad, archives := 0, 0, 0, 0
 	var examples []difference
+	var observations []difference
 	var coverage []map[string]any
 	for _, n := range job.Names {
 		m := selected[n.Name]
@@ -148,6 +150,23 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 					rows = append(rows, v2core.Row{Time: r.Sample.Time, Bits: r.Sample.Bits, Seq: r.Order})
 				}
 			}
+
+			if job.PostClose && len(classic.IsAbsent) == len(classic.Values) {
+				slots := map[int64]slot{}
+				for _, r := range rows {
+					if old, ok := slots[r.Time]; !ok || r.Seq > old.Seq {
+						slots[r.Time] = slot{r.Bits, r.Seq}
+					}
+				}
+				for i, v := range classic.Values {
+					ts := int64(classic.StartTime) + int64(i)*step
+					if ts < lo || ts >= hi {
+						continue
+					}
+					r, ok := slots[ts]
+					observations = append(observations, difference{n.Name, ts, fmt.Sprintf("%016x", r.Bits), fmt.Sprintf("%016x", math.Float64bits(v)), ok, !classic.IsAbsent[i]})
+				}
+			}
 			count, diff, ex, e := compareRaw(n.Name, rows, classic, lo, hi)
 			if e != nil {
 				failures = append(failures, e.Error())
@@ -171,6 +190,6 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 	sums.Mismatches += uint64(bad)
 	sums.Failures += uint64(len(failures))
 	// Initial differences stay in totals; no reconstruction mismatch is waived.
-	emit(map[string]any{"stage": "l3_comparison", "context": contextLoad(), "names": job.Names, "from": job.From, "until": job.Until, "compared_names": pairs, "compared_archives": archives, "compared_points": total, "mismatches": bad, "examples": examples, "failures": failures, "coverage": coverage, "seconds": time.Since(start).Seconds(), "source_lag_seconds": job.SourceLagSeconds, "source_segments_behind": job.SourceSegmentsBehind, "original_classic_applications_available": false})
+	emit(map[string]any{"stage": "l3_comparison", "context": contextLoad(), "names": job.Names, "from": job.From, "until": job.Until, "compared_names": pairs, "compared_archives": archives, "compared_points": total, "mismatches": bad, "examples": examples, "observations": observations, "failures": failures, "coverage": coverage, "seconds": time.Since(start).Seconds(), "source_lag_seconds": job.SourceLagSeconds, "source_segments_behind": job.SourceSegmentsBehind, "post_close_recheck": job.PostClose, "original_classic_applications_available": false})
 	return false
 }

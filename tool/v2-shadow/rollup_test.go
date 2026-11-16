@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -47,11 +48,16 @@ func TestLivePolicyAndBacklog(t *testing.T) {
 }
 
 func TestL3PinnedArchiveComparison(t *testing.T) {
-	s, err := v2daemon.Open(filepath.Join(t.TempDir(), "store"), v2daemon.Config{Layer: 3, Producers: 1, Shards: 1})
+	root := filepath.Join(t.TempDir(), "store")
+	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: 1, Shards: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
+	closed := false
 	defer func() {
+		if closed {
+			return
+		}
 		if err := s.Close(); err != nil {
 			t.Error(err)
 		}
@@ -89,5 +95,20 @@ func TestL3PinnedArchiveComparison(t *testing.T) {
 	compareL3(job, srv.URL, sums)
 	if sums.Names != 1 || sums.Points != 1 || sums.Mismatches != 0 || sums.Failures != 0 {
 		t.Fatal(sums)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	b, err := json.Marshal(map[string]any{"stage": "l3_comparison", "names": job.Names, "from": 100, "until": 240, "context": map[string]string{"when_cet": time.Now().Format(time.RFC3339)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "case.json")
+	if err = os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = recheckFrozen(root, path, srv.URL, 1); err != nil {
+		t.Fatal(err)
 	}
 }

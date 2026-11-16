@@ -60,3 +60,8 @@ measurement separately, including the actual observed policy population and
 missing strata. File-size backlog counters in older receipts include preallocated
 space; the current field explicitly labels that upper bound. Successor-segment
 counts and live-EOF freshness must also be inspected.
+
+Frozen rechecks also accept saved `l3_comparison` objects from a stopped L3 root.
+The read-only recheck preserves names/windows and emits each completed slot's
+presence and value bits, so convergence can be checked against the initial
+examples. It does not reconstruct missing classic application metadata.

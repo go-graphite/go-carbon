@@ -31,7 +31,7 @@ func recheckFrozen(root, casePath, base string, shards int) error {
 	if err = json.Unmarshal(b, &saved); err != nil {
 		return err
 	}
-	if root == "" || shards < 1 || saved.Stage != "comparison" || len(saved.Names) == 0 || saved.Until <= saved.From {
+	if root == "" || shards < 1 || (saved.Stage != "comparison" && saved.Stage != "l3_comparison") || len(saved.Names) == 0 || saved.Until <= saved.From {
 		return errors.New("existing shadow root, positive shards and a saved comparison required")
 	}
 	for _, n := range saved.Names {
@@ -49,6 +49,9 @@ func recheckFrozen(root, casePath, base string, shards int) error {
 		return err
 	}
 	job := compareJob{Names: saved.Names, From: saved.From, Until: saved.Until, Attempt: saved.Attempt + 1, FirstSnapshot: when.Add(-time.Duration(saved.SinceFirstSnapshotSeconds * float64(time.Second))), PostClose: true}
+	if saved.Stage == "l3_comparison" {
+		job.Layer = 3
+	}
 	var dbs []*pebble.DB
 	defer func() {
 		for _, db := range dbs {
