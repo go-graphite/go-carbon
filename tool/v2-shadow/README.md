@@ -27,3 +27,36 @@ windows begin 60s later. Comparison end is the last observed live-edge time minu
 `-lag`; the harness refuses snapshots over 10s since reaching that edge or with
 any newer segment outstanding. JSONL exposes both bounds. The external supervisor
 must still fence classic PID/start-time changes for the whole run.
+
+Use `-capacity-only -sample-every 1 -compare-interval 1s` for a full-stream
+admission run without broad parity scans. Each sample reports backlog bytes and
+successor segments, elapsed time since the last observed live EOF, and self CPU
+counters. EOF age measures source freshness, not per-point end-to-end latency.
+Measure the classic receiver counter over the same window externally. Capacity
+mode can succeed without comparisons; it never implies read parity.
+
+Use `-layer 3 -sample-every 256 -sample 192` for a separate sampled L3 run. Policies
+come from the classic read-only `/info` API, including tags, retention ladders,
+aggregation and XFF. Receiver groups are reconstructed applications using the
+shadow admission clock; the source journal does not carry classic persister apply
+boundaries/clocks. This mode cannot certify original application or metadata
+parity. It emits each policy for a schema/method census and per-name archive
+coverage. The sampled L3 run must not be presented as full-stream L3 throughput.
+
+L3 comparisons pin immutable core snapshots and use `RollupSnapshot`. A classic
+lookback beyond each finer retention selects its next archive; returned step is
+checked explicitly. Only completed intervals strictly inside the fresh run count.
+Archives with no such interval contribute no coverage. Values, presence and
+float64 bits are compared with the same endpoint rules as raw checks. Every
+initial difference/failure stays in totals; reconstruction ambiguity is never a
+successful parity result. Compare the policy census and tagged/sparse/dense
+coverage against the intended population before making a coverage claim.
+
+To remove synchronous policy discovery from a measured L3 window, first collect
+`policy` receipts in a discovery run, save their exact canonical objects as a JSON
+name-to-policy map, then start a fresh run with `-policies policies.json
+-sample-every 1`. Only that fixed population is admitted. Report discovery and
+measurement separately, including the actual observed policy population and
+missing strata. File-size backlog counters in older receipts include preallocated
+space; the current field explicitly labels that upper bound. Successor-segment
+counts and live-EOF freshness must also be inspected.

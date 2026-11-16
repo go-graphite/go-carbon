@@ -104,6 +104,7 @@ type candidate struct {
 	Name string
 }
 type compareJob struct {
+	Layer                int
 	SourceLagSeconds     float64
 	SourceSegmentsBehind int
 	Names                []candidate
@@ -208,6 +209,9 @@ func compareRaw(name string, rows []v2core.Row, classic *pb.FetchResponse, from,
 type totals struct{ Names, Points, Mismatches, Failures uint64 }
 
 func compare(job compareJob, base string, sums *totals) bool {
+	if job.Layer == 3 {
+		return compareL3(job, base, sums)
+	}
 	start := time.Now()
 	defer func() {
 		for _, s := range job.Snapshots {
@@ -285,6 +289,9 @@ func run() (retErr error) {
 	sample := flag.Int("sample", 16, "rotating names per comparison")
 	lag := flag.Duration("lag", 120*time.Second, "fixed measured/exposed exclusion, not a parity waiver")
 	sampleEvery := flag.Uint64("sample-every", 1, "admit all points only for names whose FNV64a hash modulo this value is zero; 1 admits all")
+	policyFile := flag.String("policies", "", "fixed JSON name-to-policy map; L3 admits only this population and performs no policy lookups")
+	capacityOnly := flag.Bool("capacity-only", false, "measure admission without expensive parity scans")
+	layer := flag.Int("layer", 2, "2 raw or 3 rollup; L3 reconstructs receiver applications, not original classic applications")
 	recheck := flag.String("recheck", "", "one saved comparison JSON object to check against a stopped existing out root, opened read-only")
 	flag.Parse()
 	if *recheck != "" {
@@ -370,7 +377,7 @@ func run() (retErr error) {
 	if err = os.Mkdir(*out, 0700); err != nil {
 		return fmt.Errorf("fresh output directory required: %w", err)
 	}
-	store, err := v2daemon.Open(*out, v2daemon.Config{Layer: 2, Producers: 1, Shards: *shards, MaxPendingRows: 2 << 20, GroupInterval: time.Second})
+	store, err := v2daemon.Open(*out, v2daemon.Config{Layer: *layer, Producers: 1, Shards: *shards, MaxPendingRows: 2 << 20, GroupInterval: time.Second})
 	if err != nil {
 		return err
 	}
@@ -406,11 +413,27 @@ func run() (retErr error) {
 		close(jobs)
 		<-done
 		emit(map[string]any{"stage": "comparison_totals", "context": contextLoad(), "totals": sums})
-		if retErr == nil && (sums.Points == 0 || sums.Mismatches > 0 || sums.Failures > 0) {
+		if retErr == nil && ((!*capacityOnly && sums.Points == 0) || sums.Mismatches > 0 || sums.Failures > 0) {
 			retErr = fmt.Errorf("comparison incomplete or differing: %+v", *sums)
 		}
 	}()
 	names := map[string]uint64{}
+	policies := map[string][]byte{}
+	if *policyFile != "" {
+		b, e := os.ReadFile(*policyFile)
+		if e != nil {
+			return e
+		}
+		var raw map[string]json.RawMessage
+		if e = json.Unmarshal(b, &raw); e != nil {
+			return e
+		}
+		for n, p := range raw {
+			policies[n] = p
+		}
+	}
+	policyClient := &http.Client{Timeout: 5 * time.Second}
+	var applicationOrder uint64
 	var candidates []candidate
 	rotation := 0
 	var sequence, decodedBytes uint64
@@ -431,7 +454,7 @@ func run() (retErr error) {
 		batchSeq = batchSeq[:0]
 		return e
 	}
-	emit(map[string]any{"stage": "start", "context": contextLoad(), "source_path": path, "duration_seconds": duration.Seconds(), "raw_only": true, "sample_every": *sampleEvery, "fresh_history_from": from})
+	emit(map[string]any{"stage": "start", "context": contextLoad(), "source_path": path, "duration_seconds": duration.Seconds(), "layer": *layer, "capacity_only": *capacityOnly, "raw_only": *layer == 2, "sample_every": *sampleEvery, "fresh_history_from": from})
 	for time.Now().Before(deadline) {
 		now := time.Now()
 		if !now.Before(sealAt) {
@@ -458,10 +481,13 @@ func run() (retErr error) {
 			stats["sample_every"] = *sampleEvery
 			stats["source_lag_seconds"] = time.Since(lastCaughtUp).Seconds()
 			stats["journal_sync_groups"] = producer.SyncGroups
+			stats["source_backlog"] = sourceBacklog(*source, path, tail.offset)
+			selfCPU, _ := os.ReadFile("/proc/self/stat")
+			stats["self_cpu_stat"] = string(selfCPU)
 			emit(stats)
 			until := lastCaughtUp.Add(-*lag).Unix()
-			if until > from && len(candidates) > 0 && len(jobs) == 0 {
-				job := compareJob{From: from, Until: until, FirstSnapshot: now}
+			if !*capacityOnly && until > from && len(candidates) > 0 && len(jobs) == 0 {
+				job := compareJob{Layer: *layer, From: from, Until: until, FirstSnapshot: now}
 				select {
 				case job = <-retries:
 				default:
@@ -568,13 +594,42 @@ func run() (retErr error) {
 			if e != nil {
 				return e
 			}
+			if *layer == 3 && *policyFile != "" && policies[name] == nil {
+				continue
+			}
 			id, ok := names[name]
 			if !ok {
 				id = uint64(len(names) + 1)
 				names[name] = id
-				if (*sampleEvery > 1 || id%8192 == 1) && len(candidates) < 4096 {
+				if (*layer == 3 || *sampleEvery > 1 || id%8192 == 1) && len(candidates) < 4096 {
 					candidates = append(candidates, candidate{id, name})
 				}
+			}
+
+			if *layer == 3 {
+				policy := policies[name]
+				if policy == nil {
+					policy, e = fetchPolicy(policyClient, *base, name)
+					if e != nil {
+						return e
+					}
+					policies[name] = policy
+					emit(map[string]any{"stage": "policy", "name": name, "policy": json.RawMessage(policy), "context": contextLoad()})
+				}
+				for at := 0; at < len(group.Data); {
+					end := min(at+32768, len(group.Data))
+					seqs := make([]uint64, end-at)
+					for i := range seqs {
+						sequence++
+						seqs[i] = sequence
+					}
+					applicationOrder++
+					if e = producer.AppendApplications([]v2daemon.Application{{Name: name, Policy: policy, Order: applicationOrder, Clock: time.Now().Unix(), Points: group.Data[at:end], Sequence: seqs}}); e != nil {
+						return e
+					}
+					at = end
+				}
+				continue
 			}
 			for _, point := range group.Data {
 				sequence++
