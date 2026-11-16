@@ -17,6 +17,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/daemonstore"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/partsread"
+	"github.com/go-graphite/go-carbon/internal/partsrun"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
@@ -236,11 +237,44 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 	}
 	defer refs.Close()
 	n := (until - from) / a.Step
+	var workspace partsrun.Workspace
+	policy := toDaemonMetric(m)
+	emit := func(r sealrollup.Record) error {
+		if r.Archive != archive {
+			return nil
+		}
+		slot := ((r.Sample.Time/a.Step)%a.Points - (from/a.Step)%a.Points + a.Points) % a.Points
+		if slot < n {
+			return yield(partsread.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order})
+		}
+		return nil
+	}
 	for refs.First(); refs.Valid(); refs.Next() {
 		if e = ctx.Err(); e != nil {
 			return e
 		}
 		p := slices.Clone(refs.Value())
+		compactPrefix := binary.BigEndian.AppendUint32(slices.Clone(p), compactArchive)
+		compact, err := d.snap.NewIter(&pebble.IterOptions{LowerBound: compactPrefix, UpperBound: partsformat.PrefixEnd(compactPrefix)})
+		if err != nil {
+			return err
+		}
+		for compact.First(); compact.Valid(); compact.Next() {
+			if e = ctx.Err(); e != nil {
+				break
+			}
+			if _, e = partsformat.Decode(compact.Key()); e != nil {
+				break
+			}
+			e = visitCompactRecords(compact.Value(), policy, &workspace, emit)
+			if e != nil {
+				break
+			}
+		}
+		e = errors.Join(e, compact.Error(), compact.Close())
+		if e != nil {
+			return e
+		}
 		p = binary.BigEndian.AppendUint32(p, uint32(archive))
 		ranges := physicalRanges(a, from, until)
 		for _, span := range ranges {
@@ -264,11 +298,8 @@ func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, f
 					e = err
 					break
 				}
-				slot := ((r.Sample.Time/a.Step)%a.Points - (from/a.Step)%a.Points + a.Points) % a.Points
-				if slot < n {
-					if e = yield(partsread.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order}); e != nil {
-						break
-					}
+				if e = emit(r); e != nil {
+					break
 				}
 			}
 			e = errors.Join(e, it.Error(), it.Close())

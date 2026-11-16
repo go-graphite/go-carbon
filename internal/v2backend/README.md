@@ -166,17 +166,30 @@ land together with these outstanding gates satisfied.
 
 The restart-only `[v2] write-engine = "core"` selector submits journal envelopes
 through `internal/v2core`. The default `"standalone"` path remains available for
-comparison. Core currently requires `owners = shards` and a fresh data directory;
-the directory marker rejects selecting another engine on restart. This initial
-adapter preserves one physical database per journal owner; it does not yet expose
-independent intake-producer and physical-database counts.
+comparison. Core requires `owners >= shards` and a fresh data directory;
+the directory marker rejects selecting another engine on restart. Journal owners are independent producers; owner `i` writes through physical
+database `i % shards`. Each physical database serializes its replacement plans.
+The current adapter is one process-wide pipeline; separate NUMA pipelines remain
+a qualification item.
 
-Each core batch represents one original journal envelope. Opaque descriptors
-retain each original apply's immutable catalog handle, clock, order and point
-count. Handles and core routing tokens are process-local: canonical names,
-placement groups and routing vshards remain authoritative in portable SSTs and
-recovery checkpoints. Replay resolves new handles from the retained journal and
-uses the same core submission and replacement planner as intake.
+Each core batch carries one fixed-size opaque journal-envelope reference. The
+process-local registry borrows immutable applies until that envelope is committed
+or aborted. Core receives no duplicate per-point numeric rows. Replay reconstructs
+these references from the synced original journal, which remains authoritative.
+Portable series identity is encoded once per bounded block, rather than once per
+sample: each GCP3 series key contains PG, routing vshard, partition and canonical
+name. The reserved archive discriminator `0xfffffffe` selects a V2R1 payload of
+at most 4096 authoritative records. Archive groups use `partsrun` version 1 runs
+plus correction bits, preserving exact timestamp, value bits, apply order and
+physical ring overwrite semantics. Catalog identity and placement remain portable;
+this encoding is not a process-local numeric identifier.
+
+The new reader combines compact blocks with existing per-slot parts, and recovery
+uses the same decoder. The `core-v2` directory marker rejects both opening an old `core-v1` store
+without migration and reopening the compact store under an older backend.
+Use a fresh directory; an in-place migration is not implemented.
+Raw SST copy preserves bytes and routing ranges; generic payload consumers must
+recognize this discriminator before attempting slot decoding.
 
 The backend prepares every portable data/catalog/ref/checkpoint file without
 advancing visible state. Core ingests these files atomically with its own receipt
@@ -197,3 +210,8 @@ but starts with numeric identities and excludes TCP, the input journal and the
 portable replacement planner. Report those differences with any daemon/core ratio.
 `V2_BACKEND_WRITE_ENGINE=core` selects the new path in the existing independent
 sender daemon benchmark. Neither path has a production capacity qualification.
+
+The throughput harness verifies the external sender count against receiver admission,
+then flushes and closes before printing `V2_DAEMON_COMPLETE`. Use that receipt for
+completed throughput. The matched numeric control emits complete elapsed time and
+CPU after close, verifies its committed count, and writes a CPU profile when enabled.

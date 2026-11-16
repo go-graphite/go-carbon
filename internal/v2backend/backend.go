@@ -104,8 +104,7 @@ type owner struct {
 type Store struct {
 	core                          *v2core.Engine
 	coreRoutes                    []uint64
-	coreCatalog                   sync.Map
-	coreSequence                  atomic.Uint64
+	coreEnvelopes                 sync.Map
 	coreReplay                    atomic.Bool
 	coreViewsClosed               atomic.Bool
 	opts                          daemonstore.Options
@@ -143,9 +142,10 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	if opts.WriteEngine != "" && opts.WriteEngine != "standalone" && opts.WriteEngine != "core" {
 		return nil, errors.New("unknown v2 write engine")
 	}
-	if opts.WriteEngine == "core" && opts.Owners != opts.Shards {
-		return nil, errors.New("core write engine requires owners equal shards")
+	if opts.WriteEngine == "core" && opts.Owners < opts.Shards {
+		return nil, errors.New("core write engine requires at least one journal owner per shard")
 	}
+
 	if err := validJournalCodec(opts.JournalCodec); err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	// Geometry and origin are restart invariants, never inferred from local IDs.
 	format := []byte(fmt.Sprintf("experimental-v2-single-origin-v1\nowners=%d\nshards=%d\n", opts.Owners, opts.Shards))
 	if opts.WriteEngine == "core" {
-		format = append(format, "write-engine=core-v1\n"...)
+		format = append(format, "write-engine=core-v2\n"...)
 	}
 	marker := filepath.Join(opts.DataDir, "V2FORMAT")
 	if old, e := os.ReadFile(marker); e == nil {
@@ -239,10 +239,12 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 		}
 		o.nextOrder = max(o.meta.Order, o.meta.Cursor)
 		o.coreCursor = o.meta.Cursor
-		if s.core != nil && s.core.DurableFrontiers()[i][i] != o.meta.Cursor {
+		if s.core != nil && s.core.DurableFrontiers()[i%opts.Shards][i] != o.meta.Cursor {
 			return nil, errors.New("core/backend atomic frontier mismatch")
 		}
 	}
+	// Publish owner directory entries before a durable catalog can be named by
+	// an accepted journal record. Catalog creation syncs inside each owner.
 	if opts.JournalCodec == "pdc4" {
 		d, e := os.Open(opts.DataDir)
 		if e != nil {

@@ -183,6 +183,7 @@ func TestBackendSIGKILL(t *testing.T) {
 	crashOptions := func(dir string) daemonstore.Options {
 		o := testOptions(dir, simplePolicy())
 		o.WriteEngine = os.Getenv("V2_BACKEND_CRASH_ENGINE")
+		o.JournalCodec = os.Getenv("V2_BACKEND_CRASH_CODEC")
 		return o
 	}
 	if dir := os.Getenv("V2_BACKEND_CRASH_DIR"); dir != "" {

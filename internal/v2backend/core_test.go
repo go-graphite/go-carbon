@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -102,9 +106,61 @@ func TestCoreBackendOracle3360(t *testing.T) {
 	t.Run("sealed", func(t *testing.T) { testPortableBackendOracle1680(t, true, "core") })
 	t.Run("live", func(t *testing.T) { testPortableBackendOracle1680(t, false, "core") })
 }
+func TestCoreCatalogBackendSIGKILL(t *testing.T) {
+	t.Setenv("V2_BACKEND_CRASH_CODEC", "pdc4")
+	t.Setenv("V2_BACKEND_CRASH_ENGINE", "core")
+	TestBackendSIGKILL(t)
+}
+
 func TestCoreBackendSIGKILL(t *testing.T) {
 	t.Setenv("V2_BACKEND_CRASH_ENGINE", "core")
 	TestBackendSIGKILL(t)
+}
+
+func TestCoreDecoupledGeometry(t *testing.T) {
+	clock := int64(1794700800)
+	opts := testOptions(t.TempDir(), simplePolicy())
+	opts.WriteEngine, opts.Owners, opts.Shards = "core", 7, 3
+	s, err := openAt(opts, func() time.Time { return time.Unix(clock, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	const names = 128
+	for round := range 3 {
+		var ns [][]byte
+		var ps []points.Point
+		for i := range names {
+			ns = append(ns, []byte(fmt.Sprintf("geometry.series%d", i)))
+			ps = append(ps, points.Point{Timestamp: clock - 10 + int64(round), Value: float64(i+round) + .125})
+		}
+		if err = s.AppendBatch(ns, ps); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireClose(t, s)
+	s, err = openAt(opts, func() time.Time { return time.Unix(clock, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requireClose(t, s)
+	if s.Stats().IngestedPoints != 3*names {
+		t.Fatal("replayed committed points", s.Stats())
+	}
+	for i := range names {
+		r, err := s.Fetch(context.Background(), fmt.Sprintf("geometry.series%d", i), int(clock-11), int(clock-8))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for round, v := range r.Values {
+			if math.Float64bits(v) != math.Float64bits(float64(i+round)+.125) {
+				t.Fatalf("series%d round%d got%v", i, round, r.Values)
+			}
+		}
+		r.Release()
+	}
 }
 
 func TestCorePortableRoutingAndRestartFence(t *testing.T) {
@@ -147,6 +203,21 @@ func TestCorePortableRoutingAndRestartFence(t *testing.T) {
 	if other, err := openAt(wrong, time.Now); err == nil {
 		_ = other.Close()
 		t.Fatal("silently opened a core directory with the standalone writer")
+	}
+	marker := filepath.Join(opts.DataDir, "V2FORMAT")
+	current, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, bytes.Replace(current, []byte("core-v2"), []byte("core-v1"), 1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if other, err := openAt(opts, time.Now); err == nil {
+		_ = other.Close()
+		t.Fatal("accepted an older core format without migration")
+	}
+	if err := os.WriteFile(marker, current, 0600); err != nil {
+		t.Fatal(err)
 	}
 	s, err = openAt(opts, func() time.Time { return time.Unix(clock, 0) })
 	if err != nil {
@@ -197,15 +268,32 @@ func TestCoreFixtureThroughput120(t *testing.T) {
 			t.Fatal("invalid duration", err)
 		}
 	}
-	e, err := v2core.Open(t.TempDir(), v2core.Config{JournalIdentity: "matched-name-value-clock-fixture-v1", Shards: dbs, Producers: producers, Owners: dbs, MaxRows: 8 << 20, PartitionSeconds: 86400, AppendParts: true}, v2core.Hooks{})
+	e, err := v2core.Open(t.TempDir(), v2core.Config{JournalIdentity: "matched-name-value-clock-fixture-v1", Shards: dbs, Producers: producers, Owners: dbs, MaxRows: 2 << 20, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}, v2core.Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	closed := false
 	defer func() {
-		if err := e.Close(); err != nil {
-			t.Error(err)
+		if !closed {
+			_ = e.Close()
 		}
 	}()
+	var profile *os.File
+	if dir := os.Getenv("V2_BACKEND_PROFILES"); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		profile, err = os.Create(filepath.Join(dir, "cpu.pprof"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = pprof.StartCPUProfile(profile); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { pprof.StopCPUProfile(); _ = profile.Close() }()
+	}
+	var u0, u1 syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u0)
 	start := time.Now()
 	baseline := v2core.Sample(e, "baseline", start, 0)
 	deadline := start.Add(duration)
@@ -244,6 +332,19 @@ func TestCoreFixtureThroughput120(t *testing.T) {
 	wg.Wait()
 	final := v2core.Sample(e, "matched_core_final", start, offered.Load())
 	final["baseline"], final["cardinality"], final["producers"] = baseline, cardinality, producers
+	if got := final["committed"].(uint64); got != offered.Load() {
+		t.Fatalf("core drain: committed=%d offered=%d", got, offered.Load())
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u1)
+	seconds := func(x syscall.Timeval) float64 { return float64(x.Sec) + float64(x.Usec)/1e6 }
+	elapsed := time.Since(start).Seconds()
+	cpu := seconds(u1.Utime) + seconds(u1.Stime) - seconds(u0.Utime) - seconds(u0.Stime)
+	final["complete_seconds"], final["complete_points_per_second"] = elapsed, float64(offered.Load())/elapsed
+	final["complete_cpu_ns_per_point"], final["maxrss_native_units"] = cpu*1e9/float64(offered.Load()), u1.Maxrss
 	if err := json.NewEncoder(os.Stdout).Encode(final); err != nil {
 		t.Fatal(err)
 	}

@@ -21,6 +21,7 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/partsops"
+	"github.com/go-graphite/go-carbon/internal/partsrun"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
@@ -99,26 +100,38 @@ func (o *owner) recover() error {
 			continue
 		}
 		m := o.metrics[string(k.Metric)]
-		if m == nil || string(m.Group) != string(k.Group) || int(k.Archive) >= len(m.slots) {
+		if m == nil || string(m.Group) != string(k.Group) || k.Archive != compactArchive && int(k.Archive) >= len(m.slots) {
 			return errors.New("part has no matching durable policy")
 		}
-		r, e := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, it.Value())
-		if e != nil {
-			return e
+		install := func(r sealrollup.Record) error {
+			a := m.Policy.Archives[r.Archive]
+			if r.Order > m.Frontier.Order || r.Sample.Time%int64(a.Step) != 0 || (r.Sample.Time/int64(a.Step))%int64(a.Points) != r.Slot {
+				return errors.New("invalid durable physical slot")
+			}
+			prior, ok := m.slots[r.Archive][r.Slot]
+			if ok && prior.Sequence == r.Order && (prior.Time != r.Sample.Time || prior.Bits != r.Sample.Bits) {
+				return errors.New("conflicting durable slot order")
+			}
+			if !ok || r.Order > prior.Sequence {
+				p := r.Sample
+				p.Sequence = r.Order
+				if m.slots[r.Archive] != nil {
+					m.slots[r.Archive][r.Slot] = p
+				}
+			}
+			return nil
 		}
-		a := m.Policy.Archives[k.Archive]
-		if r.Order > m.Frontier.Order || r.Sample.Time%int64(a.Step) != 0 || (r.Sample.Time/int64(a.Step))%int64(a.Points) != k.BlockStart {
-			return errors.New("invalid durable physical slot")
-		}
-		prior, ok := m.slots[k.Archive][k.BlockStart]
-		if ok && prior.Sequence == r.Order && (prior.Time != r.Sample.Time || prior.Bits != r.Sample.Bits) {
-			return errors.New("conflicting durable slot order")
-		}
-		if !ok || r.Order > prior.Sequence {
-			p := r.Sample
-			p.Sequence = r.Order
-			if m.slots[k.Archive] != nil {
-				m.slots[k.Archive][k.BlockStart] = p
+		if k.Archive == compactArchive {
+			if e := visitCompactRecords(it.Value(), m.Policy, nil, install); e != nil {
+				return e
+			}
+		} else {
+			r, e := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, it.Value())
+			if e != nil {
+				return e
+			}
+			if e = install(r); e != nil {
+				return e
 			}
 		}
 	}
@@ -260,6 +273,7 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 	scopes := make(map[string]*partsops.Batch)
 	next := make(map[string]*metricState, len(byName))
 	plans := make(map[string]sealrollup.SealPlan)
+	var runWorkspace partsrun.Workspace
 	for name, span := range byName {
 		fs := scratch.frames[span.start:span.end]
 		last := fs[len(fs)-1]
@@ -333,13 +347,28 @@ func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
 		if e != nil {
 			return nil, e
 		}
-		for _, r := range plan.Records {
-			encodedKey := scratch.bytes.copy(key)
-			// GCP3's final 16 bytes are archive, signed physical slot, ordinal.
-			tail := encodedKey[len(encodedKey)-16:]
-			binary.BigEndian.PutUint32(tail, uint32(r.Archive))
-			binary.BigEndian.PutUint64(tail[4:], uint64(r.Slot)^(1<<63))
-			dataFiles[file] = append(dataFiles[file], kv{encodedKey, scratch.bytes.copy(sealrollup.EncodeRecord(r))})
+		if o.s.core != nil {
+			for start := 0; start < len(plan.Records); start += compactRecords {
+				base.Archive, base.BlockStart, base.Ordinal = compactArchive, 0, uint32(start/compactRecords)
+				runKey, e := partsformat.Encode(base)
+				if e != nil {
+					return nil, e
+				}
+				value, e := appendCompactRecords(nil, plan.Records[start:min(start+compactRecords, len(plan.Records))], &runWorkspace)
+				if e != nil {
+					return nil, e
+				}
+				dataFiles[file] = append(dataFiles[file], kv{scratch.bytes.copy(runKey), scratch.bytes.copy(value)})
+			}
+		} else {
+			for _, r := range plan.Records {
+				encodedKey := scratch.bytes.copy(key)
+				// GCP3's final 16 bytes are archive, signed physical slot, ordinal.
+				tail := encodedKey[len(encodedKey)-16:]
+				binary.BigEndian.PutUint32(tail, uint32(r.Archive))
+				binary.BigEndian.PutUint64(tail[4:], uint64(r.Slot)^(1<<63))
+				dataFiles[file] = append(dataFiles[file], kv{encodedKey, scratch.bytes.copy(sealrollup.EncodeRecord(r))})
+			}
 		}
 		// Receipts remain in the retained durable journal. Data, catalogue and
 		// replay cursor/order still publish in a single atomic ingest.

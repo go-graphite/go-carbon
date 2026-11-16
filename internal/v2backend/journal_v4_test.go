@@ -2,10 +2,11 @@ package v2backend
 
 import (
 	"context"
-	"github.com/go-graphite/go-carbon/points"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
 // Writer switches keep the journal suffix and reconstruct each codec epoch.

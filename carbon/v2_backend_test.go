@@ -224,9 +224,10 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	journal0 := journalDiskBytes(app.Config.V2.DataDir)
 	var sender *exec.Cmd
 	stopFile := filepath.Join(t.TempDir(), "sender-stop")
+	senderResult := filepath.Join(t.TempDir(), "sender-count")
 	if cpus := os.Getenv("V2_BACKEND_SENDER_CPUS"); cpus != "" {
-		sender = exec.Command("taskset", "-c", cpus, os.Args[0], "-test.run=^TestV2DaemonExternalSender$", "-test.v=true", "-test.timeout=150s")
-		sender.Env = append(os.Environ(), "V2_BACKEND_SENDER_ADDR="+address, "V2_BACKEND_SENDER_STOP="+stopFile)
+		sender = exec.Command("taskset", "-c", cpus, os.Args[0], "-test.run=^TestV2DaemonExternalSender$", "-test.v=true", "-test.timeout=210s")
+		sender.Env = append(os.Environ(), "V2_BACKEND_SENDER_ADDR="+address, "V2_BACKEND_SENDER_STOP="+stopFile, "V2_BACKEND_SENDER_RESULT="+senderResult)
 		sender.Stdout = os.Stdout
 		sender.Stderr = os.Stderr
 		if e := sender.Start(); e != nil {
@@ -314,6 +315,49 @@ measure:
 	accepted := stats.IngestedPoints - points0
 	journalBytes := journalDiskBytes(app.Config.V2.DataDir) - journal0
 	fmt.Printf("V2_DAEMON_THROUGHPUT seconds=%.3f accepted=%d points_per_second=%.1f journal_bytes=%d journal_bytes_per_point=%.6f cpu_cores=%.3f cpu_ns_per_point=%.3f maxrss_native_units=%d heap_bytes=%d device_write_bytes=%d device_MB_per_second=%.3f startup_ms=%.3f external_senders=%t stats=%+v\n", elapsed, accepted, float64(accepted)/elapsed, journalBytes, float64(journalBytes)/float64(accepted), cpu/elapsed, cpu*1e9/float64(accepted), usage1.Maxrss, mem.HeapAlloc, io1-io0, float64(io1-io0)/elapsed/1e6, startupMS, sender != nil, stats)
+
+	stop.Store(true)
+	if sender != nil {
+		if e := os.WriteFile(stopFile, []byte("stop"), 0600); e != nil {
+			t.Fatal(e)
+		}
+		if e := sender.Wait(); e != nil {
+			t.Fatal(e)
+		}
+	}
+	wg.Wait()
+	settleStart := time.Now()
+	var written uint64
+	if sender != nil {
+		data, err := os.ReadFile(senderResult)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err = strconv.ParseUint(string(data), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Closing senders only proves socket delivery. Wait for the receiver's
+		// accepted frontier before freezing heads, and fail on loss or duplicates.
+		deadline := time.Now().Add(45 * time.Second)
+		for app.v2.Backend.Stats().IngestedPoints-points0 < written {
+			if time.Now().After(deadline) {
+				t.Fatalf("receiver drain incomplete: wrote=%d accepted=%d", written, app.v2.Backend.Stats().IngestedPoints-points0)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := app.v2.Backend.Stats().IngestedPoints - points0; got != written {
+			t.Fatalf("receiver count differs: wrote=%d accepted=%d", written, got)
+		}
+	}
+	if e := app.v2.Backend.Flush(); e != nil {
+		t.Fatal(e)
+	}
+	fmt.Printf("V2_DAEMON_DRAIN final_accepted=%d flush_seconds=%.6f stats=%+v\n", app.v2.Backend.Stats().IngestedPoints, time.Since(settleStart).Seconds(), app.v2.Backend.Stats())
+	completedBackend := app.v2.Backend
+	if err := app.DumpStop(); err != nil {
+		t.Fatal(err)
+	}
 	if cpuFile != nil {
 		pprof.StopCPUProfile()
 		_ = cpuFile.Close()
@@ -326,24 +370,11 @@ measure:
 			_ = f.Close()
 		}
 	}
-	stop.Store(true)
-	if sender != nil {
-		if e := os.WriteFile(stopFile, []byte("stop"), 0600); e != nil {
-			t.Fatal(e)
-		}
-		if e := sender.Wait(); e != nil {
-			t.Fatal(e)
-		}
-	}
-	wg.Wait()
-	settleStart := time.Now()
-	if e := app.v2.Backend.Flush(); e != nil {
-		t.Fatal(e)
-	}
-	fmt.Printf("V2_DAEMON_DRAIN final_accepted=%d flush_seconds=%.6f stats=%+v\n", app.v2.Backend.Stats().IngestedPoints, time.Since(settleStart).Seconds(), app.v2.Backend.Stats())
-	if err := app.DumpStop(); err != nil {
-		t.Fatal(err)
-	}
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &usage1)
+	cpu = seconds(usage1.Utime) + seconds(usage1.Stime) - seconds(usage0.Utime) - seconds(usage0.Stime)
+	elapsed = time.Since(start).Seconds()
+	final := completedBackend.Stats().IngestedPoints - points0
+	fmt.Printf("V2_DAEMON_COMPLETE seconds=%.6f points=%d sender_points=%d points_per_second=%.3f cpu_ns_per_point=%.3f journal_bytes_per_point=%.6f maxrss_native_units=%d drain_and_close_seconds=%.6f\n", elapsed, final, written, float64(final)/elapsed, cpu*1e9/float64(final), float64(journalDiskBytes(app.Config.V2.DataDir)-journal0)/float64(final), usage1.Maxrss, time.Since(settleStart).Seconds())
 }
 
 func journalDiskBytes(dir string) int64 {
@@ -423,7 +454,7 @@ func TestV2DaemonExternalSender(t *testing.T) {
 					data = append(data, '\n')
 					nextName = (nextName + 1) % len(lines)
 				}
-				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 				if _, e = io.Copy(conn, bytes.NewReader(data)); e != nil {
 					if !stop.Load() {
 						t.Error(e)
@@ -439,6 +470,12 @@ func TestV2DaemonExternalSender(t *testing.T) {
 		}(producer)
 	}
 	wg.Wait()
+	stop.Store(true)
+	if path := os.Getenv("V2_BACKEND_SENDER_RESULT"); path != "" {
+		if err := os.WriteFile(path, []byte(strconv.FormatUint(sent.Load(), 10)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u1)
 	seconds := func(u syscall.Rusage) float64 {
 		return float64(u.Utime.Sec+u.Stime.Sec) + float64(u.Utime.Usec+u.Stime.Usec)/1e6
