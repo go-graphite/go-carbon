@@ -109,6 +109,15 @@ three zero-reader arms. The gate is at most 2% writer loss. Never qualify from a
 static source or a memory-only publication. Publication nanoseconds in the
 receipt sum owner work, rather than measuring elapsed wall time.
 
+Each reader has an independent cancellation context with a background parent;
+sharing a cancellation context introduces a reader-only contention point. Save
+an allocation profile with `-test.memprofile` alongside the other profiles. The
+receipt reports writer-interval GC cycle and CPU-assist deltas, `GOGC` and
+`GOMEMLIMIT`. `gc_assist_pct_capacity` divides process-wide assist CPU seconds
+by writer elapsed seconds times `GOMAXPROCS`; it includes assists by readers
+and does not attribute that time to writers. Compare runtime settings in
+separate exploratory arms, keeping the registered curve unchanged.
+
 `PARTS_PUBLISH_COST_DIR=<nonexistent-directory> go test -v
 ./internal/partspublish -run '^TestPublicationCosts$' -count=1` measures 16 seals
 of 4,096 points and compares a catalog-stable publication with a catalog-byte
@@ -119,3 +128,7 @@ counts. The receipt's source-derived count of five fsyncs per added part covers
 data, manifest, staging directory, intermediate parent and publisher root; it
 excludes the core's atomic-ingest synchronization. Do not substitute that source
 count for a measured syscall result.
+Where tracing is unavailable, a separate untimed build can instrument actual
+`os.File.Sync` calls in both the block writer and publisher. Preserve the exact
+instrumentation diff and original source hashes, report failed calls separately,
+and keep its timings separate from the uninstrumented cost measurement.
