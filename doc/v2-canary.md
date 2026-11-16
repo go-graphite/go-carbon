@@ -25,7 +25,7 @@ the gate. Use the same configuration, CPU allowance and policy corpus throughout
 | Full-stream shadow | At least 20 minutes, sample-every=1, source age at most 10s and no successor-segment backlog after warm-up. Report EOF and durable/visible frontier lag separately. At least 10,000 distinct names and nonzero compared points; zero unexplained differences or comparison failures. Source age is not the comparison exclusion horizon. |
 | L3 parity | Raw and every configured archive step, metadata, policy, physical slot, presence and float bits match the independent classic oracle. Include late corrections, wrap, NaNs, sparse/XFF and original application boundaries/clocks. Sampled L3 correctness and full-stream raw capacity are separate evidence, neither implies full-stream L3 capacity. |
 | Fallback modes | The actual daemon supports qualified classic, dual-write/shadow and read selection on the same binary. Classic remains authoritative initially. Synthetic failure, restart and flip-back tests preserve classic reads/writes. Switching modes with retained v2 data must be explicitly supported. Buckyd and every already-enabled endpoint must keep working. |
-| Operator metrics | Positive ingest/committed counters; pending bytes, log sync age/frontiers, seal latency/errors, read latency/q/s, part counts and compaction debt; explicit write/read authority and dual-write state. Missing, stale, NaN or reset signals cannot count as green. Test positive and negative guard cases. |
+| Operator metrics | Positive ingest/committed counters; pending bytes, log sync age/frontiers, seal latency/errors, read latency/q/s, part counts and compaction debt; explicit write/read authority and dual-write state. config_unknown_keys must be zero. Missing, stale, NaN or reset signals cannot count as green. Test positive and negative guard cases. |
 | Reopen and copies | TCP and known-name find/render/info reopen within 120s. Keep any existing copies running across restart; each previously active copy shows names/s greater than zero within 120s of reads reopening. No pause or drain. |
 | Host envelope | Pending budget 64GiB, warning at 80%; MemAvailable at least 256GiB; free disk at least max(1TiB, twice qualified transient working set). No new write/drop/overflow errors after reopen. Baseline and proposed limits must fit the actual host. |
 
@@ -36,9 +36,10 @@ in-process dual writer. A diagnostic journal follower is not daemon shadow mode.
 
 ## Artifact recipe
 
-Build on an approved remote build host in its isolated build directory. All Go
-commands, including tests and race checks, go through the campaign remote-build
-wrapper. The example is the command payload passed to that wrapper:
+Build on an approved machine in an isolated build directory, using a native
+Linux cgo toolchain for the deployable artifact. Follow the coordinator's current
+build-location instructions; do not compile on a serving production host. The
+following payload also works inside an approved remote-build wrapper:
 
 ```sh
 set -eu
@@ -78,17 +79,33 @@ with a merge commit, rerun gates and rebuild; never relabel a test artifact.
 Freeze an operator manifest before the window: host, service name, original
 ExecStart and cgroup, existing configuration, release/source/tree hashes, classic
 roots, new v2 root, empty legacy dump path, artifact directory, shadow and classic
-configuration files, HTTP/metrics addresses, fixed query corpus and main's gate
+configuration files (cutback means shadow mode), HTTP/metrics addresses, fixed query corpus and main's gate
 confirmation. Verify physical path isolation, ownership, available disk and the
 existing configuration-management hold. Preserve every existing hold reason.
 
-Obtain the exact dual-write/read-selector TOML from the landed fallback
-implementation. At the preparation base, `[v2] enabled=true` starts the sole v2
-writer, opens classic read-only, rejects buckyd, and is restart-only. It is **not**
-shadow mode. `[v2] enabled=false` with retained history is also not a tested
-flip-back. Do not invent a `mode`, `dual-write` or `read-mode` setting. Until the
-fallback implementation and its exact configuration land, configuration creation
-and the production procedure below are blocked.
+The fallback owner specifies the following restart-only contract. Verify it in
+the landed integrated binary before use; the preparation base predates it.
+
+```toml
+[v2]
+enabled = true
+path = "/absolute/isolated/v2-root"
+mode = "shadow"
+```
+
+| Mode | Public reads | Writes / rollback |
+| --- | --- | --- |
+| `shadow` | Classic | Both engines receive the common durable stream; classic stays authoritative |
+| `v2-serving-with-classic-dual-write` | v2 plus historical classic | Both engines stay written; restart in `shadow` to flip back |
+| `v2-only` | v2 plus historical classic | Classic stops receiving input; a durable finalization receipt closes the flip-back window |
+
+Keep enabled=true and the same root in shadow and serving-dual modes. An empty
+mode retains the earlier v2-only behavior; enabled=false is not the flip-back.
+The first shadow start needs an empty v2 root. Preserve `classic-fallback.json`
+and the common journal throughout the hold. Never edit a finalization receipt to
+reopen a stale classic store. The initial implementation rejects buckyd, tags,
+classic migration, metadata prewarm and expiry during dual write. Any such live
+setting is a launch blocker, not permission to disable an existing capability.
 
 Preflight commands, with manifest values supplied explicitly:
 
@@ -96,16 +113,18 @@ Preflight commands, with manifest values supplied explicitly:
 date '+%F %T %Z'
 systemctl show "$SERVICE" -p MainPID -p ExecStart -p ControlGroup -p KillMode
 readlink -f "/proc/$(systemctl show "$SERVICE" -p MainPID --value)/exe"
-sha256sum "$ORIGINAL_CONFIG" "$SHADOW_CONFIG" "$CLASSIC_CONFIG" "$CANDIDATE_BINARY"
+sha256sum "$ORIGINAL_CONFIG" "$SHADOW_CONFIG" "$SERVING_DUAL_CONFIG" "$CANDIDATE_BINARY"
 "$CANDIDATE_BINARY" -config "$SHADOW_CONFIG" -check-config
-"$CANDIDATE_BINARY" -config "$CLASSIC_CONFIG" -check-config
+"$CANDIDATE_BINARY" -config "$SERVING_DUAL_CONFIG" -check-config
 df -B1 "$CLASSIC_ROOT"
 grep -E 'MemTotal|MemAvailable' /proc/meminfo
 curl --fail --silent --show-error --max-time 10 "$METRICS_URL"
 ```
 
 `-check-config` validates parsing; it is not proof that Start accepts a mode or
-that a root can reopen. The DQS rehearsal must start both configurations.
+that a root can reopen. Unknown TOML keys can be warned about without rejecting
+startup, so inspect warnings and require config_unknown_keys=0. The isolated
+rehearsal must start both configurations and verify their active-mode metrics.
 Sample metrics every 5s for a 15-minute baseline. Capture counter epochs, actual
 TCP ingress, read q/s/p99, classic commits and cache, available memory/disk and
 copy progress. Require a stable final ten-minute pending/debt baseline. Preserve
@@ -131,7 +150,7 @@ arguments and permissions. Do not overwrite a shared release tree in place.
    here; do not start another writable owner.
 4. Verify the legacy dump is the exact manifest path and not a symlink or any
    classic/v2 data root. Delete only that stopped service's legacy dump. Start
-   cold, without replay or backfill. Record the accepted restart gap and pending
+   cold, without legacy dump/spool replay or backfill. Record the restart gap and pending
    classic points abandoned by this policy; never call them persisted.
 5. Select the staged shadow configuration and candidate, then start the same
    service. Record PID/start epoch, actual binary hash and mode/authority metrics.
@@ -158,14 +177,16 @@ command does not prove the configuration changed.
 
 To flip back, first capture the alert, frontiers, error deltas and configuration
 hashes. Manually stop this candidate, verify all its processes are gone, apply the
-tested classic configuration on the **same binary**, remove only the verified
+tested `mode="shadow"` configuration on the **same binary**, remove only the verified
 legacy dump while stopped, and cold-start. Check classic reads, fresh TCP writes
 and copy resume. Preserve v2 log/parts and all evidence. There is no data migration,
-no v2-to-classic replay, no backfill and no deletion of either store.
+no ad-hoc data re-import, no backfill and no deletion of either store. Normal
+restart recovery through the candidate's own mandatory common journal is the
+qualified storage path; it is distinct from feeding an old classic spool.
 
 If a later phase ever stops classic writes or makes v2 authoritative, this simple
 rollback no longer proves preservation of the v2-only interval. That phase needs
-its own durable write-epoch/read-union proof before starting. A classic-only old
+its own verified recovery/catch-up and read-union plan before starting. A classic-only old
 binary cannot be used to hide retained v2 history.
 
 ## Observation windows and guards
@@ -197,8 +218,9 @@ from the sole-writer path is not evidence of implemented shadow mode.
 
 ## Isolated DQS rehearsal and receipts
 
-Run only through the remote-build wrapper and only within its own
-`build-<unique-name>` directory. Use temporary synthetic classic and v2 roots,
+Run on the currently approved rehearsal host, only within its own scratch
+directory (or `build-<unique-name>` when using the remote-build wrapper).
+Use temporary synthetic classic and v2 roots,
 loopback ephemeral listeners, copied synthetic policies, and the same artifact
 and mode configurations intended for the canary with paths/ports substituted.
 Never open or change the running daemon's roots, log, config or service.
@@ -214,7 +236,7 @@ Each receipt records CET start/end, wall time, exact command, source/tree and
 binary/config hashes, exit status, expected/observed mode, guard state and output.
 Verify the test runner actually ran the named tests (no empty-regex success).
 Retain health observations before/after and verify no owned process remains before
-wrapper cleanup. Copy/checksum the transcript first. DNS failure, unavailable
+scratch cleanup. Copy/checksum the transcript first. DNS failure, unavailable
 tooling or missing shadow mode is `BLOCKED`, never a successful dry run.
 
 ## Complexity check
