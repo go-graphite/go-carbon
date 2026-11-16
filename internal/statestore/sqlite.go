@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/url"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type sqliteEngine struct{ db *sql.DB }
@@ -16,7 +16,7 @@ type sqliteTx struct {
 
 func openSQLite(path string) (engine, error) {
 	u := url.URL{Scheme: "file", Path: path}
-	db, err := sql.Open("sqlite3", u.String()+"?_journal_mode=WAL&_synchronous=FULL&_busy_timeout=5000&_cache_size=-65536")
+	db, err := sql.Open("sqlite", u.String()+"?_pragma=journal_mode%3DWAL&_pragma=synchronous%3DFULL&_pragma=busy_timeout%3D5000&_pragma=cache_size%3D-65536")
 	if err != nil {
 		return nil, err
 	}
