@@ -344,7 +344,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if err != nil {
 			return fail(err)
 		}
-		if o.meta.Version != 1 || o.meta.Config != diskConfig || len(o.meta.Cursors) != cfg.Producers {
+		if (o.meta.Version != 1 && o.meta.Version != 2) || o.meta.Config != diskConfig || len(o.meta.Cursors) != cfg.Producers {
 			return fail(errors.New("owner format/config mismatch"))
 		}
 		o.publishFrontier(o.meta)
@@ -655,6 +655,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return nil
 		}
 		next := o.meta
+		if o.maintenance {
+			// An older runtime cannot preserve logical reset authority. Fence it
+			// through the atomically replaced owner frontier before expiry acts.
+			next.Version = 2
+		}
 		next.Cursors = slices.Clone(pending)
 		next.NextPart++
 		n, err := o.sealBatches(head, batches, next)

@@ -68,7 +68,9 @@ core seal is durable. Those reservations use per-name atomic counters; their
 metadata cells are retired when the count reaches zero.
 
 An idle owner seal writes an expired flag and reset-order barrier with its durable
-frontier. Readers remove the name and mask all covered archive slots and classic
+frontier. Reset records and expiry-enabled owner frontiers use version 2 so an
+older runtime fails closed on reopen.
+Readers remove the name and mask all covered archive slots and classic
 history. A resumed name retains its mask and advances the existing producer order;
 old slots cannot reappear after restart or after expiry is disabled. An old pinned
 snapshot remains valid. These barriers belong to the original journal stream;

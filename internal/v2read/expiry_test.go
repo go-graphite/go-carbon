@@ -70,6 +70,16 @@ func TestExpiryResetReopenResume(t *testing.T) {
 	if masked, err := r.Masked(ctx, "expiry.metric"); err != nil || !masked {
 		t.Fatalf("mask %v %v", masked, err)
 	}
+	snapshot := e.DBs()[0].NewSnapshot()
+	err = v2core.ScanRollups(snapshot, func(_ v2core.RollupPolicy, metadata v2core.RollupMetadata, _ []sealrollup.Record) error {
+		if metadata.Version != 2 {
+			t.Error("reset metadata is readable by an older reader that ignores expiry authority")
+		}
+		return nil
+	})
+	if closeErr := snapshot.Close(); err != nil || closeErr != nil {
+		t.Fatalf("reset metadata %v %v", err, closeErr)
+	}
 	old.once.Do(old.load)
 	m := old.sealed.metrics["expiry.metric"]
 	if old.err != nil || m == nil || m.meta.Expired {

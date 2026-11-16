@@ -232,6 +232,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 		}
 		if r.expire != nil && len(s.batches) == 0 && r.expire(m.policy, s.next, now) {
+			// Older readers must reject reset authority rather than ignore its
+			// fields and resurrect the covered slot history.
+			s.next.Version = 2
 			s.next.Expired = true
 			s.next.ResetOrder = s.next.Frontier.Order
 			if s.next.Revision == math.MaxUint64 {
@@ -378,10 +381,10 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 		return err
 	}
 	for name, e := range series {
-		if e.meta.Version != 1 || e.policy.Group != e.group || e.policy.Name != name || e.meta.ID == 0 || e.meta.Frontier.Order == 0 {
+		if (e.meta.Version != 1 && e.meta.Version != 2) || e.policy.Group != e.group || e.policy.Name != name || e.meta.ID == 0 || e.meta.Frontier.Order == 0 {
 			return fmt.Errorf("missing rollup metadata for %s", name)
 		}
-		if e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
+		if (e.meta.Version == 1 && (e.meta.ResetOrder != 0 || e.meta.Expired)) || e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
 			return errors.New("invalid rollup reset frontier")
 		}
 		digest, err := sealrollup.PolicyDigest(e.policy.Config)
