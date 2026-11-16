@@ -335,7 +335,26 @@ func run() (retErr error) {
 	for {
 		groups, _, e := tail.next()
 		if errors.Is(e, io.EOF) {
+			seq := binary.LittleEndian.Uint64(tail.header[8:])
+			nextPath := filepath.Join(*source, fmt.Sprintf("%016x.log", seq+1))
+			if _, e = os.Stat(nextPath); e == nil {
+				next, e := readyShadowTail(nextPath)
+				if e != nil {
+					return e
+				}
+				tail.close()
+				tail = next
+				path = nextPath
+				continue
+			}
+			if !errors.Is(e, os.ErrNotExist) {
+				return e
+			}
 			break
+		}
+		if errors.Is(e, io.ErrUnexpectedEOF) && time.Since(warmup) < time.Minute {
+			time.Sleep(25 * time.Millisecond)
+			continue
 		}
 		if e != nil {
 			return fmt.Errorf("live-tail warmup: %w", e)
