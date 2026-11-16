@@ -231,7 +231,7 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 	}
 	start := time.Now()
 	baseline := procStats()
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "index_scatter": engine.indexScatter, "notify_wait": engine.notifyWait, "sst_preallocate": engine.owners[0].fileBuffer.preallocate, "sst_direct": engine.owners[0].fileBuffer.direct, "bucket_sort": engine.owners[0].bucketSort, "radix_sort": engine.owners[0].radixSort, "stream_credit_bytes_per_producer": engine.streamBytes, "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_start", "index_scatter": engine.indexScatter, "notify_wait": engine.notifyWait, "sst_preallocate": engine.owners[0].fileBuffer.preallocate, "sst_direct": engine.owners[0].fileBuffer.direct, "bucket_sort": engine.owners[0].bucketSort, "radix_sort": engine.owners[0].radixSort, "stream_credit_bytes_per_producer": engine.streamBytes, "when_cet": start.In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "config": engine.cfg, "rate": rate, "duration_seconds": duration.Seconds(), "metrics": metrics, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": baseline, "workload": "synthetic_preidentified_rows"})
 	done := make(chan error, cfg.Producers)
 	var offered atomic.Uint64
 	cursors := make([]atomic.Uint64, cfg.Producers)

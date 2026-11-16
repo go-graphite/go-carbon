@@ -31,6 +31,7 @@ type coreConfig struct {
 	Owners                     int
 	PartitionSeconds           int64
 	BlindBatch                 bool
+	RawCodec                   string
 }
 type coreFrontier struct {
 	Version       int
@@ -190,6 +191,7 @@ type coreOwner struct {
 	radixSort                    bool
 	sortScratch                  []row
 	radixWork                    []row
+	compact                      coreCompactWorkspace
 }
 type coreEngine struct {
 	owners       []*coreOwner
@@ -222,6 +224,12 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
 	hook := hooks.Publish
+	if cfg.RawCodec == "" {
+		cfg.RawCodec = os.Getenv("CORE_RAW_CODEC")
+	}
+	if cfg.RawCodec != "" && cfg.RawCodec != "run1" {
+		return nil, errors.New("unknown raw codec")
+	}
 	streamBytes := uint64(coreStreamBytes)
 	if value := os.Getenv("CORE_STREAM_BYTES"); value != "" {
 		n, err := strconv.ParseUint(value, 10, 64)
@@ -772,15 +780,27 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return 0, errors.New("late point targets expired partition")
 		}
 		j := i + 1
-		for j < len(head) && j < i+256 && head[j].ID == head[i].ID && corePartition(head[j].Time, o.cfg.PartitionSeconds) == partition {
+		limit := 256
+		if o.cfg.RawCodec == "run1" {
+			limit = coreCompactRows
+		}
+		for j < len(head) && j < i+limit && (o.cfg.RawCodec == "run1" || head[j].ID == head[i].ID) && corePartition(head[j].Time, o.cfg.PartitionSeconds) == partition {
 			j++
 		}
-		value := valueScratch[:(j-i)*24]
-		for k, r := range head[i:j] {
-			b := value[k*24:]
-			binary.LittleEndian.PutUint64(b, uint64(r.Time))
-			binary.LittleEndian.PutUint64(b[8:], r.Bits)
-			binary.LittleEndian.PutUint64(b[16:], r.Seq)
+		var value []byte
+		if o.cfg.RawCodec == "run1" {
+			value, err = o.compact.encode(head[i:j])
+			if err != nil {
+				break
+			}
+		} else {
+			value = valueScratch[:(j-i)*24]
+			for k, r := range head[i:j] {
+				b := value[k*24:]
+				binary.LittleEndian.PutUint64(b, uint64(r.Time))
+				binary.LittleEndian.PutUint64(b[8:], r.Bits)
+				binary.LittleEndian.PutUint64(b[16:], r.Seq)
+			}
 		}
 		key := keyScratch[:]
 		coreKeyInto(key, head[i], partition, o.meta.NextPart, uint32(i))
@@ -790,6 +810,13 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			binary.BigEndian.PutUint64(key[17:25], head[i].ID)
 			binary.BigEndian.PutUint32(key[25:29], 0)
 			binary.BigEndian.PutUint64(key[29:37], uint64(head[i].Time)^(1<<63))
+		}
+		if o.cfg.RawCodec == "run1" {
+			offset := 17
+			if o.cfg.AppendParts {
+				offset = 25
+			}
+			binary.BigEndian.PutUint32(key[offset:offset+4], 1)
 		}
 		if err = put(key, value); err != nil {
 			break
@@ -916,6 +943,7 @@ func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 	}
 	defer it.Close()
 	var out []row
+	var compact coreCompactWorkspace
 	for it.First(); it.Valid(); it.Next() {
 		k := it.Key()
 		if len(k) != 41 {
@@ -924,6 +952,25 @@ func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 		offset := 9
 		if k[0] == 2 {
 			offset = 17
+		}
+		archive := 17
+		if k[0] == 2 {
+			archive = 25
+		}
+		codec := binary.BigEndian.Uint32(k[archive : archive+4])
+		if codec == 1 {
+			if err := compact.visit(it.Value(), func(r row) error {
+				if r.ID == id {
+					out = append(out, r)
+				}
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if codec != 0 {
+			return nil, errors.New("unknown core raw codec")
 		}
 		if binary.BigEndian.Uint64(k[offset:offset+8]) != id {
 			continue
