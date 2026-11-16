@@ -383,3 +383,19 @@ recovery after successful `Sync`, not storage power-loss behavior. Recovered
 prefix scans use at most eight workers with one reusable row buffer per worker.
 
 Fixture preparation can set `PARTLOG_BENCH_WRITE_RATE` to a positive aggregate points/second ceiling. After an interrupted metadata-bearing fixture, `PARTLOG_BENCH_RESUME=1` checks the original catalog and every retained row before continuing each producer prefix. It rejects changed declarations, offsets and corrupt prefixes. Pacing and fixture generation remain outside replay timing.
+
+For a continuous-live report, include the historical boundary rate, the historical
+rate over the complete settled elapsed time, accepted live rate, process-written
+bytes per historical-plus-live point, and unadjusted debt near five and ten
+minutes after the boundary. State the actual sample times and show the final
+five-minute debt trend together with L0 file counts, compaction activity and
+write stalls. A flat nonzero estimate is distinct from the harness's strict
+zero-debt settlement check; preserve its failure rather than subtracting a
+residual or invoking terminal compaction.
+
+The complete elapsed historical rate includes the deliberately extended live
+observation: a 3.6-billion-point history followed by 600 seconds of observation
+cannot exceed six million historical points/second on that denominator. Report
+the boundary rate separately when assessing catch-up capacity. Fixture creation,
+validated fixture resume and the post-run raw/rendered oracles are separate
+phases, outside both replay denominators.
