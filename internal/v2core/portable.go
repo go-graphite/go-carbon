@@ -21,6 +21,15 @@ import (
 // records, journal or owner frontier. The caller still owns pinning, manifest
 // installation, directory sync and receipt publication.
 func WritePortableRollupPart(path string, file []KV, source v2part.Provenance) (v2part.Descriptor, error) {
+	return writePortableRollupPart(path, file, source, false)
+}
+
+// WriteDenseRollupPart writes the same logical records using bounded multi-slot values.
+func WriteDenseRollupPart(path string, file []KV, source v2part.Provenance) (v2part.Descriptor, error) {
+	return writePortableRollupPart(path, file, source, true)
+}
+
+func writePortableRollupPart(path string, file []KV, source v2part.Provenance, dense bool) (v2part.Descriptor, error) {
 	if len(file) == 0 {
 		return v2part.Descriptor{}, errors.New("empty rollup file")
 	}
@@ -29,6 +38,9 @@ func WritePortableRollupPart(path string, file []KV, source v2part.Provenance) (
 		return v2part.Descriptor{}, err
 	}
 	spec := v2part.Spec{Scope: v2part.Scope{Group: first.Group, VShard: first.VShard, Partition: first.Partition, Part: first.Part}, Encoding: "core-rollup-v1", Source: source, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+	if dense {
+		spec.Scope.VShard = v2part.GroupVShard
+	}
 	spec.Source.MinOrder = math.MaxUint64
 	spec.Source.MaxOrder = 0
 	type definition struct {
@@ -125,7 +137,16 @@ func WritePortableRollupPart(path string, file []KV, source v2part.Provenance) (
 		spec.Source.MinOrder = min(spec.Source.MinOrder, order)
 		spec.Source.MaxOrder = max(spec.Source.MaxOrder, order)
 	}
-	w, err := v2part.NewWriter(path, spec)
+	var w interface {
+		SetEncoded([]byte, []byte) error
+		Close() (v2part.Descriptor, error)
+		Abort() error
+	}
+	if dense {
+		w, err = v2part.NewDenseWriter(path, spec)
+	} else {
+		w, err = v2part.NewWriter(path, spec)
+	}
 	if err != nil {
 		return v2part.Descriptor{}, err
 	}

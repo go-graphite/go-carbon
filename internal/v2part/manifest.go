@@ -31,7 +31,16 @@ type Manifest struct {
 }
 
 func scopeBytes(s Scope) []byte {
-	b, _ := PartitionPrefixForGroup(s.Group, s.VShard, s.Partition)
+	v := s.VShard
+	if v == GroupVShard {
+		v = 0
+	}
+	b, _ := PartitionPrefixForGroup(s.Group, v, s.Partition)
+	if s.VShard == GroupVShard {
+		b = append(b, 0)
+	} else {
+		b = append(b, 1)
+	}
 	return append(b, s.Part[:]...)
 }
 
@@ -64,6 +73,21 @@ func (m Manifest) MarshalBinary() ([]byte, error) {
 	for i := 1; i < len(m.Parts); i++ {
 		if m.Parts[i-1].Scope == m.Parts[i].Scope {
 			return nil, errors.New("duplicate part scope")
+		}
+	}
+	type partScope struct {
+		Partition int64
+		Part      PartID
+	}
+	groupFiles := map[partScope]bool{}
+	for _, d := range m.Parts {
+		if d.Scope.VShard == GroupVShard {
+			groupFiles[partScope{d.Scope.Partition, d.Scope.Part}] = true
+		}
+	}
+	for _, d := range m.Parts {
+		if d.Scope.VShard != GroupVShard && groupFiles[partScope{d.Scope.Partition, d.Scope.Part}] {
+			return nil, errors.New("overlapping group and vshard files")
 		}
 	}
 	m.Frontiers = slices.Clone(m.Frontiers)

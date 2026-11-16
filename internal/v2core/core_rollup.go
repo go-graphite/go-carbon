@@ -296,13 +296,15 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 				}
 			}
 		} else {
-			record, err := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, iter.Value())
+			decoded, err := partsformat.DecodeSlots(k.Archive, k.BlockStart, iter.Value())
 			if err != nil {
 				return err
 			}
-			slot := [2]int64{int64(k.Archive), k.BlockStart}
-			if old, ok := e.records[slot]; !ok || record.Order > old.Order {
-				e.records[slot] = record
+			for _, record := range decoded {
+				slot := [2]int64{int64(k.Archive), record.Slot}
+				if old, ok := e.records[slot]; !ok || record.Order > old.Order {
+					e.records[slot] = record
+				}
 			}
 		}
 	}

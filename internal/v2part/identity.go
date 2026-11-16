@@ -21,6 +21,11 @@ const VirtualShards = partsformat.VirtualShards
 const MaxNameBytes = partsformat.MaxNameBytes
 const KeyVersion = 3
 const SchemaVersion = 1
+
+// GroupFileVersion versions all dense descriptors, optionally spanning the
+// vshards of one independently movable placement group. Key bytes remain GCP3.
+const GroupFileVersion = 2
+const GroupVShard uint16 = 65535
 const MetadataArchive = ^uint32(0)
 
 func Encode(k Key) ([]byte, error)               { return partsformat.Encode(k) }
@@ -42,10 +47,11 @@ type Scope struct {
 }
 
 func (s Scope) contains(k Key) bool {
-	return k.Group == s.Group && k.VShard == s.VShard && k.Partition == s.Partition && k.Part == s.Part
+	return k.Group == s.Group && (k.VShard == s.VShard || s.VShard == GroupVShard) && k.Partition == s.Partition && k.Part == s.Part
 }
 
-// ValidateRange retains GCP3's one-(group,vshard,partition,part) SST boundary.
+// ValidateRange checks the physical file scope. GroupVShard is descriptor-only:
+// schema-2 dense files can span routed vshards of one group/partition/part.
 // Readers additionally inspect interior keys; min/max alone cannot validate an
 // untrusted file's contents.
 func (s Scope) ValidateRange(first, last []byte) error {

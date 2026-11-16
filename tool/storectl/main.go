@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/downsize"
 )
@@ -56,6 +57,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "sync" && slices.Contains(args[1:], "--parts") {
+		return partSyncMain(args[1:])
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "placement":
