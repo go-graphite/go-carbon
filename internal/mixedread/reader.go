@@ -457,6 +457,32 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 				if prefix == 0 {
 					return consume(current)
 				}
+				// The selected shape is fixed by the original query. Decode only
+				// uncovered runs into request scratch, retaining the part workspace
+				// untouched for its occupancy-proportional release.
+				if cap(q.joined) < len(current.Values) {
+					q.joined = make([]float64, len(current.Values))
+				}
+				q.joined = q.joined[:len(current.Values)]
+				archive := -1
+				for i, a := range binding.metric.Archives {
+					if a.Step == current.Step {
+						archive = i
+						break
+					}
+				}
+				e = r.opts.Legacy.FetchFrozenWindowInto(ctx, binding.frozen, archive,
+					int(current.From), int(current.From+int64(prefix)*current.Step),
+					q.joined[:prefix], current.Occupied[:prefix])
+				if e == nil {
+					if e = h.JoinLegacyPrefixInto(ctx, current, q.joined[:prefix], q.joined); e != nil {
+						return e
+					}
+					return consume(current)
+				}
+				if !errors.Is(e, chunkstore.ErrFrozenWindowUnsupported) {
+					return e
+				}
 				old, e := r.fetchFrozen(ctx, q, binding, from, current.From+int64(prefix-1)*current.Step)
 				if e != nil {
 					return e

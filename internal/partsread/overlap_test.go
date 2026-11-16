@@ -214,7 +214,8 @@ func TestReusableLegacyJoinBitExactAndWorkspaceCleanup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := h.JoinLegacyPrefixInto(ctx, out, []float64{1, 2, 3, 4, 5}, scratch); err != nil {
+		copy(scratch, []float64{1, 2, 3, 4, 5})
+		if err := h.JoinLegacyPrefixInto(ctx, out, scratch[:5], scratch); err != nil {
 			t.Fatal(err)
 		}
 		if math.Float64bits(out.Values[1]) != 0x8000000000000000 || math.Float64bits(out.Values[7]) != 0x7ff8000000000042 || out.Values[4] != 5 || !math.IsNaN(out.Values[5]) {

@@ -43,7 +43,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
@@ -303,6 +303,32 @@ func TestLatencyComparison(t *testing.T) {
 			var base, mix []int64
 			var baseBytes, mixedBytes, baseAllocs, mixedAllocs uint64
 			old, full, r := open()
+			// Record adaptive routing outside the measured samples. The bound
+			// snapshot is immutable throughout each paired repeat.
+			var routeHandle partsread.Handle
+			if err := r.opts.Snapshot.BorrowInto(&routeHandle, r.opts.Parts.Budget, r.opts.Parts.WorkBytes); err != nil {
+				t.Fatal(err)
+			}
+			token, err := routeHandle.Resolve(cfg.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, lo, hi, shapeOK := queryShape(m, clock-width, clock, clock)
+			if !shapeOK {
+				t.Fatal("latency fixture shape unresolved")
+			}
+			yes, coverage, err := routeHandle.OverlayCoverageResolved(ctx, token, step, lo, hi)
+			routeHandle.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			route := "plain-overlay"
+			if !yes {
+				route = "legacy-only"
+			} else if coverage >= ((hi-lo)/step+7)/8 {
+				route = "selective-window"
+			}
+			fmt.Printf("ROUTE class=%s path=%s coverage_hint=%d query_slots=%d threshold=%d\n", className, route, coverage, (hi-lo)/step, ((hi-lo)/step+7)/8)
 			// Validate within the callback lifetime, outside measured samples.
 			want, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 			if err != nil {
@@ -370,8 +396,8 @@ func TestLatencyComparison(t *testing.T) {
 			// CPU sampling dense without per-call MemStats or allocation tracing.
 			if duration := os.Getenv("GO_CARBON_MIXED_DENSE"); duration != "" {
 				d, err := time.ParseDuration(duration)
-				if err != nil || d < 30*time.Second || class == "" || !profile {
-					t.Fatal("dense diagnostics require a class, profile mode and >=30s per arm")
+				if err != nil || d < 5*time.Second || class == "" || !profile {
+					t.Fatal("dense diagnostics require a class, profile mode and >=5s per arm")
 				}
 				for _, arm := range []string{"native", "mixed"} {
 					pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("arm", arm, "class", className)))
@@ -528,6 +554,30 @@ func TestLatencyComparison(t *testing.T) {
 	}
 	if !slices.Equal(nativeNames, mixedNames) {
 		t.Fatal("latency find fixture names mismatch")
+	}
+	if duration := os.Getenv("GO_CARBON_MIXED_DENSE"); duration != "" {
+		d, err := time.ParseDuration(duration)
+		if err != nil || d < 5*time.Second || class != "warm-find4096" || !profile {
+			t.Fatal("dense Find diagnostics require profile mode and >=5s per arm")
+		}
+		for _, arm := range []string{"native", "mixed"} {
+			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels("arm", arm, "class", class)))
+			started, calls := time.Now(), 0
+			for time.Since(started) < d {
+				if arm == "native" {
+					err = cat.Find(ctx, "*", func(string) error { return nil })
+				} else {
+					err = r.Find(ctx, "*", func(string) error { return nil })
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls++
+			}
+			fmt.Printf("DENSE class=%s arm=%s calls=%d elapsed_ns=%d\n", class, arm, calls, time.Since(started).Nanoseconds())
+		}
+		pprof.SetGoroutineLabels(ctx)
+		return
 	}
 	findCount := 10000
 	if allocs || profile {

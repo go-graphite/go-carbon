@@ -241,7 +241,8 @@ func (h *Handle) OverlayCoverageResolved(ctx context.Context, token ResolvedMetr
 }
 
 // JoinLegacyPrefixInto uses caller scratch for the combined output. Scratch is
-// borrowed through the consumer callback and must not alias either input.
+// borrowed through the consumer callback and must not alias out.Values. It may
+// share its initial prefix with values; copying that prefix onto itself is safe.
 // Pooled render values and sparse cleanup remain untouched.
 func (h *Handle) JoinLegacyPrefixInto(ctx context.Context, out *Series, values, scratch []float64) error {
 	if h.v == nil || h.closed.Load() {

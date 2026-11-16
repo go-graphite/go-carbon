@@ -15,6 +15,20 @@ type latencyBytes struct{ KV, Decoded, Calls uint64 }
 // binaries use the original codec unless GO_CARBON_MIXED_BYTES is enabled.
 type latencyByteCodec struct{ *whisperio.ContinuationCodec }
 
+func (c *latencyByteCodec) FetchWindowInto(ctx context.Context, kv chunkstore.ContinuationIO, m chunkstore.Metadata, archive, from, until int, dst []float64, covered []bool, now func() time.Time) error {
+	counter, _ := ctx.Value(latencyByteKey{}).(*latencyBytes)
+	if counter == nil {
+		return c.ContinuationCodec.FetchWindowInto(ctx, kv, m, archive, from, until, dst, covered, now)
+	}
+	counter.Calls++
+	for i := range dst {
+		if covered == nil || !covered[i] {
+			counter.Decoded += 8
+		}
+	}
+	return c.ContinuationCodec.FetchWindowInto(ctx, &latencyByteIO{ContinuationIO: kv, counter: counter}, m, archive, from, until, dst, covered, now)
+}
+
 func (c *latencyByteCodec) Fetch(ctx context.Context, kv chunkstore.ContinuationIO, m chunkstore.Metadata, from, until int, now func() time.Time) (*chunkstore.Series, error) {
 	counter, _ := ctx.Value(latencyByteKey{}).(*latencyBytes)
 	if counter == nil {

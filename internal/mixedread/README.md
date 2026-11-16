@@ -188,3 +188,20 @@ provide forced-archive selective decoding into one caller-owned output; that
 requires the legacy decoder API. Existing continuation block decoding remains
 unchanged. The request-owned join scratch is borrowed until Fetch's consumer
 returns and is covered by the handle's render byte reservation.
+
+Dense bound reads use `Store.FetchFrozenWindowInto` with the archive chosen by
+original query bounds, the aligned render shape, request-owned values and the
+physical occupancy mask. The continuation adapter opens one immutable source
+view and visits uncovered runs. Classic groups outside those runs are skipped;
+compressed runs use the existing range-pruned archive-window reader, including
+OOO and virtual rollups. A physical group intersecting an uncovered run can
+still decode covered records within that group. Codecs without the optional
+interface keep the existing prefix fetch. Zero/one-slot shapes keep ordinary
+shape reconciliation. Occupied part NaNs and newer ring owners stay authoritative.
+
+The final join reuses caller scratch and preserves sparse workspace cleanup.
+This removes the separately allocated legacy prefix on the classic selective
+path. Compressed archive windows and ordinary sparse legacy fetches still
+allocate internally: whole-query zero allocation is not established. Native
+latency qualification for this source must include both sparse and dense
+coverage classes; earlier results do not qualify this implementation.
