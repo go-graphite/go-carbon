@@ -191,14 +191,15 @@ type syncRow struct {
 }
 
 type syncJournal struct {
-	lock     *os.File
-	mu       sync.Mutex
-	file     *os.File
-	rows     []syncRow
-	progress progressSnapshot
+	checkpoint *syncPhaseCheckpoint
+	lock       *os.File
+	mu         sync.Mutex
+	file       *os.File
+	rows       []syncRow
+	progress   progressSnapshot
 }
 
-func openSyncJournal(path, identity string) (*syncJournal, error) {
+func openSyncJournal(path, identity string, checkpointOptions ...string) (*syncJournal, error) {
 	lock, err := lockResumeState(path)
 	if err != nil {
 		return nil, err
@@ -214,8 +215,17 @@ func openSyncJournal(path, identity string) (*syncJournal, error) {
 		return nil, err
 	}
 	j := &syncJournal{file: f, lock: lock}
-	reader := bufio.NewReaderSize(f, 1<<20)
 	var good int64
+	if cp, cacheErr := readSyncCheckpoint(f, identity, checkpointOptions...); cacheErr != nil {
+		event("sync_checkpoint_ignored", map[string]any{"error": cacheErr.Error(), "journal_retained": true})
+	} else if cp != nil {
+		j.checkpoint, j.rows, j.progress, good = cp, cp.Rows, cp.Progress, cp.Offset
+	}
+	if _, err := f.Seek(good, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	reader := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if errors.Is(err, io.EOF) {
@@ -284,7 +294,13 @@ func (j *syncJournal) find(match func(syncRow) bool) []syncRow {
 	return out
 }
 
-func (j *syncJournal) close() { _ = j.file.Close(); _ = j.lock.Close() }
+func (j *syncJournal) close() {
+	if err := j.checkpointVerification(); err != nil {
+		event("sync_checkpoint_unavailable", map[string]any{"error": err.Error(), "journal_retained": true})
+	}
+	_ = j.file.Close()
+	_ = j.lock.Close()
+}
 
 type syncPhase struct {
 	names   int
@@ -361,7 +377,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	if err != nil {
 		return err
 	}
-	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity)
+	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity, syncCheckpointOptions(o))
 	if err != nil {
 		return err
 	}
@@ -541,16 +557,19 @@ func (s *syncer) endPhase(name string, names int) error {
 }
 
 func (s *syncer) run(ctx context.Context) error {
-	if err := s.discover(ctx); err != nil {
-		return fmt.Errorf("discover: %w", err)
-	}
-	if !s.o.noCopy {
-		if err := s.copyMissing(ctx); err != nil {
-			return fmt.Errorf("copy missing: %w", err)
+	if !s.restoreVerificationCheckpoint() {
+		if err := s.discover(ctx); err != nil {
+			return fmt.Errorf("discover: %w", err)
 		}
-	}
-	if err := s.waitWindowSelections(ctx); err != nil {
-		return fmt.Errorf("retry window selections: %w", err)
+		if !s.o.noCopy {
+			if err := s.copyMissing(ctx); err != nil {
+				return fmt.Errorf("copy missing: %w", err)
+			}
+		}
+		if err := s.waitWindowSelections(ctx); err != nil {
+			return fmt.Errorf("retry window selections: %w", err)
+		}
+		s.startVerificationCheckpoint()
 	}
 	if s.o.noVerify {
 		event("phase_skipped", map[string]any{"phase": "verify", "readiness": false})

@@ -128,9 +128,16 @@ func TestSyncWindowRejectedBatchDoesNotSplitTransportFailure(t *testing.T) {
 	target := nativeControllerStore(t)
 	handler := nativeControllerService(t, target)
 	var pulls atomic.Int32
+	var split atomic.Bool
 	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/native/pull" {
-			pulls.Add(1)
+			var req struct{ Range store.NativeRange }
+			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+				pulls.Add(1)
+				if !slices.Equal(req.Range.Names, []string{"one", "two"}) {
+					split.Store(true)
+				}
+			}
 			http.Error(w, "lost acknowledgement", 503)
 			return
 		}
@@ -149,7 +156,9 @@ func TestSyncWindowRejectedBatchDoesNotSplitTransportFailure(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) || pulls.Load() != 1 {
-		t.Fatal("ambiguous acknowledgement was split", err, pulls.Load())
+	// Restart recovery can retry the same batch before cancellation is observed.
+	// The invariant is exact membership, independent of scheduler timing.
+	if err := <-done; !errors.Is(err, context.Canceled) || pulls.Load() == 0 || split.Load() {
+		t.Fatal("ambiguous acknowledgement was split", err, pulls.Load(), split.Load())
 	}
 }
