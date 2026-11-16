@@ -1,6 +1,9 @@
 package sealrollup
 
-import "fmt"
+import (
+	"fmt"
+	"unsafe"
+)
 
 // PlanInto is PlanWithWorkspace with caller-owned record storage. The returned
 // Records may alias records and remain valid until the caller reuses that storage.
@@ -38,4 +41,12 @@ func (p *Prepared) PlanInto(records []Record, prior Frontier, view View, ranges 
 		plan.Records = append(plan.Records, Record{Delta: d, Correction: correction})
 	}
 	return plan, nil
+}
+
+// RetainedBytes reports private scratch high-water storage, excluding the
+// Workspace value itself. Readers can discard oversized workspaces after use.
+func (w *Workspace) RetainedBytes() int64 {
+	return int64(cap(w.positions))*4 + int64(cap(w.offsets))*int64(unsafe.Sizeof(int(0))) +
+		int64(cap(w.updates))*int64(unsafe.Sizeof(Delta{})) +
+		int64(cap(w.points)+cap(w.current)+cap(w.neighbors))*int64(unsafe.Sizeof(Sample{})) + int64(cap(w.changed))*8
 }
