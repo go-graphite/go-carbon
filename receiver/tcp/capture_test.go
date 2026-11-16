@@ -3,8 +3,10 @@ package tcp
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -239,5 +241,136 @@ func TestSwitchCaptureTimeoutDoesNotSealAfterReturning(t *testing.T) {
 	}
 	if seals.Load() != 1 {
 		t.Fatal("cancelled switch ran its seal callback later", seals.Load())
+	}
+}
+
+type boundedCaptureProbe struct {
+	Capture
+	slots chan struct{}
+}
+
+func (b boundedCaptureProbe) CaptureSlots() chan struct{} { return b.slots }
+
+func TestSwitchCaptureJoinsBoundedWorkWith280Handlers(t *testing.T) {
+	const admitted = 32
+	const handlers = 280
+	entered := make(chan struct{}, handlers)
+	release := make(chan struct{})
+	var captured, direct atomic.Int64
+	out := boundedCaptureProbe{Capture: captureFunc(func([]byte, int) error { entered <- struct{}{}; <-release; captured.Add(1); return nil }), slots: make(chan struct{}, admitted)}
+	r := &TCP{}
+	var wg sync.WaitGroup
+	for range handlers {
+		wg.Go(func() {
+			b := newCaptureBuffer(out)
+			b.sink = &r.captureSink
+			b.point([]byte("same"), 1, 1)
+			if err := b.flush(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	for range admitted {
+		<-entered
+	}
+	switched := make(chan error, 1)
+	go func() {
+		switched <- r.SwitchCapture(func(p *points.Points) { direct.Add(int64(len(p.Data))) }, func() error {
+			if n := captured.Load(); n != admitted {
+				return fmt.Errorf("fenced %d captured handlers, want %d", n, admitted)
+			}
+			return nil
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for !r.captureSink.fencing.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	// A failed TryRLock proves the exclusive waiter has queued. Avoid relying
+	// on scheduler timing while the regression runs under race detection.
+	for r.captureSink.TryRLock() {
+		r.captureSink.RUnlock()
+		if time.Now().After(deadline) {
+			t.Fatal("exclusive fence did not queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-entered:
+		t.Fatal("waiting handlers entered the ordering fence")
+	default:
+	}
+	close(release)
+	if err := <-switched; err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if n := captured.Load() + direct.Load(); n != handlers {
+		t.Fatalf("gap/duplicate: captured %d direct %d", captured.Load(), direct.Load())
+	}
+}
+
+// Empty protocol frames must progress even when every durable admission slot
+// and the exclusive direct-switch fence are occupied.
+func TestEmptyCaptureFlushDoesNotWaitForDurableAdmission(t *testing.T) {
+	for _, sharded := range []bool{false, true} {
+		slots := make(chan struct{}, 1)
+		slots <- struct{}{}
+		out := boundedCaptureProbe{Capture: captureFunc(func([]byte, int) error { t.Error("empty write"); return nil }), slots: slots}
+		b := newCaptureBuffer(out)
+		if sharded {
+			b.shards = []captureBuffer{{out: out}}
+		}
+		b.sink = &captureSink{}
+		b.sink.Lock()
+		done := make(chan error, 1)
+		go func() { done <- b.flush() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(time.Second):
+			b.sink.Unlock()
+			<-slots
+			<-done
+			t.Fatal("empty flush waited for disk/fence")
+		}
+		b.sink.Unlock()
+		<-slots
+	}
+}
+
+type stagedCaptureProbe struct {
+	entered, release chan struct{}
+	staged           atomic.Int64
+}
+
+func (s *stagedCaptureProbe) Write([]byte, int) error { panic("synchronous capture used") }
+func (s *stagedCaptureProbe) AcquireCapture(int, int) (func(), error) {
+	close(s.entered)
+	<-s.release
+	return func() {}, nil
+}
+func (s *stagedCaptureProbe) StageCapture([]byte, int) error { s.staged.Add(1); return nil }
+func TestCaptureByteWaitPrecedesDirectFence(t *testing.T) {
+	out := &stagedCaptureProbe{entered: make(chan struct{}), release: make(chan struct{})}
+	rcv := &TCP{}
+	b := newCaptureBuffer(out)
+	b.sink = &rcv.captureSink
+	b.point([]byte("ordered"), math.Float64frombits(1<<63), 7)
+	done := make(chan error, 1)
+	go func() { done <- b.flush() }()
+	<-out.entered
+	var got []*points.Points
+	if err := rcv.SwitchCapture(func(p *points.Points) { got = append(got, p) }, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	close(out.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if out.staged.Load() != 0 || len(got) != 1 || got[0].Metric != "ordered" || math.Float64bits(got[0].Data[0].Value) != 1<<63 {
+		t.Fatal("direct fence reordered staged data", got)
 	}
 }

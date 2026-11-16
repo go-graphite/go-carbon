@@ -1392,6 +1392,9 @@ store-input-handoff = false
 format = "legacy"
 
 [input-log]
+# Journal startup TCP intake before cache/storage construction. Default off.
+# Legacy startup spools are moved aside with a durable backfill-window record.
+startup-append = false
 # Continuous log of the points accepted into the cache, so that an unclean
 # exit (kill -9, OOM kill, power loss) loses only about sync-interval of input
 # instead of every point not yet persisted, which with writeout batching can

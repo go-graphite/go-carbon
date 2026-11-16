@@ -146,6 +146,7 @@ type TCP struct {
 	handoff                  handoffState
 	handoffReadAheadBytes    int
 	pointOut                 atomic.Pointer[func(name []byte, value float64, timestamp int64)]
+	captureAdmission         captureAdmission
 	capture                  Capture
 	captureSink              captureSink
 	pointsOut                atomic.Pointer[func(name []byte, data []points.Point)]
@@ -365,6 +366,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	var received uint32
 	defer func() { atomic.AddUint32(&rcv.metricsReceived, received) }()
 	capture := newCaptureBuffer(rcv.capture)
+	capture.admission = &rcv.captureAdmission
 	capture.sink = &rcv.captureSink
 	for i := range capture.shards {
 		capture.shards[i].sink = &rcv.captureSink

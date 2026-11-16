@@ -485,6 +485,18 @@ var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_live_releasable_bytes", "Confirmed live spool prefix bytes awaiting durability or release.", nil, nil),
 }
 
+var captureAdmissionDescs = []*prometheus.Desc{
+	prometheus.NewDesc("startup_capture_admission_limit_bytes", "Active capture admission charge limit; excludes receiver dictionaries, input-log encoder state and allocator overhead.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_used_bytes", "Current active capture admission charge.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_peak_bytes", "Peak active capture admission charge.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_waits_total", "Capture submissions blocked by the admission byte budget.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_rejections_total", "Capture batches rejected for exceeding the admission byte budget.", nil, nil),
+	prometheus.NewDesc("startup_capture_idle_buffer_bytes", "Idle capture buffer accounting charge, including columns and a conservative map allowance.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_seconds_total", "Elapsed time of successful capture admission calls, including budget waits.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_calls_total", "Successful capture admission calls.", nil, nil),
+	prometheus.NewDesc("startup_capture_admission_max_seconds", "Longest successful capture admission call.", nil, nil),
+}
+
 var captureHistoryBytesDesc = prometheus.NewDesc("startup_capture_history_pending_bytes", "Encoded startup spool and journal bytes still waiting for history replay.", nil, nil)
 var captureHistorySegmentsDesc = prometheus.NewDesc("startup_capture_history_pending_segments", "Nonempty startup spool files still waiting for history replay; excludes the input journal.", nil, nil)
 
@@ -492,9 +504,13 @@ var captureIODescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_operation_seconds_total", "Capture operation elapsed time, summed over independent owners.", []string{"operation"}, nil),
 	prometheus.NewDesc("startup_capture_operation_calls_total", "Capture operation calls.", []string{"operation"}, nil),
 	prometheus.NewDesc("startup_capture_operation_max_seconds", "Longest observed capture operation.", []string{"operation"}, nil),
+	prometheus.NewDesc("startup_capture_operation_p99_seconds", "Power-of-two bucket upper bound for the lifetime 99th percentile capture operation latency.", []string{"operation"}, nil),
 }
 
 func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, desc := range captureAdmissionDescs {
+		ch <- desc
+	}
 	ch <- captureHistoryBytesDesc
 	ch <- captureHistorySegmentsDesc
 	for _, desc := range captureIODescs {
@@ -546,10 +562,25 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(captureHistoryBytesDesc, prometheus.GaugeValue, float64(pendingHistory))
 	ch <- prometheus.MustNewConstMetric(captureHistorySegmentsDesc, prometheus.GaugeValue, float64(pendingSegments))
 	if capture := c.app.startupCaptureState.Load(); capture != nil {
+		if j := capture.journal; j != nil {
+			b := &j.budget
+			b.mu.Lock()
+			used := b.used
+			b.mu.Unlock()
+			values := []float64{float64(b.limit), float64(used), float64(b.peak.Load()), float64(b.waits.Load()), float64(b.rejected.Load()), float64(j.pooledBytes.Load()), float64(j.admissionTiming.total.Load()) / 1e9, float64(j.admissionTiming.calls.Load()), float64(j.admissionTiming.maximum.Load()) / 1e9}
+			for i, value := range values {
+				kind := prometheus.GaugeValue
+				if i == 3 || i == 4 || i == 6 || i == 7 {
+					kind = prometheus.CounterValue
+				}
+				ch <- prometheus.MustNewConstMetric(captureAdmissionDescs[i], kind, float64(value))
+			}
+		}
 		for i, timing := range capture.ioTimings() {
 			ch <- prometheus.MustNewConstMetric(captureIODescs[0], prometheus.CounterValue, float64(timing.total)/1e9, captureOperations[i])
 			ch <- prometheus.MustNewConstMetric(captureIODescs[1], prometheus.CounterValue, float64(timing.calls), captureOperations[i])
 			ch <- prometheus.MustNewConstMetric(captureIODescs[2], prometheus.GaugeValue, float64(timing.maximum)/1e9, captureOperations[i])
+			ch <- prometheus.MustNewConstMetric(captureIODescs[3], prometheus.GaugeValue, float64(timing.p99)/1e9, captureOperations[i])
 		}
 		live := 0
 		var pending int64
