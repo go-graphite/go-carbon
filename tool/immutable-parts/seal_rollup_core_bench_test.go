@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	runtimemetrics "runtime/metrics"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -199,6 +200,28 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	}
 	runtimemetrics.Read(classes)
 	assistStart, dedicatedStart := classes[0].Value.Float64(), classes[1].Value.Float64()
+	// Optional paired profiles exclude opening, warm-up and close. Subtract
+	// alloc_objects/alloc_space, rather than attributing a whole-process profile
+	// to steady seals. Profile flushing and forced GC are outside the timer.
+	heapProfile := os.Getenv("SEAL_BENCH_WARM_HEAP")
+	writeHeap := func(suffix string) {
+		if heapProfile == "" {
+			return
+		}
+		runtime.GC()
+		runtime.GC()
+		f, err := os.Create(heapProfile + suffix + ".pprof")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err = pprof.WriteHeapProfile(f); err != nil {
+			b.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	writeHeap("-before")
 	b.ResetTimer()
 	ioStart := sealProcessWritten()
 	start := atomicCPU()
@@ -211,6 +234,11 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	}
+	if heapProfile != "" {
+		b.StopTimer()
+		writeHeap("-after")
+		b.StartTimer()
 	}
 	for _, job := range jobs {
 		close(job)

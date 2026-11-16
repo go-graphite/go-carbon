@@ -251,6 +251,9 @@ func decodeCompactRun(value []byte, id, order uint64, scratch []sealrollup.Sampl
 // of encoding those samples twice. Partial updates still need their own run.
 // The pending history lease keeps these bytes detached until publication.
 func compactArchiveHistory(records []sealrollup.Record, history []byte) []byte {
+	if historyTiled(history) {
+		return nil
+	}
 	h, err := partsrun.Inspect(history, 1<<26)
 	if err != nil || h.Clock != 0 || h.Count != len(records) {
 		return nil
