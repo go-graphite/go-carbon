@@ -43,9 +43,9 @@ following payload also works inside an approved remote-build wrapper:
 
 ```sh
 set -eu
+export GOTOOLCHAIN=go1.27.0 CGO_ENABLED=1
 test "$(go env CGO_ENABLED)" = 1
 test "$(go env GOVERSION)" = go1.27.0
-export GOTOOLCHAIN=go1.27.0 CGO_ENABLED=1
 mkdir -p .rbuild/artifacts
 go build -p 4 -o .rbuild/artifacts/go-carbon .
 go build -p 4 -o .rbuild/artifacts/v2-shadow ./tool/v2-shadow
@@ -240,6 +240,24 @@ Verify the test runner actually ran the named tests (no empty-regex success).
 Retain health observations before/after and verify no owned process remains before
 scratch cleanup. Copy/checksum the transcript first. DNS failure, unavailable
 tooling or missing shadow mode is `BLOCKED`, never a successful dry run.
+
+## Preparation rehearsal status
+
+A native Linux Go 1.27.0 cgo diagnostic rehearsal of the fallback candidate
+completed classic -> shadow -> serving-dual -> shadow -> shadow restart using
+one synthetic single-archive metric. It checked historical and fresh reads,
+corrections, retained history, discovery/info, one-hot mode, mirrored points and
+unknown configuration keys. A deliberately wrong expected mode raised ALERT
+without changing the process. Signed-zero verification used the binary response;
+the JSON response emitted integer zero and could not establish its sign bit.
+
+This exercises transition mechanics only. A separate classic-shadow override test
+still failed in that candidate; its owner must resolve it before qualification.
+The rehearsal does not establish full-stream/L3 parity, multiarchive historical
+cutover, production endpoint compatibility, sustained capacity or full operator
+guards. Repeat on the final integrated release artifact after every blocking
+component has passed. Private receipts retain exact source/tree, hashes, commands,
+CET timing, earlier failed attempts and guard output.
 
 ## Complexity check
 
