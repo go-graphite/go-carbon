@@ -26,6 +26,7 @@ type RollupSnapshot struct {
 	metrics        map[string]*snapshotMetric
 	cache          *rollupRangeCache
 	directoryBytes int64
+	bindingSet     *RollupInventory
 	inventory      map[string][]string // descriptor binding -> immutable routed part scopes
 	hasCopied      bool
 }
@@ -81,21 +82,22 @@ type snapshotMetric struct {
 }
 
 func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
+	return NewRollupSnapshotWithInventory(ctx, snapshot, prior, nil, cacheLimit...)
+}
+
+// NewRollupSnapshotWithInventory avoids reading the descriptor namespace when
+// the owner supplies its atomically captured immutable binding set.
+func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
 	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
 		return nil, err
 	} else if found {
-		return newCopiedRollupSnapshot(ctx, snapshot, nil, cacheLimit...)
+		return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
 	}
 	limit := int64(rollupReadCacheBytes)
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
-	out := &RollupSnapshot{snapshot: snapshot, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
-	var err error
-	out.hasCopied, err = snapshotHasCopiedParts(snapshot)
-	if err != nil {
-		return nil, err
-	}
+	out := &RollupSnapshot{snapshot: snapshot, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -104,7 +106,7 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 
 	// The descriptor namespace is published atomically with the data. Walking
 	// these small adjacent keys avoids seeking every old scope through the SSTs.
-	inventory, scopes, err := rollupInventory(ctx, snapshot, prior)
+	inventory, scopes, err := rollupInventory(ctx, snapshot, prior, bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +237,13 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 // RetainedBytes conservatively charges directory storage plus the maximum
 // bounded range cache. Shared immutable entries are charged independently by
 // each pinned generation; SST and pending-arena accounting remains external.
-func (s *RollupSnapshot) RetainedBytes() int64 { return s.directoryBytes + s.cache.limit }
+func (s *RollupSnapshot) RetainedBytes() int64 {
+	n := s.directoryBytes + s.cache.limit
+	if s.bindingSet != nil {
+		n += s.bindingSet.bytes
+	}
+	return n
+}
 
 // Metadata visits only the directory, never archive values.
 func (s *RollupSnapshot) Metadata(visit func(string, RollupPolicy, RollupMetadata)) {
@@ -252,6 +260,16 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 		return RollupPolicy{}, RollupMetadata{}, false
 	}
 	return m.policy, m.meta, true
+}
+
+// MetricVersion identifies an immutable name's complete part set and metadata.
+// It owns no snapshot; equality proves archive records are unchanged, including
+// reset, retirement and rewind. Consumers may retain it in bounded caches.
+func (s *RollupSnapshot) MetricVersion(name string) any {
+	if m := s.metrics[name]; m != nil {
+		return m
+	}
+	return nil
 }
 
 // ScanArchive seeks only the named archive's physical interval in each part.

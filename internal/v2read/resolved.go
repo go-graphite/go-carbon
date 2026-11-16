@@ -104,10 +104,10 @@ func (s *resolvedSource) Scan(ctx context.Context, id uint64, a Archive, from, u
 	}
 	rs, n := SlotRanges(a, from, until)
 	for _, r := range rs[:n] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for i := s.lower(archive, r.From); i < len(s.records) && s.records[i].Archive == archive && s.records[i].Slot < r.Until; i++ {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			p := s.records[i]
 			if err := yield(Sample{Time: p.Sample.Time, Bits: p.Sample.Bits, Sequence: p.Order}); err != nil {
 				return err
@@ -123,17 +123,30 @@ func (s *resolvedSource) RetainedBytes() int64 {
 // A bounded history survives overlapping snapshot pins without retaining any
 // snapshot. The sealed generation is the authority, never a pending frontier.
 type resolvedEntry struct {
+	version    any
 	generation uint64
 	name       string
 	source     *resolvedSource
 	bytes      int64
 }
 
+// Missing names keep the sealed generation fence; existing names share their
+// exact immutable part-set identity across unrelated owner seals.
+func (s *sealedData) metricVersion(name string) any {
+	if s.index != nil {
+		if v := s.index.MetricVersion(name); v != nil {
+			return v
+		}
+	}
+	return s.number
+}
+
 func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
 	c := s.cache
+	version := s.metricVersion(name)
 	c.fullMu.Lock()
 	for _, e := range c.full {
-		if e.generation == s.number && e.name == name {
+		if e.version == version && e.name == name {
 			c.fullMu.Unlock()
 			return e.source, nil
 		}
@@ -151,7 +164,7 @@ func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2co
 	c.fullMu.Lock()
 	defer c.fullMu.Unlock()
 	for _, e := range c.full {
-		if e.generation == s.number && e.name == name {
+		if e.version == version && e.name == name {
 			return e.source, nil
 		}
 	}
@@ -161,7 +174,7 @@ func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2co
 		c.full[len(c.full)-1] = resolvedEntry{}
 		c.full = c.full[:len(c.full)-1]
 	}
-	c.full = append(c.full, resolvedEntry{s.number, name, source, size})
+	c.full = append(c.full, resolvedEntry{version, s.number, name, source, size})
 	c.fullBytes += size
 	return source, nil
 }
@@ -170,6 +183,7 @@ func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2co
 // boundary, clock and scalar sample. No digest or order-only shortcut can turn
 // a different publication into the same history. Entries retain no generation.
 type pendingReduction struct {
+	version    any
 	generation uint64
 	name       string
 	id         uint64
@@ -200,7 +214,7 @@ func (s *sealedData) cachedReduction(m *metricState) *pendingReduction {
 	var best *pendingReduction
 	for i := range candidates {
 		e := &candidates[i]
-		if e.generation != s.number || e.name != m.name || e.id != m.meta.ID || !slices.Equal(e.policy, m.meta.Policy) || (best != nil && len(e.batches) <= len(best.batches)) {
+		if e.version != s.metricVersion(m.name) || e.name != m.name || e.id != m.meta.ID || !slices.Equal(e.policy, m.meta.Policy) || (best != nil && len(e.batches) <= len(best.batches)) {
 			continue
 		}
 		if samePrefix(e.batches, m.pending) {
@@ -211,7 +225,7 @@ func (s *sealedData) cachedReduction(m *metricState) *pendingReduction {
 }
 func (s *sealedData) rememberReduction(m *metricState, next sealrollup.Frontier) {
 	c := s.cache
-	e := pendingReduction{generation: s.number, name: m.name, id: m.meta.ID, policy: m.meta.Policy, batches: m.pending, frontier: next, source: m.frozen}
+	e := pendingReduction{version: s.metricVersion(m.name), generation: s.number, name: m.name, id: m.meta.ID, policy: m.meta.Policy, batches: m.pending, frontier: next, source: m.frozen}
 	e.bytes = m.frozen.RetainedBytes() + int64(len(e.name)+len(e.policy)) + int64(cap(e.batches))*64 + 128
 	for _, b := range e.batches {
 		e.bytes += int64(cap(b.Points)) * 24
@@ -224,7 +238,7 @@ func (s *sealedData) rememberReduction(m *metricState, next sealrollup.Frontier)
 	// Keep the newest prefix per metric and sealed generation; old readers retain
 	// their own immutable source even after this bounded history evicts it.
 	for i, old := range c.reductions {
-		if old.generation == e.generation && old.name == e.name {
+		if old.version == e.version && old.name == e.name {
 			if len(old.batches) > len(e.batches) {
 				return
 			}

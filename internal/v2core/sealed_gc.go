@@ -36,6 +36,7 @@ type sealedPartGC struct {
 	removedParts  atomic.Uint64
 	fileMu        sync.Mutex // serializes seal file publication with unlink; readers never acquire it
 	mu            sync.Mutex
+	inventory     *RollupInventory // immutable; captured/updated under mu
 	db            *pebble.DB
 	dir           string
 	pending       map[v2part.Digest]retiredPart
@@ -55,6 +56,10 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 	g := &sealedPartGC{db: db, dir: filepath.Join(dir, "parts"), pending: map[v2part.Digest]retiredPart{}, grace: sealedPartGrace, now: time.Now, stage: stage}
 	if db.Metrics().Snapshots.Count != 0 {
 		return nil, errors.New("part GC must open before readers")
+	}
+	var err error
+	if g.inventory, err = loadRollupInventory(db); err != nil {
+		return nil, err
 	}
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: retiredPartPrefix, UpperBound: v2part.PrefixEnd(retiredPartPrefix)})
 	if err != nil {
@@ -159,6 +164,7 @@ func (g *sealedPartGC) retire(ids []v2part.Digest, authorize func(v2part.Descrip
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return err
 	}
+	g.inventory = g.inventory.with(nil, selected)
 	// SeqNum is the first operation's sequence; snapshot sequences are exclusive.
 	fence := batch.SeqNum() + uint64(batch.Count()) - 1
 	for id := range selected {

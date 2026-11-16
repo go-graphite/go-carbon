@@ -73,6 +73,9 @@ type coreHooks struct {
 	// The final argument identifies the sealed generation; pending-only updates
 	// retain it. It runs on the owner; readers never call back into owner state.
 	PublishBatches func(int, *pebble.Snapshot, []coreBatch, uint64) error
+	// PublishBatchesWithInventory is the same transfer with the immutable binding
+	// set captured atomically with snapshot. When set, it replaces PublishBatches.
+	PublishBatchesWithInventory func(int, *pebble.Snapshot, []coreBatch, uint64, *RollupInventory) error
 	// PlanSeal is pure: no publication/mutation until Commit. Input buffers are
 	// owner-local and valid only for this call. The planner must detach retained
 	// output. An error prevents raw data, archives and frontier from committing.
