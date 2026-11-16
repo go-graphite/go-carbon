@@ -112,6 +112,9 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	for i := range metrics {
 		id := offset + uint64(i)
 		p := coreShard(id, shards) % producers
+		if producers > shards {
+			p = coreShard(id, producers)
+		}
 		ids[p] = append(ids[p], id)
 	}
 	jobs := make([]chan int, producers)

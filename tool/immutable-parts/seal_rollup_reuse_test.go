@@ -13,6 +13,9 @@ import (
 )
 
 func compactReuseFixture(t testing.TB, density int) (*atomicRollupOwner, coreSealInput) {
+	return compactReuseFixtureSize(t, density, 64)
+}
+func compactReuseFixtureSize(t testing.TB, density, metrics int) (*atomicRollupOwner, coreSealInput) {
 	t.Helper()
 	policy, err := json.Marshal(atomicBenchInput(1, 1, 4)[0].Config)
 	if err != nil {
@@ -20,7 +23,7 @@ func compactReuseFixture(t testing.TB, density int) (*atomicRollupOwner, coreSea
 	}
 	h := new(compactRollupHead)
 	ps := make([]row, density)
-	for id := range 64 {
+	for id := range metrics {
 		fillSealRows(ps, uint64(id), 1794700800, 0, nil)
 		if err = h.append(coreBatch{ID: uint64(id), Order: 1, Clock: 1794700800, Policy: policy, Points: ps}); err != nil {
 			t.Fatal(err)
@@ -179,5 +182,59 @@ func TestCompactHeadSteadyAllocs(t *testing.T) {
 	run()
 	if n := testing.AllocsPerRun(20, run); n != 0 {
 		t.Fatalf("head allocated %.0f times", n)
+	}
+}
+
+// A large lease stays intact until Commit, then loses oversized idle output.
+func TestCompactIdleOutputBoundAndLease(t *testing.T) {
+	o, in := compactReuseFixture(t, 118)
+	w := &compactSealWorkspace{owner: o, arena: make([]byte, 0, compactIdleArenaBytes+1), data: make([]coreKV, 0, compactIdleKVs+1), meta: make([]coreKV, 0, compactIdleKVs+1)}
+	w.commit = w.install
+	o.compactFree = append(o.compactFree, w)
+	p, err := planCompactCoreRollups(o, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Files) != 2 || len(p.Files[0]) == 0 {
+		t.Fatal("missing output")
+	}
+	want := append([]byte(nil), p.Files[0][0].Value...)
+	if !bytes.Equal(p.Files[0][0].Value, want) || w.arena == nil {
+		t.Fatal("lease released early")
+	}
+	p.Commit()
+	if len(o.compactFree) != 1 || o.compactFree[0] != w {
+		t.Fatal("workspace not returned")
+	}
+	if w.arena != nil || w.data != nil || w.meta != nil {
+		t.Fatal("oversized output retained")
+	}
+	in.Next.NextPart++
+	for i := range in.Compact.batches {
+		in.Compact.batches[i].order++
+	}
+	if p, err = planCompactCoreRollups(o, in); err != nil {
+		t.Fatal(err)
+	}
+	p.Commit()
+	// Returning another independent lease must not grow the idle cache.
+	other := &compactSealWorkspace{owner: o, part: o.part}
+	other.install()
+	if len(o.compactFree) != 1 {
+		t.Fatal("unbounded idle workspaces")
+	}
+}
+
+// This exceeds the idle size class. Report regrowth separately from the small
+// warmed zero-allocation guard rather than extrapolating that guard to all heads.
+func BenchmarkCompactPlannerOversized(b *testing.B) {
+	o, in := compactReuseFixtureSize(b, 118, 16384)
+	for range 8 {
+		reuseCompactSeal(b, o, &in)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		reuseCompactSeal(b, o, &in)
 	}
 }

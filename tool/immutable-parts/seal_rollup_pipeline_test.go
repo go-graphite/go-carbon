@@ -11,6 +11,7 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,11 +31,11 @@ func sealBenchmarkGeometry(t testing.TB, cores int) (shards, owners, producers i
 		}
 		return n
 	}
-	shards = read("SEAL_BENCH_DBS", cores)
+	shards = read("SEAL_BENCH_DBS", max(1, cores/8))
 	owners = read("SEAL_BENCH_OWNERS", shards)
-	producers = read("SEAL_BENCH_PRODUCERS", max(1, cores/8))
-	if owners > shards || producers > shards {
-		t.Fatal("execution owners and producers must not exceed physical databases")
+	producers = read("SEAL_BENCH_PRODUCERS", min(cores/2, 48))
+	if owners > shards {
+		t.Fatal("execution owners must not exceed physical databases")
 	}
 	return
 }
@@ -103,20 +104,30 @@ func sealBenchmarkProfile(b *testing.B) func() {
 		}
 		return f
 	}
-	cpu, tr := create(".cpu"), create(".trace")
+	cpu := create(".cpu")
+	var tr *os.File
+	if os.Getenv("SEAL_BENCH_PROFILE_CPU_ONLY") != "1" {
+		tr = create(".trace")
+	}
 	runtime.SetBlockProfileRate(1)
 	prior := runtime.SetMutexProfileFraction(1)
 	if err := pprof.StartCPUProfile(cpu); err != nil {
 		b.Fatal(err)
 	}
-	if err := trace.Start(tr); err != nil {
-		b.Fatal(err)
+	if tr != nil {
+		if err := trace.Start(tr); err != nil {
+			b.Fatal(err)
+		}
 	}
 	return func() {
-		trace.Stop()
+		if tr != nil {
+			trace.Stop()
+		}
 		pprof.StopCPUProfile()
 		_ = cpu.Close()
-		_ = tr.Close()
+		if tr != nil {
+			_ = tr.Close()
+		}
 		for _, name := range []string{"mutex", "block"} {
 			f := create("." + name)
 			if err := pprof.Lookup(name).WriteTo(f, 0); err != nil {
@@ -231,5 +242,63 @@ func TestCompactPlanOwnsPackedBytes(t *testing.T) {
 	clear(h.data)
 	if got := copyBytes(first); !reflect.DeepEqual(got, want) {
 		t.Fatal("a later plan or input reuse mutated planned SST bytes")
+	}
+}
+
+// More producers than databases used to leave producers without an owner.
+// Exercise every independent queue and verify exact raw sample bits on reopen.
+func TestCompactMoreProducersThanDBs(t *testing.T) {
+	cfg := coreConfig{Shards: 2, Owners: 2, Producers: 8, MaxRows: 10000, PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "producer-geometry"}
+	root := t.TempDir()
+	e, _, err := openCoreRollups(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, _ := json.Marshal(atomicBenchInput(1, 1, 4)[0].Config)
+	var heads [8]compactRollupHead
+	var ids [8]uint64
+	rows := make([]row, 118)
+	for p := range heads {
+		id := uint64(p)
+		for coreShard(id, len(heads)) != p {
+			id++
+		}
+		ids[p] = id
+		fillSealRows(rows, id, 1794700800, 0, nil)
+		if err = heads[p].append(coreBatch{ID: id, Order: 1, Clock: 1794700800, Policy: policy, Points: rows}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var workers sync.WaitGroup
+	errs := make(chan error, len(heads))
+	for p := range heads {
+		workers.Go(func() { errs <- e.submitCompactRollupGroup(p, &heads[p], 1) })
+	}
+	workers.Wait()
+	for range heads {
+		if err = <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = e.close(); err != nil {
+		t.Fatal(err)
+	}
+	e, _, err = openCoreRollups(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	for p := range heads {
+		o := e.owners[coreShard(ids[p], cfg.Shards)]
+		snap := o.db.NewSnapshot()
+		got, err := appendCompactCoreRows(snap, ids[p], nil)
+		snap.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fillSealRows(rows, ids[p], 1794700800, 0, nil)
+		if !reflect.DeepEqual(got, rows) {
+			t.Fatalf("producer %d changed points after reopen", p)
+		}
 	}
 }

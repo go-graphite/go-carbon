@@ -143,6 +143,9 @@ func TestCompactWholeEngineMemory(t *testing.T) {
 		id := offset + uint64(added/density)
 		fillSealRows(scratch[:count], id, 1794700800, 0, distribution)
 		p := coreShard(id, shards) % producers
+		if producers > shards {
+			p = coreShard(id, producers)
+		}
 		if err = heads[p].append(coreBatch{ID: id, Order: 1, Clock: 1794700800, Policy: policy, Points: scratch[:count]}); err != nil {
 			t.Fatal(err)
 		}

@@ -46,6 +46,28 @@ type compactSealWorkspace struct {
 	commit      func()
 }
 
+// Idle scratch is bounded per workspace. Large one-off heads must not retain
+// their full materialized SST output indefinitely. Small steady heads retain
+// their buffers and remain allocation-free; oversized heads regrow on reuse.
+const compactIdleArenaBytes = 1 << 20
+const compactIdleKVs = 4096
+
+func (w *compactSealWorkspace) releaseOutput() {
+	clear(w.data[:cap(w.data)])
+	clear(w.meta[:cap(w.meta)])
+	clear(w.batches[:cap(w.batches)])
+	w.files = [2][]coreKV{}
+	if cap(w.arena) > compactIdleArenaBytes {
+		w.arena = nil
+	}
+	if cap(w.data) > compactIdleKVs {
+		w.data = nil
+	}
+	if cap(w.meta) > compactIdleKVs {
+		w.meta = nil
+	}
+}
+
 func (w *compactSealWorkspace) install() {
 	o := w.owner
 	for i := range w.pending {
@@ -61,10 +83,12 @@ func (w *compactSealWorkspace) install() {
 	}
 	o.part = w.part
 	w.decoder.data, w.decoder.policies = nil, nil
-	clear(w.data)
-	clear(w.meta)
-	clear(w.batches)
-	o.compactFree = append(o.compactFree, w)
+	w.releaseOutput()
+	// A serial owner needs one idle workspace. Concurrent outstanding plans
+	// keep their own leases; returning many leases cannot grow the idle cache.
+	if len(o.compactFree) == 0 {
+		o.compactFree = append(o.compactFree, w)
+	}
 }
 func appendCompactFrontier(dst []byte, f sealrollup.Frontier) []byte {
 	dst = append(dst, `{"Order":`...)
@@ -94,10 +118,20 @@ func (e *coreEngine) submitCompactRollupGroup(producer int, h *compactRollupHead
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return errors.New("invalid compact producer/cursor")
 	}
+	// Preserve disjoint groups in either direction. A multiple of the DB count
+	// gives each DB several independent producer queues without all-to-all SST
+	// publication. Non-divisible counts retain unrestricted routing.
+	startOwner, stride := producer, e.cfg.Producers
+	if e.cfg.Producers > len(e.owners) {
+		startOwner, stride = 0, 1
+		if e.cfg.Producers%len(e.owners) == 0 {
+			startOwner, stride = producer%len(e.owners), len(e.owners)
+		}
+	}
 	if h.submissionEngine != e || h.submissionProducer != producer || len(h.submission) != len(e.owners) {
 		h.submissionEngine, h.submissionProducer = e, producer
 		h.submission = make([]compactRollupSubmission, len(e.owners))
-		for owner := producer; owner < len(e.owners); owner += e.cfg.Producers {
+		for owner := startOwner; owner < len(e.owners); owner += stride {
 			o := e.owners[owner]
 			slot := &h.submission[owner]
 			slot.packet.ack = make(chan error, 1)
@@ -108,7 +142,7 @@ func (e *coreEngine) submitCompactRollupGroup(producer int, h *compactRollupHead
 			}
 		}
 	}
-	for owner := producer; owner < len(e.owners); owner += e.cfg.Producers {
+	for owner := startOwner; owner < len(e.owners); owner += stride {
 		slot := &h.submission[owner]
 		slot.selection.head = h
 		slot.selection.batches = slot.selection.batches[:0]
@@ -117,15 +151,15 @@ func (e *coreEngine) submitCompactRollupGroup(producer int, h *compactRollupHead
 	for _, m := range h.batches {
 		owner := coreShard(m.id, len(e.owners))
 		slot := &h.submission[owner]
-		if owner%e.cfg.Producers != producer || m.count < 0 || m.count > e.cfg.MaxRows-slot.encoded.Points {
+		if (owner < startOwner || (owner-startOwner)%stride != 0) || m.count < 0 || m.count > e.cfg.MaxRows-slot.encoded.Points {
 			return errors.New("compact metric outside producer group or head bound")
 		}
 		slot.selection.batches = append(slot.selection.batches, m)
 		slot.encoded.Points += m.count
 	}
 	var first error
-	submitted := producer
-	for owner := producer; owner < len(e.owners); owner += e.cfg.Producers {
+	submitted := startOwner
+	for owner := startOwner; owner < len(e.owners); owner += stride {
 		o := e.owners[owner]
 		if o.plan == nil {
 			first = errors.New("compact seal requires planner")
@@ -137,10 +171,10 @@ func (e *coreEngine) submitCompactRollupGroup(producer int, h *compactRollupHead
 			first = err
 			break
 		}
-		submitted = owner + e.cfg.Producers
+		submitted = owner + stride
 	}
 	// The complete producer arena remains borrowed until every submitted ACK.
-	for owner := producer; owner < submitted; owner += e.cfg.Producers {
+	for owner := startOwner; owner < submitted; owner += stride {
 		select {
 		case err := <-h.submission[owner].packet.ack:
 			first = errors.Join(first, err)
