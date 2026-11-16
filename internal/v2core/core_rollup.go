@@ -256,6 +256,8 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	if r.coverage == nil {
 		r.coverage = map[string]*rollupCoverage{}
 	}
+	// Sorting identities is cheaper than sorting every archive replacement key.
+	slices.SortFunc(stages, func(a, b rollupStage) int { return bytes.Compare(a.metric.keyTemplate, b.metric.keyTemplate) })
 	files := r.files
 	if files == nil {
 		files = map[string][]coreKV{}
@@ -390,7 +392,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	out := coreSealPlan{}
 	for _, k := range keys {
 		file := files[k]
-		slices.SortFunc(file, func(a, b coreKV) int { return bytes.Compare(a.Key, b.Key) })
+
 		first, err := partsformat.Decode(file[0].Key)
 		if err != nil {
 			return coreSealPlan{}, err

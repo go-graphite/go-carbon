@@ -325,6 +325,16 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	for s := 0; s < cfg.Shards; s++ {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
 		opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+		if cfg.Rollups {
+			// Preserve dense part compression when the LSM rewrites group-wide
+			// ranges; default small Snappy blocks undo most of the SST byte saving.
+			opts.Levels = make([]pebble.LevelOptions, 7)
+			for i := range opts.Levels {
+				opts.Levels[i].Compression = pebble.ZstdCompression
+				opts.Levels[i].BlockSize = 256 << 10
+				opts.Levels[i].BlockRestartInterval = 64
+			}
+		}
 		opts.Experimental.TableCacheShards = 1
 		opts.BytesPerSync = 64 << 20
 		opts.EventListener = &pebble.EventListener{
@@ -625,16 +635,50 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	var byOwner [][]coreBatch
 	if len(batches) > 0 {
+		// One immutable application and point arena per submitted packet. Owners
+		// retain these after releasing the dispatch lease; no caller slices or
+		// reusable routing storage escape into a seal or read snapshot.
 		byOwner = make([][]coreBatch, e.cfg.Shards)
-	}
-	for _, b := range batches {
-		owner, err := routeID(b.ID)
-		if err != nil {
-			return err
+		clear(counts)
+		pointCount, policyBytes := 0, 0
+		for _, b := range batches {
+			owner, err := routeID(b.ID)
+			if err != nil {
+				return err
+			}
+			counts[owner]++
+			pointCount += len(b.Points)
+			if !e.cfg.Rollups {
+				policyBytes += len(b.Policy)
+			}
 		}
-		b.Points = slices.Clone(b.Points)
-		b.Policy = slices.Clone(b.Policy)
-		byOwner[owner] = append(byOwner[owner], b)
+		descriptors := make([]coreBatch, len(batches))
+		pointArena := make([]row, pointCount)
+		policyArena := make([]byte, policyBytes)
+		offset := 0
+		for owner, n := range counts {
+			byOwner[owner] = descriptors[offset : offset : offset+n]
+			offset += n
+		}
+		pointOffset, policyOffset := 0, 0
+		for _, b := range batches {
+			owner, err := routeID(b.ID)
+			if err != nil {
+				return err
+			}
+			n := copy(pointArena[pointOffset:], b.Points)
+			b.Points = pointArena[pointOffset : pointOffset+n : pointOffset+n]
+			pointOffset += n
+			if e.cfg.Rollups {
+				// The producer-local route owns its validated canonical bytes.
+				b.Policy = router.rollupRoutes[b.ID].policy
+			} else {
+				n = copy(policyArena[policyOffset:], b.Policy)
+				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]
+				policyOffset += n
+			}
+			byOwner[owner] = append(byOwner[owner], b)
+		}
 	}
 	var acks []chan error
 	if seal && waitSeal {
@@ -748,7 +792,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		o.meta = next
 		o.publishFrontier(next)
-		batches = nil
+		clear(batches)
+		batches = batches[:0]
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
 		o.bytes.Add(n)
