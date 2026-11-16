@@ -71,3 +71,11 @@ and `CapturedLegacyP99NS` retains the original pre-deletion diagnostic separatel
 The paired legacy arm includes HTTP and protobuf decoding, while the converted
 arm runs in-process. Cache state is uncontrolled, so this is an explicitly
 unequal-transport diagnostic, not an engine latency qualification.
+
+Offline copy batches stop at either `-copy-batch-metrics` or the conservative
+aggregate `-copy-batch-mib` output estimate, whichever comes first. This permits
+large sparse name batches without rejecting a dense range merely because the
+name limit was high. A single metric that exceeds the byte cap still fails
+before publication or deletion. Saved pending plans keep their exact bounds on
+resume. The byte estimate does not replace sampling the full conversion disk
+footprint, including shared-SST compaction and cumulative target growth.

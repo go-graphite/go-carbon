@@ -145,11 +145,29 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 				}
 				var upper []byte
 				count := 0
+				var estimated uint64
 				for ok := it.First(); ok; ok = it.Next() {
 					if count == batchMetrics {
 						upper = append([]byte(nil), it.Key()[2:]...)
 						break
 					}
+					// Plan sparse names together, but stop before the same
+					// conservative aggregate byte bound used at admission.
+					snapshot, err := source.StoredSnapshot(ctx, string(it.Key()[2:]))
+					if err != nil {
+						_ = it.Close()
+						return err
+					}
+					n := storedOutputBound(it.Key()[2:], snapshot)
+					if n > maxBatchBytes-estimated {
+						if count == 0 {
+							_ = it.Close()
+							return errors.New("offline copy metric exceeds output bound")
+						}
+						upper = append([]byte(nil), it.Key()[2:]...)
+						break
+					}
+					estimated += n
 					count++
 				}
 				err = errors.Join(it.Error(), it.Close())
@@ -179,27 +197,11 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 				if err != nil {
 					return 0, err
 				}
-				for _, a := range snapshot.Archives {
-					blocks, used := uint64(1), 0
-					var partition int64
-					for i, p := range a.Points {
-						q := p.Timestamp / 86400
-						if p.Timestamp%86400 < 0 {
-							q--
-						}
-						if i > 0 && (q != partition || used == 4096) {
-							blocks++
-							used = 0
-						}
-						partition = q
-						used++
-					}
-					n := 2 * (16*uint64(len(a.Points)) + blocks*uint64(2*len(m.Name)+8*len(snapshot.Archives)+8192))
-					if n > maxBatchBytes || total > maxBatchBytes-n {
-						return 0, errors.New("offline copy batch exceeds output bound; reduce copy-batch-metrics")
-					}
-					total += n
+				n := storedOutputBound(m.Name, snapshot)
+				if n > maxBatchBytes || total > maxBatchBytes-n {
+					return 0, errors.New("offline copy batch exceeds output bound; reduce copy-batch-metrics")
 				}
+				total += n
 			}
 			bounds[u.VShard] = total
 			return total, nil
@@ -252,6 +254,30 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 	}
 	r.StoredSlotsExact = err == nil
 	return r, err
+}
+
+// storedOutputBound charges the same key/envelope/table overhead during name
+// planning and per-vshard admission. It counts existing physical slots only.
+func storedOutputBound(name []byte, snapshot chunkstore.Snapshot) uint64 {
+	var total uint64
+	for _, a := range snapshot.Archives {
+		blocks, used := uint64(1), 0
+		var partition int64
+		for i, p := range a.Points {
+			q := p.Timestamp / 86400
+			if p.Timestamp%86400 < 0 {
+				q--
+			}
+			if i > 0 && (q != partition || used == 4096) {
+				blocks++
+				used = 0
+			}
+			partition = q
+			used++
+		}
+		total += 2 * (16*uint64(len(a.Points)) + blocks*uint64(2*len(name)+8*len(snapshot.Archives)+8192))
+	}
+	return total
 }
 
 func durableIdentity(path string) (string, error) {

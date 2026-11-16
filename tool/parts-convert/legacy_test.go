@@ -35,7 +35,7 @@ func TestConvertOfflineCopyDeletesActualLegacyAndResumes(t *testing.T) {
 	if _, err := convertLegacyCopy(ctx, legacy, output, 1, 1); err == nil {
 		t.Fatal("ignored aggregate byte budget")
 	}
-	r, err := convertLegacyCopy(ctx, legacy, output, 1, 8<<20)
+	r, err := convertLegacyCopy(ctx, legacy, output, 4096, 256<<10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestConvertOfflineCopyDeletesActualLegacyAndResumes(t *testing.T) {
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := convertLegacyCopy(ctx, legacy, output, 1, 8<<20)
+	resumed, err := convertLegacyCopy(ctx, legacy, output, 4096, 256<<10)
 	if err != nil || resumed.Batches != 0 || resumed.Points != 0 || !resumed.StoredSlotsExact {
 		t.Fatalf("completed resume recopied data: %+v %v", resumed, err)
 	}
