@@ -88,7 +88,8 @@ It is not an authenticated transport protocol or a declaration of READY.
 The package itself does not retain originals or own snapshot lifetimes. The
 core retains checksum-addressed original parts and descriptors under each
 owner's `parts/` directory. Descriptor bindings are ingested atomically with
-archive data and the owner frontier. `SealedSnapshotReader` enumerates only
+raw rows and the owner frontier; archive rows stay exclusively in immutable
+original files and are opened by the snapshot reader. `SealedSnapshotReader` enumerates only
 bindings visible in a caller-retained immutable owner snapshot; unpublished
 crash leftovers are removed at exclusive startup. These originals survive
 Pebble compaction. Reclaiming published originals needs a separate retention
