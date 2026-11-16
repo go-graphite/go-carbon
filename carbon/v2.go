@@ -155,9 +155,21 @@ func (app *App) startV2() error {
 	}
 	if dual {
 		deadline := time.Now().Add(5 * time.Minute)
+		diagnosticAt := time.Now().Add(5 * time.Second)
 		for !core.IsEmpty() {
+			if !diagnosticAt.IsZero() && time.Now().After(diagnosticAt) {
+				// One bounded diagnostic per startup, including an idle queue
+				// with unconfirmed batches that cannot be offered again.
+				pebbleWrites, whisperWrites := app.Persister.WriteStats()
+				zapwriter.Logger("v2").Warn("waiting for classic replay drain",
+					zap.Int64("cache-points", core.Size()), zap.Int32("unconfirmed", core.NotConfirmedLength()),
+					zap.Any("writeout", core.WriteoutState()), zap.String("queue", core.WriteoutQueue().DebugState()),
+					zap.Any("pebble-writes", pebbleWrites), zap.Any("whisper-writes", whisperWrites),
+					zap.Uint64("committed-points", app.Persister.CommittedPoints()))
+				diagnosticAt = time.Time{}
+			}
 			if time.Now().After(deadline) {
-				return errors.New("classic replay did not drain; refusing to serve")
+				return fmt.Errorf("classic replay did not drain; refusing to serve: points=%d unconfirmed=%d writeout=%+v committed=%d", core.Size(), core.NotConfirmedLength(), core.WriteoutState(), app.Persister.CommittedPoints())
 			}
 			time.Sleep(10 * time.Millisecond)
 		}

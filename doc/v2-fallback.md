@@ -43,6 +43,12 @@ semantics; this does not claim exact original Whisper application boundaries.
 A classic persistence failure prevents recovery readiness. A journal/v2 failure
 stops intake rather than letting the two engines silently diverge. v2 read
 failures remain visible in the serving mode; an operator explicitly cuts back.
+New classic files are initialized and synced privately, then atomically linked
+into place and reopened at their final name. Killing a creator cannot expose a
+partial `.wsp` that replay would retry forever. Temporary files have no `.wsp`
+suffix and cannot appear as metrics. Existing damaged files remain storage
+errors; they are not automatically erased, since their history may predate the
+retained journal. A delayed replay drain logs one bounded cache/queue diagnostic.
 Initial support excludes tags, concurrent classic migration, metadata prewarm
 and expiration workers during dual write. Those policies require their own
 cross-engine parity qualification before relaxing these guards. The existing
