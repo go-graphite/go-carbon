@@ -110,3 +110,58 @@ func TestUnseenNamesAcrossPackets(t *testing.T) {
 		t.Fatal(unseen, ordinal, position)
 	}
 }
+
+func TestCatalogUnseenCaptureVerification(t *testing.T) {
+	root := t.TempDir()
+	c, e := partlog.OpenNameCatalog(filepath.Join(root, "0"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	fs := []partlog.DictionaryFrame{{Key: "real\x00name", Definition: []byte{255, 0}, Clock: math.MinInt64}}
+	for i := 0; i < 23; i++ {
+		fs[0].Points = append(fs[0].Points, points.Point{Timestamp: int64(i), Value: math.Float64frombits(0x7ff0000000000001 + uint64(i))})
+	}
+	wire := catalogWire(fs, c)
+	if e = c.Checkpoint(); e != nil {
+		t.Fatal(e)
+	}
+	fixture, e := os.Create(filepath.Join(root, "sender.fixture"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, b := range wire {
+		writePacket(fixture, b)
+	}
+	if e = fixture.Close(); e != nil {
+		t.Fatal(e)
+	}
+	enc := partlog.CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
+	defer enc.Close()
+	f, e := os.Create(filepath.Join(root, "0", "segment"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var ordinal uint64
+	for range 3 {
+		b, e := enc.EncodeDurable(unseenFrames(fs, &ordinal))
+		if e != nil {
+			t.Fatal(e)
+		}
+		writePacket(f, b)
+	}
+	if e = f.Sync(); e != nil {
+		t.Fatal(e)
+	}
+	if e = f.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(root, "unseen"), nil, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if got := catalogVerify(root, 1); got != 69 {
+		t.Fatal(got)
+	}
+}
