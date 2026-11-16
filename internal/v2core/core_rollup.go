@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -431,6 +432,11 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 // replacement order for each physical slot before callers apply time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
+		return err
+	} else if copied {
+		return scanCopiedRollups(snapshot, visit)
+	}
 	type entry struct {
 		group   partsformat.Group
 		policy  RollupPolicy
@@ -528,8 +534,42 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 	}
 	return nil
 }
+func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, 0)
+	if err != nil {
+		return err
+	}
+	for name, metric := range index.metrics {
+		records, err := index.Records(context.Background(), name)
+		if err != nil {
+			return err
+		}
+		slices.SortFunc(records, func(a, b sealrollup.Record) int {
+			if a.Archive != b.Archive {
+				return a.Archive - b.Archive
+			}
+			if a.Slot < b.Slot {
+				return -1
+			}
+			if a.Slot > b.Slot {
+				return 1
+			}
+			return 0
+		})
+		if err = visit(metric.policy, metric.meta, records); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 	r := newCoreRollups()
+	if found, err := hasCopiedParts(db); err != nil {
+		return nil, err
+	} else if found {
+		return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
+	}
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
 	err := ScanRollups(snapshot, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
