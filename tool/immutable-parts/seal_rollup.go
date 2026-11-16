@@ -44,6 +44,7 @@ type atomicRollupOwner struct {
 	policies       map[string]*sealrollup.Prepared
 	workspace      sealrollup.Workspace
 	historyScratch rollupHistoryWorkspace
+	compactFree    []*compactSealWorkspace
 	policyConfigs  map[string]sealrollup.Config
 	part           uint64
 	// Concurrently readable failure counter; daemon metric export is pending.

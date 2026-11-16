@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/partsrun"
@@ -18,6 +19,74 @@ type compactRollupSelection struct {
 	batches []compactRollupBatch
 }
 
+// A workspace is leased until Commit. A second outstanding plan gets another
+// workspace, so neither SST bytes nor unpublished history can be overwritten.
+type compactPendingMetric struct {
+	id       uint64
+	config   sealrollup.Config
+	frontier sealrollup.Frontier
+	history  [][]byte
+}
+type compactSealWorkspace struct {
+	configJSON  [][]byte
+	owner       *atomicRollupOwner
+	part        uint64
+	descriptors []compactRollupBatch
+	pending     []compactPendingMetric
+	data, meta  []coreKV
+	files       [2][]coreKV
+	arena       []byte
+	scratch     []sealrollup.Sample
+	batches     []sealrollup.Batch
+	records     []sealrollup.Record
+	decoder     compactRollupHead
+	policyKeys  []string
+	configs     []sealrollup.Config
+	prepared    []*sealrollup.Prepared
+	commit      func()
+}
+
+func (w *compactSealWorkspace) install() {
+	o := w.owner
+	for i := range w.pending {
+		m := &w.pending[i]
+		s := o.state.get(m.id)
+		if s == nil {
+			s = &atomicRollupState{Config: m.config}
+			o.state.set(m.id, s)
+		}
+		s.Frontier = m.frontier
+		s.history, m.history = m.history, s.history
+		s.Slots, s.index = nil, nil
+	}
+	o.part = w.part
+	w.decoder.data, w.decoder.policies = nil, nil
+	clear(w.data)
+	clear(w.meta)
+	clear(w.batches)
+	o.compactFree = append(o.compactFree, w)
+}
+func appendCompactFrontier(dst []byte, f sealrollup.Frontier) []byte {
+	dst = append(dst, `{"Order":`...)
+	dst = strconv.AppendUint(dst, f.Order, 10)
+	dst = append(dst, `,"MaxTime":`...)
+	dst = strconv.AppendInt(dst, f.MaxTime, 10)
+	dst = append(dst, `,"Policy":[`...)
+	for i, b := range f.Policy {
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		dst = strconv.AppendUint(dst, uint64(b), 10)
+	}
+	return append(dst, ']', '}')
+}
+
+type compactRollupSubmission struct {
+	selection compactRollupSelection
+	packet    corePacket
+	encoded   coreEncodedSeal
+}
+
 // submitCompactRollupGroup borrows the producer's complete frozen arena until
 // every owner has ACKed. Independent owners get independent decoder scratch.
 // Only batch descriptors cross the queues; points remain encoded throughout.
@@ -25,51 +94,61 @@ func (e *coreEngine) submitCompactRollupGroup(producer int, h *compactRollupHead
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return errors.New("invalid compact producer/cursor")
 	}
-	groups := make([]compactRollupSelection, len(e.owners))
-	counts := make([]int, len(groups))
+	if h.submissionEngine != e || h.submissionProducer != producer || len(h.submission) != len(e.owners) {
+		h.submissionEngine, h.submissionProducer = e, producer
+		h.submission = make([]compactRollupSubmission, len(e.owners))
+		for owner := producer; owner < len(e.owners); owner += e.cfg.Producers {
+			o := e.owners[owner]
+			slot := &h.submission[owner]
+			slot.packet.ack = make(chan error, 1)
+			slot.packet.seal = true
+			slot.packet.encoded = &slot.encoded
+			slot.encoded.Plan = func(next coreFrontier) (coreSealPlan, error) {
+				return o.plan(coreSealInput{Next: next, Compact: &slot.selection})
+			}
+		}
+	}
+	for owner := producer; owner < len(e.owners); owner += e.cfg.Producers {
+		slot := &h.submission[owner]
+		slot.selection.head = h
+		slot.selection.batches = slot.selection.batches[:0]
+		slot.encoded.Points = 0
+	}
 	for _, m := range h.batches {
-		owner := coreShard(m.id, len(groups))
-		if owner%e.cfg.Producers != producer || m.count < 0 || m.count > e.cfg.MaxRows-counts[owner] {
+		owner := coreShard(m.id, len(e.owners))
+		slot := &h.submission[owner]
+		if owner%e.cfg.Producers != producer || m.count < 0 || m.count > e.cfg.MaxRows-slot.encoded.Points {
 			return errors.New("compact metric outside producer group or head bound")
 		}
-		groups[owner].head = h
-		groups[owner].batches = append(groups[owner].batches, m)
-		counts[owner] += m.count
+		slot.selection.batches = append(slot.selection.batches, m)
+		slot.encoded.Points += m.count
 	}
-	type wait struct {
-		owner *coreOwner
-		ack   chan error
-	}
-	var waits []wait
 	var first error
-	for owner := producer; owner < len(groups); owner += e.cfg.Producers {
+	submitted := producer
+	for owner := producer; owner < len(e.owners); owner += e.cfg.Producers {
 		o := e.owners[owner]
 		if o.plan == nil {
 			first = errors.New("compact seal requires planner")
 			break
 		}
-		g := groups[owner]
-		ack := make(chan error, 1)
-		encoded := &coreEncodedSeal{Points: counts[owner], Plan: func(next coreFrontier) (coreSealPlan, error) {
-			// The per-owner planner wrapper recognizes the selection without any
-			// shared lock or global producer registry.
-			return o.plan(coreSealInput{Next: next, Compact: &g})
-		}}
-		if err := o.queues[producer].push(&corePacket{encoded: encoded, cursor: cursor, seal: true, ack: ack}, o.dead); err != nil {
+		slot := &h.submission[owner]
+		slot.packet.cursor = cursor
+		if err := o.queues[producer].push(&slot.packet, o.dead); err != nil {
 			first = err
 			break
 		}
-		waits = append(waits, wait{o, ack})
+		submitted = owner + e.cfg.Producers
 	}
-	// Even on failure, wait for every submitted borrower before returning its arena.
-	for _, w := range waits {
+	// The complete producer arena remains borrowed until every submitted ACK.
+	for owner := producer; owner < submitted; owner += e.cfg.Producers {
 		select {
-		case err := <-w.ack:
+		case err := <-h.submission[owner].packet.ack:
 			first = errors.Join(first, err)
-		case <-w.owner.dead:
+		case <-e.owners[owner].dead:
 			first = errors.Join(first, errors.New("compact owner stopped"))
 		}
 	}
+
 	return first
 }
 
@@ -125,7 +204,23 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 	if o.policyConfigs == nil {
 		o.policyConfigs = make(map[string]sealrollup.Config)
 	}
-	descriptors := slices.Clone(g.batches)
+	var w *compactSealWorkspace
+	if n := len(o.compactFree); n != 0 {
+		w = o.compactFree[n-1]
+		o.compactFree = o.compactFree[:n-1]
+	} else {
+		w = &compactSealWorkspace{owner: o}
+		w.commit = w.install
+	}
+	defer func() {
+		if err != nil {
+			w.decoder.data, w.decoder.policies = nil, nil
+			o.compactFree = append(o.compactFree, w)
+		}
+	}()
+	w.part = in.Next.NextPart
+	w.descriptors = append(w.descriptors[:0], g.batches...)
+	descriptors := w.descriptors
 	slices.SortStableFunc(descriptors, func(a, b compactRollupBatch) int {
 		if a.id < b.id {
 			return -1
@@ -135,29 +230,44 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		}
 		return 0
 	})
-	type pendingMetric struct {
-		id       uint64
-		config   sealrollup.Config
-		frontier sealrollup.Frontier
-		history  [][]byte
-	}
-	pending := make([]pendingMetric, 0, len(descriptors))
-	data := make([]coreKV, 0, 5*len(descriptors))
-	meta := make([]coreKV, 0, 2*len(descriptors)+1)
-	// One pointer-free arena owns the planned SST bytes until synchronous ingest
-	// completes. Thousands of tiny key/value objects otherwise feed the shared
-	// runtime mark queues as owner count grows. Growth preserves earlier slices;
-	// no arena survives through committed history or is shared with another owner.
-	rawBytes := 0
-	for _, m := range descriptors {
-		rawBytes += 49 + m.end - m.start
-	}
-	arena := make([]byte, 0, 2*rawBytes+512*len(descriptors))
-	var scratch []sealrollup.Sample
-	var batches []sealrollup.Batch
-	var decoder compactRollupHead
+	pending := w.pending[:0]
+	data, meta := w.data[:0], w.meta[:0]
+	arena := w.arena[:0]
+	scratch, batches := w.scratch, w.batches[:0]
+	decoder := &w.decoder
 	if g.head != nil {
 		decoder.data, decoder.policies = g.head.data, g.head.policies
+		for i, raw := range g.head.policies {
+			if i == len(w.policyKeys) {
+				w.policyKeys = append(w.policyKeys, "")
+				w.configJSON = append(w.configJSON, nil)
+				w.configs = append(w.configs, sealrollup.Config{})
+				w.prepared = append(w.prepared, nil)
+			}
+			if w.policyKeys[i] != string(raw) {
+				key := string(raw)
+				cfg, ok := o.policyConfigs[key]
+				if !ok {
+					if err = json.Unmarshal(raw, &cfg); err != nil {
+						return plan, err
+					}
+					o.policyConfigs[key] = cfg
+				}
+				prepared := o.policies[key]
+				if prepared == nil {
+					prepared, err = sealrollup.Prepare(cfg)
+					if err != nil {
+						return plan, err
+					}
+					o.policies[key] = prepared
+				}
+				w.policyKeys[i], w.configs[i], w.prepared[i] = key, cfg, prepared
+				w.configJSON[i], err = json.Marshal(cfg)
+				if err != nil {
+					return plan, err
+				}
+			}
+		}
 	}
 	// No expanded samples from an earlier metric survive into the next metric.
 	for lo := 0; lo < len(descriptors); {
@@ -179,35 +289,15 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 			if int(m.policy) >= len(g.head.policies) || m.count < 0 {
 				return plan, errors.New("invalid compact descriptor")
 			}
-			key := string(g.head.policies[m.policy])
+			key := w.policyKeys[m.policy]
 			if prepared == nil {
-				var ok bool
-				cfg, ok = o.policyConfigs[key]
-				if !ok {
-					if err = json.Unmarshal([]byte(key), &cfg); err != nil {
-						return plan, err
-					}
-					o.policyConfigs[key] = cfg
-				}
-				prepared = o.policies[key]
-				if prepared == nil {
-					prepared, err = sealrollup.Prepare(cfg)
-					if err != nil {
-						return plan, err
-					}
-					o.policies[key] = prepared
-				}
-				policy = key
+				cfg, prepared, policy = w.configs[m.policy], w.prepared[m.policy], key
 			} else if key != policy {
-				var other sealrollup.Config
-				if err = json.Unmarshal([]byte(key), &other); err != nil {
-					return plan, err
-				}
 				a, e := sealrollup.PolicyDigest(cfg)
 				if e != nil {
 					return plan, e
 				}
-				z, e := sealrollup.PolicyDigest(other)
+				z, e := sealrollup.PolicyDigest(w.configs[m.policy])
 				if e != nil {
 					return plan, e
 				}
@@ -243,15 +333,22 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		if e := o.historyScratch.load(old, cfg); e != nil {
 			return plan, e
 		}
-		p, e := prepared.PlanWithWorkspace(prior, o.historyScratch.view, o.historyScratch.ranges, batches, &o.workspace)
+		p, e := prepared.PlanInto(w.records, prior, o.historyScratch.view, o.historyScratch.ranges, batches, &o.workspace)
 		if e != nil {
 			return plan, e
 		}
-		history, e := o.historyScratch.seal(p.Records)
+		i := len(pending)
+		if i == cap(pending) {
+			pending = append(pending, compactPendingMetric{})
+		} else {
+			pending = pending[:i+1]
+		}
+		w.records = p.Records
+		history, e := o.historyScratch.sealInto(p.Records, pending[i].history)
 		if e != nil {
 			return plan, e
 		}
-		pending = append(pending, pendingMetric{id, cfg, p.Next, history})
+		pending[i] = compactPendingMetric{id, cfg, p.Next, history}
 		// Records are ordered by archive/slot. Encode their timestamps, exact
 		// IEEE bits and individual source orders directly, without row slices.
 		for lo := 0; lo < len(p.Records); {
@@ -280,48 +377,35 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 			arena = appendCompactRunValue(arena, g.head, m)
 			data = append(data, coreKV{Key: arena[at:mid:mid], Value: arena[mid:len(arena):len(arena)]})
 		}
-		v, e := json.Marshal(p.Next)
-		if e != nil {
-			return plan, e
-		}
-		addMeta := func(kind byte, value []byte) {
-			at := len(arena)
-			arena = append(arena, 'T', kind)
-			arena = binary.BigEndian.AppendUint64(arena, id)
-			mid := len(arena)
-			arena = append(arena, value...)
-			meta = append(meta, coreKV{arena[at:mid:mid], arena[mid:len(arena):len(arena)]})
-		}
-		addMeta('s', v)
+		at := len(arena)
+		arena = append(arena, 'T', 's')
+		arena = binary.BigEndian.AppendUint64(arena, id)
+		mid := len(arena)
+		arena = appendCompactFrontier(arena, p.Next)
+		meta = append(meta, coreKV{arena[at:mid:mid], arena[mid:len(arena):len(arena)]})
 		if old == nil {
-			v, e = json.Marshal(cfg)
-			if e != nil {
-				return plan, e
-			}
-			addMeta('p', v)
+			at := len(arena)
+			arena = append(arena, 'T', 'p')
+			arena = binary.BigEndian.AppendUint64(arena, id)
+			// Policy values are immutable and identical for every metric of a schema.
+			// Keep one canonical value per owner/policy instead of copying it per ID.
+			meta = append(meta, coreKV{arena[at:len(arena):len(arena)], w.configJSON[ms[0].policy]})
 		}
 	}
-	meta = append(meta, coreKV{[]byte{'T', 'r'}, binary.BigEndian.AppendUint64(nil, in.Next.NextPart)})
+	at := len(arena)
+	arena = append(arena, 'T', 'r')
+	mid := len(arena)
+	arena = binary.BigEndian.AppendUint64(arena, in.Next.NextPart)
+	meta = append(meta, coreKV{arena[at:mid:mid], arena[mid:len(arena):len(arena)]})
 	slices.SortFunc(meta, func(a, b coreKV) int { return slices.Compare(a.Key, b.Key) })
-	for _, file := range [][]coreKV{data, meta} {
-		if len(file) > 0 {
-			plan.Files = append(plan.Files, file)
-		}
+	w.pending, w.data, w.meta, w.arena, w.scratch, w.batches = pending, data, meta, arena, scratch, batches
+	w.files[0], w.files[1] = data, meta
+	if len(data) > 0 {
+		plan.Files = w.files[:]
+	} else {
+		plan.Files = w.files[1:]
 	}
-	plan.Commit = func() {
-		for _, m := range pending {
-			s := o.state.get(m.id)
-			if s == nil {
-				s = &atomicRollupState{Config: m.config}
-				o.state.set(m.id, s)
-			}
-			s.Frontier = m.frontier
-			s.history = m.history
-			s.Slots = nil
-			s.index = nil
-		}
-		o.part = in.Next.NextPart
-	}
+	plan.Commit = w.commit
 	return plan, nil
 }
 

@@ -110,7 +110,15 @@ func (w *rollupHistoryWorkspace) ranges(a int, start, end int64, dst []sealrollu
 	return dst
 }
 func (w *rollupHistoryWorkspace) seal(records []sealrollup.Record) ([][]byte, error) {
-	out := make([][]byte, len(w.archives))
+	return w.sealInto(records, nil)
+}
+
+// sealInto writes into inactive buffers; callers swap them only after ingest.
+func (w *rollupHistoryWorkspace) sealInto(records []sealrollup.Record, out [][]byte) ([][]byte, error) {
+	if cap(out) < len(w.archives) {
+		out = make([][]byte, len(w.archives))
+	}
+	out = out[:len(w.archives)]
 	at := 0
 	for a, ar := range w.archives {
 		lo := at
@@ -120,6 +128,7 @@ func (w *rollupHistoryWorkspace) seal(records []sealrollup.Record) ([][]byte, er
 		rs := records[lo:at]
 		old := w.samples[a]
 		if len(rs) == 0 && len(old) == 0 {
+			out[a] = out[a][:0]
 			continue
 		}
 		merged := w.merged[:0]
@@ -140,7 +149,7 @@ func (w *rollupHistoryWorkspace) seal(records []sealrollup.Record) ([][]byte, er
 			return nil, errors.New("history exceeds physical archive")
 		}
 		w.merged = merged
-		v, err := partsrun.AppendWithWorkspace(nil, 0, len(merged), func(i int) partsrun.Sample {
+		v, err := partsrun.AppendWithWorkspace(out[a][:0], 0, len(merged), func(i int) partsrun.Sample {
 			p := merged[i]
 			return partsrun.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Sequence}
 		}, &w.codec)

@@ -17,12 +17,15 @@ import (
 // timestamps and sequences retain a lossless varint fallback.
 // This is an offline numeric adapter, not a durable journal codec.
 type compactRollupHead struct {
-	data      []byte
-	scratch   []byte
-	batches   []compactRollupBatch
-	policies  [][]byte
-	policyIDs map[string]uint32
-	points    int
+	submissionEngine   *coreEngine
+	submissionProducer int
+	data               []byte
+	scratch            []byte
+	batches            []compactRollupBatch
+	policies           [][]byte
+	policyIDs          map[string]uint32
+	points             int
+	submission         []compactRollupSubmission
 }
 type compactRollupBatch struct {
 	id, order         uint64
@@ -256,6 +259,10 @@ func (h *compactRollupHead) reset() {
 }
 func (h *compactRollupHead) residentBytes() int {
 	n := int(unsafe.Sizeof(*h)) + cap(h.data) + cap(h.scratch) + cap(h.batches)*int(unsafe.Sizeof(compactRollupBatch{})) + cap(h.policies)*int(unsafe.Sizeof([]byte{}))
+	n += cap(h.submission) * int(unsafe.Sizeof(compactRollupSubmission{}))
+	for i := range h.submission {
+		n += cap(h.submission[i].selection.batches) * int(unsafe.Sizeof(compactRollupBatch{}))
+	}
 	// Policy map accounting is conservative for the small distinct-policy set;
 	// held-heap measurements also include runtime map backing and allocator classes.
 	for k, v := range h.policyIDs {
