@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -34,6 +36,13 @@ func TestCopyCampaign(t *testing.T) {
 			t.Fatal(e)
 		}
 		parts := 1000
+		if v := os.Getenv("COPY_PARTITIONS"); v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 100000 {
+				t.Fatal("invalid COPY_PARTITIONS")
+			}
+			parts = n
+		}
 		blocks := 160
 		if v := os.Getenv("COPY_BLOCKS"); v != "" {
 			n, e := strconv.Atoi(v)
@@ -44,13 +53,13 @@ func TestCopyCampaign(t *testing.T) {
 		}
 		start := time.Now()
 		var donors []*pebble.DB
-		for s := 0; s < 16; s++ {
+		for s := 0; s < 16 && os.Getenv("COPY_RETAIN_ONLY") == ""; s++ {
 			donors = append(donors, copyTestDB(t, filepath.Join(root, fmt.Sprintf("donor-%02d", s))))
 		}
 		source := copyFixtureGrouped(t, dir, parts, blocks, 1024, donors, 4)
 		exportStart := time.Now()
 		var exportBytes uint64
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 10 && os.Getenv("COPY_NO_EXPORT") == ""; i++ {
 			m := source[i].Manifest
 			snap := donors[int(m.VShard)%len(donors)].NewSnapshot()
 			p, e := copyExport(snap, dir, m, partsformat.PartID{255, byte(i)})
@@ -86,6 +95,34 @@ func TestCopyCampaign(t *testing.T) {
 		return
 	}
 	b, e := os.ReadFile(inventory)
+	if e != nil && role == "receive" && os.Getenv("COPY_ADDRESS") != "" {
+		c, err := net.DialTimeout("tcp", os.Getenv("COPY_ADDRESS"), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+		var frame [8]byte
+		binary.BigEndian.PutUint32(frame[:4], ^uint32(0))
+		binary.BigEndian.PutUint32(frame[4:], 2)
+		_, err = c.Write(frame[:])
+		if err == nil {
+			_, err = io.ReadFull(c, frame[:])
+		}
+		if err == nil {
+			n := binary.BigEndian.Uint64(frame[:])
+			if n > 64<<20 {
+				err = fmt.Errorf("inventory too large: %d", n)
+			} else {
+				b = make([]byte, int(n))
+				_, err = io.ReadFull(c, b)
+			}
+		}
+		_ = c.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e = os.WriteFile(inventory, b, 0600)
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -94,7 +131,14 @@ func TestCopyCampaign(t *testing.T) {
 		t.Fatal(e)
 	}
 	if role == "serve" {
-		l, e := net.Listen("tcp", "127.0.0.1:0")
+		if os.Getenv("COPY_COLD") != "" {
+			copyEnableCold(t)
+		}
+		bind := os.Getenv("COPY_BIND")
+		if bind == "" {
+			bind = "127.0.0.1:0"
+		}
+		l, e := net.Listen("tcp", bind)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -128,8 +172,8 @@ func TestCopyCampaign(t *testing.T) {
 		t.Fatal("invalid COPY_STREAMS")
 	}
 	damage, e := strconv.Atoi(os.Getenv("COPY_HOLES"))
-	if e != nil || damage < 0 || damage > 1000 {
-		t.Fatal("COPY_HOLES is partition count 0..1000")
+	if e != nil || damage < 0 || damage > len(source) {
+		t.Fatal("COPY_HOLES must not exceed inventory partitions")
 	}
 	dir := filepath.Join(root, "target")
 	if e = os.Mkdir(dir, 0700); e != nil {
@@ -168,6 +212,10 @@ func TestCopyCampaign(t *testing.T) {
 		}
 	}
 	address, e := os.ReadFile(filepath.Join(root, "address"))
+	if override := os.Getenv("COPY_ADDRESS"); override != "" {
+		address = []byte(override)
+		e = nil
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -195,7 +243,28 @@ func TestCopyCampaign(t *testing.T) {
 	var before, after syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &before)
 	ioBefore := copyProcessIO()
-	stats, e := copyTransfer(context.Background(), string(address), source, plan, streams, dbs, dir)
+	seconds, _ := strconv.Atoi(os.Getenv("COPY_SECONDS"))
+	ctx := context.Background()
+	if seconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
+		defer cancel()
+	}
+	start := time.Now()
+	var stats copyStats
+	for {
+		one, transferErr := copyTransfer(ctx, string(address), source, plan, streams, dbs, dir)
+		stats.Bytes += one.Bytes
+		stats.Partitions += one.Partitions
+		e = transferErr
+		if e != nil || seconds <= 0 || time.Since(start) >= time.Duration(seconds)*time.Second {
+			break
+		}
+	}
+	stats.Seconds = time.Since(start).Seconds()
+	if seconds > 0 && ctx.Err() != nil {
+		e = nil
+	}
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &after)
 	ioAfter := copyProcessIO()
 	cpu := float64(after.Utime.Sec-before.Utime.Sec+after.Stime.Sec-before.Stime.Sec) + float64(after.Utime.Usec-before.Utime.Usec+after.Stime.Usec-before.Stime.Usec)/1e6

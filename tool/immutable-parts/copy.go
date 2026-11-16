@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +28,16 @@ type copyFile struct {
 	Part partsformat.Part
 	Path string // sender-local; never supplied by the receiver
 }
+
+// Optional owned-file cache advice for the offline Linux campaign only.
+// Installed before accepting connections; never mutates daemon/global caches.
+var copyBeforeFileRead func(*os.File) error
+
 type copyPartition struct {
 	Manifest partsformat.Manifest
 	Files    []copyFile
+	Blocks   *copyBlockManifest `json:",omitempty"` // persisted once at seal
+	Additive bool               `json:",omitempty"` // hole repair preserves target-only keys
 }
 
 // copyPlan compares persisted partition inventories, never names or points.
@@ -177,6 +185,25 @@ func copyServeConn(c net.Conn, source []copyPartition) error {
 			return e
 		}
 		pi, fi := binary.BigEndian.Uint32(req[:4]), binary.BigEndian.Uint32(req[4:])
+		if pi == ^uint32(0) && fi == 2 {
+			// Trusted offline discovery for the same frozen inventory. Paths are
+			// sender-local descriptors, never opened or chosen by the receiver.
+			b, err := json.Marshal(source)
+			if err != nil {
+				return err
+			}
+			if len(b) > 64<<20 {
+				return errors.New("copy inventory too large")
+			}
+			binary.BigEndian.PutUint64(req[:], uint64(len(b)))
+			if _, err = c.Write(req[:]); err != nil {
+				return err
+			}
+			if _, err = c.Write(b); err != nil {
+				return err
+			}
+			continue
+		}
 		if pi == ^uint32(0) && fi == 0 {
 			if e = copyServeCompare(c, source); e != nil {
 				return e
@@ -190,6 +217,12 @@ func copyServeConn(c net.Conn, source []copyPartition) error {
 		f, e := os.Open(fdesc.Path)
 		if e != nil {
 			return e
+		}
+		if copyBeforeFileRead != nil {
+			if e = copyBeforeFileRead(f); e != nil {
+				_ = f.Close()
+				return e
+			}
 		}
 		st, e := f.Stat()
 		if e != nil || uint64(st.Size()) != fdesc.Part.Bytes {
@@ -402,6 +435,12 @@ func copyReceivePartition(ctx context.Context, c net.Conn, source []copyPartitio
 	}
 	if e = ctx.Err(); e != nil {
 		return total, e
+	}
+	if p.Additive {
+		if len(paths) == 0 {
+			return total, nil
+		}
+		return total, db.Ingest(paths)
 	}
 	// Pebble's empty IngestAndExcise is a no-op. A blind, synced range
 	// tombstone is required when the authoritative partition is empty.

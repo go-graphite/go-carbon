@@ -242,7 +242,7 @@ func copyRenderRoundtrip(t *testing.T, name string, records []pr.Record) pr.Sour
 	if e != nil {
 		t.Fatal(e)
 	}
-	w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{TableFormat: sstable.TableFormatPebblev4})
+	w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{TableFormat: sstable.TableFormatPebblev4, BlockSize: 1})
 	for _, r := range rows {
 		if e = w.Set(r.k, r.v); e != nil {
 			t.Fatal(e)
@@ -256,6 +256,16 @@ func copyRenderRoundtrip(t *testing.T, name string, records []pr.Record) pr.Sour
 		t.Fatal(e)
 	}
 	source := []copyPartition{{Manifest: partsformat.Manifest{VShard: vs, Partition: 0, Parts: []partsformat.Part{fd.Part}}, Files: []copyFile{fd}}}
+	source[0] = copySealedFixture(t, source[0])
+	selected := make([]int, len(source[0].Blocks.Blocks))
+	for i := range selected {
+		selected[i] = i
+	}
+	patched, _, e := copyAssembleBlocks(source[0], selected, root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	source[0] = patched
 	addr, stop := copyTestServer(t, source)
 	defer stop()
 	if _, e = copyTransfer(context.Background(), addr, source, []int{0}, 1, []*pebble.DB{db}, root); e != nil {

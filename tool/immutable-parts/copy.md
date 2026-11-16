@@ -46,6 +46,49 @@ explicit compatibility path: one bounded snapshot iteration writes a new SST.
 That export cost must be reported separately from zero-rewrite transfer rates.
 This does not claim existing numeric-ID databases are portable.
 
+## Logical summaries and additive block repair
+
+`copySealBlocks` persists a versioned `copyBlockManifest` alongside the copy
+partition. Its canonical SHA-256 covers the partition, policy and sorted opaque
+key/value record multiset. It removes only physical PartID from record keys;
+archive, block start, ordinal, value length and every value byte remain covered.
+Different SST counts and PartIDs compare equal when their encoded records agree.
+PartID must carry identity only: precedence/incarnation/tier must be in the
+stable record envelope before production use. Different encoded records that
+happen to render equally conservatively mismatch.
+
+`copyPlanBlocks` compares persisted block key sets when summaries differ.
+`copyRepairPartition` copies only donor blocks absent on the target, verifies
+their physical hashes and builds an SST containing the original physical data
+blocks byte for byte, including compression and checksum trailers. Only index,
+properties and footer are regenerated. `Additive` partitions use ordinary Pebble
+ingest, preserving target-only keys. The old authoritative replacement API
+remains separate and requires fencing.
+
+Shared canonical keys with different bytes are counted as conflicts and withheld.
+A nonzero count blocks READY; these blocks need the normal precedence-aware
+merge using a stable source/incarnation/order envelope. No other value needs
+decoding. Wire bytes equal missing physical blocks plus new SST metadata;
+sample decode count is zero. Physical SHA-256 still protects transfer integrity
+independently of the logical digest.
+
+The raw-block assembler accepts trusted, seal-generated Pebblev4 manifests,
+CRC32c trailers, sequence-zero SETs, inline values and one encoded v2 value per
+physical data block. Seal inspection rejects multi-record blocks, value
+indirection, merges and range mutations; it never silently takes the slow
+export path. Data blocks may be compressed. Manifest authentication, persistent
+publication and core-writer integration remain prerequisites. The offline copy
+inventory is supplied out of band; the existing TCP summary operation remains
+the earlier physical-inventory protocol.
+
+Conversion should emit an SST per placement group/vshard spanning many time
+partitions, with a partition-to-table/key-range index. Whole ownership ranges
+can then ship whole SSTs. Partition hole repair additionally needs the seal-time
+block offset/key-set/hash index described here. The prototype seal inspector
+currently expects partition-bounded input; a multi-partition writer must publish
+partition manifests during its single seal pass. Compaction must retain the
+logical files and their block manifests independently of physical Pebble SSTs.
+
 ## Run
 
 Normal correctness checks include full byte equality after transfer and repair,
@@ -80,6 +123,15 @@ benchmark deletes each target after close; source cleanup belongs to its caller.
 selects a namespace from the returned plan; preparation uses four placement groups.
 It is a trusted offline protocol; authentication, admission, resumable sessions,
 manifest persistence and daemon lifecycle integration remain future work.
+
+For a cross-host run, `COPY_BIND` selects the sender interface and port and
+`COPY_ADDRESS` overrides the receiver's source address. `COPY_PARTITIONS` sets
+fixture size, `COPY_RETAIN_ONLY=1 COPY_NO_EXPORT=1` prepares retained SSTs without
+donor DB/export work, and `COPY_SECONDS=120` repeats complete transfer rounds
+until its deadline. Counters report completed files, excluding any incomplete
+last file. On Linux, `COPY_COLD=1` advises DONTNEED on each requested owned file
+before reading; verify physical reads with sender `/proc/PID/io`. This evicts
+only fixture pages, and is distinct from a fixture larger than the page cache.
 
 Namespace moves use the same transport: dual delivery during an externally
 coordinated route switch, one placement-group range transfer, partition digest
