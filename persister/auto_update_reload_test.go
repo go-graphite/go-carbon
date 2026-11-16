@@ -381,7 +381,7 @@ func TestAutoUpdateCacheReloadThroughRestartEnd(t *testing.T) {
 		t.Run(strconv.Itoa(initial), func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				const scale = 4
+				const scale = 2
 				const metrics = 29700 / scale
 				const delay = 1800 * time.Second
 				core := cache.New()
