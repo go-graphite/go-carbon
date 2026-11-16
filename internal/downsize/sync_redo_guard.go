@@ -333,6 +333,11 @@ func (c *syncCommand) prepareStateIntent() error {
 		event("sync_fresh_start", map[string]any{"level": "warn", "reason": c.freshReason, "existing_state": parent, "state": next, "prior_state_preserved": true})
 		return nil
 	}
+	if selected, err := c.selectReadyScope(); err != nil {
+		return err
+	} else if selected {
+		return nil
+	}
 	if !c.resuming {
 		return errors.New("state already contains work; use --resume, or --allow-fresh-start=REASON to create a separate run preserving prior state")
 	}
@@ -343,7 +348,7 @@ func (c *syncCommand) prepareStateIntent() error {
 	// A config-only directory can be the first startup interrupted before work.
 	// Any other artifact means the missing journal must fail closed.
 	for _, e := range entries {
-		if e.Name() != "config.json" && !strings.HasPrefix(e.Name(), "config-") && !strings.HasSuffix(e.Name(), ".lock") {
+		if e.Name() != "config.json" && e.Name() != "scope-parent.json" && !strings.HasPrefix(e.Name(), "config-") && !strings.HasSuffix(e.Name(), ".lock") {
 			return fmt.Errorf("lost sync journal in existing state %s; refusing silent fresh start (artifact %s)", c.sync.state, e.Name())
 		}
 	}

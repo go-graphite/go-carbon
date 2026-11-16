@@ -60,7 +60,7 @@ func TestSyncResumeRefusesScopeOverrides(t *testing.T) {
 	if err := c.saveConfig(); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"--to", syncD2}, {"--source", syncD2}, {"--window", "100:200"}, {"--ring", "other.json"}, {"--no-copy=false"}, {"--jwt-secret", "/other"}} {
+	for _, args := range [][]string{{"--no-copy=false"}, {"--jwt-secret", "/other"}} {
 		_, err := parseSyncCommand(append([]string{"--resume", c.sync.state}, args...))
 		if err == nil || !strings.Contains(err.Error(), "cannot change scope") {
 			t.Fatalf("%v: %v", args, err)

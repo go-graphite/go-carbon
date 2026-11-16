@@ -2,7 +2,9 @@ package downsize
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -207,6 +210,159 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 				}
 			}
 			t.Logf("old->new executable swap: phase=%s done=%d->%d redo_names=%v", phase, prior.Done, saved.Done, final.RedoNames)
+		})
+	}
+}
+
+// The pre-change executable publishes the terminal verdict itself. The only
+// seeded exception is a durable exclusion predating that invocation; no state
+// is edited between executables. Network counters independently reject replay.
+func TestSyncReadyNoopExecutableSwap(t *testing.T) {
+	old, next := os.Getenv("STORECTL_SWAP_OLD"), os.Getenv("STORECTL_SWAP_NEW")
+	if old == "" || next == "" {
+		t.Skip("set STORECTL_SWAP_OLD and STORECTL_SWAP_NEW")
+	}
+	for _, except := range []bool{false, true} {
+		t.Run(map[bool]string{false: "READY", true: "READY_EXCEPT"}[except], func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "state")
+			source, target := nativeControllerStore(t), nativeControllerStore(t)
+			for i := range 100 {
+				name := fmt.Sprintf("terminal.%03d", i)
+				addPoints(t, source, name, 2)
+				addPoints(t, target, name, 2)
+			}
+			var dataCalls, proofCalls atomic.Int64
+			watch := func(h http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/transfer/digest" {
+						raw, err := io.ReadAll(r.Body)
+						if err != nil {
+							t.Error(err)
+							http.Error(w, "body", 500)
+							return
+						}
+						r.Body = io.NopCloser(bytes.NewReader(raw))
+						var req struct{ Mode string }
+						_ = json.Unmarshal(raw, &req)
+						if strings.HasPrefix(req.Mode, "proof-") {
+							proofCalls.Add(1)
+						} else {
+							dataCalls.Add(1)
+						}
+					} else if r.URL.Path == "/v1/transfer/fetch" || strings.HasPrefix(r.URL.Path, "/v1/native/") {
+						dataCalls.Add(1)
+					}
+					h.ServeHTTP(w, r)
+				})
+			}
+			donor := httptest.NewServer(watch(nativeControllerService(t, source)))
+			defer donor.Close()
+			survivor := httptest.NewServer(watch(nativeControllerService(t, target)))
+			defer survivor.Close()
+			carbon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch strings.TrimRight(r.URL.Path, "/") {
+				case "/metrics":
+					fmt.Fprintf(w, "process_start_time_seconds %d\n", testMetricNow-100)
+				case "/render":
+					dataCalls.Add(1)
+					if r.Method == http.MethodPost {
+						var req protov3.MultiFetchRequest
+						raw, _ := io.ReadAll(r.Body)
+						_ = req.UnmarshalVT(raw)
+						var out protov3.MultiFetchResponse
+						for _, m := range req.Metrics {
+							out.Metrics = append(out.Metrics, &protov3.FetchResponse{Name: m.Name, StartTime: testMetricNow - 20, StopTime: testMetricNow, StepTime: 10, Values: []float64{1, 2}})
+						}
+						raw, _ = out.MarshalVT()
+						_, _ = w.Write(raw)
+						return
+					}
+					_ = json.NewEncoder(w).Encode([]any{map[string]any{"target": r.URL.Query().Get("target"), "datapoints": [][2]float64{{1, float64(testMetricNow - 20)}, {2, float64(testMetricNow - 10)}}}})
+				default:
+					var req protov3.MultiGlobRequest
+					raw, _ := io.ReadAll(r.Body)
+					_ = req.UnmarshalVT(raw)
+					var out protov3.MultiMetricsInfoResponse
+					for _, n := range req.Metrics {
+						out.Metrics = append(out.Metrics, &protov3.MetricsInfoResponse{Name: n, ConsolidationFunc: "sum", Retentions: []*protov3.Retention{{SecondsPerPoint: 10, NumberOfPoints: 128}}})
+					}
+					raw, _ = out.MarshalVT()
+					_, _ = w.Write(raw)
+				}
+			}))
+			defer carbon.Close()
+			u, _ := url.Parse(carbon.URL)
+			args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--ready-scope=windows", "--gap-ledger-complete", "--carbonapi-url", carbon.URL, "--process-metrics-port", u.Port(), "--streams=1", "--verify-batch=50", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
+			if except {
+				c, err := parseSyncCommand(args)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = c.saveConfig(); err != nil {
+					t.Fatal(err)
+				}
+				id, _ := syncIdentity(c.sync)
+				j, err := openSyncJournal(filepath.Join(state, "sync.jsonl"), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				j.close()
+				issues, err := openSyncIssues(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = issues.record([]syncResidual{{syncHole: syncHole{Name: "excluded"}, Reason: "preexisting named exception"}}, "verify", false); err != nil {
+					t.Fatal(err)
+				}
+				if err = issues.checkpoint(); err != nil {
+					t.Fatal(err)
+				}
+				args = []string{"--resume", state}
+			}
+			run := func(binary string, args []string) ([]byte, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, binary, append([]string{"sync"}, args...)...)
+				cmd.Env = append(os.Environ(), "STORECTL_GRAPHITE_ADDR=127.0.0.1:0", "NO_PROXY=*", "no_proxy=*")
+				return cmd.CombinedOutput()
+			}
+			logs, err := run(old, args)
+			if except {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+					t.Fatalf("old READY_EXCEPT: %v\n%s", err, logs)
+				}
+			} else if err != nil {
+				t.Fatalf("old READY: %v\n%s", err, logs)
+			}
+			report, _ := os.ReadFile(filepath.Join(state, "ready.json"))
+			prior := redoProgress(t, state)
+			calls := dataCalls.Load()
+			proofs := proofCalls.Load()
+			logs, err = run(next, []string{"--resume", state})
+			if err != nil {
+				t.Fatalf("replacement: %v\n%s", err, logs)
+			}
+			saved, _ := os.ReadFile(filepath.Join(state, "ready.json"))
+			if !bytes.Equal(report, saved) {
+				t.Fatalf("verdict recomputed: %s", logs)
+			}
+			if dataCalls.Load() != calls {
+				t.Fatalf("backend data replayed: %d -> %d\n%s", calls, dataCalls.Load(), logs)
+			}
+			if proofCalls.Load() <= proofs {
+				t.Fatal("replacement did not validate metadata scope")
+			}
+			final := redoProgress(t, state)
+			if final.Phase != "ready" || final.Done != prior.Done || final.PhaseRegressions != 0 {
+				t.Fatalf("progress changed: %+v -> %+v", prior, final)
+			}
+			for _, n := range final.RedoNames {
+				if n != 0 {
+					t.Fatal(final.RedoNames)
+				}
+			}
+			t.Logf("old->new %s: done=%d backend data calls=0 redo_names=0 phase_regressions=0", readReadyReport(t, state).Verdict, final.Done)
 		})
 	}
 }

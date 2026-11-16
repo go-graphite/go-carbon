@@ -105,7 +105,15 @@ func (s *syncer) openFrontier(ctx context.Context) error {
 	}
 	data, _ = json.Marshal(f.scope)
 	f.key = string(data)
-	f.file, err = os.OpenFile(filepath.Join(s.o.state, "verification-frontier.bin"), os.O_CREATE|os.O_RDWR, 0600)
+	frontierPath := filepath.Join(s.o.state, "verification-frontier.bin")
+	if s.o.readyFrontier {
+		if _, e := os.Stat(filepath.Join(s.o.state, "ready-frontier.bin")); e == nil {
+			frontierPath = filepath.Join(s.o.state, "ready-frontier.bin")
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+	}
+	f.file, err = os.OpenFile(frontierPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return err
 	}
