@@ -251,6 +251,7 @@ type progressMetrics struct {
 	redoNames                             map[string]int64
 	redoByPath                            map[string]map[string]int64
 	repairFailedNames                     float64
+	legacyRevalidated                     map[string]int64
 	freshDone                             float64
 	freshDoneAvailable                    float64
 	storeRetries, storeWaiting            int64
@@ -313,6 +314,10 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	}
 
 	p.repairFailedNames = max(p.repairFailedNames, float64(snapshot.RepairFailedNames))
+	if p.legacyRevalidated == nil {
+		p.legacyRevalidated = map[string]int64{}
+	}
+	p.legacyRevalidated[path] = snapshot.LegacyRevalidated
 	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
 	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
 	p.snapshot = snapshot
@@ -351,6 +356,10 @@ func (p *progressMetrics) send() {
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
 	repairFailedNames := p.repairFailedNames
+	var legacyRevalidated int64
+	for _, n := range p.legacyRevalidated {
+		legacyRevalidated += n
+	}
 	redoNames := cloneRedoCounts(p.redoNames)
 	redoEnabled := p.redoEnabled || p.redoNames != nil
 	quarantined, policySkipped := p.quarantined, p.policySkipped
@@ -369,6 +378,7 @@ func (p *progressMetrics) send() {
 	// A timestamp heartbeat lets dashboards exclude stopped/abandoned runs.
 	now := at.Unix()
 	var b strings.Builder
+	fmt.Fprintf(&b, "%s.legacy_revalidated_names %d %d\n", p.prefix, legacyRevalidated, now)
 	if p.lastSentPhase != "" && p.lastSentPhase != phase {
 		fmt.Fprintf(&b, "%s.%s.active 0 %d\n%s.%s.names_per_second 0 %d\n", p.prefix, p.lastSentPhase, now, p.prefix, p.lastSentPhase, now)
 	}
