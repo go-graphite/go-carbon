@@ -100,11 +100,11 @@ func TestTransferDurableAcrossUnsyncedForegroundCrash(t *testing.T) {
 	}
 }
 
-// A crash after SST ingestion or partial catalog publication must leave only
+// A crash after private WAL staging or partial catalog publication must leave only
 // complete visible names. Replaying the transfer uses fresh reserved IDs and
 // must retain the same points and durable proofs as an uninterrupted import.
-func TestTransferSSTInterruptedImportResumes(t *testing.T) {
-	for _, phase := range []string{"ingested", "published-group"} {
+func TestTransferInterruptedImportResumes(t *testing.T) {
+	for _, phase := range []string{"staged-batch", "published-group"} {
 		t.Run(phase, func(t *testing.T) {
 			ctx := context.Background()
 			source, now := openTestStore(t, "/source", Options{fs: vfs.NewMem(), ExactBlocks: true})
@@ -127,9 +127,9 @@ func TestTransferSSTInterruptedImportResumes(t *testing.T) {
 			interrupted, cancel := context.WithCancel(ctx)
 			defer cancel()
 			calls := 0
-			if phase == "ingested" {
+			if phase == "staged-batch" {
 				target.nativeTestHook = func(step string) error {
-					if step == "native-ingest-batch" {
+					if step == "transfer-stage-batch" {
 						calls++
 						cancel()
 						return context.Canceled

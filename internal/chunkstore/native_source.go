@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -22,6 +23,7 @@ type NativeSource struct {
 	closed       bool
 	pending      map[string]struct{}
 	checkCurrent bool
+	windowOnly   bool
 	// SnapshotStartedAt precedes the MVCC pin. Backfill must also cover queued
 	// and late event timestamps; this is a commit boundary, not an event watermark.
 	SnapshotStartedAt time.Time
@@ -40,7 +42,7 @@ func (s *Store) checkNativeReady() error {
 }
 
 func (s *Store) PinNativeSource() (*NativeSource, error) {
-	return s.pinNativeSource("")
+	return s.pinNativeSource("", false)
 }
 
 // PinNativeMergeSource exports committed history even for queued or revised
@@ -49,15 +51,23 @@ func (s *Store) PinNativeMergeSource(session string) (*NativeSource, error) {
 	if session == "" || len(session) > 128 || strings.ContainsAny(session, "\r\n") {
 		return nil, ErrFormat
 	}
-	return s.pinNativeSource(session)
+	return s.pinNativeSource(session, false)
 }
 
-func (s *Store) pinNativeSource(session string) (*NativeSource, error) {
+// PinNativeWindowSource pins committed history for non-destructive repair of
+// closed windows. Queued writes and later revisions cannot invalidate the pinned
+// history: imports preserve target values and callers must verify every donor
+// again before declaring the window complete. Full-history export is forbidden.
+func (s *Store) PinNativeWindowSource() (*NativeSource, error) {
+	return s.pinNativeSource("", true)
+}
+
+func (s *Store) pinNativeSource(session string, windowOnly bool) (*NativeSource, error) {
 	if err := errors.Join(s.checkNativeReady(), s.fileOwnershipError(), s.nativeDiskCheck()); err != nil {
 		return nil, err
 	}
 	started := time.Now().UTC()
-	source := &NativeSource{store: s, view: s.db.NewSnapshot(), checkCurrent: session == "" && (s.nativePendingSnapshot != nil || s.nativePendingCheck != nil), MergeSession: session, SnapshotStartedAt: started, SnapshotPinnedAt: time.Now().UTC()}
+	source := &NativeSource{store: s, view: s.db.NewSnapshot(), windowOnly: windowOnly, checkCurrent: !windowOnly && session == "" && (s.nativePendingSnapshot != nil || s.nativePendingCheck != nil), MergeSession: session, SnapshotStartedAt: started, SnapshotPinnedAt: time.Now().UTC()}
 	if source.checkCurrent && s.nativePendingCheck == nil {
 		pending, err := s.nativePendingSnapshot()
 		if err != nil {
@@ -100,6 +110,9 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 func (s *NativeSource) WriteWindow(ctx context.Context, names []string, out io.Writer, window *NativeWindow) error {
 	if err := window.Validate(); err != nil {
 		return err
+	}
+	if s.windowOnly && (window == nil || window.Until > s.SnapshotStartedAt.Unix()) {
+		return fmt.Errorf("committed window source requires a closed historical window: %w", ErrFormat)
 	}
 	ctx, cancel := s.store.NativeTransferContext(ctx)
 	defer cancel()

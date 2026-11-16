@@ -2,6 +2,7 @@ package downsize
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -143,4 +144,80 @@ func syncCopyInput(journal string, names []string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// reserveMissingWaves indexes exact historical wave membership in the sorted
+// candidate list. A bit per candidate avoids rebuilding a string map containing
+// every name in old waves, including names no longer eligible in this source.
+// Only scheduling changes: original wave inputs and child identities stay intact.
+func reserveMissingWaves(names []string, waves []syncRow) []uint64 {
+	reserved := make([]uint64, (len(names)+63)/64)
+	for _, wave := range waves {
+		cursor := 0
+		for j, name := range wave.Selected {
+			if j == 0 || name < wave.Selected[j-1] {
+				// Current waves are sorted; retain exact membership for older inputs
+				// even if they were stored in a different order.
+				cursor = sort.SearchStrings(names, name)
+			} else {
+				for cursor < len(names) && names[cursor] < name {
+					cursor++
+				}
+			}
+			if cursor < len(names) && names[cursor] == name {
+				reserved[cursor/64] |= uint64(1) << uint(cursor%64)
+			}
+		}
+	}
+	return reserved
+}
+
+// resumeAbsentCopy avoids reopening the entire transfer pipeline for sparse
+// residuals that have vanished since a legacy wave's durable precheck. The
+// original journal identity is authenticated before crediting any done range.
+// Absent names remain failures, so this never establishes parity or READY.
+func (b *syncLiveBackend) resumeAbsentCopy(ctx context.Context, source, target string, names []string, namesPath, path string, progress func(int64, bool)) (syncCopyResult, bool, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return syncCopyResult{}, false, nil
+	} else if err != nil {
+		return syncCopyResult{}, false, err
+	}
+	options := b.copyOptions(source, target, namesPath, path, len(names))
+	identity, err := copyIdentity(options)
+	if err != nil {
+		return syncCopyResult{}, false, err
+	}
+	j, err := openCopyJournal(path, identity)
+	if err != nil {
+		return syncCopyResult{}, false, err
+	}
+	defer j.close()
+	cover := j.cover(source)
+	var unresolved []string
+	for _, name := range names {
+		if !cover(name) {
+			unresolved = append(unresolved, name)
+		}
+	}
+	if len(unresolved) > 0 {
+		// Bound extra evidence work. Dense/new waves use the ordinary copy path.
+		if len(unresolved) > 1024 || len(unresolved) > len(names)/2 {
+			return syncCopyResult{}, false, nil
+		}
+		evidence, err := b.ExpirationEvidence(ctx, source, unresolved, true)
+		if err != nil {
+			return syncCopyResult{}, false, err
+		}
+		for _, name := range unresolved {
+			e, ok := evidence[name]
+			if !ok || e.Pending || e.Latest != 0 || e.Policy == "" {
+				return syncCopyResult{}, false, nil
+			}
+		}
+		event("sync_copy_source_absent", map[string]any{"source": source, "names": len(unresolved), "journal": path, "reason": "fresh source evidence; original failures retained"})
+	}
+	if progress != nil {
+		progress(j.completedNames, true)
+	}
+	return syncCopyResult{Copied: len(names) - len(unresolved), Failed: unresolved}, true, nil
 }

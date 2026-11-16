@@ -246,6 +246,9 @@ func (s *Store) prepareExpirationDeletes(ctx context.Context, batch *pebble.Batc
 // even when they read unrelated metrics. Expiration visits the existing keys
 // instead, then revalidates under the mutation stripes before committing.
 func (s *Store) appendExpirationDelete(ctx context.Context, b *pebble.Batch, reader *transferReader, m Metadata) error {
+	if err := b.Delete(mutationKey(m), nil); err != nil {
+		return err
+	}
 	if err := b.Delete(expirationReceiptKey(m.Name), nil); err != nil {
 		return err
 	}

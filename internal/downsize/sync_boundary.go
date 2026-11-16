@@ -63,29 +63,46 @@ func (b *syncLiveBackend) repairWindowBoundary(ctx context.Context, c *nativeCon
 		return false, err
 	}
 	window := chunkstore.NativeWindow{From: skip.Timestamp, Until: now / step * step}
-	body, err := json.Marshal(struct {
-		Session string
-		Names   []string
-		Window  *chunkstore.NativeWindow
-	}{id, names, &window})
-	if err != nil {
-		return false, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, source+"/v1/native/export", bytes.NewReader(body))
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token := os.Getenv(b.o.tokenEnv); token != "" {
-		req.Header.Set("X-Buckyd-Authorization", token)
-	}
-	response, err := b.client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("boundary export: HTTP %d", response.StatusCode)
+	// Only retry this read after a vanished donor pin. Use a private fresh
+	// controller: the original pin may still have concurrent borrowers, and
+	// neither its range journal nor any completed per-name proof may be reset.
+	var response *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		body, err := json.Marshal(struct {
+			Session string
+			Names   []string
+			Window  *chunkstore.NativeWindow
+		}{id, names, &window})
+		if err != nil {
+			return false, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, source+"/v1/native/export", bytes.NewReader(body))
+		if err != nil {
+			return false, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if token := os.Getenv(b.o.tokenEnv); token != "" {
+			req.Header.Set("X-Buckyd-Authorization", token)
+		}
+		response, err = b.client.Do(req)
+		if err != nil {
+			return false, err
+		}
+		if response.StatusCode == http.StatusGone && attempt == 0 {
+			response.Body.Close()
+			next := &nativeController{mover: c.mover, committedWindow: c.committedWindow, sessions: map[string]*nativeRemoteSession{}}
+			defer next.release()
+			id, err = next.session(ctx, source)
+			if err != nil {
+				return false, err
+			}
+			continue
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return false, fmt.Errorf("boundary export: HTTP %d", response.StatusCode)
+		}
+		break
 	}
 	stream, err := chunkstore.NewTransferStream(response.Body)
 	if err != nil {

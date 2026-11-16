@@ -8,6 +8,7 @@ import (
 )
 
 func TestNativeRouteDefaultHasNoSourceBarrier(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	started := make(chan string, 2)
@@ -42,6 +43,7 @@ func TestNativeRouteDefaultHasNoSourceBarrier(t *testing.T) {
 }
 
 func TestNativeRouteSourceBarrier(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	routes := []route{{Path: "a0", sourceURL: "a"}, {Path: "a1", sourceURL: "a"}, {Path: "b0", sourceURL: "b"}, {Path: "a2", sourceURL: "a"}}
@@ -102,6 +104,7 @@ func TestNativeRouteSourceBarrier(t *testing.T) {
 }
 
 func TestNativeRouteFailureDrainsSourceBarrier(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	want := errors.New("injected range failure")

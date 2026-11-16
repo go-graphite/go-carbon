@@ -36,6 +36,7 @@ func (f *quarantineFixture) Copy(ctx context.Context, source, target string, nam
 	return r, e
 }
 func TestSyncQuarantineThousandsAndResume(t *testing.T) {
+	t.Parallel()
 	base, o, r := newReadyFixture(t, 0)
 	o.from = []string{syncD1}
 	o.batch = 200
@@ -98,6 +99,7 @@ func TestSyncQuarantineThousandsAndResume(t *testing.T) {
 }
 
 func TestSyncPolicySkipAloneAllowsReady(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 110)
 	oversized := strings.Repeat("x", 4097)
 	f.store(syncD1).archives[oversized] = []syncArchive{{3600, 240}}
@@ -115,6 +117,7 @@ func TestSyncPolicySkipAloneAllowsReady(t *testing.T) {
 }
 
 func TestSyncIssueLedgerRecovery(t *testing.T) {
+	t.Parallel()
 	state := t.TempDir()
 	q, err := openSyncIssues(state)
 	if err != nil {
@@ -147,7 +150,8 @@ func TestSyncIssueLedgerRecovery(t *testing.T) {
 	}
 }
 
-func TestSyncWindowSelectionStallQuarantinesAndResumes(t *testing.T) {
+func TestSyncWindowSelectionStallIsTerminalOnResume(t *testing.T) {
+	t.Parallel()
 	state := t.TempDir()
 	q, err := openSyncIssues(state)
 	if err != nil {
@@ -165,21 +169,20 @@ func TestSyncWindowSelectionStallQuarantinesAndResumes(t *testing.T) {
 	f.put(syncD1, "pending", syncTestSchema)
 	now := time.Unix(syncTestNow, 0)
 	s := &syncer{o: syncOptions{issues: q, to: syncT, from: []string{syncD1}, state: state, windows: syncRanges{{From: syncTestNow - 600, Until: syncTestNow - 120}}, includeShort: true, now: func() time.Time { return now }}, b: stalledSelectionBackend{f, &now}, j: j, forbid: map[string]bool{}}
-	if err = s.waitWindowSelections(context.Background()); err != nil {
+	if err = s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) || errors.Is(err, ErrSyncQuarantined) {
 		t.Fatal(err)
 	}
-	if a, b := q.counts(); a != 1 || b != 0 || !q.excluded("pending") || q.excluded("healthy") {
+	if a, b := q.counts(); a != 0 || b != 0 || q.excluded("pending") || q.excluded("healthy") {
 		t.Fatal(a, b)
 	}
-	// Resume retains the unresolved selection row as evidence while excluding
-	// its name from fresh selection attempts.
+	// Resume retains the terminal frontier without any new backend attempt.
 	reopened, err := openSyncIssues(state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.o.issues = reopened
 	before := now
-	if err = s.waitWindowSelections(context.Background()); err != nil {
+	if err = s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) || errors.Is(err, ErrSyncQuarantined) {
 		t.Fatal(err)
 	}
 	if !now.Equal(before) {
@@ -191,6 +194,7 @@ func TestSyncWindowSelectionStallQuarantinesAndResumes(t *testing.T) {
 }
 
 func TestSyncReadOnlyResidualDoesNotQuarantine(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	if err := runSync(context.Background(), o, f); !errors.Is(err, ErrSyncResidual) || errors.Is(err, ErrSyncQuarantined) {
 		t.Fatal(err)

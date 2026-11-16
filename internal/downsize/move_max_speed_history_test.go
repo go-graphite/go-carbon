@@ -8,6 +8,7 @@ import (
 )
 
 func TestMaxSpeedDecisionHistorySurvivesCompactionAndResume(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "same-journal")
 	j, err := openJournal(path, "same-approved-plan")
 	if err != nil {

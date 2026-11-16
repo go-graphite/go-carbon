@@ -14,6 +14,7 @@ import (
 )
 
 func TestWindowRetryFlushesOnlySavedPendingNames(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	addPoints(t, source, "pending", 1)
@@ -40,7 +41,7 @@ func TestWindowRetryFlushesOnlySavedPendingNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer j.close()
-	row := syncRow{Kind: "window-selected", Round: 1, Source: donor.URL, Skipped: []syncSkip{{"pending", syncWindowSelectionReason}}, SelectionComplete: true}
+	row := syncRow{Kind: "window-selected", Round: 1, Source: donor.URL, Skipped: []syncSkip{{"pending", syncWindowSelectionReason}, {"clean", syncWindowSelectionReason}}, SelectionComplete: true}
 	if err = j.append(row); err != nil {
 		t.Fatal(err)
 	}

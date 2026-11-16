@@ -83,16 +83,26 @@ func (p *Whisper) SetIncrementalMigration(db IncrementalMetricStore, scratch str
 		return nil
 	}
 	scratch = filepath.Join(scratch, ".incremental-capture")
-	// OOO snapshots create and remove a private directory per conversion.
-	// Give them independent parents instead of serializing on one directory.
-	// Store startup recursively removes this disposable tree.
-	for i := range incrementalCaptureShards {
-		if err := os.MkdirAll(filepath.Join(scratch, fmt.Sprintf("%02x", i)), 0750); err != nil {
-			return err
-		}
+	// Validate the private root at startup. Prepare each stable shard parent
+	// only when a conversion first needs it, rather than spending readiness on
+	// 256 mkdirs even for an empty or already-owned source tree.
+	if err := os.MkdirAll(scratch, 0750); err != nil {
+		return err
 	}
+	p.incrementalCapture = [incrementalCaptureShards]sync.Once{}
+	p.incrementalCaptureErrors = [incrementalCaptureShards]error{}
 	p.incrementalStore, p.incrementalScratch = db, scratch
 	return nil
+}
+
+// A shard is never removed while the persister runs. Concurrent conversions
+// share its initialization, then create private snapshots below that parent.
+func (p *Whisper) incrementalCaptureDir(shard uint64) (string, error) {
+	path := filepath.Join(p.incrementalScratch, fmt.Sprintf("%02x", shard))
+	p.incrementalCapture[shard].Do(func() {
+		p.incrementalCaptureErrors[shard] = os.MkdirAll(path, 0750)
+	})
+	return path, p.incrementalCaptureErrors[shard]
 }
 
 // Called under the ordinary per-metric writer lock, before popping cache data.
@@ -297,7 +307,10 @@ func (p *Whisper) convertFile(ctx context.Context, metric string, fault func(str
 		} else {
 			sourceActivity = info.ModTime()
 		}
-		scratch := filepath.Join(p.incrementalScratch, fmt.Sprintf("%02x", helper.HashString(metric)%incrementalCaptureShards))
+		scratch, err := p.incrementalCaptureDir(helper.HashString(metric) % incrementalCaptureShards)
+		if err != nil {
+			return result, err
+		}
 		ctx = whisperio.WithConversionSource(ctx)
 		snapshot, err := whisperio.ReadSnapshotIn(ctx, metric, path, scratch)
 		if err != nil {

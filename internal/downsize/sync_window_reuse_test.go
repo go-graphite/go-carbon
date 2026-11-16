@@ -7,6 +7,7 @@ import (
 )
 
 func TestSyncIdenticalWindowsReusePhysicalComparison(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "digest", true: "legacy"}[legacy], func(t *testing.T) {
 			f := newFakeSync()

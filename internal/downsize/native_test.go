@@ -2,10 +2,12 @@ package downsize
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,7 +19,7 @@ import (
 
 func nativeControllerStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open("/db", store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour}.WithFS(vfs.NewMem()))
+	s, err := store.Open("/db", store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(testMetricNow, 0) }}.WithFS(vfs.NewMem()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +40,7 @@ func nativeControllerService(t *testing.T, s *store.Store) http.Handler {
 	return service.Handler()
 }
 func TestNativeControllerSharedJournalAndReviewedFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target, reference := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	var names []string
@@ -177,6 +180,7 @@ func TestNativeControllerSharedJournalAndReviewedFallback(t *testing.T) {
 }
 
 func TestNativeControllerLostAckCannotReplayThroughMetricPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	names := []string{"native.lost.ack"}
@@ -247,6 +251,7 @@ func TestNativeControllerLostAckCannotReplayThroughMetricPath(t *testing.T) {
 }
 
 func TestNativeCompletedStreamDoesNotReadPlanRows(t *testing.T) {
+	t.Parallel()
 	deferred := []task{{Start: 0, End: 1, Native: &nativeRangeState{Receipt: store.NativeReceipt{Count: 1}, Done: []byte{0}}}}
 	if !nativeStreamCovered(deferred, 1, false) || nativeStreamCovered(deferred, 1, true) {
 		t.Fatal("phase-1 coverage hid phase-2 deferrals")
@@ -265,5 +270,34 @@ func TestNativeCompletedStreamDoesNotReadPlanRows(t *testing.T) {
 	}
 	if nativeStreamCovered([]task{{Start: 0, End: 10, Native: &nativeRangeState{Intent: true}}}, 10, false) {
 		t.Fatal("skipped unresolved native acknowledgement")
+	}
+}
+
+func TestNativeControllerCommittedWindowFailsClosedOnOldSource(t *testing.T) {
+	var pins, closed atomic.Int32
+	donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			closed.Add(1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		pins.Add(1)
+		var request struct{ CommittedWindow bool }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !request.CommittedWindow {
+			t.Error("missing committed window request", err)
+		}
+		// An old source that ignores the request field must not silently downgrade.
+		_ = json.NewEncoder(w).Encode(map[string]string{"ID": strings.Repeat("a", 32)})
+	}))
+	defer donor.Close()
+	c := &nativeController{mover: &mover{client: http.DefaultClient}, sessions: map[string]*nativeRemoteSession{}, committedWindow: true}
+	for range 2 {
+		if _, err := c.session(context.Background(), donor.URL); err == nil {
+			t.Fatal("old source accepted")
+		}
+	}
+	c.release()
+	if pins.Load() != 1 || closed.Load() != 1 {
+		t.Fatal("unsupported pin leaked or reused", pins.Load(), closed.Load())
 	}
 }

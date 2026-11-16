@@ -181,3 +181,30 @@ func TestFutureSlotReanchor(t *testing.T) {
 		t.Fatal("retained point lost")
 	}
 }
+
+func TestFutureSlotClassicAutomaticWrites(t *testing.T) {
+	ctx := context.Background()
+	now := int64(1700006400)
+	clock := func() time.Time { return time.Unix(now, 0) }
+	codec := &ContinuationCodec{}
+	kv := mapContinuationIO{}
+	m := store.Metadata{MetricConfig: store.MetricConfig{Name: "future.automatic", Retentions: []store.Retention{{Step: 1, Count: 60}}, AggregationMethod: store.Average}}
+	snap := store.Snapshot{Metadata: m, Archives: []store.Archive{{Retention: m.Retentions[0], Points: []store.Point{{Timestamp: now - 50, Value: 7}, {Timestamp: now - 40, Value: 8}}}}}
+	if err := codec.RestoreArchives(ctx, kv, snap, clock); err != nil {
+		t.Fatal(err)
+	}
+	// Ordinary UpdateMany accepts future points. The import/repair preference
+	// must not silently discard them when the classic ring is healthy.
+	if err := codec.Update(ctx, kv, m, []store.Point{{Timestamp: now + 10, Value: 9}}, -1, clock, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := codec.Fetch(ctx, kv, m, int(now-51), int(now-50), clock)
+	if err != nil || got == nil || len(got.Values) != 1 || !math.IsNaN(got.Values[0]) {
+		t.Fatalf("classic would hide the replaced epoch: %+v, %v", got, err)
+	}
+	now += 20
+	got, err = codec.Fetch(ctx, kv, m, int(now-11), int(now-10), clock)
+	if err != nil || got == nil || len(got.Values) != 1 || math.Float64bits(got.Values[0]) != math.Float64bits(9) {
+		t.Fatalf("accepted future point lost when its epoch became visible: %+v, %v", got, err)
+	}
+}

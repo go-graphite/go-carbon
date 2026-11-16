@@ -416,7 +416,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	}
 	s.transferApply.build.Add(uint64(time.Since(began)))
 	began = time.Now()
-	if err := s.stageTransferData(ctx, first, stage, len(records)); err != nil {
+	if err := s.stageTransferData(ctx, stage, len(records)); err != nil {
 		return nil, err
 	}
 	s.transferApply.ingest.Add(uint64(time.Since(began)))

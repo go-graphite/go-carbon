@@ -20,8 +20,12 @@ import (
 )
 
 func TestStoreCopyLiveIngestionReplayAndParity(t *testing.T) {
+	parallelTestMatrix(t)
 	for _, incremental := range []bool{false, true} {
 		t.Run(map[bool]string{false: "exact", true: "converted-v7"}[incremental], func(t *testing.T) {
+			if isolatedTestProcess(t) {
+				return
+			}
 			path, cfg := sharedAppConfig(t)
 			if incremental {
 				path, cfg = incrementalAppFixture(t)

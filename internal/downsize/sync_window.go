@@ -81,7 +81,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		defer b.beginWindowCopy()()
 	}
 	s.phase("copy")
-	s.prog.begin("window missing", s.sum.Missing)
+	if err := s.beginPhase("window missing", 0, s.sum.Missing); err != nil {
+		return err
+	}
 	if !s.legacyCopyReceipts {
 		s.prog.planVerification(int64(s.sum.Discovered))
 	}
@@ -199,8 +201,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.endPhase("copy", scanned)
-	return nil
+	return s.endPhase("copy", scanned)
 }
 
 // Replayed groups advance the durable cursor, but did no work in this run.
@@ -407,10 +408,13 @@ func (b *syncLiveBackend) splitWindowRange(ctx context.Context, source, target s
 	identity := sha256.Sum256([]byte(journalPath))
 	base := filepath.Join(filepath.Dir(journalPath), "window-split-"+hex.EncodeToString(identity[:16]))
 	left, err := b.CopyWindow(ctx, source, target, names[:mid], base+".left", windows)
-	if err != nil {
+	if err != nil && !restartCopyError(err) {
 		return left, err
 	}
-	right, err := b.CopyWindow(ctx, source, target, names[mid:], base+".right", windows)
+	right, rightErr := b.CopyWindow(ctx, source, target, names[mid:], base+".right", windows)
+	if rightErr != nil && (err == nil || !restartCopyError(rightErr)) {
+		err = rightErr
+	}
 	return syncCopyResult{Copied: left.Copied + right.Copied, Failed: append(left.Failed, right.Failed...), Forbidden: left.Forbidden || right.Forbidden}, err
 }
 
@@ -484,6 +488,7 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 	// exposes fully processed names without waiting for a whole donor/window.
 	err := runSyncWindowRanges(ctx, len(names), b.o.copyStreams, func(ctx context.Context, start, end int) error {
 		fresh := false
+		var retry error
 		for _, copy := range copies {
 			err := func() error {
 				w, id, m, j := copy.w, copy.id, copy.m, copy.m.journal
@@ -608,8 +613,15 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 				return finishCount()
 			}()
 			if err != nil {
+				if ctx.Err() == nil && restartCopyError(err) {
+					retry = err
+					continue // other windows retain independent receipts
+				}
 				return err
 			}
+		}
+		if retry != nil {
+			return retry
 		}
 		if progress != nil {
 			progress(fmt.Sprintf("%s:%d:%d", journalPath, start, end), end-start, !fresh)
@@ -882,7 +894,11 @@ const syncWindowPinAge = 15 * time.Minute
 
 func (b *syncLiveBackend) beginWindowCopy() func() {
 	b.windowMu.Lock()
+	// Selection can prove absence and must retain its pending/revision fence.
+	// Repair only fills target holes from committed history; it uses a distinct
+	// pin so queued current writes cannot starve a closed historical window.
 	b.windowSources = &nativeController{mover: b.m, sessions: map[string]*nativeRemoteSession{}}
+	b.windowCopySources = &nativeController{mover: b.m, committedWindow: true, sessions: map[string]*nativeRemoteSession{}}
 	b.windowPinned = time.Now()
 	b.windowMu.Unlock()
 	return func() {
@@ -890,11 +906,14 @@ func (b *syncLiveBackend) beginWindowCopy() func() {
 		defer b.windowMu.Unlock()
 		b.windowSources.release()
 		b.windowSources = nil
+		b.windowCopySources.release()
+		b.windowCopySources = nil
 	}
 }
 
 func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source string) (*nativeController, func(), error) {
-	c := &nativeController{mover: m, sessions: map[string]*nativeRemoteSession{}}
+	committed := m.nativeWindow != nil && m.nativeWindow.Until <= time.Now().Unix()
+	c := &nativeController{mover: m, committedWindow: committed, sessions: map[string]*nativeRemoteSession{}}
 	b.windowMu.RLock()
 	if b.windowSources == nil {
 		b.windowMu.RUnlock()
@@ -905,12 +924,16 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 		b.windowMu.Lock()
 		if b.windowSources != nil && (b.windowRestarted.Swap(false) || time.Since(b.windowPinned) >= syncWindowPinAge) {
 			b.windowSources.release()
+			b.windowCopySources.release()
 			b.windowPinned = time.Now()
 		}
 		b.windowMu.Unlock()
 		b.windowMu.RLock()
 	}
 	shared := b.windowSources
+	if committed {
+		shared = b.windowCopySources
+	}
 	if shared == nil {
 		b.windowMu.RUnlock()
 		return c, c.release, nil

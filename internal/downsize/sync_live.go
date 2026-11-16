@@ -61,6 +61,7 @@ type syncLiveBackend struct {
 	windowSelectionSlots sync.Map      // source -> *windowSelectionCapacity
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
+	windowCopySources    *nativeController // committed history is for repair, never absence proofs
 	windowPinned         time.Time
 	windowRestarted      atomic.Bool
 }
@@ -165,6 +166,9 @@ func (e *syncHTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.sta
 // Jittered backoff caps at 30s and wait logs are limited to once per minute.
 func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call func() error) error {
 	defer b.recordTime(what, store)()
+	if once, _ := ctx.Value(syncWindowAttemptKey{}).(bool); once {
+		return call()
+	}
 	delay := b.retryTick
 	if delay <= 0 {
 		delay = 2 * time.Second
@@ -295,6 +299,21 @@ func (b *syncLiveBackend) post(ctx context.Context, url string, body []byte) ([]
 	return data, nil
 }
 
+// Older info handlers report a request-body read timeout as HTTP 400 with
+// this format error. Our request is a locally marshaled v3 protobuf, so retry
+// that exact legacy response as a truncated read, within the current batch.
+// Keep other validation errors terminal and never interpret it as absence.
+func (b *syncLiveBackend) postInfo(ctx context.Context, base string, body []byte) ([]byte, error) {
+	// New servers omit absent names in one response. Older servers ignore the
+	// option and retain the existing 404 bisection below.
+	data, err := b.post(ctx, base+"/info/?format=carbonapi_v3_pb&allowPartial=1", body)
+	var h *syncHTTPError
+	if errors.As(err, &h) && h.status == http.StatusBadRequest && h.body == "Bad request (unsupported format)" {
+		return nil, fmt.Errorf("info body read failed (%v): %w", err, io.ErrUnexpectedEOF)
+	}
+	return data, err
+}
+
 // syncDigestWire mirrors buckyd's /v1/transfer/digest response.
 type syncDigestWire struct {
 	Name     string
@@ -365,6 +384,51 @@ func (b *syncLiveBackend) Proofs(ctx context.Context, store string, names []stri
 	return out, nil
 }
 
+// WindowProofs negotiates durable proof-v2 without weakening old endpoints.
+func (b *syncLiveBackend) WindowProofs(ctx context.Context, host string, names []string, from, until int64) ([]string, error) {
+	proofs, _, err := b.WindowProofsPresence(ctx, host, names, from, until)
+	return proofs, err
+}
+
+// WindowProofsPresence retains the explicit native absence already returned by
+// proof-v2. Unknown proofs and old responses never establish absence.
+func (b *syncLiveBackend) WindowProofsPresence(ctx context.Context, host string, names []string, from, until int64) ([]string, []bool, error) {
+	request := struct {
+		Names       []string
+		Mode        string
+		From, Until int64
+	}{names, "proof-v2", from, until}
+	var reply []struct {
+		Name, Mode, Proof, Reason string
+		Found                     *bool
+	}
+	err := b.wait(ctx, "proof", host, func() error {
+		reply = nil
+		_, e := b.m.requestOnce(ctx, host, "/v1/transfer/digest", request, &reply)
+		return e
+	})
+	var api *apiError
+	if errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusMethodNotAllowed || api.Status == http.StatusBadRequest) {
+		return nil, nil, errSyncNoProof
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(reply) != len(names) {
+		return nil, nil, errSyncNoProof
+	}
+	out := make([]string, len(names))
+	absent := make([]bool, len(names))
+	for i, r := range reply {
+		if r.Mode != "proof-v2" || r.Name != names[i] {
+			return nil, nil, errSyncNoProof
+		}
+		out[i] = r.Proof
+		absent[i] = r.Found != nil && !*r.Found && r.Proof != ""
+	}
+	return out, absent, nil
+}
+
 // SumDigest requires an explicit mode echo: older endpoints can ignore Mode
 // and return SHA digests with a superficially identical wire shape.
 func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []string, step, from, until int64) (map[string][]syncDigest, error) {
@@ -427,7 +491,7 @@ func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string
 					if err != nil {
 						return err
 					}
-					data, err = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
+					data, err = b.postInfo(ctx, base, body)
 					if ctx.Err() != nil || count <= 1 || !syncInfoTooLarge(err) {
 						return err
 					}
@@ -559,6 +623,9 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 	namesPath, err := syncCopyInput(journal, names)
 	if err != nil {
 		return syncCopyResult{}, err
+	}
+	if result, handled, err := b.resumeAbsentCopy(ctx, source, target, names, namesPath, journal, progress); handled || err != nil {
+		return result, err
 	}
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {

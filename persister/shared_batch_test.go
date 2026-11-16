@@ -307,6 +307,9 @@ func TestSharedBatchFallbackAccounting(t *testing.T) {
 
 // Include cache pop and acknowledgement around the real continuation codec.
 func TestSharedBatchStagePartition(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	update := sharedTimingWorkload(t, 210)
 	before := stagetime.Snapshot()
 	for i := range 128 {

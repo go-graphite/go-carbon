@@ -37,6 +37,7 @@ type effectiveSyncPolicy struct {
 }
 
 type syncCommand struct {
+	freshReason   string
 	ready         syncReadyOptions
 	sync          syncOptions
 	copy          copyOptions
@@ -61,11 +62,14 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	registerCopyFlags(flags, &c.copy)
 	flags.DurationVar(&c.timeout, "timeout", 0, "overall sync deadline including store restart waits; 0 waits without limit")
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
+	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only timeout, streams, rate and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
 	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")
 	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
+	flags.Var((*originList)(&c.ready.gapSelection), "gapfill-window", "with --ready-block: fill only these gap IDs (repeat or comma-separate); other missing receipts still block READY")
+	flags.StringVar(&c.ready.proofBlock, "ready-block", "", "independent JSON block for exhaustive final READY proof; preserves the original copy scope")
 	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for process_start_time_seconds on every store")
 	flags.Var(&c.ready.period, "period", "FROM:UNTIL block copy/cutover period in Unix seconds")
 	flags.BoolVar(&c.ready.gapsComplete, "gap-ledger-complete", false, "attest that --window includes every known input gap")
@@ -175,6 +179,14 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	c.live.noCopy = c.sync.noCopy
 	c.live.tokenEnv, c.live.copyBytes, c.live.copyIdle = c.copy.tokenEnv, c.copy.maxBytes, c.copy.transferIdle
+	if len(c.ready.gapSelection) > 0 && c.ready.proofBlock == "" {
+		return c, errors.New("--gapfill-window requires --ready-block")
+	}
+	if c.ready.proofBlock != "" && !c.ready.noReady {
+		if _, _, err := loadReadyProof(c.sync, c.ready); err != nil {
+			return c, err
+		}
+	}
 	c.captureConfig(flags)
 	return c, nil
 }
@@ -247,6 +259,10 @@ func SyncMain(ctx context.Context, args []string) error {
 	if c.explicit["verify-streams"] {
 		event("deprecated_flag", map[string]any{"level": "warn", "flag": "--verify-streams", "reason": "use only --streams; phases share one budget"})
 	}
+	if err := c.prepareStateIntent(); err != nil {
+		event("sync_state_refused", map[string]any{"level": "error", "state": c.sync.state, "reason": err.Error()})
+		return err
+	}
 	if err := os.MkdirAll(c.sync.state, 0700); err != nil {
 		return err
 	}
@@ -265,6 +281,13 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	c.copy.auth, c.live.auth = auth, auth
 	c.live.authOrigins = append(append([]string(nil), c.sync.from...), c.sync.to)
+	if c.ready.proofBlock != "" && !c.ready.noReady {
+		proof, _, err := loadReadyProof(c.sync, c.ready)
+		if err != nil {
+			return err
+		}
+		c.live.authOrigins = append(c.live.authOrigins, proof.from...)
+	}
 	limiter := &syncRateLimit{bytesPerSecond: c.rate}
 	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
@@ -274,7 +297,7 @@ func SyncMain(ctx context.Context, args []string) error {
 		streams := c.copy.streams
 		var sourceCapacity int
 		var target copyStatus
-		for _, host := range append(append([]string(nil), c.sync.from...), c.sync.to) {
+		for _, host := range c.live.authOrigins {
 			if streams != 0 && host != c.sync.to {
 				continue
 			}

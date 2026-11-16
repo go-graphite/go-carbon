@@ -16,6 +16,9 @@ import (
 )
 
 func TestIncrementalCaptureShardsKeepRootIdleDuringConcurrentConversions(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	p, _, db, _ := incrementalPersisterFixture(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -45,7 +48,27 @@ func TestIncrementalCaptureShardsKeepRootIdleDuringConcurrentConversions(t *test
 		}
 		names = append(names, name)
 	}
+	// Empty/read-only startup pays for no capture shards. The first real
+	// conversion prepares just its shard before taking its snapshot. Once
+	// initialized, parents must remain stable throughout concurrent conversions.
 	entries, err := os.ReadDir(p.incrementalScratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("startup prepared capture shards: %v %v", entries, err)
+	}
+	if _, err := p.ConvertFile(ctx, "metric"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = os.ReadDir(p.incrementalScratch)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("first conversion prepared unused shards: %v %v", entries, err)
+	}
+	// Warm all parents to measure their stability across further conversions.
+	for shard := range uint64(incrementalCaptureShards) {
+		if _, err := p.incrementalCaptureDir(shard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err = os.ReadDir(p.incrementalScratch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +158,9 @@ func TestIncrementalCaptureShardsKeepRootIdleDuringConcurrentConversions(t *test
 // without interpreting its entries. Flat and sharded leftovers are therefore
 // disposable in both versions, regardless of the durable ownership boundary.
 func TestIncrementalCaptureScratchRecoveryAndR21Layout(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	for _, boundary := range []string{"staged", "owned"} {
 		t.Run(boundary, func(t *testing.T) {
 			p, _, db, destination := incrementalPersisterFixture(t)

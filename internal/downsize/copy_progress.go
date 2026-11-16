@@ -19,6 +19,7 @@ import (
 // copyProgress tracks what a long copy is doing for the periodic progress
 // line and the stall watchdog. All methods are nil-safe.
 type copyProgress struct {
+	now              func() time.Time // immutable after construction
 	restartWaiting   atomic.Int64
 	mu               sync.Mutex
 	waiting          map[string]time.Time // host -> not answering since
@@ -30,7 +31,7 @@ type copyProgress struct {
 }
 
 func newCopyProgress() *copyProgress {
-	p := &copyProgress{waiting: map[string]time.Time{}, lastSuccess: time.Now()}
+	p := &copyProgress{waiting: map[string]time.Time{}, now: time.Now, lastSuccess: time.Now()}
 	p.total.Store(-1)
 	return p
 }
@@ -52,7 +53,7 @@ func (p *copyProgress) down(host string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, ok := p.waiting[host]; !ok {
-		p.waiting[host] = time.Now()
+		p.waiting[host] = p.now()
 	}
 }
 
@@ -78,7 +79,7 @@ func (p *copyProgress) success() {
 		return
 	}
 	p.mu.Lock()
-	p.lastSuccess = time.Now()
+	p.lastSuccess = p.now()
 	p.mu.Unlock()
 }
 
@@ -108,9 +109,9 @@ func (p *copyProgress) stuck() time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.restartWaiting.Load() > 0 || len(p.waiting) > 0 || p.inFlight.Load() == 0 {
-		p.lastSuccess = time.Now()
+		p.lastSuccess = p.now()
 	}
-	return time.Since(p.lastSuccess)
+	return p.now().Sub(p.lastSuccess)
 }
 
 type copySkip struct {

@@ -67,6 +67,9 @@ func TestJournalOnlyCaptureBeforeStorage(t *testing.T) {
 // A retired manifest is retained as evidence; neither complete nor partial
 // checkpoint files may be bypassed, and no manifest is rewritten.
 func TestJournalCaptureRetiredManifest(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, kind := range []string{"retired", "partial", "present", "retained_capture", "direct_fence"} {
 		t.Run(kind, func(t *testing.T) {
 			app := New("")

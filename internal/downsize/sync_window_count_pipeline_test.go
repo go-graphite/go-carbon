@@ -13,6 +13,7 @@ import (
 )
 
 func TestSyncWindowCountsPipelineAndResume(t *testing.T) {
+	t.Parallel()
 	source := nativeControllerStore(t)
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
@@ -89,6 +90,7 @@ func TestSyncWindowCountsPipelineAndResume(t *testing.T) {
 }
 
 func TestWindowRangeCountsLegacyTotals(t *testing.T) {
+	t.Parallel()
 	for _, complete := range []bool{false, true} {
 		t.Run(fmt.Sprint(complete), func(t *testing.T) {
 			state := t.TempDir()
@@ -121,6 +123,7 @@ func TestWindowRangeCountsLegacyTotals(t *testing.T) {
 // A recovered partial receipt can already have applied points. Taking a new
 // baseline would turn an unknown original delta into a misleading smaller total.
 func TestWindowRangeCountsAmbiguousReceipt(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int64
 	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)

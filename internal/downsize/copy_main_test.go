@@ -10,6 +10,7 @@ import (
 )
 
 func TestCandidatePreservesIdentityAndStagedPaths(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "candidate.toml")
 	manifest := &storecopy.Manifest{Metadata: map[string]any{"node": "old-host", "hash": "carbon", "replicas": float64(1), "nodes": []any{"old-host", "other"}, "encoding": "exact", "incremental": false}}

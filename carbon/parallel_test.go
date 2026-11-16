@@ -6,13 +6,15 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // Storage integration processes are memory intensive. Bound their fanout even
 // when the test binary inherits a large GOMAXPROCS or -test.parallel setting.
-var isolatedTestSlots = make(chan struct{}, 4)
+var isolatedTestSlots = make(chan struct{}, 8)
+var isolatedTestStorage sync.RWMutex
 
 const isolatedTestCase = "GRAPHITE_TEST_ISOLATED_CASE"
 
@@ -24,8 +26,18 @@ func isolatedTestProcess(t *testing.T) bool {
 	return isolatedTestProcessMode(t, true)
 }
 
+// A matrix may overlap only when its cases will run in separate processes.
+// Selective subtest and coverage runs retain serial access to process globals.
+func parallelTestMatrix(t *testing.T) {
+	t.Helper()
+	if os.Getenv(isolatedTestCase) == "" && testing.CoverMode() == "" &&
+		!strings.Contains(flag.Lookup("test.run").Value.String(), "/") {
+		t.Parallel()
+	}
+}
+
 // Wall-clock handoff tests model a bounded sender buffer. Run those processes
-// serially so competing storage startups do not consume the simulated outage
+// exclusively so competing storage startups do not consume the simulated outage
 // budget before the handoff itself can run.
 func isolatedTestProcessSerial(t *testing.T) bool {
 	return isolatedTestProcessMode(t, false)
@@ -40,9 +52,18 @@ func isolatedTestProcessMode(t *testing.T, parallel bool) bool {
 	}
 	if parallel {
 		t.Parallel()
-		isolatedTestSlots <- struct{}{}
-		defer func() { <-isolatedTestSlots }()
 	}
+	// Serial matrices overlap the other tests, but still count against the
+	// storage limit. Acquire only after Parallel releases the parent runner.
+	if parallel {
+		isolatedTestStorage.RLock()
+		defer isolatedTestStorage.RUnlock()
+	} else {
+		isolatedTestStorage.Lock()
+		defer isolatedTestStorage.Unlock()
+	}
+	isolatedTestSlots <- struct{}{}
+	defer func() { <-isolatedTestSlots }()
 	parts := strings.Split(t.Name(), "/")
 	for i := range parts {
 		parts[i] = "^" + regexp.QuoteMeta(parts[i]) + "$"

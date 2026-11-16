@@ -17,6 +17,7 @@ import (
 )
 
 func TestCopyPolicyConflictPreservesArchivesAndTargetPolicy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, xff := range []float32{0, 0.5} {
 		t.Run(string(rune('a'+int(xff*2))), func(t *testing.T) {

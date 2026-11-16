@@ -45,21 +45,29 @@ type DigestArchive struct {
 // name the store does not hold. Archives holds the serving archive; it is
 // empty when the window lies wholly outside the name's retention.
 type DigestResult struct {
-	Name     string
-	Proof    string `json:",omitempty"`
-	Mode     string `json:",omitempty"`
-	Found    bool
-	Archives []DigestArchive `json:",omitempty"`
+	Incarnation   string `json:",omitempty"`
+	Process       string `json:",omitempty"`
+	Predecessor   string `json:",omitempty"`
+	LineageReason string `json:",omitempty"`
+	Name          string
+	Proof         string `json:",omitempty"`
+	Reason        string `json:",omitempty"`
+	Mode          string `json:",omitempty"`
+	Found         bool
+	Archives      []DigestArchive `json:",omitempty"`
 }
 
 func (r DigestRequest) validate() error {
+	if r.Mode == "proof-v2" && r.Step != 0 {
+		return errors.New("window mutation proofs require zero step")
+	}
 	if r.Mode == "proof-v1" && (r.From != 0 || r.Until != 0 || r.Step != 0) {
 		return errors.New("mutation proofs require zero bounds and step")
 	}
 	if len(r.Names) == 0 || len(r.Names) > chunkstore.MaxTransferMetrics {
 		return fmt.Errorf("digest needs 1..%d names", chunkstore.MaxTransferMetrics)
 	}
-	if r.Mode != "" && r.Mode != "sum-v1" && r.Mode != "proof-v1" {
+	if r.Mode != "" && r.Mode != "sum-v1" && r.Mode != "proof-v1" && r.Mode != "proof-v2" {
 		return errors.New("unknown digest mode")
 	}
 	if !(r.Mode == "proof-v1" || r.Mode == "sum-v1" && r.From == 0 && r.Until == 0) && (r.From <= 0 || r.Until <= r.From || r.Until > math.MaxInt32) {
@@ -92,6 +100,16 @@ func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, 
 		}
 		out[i].Name = name
 		out[i].Mode = r.Mode
+		if r.Mode == "proof-v2" {
+			out[i].Incarnation, out[i].Process, out[i].Predecessor, out[i].LineageReason = s.store.ProofLineage()
+			_, e := s.store.Metadata(ctx, name)
+			if e != nil && !errors.Is(e, chunkstore.ErrNotFound) {
+				return e
+			}
+			out[i].Found = e == nil
+			out[i].Proof, out[i].Reason, e = s.store.MutationProof(ctx, name, r.From, r.Until)
+			return e
+		}
 		if r.Mode == "proof-v1" {
 			m, err := s.store.Metadata(ctx, name)
 			if err != nil && !errors.Is(err, chunkstore.ErrNotFound) {

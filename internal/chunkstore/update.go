@@ -124,6 +124,7 @@ func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRet
 	defer b.Close()
 	w := newChunkWriter(s, m)
 	defer w.release()
+	w.protectFutureSlots = targetRetention >= 0
 	now, err := storageTimestamp(s.now().Unix())
 	if err != nil {
 		return fmt.Errorf("clock timestamp: %w", err)
@@ -216,6 +217,9 @@ func (s *Store) commitUpdateAt(b *pebble.Batch, w *chunkWriter, m Metadata, acti
 		return errors.New("metric revision exhausted")
 	}
 	if err := w.commit(b); err != nil {
+		return err
+	}
+	if err := s.stageMutationHistory(b, m, w.mutationRanges, true); err != nil {
 		return err
 	}
 	m.Revision++
