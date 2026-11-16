@@ -183,6 +183,7 @@ func coreWait(wake chan struct{}) {
 type coreOwner struct {
 	gc      *sealedPartGC
 	gcDirty atomic.Bool
+	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
 	maintenance bool
@@ -415,9 +416,10 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		}
 	}
 	for i, o := range e.owners {
+		o.readGeneration = o.meta.NextPart
 		o.pub.publish(o.db.NewSnapshot())
 		if o.batchHook != nil {
-			if err := o.batchHook(o.db.NewSnapshot(), nil, o.meta.NextPart); err != nil {
+			if err := o.batchHook(o.db.NewSnapshot(), nil, o.readGeneration); err != nil {
 				return fail(err)
 			}
 		}
@@ -662,7 +664,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// submitPacketMode already detached Points and Policy. Owners never mutate
 		// those arenas; only the descriptor slice grows. Retain their immutable
 		// storage instead of copying the full head for every publication.
-		return o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.meta.NextPart)
+		return o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.readGeneration)
 	}
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
@@ -691,6 +693,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		o.meta = next
+		o.readGeneration++
 		o.publishFrontier(next)
 		batches = nil
 		o.committed.Add(uint64(len(head)))
@@ -709,6 +712,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	return func() (bool, bool) {
 		if failure == nil && o.gcDirty.Swap(false) {
+			o.readGeneration++
 			o.pub.publish(o.db.NewSnapshot())
 			failure = publishBatches()
 			if failure == nil && o.hook != nil {
