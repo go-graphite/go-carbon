@@ -13,6 +13,8 @@ type stageCounters struct {
 	enabled                                                 bool
 	resolve, identity, append, journal, sync, plan, publish atomic.Uint64
 	dataBytes, metadataBytes, files                         atomic.Uint64
+	syncGroups                                              atomic.Uint64
+	flushSync                                               atomic.Uint64
 }
 
 func (d *stageCounters) start() time.Time {
@@ -38,6 +40,8 @@ func (s *Store) StageStats() map[string]any {
 		"seal_dependency_sync_ns": d.sync.Load(), "seal_plan_ns": d.plan.Load(),
 		"snapshot_publish_ns": d.publish.Load(), "data_payload_bytes": d.dataBytes.Load(),
 		"metadata_payload_bytes": d.metadataBytes.Load(), "planned_files": d.files.Load(),
+		"dependency_sync_groups":   d.syncGroups.Load(),
+		"flush_dependency_sync_ns": d.flushSync.Load(),
 	}
 	if s.core != nil {
 		m["core"] = v2core.Sample(s.core, "backend", time.Now(), s.ingested.Load())

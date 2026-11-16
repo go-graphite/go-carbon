@@ -44,6 +44,9 @@ func (o *owner) appendCore(fs []frame) error {
 		}
 	}
 	started := o.s.stages.start()
+	// Catalog definitions and the journal append precede this release. A
+	// durability group snapshots these cursors before syncing either dependency.
+	o.coreSubmitted.Store(cursor)
 	err := o.s.core.AppendNumeric(o.id, rows, applies, cursor, false)
 	o.s.stages.finish(&o.s.stages.append, started)
 	o.numericRows, o.numericApplies = rows[:0], applies[:0]
@@ -64,10 +67,14 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 	}
 	// Numeric identities must be durable before data/frontier publication. The
 	// journal itself retains canonical names and exact policy definitions.
-	if err := s.numeric.Load().sync(); err != nil {
-		return v2core.SealPlan{}, err
+	targets := make([]uint64, len(s.owners))
+	for _, a := range in.Applies {
+		if a.Producer < 0 || a.Producer >= len(targets) {
+			return v2core.SealPlan{}, errors.New("invalid dependency producer")
+		}
+		targets[a.Producer] = max(targets[a.Producer], a.Cursor)
 	}
-	if err := s.log.Sync(); err != nil {
+	if err := s.syncCoreDependencies(targets); err != nil {
 		return v2core.SealPlan{}, err
 	}
 	s.stages.finish(&s.stages.sync, started)
@@ -168,4 +175,41 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 		s.stages.metadataBytes.Add(metadataBytes)
 	}
 	return plan, nil
+}
+
+// syncCoreDependencies shares one dependency barrier across database seals.
+// Snapshot BEFORE syncing: a concurrent append after the snapshot cannot be
+// advertised as durable merely because another stream finished syncing later.
+// Catalog definitions precede coreSubmitted, and policies precede identities.
+func (s *Store) syncCoreDependencies(targets []uint64) error {
+	s.dependencyMu.Lock()
+	defer s.dependencyMu.Unlock()
+	if len(s.dependencyCursors) == 0 {
+		s.dependencyCursors = make([]uint64, len(s.owners))
+	}
+	covered := true
+	for i, target := range targets {
+		covered = covered && s.dependencyCursors[i] >= target
+	}
+	if covered {
+		return nil
+	}
+	snapshot := make([]uint64, len(s.owners))
+	for i, o := range s.owners {
+		snapshot[i] = o.coreSubmitted.Load()
+		if snapshot[i] < targets[i] {
+			return errors.New("core dependency cursor not submitted")
+		}
+	}
+	if err := s.numeric.Load().sync(); err != nil {
+		return err
+	}
+	if err := s.log.Sync(); err != nil {
+		return err
+	}
+	s.dependencyCursors = snapshot
+	if s.stages.enabled {
+		s.stages.syncGroups.Add(1)
+	}
+	return nil
 }

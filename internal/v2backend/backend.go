@@ -87,6 +87,7 @@ type owner struct {
 	numericRows    []v2core.Row
 	numericApplies []v2core.Apply
 	coreCursor     uint64
+	coreSubmitted  atomic.Uint64
 	nextOrder      uint64
 	recovering     bool
 	journalCatalog *partlog.NameCatalog
@@ -134,6 +135,8 @@ type Store struct {
 	closing                       atomic.Bool
 	closed                        atomic.Bool
 	flushMu                       sync.Mutex
+	dependencyMu                  sync.Mutex
+	dependencyCursors             []uint64
 	closeOnce                     sync.Once
 	closeErr                      error
 	stop, done                    chan struct{}
@@ -229,6 +232,7 @@ func (s *Store) initialize(beforeOwner func(int)) (err error) {
 		}
 		o.nextOrder = max(o.meta.Order, o.meta.Cursor)
 		o.coreCursor = o.meta.Cursor
+		o.coreSubmitted.Store(o.meta.Cursor)
 		if s.core != nil && s.core.DurableFrontiers()[i%opts.Shards][i] != o.meta.Cursor {
 			return errors.New("core/backend atomic frontier mismatch")
 		}
@@ -479,17 +483,42 @@ func (s *Store) flush() error {
 		return nil
 	}
 	// All frozen records are stable before ANY durable part cursor advances.
-	if e := s.log.Sync(); e != nil {
+	var coreErr error
+	if s.core != nil {
+		targets := make([]uint64, len(frozen))
+		var hooks sync.WaitGroup
+		for i, fs := range frozen {
+			if len(fs) == 0 {
+				continue
+			}
+			targets[i] = fs[len(fs)-1].cursor
+			if s.beforeSeal != nil {
+				hooks.Add(1)
+				go func(id int) { defer hooks.Done(); s.beforeSeal(id) }(i)
+			}
+		}
+		hooks.Wait()
+		stageStart := s.stages.start()
+		e := s.syncCoreDependencies(targets)
+		s.stages.finish(&s.stages.flushSync, stageStart)
+		if e != nil {
+			return s.fail("sync", e)
+		}
+		// Freeze commands run after each producer's append fanout completes.
+		// Fence all included cursors together, rather than submitting an empty
+		// sealing append for every producer to every database.
+		coreErr = s.core.Fence(context.Background(), targets)
+	} else if e := s.log.Sync(); e != nil {
 		return s.fail("sync", e)
 	}
 	for i, o := range s.owners {
 		go func(o *owner, fs []frame, ack chan answer) {
-			if s.beforeSeal != nil && len(fs) > 0 {
+			if s.core == nil && s.beforeSeal != nil && len(fs) > 0 {
 				s.beforeSeal(o.id)
 			}
 			var e error
 			if s.core != nil {
-				e = o.awaitCorePublication(fs)
+				e = coreErr
 			} else {
 				e = o.commit(fs)
 			}

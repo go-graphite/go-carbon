@@ -192,6 +192,34 @@ func TestCoreDecoupledGeometry(t *testing.T) {
 	}
 }
 
+func TestCoreFlushSharesDependencyBarrier(t *testing.T) {
+	t.Setenv("V2_BACKEND_STAGES", "1")
+	opts := testOptions(t.TempDir(), simplePolicy())
+	opts.WriteEngine, opts.Owners, opts.Shards = "core", 7, 3
+	s, err := openAt(opts, func() time.Time { return time.Unix(1794700800, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requireClose(t, s)
+	for round := range 2 {
+		var names [][]byte
+		var data []points.Point
+		for i := range 128 {
+			names = append(names, []byte(fmt.Sprintf("grouped.series%d", i)))
+			data = append(data, points.Point{Timestamp: 1794700799, Value: float64(round + i)})
+		}
+		if err = s.AppendBatch(names, data); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.stages.syncGroups.Load(); got != uint64(round+1) {
+			t.Fatalf("dependency groups=%d want=%d", got, round+1)
+		}
+	}
+}
+
 func TestCorePortableRoutingAndRestartFence(t *testing.T) {
 	clock := int64(1794700800)
 	opts := testOptions(t.TempDir(), simplePolicy())

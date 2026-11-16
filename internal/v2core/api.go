@@ -3,7 +3,13 @@
 // This experimental format is not the portable production parts format.
 package v2core
 
-import "github.com/cockroachdb/pebble"
+import (
+	"context"
+	"errors"
+	"slices"
+
+	"github.com/cockroachdb/pebble"
+)
 
 // Row preserves value bits and original input sequence exactly.
 type Row = row
@@ -64,6 +70,42 @@ func (e *coreEngine) Append(producer int, rows []Row, cursor uint64, seal bool) 
 // AppendBatches also preserves the original application groups for seal hooks.
 func (e *coreEngine) AppendBatches(producer int, batches []Batch, cursor uint64, seal bool) error {
 	return e.submitBatches(producer, batches, cursor, seal)
+}
+
+// Fence waits until every database has durably consumed the supplied producer
+// cursors and completed its publication hook. Appends through these cursors must
+// already have returned. Other producers may continue appending while it waits.
+// One vector requests at most one additional forced seal per database. Callers
+// must finish Fence calls before Close, as with Append.
+func (e *coreEngine) Fence(ctx context.Context, cursors []uint64) error {
+	if len(cursors) != e.cfg.Producers {
+		return errors.New("fence producer count mismatch")
+	}
+	targets := slices.Clone(cursors)
+	replies := make([]chan error, len(e.owners))
+	for i, o := range e.owners {
+		replies[i] = make(chan error, 1)
+		select {
+		case o.fences <- coreFence{targets: targets, reply: replies[i], canceled: ctx.Done()}:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-o.dead:
+			return errors.New("owner stopped during fence")
+		}
+	}
+	for i, reply := range replies {
+		select {
+		case err := <-reply:
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-e.owners[i].dead:
+			return errors.New("owner stopped during fence")
+		}
+	}
+	return nil
 }
 
 // DurableFrontiers returns conservative owner snapshots safe during intake.

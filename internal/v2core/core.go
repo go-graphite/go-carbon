@@ -50,6 +50,12 @@ type corePacket struct {
 	lease      *coreDispatch
 }
 
+type coreFence struct {
+	targets  []uint64
+	reply    chan error
+	canceled <-chan struct{}
+}
+
 // Each producer owns a bounded ring. Owners release a lease after their last
 // access; the producer cannot overwrite a slice still in use by any owner.
 type coreDispatch struct {
@@ -181,6 +187,7 @@ type coreOwner struct {
 	cfg                          coreConfig
 	meta                         coreFrontier
 	queues                       []*coreQueue
+	fences                       chan coreFence
 	dead                         chan struct{}
 	done                         chan error
 	pub                          publication
@@ -288,7 +295,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), fences: make(chan coreFence, 64), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -572,6 +579,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
 	var failure error
+	var fences []coreFence
+	covers := func(have, target []uint64) bool {
+		for i, c := range target {
+			if have[i] < c {
+				return false
+			}
+		}
+		return true
+	}
 	flush := func() error {
 		if slices.Equal(pending, o.meta.Cursors) {
 			return nil
@@ -603,11 +619,29 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if failure == nil {
 				failure = flush()
 			}
+			for _, f := range fences {
+				err := failure
+				if err == nil && !covers(o.meta.Cursors, f.targets) {
+					err = errors.New("owner stopped before fence cursor")
+				}
+				f.reply <- err
+			}
 			o.done <- failure
 			close(o.dead)
 			return true, true
 		}
 		found := false
+		// Bounded admission keeps fence traffic from starving producer queues.
+		for range cap(o.fences) {
+			select {
+			case f := <-o.fences:
+				fences = append(fences, f)
+				found = true
+			default:
+				goto fencesDrained
+			}
+		}
+	fencesDrained:
 		for producer, q := range o.queues {
 			if stopped[producer] {
 				continue
@@ -663,6 +697,33 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				deadline = time.Now().Add(time.Second)
 			}
 		}
+		for _, f := range fences {
+			select {
+			case <-f.canceled:
+				continue
+			default:
+			}
+			if failure == nil && covers(pending, f.targets) && !covers(o.meta.Cursors, f.targets) {
+				failure = flush()
+				break
+			}
+		}
+		kept := fences[:0]
+		for _, f := range fences {
+			select {
+			case <-f.canceled:
+				continue
+			default:
+			}
+			if failure != nil || covers(o.meta.Cursors, f.targets) {
+				f.reply <- failure
+				found = true
+			} else {
+				kept = append(kept, f)
+			}
+		}
+		clear(fences[len(kept):])
+		fences = kept
 		return false, found
 	}
 }
