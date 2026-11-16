@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // coreBatch retains an original apply boundary. Policy is an opaque, durable
@@ -45,7 +46,11 @@ type coreSealPlan struct {
 	Abort func()
 }
 type coreHooks struct {
-	// DenseRollups selects the versioned multi-slot codec for new seal files.
+	// PartSource identifies the durable original ordering stream for sealed parts.
+	// Zero uses the persisted journal identity (or an offline incarnation).
+	PartSource v2part.Provenance
+
+	// DenseRollups is retained for source compatibility; all rollup seals are dense.
 	DenseRollups bool
 
 	// Expire runs on the serial seal owner, after admitted batches are applied.

@@ -200,10 +200,11 @@ func TestPartSyncPortableDenseFormat(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer w.Abort()
+	bits := []uint64{0, 1 << 63, 1, 0x7ff8000000000042, 0xfff8000000000017, 0x7ff0000000000000, 0xfff0000000000000, 0x3ff4000000000000}
 	for i := int64(0); i < 256; i++ {
 		k := v2part.Key{Group: "fixture", VShard: v2part.Route("fixture.metric"), Part: spec.Scope.Part, Metric: "fixture.metric", BlockStart: i}
 		key, _ := v2part.Encode(k)
-		r := sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: i, Order: 1, Sample: sealrollup.Sample{Time: 1700000000 + i*86400, Bits: uint64(i)}}}
+		r := sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: i, Order: 1, Sample: sealrollup.Sample{Time: 1700000000 + i*86400, Bits: bits[int(i)%len(bits)]}}, Correction: i%3 == 0}
 		if e = w.SetEncoded(key, sealrollup.EncodeRecord(r)); e != nil {
 			t.Fatal(e)
 		}
@@ -244,6 +245,18 @@ func TestPartSyncPortableDenseFormat(t *testing.T) {
 	if e != nil || result.Bytes != 0 || result.Skipped != 2 {
 		t.Fatalf("resume %+v %v", result, e)
 	}
+	// Both the SST and its retained descriptor-bearing manifest must transfer
+	// byte-for-byte; a successful decoded read alone could conceal a repack.
+	for _, part := range snapshot.Parts {
+		original, err := os.ReadFile(filepath.Join(snapDir, part.ID+".part"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		copied, err := os.ReadFile(filepath.Join(target, part.ID+".part"))
+		if err != nil || !bytes.Equal(original, copied) {
+			t.Fatalf("part %s changed bytes: %v", part.ID, err)
+		}
+	}
 	copied := filepath.Join(target, fmt.Sprintf("%x.part", d.SHA256))
 	n := 0
 	e = v2part.ReadExpanded(ctx, copied, &d, func(k v2part.Key, b []byte) error {
@@ -251,8 +264,8 @@ func TestPartSyncPortableDenseFormat(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		if r.Sample.Bits != uint64(n) {
-			t.Fatal("value changed in transfer")
+		if r.Sample.Bits != bits[n%len(bits)] || r.Sample.Time != 1700000000+int64(n)*86400 || r.Order != 1 || r.Correction != (n%3 == 0) || k.BlockStart != int64(n) {
+			t.Fatal("record bits, time, order or correction changed in transfer")
 		}
 		n++
 		return nil
