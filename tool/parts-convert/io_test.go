@@ -73,3 +73,32 @@ func TestPacerConcurrentReservationsAndNoIdleBurst(t *testing.T) {
 		t.Fatal("idle time accumulated a burst")
 	}
 }
+
+func TestPacerRetainsPaidTimerOversleep(t *testing.T) {
+	const rate = 24_000_000
+	p := newPacedFS(vfs.NewMem(), rate).pace
+	start := time.Unix(1, 0)
+	clock := start
+	sleeps := 0
+	p.now = func() time.Time { return clock }
+	p.sleep = func(d time.Duration) {
+		sleeps++
+		clock = clock.Add((d + time.Millisecond - 1) / time.Millisecond * time.Millisecond)
+	}
+	for i := 1; i <= 10_000; i++ {
+		p.charge(256)
+		minimum := time.Duration((int64(i)*256*int64(time.Second) + rate - 1) / rate)
+		if clock.Sub(start) < minimum {
+			t.Fatalf("byte cap exceeded at read %d: %v < %v", i, clock.Sub(start), minimum)
+		}
+	}
+	if clock.Sub(start) > 110*time.Millisecond || sleeps > 110 {
+		t.Fatalf("timer floor charged per read: elapsed %v, sleeps %d", clock.Sub(start), sleeps)
+	}
+	clock = clock.Add(time.Hour)
+	before := clock
+	p.charge(24_000)
+	if clock.Sub(before) != time.Millisecond {
+		t.Fatal("idle time retained pacing credit", clock.Sub(before))
+	}
+}

@@ -23,6 +23,7 @@ type ioPacer struct {
 	mu             sync.Mutex
 	bytesPerSecond uint64
 	next           time.Time
+	last           time.Time
 	bytes          uint64
 	now            func() time.Time
 	sleep          func(time.Duration)
@@ -36,14 +37,22 @@ func (p *ioPacer) charge(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	if p.next.Before(now) {
+	// Tiny reads must retain time already paid by an oversleep. Resetting
+	// next to now on every call turns each read into a full timer tick.
+	// Bound that credit and discard it after idle time.
+	const timerCredit = time.Millisecond
+	if p.last.IsZero() || now.Sub(p.last) > timerCredit {
 		p.next = now
+	}
+	if floor := now.Add(-timerCredit); p.next.Before(floor) {
+		p.next = floor
 	}
 	duration := time.Duration((uint64(n)*uint64(time.Second) + p.bytesPerSecond - 1) / p.bytesPerSecond)
 	p.next = p.next.Add(duration)
 	if delay := p.next.Sub(now); delay > 0 {
 		p.sleep(delay)
 	}
+	p.last = p.now()
 	p.bytes += uint64(n)
 }
 
