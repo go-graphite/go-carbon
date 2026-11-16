@@ -65,7 +65,9 @@ is outside timing; sender socket-copy CPU remains included. Completion includes
 receiver drain and core Close. L0 bypasses names, log and TCP; decode bypasses the
 core. A reopened full-core oracle detects missing/duplicate tuples after timing.
 `V2_TCP_PROFILE=/path/cpu.pprof` captures the timed arm for exclusive stack-based
-CPU attribution; process CPU alone is not decoder CPU. Encoded socket bytes per
+CPU attribution; process CPU alone is not decoder CPU. JSON results include
+receiver admission/error counters and timed interval boundaries. The finite
+fixture also checks that counted socket bytes equal the complete encoded payload. Encoded socket bytes per
 point exclude TCP/IP headers and are a synthetic fixture ratio, not measured NIC
 bytes or production compression. Report co-tenant load and CPU placement with
 every host measurement; shared-host numbers remain provisional.
