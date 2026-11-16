@@ -14,6 +14,9 @@ import (
 )
 
 func TestStartupCaptureQueuedRecords(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	s, _ := captureFixture(t)
 	const writers, records = 32, 80
 	values := []uint64{0, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042, 0x3ff0000000000001}
@@ -63,6 +66,9 @@ func TestStartupCaptureQueuedRecords(t *testing.T) {
 // A burst keeps queued requests pending so an escaping held request cannot be
 // hidden by the sequential, uncontended path through appendLoop.
 func TestStartupCaptureSubmissionAllocations(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	s, _ := captureFixture(t)
 	raw := points.OnePoint("allocation.metric", 123.456, 1794015000).AppendBinary(nil)
 	for _, shard := range s.shards {

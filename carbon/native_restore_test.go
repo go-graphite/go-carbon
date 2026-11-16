@@ -57,7 +57,9 @@ func testNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T, liveClaims bool
 	waitExpiration(t, func() bool { return first.Cache.IsEmpty() && first.Carbonserver.HasMappedIndex() })
 	first.Persister.Stop()
 	first.Persister = nil
-	const metrics, perMetric = 128, 1024
+	// Admission and readiness depend on pending names, not points per name.
+	// Keep 128 names and cycle every special value bit pattern repeatedly.
+	const metrics, perMetric = 128, 16
 	names := make([]string, metrics+1)
 	valueBits := []uint64{0x8000000000000000, 0x3ff0000000000001, 0x7ff8000000000012, 1, 0x7ff0000000000000}
 	saved := make([]points.Point, perMetric)

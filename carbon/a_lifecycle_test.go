@@ -10,17 +10,17 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 }
 
 func TestStoreInputFallbackKeepsEveryPoint(t *testing.T) {
+	parallelTestMatrix(t) // Its serial subprocesses share the bounded storage pool.
 	testStoreInputFallbackKeepsEveryPoint(t)
 }
 
 func TestSharedStoreRestartHandsInputOver(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
+	parallelTestMatrix(t) // Each subtest owns an isolated process.
 	testSharedStoreRestartHandsInputOver(t)
 }
 
 func TestRestartHandsInputOver(t *testing.T) {
+	parallelTestMatrix(t) // Each subtest owns an isolated process.
 	testRestartHandsInputOver(t)
 }
 
