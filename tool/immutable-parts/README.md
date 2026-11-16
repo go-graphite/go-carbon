@@ -403,6 +403,18 @@ phases, outside both replay denominators.
 
 ### Continuous settlement and PDC4 live intake
 
+On shared benchmark hosts, `PARTLOG_BENCH_HISTORY_RATE=30000000` and
+`PARTLOG_BENCH_LIVE_RATE=12000000` cap aggregate history and live points/s.
+History defaults to unlimited and live defaults to22M/s. Each stream paces
+before each batch, allowing at most one batch immediately after a stall rather
+than accumulating catch-up credit. The historical cap
+applies to the legacy flat numeric fixture only; other history envelopes fail
+closed when this option is set. Caps affect scheduling only: original timestamps,
+value bits, sequence numbers, apply boundaries and oracle clocks stay unchanged.
+The first `replay_rate_caps` receipt records both settings. Pair these controls
+with host-specific CPU affinity, idle IO priority and daemon/device monitoring;
+an offered-rate cap is not a storage-capacity measurement.
+
 `PARTLOG_BENCH_LIVE_SECONDS=600 PARTLOG_LIVE_CODEC=pdc4` exercises the new
 live journal in the existing history-plus-live benchmark. Historical `NLOG0001`
 records remain readable. PDC4 is used only for the numeric adapter: the eight-byte

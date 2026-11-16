@@ -17,13 +17,14 @@ import (
 // Each producer calls append serially. Optional followers accept journaled live
 // input immediately while one ordered consumer per stream catches up.
 type loggedCore struct {
-	journal   *partlog.Log
-	engine    *coreEngine
-	cancel    context.CancelFunc
-	followers chan error
-	failure   atomic.Pointer[logApplyFailure]
-	rows      [][]row
-	catalogs  []*replayCatalog
+	journal     *partlog.Log
+	engine      *coreEngine
+	cancel      context.CancelFunc
+	followers   chan error
+	failure     atomic.Pointer[logApplyFailure]
+	rows        [][]row
+	catalogs    []*replayCatalog
+	historyRate uint64 // Optional aggregate numeric benchmark cap; zero is unlimited.
 }
 
 func openLoggedCore(logDir, partDir string, cfg coreConfig, opts partlog.Options) (*loggedCore, error) {
@@ -272,6 +273,7 @@ func (l *loggedCore) startReplay(ctx context.Context) <-chan error {
 	initial := make(chan error, len(from))
 	for p, c := range from {
 		go func() {
+			pacer := replayPacer{rate: l.historyRate, streams: len(from)}
 			announced := false
 			announce := func() {
 				if !announced {
@@ -283,6 +285,15 @@ func (l *loggedCore) startReplay(ctx context.Context) <-chan error {
 				announce()
 			}
 			err := l.journal.Follow(ctx, p, c, func(r partlog.Record) error {
+				if l.historyRate > 0 && r.Cursor <= tails[p] {
+					// The paced benchmark history uses flat numeric records only.
+					if len(r.Payload) <= logEnvelopeBytes || string(r.Payload[:8]) != logEnvelope || r.Payload[8] != 0 || (len(r.Payload)-logEnvelopeBytes)%recordBytes != 0 {
+						return os.ErrInvalid
+					}
+					if err := pacer.wait(ctx.Done(), uint64((len(r.Payload)-logEnvelopeBytes)/recordBytes)); err != nil {
+						return err
+					}
+				}
 				if err := l.apply(p, r, false); err != nil {
 					return err
 				}

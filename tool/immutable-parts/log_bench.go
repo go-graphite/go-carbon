@@ -243,6 +243,15 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 // This exercises acceptance into the durable journal concurrently with ordered
 // replay. Live rows have disjoint sequence numbers but the same metric catalogue.
 func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, metrics uint64, emit func(string, uint64, map[string]any), start time.Time) error {
+	historyRate, err := replayRateEnv("PARTLOG_BENCH_HISTORY_RATE", 0)
+	if err != nil {
+		return err
+	}
+	offeredRate, err := replayRateEnv("PARTLOG_BENCH_LIVE_RATE", 22000000)
+	if err != nil {
+		return err
+	}
+	emit("replay_rate_caps", 0, map[string]any{"history_points_per_second_cap": historyRate, "live_points_per_second_cap": offeredRate})
 	writeStart := procStats()
 	continuous := time.Duration(0)
 	if raw := os.Getenv("PARTLOG_BENCH_LIVE_SECONDS"); raw != "" {
@@ -313,11 +322,11 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 			}
 		}
 	}()
-	// Keep the oracle clock unchanged; pacing has headroom above 20M accepted/s.
+	// Keep the original oracle clock independent of the offered live rate.
 	const rate = 20000000
-	const offeredRate = 22000000
 	for p := range cfg.Producers {
 		go func() {
+			pacer := replayPacer{rate: offeredRate, streams: cfg.Producers}
 			const batch = 32768
 			rows := make([]row, batch)
 			var payload []byte
@@ -329,16 +338,9 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 					return
 				default:
 				}
-				deadline := liveStart.Add(time.Duration(float64(sent) * float64(cfg.Producers) / offeredRate * float64(time.Second)))
-				if wait := time.Until(deadline); wait > 0 {
-					timer := time.NewTimer(wait)
-					select {
-					case <-stop:
-						timer.Stop()
-						done <- nil
-						return
-					case <-timer.C:
-					}
+				if err := pacer.wait(stop, batch); err != nil {
+					done <- nil
+					return
 				}
 				for i := range rows {
 					seq := total + (sent+uint64(i))*uint64(cfg.Producers) + uint64(p)
@@ -382,6 +384,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		return errors.Join(err, closeReplayCatalogs(catalogs)) // attachLoggedCore closed the journal on failure.
 	}
 	l.catalogs = catalogs
+	l.historyRate = historyRate
 	emit("storage_open_complete", 0, nil)
 	ready := l.startReplay(context.Background())
 	tick := time.NewTicker(5 * time.Second)
