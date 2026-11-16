@@ -237,6 +237,24 @@ func (s *syncer) restorePhase() error {
 		}
 		saved.Done = max(saved.Done, durable)
 	}
+	s.resume = saved // retain the attempted position even when reporting a contradiction
+	var verifyReceipts int64
+	if saved.Phase == "verify" {
+		seen := map[[2]string]bool{}
+		for _, r := range s.j.rows {
+			key := [2]string{r.First, r.Last}
+			if (r.Kind == "verified" || r.Kind == "receipt-reverified") && r.Round == saved.Round && !seen[key] {
+				verifyReceipts += int64(r.Names)
+				seen[key] = true
+			}
+		}
+		if saved.Done > verifyReceipts {
+			return s.receiptContradiction("saved verify done exceeds journal receipts")
+		}
+	}
+	if saved.Total > 0 && saved.Done > saved.Total {
+		return s.receiptContradiction("saved done exceeds phase total")
+	}
 	if phaseOrder(saved.Phase, saved.Round) < 0 {
 		return errors.New("unknown journal phase")
 	}
@@ -284,52 +302,6 @@ func (s *syncer) restorePhase() error {
 		event("sync_phase_resumed", map[string]any{"phase": label, "round": saved.Round, "done": saved.Done, "complete": saved.Complete})
 	}
 	return nil
-}
-
-// Replay a completed round locally to rebuild the convergence set. In
-// particular, legacy one-time seal adoption belongs to the current round and
-// must not send a completed earlier round back to the stores.
-func (s *syncer) replayVerifyRound(round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
-	defer set.close()
-	done := map[string]syncRow{}
-	for _, r := range s.j.rows {
-		if r.Kind == "verified" && r.Round == round {
-			done[r.First] = r
-		}
-	}
-	var holes []syncHole
-	var unindexed []string
-	var skipped []syncSkip
-	for {
-		var names []string
-		for len(names) < s.o.batch {
-			name, _, err := set.next()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			skip, err := s.excludePolicy(name, "verify")
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if !skip {
-				names = append(names, name)
-			}
-		}
-		if len(names) == 0 {
-			break
-		}
-		row, ok := done[names[0]]
-		if !ok || row.Names != len(names) || row.Last != names[len(names)-1] {
-			return nil, nil, nil, fmt.Errorf("resume: completed verify round %d lacks unambiguous receipt for %q..%q; refusing backend replay", round, names[0], names[len(names)-1])
-		}
-		holes = append(holes, row.Holes...)
-		unindexed = append(unindexed, row.Unindexed...)
-		skipped = append(skipped, row.Skipped...)
-	}
-	return holes, unindexed, skipped, nil
 }
 
 // A successful proof remains complete until a holder's mutation/schema fence

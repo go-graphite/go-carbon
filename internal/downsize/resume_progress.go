@@ -100,31 +100,33 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
-	PhaseRegressions   int64                `json:"phase_regressions"`
-	LegacyRevalidated  int64                `json:"legacy_revalidated_names"`
-	RedoNames          map[string]int64     `json:"redo_names,omitempty"`
-	Quarantined        int64                `json:"quarantined"`
-	PolicySkipped      int64                `json:"policy_skipped"`
-	RepairFailedNames  int64                `json:"repair_failed_names"`         // distinct names still missing after an accepted fill
-	NextVerifyNames    *int64               `json:"next_verify_names,omitempty"` // distinct names after this fill; nil until planned
-	WaitingForStore    bool                 `json:"waiting_for_store"`
-	FreshDoneAvailable bool                 `json:"fresh_done_available"` // controller supplied fresh work counter
-	FreshDone          int64                `json:"fresh_done"`           // excludes journal replay and discovery
-	Done               int64                `json:"done"`
-	Total              int64                `json:"total"`
-	Effective          *effectiveSyncPolicy `json:"effective,omitempty"`
-	Phase              string               `json:"phase"`
-	Round              int                  `json:"round"`
-	Cursors            map[string]string    `json:"cursors"`
-	Discovered         int64                `json:"names_discovered"`
-	Verified           int64                `json:"names_verified"`
-	Filled             int64                `json:"names_filled"`
-	Copied             int64                `json:"names_copied"`
-	Holes              int64                `json:"holes"` // cumulative hole point observations across rounds
-	Rate               float64              `json:"names_per_second"`
-	Updated            time.Time            `json:"last_update"`
-	Status             string               `json:"status"`
-	Error              string               `json:"error,omitempty"`
+	AmbiguousReceiptNames int64                `json:"ambiguous_receipt_names"`
+	ReceiptContradictions int64                `json:"receipt_contradictions"`
+	PhaseRegressions      int64                `json:"phase_regressions"`
+	LegacyRevalidated     int64                `json:"legacy_revalidated_names"`
+	RedoNames             map[string]int64     `json:"redo_names,omitempty"`
+	Quarantined           int64                `json:"quarantined"`
+	PolicySkipped         int64                `json:"policy_skipped"`
+	RepairFailedNames     int64                `json:"repair_failed_names"`         // distinct names still missing after an accepted fill
+	NextVerifyNames       *int64               `json:"next_verify_names,omitempty"` // distinct names after this fill; nil until planned
+	WaitingForStore       bool                 `json:"waiting_for_store"`
+	FreshDoneAvailable    bool                 `json:"fresh_done_available"` // controller supplied fresh work counter
+	FreshDone             int64                `json:"fresh_done"`           // excludes journal replay and discovery
+	Done                  int64                `json:"done"`
+	Total                 int64                `json:"total"`
+	Effective             *effectiveSyncPolicy `json:"effective,omitempty"`
+	Phase                 string               `json:"phase"`
+	Round                 int                  `json:"round"`
+	Cursors               map[string]string    `json:"cursors"`
+	Discovered            int64                `json:"names_discovered"`
+	Verified              int64                `json:"names_verified"`
+	Filled                int64                `json:"names_filled"`
+	Copied                int64                `json:"names_copied"`
+	Holes                 int64                `json:"holes"` // cumulative hole point observations across rounds
+	Rate                  float64              `json:"names_per_second"`
+	Updated               time.Time            `json:"last_update"`
+	Status                string               `json:"status"`
+	Error                 string               `json:"error,omitempty"`
 }
 
 func (p *progressSnapshot) apply(r syncRow) {
@@ -133,6 +135,10 @@ func (p *progressSnapshot) apply(r syncRow) {
 		p.Discovered = int64(r.Discovery.Names)
 	}
 	switch r.Kind {
+	case "ambiguous-receipt":
+		p.AmbiguousReceiptNames += int64(r.Names)
+	case "receipt-contradiction":
+		p.ReceiptContradictions++
 	case "phase-regression":
 		p.PhaseRegressions++
 	case "phase-position":

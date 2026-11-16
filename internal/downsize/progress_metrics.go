@@ -253,6 +253,8 @@ type progressMetrics struct {
 	repairFailedNames                     float64
 	legacyRevalidated                     map[string]int64
 	phaseRegressions                      int64
+	ambiguousReceiptNames                 map[string]int64
+	receiptContradictions                 int64
 	freshDone                             float64
 	freshDoneAvailable                    float64
 	storeRetries, storeWaiting            int64
@@ -323,6 +325,11 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
 	p.snapshot = snapshot
 	p.phaseRegressions = max(p.phaseRegressions, snapshot.PhaseRegressions)
+	if p.ambiguousReceiptNames == nil {
+		p.ambiguousReceiptNames = map[string]int64{}
+	}
+	p.ambiguousReceiptNames[path] = snapshot.AmbiguousReceiptNames
+	p.receiptContradictions = max(p.receiptContradictions, snapshot.ReceiptContradictions)
 	oldPhase, oldRound := p.phase, p.round
 	p.phase = metricToken(snapshot.Phase)
 	if snapshot.WaitingForStore {
@@ -358,7 +365,11 @@ func (p *progressMetrics) send() {
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
 	repairFailedNames := p.repairFailedNames
-	var legacyRevalidated int64
+	var legacyRevalidated, ambiguousReceiptNames int64
+	for _, n := range p.ambiguousReceiptNames {
+		ambiguousReceiptNames += n
+	}
+	receiptContradictions := p.receiptContradictions
 	for _, n := range p.legacyRevalidated {
 		legacyRevalidated += n
 	}
@@ -381,6 +392,7 @@ func (p *progressMetrics) send() {
 	now := at.Unix()
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s.legacy_revalidated_names %d %d\n", p.prefix, legacyRevalidated, now)
+	fmt.Fprintf(&b, "%s.ambiguous_receipt_names %d %d\n%s.receipt_contradictions %d %d\n", p.prefix, ambiguousReceiptNames, now, p.prefix, receiptContradictions, now)
 	fmt.Fprintf(&b, "%s.phase_regressions %d %d\n", p.prefix, phaseRegressions, now)
 	if p.lastSentPhase != "" && p.lastSentPhase != phase {
 		fmt.Fprintf(&b, "%s.%s.active 0 %d\n%s.%s.names_per_second 0 %d\n", p.prefix, p.lastSentPhase, now, p.prefix, p.lastSentPhase, now)

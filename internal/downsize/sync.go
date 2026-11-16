@@ -903,11 +903,15 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	previousScore := int64(-1)
 	for round := 1; ; round++ {
 		s.sum.Rounds = round
-		names := s.unionSource()
-		if s.frontier == nil && (round > 1 || round == 1 && scopedResume) || round == 1 && len(s.newScope) > 0 {
+		var names syncNameSource
+		// A mutation frontier must not expand an authenticated sparse resume back
+		// into the union catalog, including its following convergence rounds.
+		if (s.frontier == nil || scopedResume) && round > 1 || round == 1 && (scopedResume || len(s.newScope) > 0) {
 			if names, err = s.setSource(set); err != nil {
 				return err
 			}
+		} else {
+			names = s.unionSource()
 		}
 		holes, unindexed, skipped, err := s.verifyRound(ctx, round, names)
 		if err != nil {
@@ -1156,7 +1160,7 @@ func (s *syncer) sourceIndex(source string) int {
 func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
 	journalRound := round + s.verificationBase
 	if s.phaseBeforeResume("verify", journalRound) {
-		return s.replayVerifyRound(journalRound, set)
+		return s.replayVerifyRound(ctx, journalRound, set)
 	}
 	if s.frontier == nil {
 		if err := s.openFrontier(ctx); err != nil {

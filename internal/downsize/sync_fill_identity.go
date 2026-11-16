@@ -24,7 +24,9 @@ func (s *syncer) fillIdentity(round, src int, names []string) (string, error) {
 		observations[name] = ""
 	}
 	journalRound := round + s.verificationBase
-	for _, row := range s.j.find(func(r syncRow) bool { return r.Kind == "verified" && r.Round == journalRound }) {
+	for _, row := range s.j.find(func(r syncRow) bool {
+		return (r.Kind == "verified" || r.Kind == "receipt-reverified") && r.Round == journalRound
+	}) {
 		for _, hole := range row.Holes {
 			if _, ok := observations[hole.Name]; ok && hole.Source == s.o.from[src] {
 				// Legacy rows have no generation; their durable timestamp still
