@@ -10,7 +10,16 @@ import (
 // caller supplies its start time and offered-point count; owner counters may
 // advance independently. This is diagnostic telemetry, not a replay frontier.
 func Sample(e *Engine, stage string, start time.Time, offered uint64) map[string]any {
-	return coreSample(e, stage, start, offered)
+	sample := coreSample(e, stage, start, offered)
+	var compacting, flushing int64
+	for _, owner := range e.owners {
+		m := owner.db.Metrics()
+		compacting += m.Compact.NumInProgress
+		flushing += m.Flush.NumInProgress
+	}
+	sample["compactions_in_progress"] = compacting
+	sample["flushes_in_progress"] = flushing
+	return sample
 }
 
 // Read decodes numeric raw rows from a caller-owned immutable snapshot. It does

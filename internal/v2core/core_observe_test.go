@@ -27,6 +27,9 @@ func TestCoreObservationUsesImmutableSnapshot(t *testing.T) {
 		t.Fatalf("snapshot changed: %v %v", rows, err)
 	}
 	stats := Sample(e, "external", time.Now(), 2)
+	if _, ok := stats["compactions_in_progress"].(int64); !ok {
+		t.Fatal("missing active-compaction count")
+	}
 	if stats["committed"] != uint64(2) || stats["stage"] != "external" {
 		t.Fatal(stats)
 	}
