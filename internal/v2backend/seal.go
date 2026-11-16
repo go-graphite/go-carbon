@@ -126,31 +126,130 @@ func (o *owner) recover() error {
 	return it.Error()
 }
 
+// sealTransaction owns borrowed staging buffers until exactly one terminal call.
+// Preparation never advances catalogues, reducer slots, receipts or read views.
+// The storage engine must atomically ingest every file before calling commit;
+// a failed write/ingest calls abort instead. Publication is a separate step.
+type sealTransaction struct {
+	owner *owner
+	files [][]kv
+	apply func()
+	done  bool
+}
+
+func (tx *sealTransaction) release() {
+	if tx.owner == nil {
+		return
+	}
+	o := tx.owner
+	o.commitScratch.reset()
+	clear(o.batchScratch)
+	if cap(o.batchScratch) > retainedFrames {
+		o.batchScratch = nil
+	}
+	if cap(o.sampleScratch) > 65536 {
+		o.sampleScratch = nil
+	}
+	o.sealPending = false
+	tx.files = nil
+	tx.apply = nil
+}
+func (tx *sealTransaction) commit() {
+	if tx.done {
+		return
+	}
+	tx.done = true
+	defer tx.release()
+	if tx.apply != nil {
+		tx.apply()
+	}
+}
+func (tx *sealTransaction) abort() {
+	if tx.done {
+		return
+	}
+	tx.done = true
+	tx.release()
+}
+
 func (o *owner) commit(frames []frame) error {
-	if len(frames) == 0 {
+	tx, err := o.prepareSeal(frames)
+	if err != nil {
+		return err
+	}
+	defer tx.abort()
+	if len(tx.files) == 0 {
 		return nil
+	}
+	var e error
+	var paths []string
+	defer func() {
+		for _, p := range paths {
+			_ = os.Remove(p)
+		}
+	}()
+	stage := func(rows []kv) error {
+		if len(rows) == 0 {
+			return nil
+		}
+		path := filepath.Join(o.dir, fmt.Sprintf("stage-%d-%04d.sst", time.Now().UnixNano(), len(paths)))
+		f, e := vfs.Default.Create(path)
+		if e != nil {
+			return e
+		}
+		paths = append(paths, path)
+		w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
+		for i, row := range rows {
+			if i > 0 && bytes.Equal(rows[i-1].key, row.key) {
+				_ = w.Close()
+				return errors.New("duplicate key in immutable seal")
+			}
+			if e = w.Set(row.key, row.value); e != nil {
+				_ = w.Close()
+				return e
+			}
+		}
+		return w.Close()
+	}
+	for _, rows := range tx.files {
+		if e = stage(rows); e != nil {
+			return e
+		}
+	}
+	// Ingest synchronizes the manifest publication. Journal Sync has already
+	// completed for every included original batch before this command was sent.
+	if e = o.db.Ingest(paths); e != nil {
+		return e
+	}
+	tx.commit()
+	return o.publish()
+}
+
+func (o *owner) prepareSeal(frames []frame) (_ *sealTransaction, err error) {
+	if len(frames) == 0 {
+		return &sealTransaction{}, nil
+	}
+	if o.sealPending {
+		return nil, errors.New("owner already has an unresolved seal")
 	}
 	started := time.Now()
 	var part partsformat.PartID
 	if _, e := rand.Read(part[:]); e != nil {
-		return e
+		return nil, e
 	}
 	scratch := &o.commitScratch
 	byName := scratch.group(frames)
+	tx := &sealTransaction{owner: o}
+	o.sealPending = true
 	defer func() {
-		scratch.reset()
-		clear(o.batchScratch)
-		if cap(o.batchScratch) > retainedFrames {
-			o.batchScratch = nil
-		}
-		if cap(o.sampleScratch) > 65536 {
-			o.sampleScratch = nil
+		if err != nil {
+			tx.abort()
 		}
 	}()
 	var count uint64
 	for _, f := range frames {
 		if f.cursor <= o.meta.Cursor {
-			return errors.New("replayed committed batch in live seal")
+			return nil, errors.New("replayed committed batch in live seal")
 		}
 		count += uint64(len(f.points))
 	}
@@ -174,17 +273,19 @@ func (o *owner) commit(frames []frame) error {
 			}
 		}
 		if string(m.Group) != string(last.group) || !samePolicy(m.Policy, last.policy) {
-			return errors.New("metric placement/policy changed")
+			return nil, errors.New("metric placement/policy changed")
 		}
 		if m.prepared == nil {
+			copyMetric := *m
+			m = &copyMetric
 			var e error
 			m.config, e = rollupConfig(m.Policy)
 			if e != nil {
-				return e
+				return nil, e
 			}
 			m.prepared, e = sealrollup.Prepare(m.config)
 			if e != nil {
-				return e
+				return nil, e
 			}
 		}
 		cfg, prepared := m.config, m.prepared
@@ -201,7 +302,7 @@ func (o *owner) commit(frames []frame) error {
 		batches := slices.Grow(o.batchScratch[:0], len(fs))
 		for _, f := range fs {
 			if string(f.group) != string(m.Group) || (f.resolved != last.resolved || f.resolved == nil) && !samePolicy(f.policy, m.Policy) {
-				return errors.New("batch policy or placement changed inside seal")
+				return nil, errors.New("batch policy or placement changed inside seal")
 			}
 			b := sealrollup.Batch{Order: f.order, Now: f.clock, Points: samples[:len(f.points):len(f.points)]}
 			for i, p := range f.points {
@@ -214,7 +315,7 @@ func (o *owner) commit(frames []frame) error {
 		clear(batches)
 		o.batchScratch = batches[:0]
 		if e != nil {
-			return e
+			return nil, e
 		}
 		plans[name] = plan
 		copyMetric := *m
@@ -225,12 +326,12 @@ func (o *owner) commit(frames []frame) error {
 		base := partsformat.Key{Group: partsformat.Group(m.Group), VShard: vs, Partition: partition, Metric: partsformat.ID(name), Part: part}
 		prefix, e := partsformat.PartitionPrefixForGroup(partsformat.Group(m.Group), vs, partition)
 		if e != nil {
-			return e
+			return nil, e
 		}
 		file := string(prefix)
 		key, e := partsformat.Encode(base)
 		if e != nil {
-			return e
+			return nil, e
 		}
 		for _, r := range plan.Records {
 			encodedKey := scratch.bytes.copy(key)
@@ -263,7 +364,7 @@ func (o *owner) commit(frames []frame) error {
 	for _, b := range scopes {
 		edits, e := partsops.EncodeEdits(*b)
 		if e != nil {
-			return e
+			return nil, e
 		}
 		for _, edit := range edits {
 			ops = append(ops, kv{edit.Key, edit.Value})
@@ -306,71 +407,46 @@ func (o *owner) commit(frames []frame) error {
 	meta.Version = 2
 	meta.Metrics = nil // owner.metrics owns the live state; do not retain a second slice.
 	checkpointRows = append(checkpointRows, kv{metaKey(o.id), encodeCheckpoint(meta)})
-	var e error
-	var paths []string
-	defer func() {
-		for _, p := range paths {
-			_ = os.Remove(p)
-		}
-	}()
-	stage := func(rows []kv) error {
-		if len(rows) == 0 {
-			return nil
-		}
-		sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].key, rows[j].key) < 0 })
-		path := filepath.Join(o.dir, fmt.Sprintf("stage-%x-%04d.sst", part, len(paths)))
-		f, e := vfs.Default.Create(path)
-		if e != nil {
-			return e
-		}
-		paths = append(paths, path)
-		w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
-		for i, row := range rows {
-			if i > 0 && bytes.Equal(rows[i-1].key, row.key) {
-				_ = w.Close()
-				return errors.New("duplicate key in immutable seal")
-			}
-			if e = w.Set(row.key, row.value); e != nil {
-				_ = w.Close()
-				return e
-			}
-		}
-		return w.Close()
-	}
 	for _, rows := range dataFiles {
-		if e = stage(rows); e != nil {
-			return e
+		tx.files = append(tx.files, rows)
+	}
+	for _, rows := range [][]kv{ops, refs, checkpointRows} {
+		if len(rows) > 0 {
+			tx.files = append(tx.files, rows)
 		}
 	}
-	if e = stage(ops); e != nil {
-		return e
-	}
-	if e = stage(refs); e != nil {
-		return e
-	}
-	if e = stage(checkpointRows); e != nil {
-		return e
-	}
-	// Ingest synchronizes the manifest publication. Journal Sync has already
-	// completed for every included original batch before this command was sent.
-	if e = o.db.Ingest(paths); e != nil {
-		return e
-	}
-	for name, plan := range plans {
-		m := next[name]
-		for _, r := range plan.Records {
-			p := r.Sample
-			p.Sequence = r.Order
-			if m.slots[r.Archive] != nil {
-				m.slots[r.Archive][r.Slot] = p
+	for _, rows := range tx.files {
+		sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].key, rows[j].key) < 0 })
+		for i := 1; i < len(rows); i++ {
+			if bytes.Equal(rows[i-1].key, rows[i].key) {
+				return nil, errors.New("duplicate key in immutable seal")
 			}
 		}
 	}
-	for name, m := range next {
-		o.metrics[name] = m
+	sort.Slice(tx.files, func(i, j int) bool { return bytes.Compare(tx.files[i][0].key, tx.files[j][0].key) < 0 })
+	for i := 1; i < len(tx.files); i++ {
+		previous := tx.files[i-1]
+		if bytes.Compare(previous[len(previous)-1].key, tx.files[i][0].key) >= 0 {
+			return nil, errors.New("overlapping immutable seal files")
+		}
 	}
-	o.meta = meta
-	o.s.parts.Add(uint64(len(dataFiles)))
-	o.s.sealNS.Store(int64(time.Since(started)))
-	return o.publish()
+	tx.apply = func() {
+		for name, plan := range plans {
+			m := next[name]
+			for _, r := range plan.Records {
+				p := r.Sample
+				p.Sequence = r.Order
+				if m.slots[r.Archive] != nil {
+					m.slots[r.Archive][r.Slot] = p
+				}
+			}
+		}
+		for name, m := range next {
+			o.metrics[name] = m
+		}
+		o.meta = meta
+		o.s.parts.Add(uint64(len(dataFiles)))
+		o.s.sealNS.Store(int64(time.Since(started)))
+	}
+	return tx, nil
 }

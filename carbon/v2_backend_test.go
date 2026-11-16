@@ -139,6 +139,7 @@ func TestV2DaemonThroughput120(t *testing.T) {
 	defer zapwriter.Test()()
 	app := v2Fixture(t, &oracleBackend{})
 	app.v2Open = nil
+	app.Config.V2.WriteEngine = os.Getenv("V2_BACKEND_WRITE_ENGINE")
 	app.Config.Common.MaxCPU = 32
 	// The ordinary fixture has a minute/hour policy. Use the single-archive
 	// intake shape explicitly here; repeated timestamps within a minute would
@@ -525,6 +526,13 @@ func nativeWriteBytes() uint64 {
 	return 0
 }
 
+func TestV2DaemonCoreSIGKILLReplay(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	t.Setenv("V2_DAEMON_CRASH_ENGINE", "core")
+	TestV2DaemonSIGKILLReplay(t)
+}
 func TestV2DaemonSIGKILLReplay(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
@@ -537,6 +545,7 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 	}
 	app := v2Fixture(t, &oracleBackend{})
 	app.v2Open = nil
+	app.Config.V2.WriteEngine = os.Getenv("V2_DAEMON_CRASH_ENGINE")
 	app.Config.V2.DataDir = filepath.Join(root, "parts")
 	app.Config.V2.Owners = 1
 	app.Config.V2.Shards = 1
@@ -579,7 +588,7 @@ func TestV2DaemonSIGKILLReplay(t *testing.T) {
 		}
 		select {}
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestV2DaemonSIGKILLReplay$", "-test.timeout=30s")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.timeout=30s")
 	cmd.Env = append(os.Environ(), "V2_DAEMON_CRASH_ROOT="+root)
 	var childOutput bytes.Buffer
 	cmd.Stdout = &childOutput

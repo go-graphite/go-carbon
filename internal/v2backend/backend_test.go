@@ -36,11 +36,14 @@ func TestPortableBackendOracle1680(t *testing.T) {
 func TestPortableBackendLiveOracle1680(t *testing.T) {
 	testPortableBackendOracle1680(t, false)
 }
-func testPortableBackendOracle1680(t *testing.T, sealed bool) {
+func testPortableBackendOracle1680(t *testing.T, sealed bool, engine ...string) {
 	ctx := context.Background()
 	clock := int64(1794700800)
 	policies := make(map[string]daemonstore.Metric)
 	opts := testOptions(t.TempDir(), simplePolicy())
+	if len(engine) > 0 {
+		opts.WriteEngine = engine[0]
+	}
 	opts.Policy = func(n string) (daemonstore.Metric, error) { return policies[n], nil }
 	s, e := openAt(opts, func() time.Time { return time.Unix(clock, 0) })
 	if e != nil {
@@ -177,8 +180,13 @@ func TestBackendRecoveryOwnsInputAndResponseLifetime(t *testing.T) {
 }
 
 func TestBackendSIGKILL(t *testing.T) {
+	crashOptions := func(dir string) daemonstore.Options {
+		o := testOptions(dir, simplePolicy())
+		o.WriteEngine = os.Getenv("V2_BACKEND_CRASH_ENGINE")
+		return o
+	}
 	if dir := os.Getenv("V2_BACKEND_CRASH_DIR"); dir != "" {
-		s, e := openAt(testOptions(dir, simplePolicy()), func() time.Time { return time.Unix(1794700800, 0) })
+		s, e := openAt(crashOptions(dir), func() time.Time { return time.Unix(1794700800, 0) })
 		if e != nil {
 			panic(e)
 		}
@@ -221,7 +229,7 @@ func TestBackendSIGKILL(t *testing.T) {
 		t.Fatal(e)
 	}
 	_ = cmd.Wait()
-	s, e := openAt(testOptions(dir, simplePolicy()), func() time.Time { return time.Unix(1794700800, 0) })
+	s, e := openAt(crashOptions(dir), func() time.Time { return time.Unix(1794700800, 0) })
 	if e != nil {
 		t.Fatal(e)
 	}

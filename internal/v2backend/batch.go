@@ -17,6 +17,7 @@ import (
 )
 
 type resolvedMetric struct {
+	coreID uint64
 	name   string
 	owner  int
 	group  partsformat.Group
@@ -70,7 +71,14 @@ func (s *Store) resolve(name string) (*resolvedMetric, error) {
 	prefix = append(prefix, b...)
 	prefix = append(prefix, []byte(g)...)
 	r := &resolvedMetric{name: name, owner: s.route(name), group: g, policy: p, prefix: prefix}
-	actual, _ := s.resolved.LoadOrStore(name, r)
+	if s.core != nil {
+		r.coreID = s.coreSequence.Add(1)
+		s.coreCatalog.Store(r.coreID, r)
+	}
+	actual, loaded := s.resolved.LoadOrStore(name, r)
+	if loaded && s.core != nil {
+		s.coreCatalog.Delete(r.coreID)
+	}
 	return actual.(*resolvedMetric), nil
 }
 func (s *Store) makeFrame(name string, data []points.Point, clock int64) (frame, error) {

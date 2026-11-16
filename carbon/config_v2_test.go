@@ -20,6 +20,7 @@ shards = 7
 owners = 13
 part-interval = "250ms"
 journal-codec = "pdc3"
+write-engine = "standalone"
 `
 	if err := os.WriteFile(file, []byte(body), 0600); err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ journal-codec = "pdc3"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.V2.JournalCodec != "pdc3" || len(c.unknownKeys) != 0 || c.V2.Shards != 7 || c.V2.Owners != 13 || c.V2.PartInterval.Value() != 250*time.Millisecond {
+	if c.V2.WriteEngine != "standalone" || c.V2.JournalCodec != "pdc3" || len(c.unknownKeys) != 0 || c.V2.Shards != 7 || c.V2.Owners != 13 || c.V2.PartInterval.Value() != 250*time.Millisecond {
 		t.Fatalf("decode: %+v, unknown %v", c.V2, c.unknownKeys)
 	}
 	for name, change := range map[string]func(*Config){
@@ -38,6 +39,7 @@ journal-codec = "pdc3"
 		"owners":    func(n *Config) { n.V2.Owners++ },
 		"interval":  func(n *Config) { n.V2.PartInterval.Duration++ },
 		"codec":     func(n *Config) { n.V2.JournalCodec = "pdx1" },
+		"engine":    func(n *Config) { n.V2.WriteEngine = "core" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			n := *c
@@ -99,18 +101,20 @@ func TestV2Validation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, change := range map[string]func(*Config){
-		"relative":      func(n *Config) { n.V2.DataDir = "parts" },
-		"root":          func(n *Config) { n.V2.DataDir = "/" },
-		"legacy":        func(n *Config) { n.V2.DataDir = n.Whisper.DataDir },
-		"zero shards":   func(n *Config) { n.V2.Shards = 0 },
-		"zero owners":   func(n *Config) { n.V2.Owners = 0 },
-		"zero interval": func(n *Config) { n.V2.PartInterval = Duration{} },
-		"unknown codec": func(n *Config) { n.V2.JournalCodec = "unknown" },
-		"legacy log":    func(n *Config) { n.InputLog.Enabled = true },
-		"legacy dump":   func(n *Config) { n.Dump.Enabled = true },
-		"handoff":       func(n *Config) { n.Dump.HandoffSupervisor = true },
-		"tags":          func(n *Config) { n.Tags.Enabled = true },
-		"copies":        func(n *Config) { n.Buckyd.Enabled = true },
+		"relative":       func(n *Config) { n.V2.DataDir = "parts" },
+		"root":           func(n *Config) { n.V2.DataDir = "/" },
+		"legacy":         func(n *Config) { n.V2.DataDir = n.Whisper.DataDir },
+		"zero shards":    func(n *Config) { n.V2.Shards = 0 },
+		"zero owners":    func(n *Config) { n.V2.Owners = 0 },
+		"zero interval":  func(n *Config) { n.V2.PartInterval = Duration{} },
+		"unknown engine": func(n *Config) { n.V2.WriteEngine = "unknown" },
+		"core geometry":  func(n *Config) { n.V2.WriteEngine = "core"; n.V2.Owners = n.V2.Shards + 1 },
+		"unknown codec":  func(n *Config) { n.V2.JournalCodec = "unknown" },
+		"legacy log":     func(n *Config) { n.InputLog.Enabled = true },
+		"legacy dump":    func(n *Config) { n.Dump.Enabled = true },
+		"handoff":        func(n *Config) { n.Dump.HandoffSupervisor = true },
+		"tags":           func(n *Config) { n.Tags.Enabled = true },
+		"copies":         func(n *Config) { n.Buckyd.Enabled = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			n := *c

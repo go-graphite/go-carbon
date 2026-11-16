@@ -26,6 +26,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/partsread"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/points"
 	"golang.org/x/sync/semaphore"
 )
@@ -83,12 +84,14 @@ type owner struct {
 	done           chan struct{}
 	active         []frame
 	pending        []frame
+	coreCursor     uint64
 	nextOrder      uint64
 	journalEncoder receiptEncoder
 	workspace      sealrollup.Workspace
 	batchScratch   []sealrollup.Batch
 	sampleScratch  []sealrollup.Sample
 	receiptScratch []partlog.DictionaryFrame
+	sealPending    bool
 	commitScratch  sealScratch
 	spare          []frame
 	meta           checkpoint
@@ -98,6 +101,12 @@ type owner struct {
 	readBase       atomic.Pointer[liveBase]
 }
 type Store struct {
+	core                          *v2core.Engine
+	coreRoutes                    []uint64
+	coreCatalog                   sync.Map
+	coreSequence                  atomic.Uint64
+	coreReplay                    atomic.Bool
+	coreViewsClosed               atomic.Bool
 	opts                          daemonstore.Options
 	resolved                      sync.Map
 	admissionContext              context.Context
@@ -130,6 +139,12 @@ var _ daemonstore.Backend = (*Store)(nil)
 func Open(opts daemonstore.Options) (daemonstore.Backend, error) { return openAt(opts, time.Now) }
 
 func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error) {
+	if opts.WriteEngine != "" && opts.WriteEngine != "standalone" && opts.WriteEngine != "core" {
+		return nil, errors.New("unknown v2 write engine")
+	}
+	if opts.WriteEngine == "core" && opts.Owners != opts.Shards {
+		return nil, errors.New("core write engine requires owners equal shards")
+	}
 	if err := validJournalCodec(opts.JournalCodec); err != nil {
 		return nil, err
 	}
@@ -149,7 +164,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 		}
 	}()
 	// Each database's LOCK fences simultaneous processes before journal recovery.
-	for i := 0; i < opts.Shards; i++ {
+	for i := 0; opts.WriteEngine != "core" && i < opts.Shards; i++ {
 		dir := filepath.Join(opts.DataDir, fmt.Sprintf("db-%04d", i))
 		db, e := pebble.Open(dir, &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 },
 			EventListener: &pebble.EventListener{WriteStallBegin: func(pebble.WriteStallBeginInfo) { s.stalls.Add(1) }}})
@@ -160,6 +175,9 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	}
 	// Geometry and origin are restart invariants, never inferred from local IDs.
 	format := []byte(fmt.Sprintf("experimental-v2-single-origin-v1\nowners=%d\nshards=%d\n", opts.Owners, opts.Shards))
+	if opts.WriteEngine == "core" {
+		format = append(format, "write-engine=core-v1\n"...)
+	}
 	marker := filepath.Join(opts.DataDir, "V2FORMAT")
 	if old, e := os.ReadFile(marker); e == nil {
 		if !bytes.Equal(old, format) {
@@ -193,6 +211,11 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	if err != nil {
 		return nil, err
 	}
+	if opts.WriteEngine == "core" {
+		if err = s.openCore(); err != nil {
+			return nil, err
+		}
+	}
 	for i := 0; i < opts.Owners; i++ {
 		o := &owner{id: i, s: s, db: s.dbs[i%opts.Shards], dir: filepath.Join(opts.DataDir, fmt.Sprintf("owner-%04d", i)),
 			admission: semaphore.NewWeighted(256 << 20), requests: make(chan command, 64), done: make(chan struct{}), metrics: make(map[string]*metricState)}
@@ -204,6 +227,10 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 			return nil, fmt.Errorf("owner %d: %w", i, e)
 		}
 		o.nextOrder = max(o.meta.Order, o.meta.Cursor)
+		o.coreCursor = o.meta.Cursor
+		if s.core != nil && s.core.DurableFrontiers()[i][i] != o.meta.Cursor {
+			return nil, errors.New("core/backend atomic frontier mismatch")
+		}
 	}
 	if err = s.openLegacy(); err != nil {
 		return nil, err
@@ -211,10 +238,12 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	if err = s.log.Sync(); err != nil {
 		return nil, err
 	}
+	s.coreReplay.Store(true)
 	// Replay only collects while the journal stream is borrowed. Syncing from a
 	// replay callback would recursively wait on that same stream.
 	for _, o := range s.owners {
 		pendingPoints := 0
+		replayCursor := o.meta.Cursor
 		var decoder receiptDecoder
 		defer decoder.close()
 		// Definitions can precede the durable apply frontier. Decode the retained
@@ -224,7 +253,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 			if e != nil {
 				return e
 			}
-			if r.Cursor <= o.meta.Cursor {
+			if r.Cursor <= replayCursor {
 				return nil
 			}
 			for _, f := range fs {
@@ -245,9 +274,22 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 				o.nextOrder++
 				f.order = o.nextOrder
 				f.payload = nil
+				if s.core != nil {
+					f.resolved, e = s.resolve(f.name)
+					if e != nil {
+						return e
+					}
+				}
 				o.active = append(o.active, f)
 				pendingPoints += len(f.points)
 				s.ingested.Add(uint64(len(f.points)))
+			}
+			if s.core != nil {
+				if e := o.appendCore(o.active); e != nil {
+					return e
+				}
+				o.active = nil
+				pendingPoints = 0
 			}
 			// Never checkpoint a partial journal record: all its frames share Cursor.
 			if pendingPoints >= 1<<20 {
@@ -266,7 +308,14 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 		return nil, err
 	}
 	for _, o := range s.owners {
-		if err = o.commit(o.active); err != nil {
+		if s.core != nil {
+			if o.coreCursor > 0 {
+				err = s.core.Append(o.id, nil, o.coreCursor, true)
+			}
+		} else {
+			err = o.commit(o.active)
+		}
+		if err != nil {
 			return nil, err
 		}
 		o.active = nil
@@ -274,6 +323,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 			return nil, err
 		}
 	}
+	s.coreReplay.Store(false)
 	if err = s.openMixed(); err != nil {
 		return nil, err
 	}
@@ -286,11 +336,15 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 }
 
 func (s *Store) abortOpen() {
+	s.coreViewsClosed.Store(true)
 	for _, o := range s.owners {
 		o.pub.Close()
 		if b := o.readBase.Swap(nil); b != nil {
 			b.pub.Close()
 		}
+	}
+	if s.core != nil {
+		_ = s.core.Close()
 	}
 	if s.log != nil {
 		_ = s.log.Close()
@@ -298,8 +352,10 @@ func (s *Store) abortOpen() {
 	if s.legacy != nil {
 		_ = s.legacy.Close()
 	}
-	for _, db := range s.dbs {
-		_ = db.Close()
+	if s.core == nil {
+		for _, db := range s.dbs {
+			_ = db.Close()
+		}
 	}
 }
 func (s *Store) route(name string) int {
@@ -353,6 +409,10 @@ func (o *owner) run() {
 		}
 		var a answer
 		switch c.op {
+		case 's':
+			if o.coreCursor > 0 {
+				a.err = o.s.core.Append(o.id, nil, o.coreCursor, true)
+			}
 		case 'f':
 			a.frames = o.active
 			o.active = o.spare[:0]
@@ -430,8 +490,13 @@ func (o *owner) run() {
 						fs[i].payload = nil
 						n += uint64(len(fs[i].points))
 					}
-					o.active = append(o.active, fs...)
-					o.s.ingested.Add(n)
+					if o.s.core != nil {
+						a.err = o.appendCore(fs)
+					}
+					if a.err == nil {
+						o.active = append(o.active, fs...)
+						o.s.ingested.Add(n)
+					}
 				}
 			}
 			for _, cc := range commands {
@@ -485,7 +550,12 @@ func (s *Store) flush() error {
 			if s.beforeSeal != nil && len(fs) > 0 {
 				s.beforeSeal(o.id)
 			}
-			e := o.commit(fs)
+			var e error
+			if s.core != nil {
+				e = o.awaitCorePublication(fs)
+			} else {
+				e = o.commit(fs)
+			}
 			if e == nil {
 				o.admission.Release(frameCharge(fs))
 			}
@@ -562,16 +632,24 @@ func (s *Store) Close() error {
 			o.requests <- command{op: 'q', answer: a}
 			<-a
 			<-o.done
+		}
+		s.coreViewsClosed.Store(true)
+		for _, o := range s.owners {
 			o.pub.Close()
 			if b := o.readBase.Swap(nil); b != nil {
 				b.pub.Close()
 			}
 		}
+		if s.core != nil {
+			s.closeErr = errors.Join(s.closeErr, s.core.Close())
+		}
 		close(s.watchStop)
 		<-s.watchDone
 		s.closeErr = errors.Join(s.closeErr, s.log.Close())
-		for _, db := range s.dbs {
-			s.closeErr = errors.Join(s.closeErr, db.Close())
+		if s.core == nil {
+			for _, db := range s.dbs {
+				s.closeErr = errors.Join(s.closeErr, db.Close())
+			}
 		}
 		if s.legacy != nil {
 			s.closeErr = errors.Join(s.closeErr, s.legacy.Close())

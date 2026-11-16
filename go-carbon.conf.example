@@ -1523,3 +1523,8 @@ part-interval = "1s"
 # selector; retain all journal segments containing the dictionary epoch prefix.
 # "pdc3" enables exact per-series value/timestamp/arrival-clock predictions.
 journal-codec = "pdx1"
+
+# "core" routes durable envelopes through the shared owner engine, using its
+# atomic replacement seal. This experimental selector requires owners=shards
+# and a fresh directory; standalone directories cannot be opened as core.
+write-engine = "standalone"

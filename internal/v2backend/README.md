@@ -161,3 +161,39 @@ Dependency packages are composed from their sibling changes as separate commits
 so reviewers can distinguish that code from the adapter itself. The deliberate
 compatibility delta can be removed when the backend, reducer and read packages
 land together with these outstanding gates satisfied.
+
+## Shared owner engine
+
+The restart-only `[v2] write-engine = "core"` selector submits journal envelopes
+through `internal/v2core`. The default `"standalone"` path remains available for
+comparison. Core currently requires `owners = shards` and a fresh data directory;
+the directory marker rejects selecting another engine on restart. This initial
+adapter preserves one physical database per journal owner; it does not yet expose
+independent intake-producer and physical-database counts.
+
+Each core batch represents one original journal envelope. Opaque descriptors
+retain each original apply's immutable catalog handle, clock, order and point
+count. Handles and core routing tokens are process-local: canonical names,
+placement groups and routing vshards remain authoritative in portable SSTs and
+recovery checkpoints. Replay resolves new handles from the retained journal and
+uses the same core submission and replacement planner as intake.
+
+The backend prepares every portable data/catalog/ref/checkpoint file without
+advancing visible state. Core ingests these files atomically with its own receipt
+frontier, suppressing numeric raw output. Commit installs reducer state; Abort
+releases staging scratch. A journal durability barrier precedes every live seal.
+The audited backend checkpoint prefix `ff 56 32` is separate from core's
+`ff 66` frontier. Core owns database lifetime; backend readers release their
+snapshots before engine close.
+
+`TestCoreBackendOracle3360` applies the classic oracle to sealed and live reads;
+`TestCoreBackendSIGKILL` and `TestV2DaemonCoreSIGKILLReplay` exercise actual process
+kills. `TestCorePortableRoutingAndRestartFence` covers multiple owners, portable
+recovery and suppression of numeric raw records.
+
+The native opt-in `TestCoreFixtureThroughput120` (`V2_CORE_FIXTURE_BENCH=1`)
+uses the TCP fixture's cardinality, per-name value bits and advancing wall clock,
+but starts with numeric identities and excludes TCP, the input journal and the
+portable replacement planner. Report those differences with any daemon/core ratio.
+`V2_BACKEND_WRITE_ENGINE=core` selects the new path in the existing independent
+sender daemon benchmark. Neither path has a production capacity qualification.

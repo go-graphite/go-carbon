@@ -15,6 +15,7 @@ type v2Config struct {
 	Shards       int      `toml:"shards"`
 	Owners       int      `toml:"owners"`
 	PartInterval Duration `toml:"part-interval"`
+	WriteEngine  string   `toml:"write-engine"`
 	JournalCodec string   `toml:"journal-codec"`
 }
 
@@ -26,6 +27,15 @@ func validateV2Config(c *Config) error {
 	v := c.V2
 	if !v.Enabled {
 		return nil
+	}
+	switch v.WriteEngine {
+	case "", "standalone":
+	case "core":
+		if v.Owners != v.Shards {
+			return fmt.Errorf("core write engine requires owners equal shards")
+		}
+	default:
+		return fmt.Errorf("unknown v2 write-engine %q", v.WriteEngine)
 	}
 	switch v.JournalCodec {
 	case "", "pdx1", "pdc3":

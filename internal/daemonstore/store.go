@@ -45,6 +45,8 @@ type Stats struct {
 	SealLatencySeconds, ReadP99Seconds float64
 }
 type Options struct {
+	// WriteEngine selects the restart-only standalone or shared-core path.
+	WriteEngine string
 	// JournalCodec selects the restart-only receipt writer: empty/pdx1 or pdc3.
 	JournalCodec string
 	// Legacy storage is a read-only base. Open must never start its maintenance
