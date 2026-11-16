@@ -100,6 +100,13 @@ func TestV2Validation(t *testing.T) {
 	if err := validateV2Config(c); err != nil {
 		t.Fatal(err)
 	}
+	for _, codec := range []string{"pdx1", "pdc3", "pdc4"} {
+		n := *c
+		n.V2.WriteEngine, n.V2.Owners, n.V2.Shards, n.V2.JournalCodec = "core", 48, 12, codec
+		if err := validateV2Config(&n); err != nil {
+			t.Fatalf("decoupled core with %s: %v", codec, err)
+		}
+	}
 	for name, change := range map[string]func(*Config){
 		"relative":       func(n *Config) { n.V2.DataDir = "parts" },
 		"root":           func(n *Config) { n.V2.DataDir = "/" },
@@ -108,7 +115,7 @@ func TestV2Validation(t *testing.T) {
 		"zero owners":    func(n *Config) { n.V2.Owners = 0 },
 		"zero interval":  func(n *Config) { n.V2.PartInterval = Duration{} },
 		"unknown engine": func(n *Config) { n.V2.WriteEngine = "unknown" },
-		"core geometry":  func(n *Config) { n.V2.WriteEngine = "core"; n.V2.Owners = n.V2.Shards + 1 },
+		"core geometry":  func(n *Config) { n.V2.WriteEngine = "core"; n.V2.Owners = n.V2.Shards - 1 },
 		"unknown codec":  func(n *Config) { n.V2.JournalCodec = "unknown" },
 		"legacy log":     func(n *Config) { n.InputLog.Enabled = true },
 		"legacy dump":    func(n *Config) { n.Dump.Enabled = true },

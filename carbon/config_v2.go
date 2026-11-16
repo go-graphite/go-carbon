@@ -31,14 +31,14 @@ func validateV2Config(c *Config) error {
 	switch v.WriteEngine {
 	case "", "standalone":
 	case "core":
-		if v.Owners != v.Shards {
-			return fmt.Errorf("core write engine requires owners equal shards")
+		if v.Owners < v.Shards {
+			return fmt.Errorf("core write engine requires at least one journal owner per shard")
 		}
 	default:
 		return fmt.Errorf("unknown v2 write-engine %q", v.WriteEngine)
 	}
 	switch v.JournalCodec {
-	case "", "pdx1", "pdc3":
+	case "", "pdx1", "pdc3", "pdc4":
 	default:
 		return fmt.Errorf("unknown v2 journal-codec %q", v.JournalCodec)
 	}
