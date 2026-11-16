@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"math/bits"
 	"slices"
 	"strconv"
 
@@ -28,22 +29,23 @@ type compactPendingMetric struct {
 	history  [][]byte
 }
 type compactSealWorkspace struct {
-	configJSON  [][]byte
-	owner       *atomicRollupOwner
-	part        uint64
-	descriptors []compactRollupBatch
-	pending     []compactPendingMetric
-	data, meta  []coreKV
-	files       [2][]coreKV
-	arena       []byte
-	scratch     []sealrollup.Sample
-	batches     []sealrollup.Batch
-	records     []sealrollup.Record
-	decoder     compactRollupHead
-	policyKeys  []string
-	configs     []sealrollup.Config
-	prepared    []*sealrollup.Prepared
-	commit      func()
+	outputBytes, outputData, outputMeta int
+	configJSON                          [][]byte
+	owner                               *atomicRollupOwner
+	part                                uint64
+	descriptors                         []compactRollupBatch
+	pending                             []compactPendingMetric
+	data, meta                          []coreKV
+	files                               [2][]coreKV
+	arena                               []byte
+	scratch                             []sealrollup.Sample
+	batches                             []sealrollup.Batch
+	records                             []sealrollup.Record
+	decoder                             compactRollupHead
+	policyKeys                          []string
+	configs                             []sealrollup.Config
+	prepared                            []*sealrollup.Prepared
+	commit                              func()
 }
 
 // Idle scratch is bounded per workspace. Large one-off heads must not retain
@@ -52,7 +54,29 @@ type compactSealWorkspace struct {
 const compactIdleArenaBytes = 1 << 20
 const compactIdleKVs = 4096
 
+func compactOutputClass(n int) int {
+	if n <= 1 {
+		return n
+	}
+	return 1 << bits.Len(uint(n-1))
+}
+
+func (w *compactSealWorkspace) prepareOutput() {
+	// Retain size hints, not large backing arrays. The next oversized seal
+	// allocates once per output buffer instead of repeating geometric growth.
+	if w.arena == nil && w.outputBytes > 0 {
+		w.arena = make([]byte, 0, compactOutputClass(w.outputBytes))
+	}
+	if w.data == nil && w.outputData > 0 {
+		w.data = make([]coreKV, 0, compactOutputClass(w.outputData))
+	}
+	if w.meta == nil && w.outputMeta > 0 {
+		w.meta = make([]coreKV, 0, compactOutputClass(w.outputMeta))
+	}
+}
+
 func (w *compactSealWorkspace) releaseOutput() {
+	w.outputBytes, w.outputData, w.outputMeta = len(w.arena), len(w.data), len(w.meta)
 	clear(w.data[:cap(w.data)])
 	clear(w.meta[:cap(w.meta)])
 	clear(w.batches[:cap(w.batches)])
@@ -253,6 +277,7 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 		}
 	}()
 	w.part = in.Next.NextPart
+	w.prepareOutput()
 	w.descriptors = append(w.descriptors[:0], g.batches...)
 	descriptors := w.descriptors
 	slices.SortStableFunc(descriptors, func(a, b compactRollupBatch) int {
