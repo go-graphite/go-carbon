@@ -15,6 +15,7 @@ import (
 // Values include defaults so upgrading the binary cannot silently change scope.
 // Credentials are never saved: only the signing secret's path is recorded.
 type savedSyncConfig struct {
+	DataScopeKey string            `json:"data_scope_key,omitempty"`
 	RingIdentity string            `json:"ring_identity"`
 	CopyState    string            `json:"copy_state,omitempty"`
 	Version      int               `json:"version"`
@@ -59,10 +60,10 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window":
+		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
-			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --timeout, --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete, --ready-block, --gapfill-window) may override it (use a new --state for a different run)", name)
+			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; operational and READY inputs may override it; donor/target/ring/names/window changes select a preserved child scope", name)
 		}
 	}
 	// Repeated flags append, so clear their CLI/default values before restoring.
@@ -85,6 +86,15 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	if c.explicit == nil {
 		c.explicit = map[string]bool{}
 	}
+	if _, ok := overrides["source"]; ok {
+		c.copy.froms = nil
+	}
+	if _, ok := overrides["from"]; ok {
+		c.copy.froms = nil
+	}
+	if _, ok := overrides["window"]; ok {
+		c.sync.windows = nil
+	}
 	if _, ok := overrides["period"]; ok {
 		c.ready.period = nil
 	}
@@ -102,6 +112,9 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	}
 	c.copy.state = resume
 	c.sync.ringIdentity = saved.RingIdentity
+	if _, ok := overrides["ring"]; ok {
+		c.sync.ringIdentity = c.copy.ring
+	}
 	if saved.CopyState != "" {
 		c.copy.state = saved.CopyState
 	}
@@ -197,6 +210,10 @@ func (c *syncCommand) saveConfig() error {
 		return err
 	}
 	c.config.Flags["jwt-secret"] = secret
+	c.config.DataScopeKey, err = readyDataScopeKey(c.sync)
+	if err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(c.config, "", "  ")
 	if err != nil {
 		return err
@@ -255,7 +272,7 @@ func (c *syncCommand) validateResumeJournal() error {
 		return err
 	}
 	if header.Kind != "header" || header.Identity != identity {
-		return errors.New("resume scope differs from durable journal; provide the original sources, target, windows and ring (or use a new --state)")
+		return fmt.Errorf("%s record 1: resume scope differs from durable journal; prior work retained", path)
 	}
 	return nil
 }

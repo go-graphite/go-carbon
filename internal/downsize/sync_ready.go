@@ -19,16 +19,18 @@ import (
 var ErrSyncNotReady = errors.New("sync NOT_READY; see ready.json")
 
 type syncReadyOptions struct {
-	gapSelection []string
-	openGaps     []string
-	proofBlock   string
-	proofInput   json.RawMessage
-	scope        string
-	noReady      bool
-	carbonAPI    string
-	metricsPort  int
-	period       syncRanges
-	gapsComplete bool
+	recheck       []string
+	inputsChanged bool
+	gapSelection  []string
+	openGaps      []string
+	proofBlock    string
+	proofInput    json.RawMessage
+	scope         string
+	noReady       bool
+	carbonAPI     string
+	metricsPort   int
+	period        syncRanges
+	gapsComplete  bool
 }
 type readyPolicy struct {
 	Aggregation  string        `json:"aggregation"`
@@ -52,6 +54,10 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
+	PriorAttestation     string             `json:"prior_attestation,omitempty"`
+	RecheckedNames       []string           `json:"rechecked_names,omitempty"`
+	DataScopeKey         string             `json:"data_scope_key,omitempty"`
+	ScopeKey             string             `json:"scope_key,omitempty"`
 	PendingSelections    []syncResidual     `json:"pending_selections,omitempty"`
 	RedoNames            map[string]int64   `json:"redo_names"`
 	PendingRecovery      string             `json:"pending_recovery,omitempty"`
@@ -137,7 +143,36 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		}
 		return initial()
 	}
+	resume, err := inspectReadyResume(ctx, *o, r, b)
+	if err != nil {
+		return err
+	}
+	if resume.finished {
+		return publishReadyNoop(*o, resume.report)
+	}
+	o.readyFrontier = true
 	report := readyReport{Ring: o.ring, NamesSHA256: o.namesHash, Prefix: o.prefix, Period: r.period, GapLedgerComplete: r.gapsComplete, Exclusions: []string{"archive-expiration boundary plus 2400s margin", "newest unsettled points outside explicit gap windows"}, Schema: 1, Verdict: "NOT_READY", Reasons: []string{"sync in progress"}, Target: o.to, Sources: o.from, Windows: append(syncRanges(nil), o.windows...), Counts: map[string]readyCount{}}
+	report.DataScopeKey, err = readyDataScopeKey(*o)
+	if err != nil {
+		return err
+	}
+	report.ScopeKey, err = readyScopeKey(*o, r)
+	if err != nil {
+		return err
+	}
+	report.PriorAttestation, err = retainReadyAttestation(*o, resume.report)
+	if err != nil {
+		return err
+	}
+	report.RecheckedNames = resume.changed
+	if report.PriorAttestation == "" {
+		var parent struct{ Parent string }
+		if e := readReadyObservationJSON(filepath.Join(o.state, "scope-parent.json"), &parent); e == nil {
+			report.PriorAttestation = parent.Parent
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+	}
 	report.Scope = r.scope
 	if report.Scope == "" {
 		report.Scope = "full-history"
@@ -258,7 +293,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		}
 	}
 	recoveryPath := filepath.Join(o.state, "ready-recovery.json")
-	resume, e := readReadyRecovery(recoveryPath, *o, r.scope)
+	recoveryResume, e := readReadyRecovery(recoveryPath, *o, r.scope)
 	if e != nil {
 		return e
 	}
@@ -275,11 +310,11 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 			report.Reasons = append(report.Reasons, validation...)
 			report.ProofState, report.Processes = completed, before
 			report.PendingWindows = readyRestartWindows(previous, before)
-			if resume != nil {
-				report.PendingWindows = readyRestartWindows(resume.Processes, before)
-				if filepath.Join(o.state, resume.State) != completed {
-					report.PendingRecovery = resume.State
-					report.PendingWindows = append(append(syncRanges(nil), resume.Windows...), report.PendingWindows...)
+			if recoveryResume != nil {
+				report.PendingWindows = readyRestartWindows(recoveryResume.Processes, before)
+				if filepath.Join(o.state, recoveryResume.State) != completed {
+					report.PendingRecovery = recoveryResume.State
+					report.PendingWindows = append(append(syncRanges(nil), recoveryResume.Windows...), report.PendingWindows...)
 				}
 			}
 			invalidation := ""
@@ -293,11 +328,16 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 	if e = repairLegacyWindowQuarantine(ctx, *o, b); e != nil {
 		return e
 	}
-	if resume == nil {
+	if recoveryResume == nil && !resume.completed {
 		if e = initial(); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return e
 		}
 		if e = saveReadyObservation(*o, o.state); e != nil {
+			return e
+		}
+	}
+	for _, work := range resume.work {
+		if e = runSync(ctx, work, b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return e
 		}
 	}
@@ -306,22 +346,25 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		return nil
 	}
 	state := o.state
+	if resume.completed {
+		state = resume.state
+	}
 	if e = readyProgress(o.state, "running", nil); e != nil {
 		return e
 	}
-	if resume != nil {
-		if e = seedReadyRecoveryCatalog(ctx, *o, resume.options(*o)); e != nil {
+	if recoveryResume != nil {
+		if e = seedReadyRecoveryCatalog(ctx, *o, recoveryResume.options(*o)); e != nil {
 			return fmt.Errorf("restart catalog: %w", e)
 		}
-		if e = runSync(ctx, resume.options(*o), b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
+		if e = runSync(ctx, recoveryResume.options(*o), b); e != nil && !errors.Is(e, ErrSyncQuarantined) {
 			return fmt.Errorf("restart recovery: %w", e)
 		}
-		if e = saveReadyObservation(*o, filepath.Join(o.state, resume.State)); e != nil {
+		if e = saveReadyObservation(*o, filepath.Join(o.state, recoveryResume.State)); e != nil {
 			return e
 		}
-		previous, state, unbound = resume.Processes, filepath.Join(o.state, resume.State), false
-		report.Restarts = append(report.Restarts, resume.Restarts...)
-		report.Windows = append(report.Windows, resume.Restarts...)
+		previous, state, unbound = recoveryResume.Processes, filepath.Join(o.state, recoveryResume.State), false
+		report.Restarts = append(report.Restarts, recoveryResume.Restarts...)
+		report.Windows = append(report.Windows, recoveryResume.Restarts...)
 	}
 	// Check prerequisites immediately after work completes, before allocating
 	// another recovery generation for a restart observed during that work.
@@ -405,9 +448,24 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		report.PolicyNames = 0
 		report.PolicyMismatches = 0
 		report.ExpectedAbsent = 0
-		if e = readyChecks(ctx, *o, r, b, state, &report); e != nil {
+		checkOptions, checkReady := *o, r
+		if resume.report.Verdict == "READY" || resume.report.Verdict == "READY_EXCEPT" {
+			checkReady.recheck = resume.changed
+			if len(report.Restarts) > 0 || len(resume.windows) > 0 {
+				checkReady.scope, checkReady.period = "windows", nil
+				checkOptions.fullHistory = false
+			}
+		}
+		checkReport := report
+		if checkReady.scope == "windows" && r.scope != "windows" {
+			checkReport.Windows = append(append(syncRanges(nil), report.Restarts...), resume.windows...)
+		}
+		if e = readyChecks(ctx, checkOptions, checkReady, b, state, &checkReport); e != nil {
 			return e
 		}
+		report.Counts, report.Sample, report.Reasons = checkReport.Counts, checkReport.Sample, checkReport.Reasons
+		report.PolicyNames, report.PolicyMismatches, report.ExpectedAbsent = checkReport.PolicyNames, checkReport.PolicyMismatches, checkReport.ExpectedAbsent
+		report.HistoryVerifiedUntil = checkReport.HistoryVerifiedUntil
 		needsFill := false
 		for key, count := range report.Counts {
 			if !strings.HasPrefix(key, "readback ") && count.Missing > 0 {
@@ -434,6 +492,19 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		}
 		if len(readyRestartWindows(previous, final)) > 0 {
 			continue
+		}
+		if len(report.Reasons) == 0 {
+			if e = sealReadyFrontiers(ctx, *o, b, state, len(report.Restarts) > 0); e != nil {
+				return e
+			}
+			sealed, e := capture()
+			if e != nil {
+				return e
+			}
+			if len(readyRestartWindows(final, sealed)) > 0 {
+				continue
+			}
+			final = sealed
 		}
 		report.Processes = final
 		report.ProofState = state
@@ -620,12 +691,16 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		batch = nil
 		return nil
 	}
+	recheck := map[string]bool{}
+	for _, name := range r.recheck {
+		recheck[name] = true
+	}
 	for scan.Scan() {
 		name, mask, _, e := parseUnionLine(scan.Text())
 		if e != nil {
 			return e
 		}
-		if mask == 0 && o.namesFile == "" || o.issues.excluded(name) {
+		if mask == 0 && o.namesFile == "" || o.issues.excluded(name) || len(recheck) > 0 && !recheck[name] {
 			continue
 		}
 		batch = append(batch, name)
@@ -661,7 +736,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		report.Sample = append(report.Sample, name)
 	}
 	sort.Strings(report.Sample)
-	if len(cohort) < 100 {
+	if len(cohort) < 100 && len(recheck) == 0 {
 		report.Reasons = append(report.Reasons, fmt.Sprintf("sample minimum: %d names; require 100", len(cohort)))
 	}
 	windows := append(syncRanges(nil), r.period...)
@@ -720,10 +795,10 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 				readyAdd(report, key, row)
 			}
 		}
-		if r.scope != "windows" && report.Counts["period "+source].Names < 50 {
+		if len(recheck) == 0 && r.scope != "windows" && report.Counts["period "+source].Names < 50 {
 			report.Reasons = append(report.Reasons, "period sample minimum: "+source+" requires 50 names with data")
 		}
-		if r.scope != "windows" && report.Counts["history "+source].Names < 50 {
+		if len(recheck) == 0 && r.scope != "windows" && report.Counts["history "+source].Names < 50 {
 			report.Reasons = append(report.Reasons, "full-history sample minimum: "+source+" requires 50 names with data")
 		}
 	}
@@ -775,7 +850,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 			}
 		}
 		report.Counts[key] = row
-		if (r.scope != "windows" && row.Names < 50) || row.Missing > 0 || row.StepMismatch > 0 {
+		if (len(recheck) == 0 && r.scope != "windows" && row.Names < 50) || row.Missing > 0 || row.StepMismatch > 0 {
 			report.Reasons = append(report.Reasons, fmt.Sprintf("%s minimum/parity failure: %+v", key, row))
 		}
 	}

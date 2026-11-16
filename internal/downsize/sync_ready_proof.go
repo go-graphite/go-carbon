@@ -113,6 +113,48 @@ func runSeparateReadyProof(ctx context.Context, copy *syncOptions, r syncReadyOp
 		return err
 	}
 	defer lock.Close()
+	proofOptions, readyOptions, e := loadReadyProof(*copy, r)
+	if e != nil {
+		return e
+	}
+	if copy.issues == nil {
+		copy.issues, e = openSyncIssues(copy.state)
+		if e != nil {
+			return e
+		}
+	}
+	proofOptions.issues = copy.issues
+	if _, e = os.Stat(filepath.Join(proofOptions.state, "ready.json")); e == nil {
+		proofLock, e := lockResumeState(filepath.Join(proofOptions.state, "ready"))
+		if e != nil {
+			return e
+		}
+		completed, e := inspectReadyResume(ctx, proofOptions, readyOptions, b)
+		if e != nil {
+			proofLock.Close()
+			return e
+		}
+		if completed.finished {
+			defer proofLock.Close()
+			data, e := os.ReadFile(filepath.Join(proofOptions.state, "ready.json"))
+			if e != nil {
+				return e
+			}
+			root, e := os.ReadFile(filepath.Join(copy.state, "ready.json"))
+			if e != nil && !errors.Is(e, os.ErrNotExist) {
+				return e
+			}
+			if !bytes.Equal(root, data) {
+				if e = atomicSyncConfigFile(filepath.Join(copy.state, "ready.json"), data); e != nil {
+					return e
+				}
+			}
+			return publishReadyNoop(*copy, completed.report)
+		}
+		proofLock.Close()
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
 	root := filepath.Join(copy.state, "ready.json")
 	report := readyReport{Schema: 1, Verdict: "NOT_READY", Reasons: []string{"independent READY proof in progress"}, Target: copy.to}
 	if err = atomicStateJSON(root, report); err != nil {

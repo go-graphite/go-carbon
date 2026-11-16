@@ -217,11 +217,14 @@ storectl sync --resume /var/lib/carbon/sync-state \
 ```
 
 The replacement period replaces the saved period; it does not append to it or
-extend copied windows. All READY checks run again: an uncovered period or an
+extend copied windows. READY checks run for changed inputs: an uncovered period or an
 incomplete gap ledger still blocks READY. Set the ledger attestation true only
 when every known input gap has been backfilled and verified. Overrides are saved
-for later resumes. Sources, target, copy windows, phase opt-outs and authentication
-remain frozen; use a new state directory to change them. An old state without `config.json` needs its
+for later resumes. Changes to `--source`/`--from`, `--to`, `--ring`, `--names`, or `--window`
+select a deterministic `scope-*` child state and log the invalidating journal
+record. The original journal remains intact. Extending completed windows opens
+only uncovered intervals with full-history copying disabled. Phase opt-outs and
+authentication remain frozen. An old state without `config.json` needs its
 original flags once alongside `--resume`; the tool checks the journal identity
 and saves the configuration for subsequent resumes.
 
@@ -334,6 +337,15 @@ to a sorted inventory; omission means full discovery, not a sample.
 Use absolute input/state paths on the controller. Draft or open windows and an
 incomplete ledger must remain blocking until reviewed against the actual writer
 and restart ledger; never clear a flag just to pass validation.
+
+Starting an unchanged finished block again, with either `--block` or `--resume`,
+validates its saved scope, process identities, serving schemas and metadata-only
+mutation fences. It preserves `ready.json` and the journal, publishes phase
+`ready`, and exits zero for both READY and READY_EXCEPT. It performs no copy,
+data digest, render, or read-back work. Missing or unauthenticated saved proof
+fails closed. Completed verification with a blocked READY step resumes at READY.
+Changed metric fences reopen only affected names; a process restart opens only
+its new interval. A new attestation retains its prior attestation as provenance.
 
 `storectl sync --block /absolute/path/to/block.json --help` expands the block
 before displaying help without starting sync. It checks strict schema and block
@@ -730,8 +742,8 @@ missing-name copies, fills and `--sample-every` behavior, add `--full-history`.
 Without `--window`, behavior is unchanged.
 
 The saved configuration fixes the full-history/window-only scope, windows,
-verification batches and settle cutoff. Changing that configuration requires a
-fresh state directory; `--resume` only allows stream-count and rate overrides.
+verification batches and settle cutoff. Changed donor, target, ownership or window
+inputs select a named child scope as described under resume above.
 
 A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. Skipped selections are retried on fresh native pins when resuming and again after the missing-name scan. Only a complete window selection, followed by a successful window-only copy when points exist, writes a durable resolution. Original selection and native copy intents stay unchanged. Unresolved source coverage still prevents a successful exit even if another replica or serving-archive verification finds no holes; it is never treated as empty history.
 

@@ -103,6 +103,7 @@ type syncOptions struct {
 	maxRounds        int
 	settle           time.Duration
 	windows          syncRanges
+	readyFrontier    bool
 	sampleEvery      int
 	includeShort     bool
 	fullHistory      bool
