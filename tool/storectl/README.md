@@ -972,3 +972,20 @@ transfers use the existing `--snapshot-dir` / `--part-from` interface and resume
 by whole-file checksums. This stages portable files; external authority files,
 retention leases, authenticated live installation and complete coverage remain
 the retained snapshot owner's responsibility.
+
+For qualification, time snapshot creation separately from transfer: snapshot
+creation reads and hashes every retained file before publishing hard links.
+The receiver's JSON `Bytes` counts newly downloaded parts, `Skipped` counts
+locally revalidated parts, and `GBps` is decimal GB/s over the entire receive
+operation, including checksum verification, file syncs and manifest publication.
+A zero-payload resume still reads completed target files to validate their hashes.
+
+Measure loopback before cross-host transfer using the same retained inventory.
+Record the stream count, elapsed time, process CPU, physical disk and NIC byte
+deltas, cache state and concurrent workload for each run. Loopback throughput
+cannot establish physical NIC capacity. Evict only owned fixture files when
+qualifying cold reads; never clear the host's shared page cache. For an abrupt
+resume check, record completed IDs while a different part is in flight, SIGKILL
+only the fixture receiver, then repeat its exact command and target directory.
+The resumed result must skip every recorded verified ID; unfinished files may
+restart from their beginning. Repeat once more to confirm zero payload.
