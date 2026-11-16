@@ -39,11 +39,30 @@ type CatalogEncoder struct {
 func IsCatalogRecord(b []byte) bool { return bytes.HasPrefix(b, catalogCodecMagic) }
 
 func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
+	return e.encode(fs, nil)
+}
+
+// EncodeIDs accepts IDs already resolved in this encoder's catalog. It validates
+// each ID's name and definition without hashing the name again. Zero requests
+// normal interning, for example for new names mixed with resolved input frames.
+// IDs are stream-local handles, never routing or replica identities. Durability
+// ordering is identical to Encode: sync the catalog before its journal records.
+func (e *CatalogEncoder) EncodeIDs(fs []DictionaryFrame, ids []uint64) ([]byte, error) {
+	if len(ids) != len(fs) {
+		return nil, errPredictorV3
+	}
+	return e.encode(fs, ids)
+}
+
+func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64) ([]byte, error) {
 	if len(fs) == 0 || len(fs) > predictorV3MaxRaw/3 {
 		return nil, errPredictorV3
 	}
 	if e.Catalog == nil {
 		return nil, errPredictorV3
+	}
+	if e.Catalog.failed != nil {
+		return nil, e.Catalog.failed
 	}
 	reset := e.pages == nil || e.Independent
 	if reset {
@@ -59,13 +78,25 @@ func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 	values := predictorV3Writer{b: e.values[:0]}
 	clocks := predictorV3Writer{b: e.clocks[:0]}
 	clock := e.clock
-	for _, f := range fs {
+	for frame, f := range fs {
 		if f.Key == "" || len(f.Key) > predictorV3MaxRaw || len(f.Definition) > predictorV3MaxRaw || len(f.Points) == 0 || len(f.Points) > predictorV3MaxRaw {
 			return nil, errPredictorV3
 		}
-		id, err := e.Catalog.Intern(f.Key, f.Definition)
-		if err != nil {
-			return nil, err
+		var id uint64
+		if ids != nil {
+			id = ids[frame]
+		}
+		if id == 0 {
+			var err error
+			id, err = e.Catalog.Intern(f.Key, f.Definition)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			key, definition, ok := e.Catalog.Lookup(id)
+			if !ok || key != f.Key || !bytes.Equal(definition, f.Definition) {
+				return nil, errCatalog
+			}
 		}
 		start := len(meta)
 		meta = binary.AppendVarint(meta, int64(id)-previousID)

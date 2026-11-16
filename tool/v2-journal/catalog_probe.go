@@ -30,6 +30,9 @@ var catalogDir = flag.String("catalog-dir", "", "catalog experiment output root 
 var catalogFixturePoints = flag.Int64("catalog-fixture-points", 30000000, "points retained for a source fixture; short diagnostic cohorts are not production qualification")
 var captureIntervals = flag.Bool("capture-intervals", false, "report observed one-second encoded-point and process-CPU windows, separate from durable full-wall throughput")
 var captureProfile = flag.String("capture-cpuprofile", "", "capture-only CPU profile with stage labels; excludes fixture setup and exact verifier")
+var captureInitialProcs = runtime.GOMAXPROCS(0)
+var captureProcs = flag.Int("capture-procs", 0, "capture, sender and verifier GOMAXPROCS; 0 preserves the caller setting")
+var captureSenderCPUs = flag.String("capture-sender-cpus", "", "optional sender CPU set; empty inherits the caller affinity")
 var captureSeconds = flag.Int("capture-seconds", 0, "sustained group-fsync capture seconds after matched-byte comparison")
 var captureAfter = flag.Int64("capture-after-unix", 0, "do not begin capture before this Unix second")
 var captureStreams = flag.Int("capture-streams", 32, "independent capture streams")
@@ -40,6 +43,19 @@ var catalogSendStreams = flag.Int("catalog-send-streams", 32, "internal sender s
 var catalogRecapture = flag.String("catalog-recapture", "", "load a completed capture fixture instead of rereading the input log")
 var captureUnseenEvery = flag.Uint64("capture-unseen-every", 0, "one never-seen name per N points; 0 disables churn")
 var captureUnseen = flag.Bool("capture-unseen", false, "give every tenth point a new never-repeated name before durable encoding")
+
+// Source setup has its own CPU limits; capture restores the caller's initial
+// setting unless an explicit limit was requested. No host-size-specific cap.
+func configureCaptureProcs() {
+	procs := *captureProcs
+	if procs < 0 {
+		panic("capture-procs must not be negative")
+	}
+	if procs == 0 {
+		procs = captureInitialProcs
+	}
+	runtime.GOMAXPROCS(procs)
+}
 
 // unseenFrames is deterministic across packet boundaries and fixture repeats.
 // It preserves every tuple and order, changing only every tenth point's name.
@@ -52,26 +68,51 @@ func churnFrames(fs []partlog.DictionaryFrame, ordinal *uint64, every uint64) []
 }
 
 func churnFramesInto(fs []partlog.DictionaryFrame, ordinal *uint64, every uint64, out []partlog.DictionaryFrame) []partlog.DictionaryFrame {
+	out, _ = churnFramesWithIDs(fs, nil, ordinal, every, out, nil)
+	return out
+}
+
+// Preserve resolved IDs when splitting apply groups; generated names must intern.
+func churnFramesWithIDs(fs []partlog.DictionaryFrame, ids []uint64, ordinal *uint64, every uint64, out []partlog.DictionaryFrame, outIDs []uint64) ([]partlog.DictionaryFrame, []uint64) {
 	if every == 0 {
-		return fs
+		return fs, ids
 	}
-	clear(out)
-	out = out[:0]
-	for _, f := range fs {
+	previousFrames := out
+	out, outIDs = out[:0], outIDs[:0]
+	remaining := every - 1 - *ordinal%every
+	for i, f := range fs {
+		var id uint64
+		if ids != nil {
+			id = ids[i]
+		}
 		for start := 0; start < len(f.Points); {
-			n := int(min(uint64(len(f.Points)-start), every-1-*ordinal%every))
-			g := f
-			if n == 0 {
+			n := int(min(uint64(len(f.Points)-start), remaining))
+			g, resolved := f, id
+			if remaining == 0 {
 				n = 1
 				g.Key = fmt.Sprintf("\x00unseen/%d/%s", *ordinal, f.Key)
+				resolved = 0
+				remaining = every - 1
+			} else {
+				remaining -= uint64(n)
 			}
 			g.Points = f.Points[start : start+n]
 			out = append(out, g)
+			if ids != nil {
+				outIDs = append(outIDs, resolved)
+			}
 			start += n
+			previous := *ordinal
 			*ordinal += uint64(n)
+			if *ordinal < previous {
+				remaining = every - 1 - *ordinal%every
+			}
 		}
 	}
-	return out
+	if len(out) < len(previousFrames) {
+		clear(previousFrames[len(out):])
+	}
+	return out, outIDs
 }
 
 func catalogRecaptureMain() {
@@ -332,12 +373,14 @@ func catalogUnwire(b []byte, c *partlog.NameCatalog) ([]partlog.DictionaryFrame,
 type catalogWireReader struct {
 	packet []byte
 	frames []partlog.DictionaryFrame
+	ids    []uint64
 	points []points.Point
 }
 
 func (w *catalogWireReader) decode(b []byte, c *partlog.NameCatalog) ([]partlog.DictionaryFrame, int64) {
-	clear(w.frames)
+	previousFrames := w.frames
 	w.frames = w.frames[:0]
+	w.ids = w.ids[:0]
 	// Each point requires 16 wire bytes; reserve once before publishing slices.
 	if cap(w.points) < len(b)/16 {
 		w.points = make([]points.Point, 0, len(b)/16)
@@ -359,17 +402,23 @@ func (w *catalogWireReader) decode(b []byte, c *partlog.NameCatalog) ([]partlog.
 			panic("wire catalog")
 		}
 		start := len(w.points)
-		for range np {
-			w.points = append(w.points, points.Point{Timestamp: int64(binary.LittleEndian.Uint64(b)), Value: math.Float64frombits(binary.LittleEndian.Uint64(b[8:]))})
+		w.points = w.points[:start+np]
+		outPoints := w.points[start:]
+		for i := range outPoints {
+			outPoints[i] = points.Point{Timestamp: int64(binary.LittleEndian.Uint64(b)), Value: math.Float64frombits(binary.LittleEndian.Uint64(b[8:]))}
 			b = b[16:]
 		}
+		w.ids = append(w.ids, id)
 		w.frames = append(w.frames, partlog.DictionaryFrame{Key: key, Definition: def, Clock: clock, Points: w.points[start:]})
+	}
+	if len(w.frames) < len(previousFrames) {
+		clear(previousFrames[len(w.frames):])
 	}
 	return w.frames, int64(len(w.points))
 }
 
 func catalogSenderMain() {
-	runtime.GOMAXPROCS(64)
+	configureCaptureProcs()
 	f, e := os.Open(*catalogFixture)
 	must(e)
 	var blocks [][]byte
@@ -407,10 +456,10 @@ func catalogSenderMain() {
 	wg.Wait()
 }
 func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
-	if streams < 1 || streams > 96 || seconds < 1 {
+	if streams < 1 || seconds < 1 {
 		panic("capture limits")
 	}
-	runtime.GOMAXPROCS(96)
+	configureCaptureProcs()
 	root := filepath.Join(*catalogDir, "capture")
 	every := *captureUnseenEvery
 	if *captureUnseen {
@@ -448,7 +497,11 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	defer listener.Close()
 	exe, e := os.Executable()
 	must(e)
-	cmd := exec.Command("taskset", "-c", "96-191", exe, "-catalog-sender", listener.Addr().String(), "-catalog-fixture", fixture, "-catalog-send-seconds", fmt.Sprint(seconds), "-catalog-send-streams", fmt.Sprint(streams))
+	args := []string{"-catalog-sender", listener.Addr().String(), "-catalog-fixture", fixture, "-catalog-send-seconds", fmt.Sprint(seconds), "-catalog-send-streams", fmt.Sprint(streams), "-capture-procs", fmt.Sprint(*captureProcs)}
+	cmd := exec.Command(exe, args...)
+	if *captureSenderCPUs != "" {
+		cmd = exec.Command("taskset", append([]string{"-c", *captureSenderCPUs, exe}, args...)...)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	var count, encoded, unseenPoints atomic.Int64
@@ -531,6 +584,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 			var ordinal uint64
 			var wire catalogWireReader
 			var transformed []partlog.DictionaryFrame
+			var transformedIDs []uint64
 			var pending [][]byte
 			next := time.Now().Add(time.Second)
 			syncGroup := func() {
@@ -562,10 +616,10 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 				stage("wire_parse")
 				frames, n := wire.decode(b, cat)
 				stage("churn")
-				transformed = churnFramesInto(frames, &ordinal, every, transformed)
+				transformed, transformedIDs = churnFramesWithIDs(frames, wire.ids, &ordinal, every, transformed, transformedIDs)
 				frames = transformed
 				stage("encode")
-				record, e := enc.Encode(frames)
+				record, e := enc.EncodeIDs(frames, transformedIDs)
 				must(e)
 				// Keep references private until this group's catalog is durable.
 				pending = append(pending, record)
@@ -608,7 +662,7 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 		durableBytes += catalogDisk(filepath.Join(root, fmt.Sprint(i)))
 	}
 	emit(map[string]any{"stage": "capture_storage", "points": count.Load(), "unseen_points": unseenPoints.Load(), "durable_bytes": durableBytes, "bpp": float64(durableBytes) / float64(count.Load()), "catalog_fsync_p99_ms": float64(catalogP99) / 1e6, "catalog_syncs": len(catalogSyncNS), "unseen_every": every})
-	emit(map[string]any{"stage": "capture", "streams": streams, "seconds_including_final_sync": wall, "points": count.Load(), "m_points_per_second": float64(count.Load()) / wall / 1e6, "cores": cores, "cpu_ns_per_point": float64(captureCPU) / float64(count.Load()), "record_bpp": float64(encoded.Load()) / float64(count.Load()), "seed_catalog_bytes_per_stream": len(cp), "fsync_group_p99_ms": float64(p99) / 1e6, "group_syncs": len(syncNS), "exact": "tuple codec differential before run; sustained replay verification follows", "sender": "separate taskset96-191 process, raw TCP, repeated complete real cohort; capture taskset0-95"})
+	emit(map[string]any{"stage": "capture", "streams": streams, "seconds_including_final_sync": wall, "points": count.Load(), "m_points_per_second": float64(count.Load()) / wall / 1e6, "cores": cores, "cpu_ns_per_point": float64(captureCPU) / float64(count.Load()), "record_bpp": float64(encoded.Load()) / float64(count.Load()), "seed_catalog_bytes_per_stream": len(cp), "fsync_group_p99_ms": float64(p99) / 1e6, "group_syncs": len(syncNS), "exact": "tuple codec differential before run; sustained replay verification follows", "sender": "separate process, raw TCP, repeated complete real cohort", "sender_cpu_set": *captureSenderCPUs, "gomaxprocs": runtime.GOMAXPROCS(0)})
 	for _, interval := range intervals {
 		emit(interval)
 	}
@@ -623,7 +677,7 @@ func uvarintBytes(n uint64) int { var b [10]byte; return binary.PutUvarint(b[:],
 
 func catalogVerify(root string, streams int) int64 {
 	start := time.Now()
-	runtime.GOMAXPROCS(96)
+	configureCaptureProcs()
 	fixture := filepath.Join(root, "sender.fixture")
 	unseenData, unseenErr := os.ReadFile(filepath.Join(root, "unseen"))
 	var every uint64

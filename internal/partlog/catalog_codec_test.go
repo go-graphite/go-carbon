@@ -203,6 +203,8 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 					b := CatalogEncoder{Catalog: c, Independent: independent, SeriesClocks: series, SparseClocks: sparse}
 					defer a.Close()
 					defer b.Close()
+					bIDs := CatalogEncoder{Catalog: c, Independent: independent, SeriesClocks: series, SparseClocks: sparse}
+					defer bIDs.Close()
 					rng := rand.New(rand.NewSource(87153))
 					var kept, saved [][]byte
 					for record := 0; record < 17; record++ {
@@ -229,6 +231,22 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 						if !bytes.Equal(want, got) {
 							t.Fatalf("record %d changed bytes", record)
 						}
+						ids := make([]uint64, len(fs))
+						for i, f := range fs {
+							if i%3 != 0 {
+								ids[i], e = c.Intern(f.Key, f.Definition)
+								if e != nil {
+									t.Fatal(e)
+								}
+							}
+						}
+						gotIDs, e := bIDs.EncodeIDs(fs, ids)
+						if e != nil || !bytes.Equal(want, gotIDs) {
+							t.Fatalf("record %d IDs changed bytes: %v", record, e)
+						}
+						kept = append(kept, gotIDs)
+						saved = append(saved, bytes.Clone(gotIDs))
+
 						kept = append(kept, got)
 						saved = append(saved, bytes.Clone(got))
 					}
@@ -271,6 +289,39 @@ func BenchmarkCatalogEncoderRealShape(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+		})
+	}
+}
+
+func TestCatalogEncoderRejectsWrongIDs(t *testing.T) {
+	for _, kind := range []string{"length", "missing", "key", "definition", "failed"} {
+		t.Run(kind, func(t *testing.T) {
+			c := newTestCatalog(t)
+			id, err := c.Intern("one", []byte{1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			enc := CatalogEncoder{Catalog: c}
+			defer enc.Close()
+			fs := []DictionaryFrame{{Key: "one", Definition: []byte{1}, Points: []points.Point{{Timestamp: -1, Value: math.Float64frombits(1 << 63)}}}}
+			ids := []uint64{id}
+			switch kind {
+			case "length":
+				ids = nil
+			case "missing":
+				ids[0] = id + 1
+			case "key":
+				fs[0].Key = "other"
+			case "definition":
+				fs[0].Definition = []byte{2}
+			case "failed":
+				c.failed = errCatalog
+			}
+			if _, err = enc.EncodeIDs(fs, ids); err == nil {
+				t.Fatal("accepted invalid resolved ID")
+			}
+			// Restore the test-only failure so cleanup can sync and close the catalog.
+			c.failed = nil
 		})
 	}
 }

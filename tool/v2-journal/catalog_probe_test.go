@@ -213,6 +213,15 @@ func TestCatalogWireReaderReuse(t *testing.T) {
 			if n != m {
 				t.Fatal(n, m)
 			}
+			if len(wire.ids) != len(got) {
+				t.Fatal("wire ID count")
+			}
+			for i, f := range got {
+				key, def, ok := c.Lookup(wire.ids[i])
+				if !ok || key != f.Key || string(def) != string(f.Definition) {
+					t.Fatal("wire ID changed identity", i)
+				}
+			}
 			catalogExact(want, got)
 			catalogExact(fs[offset:offset+len(got)], got)
 			offset += len(got)
@@ -253,5 +262,79 @@ func BenchmarkCatalogWireDecode(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func referenceChurnFrames(fs []partlog.DictionaryFrame, ordinal *uint64, every uint64) []partlog.DictionaryFrame {
+	if every == 0 {
+		return fs
+	}
+	var out []partlog.DictionaryFrame
+	for _, f := range fs {
+		for start := 0; start < len(f.Points); {
+			n := int(min(uint64(len(f.Points)-start), every-1-*ordinal%every))
+			g := f
+			if n == 0 {
+				n = 1
+				g.Key = fmt.Sprintf("\x00unseen/%d/%s", *ordinal, f.Key)
+			}
+			g.Points = f.Points[start : start+n]
+			out = append(out, g)
+			start += n
+			*ordinal += uint64(n)
+		}
+	}
+	return out
+}
+
+func TestChurnResolvedIDsByteOracle(t *testing.T) {
+	c, e := partlog.OpenNameCatalog(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer c.Close()
+	fs := []partlog.DictionaryFrame{}
+	ids := []uint64{}
+	for i := 0; i < 71; i++ {
+		f := partlog.DictionaryFrame{Key: fmt.Sprintf("binary/%d/\x00\xff", i), Definition: []byte{byte(i), 255}, Clock: int64(i) - 20}
+		for j := 0; j < 1+i%13; j++ {
+			f.Points = append(f.Points, points.Point{Timestamp: int64(i + j), Value: math.Float64frombits(uint64(i+j) << 52)})
+		}
+		id, err := c.Intern(f.Key, f.Definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs = append(fs, f)
+		ids = append(ids, id)
+	}
+	for _, every := range []uint64{0, 1, 2, 7, 56745, math.MaxUint64} {
+		for _, initial := range []uint64{0, 17, math.MaxUint64 - 21} {
+			ordinal, reference := initial, initial
+			var out []partlog.DictionaryFrame
+			var outIDs []uint64
+			for range 3 {
+				want := referenceChurnFrames(fs, &reference, every)
+				out, outIDs = churnFramesWithIDs(fs, ids, &ordinal, every, out, outIDs)
+				catalogExact(want, out)
+				if ordinal != reference || len(outIDs) != len(out) {
+					t.Fatal(every, ordinal, reference, len(outIDs), len(out))
+				}
+				for i, f := range out {
+					if f.Key[0] == 0 {
+						if outIDs[i] != 0 {
+							t.Fatal("generated name retained old ID")
+						}
+						continue
+					}
+					if outIDs[i] == 0 {
+						t.Fatal("mature name lost resolved ID")
+					}
+					key, def, ok := c.Lookup(outIDs[i])
+					if !ok || key != f.Key || string(def) != string(f.Definition) {
+						t.Fatal("changed resolved identity", i)
+					}
+				}
+			}
+		}
 	}
 }
