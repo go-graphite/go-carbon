@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -28,7 +29,7 @@ func (r *rollupOutput) build(ordered []*rollupStage, part partsformat.PartID, st
 		r.coverage = map[string]*rollupCoverage{}
 	}
 	files := r.files
-	put := func(m *rollupMetric, archive uint32, slot int64, value []byte) error {
+	key := func(m *rollupMetric, archive uint32, slot int64) []byte {
 		start := len(r.arena)
 		r.arena = append(r.arena, m.keyTemplate...)
 		encoded := r.arena[start:len(r.arena):len(r.arena)]
@@ -36,13 +37,12 @@ func (r *rollupOutput) build(ordered []*rollupStage, part partsformat.PartID, st
 		tail := len(encoded) - 16
 		binary.BigEndian.PutUint32(encoded[tail:], archive)
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
-		group := string(m.policy.Group)
-		files[group] = append(files[group], coreKV{Key: encoded, Value: value})
-
-		return nil
+		return encoded
 	}
 	for _, s := range ordered {
 		m := s.metric
+		group := string(m.policy.Group)
+		file := files[group]
 		if stage != nil {
 			stage("rollup")
 		}
@@ -69,14 +69,8 @@ func (r *rollupOutput) build(ordered []*rollupStage, part partsformat.PartID, st
 		// Physical dense packing belongs exclusively to the shared v2part writer.
 		for i := range s.records {
 			record := &s.records[i]
-			if err := put(m, uint32(record.Archive), record.Slot, nil); err != nil {
-				return err
-			}
-			group := string(m.policy.Group)
-			file := files[group]
-			file[len(file)-1].Record = record
+			file = append(file, coreKV{Key: key(m, uint32(record.Archive), record.Slot), Record: record})
 		}
-		group := string(m.policy.Group)
 		coverage := r.coverage[group]
 		if coverage == nil {
 			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
@@ -116,9 +110,7 @@ func (r *rollupOutput) build(ordered []*rollupStage, part partsformat.PartID, st
 		start := len(r.arena)
 		r.arena = AppendRollupMetadata(r.arena, s.next)
 		metadata := r.arena[start:len(r.arena):len(r.arena)]
-		if err := put(m, rollupMetadataArchive, 0, metadata); err != nil {
-			return err
-		}
+		files[group] = append(file, coreKV{Key: key(m, rollupMetadataArchive, 0), Value: metadata})
 	}
 
 	return nil
@@ -242,7 +234,10 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 }
 
 func compareRollupStages(a, b *rollupStage) int {
-	x, y := a.metric, b.metric
+	return cmp.Compare(a.metric.ordinal, b.metric.ordinal)
+}
+
+func compareRollupMetrics(x, y *rollupMetric) int {
 	if len(x.policy.Group) != len(y.policy.Group) {
 		return len(x.policy.Group) - len(y.policy.Group)
 	}

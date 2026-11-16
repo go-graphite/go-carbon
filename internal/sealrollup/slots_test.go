@@ -7,6 +7,32 @@ import (
 	"testing"
 )
 
+func TestSlotPositionsAcrossDenseAndSparseSpans(t *testing.T) {
+	index := NewSlots([]Archive{{Step: 1, Count: 100}})
+	state := map[int64]Sample{}
+	for n, physical := range []int64{40, 41, 43, 42, 39, 44, 41, 0, 99, 1} {
+		p := Sample{Time: 100 + physical, Bits: uint64(n), Sequence: uint64(n)}
+		index.Install(Delta{Slot: physical, Sample: p})
+		state[physical] = p
+		for slot := int64(0); slot < 100; slot++ {
+			got, ok := index.View(0, slot)
+			want, exists := state[slot]
+			if ok != exists || got != want {
+				t.Fatalf("install%d slot%d: got%v/%v want%v/%v", n, slot, got, ok, want, exists)
+			}
+		}
+		var want []Sample
+		for slot := int64(38); slot < 46; slot++ {
+			if p, ok := state[slot]; ok {
+				want = append(want, p)
+			}
+		}
+		if got := index.Range(0, 138, 146, nil); !reflect.DeepEqual(got, want) {
+			t.Fatalf("install%d range got%v want%v", n, got, want)
+		}
+	}
+}
+
 func TestSparseSlotsWrap(t *testing.T) {
 	c := Config{Archives: []Archive{{1, 120}, {60, 121}}, Method: Average}
 	index := NewSlots(c.Archives)

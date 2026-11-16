@@ -29,10 +29,27 @@ func slotCompare(a, b slotSample) int {
 	}
 	return 0
 }
+
+// Contiguous occupied slots already encode their position. Keep the sparse
+// representation for holes and long retentions, without a second index.
+func slotPosition(ps []slotSample, physical int64) (int, bool) {
+	n := len(ps)
+	if n == 0 || physical < ps[0].slot {
+		return 0, false
+	}
+	if physical > ps[n-1].slot {
+		return n, false
+	}
+	if ps[n-1].slot-ps[0].slot == int64(n-1) {
+		return int(physical - ps[0].slot), true
+	}
+	return slices.BinarySearchFunc(ps, slotSample{slot: physical}, slotCompare)
+}
+
 func (s *Slots) Install(d Delta) {
 	ps := s.data[d.Archive]
 	v := slotSample{d.Slot, d.Sample}
-	i, found := slices.BinarySearchFunc(ps, v, slotCompare)
+	i, found := slotPosition(ps, d.Slot)
 	if found {
 		ps[i] = v
 	} else {
@@ -42,7 +59,7 @@ func (s *Slots) Install(d Delta) {
 }
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
 	ps := s.data[a]
-	i, ok := slices.BinarySearchFunc(ps, slotSample{slot: physical}, slotCompare)
+	i, ok := slotPosition(ps, physical)
 	if !ok {
 		return Sample{}, false
 	}
@@ -57,7 +74,7 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 	hi := lo + count
 	appendRange := func(first, last int64) {
 		ps := s.data[a]
-		i, _ := slices.BinarySearchFunc(ps, slotSample{slot: first}, slotCompare)
+		i, _ := slotPosition(ps, first)
 		for ; i < len(ps) && ps[i].slot < last; i++ {
 			p := ps[i].sample
 			if p.Time >= start && p.Time < end {

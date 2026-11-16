@@ -67,6 +67,7 @@ type rollupMetric struct {
 	prefix      string
 	partOffset  int
 	vshard      uint16
+	ordinal     uint64
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -85,6 +86,8 @@ type coreRollups struct {
 	stages         []rollupStage
 	ordered        []*rollupStage
 	positions      map[uint64]int
+	batchPositions []int
+	ordinalsReady  bool
 	pendingNames   map[partsformat.ID]uint64
 	stagedPolicies map[[32]byte]*sealrollup.Prepared
 	samples        []sealrollup.Sample
@@ -193,7 +196,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	// At most one stage per input application. Retain capacity between seals.
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
-	for _, b := range in.Batches {
+	r.batchPositions = slices.Grow(r.batchPositions[:0], len(in.Batches))[:len(in.Batches)]
+	freshCount := 0
+	for bi, b := range in.Batches {
 		i, ok := positions[b.ID]
 		if !ok {
 			m := r.metrics[b.ID]
@@ -205,19 +210,21 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 					return coreSealPlan{}, err
 				}
 				m.registered = b.Registered
+				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
+					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
+				}
+				if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
+					return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
+				}
+				names[m.policy.Name] = b.ID
+				freshCount++
 			}
-			if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
-				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
-			}
-			if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
-				return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
-			}
-			names[m.policy.Name] = b.ID
 			stages = append(stages, rollupStage{metric: m, next: m.meta, fresh: fresh})
 			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
 			positions[b.ID] = i
 		}
+		r.batchPositions[bi] = i
 		s := &stages[i]
 		if (b.Registered == nil || b.Registered != s.metric.registered) && !bytes.Equal(b.Policy, s.metric.meta.Policy) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
@@ -244,14 +251,32 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		offset += n
 	}
 	offset = 0
-	for _, b := range in.Batches {
-		s := &stages[positions[b.ID]]
+	for bi, b := range in.Batches {
+		s := &stages[r.batchPositions[bi]]
 		ps := samples[offset : offset+len(b.Points) : offset+len(b.Points)]
 		for j, p := range b.Points {
 			ps[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
 		offset += len(b.Points)
 		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
+	}
+	// Canonical byte ordering is immutable. Derive its scalar ordinal only
+	// when the catalog grows (or after recovery), rather than per seal.
+	if freshCount != 0 || !r.ordinalsReady {
+		metrics := make([]*rollupMetric, 0, len(r.metrics)+freshCount)
+		for _, m := range r.metrics {
+			metrics = append(metrics, m)
+		}
+		for i := range stages {
+			if stages[i].fresh {
+				metrics = append(metrics, stages[i].metric)
+			}
+		}
+		slices.SortFunc(metrics, compareRollupMetrics)
+		for i, m := range metrics {
+			m.ordinal = uint64(i)
+		}
+		r.ordinalsReady = true
 	}
 	// Idle maintenance visits only live metadata; no point/store reads occur.
 	now := time.Now()
