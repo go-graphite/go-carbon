@@ -246,6 +246,23 @@ func decodeCompactRun(value []byte, id, order uint64, scratch []sealrollup.Sampl
 	return sealrollup.Batch{Order: order, Now: header.Clock, Points: scratch}, err
 }
 
+// History and archive replacements use the same codec and clock. When every
+// occupied physical slot was replaced, reuse the inactive history run instead
+// of encoding those samples twice. Partial updates still need their own run.
+// The pending history lease keeps these bytes detached until publication.
+func compactArchiveHistory(records []sealrollup.Record, history []byte) []byte {
+	h, err := partsrun.Inspect(history, 1<<26)
+	if err != nil || h.Clock != 0 || h.Count != len(records) {
+		return nil
+	}
+	for _, r := range records {
+		if r.Sample.Sequence != r.Order {
+			return nil
+		}
+	}
+	return history
+}
+
 func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSealPlan, err error) {
 	defer func() {
 		if err != nil {
@@ -419,14 +436,18 @@ func planCompactCoreRollups(o *atomicRollupOwner, in coreSealInput) (plan coreSe
 			at := len(arena)
 			arena = appendRollupDataKey(arena, in.Next.NextPart, id, 'b', uint32(records[0].Archive), 0)
 			mid := len(arena)
-			arena, e = partsrun.AppendWithWorkspace(arena, 0, len(records), func(i int) partsrun.Sample {
-				r := records[i]
-				return partsrun.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order}
-			}, &o.historyScratch.codec)
-			if e != nil {
-				return plan, e
+			value := compactArchiveHistory(records, history[records[0].Archive])
+			if value == nil {
+				arena, e = partsrun.AppendWithWorkspace(arena, 0, len(records), func(i int) partsrun.Sample {
+					r := records[i]
+					return partsrun.Sample{Time: r.Sample.Time, Bits: r.Sample.Bits, Sequence: r.Order}
+				}, &o.historyScratch.codec)
+				if e != nil {
+					return plan, e
+				}
+				value = arena[mid:len(arena):len(arena)]
 			}
-			data = append(data, coreKV{Key: arena[at:mid:mid], Value: arena[mid:len(arena):len(arena)]})
+			data = append(data, coreKV{Key: arena[at:mid:mid], Value: value})
 			lo = hi
 		}
 		for _, m := range ms {

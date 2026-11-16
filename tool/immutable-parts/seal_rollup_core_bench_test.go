@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,14 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 		}
 	}
 	cores := runtime.GOMAXPROCS(0)
+	warmup := 0
+	if s := os.Getenv("SEAL_BENCH_WARMUP"); s != "" {
+		warmup, err = strconv.Atoi(s)
+		if err != nil || warmup < 0 || warmup > 10000 {
+			b.Fatal("invalid SEAL_BENCH_WARMUP")
+		}
+	}
+	fixedClock := os.Getenv("SEAL_BENCH_FIXED_CLOCK") == "1"
 	shards, owners, producers := sealBenchmarkGeometry(b, cores)
 	compact := os.Getenv("SEAL_BENCH_COMPACT") != "0"
 	cfg := coreConfig{Shards: shards, Owners: owners, Producers: producers, MaxRows: max(density, 2*metrics*density/shards), PartitionSeconds: 3600, AppendParts: true, JournalIdentity: "production-density-cost"}
@@ -138,6 +147,9 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 			for n := range jobs[p] {
 				order := uint64(n + 1)
 				now := int64(1794700800 + (n+1)*density)
+				if fixedClock {
+					now = int64(1794700800 + density)
+				}
 				var failure error
 				for i, id := range ids[p] {
 					points := scratch
@@ -167,16 +179,32 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 			}
 		})
 	}
+	for n := range warmup {
+		for _, job := range jobs {
+			job <- n
+		}
+		for range producers {
+			if err := <-errs; err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
 	b.ReportAllocs()
 	sealBenchmarkBarrier(b)
 	stopProfile := sealBenchmarkProfile(b)
 	gcStart := sealBenchmarkGCCPU()
+	classes := []runtimemetrics.Sample{
+		{Name: "/cpu/classes/gc/mark/assist:cpu-seconds"},
+		{Name: "/cpu/classes/gc/mark/dedicated:cpu-seconds"},
+	}
+	runtimemetrics.Read(classes)
+	assistStart, dedicatedStart := classes[0].Value.Float64(), classes[1].Value.Float64()
 	b.ResetTimer()
 	ioStart := sealProcessWritten()
 	start := atomicCPU()
 	for n := 0; n < b.N; n++ {
 		for _, job := range jobs {
-			job <- n
+			job <- n + warmup
 		}
 		for range producers {
 			if err := <-errs; err != nil {
@@ -205,6 +233,9 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	cpu := atomicCPU() - start
 	b.StopTimer()
 	gcCPU := sealBenchmarkGCCPU() - gcStart
+	runtimemetrics.Read(classes)
+	assistCPU := classes[0].Value.Float64() - assistStart
+	dedicatedCPU := classes[1].Value.Float64() - dedicatedStart
 	stopProfile()
 	points := float64(b.N * metrics * density)
 	written := sealProcessWritten() - ioStart
@@ -240,6 +271,9 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	b.ReportMetric(points/b.Elapsed().Seconds(), "points/s")
 	b.ReportMetric(float64(cpu)/points, "cpu-ns/point")
 	b.ReportMetric(gcCPU*1e9/points, "gc-cpu-ns/point")
+	b.ReportMetric(assistCPU*1e9/points, "gc-assist-ns/point")
+	b.ReportMetric(dedicatedCPU*1e9/points, "gc-dedicated-ns/point")
+	b.ReportMetric(float64(warmup), "warmup-seals")
 	b.ReportMetric(float64(closeCPU)/points, "close-cpu-ns/point")
 	b.ReportMetric(float64(closeWall.Nanoseconds())/points, "close-wall-ns/point")
 	b.ReportMetric(float64(shards), "physical-DBs")

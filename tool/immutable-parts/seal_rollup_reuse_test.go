@@ -9,8 +9,62 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/go-graphite/go-carbon/internal/partsrun"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
+
+func TestCompactArchiveHistoryExactAndLease(t *testing.T) {
+	o, in := compactReuseFixtureSize(t, 118, 1)
+	p, err := planCompactCoreRollups(o, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reused []byte
+	for _, kv := range p.Files[0] {
+		if kv.Key[18] == 'b' {
+			reused = kv.Value
+			break
+		}
+	}
+	if reused == nil {
+		t.Fatal("missing archive replacement")
+	}
+	want := bytes.Clone(reused)
+	p.Commit()
+	history := o.state.get(0).history[0]
+	if &reused[0] != &history[0] {
+		t.Fatal("complete replacement did not reuse pending history")
+	}
+	in.Next.NextPart++
+	in.Compact.batches[0].order++
+	next, err := planCompactCoreRollups(o, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reused, want) || !bytes.Equal(history, want) {
+		t.Fatal("planning overwrote committed history before publication")
+	}
+	next.Commit()
+
+	records := []sealrollup.Record{{Delta: sealrollup.Delta{Order: 9, Sample: sealrollup.Sample{Time: 123, Bits: math.Float64bits(math.Copysign(0, -1)), Sequence: 9}}}}
+	encoded, err := partsrun.Append(nil, 0, 1, func(int) partsrun.Sample {
+		p := records[0].Sample
+		return partsrun.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Sequence}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := compactArchiveHistory(records, encoded); !bytes.Equal(got, encoded) {
+		t.Fatal("complete replacement changed bytes")
+	}
+	if compactArchiveHistory(nil, encoded) != nil {
+		t.Fatal("partial replacement reused complete history")
+	}
+	records[0].Order++
+	if compactArchiveHistory(records, encoded) != nil {
+		t.Fatal("different archive source order reused history")
+	}
+}
 
 func compactReuseFixture(t testing.TB, density int) (*atomicRollupOwner, coreSealInput) {
 	return compactReuseFixtureSize(t, density, 64)
