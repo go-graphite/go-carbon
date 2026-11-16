@@ -8,6 +8,14 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
+// Placement is the store boundary: storage owns journal/core durability, while
+// the authority owns admission and persisted epoch floors.
+type Placement interface {
+	Register() v2placement.Sink
+	CheckNames([]string) error
+	Fence(context.Context, string, []v2placement.EndMarker, func() (v2placement.Frontier, v2placement.Roots, error)) (v2placement.Fence, error)
+}
+
 // Append remains the unversioned experiment path. A placed daemon must use
 // AppendPlaced; rejected routing metadata never poisons the producer journal.
 func (p *Producer) Append(names []string, data []points.Point, sequence []uint64, clock int64) error {

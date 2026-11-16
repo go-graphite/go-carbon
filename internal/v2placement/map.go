@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"unicode/utf8"
 )
 
 type Store struct {
@@ -81,6 +82,9 @@ func Decode(r io.Reader) (Document, error) {
 	if e != nil {
 		return d, e
 	}
+	if !utf8.Valid(b) {
+		return d, fmt.Errorf("invalid UTF-8 placement JSON")
+	}
 	if len(b) > 16<<20 {
 		return d, fmt.Errorf("placement exceeds 16 MiB")
 	}
@@ -100,6 +104,9 @@ func Decode(r io.Reader) (Document, error) {
 	return d, d.Validate()
 }
 func (d Document) Validate() error {
+	if !validStrings(reflect.ValueOf(d)) {
+		return fmt.Errorf("placement strings must be valid UTF-8")
+	}
 	if d.Schema != Version || d.Domain == "" || d.Revision == 0 || d.Operation == "" || (d.Revision == 1 && d.Predecessor != "") || (d.Revision > 1 && !validDigest(d.Predecessor)) {
 		return fmt.Errorf("invalid placement version/identity")
 	}
@@ -325,4 +332,24 @@ func (d Document) ValidateSuccessor(next Document) error {
 		}
 	}
 	return nil
+}
+
+func validStrings(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.String:
+		return utf8.ValidString(v.String())
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if !validStrings(v.Field(i)) {
+				return false
+			}
+		}
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			if !validStrings(v.Index(i)) {
+				return false
+			}
+		}
+	}
+	return true
 }

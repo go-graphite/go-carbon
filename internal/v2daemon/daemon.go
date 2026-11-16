@@ -25,7 +25,7 @@ type Config struct {
 	Layer, Producers, Shards, MaxPendingRows int
 	GroupInterval                            time.Duration
 	// Placement requires stamped intake; one daemon root owns one PG.
-	Placement *v2placement.Authority
+	Placement Placement
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -44,8 +44,8 @@ type packet struct {
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
 type Producer struct {
-	admission                                                    *v2placement.Admission
-	placement                                                    *v2placement.Authority
+	admission                                                    v2placement.Sink
+	placement                                                    Placement
 	engine                                                       *v2core.Engine
 	index, count, layer, maxPending                              int
 	catalog                                                      *partlog.NameCatalog

@@ -52,6 +52,9 @@ type Authority struct {
 }
 
 // Admission belongs to exactly one serial sink. Register before starting intake.
+// Sink is the admission interface consumed by store adapters.
+type Sink interface{ Begin(Stamp) (func(), error) }
+
 type Admission struct {
 	authority *Authority
 	active    atomic.Int64
@@ -115,7 +118,7 @@ func OpenAuthority(root string, d Document, group, replica, store string) (*Auth
 	a.publish(state, false)
 	return a, nil
 }
-func (a *Authority) Register() *Admission {
+func (a *Authority) Register() Sink {
 	a.control.Lock()
 	defer a.control.Unlock()
 	l := &Admission{authority: a}
