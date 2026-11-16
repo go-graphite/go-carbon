@@ -44,6 +44,11 @@ func TestRealOracleChecksEveryBit(t *testing.T) {
 
 // This is a harness test, not evidence for the real-data qualification gate.
 func TestRealOracleMixedAndSourceRoundTrip(t *testing.T) {
+	for _, rangeOrder := range []bool{false, true} {
+		t.Run(fmt.Sprintf("id_order_%t", rangeOrder), func(t *testing.T) { realOracleRoundTrip(t, rangeOrder) })
+	}
+}
+func realOracleRoundTrip(t *testing.T, rangeOrder bool) {
 	ctx := context.Background()
 	root := t.TempDir()
 	legacyPath, output, oraclePath := filepath.Join(root, "legacy"), filepath.Join(root, "parts"), filepath.Join(root, "oracle.json")
@@ -96,7 +101,7 @@ func TestRealOracleMixedAndSourceRoundTrip(t *testing.T) {
 			t.Fatalf("policy coverage=%d, catalogue=%d", count, oracle.CatalogNames)
 		}
 	}
-	if _, err = convertLegacyCopy(ctx, legacyPath, output, 4096, 256<<20); err != nil {
+	if _, err = convertLegacyCopy(ctx, legacyPath, output, 4096, 256<<20, copyOptions{RangeOrder: rangeOrder}); err != nil {
 		t.Fatal(err)
 	}
 	queries := make(map[string]realQuery, len(oracle.Queries))

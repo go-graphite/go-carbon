@@ -25,6 +25,7 @@ type copyConversionResult struct {
 	OfflineCopy                            bool
 	Source, Destination                    string
 	Batches, Metrics, Points, SSTBytes     uint64
+	DataIOBytes, DataIOCapMBPerSecond      uint64
 	LegacySSTBefore, LegacySSTAfter        uint64
 	Seconds, ReclaimedLegacyGBPerHour      float64
 	StoredSlotsExact                       bool
@@ -35,7 +36,7 @@ type copyConversionResult struct {
 // and physical reclaimer. It is deliberately offline: no daemon publication or
 // running-store handle is accepted. Pebble's exclusive source LOCK is retained
 // except during its own fenced close/reclaim/reopen sequence.
-func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetrics int, maxBatchBytes uint64) (copyConversionResult, error) {
+func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetrics int, maxBatchBytes uint64, options ...copyOptions) (copyConversionResult, error) {
 	r := copyConversionResult{OfflineCopy: true}
 	if copyPath == "" || output == "" || batchMetrics < 1 || batchMetrics > 4096 || maxBatchBytes == 0 {
 		return r, errors.New("invalid offline copy conversion configuration")
@@ -50,6 +51,15 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 	}
 	if sourcePath == targetPath || strings.HasPrefix(targetPath, sourcePath+string(os.PathSeparator)) || strings.HasPrefix(sourcePath, targetPath+string(os.PathSeparator)) {
 		return r, errors.New("legacy copy and output must be separate non-nested directories")
+	}
+	opts := copyOptions{}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	if opts.OriginalAllocated > 0 {
+		if err := admitCopyBatch(sourcePath, targetPath, opts.OriginalAllocated, 0); err != nil {
+			return r, err
+		}
 	}
 	// Check for a real offline source (and acquire its exclusive lock) before
 	// writing any source identity file. Never open the running daemon's DB.
@@ -131,6 +141,17 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 		if cursor.Source != "" && (cursor.Source != sourceID || cursor.Destination != targetID) {
 			return r, errors.New("offline copy resume identity mismatch")
 		}
+		if opts.RangeOrder && pending == nil && !cursor.Done {
+			ranges, err := convertIDRanges(ctx, func() *chunkstore.TransferSource { return source }, db, reclaimer, sourcePath, targetPath, sourceID, targetID, batchMetrics, maxBatchBytes, opts)
+			r.Batches += ranges.Batches
+			r.Metrics += ranges.Metrics
+			r.Points += ranges.Points
+			r.SSTBytes += ranges.SSTBytes
+			if err != nil {
+				return r, err
+			}
+			break
+		}
 		if cursor.Done && pending == nil {
 			break
 		}
@@ -180,55 +201,7 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 				return r, err
 			}
 		}
-		// Cache conservative output estimates from actual stored slots. This
-		// reads each immutable image once for admission, then once for encoding.
-		// Never substitute nominal schema capacity for actual legacy input GB.
-		bounds := make(map[uint16]uint64)
-		estimate := func(ctx context.Context, u partsconvert.Unit) (uint64, error) {
-			if n, ok := bounds[u.VShard]; ok {
-				return n, nil
-			}
-			var total uint64
-			for _, m := range plan.Metrics {
-				if partsformat.Route(partsformat.ID(m.Name)) != u.VShard {
-					continue
-				}
-				snapshot, err := source.StoredSnapshot(ctx, string(m.Name))
-				if err != nil {
-					return 0, err
-				}
-				n := storedOutputBound(m.Name, snapshot)
-				if n > maxBatchBytes || total > maxBatchBytes-n {
-					return 0, errors.New("offline copy batch exceeds output bound; reduce copy-batch-metrics")
-				}
-				total += n
-			}
-			bounds[u.VShard] = total
-			return total, nil
-		}
-		archive := partsconvert.ArchiveSource{SnapshotID: sourceID, PartitionSeconds: 86400, BlockPoints: 4096, UpperBound: estimate, ScanMetrics: func(ctx context.Context, u partsconvert.Unit, yield func(partsconvert.StoredMetric) error) error {
-			for _, m := range plan.Metrics {
-				if partsformat.Route(partsformat.ID(m.Name)) != u.VShard {
-					continue
-				}
-				snapshot, err := source.StoredSnapshot(ctx, string(m.Name))
-				if err != nil {
-					return err
-				}
-				image := partsconvert.StoredMetric{Name: partsformat.ID(m.Name), Group: partsformat.Group(plan.Group), Method: uint32(snapshot.Metadata.AggregationMethod), XFilesFactorBits: math.Float32bits(snapshot.Metadata.XFilesFactor)}
-				for _, a := range snapshot.Archives {
-					ar := partsconvert.StoredArchive{Step: uint32(a.Retention.Step), Slots: uint32(a.Retention.Count), Points: make([]partsconvert.StoredPoint, len(a.Points))}
-					for i, p := range a.Points {
-						ar.Points[i] = partsconvert.StoredPoint{Timestamp: p.Timestamp, ValueBits: math.Float64bits(p.Value)}
-					}
-					image.Archives = append(image.Archives, ar)
-				}
-				if err := yield(image); err != nil {
-					return err
-				}
-			}
-			return nil
-		}}
+		archive := copyArchive(func() *chunkstore.TransferSource { return source }, plan, maxBatchBytes)
 		conv := &partsconvert.Converter{Directory: filepath.Join(targetPath, "units"), Source: archive, Target: partsconvert.PebbleTarget{DB: db, DestinationID: targetID}, Space: &partsconvert.SpaceGuard{Path: targetPath}, ChunkBytes: 32 << 20, MaxTables: 100000}
 		nc := partsconvert.NameConverter{Directory: namesDirectory, Converter: conv, MaxOutputBytes: maxBatchBytes, Publish: func(_ context.Context, receipt partsconvert.NameReceipt) error {
 			// Offline tool has no daemon Reader pointer to swap. Its durable
@@ -236,6 +209,11 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 			// drains pins and closes/reopens the real read-only source handle.
 			return nil
 		}, Reclaim: reclaimer.Reclaim}
+		if opts.OriginalAllocated > 0 {
+			if err := admitCopyBatch(sourcePath, targetPath, opts.OriginalAllocated, maxBatchBytes); err != nil {
+				return r, err
+			}
+		}
 		receipt, err := nc.Run(ctx, plan)
 		if err != nil {
 			return r, err
@@ -319,4 +297,57 @@ func durableIdentity(path string) (string, error) {
 
 func writeCopyResult(result copyConversionResult) error {
 	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func copyArchive(source func() *chunkstore.TransferSource, plan partsconvert.LegacyPlan, maxBatchBytes uint64) partsconvert.ArchiveSource {
+	// Cache conservative output estimates from actual stored slots. This
+	// reads each immutable image once for admission, then once for encoding.
+	// Never substitute nominal schema capacity for actual legacy input GB.
+	bounds := make(map[uint16]uint64)
+	estimate := func(ctx context.Context, u partsconvert.Unit) (uint64, error) {
+		if n, ok := bounds[u.VShard]; ok {
+			return n, nil
+		}
+		var total uint64
+		for _, m := range plan.Metrics {
+			if partsformat.Route(partsformat.ID(m.Name)) != u.VShard {
+				continue
+			}
+			snapshot, err := source().StoredSnapshot(ctx, string(m.Name))
+			if err != nil {
+				return 0, err
+			}
+			n := storedOutputBound(m.Name, snapshot)
+			if n > maxBatchBytes || total > maxBatchBytes-n {
+				return 0, errors.New("offline copy batch exceeds output bound; reduce copy-batch-metrics")
+			}
+			total += n
+		}
+		bounds[u.VShard] = total
+		return total, nil
+	}
+	archive := partsconvert.ArchiveSource{SnapshotID: plan.Source, PartitionSeconds: 86400, BlockPoints: 4096, UpperBound: estimate, ScanMetrics: func(ctx context.Context, u partsconvert.Unit, yield func(partsconvert.StoredMetric) error) error {
+		for _, m := range plan.Metrics {
+			if partsformat.Route(partsformat.ID(m.Name)) != u.VShard {
+				continue
+			}
+			snapshot, err := source().StoredSnapshot(ctx, string(m.Name))
+			if err != nil {
+				return err
+			}
+			image := partsconvert.StoredMetric{Name: partsformat.ID(m.Name), Group: partsformat.Group(plan.Group), Method: uint32(snapshot.Metadata.AggregationMethod), XFilesFactorBits: math.Float32bits(snapshot.Metadata.XFilesFactor)}
+			for _, a := range snapshot.Archives {
+				ar := partsconvert.StoredArchive{Step: uint32(a.Retention.Step), Slots: uint32(a.Retention.Count), Points: make([]partsconvert.StoredPoint, len(a.Points))}
+				for i, p := range a.Points {
+					ar.Points[i] = partsconvert.StoredPoint{Timestamp: p.Timestamp, ValueBits: math.Float64bits(p.Value)}
+				}
+				image.Archives = append(image.Archives, ar)
+			}
+			if err := yield(image); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	return archive
 }

@@ -223,20 +223,43 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	if oracle.Version != 1 || len(oracle.Queries) != 2000 {
 		return errors.New("invalid real oracle")
 	}
-	b, err = os.ReadFile(filepath.Join(targetPath, "names", "name-cursor.json"))
-	if err != nil {
-		return err
-	}
-	var cursor mixedread.Cursor
-	if err = json.Unmarshal(b, &cursor); err != nil {
-		return err
+	cursor := mixedread.Cursor{Version: 1}
+	nameCursor, nameErr := os.ReadFile(filepath.Join(targetPath, "names", "name-cursor.json"))
+	if nameErr == nil {
+		if err = json.Unmarshal(nameCursor, &cursor); err != nil {
+			return err
+		}
+	} else if !errors.Is(nameErr, os.ErrNotExist) {
+		return nameErr
 	}
 	if err = cursor.Validate(); err != nil {
 		return err
 	}
+	rangeComplete := false
 	if !cursor.Done {
-		return errors.New("conversion is incomplete")
+		b, err := os.ReadFile(filepath.Join(targetPath, "ranges", "state.json"))
+		if err != nil {
+			return errors.New("conversion is incomplete")
+		}
+		var state rangeState
+		if err = json.Unmarshal(b, &state); err != nil {
+			return err
+		}
+		sourceID, err := os.ReadFile(filepath.Join(legacyPath, "CONVERSION-SOURCE"))
+		if err != nil {
+			return err
+		}
+		targetID, err := os.ReadFile(filepath.Join(targetPath, "CONVERSION-TARGET"))
+		if err != nil {
+			return err
+		}
+		if state.Version != 1 || !state.Done || state.Active != nil || state.Source != strings.TrimSpace(string(sourceID)) || state.Destination != strings.TrimSpace(string(targetID)) {
+			return errors.New("ID-range conversion is incomplete or identity changed")
+		}
+		cursor = mixedread.Cursor{Version: 1, Done: true}
+		rangeComplete = true
 	}
+
 	o, _, err := realOptions(legacyPath, oracle.Now)
 	if err != nil {
 		return err
@@ -246,6 +269,15 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 		return err
 	}
 	defer legacy.Close()
+	if rangeComplete {
+		page, err := legacy.ListCatalogPage(ctx, "", "", 1)
+		if err != nil {
+			return err
+		}
+		if len(page) != 0 {
+			return errors.New("completed ID-range state has residual legacy names")
+		}
+	}
 	db, err := pebble.Open(filepath.Join(targetPath, "parts"), &pebble.Options{ReadOnly: true})
 	if err != nil {
 		return err

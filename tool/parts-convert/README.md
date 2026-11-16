@@ -79,3 +79,55 @@ name limit was high. A single metric that exceeds the byte cap still fails
 before publication or deletion. Saved pending plans keep their exact bounds on
 resume. The byte estimate does not replace sampling the full conversion disk
 footprint, including shared-SST compaction and cumulative target growth.
+
+## Physical ID ranges and IO pacing
+
+For an offline copy, `-copy-id-order` first finishes any existing active name
+batch, then converts in ascending legacy numeric ID order. Each range freezes
+its exact names, catalog records, revisions and bucket list. Adjacent owned IDs
+share range tombstones; unconverted holes are preserved. The existing reclaimer
+closes readers, commits range deletes, compacts those exact spans and reopens
+the remaining source. `ID_RANGE_RECLAIM` records source logical SST bytes and
+allocated bytes before and after every range, together with target allocation.
+Small ranges need not release an allocation block; tombstones are never counted
+as recovered space.
+
+The independent `ranges/state.json` and reclaimed receipts describe arbitrary
+verified name coverage. They never advance the lexical `names/name-cursor.json`.
+This is an offline adapter; a live mixed reader would need the corresponding
+immutable name-coverage/catalog/parts generation and reader pinning. Final oracle
+verification accepts a completed ID journal only with matching source/target
+identities and an empty remaining legacy catalog.
+
+```sh
+parts-convert -convert-copy /private/offline-copy -dir /private/converted \
+  -copy-id-order -copy-batch-metrics 4096 -copy-batch-mib 8 \
+  -copy-original-allocated-bytes 8267907072 -copy-io-mbps 8
+```
+
+Use the measured original source allocation for the actual copy. Keep it unchanged
+across all resumes. Admission includes retained target bytes and refuses an
+already over-budget store before writing identities or opening writable DBs.
+The next output bound is also charged against original allocation plus 5%.
+This does **not** bound shared-source SST compaction scratch, deleted-open files,
+or filesystem allocation rounding; a separate complete-allocation guard and
+physical rewrite reservation remain required. `DiskCapQualified` stays false.
+
+Every destructive CLI conversion defaults to `-copy-io-mbps 8` (decimal MB/s).
+One shared pacer charges data reads and writes for source, target, external SSTs,
+verification, WAL and compaction. Operations use at most 64 KiB; cached reads count,
+and prefetch/preallocation are disabled. Filesystem metadata, fsync and small JSON
+journals are outside this data-byte budget. This is a conservative application
+byte cap, not a promised device MB/s cap or a daemon health qualification. Observe
+the daemon's commit rate and stop the converter if the host health gate fails.
+
+Reclaimed name batches retain both a complete global receipt and duplicate unit
+cursor JSON. The maintenance command below compares every duplicate with the
+retained complete global authority before removing any duplicate. It keeps all
+SSTs, global journals, active/published batches, and stage directories. This can
+recover metadata allocation without rewriting archive data. Measure complete
+allocation afterward; the reported potential release is not source throughput.
+
+```sh
+parts-convert -prune-reclaimed-copy /private/converted
+```

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/partsconvert"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"golang.org/x/sys/unix"
@@ -45,6 +46,7 @@ type result struct {
 
 func main() {
 	c := config{}
+	pruneCopy := flag.String("prune-reclaimed-copy", "", "offline converted directory: remove redundant unit receipts only after exact comparison with durable reclaimed batch authority")
 	realCapture := flag.String("capture-real-copy", "", "offline COPY: save a seeded 2000-name pre-conversion render oracle")
 	realVerify := flag.String("verify-real-copy", "", "offline legacy COPY: verify completed mixed renders against the saved oracle")
 	realOraclePath := flag.String("real-oracle", "", "pre-conversion real render oracle path")
@@ -52,6 +54,9 @@ func main() {
 	baseline := flag.Bool("compare-coldpack", false, "compare actual legacy cold-pack and converted SST bytes on identical stored slots")
 	legacyCopy := flag.String("convert-copy", "", "EXPERIMENTAL: exclusively owned offline legacy COPY to convert and delete batch by batch")
 	legacyBatch := flag.Int("copy-batch-metrics", 32, "maximum metrics per offline copy name batch")
+	legacyOrder := flag.Bool("copy-id-order", false, "convert archive payloads in numeric legacy ID order using independent coverage receipts")
+	legacyOriginal := flag.Uint64("copy-original-allocated-bytes", 0, "original source allocation, unchanged across resumes, for 5 percent batch admission")
+	legacyIO := flag.Uint64("copy-io-mbps", 8, "aggregate offline conversion data reads+writes in decimal MB/s (required positive)")
 	legacyBytes := flag.Uint64("copy-batch-mib", 128, "aggregate output bound for an offline copy name batch")
 	flag.StringVar(&c.dir, "dir", "", "new, private output directory (required)")
 	flag.IntVar(&c.workers, "workers", 1, "parallel vshards/physical Pebble owners")
@@ -64,6 +69,17 @@ func main() {
 	flag.Int64Var(&c.partitionSeconds, "partition-seconds", 86400, "synthetic time partition width; larger widths trade expiry granularity for compression")
 	flag.Uint64Var(&c.minFreeGiB, "min-free-gib", 8, "free space left for other users")
 	flag.Parse()
+	if *pruneCopy != "" {
+		r, err := pruneReclaimedReceipts(*pruneCopy, true)
+		if err == nil {
+			err = json.NewEncoder(os.Stdout).Encode(r)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *realCapture != "" || *realVerify != "" {
 		var err error
 		if *realCapture != "" && *realVerify != "" {
@@ -80,12 +96,23 @@ func main() {
 		return
 	}
 	if *legacyCopy != "" {
+		if *legacyIO == 0 || *legacyIO > 10000 {
+			fmt.Fprintln(os.Stderr, "ERROR: copy-io-mbps must be between 1 and 10000")
+			os.Exit(1)
+		}
+		paced := newPacedFS(vfs.Default, *legacyIO*1_000_000)
+		vfs.Default = paced
+		fmt.Fprintf(os.Stderr, "conversion data IO cap: %d MB/s (cached reads included; metadata/journals excluded)\n", *legacyIO)
 		if *legacyBytes > ^uint64(0)>>20 {
 			fmt.Fprintln(os.Stderr, "ERROR: offline copy batch size overflows")
 			os.Exit(1)
 		}
-		r, err := convertLegacyCopy(context.Background(), *legacyCopy, c.dir, *legacyBatch, *legacyBytes<<20)
+		r, err := convertLegacyCopy(context.Background(), *legacyCopy, c.dir, *legacyBatch, *legacyBytes<<20, copyOptions{RangeOrder: *legacyOrder, OriginalAllocated: *legacyOriginal})
 		if err == nil {
+			paced.pace.mu.Lock()
+			r.DataIOBytes = paced.pace.bytes
+			paced.pace.mu.Unlock()
+			r.DataIOCapMBPerSecond = *legacyIO
 			err = writeCopyResult(r)
 		}
 		if err != nil {
