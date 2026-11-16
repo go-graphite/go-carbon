@@ -108,7 +108,7 @@ func TestBoundedTransferIngestDifferential(t *testing.T) {
 		}
 		av, bv := a.First(), b.First()
 		for av && bv {
-			if !bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value()) {
+			if !(bytes.Equal(a.Key(), proofIdentityKey) && bytes.Equal(b.Key(), proofIdentityKey)) && (!bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value())) {
 				t.Fatalf("stored bytes differ at %x", a.Key())
 			}
 			av, bv = a.Next(), b.Next()

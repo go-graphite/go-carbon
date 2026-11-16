@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 )
 
 var errSyncNoProof = errors.New("store has no mutation proof endpoint")
+
+type syncWindowProofBackend interface {
+	WindowProofs(context.Context, string, []string, int64, int64) ([]string, error)
+}
 
 type syncProofBackend interface {
 	Proofs(context.Context, string, []string) ([]string, error)
@@ -126,7 +131,7 @@ func (s *syncer) proofStamps(ctx context.Context, names []string) ([]syncProof, 
 	for i, store := range stores {
 		wg.Add(2)
 		go func() { defer wg.Done(); infos[i], infoErrs[i] = s.b.Info(ctx, store, names) }()
-		go func() { defer wg.Done(); tokens[i], errs[i] = s.b.(syncProofBackend).Proofs(ctx, store, names) }()
+		go func() { defer wg.Done(); tokens[i], errs[i] = s.windowProofs(ctx, store, names) }()
 	}
 	wg.Wait()
 	for _, err := range infoErrs {
@@ -312,4 +317,66 @@ func frontierReadyBounds(o syncOptions, r syncReadyOptions, report *readyReport)
 		}
 	}
 	return nil
+}
+
+// Freeze each requested range at the verified horizon. Older endpoints retain
+// the whole-revision fence; a clean v2 lineage can retain historical proofs.
+func (s *syncer) windowProofs(ctx context.Context, host string, names []string) ([]string, error) {
+	b, ok := s.b.(syncWindowProofBackend)
+	if !ok {
+		return s.b.(syncProofBackend).Proofs(ctx, host, names)
+	}
+	hash := make([]hash.Hash, len(names))
+	known := make([]bool, len(names))
+	for i := range hash {
+		known[i] = true
+		hash[i] = sha256.New()
+	}
+	windows := append(syncRanges(nil), s.o.windows...)
+	if !s.windowOnly() || s.o.sampleEvery > 0 {
+		windows = append(windows, syncRange{Name: "history", From: 1, Until: s.verificationHorizon()})
+	}
+	for wi, w := range windows {
+		until := min(w.Until, s.verificationHorizon())
+		if until <= w.From {
+			continue
+		}
+		var requested []string
+		var positions []int
+		for i, n := range names {
+			if wi >= len(s.o.windows) && !s.sampled(n) {
+				continue
+			}
+			requested = append(requested, n)
+			positions = append(positions, i)
+		}
+		if len(requested) == 0 {
+			continue
+		}
+		proofs, err := b.WindowProofs(ctx, host, requested, w.From, until)
+		if errors.Is(err, errSyncNoProof) {
+			return s.b.(syncProofBackend).Proofs(ctx, host, names)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(proofs) != len(requested) {
+			return nil, errors.New("invalid window mutation proof response")
+		}
+		for j, p := range proofs {
+			i := positions[j]
+			if p == "" {
+				known[i] = false
+				continue
+			}
+			fmt.Fprintln(hash[i], w.Name, w.From, until, p)
+		}
+	}
+	out := make([]string, len(names))
+	for i := range out {
+		if known[i] {
+			out[i] = fmt.Sprintf("%x", hash[i].Sum(nil))
+		}
+	}
+	return out, nil
 }

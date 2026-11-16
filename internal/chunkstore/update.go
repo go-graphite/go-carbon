@@ -219,6 +219,9 @@ func (s *Store) commitUpdateAt(b *pebble.Batch, w *chunkWriter, m Metadata, acti
 	if err := w.commit(b); err != nil {
 		return err
 	}
+	if err := s.stageMutationHistory(b, m, w.mutationRanges, true); err != nil {
+		return err
+	}
 	m.Revision++
 	m.LastUpdate = activity
 	if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {

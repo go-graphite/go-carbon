@@ -147,15 +147,20 @@ func isContinuationBucketSuffix(suffix []byte) bool {
 }
 
 type continuationIO struct {
-	revision, indexRevision uint64
-	indexBinder             ContinuationIndexBinder
-	sidecar                 *SidecarSummary
-	ctx                     context.Context
-	reader                  pebble.Reader
-	batch                   *pebble.Batch
-	prefix                  [17]byte
-	changed                 bool
-	buckets                 bool
+	mutationWindows                   []MutationRange
+	store                             *Store
+	metric                            Metadata
+	mutationTracked, mutationComplete bool
+	mutationRanges                    []MutationRange
+	revision, indexRevision           uint64
+	indexBinder                       ContinuationIndexBinder
+	sidecar                           *SidecarSummary
+	ctx                               context.Context
+	reader                            pebble.Reader
+	batch                             *pebble.Batch
+	prefix                            [17]byte
+	changed                           bool
+	buckets                           bool
 	// Non-nil only for a new ID/generation whose publication still has a
 	// catalog conflict check. Its visible state is entirely in this batch.
 	pendingKeys map[string]struct{}
@@ -323,6 +328,7 @@ func newFreshContinuationIO(ctx context.Context, batch *pebble.Batch, metric Met
 
 func (s *Store) newContinuationIO(ctx context.Context, reader pebble.Reader, batch *pebble.Batch, metric Metadata) *continuationIO {
 	io := newContinuationIO(ctx, reader, batch, metric)
+	io.store, io.metric = s, metric
 	if b := s.digestReadBatch(ctx); b != nil && batch == nil && reader == b.view {
 		iter, err := b.walk.iterator(&b.walk.continuation, continuationLower, continuationUpper)
 		if err == nil {

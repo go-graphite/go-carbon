@@ -646,7 +646,7 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
-	return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
+	return c.updateWithMutationProof(ctx, kv, m, input, retention, clock, maintenance)
 }
 
 // updateAttempt leaves compressed writes on their existing path. Classic writes

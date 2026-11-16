@@ -371,6 +371,39 @@ func (b *syncLiveBackend) Proofs(ctx context.Context, store string, names []stri
 	return out, nil
 }
 
+// WindowProofs negotiates durable proof-v2 without weakening old endpoints.
+func (b *syncLiveBackend) WindowProofs(ctx context.Context, host string, names []string, from, until int64) ([]string, error) {
+	request := struct {
+		Names       []string
+		Mode        string
+		From, Until int64
+	}{names, "proof-v2", from, until}
+	var reply []struct{ Name, Mode, Proof, Reason string }
+	err := b.wait(ctx, "proof", host, func() error {
+		reply = nil
+		_, e := b.m.requestOnce(ctx, host, "/v1/transfer/digest", request, &reply)
+		return e
+	})
+	var api *apiError
+	if errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusMethodNotAllowed || api.Status == http.StatusBadRequest) {
+		return nil, errSyncNoProof
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) != len(names) {
+		return nil, errSyncNoProof
+	}
+	out := make([]string, len(names))
+	for i, r := range reply {
+		if r.Mode != "proof-v2" || r.Name != names[i] {
+			return nil, errSyncNoProof
+		}
+		out[i] = r.Proof
+	}
+	return out, nil
+}
+
 // SumDigest requires an explicit mode echo: older endpoints can ignore Mode
 // and return SHA digests with a superficially identical wire shape.
 func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []string, step, from, until int64) (map[string][]syncDigest, error) {
