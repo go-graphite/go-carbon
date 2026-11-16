@@ -41,6 +41,8 @@ func TestClassicNameScale(t *testing.T) {
 	cfg.Whisper.StoreDir = filepath.Join(root, "store")
 	cfg.Whisper.StoreEncoding = "exact"
 	cfg.Whisper.StoreSyncInterval = &Duration{time.Second}
+	cfg.Whisper.StoreCacheSize = 256 << 20
+	cfg.Whisper.StoreMemTableSize = 64 << 20
 	cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
 	cfg.Buckyd.Enabled = false
 	writeSharedConfig(t, path, cfg)
@@ -99,7 +101,7 @@ func TestClassicNameScale(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	result := map[string]any{"when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "names": n, "seed_seconds": seeded.Seconds(), "discovery_ready_seconds": ready.Seconds(), "heap_alloc": memory.HeapAlloc, "heap_bytes_per_name": float64(int64(memory.HeapAlloc)-int64(before.HeapAlloc)) / float64(n), "heap_objects": memory.HeapObjects, "peak_rss_bytes": peak, "scope": "classic_app_exact_pebble_one_point_per_name", "gomemlimit": os.Getenv("GOMEMLIMIT")}
+	result := map[string]any{"when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "names": n, "seed_seconds": seeded.Seconds(), "discovery_ready_seconds": ready.Seconds(), "heap_alloc": memory.HeapAlloc, "heap_bytes_per_name": float64(int64(memory.HeapAlloc)-int64(before.HeapAlloc)) / float64(n), "heap_objects": memory.HeapObjects, "peak_rss_bytes": peak, "store_cache_bytes": cfg.Whisper.StoreCacheSize, "store_memtable_bytes": cfg.Whisper.StoreMemTableSize, "scope": "classic_app_exact_pebble_one_point_per_name", "gomemlimit": os.Getenv("GOMEMLIMIT")}
 	b, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
