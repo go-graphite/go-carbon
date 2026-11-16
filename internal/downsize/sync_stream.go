@@ -26,10 +26,11 @@ import (
 // syncNameSource yields names with their source masks in byte order; next
 // returns io.EOF at the end.
 type syncNameSource struct {
-	id    func() int64 // stable union catalog line number for the last yielded name
-	total int
-	next  func() (string, uint64, error)
-	close func()
+	onTarget func() bool  // initial target membership of the last catalog name
+	id       func() int64 // stable union catalog line number for the last yielded name
+	total    int
+	next     func() (string, uint64, error)
+	close    func()
 }
 
 func (s *syncer) unionPath() string   { return filepath.Join(s.o.state, "union.tsv") }
@@ -313,6 +314,30 @@ func openLines(path string) (*os.File, *bufio.Scanner, error) {
 // unionSource streams the names to verify in round 1: on the target (or
 // copied by this sync) and held by at least one source.
 func (s *syncer) unionSource() syncNameSource {
+	if s.catalogState == nil {
+		return s.legacyUnionSource()
+	}
+	source := s.catalogState.source(false)
+	source.total = s.sum.Discovered
+	if s.legacyCopyReceipts {
+		source.total = s.both + len(s.copied)
+		next := source.next
+		source.next = func() (string, uint64, error) {
+			for {
+				name, mask, err := next()
+				if err != nil {
+					return name, mask, err
+				}
+				if mask != 0 && (source.onTarget() || s.copied[name]) {
+					return name, mask, nil
+				}
+			}
+		}
+	}
+	return source
+}
+
+func (s *syncer) legacyUnionSource() syncNameSource {
 	ordinal := int64(-1)
 	var f *os.File
 	var scanner *bufio.Scanner
@@ -356,6 +381,10 @@ func (s *syncer) unionSource() syncNameSource {
 
 // setSource yields a small re-verify set with masks read back from union.tsv.
 func (s *syncer) setSource(set []string) (syncNameSource, error) {
+	return s.catalogPersistence().selectNames(set)
+}
+
+func (s *syncer) legacySetSource(set []string) (syncNameSource, error) {
 	want := make(map[string]bool, len(set))
 	for _, n := range set {
 		want[n] = true
@@ -404,27 +433,25 @@ type syncMissing struct {
 }
 
 func (s *syncer) readMissing() ([]syncMissing, error) {
-	f, scanner, err := openLines(s.missingPath())
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
+	source := s.catalogPersistence().source(true)
+	defer source.close()
 	var out []syncMissing
-	for scanner.Scan() {
-		name, mask, _, err := parseUnionLine(scanner.Text())
+	for {
+		name, mask, err := source.next()
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
 		if err != nil {
 			return nil, err
 		}
-		skip, e := s.excludePolicy(name, "missing")
-		if e != nil {
-			return nil, e
+		skip, err := s.excludePolicy(name, "missing")
+		if err != nil {
+			return nil, err
 		}
-		if skip {
-			continue
+		if !skip {
+			out = append(out, syncMissing{name, mask})
 		}
-		out = append(out, syncMissing{name, mask})
 	}
-	return out, scanner.Err()
 }
 
 func syncShort(archives []syncArchive) bool {

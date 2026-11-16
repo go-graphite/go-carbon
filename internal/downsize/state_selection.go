@@ -23,9 +23,12 @@ CREATE TABLE window_resolution_batch(scope TEXT NOT NULL REFERENCES scope(id), t
 CREATE TABLE window_resolution_name(scope TEXT NOT NULL, token TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal>=0), version INTEGER NOT NULL CHECK(version=1), name TEXT NOT NULL, FOREIGN KEY(scope,token) REFERENCES window_resolution_batch(scope,token), PRIMARY KEY(scope,token,ordinal)) STRICT, WITHOUT ROWID;
 CREATE TABLE window_resolved(scope TEXT NOT NULL REFERENCES scope(id), group_id INTEGER NOT NULL, holder TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL CHECK(version=1), PRIMARY KEY(scope,group_id,holder,name)) STRICT, WITHOUT ROWID;
 CREATE TABLE window_resolution_proof(scope TEXT NOT NULL, token TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal>=0), version INTEGER NOT NULL CHECK(version=1), name TEXT NOT NULL, reason TEXT NOT NULL, FOREIGN KEY(scope,token) REFERENCES window_resolution_batch(scope,token), PRIMARY KEY(scope,token,ordinal)) STRICT, WITHOUT ROWID;
+CREATE TABLE window_runtime_receipt(scope TEXT NOT NULL REFERENCES scope(id), ordinal INTEGER NOT NULL CHECK(ordinal>=0), version INTEGER NOT NULL CHECK(version=1), kind TEXT NOT NULL CHECK(kind IN ('window-selected','window-resolved','window-retry-visited','window-retry-floor')), selection INTEGER, token TEXT, group_id INTEGER NOT NULL, holder TEXT NOT NULL, names INTEGER NOT NULL, saved_at TEXT NOT NULL, sha256 BLOB NOT NULL CHECK(length(sha256)=32), PRIMARY KEY(scope,ordinal), FOREIGN KEY(scope,selection) REFERENCES window_selection(scope,ordinal), FOREIGN KEY(scope,token) REFERENCES window_resolution_batch(scope,token), CHECK((kind='window-selected' AND selection IS NOT NULL AND token IS NULL AND group_id=0 AND holder='' AND names=0) OR (kind='window-resolved' AND selection IS NULL AND token IS NOT NULL AND group_id=0 AND holder='' AND names=0) OR (kind='window-retry-visited' AND selection IS NULL AND token IS NULL) OR (kind='window-retry-floor' AND selection IS NULL AND token IS NULL AND group_id=0 AND holder=''))) STRICT, WITHOUT ROWID;
+
 `
 
 var stateSelectionDigestQueries = map[string]string{
+	"window_runtime_receipt":  "SELECT * FROM window_runtime_receipt ORDER BY scope,ordinal",
 	"window_selection":        "SELECT * FROM window_selection ORDER BY scope,ordinal",
 	"window_selection_name":   "SELECT * FROM window_selection_name ORDER BY scope,selection,kind,ordinal",
 	"window_retry":            "SELECT * FROM window_retry ORDER BY scope",

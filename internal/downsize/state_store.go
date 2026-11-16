@@ -23,7 +23,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const stateSchema = 4
+const stateSchema = 5
 const stateApplicationID = 0x5343544c // SCTL, distinct from the offline benchmark
 const statePageNames = 4096
 
@@ -153,7 +153,7 @@ func createStateStore(path string, unit stateUnit) (_ *stateStore, err error) {
 		return nil, err
 	}
 	defer t.Rollback()
-	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL + stateIssuesDDL + stateSelectionDDL + stateDiscoveryDDL); err == nil {
+	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL + stateIssuesDDL + stateSelectionDDL + stateDiscoveryDDL + stateFillDDL + stateVerificationDDL); err == nil {
 		_, err = t.Exec("INSERT INTO unit VALUES(1,1,?,?,?,?)", unit.Identity, unit.Options, unit.CatalogGeneration, unit.CatalogNames)
 	}
 	if err == nil {
@@ -600,6 +600,12 @@ func stateRelationDigests(t *sql.Tx) (map[string]stateRelationDigest, error) {
 		"issue":      "SELECT i.scope,i.window,i.holder,i.kind,i.name_id,i.version,r.text,i.phase,i.first_seen,i.last_seen FROM issue i JOIN reason r ON r.id=i.reason ORDER BY i.scope,i.window,i.holder,i.kind,i.name_id",
 		"proof_page": "SELECT * FROM proof_page ORDER BY scope,window,holder,generation,first_id",
 		"ready":      "SELECT * FROM ready ORDER BY scope",
+	}
+	for name, query := range stateVerificationDigestQueries {
+		queries[name] = query
+	}
+	for name, query := range stateFillDigestQueries {
+		queries[name] = query
 	}
 	for name, query := range stateSelectionDigestQueries {
 		queries[name] = query

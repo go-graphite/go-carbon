@@ -26,7 +26,11 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 	}
 	repaired := map[string]*recoveredName{}
 	planned := map[string]bool{}
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Round == round }) {
+	receipts, err := s.readVerificationRound(round)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, r := range receipts {
 		if r.Kind == "ambiguous-receipt" {
 			for _, n := range r.Selected {
 				planned[n] = true
@@ -142,7 +146,7 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 			}
 		}
 		if len(newlyPlanned) > 0 {
-			if err := s.j.append(syncRow{Kind: "ambiguous-receipt", Identity: key, Round: round, First: newlyPlanned[0], Last: newlyPlanned[len(newlyPlanned)-1], Names: len(newlyPlanned), Selected: newlyPlanned, InvalidationReason: reason}); err != nil {
+			if err := s.verificationPersistence().append(syncRow{Kind: "ambiguous-receipt", Identity: key, Round: round, First: newlyPlanned[0], Last: newlyPlanned[len(newlyPlanned)-1], Names: len(newlyPlanned), Selected: newlyPlanned, InvalidationReason: reason}); err != nil {
 				return err
 			}
 			for _, n := range newlyPlanned {
@@ -166,7 +170,7 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 		r.Selected = append([]string(nil), names...)
 		r.InvalidationReason = reason
 		r.Work = s.redo.cleanWork(workCtx, r)
-		if err := s.j.append(r); err != nil {
+		if err := s.verificationPersistence().append(r); err != nil {
 			return err
 		}
 		collect(r)
@@ -196,7 +200,7 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 			}
 		}
 	}
-	err := advance()
+	err = advance()
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, nil, nil, err
 	}
