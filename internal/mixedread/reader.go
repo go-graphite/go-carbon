@@ -471,9 +471,14 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 						break
 					}
 				}
-				e = r.opts.Legacy.FetchFrozenWindowInto(ctx, binding.frozen, archive,
-					int(current.From), int(current.From+int64(prefix)*current.Step),
-					q.joined[:prefix], current.Occupied[:prefix])
+				windowEnd := current.From + int64(prefix)*current.Step
+				e = chunkstore.ErrFrozenWindowUnsupported
+				// The source window API requires nonnegative machine-sized
+				// bounds. Older-epoch queries retain ordinary Fetch semantics.
+				if current.From >= 0 && int64(int(current.From)) == current.From && int64(int(windowEnd)) == windowEnd {
+					e = r.opts.Legacy.FetchFrozenWindowInto(ctx, binding.frozen, archive,
+						int(current.From), int(windowEnd), q.joined[:prefix], current.Occupied[:prefix])
+				}
 				if e == nil {
 					if e = h.JoinLegacyPrefixInto(ctx, current, q.joined[:prefix], q.joined); e != nil {
 						return e

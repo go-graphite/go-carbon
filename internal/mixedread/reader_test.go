@@ -406,3 +406,71 @@ func TestOneSlotFallbackDoesNotContaminatePartWorkspace(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundSelectiveWindowNegativeEpochFallsBack(t *testing.T) {
+	ctx := context.Background()
+	opts := chunkstore.Options{ExactBlocks: true, Now: func() time.Time { return time.Unix(1000, 0) }}
+	mem := vfs.NewMem()
+	s, err := chunkstore.Open("legacy-negative", opts.WithFS(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := chunkstore.MetricConfig{Name: "metric", Retentions: []chunkstore.Retention{{Step: 1, Count: 2000}}, AggregationMethod: chunkstore.Last, XFilesFactor: .5}
+	if _, err = s.Create(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts.ReadOnly = true
+	s, err = chunkstore.Open("legacy-negative", opts.WithFS(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := partsread.Metric{ID: 42, Archives: []partsread.Archive{{Step: 1, Points: 2000}}, AggregationMethod: "last", XFilesFactor: .5}
+	cat := catalog(map[string]partsread.Metric{"metric": m})
+	frozen, err := s.ResolveFrozen(ctx, "metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := BindLegacy(frozen, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p partsread.Publication
+	p.Publish(partsread.View{Catalog: entryCatalog{Catalog: cat, entries: map[string]catalogEntry{"metric": {m, binding}}}, Parts: []partsread.Source{partsread.Freeze([]partsread.Record{{ID: 42, Step: 1, Sample: partsread.Sample{Time: 1, Bits: math.Float64bits(9)}}})}})
+	defer p.Close()
+	snap, err := p.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	base := Options{Legacy: s, LegacyCatalog: cat, UnifiedCatalog: true, Parts: partsread.Adapter{Catalog: &p, Select: func(string) *partsread.Publication { return &p }, Budget: partsread.NewBudget(1 << 20), WorkBytes: 1 << 18}}
+	plain, err := New(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Snapshot = snap
+	bound, err := New(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []float64
+	if err := plain.Fetch(ctx, "metric", -3, 3, func(s *partsread.Series) error { want = slices.Clone(s.Values); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := bound.Fetch(ctx, "metric", -3, 3, func(s *partsread.Series) error {
+		if len(s.Values) != len(want) {
+			t.Fatal("shape mismatch")
+		}
+		for i, value := range s.Values {
+			if math.Float64bits(value) != math.Float64bits(want[i]) {
+				t.Fatalf("slot%d", i)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
