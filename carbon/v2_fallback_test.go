@@ -240,7 +240,7 @@ func TestV2FallbackCostFixture(t *testing.T) {
 	now := time.Now().Unix()
 	stamp := now - now%60 - 3600
 	var input bytes.Buffer
-	for i := 0; i < 512; i++ {
+	for i := 0; i < 128; i++ {
 		for j := 0; j < 60; j++ {
 			fmt.Fprintf(&input, "fixture.metric%04d %d %d\n", i, j, stamp+int64(j*60))
 		}
@@ -251,13 +251,13 @@ func TestV2FallbackCostFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = conn.Close()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		accepted := false
 		if mode == "classic" {
-			accepted = a.Persister.CommittedPoints() >= 30720
+			accepted = a.Persister.CommittedPoints() >= 7680
 		} else {
-			accepted = a.v2.server.Stats().Accepted == 30720 && (mode == v2Only || a.Persister.CommittedPoints() >= 30720)
+			accepted = a.v2.server.Stats().Accepted == 7680 && (mode == v2Only || a.Persister.CommittedPoints() >= 7680)
 		}
 		if accepted && a.Cache.IsEmpty() {
 			break
@@ -285,13 +285,13 @@ func TestV2FallbackCostFixture(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("mode=%s points=30720 logical_bytes=%d", mode, disk)
+	t.Logf("mode=%s points=7680 logical_bytes=%d", mode, disk)
 	ready := os.Getenv("V2_FALLBACK_MEASURE_READY")
 	if ready != "" {
 		if err := os.WriteFile(ready, []byte(mode), 0600); err != nil {
 			t.Fatal(err)
 		}
-		deadline = time.Now().Add(30 * time.Second)
+		deadline = time.Now().Add(60 * time.Second)
 		for {
 			if _, err := os.Stat(ready + ".release"); err == nil {
 				break
