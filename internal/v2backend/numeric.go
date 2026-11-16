@@ -44,9 +44,6 @@ func (o *owner) appendCore(fs []frame) error {
 		}
 	}
 	started := o.s.stages.start()
-	// Catalog definitions and the journal append precede this release. A
-	// durability group snapshots these cursors before syncing either dependency.
-	o.coreSubmitted.Store(cursor)
 	err := o.s.core.AppendNumeric(o.id, rows, applies, cursor, false)
 	o.s.stages.finish(&o.s.stages.append, started)
 	o.numericRows, o.numericApplies = rows[:0], applies[:0]
@@ -67,14 +64,10 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 	}
 	// Numeric identities must be durable before data/frontier publication. The
 	// journal itself retains canonical names and exact policy definitions.
-	targets := make([]uint64, len(s.owners))
-	for _, a := range in.Applies {
-		if a.Producer < 0 || a.Producer >= len(targets) {
-			return v2core.SealPlan{}, errors.New("invalid dependency producer")
-		}
-		targets[a.Producer] = max(targets[a.Producer], a.Cursor)
+	if err := s.numeric.Load().sync(); err != nil {
+		return v2core.SealPlan{}, err
 	}
-	if err := s.syncCoreDependencies(targets); err != nil {
+	if err := s.log.Sync(); err != nil {
 		return v2core.SealPlan{}, err
 	}
 	s.stages.finish(&s.stages.sync, started)
@@ -83,28 +76,40 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 	for i, p := range in.Rows {
 		samples[i] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 	}
-	byID := make(map[uint64]*sealSeries)
+	// One contiguous series/batch allocation per seal. Keep every original
+	// apply boundary and append in its original order within each series.
+	byID := make(map[uint64]int)
+	for _, a := range in.Applies {
+		byID[a.ID]++
+	}
+	seriesStorage := make([]sealSeries, len(byID))
+	batchStorage := make([]sealrollup.Batch, len(in.Applies))
 	byOwner := make(map[int]map[string]*sealSeries)
+	index, offset := 0, 0
+	for metricID, count := range byID {
+		x, ok := s.numeric.Load().byID.Load(metricID)
+		if !ok {
+			return v2core.SealPlan{}, errors.New("missing global numeric identity")
+		}
+		r := x.(*resolvedMetric)
+		if r.owner%s.opts.Shards != id {
+			return v2core.SealPlan{}, errors.New("numeric seal route mismatch")
+		}
+		v := &seriesStorage[index]
+		v.metric = r
+		v.batches = batchStorage[offset : offset : offset+count]
+		byID[metricID] = index
+		index++
+		offset += count
+		if byOwner[r.owner] == nil {
+			byOwner[r.owner] = make(map[string]*sealSeries)
+		}
+		byOwner[r.owner][r.name] = v
+	}
 	type receipt struct{ cursor, order, count uint64 }
 	receipts := make(map[int]receipt)
 	for _, a := range in.Applies {
-		v := byID[a.ID]
-		if v == nil {
-			x, ok := s.numeric.Load().byID.Load(a.ID)
-			if !ok {
-				return v2core.SealPlan{}, errors.New("missing global numeric identity")
-			}
-			r := x.(*resolvedMetric)
-			if r.owner%s.opts.Shards != id {
-				return v2core.SealPlan{}, errors.New("numeric seal route mismatch")
-			}
-			v = &sealSeries{metric: r}
-			byID[a.ID] = v
-			if byOwner[r.owner] == nil {
-				byOwner[r.owner] = make(map[string]*sealSeries)
-			}
-			byOwner[r.owner][r.name] = v
-		}
+		v := &seriesStorage[byID[a.ID]]
 		if a.Producer != v.metric.owner || a.Offset < 0 || a.Count <= 0 || a.Offset > len(in.Rows)-a.Count || a.Cursor <= s.owners[a.Producer].meta.Cursor {
 			return v2core.SealPlan{}, errors.New("invalid numeric seal boundary")
 		}
@@ -135,7 +140,7 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 	// selects logical PG/vshard ranges from the immutable snapshot; Pebble may
 	// already combine those ranges during compaction. Coalesce each namespace
 	// across journal owners before staging to avoid thousands of tiny SSTs.
-	files := make(map[string][]v2core.KV)
+	counts := make(map[string]int)
 	for ownerID, series := range byOwner {
 		r := receipts[ownerID]
 		tx, err := s.owners[ownerID].prepareSeries(series, r.cursor, r.order, r.count)
@@ -145,12 +150,21 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 		}
 		transactions = append(transactions, tx)
 		for _, rows := range tx.files {
-			file := make([]v2core.KV, len(rows))
-			for i, row := range rows {
-				file[i] = v2core.KV{Key: row.key, Value: row.value}
-			}
+			counts[string(rows[0].key[:4])] += len(rows)
+		}
+	}
+	files := make(map[string][]v2core.KV, len(counts))
+	for ns, count := range counts {
+		files[ns] = make([]v2core.KV, 0, count)
+	}
+	for _, tx := range transactions {
+		for _, rows := range tx.files {
 			ns := string(rows[0].key[:4])
-			files[ns] = append(files[ns], file...)
+			file := files[ns]
+			for _, row := range rows {
+				file = append(file, v2core.KV{Key: row.key, Value: row.value})
+			}
+			files[ns] = file
 		}
 	}
 	for _, file := range files {
@@ -175,41 +189,4 @@ func (s *Store) planCoreSeal(id int, in v2core.SealInput) (v2core.SealPlan, erro
 		s.stages.metadataBytes.Add(metadataBytes)
 	}
 	return plan, nil
-}
-
-// syncCoreDependencies shares one dependency barrier across database seals.
-// Snapshot BEFORE syncing: a concurrent append after the snapshot cannot be
-// advertised as durable merely because another stream finished syncing later.
-// Catalog definitions precede coreSubmitted, and policies precede identities.
-func (s *Store) syncCoreDependencies(targets []uint64) error {
-	s.dependencyMu.Lock()
-	defer s.dependencyMu.Unlock()
-	if len(s.dependencyCursors) == 0 {
-		s.dependencyCursors = make([]uint64, len(s.owners))
-	}
-	covered := true
-	for i, target := range targets {
-		covered = covered && s.dependencyCursors[i] >= target
-	}
-	if covered {
-		return nil
-	}
-	snapshot := make([]uint64, len(s.owners))
-	for i, o := range s.owners {
-		snapshot[i] = o.coreSubmitted.Load()
-		if snapshot[i] < targets[i] {
-			return errors.New("core dependency cursor not submitted")
-		}
-	}
-	if err := s.numeric.Load().sync(); err != nil {
-		return err
-	}
-	if err := s.log.Sync(); err != nil {
-		return err
-	}
-	s.dependencyCursors = snapshot
-	if s.stages.enabled {
-		s.stages.syncGroups.Add(1)
-	}
-	return nil
 }

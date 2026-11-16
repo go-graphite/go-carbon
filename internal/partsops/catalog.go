@@ -66,8 +66,11 @@ type Batch struct {
 	Scope                      Scope
 	ExpectedRevision, Revision uint64
 	Upserts                    []Metric
-	Deletes                    []Tombstone
-	DropPartitions             []Partition
+	// Activity advances an existing incarnation without repeating its policy.
+	// Persist it atomically with the points and revision that it describes.
+	Activity       []Activity
+	Deletes        []Tombstone
+	DropPartitions []Partition
 }
 type Committer interface {
 	Commit(context.Context, Batch) error

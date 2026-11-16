@@ -59,6 +59,22 @@ staging must sort them using the engine comparator and publish them with the
 matching data/frontier. The standalone `OpenCatalog` adapter does **not** make
 independent data SST ingestion atomic with metadata.
 
+`Batch.Activity` updates an existing incarnation's exact arrival time and
+revision without repeating its policy definition. The daemon uses a full metric
+upsert for a new name and activity edits for later seals, publishing them in the
+same atomic ingest as points and the replay frontier. The scoped `a` record has
+a versioned 30-byte value containing generation, revision, Unix seconds and
+nanoseconds. `OpenCatalog` overlays activity on its matching definition; a newer
+full definition wins, and tombstones or a newer incarnation prevent stale
+activity from reviving a name. Activity without a matching definition is an
+error unless a tombstone already covers that incarnation.
+
+This extends the `GCOP` metadata format. Readers, copy validation and catalog
+operators must understand activity records before opening stores written by
+this daemon. Older catalog readers reject the unknown record kind; downgrade
+requires rebuilding the catalog with complete current metadata first. GCP3
+data keys, point values and private replay checkpoint encodings are unchanged.
+
 Expiration reuses `persister.WhisperExpirationRules`: first active matching rule,
 exclusions, grace, timed exemptions and fallback all retain their existing
 meaning. Dry-run never initializes activity or deletes. A missing LastUpdate

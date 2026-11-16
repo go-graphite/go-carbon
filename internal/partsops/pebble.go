@@ -54,6 +54,13 @@ func EncodeEdits(b Batch) ([]Edit, error) {
 		return nil, errors.New("invalid catalog batch")
 	}
 	var out []Edit
+	for _, a := range b.Activity {
+		data, err := encodeActivity(b.Scope, a)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Edit{Key: metadataKey(b.Scope, 'a', a.Name), Value: data})
+	}
 	for _, m := range b.Upserts {
 		if err := validateMetric(b.Scope, m); err != nil {
 			return nil, err
@@ -154,6 +161,7 @@ func OpenCatalog(db *pebble.DB, scope Scope) (*Owner, error) {
 		return nil, err
 	}
 	s := Snapshot{Scope: scope}
+	var activity []Activity
 	hasRevision := false
 	prefix := metadataPrefix(scope)
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: partsformat.PrefixEnd(prefix)})
@@ -167,6 +175,12 @@ func OpenCatalog(db *pebble.DB, scope Scope) (*Owner, error) {
 		}
 		kind := it.Key()[len(prefix)]
 		switch kind {
+		case 'a':
+			a, err := decodeActivity(string(it.Key()[len(prefix)+1:]), it.Value())
+			if err != nil {
+				return nil, err
+			}
+			activity = append(activity, a)
 		case 'm':
 			var m persistentMetric
 			if err := json.Unmarshal(it.Value(), &m); err != nil {
@@ -212,7 +226,34 @@ func OpenCatalog(db *pebble.DB, scope Scope) (*Owner, error) {
 	if err := it.Error(); err != nil {
 		return nil, err
 	}
-	if !hasRevision && len(s.Metrics)+len(s.Tombstones)+len(s.DroppedPartitions) > 0 {
+	byName := make(map[string]int, len(s.Metrics))
+	for i, m := range s.Metrics {
+		byName[m.Metadata.Name] = i
+	}
+	dead := make(map[string]uint64, len(s.Tombstones))
+	for _, d := range s.Tombstones {
+		dead[d.Name] = d.ThroughGeneration
+	}
+	for _, a := range activity {
+		i, ok := byName[a.Name]
+		if !ok {
+			if a.Generation <= dead[a.Name] {
+				continue
+			}
+			return nil, errors.New("activity has no metric definition")
+		}
+		m := &s.Metrics[i].Metadata
+		if a.Generation < m.Generation {
+			continue
+		}
+		if a.Generation != m.Generation {
+			return nil, errors.New("activity incarnation mismatch")
+		}
+		if a.Revision >= m.Revision {
+			m.Revision, m.LastUpdate = a.Revision, a.LastUpdate
+		}
+	}
+	if !hasRevision && len(s.Metrics)+len(s.Tombstones)+len(s.DroppedPartitions)+len(activity) > 0 {
 		return nil, errors.New("catalog missing revision")
 	}
 	return NewOwner(s, &pebbleCommitter{db: db, scope: scope, revision: s.Revision})

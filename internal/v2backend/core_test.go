@@ -20,9 +20,73 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/daemonstore"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/partsops"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/points"
 )
+
+func TestPointUpdatesKeepDefinitionAndAdvanceExactActivity(t *testing.T) {
+	for _, engine := range []string{"standalone", "core"} {
+		t.Run(engine, func(t *testing.T) {
+			clock := int64(1794700800)
+			opts := testOptions(t.TempDir(), simplePolicy())
+			opts.WriteEngine, opts.Owners, opts.Shards = engine, 1, 1
+			s, err := openAt(opts, func() time.Time { return time.Unix(clock, 0) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer requireClose(t, s)
+			name := "service.activity"
+			appendPoint := func() {
+				t.Helper()
+				if err := s.Append(points.OnePoint(name, float64(clock), clock-1)); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			appendPoint()
+			var definitionKey, definition []byte
+			it, err := s.dbs[0].NewIter(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for it.First(); it.Valid(); it.Next() {
+				k := it.Key()
+				if bytes.HasPrefix(k, []byte("GCOP\x01")) && bytes.HasSuffix(k, []byte("m"+name)) {
+					definitionKey, definition = bytes.Clone(k), bytes.Clone(it.Value())
+				}
+			}
+			if err := it.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if definitionKey == nil {
+				t.Fatal("missing first definition")
+			}
+			clock += 10
+			appendPoint()
+			got, closer, err := s.dbs[0].Get(definitionKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			equal := bytes.Equal(got, definition)
+			_ = closer.Close()
+			if !equal {
+				t.Fatal("ordinary points rewrote policy definition")
+			}
+			catalog, err := partsops.OpenCatalog(s.dbs[0], partsops.Scope{PlacementGroup: "service", VShard: partsformat.Route(partsformat.ID(name))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := catalog.Snapshot().Metrics[0].Metadata
+			if !m.LastUpdate.Equal(time.Unix(clock, 0)) || m.Revision < 2 {
+				t.Fatal("activity did not advance", m)
+			}
+		})
+	}
+}
 
 func TestSealPreparationAbortPreservesPublishedState(t *testing.T) {
 	clock := int64(1794700800)
@@ -192,7 +256,7 @@ func TestCoreDecoupledGeometry(t *testing.T) {
 	}
 }
 
-func TestCoreFlushSharesDependencyBarrier(t *testing.T) {
+func TestCoreRepeatedFlushUnevenGeometry(t *testing.T) {
 	t.Setenv("V2_BACKEND_STAGES", "1")
 	opts := testOptions(t.TempDir(), simplePolicy())
 	opts.WriteEngine, opts.Owners, opts.Shards = "core", 7, 3
@@ -214,8 +278,8 @@ func TestCoreFlushSharesDependencyBarrier(t *testing.T) {
 		if err = s.Flush(); err != nil {
 			t.Fatal(err)
 		}
-		if got := s.stages.syncGroups.Load(); got != uint64(round+1) {
-			t.Fatalf("dependency groups=%d want=%d", got, round+1)
+		if got := s.Stats().IngestedPoints; got != uint64((round+1)*128) {
+			t.Fatalf("accepted=%d want=%d", got, (round+1)*128)
 		}
 	}
 }

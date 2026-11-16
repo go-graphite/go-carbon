@@ -303,12 +303,17 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 	refs := make([]kv, 0, len(byName))
 	var ops []kv
 	scopes := make(map[string]*partsops.Batch)
-	next := make(map[string]*metricState, len(byName))
-	plans := make(map[string]sealrollup.SealPlan)
+	type plannedMetric struct {
+		name  string
+		state *metricState
+		plan  sealrollup.SealPlan
+	}
+	planned := make([]plannedMetric, 0, len(byName))
 	var runWorkspace partsrun.Workspace
 	for name, input := range byName {
 		last := input.metric
 		m := o.metrics[name]
+		newName := m == nil
 		if m == nil {
 			m = &metricState{Name: []byte(name), Group: []byte(last.group), Policy: last.policy, slots: make([]map[int64]sealrollup.Sample, len(last.policy.Archives))}
 			for i := range m.slots {
@@ -339,10 +344,7 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 		if e != nil {
 			return nil, e
 		}
-		plans[name] = plan
-		copyMetric := *m
-		copyMetric.Frontier = plan.Next
-		next[name] = &copyMetric
+		planned = append(planned, plannedMetric{name: name, state: m, plan: plan})
 		vs := partsformat.Route(partsformat.ID(name))
 		partition := input.clock / 86400
 		base := partsformat.Key{Group: partsformat.Group(m.Group), VShard: vs, Partition: partition, Metric: partsformat.ID(name), Part: part}
@@ -396,7 +398,11 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 			b = &partsops.Batch{Scope: scope, ExpectedRevision: rev, Revision: rev + 1}
 			scopes[keyScope] = b
 		}
-		b.Upserts = append(b.Upserts, partsops.Metric{Scope: scope, Metadata: metadata})
+		if newName {
+			b.Upserts = append(b.Upserts, partsops.Metric{Scope: scope, Metadata: metadata})
+		} else {
+			b.Activity = append(b.Activity, partsops.Activity{Name: name, Generation: metadata.Generation, Revision: metadata.Revision, LastUpdate: metadata.LastUpdate})
+		}
 	}
 	for _, b := range scopes {
 		edits, e := partsops.EncodeEdits(*b)
@@ -422,15 +428,15 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 	// metrics and touched scope revisions are replaced alongside the small header.
 	checkpointRows := make([]kv, 0, len(byName)+len(scopes)+1)
 	metricPrefix, revisionPrefix := checkpointPrefix(o.id, 'M'), checkpointPrefix(o.id, 'R')
-	for name, m := range next {
-		if _, changed := byName[name]; changed || o.meta.Version == 1 {
-			key := append(append(make([]byte, 0, len(metricPrefix)+len(name)), metricPrefix...), name...)
-			checkpointRows = append(checkpointRows, kv{key, encodeMetric(m)})
-		}
+	for _, entry := range planned {
+		m := *entry.state
+		m.Frontier = entry.plan.Next
+		key := append(append(make([]byte, 0, len(metricPrefix)+len(entry.name)), metricPrefix...), entry.name...)
+		checkpointRows = append(checkpointRows, kv{key, encodeMetric(&m)})
 	}
 	if o.meta.Version == 1 {
 		for name, m := range o.metrics {
-			if _, changed := next[name]; !changed {
+			if _, changed := byName[name]; !changed {
 				checkpointRows = append(checkpointRows, kv{append(append(make([]byte, 0, len(metricPrefix)+len(name)), metricPrefix...), name...), encodeMetric(m)})
 			}
 		}
@@ -468,8 +474,8 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 		}
 	}
 	tx.apply = func() {
-		for name, plan := range plans {
-			m := next[name]
+		for _, entry := range planned {
+			m, plan := entry.state, entry.plan
 			for _, r := range plan.Records {
 				p := r.Sample
 				p.Sequence = r.Order
@@ -477,9 +483,8 @@ func (o *owner) prepareSeries(byName map[string]*sealSeries, cursor, order, coun
 					m.slots[r.Archive][r.Slot] = p
 				}
 			}
-		}
-		for name, m := range next {
-			o.metrics[name] = m
+			m.Frontier = plan.Next
+			o.metrics[entry.name] = m
 		}
 		o.meta = meta
 		o.s.parts.Add(uint64(len(dataFiles)))
