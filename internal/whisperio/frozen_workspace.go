@@ -16,6 +16,7 @@ type frozenReadDecoder struct {
 	workspace            *fetchBlockWorkspace
 	rangeReadsEnabled    func() bool
 	keepBlockAllocations bool
+	dense                *frozenDensePlan
 }
 
 func (c *ContinuationCodec) NewFrozenReadDecoder(kv store.ContinuationIO, m store.Metadata, clock func() time.Time) (store.FrozenReadDecoder, error) {
@@ -59,15 +60,7 @@ func (d *frozenReadDecoder) Fetch(ctx context.Context, from, until int) (result 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	d.fs.rangeReads = d.rangeReadsEnabled != nil && d.rangeReadsEnabled()
-	if d.w.IsCompressed() && !d.keepBlockAllocations {
-		if !d.fs.rangeReads && d.workspace == nil {
-			d.workspace = borrowFetchBlock(d.fs)
-		} else if d.fs.rangeReads && d.workspace != nil {
-			releaseFetchBlock(d.fs, d.workspace)
-			d.workspace = nil
-		}
-	}
+	d.prepareFetch()
 	if !d.w.IsCompressed() {
 		return fetchClassic(ctx, d.w, d.m, int(d.clock().Unix()), from, until)
 	}
@@ -76,4 +69,17 @@ func (d *frozenReadDecoder) Fetch(ctx context.Context, from, until int) (result 
 		return nil, err
 	}
 	return &store.Series{Metadata: d.m, FromTime: series.FromTime(), UntilTime: series.UntilTime(), Step: series.Step(), Values: series.Values()}, nil
+}
+
+func (d *frozenReadDecoder) prepareFetch() {
+	d.fs.rangeReads = d.rangeReadsEnabled != nil && d.rangeReadsEnabled()
+	if d.w.IsCompressed() && !d.keepBlockAllocations {
+		if !d.fs.rangeReads && d.workspace == nil {
+			d.workspace = borrowFetchBlock(d.fs)
+			d.workspace.points = nil // The file owns backing storage until release.
+		} else if d.fs.rangeReads && d.workspace != nil {
+			releaseFetchBlock(d.fs, d.workspace)
+			d.workspace = nil
+		}
+	}
 }

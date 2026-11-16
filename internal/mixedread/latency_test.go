@@ -24,12 +24,14 @@ import (
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
-// This opt-in diagnostic measures the mixed adapter, with v2 parts in memory.
-// It is deliberately not evidence for a production SST reader or ingest soak.
+// This opt-in diagnostic measures the mixed adapter. Physical-cold mode uses
+// flushed SST fixtures; this is not a production SST reader or ingest soak.
 func TestLatencyComparison(t *testing.T) {
 	root := os.Getenv("GO_CARBON_MIXED_LATENCY_DIR")
 	allocs := os.Getenv("GO_CARBON_MIXED_ALLOCS") != ""
 	coldIO := os.Getenv("GO_CARBON_MIXED_COLD_IO") != ""
+	physical := os.Getenv("GO_CARBON_MIXED_PHYSICAL_COLD") != ""
+
 	ingest := os.Getenv("GO_CARBON_MIXED_INGEST") != ""
 	raw := os.Getenv("GO_CARBON_MIXED_RAW") != ""
 	persisted := os.Getenv("GO_CARBON_MIXED_PERSISTED") != ""
@@ -44,7 +46,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy13" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy14" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy13" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced && !coldIO && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
@@ -62,7 +64,7 @@ func TestLatencyComparison(t *testing.T) {
 		}
 	}
 	rng := rand.New(rand.NewSource(seed))
-	fmt.Printf("MATCHED seed=%d comparison=%q; OS page cache retained\n", seed, path)
+	fmt.Printf("MATCHED seed=%d comparison=%q physical_cold=%t; FADV_DONTNEED only for owned SSTs when physical_cold\n", seed, path, physical)
 	const clock int64 = 1794700800
 	dir, e := os.MkdirTemp(root, "latency-")
 	if e != nil {
@@ -142,6 +144,11 @@ func TestLatencyComparison(t *testing.T) {
 		}
 	}
 	for _, s := range stores {
+		if physical {
+			if e = s.Flush(); e != nil {
+				t.Fatal(e)
+			}
+		}
 		if e = s.Close(); e != nil {
 			t.Fatal(e)
 		}
@@ -152,6 +159,11 @@ func TestLatencyComparison(t *testing.T) {
 		names[fmt.Sprintf("find.metric.%04d", i)] = m
 	}
 	cat := catalog(names)
+	sstPath := filepath.Join(dir, "parts-sst")
+	if physical {
+		latencyPrepareSST(t, sstPath, m, records)
+	}
+	physicalSources := map[*chunkstore.Store]*latencySST{}
 	var disk *persistedLatency
 	if persisted {
 		disk = newPersistedLatency(t, filepath.Join(dir, "persisted"), cat, m, records, ingest)
@@ -203,11 +215,17 @@ func TestLatencyComparison(t *testing.T) {
 		entries[cfg.Name] = catalogEntry{metric: m, legacy: binding}
 		var boundPub partsread.Publication
 		view := partsread.View{Parts: []partsread.Source{partsread.Freeze(records)}}
+
 		if disk != nil {
 			view, e = disk.p.AcquireView()
 			if e != nil {
 				t.Fatal(e)
 			}
+		}
+		if physical {
+			source := latencyOpenSST(t, sstPath, m, records)
+			physicalSources[old] = source
+			view.Parts = []partsread.Source{source.index}
 		}
 		view.Catalog = entryCatalog{Catalog: cat, entries: entries}
 		boundPub.Publish(view)
@@ -266,6 +284,10 @@ func TestLatencyComparison(t *testing.T) {
 		// Each generation drains before its legacy store closes. Do not retain
 		// every cold sample's complete catalog until the end of the benchmark.
 		borrowedSnapshots[old].Close()
+		if source := physicalSources[old]; source != nil {
+			source.close(t)
+			delete(physicalSources, old)
+		}
 		delete(borrowedSnapshots, old)
 		_ = old.Close()
 		_ = full.Close()
@@ -310,12 +332,43 @@ func TestLatencyComparison(t *testing.T) {
 				}
 				for sample := range 20 {
 					old, full, r := open()
-					latencyColdIO(t, className, sample, full, old, func() error {
+					var evict func(string)
+					var partCounts func() (uint64, uint64)
+					if physical {
+						evict = func(arm string) {
+							if arm == "native" {
+								latencyEvictOwned(t, dir, paths[1])
+							} else {
+								latencyEvictOwned(t, dir, legacyPathForProbe(paths, path), sstPath)
+							}
+						}
+						partCounts = physicalSources[old].counts
+					}
+					latencyColdIO(t, className, sample, full, old, evict, partCounts, func() error {
 						_, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 						return err
 					}, func() error {
 						return r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
 					}, rng.Intn(2) == 0)
+					if physical {
+						want, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := r.Fetch(ctx, cfg.Name, clock-width, clock, func(got *partsread.Series) error {
+							if got.From != int64(want.FromTime) || got.Until != int64(want.UntilTime) || got.Step != int64(want.Step) || len(got.Values) != len(want.Values) {
+								t.Fatal("physical fixture shape")
+							}
+							for i, v := range want.Values {
+								if math.Float64bits(v) != math.Float64bits(got.Values[i]) {
+									t.Fatal("physical fixture bits")
+								}
+							}
+							return nil
+						}); err != nil {
+							t.Fatal(err)
+						}
+					}
 					closePair(old, full)
 				}
 				continue
@@ -457,6 +510,13 @@ func TestLatencyComparison(t *testing.T) {
 			base = make([]int64, 0, count)
 			mix = make([]int64, 0, count)
 			measure := func(mixed bool) {
+				if physical && !warm {
+					if mixed {
+						latencyEvictOwned(t, dir, legacyPathForProbe(paths, path), sstPath)
+					} else {
+						latencyEvictOwned(t, dir, paths[1])
+					}
+				}
 				var before, after runtime.MemStats
 				if profile || allocs {
 					kind := "native"

@@ -30,6 +30,7 @@ type FrozenReadWorkspace struct {
 	metric  weak.Pointer[FrozenMetric]
 	io      continuationIO
 	decoder FrozenReadDecoder
+	output  Series
 }
 
 var ErrFrozenWorkspaceBusy = errors.New("frozen read workspace already in use")
@@ -41,6 +42,7 @@ func (w *FrozenReadWorkspace) reset() error {
 	}
 	w.metric = weak.Pointer[FrozenMetric]{}
 	w.decoder = nil
+	w.output = Series{}
 	w.io = continuationIO{}
 	return err
 }
@@ -56,6 +58,10 @@ func (w *FrozenReadWorkspace) Reset() error {
 // FetchFrozenValuesWithWorkspace preserves per-call cancellation, admission,
 // file ownership and view lifetime. Results remain owned by the consumer.
 func (s *Store) FetchFrozenValuesWithWorkspace(ctx context.Context, m *FrozenMetric, from, until int, w *FrozenReadWorkspace, consume func(int, int, int, []float64) error) error {
+	return s.fetchFrozenWorkspace(ctx, m, from, until, w, false, consume)
+}
+
+func (s *Store) fetchFrozenWorkspace(ctx context.Context, m *FrozenMetric, from, until int, w *FrozenReadWorkspace, dense bool, consume func(int, int, int, []float64) error) error {
 	if m == nil || m.store != s || !s.ReadOnly() {
 		return ErrFrozenMetric
 	}
@@ -113,7 +119,16 @@ func (s *Store) FetchFrozenValuesWithWorkspace(ctx context.Context, m *FrozenMet
 		}
 		w.metric = weak.Make(m)
 	}
-	series, err := w.decoder.Fetch(ctx, from, until)
+	var series *Series
+	if decoder, ok := w.decoder.(FrozenDenseReadDecoder); dense && ok {
+		var present bool
+		present, err = decoder.FetchDense(ctx, from, until, &w.output)
+		if present {
+			series = &w.output
+		}
+	} else {
+		series, err = w.decoder.Fetch(ctx, from, until)
+	}
 	err = errors.Join(err, w.io.Close(), ctx.Err())
 	if err != nil {
 		// A canceled/failed virtual-file read may leave partial lazy state.

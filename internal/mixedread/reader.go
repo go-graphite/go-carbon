@@ -401,7 +401,7 @@ func (r *Reader) fetchFrozen(ctx context.Context, q *request, b *LegacyBinding, 
 		return nil, err
 	}
 	var result *partsread.Series
-	err := r.opts.Legacy.FetchFrozenValuesWithWorkspace(ctx, b.frozen, int(from), int(until), &q.frozenWorkspace, func(from, until, step int, values []float64) error {
+	err := r.opts.Legacy.FetchFrozenDenseWithWorkspace(ctx, b.frozen, int(from), int(until), &q.frozenWorkspace, func(from, until, step int, values []float64) error {
 		q.legacy = partsread.Series{Metric: b.metric, From: int64(from), Until: int64(until), Step: int64(step), Values: values}
 		result = &q.legacy
 		return nil
