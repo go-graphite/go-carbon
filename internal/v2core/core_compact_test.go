@@ -59,7 +59,7 @@ func TestCoreCompactDifferentialAndReopen(t *testing.T) {
 				cfg.AppendParts = appendParts
 				cfg.BlindBatch = blind
 				var digests []string
-				for _, codec := range []string{"", "run1"} {
+				for _, codec := range []string{"legacy", "run1"} {
 					cfg.RawCodec = codec
 					root := t.TempDir()
 					e, err := openCore(root, cfg)
@@ -107,10 +107,10 @@ func TestCoreCompactDifferentialAndReopen(t *testing.T) {
 					}
 					cfg.RawCodec = codec
 					other := cfg
-					if codec == "" {
+					if codec == "legacy" {
 						other.RawCodec = "run1"
 					} else {
-						other.RawCodec = ""
+						other.RawCodec = "legacy"
 					}
 					if e, err = openCore(root, other); err == nil {
 						e.close()

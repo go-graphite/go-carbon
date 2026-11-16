@@ -26,12 +26,22 @@ type coreSealInput struct {
 }
 type coreKV struct{ Key, Value []byte }
 type coreSealPlan struct {
+	// ReplaceRaw suppresses numeric sorting and raw output. The caller supplies
+	// the authoritative replacement, catalogue and receipt keys in Files. A
+	// nonempty input requires at least one file; empty cursor barriers need none.
+	ReplaceRaw bool
 	// Each file is nonempty, strictly sorted, and disjoint from other files.
-	// Prefixes 0..2 and ff are reserved for raw data and the owner frontier.
+	// Prefixes 0..2 are reserved for raw data. Prefix ff is reserved except
+	// ff V 2: this checkpoint namespace sorts strictly before frontier ff f.
 	Files [][]coreKV
 	// Commit publishes staged owner-local state after durable atomic ingestion.
 	// It cannot fail and must not retain mutable input buffers.
 	Commit func()
+	// Abort releases private planning resources if durable ingestion fails,
+	// including validation or planner errors. It must not change durable state.
+	// Exactly one of Commit or Abort is selected for a returned plan. Neither
+	// callback may fail. A process crash can bypass both; replay is authoritative.
+	Abort func()
 }
 type coreHooks struct {
 	OwnerCPUs []int
@@ -49,7 +59,7 @@ func validateCoreSealPlan(p coreSealPlan) error {
 			return errors.New("empty seal extension file")
 		}
 		for i, kv := range file {
-			if len(kv.Key) == 0 || kv.Key[0] < 3 || kv.Key[0] == 255 {
+			if len(kv.Key) == 0 || kv.Key[0] < 3 || (kv.Key[0] == 255 && !bytes.HasPrefix(kv.Key, []byte{255, 'V', '2'})) {
 				return errors.New("reserved seal extension key")
 			}
 			if i > 0 && bytes.Compare(file[i-1].Key, kv.Key) >= 0 {

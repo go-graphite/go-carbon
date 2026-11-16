@@ -20,6 +20,16 @@ import (
 	"github.com/go-graphite/go-carbon/tags"
 )
 
+// Opt-in diagnostics go to stderr, separate from the sampled result stream.
+// Each event is a single file Write, so concurrent Pebble callbacks do not
+// interleave JSON records. No event data or lock enters the stored format.
+func coreTrace(enabled bool, phase, owner string, job int) {
+	if !enabled {
+		return
+	}
+	_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"event": phase, "owner": owner, "job": job, "unix_ns": time.Now().UnixNano()})
+}
+
 // Replay a single immutable journal. The dictionary prefix is decoded again on
 // restart to reconstruct the collision-free canonical numeric ID catalogue.
 // Cursors count source points (not sorted points); a segment identity prevents
@@ -188,7 +198,7 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 		for _, q := range o.queues {
 			blocked += q.blockedNS.Load()
 		}
-		phases = append(phases, map[string]any{"owner": owner, "committed": o.committed.Load(), "sort_seconds": float64(o.sortNS.Load()) / 1e9, "encode_seconds": float64(o.encodeNS.Load()) / 1e9, "ingest_seconds": float64(o.ingestNS.Load()) / 1e9, "producer_queue_wait_seconds": float64(blocked) / 1e9})
+		phases = append(phases, map[string]any{"owner": owner, "seal_rows": o.sealRows, "sealing": o.sealing.Load(), "seal_calls": o.sealCalls.Load(), "seal_seconds": float64(o.sealNS.Load()) / 1e9, "compaction_count": m.Compact.Count, "compaction_in_progress": m.Compact.NumInProgress, "compaction_in_progress_bytes": m.Compact.InProgressBytes, "compaction_seconds": m.Compact.Duration.Seconds(), "compaction_debt_bytes": m.Compact.EstimatedDebt, "sst_sync_max_seconds": float64(o.syncMaxNS.Load()) / 1e9, "sst_sync_seconds": float64(o.syncNS.Load()) / 1e9, "sst_sync_calls": o.syncCalls.Load(), "committed": o.committed.Load(), "sort_seconds": float64(o.sortNS.Load()) / 1e9, "encode_seconds": float64(o.encodeNS.Load()) / 1e9, "ingest_seconds": float64(o.ingestNS.Load()) / 1e9, "producer_queue_wait_seconds": float64(blocked) / 1e9})
 	}
 	return map[string]any{"sst_preallocate_seconds": float64(preallocateNS) / 1e9, "sst_preallocated_write_seconds": float64(fileWriteNS) / 1e9, "producer_lease_wait_seconds": float64(leaseWaitNS) / 1e9, "producer_lease_wait_count": leaseWaitCount, "producer_lease_waiting": leaseWaiting, "runtime_counters": runtimeCounters, "sst_sync_seconds": float64(syncNS) / 1e9, "sst_sync_max_seconds": float64(syncMaxNS) / 1e9, "sst_sync_calls": syncCalls, "l0_sublevels": l0Sublevels, "read_amp": readAmp, "memtables": memtables, "memtable_bytes": memtableBytes, "flushes": flushes, "heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse, "total_alloc": memory.TotalAlloc, "num_gc": memory.NumGC, "gc_pause_ns": memory.PauseTotalNs, "gc_cpu_fraction": memory.GCCPUFraction, "owner_phases": phases, "live_sst_bytes": liveBytes, "stage": stage, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339Nano), "seconds": time.Since(start).Seconds(), "offered": offered, "committed": points, "parts": parts, "sink_bytes": bytes, "estimated_debt_bytes": debt, "compacted_bytes": compacted, "l0_files": l0, "write_stalls": engine.stalls.Load(), "proc": procStats()}
 }

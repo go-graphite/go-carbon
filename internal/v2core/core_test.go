@@ -582,3 +582,120 @@ func TestCoreSortMatchesOriginalComparator(t *testing.T) {
 		}
 	}
 }
+
+// A seal owns detached input. Its producer lease must be reusable even while
+// durable planning blocks; the next packet must not overwrite the sealed rows.
+func TestCoreSealReturnsCopiedPacketLease(t *testing.T) {
+	t.Setenv("CORE_STREAM_BYTES", "256")
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.MaxRows = 1, 1, 1
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var calls int
+	e, err := openCoreWithHooks(t.TempDir(), cfg, coreHooks{PlanSeal: func(_ int, in coreSealInput) (coreSealPlan, error) {
+		calls++
+		if calls == 1 {
+			close(entered)
+			<-resume
+			if len(in.Rows) != 1 || in.Rows[0].Bits != 42 || in.Batches[0].Points[0].Bits != 42 {
+				return coreSealPlan{}, fmt.Errorf("leased input overwritten")
+			}
+		}
+		return coreSealPlan{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = e.AppendBatches(0, []Batch{{ID: 9, Points: []Row{{ID: 9, Bits: 42}}}}, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("seal not entered")
+	}
+	next := make(chan error, 1)
+	go func() { next <- e.AppendBatches(0, []Batch{{ID: 9, Points: []Row{{ID: 9, Bits: 99}}}}, 2, false) }()
+	var nextErr error
+	select {
+	case nextErr = <-next:
+	case <-time.After(5 * time.Second):
+		nextErr = fmt.Errorf("seal retained producer lease")
+	}
+	close(resume)
+	if err = e.Close(); err != nil {
+		t.Error(err)
+	}
+	if nextErr != nil {
+		t.Fatal(nextErr)
+	}
+}
+
+func TestCoreDefaultCompactCodec(t *testing.T) {
+	t.Setenv("CORE_RAW_CODEC", "")
+	e, err := openCore(t.TempDir(), coreTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if e.cfg.RawCodec != "run1" {
+		t.Fatalf("default codec %q", e.cfg.RawCodec)
+	}
+}
+
+// Seal scheduling must preserve exact values, sequence order and replay config.
+func TestCoreProcessSealPhaseExact(t *testing.T) {
+	t.Setenv("CORE_STAGGER_SEAL", "1")
+	var want string
+	thresholds := map[int]bool{}
+	for _, phase := range []string{"0", "512", "1023"} {
+		t.Setenv("CORE_SEAL_PHASE", phase)
+		cfg := coreTestConfig()
+		cfg.Shards = 1
+		cfg.MaxRows = 160
+		root := t.TempDir()
+		e, err := openCore(root, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		threshold := e.owners[0].sealRows
+		if threshold < 120 || threshold > 160 {
+			t.Fatal("unbounded seal threshold", threshold)
+		}
+		thresholds[threshold] = true
+		for b := 1; b <= 9; b++ {
+			for p := 0; p < cfg.Producers; p++ {
+				if err := e.submit(p, coreRows(p, b), uint64(b), false); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := e.close(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := coreDigest(root, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want != "" && want != got {
+			t.Fatal("seal phase changed exact rows", phase, want, got)
+		}
+		want = got
+		// Execution phase may change across a restart without a format migration.
+		t.Setenv("CORE_SEAL_PHASE", "17")
+		e, err = openCore(root, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = e.close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(thresholds) != 3 {
+		t.Fatal("one-owner processes did not stagger", thresholds)
+	}
+	t.Setenv("CORE_SEAL_PHASE", "1024")
+	if e, err := openCore(t.TempDir(), coreTestConfig()); err == nil {
+		e.close()
+		t.Fatal("accepted out-of-range phase")
+	}
+}
