@@ -483,7 +483,10 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		time.Sleep(200 * time.Millisecond)
 	}
 	sample := coreSample(l.engine, "settled", start, total+live.Load())
-	settlement.assess(sample, continuous >= 600*time.Second)
+	settlement.observe(time.Since(replayStart), sample)
+	// The terminal receipt must itself satisfy the rule; work may have begun
+	// between the fifth quiet observation and this final preclose sample.
+	settled = settlement.assess(sample, continuous >= 600*time.Second) && settled
 	if e := replayWriteStages(root, sample); e != nil {
 		err = errors.Join(err, e)
 	}
