@@ -443,6 +443,32 @@ func (g *syncRedoGuard) cleanWork(ctx context.Context, row syncRow) []syncRedoWo
 			}
 		}
 	}
+	for i := range work {
+		sort.Slice(work[i].Keys, func(a, b int) bool { return work[i].Keys[a] < work[i].Keys[b] })
+	}
+	sort.Slice(work, func(a, b int) bool {
+		x, y := work[a], work[b]
+		if x.Reason != y.Reason {
+			return x.Reason < y.Reason
+		}
+		for i := 0; i < min(len(x.IDs), len(y.IDs)); i++ {
+			if x.IDs[i].First != y.IDs[i].First {
+				return x.IDs[i].First < y.IDs[i].First
+			}
+			if x.IDs[i].Last != y.IDs[i].Last {
+				return x.IDs[i].Last < y.IDs[i].Last
+			}
+		}
+		if len(x.IDs) != len(y.IDs) {
+			return len(x.IDs) < len(y.IDs)
+		}
+		for i := 0; i < min(len(x.Keys), len(y.Keys)); i++ {
+			if x.Keys[i] != y.Keys[i] {
+				return x.Keys[i] < y.Keys[i]
+			}
+		}
+		return len(x.Keys) < len(y.Keys)
+	})
 	return work
 }
 
