@@ -71,8 +71,10 @@ func coreDigest(root string, cfg coreConfig) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 func TestCoreReplayAndProducerRouting(t *testing.T) {
+	t.Parallel()
 	for _, blind := range []bool{false, true} {
 		t.Run(fmt.Sprint(blind), func(t *testing.T) {
+			t.Parallel()
 			cfg := coreTestConfig()
 			cfg.BlindBatch = blind
 			root := t.TempDir()
@@ -159,6 +161,7 @@ func TestCoreReplayAndProducerRouting(t *testing.T) {
 	}
 }
 func TestCoreSubmitDetachesCallerRows(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	e, err := openCore(t.TempDir(), cfg)
 	if err != nil {
@@ -207,6 +210,7 @@ func TestCoreSubmitDetachesCallerRows(t *testing.T) {
 }
 
 func TestCoreIdleOneSecondSeal(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	e, err := openCore(t.TempDir(), cfg)
 	if err != nil {
@@ -230,6 +234,7 @@ func TestCoreIdleOneSecondSeal(t *testing.T) {
 	t.Fatal("idle heads were not sealed by timer")
 }
 func TestCoreWholePartitionExpiryPinnedSnapshot(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	root := t.TempDir()
 	e, err := openCore(root, cfg)
@@ -265,6 +270,8 @@ func TestCoreWholePartitionExpiryPinnedSnapshot(t *testing.T) {
 	_ = db.Close()
 }
 func TestCoreCrashReplay(t *testing.T) {
+	// The child performs real durable writes before signaling readiness. Keep
+	// subprocess crash tests outside the parallel disk-heavy fixture pool.
 	if root := os.Getenv("IMMUTABLE_CORE_CRASH_ROOT"); root != "" {
 		cfg := coreTestConfig()
 		e, err := openCore(root, cfg)
@@ -372,6 +379,7 @@ func TestCoreCrashReplay(t *testing.T) {
 	t.Logf("SIGKILL/replay raw archive SHA256 %s", got)
 }
 func TestCoreRejectChangedConfig(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	root := t.TempDir()
 	e, err := openCore(root, cfg)
@@ -392,6 +400,8 @@ func TestCoreRejectChangedConfig(t *testing.T) {
 }
 
 func TestCoreJournalKillReplay(t *testing.T) {
+	// The child performs real durable writes before signaling readiness. Keep
+	// subprocess crash tests outside the parallel disk-heavy fixture pool.
 	if root := os.Getenv("IMMUTABLE_CORE_JOURNAL_ROOT"); root != "" {
 		err := coreReplayWithHook(filepath.Join(root, "input.log"), filepath.Join(root, "crashed"), coreTestConfig(), func(shard int, snap *pebble.Snapshot, _ []row) error {
 			var meta coreFrontier
@@ -423,7 +433,11 @@ func TestCoreJournalKillReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for b := 1; b <= 80; b++ {
+	// Sixteen groups cover all names/IEEE cases and multiple time partitions.
+	// At 220 points/group the crash at cursor >=256 leaves both a durable
+	// prefix and a longer tail. The total remains a multiple of the 64-row
+	// replay batch, retaining empty-final-flush coverage without 80 repeats.
+	for b := 1; b <= 16; b++ {
 		var groups []*points.Points
 		for id := 0; id < 11; id++ {
 			p := &points.Points{Metric: fmt.Sprintf("sample.%d;b=2;a=1", id)}
@@ -492,6 +506,7 @@ func TestCoreJournalKillReplay(t *testing.T) {
 }
 
 func TestCorePublishesDetachedFrozenHead(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	cfg.MaxRows = 1024
 	type view struct {

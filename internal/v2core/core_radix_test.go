@@ -12,6 +12,7 @@ import (
 )
 
 func TestCoreRadixPreservesSSTBytes(t *testing.T) {
+	t.Parallel()
 	for _, ambiguous := range []bool{false, true} {
 		name := "unique-sequence"
 		if ambiguous {

@@ -51,10 +51,11 @@ func TestCoreCompactEveryRow(t *testing.T) {
 	}
 }
 func TestCoreCompactDifferentialAndReopen(t *testing.T) {
-	t.Setenv("CORE_RAW_CODEC", "")
+	t.Parallel()
 	for _, appendParts := range []bool{false, true} {
 		for _, blind := range []bool{false, true} {
 			t.Run(fmt.Sprint(appendParts, blind), func(t *testing.T) {
+				t.Parallel()
 				cfg := coreTestConfig()
 				cfg.AppendParts = appendParts
 				cfg.BlindBatch = blind
@@ -125,6 +126,7 @@ func TestCoreCompactDifferentialAndReopen(t *testing.T) {
 	}
 }
 func TestCoreCompactCorruption(t *testing.T) {
+	t.Parallel()
 	var w coreCompactWorkspace
 	b, err := w.encode([]row{{ID: 9, Time: -1, Bits: 1, Seq: 99}})
 	if err != nil {

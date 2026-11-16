@@ -13,6 +13,7 @@ import (
 )
 
 func TestCoreOriginalBatchesAtomicExtension(t *testing.T) {
+	t.Parallel()
 	for _, blind := range []bool{false, true} {
 		cfg := coreTestConfig()
 		cfg.Shards = 1
@@ -64,6 +65,7 @@ func TestCoreOriginalBatchesAtomicExtension(t *testing.T) {
 	}
 }
 func TestCorePlanFailureDoesNotCommit(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	cfg.Shards = 1
 	cfg.Producers = 1
@@ -96,6 +98,7 @@ func TestCorePlanValidation(t *testing.T) {
 	}
 }
 func TestCoreConcurrentDurableFrontier(t *testing.T) {
+	t.Parallel()
 	cfg := coreTestConfig()
 	e, err := openCore(t.TempDir(), cfg)
 	if err != nil {
@@ -143,6 +146,8 @@ func TestCoreConcurrentDurableFrontier(t *testing.T) {
 }
 
 func TestCoreSealExtensionCrash(t *testing.T) {
+	// The child performs real durable writes before signaling readiness. Keep
+	// subprocess crash tests outside the parallel disk-heavy fixture pool.
 	cfg := coreTestConfig()
 	cfg.Shards = 1
 	cfg.Producers = 1

@@ -18,8 +18,9 @@ import (
 )
 
 func TestOriginalApplicationsJournalCore(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
-	cfg := Config{Layer: 3, Producers: 1, Shards: 2, GroupInterval: time.Hour}
+	cfg := Config{Layer: 3, Producers: 1, Shards: 2, coreMaxRows: 256, GroupInterval: time.Hour}
 	s, err := Open(root, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +157,7 @@ func TestOriginalApplicationsJournalCore(t *testing.T) {
 }
 
 func TestApplicationsRejectBeforeAdmission(t *testing.T) {
+	t.Parallel()
 	for _, apps := range [][]Application{
 		{{Name: "a", Order: 1, Points: []points.Point{{}}, Sequence: nil}},
 		{{Name: "a", Order: 2, Points: []points.Point{{}}, Sequence: []uint64{1}}, {Name: "a", Order: 1, Points: []points.Point{{}}, Sequence: []uint64{2}}},
@@ -179,6 +181,7 @@ func TestApplicationsRejectBeforeAdmission(t *testing.T) {
 }
 
 func TestClassicFixtureShapes(t *testing.T) {
+	t.Parallel()
 	for shape := 0; shape < 4; shape++ {
 		slots, err := classicFixtureSlots(Fixture{Rounds: 8}, shape)
 		if err != nil {

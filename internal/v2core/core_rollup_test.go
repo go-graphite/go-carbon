@@ -32,10 +32,12 @@ func rollupTestPolicy(t *testing.T, name, def string, method sealrollup.Method, 
 }
 
 func TestCoreRollupClassicRestart(t *testing.T) {
+	t.Parallel()
 	for _, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y"} {
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			for _, xff := range []float32{0, .5, 1} {
 				t.Run(fmt.Sprintf("%s/%d/%g", def, method, xff), func(t *testing.T) {
+					t.Parallel()
 					policy, encoded := rollupTestPolicy(t, "test.metric", def, method, xff)
 					clock := int64(1794700800)
 					root := t.TempDir()
@@ -246,6 +248,7 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 }
 
 func TestCoreRollupIngestFailureDoesNotPublish(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := filepath.Join(root, "db")
 	db, err := pebble.Open(dir, &pebble.Options{})

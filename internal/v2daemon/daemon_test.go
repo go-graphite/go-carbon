@@ -17,11 +17,13 @@ import (
 )
 
 func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
+	t.Parallel()
 	bits := []uint64{0, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042, 0x7ff0000000000001, 0x3ff0000000000000}
 	for layer := 0; layer <= 2; layer++ {
 		t.Run(fmt.Sprint(layer), func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
-			cfg := Config{Layer: layer, Producers: 2, Shards: 2, GroupInterval: time.Hour}
+			cfg := Config{Layer: layer, Producers: 2, Shards: 2, coreMaxRows: 256, GroupInterval: time.Hour}
 			s, err := Open(root, cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -145,6 +147,7 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 }
 
 func TestPendingQuotaAndStickyFailure(t *testing.T) {
+	t.Parallel()
 	s, err := Open(t.TempDir(), Config{Layer: 2, Producers: 1, Shards: 1, MaxPendingRows: 1, GroupInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +169,7 @@ func TestPendingQuotaAndStickyFailure(t *testing.T) {
 }
 
 func TestCatalogAdmissionAfterSeal(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	cfg := Config{Layer: 1, Producers: 1, Shards: 1}
 	s, err := Open(root, cfg)
