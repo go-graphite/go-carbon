@@ -68,6 +68,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
 	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")
 	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
+	flags.Var((*originList)(&c.ready.gapSelection), "gapfill-window", "with --ready-block: fill only these gap IDs (repeat or comma-separate); other missing receipts still block READY")
 	flags.StringVar(&c.ready.proofBlock, "ready-block", "", "independent JSON block for exhaustive final READY proof; preserves the original copy scope")
 	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for process_start_time_seconds on every store")
 	flags.Var(&c.ready.period, "period", "FROM:UNTIL block copy/cutover period in Unix seconds")
@@ -178,6 +179,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	c.live.noCopy = c.sync.noCopy
 	c.live.tokenEnv, c.live.copyBytes, c.live.copyIdle = c.copy.tokenEnv, c.copy.maxBytes, c.copy.transferIdle
+	if len(c.ready.gapSelection) > 0 && c.ready.proofBlock == "" {
+		return c, errors.New("--gapfill-window requires --ready-block")
+	}
 	if c.ready.proofBlock != "" && !c.ready.noReady {
 		if _, _, err := loadReadyProof(c.sync, c.ready); err != nil {
 			return c, err

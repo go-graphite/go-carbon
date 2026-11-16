@@ -944,8 +944,9 @@ all closed gap windows. Omitted names/ring fields mean the entire source union,
 not the original copy's restricted cohort: provide the authoritative target
 ownership ring when only part of that union belongs on the receiver.
 
-The copy keeps its original journal identity. After its copy/fill completes,
-READY runs exhaustive retained-history and period/gap verification with
+The copy keeps its original journal identity. After all gap receipts and the
+complete-ledger attestation are present, READY resumes that copy and runs
+exhaustive retained-history and period/gap verification with
 sample-every=1, including short retentions, in `ready-proof-<scope hash>/`.
 Changing the descriptor or ownership inputs creates a new proof journal;
 unchanged scope resumes the same proof. The descriptor is saved with the copy,
@@ -953,5 +954,32 @@ its exact bytes are retained in the proof directory, and `ready-proof.json`
 points to that proof. Accepted quarantine/policy exclusions remain in the
 original ledger and are never counted as repaired. READY/READY_EXCEPT still
 requires policy checks, donor/peer parity, read-back and a true complete-gap
-attestation. An incomplete ledger stays NOT_READY even after the new proof
-converges. The tool does not infer closure of unknown input gaps.
+attestation. The tool does not infer closure of unknown input gaps.
+
+Closed gaps can be filled while the READY block still contains open gaps:
+
+```sh
+storectl sync --resume ./existing-copy --ready-block ./readiness.json \
+  --gapfill-window outage-a --gapfill-window outage-b
+```
+
+`--gapfill-window` selects gap IDs, without changing the saved copy scope. Omit
+it to fill every closed gap without a receipt. Open gaps are never assigned an
+estimated end. Each completed window has its own receipt under
+`gapfill-window-*/receipt-*.json`, recording the target, all donors and peers,
+processed names, source-name fill transfers, measured point additions and retention
+samples. Point additions remain explicitly unknown if an interrupted measurement
+cannot establish the original baseline. Identical bounds share the fill work.
+
+The gap phase shares one durable discovery snapshot across windows. It never
+runs the original copy or full-history proof while gaps are open, the ledger is
+incomplete, or any window lacks a receipt. After interruption, completed windows
+are skipped; `filled.json` also preserves a finished native fill while
+`samples.json` resumes its bounded retention samples. Receipts are bound to the
+source list and ownership/name inputs, independently of other ledger entries.
+
+The command finishes `NOT_READY` and lists every open gap and pending receipt.
+READY still requires all windows closed with receipts, an explicitly complete
+ledger, and the independent all-donor proof and read-back. That final proof also
+covers names created after the gap inventory snapshot. Keep the existing state
+directory and provide the updated `--ready-block` when end evidence arrives.
