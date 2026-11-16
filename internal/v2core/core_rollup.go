@@ -10,8 +10,8 @@ import (
 	"slices"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // RollupPolicy binds an immutable schema to its portable canonical identity.
@@ -233,7 +233,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if err != nil {
 			return coreSealPlan{}, err
 		}
-		if err = partsformat.ValidateFileRange(partsformat.Manifest{Group: first.Group, VShard: first.VShard, Partition: 0}, file[0].Key, file[len(file)-1].Key); err != nil {
+		if err = (partsformat.Scope{Group: first.Group, VShard: first.VShard, Partition: 0, Part: first.Part}).ValidateRange(file[0].Key, file[len(file)-1].Key); err != nil {
 			return coreSealPlan{}, err
 		}
 		out.Files = append(out.Files, file)
