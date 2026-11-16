@@ -171,6 +171,7 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
 	frontier                     atomic.Pointer[coreFrontier]
@@ -197,6 +198,7 @@ type coreOwner struct {
 	sealing                      atomic.Bool
 	trace                        bool
 }
+type coreFailure struct{ err error }
 type coreEngine struct {
 	owners       []*coreOwner
 	routers      []coreRouter
@@ -372,6 +374,27 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 	return e.submitPacket(producer, rows, nil, cursor, seal)
 }
 func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
+	return e.submitPacketMode(producer, rows, batches, cursor, seal, true)
+}
+
+func (e *coreEngine) submissionError() error {
+	for _, o := range e.owners {
+		if failure := o.failure.Load(); failure != nil {
+			return failure.err
+		}
+		select {
+		case <-o.dead:
+			return errors.New("owner stopped")
+		default:
+		}
+	}
+	return nil
+}
+
+func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBatch, cursor uint64, seal, waitSeal bool) error {
+	if err := e.submissionError(); err != nil {
+		return err
+	}
 	router := &e.routers[producer]
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
@@ -414,6 +437,9 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 			router.leaseWaiting.Store(true)
 		}
 		for _, o := range e.owners {
+			if failure := o.failure.Load(); failure != nil {
+				return failure.err
+			}
 			select {
 			case <-o.dead:
 				return errors.New("owner stopped during buffer reuse")
@@ -488,7 +514,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		byOwner[owner] = append(byOwner[owner], b)
 	}
 	var acks []chan error
-	if seal {
+	if seal && waitSeal {
 		acks = make([]chan error, len(e.owners))
 	}
 	d.router, d.bytes = router, charge
@@ -500,7 +526,7 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 		if byOwner != nil {
 			p.batches = byOwner[s]
 		}
-		if seal {
+		if seal && waitSeal {
 			p.ack = make(chan error, 1)
 			acks[s] = p.ack
 		}
@@ -595,6 +621,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if failure == nil {
 				failure = flush()
 			}
+			if failure != nil {
+				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+			}
 			o.done <- failure
 			close(o.dead)
 			return true, true
@@ -630,9 +659,12 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			// The head owns copied rows and detached batch descriptors now.
 			// Capture everything still needed before returning the packet: its
 			// producer can immediately reuse and overwrite the leased storage.
-			seal, ack := p.seal, p.ack
-			if p.lease != nil {
-				p.lease.release()
+			seal, ack, lease := p.seal, p.ack, p.lease
+			// Pipelined seals keep their existing dispatch credit until durable
+			// completion. There is no unbounded receipt or second work queue.
+			holdLease := seal && ack == nil
+			if lease != nil && !holdLease {
+				lease.release()
 			}
 			if failure == nil && (seal || len(head) >= o.sealRows || time.Now().After(deadline)) {
 				failure = flush()
@@ -641,13 +673,22 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 				headPublication = time.Now()
 			}
+			if failure != nil {
+				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+			}
 			if ack != nil {
 				ack <- failure
+			}
+			if lease != nil && holdLease {
+				lease.release()
 			}
 		}
 		if !found {
 			if failure == nil && time.Now().After(deadline) {
 				failure = flush()
+				if failure != nil {
+					o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+				}
 				deadline = time.Now().Add(time.Second)
 			}
 		}

@@ -8,8 +8,9 @@ It is an offline harness, not a replacement production daemon.
 
 `internal/v2daemon` owns independent, single-caller producers. Each producer owns
 its name catalog, PDC4 encoder, pending rows, journal file and cursor. No mutex is
-shared by producers. `internal/v2core.Engine.Append` copies numeric rows into the
-existing bounded owner queues. The core retains its own sorting, immutable SST
+shared by producers. `internal/v2core.Engine.AppendPipelined` copies named-layer numeric rows into
+the existing bounded owner queues. The numeric L0 control keeps synchronous seals
+through `Append`. The core retains its own sorting, immutable SST
 creation, monotonic parts, snapshots and durability frontiers.
 
 `internal/partlog` owns the durable catalog and the existing PDC4 codec.
@@ -39,7 +40,7 @@ No caller may invent a competing key encoding in this adapter.
 name + exact point -> producer-local catalog -> numeric row
                      PDC4 encode -> pending group
                      catalog sync -> journal append + sync
-                     core Append -> core-native immutable parts
+                     core FIFO admission -> core-native immutable parts
 ```
 
 L2 groups for one second, with a bounded pending-row limit that may force an
@@ -47,7 +48,17 @@ earlier sync. Idle producers explicitly drain to acknowledge their final group.
 References remain private until the catalog is durable. Core appends happen only
 after journal sync. A returned Append accepts pending memory; only Drain is a
 durable acknowledgment. Seal markers remain in input order and are applied
-through the same core API after their journal group is durable. The harness
+through the same core API after their journal group is durable. Named-layer
+submission returns after bounded admission, while core seal completion returns
+the existing dispatch credit asynchronously. No receipt queue or background
+daemon sender is added. Each producer completes fanout before its next packet,
+so seals retain per-stream order. The owner keeps original row bits, sequence,
+apply clocks and policies; its existing planner remains the only owner of
+LastUpdate/revision state. Core durability is separate from the journal ACK and
+is observed through committed frontiers, synchronous seals, or Close. Owner
+failures are sticky and are returned by subsequent admission and Close. The
+one-second journal grouping deadline and pending-row/credit limits are unchanged.
+The harness
 reports intake and complete/drained throughput separately. Sync rates and forced
 groups are reported rather than assuming one sync per second.
 
@@ -100,7 +111,8 @@ A finite fixed-corpus run does not establish settled sustained throughput.
 CPU and blocking profiles cover admission, intake, drain and close, excluding
 read-back and the journal oracle. Reported stream stage times are summed elapsed
 times across producers, not CPU time or additive process wall time. In particular,
-core submission can include queue-credit waits and synchronous seal acknowledgments.
+core submission includes queue and dispatch-credit waits. The synchronous L0
+control also waits for each seal acknowledgment; named layers pipeline them.
 
 ## Usage
 
@@ -112,10 +124,12 @@ go run ./tool/v2-daemon -layer 2 -root /scratch/l2-profile \
   -cpuprofile /scratch/l2.cpu -blockprofile /scratch/l2.block
 ```
 
-Each command runs the fixed corpus and verifies sampled names through
-`v2core.Read` on reopened immutable snapshots. No running daemon is contacted.
-The default sample checks all 256 exact timestamps, IEEE value bits and sequence
-numbers. L2 also decodes every journal record outside timing and checks every
+Each command runs the fixed corpus and verifies every stored tuple through
+the existing `v2core.ScanRaw` decoder on reopened immutable snapshots. A bitmap
+rejects duplicate and missing metric/sequence pairs; timestamps and IEEE value
+bits are checked individually. All persisted catalog names are checked. Sample
+reads through `v2core.Read` remain as an independent query-path check. Verification
+runs outside the timed intake/drain/close interval. No running daemon is contacted. L2 also decodes every journal record outside timing and checks every
 name, definition, clock, timestamp and IEEE value bit against the fixture.
 A separate correctness suite includes NaNs, signed zero, infinities,
 subnormals, signed times, name collisions across streams and journal decoding.

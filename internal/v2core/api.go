@@ -3,7 +3,11 @@
 // This experimental format is not the portable production parts format.
 package v2core
 
-import "github.com/cockroachdb/pebble"
+import (
+	"os"
+
+	"github.com/cockroachdb/pebble"
+)
 
 // Row preserves value bits and original input sequence exactly.
 type Row = row
@@ -55,6 +59,19 @@ func (e *coreEngine) DBs() []*pebble.DB {
 // A seal waits for durable ingestion in every owner.
 func (e *coreEngine) Append(producer int, rows []Row, cursor uint64, seal bool) error {
 	return e.submit(producer, rows, cursor, seal)
+}
+
+// AppendPipelined copies rows into the same bounded owner queues as Append.
+// A seal preserves the per-producer FIFO boundary but returns after admission,
+// before durable core ingestion. Its dispatch credit returns only after the
+// seal completes. Callers must fsync their input journal before acknowledging
+// input; core durability is observed through DurableFrontiers, a synchronous
+// Append seal, or Close. Owner failures are sticky and also returned by Close.
+func (e *coreEngine) AppendPipelined(producer int, rows []Row, cursor uint64, seal bool) error {
+	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
+		return os.ErrInvalid
+	}
+	return e.submitPacketMode(producer, rows, nil, cursor, seal, false)
 }
 
 // AppendBatches also preserves the original application groups for seal hooks.

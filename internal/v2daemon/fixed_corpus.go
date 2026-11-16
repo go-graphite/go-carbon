@@ -275,6 +275,65 @@ func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[stri
 		return result, e
 	}
 	defer func() { err = errors.Join(err, reader.Close()) }()
+	// Check every stored tuple with the core-owned decoder. Each metric routes
+	// to one owner, so parallel owners write disjoint words of this bitmap.
+	// The bitmap detects duplicates as well as missing tuples; a count alone
+	// could hide one missing row behind one duplicate.
+	words := (f.Rounds + 63) / 64
+	seen := make([]uint64, f.Names*words)
+	counts := make([]uint64, f.Shards)
+	dbs := reader.DBs()
+	if e = parallel(f.Shards, func(shard int) error {
+		snapshot := dbs[shard].NewSnapshot()
+		defer snapshot.Close()
+		return v2core.ScanRaw(snapshot, func(r v2core.Row) error {
+			if r.ID == 0 || r.ID > uint64(f.Names) || r.Seq == 0 || r.Seq > uint64(f.Rounds) || v2core.Shard(r.ID, f.Shards) != shard {
+				return fmt.Errorf("invalid stored fixture row: %#v", r)
+			}
+			id, round := int(r.ID-1), int(r.Seq-1)
+			point := fixturePoint(id, round)
+			if r.Time != point.Timestamp || r.Bits != math.Float64bits(point.Value) {
+				return fmt.Errorf("stored fixture tuple changed: %#v", r)
+			}
+			word, bit := id*words+round/64, uint64(1)<<uint(round%64)
+			if seen[word]&bit != 0 {
+				return fmt.Errorf("duplicate stored fixture tuple: %#v", r)
+			}
+			seen[word] |= bit
+			counts[shard]++
+			return nil
+		})
+	}); e != nil {
+		return result, e
+	}
+	var checked uint64
+	for _, n := range counts {
+		checked += n
+	}
+	if checked != uint64(f.Names)*uint64(f.Rounds) {
+		return result, fmt.Errorf("stored fixture count %d, want %d", checked, f.Names*f.Rounds)
+	}
+	result["exact_core_points"] = checked
+	if layer > 0 {
+		if e = parallel(f.Producers, func(p int) (err error) {
+			catalog, err := partlog.OpenNameCatalog(filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", p), "catalog"))
+			if err != nil {
+				return err
+			}
+			defer func() { err = errors.Join(err, catalog.Close()) }()
+			for id := p; id < f.Names; id += f.Producers {
+				local := uint64(id/f.Producers + 1)
+				name, _, ok := catalog.Lookup(local)
+				if !ok || name != names[id] || NumericID(local, p, f.Producers) != uint64(id+1) {
+					return fmt.Errorf("persisted fixture name/ID mismatch %s", names[id])
+				}
+			}
+			return nil
+		}); e != nil {
+			return result, e
+		}
+		result["exact_catalog_names"] = f.Names
+	}
 	for i := 0; i < f.SampleNames; i++ {
 		id := i * (f.Names - 1) / max(1, f.SampleNames-1)
 		if layer > 0 {

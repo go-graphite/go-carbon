@@ -18,6 +18,12 @@ func TestFixedCorpusAllLayers(t *testing.T) {
 			if r["exact_sample_points"] != f.Names*f.Rounds {
 				t.Fatal(r)
 			}
+			if r["exact_core_points"] != uint64(f.Names*f.Rounds) {
+				t.Fatal(r)
+			}
+			if layer > 0 && r["exact_catalog_names"] != f.Names {
+				t.Fatal(r)
+			}
 			if layer == 2 && r["exact_journal_points"] != f.Names*f.Rounds {
 				t.Fatal(r)
 			}

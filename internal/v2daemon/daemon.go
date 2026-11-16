@@ -261,7 +261,7 @@ func (p *Producer) Drain() error {
 	}
 	start = time.Now()
 	for _, packet := range p.packets {
-		if err := p.engine.Append(p.index, packet.rows, packet.cursor, packet.seal); err != nil {
+		if err := p.engine.AppendPipelined(p.index, packet.rows, packet.cursor, packet.seal); err != nil {
 			return p.fail(err)
 		}
 		if packet.rows != nil {
