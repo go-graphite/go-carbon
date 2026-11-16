@@ -58,3 +58,8 @@ The first PDC4 consumer is the offline `tool/v2-journal` catalog/capture probe.
 Production dispatch and trimming must preserve PDX1/PDC3 decoding and establish
 an explicit catalog-before-journal barrier. No production backend selector is
 introduced here.
+
+Definitions are immutable within a catalog epoch. Include policy identity in the
+opaque key when policy changes must coexist, or start a new catalog epoch and
+retain the old catalog alongside its referencing segments. A changed definition
+under the same key fails closed.

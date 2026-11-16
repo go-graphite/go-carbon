@@ -22,6 +22,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
+var catalogVerifyDir = flag.String("catalog-verify", "", "verify an already completed capture root")
 var catalogDir = flag.String("catalog-dir", "", "catalog experiment output root (enables catalog comparison)")
 var captureSeconds = flag.Int("capture-seconds", 0, "sustained group-fsync capture seconds after matched-byte comparison")
 var captureAfter = flag.Int64("capture-after-unix", 0, "do not begin capture before this Unix second")
@@ -389,40 +390,57 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	sort.Slice(syncNS, func(i, j int) bool { return syncNS[i] < syncNS[j] })
 	p99 := syncNS[min(len(syncNS)-1, len(syncNS)*99/100)]
 	emit(map[string]any{"stage": "capture", "streams": streams, "seconds_including_final_sync": wall, "points": count.Load(), "m_points_per_second": float64(count.Load()) / wall / 1e6, "cores": cores, "record_bpp": float64(encoded.Load()) / float64(count.Load()), "seed_catalog_bytes_per_stream": len(cp), "fsync_group_p99_ms": float64(p99) / 1e6, "group_syncs": len(syncNS), "exact": "tuple codec differential before run; sustained replay verification follows", "sender": "separate taskset96-191 process, raw TCP, repeated complete real cohort; capture taskset0-95"})
-	// Verify every captured record against the corresponding exact sender packet.
-	for i := range streams {
-		dir := filepath.Join(root, fmt.Sprint(i))
-		cat, e := partlog.OpenNameCatalog(dir)
-		must(e)
-		d := partlog.CatalogDecoder{Catalog: cat}
-		file, e := os.Open(filepath.Join(dir, "segment"))
-		must(e)
-		source, e := os.Open(fixture)
-		must(e)
-		for {
-			b, e := readPacket(file)
-			if e == io.EOF {
-				break
-			}
-			must(e)
-			want, e := readPacket(source)
-			if e == io.EOF {
-				_, e = source.Seek(0, 0)
-				must(e)
-				want, e = readPacket(source)
-			}
-			must(e)
-			expected, _ := catalogUnwire(want, cat)
-			got, e := d.Decode(b)
-			must(e)
-			catalogExact(expected, got)
-		}
-		must(file.Close())
-		must(source.Close())
-		d.Close()
-		must(cat.Close())
+	verified := catalogVerify(root, streams)
+	if verified != count.Load() {
+		panic("capture verification count")
 	}
-	emit(map[string]any{"stage": "capture_replay", "points": count.Load(), "exact": true})
+	emit(map[string]any{"stage": "capture_replay", "points": verified, "exact": true})
 }
 
 func uvarintBytes(n uint64) int { var b [10]byte; return binary.PutUvarint(b[:], n) }
+
+func catalogVerify(root string, streams int) int64 {
+	runtime.GOMAXPROCS(96)
+	fixture := filepath.Join(root, "sender.fixture")
+	var wg sync.WaitGroup
+	var verified atomic.Int64
+	for i := range streams {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			dir := filepath.Join(root, fmt.Sprint(i))
+			cat, e := partlog.OpenNameCatalog(dir)
+			must(e)
+			d := partlog.CatalogDecoder{Catalog: cat}
+			file, e := os.Open(filepath.Join(dir, "segment"))
+			must(e)
+			source, e := os.Open(fixture)
+			must(e)
+			for {
+				b, e := readPacket(file)
+				if e == io.EOF {
+					break
+				}
+				must(e)
+				want, e := readPacket(source)
+				if e == io.EOF {
+					_, e = source.Seek(0, 0)
+					must(e)
+					want, e = readPacket(source)
+				}
+				must(e)
+				expected, n := catalogUnwire(want, cat)
+				verified.Add(n)
+				got, e := d.Decode(b)
+				must(e)
+				catalogExact(expected, got)
+			}
+			must(file.Close())
+			must(source.Close())
+			d.Close()
+			must(cat.Close())
+		}(i)
+	}
+	wg.Wait()
+	return verified.Load()
+}

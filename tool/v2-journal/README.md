@@ -113,3 +113,17 @@ The probe uses a four-byte outer record length plus PDC4's own CRC; ordinary
 comparison accounting includes the modeled 32-byte production journal header.
 Output includes source selection and exact point counts. Use a fresh output
 root for each invocation, and an external daemon-health guard on shared hosts.
+
+A completed timed capture can be verified again, independently and concurrently
+per stream, without rerunning capture:
+
+```sh
+go run ./tool/v2-journal -catalog-verify /path/to/experiment/capture \
+  -capture-streams 32
+```
+
+The verifier reads the persisted catalog and each segment, rewinds the exact raw
+sender fixture at its recorded repetition boundary, compares every tuple and
+reports the total verified point count. Match that count to the original capture
+receipt. Verification has its own resource/health guard on a shared host; it is
+outside the timed capture interval.
