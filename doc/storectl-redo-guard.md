@@ -27,6 +27,12 @@ bytes or distinct names across the whole run. `verify` covers digest requests;
 covered by successful copy receipts. An authenticated completed-copy checkpoint
 also proves that another initial-copy submission repeats the completed phase.
 A fill follows a new hole observation and is an explicitly recorded repair.
+Window selection retries reconcile successful copy receipts from the same
+source and catalog group before requesting more data. This retires stale pending
+membership and survives a stop between the copy receipt and its selection
+resolution. Failed, forbidden, short and explicitly excluded names remain
+unresolved. These import receipts do not replace final all-donor verification;
+newly observed holes still follow the fill path.
 Counters survive client replacement, include completed READY recovery children,
 and appear as `redo_names` in `ready.json`. A positive value warrants inspection
 of the matching ERROR events. Zero means no unexpected redo was observed within
