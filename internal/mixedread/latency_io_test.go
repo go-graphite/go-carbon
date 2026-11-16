@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
@@ -28,6 +29,8 @@ type latencySST struct {
 type latencySSTFS struct {
 	vfs.FS
 	reads, bytes atomic.Uint64
+	nanos        atomic.Uint64
+	timed        bool
 }
 type latencySSTFile struct {
 	vfs.File
@@ -35,7 +38,14 @@ type latencySSTFile struct {
 }
 
 func (f *latencySSTFile) ReadAt(p []byte, off int64) (int, error) {
+	var started time.Time
+	if f.fs.timed {
+		started = time.Now()
+	}
 	n, err := f.File.ReadAt(p, off)
+	if f.fs.timed {
+		f.fs.nanos.Add(uint64(time.Since(started).Nanoseconds()))
+	}
 	f.fs.reads.Add(1)
 	f.fs.bytes.Add(uint64(n))
 	return n, err
@@ -96,7 +106,7 @@ func latencyPrepareSST(t *testing.T, path string, m partsread.Metric, records []
 }
 func latencyOpenSST(t *testing.T, path string, m partsread.Metric, records []partsread.Record) *latencySST {
 	t.Helper()
-	fs := &latencySSTFS{FS: vfs.Default}
+	fs := &latencySSTFS{FS: vfs.Default, timed: os.Getenv("GO_CARBON_MIXED_DIAG_IO_TIME") != ""}
 	db, err := pebble.Open(path, &pebble.Options{ReadOnly: true, FS: fs})
 	if err != nil {
 		t.Fatal(err)

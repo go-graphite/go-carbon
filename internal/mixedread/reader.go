@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/partsread"
@@ -52,6 +53,7 @@ type request struct {
 	current         partsread.Series
 	joined          []float64
 	frozenWorkspace chunkstore.FrozenReadWorkspace
+	legacyMetric    weak.Pointer[chunkstore.FrozenMetric]
 }
 type Reader struct {
 	opts Options
@@ -406,6 +408,11 @@ func (r *Reader) fetchFrozen(ctx context.Context, q *request, b *LegacyBinding, 
 		result = &q.legacy
 		return nil
 	})
+	if err == nil && result != nil {
+		q.legacyMetric = weak.Make(b.frozen)
+	} else {
+		q.legacyMetric = weak.Pointer[chunkstore.FrozenMetric]{}
+	}
 	return result, err
 }
 
@@ -450,6 +457,9 @@ func (r *Reader) fetchBound(ctx context.Context, name string, from, until int64,
 			// legacy-owned result and overlay directly, as on the ordinary path.
 			// Density is only a cost hint; Render still resolves physical slots.
 			if covered < ((end-start)/step+7)/8 {
+				if q.legacyMetric.Value() != binding.frozen {
+					return r.fetchColdOverlay(ctx, q, binding, resolved, from, until, consume)
+				}
 				old, e := r.fetchFrozen(ctx, q, binding, from, until)
 				if e != nil {
 					return e
@@ -635,4 +645,53 @@ func queryShape(m partsread.Metric, from, until, now int64) (step, start, end in
 		return t - rem + a.Step
 	}
 	return a.Step, align(from), align(until), true
+}
+
+// A new immutable metric may need independent legacy and part SST reads. Start
+// both while one admission/snapshot generation is pinned, then reconcile only
+// after both finish. Reused decoder workspaces keep the cheaper serial overlay.
+func (r *Reader) fetchColdOverlay(ctx context.Context, q *request, binding *LegacyBinding, resolved partsread.ResolvedMetric, from, until int64, consume func(*partsread.Series) error) error {
+	h := &q.handle
+	var current *partsread.Series
+	var partErr error
+	var partPanic any
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			partPanic = recover()
+			close(done)
+		}()
+		current, partErr = h.RenderResolvedTo(ctx, resolved, from, until, r.opts.Now().Unix(), nil, &q.current)
+	}()
+	var old *partsread.Series
+	var legacyErr error
+	func() {
+		// Join before any error or panic can release the handle/workspace.
+		defer func() { <-done }()
+		old, legacyErr = r.fetchFrozen(ctx, q, binding, from, until)
+	}()
+	if partPanic != nil {
+		panic(partPanic)
+	}
+	if legacyErr != nil {
+		return legacyErr
+	}
+	if partErr != nil {
+		return partErr
+	}
+	if current == nil {
+		return consume(old)
+	}
+	if old == nil {
+		return consume(current)
+	}
+	if old.From != current.From || old.Until != current.Until || old.Step != current.Step || len(old.Values) != len(current.Values) {
+		return ErrPolicy
+	}
+	// Legacy output is caller-owned scratch. The handle copies only occupied
+	// physical part winners, including NaNs and wrapped replacements, onto it.
+	if err := h.JoinLegacyPrefixInto(ctx, current, old.Values, old.Values); err != nil {
+		return err
+	}
+	return consume(current)
 }

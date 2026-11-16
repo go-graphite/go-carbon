@@ -2,6 +2,7 @@ package mixedread
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -46,7 +47,7 @@ func TestLatencyComparison(t *testing.T) {
 	if root == "" {
 		t.Skip("explicit isolated benchmark directory required")
 	}
-	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy14" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy13" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
+	if !profile && !local && filepath.Clean(root) != "/var/lib/carbon/v2-legacy15" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy14" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy13" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy12" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy11" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy10" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy4" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy5" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy6" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy7" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy8" && filepath.Clean(root) != "/var/lib/carbon/v2-legacy9" {
 		t.Fatal("benchmark requires assigned private host directory")
 	}
 	if class != "" && !profile && !traced && !coldIO && !((os.Getenv("GO_CARBON_MIXED_COVERAGE") == "half" || os.Getenv("GO_CARBON_MIXED_COVERAGE") == "quarter") && class == "warm-1h") {
@@ -153,6 +154,37 @@ func TestLatencyComparison(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+	if physical && path == "native" {
+		// Clone the closed full fixture: identical physical SST bytes, distinct
+		// DB handles and block caches. Eviction remains per arm, outside timing.
+		if err := os.RemoveAll(paths[2]); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.CopyFS(paths[2], os.DirFS(paths[1])); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(paths[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if filepath.Ext(entry.Name()) != ".sst" {
+				continue
+			}
+			a, err := os.ReadFile(filepath.Join(paths[1], entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(filepath.Join(paths[2], entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sha256.Sum256(a) != sha256.Sum256(b) {
+				t.Fatal("A/A SST mismatch")
+			}
+			fmt.Printf("CONTROL_SST name=%s bytes=%d sha256=%x independent_caches=true\n", entry.Name(), len(a), sha256.Sum256(a))
+		}
+	}
 	opts.ReadOnly = true
 	names := map[string]partsread.Metric{cfg.Name: m}
 	for i := 0; i < 4095; i++ {
@@ -200,6 +232,11 @@ func TestLatencyComparison(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		if path == "native" {
+			if _, err := full.ResolveFrozen(ctx, cfg.Name); err != nil {
+				t.Fatal(err)
+			}
+		}
 		frozen, e := old.ResolveFrozen(ctx, cfg.Name)
 		if e != nil {
 			t.Fatal(e)
@@ -224,6 +261,34 @@ func TestLatencyComparison(t *testing.T) {
 		}
 		if physical {
 			source := latencyOpenSST(t, sstPath, m, records)
+			if os.Getenv("GO_CARBON_MIXED_DIAG_PART_RESIDENT") != "" {
+				// Causal ablation only: verify actual payload before retaining its
+				// Pebble cache blocks. Legacy still uses a fresh cold store.
+				for _, a := range m.Archives {
+					seen := 0
+					err := source.index.Scan(ctx, m.ID, a, clock-a.Step*a.Points, clock+a.Step, func(p partsread.Sample) error {
+						for _, record := range records {
+							if record.Step == a.Step && record.Sample == p {
+								seen++
+								return nil
+							}
+						}
+						return fmt.Errorf("resident ablation payload differs")
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					expected := 0
+					for _, record := range records {
+						if record.Step == a.Step {
+							expected++
+						}
+					}
+					if seen != expected {
+						t.Fatal("resident ablation incomplete", seen, expected)
+					}
+				}
+			}
 			physicalSources[old] = source
 			view.Parts = []partsread.Source{source.index}
 		}
@@ -344,12 +409,19 @@ func TestLatencyComparison(t *testing.T) {
 						}
 						partCounts = physicalSources[old].counts
 					}
+					var partNanos uint64
+					if physical {
+						partNanos = physicalSources[old].fs.nanos.Load()
+					}
 					latencyColdIO(t, className, sample, full, old, evict, partCounts, func() error {
 						_, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 						return err
 					}, func() error {
 						return r.Fetch(ctx, cfg.Name, clock-width, clock, func(*partsread.Series) error { return nil })
 					}, rng.Intn(2) == 0)
+					if physical {
+						fmt.Printf("PART_IO class=%s sample=%d read_nanos=%d resident=%t\n", className, sample, physicalSources[old].fs.nanos.Load()-partNanos, os.Getenv("GO_CARBON_MIXED_DIAG_PART_RESIDENT") != "")
+					}
 					if physical {
 						want, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock))
 						if err != nil {
@@ -449,8 +521,9 @@ func TestLatencyComparison(t *testing.T) {
 					count = 100
 				}
 			}
+			// Native A/A uses independently cached full-history stores (control/full).
 			// Both warm paths complete their native lazy initialization first.
-			// Cold samples still use fresh block caches; no OS cache flush.
+			// Physical cold arms also evict their own SST pages outside timing.
 			if warm {
 				for range 10 {
 					if _, err := full.Fetch(ctx, cfg.Name, int(clock-width), int(clock)); err != nil {
