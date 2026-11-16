@@ -75,7 +75,7 @@ go build -o storestatebench ./tool/storestatebench
 STORESTATE_LEGACY_FIXTURE=/offline/state go test -v ./internal/downsize -run '^TestCopyStateLegacyCost$' -count=1
 ```
 
-Normalization validates every catalog name's ordering and round-trips each transformed legacy JSON value against its canonical original, preserving large JSON integers and unknown names. Both engines ingest identical framed records and verify a full logical-record count and XOR of per-record SHA-256 hashes. The hash comparison is order-independent; the import spool should also retain its ordinary file SHA-256 in measurement artifacts. Input directories are never modified. Output paths must be private scratch paths; use fresh paths for each comparison.
+Normalization validates every catalog name's ordering and round-trips each transformed legacy JSON value against its canonical original, preserving large JSON integers and unknown names. The JSON round-trip oracle restores transformed in-memory values; a complete persisted JSON decoder and reserved ID-tag collision semantics remain production-codec gates. Both engines ingest identical framed records and verify a full logical-record count and XOR of per-record SHA-256 hashes. The hash comparison is order-independent; the import spool should also retain its ordinary file SHA-256 in measurement artifacts. Input directories are never modified. Output paths must be private scratch paths; use fresh paths for each comparison.
 
 The query command returns the captured progress record, including phase, done, holes and quarantine counts. Standard tools can inspect small metadata and record labels directly:
 
