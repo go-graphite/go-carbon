@@ -238,6 +238,9 @@ func TestV2UnionExpiryDoesNotResurrectClassic(t *testing.T) {
 	app.Stop()
 	app = nil
 	app = setup()
+	// Reset authority is durable even when expiry is disabled on restart.
+	// This also leaves the resumed incarnation a deterministic query window.
+	app.Config.Whisper.StoreExpiration = &Duration{}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
