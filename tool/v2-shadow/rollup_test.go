@@ -10,6 +10,8 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2daemon"
+	"github.com/go-graphite/go-carbon/points"
 	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"google.golang.org/protobuf/proto"
 )
@@ -41,5 +43,51 @@ func TestLivePolicyAndBacklog(t *testing.T) {
 	backlog := sourceBacklog(dir, a, 5)
 	if backlog["preallocated_file_bytes_upper_bound"] != int64(45) || backlog["successor_segments"] != 1 {
 		t.Fatal(backlog)
+	}
+}
+
+func TestL3PinnedArchiveComparison(t *testing.T) {
+	s, err := v2daemon.Open(filepath.Join(t.TempDir(), "store"), v2daemon.Config{Layer: 3, Producers: 1, Shards: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: "a;b=c", Group: "shadow", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: 0, Archives: []sealrollup.Archive{{Step: 1, Count: 60}, {Step: 60, Count: 10}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := s.Producers[0]
+	if err = p.AppendApplications([]v2daemon.Application{{Name: "a;b=c", Policy: policy, Order: 1, Clock: 122, Points: []points.Point{{Timestamp: 120, Value: 2}, {Timestamp: 121, Value: 3}}, Sequence: []uint64{1, 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Core.Append(0, nil, 2, true); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("target") != "a;b=c" {
+			t.Error("lost tagged target")
+		}
+		b, _ := proto.Marshal(&pb.MultiFetchResponse{Metrics: []*pb.FetchResponse{{Name: "a;b=c", StartTime: 120, StopTime: 240, StepTime: 60, Values: []float64{5, 0}, IsAbsent: []bool{false, true}}}})
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+	job := compareJob{Layer: 3, Names: []candidate{{ID: 1, Name: "a;b=c"}}, From: 100, Until: 240}
+	for _, db := range s.Core.DBs() {
+		job.Snapshots = append(job.Snapshots, db.NewSnapshot())
+	}
+	sums := &totals{}
+	compareL3(job, srv.URL, sums)
+	if sums.Names != 1 || sums.Points != 1 || sums.Mismatches != 0 || sums.Failures != 0 {
+		t.Fatal(sums)
 	}
 }
