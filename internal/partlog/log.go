@@ -59,6 +59,8 @@ type request struct {
 	from     uint64
 	apply    func(Record) error
 	snapshot *replaySnapshot
+	history  []segment
+	err      error
 	done     chan answer
 }
 type answer struct {
@@ -79,15 +81,21 @@ type stream struct {
 	segments      []segment
 	last, durable uint64
 	failure       error
+	retired       uint64
 }
 type Log struct {
-	dir, identity string
-	opts          Options
-	streams       []*stream
-	unlock        func() error
-	closeOnce     sync.Once
-	errors        chan error
-	closeErr      error
+	dir, identity  string
+	opts           Options
+	streams        []*stream
+	unlock         func() error
+	closeOnce      sync.Once
+	errors         chan error
+	closeErr       error
+	recovered      chan struct{}
+	recoverErr     error
+	recoveredTails []uint64
+	fences         map[uint64]bool
+	epoch          uint64
 }
 
 func syncDir(path string) error {
@@ -102,6 +110,10 @@ func syncDir(path string) error {
 // Open owns dir exclusively until Close. A fresh segment is always created
 // after restart; incomplete final records are removed before any new append.
 func Open(dir string, opts Options) (_ *Log, err error) {
+	return open(dir, opts, false)
+}
+
+func open(dir string, opts Options, admission bool) (_ *Log, err error) {
 	if opts.Streams < 1 || opts.Streams > 4096 {
 		return nil, os.ErrInvalid
 	}
@@ -133,7 +145,8 @@ func Open(dir string, opts Options) (_ *Log, err error) {
 	if e != nil {
 		return nil, e
 	}
-	l := &Log{dir: dir, opts: opts, unlock: release, errors: make(chan error, opts.Streams)}
+	l := &Log{dir: dir, opts: opts, unlock: release, errors: make(chan error, opts.Streams), recovered: make(chan struct{})}
+	l.recoveredTails = make([]uint64, opts.Streams)
 	defer func() {
 		if err != nil {
 			for _, s := range l.streams {
@@ -177,9 +190,18 @@ func Open(dir string, opts Options) (_ *Log, err error) {
 		return nil, errors.New("part log identity/config mismatch")
 	}
 	l.identity = ident.ID
+	if err = l.loadFences(); err != nil {
+		return nil, err
+	}
 	for id := 0; id < opts.Streams; id++ {
 		s := &stream{log: l, id: id, requests: make(chan request, 2), done: make(chan struct{})}
 		l.streams = append(l.streams, s)
+	}
+	if admission {
+		if err = l.openAdmission(); err != nil {
+			return nil, err
+		}
+		return l, nil
 	}
 	// Streams share no records or cursors. Validate each independently, joining
 	// every recovery before returning or releasing the directory lock on error.
@@ -193,6 +215,10 @@ func Open(dir string, opts Options) (_ *Log, err error) {
 	if err != nil {
 		return nil, err
 	}
+	for id, s := range l.streams {
+		l.recoveredTails[id] = lastRecordCursor(s.segments)
+	}
+	close(l.recovered)
 	for _, s := range l.streams {
 		go s.run()
 	}
@@ -239,6 +265,13 @@ func (l *Log) call(id int, r request) (uint64, error) {
 func (l *Log) Append(id int, clock int64, payload []byte) (uint64, error) {
 	if len(payload) == 0 || len(payload) > maxPayload {
 		return 0, os.ErrInvalid
+	}
+	select {
+	case <-l.recovered:
+		if l.recoverErr != nil {
+			return 0, l.recoverErr
+		}
+	default:
 	}
 	return l.call(id, request{op: "append", record: Record{Clock: clock, Payload: payload}})
 }
@@ -287,6 +320,9 @@ type replayPosition struct {
 }
 
 func (l *Log) snapshot(id int, from uint64) (*replaySnapshot, error) {
+	if err := l.WaitReady(context.Background()); err != nil {
+		return nil, err
+	}
 	snap := new(replaySnapshot)
 	_, err := l.call(id, request{op: "snapshot", from: from, snapshot: snap})
 	if err != nil {
@@ -298,7 +334,7 @@ func (s *stream) capture(from uint64, snap *replaySnapshot) (err error) {
 	if from > s.last {
 		return errors.New("parts frontier exceeds journal tail")
 	}
-	if len(s.segments) > 0 && from+1 < s.segments[0].first {
+	if from < s.retired {
 		return errors.New("parts frontier precedes retained journal")
 	}
 	snap.tail = s.last
@@ -423,6 +459,9 @@ func (l *Log) Follow(ctx context.Context, id int, from uint64, apply func(Record
 	if apply == nil {
 		return os.ErrInvalid
 	}
+	if err := l.WaitReady(ctx); err != nil {
+		return err
+	}
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	position := new(replayPosition)
@@ -458,6 +497,9 @@ func (l *Log) Follow(ctx context.Context, id int, from uint64, apply func(Record
 // every producer, even idle ones. Only sealed segments completely below the
 // minimum frontier are retired. Callers publish frontiers only with durable data.
 func (l *Log) Truncate(frontiers [][]uint64) error {
+	if err := l.WaitReady(context.Background()); err != nil {
+		return err
+	}
 	if len(frontiers) == 0 {
 		return os.ErrInvalid
 	}
@@ -482,6 +524,7 @@ func (l *Log) Truncate(frontiers [][]uint64) error {
 }
 func (l *Log) Close() error {
 	l.closeOnce.Do(func() {
+		l.closeErr = l.WaitReady(context.Background())
 		for id := range l.streams {
 			_, e := l.call(id, request{op: "close"})
 			l.closeErr = errors.Join(l.closeErr, e)
@@ -533,6 +576,17 @@ func (s *stream) run() {
 				e = s.sync()
 			case "snapshot":
 				e = s.capture(r.from, r.snapshot)
+			case "recovered":
+				e = r.err
+				if e != nil {
+					// Preserve any live suffix accepted before detecting corrupt
+					// history, then fail intake. A historical read failure must
+					// not prevent the final sync of otherwise valid new writes.
+					e = errors.Join(e, s.sync())
+				} else {
+					s.segments = append(r.history, s.segments...)
+					s.retired = max(s.retired, r.from)
+				}
 			case "trim":
 				e = s.trim(r.from)
 			case "close":
@@ -540,7 +594,9 @@ func (s *stream) run() {
 				if e == nil && s.file != nil {
 					e = s.saveIndex(s.segments[len(s.segments)-1])
 				}
-				e = errors.Join(e, s.file.Close())
+				if s.file != nil {
+					e = errors.Join(e, s.file.Close())
+				}
 				r.done <- answer{s.last, e}
 				return
 			}
@@ -586,6 +642,14 @@ func (s *stream) rotate() error {
 	return nil
 }
 func (s *stream) append(r Record) error {
+	if s.log.epoch != 0 && s.last&epochMask == epochMask {
+		return errors.New("part log epoch cursor exhausted")
+	}
+	if s.file == nil {
+		if err := s.rotate(); err != nil {
+			return err
+		}
+	}
 	if s.segments[len(s.segments)-1].size+int64(headerSize+len(r.Payload)) > s.log.opts.SegmentBytes && s.segments[len(s.segments)-1].last >= s.segments[len(s.segments)-1].first {
 		if e := s.rotate(); e != nil {
 			return e
@@ -682,49 +746,15 @@ func (s *stream) recover() error {
 		return e
 	}
 	slices.Sort(paths)
-	if len(paths) > 0 {
-		p := paths[len(paths)-1]
-		info, err := os.Stat(p)
-		if err != nil {
-			return err
-		}
-		if info.Size() < headerSize {
-			if err = inputlog.RetireSegment(p, os.Remove, syncDir); err != nil {
-				return err
-			}
-			paths = paths[:len(paths)-1]
-		}
-	}
-	for i, p := range paths {
-		var seg segment
-		var ok bool
-		// The newest segment may have been active at a crash, regardless of a
-		// surviving sidecar. Always validate its bytes, even when coarse file
-		// timestamps cannot distinguish an immediately following tail write.
-		if i < len(paths)-1 {
-			seg, ok = s.loadIndex(p)
-		}
-		if !ok {
-			s.hook("recover-scan")
-			var e error
-			seg, e = s.scan(p, i == len(paths)-1, nil)
-			if e != nil {
-				return e
-			}
-			// scan synced the tail; older files were synced before rotation.
-			if e = s.saveIndex(seg); e != nil {
-				return e
-			}
-		} else {
-			s.hook("recover-index")
-		}
-		if i > 0 && seg.first != s.last+1 {
-			return errors.New("part log sequence gap")
-		}
-		s.segments = append(s.segments, seg)
-		s.last = seg.last
+	if e = s.recoverPaths(paths); e != nil {
+		return e
 	}
 	s.durable = s.last
+	if s.log.epoch > 0 && s.last/epochStride < s.log.epoch {
+		// A crash may reserve an epoch without appending to this stream.
+		s.last, s.durable = s.log.epoch*epochStride, s.log.epoch*epochStride
+		return s.rotate()
+	}
 	// Reuse an empty last segment. Creating another with the same start would
 	// collide after a restart that occurred before its first append.
 	if len(s.segments) > 0 {
@@ -737,6 +767,71 @@ func (s *stream) recover() error {
 	}
 	return s.rotate()
 }
+
+func (s *stream) recoverPaths(paths []string) error {
+	for i, p := range paths {
+		first, err := segmentFirst(p)
+		if err != nil || first == 0 || (first >= epochStride && !s.log.fences[first/epochStride]) {
+			return errors.New("unfenced part log segment")
+		}
+		tail := i == len(paths)-1
+		if !tail {
+			next, err := segmentFirst(paths[i+1])
+			if err != nil {
+				return err
+			}
+			tail = next/epochStride != first/epochStride
+		}
+		if tail {
+			info, err := os.Stat(p)
+			if err != nil {
+				return err
+			}
+			if info.Size() < headerSize {
+				if err = inputlog.RetireSegment(p, os.Remove, syncDir); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		var seg segment
+		var ok bool
+		// The newest segment may have been active at a crash, regardless of a
+		// surviving sidecar. Always validate its bytes, even when coarse file
+		// timestamps cannot distinguish an immediately following tail write.
+		if !tail {
+			seg, ok = s.loadIndex(p)
+		}
+		if !ok {
+			s.hook("recover-scan")
+			var e error
+			seg, e = s.scan(p, tail, nil)
+			if e != nil {
+				return e
+			}
+			// scan synced the tail; older files were synced before rotation.
+			if e = s.saveIndex(seg); e != nil {
+				return e
+			}
+		} else {
+			s.hook("recover-index")
+		}
+		if len(s.segments) > 0 && !s.log.follows(s.last, seg.first) {
+			return errors.New("part log sequence gap")
+		}
+		s.segments = append(s.segments, seg)
+		s.last = seg.last
+	}
+	if len(s.segments) > 0 {
+		// Legacy logs have no explicit retired watermark. A non-initial first
+		// segment already proves that its preceding prefix was retired.
+		first := s.segments[0].first
+		if first < epochStride {
+			s.retired = first - 1
+		}
+	}
+	return s.loadRetired()
+}
 func (s *stream) trim(frontier uint64) error {
 	if frontier > s.last {
 		return errors.New("frontier exceeds journal tail")
@@ -744,6 +839,11 @@ func (s *stream) trim(frontier uint64) error {
 	frontier = min(frontier, s.durable)
 	for len(s.segments) > 1 && s.segments[0].last < frontier {
 		seg := s.segments[0]
+		if len(s.log.fences) > 0 {
+			if e := s.saveRetired(seg.last); e != nil {
+				return e
+			}
+		}
 		s.hook("before-retire")
 		if e := inputlog.RetireSegment(seg.path, os.Remove, syncDir); e != nil {
 			return e
@@ -752,6 +852,7 @@ func (s *stream) trim(frontier uint64) error {
 			return e
 		}
 		s.segments = s.segments[1:]
+		s.retired = max(s.retired, seg.last)
 	}
 	return nil
 }
