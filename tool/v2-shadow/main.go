@@ -116,6 +116,7 @@ type compareJob struct {
 	Attempt              int
 	FirstSnapshot        time.Time
 	PostClose            bool
+	SkipObservations     bool
 }
 type slot struct{ Bits, Seq uint64 }
 type difference struct {
@@ -190,7 +191,7 @@ func compareRaw(name string, rows []v2core.Row, classic *pb.FetchResponse, from,
 		compared++
 		if present != occupied || (present && r.Bits != math.Float64bits(v)) {
 			mismatches++
-			if len(examples) < 8 {
+			if true {
 				examples = append(examples, difference{name, ts, fmt.Sprintf("%016x", r.Bits), fmt.Sprintf("%016x", math.Float64bits(v)), present, occupied})
 			}
 		}
@@ -199,7 +200,7 @@ func compareRaw(name string, rows []v2core.Row, classic *pb.FetchResponse, from,
 	for ts, r := range raw {
 		compared++
 		mismatches++
-		if len(examples) < 8 {
+		if true {
 			examples = append(examples, difference{Name: name, Time: ts, V2Bits: fmt.Sprintf("%016x", r.Bits), V2Present: true})
 		}
 	}
@@ -292,10 +293,19 @@ func run() (retErr error) {
 	policyFile := flag.String("policies", "", "fixed JSON name-to-policy map; L3 admits only this population and performs no policy lookups")
 	capacityOnly := flag.Bool("capacity-only", false, "measure admission without expensive parity scans")
 	layer := flag.Int("layer", 2, "2 raw or 3 rollup; L3 reconstructs receiver applications, not original classic applications")
+	workers := flag.Int("workers", 0, "partition-parallel decoder/catalog workers (1..16); requires capacity-only or fixed L3 policies")
+	receipts := flag.String("classic-receipts", "", "JSON array of frozen differences to reobserve through classic read API")
+	recheckQuiet := flag.Bool("recheck-quiet", false, "retain all differences but omit equal-slot observations during a frozen recheck")
 	recheck := flag.String("recheck", "", "one saved comparison JSON object to check against a stopped existing out root, opened read-only")
 	flag.Parse()
+	if *receipts != "" {
+		return reobserveClassic(*receipts, *base)
+	}
+	if *workers > 0 {
+		return runParallel(*source, *out, *base, *policyFile, *duration, *interval, *lag, *workers, *shards, *sample, *layer, *capacityOnly)
+	}
 	if *recheck != "" {
-		return recheckFrozen(*out, *recheck, *base, *shards)
+		return recheckFrozen(*out, *recheck, *base, *shards, *recheckQuiet)
 	}
 	if *source == "" || *out == "" || *duration <= 0 || *sample < 1 || *interval <= 0 || *lag < 0 || *sampleEvery < 1 {
 		return errors.New("source, fresh out and positive limits required")

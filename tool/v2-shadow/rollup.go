@@ -125,8 +125,11 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 			continue
 		}
 		comparedName := false
-		for a := 1; a < len(m.p.Config.Archives); a++ {
-			prev := m.p.Config.Archives[a-1]
+		first := 1
+		if len(m.p.Config.Archives) == 1 {
+			first = 0
+		}
+		for a := first; a < len(m.p.Config.Archives); a++ {
 			step := m.p.Config.Archives[a].Step
 			lo := (job.From/step + 1) * step
 			hi := job.Until / step * step
@@ -134,7 +137,11 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 				continue
 			}
 			// Request well beyond the finer retention, preserving the recent until.
-			queryFrom := time.Now().Unix() - prev.Step*prev.Count - 2*step
+			queryFrom := lo - 1
+			if a > 0 {
+				prev := m.p.Config.Archives[a-1]
+				queryFrom = time.Now().Unix() - prev.Step*prev.Count - 2*step
+			}
 			classic, e := fetch(client, base, n.Name, queryFrom, hi-1)
 			if e != nil {
 				failures = append(failures, n.Name+": "+e.Error())
@@ -151,7 +158,7 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 				}
 			}
 
-			if job.PostClose && len(classic.IsAbsent) == len(classic.Values) {
+			if job.PostClose && !job.SkipObservations && len(classic.IsAbsent) == len(classic.Values) {
 				slots := map[int64]slot{}
 				for _, r := range rows {
 					if old, ok := slots[r.Time]; !ok || r.Seq > old.Seq {
@@ -176,9 +183,7 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 			bad += diff
 			archives++
 			comparedName = true
-			if len(examples) < 32 {
-				examples = append(examples, ex...)
-			}
+			examples = append(examples, ex...)
 			coverage = append(coverage, map[string]any{"name": n.Name, "archive": a, "step": step, "from": lo, "until": hi, "slots": count, "differences": diff, "method": m.p.Config.Method, "tagged": strings.Contains(n.Name, ";")})
 		}
 		if comparedName {

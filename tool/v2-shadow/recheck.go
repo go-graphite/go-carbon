@@ -13,7 +13,7 @@ import (
 
 // recheckFrozen uses only read-only DB handles after the owning harness stops.
 // It neither opens writable journals nor acquires the classic input-log lock.
-func recheckFrozen(root, casePath, base string, shards int) error {
+func recheckFrozen(root, casePath, base string, shards int, quiet ...bool) error {
 	var saved struct {
 		Stage                     string
 		Names                     []candidate
@@ -49,6 +49,9 @@ func recheckFrozen(root, casePath, base string, shards int) error {
 		return err
 	}
 	job := compareJob{Names: saved.Names, From: saved.From, Until: saved.Until, Attempt: saved.Attempt + 1, FirstSnapshot: when.Add(-time.Duration(saved.SinceFirstSnapshotSeconds * float64(time.Second))), PostClose: true}
+	if len(quiet) > 0 {
+		job.SkipObservations = quiet[0]
+	}
 	if saved.Stage == "l3_comparison" {
 		job.Layer = 3
 	}

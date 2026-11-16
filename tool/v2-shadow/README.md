@@ -65,3 +65,31 @@ Frozen rechecks also accept saved `l3_comparison` objects from a stopped L3 root
 The read-only recheck preserves names/windows and emits each completed slot's
 presence and value bits, so convergence can be checked against the initial
 examples. It does not reconstruct missing classic application metadata.
+
+Partition-parallel admission uses `-workers 16 -capacity-only -layer 2`.
+Each source partition stays on one decoder and one producer-local catalog. The
+bounded frame queues retain original bytes; the existing `SegmentReplay` checks
+payloads and dictionary continuity through a decoder-local `ReaderAt` view.
+Metric groups are submitted together rather than expanded into per-point
+applications. The source is opened read-only, including during warmup.
+
+For a fixed policy cohort, use `-workers 16 -layer 3 -policies policies.json`.
+Single-archive policies compare their finest archive too; multi-archive policies
+compare completed coarse intervals. Receiver groups and current clocks remain a
+reconstruction, so every difference requires original classic application
+metadata or measured classic convergence to the exact frozen v2 bits.
+`-classic-receipts differences.json` reobserves an array of saved differences
+through the classic read API without opening a v2 store. Each entry may specify `step`; omitted steps retain the legacy 60-second
+archive choice. The policy read API determines the lookback needed to select it. The receipt records both the original expectation
+and new observed value/presence, and never waives an unresolved difference.
+
+`offered_points` counts validated source frame headers dispatched by this
+reader; `admitted_points` counts points accepted by the private daemon. Live
+classic intake must also be measured independently from its bracketing counters:
+a lagging reader's own offered count is not the full offered stream. Source lag
+is time since the scanner last reached logical EOF, not a per-point append clock.
+Report pending admission and actual source backlog beside this proxy. All
+shared-host measurements require CPU affinity and co-tenant context.
+
+Use `-recheck-quiet` for large frozen cohorts: all differences remain, while
+equal-slot observations are omitted from the receipt to bound output size.
