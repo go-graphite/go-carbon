@@ -257,35 +257,52 @@ seal acknowledgements, byte-credit refunds and indivisible oversized packets.
 
 ### Endurance qualification status
 
-The 1800-second qualification is incomplete. The latest attempt was held before
-build or benchmark IO: over a read-only 120-second window, the co-resident service
-received 3.398946M points/s and committed 0.000826M points/s, a ratio of 0.000243.
-Cache grew from 636.0M to 1043.8M points. This tripped the required minimum 0.5
-commit/intake ratio; no arm or retry was launched. The service incarnation stayed
-unchanged and write errors/drops were zero on every scrape.
+A complete 1800-second trial used 24 independent processes, each with eight
+selected CPUs, four producers and one database. All 680,392,982,528 submitted
+numeric points committed, every process closed successfully, and write stalls
+were zero. Both stability gates fail; keep the PR Draft.
 
-Service-accounted writes were 33.841MB/s and physical-device writes 33.864MB/s in
-that window; device write await was 2.171ms, weighted queue 0.608 and busy time
-5.624%. These observations precede engine IO and do not measure engine throughput
-or attribute the service's slowdown to this prototype. All 38 read-only observation
-samples contained the required counters. No new raw/filtered worst-ten-second,
-CPU/point, written bytes/point, final-ten-minute debt or exact/replay result exists.
-Earlier native exact/SIGKILL results remain prior evidence only.
+| Selected CPUs | Intake seconds | Mean M points/s | Worst sliding 10s M/s | Worst / raw mean | CPU ns/point | Written B/point | Gate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+|192|1800.336|377.925459|309.181923|81.8103%|77.5300|1.900716|Raw FAIL|
+|192|1800.336|377.925459|331.215529|87.6404%|77.5300|1.900716|Declared-filter FAIL|
 
-A new trial needs its own booked window and fresh 60-second baseline; wait while
-cache is rising. Stop only benchmark IO on write errors/drops, service-incarnation
-change, cache above 3B points, cache growth above 2B from baseline, or committed
-points below half of input points averaged over 120 seconds. Retry a missing
-scrape three times; do not turn missing counters into zero. Input-log age is not
-a health signal for this workload and is not a stop condition. A guard stop ends
-the attempt; do not retry within the same booked window.
+The gates require worst-ten-second throughput at least 90% of the same raw mean
+and CPU cost at most 120ns/point. Mean and per-point costs include final sealing;
+close, the two-second observation interval, reporting and temporary database
+deletion are excluded. Start skew was 41.112ms and mean busy CPU count
+was 29.301; selecting 192 affinity CPUs does not mean 192 busy CPUs.
 
-Predeclare the external-writer rule before measurement: report every raw window,
-and separately exclude a sliding ten-second window only when the service's
-integrated accounted-write rate exceeds twice its own fresh baseline. Match PID
-and process start time, reject permission gaps, use the raw mean denominator for
-both gates, show eligible coverage, and retain all debt samples. The reporter
-consumes the monitor's baseline and trace:
+The factor-two external-writer rule was declared before measurement. The fresh
+60.002-second baseline accounted for 273.900MB/s of service writes;
+windows above 547.799MB/s were excluded only from the separate diagnostic.
+Eligible sliding-window coverage was 89.8107%, with
+161/180 eligible aligned windows averaging 381.653235M points/s.
+The raw trough coincided with 1121.394MB/s of service-accounted writes.
+The filtered gate still fails, so external writes do not explain away instability.
+
+Unfiltered estimated debt over the final 600 seconds had a fitted slope of
+-0.916206B/s, ranging from 13731.7 to 49184.8 bytes;
+interpolated endpoints were 26737.9 and 34829.0 bytes.
+The post-close total was 29763 bytes. A downward fitted slope does not
+mean every debt sample decreased. Default and explicit legacy exact and actual
+SIGKILL journal-replay suites passed on native Linux with CGO and Go 1.27,
+alongside build, vet and the complete touched-package tests.
+
+A new trial needs its own booked window and fresh 60-second baseline. Wait for
+cache to fall only when it exceeds 2B points. Stop only benchmark IO on write
+errors/drops, service-incarnation change, cache above 3B points, or cache growth
+above 2B from baseline. Retry a missing scrape three times; do not turn missing
+counters into zero. Input-log age and short-window commit/intake ratios are not
+health signals for this burst-writing workload. Report commit/intake over windows
+at least as long as the service's configured maximum writeout delay. The earlier
+120-second ratio condition is withdrawn. A guard stop ends the attempt; do not
+retry within the same booked window. This trial had no guard trip, counter reset
+or process-IO permission gaps.
+
+For the separate diagnostic, match PID and process start time, reject permission
+gaps, use the raw mean denominator for both gates, show eligible coverage, and
+retain every debt sample:
 
 ```sh
 python3 tool/immutable-parts/endurance_report.py \
@@ -293,7 +310,8 @@ python3 tool/immutable-parts/endurance_report.py \
   --baseline /scratch/baseline.json --factor 2 --out /scratch/endurance.json
 ```
 
-This documentation update changes no executable code. No new build or tests ran.
-Full-engine admission/journal/rollup/retention budgets, portable copies,
-hardware-only scaling and production readiness remain unqualified. Keep the PR
-Draft.
+This is the unchanged offline numeric engine: input-journal/network/name admission,
+authoritative rollups and retention remain outside its timed path. This trial
+establishes neither complete-engine throughput nor hardware-only scaling, portable
+copies, native-engine superiority or production readiness. No engine or persisted
+format changed in this documentation update.
