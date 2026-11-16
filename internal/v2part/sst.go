@@ -78,7 +78,13 @@ func NewWriter(path string, spec Spec) (*Writer, error) {
 	out := &hashedOutput{f: f, buf: bufio.NewWriterSize(f, 256<<10), h: sha256.New()}
 	// Match core's current default SST container, so ingestion needs no DB
 	// format ratchet. GCP3 is the key schema, independent of SST container.
-	return &Writer{path: path, spec: spec, out: out, sst: sstable.NewWriter(out, sstable.WriterOptions{Compression: sstable.SnappyCompression, TableFormat: sstable.TableFormatRocksDBv2})}, nil
+	opts := sstable.WriterOptions{Compression: sstable.SnappyCompression, TableFormat: sstable.TableFormatRocksDBv2}
+	if spec.Encoding == DenseEncoding {
+		opts.Compression = sstable.ZstdCompression
+		opts.BlockSize = 256 << 10
+		opts.BlockRestartInterval = 64
+	}
+	return &Writer{path: path, spec: spec, out: out, sst: sstable.NewWriter(out, opts)}, nil
 }
 
 func (w *Writer) Set(k Key, value []byte) error {
@@ -158,6 +164,9 @@ func (w *Writer) Close() (Descriptor, error) {
 		return Descriptor{}, errors.Join(err, os.Remove(w.path))
 	}
 	d := Descriptor{Version: SchemaVersion, KeyVersion: KeyVersion, Scope: w.spec.Scope, Encoding: w.spec.Encoding, Source: w.spec.Source, Bytes: w.out.n, FirstKey: w.first, LastKey: w.last, Coverage: Coverage{MinTime: w.spec.MinTime, MaxTime: w.spec.MaxTime, Names: w.names, Records: w.records, Policies: w.spec.Policies}}
+	if w.spec.Encoding == DenseEncoding {
+		d.Version = GroupFileVersion
+	}
 	copy(d.SHA256[:], w.out.h.Sum(nil))
 	return d, d.Validate()
 }
@@ -256,6 +265,9 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 		}
 		if records == 0 {
 			scope = Scope{Group: k.Group, VShard: k.VShard, Partition: k.Partition, Part: k.Part}
+			if expected != nil {
+				scope = expected.Scope
+			}
 			first = bytes.Clone(ik.UserKey)
 		}
 		if !scope.contains(k) || (records > 0 && bytes.Compare(last, ik.UserKey) >= 0) {

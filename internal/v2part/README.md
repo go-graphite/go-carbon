@@ -10,11 +10,12 @@ boundary now; `v2core.WritePortableRollupPart` adapts its existing seal records.
 | --- | --- |
 | Key | GCP3: exact placement group, CRC32C(name) mod 4096 vshard, signed partition, 16-byte part ID, exact canonical name, archive, signed physical block/slot, ordinal |
 | SST | Core-compatible RocksDB v2 container, Snappy, bytewise comparer, sequence-zero SETs only; no range keys/deletes, merges or point tombstones |
-| Descriptor | Schema 1; physical size/SHA-256, complete scope, value encoding, original source incarnation/stream/order bounds, key bounds, event-time bounds, exact distinct-name/record counts, archive policy definitions and their SHA-256 |
+| Descriptor | Schema 1 (existing) / 2 (dense); physical size/SHA-256, complete scope, value encoding, original source incarnation/stream/order bounds, key bounds, event-time bounds, exact distinct-name/record counts, archive policy definitions and their SHA-256 |
 | Manifest | Schema 1; one PG, generation, canonical catalog/policy/tombstone roots, ordered stream frontiers and sorted descriptors |
 | Receipt | Schema 1; manifest digest + descriptor digest + target storage incarnation + durably installed target generation |
 
-One file contains exactly one `(group,vshard,partition,part)` scope. An old core
+Schema-1 files contain exactly one `(group,vshard,partition,part)` scope.
+The explicit schema-2 extension below allows same-group vshard packing. An old core
 seal can reuse its UUID in several scopes: the UUID alone is not the file ID.
 No physical owner, DB count, core count, target host or placement-map epoch
 participates in persistent key identity. A manifest may span many vshards/time
@@ -91,6 +92,37 @@ the manifest before claiming whole-engine movement. Numeric raw records and
 local replay IDs in the current offline engine remain outside portable archive
 identity. The adapter is not a complete runtime importer for those namespaces.
 
-This change preserves current value density and the one-vshard file boundary;
-it does not introduce a dense multi-slot codec or qualify conversion's disk
-amplification/throughput gate. Core readers continue to read the same GCP3 keys.
+The schema-1 writer preserves existing singleton values. The opt-in dense
+extension below improves packing; real-source density and disk-speed conversion
+remain separate qualification gates.
+
+## Dense archive values and larger physical files
+
+`NewDenseWriter(path, spec)` accepts the published sorted singleton stream and
+produces `core-rollup-dense-v1` values. A value holds at most 4,096 occupied
+physical slots of one metric/archive. Slot deltas encode sparse archives without
+padding; timestamp delta-of-deltas retain physical ring wrap; XOR varints retain
+original replacement orders; a bitmap retains correction flags. Values use
+bit-checked integer deltas or eight exact byte planes. Zstd/256KiB SST blocks
+compress these columns. No floating-point arithmetic changes noninteger bits.
+`DecodeSlots` accepts both dense and singleton values. `ReadExpanded` reconstructs
+the exact original singleton keys/values and rejects overlapping runs. Coverage
+record counts refer to physical SST records, not expanded slot counts.
+
+Dense descriptors use **schema 2**, including files with a single vshard.
+Existing schema-1 descriptor and golden SST bytes remain unchanged; older
+readers reject schema 2. Dense files can set `Scope.VShard = GroupVShard` (65535)
+to span the vshards of **one placement group**, retaining one partition and
+original part ID. Every GCP3 key still carries its actual routed vshard; 65535
+never appears in a key. This is a physical packing boundary, not a routing
+change. `Read` requires the descriptor for a file spanning vshards; its nil
+compatibility mode stays strict. Manifests reject overlapping group-wide and
+single-vshard descriptors for the same original part/partition.
+
+`v2core.WriteDenseRollupPart` derives coverage and archive policies from complete
+core metadata, and `ScanRollups` resolves dense and singleton replacements by
+original order. Offline conversion is the first dense writer consumer. Repacking
+preserves original IDs: combining unrelated singleton parts requires a certified
+materialized source/compaction contract and is not inferred from filenames.
+The synthetic byte gate covers encoded SST bytes against native exact point
+blocks; it does not certify captured-data or whole-engine at-rest density.

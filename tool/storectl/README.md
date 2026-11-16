@@ -955,3 +955,20 @@ requires both `--part-allow-http` and `--part-token-file` (at least 32 character
 Clients must explicitly opt into unencrypted cross-host fixture traffic with
 `--part-allow-http`; production transport requires an authenticated HTTPS endpoint.
 Keep tokens in private files and supply the same file to sender and receiver.
+
+A retained canonical `v2part.Manifest` can supply the file inventory directly:
+
+```sh
+storectl sync --parts --portable-manifest /owned/retained/manifest.json \
+  --snapshot-dir /owned/new-hardlink-snapshot
+```
+
+Its immutable data files must be named `<descriptor-SHA256>.sst` beside the
+manifest and retained until snapshot linking completes. The adapter validates
+canonical descriptors and uses their size/checksum without decoding names.
+The manifest itself is pinned and copied as another checksum-addressed object,
+preserving original logical scopes, policies and frontier assertions. Subsequent
+transfers use the existing `--snapshot-dir` / `--part-from` interface and resume
+by whole-file checksums. This stages portable files; external authority files,
+retention leases, authenticated live installation and complete coverage remain
+the retained snapshot owner's responsibility.

@@ -3,6 +3,7 @@ package v2convert
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +13,12 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/cockroachdb/pebble/sstable"
+	"strings"
+
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // CoreRecords accepts ONLY materialized current-core GCP3 records. Native
@@ -22,8 +26,11 @@ import (
 // verified physical-slot/continuation adapter before conversion is safe.
 type CoreRecords struct{}
 
-func (CoreRecords) Format() string { return "gcp3-materialized-sealrollup-v1" }
+func (CoreRecords) Format() string { return "gcp3-materialized-sealrollup-v2" }
 func (CoreRecords) Convert(e Entry) (Record, error) {
+	if e.Trailer>>8 != 0 {
+		return Record{}, errors.New("nonzero materialized sequence")
+	}
 	k, err := partsformat.Decode(e.Key)
 	if err != nil {
 		return Record{}, fmt.Errorf("source is not current core GCP3: %w", err)
@@ -41,80 +48,135 @@ func (CoreRecords) Convert(e Entry) (Record, error) {
 	return Record{e.Key, e.Value}, nil
 }
 
-// CoreWriter retains current core bytes. Larger blocks reduce table overhead,
-// but singleton values remain singleton values: this writer does not claim the
-// native-density gate. One SST never crosses a placement-group/vshard boundary.
-type CoreWriter struct{}
-
-func (CoreWriter) Format() string { return "gcp3-sst-zstd-256k-v1" }
-func (CoreWriter) Write(ctx context.Context, dir string, rows []Record) (paths []string, err error) {
-	slices.SortFunc(rows, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
-	var w *sstable.Writer
-	var ownership string
-	defer func() {
-		if w != nil {
-			err = errors.Join(err, w.Close())
-		}
-	}()
-	for i, r := range rows {
-		if err = ctx.Err(); err != nil {
-			return paths, err
-		}
-		if i > 0 && bytes.Equal(rows[i-1].Key, r.Key) {
-			return paths, errors.New("duplicate materialized key")
-		}
-		if _, err = (CoreRecords{}).Convert(Entry{Key: r.Key, Value: r.Value}); err != nil {
-			return paths, err
-		}
-		k, _ := partsformat.Decode(r.Key)
-		lower, _, e := partsformat.VShardRangeForGroup(k.Group, k.VShard)
-		if e != nil {
-			return paths, e
-		}
-		if w == nil || ownership != string(lower) {
-			if w != nil {
-				e = w.Close()
-				w = nil
-				if e != nil {
-					return paths, e
-				}
-			}
-			name := fmt.Sprintf("part-%06d.sst", len(paths))
-			f, e := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-			if e != nil {
-				return paths, e
-			}
-			w = sstable.NewWriter(&partFile{f}, sstable.WriterOptions{Compression: sstable.ZstdCompression, BlockSize: 256 << 10, BlockRestartInterval: 64})
-			paths = append(paths, name)
-			ownership = string(lower)
-		}
-		if err = w.Set(r.Key, r.Value); err != nil {
-			return paths, err
-		}
-	}
-	if w != nil {
-		err = w.Close()
-		w = nil
-	}
-	return paths, err
-}
-
-func (CoreWriter) Read(ctx context.Context, path string, fn func(Record) error) error {
-	stats, err := ScanSST(ctx, path, func(e Entry) error {
-		if sstable.InternalKeyKind(e.Trailer&255) != sstable.InternalKeyKindSet {
-			return errors.New("non-SET output")
-		}
-		return fn(Record{e.Key, e.Value})
-	})
+// Expand is the shared dense/source adapter. It reconstructs the same logical
+// singleton stream, so an already-dense part can be repacked and reverified.
+func (c CoreRecords) Expand(e Entry, emit func(Record) error) error {
+	k, err := v2part.Decode(e.Key)
 	if err != nil {
 		return err
 	}
-	if stats.RangeDeletes != 0 || stats.RangeKeys != 0 {
-		return errors.New("range records in output")
+	if k.Archive == v2part.MetadataArchive {
+		r, err := c.Convert(e)
+		if err != nil {
+			return err
+		}
+		return emit(r)
+	}
+	if k.Ordinal != 0 || k.Partition != 0 || e.Trailer>>8 != 0 {
+		return errors.New("unsupported materialized source key/sequence")
+	}
+	records, err := v2part.DecodeSlots(k.Archive, k.BlockStart, e.Value)
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		k.BlockStart = r.Slot
+		key, err := v2part.Encode(k)
+		if err != nil {
+			return err
+		}
+		if err = emit(Record{Key: key, Value: sealrollup.EncodeRecord(r)}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
+// CoreWriter uses the common dense part writer and verifies through its reader.
+// Source must identify the original ordering stream, never this conversion run.
+type CoreWriter struct{ Source v2part.Provenance }
+
+func (cw CoreWriter) Format() string {
+	// Resume identity must include immutable producer provenance, not just codec.
+	identity := sha256.Sum256(append(cw.Source.Incarnation[:], []byte(cw.Source.Stream)...))
+	return fmt.Sprintf("%s-sst-v1:%x", v2part.DenseEncoding, identity)
+}
+func (cw CoreWriter) Write(ctx context.Context, dir string, rows []Record) ([]string, error) {
+	slices.SortFunc(rows, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
+	type scope struct {
+		group     v2part.Group
+		partition int64
+		part      v2part.PartID
+	}
+	var scopes []scope
+	files := map[scope][]v2core.KV{}
+	for i, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if i > 0 && bytes.Equal(rows[i-1].Key, row.Key) {
+			return nil, errors.New("duplicate materialized key")
+		}
+		if _, e := (CoreRecords{}).Convert(Entry{Key: row.Key, Value: row.Value}); e != nil {
+			return nil, e
+		}
+		k, _ := v2part.Decode(row.Key)
+		id := scope{k.Group, k.Partition, k.Part}
+		if _, ok := files[id]; !ok {
+			scopes = append(scopes, id)
+		}
+		files[id] = append(files[id], v2core.KV{Key: row.Key, Value: row.Value})
+	}
+	var paths []string
+	for _, id := range scopes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		name := fmt.Sprintf("part-%06d.sst", len(paths))
+		path := filepath.Join(dir, name)
+		d, err := v2core.WriteDenseRollupPart(path, files[id], cw.Source)
+		if err != nil {
+			return nil, err
+		}
+		name = fmt.Sprintf("%x.sst", d.SHA256)
+		if err = os.Rename(path, filepath.Join(dir, name)); err != nil {
+			return nil, err
+		}
+		b, err := d.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		desc := name + ".descriptor"
+		f, err := os.OpenFile(filepath.Join(dir, desc), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, err
+		}
+		_, err = f.Write(b)
+		err = errors.Join(err, f.Sync(), f.Close())
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, name, desc)
+	}
+	return paths, nil
+}
+func (CoreWriter) Read(ctx context.Context, path string, fn func(Record) error) error {
+	if strings.HasSuffix(path, ".descriptor") {
+		b, e := os.ReadFile(path)
+		if e != nil {
+			return e
+		}
+		_, e = v2part.ParseDescriptor(b)
+		return e
+	}
+	b, e := os.ReadFile(path + ".descriptor")
+	if e != nil {
+		return e
+	}
+	d, e := v2part.ParseDescriptor(b)
+	if e != nil {
+		return e
+	}
+	return v2part.ReadExpanded(ctx, path, &d, func(k v2part.Key, value []byte) error {
+		key, e := v2part.Encode(k)
+		if e != nil {
+			return e
+		}
+		return fn(Record{Key: key, Value: value})
+	})
+}
+
+// Used only by raw-source diagnostics/tests; output uses v2part.Writer.
 type partFile struct{ f *os.File }
 
 func (p *partFile) Write(b []byte) error {

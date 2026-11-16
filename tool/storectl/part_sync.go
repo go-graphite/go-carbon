@@ -48,6 +48,7 @@ func readPartSnapshot(path string) (v2core.PartSnapshot, error) {
 func partSyncMain(args []string) error {
 	fs := flag.NewFlagSet("sync --parts", flag.ContinueOnError)
 	fs.Bool("parts", false, "copy immutable parts into an offline staging repository")
+	portable := fs.String("portable-manifest", "", "retained canonical v2part manifest; files are <sha256>.sst beside it")
 	source := fs.String("snapshot-source", "", "trusted JSON inventory from a retained format reader (local Paths)")
 	dir := fs.String("snapshot-dir", "", "hard-link snapshot directory (new when --snapshot-source is set)")
 	listen := fs.String("part-listen", "", "serve this immutable snapshot until stopped")
@@ -72,6 +73,13 @@ func partSyncMain(args []string) error {
 		if len(token) < 32 {
 			return errors.New("part token must contain at least 32 characters")
 		}
+	}
+	if *portable != "" {
+		if *source != "" || *dir == "" {
+			return errors.New("--portable-manifest requires --snapshot-dir and excludes --snapshot-source")
+		}
+		_, err := v2core.LinkPartSnapshot(context.Background(), *dir, v2core.PortableSnapshotReader{ManifestPath: *portable, Directory: filepath.Dir(*portable)})
+		return err
 	}
 	if *source != "" {
 		if *dir == "" {

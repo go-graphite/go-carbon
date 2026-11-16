@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
@@ -180,5 +185,92 @@ func TestPartSyncSIGKILLResume(t *testing.T) {
 	var got v2core.PartSnapshot
 	if e = json.Unmarshal(b, &got); e != nil || len(got.Parts) != 3 {
 		t.Fatal("final inventory", e)
+	}
+}
+
+func TestPartSyncPortableDenseFormat(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	path := filepath.Join(source, "building.sst")
+	definition := []byte(`{"step":86400,"count":3650}`)
+	sourceID := v2part.PartID{9}
+	spec := v2part.Spec{Scope: v2part.Scope{Group: "fixture", VShard: v2part.GroupVShard, Part: v2part.PartID{1}}, Source: v2part.Provenance{Incarnation: sourceID, Stream: "fixture", MinOrder: 1, MaxOrder: 1}, MinTime: 1700000000, MaxTime: 1700000000 + 255*86400, Policies: []v2part.ArchivePolicy{{Archive: 0, Definition: definition, Digest: sha256.Sum256(definition)}}}
+	w, e := v2part.NewDenseWriter(path, spec)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer w.Abort()
+	for i := int64(0); i < 256; i++ {
+		k := v2part.Key{Group: "fixture", VShard: v2part.Route("fixture.metric"), Part: spec.Scope.Part, Metric: "fixture.metric", BlockStart: i}
+		key, _ := v2part.Encode(k)
+		r := sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: i, Order: 1, Sample: sealrollup.Sample{Time: 1700000000 + i*86400, Bits: uint64(i)}}}
+		if e = w.SetEncoded(key, sealrollup.EncodeRecord(r)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	d, e := w.Close()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Rename(path, filepath.Join(source, fmt.Sprintf("%x.sst", d.SHA256))); e != nil {
+		t.Fatal(e)
+	}
+	root := sha256.Sum256([]byte("empty-fixture-authority"))
+	m := v2part.Manifest{Version: 1, Group: "fixture", Generation: 1, CatalogRoot: root, PolicyRoot: root, TombstoneRoot: root, Frontiers: []v2part.StreamFrontier{{Incarnation: sourceID, Stream: "fixture", Cursor: 1}}, Parts: []v2part.Descriptor{d}}
+	b, e := m.MarshalBinary()
+	if e != nil {
+		t.Fatal(e)
+	}
+	manifest := filepath.Join(source, "manifest.json")
+	if e = os.WriteFile(manifest, b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	snapDir := filepath.Join(t.TempDir(), "snapshot")
+	if e = partSyncMain([]string{"--parts", "--portable-manifest", manifest, "--snapshot-dir", snapDir}); e != nil {
+		t.Fatal(e)
+	}
+	snapshot, e := readPartSnapshot(filepath.Join(snapDir, "snapshot.json"))
+	if e != nil || len(snapshot.Parts) != 2 {
+		t.Fatalf("snapshot: %+v %v", snapshot, e)
+	}
+	server := httptest.NewServer(partSnapshotHandler(snapDir, snapshot, ""))
+	defer server.Close()
+	target := t.TempDir()
+	result, e := receivePartSnapshot(ctx, server.Client(), server.URL, "", target, 2)
+	if e != nil || result.Parts != 2 {
+		t.Fatalf("copy %+v %v", result, e)
+	}
+	result, e = receivePartSnapshot(ctx, server.Client(), server.URL, "", target, 2)
+	if e != nil || result.Bytes != 0 || result.Skipped != 2 {
+		t.Fatalf("resume %+v %v", result, e)
+	}
+	copied := filepath.Join(target, fmt.Sprintf("%x.part", d.SHA256))
+	n := 0
+	e = v2part.ReadExpanded(ctx, copied, &d, func(k v2part.Key, b []byte) error {
+		r, e := sealrollup.DecodeRecord(0, k.BlockStart, b)
+		if e != nil {
+			return e
+		}
+		if r.Sample.Bits != uint64(n) {
+			t.Fatal("value changed in transfer")
+		}
+		n++
+		return nil
+	})
+	if e != nil || n != 256 {
+		t.Fatalf("readback %d: %v", n, e)
+	}
+	// The physical checksum binds the descriptor supplied by the format reader.
+	f, e := os.OpenFile(filepath.Join(source, fmt.Sprintf("%x.sst", d.SHA256)), os.O_WRONLY, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = f.WriteAt([]byte("corrupt"), 0)
+	f.Close()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = v2core.LinkPartSnapshot(ctx, filepath.Join(t.TempDir(), "bad"), v2core.PortableSnapshotReader{ManifestPath: manifest, Directory: source}); e == nil {
+		t.Fatal("descriptor checksum mismatch accepted")
 	}
 }

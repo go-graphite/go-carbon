@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2part"
 
 	"github.com/go-graphite/go-carbon/internal/v2convert"
 )
@@ -20,7 +23,18 @@ func main() {
 	output := flag.String("output", "", "repack materialized GCP3 SSTs to this directory; omit for scan only")
 	limit := flag.Int("limit", 0, "maximum number of source SSTs (0 = all)")
 	memory := flag.Int("part-mib", 256, "maximum decoded input table size in MiB")
+	incarnation := flag.String("source-incarnation", "", "original source incarnation, 32 hex digits; required for output")
+	stream := flag.String("source-stream", "", "original ordering stream; required for output")
 	flag.Parse()
+	var provenance v2part.Provenance
+	if *output != "" {
+		b, e := hex.DecodeString(*incarnation)
+		if e != nil || len(b) != 16 || *stream == "" {
+			fail(fmt.Errorf("original source-incarnation and source-stream required"))
+		}
+		copy(provenance.Incarnation[:], b)
+		provenance.Stream = *stream
+	}
 	if *source == "" {
 		fmt.Fprintln(os.Stderr, "-source is required")
 		os.Exit(2)
@@ -52,7 +66,7 @@ func main() {
 		if *output == "" {
 			r.Stats, err = v2convert.ScanSST(ctx, path, nil)
 		} else {
-			receipt, e := v2convert.ConvertSST(ctx, path, v2convert.Options{Directory: *output, PartBytes: *memory << 20, Adapter: v2convert.CoreRecords{}, Writer: v2convert.CoreWriter{}})
+			receipt, e := v2convert.ConvertSST(ctx, path, v2convert.Options{Directory: *output, PartBytes: *memory << 20, Adapter: v2convert.CoreRecords{}, Writer: v2convert.CoreWriter{Source: provenance}})
 			err = e
 			r.Receipt = &receipt
 			r.Stats.Bytes = receipt.InputBytes

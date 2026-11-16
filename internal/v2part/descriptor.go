@@ -69,7 +69,14 @@ func validateSpec(s Spec) error {
 	if !utf8.ValidString(string(s.Scope.Group)) || !utf8.ValidString(s.Encoding) || !utf8.ValidString(s.Source.Stream) {
 		return errors.New("invalid UTF-8 descriptor identity")
 	}
-	if _, err := PartitionPrefixForGroup(s.Scope.Group, s.Scope.VShard, s.Scope.Partition); err != nil {
+	vshard := s.Scope.VShard
+	if vshard == GroupVShard {
+		if s.Encoding != DenseEncoding {
+			return errors.New("group files require dense encoding")
+		}
+		vshard = 0
+	}
+	if _, err := PartitionPrefixForGroup(s.Scope.Group, vshard, s.Scope.Partition); err != nil {
 		return err
 	}
 	if s.MinTime > s.MaxTime || s.Source.MinOrder > s.Source.MaxOrder {
@@ -87,7 +94,11 @@ func validateSpec(s Spec) error {
 }
 
 func (d Descriptor) Validate() error {
-	if d.Version != SchemaVersion || d.KeyVersion != KeyVersion {
+	wantVersion := uint32(SchemaVersion)
+	if d.Encoding == DenseEncoding {
+		wantVersion = GroupFileVersion
+	}
+	if d.Version != wantVersion || d.KeyVersion != KeyVersion {
 		return errors.New("unsupported part schema/key version")
 	}
 	if err := validateSpec(d.spec()); err != nil {

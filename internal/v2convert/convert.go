@@ -23,6 +23,12 @@ type Adapter interface {
 	Format() string
 	Convert(Entry) (Record, error)
 }
+
+// ExpandingAdapter accepts a physical multi-slot source value and emits its
+// materialized logical records. The converter applies the same memory bound.
+type ExpandingAdapter interface {
+	Expand(Entry, func(Record) error) error
+}
 type Record struct{ Key, Value []byte }
 
 // Writer is the replacement boundary for the dense part writer. Write must
@@ -95,20 +101,26 @@ func ConvertSST(ctx context.Context, source string, o Options) (receipt Receipt,
 	defer os.RemoveAll(stage)
 	records := []Record{}
 	used := 0
-	stats, err := ScanSST(ctx, source, func(e Entry) error {
-		if sstable.InternalKeyKind(e.Trailer&255) != sstable.InternalKeyKindSet {
-			return errors.New("unresolved non-SET input: adapter requires a materialized snapshot")
-		}
-		r, e2 := o.Adapter.Convert(e)
-		if e2 != nil {
-			return e2
-		}
+	accept := func(r Record) error {
 		if o.PartBytes-used < 48 || len(r.Key) > o.PartBytes-used-48 || len(r.Value) > o.PartBytes-used-48-len(r.Key) {
 			return errors.New("source table exceeds part memory limit; split resolved input tables first")
 		}
 		used += 48 + len(r.Key) + len(r.Value)
-		records = append(records, Record{Key: append([]byte(nil), r.Key...), Value: append([]byte(nil), r.Value...)})
+		records = append(records, Record{Key: bytes.Clone(r.Key), Value: bytes.Clone(r.Value)})
 		return nil
+	}
+	stats, err := ScanSST(ctx, source, func(e Entry) error {
+		if sstable.InternalKeyKind(e.Trailer&255) != sstable.InternalKeyKindSet {
+			return errors.New("unresolved non-SET input: adapter requires a materialized snapshot")
+		}
+		if expanded, ok := o.Adapter.(ExpandingAdapter); ok {
+			return expanded.Expand(e, accept)
+		}
+		r, err := o.Adapter.Convert(e)
+		if err != nil {
+			return err
+		}
+		return accept(r)
 	})
 	if err != nil {
 		return receipt, err
@@ -116,7 +128,7 @@ func ConvertSST(ctx context.Context, source string, o Options) (receipt Receipt,
 	if stats.RangeDeletes != 0 || stats.RangeKeys != 0 {
 		return receipt, errors.New("range records require a resolved source snapshot")
 	}
-	receipt = Receipt{Version: 1, Source: filepath.Base(source), SourceSHA: sum, Adapter: o.Adapter.Format(), Writer: o.Writer.Format(), InputBytes: n, Entries: stats.Entries, LogicalDigest: stats.Digest}
+	receipt = Receipt{Version: 1, Source: filepath.Base(source), SourceSHA: sum, Adapter: o.Adapter.Format(), Writer: o.Writer.Format(), InputBytes: n, Entries: uint64(len(records)), LogicalDigest: stats.Digest}
 	slices.SortFunc(records, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
 	expected := sha256.New()
 	for _, r := range records {
@@ -142,14 +154,22 @@ func ConvertSST(ctx context.Context, source string, o Options) (receipt Receipt,
 		}
 		receipt.Files = append(receipt.Files, File{path, sum, size})
 	}
-	actual := sha256.New()
+	seenRows := make([]bool, len(records))
 	var count uint64
 	for _, file := range receipt.Files {
-		if err = o.Writer.Read(ctx, filepath.Join(stage, file.Name), func(r Record) error { hashEntry(actual, Entry{Key: r.Key, Value: r.Value}); count++; return nil }); err != nil {
+		if err = o.Writer.Read(ctx, filepath.Join(stage, file.Name), func(r Record) error {
+			i, ok := slices.BinarySearchFunc(records, r, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
+			if !ok || seenRows[i] || !bytes.Equal(records[i].Value, r.Value) {
+				return errors.New("writer readback differs from transformed source")
+			}
+			seenRows[i] = true
+			count++
+			return nil
+		}); err != nil {
 			return receipt, err
 		}
 	}
-	if count != receipt.Entries || hex.EncodeToString(actual.Sum(nil)) != receipt.LogicalDigest {
+	if count != receipt.Entries {
 		return receipt, errors.New("writer readback differs from transformed source")
 	}
 	if o.Checkpoint != nil {
