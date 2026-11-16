@@ -60,9 +60,10 @@ type readPartMetric struct {
 	meta   RollupMetadata
 }
 type snapshotMetric struct {
-	policy RollupPolicy
-	meta   RollupMetadata
-	parts  []*readPartMetric
+	policy  RollupPolicy
+	meta    RollupMetadata
+	parts   []*readPartMetric
+	partIDs map[string]struct{}
 }
 
 func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
@@ -124,8 +125,9 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 				if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 					return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 				}
-				var meta RollupMetadata
-				if err = json.Unmarshal(it.Value(), &meta); err != nil {
+				meta, decodeErr := DecodeRollupMetadata(it.Value())
+				if decodeErr != nil {
+					err = decodeErr
 					return nil, err
 				}
 				var policy RollupPolicy
@@ -155,6 +157,28 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 		for name, pm := range part.metrics {
 			out.directoryBytes += int64(512 + len(name)*2 + len(pm.meta.Policy)*2 + len(pm.policy.Group)*2 + len(pm.policy.Config.Archives)*32)
 		}
+		valid = it.SeekGE(v2part.PrefixEnd(scope))
+	}
+	if err = it.Error(); err != nil {
+		return nil, err
+	}
+	// Inventory identity is immutable. Reuse the complete directory when a new
+	// sealed publication has the same part set; never retain its old snapshot.
+	unchanged := prior != nil && len(out.parts) == len(prior.parts)
+	if unchanged {
+		for id := range out.parts {
+			if prior.parts[id] == nil {
+				unchanged = false
+				break
+			}
+		}
+	}
+	if unchanged {
+		out.metrics = prior.metrics
+		out.directoryBytes = prior.directoryBytes
+		return out, nil
+	}
+	for _, part := range out.parts {
 		for name, p := range part.metrics {
 			m := out.metrics[name]
 			if m == nil {
@@ -169,11 +193,15 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 			}
 			m.parts = append(m.parts, p)
 		}
-		valid = it.SeekGE(v2part.PrefixEnd(scope))
 	}
-	if err = it.Error(); err != nil {
-		return nil, err
+	for _, m := range out.metrics {
+		m.partIDs = make(map[string]struct{}, len(m.parts))
+		out.directoryBytes += int64(64 + len(m.parts)*48)
+		for _, part := range m.parts {
+			m.partIDs[part.id] = struct{}{}
+		}
 	}
+
 	return out, nil
 }
 
@@ -187,6 +215,16 @@ func (s *RollupSnapshot) Metadata(visit func(string, RollupPolicy, RollupMetadat
 	for name, m := range s.metrics {
 		visit(name, m.policy, m.meta)
 	}
+}
+
+// LookupMetadata reads the immutable directory without constructing a second
+// all-name map in each consumer generation.
+func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetadata, bool) {
+	m := s.metrics[name]
+	if m == nil {
+		return RollupPolicy{}, RollupMetadata{}, false
+	}
+	return m.policy, m.meta, true
 }
 
 // ScanArchive seeks only the named archive's physical interval in each part.
@@ -211,10 +249,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	count := copy(candidates[:], s.cache.entries[cacheKey])
 	s.cache.mu.Unlock()
 	var cached *archiveResult
-	parts := make(map[string]struct{}, len(m.parts))
-	for _, part := range m.parts {
-		parts[part.id] = struct{}{}
-	}
+	parts := m.partIDs
 	for _, candidate := range candidates[:count] {
 		if candidate.frontier > m.meta.Frontier.Order || len(candidate.parts) > len(parts) {
 			continue

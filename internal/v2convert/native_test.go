@@ -3,7 +3,6 @@ package v2convert
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -51,8 +50,8 @@ func TestNativeRecordsPreserveArchivesAndAuthority(t *testing.T) {
 			t.Fatal("baseline identity changed")
 		}
 		if key.Archive == v2part.MetadataArchive {
-			var meta v2core.RollupMetadata
-			if err := json.Unmarshal(row.Value, &meta); err != nil {
+			meta, err := v2core.DecodeRollupMetadata(row.Value)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if meta.ID != snapshot.Metadata.ID || meta.Revision != snapshot.Metadata.Revision || meta.LastUpdate != snapshot.Metadata.LastUpdate.UnixNano() || meta.Frontier.Order != baseline.Order || meta.Frontier.MaxTime != 1794700800 {
