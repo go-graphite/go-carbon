@@ -172,6 +172,8 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	if e != nil {
 		return nil, e
 	}
+	var allocStart runtime.MemStats
+	runtime.ReadMemStats(&allocStart)
 	start := time.Now()
 	s, e := Open(root, cfg)
 	if e != nil {
@@ -275,6 +277,8 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	closeSeconds := time.Since(closeStart).Seconds()
 	s = nil
 	complete := time.Since(start).Seconds()
+	var allocEnd runtime.MemStats
+	runtime.ReadMemStats(&allocEnd)
 	endCPU, e := processCPU()
 	if e != nil {
 		return nil, e
@@ -300,6 +304,9 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	count := float64(f.Names) * float64(f.Rounds)
 	result = map[string]any{"layer": layer, "names": f.Names, "rounds": f.Rounds, "producers": f.Producers, "shards": f.Shards, "barriers": f.Rounds / 4, "points": uint64(count), "intake_seconds": intake, "complete_seconds": complete, "intake_points_per_second": count / intake, "complete_points_per_second": count / complete, "cpu_ns_per_point": (endCPU - startCPU) * 1e9 / count, "written_B_per_point": float64(endWrite-startWrite) / count, "ingested_SST_before_close_B_per_point": float64(ingest) / count, "compaction_before_close_B_per_point": float64(compact) / count, "flush_before_close_B_per_point": float64(flushed) / count, "catalog_B_per_point": float64(catalog) / count, "journal_B_per_point": float64(journal) / count, "at_rest_B_per_point": float64(rest) / count, "estimated_debt_before_close": debt, "active_compactions_before_close": active, "journal_sync_groups": groups, "forced_groups": forced, "encoded_journal_bytes": encoded, "sync_groups_per_stream_second": float64(groups) / float64(f.Producers) / complete}
 	result["final_drain_seconds"] = drainSeconds
+	result["allocated_bytes"] = allocEnd.TotalAlloc - allocStart.TotalAlloc
+	result["allocated_B_per_point"] = float64(allocEnd.TotalAlloc-allocStart.TotalAlloc) / count
+	result["allocated_B_per_30s_normalized"] = float64(allocEnd.TotalAlloc-allocStart.TotalAlloc) * 30 / complete
 	result["core_before_close"] = coreStats
 	result["close_seconds"] = closeSeconds
 	result["stream_encode_seconds"] = encodeTime.Seconds()
