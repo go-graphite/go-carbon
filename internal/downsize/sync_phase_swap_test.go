@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -365,4 +366,117 @@ func TestSyncReadyNoopExecutableSwap(t *testing.T) {
 			t.Logf("old->new %s: done=%d backend data calls=0 redo_names=0 phase_regressions=0", readReadyReport(t, state).Verdict, final.Done)
 		})
 	}
+}
+
+// The previous executable itself demonstrates the refusal, then the candidate
+// adopts exactly the same journal. No state is edited between the executables.
+func TestSyncReceiptResumeExecutableSwap(t *testing.T) {
+	old, next := os.Getenv("STORECTL_SWAP_OLD"), os.Getenv("STORECTL_SWAP_NEW")
+	if old == "" || next == "" {
+		t.Skip("set STORECTL_SWAP_OLD and STORECTL_SWAP_NEW")
+	}
+	state := filepath.Join(t.TempDir(), "state")
+	source, target := nativeControllerStore(t), nativeControllerStore(t)
+	for _, n := range []string{"receipt.a", "receipt.b", "receipt.c", "receipt.d", "receipt.e", "receipt.f"} {
+		addPoints(t, source, n, 2)
+		addPoints(t, target, n, 2)
+	}
+	var callsMu sync.Mutex
+	calls := map[string]int{}
+	watch := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/transfer/digest" {
+				raw, _ := io.ReadAll(r.Body)
+				r.Body = io.NopCloser(bytes.NewReader(raw))
+				var req struct {
+					Names []string
+					Mode  string
+				}
+				_ = json.Unmarshal(raw, &req)
+				if !strings.HasPrefix(req.Mode, "proof-") {
+					p := redoProgress(t, state)
+					if p.Phase != "fill" || p.Round != 16 || p.Done < 3854336 {
+						t.Errorf("first data request regressed saved position: %+v", p)
+					}
+					callsMu.Lock()
+					for _, n := range req.Names {
+						calls[n]++
+					}
+					callsMu.Unlock()
+				}
+			}
+			h.ServeHTTP(w, r)
+		})
+	}
+	donor := httptest.NewServer(watch(nativeControllerService(t, source)))
+	defer donor.Close()
+	survivor := httptest.NewServer(watch(nativeControllerService(t, target)))
+	defer survivor.Close()
+	carbon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req protov3.MultiGlobRequest
+		raw, _ := io.ReadAll(r.Body)
+		_ = req.UnmarshalVT(raw)
+		var out protov3.MultiMetricsInfoResponse
+		for _, n := range req.Metrics {
+			out.Metrics = append(out.Metrics, &protov3.MetricsInfoResponse{Name: n, Retentions: []*protov3.Retention{{SecondsPerPoint: 10, NumberOfPoints: 128}}})
+		}
+		raw, _ = out.MarshalVT()
+		_, _ = w.Write(raw)
+	}))
+	defer carbon.Close()
+	u, _ := url.Parse(carbon.URL)
+	args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
+	c, err := parseSyncCommand(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := syncIdentity(c.sync)
+	j, err := openSyncJournal(filepath.Join(state, "sync.jsonl"), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &syncer{o: c.sync, j: j, copied: map[string]bool{}, forbid: map[string]bool{}, failedCp: map[string]bool{}}
+	seedReceiptResume(t, s, os.Getenv("STORECTL_RECEIPT_SCALE") == "1")
+	w := c.sync.windows[0]
+	if err = j.append(syncRow{Kind: "verified", Round: 1, First: "receipt.a", Last: "receipt.f", Names: 6, Work: []syncRedoWork{{Keys: []uint64{redoKey("verify", c.sync.to, w.From, w.Until)}, IDs: []syncRedoRange{{0, 5}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.savePhase("fill", 16, 3854336, 9537100); err != nil {
+		t.Fatal(err)
+	}
+	j.close()
+	run := func(binary string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, "sync", "--resume", state)
+		cmd.Env = append(os.Environ(), "STORECTL_GRAPHITE_ADDR=127.0.0.1:0", "NO_PROXY=*", "no_proxy=*")
+		return cmd.CombinedOutput()
+	}
+	before, err := run(old)
+	if err == nil || !bytes.Contains(before, []byte("lacks unambiguous receipt")) {
+		t.Fatalf("old executable did not reproduce refusal: %v\n%s", err, before)
+	}
+	callsMu.Lock()
+	oldCalls := len(calls)
+	callsMu.Unlock()
+	if oldCalls != 0 {
+		t.Fatal("old refusal performed data work")
+	}
+	after, err := run(next)
+	if err != nil {
+		t.Fatalf("candidate failed: %v\n%s", err, after)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if len(calls) != 2 || calls["receipt.d"] == 0 || calls["receipt.e"] == 0 {
+		t.Fatalf("candidate reverified proven names: %v", calls)
+	}
+	p := redoProgress(t, state)
+	if p.PhaseRegressions != 0 || p.AmbiguousReceiptNames != 2 || p.RedoNames["verify"] != 2 {
+		t.Fatalf("bad recovery counters: %+v\n%s", p, after)
+	}
+	t.Logf("old refusal -> new fill16 done3854336 preserved; data names=%v ambiguous_receipt_names=2 redo_names.verify=2 phase_regressions=0", calls)
 }

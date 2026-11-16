@@ -40,12 +40,12 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 	p.observeStoreWait(0, true)
 	p.storeWaitStarted = time.Now().Add(-time.Second)
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
-		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true, Quarantined: 2, PolicySkipped: 1, LegacyRevalidated: 9, PhaseRegressions: 1})
+		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true, Quarantined: 2, PolicySkipped: 1, LegacyRevalidated: 9, PhaseRegressions: 1, AmbiguousReceiptNames: 2, ReceiptContradictions: 3})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 29
+		count := 31
 		if index == 0 {
 			count++
 		}
@@ -66,6 +66,9 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		}
 		if got[p.prefix+".legacy_revalidated_names"] != "9" {
 			t.Fatal("missing migration count", got)
+		}
+		if got[p.prefix+".ambiguous_receipt_names"] != "2" || got[p.prefix+".receipt_contradictions"] != "3" {
+			t.Fatal("missing receipt recovery metrics", got)
 		}
 		if got[p.prefix+".phase_regressions"] != "1" {
 			t.Fatal("missing refused regression metric", got)
@@ -89,7 +92,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		t.Fatal("wait duration lost", p.storeWaitSeconds)
 	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete", RepairFailedNames: 7})
-	for i := 0; i < 29; i++ {
+	for i := 0; i < 31; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".repair_failed_names ") && !strings.Contains(line, ".repair_failed_names 7 ") {

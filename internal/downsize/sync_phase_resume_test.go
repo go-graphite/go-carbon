@@ -39,6 +39,11 @@ func TestSyncPhaseResumeEveryPosition(t *testing.T) {
 				if phase == "verify" || phase == "fill" {
 					round = 16
 				}
+				if phase == "verify" {
+					if err := j.append(syncRow{Kind: "verified", Round: round, First: "a", Last: "g", Names: 7}); err != nil {
+						t.Fatal(err)
+					}
+				}
 				p := syncPhasePosition{Phase: phase, Round: round, Done: 7, Total: 11, Complete: complete, Options: syncCheckpointOptions(s.o)}
 				if err := j.append(syncRow{Kind: "phase-position", Position: &p}); err != nil {
 					t.Fatal(err)
@@ -98,6 +103,11 @@ func TestSyncPhaseResumeLegacyProgressFloor(t *testing.T) {
 			s, j := phaseResumeFixture(t)
 			if err := j.append(syncRow{Kind: "discovered", Names: 271248522, Missing: 137041866}); err != nil {
 				t.Fatal(err)
+			}
+			if label == "verify round 16" {
+				if err := j.append(syncRow{Kind: "verified", Round: 16, First: "a", Last: "z", Names: 146847}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := atomicStateJSON(filepath.Join(s.o.state, "progress.json"), progressSnapshot{Phase: label, Round: 16, Done: 146847, Total: 43830096}); err != nil {
 				t.Fatal(err)
@@ -221,7 +231,7 @@ func TestSyncPhaseResumeCompletedRoundsUseOnlyReceipts(t *testing.T) {
 	}
 }
 
-func TestSyncPhaseResumeAmbiguousFailsBeforeBackend(t *testing.T) {
+func TestSyncPhaseResumeMissingReceiptIsSparse(t *testing.T) {
 	s, j := phaseResumeFixture(t)
 	s.sum.Discovered = 2
 	if err := os.WriteFile(s.unionPath(), []byte("a\t1\t1\nb\t1\t1\n"), 0600); err != nil {
@@ -231,8 +241,11 @@ func TestSyncPhaseResumeAmbiguousFailsBeforeBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.resume = syncPhasePosition{Phase: "fill", Round: 1}
-	if _, _, _, err := s.verifyRound(context.Background(), 1, s.unionSource()); err == nil || !strings.Contains(err.Error(), "refusing backend replay") {
-		t.Fatalf("ambiguous phase restarted: %v", err)
+	if _, unknown, _, err := s.verifyRound(context.Background(), 1, s.unionSource()); err != nil {
+		t.Fatalf("sparse legacy recovery: unknown=%v err=%v", unknown, err)
+	}
+	if j.progress.AmbiguousReceiptNames != 1 || j.progress.PhaseRegressions != 0 {
+		t.Fatalf("bad recovery counters: %+v", j.progress)
 	}
 }
 
