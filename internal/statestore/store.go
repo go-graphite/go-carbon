@@ -75,14 +75,21 @@ func (s *Store) Apply(records []Record) error {
 	}
 	defer t.Close()
 	for _, r := range records {
-		if r.Bucket == "" || strings.ContainsRune(r.Bucket, 0) || r.ID > math.MaxInt64 || r.Payload == nil {
-			return errors.New("invalid state record")
+		if err = validateRecord(r); err != nil {
+			return err
 		}
 		if err = t.Put(r); err != nil {
 			return err
 		}
 	}
 	return t.Commit()
+}
+
+func validateRecord(r Record) error {
+	if r.Bucket == "" || strings.ContainsRune(r.Bucket, 0) || r.ID > math.MaxInt64 || r.Payload == nil {
+		return errors.New("invalid state record")
+	}
+	return nil
 }
 
 // CommitWork atomically retires unique IDs, records an idempotency token, and

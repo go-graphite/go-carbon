@@ -156,8 +156,8 @@ func parseCatalog(s string) (catalogName, error) {
 	return catalogName{v[0], mask, v[2] == "1"}, nil
 }
 
-// An object tag avoids collisions with literal legacy strings. Unknown names
-// remain intact, including residuals for names outside the captured catalog.
+// Both reserved object shapes are escaped. A legacy object can contain either
+// key literally, including nested escape-shaped objects.
 func (d *dictionary) normalize(v any) (any, error) {
 	switch x := v.(type) {
 	case string:
@@ -185,12 +185,20 @@ func (d *dictionary) normalize(v any) (any, error) {
 			}
 			x[k] = n
 		}
+		if len(x) == 1 {
+			if _, ok := x["$catalog_id"]; ok {
+				return map[string]any{"$catalog_object": x}, nil
+			}
+			if _, ok := x["$catalog_object"]; ok {
+				return map[string]any{"$catalog_object": x}, nil
+			}
+		}
 	}
 	return v, nil
 }
 
-// restore is an import oracle: replacing known strings by IDs must preserve the
-// complete canonical JSON value, including unknown names and large integers.
+// restore decodes persisted tagged values; decode uses UseNumber so IDs never
+// pass through float64.
 func (d *dictionary) restore(v any) (any, error) {
 	switch x := v.(type) {
 	case []any:
@@ -202,7 +210,20 @@ func (d *dictionary) restore(v any) (any, error) {
 			x[i] = n
 		}
 	case map[string]any:
-		if id, ok := x["$catalog_id"].(uint64); ok && len(x) == 1 {
+		if raw, ok := x["$catalog_id"]; ok && len(x) == 1 {
+			var id uint64
+			switch n := raw.(type) {
+			case uint64:
+				id = n
+			case json.Number:
+				var err error
+				id, err = strconv.ParseUint(n.String(), 10, 64)
+				if err != nil {
+					return nil, fmt.Errorf("invalid catalog ID: %w", err)
+				}
+			default:
+				return nil, fmt.Errorf("invalid catalog ID type %T", raw)
+			}
 			i := sort.Search(len(d.pages), func(i int) bool { return d.pages[i].FirstID > id }) - 1
 			if i < 0 {
 				return nil, fmt.Errorf("ID outside dictionary")
@@ -216,6 +237,20 @@ func (d *dictionary) restore(v any) (any, error) {
 				return nil, fmt.Errorf("ID outside page")
 			}
 			return names[off].Name, nil
+		}
+		if raw, ok := x["$catalog_object"]; ok && len(x) == 1 {
+			literal, ok := raw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid escaped catalog object")
+			}
+			for k, y := range literal {
+				n, e := d.restore(y)
+				if e != nil {
+					return nil, e
+				}
+				literal[k] = n
+			}
+			return literal, nil
 		}
 		for k, y := range x {
 			n, e := d.restore(y)
@@ -236,11 +271,14 @@ func (d *dictionary) canonical(v any) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	normalized, e := json.Marshal(v)
+	normalized, e := json.Marshal(struct {
+		Version int `json:"version"`
+		Value   any `json:"value"`
+	}{1, v})
 	if e != nil {
 		return nil, e
 	}
-	v, e = d.restore(v)
+	v, e = d.decodeCanonical(normalized)
 	if e != nil {
 		return nil, e
 	}
@@ -252,4 +290,20 @@ func (d *dictionary) canonical(v any) ([]byte, error) {
 		return nil, fmt.Errorf("legacy round-trip mismatch")
 	}
 	return normalized, nil
+}
+
+func (d *dictionary) decodeCanonical(b []byte) (any, error) {
+	v, err := decode(b)
+	if err != nil {
+		return nil, err
+	}
+	envelope, ok := v.(map[string]any)
+	if !ok || len(envelope) != 2 || envelope["version"] != json.Number("1") {
+		return nil, fmt.Errorf("unsupported catalog JSON codec version")
+	}
+	value, ok := envelope["value"]
+	if !ok {
+		return nil, fmt.Errorf("missing catalog JSON value")
+	}
+	return d.restore(value)
 }

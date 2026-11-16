@@ -42,7 +42,7 @@ Proposed production relations:
 | `batch` | unique logical batch token and membership digest; counters/outcomes committed atomically |
 | `adoption` | source stamps, consumed byte offsets and last committed import position per legacy file |
 
-The prototype uses `mattn/go-sqlite3` with cgo. The repository public release workflow currently sets `CGO_ENABLED=0` for package builds and overrides it to1 only for tests; its Makefile cross-builds386/amd64/arm64. The offline package is not imported by production storectl, so this Draft does not change those binaries. Before production wiring, either provide and test a cgo cross-toolchain matrix for supported packages or use a pure-Go SQLite driver and rerun this same comparison. The measured engine recommendation does not decide that packaging tradeoff.
+The prototype now uses `modernc.org/sqlite` v1.62.0, a pure-Go driver. The repository public release workflow sets `CGO_ENABLED=0` for package builds and its Makefile cross-builds386/amd64/arm64. The measured driver comparison below selects modernc without changing that packaging contract. There is one SQLite driver in the dependency graph; the cgo comparison uses the prior prototype executable. Production storectl is still not wired to this experimental store.
 
 SQLite uses WAL, `synchronous=FULL`, prepared statements, bounded transactions, a single writer and a busy timeout. NORMAL is insufficient for acknowledged-commit durability after power loss. Database, WAL and shared-memory files are one operational unit; use the backup API or a clean closed copy, never copy just the live main file. The database must be on a local filesystem with working fsync semantics. Pebble uses synchronous WAL commits and indexed batches. Its block cache and memtables are bounded. Do not disable the WAL or fsync for import measurements.
 
@@ -62,10 +62,10 @@ The prototype imports `union.tsv`, `missing.tsv`, `sync.jsonl`, pending selectio
 
 ## Usage
 
-Build this benchmark with cgo:
+Build this benchmark without cgo:
 
 ```sh
-go build -o storestatebench ./tool/storestatebench
+CGO_ENABLED=0 go build -o storestatebench ./tool/storestatebench
 ./storestatebench -mode=normalize -input=/offline/state -output=/scratch/state.spool
 ./storestatebench -mode=import -backend=sqlite -input=/scratch/state.spool -output=/scratch/state.db
 ./storestatebench -mode=import -backend=pebble -input=/scratch/state.spool -output=/scratch/state.pebble
@@ -75,7 +75,7 @@ go build -o storestatebench ./tool/storestatebench
 STORESTATE_LEGACY_FIXTURE=/offline/state go test -v ./internal/downsize -run '^TestCopyStateLegacyCost$' -count=1
 ```
 
-Normalization validates every catalog name's ordering and round-trips each transformed legacy JSON value against its canonical original, preserving large JSON integers and unknown names. The JSON round-trip oracle restores transformed in-memory values; a complete persisted JSON decoder and reserved ID-tag collision semantics remain production-codec gates. Both engines ingest identical framed records and verify a full logical-record count and XOR of per-record SHA-256 hashes. The hash comparison is order-independent; the import spool should also retain its ordinary file SHA-256 in measurement artifacts. Input directories are never modified. Output paths must be private scratch paths; use fresh paths for each comparison.
+Normalization validates every catalog name's ordering and round-trips each transformed legacy JSON value through its persisted, versioned encoding before comparing with the original. The decoder preserves exact JSON numbers and escapes literal objects matching either reserved catalog-ID/object shape. Backend tests also encode, store, retrieve and decode values containing nested reserved objects, unknown names and integers larger than2^53. These remain offline codecs, not the typed production phase/window/proof codecs required below. Both engines ingest identical framed records and verify a full logical-record count and XOR of per-record SHA-256 hashes. The hash comparison is order-independent; the import spool should also retain its ordinary file SHA-256 in measurement artifacts. Input directories are never modified. Output paths must be private scratch paths; use fresh paths for each comparison.
 
 The query command returns the captured progress record, including phase, done, holes and quarantine counts. Standard tools can inspect small metadata and record labels directly:
 
@@ -134,3 +134,41 @@ The update workload is1,048,576unique IDs in128synchronous8,192-ID transactions,
 
 Read-only operator SQL returned phase/done/holes/quarantine in0.646ms, grouped journal kinds in29.309ms, a synthetic window counter in0.067ms and an exact completed ID in0.079ms. `PRAGMA quick_check` returned `ok`. The complete production window/reason/proof views and first-start adopter still need implementation. This Draft is an offline prototype and design plan.
 
+
+
+## Pure-Go driver qualification and resumable offline import
+
+The follow-up compares the original cgo executable (`mattn/go-sqlite3` v1.14.53)
+with modernc v1.62.0 on the exact same normalized input and unique-update
+workload. Both import522,808records with count/hash parity. Both use WAL/FULL,
+one connection, prepared statements and128batches of8,192unique IDs.
+
+| Driver | Unique names/s | First open + captured progress | Decision |
+| --- | ---: | ---: | --- |
+| mattn/cgo | 287,989 | 0.620ms | Comparison executable only |
+| modernc/pure Go | 212,919 | 1.151ms | Selected; exceeds50k names/s and meets10ms open threshold |
+
+The follow-up used a private tmpfs, so these numbers establish driver overhead
+and process-crash behavior while issuing FULL synchronization. They do not
+measure physical storage latency or establish power-loss durability. The earlier
+on-disk SQLite results above remain a separate experiment.
+
+The offline `import` command now resumes automatically at a committed frame
+boundary. A versioned cursor stores the complete input SHA256, byte offset,
+record count and logical-record hash in the same transaction as its batch.
+Restarting the same command skips already committed insertions. It still scans
+the immutable input to authenticate its digest and compute expected per-relation
+counts/hashes, then checks every imported relation against those values. A
+changed input, stale cursor, malformed frame, extra record or parity mismatch
+fails. Six subprocess SIGKILL cuts cover before/after commit at the first three
+batch boundaries. SQLITE_FULL coverage checks that membership, batch token and
+counter roll back together and the reopened database passes integrity_check.
+
+This progress does not implement automatic legacy-state adoption in production.
+`internal/downsize` retains its existing persistence boundary. The remaining
+production gates are the complete typed relations, every child receipt and
+READY/recovery state, exact reducer parity, durable format publication and real
+old-to-new SQLite executable swaps. The future-version config fence test can be
+run against separately built older executables using
+`STORECTL_FENCE_OLD_BINARIES`; it proves rejection of that proposed marker, not
+that production cutover is complete. Keep this PR Draft until those gates pass.

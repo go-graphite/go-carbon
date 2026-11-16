@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -112,6 +113,18 @@ func hashRecord(sum *[32]byte, r statestore.Record) {
 		sum[i] ^= h[i]
 	}
 }
+
+type relationDigest struct {
+	Records uint64   `json:"records"`
+	XOR     [32]byte `json:"xor_sha256"`
+}
+
+func addRelation(relations map[string]relationDigest, r statestore.Record) {
+	v := relations[r.Bucket]
+	v.Records++
+	hashRecord(&v.XOR, r)
+	relations[r.Bucket] = v
+}
 func scanner(f *os.File) *bufio.Scanner {
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 1<<20), 64<<20)
@@ -122,7 +135,14 @@ func decode(b []byte) (any, error) {
 	d.UseNumber()
 	var v any
 	err := d.Decode(&v)
-	return v, err
+	if err != nil {
+		return nil, err
+	}
+	var extra any
+	if err = d.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing JSON value or corrupt suffix")
+	}
+	return v, nil
 }
 
 func normalize(input, output, dictionaryInput string) error {
@@ -410,19 +430,50 @@ func normalize(input, output, dictionaryInput string) error {
 	return nil
 }
 func importSpool(backend, input, output string) error {
+	return importSpoolWithCut(backend, input, output, nil)
+}
+
+func importSpoolWithCut(backend, input, output string, cut func(int64, bool)) (result error) {
 	s, err := statestore.Open(backend, output)
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer func() { result = errors.Join(result, s.Close()) }()
 	f, err := os.Open(input)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	sourceHash := sha256.New()
+	expectedRelations := map[string]relationDigest{}
+	sourceReader := bufio.NewReaderSize(io.TeeReader(f, sourceHash), 8<<20)
+	for {
+		record, err := readRecord(sourceReader)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		addRelation(expectedRelations, record)
+	}
+	source := fmt.Sprintf("%x", sourceHash.Sum(nil))
+	cursor, err := s.ImportPosition(source)
+	if err != nil {
+		return err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if cursor.Offset > st.Size() {
+		return errors.New("import offset exceeds input")
+	}
+	if _, err = f.Seek(cursor.Offset, io.SeekStart); err != nil {
+		return err
+	}
 	r := bufio.NewReaderSize(f, 8<<20)
-	var expected [32]byte
-	var count uint64
+	expected, count, offset := cursor.XOR, cursor.Records, cursor.Offset
 	var batch []statestore.Record
 	var bytes int
 	start := time.Now()
@@ -430,7 +481,18 @@ func importSpool(backend, input, output string) error {
 		if len(batch) == 0 {
 			return nil
 		}
-		e := s.Apply(batch)
+		next := statestore.ImportCursor{Version: 1, Source: source, Offset: offset, Records: count, XOR: expected}
+		var hook func()
+		if cut != nil {
+			hook = func() { cut(offset, true) }
+		}
+		e := s.ImportBatch(cursor, next, batch, hook)
+		if e == nil {
+			cursor = next
+			if cut != nil {
+				cut(offset, false)
+			}
+		}
 		batch = batch[:0]
 		bytes = 0
 		return e
@@ -443,6 +505,13 @@ func importSpool(backend, input, output string) error {
 		if e != nil {
 			return e
 		}
+		// readRecord consumes its length prefix plus canonical JSON. The reader
+		// may prefetch beyond this record, so Seek's offset is not a cursor.
+		position, e := f.Seek(0, io.SeekCurrent)
+		if e != nil {
+			return e
+		}
+		offset = position - int64(r.Buffered())
 		hashRecord(&expected, v)
 		count++
 		batch = append(batch, v)
@@ -456,26 +525,41 @@ func importSpool(backend, input, output string) error {
 	if err = flush(); err != nil {
 		return err
 	}
-	emit(map[string]any{"stage": "import", "records": count, "seconds": time.Since(start).Seconds(), "xor_sha256": fmt.Sprintf("%x", expected)})
-	var actual [32]byte
-	var n uint64
-	start = time.Now()
-	err = s.Scan(func(r statestore.Record) error { hashRecord(&actual, r); n++; return nil })
+	current, err := f.Stat()
 	if err != nil {
 		return err
 	}
-	if actual != expected || n != count {
+	if current.Size() != st.Size() || !current.ModTime().Equal(st.ModTime()) {
+		return errors.New("immutable import input changed during import")
+	}
+	emit(map[string]any{"stage": "import", "records": count, "seconds": time.Since(start).Seconds(), "xor_sha256": fmt.Sprintf("%x", expected)})
+	var actual [32]byte
+	var n uint64
+	actualRelations := map[string]relationDigest{}
+	start = time.Now()
+	err = s.Scan(func(r statestore.Record) error {
+		if !statestore.IsImportMetadata(r) {
+			hashRecord(&actual, r)
+			addRelation(actualRelations, r)
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if actual != expected || n != count || !reflect.DeepEqual(expectedRelations, actualRelations) {
 		return errors.New("engine parity mismatch")
 	}
-	emit(map[string]any{"stage": "full_engine_parity", "records": n, "seconds": time.Since(start).Seconds(), "xor_sha256": fmt.Sprintf("%x", actual)})
+	emit(map[string]any{"stage": "full_engine_parity", "records": n, "seconds": time.Since(start).Seconds(), "xor_sha256": fmt.Sprintf("%x", actual), "relations": actualRelations})
 	return nil
 }
-func update(backend, path string, n int) error {
+func update(backend, path string, n int) (result error) {
 	s, err := statestore.Open(backend, path)
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer func() { result = errors.Join(result, s.Close()) }()
 	start := time.Now()
 	var added uint64
 	for off := 0; off < n; off += 8192 {
