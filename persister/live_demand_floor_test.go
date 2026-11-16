@@ -59,6 +59,7 @@ func TestLiveDemandOrdinaryLimits(t *testing.T) {
 // Exercise the cache, eligibility queue, real worker/token driver and automatic
 // sampler together. Only the storage syscall is replaced by a confirmed write.
 func TestLiveDemandSurvivesRestartWindow(t *testing.T) {
+	t.Parallel() // This test owns its cache, workers and virtual-time bubble.
 	// Preserve every demand/floor ratio and the high-rate (>1000/s) token
 	// path while avoiding millions of distinct names under the race detector.
 	const scale = 20

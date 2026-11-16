@@ -12,6 +12,7 @@ import (
 )
 
 func TestRestartLiveInputAdmissionWithYoungCache(t *testing.T) {
+	t.Parallel() // This test owns its cache, workers and virtual-time bubble.
 	for _, mode := range []int{-1, 1000} {
 		t.Run(map[int]string{-1: "automatic", 1000: "fixed"}[mode], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {

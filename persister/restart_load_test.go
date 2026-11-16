@@ -15,6 +15,7 @@ import (
 )
 
 func TestRestartWorkersCatchUpAfterTripledLoad(t *testing.T) {
+	t.Parallel() // This test owns its cache, workers and virtual-time bubble.
 	path := filepath.Join(t.TempDir(), "restart-cpu.json")
 	synctest.Test(t, func(t *testing.T) {
 		host, _ := os.Hostname()
