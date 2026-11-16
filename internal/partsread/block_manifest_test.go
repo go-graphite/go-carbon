@@ -408,3 +408,30 @@ func TestBlockManifestCacheDisabledAndInvalid(t *testing.T) {
 		t.Fatal("uncached read missed corruption", got, err)
 	}
 }
+
+// Source adapters can return after their last yield without polling context.
+// Render still observes cancellation at the final source boundary.
+type cancelingFinalSource struct{ cancel context.CancelFunc }
+
+func (s cancelingFinalSource) HasArchive(context.Context, uint64, int64) (bool, error) {
+	return true, nil
+}
+func (s cancelingFinalSource) Scan(_ context.Context, _ uint64, _ Archive, _, _ int64, yield func(Sample) error) error {
+	s.cancel()
+	return yield(Sample{Time: 1, Bits: 42, Sequence: 1})
+}
+func TestRenderCancellationAtFinalSource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var p Publication
+	p.Publish(View{Catalog: testCatalog([]Archive{{1, 100}}), Parts: []Source{cancelingFinalSource{cancel}}})
+	defer p.Close()
+	h, err := p.Pin(NewBudget(1024), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if _, err = h.Render(ctx, "sample", 0, 10, 10); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
