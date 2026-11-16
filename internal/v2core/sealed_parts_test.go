@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -106,9 +107,17 @@ func TestSealedPartCrashPublicationAndReplay(t *testing.T) {
 			}
 			defer e.close()
 			paths, err = filepath.Glob(filepath.Join(root, "owner-000", "parts", "*"))
-			want := 0
-			if phase == "commit" {
-				want = 2
+			want := 2
+			if phase != "commit" {
+				g := e.owners[0].gc
+				g.mu.Lock()
+				g.now = func() time.Time { return time.Now().Add(2 * sealedPartGrace) }
+				g.mu.Unlock()
+				if _, err = g.sweep(); err != nil {
+					t.Fatal(err)
+				}
+				paths, err = filepath.Glob(filepath.Join(root, "owner-000", "parts", "*"))
+				want = 0
 			}
 			if err != nil || len(paths) != want {
 				t.Fatalf("recovery retained %d files, want %d: %v", len(paths), want, err)
