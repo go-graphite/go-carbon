@@ -39,8 +39,8 @@ func (s *Store) SeedMemtableRangeTombstonesForTest(n int) error {
 	return b.Commit(nil)
 }
 
-// SetTransferBatchBytesForTest selects the old WAL staging oracle with a
-// positive byte cap; zero restores production SST staging.
+// SetTransferBatchBytesForTest reduces the WAL staging byte cap; zero
+// restores the production bound.
 func (s *Store) SetTransferBatchBytesForTest(n int) { s.transferBatchBytes = n }
 
 // PebbleMetricsForTest renders the Pebble LSM metrics (levels, files, sizes).

@@ -97,6 +97,9 @@ func TestBoundedTransferIngestDifferential(t *testing.T) {
 	if err := wal.stageTransferWAL(ctx, stage, 1); err != nil {
 		t.Fatal(err)
 	}
+	if wal.db.Metrics().Ingest.Count != 0 {
+		t.Fatal("private staging used SST placement")
+	}
 	for _, candidate := range []*Store{bounded, wal} {
 		a, err := old.db.NewIter(nil)
 		if err != nil {

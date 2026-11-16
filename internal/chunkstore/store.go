@@ -381,8 +381,8 @@ type Store struct {
 	// transferMergeAppendOff merges every present continuation name with
 	// RestoreArchives (differential tests).
 	transferMergeAppendOff bool
-	// transferBatchBytes selects the previous WAL staging path with this byte
-	// cap in differential tests/benchmarks. Production uses verified SSTs.
+	// transferBatchBytes reduces the WAL staging byte cap in differential
+	// tests and manual benchmarks. Zero uses the production bound.
 	transferBatchBytes int
 	// backgroundStopped is set once StopBackground completed.
 	backgroundStopped atomic.Bool
