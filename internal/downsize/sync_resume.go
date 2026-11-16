@@ -59,10 +59,10 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete":
+		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete", "ready-block":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
-			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --timeout, --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete) may override it (use a new --state for a different run)", name)
+			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --timeout, --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete, --ready-block) may override it (use a new --state for a different run)", name)
 		}
 	}
 	// Repeated flags append, so clear their CLI/default values before restoring.
@@ -145,7 +145,7 @@ func (c *syncCommand) saveConfig() error {
 	}
 	// Keep local input files beside the journal. --resume survives a different
 	// working directory and removal of the original ring/name/block descriptor.
-	for _, name := range []string{"ring", "names", "block"} {
+	for _, name := range []string{"ring", "names", "block", "ready-block"} {
 		path := c.config.Flags[name]
 		if path == "" {
 			continue
@@ -178,6 +178,8 @@ func (c *syncCommand) saveConfig() error {
 			c.sync.ring, c.copy.ring = dest, dest
 		case "names":
 			c.sync.namesFile, c.copy.names = dest, dest
+		case "ready-block":
+			c.ready.proofBlock = dest
 		}
 	}
 	if c.config.CopyState != "" {

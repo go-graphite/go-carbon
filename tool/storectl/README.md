@@ -926,3 +926,32 @@ It does not certify coverage for those names or count them as copied. Exit **2**
 continues to mean incomplete readiness; process, scope and read-back gates still
 apply to every other name. Keep both lists with the unit's saved state; resume
 preserves the exceptions rather than repeatedly attempting their failed work.
+
+### Widen final readiness without changing a saved copy
+
+A legacy copy may have selected one donor or only restart windows. Attach an
+independent block definition to the same command:
+
+```sh
+storectl sync --resume ./existing-copy --ready-block ./complete-readiness.json
+```
+
+`complete-readiness.json` uses the block schema (`target`, `donors`, `peers`,
+`ring` or `names` if ownership requires them, `period`, `gaps`,
+`gap_ledger_complete`, `carbonapi_url`); `state` is optional and ignored here.
+Its target must match the saved copy. List every required donor and peer and
+all closed gap windows. Omitted names/ring fields mean the entire source union,
+not the original copy's restricted cohort: provide the authoritative target
+ownership ring when only part of that union belongs on the receiver.
+
+The copy keeps its original journal identity. After its copy/fill completes,
+READY runs exhaustive retained-history and period/gap verification with
+sample-every=1, including short retentions, in `ready-proof-<scope hash>/`.
+Changing the descriptor or ownership inputs creates a new proof journal;
+unchanged scope resumes the same proof. The descriptor is saved with the copy,
+its exact bytes are retained in the proof directory, and `ready-proof.json`
+points to that proof. Accepted quarantine/policy exclusions remain in the
+original ledger and are never counted as repaired. READY/READY_EXCEPT still
+requires policy checks, donor/peer parity, read-back and a true complete-gap
+attestation. An incomplete ledger stays NOT_READY even after the new proof
+converges. The tool does not infer closure of unknown input gaps.

@@ -66,6 +66,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
 	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")
 	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
+	flags.StringVar(&c.ready.proofBlock, "ready-block", "", "independent JSON block for exhaustive final READY proof; preserves the original copy scope")
 	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for process_start_time_seconds on every store")
 	flags.Var(&c.ready.period, "period", "FROM:UNTIL block copy/cutover period in Unix seconds")
 	flags.BoolVar(&c.ready.gapsComplete, "gap-ledger-complete", false, "attest that --window includes every known input gap")
@@ -175,6 +176,11 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	c.live.noCopy = c.sync.noCopy
 	c.live.tokenEnv, c.live.copyBytes, c.live.copyIdle = c.copy.tokenEnv, c.copy.maxBytes, c.copy.transferIdle
+	if c.ready.proofBlock != "" && !c.ready.noReady {
+		if _, _, err := loadReadyProof(c.sync, c.ready); err != nil {
+			return c, err
+		}
+	}
 	c.captureConfig(flags)
 	return c, nil
 }
@@ -265,6 +271,13 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	c.copy.auth, c.live.auth = auth, auth
 	c.live.authOrigins = append(append([]string(nil), c.sync.from...), c.sync.to)
+	if c.ready.proofBlock != "" && !c.ready.noReady {
+		proof, _, err := loadReadyProof(c.sync, c.ready)
+		if err != nil {
+			return err
+		}
+		c.live.authOrigins = append(c.live.authOrigins, proof.from...)
+	}
 	limiter := &syncRateLimit{bytesPerSecond: c.rate}
 	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
@@ -274,7 +287,7 @@ func SyncMain(ctx context.Context, args []string) error {
 		streams := c.copy.streams
 		var sourceCapacity int
 		var target copyStatus
-		for _, host := range append(append([]string(nil), c.sync.from...), c.sync.to) {
+		for _, host := range c.live.authOrigins {
 			if streams != 0 && host != c.sync.to {
 				continue
 			}

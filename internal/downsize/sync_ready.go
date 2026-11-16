@@ -19,6 +19,8 @@ import (
 var ErrSyncNotReady = errors.New("sync NOT_READY; see ready.json")
 
 type syncReadyOptions struct {
+	proofBlock   string
+	proofInput   json.RawMessage
 	scope        string
 	noReady      bool
 	carbonAPI    string
@@ -90,6 +92,9 @@ func runSyncReady(ctx context.Context, o *syncOptions, r syncReadyOptions, b syn
 
 // prepare initializes shared backend budgets even when resume skips the root job.
 func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOptions, b syncReadyBackend, prepare, initial func() error) (err error) {
+	if r.proofBlock != "" && !r.noReady {
+		return runSeparateReadyProof(ctx, o, r, b, prepare, initial)
+	}
 	if o.now == nil {
 		o.now = time.Now
 	}
