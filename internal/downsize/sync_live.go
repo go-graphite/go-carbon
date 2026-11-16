@@ -375,12 +375,22 @@ func (b *syncLiveBackend) Proofs(ctx context.Context, store string, names []stri
 
 // WindowProofs negotiates durable proof-v2 without weakening old endpoints.
 func (b *syncLiveBackend) WindowProofs(ctx context.Context, host string, names []string, from, until int64) ([]string, error) {
+	proofs, _, err := b.WindowProofsPresence(ctx, host, names, from, until)
+	return proofs, err
+}
+
+// WindowProofsPresence retains the explicit native absence already returned by
+// proof-v2. Unknown proofs and old responses never establish absence.
+func (b *syncLiveBackend) WindowProofsPresence(ctx context.Context, host string, names []string, from, until int64) ([]string, []bool, error) {
 	request := struct {
 		Names       []string
 		Mode        string
 		From, Until int64
 	}{names, "proof-v2", from, until}
-	var reply []struct{ Name, Mode, Proof, Reason string }
+	var reply []struct {
+		Name, Mode, Proof, Reason string
+		Found                     *bool
+	}
 	err := b.wait(ctx, "proof", host, func() error {
 		reply = nil
 		_, e := b.m.requestOnce(ctx, host, "/v1/transfer/digest", request, &reply)
@@ -388,22 +398,24 @@ func (b *syncLiveBackend) WindowProofs(ctx context.Context, host string, names [
 	})
 	var api *apiError
 	if errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusMethodNotAllowed || api.Status == http.StatusBadRequest) {
-		return nil, errSyncNoProof
+		return nil, nil, errSyncNoProof
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(reply) != len(names) {
-		return nil, errSyncNoProof
+		return nil, nil, errSyncNoProof
 	}
 	out := make([]string, len(names))
+	absent := make([]bool, len(names))
 	for i, r := range reply {
 		if r.Mode != "proof-v2" || r.Name != names[i] {
-			return nil, errSyncNoProof
+			return nil, nil, errSyncNoProof
 		}
 		out[i] = r.Proof
+		absent[i] = r.Found != nil && !*r.Found && r.Proof != ""
 	}
-	return out, nil
+	return out, absent, nil
 }
 
 // SumDigest requires an explicit mode echo: older endpoints can ignore Mode

@@ -22,6 +22,10 @@ type syncWindowProofBackend interface {
 	WindowProofs(context.Context, string, []string, int64, int64) ([]string, error)
 }
 
+type syncWindowPresenceBackend interface {
+	WindowProofsPresence(context.Context, string, []string, int64, int64) ([]string, []bool, error)
+}
+
 type syncProofBackend interface {
 	Proofs(context.Context, string, []string) ([]string, error)
 }
@@ -137,6 +141,14 @@ func (s *syncer) proofStamps(ctx context.Context, names []string) ([]syncProof, 
 }
 
 func (s *syncer) proofStampsVersion(ctx context.Context, names []string, donorOut ...*[]syncProof) ([]syncProof, bool, error) {
+	var donors *[]syncProof
+	if len(donorOut) > 0 {
+		donors = donorOut[0]
+	}
+	return s.proofStampsMetadata(ctx, names, donors, nil)
+}
+
+func (s *syncer) proofStampsMetadata(ctx context.Context, names []string, donorOut *[]syncProof, targetInfo *map[string][]syncArchive) ([]syncProof, bool, error) {
 	stores := append([]string{s.o.to}, s.o.from...)
 	tokens := make([][]string, len(stores))
 	errs := make([]error, len(stores))
@@ -145,6 +157,33 @@ func (s *syncer) proofStampsVersion(ctx context.Context, names []string, donorOu
 	bounded := make([]bool, len(stores))
 	var wg sync.WaitGroup
 	for i, store := range stores {
+		if _, ok := s.b.(syncWindowPresenceBackend); ok {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var absent []bool
+				tokens[i], bounded[i], errs[i] = s.windowProofsVersion(ctx, store, names, &absent)
+				if errs[i] != nil && !errors.Is(errs[i], errSyncNoProof) {
+					return
+				}
+				requested := make([]string, 0, len(names))
+				for j, n := range names {
+					// An unknown donor token already makes both seals unknown;
+					// its schema is never read by the hashing loop below. Target
+					// presence is independently needed by legacy adoption.
+					if i > 0 && len(tokens[i]) == len(names) && tokens[i][j] == "" {
+						continue
+					}
+					if len(absent) != len(names) || !absent[j] {
+						requested = append(requested, n)
+					}
+				}
+				if len(requested) > 0 {
+					infos[i], infoErrs[i] = s.b.Info(ctx, store, requested)
+				}
+			}()
+			continue
+		}
 		wg.Add(2)
 		go func() { defer wg.Done(); infos[i], infoErrs[i] = s.b.Info(ctx, store, names) }()
 		go func() { defer wg.Done(); tokens[i], bounded[i], errs[i] = s.windowProofsVersion(ctx, store, names) }()
@@ -213,8 +252,11 @@ func (s *syncer) proofStampsVersion(ctx context.Context, names []string, donorOu
 			copy(donors[i][:], donorHash.Sum(nil))
 		}
 	}
-	if len(donorOut) > 0 {
-		*donorOut[0] = donors
+	if donorOut != nil {
+		*donorOut = donors
+	}
+	if targetInfo != nil {
+		*targetInfo = infos[0]
 	}
 	v2 := true
 	for _, b := range bounded {
@@ -254,7 +296,8 @@ func observationProof(names []string, ids []int64, stamps []syncProof) string {
 
 func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []string, ids []int64, prior syncRow) (syncRow, error) {
 	var donorBefore []syncProof
-	before, v2, err := s.proofStampsVersion(ctx, names, &donorBefore)
+	var targetInfo map[string][]syncArchive
+	before, v2, err := s.proofStampsMetadata(ctx, names, &donorBefore, &targetInfo)
 	if !v2 {
 		donorBefore = nil
 	}
@@ -265,7 +308,7 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 	if proof != "" && v2 {
 		proof = "v2:" + proof
 	}
-	if row, adopted, err := s.adoptLegacyObservation(ctx, round, names, ids, prior, before, donorBefore, proof); adopted || err != nil {
+	if row, adopted, err := s.adoptLegacyObservation(ctx, round, names, ids, prior, before, donorBefore, proof, targetInfo); adopted || err != nil {
 		return row, err
 	}
 	// The first v2 client used an unprefixed seal. Exact matching metadata
@@ -485,7 +528,7 @@ func (s *syncer) windowProofs(ctx context.Context, host string, names []string) 
 	return proofs, err
 }
 
-func (s *syncer) windowProofsVersion(ctx context.Context, host string, names []string) ([]string, bool, error) {
+func (s *syncer) windowProofsVersion(ctx context.Context, host string, names []string, absentOut ...*[]bool) ([]string, bool, error) {
 	b, ok := s.b.(syncWindowProofBackend)
 	if !ok {
 		proofs, err := s.b.(syncProofBackend).Proofs(ctx, host, names)
@@ -493,6 +536,8 @@ func (s *syncer) windowProofsVersion(ctx context.Context, host string, names []s
 	}
 	hash := make([]hash.Hash, len(names))
 	known := make([]bool, len(names))
+	absent := make([]bool, len(names))
+	seenPresence := make([]bool, len(names))
 	for i := range hash {
 		known[i] = true
 		hash[i] = sha256.New()
@@ -518,7 +563,14 @@ func (s *syncer) windowProofsVersion(ctx context.Context, host string, names []s
 		if len(requested) == 0 {
 			continue
 		}
-		proofs, err := b.WindowProofs(ctx, host, requested, w.From, until)
+		var proofs []string
+		var missing []bool
+		var err error
+		if presence, ok := s.b.(syncWindowPresenceBackend); ok {
+			proofs, missing, err = presence.WindowProofsPresence(ctx, host, requested, w.From, until)
+		} else {
+			proofs, err = b.WindowProofs(ctx, host, requested, w.From, until)
+		}
 		if errors.Is(err, errSyncNoProof) {
 			proofs, err := s.b.(syncProofBackend).Proofs(ctx, host, names)
 			return proofs, false, err
@@ -531,12 +583,22 @@ func (s *syncer) windowProofsVersion(ctx context.Context, host string, names []s
 		}
 		for j, p := range proofs {
 			i := positions[j]
+			isAbsent := len(missing) == len(requested) && missing[j] && p != ""
+			if !seenPresence[i] {
+				absent[i] = isAbsent
+				seenPresence[i] = true
+			} else {
+				absent[i] = absent[i] && isAbsent
+			}
 			if p == "" {
 				known[i] = false
 				continue
 			}
 			fmt.Fprintln(hash[i], w.Name, w.From, until, p)
 		}
+	}
+	if len(absentOut) > 0 {
+		*absentOut[0] = absent
 	}
 	out := make([]string, len(names))
 	for i := range out {
