@@ -215,6 +215,21 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 		if before[i] != (syncProof{}) && saved == s.frontier.record(n, before[i]) {
 			continue
 		}
+		if saved != ([32]byte{}) {
+			var prior syncProof
+			copy(prior[:], saved[:16])
+			if saved != s.frontier.record(n, prior) {
+				// A torn optional proof must never authorize reuse. Keep the existing
+				// conservative read path, and make this lost reuse evidence loud.
+				event("sync_proof_receipt_invalid", map[string]any{"level": "error", "metric": n, "reason": "corrupt or torn mutation receipt; revalidation required"})
+			} else {
+				reason := "mutation_proof_changed"
+				if before[i] == (syncProof{}) {
+					reason = "mutation_proof_unavailable"
+				}
+				redoReason(ctx, n, reason)
+			}
+		}
 		selected = append(selected, n)
 		positions = append(positions, i)
 	}

@@ -37,6 +37,7 @@ type effectiveSyncPolicy struct {
 }
 
 type syncCommand struct {
+	freshReason   string
 	ready         syncReadyOptions
 	sync          syncOptions
 	copy          copyOptions
@@ -61,6 +62,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	registerCopyFlags(flags, &c.copy)
 	flags.DurationVar(&c.timeout, "timeout", 0, "overall sync deadline including store restart waits; 0 waits without limit")
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
+	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only timeout, streams, rate and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
 	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
@@ -252,6 +254,10 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	if c.explicit["verify-streams"] {
 		event("deprecated_flag", map[string]any{"level": "warn", "flag": "--verify-streams", "reason": "use only --streams; phases share one budget"})
+	}
+	if err := c.prepareStateIntent(); err != nil {
+		event("sync_state_refused", map[string]any{"level": "error", "state": c.sync.state, "reason": err.Error()})
+		return err
 	}
 	if err := os.MkdirAll(c.sync.state, 0700); err != nil {
 		return err

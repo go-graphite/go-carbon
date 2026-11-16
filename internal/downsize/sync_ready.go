@@ -50,6 +50,7 @@ type readyCount struct {
 	StepMismatch int `json:"step_mismatch"`
 }
 type readyReport struct {
+	RedoNames            map[string]int64   `json:"redo_names"`
 	Quarantined          int64              `json:"quarantined"`
 	PolicySkipped        int64              `json:"policy_skipped"`
 	QuarantinePath       string             `json:"quarantine_path,omitempty"`
@@ -144,6 +145,9 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 		return err
 	}
 	defer func() {
+		var redoErr error
+		report.RedoNames, redoErr = syncRedoCounts(o.state)
+		err = errors.Join(err, redoErr)
 		if r.scope == "windows" && ctx.Err() == nil {
 			counts, e := collectWindowPointCountsContext(ctx, o.state)
 			if e != nil {
