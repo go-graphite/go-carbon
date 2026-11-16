@@ -215,6 +215,12 @@ func TestV2DaemonThroughput120(t *testing.T) {
 		if err = pprof.StartCPUProfile(cpuFile); err != nil {
 			t.Fatal(err)
 		}
+		defer func() {
+			if cpuFile != nil {
+				pprof.StopCPUProfile()
+				_ = cpuFile.Close()
+			}
+		}()
 	}
 	addr := app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
 	var stop atomic.Bool
@@ -364,6 +370,7 @@ measure:
 	if cpuFile != nil {
 		pprof.StopCPUProfile()
 		_ = cpuFile.Close()
+		cpuFile = nil
 		for _, kind := range []string{"mutex", "block"} {
 			f, err := os.Create(filepath.Join(os.Getenv("V2_BACKEND_PROFILES"), kind+".pprof"))
 			if err != nil {
