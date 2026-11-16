@@ -97,7 +97,7 @@ func (app *App) startV2() error {
 	// Replay must complete before wall-clock expiry may create new reset barriers.
 	var recovered atomic.Bool
 	var intake atomic.Pointer[v2recv.Server]
-	hooks := v2core.Hooks{PublishBatches: r.Publish, DenseRollups: true}
+	hooks := v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
