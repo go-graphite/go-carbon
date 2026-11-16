@@ -328,7 +328,12 @@ func (s *syncer) holders(src int, names []string) []string {
 }
 
 func (s *syncer) fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
+	finish, err := s.redo.begin(ctx, "fetch", store, names, from, until)
+	if err != nil {
+		return nil, err
+	}
 	got, err := s.b.Fetch(ctx, store, names, from, until)
+	finish(err == nil)
 	if errors.Is(err, errSyncStoreDown) {
 		s.markDown(store, err)
 	}
@@ -346,7 +351,12 @@ func (s *syncer) digest(ctx context.Context, store string, names []string, w syn
 	if s.noDigest(store) {
 		return nil, errSyncNoDigest
 	}
+	finish, err := s.redo.begin(ctx, "verify", store, names, w.From, w.Until)
+	if err != nil {
+		return nil, err
+	}
 	got, err := s.b.Digest(ctx, store, names, w.From, w.Until)
+	finish(err == nil)
 	if errors.Is(err, errSyncNoDigest) {
 		if _, loaded := s.digests.LoadOrStore(store, false); !loaded {
 			event("sync_digest_unavailable", map[string]any{"store": store, "fallback": "carbonserver multi-fetch"})
@@ -659,7 +669,12 @@ func (s *syncer) fullDigest(ctx context.Context, store string, names []string, s
 	key := "sum-v1:" + store
 	v, known := s.digests.Load(key)
 	if ok && (!known || v.(bool)) {
+		finish, err := s.redo.begin(ctx, "verify", fmt.Sprintf("%s#sum:%d", store, step), names, w.From, w.Until)
+		if err != nil {
+			return nil, true, err
+		}
 		got, err := b.SumDigest(ctx, store, names, step, w.From, w.Until)
+		finish(err == nil)
 		if !errors.Is(err, errSyncNoDigest) {
 			return got, true, err
 		}

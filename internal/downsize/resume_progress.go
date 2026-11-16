@@ -100,6 +100,7 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	RedoNames          map[string]int64     `json:"redo_names,omitempty"`
 	Quarantined        int64                `json:"quarantined"`
 	PolicySkipped      int64                `json:"policy_skipped"`
 	RepairFailedNames  int64                `json:"repair_failed_names"`         // distinct names still missing after an accepted fill
@@ -130,6 +131,11 @@ func (p *progressSnapshot) apply(r syncRow) {
 		p.Discovered = int64(r.Discovery.Names)
 	}
 	switch r.Kind {
+	case "redo":
+		if p.RedoNames == nil {
+			p.RedoNames = map[string]int64{}
+		}
+		p.RedoNames[r.Phase] += int64(r.Names)
 	case "discovered":
 		p.Discovered = int64(r.Names)
 	case "verified":

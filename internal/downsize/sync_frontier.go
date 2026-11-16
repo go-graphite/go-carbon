@@ -215,6 +215,18 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 		if before[i] != (syncProof{}) && saved == s.frontier.record(n, before[i]) {
 			continue
 		}
+		if saved != ([32]byte{}) {
+			var prior syncProof
+			copy(prior[:], saved[:16])
+			if saved != s.frontier.record(n, prior) {
+				return syncRow{}, fmt.Errorf("corrupt verification receipt for %s", n)
+			}
+			reason := "mutation_proof_changed"
+			if before[i] == (syncProof{}) {
+				reason = "mutation_proof_unavailable"
+			}
+			redoReason(ctx, n, reason)
+		}
 		selected = append(selected, n)
 		positions = append(positions, i)
 	}

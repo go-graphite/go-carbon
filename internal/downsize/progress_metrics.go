@@ -59,6 +59,10 @@ func MainWithMetrics(args []string, version string) error {
 			filepath.Join(state+".sync", "progress.json"): true,
 		}
 	}
+	if args[0] == "sync" {
+		p.redoEnabled = true
+		p.restoreRedoMetrics(state)
+	}
 	outputMu.Lock()
 	progressObserver = p.observe
 	storeWaitObserver = p.observeStoreWait
@@ -243,6 +247,9 @@ type progressMetrics struct {
 	addr, prefix, phase                   string
 	active, done, total, rate             float64
 	quarantined, policySkipped            float64
+	redoEnabled                           bool
+	redoNames                             map[string]int64
+	redoByPath                            map[string]map[string]int64
 	repairFailedNames                     float64
 	freshDone                             float64
 	freshDoneAvailable                    float64
@@ -290,6 +297,21 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 			return
 		}
 	}
+	if p.redoEnabled || snapshot.RedoNames != nil {
+		p.redoEnabled = true
+		if p.redoByPath == nil {
+			p.redoByPath = map[string]map[string]int64{}
+		}
+		p.redoByPath[path] = cloneRedoCounts(snapshot.RedoNames)
+		p.redoNames = map[string]int64{}
+		for _, counts := range p.redoByPath {
+			for phase, n := range counts {
+				p.redoNames[phase] += n
+			}
+		}
+
+	}
+
 	p.repairFailedNames = max(p.repairFailedNames, float64(snapshot.RepairFailedNames))
 	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
 	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
@@ -329,6 +351,8 @@ func (p *progressMetrics) send() {
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
 	repairFailedNames := p.repairFailedNames
+	redoNames := cloneRedoCounts(p.redoNames)
+	redoEnabled := p.redoEnabled || p.redoNames != nil
 	quarantined, policySkipped := p.quarantined, p.policySkipped
 	at := time.Now()
 	eta := p.eta(at)
@@ -359,6 +383,11 @@ func (p *progressMetrics) send() {
 		value float64
 	}{{"quarantined", quarantined}, {"policy_skipped", policySkipped}, {"repair_failed_names", repairFailedNames}, {"store_retries", float64(retries)}, {"store_wait_seconds", waitSeconds}, {"waiting_for_store", waiting}, {"phase_fresh_done", freshDone}, {"fresh_done_available", freshAvailable}, {"process_start_time_seconds", started}, {"phase", float64(code)}, {"round", float64(round)}, {"phase_done", done}, {"phase_total", total}, {"eta_seconds", eta}, {"eta_ready_seconds", ready.seconds}, {"eta_ready_known_seconds", ready.known}, {"eta_ready_unknown_parts", float64(ready.unknown)}, {"phases_left", float64(ready.phases)}, {"active", active}, {"heartbeat", float64(now)}} {
 		fmt.Fprintf(&b, "%s.%s %g %d\n", p.prefix, v.name, v.value, now)
+	}
+	if redoEnabled {
+		for _, phase := range []string{"verify", "fetch", "import"} {
+			fmt.Fprintf(&b, "%s.%s.redo_names %d %d\n", p.prefix, phase, redoNames[phase], now)
+		}
 	}
 	if p.version != "" {
 		if p.lastSentVersion != "" && p.lastSentVersion != p.version {

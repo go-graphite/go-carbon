@@ -163,32 +163,34 @@ type syncHole struct {
 }
 
 type syncRow struct {
-	Reused            int                      `json:"proof_reused,omitempty"`
-	Resolved          []syncSkip               `json:"resolved,omitempty"`
-	Discovery         *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
-	Selected          []string                 `json:"selected,omitempty"`
-	SelectionComplete bool                     `json:"selection_complete,omitempty"`
-	Kind              string                   `json:"kind"`
-	Identity          string                   `json:"identity,omitempty"`
-	Phase             string                   `json:"phase,omitempty"`
-	Round             int                      `json:"round,omitempty"`
-	Source            string                   `json:"source,omitempty"`
-	First             string                   `json:"first,omitempty"`
-	Last              string                   `json:"last,omitempty"`
-	Names             int                      `json:"names,omitempty"`
-	Copied            int                      `json:"copied,omitempty"`
-	Failed            []string                 `json:"failed,omitempty"`
-	Forbidden         bool                     `json:"forbidden,omitempty"`
-	Holes             []syncHole               `json:"holes,omitempty"`
-	Absent            []string                 `json:"absent,omitempty"`
-	Unindexed         []string                 `json:"unindexed,omitempty"`
-	Short             []string                 `json:"short,omitempty"`
-	Skipped           []syncSkip               `json:"skipped,omitempty"`
-	Missing           int                      `json:"missing,omitempty"`
-	OnTarget          int                      `json:"on_target,omitempty"`
-	Both              int                      `json:"both,omitempty"`
-	NotOwned          int                      `json:"not_owned,omitempty"`
-	Time              string                   `json:"time"`
+	InvalidationReason string                   `json:"invalidation_reason,omitempty"`
+	Work               []syncRedoWork           `json:"backend_work,omitempty"`
+	Reused             int                      `json:"proof_reused,omitempty"`
+	Resolved           []syncSkip               `json:"resolved,omitempty"`
+	Discovery          *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
+	Selected           []string                 `json:"selected,omitempty"`
+	SelectionComplete  bool                     `json:"selection_complete,omitempty"`
+	Kind               string                   `json:"kind"`
+	Identity           string                   `json:"identity,omitempty"`
+	Phase              string                   `json:"phase,omitempty"`
+	Round              int                      `json:"round,omitempty"`
+	Source             string                   `json:"source,omitempty"`
+	First              string                   `json:"first,omitempty"`
+	Last               string                   `json:"last,omitempty"`
+	Names              int                      `json:"names,omitempty"`
+	Copied             int                      `json:"copied,omitempty"`
+	Failed             []string                 `json:"failed,omitempty"`
+	Forbidden          bool                     `json:"forbidden,omitempty"`
+	Holes              []syncHole               `json:"holes,omitempty"`
+	Absent             []string                 `json:"absent,omitempty"`
+	Unindexed          []string                 `json:"unindexed,omitempty"`
+	Short              []string                 `json:"short,omitempty"`
+	Skipped            []syncSkip               `json:"skipped,omitempty"`
+	Missing            int                      `json:"missing,omitempty"`
+	OnTarget           int                      `json:"on_target,omitempty"`
+	Both               int                      `json:"both,omitempty"`
+	NotOwned           int                      `json:"not_owned,omitempty"`
+	Time               string                   `json:"time"`
 }
 
 type syncJournal struct {
@@ -242,6 +244,10 @@ func openSyncJournal(path, identity string, checkpointOptions ...string) (*syncJ
 			return nil, fmt.Errorf("journal %s: corrupt row at byte %d: %w", path, good, err)
 		}
 		good += int64(len(line))
+		if len(j.rows) == 0 && (row.Kind != "header" || row.Identity != identity) {
+			f.Close()
+			return nil, fmt.Errorf("journal %s: missing or invalid sync header; refusing fresh start", path)
+		}
 		if row.Kind == "header" && row.Identity != identity {
 			f.Close()
 			return nil, fmt.Errorf("journal %s belongs to another sync (%s); use a new --state", path, row.Identity)
@@ -331,6 +337,7 @@ type syncResidual struct {
 }
 
 type syncer struct {
+	redo                 *syncRedoGuard
 	frontier             *syncFrontier
 	windowRetryCopyError error // selection waits must not hide rejected repairs
 	legacyCopyReceipts   bool  // keep the selection and transport of old window campaigns
@@ -398,6 +405,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 
 	defer func() { result = errors.Join(result, o.issues.checkpoint()) }()
 	s := &syncer{o: o, b: b, j: j, forbid: map[string]bool{}, failedCp: map[string]bool{}, copied: map[string]bool{}, started: time.Now()}
+	s.redo = newSyncRedoGuard(j)
 	s.sum.phases = map[string]*syncPhase{}
 	if err := s.prepareVerificationRetry(); err != nil {
 		return err
@@ -417,6 +425,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	stopFile := startProgressFile(progressCtx, filepath.Join(o.state, "progress.json"), func() progressSnapshot {
 		j.mu.Lock()
 		snap := j.progress
+		snap.RedoNames = cloneRedoCounts(snap.RedoNames)
 		snap.Cursors = cloneCursors(snap.Cursors)
 		j.mu.Unlock()
 		s.prog.mu.Lock()
@@ -719,6 +728,9 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	if err != nil {
 		return syncCopyResult{}, err
 	}
+	if err := s.redoImport(ctx, source, names, phase); err != nil {
+		return syncCopyResult{}, err
+	}
 	event("sync_copy", map[string]any{"phase": phase, "round": round, "source": source, "names": len(names), "journal": journal})
 	var res syncCopyResult
 	if s.windowOnly() && !s.legacyCopyReceipts {
@@ -753,9 +765,14 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		res.ExpectedAbsent = append(res.ExpectedAbsent, item.Name)
 	}
 	journalStarted := time.Now()
-	if err := s.j.append(syncRow{Kind: "copied", Identity: repair, Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
+	invalidationReason := ""
+	if phase == "fill" {
+		invalidationReason = "verified_holes"
+	}
+	if err := s.j.append(syncRow{Kind: "copied", Identity: repair, Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), InvalidationReason: invalidationReason, Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Short: short, Selected: selected, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
 		return res, err
 	}
+	s.rememberRedoImport(syncRow{Kind: "copied", Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Copied: res.Copied, Failed: res.Failed, Forbidden: res.Forbidden, Selected: selected, Resolved: resolved})
 	event("sync_copy_journal", map[string]any{"phase": phase, "round": round, "source": source, "seconds": time.Since(journalStarted).Seconds()})
 	return res, nil
 }
@@ -1086,17 +1103,19 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 					}
 					s.masks.Store(n, mask)
 				}
+				workCtx := redoBatchContext(ctx, jb.names, jb.ids)
 				var row syncRow
 				var err error
 				if s.frontier != nil {
-					row, err = s.verifyFrontierBatch(ctx, journalRound, jb.names, jb.ids)
+					row, err = s.verifyFrontierBatch(workCtx, journalRound, jb.names, jb.ids)
 				} else {
-					row, err = s.verifyBatch(ctx, journalRound, jb.names)
+					row, err = s.verifyBatch(workCtx, journalRound, jb.names)
 				}
 				for _, n := range jb.names {
 					s.masks.Delete(n)
 				}
 				if err == nil {
+					row.Work = s.redo.cleanWork(workCtx, row)
 					err = s.j.append(row)
 				}
 				if err != nil {

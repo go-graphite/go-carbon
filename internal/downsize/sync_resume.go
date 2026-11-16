@@ -115,13 +115,13 @@ func (c *syncCommand) captureConfig(flags *flag.FlagSet) {
 	}
 	flags.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
-		case "resume", "from":
+		case "resume", "from", "allow-fresh-start":
 			return
 		}
 		c.config.Flags[f.Name] = f.Value.String()
 	})
 	for name, explicit := range c.explicit {
-		if name != "resume" {
+		if name != "resume" && name != "allow-fresh-start" {
 			c.config.Explicit[name] = explicit
 		}
 	}
