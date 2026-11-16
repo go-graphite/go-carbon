@@ -30,6 +30,10 @@ type NameCatalog struct {
 	ids            map[string]uint64
 	wal            *os.File
 	failed         error
+	pending        []uint64
+	pendingBytes   int
+	groupEncoder   *zstd.Encoder
+	groupDecoder   *zstd.Decoder
 }
 
 var errCatalog = errors.New("invalid name catalog")
@@ -126,7 +130,7 @@ func OpenNameCatalog(dir string) (*NameCatalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	fail := func(e error) (*NameCatalog, error) { _ = c.wal.Close(); return nil, e }
+	fail := func(e error) (*NameCatalog, error) { _ = c.Close(); return nil, e }
 	st, err := c.wal.Stat()
 	if err != nil {
 		return fail(err)
@@ -245,6 +249,8 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 		return 0, errCatalog
 	}
 	size := binary.LittleEndian.Uint32(h[:])
+	grouped := size&catalogGroupFlag != 0
+	size &^= catalogGroupFlag
 	if size == 0 || size > catalogLimit {
 		return 4, errCatalog
 	}
@@ -257,6 +263,9 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 	crc = crc32.Update(crc, predictorV3CRC, b[:size])
 	if crc != binary.LittleEndian.Uint32(b[size:]) {
 		return 0, errCatalog
+	}
+	if grouped {
+		return int64(size) + 12, c.readGroup(b[:size])
 	}
 	d := dictionaryReader{b: b[:size]}
 	id := d.u()
@@ -293,10 +302,22 @@ func (c *NameCatalog) Intern(key string, definition []byte) (uint64, error) {
 		return 0, errCatalog
 	}
 	id := uint64(len(c.entries))
-	b := catalogRecord(id, key, definition)
-	if _, e := c.buffer.Write(b); e != nil {
-		c.failed = e
-		return 0, e
+	// Bound transient sorting/compression memory independently of cardinality.
+	if c.pendingBytes+len(key)+len(definition)+64 > catalogGroupLimit {
+		if e := c.flushGroup(); e != nil {
+			c.failed = e
+			return 0, e
+		}
+	}
+	if len(key)+len(definition)+64 > catalogGroupLimit {
+		// A single unusually large definition retains the original record format.
+		if _, e := c.buffer.Write(catalogRecord(id, key, definition)); e != nil {
+			c.failed = e
+			return 0, e
+		}
+	} else {
+		c.pending = append(c.pending, id)
+		c.pendingBytes += len(key) + len(definition) + 64
 	}
 	c.dirty = true
 	c.ids[key] = id
@@ -320,6 +341,10 @@ func (c *NameCatalog) Sync() error {
 	}
 	if !c.dirty {
 		return nil
+	}
+	c.failed = c.flushGroup()
+	if c.failed != nil {
+		return c.failed
 	}
 	c.failed = c.buffer.Flush()
 	if c.failed != nil {
@@ -405,6 +430,8 @@ func (c *NameCatalog) checkpoint() error {
 	hook("published")
 	// Keep the epoch header. Durable checkpoint precedes WAL reclamation.
 	c.buffer.Reset(c.wal)
+	c.pending = c.pending[:0]
+	c.pendingBytes = 0
 	if e = c.wal.Truncate(28); e != nil {
 		return e
 	}
@@ -415,6 +442,14 @@ func (c *NameCatalog) checkpoint() error {
 	return c.wal.Sync()
 }
 func (c *NameCatalog) Close() error {
+	if c.groupEncoder != nil {
+		_ = c.groupEncoder.Close()
+		c.groupEncoder = nil
+	}
+	if c.groupDecoder != nil {
+		c.groupDecoder.Close()
+		c.groupDecoder = nil
+	}
 	if c.wal == nil {
 		return nil
 	}

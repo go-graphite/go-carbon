@@ -22,6 +22,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
+var catalogFixtureOnly = flag.Bool("catalog-fixture-only", false, "read source, report first-observed name churn and save a raw capture fixture without codec comparison")
 var catalogVerifyDir = flag.String("catalog-verify", "", "verify an already completed capture root")
 var catalogDir = flag.String("catalog-dir", "", "catalog experiment output root (enables catalog comparison)")
 var captureSeconds = flag.Int("capture-seconds", 0, "sustained group-fsync capture seconds after matched-byte comparison")
@@ -32,15 +33,23 @@ var catalogFixture = flag.String("catalog-fixture", "", "internal sender fixture
 var catalogSendDuration = flag.Int("catalog-send-seconds", 120, "internal sender duration")
 var catalogSendStreams = flag.Int("catalog-send-streams", 32, "internal sender streams")
 var catalogRecapture = flag.String("catalog-recapture", "", "load a completed capture fixture instead of rereading the input log")
+var captureUnseenEvery = flag.Uint64("capture-unseen-every", 0, "one never-seen name per N points; 0 disables churn")
 var captureUnseen = flag.Bool("capture-unseen", false, "give every tenth point a new never-repeated name before durable encoding")
 
 // unseenFrames is deterministic across packet boundaries and fixture repeats.
 // It preserves every tuple and order, changing only every tenth point's name.
 func unseenFrames(fs []partlog.DictionaryFrame, ordinal *uint64) []partlog.DictionaryFrame {
+	return churnFrames(fs, ordinal, 10)
+}
+
+func churnFrames(fs []partlog.DictionaryFrame, ordinal *uint64, every uint64) []partlog.DictionaryFrame {
+	if every == 0 {
+		return fs
+	}
 	var out []partlog.DictionaryFrame
 	for _, f := range fs {
 		for start := 0; start < len(f.Points); {
-			n := min(len(f.Points)-start, int(9-*ordinal%10))
+			n := int(min(uint64(len(f.Points)-start), every-1-*ordinal%every))
 			g := f
 			if n == 0 {
 				n = 1
@@ -106,6 +115,10 @@ func catalogDisk(dir string) int64 {
 	return n
 }
 func catalogProbe(segs []segment, partition int, rate float64) {
+	if *catalogFixtureOnly {
+		catalogSourceFixture(segs, partition, rate)
+		return
+	}
 	runtime.GOMAXPROCS(8)
 	must(os.MkdirAll(*catalogDir, 0700))
 	var accounts [4]partlog.PredictorV3Accounting
@@ -339,6 +352,10 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	}
 	runtime.GOMAXPROCS(96)
 	root := filepath.Join(*catalogDir, "capture")
+	every := *captureUnseenEvery
+	if *captureUnseen {
+		every = 10
+	}
 	must(os.MkdirAll(root, 0700))
 	c, e := partlog.OpenNameCatalog(filepath.Join(root, "template"))
 	must(e)
@@ -398,14 +415,26 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 			file, e := os.Create(filepath.Join(dir, "segment"))
 			must(e)
 			defer file.Close()
+			directory, e := os.Open(dir)
+			must(e)
+			must(directory.Sync())
+			must(directory.Close())
 			var ordinal uint64
+			var pending [][]byte
 			next := time.Now().Add(time.Second)
 			syncGroup := func() {
 				t := time.Now()
 				must(cat.Sync())
+				catalogElapsed := time.Since(t).Nanoseconds()
+				for _, record := range pending {
+					writePacket(file, record)
+				}
+				clear(pending)
+				pending = pending[:0]
 				must(file.Sync())
 				mu.Lock()
 				syncNS = append(syncNS, time.Since(t).Nanoseconds())
+				catalogSyncNS = append(catalogSyncNS, catalogElapsed)
 				mu.Unlock()
 			}
 			for {
@@ -415,21 +444,11 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 				}
 				must(e)
 				frames, n := catalogUnwire(b, cat)
-				if *captureUnseen {
-					frames = unseenFrames(frames, &ordinal)
-				}
+				frames = churnFrames(frames, &ordinal, every)
 				record, e := enc.Encode(frames)
 				must(e)
-				// Catalog definitions must be durable before their journal record
-				// can be appended and eventually acknowledged by group sync.
-				t := time.Now()
-				must(cat.Sync())
-				if *captureUnseen {
-					mu.Lock()
-					catalogSyncNS = append(catalogSyncNS, time.Since(t).Nanoseconds())
-					mu.Unlock()
-				}
-				writePacket(file, record)
+				// Keep references private until this group's catalog is durable.
+				pending = append(pending, record)
 				count.Add(n)
 				encoded.Add(int64(len(record) + 4))
 				if time.Now().After(next) {
@@ -438,7 +457,9 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 				}
 			}
 			syncGroup()
-			unseenPoints.Add(int64(ordinal / 10))
+			if every > 0 {
+				unseenPoints.Add(int64(ordinal / every))
+			}
 		}(i, conn)
 	}
 	wg.Wait()
@@ -451,13 +472,15 @@ func catalogCapture(fs []partlog.DictionaryFrame, streams, seconds int) {
 	if len(catalogSyncNS) > 0 {
 		sort.Slice(catalogSyncNS, func(i, j int) bool { return catalogSyncNS[i] < catalogSyncNS[j] })
 		catalogP99 = catalogSyncNS[len(catalogSyncNS)*99/100]
-		must(os.WriteFile(filepath.Join(root, "unseen"), []byte("every tenth point; per-stream ordinal\n"), 0600))
+	}
+	if every > 0 {
+		must(os.WriteFile(filepath.Join(root, "unseen"), []byte(fmt.Sprint(every)), 0600))
 	}
 	var durableBytes int64
 	for i := range streams {
 		durableBytes += catalogDisk(filepath.Join(root, fmt.Sprint(i)))
 	}
-	emit(map[string]any{"stage": "capture_storage", "points": count.Load(), "unseen_points": unseenPoints.Load(), "durable_bytes": durableBytes, "bpp": float64(durableBytes) / float64(count.Load()), "catalog_fsync_p99_ms": float64(catalogP99) / 1e6, "catalog_syncs": len(catalogSyncNS), "unseen": *captureUnseen})
+	emit(map[string]any{"stage": "capture_storage", "points": count.Load(), "unseen_points": unseenPoints.Load(), "durable_bytes": durableBytes, "bpp": float64(durableBytes) / float64(count.Load()), "catalog_fsync_p99_ms": float64(catalogP99) / 1e6, "catalog_syncs": len(catalogSyncNS), "unseen_every": every})
 	emit(map[string]any{"stage": "capture", "streams": streams, "seconds_including_final_sync": wall, "points": count.Load(), "m_points_per_second": float64(count.Load()) / wall / 1e6, "cores": cores, "record_bpp": float64(encoded.Load()) / float64(count.Load()), "seed_catalog_bytes_per_stream": len(cp), "fsync_group_p99_ms": float64(p99) / 1e6, "group_syncs": len(syncNS), "exact": "tuple codec differential before run; sustained replay verification follows", "sender": "separate taskset96-191 process, raw TCP, repeated complete real cohort; capture taskset0-95"})
 	verified := catalogVerify(root, streams)
 	if verified != count.Load() {
@@ -472,7 +495,13 @@ func catalogVerify(root string, streams int) int64 {
 	start := time.Now()
 	runtime.GOMAXPROCS(96)
 	fixture := filepath.Join(root, "sender.fixture")
-	_, unseenErr := os.Stat(filepath.Join(root, "unseen"))
+	unseenData, unseenErr := os.ReadFile(filepath.Join(root, "unseen"))
+	var every uint64
+	if unseenErr == nil {
+		if _, err := fmt.Sscan(string(unseenData), &every); err != nil {
+			every = 10
+		}
+	}
 	if unseenErr != nil && !os.IsNotExist(unseenErr) {
 		must(unseenErr)
 	}
@@ -506,7 +535,7 @@ func catalogVerify(root string, streams int) int64 {
 				must(e)
 				expected, n := catalogUnwire(want, cat)
 				if unseenErr == nil {
-					expected = unseenFrames(expected, &ordinal)
+					expected = churnFrames(expected, &ordinal, every)
 				}
 				verified.Add(n)
 				got, e := d.Decode(b)
@@ -523,4 +552,75 @@ func catalogVerify(root string, streams int) int64 {
 	wall := time.Since(start).Seconds()
 	emit(map[string]any{"stage": "catalog_verify", "points": verified.Load(), "seconds": wall, "m_points_per_second": float64(verified.Load()) / wall / 1e6, "exact": true})
 	return verified.Load()
+}
+
+// First-observed names after the first complete segment are an upper bound on
+// truly new daemon names: a finite log cohort cannot prove lifetime novelty.
+func catalogSourceFixture(segs []segment, partition int, rate float64) {
+	root := filepath.Join(*catalogDir, "fixture")
+	must(os.MkdirAll(root, 0700))
+	c, e := partlog.OpenNameCatalog(filepath.Join(root, "template"))
+	must(e)
+	defer c.Close()
+	f, e := os.Create(filepath.Join(root, "sender.fixture"))
+	must(e)
+	defer f.Close()
+	var samplePoints, total, sourceBytes int64
+	var sample []partlog.DictionaryFrame
+	started := time.Now()
+	for index, s := range segs {
+		var h [64]byte
+		_, e = s.f.ReadAt(h[:], 0)
+		must(e)
+		if h != s.header {
+			panic("source recycled")
+		}
+		view, frontier, selected, e := selectPartition(s.f, s.Bytes, partition)
+		must(e)
+		r, e := inputlog.NewSegmentReplay(view)
+		must(e)
+		before := c.Count()
+		var count, first, last int64
+		for {
+			ps, offset, n, e := r.Next(frontier)
+			if e == io.EOF {
+				break
+			}
+			must(e)
+			for _, p := range ps {
+				if first == 0 || p.FirstArrival < first {
+					first = p.FirstArrival
+				}
+				if p.FirstArrival > last {
+					last = p.FirstArrival
+				}
+				_, e = c.Intern(p.Metric, nil)
+				must(e)
+				if samplePoints < 30000000 {
+					frame := partlog.DictionaryFrame{Key: p.Metric, Clock: p.FirstArrival, Points: p.Data}
+					sample = append(sample, frame)
+					samplePoints += int64(len(p.Data))
+				}
+			}
+			count += int64(n)
+			if delay := time.Duration(float64(sourceBytes+offset)/(rate*1e6)*float64(time.Second)) - time.Since(started); delay > 0 {
+				time.Sleep(delay)
+			}
+		}
+		r.Close()
+		_, e = s.f.ReadAt(h[:], 0)
+		must(e)
+		if h != s.header || count != selected {
+			panic("source changed")
+		}
+		sourceBytes += frontier
+		total += count
+		emit(map[string]any{"stage": "source_name_churn", "segment": s.Path, "warmup": index == 0, "points": count, "first_observed_names": c.Count() - before, "first_arrival_ns": first, "last_arrival_ns": last, "seconds": float64(last-first) / 1e9, "bpp": float64(frontier) / float64(count), "novelty_scope": "first observed in finite cohort; later segments upper-bound lifetime novelty"})
+	}
+	for _, b := range catalogWire(sample, c) {
+		writePacket(f, b)
+	}
+	must(c.Checkpoint())
+	must(f.Sync())
+	emit(map[string]any{"stage": "source_fixture", "points": total, "sample_points": samplePoints, "catalog_names": c.Count(), "source_bytes": sourceBytes, "fixture": root})
 }

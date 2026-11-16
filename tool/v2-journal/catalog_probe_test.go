@@ -165,3 +165,25 @@ func TestCatalogUnseenCaptureVerification(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestChurnRateAcrossPackets(t *testing.T) {
+	for _, every := range []uint64{1, 7, 1003} {
+		var ordinal uint64
+		count := 0
+		for range 17 {
+			fs := []partlog.DictionaryFrame{{Key: "real\x00metric", Clock: -1, Definition: []byte{0, 255}, Points: make([]points.Point, 87)}}
+			got := churnFrames(fs, &ordinal, every)
+			for _, f := range got {
+				if f.Key != fs[0].Key {
+					count++
+					if len(f.Points) != 1 {
+						t.Fatal("churn frame")
+					}
+				}
+			}
+		}
+		if uint64(count) != ordinal/every || ordinal != 17*87 {
+			t.Fatal(every, count, ordinal)
+		}
+	}
+}

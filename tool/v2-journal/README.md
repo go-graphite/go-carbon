@@ -127,3 +127,24 @@ sender fixture at its recorded repetition boundary, compares every tuple and
 reports the total verified point count. Match that count to the original capture
 receipt. Verification has its own resource/health guard on a shared host; it is
 outside the timed capture interval.
+
+
+`-capture-unseen-every N` generates one globally never-repeated name per N
+points per stream, deterministically across fixture cycles. `-capture-unseen`
+retains its historical 10% spelling. The persisted churn manifest drives the
+same transformation during full tuple verification. All stream checkpoints,
+compressed catalog WALs and journal bytes are charged in `capture_storage`.
+
+Capture now retains encoded records until the one-second group boundary, syncs
+the compressed catalog suffix, appends the records and syncs the journal. Its
+catalog timing includes group compression, WAL flush and catalog fsync; group
+p99 includes both sync calls and journal append. No per-record catalog sync is
+performed. The two files still require separate sync syscalls for ordering.
+
+Use `-catalog-fixture-only -catalog-dir DIR -input INPUT -segments N` to read
+complete immutable input-log segments without running codec variants, report
+first-observed name counts and source arrival intervals per segment, and save
+the first 30M source points as a raw fixture. The first segment warms the seen
+set; later first-observed-name fractions upper-bound true lifetime novelty.
+They are not daemon new-metric counters and do not prove post-restart novelty.
+All source reads remain read-only and use the existing read-MB/s limit.

@@ -24,9 +24,13 @@ record, err := encoder.EncodeDurable(frames)
 
 `EncodeDurable` fsyncs new catalog definitions before exposing their referencing
 record to a journal that might sync independently. Clean catalogs do not fsync.
-It batches definitions per encoded record; it does not fsync per point. Plain
-`Encode` is useful for codec comparison, but its caller must establish the same
-catalog-before-journal durability barrier before an independent journal append.
+It batches definitions per encoded record; it does not fsync per point. For
+one-second group commit, use plain
+`Encode` and retain every returned record in memory. At the group boundary,
+call `catalog.Sync()`, append the retained records, then fsync the journal before
+acknowledging the group. Never publish references to an independently flushing
+journal before the catalog barrier. This uses one catalog fsync per dirty group,
+plus the journal fsync: two files cannot share one `fsync` syscall.
 Never acknowledge points before the referencing journal record is durable.
 An error poisons the relevant encoder/decoder; discard it and recover.
 
@@ -44,7 +48,15 @@ segment starts an independent predictor epoch; retain the catalog checkpoint and
 its WAL suffix alongside all referencing segments. Catalog IDs are never reused.
 
 The catalog WAL has a CRC-protected epoch header. Each append has a separately
-CRC-protected length and a CRC over its header and contents. Recovery discards a
+CRC-protected length and a CRC over its header and contents. New WAL appends
+batch at most 4MiB of estimated uncompressed metadata, sort names lexically,
+front-code their common prefixes, retain their original numeric IDs, and zstd
+compress each independent batch. `Sync` flushes pending batches and fsyncs once;
+a full in-memory batch can be written earlier without syncing. Unusually large
+individual definitions retain the legacy record format. The length high bit
+marks a compressed group; new readers accept old and mixed WALs. Older readers
+reject grouped WALs, so downgrade requires retaining a compatible checkpoint and
+an empty suffix from a quiescent stream. Recovery discards a
 physically incomplete final WAL append, and rejects corruption, conflicting
 ID/name/definition bindings, holes and epoch mismatches. A checkpoint contains
 the full name table, its entry count, zstd checksums and a whole-file CRC. It is
