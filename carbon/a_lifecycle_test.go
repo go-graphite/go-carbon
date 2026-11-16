@@ -30,7 +30,12 @@ func TestSharedStoreRestartHandsInputOver(t *testing.T) {
 }
 
 func TestRestartHandsInputOver(t *testing.T) {
-	parallelTestMatrix(t) // Each subtest owns an isolated process.
+	parallelTestMatrix(t)
+	// Capability probes and connected senders share a wall-clock outage
+	// budget. Keep unrelated process startups outside the complete matrix.
+	if isolatedTestProcessSerial(t) {
+		return
+	}
 	testRestartHandsInputOver(t)
 }
 
