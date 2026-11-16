@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +26,7 @@ type Reader struct {
 	caches    []sealedCache
 	Budget    *Budget
 	WorkBytes int64
+	work      chan *sealrollup.Workspace
 	// Now is fixed by the caller before intake; nil uses time.Now.
 	Now func() time.Time
 }
@@ -39,40 +39,52 @@ type generation struct {
 	err     error
 }
 type sealedCache struct {
-	mu    sync.Mutex // read-side only; Publish never acquires this lock
-	index *v2core.RollupSnapshot
-	limit int64
+	mu             sync.Mutex // read-side only; Publish never acquires this lock
+	index          *v2core.RollupSnapshot
+	limit          int64
+	fullMu         sync.Mutex
+	full           []resolvedEntry
+	fullBytes      int64
+	pendingMu      sync.Mutex
+	reductions     []pendingReduction
+	reductionBytes int64
+	orderMu        sync.Mutex
+	ordered        []orderedSamples
+	orderedBytes   int64
 }
 type sealedData struct {
 	cache    *sealedCache
 	index    *v2core.RollupSnapshot
 	refs     atomic.Int64
 	number   uint64
+	reader   *Reader
 	snapshot *pebble.Snapshot
 	once     sync.Once
-	metrics  map[string]*metricState
+	metrics  sync.Map
 	err      error
 }
 
 type metricState struct {
-	sealed  *v2core.RollupSnapshot
-	name    string
-	policy  v2core.RollupPolicy
-	meta    v2core.RollupMetadata
-	records []sealrollup.Record
-	pending []sealrollup.Batch
-	once    sync.Once
-	frozen  *Frozen
-	err     error
+	sealed   *v2core.RollupSnapshot
+	name     string
+	policy   v2core.RollupPolicy
+	meta     v2core.RollupMetadata
+	records  []sealrollup.Record
+	pending  []sealrollup.Batch
+	once     sync.Once
+	frozen   *resolvedSource
+	reader   *Reader
+	err      error
+	resource *sealedData
 }
 
 func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
 	if owners < 1 || budgetBytes < 1 || workBytes < 0 {
 		return nil, errors.New("invalid read geometry/budget")
 	}
-	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes}
+	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes, work: make(chan *sealrollup.Workspace, owners)}
 	for i := range r.caches {
-		r.caches[i].limit = min(16<<20, budgetBytes/int64(owners)/8)
+		r.caches[i].limit = min(4<<20, budgetBytes/int64(owners)/32)
 	}
 	return r, nil
 }
@@ -102,7 +114,7 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 	if g.sealed != nil {
 		_ = snapshot.Close()
 	} else {
-		g.sealed = &sealedData{snapshot: snapshot, number: number, cache: &r.caches[owner]}
+		g.sealed = &sealedData{snapshot: snapshot, number: number, cache: &r.caches[owner], reader: r}
 		g.sealed.refs.Store(1)
 	}
 	g.refs.Store(1)
@@ -147,11 +159,20 @@ func (s *sealedData) load() {
 		return
 	}
 	s.cache.index = s.index
-	s.metrics = make(map[string]*metricState)
-	s.index.Metadata(func(name string, p v2core.RollupPolicy, m v2core.RollupMetadata) {
-		s.metrics[name] = &metricState{policy: p, meta: m, sealed: s.index, name: name}
-	})
 }
+func (s *sealedData) lookup(name string) *metricState {
+	if m, ok := s.metrics.Load(name); ok {
+		return m.(*metricState)
+	}
+	p, meta, ok := s.index.LookupMetadata(name)
+	if !ok {
+		return nil
+	}
+	m := &metricState{policy: p, meta: meta, sealed: s.index, name: name, reader: s.reader, resource: s}
+	actual, _ := s.metrics.LoadOrStore(name, m)
+	return actual.(*metricState)
+}
+
 func (g *generation) load() {
 	g.sealed.once.Do(g.sealed.load)
 	if g.sealed.err != nil {
@@ -176,13 +197,13 @@ func (g *generation) load() {
 		name := string(p.Name)
 		m := g.metrics[name]
 		if m == nil {
-			if base := g.sealed.metrics[name]; base != nil {
-				m = &metricState{policy: base.policy, meta: base.meta, sealed: base.sealed, name: name}
+			if base := g.sealed.lookup(name); base != nil {
+				m = &metricState{policy: base.policy, meta: base.meta, sealed: base.sealed, name: name, reader: g.sealed.reader, resource: g.sealed}
 				g.metrics[name] = m
 			}
 		}
 		if m == nil {
-			m = &metricState{policy: p, meta: v2core.RollupMetadata{ID: b.ID, Policy: canonical}}
+			m = &metricState{name: name, policy: p, meta: v2core.RollupMetadata{ID: b.ID, Policy: canonical}, reader: g.sealed.reader, resource: g.sealed}
 			g.metrics[name] = m
 		}
 		if m.meta.ID != b.ID || !bytes.Equal(m.meta.Policy, b.Policy) {
@@ -202,39 +223,74 @@ func (g *generation) load() {
 	}
 }
 func (m *metricState) resolve() {
-	records := m.records
+	var base *resolvedSource
 	if m.sealed != nil {
-		records, m.err = m.sealed.Records(context.Background(), m.name)
+		base, m.err = m.resource.resolved(m.name, m.policy, m.meta)
 		if m.err != nil {
 			return
 		}
+	} else {
+		base = newResolvedSource(m.meta.ID, m.policy.Config.Archives, m.records)
 	}
-	if len(m.pending) > 0 {
-		slots := sealrollup.NewSlots(m.policy.Config.Archives)
-		for _, record := range records {
-			slots.Install(record.Delta)
-		}
-		prepared, err := sealrollup.Prepare(m.policy.Config)
-		if err != nil {
-			m.err = err
+	if len(m.pending) == 0 {
+		m.frozen = base
+		return
+	}
+	batches, frontier := m.pending, m.meta.Frontier
+	if cached := m.resource.cachedReduction(m); cached != nil {
+		base, frontier = cached.source, cached.frontier
+		batches = batches[len(cached.batches):]
+		if len(batches) == 0 {
+			m.frozen = base
 			return
 		}
-		// An explicit workspace lets the canonical reducer choose its direct
-		// physical-slot index when the archive geometry is small enough.
-		// It remains private to this resolution and cannot retain writer state.
-		var workspace sealrollup.Workspace
-		plan, err := prepared.PlanWithWorkspace(m.meta.Frontier, slots.View, slots.Range, m.pending, &workspace)
-		if err != nil {
-			m.err = err
-			return
+	}
+	prepared, err := sealrollup.Prepare(m.policy.Config)
+	if err != nil {
+		m.err = err
+		return
+	}
+	var workspace *sealrollup.Workspace
+	select {
+	case workspace = <-m.reader.work:
+	default:
+		workspace = new(sealrollup.Workspace)
+	}
+	defer func() {
+		if workspace.RetainedBytes() <= m.reader.WorkBytes {
+			select {
+			case m.reader.work <- workspace:
+			default:
+			}
 		}
-		records = append(slices.Clone(records), plan.Records...)
+	}()
+	// Direct physical lookups avoid repeatedly scanning every changed slot for
+	// small fan-in buckets. Both paths retain the canonical reducer and summation
+	// order; wide sparse buckets keep its bounded range reader.
+	var ranges sealrollup.RangeView = base.rangeSamples
+	direct := true
+	for i := 1; i < len(base.archives); i++ {
+		if base.archives[i].Step/base.archives[i-1].Step > 1024 {
+			direct = false
+		}
 	}
-	output := make([]Record, len(records))
-	for i, record := range records {
-		output[i] = Record{ID: m.meta.ID, Step: m.policy.Config.Archives[record.Archive].Step, Sample: Sample{Time: record.Sample.Time, Bits: record.Sample.Bits, Sequence: record.Order}}
+	if direct {
+		ranges = nil
 	}
-	m.frozen = Freeze(output)
+	// Order only this requested name's new boundaries; unrequested pending
+	// metrics never pay stable-sort work during generation materialization.
+	ordered := make([]sealrollup.Batch, len(batches))
+	copy(ordered, batches)
+	for i := range ordered {
+		ordered[i].Points = m.resource.cache.orderSamples(ordered[i].Points)
+	}
+	plan, err := prepared.PlanWithWorkspace(frontier, base.view, ranges, ordered, workspace)
+	if err != nil {
+		m.err = err
+		return
+	}
+	m.frozen = base.replace(plan.Records)
+	m.resource.rememberReduction(m, plan.Next)
 }
 
 // FetchMany adapts the carbonserver fetch boundary for an already expanded set
@@ -281,7 +337,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metrics[name]
+				m = g.sealed.lookup(name)
 			}
 			if m != nil {
 				if metric != nil {
@@ -318,7 +374,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		var p Publication
 		retained := int64(0)
 		if metric.sealed != nil {
-			retained = metric.sealed.RetainedBytes()
+			retained = metric.sealed.RetainedBytes() + 3*metric.resource.cache.limit
 		}
 		if metric.frozen != nil {
 			retained += metric.frozen.RetainedBytes()

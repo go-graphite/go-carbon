@@ -218,7 +218,11 @@ func checkRestartOracle(t *testing.T, s *Store, apps []Application, layer int) {
 		}
 	}
 	for id, rows := range want {
-		snap := s.Core.DBs()[v2core.Shard(id, s.cfg.Shards)].NewSnapshot()
+		owner := v2core.Shard(id, s.cfg.Shards)
+		if layer == 3 {
+			owner = int(partsformat.Route(partsformat.ID(fmt.Sprintf("replay.%d", id-1)))) % s.cfg.Shards
+		}
+		snap := s.Core.DBs()[owner].NewSnapshot()
 		got, err := v2core.Read(snap, id)
 		_ = snap.Close()
 		if err != nil || !slices.Equal(got, rows) {
