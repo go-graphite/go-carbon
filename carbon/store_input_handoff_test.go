@@ -122,7 +122,9 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 		{"successor never asks", true, true, false, "silent", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if isolatedTestProcess(t) {
+			// Capability probes and connected clients have wall-clock bounds.
+			// Keep unrelated storage startups outside this handoff interval.
+			if isolatedTestProcessSerial(t) {
 				return
 			}
 			defer zapwriter.Test()()
