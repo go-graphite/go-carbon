@@ -2,6 +2,7 @@ package v2read
 
 import (
 	"context"
+	"github.com/go-graphite/go-carbon/internal/v2core"
 	"slices"
 )
 
@@ -50,7 +51,7 @@ func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpir
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metrics[name]
+				m = g.sealed.lookup(name)
 			}
 			if m != nil {
 				masked = masked || m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0
@@ -106,17 +107,17 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 				g.release()
 				return nil, nil, g.err
 			}
-			for n, m := range g.sealed.metrics {
-				if p := g.metrics[n]; p != nil {
-					m = p
+			g.sealed.index.Metadata(func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
+				if pending := g.metrics[n]; pending != nil {
+					meta = pending.meta
 				}
-				if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
+				if meta.BaselineOrder > 0 || meta.Expired || meta.ResetOrder > 0 {
 					masks[n] = true
 				}
-				if !m.meta.Expired {
+				if !meta.Expired {
 					names = append(names, n)
 				}
-			}
+			})
 			for n, m := range g.metrics {
 				if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
 					masks[n] = true
@@ -156,7 +157,7 @@ func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.metrics[name]
+				m = g.sealed.lookup(name)
 			}
 			masked := m != nil && (m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0)
 			g.release()

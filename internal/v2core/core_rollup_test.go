@@ -229,6 +229,10 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 	if len(r.metrics) != 0 {
 		t.Fatal("abort published state")
 	}
+	plan, err = r.plan(SealInput{Batches: []Batch{valid}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	plan.Commit()
 	before := r.metrics[7].meta
 	changed := policy

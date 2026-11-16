@@ -47,6 +47,10 @@ func TestRetirementPublishesNewSealedGenerationWithoutInput(t *testing.T) {
 		}
 		return files
 	}
+	old.sealed.once.Do(old.sealed.load)
+	if old.sealed.err != nil {
+		t.Fatal(old.sealed.err)
+	}
 	files := inventory(old)
 	if len(files) != 2 {
 		t.Fatalf("initial files %d", len(files))
@@ -76,6 +80,23 @@ func TestRetirementPublishesNewSealedGenerationWithoutInput(t *testing.T) {
 	}
 	if len(inventory(old)) != 2 {
 		t.Fatal("pinned reader lost retired inventory")
+	}
+	current.sealed.once.Do(current.sealed.load)
+	if current.sealed.err != nil {
+		t.Fatal(current.sealed.err)
+	}
+	if _, _, ok := current.sealed.index.LookupMetadata("gc.reader"); ok {
+		t.Fatal("retired final part resurrected from GCP3 keys")
+	}
+	if _, _, ok := old.sealed.index.LookupMetadata("gc.reader"); !ok {
+		t.Fatal("old pinned directory changed after retirement")
+	}
+	fresh, err := v2core.NewRollupSnapshot(context.Background(), current.sealed.snapshot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := fresh.LookupMetadata("gc.reader"); ok {
+		t.Fatal("fresh directory resurrected a retired part")
 	}
 	if e.DurableFrontiers()[0][0] != 1 {
 		t.Fatal("retirement advanced input frontier")

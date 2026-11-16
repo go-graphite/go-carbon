@@ -141,8 +141,8 @@ func installBaseline(root string, c Config) (uint64, error) {
 	slices.Sort(names)
 	for _, name := range names {
 		index := metadata[name]
-		var m v2core.RollupMetadata
-		if err := json.Unmarshal(rows[index].Value, &m); err != nil {
+		m, err := v2core.DecodeRollupMetadata(rows[index].Value)
+		if err != nil {
 			return 0, err
 		}
 		var p v2core.RollupPolicy
@@ -160,10 +160,7 @@ func installBaseline(root string, c Config) (uint64, error) {
 		}
 		m.ID = NumericID(id, producer, c.Producers)
 		m.BaselineOrder = receipt.Baseline.Order
-		rows[index].Value, err = json.Marshal(m)
-		if err != nil {
-			return 0, err
-		}
+		rows[index].Value = v2core.AppendRollupMetadata(nil, m)
 	}
 	for i, catalog := range catalogs {
 		if err := catalog.Sync(); err != nil {

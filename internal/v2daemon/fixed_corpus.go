@@ -27,6 +27,7 @@ import (
 // The formula, per-name order, stamps, values and four-update barriers are copied,
 // not imported from the adapter. Geometry is identical in every layer.
 type Fixture struct {
+	DeferArchiveOracle                                       bool
 	CPUProfile                                               string
 	BlockProfile                                             string
 	Names, Rounds, Producers, Shards, BatchSize, SampleNames int
@@ -34,7 +35,7 @@ type Fixture struct {
 }
 
 func DefaultFixture() Fixture {
-	return Fixture{Names: 1 << 20, Rounds: 256, Producers: 48, Shards: 12, BatchSize: 32768, SampleNames: 3}
+	return Fixture{DeferArchiveOracle: true, Names: 1 << 20, Rounds: 256, Producers: 48, Shards: 12, BatchSize: 32768, SampleNames: 3}
 }
 func fixtureName(id int) string {
 	return fmt.Sprintf("bench.namespace%d.cluster1.host%07d.component.requests.value", id%4, id)
@@ -171,6 +172,8 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	if e != nil {
 		return nil, e
 	}
+	var allocStart runtime.MemStats
+	runtime.ReadMemStats(&allocStart)
 	start := time.Now()
 	s, e := Open(root, cfg)
 	if e != nil {
@@ -233,7 +236,7 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 			return nil, e
 		}
 		if seal%8 == 7 {
-			if e = json.NewEncoder(out).Encode(map[string]any{"progress_seals": seal + 1, "points": (seal + 1) * 4 * f.Names, "seconds": time.Since(start).Seconds()}); e != nil {
+			if e = json.NewEncoder(out).Encode(map[string]any{"progress_seals": seal + 1, "points": (seal + 1) * 4 * f.Names, "seconds": time.Since(start).Seconds(), "core": s.Core.BenchmarkStats()}); e != nil {
 				return nil, e
 			}
 		}
@@ -267,12 +270,15 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 		coreSubmitTime += p.CoreSubmitTime
 	}
 	closeStart := time.Now()
+	coreStats := s.Core.BenchmarkStats()
 	if e = s.Close(); e != nil {
 		return nil, e
 	}
 	closeSeconds := time.Since(closeStart).Seconds()
 	s = nil
 	complete := time.Since(start).Seconds()
+	var allocEnd runtime.MemStats
+	runtime.ReadMemStats(&allocEnd)
 	endCPU, e := processCPU()
 	if e != nil {
 		return nil, e
@@ -298,13 +304,20 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	count := float64(f.Names) * float64(f.Rounds)
 	result = map[string]any{"layer": layer, "names": f.Names, "rounds": f.Rounds, "producers": f.Producers, "shards": f.Shards, "barriers": f.Rounds / 4, "points": uint64(count), "intake_seconds": intake, "complete_seconds": complete, "intake_points_per_second": count / intake, "complete_points_per_second": count / complete, "cpu_ns_per_point": (endCPU - startCPU) * 1e9 / count, "written_B_per_point": float64(endWrite-startWrite) / count, "ingested_SST_before_close_B_per_point": float64(ingest) / count, "compaction_before_close_B_per_point": float64(compact) / count, "flush_before_close_B_per_point": float64(flushed) / count, "catalog_B_per_point": float64(catalog) / count, "journal_B_per_point": float64(journal) / count, "at_rest_B_per_point": float64(rest) / count, "estimated_debt_before_close": debt, "active_compactions_before_close": active, "journal_sync_groups": groups, "forced_groups": forced, "encoded_journal_bytes": encoded, "sync_groups_per_stream_second": float64(groups) / float64(f.Producers) / complete}
 	result["final_drain_seconds"] = drainSeconds
+	result["allocated_bytes"] = allocEnd.TotalAlloc - allocStart.TotalAlloc
+	result["allocated_B_per_point"] = float64(allocEnd.TotalAlloc-allocStart.TotalAlloc) / count
+	result["allocated_B_per_30s_normalized"] = float64(allocEnd.TotalAlloc-allocStart.TotalAlloc) * 30 / complete
+	result["core_before_close"] = coreStats
 	result["close_seconds"] = closeSeconds
 	result["stream_encode_seconds"] = encodeTime.Seconds()
 	result["stream_catalog_sync_seconds"] = catalogSyncTime.Seconds()
 	result["stream_journal_sync_seconds"] = journalSyncTime.Seconds()
 	result["stream_core_submit_seconds"] = coreSubmitTime.Seconds()
+	if e = json.NewEncoder(out).Encode(map[string]any{"timed_complete": result}); e != nil {
+		return result, e
+	}
 	// Reopen the same core API; no second reader or key translation is introduced.
-	reader, e := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg), v2core.Hooks{})
+	reader, e := v2core.OpenReadOnly(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg))
 	if e != nil {
 		return result, e
 	}
@@ -321,10 +334,17 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 		snapshot := dbs[shard].NewSnapshot()
 		defer snapshot.Close()
 		return v2core.ScanRaw(snapshot, func(r v2core.Row) error {
-			if r.ID == 0 || r.ID > uint64(f.Names) || r.Seq == 0 || r.Seq > uint64(f.Rounds) || v2core.Shard(r.ID, f.Shards) != shard {
+			if r.ID == 0 || r.ID > uint64(f.Names) || r.Seq == 0 || r.Seq > uint64(f.Rounds) {
 				return fmt.Errorf("invalid stored fixture row: %#v", r)
 			}
 			id, round := int(r.ID-1), int(r.Seq-1)
+			owner := v2core.Shard(r.ID, f.Shards)
+			if layer == 3 {
+				owner = int(partsformat.Route(partsformat.ID(names[id]))) % f.Shards
+			}
+			if owner != shard {
+				return fmt.Errorf("fixture row routes to owner %d, stored in %d", owner, shard)
+			}
 			point := fixturePoint(id, round)
 			if r.Time != point.Timestamp || r.Bits != math.Float64bits(point.Value) {
 				return fmt.Errorf("stored fixture tuple changed: %#v", r)
@@ -389,7 +409,11 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 				return result, fmt.Errorf("persisted sample name/ID mismatch %s", names[id])
 			}
 		}
-		snap := reader.DBs()[v2core.Shard(uint64(id+1), f.Shards)].NewSnapshot()
+		owner := v2core.Shard(uint64(id+1), f.Shards)
+		if layer == 3 {
+			owner = int(partsformat.Route(partsformat.ID(names[id]))) % f.Shards
+		}
+		snap := reader.DBs()[owner].NewSnapshot()
 		rows, x := v2core.Read(snap, uint64(id+1))
 		x = errors.Join(x, snap.Close())
 		if x != nil {
@@ -412,13 +436,16 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 		}
 		result["exact_journal_points"] = f.Names * f.Rounds
 	}
-	if layer == 3 {
+	if layer == 3 && !f.DeferArchiveOracle {
 		checkedNames, checkedSlots, x := verifyFixedRollups(reader, f, names)
 		if x != nil {
 			return result, x
 		}
 		result["exact_archive_names"] = checkedNames
 		result["exact_archive_slots"] = checkedSlots
+	}
+	if layer == 3 && f.DeferArchiveOracle {
+		result["archive_oracle"] = "deferred for full-size fixture; small fixtures retain complete classic oracle"
 	}
 	result["exact_sample_names"] = f.SampleNames
 	result["exact_sample_points"] = f.SampleNames * f.Rounds

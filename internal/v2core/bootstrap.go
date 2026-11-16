@@ -2,7 +2,6 @@ package v2core
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,8 +38,8 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 			return err
 		}
 		if k.Archive == v2part.MetadataArchive {
-			var m RollupMetadata
-			if err := json.Unmarshal(kv.Value, &m); err != nil {
+			m, err := DecodeRollupMetadata(kv.Value)
+			if err != nil {
 				return err
 			}
 			if ids[k.Metric] != 0 || m.ID == 0 {
