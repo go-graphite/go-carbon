@@ -33,6 +33,36 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 	if len(file) == 0 {
 		return v2part.Descriptor{}, errors.New("empty rollup file")
 	}
+	if dense {
+		// Runtime seals may already contain dense runs. Normalize their logical
+		// singleton stream before re-packing so conversion/export share one codec.
+		expanded := make([]KV, 0, len(file))
+		for _, kv := range file {
+			k, err := v2part.Decode(kv.Key)
+			if err != nil {
+				return v2part.Descriptor{}, err
+			}
+			if k.Archive == v2part.MetadataArchive {
+				expanded = append(expanded, kv)
+				continue
+			}
+			records, err := v2part.DecodeSlots(k.Archive, k.BlockStart, kv.Value)
+			if err != nil {
+				return v2part.Descriptor{}, err
+			}
+			for _, record := range records {
+				slotKey := k
+				slotKey.BlockStart = record.Slot
+				encoded, err := v2part.Encode(slotKey)
+				if err != nil {
+					return v2part.Descriptor{}, err
+				}
+				expanded = append(expanded, KV{Key: encoded, Value: sealrollup.EncodeRecord(record)})
+			}
+		}
+		file = expanded
+	}
+
 	first, err := v2part.Decode(file[0].Key)
 	if err != nil {
 		return v2part.Descriptor{}, err

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -42,6 +43,11 @@ func EncodeRollupPolicy(p RollupPolicy) ([]byte, error) {
 // LastUpdate is the original admission clock in nanoseconds, clamped against
 // backward clocks just as chunkstore activity is. Revision starts at creation.
 type RollupMetadata struct {
+	// ResetOrder masks every older physical slot in all parts, including copies.
+	// The producer order frontier is retained across expiry and restart.
+	ResetOrder uint64 `json:",omitempty"`
+	Expired    bool   `json:",omitempty"`
+
 	Version    uint8
 	ID         uint64
 	Policy     []byte
@@ -57,6 +63,11 @@ type rollupMetric struct {
 	prepared *sealrollup.Prepared
 }
 type coreRollups struct {
+	dense bool
+
+	expire func(RollupPolicy, RollupMetadata, time.Time) bool
+	now    func() time.Time
+
 	stage     func(string)
 	metrics   map[uint64]*rollupMetric
 	names     map[partsformat.ID]uint64
@@ -138,6 +149,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 			names[m.policy.Name] = b.ID
 			stages = append(stages, rollupStage{metric: m, next: m.meta, fresh: fresh})
+			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
 			positions[b.ID] = i
 		}
@@ -152,6 +164,18 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			batch.Points[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
 		s.batches = append(s.batches, batch)
+	}
+	// Idle maintenance visits only live metadata; no point/store reads occur.
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	if r.expire != nil {
+		for id, m := range r.metrics {
+			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.policy, m.meta, now) {
+				stages = append(stages, rollupStage{metric: m, next: m.meta})
+			}
+		}
 	}
 	files := map[string][]coreKV{}
 	var part partsformat.PartID
@@ -207,9 +231,48 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
 			}
 		}
-		for _, record := range s.records {
-			if err := put(m, uint32(record.Archive), record.Slot, sealrollup.EncodeRecord(record)); err != nil {
-				return coreSealPlan{}, err
+		if r.expire != nil && len(s.batches) == 0 && r.expire(m.policy, s.next, now) {
+			s.next.Expired = true
+			s.next.ResetOrder = s.next.Frontier.Order
+			if s.next.Revision == math.MaxUint64 {
+				return coreSealPlan{}, errors.New("metric revision exhausted")
+			}
+			s.next.Revision++
+		}
+		if !r.dense {
+			for _, record := range s.records {
+				if err := put(m, uint32(record.Archive), record.Slot, sealrollup.EncodeRecord(record)); err != nil {
+					return coreSealPlan{}, err
+				}
+			}
+		} else {
+			// Runs keep the immutable metric/archive boundary and original orders.
+			slices.SortFunc(s.records, func(a, b sealrollup.Record) int {
+				if a.Archive != b.Archive {
+					return a.Archive - b.Archive
+				}
+				if a.Slot < b.Slot {
+					return -1
+				}
+				if a.Slot > b.Slot {
+					return 1
+				}
+				return 0
+			})
+			for start := 0; start < len(s.records); {
+				end := start + 1
+				for end < len(s.records) && end-start < partsformat.MaxDenseSlots && s.records[end].Archive == s.records[start].Archive {
+					end++
+				}
+				value, err := partsformat.EncodeSlots(s.records[start:end])
+				if err != nil {
+					return coreSealPlan{}, err
+				}
+				record := s.records[start]
+				if err := put(m, uint32(record.Archive), record.Slot, value); err != nil {
+					return coreSealPlan{}, err
+				}
+				start = end
 			}
 		}
 		metadata, err := json.Marshal(s.next)
@@ -243,6 +306,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			m := s.metric
 			for _, record := range s.records {
 				m.slots.Install(record.Delta)
+			}
+			if s.next.Expired {
+				m.slots = sealrollup.NewSlots(m.policy.Config.Archives)
 			}
 			m.meta = s.next
 			if s.fresh {
@@ -289,7 +355,7 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			if err = json.Unmarshal(iter.Value(), &m); err != nil {
 				return err
 			}
-			if m.Frontier.Order > e.meta.Frontier.Order {
+			if m.Frontier.Order > e.meta.Frontier.Order || (m.Frontier.Order == e.meta.Frontier.Order && m.Revision > e.meta.Revision) {
 				e.meta = m
 				if err = json.Unmarshal(m.Policy, &e.policy); err != nil {
 					return err
@@ -315,6 +381,9 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 		if e.meta.Version != 1 || e.policy.Group != e.group || e.policy.Name != name || e.meta.ID == 0 || e.meta.Frontier.Order == 0 {
 			return fmt.Errorf("missing rollup metadata for %s", name)
 		}
+		if e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
+			return errors.New("invalid rollup reset frontier")
+		}
 		digest, err := sealrollup.PolicyDigest(e.policy.Config)
 		if err != nil {
 			return err
@@ -327,7 +396,9 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			if slot[0] >= int64(len(e.policy.Config.Archives)) || slot[1] >= e.policy.Config.Archives[slot[0]].Count || record.Order > e.meta.Frontier.Order {
 				return errors.New("invalid rollup slot/frontier")
 			}
-			records = append(records, record)
+			if record.Order > e.meta.ResetOrder {
+				records = append(records, record)
+			}
 		}
 		slices.SortFunc(records, func(a, b sealrollup.Record) int {
 			if a.Archive < b.Archive {

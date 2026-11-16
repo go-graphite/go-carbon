@@ -291,3 +291,63 @@ func TestPortableDenseNewestSingletonWins(t *testing.T) {
 		t.Fatalf("read %d: %v", n, e)
 	}
 }
+
+func TestDenseRuntimeSealExport(t *testing.T) {
+	_, policy := rollupTestPolicy(t, "test.runtime.dense", "1s:1d,1m:30d", sealrollup.Last, .5)
+	r := newCoreRollups()
+	r.dense = true
+	rows := []Row{{ID: 7, Time: 1700000000, Bits: 0x7ff8000000000042, Seq: 1}, {ID: 7, Time: 1700000001, Bits: 1 << 63, Seq: 2}, {ID: 7, Time: 1700000002, Bits: 1, Seq: 3}}
+	plan, err := r.plan(SealInput{Batches: []Batch{{ID: 7, Order: 1, Clock: 1700000003, Policy: policy, Points: rows}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Files) != 1 {
+		t.Fatalf("files %d", len(plan.Files))
+	}
+	source := v2part.Provenance{Incarnation: v2part.PartID{9}, Stream: "journal-0"}
+	path := filepath.Join(t.TempDir(), "runtime.sst")
+	d, err := WriteDenseRollupPart(path, plan.Files[0], source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := map[string][]byte{}
+	if err := v2part.ReadExpanded(context.Background(), path, &d, func(k v2part.Key, value []byte) error {
+		key, err := v2part.Encode(k)
+		if err != nil {
+			return err
+		}
+		actual[string(key)] = bytes.Clone(value)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, kv := range plan.Files[0] {
+		key, err := v2part.Decode(kv.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key.Archive == v2part.MetadataArchive {
+			count++
+			if !bytes.Equal(actual[string(kv.Key)], kv.Value) {
+				t.Fatal("metadata changed")
+			}
+			continue
+		}
+		records, err := v2part.DecodeSlots(key.Archive, key.BlockStart, kv.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range records {
+			count++
+			key.BlockStart = record.Slot
+			encoded, _ := v2part.Encode(key)
+			if !bytes.Equal(actual[string(encoded)], sealrollup.EncodeRecord(record)) {
+				t.Fatalf("runtime slot changed %+v", record)
+			}
+		}
+	}
+	if count != len(actual) {
+		t.Fatalf("expanded slots %d want%d", len(actual), count)
+	}
+}

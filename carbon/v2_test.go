@@ -213,17 +213,29 @@ func TestV2TCPRenderFindInfoRestart(t *testing.T) {
 	}
 	check()
 }
-func TestV2RejectsUnsupportedLifecycle(t *testing.T) {
-	app := v2TestApp(t, t.TempDir())
-	app.Config.Whisper.StoreExpiration = &Duration{time.Hour}
-	if err := app.Start(); err == nil {
-		app.Stop()
-		t.Fatal("accepted unsupported expiry")
+func TestV2LifecycleConfigurationAccepted(t *testing.T) {
+	for _, mode := range []string{"expiry", "quota"} {
+		t.Run(mode, func(t *testing.T) {
+			app := v2TestApp(t, t.TempDir())
+			if mode == "expiry" {
+				app.Config.Whisper.StoreExpiration = &Duration{time.Hour}
+			} else {
+				app.Config.Whisper.Quotas = persister.WhisperQuotas{{Pattern: "/", Metrics: 1, DroppingPolicy: "new"}}
+			}
+			if err := app.Start(); err != nil {
+				app.Stop()
+				t.Fatal(err)
+			}
+			defer app.Stop()
+			if mode == "quota" && app.v2.quotas == nil {
+				t.Fatal("quota admission missing")
+			}
+		})
 	}
 }
 
-func TestV2RejectsClassicDataAndQuota(t *testing.T) {
-	for _, mode := range []string{"classic", "quota"} {
+func TestV2RejectsCorruptClassicAndPhysicalQuota(t *testing.T) {
+	for _, mode := range []string{"classic", "physical-quota"} {
 		t.Run(mode, func(t *testing.T) {
 			app := v2TestApp(t, t.TempDir())
 			if mode == "classic" {
@@ -231,12 +243,13 @@ func TestV2RejectsClassicDataAndQuota(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				app.Config.Whisper.Quotas = persister.WhisperQuotas{{Pattern: ".*", Metrics: 1}}
+				app.Config.Whisper.Quotas = persister.WhisperQuotas{{Pattern: "/", PhysicalSize: 1, DroppingPolicy: "new"}}
 			}
 			if err := app.Start(); err == nil {
 				app.Stop()
-				t.Fatal("accepted unsupported source/lifecycle")
+				t.Fatal("accepted corrupt history/unsupported physical quota")
 			}
+			app.Stop()
 		})
 	}
 }
@@ -336,4 +349,35 @@ func TestV2RuntimeSIGKILLWithActiveTCP(t *testing.T) {
 	if !strings.Contains(string(b), "3.25") {
 		t.Fatalf("lost durable prefix: %s", b)
 	}
+}
+
+func TestV2RejectsClassicOnlyFallbackWithRetainedHistory(t *testing.T) {
+	root := t.TempDir()
+	app := v2TestApp(t, root)
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	app.Stop()
+	app = v2TestApp(t, root)
+	app.Config.V2.Enabled = false
+	if err := app.Start(); err == nil {
+		app.Stop()
+		t.Fatal("classic-only fallback hid retained v2 history")
+	}
+	app.Stop()
+}
+
+func TestV2RejectsPhysicalRootAliases(t *testing.T) {
+	root := t.TempDir()
+	app := v2TestApp(t, root)
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(app.Config.Whisper.DataDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	app.Config.V2.Path = filepath.Join(alias, "new-v2-root")
+	if err := app.Start(); err == nil {
+		app.Stop()
+		t.Fatal("accepted physically overlapping roots")
+	}
+	app.Stop()
 }

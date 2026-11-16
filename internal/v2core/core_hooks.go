@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -44,6 +45,14 @@ type coreSealPlan struct {
 	Abort func()
 }
 type coreHooks struct {
+	// DenseRollups selects the versioned multi-slot codec for new seal files.
+	DenseRollups bool
+
+	// Expire runs on the serial seal owner, after admitted batches are applied.
+	// It must be immutable and must remain false until journal replay finishes.
+	Expire func(RollupPolicy, RollupMetadata, time.Time) bool
+	Now    func() time.Time
+
 	// Stage is an optional fault-injection observer for offline recovery tests.
 	// It runs on owner goroutines; callers must serialize their own observer.
 	Stage func(string)

@@ -178,6 +178,7 @@ func (g *generation) load() {
 			batch.Points[i] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
 		m.pending = append(m.pending, batch)
+		m.meta.Expired = false
 	}
 }
 func (m *metricState) resolve() {
@@ -211,6 +212,10 @@ func (m *metricState) resolve() {
 // are pinned. Values are read-only and valid until the callback returns.
 // now is explicit so all names share one archive-selection clock.
 func (r *Reader) FetchMany(ctx context.Context, names []string, from, until, now int64, consume func(string, *Series) error) error {
+	return r.fetchMany(ctx, names, from, until, now, consume, nil)
+}
+
+func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now int64, consume func(string, *Series) error, mask func(bool)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -256,6 +261,12 @@ func (r *Reader) FetchMany(ctx context.Context, names []string, from, until, now
 			}
 		}
 		if metric == nil {
+			return ErrNotFound
+		}
+		if mask != nil {
+			mask(metric.meta.Expired || metric.meta.ResetOrder > 0)
+		}
+		if metric.meta.Expired {
 			return ErrNotFound
 		}
 		metric.once.Do(metric.resolve)

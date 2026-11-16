@@ -1,73 +1,113 @@
 # Experimental v2 daemon integration
 
-This branch combines the seven core-first read, discovery, lifecycle, TCP,
-replay, placement and portable-part Drafts with merge commits. It adds a real
-`carbon.App` startup path for **fresh local stores**. It is incomplete and must
-remain Draft; it does not qualify an existing-store cutover.
+This Draft joins nine component Drafts through real merge commits and connects
+TCP intake, the mandatory journal, canonical rollups, immutable read snapshots,
+discovery, logical inactivity expiry and host-wide quota admission.
 
 ```toml
 [v2]
 enabled = true
-path = "/absolute/path/to/fresh-v2-root"
+path = "/absolute/path/to/v2-root"
 producers = 2
 shards = 2
 read-budget-bytes = 268435456
 ```
 
-The selector defaults off and is restart-only. Existing schema and aggregation
-files select immutable per-name policies. Enable TCP and carbonserver, and
-disable UDP, pickle, CarbonLink, cache gRPC, custom receivers, buckyd, classic
-dump and classic input-log. Both classic data roots must be empty. The mandatory
-v2 journal lives below its own root; disabling classic input-log never disables
-v2 durability. Geometry persists across restart and cannot change on reopen.
+The selector defaults off and is restart-only. Enable TCP and carbonserver, and
+disable UDP, pickle, CarbonLink, cache gRPC, custom receivers, buckyd, classic dump
+and classic input-log. The mandatory v2 journal lives below its separate root;
+disabling classic input-log never disables v2 durability. Geometry is persisted.
+The experimental runtime rejects policy reloads; apply configuration at restart.
 
-Data flows through the existing bounded receiver queues to serial producers,
-producer-local catalogs and one-second journal sync, then the canonical core
-owner queues and rollup planner. Each TCP point is an explicit application with
-persisted order, policy and clock. This is independent of socket batch cuts;
-**equivalence to classic cache/persister UpdateMany grouping is unqualified**.
-Do not infer classic rollup parity for arbitrary streams from the small primary
-archive integration fixture.
+TCP points pass through bounded producer queues and producer-local policy caches
+and journals. Each point is an explicit application with original order, policy
+and admission clock, independent of socket batch cuts. Journal sync and idle seal
+run every second. Rollups run at seal time. Normal runtime seals use bounded dense
+slot runs, preserving all value bits and replacement orders. The public core hook
+`DenseRollups` opts into that codec; existing core callers retain their singleton
+encoding. Read, conversion and export understand the dense runtime output.
 
-Core hands immutable sealed snapshots and detached pending applications to L4.
-Carbonserver render and info use that reader; find uses the existing classic
-trie/trigram projection of names obtained from pinned reader publications.
-Discovery refreshes once a second, outside writer callbacks. First lookup of a
-new sealed generation still scans an entire owner; catalog membership changes
-still rebuild the classic image. Neither path is qualified for large churn.
+Readers pin immutable owner snapshots and detached pending applications. Render,
+info and find use those publications; the catalog refreshes once a second outside
+writer callbacks. Render caches without snapshot identities are disabled. No
+reader acquires a writer lock. First access to a sealed generation still scans an
+owner, and catalog/quota refreshes rebuild metadata indexes; large-catalog cost,
+complete retained-memory bounds and production capacity remain unqualified.
 
-Restart synchronously scans the journal and submits original applications to
-normal core queues before opening listeners. Owner frontiers suppress committed
-prefixes. Repeated reopen and continued corrections use recovered application
-order. The inherited crash matrix exercises actual SIGKILL cuts; startup latency
-and retained-log scale remain unqualified.
+## Historical classic data
 
-| Boundary | Current integrated behavior |
-| --- | --- |
-| TCP / render / find / info | Connected for a fresh unplaced local store |
-| L3 | Uses existing canonical rollups; no replacement reducer or per-point rollup I/O |
-| Lifecycle / quota | Libraries merged; configured activation explicitly rejected |
-| Placement | Direct stamped producer API merged; legacy L2 adaptation fixed; TCP rejects placed input; placed journal reopen rejected |
-| Portable parts | Shared format and core adapter merged; no live installer/copy endpoint |
-| Classic + v2 union | Nonempty classic roots rejected; no silent fallback |
-| Read memory | Render reservation bounded; complete sealed index and pinned SST accounting still missing |
-| Shutdown | Stop intake, drain decoded prefix, stop HTTP, close reader pins, close journal/core |
+Existing Whisper files and shared classic stores open read-only. Initial discovery
+includes classic names before the first v2 write. Union reads use the stored
+retention ladder and overlay occupied v2 physical slots, including NaNs and newer
+ring replacements outside the requested interval. Unoccupied slots retain their
+classic values. Data and reset authority are taken from the same pinned v2 image.
+The classic roots and v2 root must be separate.
 
-Lifecycle cannot safely be enabled until portable metric incarnations and reset
-records fence old archive slots, planner hooks compose lifecycle with canonical
-rollups, readers pin masks with data, and host-wide quota usage is updated without
-resetting throughput. Current ring partition zero is not a safe aged deletion
-unit. A standalone lifecycle database must never be opened on a core root.
+Overlapping intake requires identical stored policies. Single-archive overlap is
+supported. **Multiarchive overlap is rejected** because a reducer starting empty
+cannot correctly update a coarse boundary bucket containing classic fine slots.
+Classic-only multiarchive history remains readable. A short-retention multiarchive
+canary therefore remains blocked until boundary seeding or an equivalent qualified
+union reducer is available. Arbitrary classic cache/persister UpdateMany grouping
+parity is also unqualified: TCP's explicit point applications are a different
+application boundary.
 
-Placement activation additionally needs authenticated stamped transport, original
-stamp retention in the journal, authority checks during replay and coherent
-coverage receipts. Replaying an existing placed journal is explicitly refused
-until that contract exists. Whole-part copy/import and legacy overlay also need
-the same durable incarnation and authority boundary.
+Classic remains immutable throughout v2 operation. Safe classic-write fallback
+requires durable cross-engine write epochs, which are absent. The current binary
+refuses classic-only startup when a configured v2 root is nonempty. Do not use an
+older classic-only binary to roll back; it would hide the v2 interval and later
+classic corrections have no precedence authority on a subsequent v2 reopen.
 
-Run Go 1.27 build/vet/tests on `carbon`, `carbonserver`, `internal/v2*` and
-`tool/storectl`. `TestV2TCPRenderFindInfoRestart` sends actual TCP input, checks
-find/info and HTTP render against a real Whisper file, reopens the same root,
-applies a correction, and verifies another reopen. This does not test expiry or
-a mixed-format source. Existing component suites retain their stronger codec,
-classic reducer and SIGKILL fixtures.
+## Expiry and quotas
+
+Existing `whisper.store-expiration`, expiration-file rules, grace, exclusions and
+dry-run settings control logical v2 inactivity expiry. Original activity clocks,
+not sample timestamps, select expiry. Replay finishes before maintenance activates;
+decoded, queued and journal-buffered input holds an expiry reservation until its
+core seal is durable. Those reservations use per-name atomic counters; their
+metadata cells are retired when the count reaches zero.
+
+An idle owner seal writes an expired flag and reset-order barrier with its durable
+frontier. Readers remove the name and mask all covered archive slots and classic
+history. A resumed name retains its mask and advances the existing producer order;
+old slots cannot reappear after restart or after expiry is disabled. An old pinned
+snapshot remains valid. These barriers belong to the original journal stream;
+cross-stream installation and generation allocation remain external contracts.
+
+Existing quota rules use one host-wide classic quota index, covering classic,
+active v2 and accepted pending names. New-name reservations serialize metadata;
+existing-name admission uses atomic throughput accounting. Catalog replacement
+releases expired logical storage while retaining consumed throughput. Physical
+quotas are rejected unless explicitly ignored by the existing setting, because
+shared immutable files have no per-name physical byte ownership. `Rejected()`
+reports quota admission rejections independently of TCP decode counters. These
+experimental counters are not yet a complete operator metrics surface.
+
+Logical expiry does not physically reclaim old part bytes. Partition zero contains
+ring replacements and is not an aged deletion unit. Whole-part reclamation,
+compaction of reset history and safe reset/tombstone GC remain unimplemented; never
+range-delete that partition or open a standalone lifecycle writer on a core root.
+
+## Placement and recovery
+
+Startup replays through the normal owner queues before listeners open. Owner
+frontiers suppress committed prefixes; original application order is recovered
+before further intake. Placement journals retain exact checksummed stamps and
+validate original group, map, epoch, producer lane and owned names during replay.
+An accepted prefix in a fenced current epoch can recover while intake stays closed.
+Historical map/epoch changes remain fail-closed pending certified coverage.
+Authenticated stamped TCP is absent; placed plaintext/stream TCP is rejected.
+
+Portable dense exports, manifest snapshots and whole-file copy helpers are joined,
+but live install/copy endpoints, authenticated adoption and historical coverage
+are not wired. Copies retain immutable files and use complete part checksums;
+there is no per-name digest path.
+
+## Local verification
+
+Use Go 1.27 with vendoring. Component ordinary/race suites cover the codec,
+canonical classic matrix, placement replay and SIGKILL cuts. Application tests
+cover real TCP -> HTTP render/find/info, independent Whisper values, Whisper and
+shared-store union, restart with an open sender, quota rejection/release, actual
+expiry and resumed-name masking. These local tests do not authorize or qualify a
+production canary, relay change, live copy adoption or general rollback.

@@ -211,6 +211,9 @@ func (app *App) configure() error {
 	if err != nil {
 		return err
 	}
+	if app.v2 != nil {
+		return errors.New("v2 runtime policy changes require restart")
+	}
 	if err := validateRuntimeProfiling(cfg); err != nil {
 		return err
 	}
@@ -926,6 +929,15 @@ func (app *App) Start() (err error) {
 	if conf.V2.Enabled {
 		return app.startV2()
 	}
+	if conf.V2.Path != "" {
+		entries, e := os.ReadDir(conf.V2.Path)
+		if e != nil && !os.IsNotExist(e) {
+			return e
+		}
+		if len(entries) > 0 {
+			return errors.New("classic write fallback with retained v2 history requires union write-epoch support")
+		}
+	}
 	// ParseConfig already took this snapshot. Embedded callers may supply or
 	// clone Config directly; snapshot their receipt before source validation.
 	if app.completionConfig != conf {
@@ -1489,6 +1501,10 @@ func (app *App) carbonserverRateLimiters() (map[string]*carbonserver.ApiPerPathR
 }
 
 func (app *App) configureCarbonserverQuotas(listener *carbonserver.CarbonserverListener) error {
+	// v2 owns one catalog + pending admission authority.
+	if app.Config.V2.Enabled {
+		return nil
+	}
 	conf := app.Config
 	if app.Config.Whisper.Quotas != nil {
 		if !conf.Carbonserver.ConcurrentIndex || conf.Carbonserver.RealtimeIndex <= 0 {

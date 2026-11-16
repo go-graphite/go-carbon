@@ -57,6 +57,7 @@ type Server struct {
 	conns    map[net.Conn]struct{}
 	err      error
 	stats    counters
+	pending  sync.Map // name -> *atomic.Int64; negative cells are retired before deletion
 	finish   sync.Once
 	finished chan struct{}
 }
@@ -107,6 +108,32 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	go s.listen()
 	return s, nil
 }
+
+// Pending fences inactivity expiry against decoded, queued and journal-buffered
+// input. Counts are released only after the producer's successful durable Drain.
+func (s *Server) Pending(name string) bool {
+	value, ok := s.pending.Load(name)
+	return ok && value.(*atomic.Int64).Load() > 0
+}
+func (s *Server) pendingAdd(name string, n int64) {
+	for {
+		value, ok := s.pending.Load(name)
+		if !ok {
+			value, _ = s.pending.LoadOrStore(name, &atomic.Int64{})
+		}
+		cell := value.(*atomic.Int64)
+		for old := cell.Load(); old >= 0; old = cell.Load() {
+			if cell.CompareAndSwap(old, old+n) {
+				if old+n == 0 && cell.CompareAndSwap(0, -1) {
+					s.pending.CompareAndDelete(name, value)
+				}
+				return
+			}
+		}
+		s.pending.CompareAndDelete(name, value)
+	}
+}
+
 func (s *Server) Stats() Stats {
 	c := &s.stats
 	return Stats{c.accepted.Load(), c.rejected.Load(), c.parse.Load(), c.transport.Load(), c.sink.Load(), c.wire.Load(), c.connections.Load()}
@@ -134,12 +161,21 @@ func (s *Server) work(o Owner, q <-chan batch) {
 	defer tick.Stop()
 	var seq uint64
 	failed := false
+	buffered := map[string]int64{}
+	releaseBuffered := func() {
+		for name, n := range buffered {
+			s.pendingAdd(name, -n)
+			delete(buffered, name)
+		}
+	}
 	syncOwner := func() {
 		if !failed {
 			if err := errors.Join(o.Seal(), o.Drain()); err != nil {
 				failed = true
 				s.stats.sink.Add(1)
 				s.fail(err)
+			} else {
+				releaseBuffered()
 			}
 		}
 	}
@@ -151,8 +187,14 @@ func (s *Server) work(o Owner, q <-chan batch) {
 				return
 			}
 			if failed {
+				for _, name := range b.names {
+					s.pendingAdd(name, -1)
+				}
 				s.stats.rejected.Add(uint64(len(b.data)))
 				continue
+			}
+			for _, name := range b.names {
+				buffered[name]++
 			}
 			sequence := make([]uint64, len(b.data))
 			for i := range sequence {
@@ -288,6 +330,9 @@ func (s *Server) read(c net.Conn) error {
 			buffers[i] = batch{}
 			return nil
 		case <-s.done:
+			for _, name := range b.names {
+				s.pendingAdd(name, -1)
+			}
 			s.stats.rejected.Add(uint64(len(b.data)))
 			buffers[i] = batch{}
 			return errors.New("receiver stopped")
@@ -307,6 +352,7 @@ func (s *Server) read(c net.Conn) error {
 			s.stats.rejected.Add(1)
 			return
 		}
+		s.pendingAdd(ref.name, 1)
 		b := &buffers[ref.owner]
 		b.names = append(b.names, ref.name)
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})

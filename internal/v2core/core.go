@@ -162,6 +162,13 @@ func coreWait(wake chan struct{}) {
 		time.Sleep(10 * time.Microsecond)
 		return
 	}
+	// Prefer a notification already available. Under scheduler pressure both
+	// a fresh timer and the wake can become ready before the select executes.
+	select {
+	case <-wake:
+		return
+	default:
+	}
 	// Retry periodically to observe owner failure even without a release.
 	timer := time.NewTimer(time.Millisecond)
 	select {
@@ -172,6 +179,8 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	maintenance bool
+
 	stage func(string)
 
 	failure                      atomic.Pointer[coreFailure]
@@ -345,6 +354,10 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 				return fail(err)
 			}
 			r.stage = hooks.Stage
+			r.dense = hooks.DenseRollups
+			r.expire = hooks.Expire
+			r.now = hooks.Now
+			o.maintenance = hooks.Expire != nil
 			o.plan = r.plan
 		}
 		// Only uncommitted staging files remain after successful atomic ingestion.
@@ -638,7 +651,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	completions := make([]completion, o.cfg.Producers)
 	flush := func() error {
-		if slices.Equal(pending, o.meta.Cursors) {
+		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
 			return nil
 		}
 		next := o.meta
