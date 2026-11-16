@@ -63,7 +63,7 @@ func TestPlacedSinksAndDurableFence(t *testing.T) {
 	if e := p.AppendPlaced(stamp, names, data, seq, 100); e != nil {
 		t.Fatal(e)
 	}
-	if e := p.AppendApplicationsPlaced(stamp, []Application{{Name: "metric.b", Order: 1, Clock: 100, Points: data, Sequence: seq}}); e != nil {
+	if e := p.AppendApplicationsPlaced(stamp, []Application{{Name: "metric.b", Order: 2, Clock: 100, Points: data, Sequence: seq}}); e != nil {
 		t.Fatal(e)
 	}
 	ends := []v2placement.EndMarker{{Lane: stamp.Lane, Final: 2, Durable: 2}}
@@ -102,5 +102,26 @@ func TestFenceWithoutCoverageStaysClosed(t *testing.T) {
 	}
 	if e := s.Producers[0].AppendPlaced(stamp, []string{"a"}, []points.Point{{Timestamp: 1}}, []uint64{1}, 1); !errors.Is(e, v2placement.ErrStaleEpoch) {
 		t.Fatal("uncertified fence reopened", e)
+	}
+}
+
+// Retained logs currently omit placement stamps. Never turn a fresh placed
+// producer into an unversioned replay path after restart.
+func TestPlacedRestartRefusesUnstampedJournal(t *testing.T) {
+	original, _, _ := placedFixture(t)
+	a := original.cfg.Placement
+	root := t.TempDir()
+	cfg := Config{Layer: 2, Producers: 1, Shards: 1, Placement: a}
+	s, err := Open(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(root, cfg)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("reopened placed journal without stamp contract")
 	}
 }

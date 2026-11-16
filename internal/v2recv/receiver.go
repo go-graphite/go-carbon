@@ -410,3 +410,6 @@ func (s *Server) read(c net.Conn) error {
 		}
 	}
 }
+
+// Addr reports the bound listener address, including an allocated ephemeral port.
+func (s *Server) Addr() net.Addr { return s.listener.Addr() }

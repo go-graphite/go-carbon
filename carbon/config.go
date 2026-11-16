@@ -415,6 +415,7 @@ type tracingConfig struct {
 
 // Config ...
 type Config struct {
+	V2 v2Config `toml:"v2"`
 	// Loaded once with configuration; never serialized as an operator setting.
 	incrementalMigrationComplete bool
 	// memoryBudget and memoryLimit are resolved at config load; an explicit

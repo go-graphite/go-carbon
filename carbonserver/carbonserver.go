@@ -40,6 +40,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/v2read"
+
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	_ "google.golang.org/grpc/encoding/gzip"
@@ -356,6 +358,7 @@ type CarbonserverListener struct {
 	realtimeIndex   int
 	newMetricsQueue *helper.MetricQueue
 
+	v2Reader     *v2read.Reader
 	v2Catalog    atomic.Pointer[v2CatalogBinding]
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex

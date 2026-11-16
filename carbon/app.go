@@ -75,6 +75,7 @@ func (r *wspConfigRetriever) MetricAggrConf(metric string) (whisper.AggregationM
 }
 
 type App struct {
+	v2 *v2Runtime
 	sync.RWMutex
 	ConfigFilename         string
 	Config                 *Config
@@ -215,6 +216,9 @@ func (app *App) configure() error {
 	}
 	if err := validatePhaseCPU(cfg); err != nil {
 		return err
+	}
+	if app.Cache != nil && app.Config.V2 != cfg.V2 {
+		return errors.New("v2 configuration changes require restart")
 	}
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
 		return errors.New("storage and buckyd settings require a restart")
@@ -452,6 +456,9 @@ func (app *App) ReloadConfig() error {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	if app.Config.V2.Enabled {
+		return errors.New("v2 configuration is restart-only")
+	}
 	defer app.startLiveStoreMigration()
 	if app.copyInputSealed || app.Buckyd != nil && app.Buckyd.StoreCopyActive() {
 		return errors.New("configuration reload is fenced by whole-store copy; sealed input requires a restart")
@@ -596,6 +603,9 @@ func (app *App) stopListeners() <-chan struct{} {
 // Keep reads available while receivers and other input cleanup finish.
 // Assumes we are holding app.Lock().
 func (app *App) stopInputListeners() {
+	if app.v2 != nil {
+		app.v2.stopIntake()
+	}
 	if app.SocketStats != nil {
 		app.SocketStats.Stop()
 		if app.PromRegisterer != nil {
@@ -696,6 +706,10 @@ func (app *App) stopAll() {
 		_ = app.Cache.SetWriteoutBatching(0, 0)
 	}
 	<-app.stopListeners()
+	if app.v2 != nil {
+		app.v2.close()
+		app.v2 = nil
+	}
 	if app.startupInput != nil {
 		if err := app.startupInput.close(); err != nil {
 			zapwriter.Logger("app").Error("startup input capture failed", zap.Error(err))
@@ -909,6 +923,9 @@ func (app *App) Start() (err error) {
 	}()
 
 	conf := app.Config
+	if conf.V2.Enabled {
+		return app.startV2()
+	}
 	// ParseConfig already took this snapshot. Embedded callers may supply or
 	// clone Config directly; snapshot their receipt before source validation.
 	if app.completionConfig != conf {
@@ -1301,7 +1318,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsQueue *helpe
 		return nil, nil
 	}
 
-	if app.MetricStore == nil && (conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex) {
+	if app.v2 == nil && app.MetricStore == nil && (conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex) {
 		if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
 			return nil, fmt.Errorf("failed to stat whisper data directory: %w", err)
 		} else if fi.Mode()&os.ModeSymlink == 1 {

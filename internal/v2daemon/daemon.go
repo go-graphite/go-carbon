@@ -26,6 +26,7 @@ type Config struct {
 	GroupInterval                            time.Duration
 	// Placement requires stamped intake; one daemon root owns one PG.
 	Placement Placement
+	Hooks     v2core.Hooks
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -72,7 +73,7 @@ func coreConfig(c Config) v2core.Config {
 }
 
 // Open recovers durable journal layers through the normal core write queues.
-func Open(root string, c Config) (*Store, error) { return openWithHooks(root, c, v2core.Hooks{}) }
+func Open(root string, c Config) (*Store, error) { return openWithHooks(root, c, c.Hooks) }
 
 func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 	if c.Placement != nil && c.Layer < 2 {
@@ -97,9 +98,13 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	lock, _, err := lockRoot(root, c)
+	lock, reopened, err := lockRoot(root, c)
 	if err != nil {
 		return nil, err
+	}
+	if reopened && c.Placement != nil {
+		_ = lock.Close()
+		return nil, errors.New("placed journal replay requires persisted placement stamps; not implemented")
 	}
 	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), hooks)
 	if err != nil {
@@ -188,7 +193,7 @@ func (p *Producer) appendNamed(names []string, data []points.Point, sequence []u
 		for i, name := range names {
 			apps[i] = Application{Name: name, Order: p.applyOrder + uint64(i) + 1, Clock: clock, Points: data[i : i+1], Sequence: sequence[i : i+1]}
 		}
-		return p.AppendApplications(apps)
+		return p.appendApplications(apps)
 	}
 	var rows []v2core.Row
 	if n := len(p.spareRows); n > 0 {

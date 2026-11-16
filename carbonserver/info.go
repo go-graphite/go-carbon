@@ -39,6 +39,18 @@ type retentionInfo struct {
 }
 
 func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, error) {
+	if listener.v2Reader != nil {
+		m, err := listener.v2Reader.Metadata(context.Background(), metric)
+		if err != nil {
+			return metricInfo{}, err
+		}
+		info := metricInfo{aggregationMethod: titleizeAggrMethod(m.AggregationMethod), xFilesFactor: m.XFilesFactor}
+		for _, a := range m.Archives {
+			info.retentions = append(info.retentions, retentionInfo{int(a.Step), int(a.Points)})
+			info.maxRetention = max(info.maxRetention, a.Step*a.Points)
+		}
+		return info, nil
+	}
 	metricStore := listener.getMetricStore()
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()
