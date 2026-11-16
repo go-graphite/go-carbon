@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ func check(err error) {
 }
 func emit(v any) { check(json.NewEncoder(os.Stdout).Encode(v)) }
 func main() {
+	dictionaryInput := flag.String("dictionary-spool", "", "reuse catalog frames from an earlier normalization spool")
 	mode := flag.String("mode", "normalize", "normalize, import, query, update, crash-child, crash-check, legacy-scan")
 	input := flag.String("input", "", "read-only legacy state or normalized spool")
 	output := flag.String("output", "", "new spool or database path")
@@ -41,7 +43,7 @@ func main() {
 	start := time.Now()
 	switch *mode {
 	case "normalize":
-		check(normalize(*input, *output))
+		check(normalize(*input, *output, *dictionaryInput))
 	case "import":
 		check(importSpool(*backend, *input, *output))
 	case "query":
@@ -123,7 +125,7 @@ func decode(b []byte) (any, error) {
 	return v, err
 }
 
-func normalize(input, output string) error {
+func normalize(input, output, dictionaryInput string) error {
 	d, err := newDictionary()
 	if err != nil {
 		return err
@@ -138,51 +140,91 @@ func normalize(input, output string) error {
 	var digest [32]byte
 	var records uint64
 	put := func(r statestore.Record) error { hashRecord(&digest, r); records++; return writeRecord(w, r) }
-	f, err := os.Open(filepath.Join(input, "union.tsv"))
-	if err != nil {
-		return err
-	}
-	s := scanner(f)
-	names := make([]catalogName, 0, pageSize)
-	var prev string
+	var f *os.File
+	var s *bufio.Scanner
 	start := time.Now()
-	flush := func() error {
-		if len(names) == 0 {
-			return nil
-		}
-		p := d.add(names)
-		err := put(statestore.Record{Bucket: "catalog", ID: p.FirstID, Label: p.Last, Payload: p.Data})
-		names = names[:0]
-		return err
-	}
-	for s.Scan() {
-		n, e := parseCatalog(s.Text())
+	if dictionaryInput != "" {
+		old, e := os.Open(dictionaryInput)
 		if e != nil {
-			f.Close()
 			return e
 		}
-		if n.Name <= prev {
-			f.Close()
-			return errors.New("catalog must be strictly sorted")
-		}
-		prev = n.Name
-		names = append(names, n)
-		if len(names) == pageSize {
-			if e = flush(); e != nil {
-				f.Close()
+		r := bufio.NewReaderSize(old, 8<<20)
+		for {
+			record, e := readRecord(r)
+			if errors.Is(e, io.EOF) {
+				break
+			}
+			if e != nil {
+				old.Close()
+				return e
+			}
+			if record.Bucket != "catalog" {
+				break
+			}
+			d.pages = append(d.pages, catalogPage{record.Label, record.ID, record.Payload})
+			if e = put(record); e != nil {
+				old.Close()
 				return e
 			}
 		}
+		old.Close()
+		if len(d.pages) == 0 {
+			return errors.New("no reusable dictionary")
+		}
+		last := d.pages[len(d.pages)-1]
+		names, e := d.names(len(d.pages) - 1)
+		if e != nil {
+			return e
+		}
+		d.count = last.FirstID + uint64(len(names)) - 1
+	} else {
+		f, err = os.Open(filepath.Join(input, "union.tsv"))
+		if err != nil {
+			return err
+		}
+		s = scanner(f)
+		names := make([]catalogName, 0, pageSize)
+		var prev string
+		start = time.Now()
+		flush := func() error {
+			if len(names) == 0 {
+				return nil
+			}
+			p := d.add(names)
+			err := put(statestore.Record{Bucket: "catalog", ID: p.FirstID, Label: p.Last, Payload: p.Data})
+			names = names[:0]
+			return err
+		}
+		for s.Scan() {
+			n, e := parseCatalog(s.Text())
+			if e != nil {
+				f.Close()
+				return e
+			}
+			if n.Name <= prev {
+				f.Close()
+				return errors.New("catalog must be strictly sorted")
+			}
+			prev = n.Name
+			names = append(names, n)
+			if len(names) == pageSize {
+				if e = flush(); e != nil {
+					f.Close()
+					return e
+				}
+			}
+		}
+		err = s.Err()
+		f.Close()
+		if err != nil {
+			return err
+		}
+		if err = flush(); err != nil {
+			return err
+		}
+		emit(map[string]any{"stage": "dictionary", "names": d.count, "pages": len(d.pages), "seconds": time.Since(start).Seconds()})
 	}
-	err = s.Err()
-	f.Close()
-	if err != nil {
-		return err
-	}
-	if err = flush(); err != nil {
-		return err
-	}
-	emit(map[string]any{"stage": "dictionary", "names": d.count, "pages": len(d.pages), "seconds": time.Since(start).Seconds()})
+	emit(map[string]any{"stage": "dictionary_ready", "names": d.count, "pages": len(d.pages), "reuse": dictionaryInput != "", "seconds": time.Since(start).Seconds()})
 	// Missing membership is preserved independently for comparison even though it
 	// is derivable from the dictionary's source/target flags.
 	for _, file := range []string{"missing.tsv", "sync.jsonl", "pending-selections.json", "residual.json", "config.json", "progress.json", "resolved.json"} {
@@ -196,6 +238,22 @@ func normalize(input, output string) error {
 		var chunkID uint64
 		kinds := map[string]uint64{}
 		var bytesIn int64
+		var memberBytes []byte
+		var lastID uint64
+		var memberCount int
+		catalogIndex, nameIndex := 0, 0
+		var catalogNames []catalogName
+		flushMembers := func() error {
+			if memberCount == 0 {
+				return nil
+			}
+			e := put(statestore.Record{Bucket: file, ID: chunkID, Label: "delta-id/source-mask", Payload: d.enc.EncodeAll(memberBytes, nil)})
+			chunkID++
+			memberBytes = memberBytes[:0]
+			memberCount = 0
+			lastID = 0
+			return e
+		}
 		emitChunk := func() error {
 			if len(chunk) == 0 {
 				return nil
@@ -232,9 +290,41 @@ func normalize(input, output string) error {
 						f.Close()
 						return errors.New("invalid missing row")
 					}
-					if err = add(v); err != nil {
-						f.Close()
-						return err
+					mask, e := strconv.ParseUint(v[1], 16, 64)
+					if e != nil {
+						return e
+					}
+					for {
+						if nameIndex >= len(catalogNames) {
+							if catalogIndex >= len(d.pages) {
+								return errors.New("missing name outside catalog")
+							}
+							catalogNames, e = d.names(catalogIndex)
+							if e != nil {
+								return e
+							}
+							catalogIndex++
+							nameIndex = 0
+						}
+						if catalogNames[nameIndex].Name >= v[0] {
+							break
+						}
+						nameIndex++
+					}
+					if catalogNames[nameIndex].Name != v[0] || catalogNames[nameIndex].Sources != mask || catalogNames[nameIndex].Target {
+						return errors.New("missing/catalog membership mismatch")
+					}
+					id := d.pages[catalogIndex-1].FirstID + uint64(nameIndex)
+					memberBytes = binary.AppendUvarint(memberBytes, id-lastID)
+					memberBytes = binary.AppendUvarint(memberBytes, mask)
+					lastID = id
+					memberCount++
+					row++
+					nameIndex++
+					if memberCount == pageSize {
+						if err = flushMembers(); err != nil {
+							return err
+						}
 					}
 				} else {
 					v, e := decode(line)
@@ -300,6 +390,9 @@ func normalize(input, output string) error {
 		}
 		f.Close()
 		if err != nil {
+			return err
+		}
+		if err = flushMembers(); err != nil {
 			return err
 		}
 		if err = emitChunk(); err != nil {

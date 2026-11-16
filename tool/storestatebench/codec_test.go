@@ -56,3 +56,10 @@ func TestCanonicalNoLoss(t *testing.T) {
 		t.Fatal(string(b))
 	}
 }
+
+func TestCatalogHexMask(t *testing.T) {
+	n, e := parseCatalog("metric\t3f\t0")
+	if e != nil || n.Sources != 63 || n.Target {
+		t.Fatal(n, e)
+	}
+}
