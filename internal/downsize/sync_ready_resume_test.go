@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -125,5 +126,28 @@ func TestReadyObservationNeverBypassesMutationChecks(t *testing.T) {
 	}
 	if _, ok := f.store(syncT).points["metric.001"][3600][syncTestNow-5*3600]; !initial || !ok {
 		t.Fatal("completed observation bypassed mutation/repair")
+	}
+}
+
+// Use the independent acceptance harness as well as the live-style legacy
+// recovery fixture above. Even a changed target proof cannot make missing
+// operator inputs repairable by another historical digest pass.
+func TestRedoReadyMissingInputsKeepsCompletedWork(t *testing.T) {
+	t.Parallel()
+	f, o, r := redoReadyFixture(t)
+	r.gapsComplete = false
+	ctx := context.Background()
+	if err := runSyncReady(ctx, &o, r, f, func() error { return runSync(ctx, o, f) }); !errors.Is(err, ErrSyncNotReady) {
+		t.Fatal(err)
+	}
+	before := f.snapshot()
+	f.store(syncT).points["metric.002"][3600][syncTestNow+3600] = 1
+	for range 2 {
+		if err := runSyncReady(ctx, &o, r, f, func() error { t.Fatal("replayed completed root"); return nil }); !errors.Is(err, ErrSyncNotReady) {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, f.snapshot()) {
+			t.Fatal("input-blocked verdict repeated backend work")
+		}
 	}
 }
