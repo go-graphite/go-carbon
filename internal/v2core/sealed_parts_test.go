@@ -15,6 +15,10 @@ import (
 
 func TestPartSourcePersistsWithoutAliasingIndependentRoots(t *testing.T) {
 	root := t.TempDir()
+	// A process may die during initial identity creation, before publication.
+	if err := os.WriteFile(filepath.Join(root, ".PARTSOURCE-interrupted"), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	first, err := openPartSource(root, "shared-journal-label", v2part.Provenance{})
 	if err != nil {
 		t.Fatal(err)

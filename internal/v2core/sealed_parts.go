@@ -103,15 +103,21 @@ func openPartSource(root, journal string, source v2part.Provenance) (v2part.Prov
 	if err != nil {
 		return source, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.CreateTemp(root, ".PARTSOURCE-")
 	if err != nil {
 		return source, err
 	}
+	defer os.Remove(f.Name())
 	_, err = f.Write(b)
 	if err == nil {
 		err = f.Sync()
 	}
 	err = errors.Join(err, f.Close())
+	if err == nil {
+		// Publish only the fully synced identity. A partial initial write must
+		// not leave an unreadable PARTSOURCE that prevents journal recovery.
+		err = os.Link(f.Name(), path)
+	}
 	if err == nil {
 		err = SyncPartDirectory(root)
 	}
