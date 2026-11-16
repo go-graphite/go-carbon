@@ -83,24 +83,26 @@ func (p *Whisper) SetIncrementalMigration(db IncrementalMetricStore, scratch str
 		return nil
 	}
 	scratch = filepath.Join(scratch, ".incremental-capture")
-	// Validate the private root at startup, but defer the 256 shard parents
-	// until an original actually needs a snapshot. Restart/read-only paths may
-	// never convert anything; their readiness must not wait for that metadata I/O.
+	// Validate the private root at startup. Prepare each stable shard parent
+	// only when a conversion first needs it, rather than spending readiness on
+	// 256 mkdirs even for an empty or already-owned source tree.
 	if err := os.MkdirAll(scratch, 0750); err != nil {
 		return err
 	}
-	p.incrementalCapture = sync.OnceValue(func() error {
-		// Prepare every shard before any snapshot starts. Conversions then create
-		// and remove private directories below independent, stable parents.
-		for i := range incrementalCaptureShards {
-			if err := os.MkdirAll(filepath.Join(scratch, fmt.Sprintf("%02x", i)), 0750); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	p.incrementalCapture = [incrementalCaptureShards]sync.Once{}
+	p.incrementalCaptureErrors = [incrementalCaptureShards]error{}
 	p.incrementalStore, p.incrementalScratch = db, scratch
 	return nil
+}
+
+// A shard is never removed while the persister runs. Concurrent conversions
+// share its initialization, then create private snapshots below that parent.
+func (p *Whisper) incrementalCaptureDir(shard uint64) (string, error) {
+	path := filepath.Join(p.incrementalScratch, fmt.Sprintf("%02x", shard))
+	p.incrementalCapture[shard].Do(func() {
+		p.incrementalCaptureErrors[shard] = os.MkdirAll(path, 0750)
+	})
+	return path, p.incrementalCaptureErrors[shard]
 }
 
 // Called under the ordinary per-metric writer lock, before popping cache data.
@@ -305,10 +307,10 @@ func (p *Whisper) convertFile(ctx context.Context, metric string, fault func(str
 		} else {
 			sourceActivity = info.ModTime()
 		}
-		if err := p.incrementalCapture(); err != nil {
+		scratch, err := p.incrementalCaptureDir(helper.HashString(metric) % incrementalCaptureShards)
+		if err != nil {
 			return result, err
 		}
-		scratch := filepath.Join(p.incrementalScratch, fmt.Sprintf("%02x", helper.HashString(metric)%incrementalCaptureShards))
 		ctx = whisperio.WithConversionSource(ctx)
 		snapshot, err := whisperio.ReadSnapshotIn(ctx, metric, path, scratch)
 		if err != nil {
