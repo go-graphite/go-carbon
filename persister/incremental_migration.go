@@ -83,14 +83,22 @@ func (p *Whisper) SetIncrementalMigration(db IncrementalMetricStore, scratch str
 		return nil
 	}
 	scratch = filepath.Join(scratch, ".incremental-capture")
-	// OOO snapshots create and remove a private directory per conversion.
-	// Give them independent parents instead of serializing on one directory.
-	// Store startup recursively removes this disposable tree.
-	for i := range incrementalCaptureShards {
-		if err := os.MkdirAll(filepath.Join(scratch, fmt.Sprintf("%02x", i)), 0750); err != nil {
-			return err
-		}
+	// Validate the private root at startup, but defer the 256 shard parents
+	// until an original actually needs a snapshot. Restart/read-only paths may
+	// never convert anything; their readiness must not wait for that metadata I/O.
+	if err := os.MkdirAll(scratch, 0750); err != nil {
+		return err
 	}
+	p.incrementalCapture = sync.OnceValue(func() error {
+		// Prepare every shard before any snapshot starts. Conversions then create
+		// and remove private directories below independent, stable parents.
+		for i := range incrementalCaptureShards {
+			if err := os.MkdirAll(filepath.Join(scratch, fmt.Sprintf("%02x", i)), 0750); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	p.incrementalStore, p.incrementalScratch = db, scratch
 	return nil
 }
@@ -296,6 +304,9 @@ func (p *Whisper) convertFile(ctx context.Context, metric string, fault func(str
 			return result, errors.New("conversion source is not a regular file")
 		} else {
 			sourceActivity = info.ModTime()
+		}
+		if err := p.incrementalCapture(); err != nil {
+			return result, err
 		}
 		scratch := filepath.Join(p.incrementalScratch, fmt.Sprintf("%02x", helper.HashString(metric)%incrementalCaptureShards))
 		ctx = whisperio.WithConversionSource(ctx)

@@ -45,7 +45,17 @@ func TestIncrementalCaptureShardsKeepRootIdleDuringConcurrentConversions(t *test
 		}
 		names = append(names, name)
 	}
+	// Empty/read-only startup pays for no capture shards. The first real
+	// conversion prepares them before taking its snapshot; subsequent parallel
+	// conversions must keep those parents stable.
 	entries, err := os.ReadDir(p.incrementalScratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("startup prepared capture shards: %v %v", entries, err)
+	}
+	if _, err := p.ConvertFile(ctx, "metric"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = os.ReadDir(p.incrementalScratch)
 	if err != nil {
 		t.Fatal(err)
 	}

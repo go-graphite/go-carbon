@@ -77,6 +77,7 @@ type Whisper struct {
 	metricStore              MetricStore
 	incrementalStore         IncrementalMetricStore
 	incrementalScratch       string
+	incrementalCapture       func() error
 	incrementalArchive       string
 	incrementalPriority      atomic.Pointer[func(string)]
 	// incrementalComplete routes writes to the store without an ownership
