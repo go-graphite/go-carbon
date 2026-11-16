@@ -77,3 +77,39 @@ corpus can make every name's value match its preceding pass and artificially
 improve XOR prediction; those warm curves are diagnostics, not capture evidence.
 `-analysis` and `-parallel-only` select the newest requested complete segments to
 reduce recycling risk. Source descriptors and headers are checked before/after.
+
+For a durable name-catalog comparison on the same selected source points:
+
+```sh
+go run ./tool/v2-journal -input /path/to/input-log -segments 6 -read-mbps 10 \
+  -catalog-dir /path/to/experiment
+```
+
+The four variants are normal PDC3, sparse-clock PDC3, normal PDC4 and sparse-clock
+PDC4. PDC3 restarts its dictionary per segment. PDC4 restarts only predictors;
+stable IDs refer to a stream-owned durable catalog shared across those segments.
+Names, opaque definitions, clocks, frame order and every point bit are compared.
+Raw field accounting charges the catalog names/definitions/IDs/framing once;
+`catalog_storage` separately reports actual compressed checkpoint plus WAL bytes.
+Add those bytes to PDC4 record bytes for a finite-cohort total. Checkpoint bytes
+are not hidden or attributed proportionally to jointly compressed fields.
+
+`-capture-seconds 120 -capture-streams 32` then tests appending the retained real
+cohort with a one-second group-fsync interval. Run capture on CPUs0–95 of a
+192-CPU benchmark machine; the tool pins its separate raw-TCP sender process to
+CPUs96–191. Each capture stream owns a catalog, encoder and file. Catalog seeds
+are checkpointed before capture. New definitions use `EncodeDurable` before the
+referencing append; group sync waits for catalog sync before file sync. The
+reported p99 measures that complete group-sync call, including catalog work if
+needed. Throughput includes receive/decode/encode/write and final sync. Capture
+CPU excludes the separate sender; elapsed time includes its startup. Seed
+catalog bytes are reported separately from record bytes. Every captured record
+is replayed and compared to the exact sender tuples after timing.
+
+The sender repeats an explicitly retained real cohort (at most 30M points).
+Predictors remain warm across repetitions; this sustained IO test is distinct
+from a one-pass representative codec test or production admission/backend replay.
+The probe uses a four-byte outer record length plus PDC4's own CRC; ordinary
+comparison accounting includes the modeled 32-byte production journal header.
+Output includes source selection and exact point counts. Use a fresh output
+root for each invocation, and an external daemon-health guard on shared hosts.

@@ -103,6 +103,10 @@ func main() {
 	repeats := flag.Int("repeats", 8, "parallel real-corpus repetitions per stream")
 	manifest := flag.Bool("manifest", false, "headers/selection only")
 	flag.Parse()
+	if *catalogSender != "" {
+		catalogSenderMain()
+		return
+	}
 	runtime.GOMAXPROCS(1)
 	if *rate <= 0 || *nsegments <= 0 || *partition < 0 || *partition > 15 {
 		panic("invalid flags")
@@ -113,7 +117,7 @@ func main() {
 		paths = paths[:len(paths)-1]
 	}
 	if len(paths) > *nsegments {
-		if *analysis || *parallelOnly {
+		if *analysis || *parallelOnly || *catalogDir != "" {
 			paths = paths[len(paths)-*nsegments:]
 		} else {
 			paths = paths[:*nsegments]
@@ -130,6 +134,10 @@ func main() {
 		segs = append(segs, s)
 	}
 	emit(map[string]any{"stage": "manifest", "segments": segs, "partition": *partition, "coverage_lower_bound_seconds": float64(segs[len(segs)-1].Created-segs[0].Created) / 1e9, "full_arrival_nanoseconds": true, "series_clock_prediction": *seriesClocks})
+	if *catalogDir != "" {
+		catalogProbe(segs, *partition, *rate)
+		return
+	}
 	if *analysis || *parallelOnly {
 		analyze(segs, *partition, *rate, *streams, *sample, *repeats, *parallelOnly)
 		return
