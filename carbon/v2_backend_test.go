@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -396,6 +397,7 @@ measure:
 	final := completedBackend.Stats().IngestedPoints - points0
 	fmt.Printf("V2_DAEMON_COMPLETE seconds=%.6f points=%d sender_points=%d points_per_second=%.3f cpu_ns_per_point=%.3f journal_bytes_per_point=%.6f maxrss_native_units=%d drain_and_close_seconds=%.6f\n", elapsed, final, written, float64(final)/elapsed, cpu*1e9/float64(final), float64(journalDiskBytes(app.Config.V2.DataDir)-journal0)/float64(final), usage1.Maxrss, time.Since(settleStart).Seconds())
 	var atRest int64
+	var sstSizes []int64
 	if err := filepath.WalkDir(app.Config.V2.DataDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
 			return walkErr
@@ -403,6 +405,9 @@ measure:
 		info, err := d.Info()
 		if err == nil {
 			atRest += info.Size()
+			if filepath.Ext(path) == ".sst" {
+				sstSizes = append(sstSizes, info.Size())
+			}
 		}
 		return err
 	}); err != nil {
@@ -410,6 +415,12 @@ measure:
 	}
 	writtenBytes := nativeWriteBytes() - io0
 	fmt.Printf("V2_DAEMON_STORAGE points=%d device_write_bytes=%d device_bytes_per_point=%.6f logical_at_rest_bytes=%d\n", final, writtenBytes, float64(writtenBytes)/float64(final), atRest)
+	sort.Slice(sstSizes, func(i, j int) bool { return sstSizes[i] < sstSizes[j] })
+	var median int64
+	if len(sstSizes) > 0 {
+		median = sstSizes[len(sstSizes)/2]
+	}
+	fmt.Printf("V2_DAEMON_SSTS count=%d median_bytes=%d\n", len(sstSizes), median)
 }
 
 func journalDiskBytes(dir string) int64 {
