@@ -42,6 +42,13 @@ func Open(root string, cfg Config, hooks Hooks) (*Engine, error) {
 	return openCoreWithHooks(root, cfg, hooks)
 }
 
+// OpenReadOnly opens immutable snapshots without rebuilding writable reducer
+// state. All admission and direct database writes are refused. Close after
+// releasing snapshots. The fixed-corpus raw/journal oracle is its first consumer.
+func OpenReadOnly(root string, cfg Config) (*Engine, error) {
+	return openCoreMode(root, cfg, Hooks{}, true)
+}
+
 // DBs borrows the engine-owned databases in owner order. A caller may recover
 // or initialize its own namespaces before the first Append/AppendBatches call.
 // After intake starts, publish writes only through PlanSeal. Never close these
@@ -89,4 +96,23 @@ func (e *coreEngine) AppendBatchesPipelined(producer int, batches []Batch, curso
 // DurableFrontiers returns conservative owner snapshots safe during intake.
 // Log retirement must also respect the journal's own fsync frontier.
 func (e *coreEngine) DurableFrontiers() [][]uint64 { return e.durableFrontiers() }
-func (e *coreEngine) Close() error                 { return e.close() }
+
+// BenchmarkStats samples atomic owner counters and Pebble metrics. Call while
+// the experiment is open, before Close; it never reads mutable reducer state.
+func (e *coreEngine) BenchmarkStats() map[string]any {
+	var calls, nanos, maximum, parts, written uint64
+	var files int64
+	for _, o := range e.owners {
+		calls += o.syncCalls.Load()
+		nanos += o.syncNS.Load()
+		maximum = max(maximum, o.syncMaxNS.Load())
+		parts += o.parts.Load()
+		written += o.bytes.Load()
+		for _, level := range o.db.Metrics().Levels {
+			files += level.NumFiles
+		}
+	}
+	return map[string]any{"sst_sync_calls": calls, "sst_sync_seconds": float64(nanos) / 1e9, "sst_sync_max_seconds": float64(maximum) / 1e9, "sealed_parts": parts, "sst_bytes": written, "live_sst_files": files}
+}
+
+func (e *coreEngine) Close() error { return e.close() }

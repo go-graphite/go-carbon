@@ -4,6 +4,7 @@ package v2core
 // allocation and the durable input log. An ID is an identity, never a name hash;
 // only routing hashes the ID, so hash collisions cannot combine metric values.
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -20,12 +21,14 @@ import (
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
 )
 
 var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
 	Rollups                    bool
+	RollupRoutingVersion       uint8
 	AppendParts                bool
 	JournalIdentity            string
 	Shards, Producers, MaxRows int
@@ -70,7 +73,12 @@ const (
 	corePacketBytes = uint64(unsafe.Sizeof(corePacket{}))
 )
 
+type rollupRoute struct {
+	owner  int
+	policy []byte
+}
 type coreRouter struct {
+	rollupRoutes                map[uint64]rollupRoute
 	slots                       []coreDispatch
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
@@ -208,6 +216,7 @@ type coreEngine struct {
 	streamBytes  uint64
 	indexScatter bool
 	notifyWait   bool
+	readOnly     bool
 }
 
 // Hash only the canonical numeric ID, with stable distribution independent of
@@ -230,8 +239,21 @@ func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapsh
 	return openCoreWithHooks(root, cfg, coreHooks{Publish: hook})
 }
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
+	return openCoreMode(root, cfg, hooks, false)
+}
+func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (*coreEngine, error) {
 	if cfg.Rollups && hooks.PlanSeal != nil {
 		return nil, errors.New("core rollups already own the seal planner")
+	}
+	if cfg.Rollups {
+		if cfg.RollupRoutingVersion == 0 {
+			cfg.RollupRoutingVersion = 1
+		}
+		if cfg.RollupRoutingVersion != 1 {
+			return nil, errors.New("unknown rollup routing version")
+		}
+	} else if cfg.RollupRoutingVersion != 0 {
+		return nil, errors.New("rollup routing requires rollups")
 	}
 	hook := hooks.Publish
 	if cfg.RawCodec == "" {
@@ -271,7 +293,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	diskConfig := cfg
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
-	e := &coreEngine{cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
+	e := &coreEngine{readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			_ = o.db.Close()
@@ -280,7 +302,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	}
 	for s := 0; s < cfg.Shards; s++ {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
-		opts := &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+		opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
 		opts.Experimental.TableCacheShards = 1
 		opts.BytesPerSync = 64 << 20
 		opts.EventListener = &pebble.EventListener{
@@ -326,7 +348,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			return fail(errors.New("owner format/config mismatch"))
 		}
 		o.publishFrontier(o.meta)
-		if cfg.Rollups {
+		if cfg.Rollups && !readOnly {
 			r, err := recoverCoreRollups(db)
 			if err != nil {
 				return fail(err)
@@ -389,6 +411,9 @@ func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch,
 }
 
 func (e *coreEngine) submissionError() error {
+	if e.readOnly {
+		return os.ErrPermission
+	}
 	for _, o := range e.owners {
 		if failure := o.failure.Load(); failure != nil {
 			return failure.err
@@ -407,6 +432,41 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		return err
 	}
 	router := &e.routers[producer]
+	if e.cfg.Rollups {
+		if router.rollupRoutes == nil {
+			router.rollupRoutes = make(map[uint64]rollupRoute)
+		}
+		for _, b := range batches {
+			if route, ok := router.rollupRoutes[b.ID]; ok {
+				if !bytes.Equal(route.policy, b.Policy) {
+					return errors.New("stored rollup policy changed")
+				}
+			} else {
+				var p RollupPolicy
+				if err := json.Unmarshal(b.Policy, &p); err != nil {
+					return err
+				}
+				canonical, err := EncodeRollupPolicy(p)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(canonical, b.Policy) {
+					return errors.New("noncanonical rollup policy")
+				}
+				router.rollupRoutes[b.ID] = rollupRoute{owner: int(partsformat.Route(p.Name)) % e.cfg.Shards, policy: canonical}
+			}
+		}
+	}
+	routeID := func(id uint64) (int, error) {
+		if !e.cfg.Rollups {
+			return coreShard(id, e.cfg.Shards), nil
+		}
+		route, ok := router.rollupRoutes[id]
+		if !ok {
+			return 0, errors.New("rollup row requires original application policy")
+		}
+		return route.owner, nil
+	}
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
 		streamBytes = coreStreamBytes
@@ -477,7 +537,10 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	routes := d.routes[:len(rows)]
 	for i, r := range rows {
-		s := coreShard(r.ID, e.cfg.Shards)
+		s, err := routeID(r.ID)
+		if err != nil {
+			return err
+		}
 		routes[i] = s
 		counts[s]++
 	}
@@ -519,7 +582,10 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		byOwner = make([][]coreBatch, e.cfg.Shards)
 	}
 	for _, b := range batches {
-		owner := coreShard(b.ID, e.cfg.Shards)
+		owner, err := routeID(b.ID)
+		if err != nil {
+			return err
+		}
 		b.Points = slices.Clone(b.Points)
 		b.Policy = slices.Clone(b.Policy)
 		byOwner[owner] = append(byOwner[owner], b)
