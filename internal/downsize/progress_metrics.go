@@ -252,6 +252,7 @@ type progressMetrics struct {
 	redoByPath                            map[string]map[string]int64
 	repairFailedNames                     float64
 	legacyRevalidated                     map[string]int64
+	phaseRegressions                      int64
 	freshDone                             float64
 	freshDoneAvailable                    float64
 	storeRetries, storeWaiting            int64
@@ -321,6 +322,7 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
 	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
 	p.snapshot = snapshot
+	p.phaseRegressions = max(p.phaseRegressions, snapshot.PhaseRegressions)
 	oldPhase, oldRound := p.phase, p.round
 	p.phase = metricToken(snapshot.Phase)
 	if snapshot.WaitingForStore {
@@ -366,7 +368,7 @@ func (p *progressMetrics) send() {
 	at := time.Now()
 	eta := p.eta(at)
 	ready := p.ready.estimate(at, p.path, p.snapshot)
-	code, round := p.code, p.round
+	code, round, phaseRegressions := p.code, p.round, p.phaseRegressions
 	freshDone, freshAvailable, started := p.freshDone, p.freshDoneAvailable, p.started
 	retries, waiting, waitSeconds := p.storeRetries, float64(0), p.storeWaitSeconds
 	if p.storeWaiting > 0 {
@@ -379,6 +381,7 @@ func (p *progressMetrics) send() {
 	now := at.Unix()
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s.legacy_revalidated_names %d %d\n", p.prefix, legacyRevalidated, now)
+	fmt.Fprintf(&b, "%s.phase_regressions %d %d\n", p.prefix, phaseRegressions, now)
 	if p.lastSentPhase != "" && p.lastSentPhase != phase {
 		fmt.Fprintf(&b, "%s.%s.active 0 %d\n%s.%s.names_per_second 0 %d\n", p.prefix, p.lastSentPhase, now, p.prefix, p.lastSentPhase, now)
 	}

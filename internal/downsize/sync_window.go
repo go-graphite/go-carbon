@@ -81,7 +81,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		defer b.beginWindowCopy()()
 	}
 	s.phase("copy")
-	s.prog.begin("window missing", s.sum.Missing)
+	if err := s.beginPhase("window missing", 0, s.sum.Missing); err != nil {
+		return err
+	}
 	if !s.legacyCopyReceipts {
 		s.prog.planVerification(int64(s.sum.Discovered))
 	}

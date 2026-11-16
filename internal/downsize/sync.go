@@ -163,6 +163,7 @@ type syncHole struct {
 }
 
 type syncRow struct {
+	Position           *syncPhasePosition       `json:"phase_position,omitempty"`
 	HoleProofs         map[string]string        `json:"hole_proofs_v2,omitempty"`
 	LegacyRevalidated  int                      `json:"legacy_revalidated_names,omitempty"`
 	ObservationProof   string                   `json:"observation_proof,omitempty"`
@@ -197,12 +198,14 @@ type syncRow struct {
 }
 
 type syncJournal struct {
-	checkpoint *syncPhaseCheckpoint
-	lock       *os.File
-	mu         sync.Mutex
-	file       *os.File
-	rows       []syncRow
-	progress   progressSnapshot
+	phaseGuard    *syncPhasePosition
+	phaseGuardRow int
+	checkpoint    *syncPhaseCheckpoint
+	lock          *os.File
+	mu            sync.Mutex
+	file          *os.File
+	rows          []syncRow
+	progress      progressSnapshot
 }
 
 func openSyncJournal(path, identity string, checkpointOptions ...string) (*syncJournal, error) {
@@ -289,11 +292,15 @@ func (j *syncJournal) append(row syncRow) error {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if err := j.guardPhase(row); err != nil {
+		return err
+	}
 	if _, err := j.file.Write(append(data, '\n')); err != nil {
 		return err
 	}
 	j.rows = append(j.rows, row)
 	j.progress.apply(row)
+	j.observePhase(row, len(j.rows))
 	return j.file.Sync()
 }
 
@@ -340,6 +347,10 @@ type syncResidual struct {
 }
 
 type syncer struct {
+	phaseMu              sync.Mutex // phase entry and progress publication are one transition
+	resume               syncPhasePosition
+	phaseJournal         bool
+	newScope             []string
 	redo                 *syncRedoGuard
 	frontier             *syncFrontier
 	windowRetryCopyError error // selection waits must not hide rejected repairs
@@ -411,6 +422,9 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	if err := s.preserveWindowRetryProgress(); err != nil {
 		return err
 	}
+	if err := s.restorePhase(); err != nil {
+		return fmt.Errorf("resume phase: %w", err)
+	}
 	s.redo = newSyncRedoGuard(j)
 	s.sum.phases = map[string]*syncPhase{}
 	if err := s.prepareVerificationRetry(); err != nil {
@@ -428,7 +442,10 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	defer cancelFile(nil)
 	progressCtx, stopProgress := context.WithCancel(ctx)
 	go s.progressLoop(progressCtx, o.progress)
+	var progressJournalErr error
 	stopFile := startProgressFile(progressCtx, filepath.Join(o.state, "progress.json"), func() progressSnapshot {
+		s.phaseMu.Lock()
+		defer s.phaseMu.Unlock()
 		j.mu.Lock()
 		snap := j.progress
 		snap.RedoNames = cloneRedoCounts(snap.RedoNames)
@@ -458,6 +475,27 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 		}
 		snap.Quarantined, snap.PolicySkipped = o.issues.counts()
 		snap.Effective = o.policy
+		phase, round := parseSyncPhase(snap.Phase, snap.Round)
+		if phase != "verify" && phase != "fill" && phase != "complete" {
+			round = 0
+		}
+		position := syncPhasePosition{Phase: phase, Round: round, Done: snap.Done, Total: snap.Total}
+		if e := j.append(syncRow{Kind: "phase-progress", Position: &position}); e != nil {
+			if progressJournalErr == nil {
+				progressJournalErr = fmt.Errorf("journal progress before publish: %w", e)
+				event("sync_phase_checkpoint_failed", map[string]any{"level": "ERROR", "error": e.Error()})
+				cancelFile(progressJournalErr)
+			}
+			j.mu.Lock()
+			if p := j.phaseGuard; p != nil {
+				snap.Phase, snap.Round, snap.Done, snap.Total = p.Phase, p.Round, p.Done, p.Total
+				if p.Phase == "verify" {
+					snap.Phase = fmt.Sprintf("verify round %d", p.Round)
+				}
+			}
+			snap.PhaseRegressions = j.progress.PhaseRegressions
+			j.mu.Unlock()
+		}
 		return snap
 	}, cancelFile)
 	err = s.run(ctx)
@@ -492,6 +530,10 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	}
 	if perr := stopFile(progressErr); perr != nil {
 		err = errors.Join(err, perr)
+	}
+	err = errors.Join(err, progressJournalErr)
+	if err == nil && len(s.sum.residual) == 0 && !o.noVerify {
+		err = s.savePhase("complete", max(s.resume.Round, s.sum.Rounds+s.verificationBase), int(max(s.prog.done.Load(), s.prog.durableFloor)), s.prog.total)
 	}
 	s.summary(err)
 	if err != nil {
@@ -574,7 +616,7 @@ func (s *syncer) endPhase(name string, names int) error {
 		fields["names_per_second"] = float64(p.names) / p.seconds
 	}
 	event("sync_phase", fields)
-	return nil
+	return s.finishPhase()
 }
 
 func (s *syncer) run(ctx context.Context) error {
@@ -586,19 +628,36 @@ func (s *syncer) run(ctx context.Context) error {
 		if err := s.discover(ctx); err != nil {
 			return fmt.Errorf("discover: %w", err)
 		}
-		if !s.o.noCopy {
+		if !s.o.noCopy && !s.phaseBeforeResume("copy", 0) {
 			if err := s.copyMissing(ctx); err != nil {
 				return fmt.Errorf("copy missing: %w", err)
 			}
 		}
 	}
-	// A checkpoint authenticates its prefix, not later selection/import rows.
-	if err := s.waitWindowSelections(ctx); err != nil {
-		return fmt.Errorf("retry window selections: %w", err)
+	// New journal tail selections are new work even if an older prefix reached
+	// verification. They must never be hidden by a completed phase/checkpoint.
+	pending := s.hasPendingWindowSelections()
+	if pending && s.phaseBeforeResume("window retry", 0) {
+		event("sync_scope_changed", map[string]any{"reason": "unresolved window selections appended after completed phase", "prior_phase": s.resume.Phase})
+		if err := s.startPhaseScope(syncPhasePosition{Phase: "window retry"}, "new pending selections after completed phase"); err != nil {
+			return err
+		}
+	}
+	if s.resume.Phase == "complete" {
+		changed, err := s.reopenChangedScope(ctx)
+		if err != nil || !changed {
+			return err
+		}
+	}
+	if !s.phaseBeforeResume("window retry", 0) || pending {
+		if err := s.waitWindowSelections(ctx); err != nil {
+			return fmt.Errorf("retry window selections: %w", err)
+		}
 	}
 	if !restored {
 		s.startVerificationCheckpoint()
 	}
+
 	if s.o.noVerify {
 		event("phase_skipped", map[string]any{"phase": "verify", "readiness": false})
 		return nil
@@ -816,15 +875,22 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		return err
 	}
 	set, scopedResume, err := s.windowResumeSet()
+	if len(s.newScope) > 0 {
+		set, scopedResume = s.newScope, true
+	}
 	if err != nil {
 		return err
 	}
-	if err = s.openFrontier(ctx); err != nil {
-		return err
+	if s.frontier == nil {
+		if err = s.openFrontier(ctx); err != nil {
+			return err
+		}
 	}
-	if s.frontier != nil {
-		defer func() { err = errors.Join(err, s.frontier.file.Sync(), s.frontier.file.Close()) }()
-	}
+	defer func() {
+		if s.frontier != nil {
+			err = errors.Join(err, s.frontier.file.Sync(), s.frontier.file.Close())
+		}
+	}()
 	filledBefore := map[syncKey]bool{}
 	failedAttempts := map[syncKey]int{}
 	retryFailed := false
@@ -837,7 +903,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	for round := 1; ; round++ {
 		s.sum.Rounds = round
 		names := s.unionSource()
-		if s.frontier == nil && (round > 1 || round == 1 && scopedResume) {
+		if s.frontier == nil && (round > 1 || round == 1 && scopedResume) || round == 1 && len(s.newScope) > 0 {
 			if names, err = s.setSource(set); err != nil {
 				return err
 			}
@@ -926,7 +992,9 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		}
 		retryFailed = false
 		s.phase("fill")
-		s.prog.begin("fill", fillable)
+		if err := s.beginPhase("fill", round+s.verificationBase, fillable); err != nil {
+			return err
+		}
 		// Count the planned convergence set without allocating another name map.
 		// A later source failure may change it; this is an ETA, not a receipt.
 		nextVerifyNames := int64(len(next))
@@ -941,7 +1009,9 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 				}
 			}
 		}
-		s.prog.planVerification(nextVerifyNames)
+		if !s.phaseBeforeResume("fill", round+s.verificationBase) {
+			s.prog.planVerification(nextVerifyNames)
+		}
 		work := 0
 		for src := range s.o.from {
 			names := bySource[src]
@@ -955,7 +1025,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 				return err
 			}
 			if rows := s.j.find(func(r syncRow) bool {
-				return r.Kind == "copied" && !r.Forbidden && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src] && r.Identity == repair
+				return r.Kind == "copied" && (!r.Forbidden || s.phaseBeforeResume("fill", round+s.verificationBase)) && r.Phase == "fill" && r.Round == round+s.verificationBase && r.Source == s.o.from[src] && r.Identity == repair
 			}); len(rows) > 0 {
 				replayed = true
 				res = syncCopyResult{Copied: rows[0].Copied, Failed: rows[0].Failed, Forbidden: rows[0].Forbidden}
@@ -963,6 +1033,9 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 					res.ExpectedAbsent = append(res.ExpectedAbsent, item.Name)
 				}
 			} else {
+				if s.phaseBeforeResume("fill", round+s.verificationBase) {
+					return fmt.Errorf("resume: completed fill round %d lacks receipt for %s", round+s.verificationBase, s.o.from[src])
+				}
 				res, err = s.copyFrom(ctx, "fill", round, src, names)
 				if err != nil {
 					return err
@@ -970,6 +1043,10 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 				work += len(names)
 			}
 			if res.Forbidden {
+				retryFailed = true
+				for _, n := range names {
+					next[n] = true
+				}
 				continue
 			}
 			bad := map[string]bool{}
@@ -991,13 +1068,17 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 				}
 			}
 			s.sum.Filled += len(names) - len(res.Failed) - len(res.ExpectedAbsent)
-			if replayed {
-				s.prog.replayed.Add(int64(len(names)))
+			if !s.phaseBeforeResume("fill", round+s.verificationBase) {
+				if replayed {
+					s.prog.replayed.Add(int64(len(names)))
+				}
+				s.prog.finishCopy(len(names))
 			}
-			s.prog.finishCopy(len(names))
 		}
-		if err := s.endPhase("fill", work); err != nil {
-			return err
+		if !s.phaseBeforeResume("fill", round+s.verificationBase) {
+			if err := s.endPhase("fill", work); err != nil {
+				return err
+			}
 		}
 		set = set[:0]
 		for n := range next {
@@ -1073,6 +1154,15 @@ func (s *syncer) sourceIndex(source string) int {
 // replays them instead of reading again (batch boundaries are deterministic).
 func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
 	journalRound := round + s.verificationBase
+	if s.phaseBeforeResume("verify", journalRound) {
+		return s.replayVerifyRound(journalRound, set)
+	}
+	if s.frontier == nil {
+		if err := s.openFrontier(ctx); err != nil {
+			set.close()
+			return nil, nil, nil, err
+		}
+	}
 	done := map[string]syncRow{}
 	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "verified" && r.Round == journalRound }) {
 		done[r.First] = r
@@ -1087,7 +1177,10 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	// Receipts can overlap after a resumed run changes batch boundaries. Only
 	// matching batches below prove progress in the current name stream; summing
 	// old rows can exceed the catalog and hide hours of fresh verification.
-	s.prog.begin(fmt.Sprintf("verify round %d", journalRound), set.total)
+	if err := s.beginPhase("verify", journalRound, set.total); err != nil {
+		set.close()
+		return nil, nil, nil, err
+	}
 	defer set.close()
 	collect := func(r syncRow) {
 		mu.Lock()

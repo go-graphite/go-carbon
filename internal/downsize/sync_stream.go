@@ -161,8 +161,13 @@ func (s *syncer) discover(ctx context.Context) error {
 		event("sync_discover_resumed", map[string]any{"names": r.Names, "missing": r.Missing})
 		return nil
 	}
+	if s.phaseBeforeResume("discover", 0) {
+		return errors.New("resume: completed discovery has no durable receipt; refusing backend replay")
+	}
 	s.phase("discover")
-	s.prog.begin("discover", 0)
+	if err := s.beginPhase("discover", 0, 0); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stores := append([]string{s.o.to}, s.o.from...)
@@ -687,7 +692,9 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		done[r.Source] = r
 	}
 	s.phase("copy")
-	s.prog.begin("copy", len(missing))
+	if err := s.beginPhase("copy", 0, len(missing)); err != nil {
+		return err
+	}
 	if !s.legacyCopyReceipts {
 		s.prog.planVerification(int64(s.sum.Discovered))
 	}

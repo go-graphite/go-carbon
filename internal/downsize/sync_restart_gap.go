@@ -87,7 +87,7 @@ func seedReadyRecoveryCatalog(ctx context.Context, original, recovery syncOption
 		} else if row.Kind == "discovered" {
 			discovered = row
 			break
-		} else if row.Kind != "discover_checkpoint" {
+		} else if row.Kind != "discover_checkpoint" && row.Kind != "phase-position" && row.Kind != "phase-progress" {
 			return errors.New("restart catalog journal has no discovery boundary")
 		}
 	}
