@@ -52,6 +52,15 @@ func TestLegacyWindowQuarantineRepairUsesFreshNamedProof(t *testing.T) {
 	if f.store(syncT).points["already"][60][syncTestNow-86400] != 12345 || f.attempted["held"] != 0 || f.attempted["repair"] == 0 {
 		t.Fatal("target wins or targeted repair violated", f.attempted)
 	}
+	// A process crash after publishing the replacement snapshot must not
+	// replay the former issue journal and resurrect resolved exclusions.
+	reopened, err := openSyncIssues(o.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.excluded("already") || reopened.excluded("repair") || !reopened.excluded("broken") || !reopened.excluded("held") {
+		t.Fatal("resolved exclusions resurrected on recovery", reopened.quarantined)
+	}
 	files, _ := filepath.Glob(filepath.Join(o.state, "quarantine-repair-*", "original-quarantine.json"))
 	if len(files) != 1 {
 		t.Fatal("legacy evidence not preserved", files)
