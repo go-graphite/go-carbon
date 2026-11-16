@@ -40,12 +40,12 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 	p.observeStoreWait(0, true)
 	p.storeWaitStarted = time.Now().Add(-time.Second)
 	for index, phase := range []string{"copy", "fill", "verify round 2"} {
-		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true, Quarantined: 2, PolicySkipped: 1, LegacyRevalidated: 9, PhaseRegressions: 1, AmbiguousReceiptNames: 2, ReceiptContradictions: 3})
+		p.observe("state/progress.json", progressSnapshot{Phase: phase, Done: 12, Total: 20, Rate: 3.5, Status: "running", FreshDone: 5, FreshDoneAvailable: true, Quarantined: 2, PolicySkipped: 1, LegacyRevalidated: 9, LegacyAdopted: 7, LegacyReverified: 2, PhaseRegressions: 1, AmbiguousReceiptNames: 2, ReceiptContradictions: 3})
 		// Internal copy progress must not replace parent sync phase or totals.
 		p.observe("nested.progress.json", progressSnapshot{Done: 999, Total: 999})
 		p.send()
 		got := map[string]string{}
-		count := 31
+		count := 33
 		if index == 0 {
 			count++
 		}
@@ -63,6 +63,9 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		}
 		if got[p.prefix+".quarantined"] != "2" || got[p.prefix+".policy_skipped"] != "1" {
 			t.Fatal("missing issue counts", got)
+		}
+		if got[p.prefix+".legacy_observation_adopted"] != "7" || got[p.prefix+".legacy_observation_reverified"] != "2" {
+			t.Fatal("missing legacy adoption counters", got)
 		}
 		if got[p.prefix+".legacy_revalidated_names"] != "9" {
 			t.Fatal("missing migration count", got)
@@ -92,7 +95,7 @@ func TestProgressMetricsWireAndSyncPhases(t *testing.T) {
 		t.Fatal("wait duration lost", p.storeWaitSeconds)
 	}
 	p.observe("state/progress.json", progressSnapshot{Phase: "verify round 2", Status: "incomplete", RepairFailedNames: 7})
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 33; i++ {
 		select {
 		case line := <-lines:
 			if strings.Contains(line, ".repair_failed_names ") && !strings.Contains(line, ".repair_failed_names 7 ") {

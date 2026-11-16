@@ -252,6 +252,7 @@ type progressMetrics struct {
 	redoByPath                            map[string]map[string]int64
 	repairFailedNames                     float64
 	legacyRevalidated                     map[string]int64
+	legacyAdopted, legacyReverified       map[string]int64
 	phaseRegressions                      int64
 	ambiguousReceiptNames                 map[string]int64
 	receiptContradictions                 int64
@@ -321,6 +322,12 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 		p.legacyRevalidated = map[string]int64{}
 	}
 	p.legacyRevalidated[path] = snapshot.LegacyRevalidated
+	if p.legacyAdopted == nil {
+		p.legacyAdopted = map[string]int64{}
+		p.legacyReverified = map[string]int64{}
+	}
+	p.legacyAdopted[path] = snapshot.LegacyAdopted
+	p.legacyReverified[path] = snapshot.LegacyReverified
 	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
 	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
 	p.snapshot = snapshot
@@ -365,7 +372,13 @@ func (p *progressMetrics) send() {
 	p.mu.Lock()
 	phase, active, done, total, rate := p.phase, p.active, p.done, p.total, p.rate
 	repairFailedNames := p.repairFailedNames
-	var legacyRevalidated, ambiguousReceiptNames int64
+	var legacyRevalidated, ambiguousReceiptNames, legacyAdopted, legacyReverified int64
+	for _, n := range p.legacyAdopted {
+		legacyAdopted += n
+	}
+	for _, n := range p.legacyReverified {
+		legacyReverified += n
+	}
 	for _, n := range p.ambiguousReceiptNames {
 		ambiguousReceiptNames += n
 	}
@@ -391,6 +404,7 @@ func (p *progressMetrics) send() {
 	// A timestamp heartbeat lets dashboards exclude stopped/abandoned runs.
 	now := at.Unix()
 	var b strings.Builder
+	fmt.Fprintf(&b, "%s.legacy_observation_adopted %d %d\n%s.legacy_observation_reverified %d %d\n", p.prefix, legacyAdopted, now, p.prefix, legacyReverified, now)
 	fmt.Fprintf(&b, "%s.legacy_revalidated_names %d %d\n", p.prefix, legacyRevalidated, now)
 	fmt.Fprintf(&b, "%s.ambiguous_receipt_names %d %d\n%s.receipt_contradictions %d %d\n", p.prefix, ambiguousReceiptNames, now, p.prefix, receiptContradictions, now)
 	fmt.Fprintf(&b, "%s.phase_regressions %d %d\n", p.prefix, phaseRegressions, now)

@@ -136,7 +136,7 @@ func (s *syncer) proofStamps(ctx context.Context, names []string) ([]syncProof, 
 	return stamps, err
 }
 
-func (s *syncer) proofStampsVersion(ctx context.Context, names []string) ([]syncProof, bool, error) {
+func (s *syncer) proofStampsVersion(ctx context.Context, names []string, donorOut ...*[]syncProof) ([]syncProof, bool, error) {
 	stores := append([]string{s.o.to}, s.o.from...)
 	tokens := make([][]string, len(stores))
 	errs := make([]error, len(stores))
@@ -164,18 +164,29 @@ func (s *syncer) proofStampsVersion(ctx context.Context, names []string) ([]sync
 		}
 	}
 	out := make([]syncProof, len(names))
+	donors := make([]syncProof, len(names))
 	for i, n := range names {
 		hash := sha256.New()
+		donorHash := sha256.New()
+		fmt.Fprintln(donorHash, s.frontier.key, n)
+		donorKnown := true
 		fmt.Fprintln(hash, s.frontier.key, n)
 		known := true
 		for store := range stores {
 			if errs[store] != nil || tokens[store][i] == "" {
 				known = false
-				break
+				if store > 0 {
+					donorKnown = false
+				}
+				continue
 			}
 			fmt.Fprintln(hash, stores[store], tokens[store][i])
 			schema, _ := json.Marshal(infos[store][n])
 			hash.Write(schema)
+			if store > 0 {
+				fmt.Fprintln(donorHash, stores[store], tokens[store][i])
+				donorHash.Write(schema)
+			}
 			// A fixed window can age into another serving archive without a write.
 			// Its selected archive therefore participates in the mutation fence.
 			for _, w := range s.o.windows {
@@ -190,11 +201,20 @@ func (s *syncer) proofStampsVersion(ctx context.Context, names []string) ([]sync
 					}
 				}
 				fmt.Fprintln(hash, w.Name, step)
+				if store > 0 {
+					fmt.Fprintln(donorHash, w.Name, step)
+				}
 			}
 		}
 		if known {
 			copy(out[i][:], hash.Sum(nil))
 		}
+		if donorKnown {
+			copy(donors[i][:], donorHash.Sum(nil))
+		}
+	}
+	if len(donorOut) > 0 {
+		*donorOut[0] = donors
 	}
 	v2 := true
 	for _, b := range bounded {
@@ -233,13 +253,20 @@ func observationProof(names []string, ids []int64, stamps []syncProof) string {
 }
 
 func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []string, ids []int64, prior syncRow) (syncRow, error) {
-	before, v2, err := s.proofStampsVersion(ctx, names)
+	var donorBefore []syncProof
+	before, v2, err := s.proofStampsVersion(ctx, names, &donorBefore)
+	if !v2 {
+		donorBefore = nil
+	}
 	if err != nil {
 		return syncRow{}, err
 	}
 	proof := observationProof(names, ids, before)
 	if proof != "" && v2 {
 		proof = "v2:" + proof
+	}
+	if row, adopted, err := s.adoptLegacyObservation(ctx, round, names, ids, prior, before, donorBefore, proof); adopted || err != nil {
+		return row, err
 	}
 	// The first v2 client used an unprefixed seal. Exact matching metadata
 	// authenticates those observations too, without forcing another migration.
@@ -259,6 +286,7 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 			}
 		}
 		prior.Reused = len(names)
+		prior.LegacyAdopted, prior.LegacyReverified = 0, 0
 		prior.Work = nil            // no backend data operation was performed by this replay
 		prior.LegacyRevalidated = 0 // this append records reuse, not a second migration
 		return prior, nil
@@ -318,7 +346,7 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 		selected = append(selected, n)
 		positions = append(positions, i)
 	}
-	row := syncRow{Kind: "verified", Round: round}
+	row := syncRow{Kind: "verified", Round: round, MutationObserved: true}
 	if len(selected) > 0 {
 		if prior.Kind == "verified" && prior.Round == round && prior.Names == len(names) && prior.First == names[0] && prior.Last == names[len(names)-1] {
 			reason := "completed_observation_has_no_mutation_seal"
@@ -334,6 +362,7 @@ func (s *syncer) verifyFrontierBatch(ctx context.Context, round int, names []str
 		if err != nil {
 			return row, err
 		}
+		row.MutationObserved = true
 		after, afterV2, err := s.proofStampsVersion(ctx, selected)
 		if err != nil {
 			return row, err

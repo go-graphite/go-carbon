@@ -17,9 +17,9 @@ func (f *legacyRevalidationFixture) WindowProofs(ctx context.Context, host strin
 	return f.bounded.WindowProofs(ctx, host, names, from, until)
 }
 
-// A pre-v2 observation has no digest baseline. Revalidate it once using the
-// existing digest-first comparison, then seal holes as well as clean names.
-func TestSyncLegacyRevalidationSealsOnceAcrossStoreRestart(t *testing.T) {
+// A pre-v2 completed observation is adopted without another data comparison,
+// then receives a modern seal for future resumes.
+func TestSyncLegacyAdoptionSealsOnceAcrossStoreRestart(t *testing.T) {
 	f, o := newRedoHarness(t)
 	o.noCopy = true
 	delete(f.store(syncT).points["metric.00"][3600], syncTestNow-7200)
@@ -38,6 +38,7 @@ func TestSyncLegacyRevalidationSealsOnceAcrossStoreRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, row := range j.find(func(r syncRow) bool { return r.Kind == "verified" }) {
+		row.MutationObserved = false
 		row.ObservationProof = "" // exact legacy on-disk shape, including holes
 		if err := j.append(row); err != nil {
 			t.Fatal(err)
@@ -45,20 +46,46 @@ func TestSyncLegacyRevalidationSealsOnceAcrossStoreRestart(t *testing.T) {
 	}
 	j.close()
 	f.kill = nil
+	beforeAdoption := f.snapshot()
 	b := &legacyRevalidationFixture{f, &boundedProofFixture{proofFixture: f.proofFixture, incarnation: "durable"}}
 	if err := runSync(context.Background(), o, b); !errors.Is(err, ErrSyncResidual) {
 		t.Fatal(err)
 	}
-	if got := redoProgress(t, o.state).LegacyRevalidated; got != 2 {
+	assertNoRedoCalls(t, beforeAdoption, f.snapshot())
+	if got := redoProgress(t, o.state).LegacyAdopted; got != 2 {
 		t.Fatalf("migration names=%d, want 2", got)
 	}
+	repairID := func() string {
+		t.Helper()
+		journal, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer journal.close()
+		s := &syncer{o: o, b: b, j: journal}
+		if err := s.openFrontier(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if s.frontier != nil {
+			defer s.frontier.file.Close()
+		}
+		id, err := s.fillIdentity(1, 0, []string{"metric.00"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	firstRepair := repairID()
 	before := f.snapshot()
 	f.epoch = "clean-successor"
 	if err := runSync(context.Background(), o, b); !errors.Is(err, ErrSyncResidual) {
 		t.Fatal(err)
 	}
 	assertNoRedoCalls(t, before, f.snapshot())
-	if got := redoProgress(t, o.state).LegacyRevalidated; got != 2 {
+	if got := repairID(); got != firstRepair {
+		t.Fatal("adopted hole acquired a new repair generation on resume")
+	}
+	if got := redoProgress(t, o.state).LegacyAdopted; got != 2 {
 		t.Fatalf("migration counted twice: %d", got)
 	}
 	j, err = openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity)
@@ -66,7 +93,7 @@ func TestSyncLegacyRevalidationSealsOnceAcrossStoreRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer j.close()
-	for _, row := range j.find(func(r syncRow) bool { return r.Kind == "verified" && r.LegacyRevalidated > 0 }) {
+	for _, row := range j.find(func(r syncRow) bool { return r.Kind == "verified" && r.LegacyAdopted > 0 }) {
 		if !strings.HasPrefix(row.ObservationProof, "v2:") || len(row.Holes) == 0 {
 			t.Fatalf("migration lost v2 seal or hole observation: %+v", row)
 		}
