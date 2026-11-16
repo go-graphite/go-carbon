@@ -1,0 +1,93 @@
+package v2core
+
+import (
+	"context"
+	"slices"
+	"testing"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+)
+
+func TestRollupInventoryAddsOnlyChangedNamesAndRewinds(t *testing.T) {
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.Rollups = 1, 1, true
+	e, err := openCore(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	ctx := context.Background()
+	var pins []*pebble.Snapshot
+	defer func() {
+		for _, p := range pins {
+			_ = p.Close()
+		}
+	}()
+	seal := func(name string, id, order uint64, prior *RollupSnapshot) *RollupSnapshot {
+		t.Helper()
+		_, policy := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
+		if err := e.submitBatches(0, []coreBatch{{ID: id, Order: order, Clock: 1700000002, Policy: policy, Points: []row{{ID: id, Time: 1700000000, Bits: order, Seq: order}}}}, order, true); err != nil {
+			t.Fatal(err)
+		}
+		p := e.owners[0].db.NewSnapshot()
+		pins = append(pins, p)
+		s, err := NewRollupSnapshot(ctx, p, prior)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	first := seal("inventory.a", 1, 1, nil)
+	second := seal("inventory.b", 2, 2, first)
+	third := seal("inventory.a", 1, 3, second)
+	if len(third.inventory) != 3 {
+		t.Fatalf("descriptor inventory: %d", len(third.inventory))
+	}
+	if first.metrics["inventory.a"] != second.metrics["inventory.a"] {
+		t.Fatal("unaffected name rebuilt")
+	}
+	if second.metrics["inventory.b"] != third.metrics["inventory.b"] {
+		t.Fatal("unaffected name rebuilt on correction")
+	}
+	if first.metrics["inventory.a"].meta.Frontier.Order != 1 || len(first.metrics["inventory.a"].parts) != 1 {
+		t.Fatal("old pinned directory mutated")
+	}
+	if len(third.metrics["inventory.a"].parts) != 2 {
+		t.Fatal("added part missing")
+	}
+	rewind, err := NewRollupSnapshot(ctx, pins[0], third)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewind.metrics["inventory.b"] != nil || rewind.metrics["inventory.a"].meta.Frontier.Order != 1 {
+		t.Fatal("removed parts survived rewind")
+	}
+	for _, s := range []*RollupSnapshot{first, second, third, rewind} {
+		err := ScanRollups(s.snapshot, func(policy RollupPolicy, _ RollupMetadata, want []sealrollup.Record) error {
+			got, err := s.Records(ctx, string(policy.Name))
+			if err != nil {
+				return err
+			}
+			slices.SortFunc(got, func(a, b sealrollup.Record) int {
+				if a.Archive != b.Archive {
+					return a.Archive - b.Archive
+				}
+				if a.Slot < b.Slot {
+					return -1
+				}
+				if a.Slot > b.Slot {
+					return 1
+				}
+				return 0
+			})
+			if !slices.Equal(got, want) {
+				t.Fatalf("inventory differs from full scan for %s", policy.Name)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}

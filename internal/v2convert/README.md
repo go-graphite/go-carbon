@@ -52,6 +52,24 @@ Catalog/policy/tombstone authority, migration frontiers, native source semantics
 source reclamation and live publication remain external responsibilities. A
 conversion receipt is not a live adoption or complete coverage certificate.
 
+The scan-only command accepts `-scan-workers N` (default 1). Each worker walks
+one physical SST forwards with its own reader, counters and SHA-256 digest.
+Results retain input-file order, including individual file errors; any error
+sets the process exit status and the final `failed` field. Workers are bounded
+by both N and the file count. Concurrent scanning does not resolve visibility
+across SSTs and cannot make a loose hard-link inventory a database snapshot.
+Parallel workers are rejected in output mode: conversion still publishes one
+materialized input transaction at a time through the shared dense writer.
+
+```sh
+go run ./internal/v2convert/cmd -source /owned/frozen-ssts -scan-workers 8
+```
+
+When measuring, distinguish physical direct-I/O byte reads, warm decoded scans,
+and complete conversion plus verified publication. Record concurrent host load,
+physical-read counters, CPU time and exact per-file digest parity. A decoded
+scan rate does not qualify native conversion density or whole-name readback.
+
 ## Native checkpoint materialization
 
 `-native-plan plan.json` enables a separate coherent-checkpoint source path:

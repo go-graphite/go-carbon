@@ -76,6 +76,10 @@ type rollupCoverage struct {
 	spec partsformat.Spec
 	seen map[[32]byte]bool
 }
+type rollupCoverage struct {
+	spec partsformat.Spec
+	seen map[[32]byte]bool
+}
 type coreRollups struct {
 	lanes       []rollupPlannerLane
 	parallelism int
