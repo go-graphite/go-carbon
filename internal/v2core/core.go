@@ -192,6 +192,10 @@ type coreOwner struct {
 	sortScratch                  []row
 	radixWork                    []row
 	compact                      coreCompactWorkspace
+	sealRows                     int
+	sealCalls, sealNS            atomic.Uint64
+	sealing                      atomic.Bool
+	trace                        bool
 }
 type coreEngine struct {
 	owners       []*coreOwner
@@ -227,6 +231,12 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	if cfg.RawCodec == "" {
 		cfg.RawCodec = os.Getenv("CORE_RAW_CODEC")
 	}
+	if cfg.RawCodec == "" {
+		cfg.RawCodec = "run1"
+	} else if cfg.RawCodec == "legacy" {
+		// Preserve the original on-disk config for explicit legacy reopen.
+		cfg.RawCodec = ""
+	}
 	if cfg.RawCodec != "" && cfg.RawCodec != "run1" {
 		return nil, errors.New("unknown raw codec")
 	}
@@ -241,6 +251,15 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 {
 		return nil, os.ErrInvalid
 	}
+	sealPhase := 0
+	if value := os.Getenv("CORE_SEAL_PHASE"); value != "" {
+		var err error
+		sealPhase, err = strconv.Atoi(value)
+		if err != nil || sealPhase < 0 || sealPhase >= 1024 {
+			return nil, errors.New("CORE_SEAL_PHASE must be between 0 and 1023")
+		}
+	}
+	trace := os.Getenv("CORE_TRACE_PHASES") == "1"
 	if err := os.MkdirAll(root, 0750); err != nil {
 		return nil, err
 	}
@@ -258,12 +277,23 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		opts := &pebble.Options{MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
 		opts.Experimental.TableCacheShards = 1
 		opts.BytesPerSync = 64 << 20
-		opts.EventListener = &pebble.EventListener{WriteStallBegin: func(pebble.WriteStallBeginInfo) { e.stalls.Add(1) }}
+		opts.EventListener = &pebble.EventListener{
+			WriteStallBegin: func(pebble.WriteStallBeginInfo) { e.stalls.Add(1) },
+			CompactionBegin: func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_begin", dir, info.JobID) },
+			CompactionEnd:   func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_end", dir, info.JobID) },
+		}
 		db, err := pebble.Open(dir, opts)
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1)}
+		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o.sealRows = cfg.MaxRows
+		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
+			// Include the process phase: one DB per process must stagger too.
+			// This changes execution boundaries, never the persisted format.
+			phase := (sealPhase + 1024*s/cfg.Shards) % 1024
+			o.sealRows -= (cfg.MaxRows / 4) * phase / 1024
+		}
 		o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
 		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
 		o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
@@ -597,18 +627,22 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					pending[producer] = p.cursor
 				}
 			}
-			if failure == nil && (p.seal || len(head) >= o.cfg.MaxRows || time.Now().After(deadline)) {
+			// The head owns copied rows and detached batch descriptors now.
+			// Capture everything still needed before returning the packet: its
+			// producer can immediately reuse and overwrite the leased storage.
+			seal, ack := p.seal, p.ack
+			if p.lease != nil {
+				p.lease.release()
+			}
+			if failure == nil && (seal || len(head) >= o.sealRows || time.Now().After(deadline)) {
 				failure = flush()
 			}
-			if failure == nil && o.hook != nil && (p.seal || time.Since(headPublication) >= time.Second) {
+			if failure == nil && o.hook != nil && (seal || time.Since(headPublication) >= time.Second) {
 				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 				headPublication = time.Now()
 			}
-			if p.ack != nil {
-				p.ack <- failure
-			}
-			if p.lease != nil {
-				p.lease.release()
+			if ack != nil {
+				ack <- failure
 			}
 		}
 		if !found {
@@ -713,6 +747,15 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 	return o.sealBatches(head, nil, next)
 }
 func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
+	sealStart := time.Now()
+	coreTrace(o.trace, "seal_begin", o.dir, 0)
+	o.sealing.Store(true)
+	defer func() {
+		o.sealNS.Add(uint64(time.Since(sealStart)))
+		o.sealCalls.Add(1)
+		o.sealing.Store(false)
+		coreTrace(o.trace, "seal_end", o.dir, 0)
+	}()
 	var plan coreSealPlan
 	var err error
 	durable := false
