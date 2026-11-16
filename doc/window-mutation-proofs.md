@@ -14,32 +14,35 @@ verification leaves the affected receipt unclean.
 
 ## Adopting older verification observations
 
-Old journal rows remain the source of truth for completed comparisons and their
-holes. A v1 token, or an observation without a mutation seal, cannot authenticate
-history across an unobserved store restart. Such observations receive one normal
-batched revalidation: compare every holder by digest and fetch only differences.
-No historical result is promoted merely because its window predates a restart.
+Old journal rows are the authority for completed comparisons and their holes.
+A completed observation without a mutation seal is adopted automatically instead
+of reading its data again. Its authenticated journal scope still binds the target,
+donors, catalog and verification windows. Stable current metadata supplies modern
+seals and per-name clean frontier records; unknown metadata never manufactures a
+clean frontier or authorizes READY.
 
-After stable v2 proofs before and after that comparison, the existing journal
-stores an observation seal with the `v2:` prefix. This includes completed hole
-observations, preserving their repair intent. A matching seal reuses that exact
-batch after client or clean store restarts with no digest or point-fetch calls.
-Changed data, schema, archive selection, broken lineage or unknown proofs still
-reopen affected work. Older holders retain the conservative v1 behavior; upgrade
-every holder before expecting durable cross-process reuse.
+Only recorded target deletion/expiration, overlapping restart gaps and donor
+changes reopen adopted observations. The target expiration endpoint supplies
+timestamped deletion receipts; existing READY recovery checkpoints supply bounded
+restart windows. The journal retains these as `verification-invalidated` rows
+with a reason, optional names and optional windows. Destructive events predating
+the observation and windows outside its frozen scope do not reopen it. A restart
+compares only the overlapping interval against every donor. Original hole results
+outside that interval retain their repair intent.
 
-`progress.json` and Graphite expose cumulative `legacy_revalidated_names`, and
-each promoted batch logs `sync_legacy_revalidated` with its bounds and count.
-Only comparisons promoted to a stable v2 seal increment this count; journal
-replay does not. It is separate from `redo_names` and does not claim zero backend
-work for the first migration. There is no new catalog or frontier file format.
-Same-round hole observation reuse retains the original batch boundaries.
-Completed holes additionally store optional per-name `hole_proofs_v2` seals in
-the existing journal row, so an unknown neighbor does not reopen known names.
-Each name still requires stable proofs from every holder; partial holder proof
-is insufficient. This additive row field does not change the frontier layout.
-Legacy-file ownership remains unknown until a durable absence/mutation fence
-covers the original files as well as the native catalog.
+Adopted rows retain separate donor fences and target presence/expiration receipts.
+Later target writes do not invalidate their hole-coverage observation. A recorded
+delete or a changed bounded donor fence rechecks only affected names. Changing the
+donor inventory still requires a new authenticated scope. READY continues to
+require every gap to be backfilled and verified, plus its independent all-donor
+parity, schema and readback checks.
+
+`progress.json` and Graphite expose cumulative `legacy_observation_adopted` and
+`legacy_observation_reverified` counts. Each batch logs `sync_legacy_observation`
+once with its range, counts and reasons. Replaying adoption does not increment its
+count again. The earlier `legacy_revalidated_names` metric remains readable for
+existing journals. Modern non-legacy observations retain their existing mutation
+seals, including optional per-name `hole_proofs_v2` entries.
 
 ## Storage continuity
 

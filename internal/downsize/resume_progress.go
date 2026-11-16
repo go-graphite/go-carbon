@@ -100,6 +100,8 @@ func atomicStateJSON(path string, value any) error {
 }
 
 type progressSnapshot struct {
+	LegacyAdopted         int64                `json:"legacy_observation_adopted"`
+	LegacyReverified      int64                `json:"legacy_observation_reverified"`
 	AmbiguousReceiptNames int64                `json:"ambiguous_receipt_names"`
 	ReceiptContradictions int64                `json:"receipt_contradictions"`
 	PhaseRegressions      int64                `json:"phase_regressions"`
@@ -153,6 +155,8 @@ func (p *progressSnapshot) apply(r syncRow) {
 	case "discovered":
 		p.Discovered = int64(r.Names)
 	case "verified":
+		p.LegacyAdopted += int64(r.LegacyAdopted)
+		p.LegacyReverified += int64(r.LegacyReverified)
 		p.LegacyRevalidated += int64(r.LegacyRevalidated)
 		p.Verified += int64(r.Names)
 		for _, h := range r.Holes {

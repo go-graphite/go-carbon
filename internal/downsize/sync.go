@@ -163,39 +163,56 @@ type syncHole struct {
 	Last   int64  `json:"last"`
 }
 
+type syncInvalidation struct {
+	At      time.Time  `json:"at,omitempty"`
+	Reason  string     `json:"reason"`
+	Names   []string   `json:"names,omitempty"`   // empty means every catalog name
+	Windows syncRanges `json:"windows,omitempty"` // empty means the entire verified scope
+}
+
 type syncRow struct {
-	Position           *syncPhasePosition       `json:"phase_position,omitempty"`
-	HoleProofs         map[string]string        `json:"hole_proofs_v2,omitempty"`
-	LegacyRevalidated  int                      `json:"legacy_revalidated_names,omitempty"`
-	ObservationProof   string                   `json:"observation_proof,omitempty"`
-	InvalidationReason string                   `json:"invalidation_reason,omitempty"`
-	Work               []syncRedoWork           `json:"backend_work,omitempty"`
-	Reused             int                      `json:"proof_reused,omitempty"`
-	Resolved           []syncSkip               `json:"resolved,omitempty"`
-	Discovery          *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
-	Selected           []string                 `json:"selected,omitempty"`
-	SelectionComplete  bool                     `json:"selection_complete,omitempty"`
-	Kind               string                   `json:"kind"`
-	Identity           string                   `json:"identity,omitempty"`
-	Phase              string                   `json:"phase,omitempty"`
-	Round              int                      `json:"round,omitempty"`
-	Source             string                   `json:"source,omitempty"`
-	First              string                   `json:"first,omitempty"`
-	Last               string                   `json:"last,omitempty"`
-	Names              int                      `json:"names,omitempty"`
-	Copied             int                      `json:"copied,omitempty"`
-	Failed             []string                 `json:"failed,omitempty"`
-	Forbidden          bool                     `json:"forbidden,omitempty"`
-	Holes              []syncHole               `json:"holes,omitempty"`
-	Absent             []string                 `json:"absent,omitempty"`
-	Unindexed          []string                 `json:"unindexed,omitempty"`
-	Short              []string                 `json:"short,omitempty"`
-	Skipped            []syncSkip               `json:"skipped,omitempty"`
-	Missing            int                      `json:"missing,omitempty"`
-	OnTarget           int                      `json:"on_target,omitempty"`
-	Both               int                      `json:"both,omitempty"`
-	NotOwned           int                      `json:"not_owned,omitempty"`
-	Time               string                   `json:"time"`
+	MutationObserved      bool                     `json:"mutation_observed,omitempty"`
+	LegacyExpiry          map[string]int64         `json:"legacy_expiration_receipts,omitempty"`
+	LegacyDonorProofs     map[string]string        `json:"legacy_donor_proofs,omitempty"`
+	LegacyTargetPresent   []string                 `json:"legacy_target_present,omitempty"`
+	Invalidation          *syncInvalidation        `json:"invalidation,omitempty"`
+	LegacyAdopted         int                      `json:"legacy_observation_adopted,omitempty"`
+	LegacyReverified      int                      `json:"legacy_observation_reverified,omitempty"`
+	LegacyObservation     bool                     `json:"legacy_observation,omitempty"`
+	LegacyObservationTime string                   `json:"legacy_observation_time,omitempty"`
+	LegacyInvalidations   []string                 `json:"legacy_invalidations_applied,omitempty"`
+	Position              *syncPhasePosition       `json:"phase_position,omitempty"`
+	HoleProofs            map[string]string        `json:"hole_proofs_v2,omitempty"`
+	LegacyRevalidated     int                      `json:"legacy_revalidated_names,omitempty"`
+	ObservationProof      string                   `json:"observation_proof,omitempty"`
+	InvalidationReason    string                   `json:"invalidation_reason,omitempty"`
+	Work                  []syncRedoWork           `json:"backend_work,omitempty"`
+	Reused                int                      `json:"proof_reused,omitempty"`
+	Resolved              []syncSkip               `json:"resolved,omitempty"`
+	Discovery             *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
+	Selected              []string                 `json:"selected,omitempty"`
+	SelectionComplete     bool                     `json:"selection_complete,omitempty"`
+	Kind                  string                   `json:"kind"`
+	Identity              string                   `json:"identity,omitempty"`
+	Phase                 string                   `json:"phase,omitempty"`
+	Round                 int                      `json:"round,omitempty"`
+	Source                string                   `json:"source,omitempty"`
+	First                 string                   `json:"first,omitempty"`
+	Last                  string                   `json:"last,omitempty"`
+	Names                 int                      `json:"names,omitempty"`
+	Copied                int                      `json:"copied,omitempty"`
+	Failed                []string                 `json:"failed,omitempty"`
+	Forbidden             bool                     `json:"forbidden,omitempty"`
+	Holes                 []syncHole               `json:"holes,omitempty"`
+	Absent                []string                 `json:"absent,omitempty"`
+	Unindexed             []string                 `json:"unindexed,omitempty"`
+	Short                 []string                 `json:"short,omitempty"`
+	Skipped               []syncSkip               `json:"skipped,omitempty"`
+	Missing               int                      `json:"missing,omitempty"`
+	OnTarget              int                      `json:"on_target,omitempty"`
+	Both                  int                      `json:"both,omitempty"`
+	NotOwned              int                      `json:"not_owned,omitempty"`
+	Time                  string                   `json:"time"`
 }
 
 type syncJournal struct {
@@ -287,6 +304,9 @@ func (j *syncJournal) append(row syncRow) error {
 		row.Identity = rand.Text()
 	}
 	row.Time = time.Now().UTC().Format(time.RFC3339Nano)
+	if row.LegacyObservation && row.LegacyObservationTime == "" {
+		row.LegacyObservationTime = row.Time
+	}
 	data, err := json.Marshal(row)
 	if err != nil {
 		return err
@@ -353,6 +373,7 @@ type syncer struct {
 	phaseJournal         bool
 	newScope             []string
 	redo                 *syncRedoGuard
+	legacyInvalidations  []syncRow
 	frontier             *syncFrontier
 	windowRetryCopyError error // selection waits must not hide rejected repairs
 	legacyCopyReceipts   bool  // keep the selection and transport of old window campaigns
@@ -1168,6 +1189,10 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 			return nil, nil, nil, err
 		}
 	}
+	if err := s.loadLegacyInvalidations(); err != nil {
+		set.close()
+		return nil, nil, nil, err
+	}
 	done := map[string]syncRow{}
 	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "verified" && r.Round == journalRound }) {
 		done[r.First] = r
@@ -1228,7 +1253,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 			for jb := range jobs {
 				for i, n := range jb.names {
 					mask := jb.masks[i]
-					if s.frontier != nil || s.o.restartWindow {
+					if s.frontier != nil || s.o.restartWindow || len(s.legacyInvalidations) > 0 {
 						// Check holders acquired after catalog discovery too.
 						mask = (uint64(1) << uint(len(s.o.from))) - 1
 					}
@@ -1241,7 +1266,11 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 					prior := done[jb.names[0]]
 					row, err = s.verifyFrontierBatch(workCtx, journalRound, jb.names, jb.ids, prior)
 				} else {
-					row, err = s.verifyBatch(workCtx, journalRound, jb.names)
+					var adopted bool
+					row, adopted, err = s.adoptLegacyObservation(workCtx, journalRound, jb.names, jb.ids, done[jb.names[0]], nil, nil, "")
+					if !adopted && err == nil {
+						row, err = s.verifyBatch(workCtx, journalRound, jb.names)
+					}
 				}
 				for _, n := range jb.names {
 					s.masks.Delete(n)
@@ -1296,7 +1325,7 @@ feed:
 			break
 		}
 		fed += len(chunk.names)
-		if r, ok := done[chunk.names[0]]; s.frontier == nil && ok && r.Names == len(chunk.names) && r.Last == chunk.names[len(chunk.names)-1] {
+		if r, ok := done[chunk.names[0]]; s.frontier == nil && len(s.legacyInvalidations) == 0 && ok && r.Names == len(chunk.names) && r.Last == chunk.names[len(chunk.names)-1] {
 			s.prog.replayed.Add(int64(r.Names))
 			collect(r)
 			resumed += len(chunk.names)

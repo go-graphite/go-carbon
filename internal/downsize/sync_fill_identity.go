@@ -31,7 +31,11 @@ func (s *syncer) fillIdentity(round, src int, names []string) (string, error) {
 			if _, ok := observations[hole.Name]; ok && hole.Source == s.o.from[src] {
 				// Legacy rows have no generation; their durable timestamp still
 				// separates observations. New rows also carry a random identity.
-				observations[hole.Name] = row.Identity + "/" + row.Time
+				observed := row.Time
+				if row.LegacyObservationTime != "" {
+					observed = row.LegacyObservationTime
+				}
+				observations[hole.Name] = row.Identity + "/" + observed
 			}
 		}
 	}

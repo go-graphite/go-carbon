@@ -30,8 +30,14 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 	if old == "" || next == "" {
 		t.Skip("set STORECTL_SWAP_OLD and STORECTL_SWAP_NEW to run executable upgrade acceptance")
 	}
-	for _, phase := range []string{"window retry", "verify round 1"} {
+	for _, phase := range []string{"window retry", "verify round 1", "legacy verify"} {
 		t.Run(phase, func(t *testing.T) {
+			legacy := phase == "legacy verify"
+			if legacy {
+				phase = "verify round 1"
+			}
+			var oldProcess atomic.Bool
+			oldProcess.Store(true)
 			state := filepath.Join(t.TempDir(), "state")
 			source, target := nativeControllerStore(t), nativeControllerStore(t)
 			names := []string{"swap.a", "swap.b", "swap.c", "swap.d"}
@@ -73,8 +79,15 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 				if phase == "verify round 1" && r.URL.Path == "/v1/transfer/digest" {
 					raw, _ := io.ReadAll(r.Body)
 					r.Body = io.NopCloser(bytes.NewReader(raw))
-					var req struct{ Names []string }
+					var req struct {
+						Names []string
+						Mode  string
+					}
 					_ = json.Unmarshal(raw, &req)
+					if legacy && oldProcess.Load() && strings.HasPrefix(req.Mode, "proof") {
+						http.NotFound(w, r)
+						return
+					}
 					if len(req.Names) > 0 && req.Names[0] >= "swap.c" && !wait(r) {
 						return
 					}
@@ -187,6 +200,7 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 			if prior.Phase != phase || prior.Done < 2 {
 				t.Fatalf("old process did not save a real mid-phase cursor: %+v", prior)
 			}
+			oldProcess.Store(false)
 			_, done, path = start(next, []string{"--resume", state})
 			await(done, path)
 			saved := redoProgress(t, state)

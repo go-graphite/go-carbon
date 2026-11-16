@@ -38,8 +38,8 @@ func TestSyncInterruptedObservationWithHolesResumes(t *testing.T) {
 	}
 }
 
-// Never import a historical observation without its original mutation seal,
-// and never ignore store restarts, revision changes or unknown ownership.
+// Modern seals retain their mutation rules; unsealed legacy observations are
+// adopted when no destructive invalidation has been recorded.
 func TestSyncObservationResumeInvalidation(t *testing.T) {
 	t.Parallel()
 	for _, change := range []string{"none", "epoch", "target_write", "donor_write", "unknown", "legacy"} {
@@ -75,6 +75,7 @@ func TestSyncObservationResumeInvalidation(t *testing.T) {
 				}
 				rows := j.find(func(r syncRow) bool { return r.Kind == "verified" })
 				for _, r := range rows {
+					r.MutationObserved = false
 					r.ObservationProof = ""
 					if err := j.append(r); err != nil {
 						t.Fatal(err)
@@ -92,7 +93,7 @@ func TestSyncObservationResumeInvalidation(t *testing.T) {
 					repeated = true
 				}
 			}
-			if repeated != (change != "none") {
+			if repeated != (change != "none" && change != "legacy") {
 				t.Fatalf("change=%s rechecked prior hole=%v", change, repeated)
 			}
 		})
