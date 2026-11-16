@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -355,5 +356,63 @@ func TestCoverageRequirementsAndFrozenInventory(t *testing.T) {
 	next.Groups[0].Replicas[0].Producers = next.Groups[0].Replicas[0].Producers[:1]
 	if d.ValidateSuccessor(next) == nil {
 		t.Fatal("old producer silently removed")
+	}
+}
+
+func TestHistoricalReplayIsPersistedAndNeverAuthorizesLiveIntake(t *testing.T) {
+	d := fixture(t)
+	next, act := certificate(t, d)
+	group, replica, store := act.Fence.Group, act.Fence.Replica, act.Fence.Store
+	root := t.TempDir()
+	a, e := OpenAuthority(root, d, group, replica, store)
+	if e != nil {
+		t.Fatal(e)
+	}
+	before, _ := d.Lookup(group, replica)
+	stamp := Stamp{Group: group, Replica: replica, MapDigest: d.Digest(), Epoch: before.Epoch, Lane: before.Producers[0]}
+	// A no-owner-change revision is enough to change every map stamp. Its exact
+	// predecessor must remain readable from retained journals after restart.
+	metadata := cloneDocument(d)
+	metadata.Revision++
+	metadata.Predecessor = d.Digest()
+	metadata.Operation = "metadata"
+	if e = a.Adopt(metadata, nil); e != nil {
+		t.Fatal(e)
+	}
+	a, e = OpenAuthority(root, metadata, group, replica, store)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = a.Replay(stamp); e != nil {
+		t.Fatal("lost historical replay authority", e)
+	}
+	if _, e = a.Register().Begin(stamp); !errors.Is(e, ErrStaleEpoch) {
+		t.Fatal("historical map reopened intake", e)
+	}
+	other := stamp
+	other.MapDigest = digest("other-map")
+	if e = a.Replay(other); !errors.Is(e, ErrStaleEpoch) {
+		t.Fatal("arbitrary old map accepted", e)
+	}
+	// The separately validated move certificate still belongs to d -> next;
+	// it cannot be inserted as a successor of metadata with a different digest.
+	if e = a.Adopt(next, []Activation{act}); e == nil {
+		t.Fatal("unrelated history appended")
+	}
+	stateBytes, e := os.ReadFile(filepath.Join(root, "placement.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var state durableState
+	if e = json.Unmarshal(stateBytes, &state); e != nil {
+		t.Fatal(e)
+	}
+	state.History[0].Document.Operation = "tampered"
+	stateBytes, _ = json.Marshal(state)
+	if e = os.WriteFile(filepath.Join(root, "placement.json"), stateBytes, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = OpenAuthority(root, metadata, group, replica, store); e == nil {
+		t.Fatal("corrupt replay history accepted")
 	}
 }
