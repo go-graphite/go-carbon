@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -36,10 +35,10 @@ func refPrefix(id int, name string) []byte {
 	return append(b, []byte(name)...)
 }
 func (o *owner) recover() error {
-	o.meta = checkpoint{Version: 1, Journal: o.s.log.Identity()}
+	o.meta = checkpoint{Version: 2, Journal: o.s.log.Identity()}
 	data, c, e := o.db.Get(metaKey(o.id))
 	if e == nil {
-		e = json.Unmarshal(data, &o.meta)
+		e = o.readCheckpoint(data)
 		e = errors.Join(e, c.Close())
 	} else if errors.Is(e, pebble.ErrNotFound) {
 		e = nil
@@ -47,7 +46,7 @@ func (o *owner) recover() error {
 	if e != nil {
 		return e
 	}
-	if o.meta.Version != 1 || o.meta.Journal != o.s.log.Identity() {
+	if (o.meta.Version != 1 && o.meta.Version != 2) || o.meta.Journal != o.s.log.Identity() {
 		return errors.New("owner checkpoint origin mismatch")
 	}
 	for _, m := range o.meta.Metrics {
@@ -138,7 +137,16 @@ func (o *owner) commit(frames []frame) error {
 	}
 	scratch := &o.commitScratch
 	byName := scratch.group(frames)
-	defer scratch.reset()
+	defer func() {
+		scratch.reset()
+		clear(o.batchScratch)
+		if cap(o.batchScratch) > retainedFrames {
+			o.batchScratch = nil
+		}
+		if cap(o.sampleScratch) > 65536 {
+			o.sampleScratch = nil
+		}
+	}()
 	var count uint64
 	for _, f := range frames {
 		if f.cursor <= o.meta.Cursor {
@@ -151,10 +159,7 @@ func (o *owner) commit(frames []frame) error {
 	refs := make([]kv, 0, len(byName))
 	var ops []kv
 	scopes := make(map[string]*partsops.Batch)
-	next := make(map[string]*metricState, len(o.metrics)+len(byName))
-	for n, m := range o.metrics {
-		next[n] = m
-	}
+	next := make(map[string]*metricState, len(byName))
 	plans := make(map[string]sealrollup.SealPlan)
 	for name, span := range byName {
 		fs := scratch.frames[span.start:span.end]
@@ -275,15 +280,33 @@ func (o *owner) commit(frames []frame) error {
 	meta.Cursor = frames[len(frames)-1].cursor
 	meta.Order = frames[len(frames)-1].order
 	meta.Points += count
-	meta.Metrics = make([]*metricState, 0, len(next))
-	for _, m := range next {
-		meta.Metrics = append(meta.Metrics, m)
+	// Upgrade a legacy full JSON checkpoint once. Thereafter only changed
+	// metrics and touched scope revisions are replaced alongside the small header.
+	checkpointRows := make([]kv, 0, len(byName)+len(scopes)+1)
+	metricPrefix, revisionPrefix := checkpointPrefix(o.id, 'M'), checkpointPrefix(o.id, 'R')
+	for name, m := range next {
+		if _, changed := byName[name]; changed || o.meta.Version == 1 {
+			key := append(append(make([]byte, 0, len(metricPrefix)+len(name)), metricPrefix...), name...)
+			checkpointRows = append(checkpointRows, kv{key, encodeMetric(m)})
+		}
 	}
-	sort.Slice(meta.Metrics, func(i, j int) bool { return bytes.Compare(meta.Metrics[i].Name, meta.Metrics[j].Name) < 0 })
-	encoded, e := json.Marshal(meta)
-	if e != nil {
-		return e
+	if o.meta.Version == 1 {
+		for name, m := range o.metrics {
+			if _, changed := next[name]; !changed {
+				checkpointRows = append(checkpointRows, kv{append(append(make([]byte, 0, len(metricPrefix)+len(name)), metricPrefix...), name...), encodeMetric(m)})
+			}
+		}
 	}
+	for name, revision := range meta.Revisions {
+		if _, changed := scopes[name]; changed || o.meta.Version == 1 {
+			key := append(append(make([]byte, 0, len(revisionPrefix)+len(name)), revisionPrefix...), name...)
+			checkpointRows = append(checkpointRows, kv{key, binary.BigEndian.AppendUint64(nil, revision)})
+		}
+	}
+	meta.Version = 2
+	meta.Metrics = nil // owner.metrics owns the live state; do not retain a second slice.
+	checkpointRows = append(checkpointRows, kv{metaKey(o.id), encodeCheckpoint(meta)})
+	var e error
 	var paths []string
 	defer func() {
 		for _, p := range paths {
@@ -325,7 +348,7 @@ func (o *owner) commit(frames []frame) error {
 	if e = stage(refs); e != nil {
 		return e
 	}
-	if e = stage([]kv{{metaKey(o.id), encoded}}); e != nil {
+	if e = stage(checkpointRows); e != nil {
 		return e
 	}
 	// Ingest synchronizes the manifest publication. Journal Sync has already
@@ -343,7 +366,9 @@ func (o *owner) commit(frames []frame) error {
 			}
 		}
 	}
-	o.metrics = next
+	for name, m := range next {
+		o.metrics[name] = m
+	}
 	o.meta = meta
 	o.s.parts.Add(uint64(len(dataFiles)))
 	o.s.sealNS.Store(int64(time.Since(started)))

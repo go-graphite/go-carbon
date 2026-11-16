@@ -125,3 +125,27 @@ func BenchmarkSealGrouping(b *testing.B) {
 		}
 	})
 }
+
+func TestSealScratchReleasesBurstCapacity(t *testing.T) {
+	var s sealScratch
+	s.frames = make([]frame, retainedFrames+1)
+	s.spans = make(map[string]frameSpan, retainedFrames+1)
+	for i := 0; i <= retainedFrames; i++ {
+		s.spans[fmt.Sprint(i)] = frameSpan{}
+	}
+	for i := 0; i < retainedSealBytes/(64<<10)+5; i++ {
+		s.bytes.copy(make([]byte, 64<<10))
+	}
+	s.bytes.copy(make([]byte, retainedSealBytes+1))
+	s.reset()
+	if s.frames != nil || s.spans != nil {
+		t.Fatal("retained burst frame maps")
+	}
+	total := 0
+	for _, b := range s.bytes.chunks {
+		total += len(b)
+	}
+	if total > retainedSealBytes {
+		t.Fatal("retained burst arena", total)
+	}
+}

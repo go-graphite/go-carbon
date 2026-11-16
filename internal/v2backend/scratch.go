@@ -41,7 +41,22 @@ func (s *sealScratch) group(fs []frame) map[string]frameSpan {
 	}
 	return s.spans
 }
-func (s *sealScratch) reset() { clear(s.frames); clear(s.spans); s.bytes.reset() }
+
+const retainedFrames = 32768
+const retainedSealBytes = 4 << 20
+
+func (s *sealScratch) reset() {
+	clear(s.frames)
+	if cap(s.frames) > retainedFrames {
+		s.frames = nil
+	}
+	if len(s.spans) > retainedFrames {
+		s.spans = nil
+	} else {
+		clear(s.spans)
+	}
+	s.bytes.reset()
+}
 
 // Fixed size chunks keep previously returned slices stable when the arena grows.
 // An unusually large key uses its own chunk. All retained capacity is bounded
@@ -64,7 +79,21 @@ func (a *sealBytes) copy(b []byte) []byte {
 	a.used += len(b)
 	return out
 }
-func (a *sealBytes) reset() { a.chunk = 0; a.used = 0 }
+func (a *sealBytes) reset() {
+	// Retain a small steady-state arena, not a burst's high-water capacity.
+	total, n := 0, 0
+	for _, chunk := range a.chunks {
+		if len(chunk) <= 64<<10 && total+len(chunk) <= retainedSealBytes {
+			a.chunks[n] = chunk
+			total += len(chunk)
+			n++
+		}
+	}
+	clear(a.chunks[n:])
+	a.chunks = a.chunks[:n]
+	a.chunk = 0
+	a.used = 0
+}
 func samePolicy(a, b daemonstore.Metric) bool {
 	return a.AggregationMethod == b.AggregationMethod && a.XFilesFactor == b.XFilesFactor && slices.Equal(a.Archives, b.Archives)
 }

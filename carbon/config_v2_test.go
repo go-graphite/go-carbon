@@ -19,6 +19,7 @@ data-dir = "/tmp/immutable-parts"
 shards = 7
 owners = 13
 part-interval = "250ms"
+journal-codec = "pdc3"
 `
 	if err := os.WriteFile(file, []byte(body), 0600); err != nil {
 		t.Fatal(err)
@@ -27,7 +28,7 @@ part-interval = "250ms"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.unknownKeys) != 0 || c.V2.Shards != 7 || c.V2.Owners != 13 || c.V2.PartInterval.Value() != 250*time.Millisecond {
+	if c.V2.JournalCodec != "pdc3" || len(c.unknownKeys) != 0 || c.V2.Shards != 7 || c.V2.Owners != 13 || c.V2.PartInterval.Value() != 250*time.Millisecond {
 		t.Fatalf("decode: %+v, unknown %v", c.V2, c.unknownKeys)
 	}
 	for name, change := range map[string]func(*Config){
@@ -36,6 +37,7 @@ part-interval = "250ms"
 		"shards":    func(n *Config) { n.V2.Shards++ },
 		"owners":    func(n *Config) { n.V2.Owners++ },
 		"interval":  func(n *Config) { n.V2.PartInterval.Duration++ },
+		"codec":     func(n *Config) { n.V2.JournalCodec = "pdx1" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			n := *c
@@ -103,6 +105,7 @@ func TestV2Validation(t *testing.T) {
 		"zero shards":   func(n *Config) { n.V2.Shards = 0 },
 		"zero owners":   func(n *Config) { n.V2.Owners = 0 },
 		"zero interval": func(n *Config) { n.V2.PartInterval = Duration{} },
+		"unknown codec": func(n *Config) { n.V2.JournalCodec = "unknown" },
 		"legacy log":    func(n *Config) { n.InputLog.Enabled = true },
 		"legacy dump":   func(n *Config) { n.Dump.Enabled = true },
 		"handoff":       func(n *Config) { n.Dump.HandoffSupervisor = true },

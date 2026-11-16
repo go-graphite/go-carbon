@@ -39,6 +39,27 @@ An older binary cannot decode new PDX1 records. Dictionary and predictor
 checkpoints are required before journal trimming can be enabled. Lossless
 compression cannot promise four bytes per point for arbitrary high-entropy values.
 
+The restart-only `v2.journal-codec` selector defaults to `"pdx1"`.
+`"pdc3"` enables the per-series timestamp/value and full arrival-clock predictor.
+Replay dispatches both formats by their record magic regardless of the selected
+writer. Encoder state belongs to one ordered stream; the retained epoch prefix
+is still required. The PDC3 decoder checks record sequence and prior-record CRC.
+
+Each seal replaces a small binary V2C2 owner header plus the touched metric
+frontiers and scope revisions in the same atomic ingest as the SST data. Latest
+metric/revision keys replace earlier values; restart scans them once, without an
+unbounded chain of checkpoint deltas. Legacy JSON checkpoints migrate atomically
+on the first seal, including untouched metrics. Older binaries fail closed on
+V2C2 checkpoints, so downgrading requires restoring a compatible store rather
+than reopening the migrated directory.
+
+The frozen name catalog shares immutable size-tiered segments. Point-only seals
+reuse the complete catalog and glob index; admitting new names merges colliding
+size tiers without changing existing reader IDs or old views. Durable identity
+continues to use the complete PG/vshard/name key. Scratch retains at most 4MiB of
+key/value chunks per owner; oversized grouping/frame/sample buffers are released
+after sealing. This limits retained scratch, not total process RSS or live heads.
+
 Startup still completes journal/database recovery and replay before opening
 listeners. It does not satisfy the 100ms first-live-append requirement. A durable
 admission epoch and process fencing must be available before historical recovery
@@ -123,7 +144,7 @@ while sealing is blocked and preserves pinned responses across publication.
 * Journal trimming, physical retention and superseded-part reclamation are not
   implemented. The journal remains the retained source of original receipt
   envelopes; duplicate raw receipt rows are no longer written into each SST.
-* Active heads have per-owner admission credits. Full catalog reconstruction,
+* Active heads have per-owner admission credits. Catalog growth and startup reconstruction,
   policy/name cache growth, reducer workspace and retained fine-archive state
   for multi-archive rollups still need host-scale bounds. A single archive
   retains no historical reducer ring in memory.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/bits"
 	"slices"
 	"sort"
 	"sync"
@@ -23,11 +24,61 @@ type catalog struct {
 	names map[string]partsread.Metric
 	ids   map[uint64]string
 	index *carbonserver.PartsCatalogIndex
+	// A root shares disjoint, immutable size-tiered segments. Existing names
+	// and IDs never move when a seal contains only point updates.
+	segments []*catalog
+	count    int
+	retained int64
 }
 
-func (c *catalog) Lookup(name string) (partsread.Metric, bool) { m, ok := c.names[name]; return m, ok }
+func (c *catalog) Lookup(name string) (partsread.Metric, bool) {
+	m, ok := c.names[name]
+	if ok {
+		return m, true
+	}
+	for _, segment := range c.segments {
+		if segment != nil {
+			if m, ok = segment.names[name]; ok {
+				return m, true
+			}
+		}
+	}
+	return partsread.Metric{}, false
+}
+func (c *catalog) nameForID(id uint64) (string, bool) {
+	if name, ok := c.ids[id]; ok {
+		return name, true
+	}
+	for _, segment := range c.segments {
+		if segment != nil {
+			if name, ok := segment.ids[id]; ok {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+func (c *catalog) findNames(pattern string) ([]string, []bool, error) {
+	if c.index != nil {
+		return c.index.Find(pattern)
+	}
+	var names []string
+	var leafs []bool
+	for _, segment := range c.segments {
+		if segment == nil {
+			continue
+		}
+		ns, ls, err := segment.index.Find(pattern)
+		if err != nil {
+			return nil, nil, err
+		}
+		names = append(names, ns...)
+		leafs = append(leafs, ls...)
+	}
+	return names, leafs, nil
+}
 func (c *catalog) Find(ctx context.Context, pattern string, yield func(string) error) error {
-	names, leafs, e := c.index.Find(pattern)
+	names, leafs, e := c.findNames(pattern)
 	if e != nil {
 		return e
 	}
@@ -57,37 +108,88 @@ func toDaemonMetric(m partsread.Metric) daemonstore.Metric {
 	}
 	return r
 }
-func (o *owner) publish() error {
-	c := &catalog{names: make(map[string]partsread.Metric, len(o.metrics)), ids: make(map[uint64]string, len(o.metrics))}
-	var metadata []store.Metadata
-	names := make([]string, 0, len(o.metrics))
-	for n := range o.metrics {
-		names = append(names, n)
+func (o *owner) publishCatalog() (*catalog, error) {
+	old := o.readCatalog.Load()
+	// Policies are fixed and this backend has no delete/rename path. Equal
+	// cardinality therefore proves that the frozen catalogue is still current.
+	if old != nil && old.count == len(o.metrics) {
+		return old, nil
 	}
-	sort.Strings(names)
-	var retained int64
-	for i, n := range names {
-		m := o.metrics[n]
-		r := toReadMetric(m.Policy)
-		r.ID = uint64(i + 1)
-		c.names[n] = r
-		c.ids[r.ID] = n
-		cfg, e := rollupConfig(m.Policy)
-		if e != nil {
-			return e
+	delta := &catalog{names: make(map[string]partsread.Metric), ids: make(map[uint64]string)}
+	count := 0
+	if old != nil {
+		count = old.count
+	}
+	// Stable owner-local IDs are read handles only; durable GCP3 keys continue
+	// carrying the complete portable PG/vshard/name identity.
+	for name, m := range o.metrics {
+		if old != nil {
+			if _, exists := old.Lookup(name); exists {
+				continue
+			}
 		}
-		meta := store.Metadata{MetricConfig: store.MetricConfig{Name: n, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}}
-		for _, a := range m.Policy.Archives {
-			meta.Retentions = append(meta.Retentions, store.Retention{Step: a.Step, Count: a.Points})
+		count++
+		r := toReadMetric(m.Policy)
+		r.ID = uint64(count)
+		delta.names[name] = r
+		delta.ids[r.ID] = name
+	}
+	if len(delta.names) == 0 && old != nil {
+		return old, nil
+	}
+	c := &catalog{count: count}
+	if old != nil {
+		c.segments = slices.Clone(old.segments)
+		c.retained = old.retained
+	}
+	addedBytes := int64(0)
+	for name, m := range delta.names {
+		addedBytes += int64(256 + len(name)*3 + len(m.Archives)*32)
+	}
+	c.retained += addedBytes
+	// Binary size tiers bound lookup/find fanout by log2(catalogue size).
+	// A merge happens only on new-name admission, never on ordinary seals.
+	for len(delta.names) > 0 {
+		level := bits.Len(uint(len(delta.names))) - 1
+		for len(c.segments) <= level {
+			c.segments = append(c.segments, nil)
+		}
+		prior := c.segments[level]
+		if prior == nil {
+			c.segments[level] = delta
+			break
+		}
+		for name, m := range prior.names {
+			delta.names[name] = m
+			delta.ids[m.ID] = name
+		}
+		c.segments[level] = nil
+	}
+	metadata := make([]store.Metadata, 0, len(delta.names))
+	for name, m := range delta.names {
+		cfg, e := rollupConfig(toDaemonMetric(m))
+		if e != nil {
+			return nil, e
+		}
+		meta := store.Metadata{MetricConfig: store.MetricConfig{Name: name, AggregationMethod: store.AggregationMethod(cfg.Method), XFilesFactor: cfg.XFilesFactor}}
+		for _, a := range m.Archives {
+			meta.Retentions = append(meta.Retentions, store.Retention{Step: int(a.Step), Count: int(a.Points)})
 		}
 		metadata = append(metadata, meta)
-		retained += int64(256 + len(n)*3 + len(r.Archives)*32)
 	}
 	var e error
-	c.index, e = carbonserver.NewPartsCatalogIndex(metadata, carbonserver.PartsIndexOptions{Trie: true, ReportFrequency: time.Minute})
+	delta.index, e = carbonserver.NewPartsCatalogIndex(metadata, carbonserver.PartsIndexOptions{Trie: true, ReportFrequency: time.Minute})
+	if count == 0 {
+		c.index = delta.index
+	}
+	return c, e
+}
+func (o *owner) publish() error {
+	c, e := o.publishCatalog()
 	if e != nil {
 		return e
 	}
+	retained := c.retained
 	snap := o.db.NewSnapshot()
 	source := &diskSource{snap: snap, owner: o.id, catalog: c}
 	o.pub.Publish(partsread.View{Generation: o.meta.Cursor, Frontier: []uint64{o.meta.Cursor}, Catalog: c, Parts: []partsread.Source{source}, RetainedBytes: retained, Close: func() { _ = snap.Close() }})
@@ -112,11 +214,11 @@ type diskSource struct {
 }
 
 func (d *diskSource) Scan(ctx context.Context, id uint64, a partsread.Archive, from, until int64, yield func(partsread.Sample) error) error {
-	name, ok := d.catalog.ids[id]
+	name, ok := d.catalog.nameForID(id)
 	if !ok {
 		return partsread.ErrNotFound
 	}
-	m := d.catalog.names[name]
+	m, _ := d.catalog.Lookup(name)
 	archive := -1
 	for i, c := range m.Archives {
 		if c == a {
@@ -203,11 +305,12 @@ func physicalRanges(a partsread.Archive, from, until int64) [][2]int64 {
 var foundArchive = errors.New("archive found")
 
 func (d *diskSource) HasArchive(ctx context.Context, id uint64, step int64) (bool, error) {
-	name, ok := d.catalog.ids[id]
+	name, ok := d.catalog.nameForID(id)
 	if !ok {
 		return false, nil
 	}
-	for _, a := range d.catalog.names[name].Archives {
+	m, _ := d.catalog.Lookup(name)
+	for _, a := range m.Archives {
 		if a.Step == step {
 			e := d.Scan(ctx, id, a, 0, a.Points*a.Step, func(partsread.Sample) error { return foundArchive })
 			if errors.Is(e, foundArchive) {
@@ -365,7 +468,7 @@ func (s *Store) Find(ctx context.Context, pattern string) ([]daemonstore.Match, 
 		if c == nil {
 			continue
 		}
-		names, leafs, e := c.index.Find(pattern)
+		names, leafs, e := c.findNames(pattern)
 		if e != nil {
 			return nil, e
 		}
@@ -381,7 +484,7 @@ func (s *Store) Find(ctx context.Context, pattern string) ([]daemonstore.Match, 
 		}
 	}
 	if s.legacyCatalog != nil {
-		names, leafs, e := s.legacyCatalog.index.Find(pattern)
+		names, leafs, e := s.legacyCatalog.findNames(pattern)
 		if e != nil {
 			return nil, e
 		}

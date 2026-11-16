@@ -52,6 +52,7 @@ func (app *App) startV2() (err error) {
 		DataDir: conf.V2.DataDir, Shards: conf.V2.Shards, Owners: conf.V2.Owners,
 		LegacyDataDir: conf.Whisper.DataDir, LegacyStoreDir: sharedStorePath(conf), LegacyBackend: conf.Whisper.StorageBackend,
 		PartInterval: conf.V2.PartInterval.Value(),
+		JournalCodec: conf.V2.JournalCodec,
 		Policy: func(name string) (daemonstore.Metric, error) {
 			schema, ok := conf.Whisper.Schemas.Match(name)
 			if !ok {

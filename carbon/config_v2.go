@@ -15,6 +15,7 @@ type v2Config struct {
 	Shards       int      `toml:"shards"`
 	Owners       int      `toml:"owners"`
 	PartInterval Duration `toml:"part-interval"`
+	JournalCodec string   `toml:"journal-codec"`
 }
 
 func newV2Config() v2Config {
@@ -25,6 +26,11 @@ func validateV2Config(c *Config) error {
 	v := c.V2
 	if !v.Enabled {
 		return nil
+	}
+	switch v.JournalCodec {
+	case "", "pdx1", "pdc3":
+	default:
+		return fmt.Errorf("unknown v2 journal-codec %q", v.JournalCodec)
 	}
 	if !filepath.IsAbs(v.DataDir) || filepath.Clean(v.DataDir) == string(filepath.Separator) {
 		return fmt.Errorf("v2.data-dir must be an absolute non-root directory")

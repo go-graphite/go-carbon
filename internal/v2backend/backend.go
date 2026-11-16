@@ -84,7 +84,7 @@ type owner struct {
 	active         []frame
 	pending        []frame
 	nextOrder      uint64
-	journalEncoder partlog.DictionaryDeltaEncoder
+	journalEncoder receiptEncoder
 	workspace      sealrollup.Workspace
 	batchScratch   []sealrollup.Batch
 	sampleScratch  []sealrollup.Sample
@@ -130,6 +130,9 @@ var _ daemonstore.Backend = (*Store)(nil)
 func Open(opts daemonstore.Options) (daemonstore.Backend, error) { return openAt(opts, time.Now) }
 
 func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error) {
+	if err := validJournalCodec(opts.JournalCodec); err != nil {
+		return nil, err
+	}
 	if opts.DataDir == "" || opts.Owners < 1 || opts.Shards < 1 || opts.PartInterval <= 0 || opts.Policy == nil {
 		return nil, errors.New("invalid v2 backend options")
 	}
@@ -213,7 +216,7 @@ func openAt(opts daemonstore.Options, now func() time.Time) (_ *Store, err error
 	for _, o := range s.owners {
 		pendingPoints := 0
 		var decoder receiptDecoder
-		defer decoder.dictionary.Close()
+		defer decoder.close()
 		// Definitions can precede the durable apply frontier. Decode the retained
 		// epoch prefix but never reapply a checkpointed receipt.
 		if e := s.log.Replay(o.id, 0, func(r partlog.Record) error {
@@ -334,6 +337,7 @@ func (s *Store) Append(p *points.Points) error {
 	return s.admit([][]frame{{f}}, []int{s.route(p.Metric)})
 }
 func (o *owner) run() {
+	o.journalEncoder = newReceiptEncoder(o.s.opts.JournalCodec)
 	defer close(o.done)
 	defer o.journalEncoder.Close()
 	var deferred *command
@@ -357,6 +361,9 @@ func (o *owner) run() {
 		case 'd':
 			clear(o.pending)
 			o.spare = o.pending[:0]
+			if cap(o.spare) > retainedFrames {
+				o.spare = nil
+			}
 			o.pending = nil
 		case 'r':
 			for _, fs := range [][]frame{o.pending, o.active} {

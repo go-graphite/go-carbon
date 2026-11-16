@@ -45,6 +45,8 @@ type Stats struct {
 	SealLatencySeconds, ReadP99Seconds float64
 }
 type Options struct {
+	// JournalCodec selects the restart-only receipt writer: empty/pdx1 or pdc3.
+	JournalCodec string
 	// Legacy storage is a read-only base. Open must never start its maintenance
 	// or writer paths, even when a coarse archive straddles the cutover.
 	LegacyDataDir, LegacyStoreDir, LegacyBackend string

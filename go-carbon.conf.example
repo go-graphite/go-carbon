@@ -1519,3 +1519,7 @@ shards = 16
 # Zero is invalid when enabled; size owners for the CPUs available to the daemon.
 owners = 16
 part-interval = "1s"
+# Restart-only receipt writer. Replay accepts both codecs regardless of this
+# selector; retain all journal segments containing the dictionary epoch prefix.
+# "pdc3" enables exact per-series value/timestamp/arrival-clock predictions.
+journal-codec = "pdx1"
