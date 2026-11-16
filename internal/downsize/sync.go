@@ -353,16 +353,9 @@ func syncIdentity(o syncOptions) (string, error) {
 	return string(identity), err
 }
 
-func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
+func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	if err := os.MkdirAll(o.state, 0o755); err != nil {
 		return err
-	}
-	if o.issues == nil {
-		var err error
-		o.issues, err = openSyncIssues(o.state)
-		if err != nil {
-			return err
-		}
 	}
 	identity, err := syncIdentity(o)
 	if err != nil {
@@ -373,6 +366,15 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 		return err
 	}
 	defer j.close()
+	if o.issues == nil {
+		var err error
+		o.issues, err = openSyncIssues(o.state)
+		if err != nil {
+			return err
+		}
+	}
+
+	defer func() { result = errors.Join(result, o.issues.checkpoint()) }()
 	s := &syncer{o: o, b: b, j: j, forbid: map[string]bool{}, failedCp: map[string]bool{}, copied: map[string]bool{}, started: time.Now()}
 	s.sum.phases = map[string]*syncPhase{}
 	if err := s.prepareVerificationRetry(); err != nil {
@@ -429,6 +431,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	if err == nil && !o.noCopy {
 		err = s.quarantineResiduals("verify")
 	}
+	err = errors.Join(err, o.issues.checkpoint())
 	j.mu.Lock()
 	j.progress.Quarantined, j.progress.PolicySkipped = o.issues.counts()
 	j.mu.Unlock()
@@ -522,7 +525,10 @@ func (s *syncer) phase(name string) *syncPhase {
 	return p
 }
 
-func (s *syncer) endPhase(name string, names int) {
+func (s *syncer) endPhase(name string, names int) error {
+	if err := s.o.issues.checkpoint(); err != nil {
+		return err
+	}
 	p := s.phase(name)
 	p.names += names
 	p.seconds = time.Since(p.started).Seconds()
@@ -531,6 +537,7 @@ func (s *syncer) endPhase(name string, names int) {
 		fields["names_per_second"] = float64(p.names) / p.seconds
 	}
 	event("sync_phase", fields)
+	return nil
 }
 
 func (s *syncer) run(ctx context.Context) error {
@@ -896,7 +903,9 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 			}
 			s.prog.finishCopy(len(names))
 		}
-		s.endPhase("fill", work)
+		if err := s.endPhase("fill", work); err != nil {
+			return err
+		}
 		set = set[:0]
 		for n := range next {
 			set = append(set, n)
@@ -1132,7 +1141,9 @@ feed:
 		return holes[a].Step < holes[b].Step
 	})
 	sort.Strings(unindexed)
-	s.endPhase("verify", 0)
+	if err := s.endPhase("verify", 0); err != nil {
+		return nil, nil, nil, err
+	}
 	event("sync_verified", map[string]any{"round": round, "names": fed - frontierReused, "candidate_names": fed, "proof_reused": frontierReused, "resumed": resumed, "hole_names": len(holeNames), "hole_points": points, "unindexed": len(unindexed), "skipped": len(skipped),
 		"compared_by_digest": s.prog.digests.Load(), "read_point_by_point": s.prog.reads.Load()})
 	return holes, unindexed, skipped, nil

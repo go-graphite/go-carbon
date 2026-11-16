@@ -910,6 +910,14 @@ names continue through every phase. Both files contain the name, reason, phase,
 and first/last observation time and survive `--resume`. Recovery jobs share their
 parent's lists, preserving the original journals and immutable copy selections.
 
+Each issue update is durably appended to `quarantine.json.jsonl` or
+`policy-skipped.json.jsonl` before a phase can acknowledge the exclusion.
+Phase completion and exit checkpoint these journals into the same sorted JSON
+arrays using atomic rename. Resume replays pending transactions; a torn final
+append is discarded, while complete corrupt records fail loudly. Keep journals
+with their snapshots. Before downgrading to an older client, let the new client
+checkpoint so the legacy arrays include every acknowledged exception.
+
 Each newly excluded name emits an ERROR event. Progress JSON and Graphite expose
 `quarantined` and `policy_skipped` counts under the existing sync metric prefix.
 An otherwise successful final attestation is `READY_EXCEPT` when quarantined

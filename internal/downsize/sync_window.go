@@ -199,8 +199,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.endPhase("copy", scanned)
-	return nil
+	return s.endPhase("copy", scanned)
 }
 
 // Replayed groups advance the durable cursor, but did no work in this run.
