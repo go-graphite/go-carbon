@@ -42,8 +42,8 @@ func (s *sealScratch) group(fs []frame) map[string]frameSpan {
 	return s.spans
 }
 
-const retainedFrames = 32768
-const retainedSealBytes = 4 << 20
+const retainedFrames = 262144
+const retainedSealBytes = 16 << 20
 
 func (s *sealScratch) reset() {
 	clear(s.frames)

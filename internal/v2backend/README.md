@@ -56,7 +56,7 @@ than reopening the migrated directory.
 The frozen name catalog shares immutable size-tiered segments. Point-only seals
 reuse the complete catalog and glob index; admitting new names merges colliding
 size tiers without changing existing reader IDs or old views. Durable identity
-continues to use the complete PG/vshard/name key. Scratch retains at most 4MiB of
+continues to use the complete PG/vshard/name key. Scratch retains at most 16MiB of
 key/value chunks per owner; oversized grouping/frame/sample buffers are released
 after sealing. This limits retained scratch, not total process RSS or live heads.
 
