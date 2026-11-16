@@ -162,7 +162,7 @@ func (e *PredictorV3Encoder) Encode(fs []DictionaryFrame) ([]byte, error) {
 			}
 			s.value = v
 		}
-		if len(meta)+len(values.b) > predictorV3MaxRaw-20 {
+		if len(meta)+len(values.b)+len(clocks.b) > predictorV3MaxRaw-20 {
 			return nil, errPredictorV3
 		}
 	}
