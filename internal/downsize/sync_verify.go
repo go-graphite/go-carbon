@@ -158,14 +158,20 @@ func (s *syncer) markDown(store string, err error) {
 	}
 }
 
-// verifyBatch verifies names; a failure that is not the target being down is
-// retried on halves down to single names, which are skipped with a reason so
-// one bad metric never stalls the run.
+// verifyBatch verifies names. Backend read failures are split at the request
+// boundary so completed reads are not repeated. Remaining comparison errors
+// fall back to name-batch isolation; singleton failures are recorded as skips.
 func (s *syncer) verifyBatch(ctx context.Context, round int, names []string) (syncRow, error) {
+	if _, ok := ctx.Value(syncReadFailuresKey{}).(*syncReadFailures); !ok {
+		ctx = context.WithValue(ctx, syncReadFailuresKey{}, &syncReadFailures{names: map[string]string{}})
+	}
 	started := time.Now()
 	defer func() { s.prog.batches.Add(1); s.prog.batchNanos.Add(int64(time.Since(started))) }()
 	row := syncRow{Kind: "verified", Round: round, First: names[0], Last: names[len(names)-1], Names: len(names)}
 	err := s.verifyNames(ctx, &row, names)
+	if err == nil {
+		finishVerifyReads(ctx, &row)
+	}
 	if err == nil || ctx.Err() != nil || errors.Is(err, errSyncStoreDown) && s.isDown(s.o.to) {
 		return row, err
 	}
@@ -196,7 +202,7 @@ func (s *syncer) verifyBatch(ctx context.Context, round int, names []string) (sy
 }
 
 func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) error {
-	info, err := s.b.Info(ctx, s.o.to, names)
+	info, err := s.verifyInfo(ctx, s.o.to, names)
 	if errors.Is(err, errSyncStoreDown) {
 		s.markDown(s.o.to, err)
 	}
@@ -328,16 +334,18 @@ func (s *syncer) holders(src int, names []string) []string {
 }
 
 func (s *syncer) fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
-	finish, err := s.redo.begin(ctx, "fetch", store, names, from, until)
-	if err != nil {
-		return nil, err
-	}
-	got, err := s.b.Fetch(ctx, store, names, from, until)
-	finish(err == nil)
-	if errors.Is(err, errSyncStoreDown) {
-		s.markDown(store, err)
-	}
-	return got, err
+	return splitVerifyRead(ctx, "fetch", store, names, func(names []string) (map[string]syncSeries, error) {
+		finish, err := s.redo.begin(ctx, "fetch", store, names, from, until)
+		if err != nil {
+			return nil, err
+		}
+		got, err := s.b.Fetch(ctx, store, names, from, until)
+		finish(err == nil)
+		if errors.Is(err, errSyncStoreDown) {
+			s.markDown(store, err)
+		}
+		return got, err
+	})
 }
 
 // noDigest reports a store already known not to serve digests.
@@ -351,25 +359,27 @@ func (s *syncer) digest(ctx context.Context, store string, names []string, w syn
 	if s.noDigest(store) {
 		return nil, errSyncNoDigest
 	}
-	finish, err := s.redo.begin(ctx, "verify", store, names, w.From, w.Until)
-	if err != nil {
-		return nil, err
-	}
-	got, err := s.b.Digest(ctx, store, names, w.From, w.Until)
-	finish(err == nil)
-	if errors.Is(err, errSyncNoDigest) {
-		if _, loaded := s.digests.LoadOrStore(store, false); !loaded {
-			event("sync_digest_unavailable", map[string]any{"store": store, "fallback": "carbonserver multi-fetch"})
+	return splitVerifyRead(ctx, "digest", store, names, func(names []string) (map[string][]syncDigest, error) {
+		finish, err := s.redo.begin(ctx, "verify", store, names, w.From, w.Until)
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
-	if errors.Is(err, errSyncStoreDown) {
-		s.markDown(store, err)
-	}
-	if err == nil {
-		s.digests.Store(store, true)
-	}
-	return got, err
+		got, err := s.b.Digest(ctx, store, names, w.From, w.Until)
+		finish(err == nil)
+		if errors.Is(err, errSyncNoDigest) {
+			if _, loaded := s.digests.LoadOrStore(store, false); !loaded {
+				event("sync_digest_unavailable", map[string]any{"store": store, "fallback": "carbonserver multi-fetch"})
+			}
+			return nil, err
+		}
+		if errors.Is(err, errSyncStoreDown) {
+			s.markDown(store, err)
+		}
+		if err == nil {
+			s.digests.Store(store, true)
+		}
+		return got, err
+	})
 }
 
 // checkWindow compares every name over one window: by digest where both
@@ -669,12 +679,15 @@ func (s *syncer) fullDigest(ctx context.Context, store string, names []string, s
 	key := "sum-v1:" + store
 	v, known := s.digests.Load(key)
 	if ok && (!known || v.(bool)) {
-		finish, err := s.redo.begin(ctx, "verify", fmt.Sprintf("%s#sum:%d", store, step), names, w.From, w.Until)
-		if err != nil {
-			return nil, true, err
-		}
-		got, err := b.SumDigest(ctx, store, names, step, w.From, w.Until)
-		finish(err == nil)
+		got, err := splitVerifyRead(ctx, "sum digest", store, names, func(names []string) (map[string][]syncDigest, error) {
+			finish, err := s.redo.begin(ctx, "verify", fmt.Sprintf("%s#sum:%d", store, step), names, w.From, w.Until)
+			if err != nil {
+				return nil, err
+			}
+			got, err := b.SumDigest(ctx, store, names, step, w.From, w.Until)
+			finish(err == nil)
+			return got, err
+		})
 		if !errors.Is(err, errSyncNoDigest) {
 			return got, true, err
 		}

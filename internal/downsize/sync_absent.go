@@ -68,7 +68,7 @@ func (s *syncer) resolveAbsent(ctx context.Context, row *syncRow, names []string
 			if len(found) == 0 {
 				return
 			}
-			r.schemas, err = s.b.Info(ctx, store, found)
+			r.schemas, err = s.verifyInfo(ctx, store, found)
 			if err != nil {
 				r.err = err
 				return
