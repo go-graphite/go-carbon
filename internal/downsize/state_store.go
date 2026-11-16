@@ -23,7 +23,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const stateSchema = 2
+const stateSchema = 3
 const stateApplicationID = 0x5343544c // SCTL, distinct from the offline benchmark
 const statePageNames = 4096
 
@@ -106,7 +106,7 @@ CREATE UNIQUE INDEX catalog_page_name ON catalog_page(first_name);
 CREATE TABLE membership_page(scope TEXT NOT NULL REFERENCES scope(id), window TEXT NOT NULL, holder TEXT NOT NULL, phase TEXT NOT NULL, round INTEGER NOT NULL CHECK(round>=0), kind TEXT NOT NULL CHECK(kind IN ('missing','pending','done','residual','selected','resolved','retry','dirty')), first_id INTEGER NOT NULL CHECK(first_id>0 AND (first_id-1)%4096=0), version INTEGER NOT NULL CHECK(version=1), names INTEGER NOT NULL CHECK(names>=0 AND names<=4096), bits BLOB NOT NULL CHECK(length(bits)=512), PRIMARY KEY(scope,phase,round,window,holder,kind,first_id)) STRICT, WITHOUT ROWID;
 CREATE TABLE operation(id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version=1), scope TEXT NOT NULL REFERENCES scope(id), window TEXT NOT NULL, holder TEXT NOT NULL, plan TEXT NOT NULL, stream TEXT NOT NULL, start INTEGER NOT NULL CHECK(start>=0), end INTEGER NOT NULL CHECK(end>start), status TEXT NOT NULL CHECK(status IN ('intent','acknowledged','complete')), selection BLOB NOT NULL, selection_sha256 BLOB NOT NULL CHECK(length(selection_sha256)=32), receipt BLOB NOT NULL) STRICT;
 CREATE TABLE batch(scope TEXT NOT NULL REFERENCES scope(id), phase TEXT NOT NULL, round INTEGER NOT NULL CHECK(round>=0), token TEXT NOT NULL, version INTEGER NOT NULL CHECK(version=1), sha256 BLOB NOT NULL CHECK(length(sha256)=32), added INTEGER NOT NULL CHECK(added>=0), PRIMARY KEY(scope,phase,round,token)) STRICT, WITHOUT ROWID;
-CREATE TABLE reason(id INTEGER PRIMARY KEY, version INTEGER NOT NULL CHECK(version=1), text TEXT NOT NULL UNIQUE CHECK(length(text)>0)) STRICT;
+CREATE TABLE reason(id INTEGER PRIMARY KEY, version INTEGER NOT NULL CHECK(version=1), text TEXT NOT NULL UNIQUE CHECK(text<>'')) STRICT;
 CREATE TABLE issue(scope TEXT NOT NULL REFERENCES scope(id), window TEXT NOT NULL, holder TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('policy','quarantine','terminal','residual')), name_id INTEGER NOT NULL CHECK(name_id>0), version INTEGER NOT NULL CHECK(version=1), reason INTEGER NOT NULL REFERENCES reason(id), phase TEXT NOT NULL, first_seen INTEGER NOT NULL CHECK(first_seen>0), last_seen INTEGER NOT NULL CHECK(last_seen>=first_seen), PRIMARY KEY(scope,window,holder,kind,name_id)) STRICT, WITHOUT ROWID;
 CREATE TABLE proof_page(scope TEXT NOT NULL REFERENCES scope(id), window TEXT NOT NULL, holder TEXT NOT NULL, generation TEXT NOT NULL, first_id INTEGER NOT NULL CHECK(first_id>0 AND (first_id-1)%4096=0), version INTEGER NOT NULL CHECK(version=1), records BLOB NOT NULL CHECK(length(records)>0 AND length(records)<=131072 AND length(records)%32=0), sha256 BLOB NOT NULL CHECK(length(sha256)=32), PRIMARY KEY(scope,window,holder,generation,first_id)) STRICT, WITHOUT ROWID;
 CREATE TABLE ready(scope TEXT PRIMARY KEY REFERENCES scope(id), version INTEGER NOT NULL CHECK(version=1), proof_scope TEXT NOT NULL, recovery_scope TEXT NOT NULL, verdict TEXT NOT NULL CHECK(verdict IN ('READY','READY_EXCEPT','NOT_READY')), report BLOB NOT NULL) STRICT;
@@ -151,7 +151,7 @@ func createStateStore(path string, unit stateUnit) (_ *stateStore, err error) {
 		return nil, err
 	}
 	defer t.Rollback()
-	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL); err == nil {
+	if _, err = t.Exec(stateDDL + stateSemanticDDL + stateRecoveryDDL + stateNativeReceiptDDL + stateTransferTaskDDL + stateIssuesDDL + stateSelectionDDL); err == nil {
 		_, err = t.Exec("INSERT INTO unit VALUES(1,1,?,?,?,?)", unit.Identity, unit.Options, unit.CatalogGeneration, unit.CatalogNames)
 	}
 	if err == nil {
@@ -570,10 +570,16 @@ func stateRelationDigests(t *sql.Tx) (map[string]stateRelationDigest, error) {
 		"operation":       "SELECT * FROM operation ORDER BY id",
 		"batch":           "SELECT * FROM batch ORDER BY scope,phase,round,token",
 		// Reason IDs are allocation details, so canonicalize their text.
-		"reason":     "SELECT version,text FROM reason ORDER BY text",
+		"reason":     "SELECT version,text FROM reason WHERE id IN (SELECT reason FROM issue UNION SELECT reason FROM ledger_issue UNION SELECT reason FROM ledger_repair) ORDER BY text",
 		"issue":      "SELECT i.scope,i.window,i.holder,i.kind,i.name_id,i.version,r.text,i.phase,i.first_seen,i.last_seen FROM issue i JOIN reason r ON r.id=i.reason ORDER BY i.scope,i.window,i.holder,i.kind,i.name_id",
 		"proof_page": "SELECT * FROM proof_page ORDER BY scope,window,holder,generation,first_id",
 		"ready":      "SELECT * FROM ready ORDER BY scope",
+	}
+	for name, query := range stateSelectionDigestQueries {
+		queries[name] = query
+	}
+	for name, query := range stateIssuesDigestQueries {
+		queries[name] = query
 	}
 	for name, query := range stateTransferDigestQueries {
 		queries[name] = query

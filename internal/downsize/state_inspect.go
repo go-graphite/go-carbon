@@ -19,14 +19,15 @@ func StateMain(ctx context.Context, args []string) error {
 }
 
 type stateInspection struct {
-	Version int                            `json:"version"`
-	Unit    stateUnit                      `json:"unit"`
-	Phases  []statePhase                   `json:"phases"`
-	Windows []stateWindow                  `json:"windows"`
-	NameID  int64                          `json:"name_id,omitempty"`
-	Name    *syncName                      `json:"name,omitempty"`
-	Issues  []stateIssue                   `json:"issues,omitempty"`
-	Digests map[string]stateRelationDigest `json:"relation_digests,omitempty"`
+	Version    int                            `json:"version"`
+	Unit       stateUnit                      `json:"unit"`
+	Phases     []statePhase                   `json:"phases"`
+	Windows    []stateWindow                  `json:"windows"`
+	NameID     int64                          `json:"name_id,omitempty"`
+	Name       *syncName                      `json:"name,omitempty"`
+	Issues     []stateIssue                   `json:"issues,omitempty"`
+	Exclusions []stateNamedLedgerIssue        `json:"exclusions,omitempty"`
+	Digests    map[string]stateRelationDigest `json:"relation_digests,omitempty"`
 }
 
 func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
@@ -51,23 +52,26 @@ func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
 	defer func() { err = errors.Join(err, s.close()) }()
 	result := stateInspection{Version: stateSchema, Unit: s.unit, Phases: []statePhase{}, Windows: []stateWindow{}}
 	if *name != "" {
-		if err = s.db.QueryRowContext(ctx, "SELECT first_id FROM catalog_page WHERE first_name<=? ORDER BY first_name DESC LIMIT 1", *name).Scan(id); err != nil {
-			return err
-		}
-		page, err := s.catalogPage("first_id=?", *id)
-		if err != nil {
-			return err
-		}
 		found := false
-		for ordinal, entry := range page {
-			if entry.Name == *name {
-				*id += int64(ordinal)
-				found = true
-				break
+		err = s.db.QueryRowContext(ctx, "SELECT first_id FROM catalog_page WHERE first_name<=? ORDER BY first_name DESC LIMIT 1", *name).Scan(id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			page, pageErr := s.catalogPage("first_id=?", *id)
+			if pageErr != nil {
+				return pageErr
+			}
+			for ordinal, entry := range page {
+				if entry.Name == *name {
+					*id += int64(ordinal)
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
-			return sql.ErrNoRows
+			*id = 0
 		}
 	}
 	if *id > 0 {
@@ -76,6 +80,9 @@ func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
 			return err
 		}
 		result.NameID, result.Name = *id, &n
+		if *name == "" {
+			*name = n.Name
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -127,6 +134,15 @@ func stateMain(ctx context.Context, args []string, out io.Writer) (err error) {
 		}
 		if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 			return err
+		}
+	}
+	if *name != "" {
+		result.Exclusions, err = readStateNamedLedgerIssues(tx, *name)
+		if err != nil {
+			return err
+		}
+		if result.Name == nil && len(result.Exclusions) == 0 {
+			return sql.ErrNoRows
 		}
 	}
 	if *hashes {
