@@ -430,22 +430,22 @@ func (j *syncJournal) guardPhase(r syncRow) error {
 	return errors.Join(err, writeErr)
 }
 
-func (s *syncer) hasPendingWindowSelections() bool {
+func (s *syncer) hasPendingWindowSelections() (bool, error) {
 	if !s.windowOnly() {
-		return false
+		return false, nil
 	}
-	resolved := s.resolvedWindowSelections()
-	for _, r := range s.j.rows {
-		if r.Kind != "window-selected" {
-			continue
-		}
+	saved, err := s.windowPersistence().load()
+	if err != nil {
+		return false, err
+	}
+	for _, r := range saved.selections {
 		for _, skip := range r.Skipped {
-			if !resolved[syncWindowSelectionKey{r.Round, r.Source}][skip.Name] && !s.o.issues.excluded(skip.Name) {
-				return true
+			if !saved.resolved[syncWindowSelectionKey{r.Round, r.Source}][skip.Name] && !s.o.issues.excluded(skip.Name) {
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // Stream budgets and verification batch boundaries do not invalidate a data
