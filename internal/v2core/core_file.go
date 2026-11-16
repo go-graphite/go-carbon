@@ -52,7 +52,14 @@ func (f *coreMeasuredFile) Write(p []byte) (int, error) {
 		}
 		return f.whole.Write(p)
 	}
-	return f.buffer.Write(p)
+	n, err := f.buffer.Write(p)
+	if err == nil && f.owner.stage != nil {
+		err = f.buffer.Flush()
+		if err == nil {
+			f.owner.stage("part-write")
+		}
+	}
+	return n, err
 }
 func (f *coreMeasuredFile) flush() error {
 	if f.whole == nil {

@@ -73,8 +73,18 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 				t.Fatal(err)
 			}
 			closed = true
-			if _, err = Open(root, cfg); err == nil {
-				t.Fatal("writable reopen without replay accepted")
+			if layer < 2 {
+				if _, err = Open(root, cfg); err == nil {
+					t.Fatal("non-durable reopen accepted")
+				}
+			} else {
+				recovered, e := Open(root, cfg)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = recovered.Close(); e != nil {
+					t.Fatal(e)
+				}
 			}
 			reader, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg), v2core.Hooks{})
 			if err != nil {
@@ -117,16 +127,17 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 					if _, err = io.ReadFull(file, b); err != nil {
 						t.Fatal(err)
 					}
-					frames, err := decoder.Decode(b)
-					if err != nil {
-						t.Fatal(err)
+					batches, cursor, err := DecodeApplications(b, &decoder, catalog, p, 2)
+					if err != nil || len(batches) != 2 || cursor != uint64((rounds+1)*2) {
+						t.Fatal("changed application packet", err)
 					}
-					if len(frames) != 2 {
-						t.Fatal(frames)
-					}
-					for i, f := range frames {
-						if f.Key != []string{"same.name", "other\x00name"}[i] || len(f.Points) != 1 || f.Clock != int64(100+rounds) || f.Points[0].Timestamp != int64(rounds-4) || math.Float64bits(f.Points[0].Value) != bits[(rounds+i)%len(bits)] {
-							t.Fatalf("journal changed round %d frame %#v", rounds, f)
+					for i, batch := range batches {
+						if batch.Clock != int64(100+rounds) || len(batch.Points) != 1 {
+							t.Fatal(batch)
+						}
+						point := batch.Points[0]
+						if point.Time != int64(rounds-4) || point.Bits != bits[(rounds+i)%len(bits)] || point.Seq != uint64(rounds+1) {
+							t.Fatal(point)
 						}
 					}
 					rounds++

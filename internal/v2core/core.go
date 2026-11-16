@@ -172,6 +172,8 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	stage func(string)
+
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
@@ -284,6 +286,11 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		opts.Experimental.TableCacheShards = 1
 		opts.BytesPerSync = 64 << 20
 		opts.EventListener = &pebble.EventListener{
+			TableCreated: func(info pebble.TableCreateInfo) {
+				if hooks.Stage != nil && info.Reason == "ingesting" {
+					hooks.Stage("ingest")
+				}
+			},
 			WriteStallBegin: func(pebble.WriteStallBeginInfo) { e.stalls.Add(1) },
 			CompactionBegin: func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_begin", dir, info.JobID) },
 			CompactionEnd:   func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_end", dir, info.JobID) },
@@ -292,7 +299,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -331,6 +338,7 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 			if err != nil {
 				return fail(err)
 			}
+			r.stage = hooks.Stage
 			o.plan = r.plan
 		}
 		// Only uncommitted staging files remain after successful atomic ingestion.
@@ -828,6 +836,9 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 }
 func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
 	sealStart := time.Now()
+	if o.stage != nil {
+		o.stage("seal")
+	}
 	coreTrace(o.trace, "seal_begin", o.dir, 0)
 	o.sealing.Store(true)
 	defer func() {
@@ -859,6 +870,22 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	phaseStart := time.Now()
 	if plan.ReplaceRaw {
 		// The replacement planner owns ordering and retention in its format.
+	} else if o.stage != nil {
+		observed := false
+		slices.SortFunc(head, func(a, b row) int {
+			if !observed {
+				observed = true
+				o.stage("sort")
+			}
+			pa, pb := corePartition(a.Time, o.cfg.PartitionSeconds), corePartition(b.Time, o.cfg.PartitionSeconds)
+			if pa < pb {
+				return -1
+			}
+			if pa > pb {
+				return 1
+			}
+			return less(a, b)
+		})
 	} else if o.radixSort {
 		o.sortScratch, o.radixWork = sortCoreRowsRadix(head, o.cfg.PartitionSeconds, o.sortScratch, o.radixWork)
 	} else if o.bucketSort {
@@ -1040,6 +1067,9 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		return 0, err
 	}
 	durable = true
+	if o.stage != nil {
+		o.stage("commit")
+	}
 	if plan.Commit != nil {
 		plan.Commit()
 	}

@@ -44,6 +44,10 @@ type coreSealPlan struct {
 	Abort func()
 }
 type coreHooks struct {
+	// Stage is an optional fault-injection observer for offline recovery tests.
+	// It runs on owner goroutines; callers must serialize their own observer.
+	Stage func(string)
+
 	OwnerCPUs []int
 	Publish   func(int, *pebble.Snapshot, []row) error
 	// PlanSeal is pure: no publication/mutation until Commit. Input buffers are
