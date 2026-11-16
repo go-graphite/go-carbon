@@ -119,6 +119,14 @@ func retainSealedPart(dir, path string, d v2part.Descriptor) (coreKV, []string, 
 		if !bytes.Equal(old, b) {
 			return coreKV{}, saved, errors.New("existing descriptor mismatch")
 		}
+		// The sidecar can outlive an interrupted data-link deletion. A
+		// newly recreated link still needs directory durability before binding.
+		if e = SyncPartDirectory(parts); e != nil {
+			return coreKV{}, saved, e
+		}
+		if e = SyncPartDirectory(dir); e != nil {
+			return coreKV{}, saved, e
+		}
 		key := append(bytes.Clone(sealedPartPrefix), d.SHA256[:]...)
 		return coreKV{Key: key, Value: b}, saved, nil
 	}
