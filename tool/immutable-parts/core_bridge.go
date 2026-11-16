@@ -3,6 +3,7 @@ package main
 // The replay adapter deliberately owns no storage engine implementation.
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,8 +24,9 @@ type coreSealPlan = v2core.SealPlan
 const recordBytes = 32
 
 type coreEngine struct {
-	engine *v2core.Engine
-	cfg    coreConfig
+	engine     *v2core.Engine
+	cfg        coreConfig
+	settlement *v2core.SettlementProbe
 }
 
 func openCore(root string, cfg coreConfig) (*coreEngine, error) {
@@ -32,7 +34,14 @@ func openCore(root string, cfg coreConfig) (*coreEngine, error) {
 }
 func openCoreWithHooks(root string, cfg coreConfig, h coreHooks) (*coreEngine, error) {
 	engine, err := v2core.Open(root, cfg, h)
-	return &coreEngine{engine: engine, cfg: cfg}, err
+	if err != nil {
+		return nil, err
+	}
+	probe, err := v2core.NewSettlementProbe(engine)
+	if err != nil {
+		return nil, errors.Join(err, engine.Close())
+	}
+	return &coreEngine{engine: engine, cfg: cfg, settlement: probe}, nil
 }
 func (e *coreEngine) submit(p int, rs []row, c uint64, s bool) error {
 	return e.engine.Append(p, rs, c, s)
@@ -86,7 +95,11 @@ func procStats() map[string]float64 {
 }
 
 func coreSample(e *coreEngine, stage string, start time.Time, offered uint64) map[string]any {
-	return v2core.Sample(e.engine, stage, start, offered)
+	sample := v2core.Sample(e.engine, stage, start, offered)
+	for k, v := range e.settlement.Sample() {
+		sample[k] = v
+	}
+	return sample
 }
 
 // Replay writes include the concurrently admitted live journal, generated SSTs

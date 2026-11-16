@@ -28,6 +28,11 @@ func retainedLiveCounts(root string, total uint64, producers int) ([]uint64, err
 		return nil, e
 	}
 	defer log.Close()
+	catalogs, e := openReplayCatalogs(filepath.Join(root, "log"), producers, false)
+	if e != nil {
+		return nil, e
+	}
+	defer closeReplayCatalogs(catalogs)
 	counts := make([]uint64, producers)
 	check := func(p int) error {
 		historical := uint64(0)
@@ -37,7 +42,16 @@ func retainedLiveCounts(root string, total uint64, producers int) ([]uint64, err
 		var seen uint64
 		var buffer []row
 		e := log.Replay(p, 0, func(r partlog.Record) error {
-			rows, e := decodeLogRowsInto(buffer, r.Payload)
+			var rows []row
+			var e error
+			if partlog.IsCatalogRecord(r.Payload) {
+				if len(catalogs) != producers {
+					return errors.New("missing numeric PDC4 catalog")
+				}
+				rows, e = catalogs[p].decode(buffer, r.Payload)
+			} else {
+				rows, e = decodeLogRowsInto(buffer, r.Payload)
+			}
 			buffer = rows
 			if e != nil {
 				return e
@@ -311,4 +325,107 @@ func TestRetainedCrashCoverage(t *testing.T) {
 	if _, e = retainedLiveCounts(root, 100004, 3); e == nil {
 		t.Fatal("accepted incomplete historical prefix")
 	}
+	cs, e := openReplayCatalogs(filepath.Join(root, "log"), 3, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	j, e := partlog.Open(filepath.Join(root, "log"), partlog.Options{Streams: 3})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for p := range 3 {
+		payload, err := cs[p].encode([]row{{ID: uint64(p), Seq: 100003 + uint64(p)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = j.Append(p, 0, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e = errors.Join(j.Close(), closeReplayCatalogs(cs)); e != nil {
+		t.Fatal(e)
+	}
+	counts, e = retainedLiveCounts(root, 100003, 3)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, n := range counts {
+		if n != 1 {
+			t.Fatal("PDC4 retained live prefix", counts)
+		}
+	}
+}
+
+// Recover an externally interrupted benchmark without manufacturing its durable
+// frontier. The receipt must have been emitted before the interruption.
+func TestRecoverRetainedCorpus(t *testing.T) {
+	root := os.Getenv("PARTLOG_RECOVER_ROOT")
+	if root == "" {
+		t.Skip("offline retained-corpus recovery")
+	}
+	total, err := strconv.ParseUint(os.Getenv("PARTLOG_BENCH_POINTS"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producers, err := strconv.Atoi(os.Getenv("PARTLOG_BENCH_PRODUCERS"))
+	if err != nil || producers < 1 {
+		t.Fatal("invalid producers", err)
+	}
+	owners, err := strconv.Atoi(os.Getenv("PARTLOG_BENCH_OWNERS"))
+	if err != nil || owners < 1 {
+		t.Fatal("invalid owners", err)
+	}
+	data, err := os.ReadFile(os.Getenv("PARTLOG_RECOVER_ACK"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack struct {
+		Identity string   `json:"identity"`
+		Counts   []uint64 `json:"live_counts"`
+	}
+	if err = json.Unmarshal(data, &ack); err != nil || ack.Identity == "" || len(ack.Counts) != producers {
+		t.Fatal("invalid pre-interruption receipt", err)
+	}
+	data, err = os.ReadFile(filepath.Join(root, "log", "IDENTITY"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity struct{ ID string }
+	if err = json.Unmarshal(data, &identity); err != nil || identity.ID != ack.Identity {
+		t.Fatal("receipt identity mismatch", err)
+	}
+	counts, err := retainedLiveCounts(root, total, producers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retained uint64
+	for p, n := range counts {
+		if n < ack.Counts[p] {
+			t.Fatalf("stream%d lost acknowledged prefix: retained%d ack%d", p, n, ack.Counts[p])
+		}
+		retained += n
+	}
+	data, err = json.Marshal(counts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "live-counts.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := coreConfig{AppendParts: true, Shards: owners, Producers: producers, MaxRows: 1 << 20, PartitionSeconds: 3600, RawCodec: os.Getenv("CORE_RAW_CODEC")}
+	l, err := openLoggedCore(filepath.Join(root, "log"), filepath.Join(root, "parts"), cfg, partlog.Options{ReadAheadBytes: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = l.replay()
+	err = errors.Join(err, l.close())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyLogBenchmark(root, total, 36000000, producers, owners, func(stage string, points uint64, extra map[string]any) {
+		t.Logf("%s points%d %v", stage, points, extra)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("retained_corpus_recovered historical%d live%d durable_ack_exact=true raw_exact=true", total, retained)
 }

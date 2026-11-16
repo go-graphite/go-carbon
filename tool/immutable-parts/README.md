@@ -306,9 +306,10 @@ The journal harness imports `internal/v2core`; it does not retain its own copy
 of the owner engine. Five-second samples cover historical replay, accepted live
 suffix drain, compaction settlement and final close. The close phase reports
 process progress and the last preclose debt snapshot, because closed databases
-cannot be sampled. Settlement requires five consecutive 200ms observations with
+cannot be sampled. Finite-run settlement requires five consecutive 200ms observations with
 zero estimated compaction debt, active compactions and active flushes, after
-all stream durability barriers complete. The settled rate includes close.
+all stream durability barriers complete. Continuous runs of at least 600s use
+the Pebble-threshold rule below. The settled rate includes close.
 
 `TestLogSIGKILLRandomReplay` kills a child at three distinct seeded journal-record
 offsets and verifies every recovered persisted row for coverage, uniqueness,
@@ -342,7 +343,7 @@ and frontier SST file bytes, Pebble compaction-output file bytes, and the proces
 `write_bytes` delta divided by historical plus accepted live points. File sizes
 and process block writes are distinct counters; their difference includes
 allocation, rounding, manifest and other write effects. Final estimated debt is
-reported verbatim; a nonzero residual still fails the strict settlement gate.
+reported verbatim; a nonzero residual still fails the finite-run strict settlement gate. Continuous runs of at least600s use the Pebble-threshold rule below.
 
 `PARTLOG_BENCH_FINAL_COMPACT=1` selects a separate terminal measurement: close
 the owner engine after the live suffix drains, reopen the disposable databases,
@@ -350,7 +351,7 @@ explicitly compact the entire raw/frontier key range, require five consecutive
 zero-debt/zero-active observations, then close again. Its reported rate and
 process writes include every reopen, compaction and close. Label this as explicit
 offline final compaction; it does not establish natural background settlement or
-continuous steady-state behavior. The default natural-settlement gate is unchanged.
+continuous steady-state behavior. Finite runs retain the strict zero-debt gate; continuous runs use the rule below.
 
 ### Full-corpus replay qualification
 
@@ -389,9 +390,8 @@ rate over the complete settled elapsed time, accepted live rate, process-written
 bytes per historical-plus-live point, and unadjusted debt near five and ten
 minutes after the boundary. State the actual sample times and show the final
 five-minute debt trend together with L0 file counts, compaction activity and
-write stalls. A flat nonzero estimate is distinct from the harness's strict
-zero-debt settlement check; preserve its failure rather than subtracting a
-residual or invoking terminal compaction.
+write stalls. Finite runs retain the strict zero-debt check. Continuous runs
+use the declared Pebble-threshold rule below; report residual debt verbatim.
 
 The complete elapsed historical rate includes the deliberately extended live
 observation: a 3.6-billion-point history followed by 600 seconds of observation
@@ -399,3 +399,46 @@ cannot exceed six million historical points/second on that denominator. Report
 the boundary rate separately when assessing catch-up capacity. Fixture creation,
 validated fixture resume and the post-run raw/rendered oracles are separate
 phases, outside both replay denominators.
+
+
+### Continuous settlement and PDC4 live intake
+
+`PARTLOG_BENCH_LIVE_SECONDS=600 PARTLOG_LIVE_CODEC=pdc4` exercises the new
+live journal in the existing history-plus-live benchmark. Historical `NLOG0001`
+records remain readable. PDC4 is used only for the numeric adapter: the eight-byte
+key preserves ID, the clock lane preserves sequence bits, and the point preserves
+signed timestamp and IEEE value bits. `corpus.json` remains the identity-bound
+name/policy/original-clock authority. This is not production name admission.
+Each record starts an independent predictor epoch, allowing cursor seeks and
+segment retirement without a predictor pre-roll. Each stream owns its durable
+catalog; new definitions sync before their referencing journal append. Catalog
+publication/lookup serialize only within that journal stream; storage owners and
+render readers never take that mutex. Journal bytes include all catalog files.
+
+For continuous runs of at least600s, natural settlement requires five consecutive
+observations200ms apart satisfying all of:
+
+- No active Pebble compactions or flushes.
+- Every DB's L0 sublevels strictly below its configured compaction threshold.
+- Aggregate estimated debt strictly below one target file, using the smallest
+  configured target across DBs and levels.
+- Absolute OLS debt slope across the last ten minutes within a declared noise
+  budget: `min(target_file_bytes /100, 65536) /600` bytes/s. The window retains
+  its preceding sample, so its span is at least600s; the five-second live cadence
+  can extend it by one sample interval.
+
+Thresholds come from each open DB's persisted Pebble OPTIONS, parsed once by
+Pebble itself. Samples report thresholds, residual debt, maximum L0 sublevels,
+signed slope, noise allowance and window duration. No debt is subtracted and no
+explicit compaction is requested. With a2MiB target, the noise allowance is
+34.95B/s (1% of one file over ten minutes). Finite or shorter runs retain the
+strict zero-debt/zero-active gate. Rates still include live observation, drain,
+settlement and close; boundary and complete-elapsed replay rates stay separate.
+
+`TestRecoverRetainedCorpus` recovers an externally interrupted benchmark using
+`PARTLOG_RECOVER_ROOT` and a pre-interruption `durable_ack_frontier` JSON receipt
+at `PARTLOG_RECOVER_ACK`, plus the existing point/producer/owner variables. It
+checks journal identity, every retained producer prefix and acknowledged lower
+bound, replays through the normal adapter and checks every raw row. Run
+`TestFullScaleRenderedCorpus` afterward for the rendered sample. This recovery
+probe does not establish uninterrupted live duration or natural settlement.

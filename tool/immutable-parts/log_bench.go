@@ -269,6 +269,13 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	if err != nil {
 		return err
 	}
+	var catalogs []*replayCatalog
+	if os.Getenv("PARTLOG_LIVE_CODEC") == "pdc4" {
+		catalogs, err = openReplayCatalogs(filepath.Join(root, "log"), cfg.Producers, true)
+		if err != nil {
+			return errors.Join(err, journal.Close())
+		}
+	}
 	emit("journal_admission_open", 0, nil)
 	stop := make(chan struct{})
 	done := make(chan error, cfg.Producers)
@@ -337,7 +344,16 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 					seq := total + (sent+uint64(i))*uint64(cfg.Producers) + uint64(p)
 					rows[i] = row{ID: seq % metrics, Time: 1800000000 + int64(seq/rate), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
 				}
-				payload = encodeLogRowsInto(payload, rows)
+				if catalogs != nil {
+					var encodeErr error
+					payload, encodeErr = catalogs[p].encode(rows)
+					if encodeErr != nil {
+						done <- encodeErr
+						return
+					}
+				} else {
+					payload = encodeLogRowsInto(payload, rows)
+				}
 				if _, err := journal.Append(p, time.Now().Unix(), payload); err != nil {
 					done <- err
 					return
@@ -363,8 +379,9 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		}
 		close(ackStop)
 		receipts.Wait()
-		return err // attachLoggedCore closed the journal on failure.
+		return errors.Join(err, closeReplayCatalogs(catalogs)) // attachLoggedCore closed the journal on failure.
 	}
+	l.catalogs = catalogs
 	emit("storage_open_complete", 0, nil)
 	ready := l.startReplay(context.Background())
 	tick := time.NewTicker(5 * time.Second)
@@ -380,6 +397,8 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	}
 	backlogSeconds := time.Since(replayStart).Seconds()
 	boundaryLive := live.Load()
+	var settlement replaySettlement
+	settlement.observe(time.Since(replayStart), coreSample(l.engine, "boundary", start, total+boundaryLive))
 	emit("historical_boundary", total, map[string]any{"backlog_seconds": backlogSeconds, "backlog_mpoints_per_second": float64(total) / backlogSeconds / 1e6, "live_accepted": boundaryLive})
 	if err == nil && continuous > 0 {
 		until := time.NewTimer(continuous)
@@ -390,6 +409,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 				observing = false
 			case <-tick.C:
 				sample := coreSample(l.engine, "natural_live", start, total+live.Load())
+				settlement.observe(time.Since(replayStart), sample)
 				sample["post_boundary_seconds"] = time.Since(replayStart).Seconds() - backlogSeconds
 				sample["live_accepted"] = live.Load()
 				emit("replay_live_background_sample", total+live.Load(), sample)
@@ -442,9 +462,9 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 	settled := false
 	quiet := 0
 	for time.Now().Before(deadline) {
-		busy := false
 		snapshot := coreSample(l.engine, "settling", start, total+live.Load())
-		busy = snapshot["estimated_debt_bytes"].(uint64) > 0 || snapshot["compactions_in_progress"].(int64) > 0 || snapshot["flushes_in_progress"].(int64) > 0
+		settlement.observe(time.Since(replayStart), snapshot)
+		busy := !settlement.assess(snapshot, continuous >= 600*time.Second)
 		select {
 		case <-tick.C:
 			emit("replay_live_settle_sample", total+live.Load(), snapshot)
@@ -463,6 +483,7 @@ func logReplayLive(root string, cfg coreConfig, opts partlog.Options, total, met
 		time.Sleep(200 * time.Millisecond)
 	}
 	sample := coreSample(l.engine, "settled", start, total+live.Load())
+	settlement.assess(sample, continuous >= 600*time.Second)
 	if e := replayWriteStages(root, sample); e != nil {
 		err = errors.Join(err, e)
 	}

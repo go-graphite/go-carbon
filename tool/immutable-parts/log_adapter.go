@@ -23,6 +23,7 @@ type loggedCore struct {
 	followers chan error
 	failure   atomic.Pointer[logApplyFailure]
 	rows      [][]row
+	catalogs  []*replayCatalog
 }
 
 func openLoggedCore(logDir, partDir string, cfg coreConfig, opts partlog.Options) (*loggedCore, error) {
@@ -34,7 +35,15 @@ func openLoggedCoreWithHooks(logDir, partDir string, cfg coreConfig, opts partlo
 	if err != nil {
 		return nil, err
 	}
-	return attachLoggedCore(log, partDir, cfg, hooks)
+	l, err := attachLoggedCore(log, partDir, cfg, hooks)
+	if err != nil {
+		return nil, err
+	}
+	l.catalogs, err = openReplayCatalogs(logDir, cfg.Producers, false)
+	if err != nil {
+		return nil, errors.Join(err, l.close())
+	}
+	return l, nil
 }
 
 // attachLoggedCore transfers journal ownership to the adapter. Intake may use
@@ -172,7 +181,16 @@ func (l *loggedCore) apply(producer int, r partlog.Record, seal bool) error {
 	if producer < 0 || producer >= len(l.rows) {
 		return os.ErrInvalid
 	}
-	rows, e := decodeLogRowsInto(l.rows[producer], r.Payload)
+	var rows []row
+	var e error
+	if partlog.IsCatalogRecord(r.Payload) {
+		if len(l.catalogs) != len(l.rows) {
+			return errors.New("missing numeric PDC4 catalog")
+		}
+		rows, e = l.catalogs[producer].decode(l.rows[producer], r.Payload)
+	} else {
+		rows, e = decodeLogRowsInto(l.rows[producer], r.Payload)
+	}
 	if e != nil {
 		return e
 	}
@@ -325,7 +343,7 @@ func (l *loggedCore) stopReplay() error {
 	return errors.Join(err, l.replay())
 }
 func (l *loggedCore) close() error {
-	return errors.Join(l.stopReplay(), l.engine.close(), l.journal.Close())
+	return errors.Join(l.stopReplay(), l.engine.close(), l.journal.Close(), closeReplayCatalogs(l.catalogs))
 }
 
 // Owners may still be sealing when followers stop; only atomic published
