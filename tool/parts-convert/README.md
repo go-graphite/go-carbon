@@ -153,7 +153,9 @@ parts-convert -pack-copy /private/converted -pack-apply -pack-mib 32 \
 ```
 
 The source remains untouched. Output is built in `packing-next` with automatic
-compactions disabled, then read back completely. Canonical key/value SHA-256,
+compactions disabled, then read back completely. Conversion resumes also disable
+automatic target compaction so stock splitting cannot undo the physical boundary.
+Canonical key/value SHA-256,
 record/occupied-slot counts and metadata must agree. Actual output SST bounds
 are checked against the transfer boundary. A destination-bound `PACKING.json`
 journal records verification before the directory swap. Conversion and oracle

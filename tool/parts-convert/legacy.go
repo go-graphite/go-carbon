@@ -127,7 +127,9 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 	if err != nil {
 		return r, err
 	}
-	db, err := pebble.Open(filepath.Join(targetPath, "parts"), &pebble.Options{})
+	// Stock automatic compaction may merge adjacent transfer boundaries on a
+	// later resume. Explicit offline packing owns that policy for this copy.
+	db, err := pebble.Open(filepath.Join(targetPath, "parts"), packingOptions(false))
 	if err != nil {
 		return r, err
 	}
