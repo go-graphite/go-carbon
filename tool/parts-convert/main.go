@@ -46,13 +46,14 @@ type result struct {
 
 func main() {
 	c := config{}
-	packTarget := flag.String("pack-copy", "", "offline converted target: inventory or repack physical SSTs within exact transfer boundaries")
+	packTarget := flag.String("pack-copy", "", "offline converted target: inventory or repack SSTs with indexed transfer key ranges")
 	packSource := flag.String("pack-source", "", "offline legacy source path used only for original-allocation admission")
 	packApply := flag.Bool("pack-apply", false, "apply verified offline SST packing (default inventories only)")
-	packMiB := flag.Uint64("pack-mib", 32, "maximum uncompressed packed SST payload in MiB; boundary tails remain smaller")
+	packMiB := flag.Uint64("pack-mib", 32, "maximum uncompressed packed SST payload in MiB")
 	pruneCopy := flag.String("prune-reclaimed-copy", "", "offline converted directory: remove redundant unit receipts only after exact comparison with durable reclaimed batch authority")
 	realCapture := flag.String("capture-real-copy", "", "offline COPY: save a seeded 2000-name pre-conversion render oracle")
 	realVerify := flag.String("verify-real-copy", "", "offline legacy COPY: verify completed mixed renders against the saved oracle")
+	realPartial := flag.Bool("verify-partial-real-copy", false, "verify frozen queries across published parts and remaining legacy; report incomplete coverage explicitly")
 	realOraclePath := flag.String("real-oracle", "", "pre-conversion real render oracle path")
 	realSource := flag.String("real-source-render", "", "optional read-only source render origin for exact differential verification")
 	baseline := flag.Bool("compare-coldpack", false, "compare actual legacy cold-pack and converted SST bytes on identical stored slots")
@@ -99,13 +100,18 @@ func main() {
 		return
 	}
 	if *realCapture != "" || *realVerify != "" {
+		if *legacyIO == 0 || *legacyIO > 10000 {
+			fmt.Fprintln(os.Stderr, "ERROR: invalid real-copy IO cap")
+			os.Exit(1)
+		}
+		vfs.Default = newPacedFS(vfs.Default, *legacyIO*1_000_000)
 		var err error
 		if *realCapture != "" && *realVerify != "" {
 			err = errors.New("select capture or verify, not both")
 		} else if *realCapture != "" {
 			err = captureReal(context.Background(), *realCapture, *realOraclePath)
 		} else {
-			err = verifyReal(context.Background(), *realVerify, c.dir, *realOraclePath, *realSource)
+			err = verifyReal(context.Background(), *realVerify, c.dir, *realOraclePath, *realSource, *realPartial)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ERROR:", err)

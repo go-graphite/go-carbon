@@ -119,6 +119,16 @@ verified first. Persisted receipts are reverified against the actual target on
 recovery, before source deletion. A pending plan survives deletion of its source
 catalog and prevents starting another batch until reclamation finishes.
 
+An older saved plan larger than the current aggregate budget is persisted as a
+parent with bounded contiguous child batches. The original plan, journal, unit
+tokens and receipts remain authority. Each child charges complete original
+shards, reuses their durable output, verifies it again, publishes only that
+lexical prefix, and physically reclaims only its frozen names before advancing.
+The parent stays active until every child is reclaimed. A single original shard
+larger than the budget still refuses; no byte cap is silently increased. Child
+publication receipts may reference a complete original shard containing later
+names; the child plan and cursor define published coverage, never table bounds.
+
 `ReaderGate` fences new reads and drains existing whole-request pins. The physical
 adapter closes the read-only Pebble handle, acquires the exclusive writable
 handle with the existing comparer/merger, validates remaining catalog/revision

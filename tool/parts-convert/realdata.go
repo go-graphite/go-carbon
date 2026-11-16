@@ -211,7 +211,8 @@ func sourceReal(ctx context.Context, base string, q realQuery) error {
 	return compareRealSeries(q, m.StartTime, m.StopTime, m.StepTime, m.Values)
 }
 
-func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceURL string) error {
+func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceURL string, partial ...bool) error {
+	allowPartial := len(partial) > 0 && partial[0]
 	unlockPacking, err := packingLock(targetPath)
 	if err != nil {
 		return err
@@ -243,29 +244,12 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	if err = cursor.Validate(); err != nil {
 		return err
 	}
-	rangeComplete := false
-	if !cursor.Done {
-		b, err := os.ReadFile(filepath.Join(targetPath, "ranges", "state.json"))
-		if err != nil {
-			return errors.New("conversion is incomplete")
-		}
-		var state rangeState
-		if err = json.Unmarshal(b, &state); err != nil {
-			return err
-		}
-		sourceID, err := os.ReadFile(filepath.Join(legacyPath, "CONVERSION-SOURCE"))
-		if err != nil {
-			return err
-		}
-		targetID, err := os.ReadFile(filepath.Join(targetPath, "CONVERSION-TARGET"))
-		if err != nil {
-			return err
-		}
-		if state.Version != 1 || !state.Done || state.Active != nil || state.Source != strings.TrimSpace(string(sourceID)) || state.Destination != strings.TrimSpace(string(targetID)) {
-			return errors.New("ID-range conversion is incomplete or identity changed")
-		}
-		cursor = mixedread.Cursor{Version: 1, Done: true}
-		rangeComplete = true
+	covered, rangeComplete, err := realCoverage(targetPath, legacyPath, oracle.Queries, cursor)
+	if err != nil {
+		return err
+	}
+	if !cursor.Done && !rangeComplete && !allowPartial {
+		return errors.New("conversion is incomplete")
 	}
 
 	o, _, err := realOptions(legacyPath, oracle.Now)
@@ -320,7 +304,7 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 			return e
 		}
 		q, ok := queries[string(key.Metric)]
-		if !ok {
+		if !ok || !covered[q.Name] {
 			continue
 		}
 		stored, archive, ps, e := partsconvert.DecodeArchive(it.Value())
@@ -345,9 +329,26 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	if err = errors.Join(it.Error(), it.Close()); err != nil {
 		return err
 	}
-	if len(metrics) != len(queries) {
-		return errors.New("sampled names are missing from the converted archive catalogue")
+	convertedCount := len(covered)
+	if len(metrics) != convertedCount {
+		return errors.New("published sampled names are missing from converted archives")
 	}
+	legacyMetrics := make(map[string]partsread.Metric)
+	for _, q := range oracle.Queries {
+		if covered[q.Name] {
+			continue
+		}
+		m, e := legacy.Metadata(ctx, q.Name)
+		if e != nil {
+			return fmt.Errorf("unconverted sample %s: %w", q.Name, e)
+		}
+		metric := partsread.Metric{ID: q.Metric.ID, AggregationMethod: m.AggregationMethod.String(), XFilesFactor: m.XFilesFactor}
+		for _, a := range m.Retentions {
+			metric.Archives = append(metric.Archives, partsread.Archive{Step: int64(a.Step), Points: int64(a.Count)})
+		}
+		legacyMetrics[q.Name] = metric
+	}
+	legacyCatalog := partsread.CatalogFuncs{LookupFunc: func(n string) (partsread.Metric, bool) { m, ok := legacyMetrics[n]; return m, ok }, FindFunc: catalog.FindFunc}
 	index, err := partsread.NewSlotIndex(blocks, func(ctx context.Context, key []byte, _ []partsread.SlotRange, y func(partsread.Sample) error) error {
 		v, closer, e := db.Get(key)
 		if e != nil {
@@ -374,7 +375,12 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	publication := new(partsread.Publication)
 	publication.Publish(partsread.View{Catalog: catalog, Parts: []partsread.Source{index}, RetainedBytes: index.RetainedBytes()})
 	defer publication.Close()
-	reader, err := mixedread.New(mixedread.Options{Legacy: legacy, LegacyCatalog: catalog, UnifiedCatalog: true, Converted: &cursor, Now: func() time.Time { return time.Unix(oracle.Now, 0) }, Parts: partsread.Adapter{Catalog: publication, Select: func(string) *partsread.Publication { return publication }, Budget: partsread.NewBudget(1 << 30), WorkBytes: 64 << 20}})
+	reader, err := mixedread.New(mixedread.Options{Legacy: legacy, LegacyCatalog: legacyCatalog, SuppressLegacy: func(n string) bool { return covered[n] }, Now: func() time.Time { return time.Unix(oracle.Now, 0) }, Parts: partsread.Adapter{Catalog: publication, Select: func(n string) *partsread.Publication {
+		if covered[n] {
+			return publication
+		}
+		return nil
+	}, Budget: partsread.NewBudget(1 << 30), WorkBytes: 64 << 20}})
 	if err != nil {
 		return err
 	}
@@ -426,16 +432,101 @@ func verifyReal(ctx context.Context, legacyPath, targetPath, oraclePath, sourceU
 	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
 		Names                       int
+		ConvertedNames, LegacyNames int
+		Partial                     bool
 		Seed                        int64
 		MixedExact, LiveSourceExact bool
 		LegacyP99NS, ConvertedP99NS int64
 		CapturedLegacyP99NS         int64
 		PairedQueries               int
 		LatencyComparison           string
-	}{len(oracle.Queries), oracle.Seed, true, sourceURL != "", percentile(legacyNS, 99), percentile(convertedNS, 99), percentile(capturedNS, 99), func() int {
+	}{len(oracle.Queries), convertedCount, len(oracle.Queries) - convertedCount, !cursor.Done && !rangeComplete, oracle.Seed, true, sourceURL != "", percentile(legacyNS, 99), percentile(convertedNS, 99), percentile(capturedNS, 99), func() int {
 		if sourceURL != "" {
 			return len(oracle.Queries)
 		}
 		return 0
 	}(), comparison})
+}
+
+// Only durable publication authority chooses v2; staged target keys never do.
+func realCoverage(target, source string, queries []realQuery, cursor mixedread.Cursor) (map[string]bool, bool, error) {
+	covered := make(map[string]bool)
+	for _, q := range queries {
+		if cursor.Suppresses(q.Name) {
+			covered[q.Name] = true
+		}
+	}
+	sid, err := os.ReadFile(filepath.Join(source, "CONVERSION-SOURCE"))
+	if err != nil {
+		return nil, false, err
+	}
+	tid, err := os.ReadFile(filepath.Join(target, "CONVERSION-TARGET"))
+	if err != nil {
+		return nil, false, err
+	}
+	sourceID, targetID := strings.TrimSpace(string(sid)), strings.TrimSpace(string(tid))
+	nameCursor, _, err := partsconvert.NameState(filepath.Join(target, "names"))
+	if err != nil {
+		return nil, false, err
+	}
+	if nameCursor.Version != 0 && (nameCursor.Source != sourceID || nameCursor.Destination != targetID) {
+		return nil, false, errors.New("oracle name cursor identity mismatch")
+	}
+	var state rangeState
+	data, err := os.ReadFile(filepath.Join(target, "ranges", "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return covered, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if err = json.Unmarshal(data, &state); err != nil {
+		return nil, false, err
+	}
+	if state.Version != 1 || state.Source != sourceID || state.Destination != targetID || state.Done && state.Active != nil {
+		return nil, false, errors.New("oracle range identity mismatch")
+	}
+	wanted := make(map[string]bool)
+	for _, q := range queries {
+		wanted[q.Name] = true
+	}
+	add := func(r partsconvert.NameReceipt) error {
+		if r.Version != 1 || r.Plan.Source != sourceID || r.Cursor.Source != sourceID || r.Cursor.Destination != targetID || (r.State != "published" && r.State != "reclaimed") {
+			return errors.New("oracle range receipt identity mismatch")
+		}
+		for _, m := range r.Plan.Metrics {
+			if wanted[string(m.Name)] {
+				covered[string(m.Name)] = true
+			}
+		}
+		return nil
+	}
+	paths, err := filepath.Glob(filepath.Join(target, "ranges", "reclaimed-*.json"))
+	if err != nil {
+		return nil, false, err
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false, err
+		}
+		var r partsconvert.NameReceipt
+		if err = json.Unmarshal(data, &r); err != nil {
+			return nil, false, err
+		}
+		if err = add(r); err != nil {
+			return nil, false, err
+		}
+	}
+	if state.Active != nil && state.Active.State != "building" {
+		if err = add(*state.Active); err != nil {
+			return nil, false, err
+		}
+	}
+	if state.Done {
+		for _, q := range queries {
+			covered[q.Name] = true
+		}
+	}
+	return covered, state.Done, nil
 }

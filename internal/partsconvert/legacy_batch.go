@@ -32,6 +32,8 @@ type NameReceipt struct {
 	Cursor  NameCursor
 	State   string
 	Units   []Receipt
+	// Batches preserve the original plan and unit identities during a bounded resume.
+	Batches []NameReceipt `json:",omitempty"`
 }
 
 // NameConverter verifies all shards of a global name batch before publishing a
@@ -88,7 +90,7 @@ func (c *NameConverter) Run(ctx context.Context, plan LegacyPlan) (NameReceipt, 
 		return r, errors.New("name batch journal identity mismatch")
 	}
 	switch r.State {
-	case "building", "ready", "published", "reclaimed":
+	case "building", "splitting", "ready", "published", "reclaimed":
 	default:
 		return r, errors.New("invalid global name cursor state")
 	}
@@ -99,6 +101,9 @@ func (c *NameConverter) Run(ctx context.Context, plan LegacyPlan) (NameReceipt, 
 			}
 		}
 		return r, clearActivePlan(c.Directory, plan)
+	}
+	if r.State == "splitting" {
+		return c.runSplit(ctx, path, r)
 	}
 	var current NameCursor
 	err = readJSON(filepath.Join(c.Directory, "name-cursor.json"), &current)
@@ -146,15 +151,57 @@ func (c *NameConverter) Run(ctx context.Context, plan LegacyPlan) (NameReceipt, 
 	units := plan.Units()
 	if r.State == "building" {
 		var total uint64
+		bounds := make(map[uint16]uint64)
 		for _, u := range units {
 			n, err := c.Converter.Source.Estimate(ctx, u)
 			if err != nil {
 				return r, err
 			}
-			if n > c.MaxOutputBytes-total {
-				return r, errors.New("global name batch exceeds aggregate output budget")
+			if n > c.MaxOutputBytes {
+				return r, errors.New("global name shard exceeds output budget")
+			}
+			bounds[u.VShard] = n
+			if total > ^uint64(0)-n {
+				return r, errors.New("global name estimate overflows")
 			}
 			total += n
+		}
+		if total > c.MaxOutputBytes {
+			// Persist the complete frozen authority before doing any child work.
+			// Charge full original shards: a shard shared by children is built
+			// once, with its original token, before any of its names are deleted.
+			for start := 0; start < len(plan.Metrics); {
+				end, used := start, uint64(0)
+				seen := make(map[uint16]bool)
+				for end < len(plan.Metrics) {
+					shard := partsformat.Route(partsformat.ID(plan.Metrics[end].Name))
+					if !seen[shard] {
+						if bounds[shard] > c.MaxOutputBytes-used {
+							break
+						}
+						used += bounds[shard]
+						seen[shard] = true
+					}
+					end++
+				}
+				child := plan
+				child.Metrics = plan.Metrics[start:end]
+				if start > 0 {
+					child.Lower = bytes.Clone(plan.Metrics[start].Name)
+				}
+				if end < len(plan.Metrics) {
+					child.Upper, child.Final = bytes.Clone(plan.Metrics[end].Name), false
+				}
+				cursor := r.Cursor
+				cursor.Before, cursor.Done = bytes.Clone(child.Upper), child.Final
+				r.Batches = append(r.Batches, NameReceipt{Version: 1, Plan: child, Cursor: cursor, State: "building"})
+				start = end
+			}
+			r.State = "splitting"
+			if err := writeJSON(path, r); err != nil {
+				return r, err
+			}
+			return c.runSplit(ctx, path, r)
 		}
 		r.Units = nil
 		// Do not mutate the caller's converter while installing the coverage
@@ -379,4 +426,157 @@ func (r LegacyReclaimer) Reclaim(ctx context.Context, receipt NameReceipt) error
 		}
 		return errors.Join(err, db.Close())
 	}, r.ReopenReaders)
+}
+
+// runSplit keeps the parent active plan, all original unit journals and all
+// pending deletion authority. Only verified lexical prefixes advance the cursor.
+func (c *NameConverter) runSplit(ctx context.Context, path string, r NameReceipt) (NameReceipt, error) {
+	if len(r.Batches) < 2 {
+		return r, errors.New("invalid split name journal")
+	}
+	position := 0
+	for i, child := range r.Batches {
+		if len(child.Plan.Metrics) == 0 || position+len(child.Plan.Metrics) > len(r.Plan.Metrics) {
+			return r, errors.New("invalid split coverage")
+		}
+		want := r.Plan
+		want.Metrics = r.Plan.Metrics[position : position+len(child.Plan.Metrics)]
+		if position > 0 {
+			want.Lower = bytes.Clone(r.Plan.Metrics[position].Name)
+		}
+		position += len(child.Plan.Metrics)
+		if position < len(r.Plan.Metrics) {
+			want.Upper = bytes.Clone(r.Plan.Metrics[position].Name)
+			want.Final = false
+		}
+		a, _ := json.Marshal(want)
+		b, _ := json.Marshal(child.Plan)
+		cursor := r.Cursor
+		cursor.Before = want.Upper
+		cursor.Done = want.Final
+		x, _ := json.Marshal(cursor)
+		y, _ := json.Marshal(child.Cursor)
+		if !bytes.Equal(a, b) || !bytes.Equal(x, y) || child.Version != 1 {
+			return r, errors.New("split authority changed")
+		}
+		switch child.State {
+		case "building", "ready", "published", "reclaimed":
+		default:
+			return r, errors.New("invalid split state")
+		}
+		if i > 0 && r.Batches[i-1].State != "reclaimed" && child.State != "building" {
+			return r, errors.New("split cursor skipped reclamation")
+		}
+	}
+	if position != len(r.Plan.Metrics) {
+		return r, errors.New("split coverage is incomplete")
+	}
+	var current NameCursor
+	if err := readJSON(filepath.Join(c.Directory, "name-cursor.json"), &current); err == nil {
+		if current.Version != 1 || current.Source != r.Plan.Source || current.Destination != r.Cursor.Destination {
+			return r, errors.New("split cursor identity changed")
+		}
+		valid := current.Batch != r.Cursor.Batch && !current.Done && bytes.Equal(current.Before, r.Plan.Lower)
+		for _, child := range r.Batches {
+			if current.Batch == child.Cursor.Batch && current.Done == child.Cursor.Done && bytes.Equal(current.Before, child.Cursor.Before) && child.State != "building" {
+				valid = true
+			}
+		}
+		if !valid {
+			return r, errors.New("split cursor would skip or regress coverage")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) || len(r.Plan.Lower) != 0 {
+		return r, errors.New("split cursor is missing or unreadable")
+	}
+	base := c.Converter
+	worker := &Converter{Directory: base.Directory, Source: plannedSource{Source: base.Source, plan: r.Plan}, Target: base.Target, Space: base.Space, ChunkBytes: base.ChunkBytes, MaxTables: base.MaxTables}
+	original := make(map[uint16]Unit)
+	for _, u := range r.Plan.Units() {
+		original[u.VShard] = u
+	}
+	for i := range r.Batches {
+		child := &r.Batches[i]
+		if child.State == "reclaimed" {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return r, err
+		}
+		if child.State == "building" {
+			child.Units = nil
+			for _, u := range child.Plan.Units() {
+				receipt, err := worker.Run(ctx, original[u.VShard])
+				if err != nil {
+					return r, err
+				}
+				child.Units = append(child.Units, receipt)
+			}
+			child.State = "ready"
+			if err := writeJSON(path, r); err != nil {
+				return r, err
+			}
+		}
+		if len(child.Units) != len(child.Plan.Units()) {
+			return r, errors.New("split has incomplete receipts")
+		}
+		for j, unit := range child.Units {
+			u := original[child.Plan.Units()[j].VShard]
+			if unit.Unit != u || unit.Source != r.Plan.Source || unit.Destination != r.Cursor.Destination || unit.State != "ready" {
+				return r, errors.New("invalid split unit receipt")
+			}
+			if err := base.Target.Verify(ctx, unit.Tables); err != nil {
+				return r, err
+			}
+		}
+		if child.State == "ready" {
+			if err := writeJSON(filepath.Join(c.Directory, "name-cursor.json"), child.Cursor); err != nil {
+				return r, err
+			}
+		}
+		if err := c.Publish(ctx, *child); err != nil {
+			return r, err
+		}
+		child.State = "published"
+		if err := writeJSON(path, r); err != nil {
+			return r, err
+		}
+		if c.Checkpoint != nil {
+			if err := c.Checkpoint("split-published"); err != nil {
+				return r, err
+			}
+		}
+		if err := c.Reclaim(ctx, *child); err != nil {
+			return r, err
+		}
+		child.State = "reclaimed"
+		if err := writeJSON(path, r); err != nil {
+			return r, err
+		}
+		if c.Checkpoint != nil {
+			if err := c.Checkpoint("split-reclaimed"); err != nil {
+				return r, err
+			}
+		}
+	}
+	// Keep one receipt per original unit for completed retries and stage GC.
+	r.Units = nil
+	seen := make(map[uint16]bool)
+	for _, child := range r.Batches {
+		for _, unit := range child.Units {
+			if !seen[unit.Unit.VShard] {
+				r.Units = append(r.Units, unit)
+				seen[unit.Unit.VShard] = true
+			}
+		}
+	}
+	r.State = "reclaimed"
+	if err := writeJSON(path, r); err != nil {
+		return r, err
+	}
+	for _, unit := range r.Units {
+		if err := cleanStage(filepath.Join(base.Directory, unitName(unit.Unit))); err != nil {
+			return r, err
+		}
+	}
+	return r, clearActivePlan(c.Directory, r.Plan)
 }

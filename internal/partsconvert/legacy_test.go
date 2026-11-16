@@ -346,3 +346,66 @@ func TestLegacyNameBatchCrashResume(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyOversizedSavedPlanSplitsWithoutReset(t *testing.T) {
+	for _, stop := range []string{"split-published", "split-reclaimed"} {
+		t.Run(stop, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			plan := legacyFixture(t, filepath.Join(root, "legacy"), false)
+			nc, db := globalConverter(t, root, plan, nil)
+			defer db.Close()
+			// Simulate work ingested before the old aggregate budget refused resume.
+			unit, err := nc.Converter.Run(ctx, plan.Units()[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			nc.MaxOutputBytes = 1 << 20
+			interrupted := errors.New("stop split")
+			nc.Checkpoint = func(stage string) error {
+				if stage == stop {
+					return interrupted
+				}
+				return nil
+			}
+			published := 0
+			nc.Publish = func(_ context.Context, r NameReceipt) error {
+				published++
+				if len(r.Plan.Metrics) != 1 || len(r.Units) != 1 {
+					t.Fatal("unbounded child", r)
+				}
+				return nil
+			}
+			r, err := nc.Run(ctx, plan)
+			if !errors.Is(err, interrupted) || r.State != "splitting" || len(r.Batches) != 2 {
+				t.Fatalf("split %+v %v", r, err)
+			}
+			cursor, pending, err := NameState(nc.Directory)
+			if err != nil || pending == nil || len(pending.Metrics) != len(plan.Metrics) || !bytes.Equal(cursor.Before, plan.Metrics[1].Name) {
+				t.Fatalf("lost authority %+v %+v %v", cursor, pending, err)
+			}
+			// Restart with the exact same parent and its existing token/receipts.
+			nc.Checkpoint = nil
+			r, err = nc.Run(ctx, *pending)
+			if err != nil || r.State != "reclaimed" || len(r.Units) != 2 {
+				t.Fatalf("resume %+v %v", r, err)
+			}
+			found := false
+			for _, got := range r.Units {
+				if got.Unit == unit.Unit {
+					found = true
+					if got.Token != unit.Token {
+						t.Fatal("reset existing unit token")
+					}
+				}
+			}
+			if !found || published < 2 {
+				t.Fatal("lost original receipt or publication")
+			}
+			assertLegacyRemainder(t, filepath.Join(root, "legacy"), plan)
+			if _, err = nc.Run(ctx, plan); err != nil {
+				t.Fatal("completed retry", err)
+			}
+		})
+	}
+}

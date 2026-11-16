@@ -134,6 +134,15 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 		return r, err
 	}
 	defer db.Close()
+	// The index describes a sealed physical packing generation. New ingestion
+	// changes its SST set; remove it durably before any conversion can proceed.
+	if err := os.Remove(filepath.Join(targetPath, "parts", "PARTITION-INDEX.json")); err == nil {
+		if err := syncPackingDirectory(filepath.Join(targetPath, "parts")); err != nil {
+			return r, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return r, err
+	}
 	gate := &partsconvert.ReaderGate{}
 	reclaimer := partsconvert.LegacyReclaimer{Gate: gate, CloseReaders: closeReaders, ReopenReaders: openReaders, Open: func() (*pebble.DB, error) {
 		return chunkstore.OpenLegacyReclaimCopy(sourcePath)
@@ -213,7 +222,7 @@ func convertLegacyCopy(ctx context.Context, copyPath, output string, batchMetric
 		}
 		archive := copyArchive(func() *chunkstore.TransferSource { return source }, plan, maxBatchBytes)
 		conv := &partsconvert.Converter{Directory: filepath.Join(targetPath, "units"), Source: archive, Target: partsconvert.PebbleTarget{DB: db, DestinationID: targetID}, Space: &partsconvert.SpaceGuard{Path: targetPath}, ChunkBytes: 32 << 20, MaxTables: 100000}
-		nc := partsconvert.NameConverter{Directory: namesDirectory, Converter: conv, MaxOutputBytes: maxBatchBytes, Publish: func(_ context.Context, receipt partsconvert.NameReceipt) error {
+		nc := partsconvert.NameConverter{Directory: namesDirectory, Converter: conv, MaxOutputBytes: maxBatchBytes, Checkpoint: opts.Checkpoint, Publish: func(_ context.Context, receipt partsconvert.NameReceipt) error {
 			// Offline tool has no daemon Reader pointer to swap. Its durable
 			// name cursor is the complete publication; the physical adapter still
 			// drains pins and closes/reopens the real read-only source handle.

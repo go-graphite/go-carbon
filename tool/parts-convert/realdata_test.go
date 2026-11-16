@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -100,6 +101,22 @@ func realOracleRoundTrip(t *testing.T, rangeOrder bool) {
 		if count != oracle.CatalogNames {
 			t.Fatalf("policy coverage=%d, catalogue=%d", count, oracle.CatalogNames)
 		}
+	}
+	interrupted := errors.New("saved partial conversion")
+	_, err = convertLegacyCopy(ctx, legacyPath, output, 1000, 256<<20, copyOptions{RangeOrder: rangeOrder, Checkpoint: func(stage string) error {
+		if stage == "names-published" || stage == "id-published" {
+			return interrupted
+		}
+		return nil
+	}})
+	if !errors.Is(err, interrupted) {
+		t.Fatalf("partial checkpoint: %v", err)
+	}
+	if err = verifyReal(ctx, legacyPath, output, oraclePath, ""); err == nil {
+		t.Fatal("strict verifier accepted partial conversion")
+	}
+	if err = verifyReal(ctx, legacyPath, output, oraclePath, "", true); err != nil {
+		t.Fatal("partial frozen oracle", err)
 	}
 	if _, err = convertLegacyCopy(ctx, legacyPath, output, 4096, 256<<20, copyOptions{RangeOrder: rangeOrder}); err != nil {
 		t.Fatal(err)

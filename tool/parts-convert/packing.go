@@ -58,6 +58,7 @@ type packingJournal struct {
 	Destination string
 	State       string
 	Expected    packingInventory
+	IndexDigest string `json:",omitempty"`
 }
 
 func packingOptions(readOnly bool) *pebble.Options {
@@ -90,7 +91,7 @@ func inventoryPacking(ctx context.Context, db *pebble.DB, path string, target ui
 		return out, err
 	}
 	h := sha256.New()
-	var prefix []byte
+	var prefix, shardPrefix []byte
 	var used uint64
 	var writer *sstable.Writer
 	var sink *packingSizeSink
@@ -116,11 +117,16 @@ func inventoryPacking(ctx context.Context, db *pebble.DB, path string, target ui
 			break
 		}
 		if !bytes.Equal(prefix, p) {
+			out.Boundaries++
+			prefix = bytes.Clone(p)
+		}
+		shard := p[:len(p)-8]
+		if !bytes.Equal(shardPrefix, shard) {
 			if err = flush(); err != nil {
 				break
 			}
-			out.Boundaries++
-			prefix, used = bytes.Clone(p), 0
+			shardPrefix = bytes.Clone(shard)
+			used = 0
 		}
 		n := uint64(len(it.Key()) + len(it.Value()) + 64)
 		if used == 0 || used+n > target {
@@ -137,6 +143,7 @@ func inventoryPacking(ctx context.Context, db *pebble.DB, path string, target ui
 		}
 		used += n
 		out.Records++
+		out.OutputBoundBytes += uint64(2*len(p) + 128)
 		out.KeyBytes += uint64(len(it.Key()))
 		out.ValueBytes += uint64(len(it.Value()))
 		_, _, points, e := partsconvert.DecodeArchive(it.Value())
@@ -154,7 +161,7 @@ func inventoryPacking(ctx context.Context, db *pebble.DB, path string, target ui
 	// Ingest links these same-filesystem SSTs. Charge dry-encoded lengths
 	// rounded to 4KiB plus a metadata/WAL allowance. Directory blocks and
 	// filesystem-specific metadata are not certified by this estimate.
-	out.OutputBoundBytes = out.PlannedSSTAllocatedBytes + (16 << 20)
+	out.OutputBoundBytes += out.PlannedSSTAllocatedBytes + (16 << 20)
 	levels, err := db.SSTables()
 	if err != nil {
 		return out, err
@@ -280,7 +287,7 @@ func recoverPackingAt(ctx context.Context, target string, checkpoint func(string
 			return e
 		}
 		got, e := inventoryPacking(ctx, db, candidate, 32<<20)
-		e = errors.Join(e, db.Close())
+		e = errors.Join(e, checkPackingIndex(candidate, j.IndexDigest), db.Close())
 		if e != nil {
 			return e
 		}
@@ -338,7 +345,7 @@ func recoverPackingAt(ctx context.Context, target string, checkpoint func(string
 				return e
 			}
 			got, e := inventoryPacking(ctx, db, live, 32<<20)
-			e = errors.Join(e, db.Close())
+			e = errors.Join(e, checkPackingIndex(live, j.IndexDigest), db.Close())
 			if e != nil {
 				return e
 			}
@@ -417,7 +424,7 @@ func packCopy(ctx context.Context, source, target string, original, targetBytes 
 		return out, err
 	}
 	var w *sstable.Writer
-	var prefix []byte
+	var shardPrefix []byte
 	var used, number uint64
 	var stage string
 	flush := func() error {
@@ -446,13 +453,14 @@ func packCopy(ctx context.Context, source, target string, original, targetBytes 
 		if err = ctx.Err(); err != nil {
 			break
 		}
-		p, e := packingPrefix(it.Key())
+		prefix, e := packingPrefix(it.Key())
 		if e != nil {
 			err = e
 			break
 		}
+		shard := prefix[:len(prefix)-8]
 		n := uint64(len(it.Key()) + len(it.Value()) + 64)
-		if w != nil && (!bytes.Equal(p, prefix) || used+n > targetBytes) {
+		if w != nil && (!bytes.Equal(shardPrefix, shard) || used+n > targetBytes) {
 			if err = flush(); err != nil {
 				break
 			}
@@ -466,7 +474,7 @@ func packCopy(ctx context.Context, source, target string, original, targetBytes 
 				break
 			}
 			w = sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
-			prefix = bytes.Clone(p)
+			shardPrefix = bytes.Clone(shard)
 		}
 		if err = w.Set(it.Key(), it.Value()); err != nil {
 			break
@@ -490,20 +498,17 @@ func packCopy(ctx context.Context, source, target string, original, targetBytes 
 	if !samePacking(out.Before, out.After) {
 		return out, errors.New("packed target changed logical data")
 	}
-	// Assert the physical transfer boundary on actual output table metadata.
-	levels, err := newDB.SSTables()
+	// Key-range transfer replaces the old one-file-per-partition contract.
+	// Index names actual ingested SSTs; it is fsynced before generation swap.
+	if err = writePackingIndex(ctx, newDB, next); err != nil {
+		return out, err
+	}
+	indexBytes, err := os.ReadFile(filepath.Join(next, "PARTITION-INDEX.json"))
 	if err != nil {
 		return out, err
 	}
-	for _, level := range levels {
-		for _, table := range level {
-			a, e := packingPrefix(table.Smallest.UserKey)
-			b, e2 := packingPrefix(table.Largest.UserKey)
-			if e != nil || e2 != nil || !bytes.Equal(a, b) {
-				return out, errors.New("packed SST crosses a transfer boundary")
-			}
-		}
-	}
+	indexSum := sha256.Sum256(indexBytes)
+	j.IndexDigest = hex.EncodeToString(indexSum[:])
 	if err = newDB.Close(); err != nil {
 		return out, err
 	}
@@ -527,4 +532,102 @@ func packCopy(ctx context.Context, source, target string, original, targetBytes 
 	out.After.AllocatedBytes, err = allocatedBytes(filepath.Join(target, "parts"))
 	out.BitExact = err == nil
 	return out, err
+}
+
+// A range is the intersection of [Prefix, PrefixEnd(Prefix)) and the indexed
+// table's inclusive [Smallest, Largest]. This avoids repeating long metric names
+// in every partition entry. Prefix includes placement group and routing vshard.
+type packingRange struct {
+	Prefix []byte `json:"prefix"`
+	Table  int    `json:"table"`
+}
+
+type packingTable struct {
+	SST      string `json:"sst"`
+	Smallest []byte `json:"smallest"`
+	Largest  []byte `json:"largest"`
+}
+
+type packingIndex struct {
+	Version int            `json:"version"`
+	Tables  []packingTable `json:"tables"`
+	Ranges  []packingRange `json:"ranges"`
+}
+
+func writePackingIndex(ctx context.Context, db *pebble.DB, directory string) error {
+	levels, err := db.SSTables()
+	if err != nil {
+		return err
+	}
+	type span struct {
+		name   string
+		lo, hi []byte
+	}
+	var tables []span
+	for _, level := range levels {
+		for _, table := range level {
+			a, e := packingPrefix(table.Smallest.UserKey)
+			b, e2 := packingPrefix(table.Largest.UserKey)
+			if e != nil || e2 != nil || !bytes.Equal(a[:len(a)-8], b[:len(b)-8]) {
+				return errors.New("packed SST crosses PG/vshard boundary")
+			}
+			tables = append(tables, span{fmt.Sprintf("%06d.sst", table.FileNum), bytes.Clone(table.Smallest.UserKey), bytes.Clone(table.Largest.UserKey)})
+		}
+	}
+	slices.SortFunc(tables, func(a, b span) int { return bytes.Compare(a.lo, b.lo) })
+	for i := 1; i < len(tables); i++ {
+		if bytes.Compare(tables[i-1].hi, tables[i].lo) >= 0 {
+			return errors.New("packed SST ranges overlap")
+		}
+	}
+	it, err := db.NewIter(nil)
+	if err != nil {
+		return err
+	}
+	index := packingIndex{Version: 1}
+	for _, t := range tables {
+		index.Tables = append(index.Tables, packingTable{t.name, t.lo, t.hi})
+	}
+	table := 0
+	for ok := it.First(); ok; ok = it.Next() {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		for table < len(tables) && bytes.Compare(it.Key(), tables[table].hi) > 0 {
+			table++
+		}
+		if table == len(tables) || bytes.Compare(it.Key(), tables[table].lo) < 0 {
+			err = errors.New("packed key is outside SST ranges")
+			break
+		}
+		prefix, e := packingPrefix(it.Key())
+		if e != nil {
+			err = e
+			break
+		}
+		n := len(index.Ranges)
+		if n == 0 || index.Ranges[n-1].Table != table || !bytes.Equal(index.Ranges[n-1].Prefix, prefix) {
+			index.Ranges = append(index.Ranges, packingRange{Prefix: prefix, Table: table})
+		}
+	}
+	if err = errors.Join(err, it.Error(), it.Close()); err != nil {
+		return err
+	}
+	return saveRangeJSON(filepath.Join(directory, "PARTITION-INDEX.json"), index)
+}
+
+func checkPackingIndex(directory, want string) error {
+	// Old version-1 packing journals predate the optional range index.
+	if want == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "PARTITION-INDEX.json"))
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != want {
+		return errors.New("packing partition index changed")
+	}
+	return nil
 }

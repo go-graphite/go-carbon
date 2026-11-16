@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -69,8 +71,31 @@ func TestPackingPreservesLogicalReceiptsAndBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.BitExact || r.Before.Records != 48 || r.Before.Points != 96 || r.After.SSTs != 3 || r.Before.SSTs != 48 || r.After.Boundaries != 3 {
+	if !r.BitExact || r.Before.Records != 48 || r.Before.Points != 96 || r.After.SSTs != 1 || r.Before.SSTs != 48 || r.After.Boundaries != 3 {
 		t.Fatalf("packing: %+v", r)
+	}
+	var index packingIndex
+	data, e := os.ReadFile(filepath.Join(dir, "parts", "PARTITION-INDEX.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = json.Unmarshal(data, &index); e != nil {
+		t.Fatal(e)
+	}
+	if index.Version != 1 || len(index.Ranges) != 3 {
+		t.Fatalf("index %+v", index)
+	}
+	for _, span := range index.Ranges {
+		if span.Table < 0 || span.Table >= len(index.Tables) {
+			t.Fatal("invalid table", span)
+		}
+		table := index.Tables[span.Table]
+		if _, e = os.Stat(filepath.Join(dir, "parts", table.SST)); e != nil {
+			t.Fatal(e)
+		}
+		if bytes.Compare(table.Largest, span.Prefix) < 0 || bytes.Compare(table.Smallest, partsformat.PrefixEnd(span.Prefix)) >= 0 {
+			t.Fatal("wrong partition range", span)
+		}
 	}
 	if r.DiskCapQualified {
 		t.Fatal("offline packing is not a whole-conversion disk qualification")
@@ -110,7 +135,7 @@ func TestPackingVerifiedCrashRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := packCopy(context.Background(), "", dir, 0, 16<<20, false, nil)
-			if err != nil || !samePacking(r.Before, got.Before) || got.Before.SSTs != 3 {
+			if err != nil || !samePacking(r.Before, got.Before) || got.Before.SSTs != 1 {
 				t.Fatalf("recovery: %+v %v", got, err)
 			}
 		})
@@ -167,5 +192,75 @@ func TestPackingRejectsConcurrentConverter(t *testing.T) {
 	defer unlock()
 	if _, err := packCopy(context.Background(), "", dir, 0, 16<<20, true, nil); err == nil {
 		t.Fatal("concurrent target owner accepted")
+	}
+}
+
+func TestPackingRefusesChangedVerifiedIndex(t *testing.T) {
+	dir := packingFixture(t)
+	_, err := packCopy(context.Background(), "", dir, 0, 16<<20, true, func(string) error { return errors.New("stop") })
+	if err == nil {
+		t.Fatal("missing interruption")
+	}
+	if err = os.WriteFile(filepath.Join(dir, "packing-next", "PARTITION-INDEX.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = recoverPacking(context.Background(), dir); err == nil {
+		t.Fatal("changed index accepted")
+	}
+	if _, err = os.Stat(filepath.Join(dir, "parts")); err != nil {
+		t.Fatal("source removed", err)
+	}
+}
+
+func TestPackingKeepsPlacementGroupAndVShardOwnership(t *testing.T) {
+	dir := packingFixture(t)
+	db, err := pebble.Open(filepath.Join(dir, "parts"), packingOptions(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	it, err := db.NewIter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !it.First() {
+		t.Fatal("empty fixture")
+	}
+	value := bytes.Clone(it.Value())
+	if err = it.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range []partsformat.Group{"first", "second"} {
+		for _, name := range []partsformat.ID{"extra.a", "extra.b"} {
+			for partition := range 3 {
+				key, e := partsformat.Encode(partsformat.Key{Group: group, VShard: partsformat.Route(name), Partition: int64(partition), Metric: name})
+				if e != nil {
+					t.Fatal(e)
+				}
+				if err = db.Set(key, value, pebble.Sync); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := packCopy(context.Background(), "", dir, 0, 16<<20, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.After.SSTs != 5 || r.After.Boundaries != 15 || !r.BitExact {
+		t.Fatalf("ownership packing %+v", r)
+	}
+	var index packingIndex
+	data, err := os.ReadFile(filepath.Join(dir, "parts", "PARTITION-INDEX.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(data, &index); err != nil {
+		t.Fatal(err)
+	}
+	if len(index.Tables) != 5 || len(index.Ranges) != 15 {
+		t.Fatalf("index tables=%d ranges=%d", len(index.Tables), len(index.Ranges))
 	}
 }

@@ -46,6 +46,13 @@ parts-convert -verify-real-copy /private/offline-copy \
   -dir /private/converted -real-oracle /private/render-oracle.json
 ```
 
+Use `-verify-partial-real-copy` with verification to check the same frozen 2,000
+queries after a partial conversion. Published name-prefix and ID-range receipts
+select converted samples; all remaining samples read the actual legacy copy.
+Unpublished target keys are excluded. The result reports converted/legacy query
+counts and `Partial=true`; it never claims whole-corpus completion. The strict
+completed-conversion check remains the default.
+
 Add `-real-source-render http://127.0.0.1:8080` to compare the same 2,000 names
 and frozen ranges with a source daemon. This explicit option sends only render
 requests using the protobuf v3 read API. Every shape or value-bit mismatch
@@ -76,8 +83,8 @@ Offline copy batches stop at either `-copy-batch-metrics` or the conservative
 aggregate `-copy-batch-mib` output estimate, whichever comes first. This permits
 large sparse name batches without rejecting a dense range merely because the
 name limit was high. A single metric that exceeds the byte cap still fails
-before publication or deletion. Saved pending plans keep their exact bounds on
-resume. The byte estimate does not replace sampling the full conversion disk
+before publication or deletion. Saved pending plans keep their exact parent bounds on
+resume; oversized parents use durable bounded children and retain all original unit receipts. The byte estimate does not replace sampling the full conversion disk
 footprint, including shared-SST compaction and cumulative target growth.
 
 ## Physical ID ranges and IO pacing
@@ -136,11 +143,18 @@ parts-convert -prune-reclaimed-copy /private/converted
 
 Small name batches may leave many tiny ingested SSTs. The packing diagnostic
 streams the complete existing target in key order into new SSTs, combining
-records across name batches within each exact placement-group/vshard/partition.
+records across name batches and partitions within each placement-group/vshard.
 Every logical key (including immutable Part ID) and value stays unchanged.
-`-pack-mib` is an uncompressed payload target, not a minimum file size: a boundary
-tail must stay smaller when that entire boundary contains little data. Inventory
-reports the number of distinct boundaries, which is a lower bound on file count.
+`-pack-mib` is an uncompressed payload target, not a minimum file size. Inventory
+reports logical partition count separately from planned physical file count.
+Physical files retain placement-group/vshard ownership, permitting verbatim whole
+SST transfers; partial holes require a separate verified block-transfer protocol.
+`parts/PARTITION-INDEX.json` names the actual immutable SSTs and maps each exact
+partition prefix to a table index. A range is the intersection of the table's
+inclusive smallest/largest key range with `[prefix, PrefixEnd(prefix))`. Copies
+can select placement group and vshard, then stream those ranges. This diagnostic
+does not install an online copy API. Resuming conversion removes this physical
+index durably before new ingestion; repack to obtain a new sealed index.
 
 ```sh
 # Read-only data inventory; the maintenance lock/recovery metadata is writable.
@@ -154,10 +168,10 @@ parts-convert -pack-copy /private/converted -pack-apply -pack-mib 32 \
 
 The source remains untouched. Output is built in `packing-next` with automatic
 compactions disabled, then read back completely. Conversion resumes also disable
-automatic target compaction so stock splitting cannot undo the physical boundary.
+automatic target compaction to keep the sealed physical generation stable.
 Canonical key/value SHA-256,
-record/occupied-slot counts and metadata must agree. Actual output SST bounds
-are checked against the transfer boundary. A destination-bound `PACKING.json`
+record/occupied-slot counts and metadata must agree. The partition index is
+synced and its digest is bound to the packing recovery journal. A destination-bound `PACKING.json`
 journal records verification before the directory swap. Conversion and oracle
 verification recover that journal under the same maintenance lock before opening
 `parts`. Recovery handles both renames and retains the old DB until the verified
@@ -165,7 +179,8 @@ replacement is installed durably. This is an offline directory replacement; it
 does not provide online reader pinning or shared-SST publication.
 
 Admission first runs the identical SST encoder into a counting sink, charges
-those compressed lengths rounded to 4 KiB per file and a 16 MiB DB allowance
+those compressed lengths rounded to 4 KiB per file, a conservative index bound,
+and a 16 MiB DB allowance
 before creating the replacement. Packing
 needs both generations until verification completes. This is conservative
 accounting, not a certified filesystem allocation maximum; original-conversion
