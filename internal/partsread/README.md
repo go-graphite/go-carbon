@@ -226,3 +226,17 @@ synchronizes only readers of that block; hot reads load an atomic pointer and
 hold no mutex while invoking consumers. Cancellation is checked before and after
 a bounded block, rather than per sample, including when cancellation happens in
 the final block. Close follows the pinned publication lifetime.
+
+### Exact range delivery
+
+File sources perform physical-slot filtering before delivering samples. Their
+verified decoded cache records the actual slot span once; requests covering that
+span borrow every cached sample directly, without another filtering callback.
+Partial requests inspect timestamps before delivering the selected samples, and
+uncached reads validate the complete CRC before decoding value/sequence fields
+for requested slots. Every retained wrapped version and IEEE value bit survives.
+Generic block readers retain the directory's defensive filter. Its synchronous
+callback and borrowed range state are allocated once per scan, independently of
+the number of blocks. The decoded cache cap and pre-publication resource charge
+are unchanged. The runtime and garbage collector remain shared with writers;
+allocation reductions alone do not qualify the writer-isolation throughput gate.

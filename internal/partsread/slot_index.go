@@ -32,6 +32,8 @@ type SlotIndex struct {
 	blocks []SlotBlock
 	read   ReadSlotBlock
 	bytes  int64
+	// Only file-backed readers set this after installing their exact range filter.
+	rangeFiltered bool
 }
 
 func NewSlotIndex(blocks []SlotBlock, read ReadSlotBlock) (*SlotIndex, error) {
@@ -76,6 +78,20 @@ func (s *SlotIndex) Scan(ctx context.Context, id uint64, a Archive, from, until 
 		return err
 	}
 	ranges, n := SlotRanges(a, from, until)
+	// The callback consumes these borrowed ranges synchronously. Allocate its
+	// captured state once per scan, rather than once for every immutable block.
+	var selected [2]SlotRange
+	count := 0
+	deliver := yield
+	if !s.rangeFiltered {
+		deliver = func(p Sample) error {
+			slot := archiveSlot(p.Time, a)
+			if selectedSlot(slot, selected[:count]) {
+				return yield(p)
+			}
+			return nil
+		}
+	}
 	for i := s.first(id, a.Step); i < len(s.blocks); i++ {
 		b := &s.blocks[i]
 		if b.ID != id || b.Archive.Step != a.Step {
@@ -84,8 +100,7 @@ func (s *SlotIndex) Scan(ctx context.Context, id uint64, a Archive, from, until 
 		if b.Archive != a {
 			continue
 		}
-		var selected [2]SlotRange
-		count := 0
+		count = 0
 		for _, r := range ranges[:n] {
 			lo, hi := max(r.From, b.Slots.From), min(r.Until, b.Slots.Until)
 			if lo < hi {
@@ -99,20 +114,26 @@ func (s *SlotIndex) Scan(ctx context.Context, id uint64, a Archive, from, until 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.read(ctx, b.Key, selected[:count], func(p Sample) error {
-			slot := (p.Time / a.Step) % a.Points
-			if slot < 0 {
-				slot += a.Points
-			}
-			for _, r := range selected[:count] {
-				if slot >= r.From && slot < r.Until {
-					return yield(p)
-				}
-			}
-			return nil
-		}); err != nil {
+		if err := s.read(ctx, b.Key, selected[:count], deliver); err != nil {
 			return err
 		}
 	}
 	return ctx.Err()
+}
+
+// archiveSlot normalizes negative timestamps without changing retained versions.
+func archiveSlot(timestamp int64, a Archive) int64 {
+	slot := (timestamp / a.Step) % a.Points
+	if slot < 0 {
+		slot += a.Points
+	}
+	return slot
+}
+func selectedSlot(slot int64, ranges []SlotRange) bool {
+	for _, r := range ranges {
+		if slot >= r.From && slot < r.Until {
+			return true
+		}
+	}
+	return false
 }

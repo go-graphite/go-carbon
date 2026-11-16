@@ -136,10 +136,11 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 	// Sources check cancellation at block boundaries. Per-sample polling takes
 	// a cancel-context mutex for every version, even for fully cached blocks.
 	emit := func(p Sample) error {
-		if p.Time%a.Step != 0 {
+		tick := p.Time / a.Step
+		if p.Time-tick*a.Step != 0 {
 			return errors.New("source returned unaligned archive slot")
 		}
-		slot := (p.Time / a.Step) % a.Points
+		slot := tick % a.Points
 		if slot < 0 {
 			slot += a.Points
 		}
