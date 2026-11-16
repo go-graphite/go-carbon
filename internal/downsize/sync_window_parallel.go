@@ -82,7 +82,7 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 			// The scan's borrowed pin can predate a source flush. Own a fresh
 			// pin for this attempt without closing any concurrent borrower's pin.
 			err = func() error {
-				next := &nativeController{mover: c.mover, sessions: map[string]*nativeRemoteSession{}}
+				next := &nativeController{mover: c.mover, committedWindow: c.committedWindow, sessions: map[string]*nativeRemoteSession{}}
 				defer next.release()
 				return next.executeDeferred(ctx, t, names)
 			}()

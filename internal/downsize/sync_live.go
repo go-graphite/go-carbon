@@ -61,6 +61,7 @@ type syncLiveBackend struct {
 	windowSelectionSlots sync.Map      // source -> *windowSelectionCapacity
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
+	windowCopySources    *nativeController // committed history is for repair, never absence proofs
 	windowPinned         time.Time
 	windowRestarted      atomic.Bool
 }

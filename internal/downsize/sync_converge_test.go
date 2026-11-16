@@ -386,3 +386,40 @@ func TestSyncConvergeRetriesFailedFill(t *testing.T) {
 		})
 	}
 }
+
+// A successful historical repair that only reduces a hole must stop with the
+// remaining evidence. A shrinking score does not authorize replaying that name.
+type partialWindowSync struct {
+	partialSync
+	calls int
+}
+
+func (f *partialWindowSync) CopyWindow(ctx context.Context, source, target string, names []string, path string, _ syncRanges) (syncCopyResult, error) {
+	f.calls++
+	return f.partialSync.Copy(ctx, source, target, names, path)
+}
+func TestSyncWindowSuccessfulPartialRepairIsNotRepeated(t *testing.T) {
+	f := newFakeSync()
+	o := convergeOptions(t)
+	o.from = []string{syncP}
+	o.includeShort = true
+	o.windows = syncRanges{{Name: "closed", From: syncTestNow - 7200, Until: syncTestNow - 120}}
+	schema := []syncArchive{{60, 10000}}
+	f.put(syncP, "hole", schema)
+	f.put(syncT, "hole", schema)
+	for _, ts := range []int64{syncTestNow - 6000, syncTestNow - 5940, syncTestNow - 5880} {
+		f.store(syncP).points["hole"][60][ts] = 1
+		delete(f.store(syncT).points["hole"][60], ts)
+	}
+	b := &partialWindowSync{partialSync: partialSync{fakeSync: f}}
+	if err := runSync(context.Background(), o, b); !errors.Is(err, ErrSyncResidual) {
+		t.Fatalf("incomplete successful repair was accepted: %v", err)
+	}
+	if b.calls != 1 {
+		t.Fatalf("successful name repaired %d times", b.calls)
+	}
+	data, err := os.ReadFile(filepath.Join(o.state, "residual.json"))
+	if err != nil || !strings.Contains(string(data), "persisted_after_fill") {
+		t.Fatal("remaining hole evidence missing", string(data), err)
+	}
+}

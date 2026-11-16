@@ -881,7 +881,11 @@ const syncWindowPinAge = 15 * time.Minute
 
 func (b *syncLiveBackend) beginWindowCopy() func() {
 	b.windowMu.Lock()
+	// Selection can prove absence and must retain its pending/revision fence.
+	// Repair only fills target holes from committed history; it uses a distinct
+	// pin so queued current writes cannot starve a closed historical window.
 	b.windowSources = &nativeController{mover: b.m, sessions: map[string]*nativeRemoteSession{}}
+	b.windowCopySources = &nativeController{mover: b.m, committedWindow: true, sessions: map[string]*nativeRemoteSession{}}
 	b.windowPinned = time.Now()
 	b.windowMu.Unlock()
 	return func() {
@@ -889,11 +893,14 @@ func (b *syncLiveBackend) beginWindowCopy() func() {
 		defer b.windowMu.Unlock()
 		b.windowSources.release()
 		b.windowSources = nil
+		b.windowCopySources.release()
+		b.windowCopySources = nil
 	}
 }
 
 func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source string) (*nativeController, func(), error) {
-	c := &nativeController{mover: m, sessions: map[string]*nativeRemoteSession{}}
+	committed := m.nativeWindow != nil && m.nativeWindow.Until <= time.Now().Unix()
+	c := &nativeController{mover: m, committedWindow: committed, sessions: map[string]*nativeRemoteSession{}}
 	b.windowMu.RLock()
 	if b.windowSources == nil {
 		b.windowMu.RUnlock()
@@ -904,12 +911,16 @@ func (b *syncLiveBackend) windowController(ctx context.Context, m *mover, source
 		b.windowMu.Lock()
 		if b.windowSources != nil && (b.windowRestarted.Swap(false) || time.Since(b.windowPinned) >= syncWindowPinAge) {
 			b.windowSources.release()
+			b.windowCopySources.release()
 			b.windowPinned = time.Now()
 		}
 		b.windowMu.Unlock()
 		b.windowMu.RLock()
 	}
 	shared := b.windowSources
+	if committed {
+		shared = b.windowCopySources
+	}
 	if shared == nil {
 		b.windowMu.RUnlock()
 		return c, c.release, nil
