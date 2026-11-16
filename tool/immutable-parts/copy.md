@@ -142,3 +142,70 @@ Catalog entries, name-incarnation tombstones and replay frontiers must be pinned
 with the data and published coherently. Copying data alone must never resurrect
 a deleted name. This format does not yet carry the required incarnation/tier
 contract, so READY and operational namespace deletion remain blocked.
+
+## Immutable publication and durable completion (offline integration)
+
+`copyPublish` freezes one `copySnapshot`, strips sender-local paths, and binds
+its catalogue, policy, tombstones, frontier and physical/logical descriptors to
+a SHA-256 content address. The caller must acquire these roots atomically and
+pin every referenced SST until publication and all transfers have ended.
+`copyManifestHandler` serves `/v1/manifests/<sha256>` only to a CA-verified,
+explicitly allowlisted client certificate. Configure the HTTPS listener with
+`tls.RequireAndVerifyClientCert` and private trust roots. It uses ordinary HTTP
+byte ranges and an immutable ETag; `copyFetchManifest` syncs partial downloads,
+resumes their exact suffix, verifies the final hash, and atomically publishes the
+local object with a directory sync. A completed manifest is reused without a
+request. Supply an HTTPS client with normal server verification and its client
+certificate. The older reserved TCP inventory request remains a fixture-only
+protocol; the raw SST TCP endpoint has no authentication and is not production
+transport. No daemon listener is added by these primitives.
+
+`copyTransferResumable(..., ledger)` records a synced pending receipt before
+partition IO and a synced done receipt after successful durable ingest. Receipt
+identity includes the exact partition descriptor, source snapshot and durable
+target generation. Reopening a done partition transfers zero payload. A crash
+after ingest but before done publication invokes the required `Reconcile`
+callback: compare the persisted installed logical digest/frontier and finish the
+receipt without resending. `Generation` must identify the durable store
+incarnation and partition frontier and change when the target mutates. The
+integration owner must fence concurrent target mutation across validation,
+ingest and receipt publication. One scheduler owns each ledger directory;
+duplicate tasks are rejected. Missing callbacks, unreadable receipts and invalid
+metadata fail. This is an exercised restart primitive, not a daemon-level crash
+recovery qualification or an implementation of the target frontier catalogue.
+
+### Conflicting blocks and converter boundary
+
+Target-only blocks remain intact. Equal logical blocks ship zero bytes. A shared
+canonical key with unequal encoded values stays withheld. There is no generic
+"donor wins" rule: the normal reader must resolve source, source incarnation,
+raw-versus-rollup tier, archive policy, stable arrival order and tombstones using
+the same ordering as the writer. Replica identity, copy time, physical SST ID,
+local numeric metric ID and local journal offsets cannot break ties. Distinct
+valid source/incarnation records must be retained together when the normal
+merge requires them. Equal logical precedence with different payloads is an
+integrity conflict and must block publication. The final envelope contract and
+bit-exact differential gate belong to the core/seal owner; this prototype keeps
+conflicts explicit until that contract is available.
+
+Converter tables remain bounded by placement group and routing vshard and may
+span partitions. `PARTITION-INDEX.json` table ranges can select SST candidates;
+they do not replace a seal-produced multi-record block index, logical digest,
+coherent root set or retained-file pin. The current raw assembler accepts one
+record per physical block only. No conversion-owned files are changed here.
+
+### Partial-hole campaign
+
+Prepare the ordinary fixture with exactly 100 blocks and 1000 partitions, then
+run `TestCopyPartialHolePrepare` with `COPY_ROLE=holes`. It writes `holes-1`,
+`holes-10` and `holes-50` inventories; holes rotate across block positions in
+every partition. Planning reads persisted metadata only and reports milliseconds
+per 1000 partitions. Healthy-base setup is outside patch assembly/transfer
+measurements. Serve a variant normally, then use `COPY_ROLE=hole-receive` and
+`COPY_ADDRESS` to seed its healthy blocks and transfer only its missing blocks.
+The receiver independently regenerates all opaque key/value bytes, including
+special float payloads, after timing; the expected union must contain exactly
+100 blocks in every partition. This synthetic check does not replace the
+render differential or qualify multi-record production SSTs. `COPY_COLD=1`
+evicts each owned file before every transfer request; no global caches or daemon
+files are touched.

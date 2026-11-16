@@ -271,6 +271,12 @@ func copyAssembleBlocks(p copyPartition, selected []int, dir string) (_ copyPart
 			if err != nil {
 				return copyPartition{}, raw, err
 			}
+			if copyBeforeFileRead != nil {
+				if err = copyBeforeFileRead(src); err != nil {
+					_ = src.Close()
+					return copyPartition{}, raw, err
+				}
+			}
 			inputs[b.File] = src
 		}
 		h := sha256.New()

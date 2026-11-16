@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -95,7 +97,7 @@ func TestCopyCampaign(t *testing.T) {
 		return
 	}
 	b, e := os.ReadFile(inventory)
-	if e != nil && role == "receive" && os.Getenv("COPY_ADDRESS") != "" {
+	if e != nil && (role == "receive" || role == "hole-receive") && os.Getenv("COPY_ADDRESS") != "" {
 		c, err := net.DialTimeout("tcp", os.Getenv("COPY_ADDRESS"), 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
@@ -163,6 +165,10 @@ func TestCopyCampaign(t *testing.T) {
 				}
 			}()
 		}
+	}
+	if role == "hole-receive" {
+		copyReceiveHoles(t, root, source)
+		return
 	}
 	if role != "receive" {
 		t.Fatal("COPY_ROLE must be prepare, serve or receive")
@@ -293,3 +299,190 @@ func copyProcessIO() map[string]uint64 {
 	return out
 }
 func copyPrint(v any) { b, _ := json.Marshal(v); fmt.Println("COPY_JSON " + string(b)) }
+
+// Partial-hole fixture construction and planning are measured separately from
+// transfer. Healthy and patch inventories alternate by partition; source raw
+// blocks are copied verbatim. No payload is opened by the planner itself.
+func TestCopyPartialHolePrepare(t *testing.T) {
+	root := os.Getenv("COPY_ROOT")
+	if root == "" || os.Getenv("COPY_ROLE") != "holes" {
+		t.Skip("explicit hole fixture only")
+	}
+	raw, e := os.ReadFile(filepath.Join(root, "inventory.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var full []copyPartition
+	if e = json.Unmarshal(raw, &full); e != nil {
+		t.Fatal(e)
+	}
+	for i := range full {
+		full[i] = copySealedFixture(t, full[i])
+	}
+	for _, percent := range []int{1, 10, 50} {
+		dir := filepath.Join(root, fmt.Sprintf("holes-%d", percent))
+		if e = os.Mkdir(dir, 0700); e != nil {
+			t.Fatal(e)
+		}
+		var inventory []copyPartition
+		var rawBytes uint64
+		var planSeconds, assemblySeconds float64
+		var before, after syscall.Rusage
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &before)
+		for pi, p := range full {
+			target := *p.Blocks
+			target.Blocks = nil
+			var healthy []int
+			// Spread holes across partitions and physical block positions. 100 blocks
+			// per partition makes all three fractions exact, without rounding.
+			for bi, b := range p.Blocks.Blocks {
+				if (bi+pi)%100 >= percent {
+					healthy = append(healthy, bi)
+					target.Blocks = append(target.Blocks, b)
+				}
+			}
+			target.Digest = copyLogicalDigest(target)
+			start := time.Now()
+			plan, err := copyPlanBlocks(*p.Blocks, target)
+			planSeconds += time.Since(start).Seconds()
+			if err != nil || plan.Conflicts != 0 {
+				t.Fatal(err, plan)
+			}
+			start = time.Now()
+			base, _, err := copyAssembleBlocks(p, healthy, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start = time.Now()
+			patch, n, err := copyAssembleBlocks(p, plan.Missing, dir)
+			assemblySeconds += time.Since(start).Seconds()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rawBytes += n
+			base.Additive = true
+			patch.Additive = true
+			inventory = append(inventory, base, patch)
+		}
+		_ = syscall.Getrusage(syscall.RUSAGE_SELF, &after)
+		cpu := float64(after.Utime.Sec-before.Utime.Sec+after.Stime.Sec-before.Stime.Sec) + float64(after.Utime.Usec-before.Utime.Usec+after.Stime.Usec-before.Stime.Usec)/1e6
+		b, err := json.Marshal(inventory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(dir, "inventory.json"), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		copyPrint(map[string]any{"phase": "hole_prepare", "percent": percent, "partitions": len(full), "raw_bytes": rawBytes, "plan_seconds": planSeconds, "plan_ms_per_1000": planSeconds * 1e6 / float64(len(full)), "assembly_seconds": assemblySeconds, "assembly_MBps": float64(rawBytes) / assemblySeconds / 1e6, "cpu_seconds": cpu})
+	}
+}
+
+func copyReceiveHoles(t *testing.T, root string, source []copyPartition) {
+	t.Helper()
+	if len(source)%2 != 0 {
+		t.Fatal("unpaired fixture")
+	}
+	dir := filepath.Join(root, "target")
+	if e := os.Mkdir(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	defer os.RemoveAll(dir)
+	var dbs []*pebble.DB
+	for i := 0; i < 16; i++ {
+		dbs = append(dbs, copyTestDB(t, filepath.Join(dir, fmt.Sprint(i))))
+	}
+	defer func() {
+		for _, db := range dbs {
+			if e := db.Close(); e != nil {
+				t.Error(e)
+			}
+		}
+	}()
+	var base, holes []int
+	for i := 0; i < len(source); i += 2 {
+		base = append(base, i)
+		holes = append(holes, i+1)
+	}
+	streams, e := strconv.Atoi(os.Getenv("COPY_STREAMS"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	address := os.Getenv("COPY_ADDRESS")
+	if _, e = copyTransfer(context.Background(), address, source, base, streams, dbs, dir); e != nil {
+		t.Fatal(e)
+	}
+	var before, after syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &before)
+	st, e := copyTransfer(context.Background(), address, source, holes, streams, dbs, dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &after)
+	cpu := float64(after.Utime.Sec-before.Utime.Sec+after.Stime.Sec-before.Stime.Sec) + float64(after.Utime.Usec-before.Utime.Usec+after.Stime.Usec-before.Stime.Usec)/1e6
+	// Independently regenerate the deterministic opaque fixture oracle. This
+	// verification is outside the transfer timing and decodes no sample format.
+	var checked uint64
+	for pi := 0; pi < len(source)/2; pi++ {
+		p := source[pi*2]
+		prefix, err := partsformat.PartitionPrefixForGroup(p.Manifest.Group, p.Manifest.VShard, p.Manifest.Partition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		it, err := dbs[int(p.Manifest.VShard)%len(dbs)].NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: partsformat.PrefixEnd(prefix)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := uint64(pi + 1)
+		bi := 0
+		for it.First(); it.Valid(); it.Next() {
+			k, err := partsformat.Decode(it.Key())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if k.Ordinal != uint32(bi) || k.BlockStart != int64(bi*1024) {
+				t.Fatal("union key order/count", pi, bi, k)
+			}
+			expected := make([]byte, 24*1024)
+			for point := 0; point < 1024; point++ {
+				state ^= state << 13
+				state ^= state >> 7
+				state ^= state << 17
+				bits := state
+				switch point {
+				case 0:
+					bits = 0x8000000000000000
+				case 1:
+					bits = 0x7ff80000000000ab
+				case 2:
+					bits = 1
+				case 3:
+					bits = 0x7ff0000000000000
+				}
+				binary.LittleEndian.PutUint64(expected[point*24:], uint64(pi*100*1024+bi*1024+point))
+				binary.LittleEndian.PutUint64(expected[point*24+8:], bits)
+				binary.LittleEndian.PutUint64(expected[point*24+16:], uint64(bi*1024+point))
+			}
+			wantKey, err := partsformat.Encode(partsformat.Key{Group: p.Manifest.Group, VShard: p.Manifest.VShard, Partition: int64(pi), Metric: partsformat.ID(fmt.Sprintf("copy.fixture.metric.%04d", pi%64)), BlockStart: int64(bi * 1024), Part: func() partsformat.PartID {
+				var id partsformat.PartID
+				binary.BigEndian.PutUint64(id[:8], uint64(pi+1))
+				id[15] = 1
+				return id
+			}(), Ordinal: uint32(bi)})
+			if err != nil || !bytes.Equal(wantKey, it.Key()) || sha256.Sum256(expected) != sha256.Sum256(it.Value()) {
+				t.Fatal("union differs", pi, bi, err)
+			}
+			bi++
+			checked++
+		}
+		if e = it.Error(); e != nil {
+			t.Fatal(e)
+		}
+		if e = it.Close(); e != nil {
+			t.Fatal(e)
+		}
+		if bi != 100 {
+			t.Fatal("missing/extra union blocks", pi, bi)
+		}
+	}
+	copyPrint(map[string]any{"phase": "hole_receive", "streams": streams, "stats": st, "MBps": float64(st.Bytes) / st.Seconds / 1e6, "receiver_cores": cpu / st.Seconds, "exact": true, "blocks_checked": checked, "sample_decode": false})
+}

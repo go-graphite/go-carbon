@@ -500,12 +500,21 @@ type copyStats struct {
 // One TCP connection and bounded receive buffer per worker; Pebble ownership is
 // independent of stream count. Independent receiver DBs avoid a shared writer.
 func copyTransfer(ctx context.Context, address string, source []copyPartition, plan []int, streams int, targets []*pebble.DB, stage string) (copyStats, error) {
+	return copyTransferResumable(ctx, address, source, plan, streams, targets, stage, nil)
+}
+
+func copyTransferResumable(ctx context.Context, address string, source []copyPartition, plan []int, streams int, targets []*pebble.DB, stage string, ledger *copyDoneLedger) (copyStats, error) {
 	start := time.Now()
 	stats := copyStats{Partitions: len(plan)}
 	if streams < 1 || streams > 64 || len(targets) == 0 {
 		return stats, os.ErrInvalid
 	}
+	seenPlan := make(map[int]bool, len(plan))
 	for _, pi := range plan {
+		if seenPlan[pi] {
+			return stats, errors.New("duplicate partition task")
+		}
+		seenPlan[pi] = true
 		if pi < 0 || pi >= len(source) {
 			return stats, errors.New("invalid partition index")
 		}
@@ -536,7 +545,17 @@ func copyTransfer(ctx context.Context, address string, source []copyPartition, p
 			stop := context.AfterFunc(ctx, func() { _ = c.Close() })
 			defer stop()
 			for pi := range jobs {
-				n, e := copyReceivePartition(ctx, c, source, pi, targets[int(source[pi].Manifest.VShard)%len(targets)], stage)
+				var n uint64
+				var skipped bool
+				if ledger != nil {
+					skipped, e = ledger.begin(pi, source[pi])
+				}
+				if e == nil && !skipped {
+					n, e = copyReceivePartition(ctx, c, source, pi, targets[int(source[pi].Manifest.VShard)%len(targets)], stage)
+					if e == nil && ledger != nil {
+						e = ledger.finish(pi, source[pi])
+					}
+				}
 				mu.Lock()
 				stats.Bytes += n
 				failure = errors.Join(failure, e)
