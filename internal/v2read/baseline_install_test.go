@@ -242,8 +242,7 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// A synchronous empty barrier fences pending publication without sealing.
-		// Observe all submitted packets through their regular asynchronous publications.
+		// Observe every submitted application through ordinary pending publications.
 		await(t, func() bool {
 			n := 0
 			for i := range reader.owners {

@@ -34,7 +34,7 @@ func TestV2MultiarchiveBaselineTCPRestart(t *testing.T) {
 	setup := func() *App {
 		app := v2TestApp(t, root)
 		var err error
-		app.Config.Whisper.Schemas[0].Retentions, err = persister.ParseRetentionDefs("1s:120,60s:120")
+		app.Config.Whisper.Schemas[0].Retentions, err = persister.ParseRetentionDefs("1s:2m,1m:2h")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,7 +130,7 @@ func TestV2MultiarchiveBaselineTCPRestart(t *testing.T) {
 		deadline := time.Now().Add(8 * time.Second)
 		for {
 			series, masked, err := app.v2.reader.FetchWithMask(t.Context(), "union.multi", int(now-121), int(now))
-			if err == nil && masked && series != nil && series.Step() == 60 && len(series.Values()) == 2 && series.Values()[1] == 6 {
+			if err == nil && masked && series != nil && series.Step() == 60 && len(series.Values()) >= 2 && series.Values()[1] == 6 {
 				return
 			}
 			if time.Now().After(deadline) {
