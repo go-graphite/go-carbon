@@ -133,3 +133,11 @@ This is a correctness-first experimental path. Frames drain individually; there
 is no group-commit throughput qualification or complete cutover controller.
 HMAC does not encrypt payloads; use a trusted network or TLS listener as needed.
 No production receiver configuration or automatic startup path is changed.
+
+Placed connections collect up to 256 authenticated frames or about 256KiB of frame memory, with a 2ms quiet
+flush bound, and use `PlacedBatchSink` when available. The daemon serializes a
+whole batch on its storage producer, drains its stamped journal once, and then
+permits ACKs. Recovery retains the latest 256 exact retry digests per stream,
+matching the relay's maximum outstanding window. Novel stale writes and
+conflicting or expired retries still fail. The wire format and golden frame are
+unchanged; roll out the recovered retry window before enabling batched relays.

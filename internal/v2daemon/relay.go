@@ -17,6 +17,7 @@ import (
 type relayPosition struct {
 	Sequence uint64
 	Digest   string
+	Recent   map[uint64]string
 }
 
 func relayScope(stamp v2placement.Stamp) v2placement.Stamp {
@@ -37,7 +38,16 @@ func (p *Producer) rememberRelay(stamp v2placement.Stamp) error {
 	if p.relayPositions == nil {
 		p.relayPositions = make(map[v2placement.Stamp]relayPosition)
 	}
-	p.relayPositions[k] = relayPosition{stamp.RelaySequence, stamp.RelayDigest}
+	if last.Recent == nil {
+		last.Recent = make(map[uint64]string)
+	}
+	last.Recent[stamp.RelaySequence] = stamp.RelayDigest
+	if stamp.RelaySequence > 256 {
+		delete(last.Recent, stamp.RelaySequence-256)
+	}
+	last.Sequence = stamp.RelaySequence
+	last.Digest = stamp.RelayDigest
+	p.relayPositions[k] = last
 	return nil
 }
 
@@ -49,13 +59,23 @@ type relayReceiver struct {
 }
 
 func (r *relayReceiver) AcceptPlaced(f v2wire.Frame) error {
-	if err := f.Validate(); err != nil || f.Kind != v2wire.Data {
-		return errors.New("invalid placed delivery")
+	return r.AcceptPlacedBatch([]v2wire.Frame{f})
+}
+
+// AcceptPlacedBatch keeps a bounded retry window equal to the transport's
+// maximum outstanding group. All ACKs follow one catalog/journal drain.
+func (r *relayReceiver) AcceptPlacedBatch(frames []v2wire.Frame) (result error) {
+	if len(frames) == 0 || len(frames) > 256 {
+		return errors.New("invalid placed batch size")
 	}
-	// All names on a relay stream use one serial producer. Geometry is persisted
-	// by the daemon and cannot silently change across restart.
+	first := frames[0].Stream
+	for _, f := range frames {
+		if e := f.Validate(); e != nil || f.Kind != v2wire.Data || f.Stream.Producer != first.Producer || f.Stream.Lane != first.Lane {
+			return errors.New("invalid or mixed placed batch")
+		}
+	}
 	h := uint64(14695981039346656037)
-	for _, s := range []string{f.Stream.Producer, "/", f.Stream.Lane} {
+	for _, s := range []string{first.Producer, "/", first.Lane} {
 		for i := range s {
 			h = (h ^ uint64(s[i])) * 1099511628211
 		}
@@ -64,45 +84,85 @@ func (r *relayReceiver) AcceptPlaced(f v2wire.Frame) error {
 	r.locks[i].Lock()
 	defer r.locks[i].Unlock()
 	p := r.store.Producers[i]
-	stamp := v2placement.Stamp{Group: f.Stream.Group, Replica: f.Stream.Replica, MapDigest: f.Stream.MapDigest, Epoch: f.Stream.Epoch, Lane: v2placement.Lane{Producer: f.Stream.Producer, Stream: f.Stream.Lane}, RelaySequence: f.Sequence, RelayDigest: f.Digest()}
-	last := p.relayPositions[relayScope(stamp)]
-	if f.Sequence == last.Sequence {
-		if last.Digest != stamp.RelayDigest {
-			return errors.New("conflicting relay retry")
+	if p.failed != nil {
+		return p.failed
+	}
+	// Staged positions are private until the entire valid prefix is durable.
+	staged := make(map[v2placement.Stamp]relayPosition)
+	stamps := make([]v2placement.Stamp, 0, len(frames))
+	defer func() {
+		if len(stamps) == 0 {
+			return
 		}
-		return nil
-	}
-	if last.Sequence == ^uint64(0) || f.Sequence != last.Sequence+1 {
-		return errors.New("relay sequence gap or stale retry")
-	}
+		if e := p.Drain(); e != nil {
+			result = e
+			return
+		}
+		for _, stamp := range stamps {
+			if e := p.rememberRelay(stamp); e != nil {
+				result = e
+				return
+			}
+		}
+	}()
 	d := r.document.Document()
-	selector, v, err := d.Routing.Select(f.Name)
-	if err != nil {
-		return err
-	}
-	rep, err := d.Lookup(selector.GroupID(), f.Stream.Replica)
-	if err != nil {
-		return err
-	}
-	if selector.GroupID() != f.Stream.Group || v != f.VShard || rep.Writer != f.Stream.Store || rep.Epoch != f.Stream.Epoch || d.Digest() != f.Stream.MapDigest || d.Revision != f.Stream.Revision {
-		return v2placement.ErrStaleEpoch
-	}
-	app := Application{Name: f.Name, Order: p.applyOrder + 1, Clock: time.Now().Unix(), Points: []points.Point{{Value: math.Float64frombits(f.Bits), Timestamp: f.Timestamp}}, Sequence: []uint64{p.applyOrder + 1}}
-	if r.resolve != nil {
-		app.Policy, err = r.resolve(f.Name)
-		if err != nil {
-			return err
+	digest := d.Digest()
+	for _, f := range frames {
+		stamp := v2placement.Stamp{Group: f.Stream.Group, Replica: f.Stream.Replica, MapDigest: f.Stream.MapDigest, Epoch: f.Stream.Epoch, Lane: v2placement.Lane{Producer: f.Stream.Producer, Stream: f.Stream.Lane}, RelaySequence: f.Sequence, RelayDigest: f.Digest()}
+		scope := relayScope(stamp)
+		last, ok := staged[scope]
+		if !ok {
+			last = p.relayPositions[scope]
 		}
+		if f.Sequence <= last.Sequence {
+			digest := last.Recent[f.Sequence]
+			if f.Sequence == last.Sequence {
+				digest = last.Digest
+			}
+			if digest == "" || digest != stamp.RelayDigest {
+				return errors.New("conflicting or expired relay retry")
+			}
+			continue
+		}
+		if last.Sequence == ^uint64(0) || f.Sequence != last.Sequence+1 {
+			return errors.New("relay sequence gap")
+		}
+		selector, v, e := d.Routing.Select(f.Name)
+		if e != nil {
+			return e
+		}
+		rep, e := d.Lookup(selector.GroupID(), f.Stream.Replica)
+		if e != nil {
+			return e
+		}
+		if selector.GroupID() != f.Stream.Group || v != f.VShard || rep.Writer != f.Stream.Store || rep.Epoch != f.Stream.Epoch || digest != f.Stream.MapDigest || d.Revision != f.Stream.Revision {
+			return v2placement.ErrStaleEpoch
+		}
+		app := Application{Name: f.Name, Order: p.applyOrder + 1, Clock: time.Now().Unix(), Points: []points.Point{{Value: math.Float64frombits(f.Bits), Timestamp: f.Timestamp}}, Sequence: []uint64{p.applyOrder + 1}}
+		if r.resolve != nil {
+			app.Policy, e = r.resolve(f.Name)
+			if e != nil {
+				return e
+			}
+		}
+		if e = p.AppendApplicationsPlaced(stamp, []Application{app}); e != nil {
+			return e
+		}
+		// Clone the small retry map on first mutation, keeping durable state private.
+		if !ok {
+			recent := make(map[uint64]string, len(last.Recent)+1)
+			for n, digest := range last.Recent {
+				recent[n] = digest
+			}
+			last.Recent = recent
+		}
+		last.Sequence = f.Sequence
+		last.Digest = stamp.RelayDigest
+		last.Recent[f.Sequence] = stamp.RelayDigest
+		staged[scope] = last
+		stamps = append(stamps, stamp)
 	}
-	if err = p.AppendApplicationsPlaced(stamp, []Application{app}); err != nil {
-		return err
-	}
-	// Drain syncs catalog + stamped journal before ACK. Recovery derives the
-	// dedup frontier from that same journal; there is no receipt/data crash gap.
-	if err = p.Drain(); err != nil {
-		return err
-	}
-	return p.rememberRelay(stamp)
+	return nil
 }
 
 // ReceivePlacedTCP owns all producer methods until Server.Wait completes. Stop

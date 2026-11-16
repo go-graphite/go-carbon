@@ -106,6 +106,8 @@ func TestStoreNameScale(t *testing.T) {
 	}
 	names = nil
 	elapsed := time.Since(start)
+	// Persist readiness in the test log even if the profiling GC times out.
+	fmt.Printf("SCALE_READY phase=%s names=%d core_open_seconds=%.9f discovery_ready_seconds=%.9f\n", phase, n, opened.Seconds(), elapsed.Seconds())
 	runtime.GC()
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
