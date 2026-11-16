@@ -63,8 +63,12 @@ schema shapes, six aggregation methods and 1h/1d/7d/30d queries.
 A mixed render reserves twice the part adapter's configured work budget before
 reading, accounting for the legacy output and bounded winner workspace. It
 resolves legacy metadata once. Bound queries scan the occupied suffix, fetch
-the uncovered legacy prefix, and fill only unoccupied output slots. A suffix
-covered entirely by parts therefore avoids decoding that legacy data. The
+the uncovered legacy prefix, and merge only occupied part slots into the
+legacy-owned result. A shortened prefix needs one bounded output extension;
+the handle charges its additional 8B per query slot. Pooled part values stay
+unchanged, so workspace cleanup remains proportional to part occupancy. A suffix
+covered entirely by parts therefore avoids decoding that legacy data. Interior
+holes still use the enclosing legacy prefix. The
 unbound compatibility path overlays into legacy values through `RenderInto`. Converted or suppressed
 names skip legacy lookup and fetching entirely. `LegacyHorizon` optionally
 skips legacy data reads for intervals strictly after its verified inclusive
@@ -138,8 +142,9 @@ Bound requests reuse handle/result storage and a sparse workspace callback.
 Their adapter bookkeeping performs no publication retain/release and introduces
 no writer lock; native legacy admission and read-view synchronization remain.
 The byte budget still charges every active request. Warm v2-only renders have
-zero adapter allocations. A small warm mixed fixture also adds no allocations
-over frozen legacy fetching (14 mixed versus 15 frozen allocations/request). The legacy
+zero adapter allocations. The earlier full-range overlay fixture added no allocations above frozen
+legacy fetching; the suffix path can allocate an extended result when it shortens
+the legacy output. The legacy
 decoder and the existing index can still
 allocate, and cold workspace/pool misses can allocate. These statements do not
 establish a latency improvement or a persisted-part production qualification.
