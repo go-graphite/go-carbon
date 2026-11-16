@@ -1,0 +1,13 @@
+# Raw live shadow
+
+`go run ./tool/v2-shadow -source /path/to/classic-input-log -out /fresh/private/root -classic http://127.0.0.1:8080 -duration 20m`
+
+Opens the classic journal O_RDONLY, verifies segment identity and frame/payload CRC before advancing the stateful decoder, and follows only immediate successor segments. The tailer and its adversarial fixture are ported from the earlier immutable-parts shadow diagnostic. Never point `out` at a production store or an existing experiment.
+
+Normalized input goes through `v2daemon` layer 2: durable names, one-second grouped journal sync and bounded pipelined core admission. No shared core implementation is modified. A diagnostic first-seen name map mirrors the serial producer catalog IDs (one-based); samples rotate through every 8192nd observed distinct name, up to 4096 candidates. The serial decoder/catalog and broad snapshot scans limit throughput. This is an experimental harness, not daemon capacity evidence.
+
+Each comparison pins immutable owner snapshots, scans their raw records once for the selected names, and fetches classic protobuf responses via HTTP GET. It compares slot presence and float64 bits, including signed zero and NaN payloads, choosing the greatest original input sequence for repeated exact timestamps. Ranges begin 60 seconds after shadow start and end at wall time minus `-lag` (default 120s). This fixed exclusion is reported, not treated as measured ingest lag or permission to ignore mismatches. A source cursor that has not caught up, or classic correction arriving after the snapshot, leaves mismatches unclassified; rerun identical frozen ranges after convergence before blaming either engine.
+
+The source journal contains receiver groups, not original persister application boundaries or admission clocks. L3 rollup, retention, physical-slot wrap, LastUpdate, historical data and L4 serving parity remain unqualified. Unaligned raw input is reported as an unsupported comparison. Missing API metrics/errors are failures, not successful comparisons. Inspect `compared_names`, `compared_points`, `mismatches`, exact examples, failures, source cursor/caught-up state, frontiers, and process/load context on every JSONL row. Empty comparison coverage proves nothing.
+
+Use external `taskset`, a hard timeout and a process/load observer on shared hosts. All rates are provisional under co-tenant load. Stop only the recorded harness process group and preserve results/checksums before removing its private output. The harness never signals or configures the classic daemon. A fresh output is required for every run; crash replay is owned by the daemon integration.
