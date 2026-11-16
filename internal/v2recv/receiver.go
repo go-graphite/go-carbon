@@ -44,6 +44,10 @@ type batch struct {
 	names []string
 	data  []points.Point
 }
+type ownerCall struct {
+	run func() error
+	ack chan error
+}
 type counters struct{ accepted, rejected, parse, transport, sink, wire, connections atomic.Uint64 }
 type Stats struct{ Accepted, Rejected, ParseErrors, TransportErrors, SinkErrors, WireBytes, Connections uint64 }
 
@@ -53,6 +57,7 @@ type Server struct {
 	cfg      Config
 	listener net.Listener
 	queues   []chan batch
+	controls []chan ownerCall
 	owners   []Owner
 	done     chan struct{}
 	stop     sync.Once
@@ -129,9 +134,11 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	}
 	for _, o := range owners {
 		q := make(chan batch, cfg.QueueDepth)
+		control := make(chan ownerCall)
+		s.controls = append(s.controls, control)
 		s.queues = append(s.queues, q)
 		s.workers.Add(1)
-		go s.work(o, q)
+		go s.work(o, q, control)
 	}
 	s.accept.Add(1)
 	go s.listen()
@@ -184,7 +191,7 @@ func (s *Server) fail(err error) {
 		s.mu.Unlock()
 	})
 }
-func (s *Server) work(o Owner, q <-chan batch) {
+func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
 	defer s.workers.Done()
 	tick := time.NewTicker(s.cfg.SyncInterval)
 	defer tick.Stop()
@@ -210,6 +217,12 @@ func (s *Server) work(o Owner, q <-chan batch) {
 	}
 	for {
 		select {
+		case call := <-control:
+			if failed {
+				call.ack <- errors.New("receiver owner failed")
+			} else {
+				call.ack <- call.run()
+			}
 		case b, ok := <-q:
 			if !ok {
 				syncOwner()

@@ -46,6 +46,7 @@ type coreFrontier struct {
 	ExpiredBefore int64
 }
 type corePacket struct {
+	operation  func(*coreOwner) error
 	rows       []row
 	batches    []coreBatch
 	cursor     uint64
@@ -188,8 +189,9 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
-	gc      *sealedPartGC
-	gcDirty atomic.Bool
+	rollups        *coreRollups
+	gc             *sealedPartGC
+	gcDirty        atomic.Bool
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
@@ -408,6 +410,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			r.now = hooks.Now
 			o.maintenance = hooks.Expire != nil
 			o.plan = r.plan
+			o.rollups = r
 		}
 		// Only uncommitted staging files remain after successful atomic ingestion.
 		files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
@@ -850,6 +853,25 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				continue
 			}
 			found = true
+			if p.operation != nil {
+				err := failure
+				if err == nil {
+					err = flush()
+				}
+				if err == nil {
+					err = p.operation(o)
+				}
+				if err == nil {
+					o.readGeneration++
+					o.pub.publish(o.db.NewSnapshot())
+					err = publishBatches()
+					if err == nil && o.hook != nil {
+						err = o.hook(o.db.NewSnapshot(), nil)
+					}
+				}
+				p.ack <- err
+				continue
+			}
 			if p.stop {
 				stopped[producer] = true
 				left--

@@ -100,9 +100,9 @@ func newerOrigin(a partOrigin, ao uint64, b partOrigin, bo uint64) (bool, error)
 // InstallCopiedPart atomically ingests verified, unchanged SST bytes and their
 // class-0 catalog entry. It is an OFFLINE read-store primitive: the caller owns
 // exclusive installation, coherent inventory, lifecycle authority and identity
-// adoption. Do not call it on Engine.DBs during intake: numeric producer IDs and
-// the live reducer must first be adopted by an owner-serialized daemon operation.
-// A writable Engine deliberately refuses this catalog until that exists.
+// adoption. Do not call it on Engine.DBs during intake: use PrepareMove and the
+// serial producer's AdoptMove instead. Writable recovery refuses this catalog
+// when it has no atomically installed receiving identity/reducer authority.
 //
 // Input path is retained by hard link; neither successful ingest nor retries
 // consume it. A crash exposes both the data and precedence, or neither. Repeating
@@ -223,8 +223,8 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 			names[k.Metric] = entry
 		}
 		if k.Archive == v2part.MetadataArchive {
-			var m RollupMetadata
-			if err := json.Unmarshal(b, &m); err != nil {
+			m, decodeErr := DecodeRollupMetadata(b)
+			if err := decodeErr; err != nil {
 				return err
 			}
 			if k.BlockStart != 0 || entry.meta != nil || (m.Version != 1 && m.Version != 2) || m.ID == 0 || m.Frontier.Order == 0 || m.ResetOrder > m.Frontier.Order || (m.Version == 1 && (m.ResetOrder != 0 || m.Expired)) || (m.Expired && m.ResetOrder != m.Frontier.Order) {

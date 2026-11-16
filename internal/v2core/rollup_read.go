@@ -27,7 +27,7 @@ type RollupSnapshot struct {
 	cache          *rollupRangeCache
 	directoryBytes int64
 	inventory      map[string][]string // descriptor binding -> immutable routed part scopes
-	hasCopied bool
+	hasCopied      bool
 }
 
 // Shared only by readers. Entries own scalar records and scope strings, never
@@ -70,18 +70,22 @@ type readPartMetric struct {
 	origin partOrigin
 }
 type snapshotMetric struct {
-	policy  RollupPolicy
-	meta    RollupMetadata
-	parts   []*readPartMetric
-	partIDs map[string]struct{}
-	origin partOrigin
-	origins map[partOrigin]RollupMetadata
-	copied bool
+	policy    RollupPolicy
+	meta      RollupMetadata
+	parts     []*readPartMetric
+	partIDs   map[string]struct{}
+	origin    partOrigin
+	origins   map[partOrigin]RollupMetadata
+	copied    bool
 	authority *moveAuthority
 }
 
 func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
-	if found,err := snapshotHasCopiedParts(snapshot); err != nil { return nil,err } else if found { return newCopiedRollupSnapshot(ctx,snapshot,nil,cacheLimit...) }
+	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
+		return nil, err
+	} else if found {
+		return newCopiedRollupSnapshot(ctx, snapshot, nil, cacheLimit...)
+	}
 	limit := int64(rollupReadCacheBytes)
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
@@ -264,7 +268,9 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if archive < 0 || archive >= len(m.policy.Config.Archives) || first < 0 || last > m.policy.Config.Archives[archive].Count {
 		return errors.New("invalid archive range")
 	}
-	if archive > 0 && m.authority != nil { return s.scanAdoptedCoarse(ctx,name,archive,first,last,yield) }
+	if archive > 0 && m.authority != nil {
+		return s.scanAdoptedCoarse(ctx, name, archive, first, last, yield)
+	}
 	if archive > 0 && len(m.origins) > 1 {
 		return errors.New("mixed-origin coarse reads require installed rollup rebuild authority")
 	}
@@ -559,7 +565,7 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*re
 		if digest != meta.Frontier.Policy {
 			return nil, errors.New("rollup policy/frontier mismatch")
 		}
-		part.metrics[string(key.Metric)] = &readPartMetric{origin:partOrigin{Class:LivePart},id: string(scope), key: key, policy: policy, meta: meta}
+		part.metrics[string(key.Metric)] = &readPartMetric{origin: partOrigin{Class: LivePart}, id: string(scope), key: key, policy: policy, meta: meta}
 		// The last 16 bytes are archive, physical slot and ordinal.
 		it.SeekGE(v2part.PrefixEnd(encoded[:len(encoded)-16]))
 	}
@@ -641,8 +647,8 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 				if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 					return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 				}
-				var meta RollupMetadata
-				if err = json.Unmarshal(it.Value(), &meta); err != nil {
+				meta, decodeErr := DecodeRollupMetadata(it.Value())
+				if err = decodeErr; err != nil {
 					return nil, err
 				}
 				var policy RollupPolicy
@@ -678,7 +684,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 		for name, p := range part.metrics {
 			m := out.metrics[name]
 			if m == nil {
-				m = &snapshotMetric{policy: p.policy, meta: p.meta, origin: p.origin, origins: map[partOrigin]RollupMetadata{}, partIDs:map[string]struct{}{}}
+				m = &snapshotMetric{policy: p.policy, meta: p.meta, origin: p.origin, origins: map[partOrigin]RollupMetadata{}, partIDs: map[string]struct{}{}}
 				out.metrics[name] = m
 			}
 			if m.policy.Group != p.policy.Group || !bytes.Equal(m.meta.Policy, p.meta.Policy) {
@@ -707,9 +713,11 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 	if err = it.Error(); err != nil {
 		return nil, err
 	}
-	if err := out.loadMoveAuthorities(); err != nil { return nil,err }; return out, nil
+	if err := out.loadMoveAuthorities(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
-
 
 // Resets are source-local counters too. A receiver reset also masks all donor
 // history, since every imported part precedes every local lifecycle event.

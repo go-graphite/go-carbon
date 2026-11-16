@@ -565,13 +565,21 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 
 func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 	r := newCoreRollups()
-	if found, err := hasCopiedParts(db); err != nil {
-		return nil, err
-	} else if found {
-		return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
-	}
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
+	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
+		return nil, err
+	} else if found {
+		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range index.metrics {
+			if m.copied && m.authority == nil {
+				return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
+			}
+		}
+	}
 	err := ScanRollups(snapshot, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
 		m, err := r.metric(meta.ID, meta.Policy, r.prepared)
 		if err != nil {
