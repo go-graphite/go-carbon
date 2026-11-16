@@ -4,6 +4,7 @@ package v2daemon
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -60,6 +61,7 @@ type Producer struct {
 	writer                                                       *bufio.Writer
 	packets                                                      []packet
 	records                                                      [][]byte
+	spareRecords                                                 [][]byte
 	spareRows                                                    [][]v2core.Row
 	spareBatches                                                 [][]v2core.Batch
 	applicationFrames                                            []partlog.DictionaryFrame
@@ -299,6 +301,15 @@ func (p *Producer) Drain() error {
 		}
 		p.JournalSyncTime += time.Since(start)
 		p.SyncGroups++
+		// Write/Flush and fsync have finished consuming these detached records.
+		// No core packet aliases the serialized application envelope.
+		for _, record := range p.records {
+			// Placed envelopes currently allocate independently and never take
+			// a spare. Keep this pool bounded by recycling only plain frames.
+			if bytes.HasPrefix(record, applicationMagic) {
+				p.spareRecords = append(p.spareRecords, record[:0])
+			}
+		}
 		clear(p.records)
 		p.records = p.records[:0]
 	}

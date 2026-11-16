@@ -106,6 +106,9 @@ func validateCoreSealPlan(p coreSealPlan) error {
 			return errors.New("empty seal extension file")
 		}
 		for i, kv := range file {
+			if kv.Record != nil && !isRollupFile(file) {
+				return errors.New("typed rollup record requires GCP3 extension file")
+			}
 			if len(kv.Key) == 0 || kv.Key[0] < 3 || (kv.Key[0] == 255 && !bytes.HasPrefix(kv.Key, []byte{255, 'V', '2'})) {
 				return errors.New("reserved seal extension key")
 			}

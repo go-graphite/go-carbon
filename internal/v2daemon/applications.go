@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"math/bits"
 	"slices"
 	"time"
 
@@ -117,7 +118,14 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		return p.fail(err)
 	}
 	cursor := p.cursor + uint64(n)
-	record := encodeApplications(cursor, ids, batches, encoded)
+	var record []byte
+	if stamp == nil && len(p.spareRecords) > 0 {
+		last := len(p.spareRecords) - 1
+		record = p.spareRecords[last][:0]
+		p.spareRecords[last] = nil
+		p.spareRecords = p.spareRecords[:last]
+	}
+	record = appendApplicationRecord(record, cursor, ids, batches, encoded)
 	if stamp != nil {
 		record = encodePlacementEnvelope(*stamp, record)
 	}
@@ -146,7 +154,23 @@ var applicationCRC = crc32.MakeTable(crc32.Castagnoli)
 // The existing PDC4 point codec is nested unchanged. The outer checksum binds
 // source IDs, application orders and sequences to those original PDC4 frames.
 func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
-	b := append([]byte(nil), applicationMagic...)
+	return appendApplicationRecord(nil, cursor, ids, batches, pdc4)
+}
+
+func applicationVarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
+
+// Append into producer-owned storage retained until the journal fsync succeeds.
+// Reserve the complete envelope once, including all original sequence varints.
+func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
+	size := len(applicationMagic) + applicationVarintLen(cursor) + applicationVarintLen(uint64(len(batches))) + applicationVarintLen(uint64(len(pdc4))) + len(pdc4) + 4
+	for i, a := range batches {
+		size += applicationVarintLen(ids[i]) + applicationVarintLen(a.Order) + applicationVarintLen(uint64(len(a.Points)))
+		for _, p := range a.Points {
+			size += applicationVarintLen(p.Seq)
+		}
+	}
+	start := len(dst)
+	b := append(slices.Grow(dst, size), applicationMagic...)
 	b = binary.AppendUvarint(b, cursor)
 	b = binary.AppendUvarint(b, uint64(len(batches)))
 	for i, a := range batches {
@@ -159,7 +183,7 @@ func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc
 	}
 	b = binary.AppendUvarint(b, uint64(len(pdc4)))
 	b = append(b, pdc4...)
-	return binary.LittleEndian.AppendUint32(b, crc32.Checksum(b, applicationCRC))
+	return binary.LittleEndian.AppendUint32(b, crc32.Checksum(b[start:], applicationCRC))
 }
 
 // DecodeApplications verifies a journal application packet against the synced

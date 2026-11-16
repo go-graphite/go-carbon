@@ -529,8 +529,14 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 					return errors.New("registered policy with mutable definition")
 				}
 				if route, ok := router.rollupRoutes[b.ID]; ok {
-					if route.registered != b.Registered && !bytes.Equal(route.policy, b.Registered.policy) {
-						return errors.New("stored rollup policy changed")
+					if route.registered != b.Registered {
+						if !bytes.Equal(route.policy, b.Registered.policy) {
+							return errors.New("stored rollup policy changed")
+						}
+						// Replay supplies bytes before the live catalog handle.
+						// Bind only after canonical equality is established.
+						route.registered = b.Registered
+						router.rollupRoutes[b.ID] = route
 					}
 				} else {
 					router.rollupRoutes[b.ID] = rollupRoute{owner: int(b.Registered.vshard) % e.cfg.Shards, policy: b.Registered.policy, registered: b.Registered}
@@ -1097,6 +1103,8 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return 0, errors.New("raw replacement requires output for nonempty input")
 		}
 	}
+	rollupWrites := o.startRollupPartWrites(plan)
+	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
 	if plan.ReplaceRaw {
 		// The replacement planner owns ordering and retention in its format.
@@ -1234,7 +1242,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	if o.cfg.BlindBatch && !o.cfg.Rollups {
 		for _, file := range plan.Files {
 			for _, kv := range file {
-				if err = batch.Set(kv.Key, kv.Value, nil); err != nil {
+				if err = batch.Set(kv.Key, kv.encodedValue(), nil); err != nil {
 					return 0, err
 				}
 			}
@@ -1266,18 +1274,10 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	}()
 	for i, file := range plan.Files {
 		if isRollupFile(file) {
-			xp := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
-			stagedPaths = append(stagedPaths, xp)
-			var d v2part.Descriptor
-			var e error
-			if len(plan.PartSpecs) == len(plan.Files) {
-				spec := plan.PartSpecs[i]
-				spec.Source.Incarnation = o.partSource.Incarnation
-				spec.Source.Stream = o.partSource.Stream
-				d, e = writePlannedRollupPart(xp, file, spec)
-			} else {
-				d, e = WriteDenseRollupPart(xp, file, o.partSource)
-			}
+			<-rollupWrites.done
+			result := rollupWrites.results[i]
+			xp, d, e := result.path, result.descriptor, result.err
+
 			if e != nil {
 				return 0, e
 			}
