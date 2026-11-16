@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import time
 
+from host_io import HostIO
+
 
 def cpus(value):
     result = []
@@ -39,6 +41,8 @@ def main():
     parser.add_argument('--settle', type=int, default=2)
     parser.add_argument('--profiles', action='store_true',
                         help='save one CPU profile per node in the trial directory')
+    parser.add_argument('--host-io', action='store_true',
+                        help='sample Linux process/device IO each second; privilege may be needed for other users')
     args = parser.parse_args()
     nodes = [item.split(':', 1) for item in args.nodes.split(';')]
     all_cpus = [cpu for _, mask in nodes for cpu in cpus(mask)]
@@ -46,7 +50,10 @@ def main():
         raise ValueError('node CPU sets overlap')
     args.out.mkdir(parents=True, exist_ok=False)
     children = []
+    host_io = HostIO(args.out / 'host-io.trace') if args.host_io else None
     try:
+        if host_io is not None:
+            host_io.start()
         for index, (node, mask) in enumerate(nodes):
             env = os.environ.copy()
             env['GOMAXPROCS'] = str(len(cpus(mask)))
@@ -79,6 +86,9 @@ def main():
         for _, output, errors, _ in children:
             output.close()
             errors.close()
+        if host_io is not None:
+            host_io.close()
+            host_io = None
         rows = [[json.loads(line) for line in
                  (args.out / (str(i) + '.jsonl')).read_text().splitlines()]
                 for i in range(len(nodes))]
@@ -104,6 +114,8 @@ def main():
             directory = args.out / ('db-' + str(i))
             if directory.exists():
                 shutil.rmtree(directory)
+        if host_io is not None:
+            host_io.close()
 
 
 def summarize(rows):
