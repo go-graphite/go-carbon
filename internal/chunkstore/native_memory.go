@@ -164,7 +164,8 @@ func nativeMetadataSize(c MetricConfig) int64 {
 	return int64(512 + 2*len(c.Name) + 32*len(c.Retentions))
 }
 
-// NativeSkip records a name left uncopied by admission or a window conflict.
+// NativeSkip records a name left uncopied by admission, a pending target
+// creation fence, or a window conflict.
 // For size admission, sizes are measured
 // without decoding history. DeferredCount includes these ordinals; they must
 // never be mistaken for completed work or sent to the metric fallback silently.

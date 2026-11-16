@@ -15,6 +15,9 @@ import (
 // returned values must remain detached after another file reuses the scratch,
 // including when a sidecar correction replaces a compressed main-file value.
 func TestWhisperArchiveReadScratchOwnership(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	now := int(time.Now().Unix())
 	for _, tc := range []struct {
 		name, retention string

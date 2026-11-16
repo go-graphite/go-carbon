@@ -58,6 +58,7 @@ func pipelineFixture(t *testing.T, streams int) (*pipelineWindowBackend, syncOpt
 }
 
 func TestSyncWindowPipelineDifferentialAndResume(t *testing.T) {
+	t.Parallel()
 	var oracle map[string]map[int64]map[int64]uint64
 	for _, streams := range []int{1, 8} {
 		b, o := pipelineFixture(t, streams)
@@ -90,6 +91,7 @@ func TestSyncWindowPipelineDifferentialAndResume(t *testing.T) {
 }
 
 func TestSyncWindowPipelineOverlapAndCancel(t *testing.T) {
+	t.Parallel()
 	b, o := pipelineFixture(t, 4) // two disjoint groups, each with two donor requests
 	b.arrived = make(chan string, 64)
 	b.release = make(chan struct{})

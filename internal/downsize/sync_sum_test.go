@@ -51,6 +51,7 @@ func (f *sumSyncFixture) SumDigest(_ context.Context, store string, names []stri
 }
 
 func TestSyncFullSumDifferential2048Names(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	schema := []syncArchive{{Step: 60, Points: 240}, {Step: 3600, Points: 48}}
 	names := make([]string, 2048)
@@ -114,6 +115,7 @@ func TestSyncFullSumDifferential2048Names(t *testing.T) {
 }
 
 func TestSyncSumMixedHolderSkipsPointReads(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	b := &sumSyncFixture{fakeSync: f, old: map[string]bool{syncD1: true}}
 	s := &syncer{o: o, b: b}
@@ -129,6 +131,7 @@ func TestSyncSumMixedHolderSkipsPointReads(t *testing.T) {
 }
 
 func TestSyncLiveSumModeNegotiation(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"sum-v1", "", "wrong"} {
 		t.Run(mode, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +156,7 @@ func TestSyncLiveSumModeNegotiation(t *testing.T) {
 }
 
 func TestSyncFullSumDifferentBoundsFallBack(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	b := &sumSyncFixture{fakeSync: f, old: map[string]bool{}, clipped: true}
 	s := &syncer{o: o, b: b}
@@ -201,6 +205,7 @@ func (f *servingSHA) Digest(ctx context.Context, store string, names []string, f
 }
 
 func TestSyncFullLegacySHADifferential(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	b := &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true, syncD1: true, syncD2: true, syncP: true}}}
 	s := &syncer{o: o, b: b}
@@ -226,6 +231,7 @@ func TestSyncFullLegacySHADifferential(t *testing.T) {
 }
 
 func TestSyncFullLegacySHAEmptySource(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	for _, src := range o.from {
 		f.put(src, "a.clean", syncTestSchema)
@@ -258,6 +264,7 @@ func (f *countedTargetSHA) Digest(ctx context.Context, host string, names []stri
 	return f.servingSHA.Digest(ctx, host, names, from, until)
 }
 func TestSyncLegacyTargetReadOnceAfterNegotiation(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	b := &countedTargetSHA{servingSHA: &servingSHA{&sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true, syncD1: true, syncD2: true, syncP: true}}}}
 	s := &syncer{o: o, b: b}
@@ -283,6 +290,7 @@ func TestSyncLegacyTargetReadOnceAfterNegotiation(t *testing.T) {
 }
 
 func TestSyncFullTargetWithoutDigestEndpoints(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	f.noDigest[syncT] = true
 	b := &sumSyncFixture{fakeSync: f, old: map[string]bool{syncT: true}}
@@ -317,6 +325,7 @@ func (f *countedMixedFull) Fetch(ctx context.Context, store string, names []stri
 	return f.fakeSync.Fetch(ctx, store, names, from, until)
 }
 func TestSyncMixedSHADigestBeforePointReads(t *testing.T) {
+	t.Parallel()
 	for _, holes := range []bool{false, true} {
 		t.Run(fmt.Sprint(holes), func(t *testing.T) {
 			f, o, _ := threeSources(t)
@@ -371,6 +380,7 @@ func (b *absentFullSource) Fetch(ctx context.Context, host string, names []strin
 }
 
 func TestSyncFullAbsentLegacySourceDifferential(t *testing.T) {
+	t.Parallel()
 	for _, holes := range []bool{false, true} {
 		t.Run(fmt.Sprint(holes), func(t *testing.T) {
 			f, o, _ := threeSources(t)

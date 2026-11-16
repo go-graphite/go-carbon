@@ -27,6 +27,14 @@ type hostWaiter struct {
 	progress                       *copyProgress // optional
 }
 
+// now uses the same stall clock as the progress reporter.
+func (w *hostWaiter) now() time.Time {
+	if w.progress != nil {
+		return w.progress.now()
+	}
+	return time.Now()
+}
+
 var errCopyStall = errors.New("copy stalled")
 
 // retryTransient retries guard responses (429 left by request, 502/503/504),
@@ -64,7 +72,7 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 		if !transientCopyError(err) {
 			return err
 		}
-		now := time.Now()
+		now := w.now()
 		if first.IsZero() {
 			first = now
 		}
@@ -85,7 +93,7 @@ func (w *hostWaiter) retryTransient(ctx context.Context, path string, hosts []st
 			since = now
 		}
 		wasDown = down
-		if stuck := time.Since(since); !down && !restartCopyError(err) && stuck >= w.stallTimeout {
+		if stuck := w.now().Sub(since); !down && !restartCopyError(err) && stuck >= w.stallTimeout {
 			event("copy_stalled", map[string]any{"level": "error", "path": path, "hosts": hosts, "attempts": attempt, "stuck_seconds": stuck.Seconds(), "stall_timeout": w.stallTimeout.String(), "error": err.Error()})
 			return fmt.Errorf("%w: %s: no progress for %s with every host up (--stall-timeout %s): %w", errCopyStall, path, stuck.Round(time.Second), w.stallTimeout, err)
 		}

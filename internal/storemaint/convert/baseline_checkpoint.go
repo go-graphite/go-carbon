@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -63,12 +64,17 @@ func openBaselineCheckpoint(dir string, id identity) (*baselineCheckpoint, error
 	return &baselineCheckpoint{db: db}, nil
 }
 
-// Ignore access time. Main and OOO identity/change time invalidate replacement,
-// in-place modification, sidecar addition/removal and inode reuse after a crash.
+// Ignore access time. Identity and timestamps invalidate obvious changes, but
+// cannot prove unchanged contents on filesystems with coarse timestamps. Hash
+// every byte of the main capture and optional OOO sidecar on every reuse.
 func baselineCaptureStamp(path string) ([32]byte, error) {
+	return baselineCaptureStampWithStat(path, os.Lstat)
+}
+
+func baselineCaptureStampWithStat(path string, stat func(string) (os.FileInfo, error)) ([32]byte, error) {
 	h := sha256.New()
 	for i, name := range []string{path, whisper.OutOfOrderSidecarPath(path)} {
-		info, err := os.Lstat(name)
+		info, err := stat(name)
 		if i == 1 && errors.Is(err, os.ErrNotExist) {
 			_, _ = h.Write([]byte{0})
 			continue
@@ -89,6 +95,18 @@ func baselineCaptureStamp(path string) ([32]byte, error) {
 			binary.BigEndian.PutUint64(raw[1+j*8:], n)
 		}
 		_, _ = h.Write(raw[:])
+		f, err := os.Open(name)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		n, readErr := io.Copy(h, f)
+		closeErr := f.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return [32]byte{}, err
+		}
+		if n != info.Size() {
+			return [32]byte{}, errors.New("baseline capture size changed while hashing")
+		}
 	}
 	var result [32]byte
 	copy(result[:], h.Sum(nil))
@@ -104,7 +122,7 @@ func (p *baselineCheckpoint) match(name string, m chunkstore.Metadata, stamp [32
 		return 0, false, err
 	}
 	defer closer.Close()
-	if len(data) != 65 || data[0] != 1 || !bytes.Equal(data[1:25], proofBytes(m)) || !bytes.Equal(data[33:], stamp[:]) {
+	if len(data) != 65 || data[0] != 2 || !bytes.Equal(data[1:25], proofBytes(m)) || !bytes.Equal(data[33:], stamp[:]) {
 		return 0, false, nil
 	}
 	count := binary.BigEndian.Uint64(data[25:33])
@@ -117,13 +135,14 @@ func (p *baselineCheckpoint) match(name string, m chunkstore.Metadata, stamp [32
 
 func (p *baselineCheckpoint) verified(name string, m chunkstore.Metadata, stamp [32]byte, count int) error {
 	var data [65]byte
-	data[0] = 1
+	data[0] = 2
 	copy(data[1:25], proofBytes(m))
 	binary.BigEndian.PutUint64(data[25:33], uint64(count))
 	copy(data[33:], stamp[:])
 	// Destination catalog and blocks are one atomic batch. A receipt surviving
 	// a lost destination batch cannot match its metadata. A recapture changes
-	// the file stamp, so stale receipts also fail after interrupted recapture.
+	// the content stamp, so stale receipts fail even when timestamps are equal.
+	// Version 1 stat-only receipts are reverified before upgrading to version 2.
 	// Group-sync receipts instead of adding one fsync to every converted metric.
 	return p.db.Set([]byte(name), data[:], pebble.NoSync)
 }

@@ -77,6 +77,7 @@ func (s *syncer) checkFullReference(ctx context.Context, row *syncRow, names []s
 }
 
 func TestSyncFullDigestParity(t *testing.T) {
+	t.Parallel()
 	for _, fallback := range []bool{false, true} {
 		for _, variant := range []string{"clean", "holes", "values", "retentions", "missing"} {
 			t.Run(variant+"/fallback="+fmt.Sprint(fallback), func(t *testing.T) {
@@ -128,6 +129,7 @@ func TestSyncFullDigestParity(t *testing.T) {
 }
 
 func TestSyncFullConcurrentFallback(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	f.noDigest[syncT] = true
 	names := []string{"b.holes", "c.peerhole"}
@@ -163,6 +165,7 @@ func (b *detailNamesSync) Fetch(ctx context.Context, store string, names []strin
 	return b.fakeSync.Fetch(ctx, store, names, from, until)
 }
 func TestSyncWindowReadsOnlyMismatches(t *testing.T) {
+	t.Parallel()
 	f, o, holes := threeSources(t)
 	// Keep this request on a single archive: the shared fake returns all
 	// archive digests, while the production endpoint returns the serving one.

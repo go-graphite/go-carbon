@@ -15,6 +15,7 @@ import (
 // A terminal round followed by saved window resolutions used to start a new
 // generation against the whole catalog, including names already proved clean.
 func TestSyncResolvedWindowResumeOnlyRechecksResiduals(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", syncTestNow - 7200, syncTestNow - 3600}}
@@ -70,6 +71,7 @@ func (b *resumeDigestWatch) Digest(ctx context.Context, host string, names []str
 }
 
 func TestReadyResumeRunsSavedChildBeforeRoot(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	identity, _ := syncIdentity(o)
 	processes := map[string]readyProcess{}
@@ -93,6 +95,7 @@ func TestReadyResumeRunsSavedChildBeforeRoot(t *testing.T) {
 }
 
 func TestReadyResumePreparesBackendAndRejectsInvalidIntent(t *testing.T) {
+	t.Parallel()
 	for _, valid := range []bool{true, false} {
 		t.Run(map[bool]string{true: "valid", false: "invalid scope"}[valid], func(t *testing.T) {
 			f, o, r := newReadyFixture(t, 100)
@@ -121,6 +124,7 @@ func TestReadyResumePreparesBackendAndRejectsInvalidIntent(t *testing.T) {
 }
 
 func TestWindowResumeSetLegacySparseMembership(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", 1, 2}}
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("a\t1\t1\nb\t1\t1\nc\t1\t1\nz\t1\t1\n"), 0600); err != nil {
@@ -155,6 +159,7 @@ func TestWindowResumeSetLegacySparseMembership(t *testing.T) {
 }
 
 func TestWindowResumeSetRejectsIncompleteOriginalProof(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", 1, 2}}
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("a\t1\t1\nb\t1\t1\n"), 0600); err != nil {
@@ -177,22 +182,38 @@ func TestWindowResumeSetRejectsIncompleteOriginalProof(t *testing.T) {
 	}
 }
 
-// A fixed-window repair changes only its touched names. Keep their per-name
-// mutation fences, including the before/after write check, without restarting
-// the whole catalog's proof/data pass after each successful fill.
+// Reuse clean data after a window repair, while metadata fences still detect
+// another holder changing an unrelated name during the repair.
 type repairedWindowProofWatch struct {
 	*proofFixture
-	repaired    atomic.Bool
-	proofMu     sync.Mutex
-	afterRepair map[string]bool
+	repaired        atomic.Bool
+	mutateOnce      sync.Once
+	proofMu         sync.Mutex
+	afterRepair     map[string]bool
+	dataAfterRepair map[string]bool
 }
 
 func (b *repairedWindowProofWatch) CopyWindow(ctx context.Context, source, target string, names []string, journal string, windows syncRanges) (syncCopyResult, error) {
 	result, err := b.fakeSync.CopyWindow(ctx, source, target, names, journal, windows)
 	if err == nil {
 		b.repaired.Store(true)
+		b.mutateOnce.Do(func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			delete(b.store(syncT).points["metric.02"][3600], syncTestNow-5*3600)
+		})
 	}
 	return result, err
+}
+func (b *repairedWindowProofWatch) Digest(ctx context.Context, host string, names []string, from, until int64) (map[string][]syncDigest, error) {
+	if b.repaired.Load() {
+		b.proofMu.Lock()
+		for _, n := range names {
+			b.dataAfterRepair[n] = true
+		}
+		b.proofMu.Unlock()
+	}
+	return b.proofFixture.Digest(ctx, host, names, from, until)
 }
 func (b *repairedWindowProofWatch) Proofs(ctx context.Context, host string, names []string) ([]string, error) {
 	if b.repaired.Load() {
@@ -204,12 +225,13 @@ func (b *repairedWindowProofWatch) Proofs(ctx context.Context, host string, name
 	}
 	return b.proofFixture.Proofs(ctx, host, names)
 }
-func TestSyncWindowRepairRechecksOnlyTouchedMutationFences(t *testing.T) {
+func TestSyncWindowRepairReusesCleanDataWithMutationFences(t *testing.T) {
+	t.Parallel()
 	f, o := frontierFixture(t)
 	o.noCopy = false
 	o.maxRounds = 0
 	o.windows = syncRanges{{"gap", syncTestNow - 6*3600, syncTestNow - 4*3600}}
-	b := &repairedWindowProofWatch{proofFixture: f, afterRepair: map[string]bool{}}
+	b := &repairedWindowProofWatch{proofFixture: f, afterRepair: map[string]bool{}, dataAfterRepair: map[string]bool{}}
 	if err := runSync(context.Background(), o, b); err != nil {
 		t.Fatal(err)
 	}
@@ -218,12 +240,19 @@ func TestSyncWindowRepairRechecksOnlyTouchedMutationFences(t *testing.T) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	if !reflect.DeepEqual(names, []string{"metric.19"}) {
-		t.Fatalf("rechecked outside repair: %v", names)
+	if len(names) != 20 {
+		t.Fatalf("did not check all mutation fences: %v", names)
+	}
+	if got := sortedKeys(b.dataAfterRepair); !reflect.DeepEqual(got, []string{"metric.02", "metric.19"}) {
+		t.Fatalf("reverified data %v, want only repaired and concurrently changed names", got)
+	}
+	if _, ok := b.store(syncT).points["metric.02"][3600][syncTestNow-5*3600]; !ok {
+		t.Fatal("concurrent mutation was certified clean")
 	}
 }
 
 func TestWindowResumePreservesHolesFromInterruptedBroadRetry(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.windows = syncRanges{{"gap", 1, 2}}
 	if err := os.WriteFile(filepath.Join(o.state, "union.tsv"), []byte("a\t1\t1\nb\t1\t1\n"), 0600); err != nil {

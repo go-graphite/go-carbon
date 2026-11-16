@@ -35,6 +35,7 @@ func (b *restartWindowWatch) Fetch(ctx context.Context, host string, names []str
 	return b.fakeSync.Fetch(ctx, host, names, from, until)
 }
 func TestRestartWindowProofBoundsAndEmptyNames(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{false, true} {
 		for _, hole := range []bool{false, true} {
 			t.Run(fmt.Sprintf("legacy=%v/hole=%v", legacy, hole), func(t *testing.T) {
@@ -77,6 +78,7 @@ func TestRestartWindowProofBoundsAndEmptyNames(t *testing.T) {
 	}
 }
 func TestRestartWindowRejectsFullHistory(t *testing.T) {
+	t.Parallel()
 	s := syncer{o: syncOptions{restartWindow: true, fullHistory: true}, b: newFakeSync()}
 	if err := s.verifyNames(context.Background(), &syncRow{}, []string{"a"}); err == nil {
 		t.Fatal("accepted unbounded restart proof")
@@ -101,6 +103,7 @@ func (b *restartNewHolder) Info(ctx context.Context, host string, names []string
 	return b.fakeSync.Info(ctx, host, names)
 }
 func TestRestartWindowChecksHolderCreatedAfterDiscovery(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	w := syncRange{"restart", syncTestNow - 600, syncTestNow - 120}
 	for _, host := range []string{syncT, syncD1} {

@@ -19,11 +19,12 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-// A delayed native receiver exposes whether ranges overlap, independently of disk speed.
+// A gated native receiver proves overlap without racing wall-clock delays.
 func TestSyncWindowRangeTiming(t *testing.T) {
 	source := nativeControllerStore(t)
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
+	entered := make(chan chan struct{}, 4)
 	var active, peak, pulls atomic.Int64
 	var progressedBeforeLastPull atomic.Bool
 	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +44,13 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(150 * time.Millisecond)
+		gate := make(chan struct{})
+		entered <- gate
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
 		var req struct{ Range store.NativeRange }
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
@@ -63,6 +70,8 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(receipt)
 	}))
 	defer dst.Close()
+	testCtx, cancel := context.WithCancel(t.Context())
+	defer cancel() // release gated handlers before closing either server on failure
 	names := copyNames("metric.", store.NativeMaxRangeNames*8)
 	for _, streams := range []int{1, 4} {
 		b := newSyncLiveBackend(syncLiveOptions{copyStreams: streams, hostWait: time.Nanosecond})
@@ -71,12 +80,35 @@ func TestSyncWindowRangeTiming(t *testing.T) {
 		pulls.Store(0)
 		progressedBeforeLastPull.Store(false)
 		started := time.Now()
-		ctx := context.WithValue(context.Background(), syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
+		ctx := context.WithValue(testCtx, syncWindowProgressKey{}, func(_ string, n int, replayed bool) {
 			if n > 0 && !replayed && pulls.Load() < int64(len(names)/store.NativeMaxRangeNames) {
 				progressedBeforeLastPull.Store(true)
 			}
 		})
-		res, err := b.CopyWindow(ctx, donor.URL, dst.URL, names, t.TempDir()+"/copy", syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
+		path := t.TempDir() + "/copy"
+		done := make(chan struct{})
+		var res syncCopyResult
+		var err error
+		go func() {
+			defer close(done)
+			res, err = b.CopyWindow(ctx, donor.URL, dst.URL, names, path, syncRanges{{From: testMetricNow - 10, Until: testMetricNow}})
+		}()
+		for i := 0; i < 8; i += streams {
+			gates := make([]chan struct{}, streams)
+			for j := range gates {
+				select {
+				case gates[j] = <-entered:
+				case <-done:
+					t.Fatal("copy stopped before all ranges entered", err)
+				case <-time.After(5 * time.Second):
+					t.Fatal("ranges did not use available streams")
+				}
+			}
+			for _, gate := range gates {
+				close(gate)
+			}
+		}
+		<-done
 		stop()
 		t.Logf("streams=%d elapsed=%s peak=%d names=%d", streams, time.Since(started), peak.Load(), res.Copied)
 		if err != nil {
@@ -112,7 +144,7 @@ func TestSyncWindowProgressRetryDeduplicates(t *testing.T) {
 // precedence and all float bits must match a clean serial reference.
 func TestSyncWindowParallelDifferentialResume(t *testing.T) {
 	previousLimit := nativeRangeNames
-	nativeRangeNames = 16
+	nativeRangeNames = 4
 	defer func() { nativeRangeNames = previousLimit }()
 	for _, status := range []int{0, http.StatusConflict, http.StatusRequestEntityTooLarge} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
@@ -144,7 +176,7 @@ func TestSyncWindowParallelDifferentialResume(t *testing.T) {
 						http.Error(w, "interrupted fill", 503)
 						return
 					}
-					reject := status == http.StatusConflict && slices.Contains(req.Range.Names, names[int(nativeRangeNames)+7]) || status == http.StatusRequestEntityTooLarge && len(req.Range.Names) > int(nativeRangeNames)/2
+					reject := status == http.StatusConflict && slices.Contains(req.Range.Names, names[int(nativeRangeNames)+1]) || status == http.StatusRequestEntityTooLarge && len(req.Range.Names) > int(nativeRangeNames)/2
 					if reject {
 						http.Error(w, "isolate rejected range", status)
 						return
@@ -161,7 +193,7 @@ func TestSyncWindowParallelDifferentialResume(t *testing.T) {
 			windows := syncRanges{{Name: "early", From: testMetricNow - 20, Until: testMetricNow - 10}, {Name: "late", From: testMetricNow - 10, Until: testMetricNow}}
 			good := slices.Clone(names)
 			if status == http.StatusConflict {
-				good = slices.Delete(good, int(nativeRangeNames)+7, int(nativeRangeNames)+8)
+				good = slices.Delete(good, int(nativeRangeNames)+1, int(nativeRangeNames)+2)
 			}
 			serial := newSyncLiveBackend(syncLiveOptions{copyStreams: 1})
 			stop := serial.beginWindowCopy()

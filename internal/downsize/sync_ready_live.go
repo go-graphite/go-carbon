@@ -101,7 +101,7 @@ func (b *syncLiveBackend) Policies(ctx context.Context, store string, names []st
 			return nil, e
 		}
 		var data []byte
-		e = b.wait(ctx, "ready policy", store, func() error { var e error; data, e = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body); return e })
+		e = b.wait(ctx, "ready policy", store, func() error { var e error; data, e = b.postInfo(ctx, base, body); return e })
 		if e != nil {
 			return nil, e
 		}

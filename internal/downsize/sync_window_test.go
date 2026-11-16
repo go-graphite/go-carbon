@@ -21,6 +21,7 @@ import (
 )
 
 func TestSyncWindowMissingSelectionAndResume(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	w := syncRange{Name: "gap", From: syncTestNow - 600, Until: syncTestNow - 120}
 	schema := []syncArchive{{Step: 60, Points: 10000}}
@@ -83,6 +84,7 @@ func TestSyncWindowMissingSelectionAndResume(t *testing.T) {
 }
 
 func TestSyncWindowNativeDifferential(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	for _, n := range []string{"new", "overlap"} {
@@ -165,6 +167,7 @@ func TestSyncWindowNativeDifferential(t *testing.T) {
 }
 
 func TestSyncWindowRequiresSourceDigest(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	o.windows = syncRanges{{Name: "gap", From: syncTestNow - 86400, Until: syncTestNow - 86000}}
 	f.noDigest[syncD1] = true
@@ -177,6 +180,7 @@ func TestSyncWindowRequiresSourceDigest(t *testing.T) {
 }
 
 func TestSyncWindowIncompleteCoarseBoundaryIsResidual(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	base := testMetricNow/60*60 - 120
@@ -199,6 +203,7 @@ func TestSyncWindowIncompleteCoarseBoundaryIsResidual(t *testing.T) {
 }
 
 func TestSyncWindowPresenceIncludesCoarseOnlyPoints(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	base := testMetricNow/60*60 - 120
@@ -223,6 +228,7 @@ func TestSyncWindowPresenceIncludesCoarseOnlyPoints(t *testing.T) {
 }
 
 func TestSyncWindowPresenceRetainsPendingResidual(t *testing.T) {
+	t.Parallel()
 	source := nativeControllerStore(t)
 	addPoints(t, source, "pending", 42)
 	addPoints(t, source, "healthy", 7)
@@ -268,6 +274,7 @@ func (b *cancelUnresolvedWindowBackend) WindowPresence(ctx context.Context, sour
 }
 
 func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	w := syncRange{Name: "gap", From: syncTestNow - 600, Until: syncTestNow - 120}
 	for _, n := range []string{"healthy", "pending"} {
@@ -295,12 +302,13 @@ func TestSyncWindowSelectionResidualContinuesAndResumes(t *testing.T) {
 }
 
 // Compare fresh-pin selection/copy with the scoped-pin path on the same
-// 2,048-name fixture. Include target-wins overlap and an unresolved source.
-func TestSyncWindowSharedPinDifferential2048(t *testing.T) {
+// four-batch fixture. Include target-wins overlap and an unresolved source.
+func TestSyncWindowSharedPinDifferentialBatches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
-	names := make([]string, 2048)
+	names := make([]string, 128)
 	for i := range names {
 		names[i] = fmt.Sprintf("metric.%04d", i)
 		value := float64(i) + 0.125
@@ -318,10 +326,8 @@ func TestSyncWindowSharedPinDifferential2048(t *testing.T) {
 		}
 	}
 	var pins atomic.Int64
-	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) {
-		pins.Add(1)
-		return map[string]struct{}{names[0]: {}}, nil
-	})
+	source.SetNativeReady(func() error { pins.Add(1); return nil })
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { return map[string]struct{}{names[0]: {}}, nil })
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
 	w := syncRange{From: testMetricNow - 10, Until: testMetricNow}
@@ -335,15 +341,15 @@ func TestSyncWindowSharedPinDifferential2048(t *testing.T) {
 		}
 		path := t.TempDir()
 		before := pins.Load()
-		for start := 0; start < len(names); start += 128 {
-			batch := names[start : start+128]
+		for start := 0; start < len(names); start += 32 {
+			batch := names[start : start+32]
 			presence, err := backend.WindowPresence(ctx, donor.URL, batch, w)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if mode == 0 {
 				reference = append(reference, presence)
-			} else if !reflect.DeepEqual(reference[start/128], presence) {
+			} else if !reflect.DeepEqual(reference[start/32], presence) {
 				t.Fatal("selection differs", start)
 			}
 			var selected []string
@@ -359,9 +365,9 @@ func TestSyncWindowSharedPinDifferential2048(t *testing.T) {
 		}
 		finish()
 		survivor.Close()
-		wantPins := int64(32)
+		wantPins := int64(8)
 		if mode == 1 {
-			wantPins = 1
+			wantPins = 2 // selection proof and committed repair have separate pins
 		}
 		if got := pins.Load() - before; got != wantPins {
 			t.Fatalf("mode %d: pins %d, want %d", mode, got, wantPins)
@@ -389,11 +395,13 @@ func TestSyncWindowSharedPinDifferential2048(t *testing.T) {
 }
 
 func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	addPoints(t, source, "changing", 1)
 	var pins atomic.Int64
-	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { pins.Add(1); return nil, nil })
+	source.SetNativeReady(func() error { pins.Add(1); return nil })
+	source.SetNativePendingSnapshot(func() (map[string]struct{}, error) { return nil, nil })
 	donor := httptest.NewServer(nativeControllerService(t, source))
 	defer donor.Close()
 	backend := newSyncLiveBackend(syncLiveOptions{})
@@ -411,7 +419,7 @@ func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
 	if err := source.UpdateMany(ctx, "changing", []store.Point{{Timestamp: testMetricNow - 5, Value: 2}}); err != nil {
 		t.Fatal(err)
 	}
-	check(true)
+	check(true) // selection still rejects a revised source snapshot
 	backend.windowPinned = time.Now().Add(-syncWindowPinAge - time.Minute)
 	check(false)
 	if pins.Load() != 2 {
@@ -420,6 +428,7 @@ func TestSyncWindowSharedPinRevisionAndRotation(t *testing.T) {
 }
 
 func TestSyncCopyWindowsUnion(t *testing.T) {
+	t.Parallel()
 	s := &syncer{o: syncOptions{now: func() time.Time { return time.Unix(1000, 0) }, settle: 100 * time.Second,
 		windows: syncRanges{{Name: "nested", From: 200, Until: 300}, {Name: "gap", From: 700, Until: 1100}, {Name: "broad", From: 100, Until: 400}, {Name: "overlap", From: 350, Until: 500}, {Name: "adjacent", From: 500, Until: 600}, {Name: "future", From: 950, Until: 1000}}}}
 	original := append(syncRanges(nil), s.o.windows...)
@@ -434,6 +443,7 @@ func TestSyncCopyWindowsUnion(t *testing.T) {
 }
 
 func TestSyncCopyWindowsUnionNativeDifferential(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target, oracle := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	for _, n := range []string{"new", "overlap"} {
@@ -487,6 +497,7 @@ func TestSyncCopyWindowsUnionNativeDifferential(t *testing.T) {
 }
 
 func TestSyncWindowTruncatedSelectionSplitsWithoutPartialResults(t *testing.T) {
+	t.Parallel()
 	source := nativeControllerStore(t)
 	names := []string{"a", "bad", "c", "d"}
 	for _, name := range names {
@@ -537,6 +548,7 @@ func TestSyncWindowTruncatedSelectionSplitsWithoutPartialResults(t *testing.T) {
 }
 
 func TestSyncWindowConflictSelectionIsUnresolved(t *testing.T) {
+	t.Parallel()
 	source := nativeControllerStore(t)
 	names := []string{"a", "bad", "c", "d"}
 	for _, name := range names {

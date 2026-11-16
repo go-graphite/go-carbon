@@ -13,6 +13,7 @@ import (
 )
 
 func TestSyncResumeTerminalResidualKeepsQuarantine(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	schema := []syncArchive{{60, 10000}}
@@ -44,6 +45,7 @@ func TestSyncResumeTerminalResidualKeepsQuarantine(t *testing.T) {
 }
 
 func TestSyncLegacyResidualRetryKeepsInterruptedGeneration(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	j, err := openSyncJournal(filepath.Join(dir, "sync.jsonl"), "test")
 	if err != nil {
@@ -80,6 +82,7 @@ func TestSyncLegacyResidualRetryKeepsInterruptedGeneration(t *testing.T) {
 // A terminal failure is a durable named exception. Changing an allowlist does
 // not silently clear it; interrupted attempts below still retry on resume.
 func TestSyncResumeRetainsQuarantineAfterSourceAllowlistRepair(t *testing.T) {
+	t.Parallel()
 	for _, missing := range []bool{false, true} {
 		t.Run(fmt.Sprint("missing=", missing), func(t *testing.T) {
 			f := newFakeSync()
@@ -138,6 +141,7 @@ func (b cancelDeniedSync) Copy(ctx context.Context, source, target string, names
 }
 
 func TestSyncInterruptedResumeRetriesDeniedFill(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	o := convergeOptions(t)
 	o.from = []string{syncD1}
@@ -161,6 +165,7 @@ func TestSyncInterruptedResumeRetriesDeniedFill(t *testing.T) {
 }
 
 func TestSyncVerificationResumeCountsOnlyMatchedReceipts(t *testing.T) {
+	t.Parallel()
 	o := convergeOptions(t)
 	o.batch = 1
 	j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), "floor-test")

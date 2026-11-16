@@ -161,8 +161,13 @@ func (s *syncer) discover(ctx context.Context) error {
 		event("sync_discover_resumed", map[string]any{"names": r.Names, "missing": r.Missing})
 		return nil
 	}
+	if s.phaseBeforeResume("discover", 0) {
+		return errors.New("resume: completed discovery has no durable receipt; refusing backend replay")
+	}
 	s.phase("discover")
-	s.prog.begin("discover", 0)
+	if err := s.beginPhase("discover", 0, 0); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stores := append([]string{s.o.to}, s.o.from...)
@@ -302,8 +307,7 @@ func (s *syncer) discover(ctx context.Context) error {
 		return err
 	}
 	event("sync_discovered", map[string]any{"names": names, "on_target": onTarget, "on_target_and_source": both, "missing": nMissing, "not_owned": notOwned})
-	s.endPhase("discover", names)
-	return nil
+	return s.endPhase("discover", names)
 }
 
 func parseUnionLine(line string) (name string, mask uint64, onTarget bool, err error) {
@@ -688,7 +692,9 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		done[r.Source] = r
 	}
 	s.phase("copy")
-	s.prog.begin("copy", len(missing))
+	if err := s.beginPhase("copy", 0, len(missing)); err != nil {
+		return err
+	}
 	if !s.legacyCopyReceipts {
 		s.prog.planVerification(int64(s.sum.Discovered))
 	}
@@ -754,21 +760,18 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		// Keep a pending wave's exact input stable across retries and changes to
 		// concurrency. Its precheck rows and transfer journal remain reusable.
 		pending := s.j.find(func(r syncRow) bool { return r.Kind == "missing-wave" && r.Source == source })
-		reserved := map[string]bool{}
+		reserved := reserveMissingWaves(names, pending)
 		nextGroup := 1
 		for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "copied" && r.Source == source }) {
 			nextGroup = max(nextGroup, r.Round+1)
 		}
 		for _, r := range pending {
 			nextGroup = max(nextGroup, r.Round+1)
-			for _, n := range r.Selected {
-				reserved[n] = true
-			}
 		}
 		wave := s.o.batch * s.o.streams
 		var fresh []string
-		for _, n := range names {
-			if !reserved[n] && !s.copied[n] && !short[n] && !s.failedCp[n] {
+		for i, n := range names {
+			if reserved[i/64]&(uint64(1)<<uint(i%64)) == 0 && !s.copied[n] && !short[n] && !s.failedCp[n] {
 				fresh = append(fresh, n)
 			}
 		}
@@ -869,8 +872,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			s.addResidual(syncHole{Name: m.name, Source: s.sourcesOf(m.mask)}, reason)
 		}
 	}
-	s.endPhase("copy", work)
-	return nil
+	return s.endPhase("copy", work)
 }
 
 // Failed names remain eligible on resume; only successful receipts suppress

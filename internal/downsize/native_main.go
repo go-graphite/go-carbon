@@ -27,9 +27,10 @@ const stopCleanupTimeout = 2 * time.Second
 
 type nativeController struct {
 	*mover
-	mu       sync.Mutex
-	sessions map[string]*nativeRemoteSession
-	issued   atomic.Int64
+	mu              sync.Mutex
+	sessions        map[string]*nativeRemoteSession
+	issued          atomic.Int64
+	committedWindow bool
 }
 
 func runNative(ctx context.Context, o options) error {
@@ -211,6 +212,7 @@ type nativeSourceCheckpoint struct {
 	SnapshotStartedAt, SnapshotPinnedAt time.Time
 	BackfillFromUnix                    int64
 	BackfillFullRetention               bool
+	CommittedWindow                     bool
 }
 
 func (c *nativeController) session(ctx context.Context, source string) (string, error) {
@@ -230,11 +232,19 @@ func (c *nativeController) session(ctx context.Context, source string) (string, 
 		return entry.id, nil
 	}
 	var response nativeSourceCheckpoint
-	if _, err := c.requestOnce(ctx, source, "/v1/native/source", struct{ MergeSession string }{c.mergeSession}, &response); err != nil {
+	if _, err := c.requestOnce(ctx, source, "/v1/native/source", struct {
+		MergeSession    string
+		CommittedWindow bool `json:",omitempty"`
+	}{c.mergeSession, c.committedWindow}, &response); err != nil {
 		return "", err
 	}
 	if len(response.ID) != 32 {
 		return "", errors.New("invalid native source session")
+	}
+	if c.committedWindow && !response.CommittedWindow {
+		// Close even an unsupported pin rather than retaining it on failure.
+		entry.id, entry.ready = response.ID, false
+		return "", errors.New("source does not support committed historical window snapshots")
 	}
 	entry.id = response.ID
 	if c.mergeSession != "" {

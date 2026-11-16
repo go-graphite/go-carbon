@@ -15,6 +15,7 @@ import (
 // Values include defaults so upgrading the binary cannot silently change scope.
 // Credentials are never saved: only the signing secret's path is recorded.
 type savedSyncConfig struct {
+	DataScopeKey string            `json:"data_scope_key,omitempty"`
 	RingIdentity string            `json:"ring_identity"`
 	CopyState    string            `json:"copy_state,omitempty"`
 	Version      int               `json:"version"`
@@ -59,14 +60,14 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete":
+		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
-			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; only --timeout, --streams, --rate and READY inputs (--carbonapi-url, --period, --gap-ledger-complete) may override it (use a new --state for a different run)", name)
+			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; operational and READY inputs may override it; donor/target/ring/names/window changes select a preserved child scope", name)
 		}
 	}
 	// Repeated flags append, so clear their CLI/default values before restoring.
-	c.copy.froms, c.sync.windows, c.ready.period = nil, nil, nil
+	c.copy.froms, c.sync.windows, c.ready.period, c.ready.gapSelection = nil, nil, nil, nil
 	names := make([]string, 0, len(saved.Flags))
 	for name := range saved.Flags {
 		names = append(names, name)
@@ -85,8 +86,20 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	if c.explicit == nil {
 		c.explicit = map[string]bool{}
 	}
+	if _, ok := overrides["source"]; ok {
+		c.copy.froms = nil
+	}
+	if _, ok := overrides["from"]; ok {
+		c.copy.froms = nil
+	}
+	if _, ok := overrides["window"]; ok {
+		c.sync.windows = nil
+	}
 	if _, ok := overrides["period"]; ok {
 		c.ready.period = nil
+	}
+	if _, ok := overrides["gapfill-window"]; ok {
+		c.ready.gapSelection = nil
 	}
 	for name, value := range overrides {
 		if err := flags.Lookup(name).Value.Set(value); err != nil {
@@ -99,6 +112,9 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	}
 	c.copy.state = resume
 	c.sync.ringIdentity = saved.RingIdentity
+	if _, ok := overrides["ring"]; ok {
+		c.sync.ringIdentity = c.copy.ring
+	}
 	if saved.CopyState != "" {
 		c.copy.state = saved.CopyState
 	}
@@ -115,13 +131,13 @@ func (c *syncCommand) captureConfig(flags *flag.FlagSet) {
 	}
 	flags.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
-		case "resume", "from":
+		case "resume", "from", "allow-fresh-start":
 			return
 		}
 		c.config.Flags[f.Name] = f.Value.String()
 	})
 	for name, explicit := range c.explicit {
-		if name != "resume" {
+		if name != "resume" && name != "allow-fresh-start" {
 			c.config.Explicit[name] = explicit
 		}
 	}
@@ -145,7 +161,7 @@ func (c *syncCommand) saveConfig() error {
 	}
 	// Keep local input files beside the journal. --resume survives a different
 	// working directory and removal of the original ring/name/block descriptor.
-	for _, name := range []string{"ring", "names", "block"} {
+	for _, name := range []string{"ring", "names", "block", "ready-block"} {
 		path := c.config.Flags[name]
 		if path == "" {
 			continue
@@ -178,6 +194,8 @@ func (c *syncCommand) saveConfig() error {
 			c.sync.ring, c.copy.ring = dest, dest
 		case "names":
 			c.sync.namesFile, c.copy.names = dest, dest
+		case "ready-block":
+			c.ready.proofBlock = dest
 		}
 	}
 	if c.config.CopyState != "" {
@@ -192,6 +210,10 @@ func (c *syncCommand) saveConfig() error {
 		return err
 	}
 	c.config.Flags["jwt-secret"] = secret
+	c.config.DataScopeKey, err = readyDataScopeKey(c.sync)
+	if err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(c.config, "", "  ")
 	if err != nil {
 		return err
@@ -250,7 +272,7 @@ func (c *syncCommand) validateResumeJournal() error {
 		return err
 	}
 	if header.Kind != "header" || header.Identity != identity {
-		return errors.New("resume scope differs from durable journal; provide the original sources, target, windows and ring (or use a new --state)")
+		return fmt.Errorf("%s record 1: resume scope differs from durable journal; prior work retained", path)
 	}
 	return nil
 }

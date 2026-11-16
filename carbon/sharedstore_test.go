@@ -501,6 +501,9 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 }
 
 func TestReloadCompactionRate(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := incrementalAppFixture(t)
 	writeSharedConfig(t, path, cfg)
 	app := startIncrementalApp(t, path)

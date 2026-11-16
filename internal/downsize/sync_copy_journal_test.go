@@ -8,6 +8,7 @@ import (
 )
 
 func TestSyncChangedWaveKeepsPartialCopyJournal(t *testing.T) {
+	t.Parallel()
 	for _, legacyWindow := range []bool{false, true} {
 		s := &syncer{o: syncOptions{state: t.TempDir()}, legacyCopyReceipts: legacyWindow}
 		if legacyWindow {

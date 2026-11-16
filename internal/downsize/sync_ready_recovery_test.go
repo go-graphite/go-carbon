@@ -38,6 +38,7 @@ func (b *recoveryDigestWatch) Digest(ctx context.Context, store string, names []
 }
 
 func TestReadyInterruptedRecoveryResumesVerifiedPrefix(t *testing.T) {
+	t.Parallel()
 	for _, restarted := range []bool{false, true} {
 		t.Run(map[bool]string{false: "same processes", true: "another restart"}[restarted], func(t *testing.T) {
 			f, o, r := newReadyFixture(t, 100)
@@ -123,6 +124,7 @@ func TestReadyInterruptedRecoveryResumesVerifiedPrefix(t *testing.T) {
 }
 
 func TestReadyLaterRestartOnlyChecksNewWindow(t *testing.T) {
+	t.Parallel()
 	f, o, r := newReadyFixture(t, 100)
 	clock := syncTestNow - 14400
 	wall := time.Now()
@@ -180,6 +182,7 @@ func TestReadyLaterRestartOnlyChecksNewWindow(t *testing.T) {
 }
 
 func TestReadyRecoveryCheckpointRejectsChangedScope(t *testing.T) {
+	t.Parallel()
 	_, o, r := newReadyFixture(t, 100)
 	identity, err := syncIdentity(o)
 	if err != nil {

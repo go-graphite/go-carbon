@@ -12,6 +12,7 @@ import (
 )
 
 func TestSyncWindowReusesLegacyMissingReceipts(t *testing.T) {
+	t.Parallel()
 	for _, phase := range []string{"missing", "missing-batch"} {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
@@ -67,6 +68,7 @@ func (f *legacyWindowTransport) CopyWindow(context.Context, string, string, []st
 }
 
 func TestSyncLegacyWindowVerificationSelection(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "union.tsv"), []byte("a\t1\t0\nb\t1\t1\nc\t1\t0\nz\t0\t1\n"), 0600); err != nil {
 		t.Fatal(err)

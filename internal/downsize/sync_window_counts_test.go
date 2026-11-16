@@ -7,6 +7,7 @@ import (
 )
 
 func TestWindowPointCountsResumeAndUncertainty(t *testing.T) {
+	t.Parallel()
 	state := t.TempDir()
 	path := filepath.Join(state, "copy.window-points.json")
 	before, after := int64(10), int64(17)

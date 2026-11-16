@@ -19,8 +19,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
-// TestTransferImportConcurrencyBench compares SST ingestion with batch
-// commits for concurrent 256-name transfers into a populated LSM. It is a
+// TestTransferImportConcurrencyBench compares bounded WAL batch sizes for concurrent 256-name transfers into a populated LSM. It is a
 // manual benchmark: CHUNKSTORE_IMPORT_BENCH=<scratch dir> enables it,
 // CHUNKSTORE_IMPORT_BENCH_SEED=<transfers> sizes the pre-populated LSM,
 // CHUNKSTORE_IMPORT_BENCH_RUN=<transfers> each measured run and
@@ -196,7 +195,7 @@ func TestTransferImportConcurrencyBench(t *testing.T) {
 		for _, mode := range []struct {
 			name  string
 			limit int
-		}{{"wal", 256 << 10}, {"sst", 0}} {
+		}{{"small-batch", 1 << 10}, {"default", 0}} {
 			target.SetTransferBatchBytesForTest(mode.limit)
 			stop := make(chan struct{})
 			var latencies []time.Duration

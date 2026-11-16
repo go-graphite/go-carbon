@@ -15,6 +15,7 @@ import (
 )
 
 func TestSyncPrecheckLeavesInvalidNamesForCopyFailure(t *testing.T) {
+	t.Parallel()
 	j, err := openSyncJournal(filepath.Join(t.TempDir(), "sync.jsonl"), "test")
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +61,7 @@ func (b *precheckBackend) Copy(ctx context.Context, source, target string, names
 }
 
 func TestSyncPrecheckBoundedCheckpoint(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	j, err := openSyncJournal(filepath.Join(dir, "sync.jsonl"), "test")
 	if err != nil {
@@ -142,6 +144,7 @@ func TestSyncPrecheckBoundedCheckpoint(t *testing.T) {
 }
 
 func TestSyncMissingBatchResumeAndAbsentFallback(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	// Catalog still lists the name, but its first source has lost the metadata.
 	f.put(syncP, "d.missing", syncTestSchema)
@@ -174,6 +177,7 @@ func TestSyncMissingBatchResumeAndAbsentFallback(t *testing.T) {
 }
 
 func TestSyncMissingCopiesBeforePrecheckEnds(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	j, err := openSyncJournal(filepath.Join(dir, "sync.jsonl"), "test")
 	if err != nil {

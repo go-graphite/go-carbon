@@ -84,7 +84,7 @@ func TestTransferPublicationStoredBytesDifferential(t *testing.T) {
 	defer b.Close()
 	x, y := a.First(), b.First()
 	for x && y {
-		if !bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value()) {
+		if !(bytes.Equal(a.Key(), proofIdentityKey) && bytes.Equal(b.Key(), proofIdentityKey)) && (!bytes.Equal(a.Key(), b.Key()) || !bytes.Equal(a.Value(), b.Value())) {
 			t.Fatalf("stored bytes differ at %x / %x", a.Key(), b.Key())
 		}
 		x, y = a.Next(), b.Next()

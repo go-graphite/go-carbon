@@ -17,6 +17,7 @@ import (
 )
 
 func TestSyncWindowNameBytesPlanDifferentialResume(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target, reference := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	names := make([]string, 260)
@@ -62,12 +63,15 @@ func TestSyncWindowNameBytesPlanDifferentialResume(t *testing.T) {
 	if exports.Load()-before != 2 {
 		t.Fatal("selection did not plan known name-byte bound", exports.Load()-before)
 	}
-	// The established per-name path is the differential oracle. Use an independent
-	// journal and target, then compare every persisted timestamp and float bit.
-	ref := httptest.NewServer(nativeControllerService(t, reference))
-	defer ref.Close()
-	for i, n := range names {
-		if _, err := b.CopyWindow(ctx, donor.URL, ref.URL, []string{n}, fmt.Sprintf("%s.ref-%d", state, i), windows); err != nil {
+	// Use the metric engine's per-name export/import as an independent oracle.
+	// All fixture points fall inside this window. Keep all 260 maximal names
+	// crossing the real byte bound, without 260 redundant controller journals.
+	for _, n := range names {
+		records, err := source.ExportTransfer(ctx, []string{n})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reference.ImportTransfer(ctx, records); err != nil {
 			t.Fatal(err)
 		}
 		want, err := reference.Snapshot(ctx, n)
@@ -85,6 +89,7 @@ func TestSyncWindowNameBytesPlanDifferentialResume(t *testing.T) {
 }
 
 func TestSyncWindowFutureSlotRecoveredOnResume(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// Keep future-slot classification independent of the rest of the suite's
 	// runtime: its seeded package timestamp may be many minutes old by now.

@@ -23,6 +23,7 @@ func syncCLIArgs(t *testing.T, extra ...string) []string {
 }
 
 func TestSyncCommandModesAndFlags(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -72,6 +73,7 @@ func TestSyncCommandModesAndFlags(t *testing.T) {
 }
 
 func TestSyncSourceAliasAndNamesFormat(t *testing.T) {
+	t.Parallel()
 	state := filepath.Join(t.TempDir(), "state")
 	canonical := []string{"--source", syncD1 + "," + syncD2, "--to", syncT, "--state", state}
 	compat := []string{"--from", syncD1, "--source", syncD2, "--to", syncT, "--state", state}
@@ -110,9 +112,11 @@ func TestSyncSourceAliasAndNamesFormat(t *testing.T) {
 // Several windows in one run must produce exactly the same target float bits
 // as the retained single-window orchestration, including target corrections.
 func TestSyncRepeatedWindowsDifferential2000(t *testing.T) {
+	t.Parallel()
 	windows := syncRanges{{Name: "closed", From: syncTestNow - 600, Until: syncTestNow - 480}, {Name: "shard", From: syncTestNow - 360, Until: syncTestNow - 240}, {Name: "dump", From: syncTestNow - 120, Until: syncTestNow}}
 	makeBackend := func() *fakeSync {
 		b := newFakeSync()
+		b.listPageSize = 397 // mismatched pages still cross every 500-name batch
 		schema := []syncArchive{{Step: 60, Points: 10000}}
 		for i := range 2000 {
 			n := fmt.Sprintf("metric.%04d", i)
@@ -173,6 +177,7 @@ func TestSyncRepeatedWindowsDifferential2000(t *testing.T) {
 }
 
 func TestSyncNamesDiscoveryStreamingAndResume(t *testing.T) {
+	t.Parallel()
 	b := newFakeSync()
 	for _, n := range []string{"a", "b", "c", "d", "e"} {
 		b.store(syncD1).archives[n] = syncTestSchema
@@ -245,6 +250,7 @@ func TestSyncInactiveSamplingWarns(t *testing.T) {
 }
 
 func TestSyncEndToEndAndLegacyTransition(t *testing.T) {
+	t.Parallel()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/transfer/status":
@@ -292,6 +298,7 @@ func TestSyncEndToEndAndLegacyTransition(t *testing.T) {
 }
 
 func TestSyncOptOuts(t *testing.T) {
+	t.Parallel()
 	c, err := parseSyncCommand(syncCLIArgs(t, "--window", "100:200", "--no-full-history", "--no-copy", "--no-verify"))
 	if err != nil {
 		t.Fatal(err)
@@ -334,6 +341,7 @@ func TestSyncOptOuts(t *testing.T) {
 }
 
 func TestSyncNoCopyMissingIsResidual(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	f.put(syncD1, "missing", syncTestSchema)
 	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), streams: 2, batch: 2, maxRounds: 4, noCopy: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}

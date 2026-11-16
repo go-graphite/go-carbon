@@ -14,6 +14,7 @@ import (
 // The fixture is the original header/done JSONL wire format, including a
 // partially finished copy. Only its ephemeral HTTP origins are substituted.
 func TestSyncAdoptsLegacyJournalAndFills(t *testing.T) {
+	t.Parallel()
 	for _, noCopy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "resume", true: "read-only"}[noCopy], func(t *testing.T) {
 			f, src, dst := newFakeCopy(t, []string{"a", "b", "c"})
@@ -108,6 +109,7 @@ func (b *legacyImportSync) List(ctx context.Context, host, prefix, after string,
 }
 
 func TestStorectlRejectsCopyCommand(t *testing.T) {
+	t.Parallel()
 	if err := Main([]string{"copy"}); err == nil || !strings.Contains(err.Error(), "unknown storectl command") {
 		t.Fatal(err)
 	}
@@ -116,6 +118,7 @@ func TestStorectlRejectsCopyCommand(t *testing.T) {
 // Missing names are transferred before any digest/fetch comparison. The only
 // pre-transfer metadata I/O is the batched donor retention eligibility check.
 func TestSyncMissingNamesTransferBeforeCompare(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	f.put(syncD1, "missing", syncTestSchema)
 	f.put(syncD1, "shared", syncTestSchema)
@@ -139,6 +142,7 @@ func TestSyncMissingNamesTransferBeforeCompare(t *testing.T) {
 }
 
 func TestSyncLegacyJournalOptOutAndWindows(t *testing.T) {
+	t.Parallel()
 	_, src, dst := newFakeCopy(t, []string{"a", "b", "c"})
 	state := filepath.Join(t.TempDir(), "copy.jsonl")
 	fixture, err := os.ReadFile("testdata/legacy-copy.jsonl")

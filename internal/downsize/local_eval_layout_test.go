@@ -9,6 +9,7 @@ import (
 )
 
 func TestEvalRecordLayoutDigestReboundIndex(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 10)
 	key[0], key[9] = 'f', 'w'
 	binary.BigEndian.PutUint64(key[1:], 1)

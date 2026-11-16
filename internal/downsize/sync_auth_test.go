@@ -16,6 +16,7 @@ import (
 )
 
 func TestSyncJWTRefreshAcrossBackendsBeforeExpiry(t *testing.T) {
+	t.Parallel()
 	var seconds atomic.Int64
 	seconds.Store(1800000000)
 	now := func() time.Time { return time.Unix(seconds.Load(), 0) }
@@ -83,6 +84,7 @@ func TestSyncJWTRefreshAcrossBackendsBeforeExpiry(t *testing.T) {
 }
 
 func TestSyncJWTDoesNotEscapeStoreOriginsAndFailsClosed(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Buckyd-Authorization") != "" {
 			t.Error("JWT leaked to read-back origin")
@@ -107,6 +109,7 @@ func TestSyncJWTDoesNotEscapeStoreOriginsAndFailsClosed(t *testing.T) {
 }
 
 func TestSyncRateCancellation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := (&syncRateLimit{bytesPerSecond: 1}).wait(ctx, 1000); !errors.Is(err, context.Canceled) {

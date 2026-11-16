@@ -35,6 +35,7 @@ func (f *discoveryFixture) List(ctx context.Context, store, prefix, after string
 // Exercise mismatched pages, overlap, filtered names, graceful cancellation and
 // a crash with uncommitted bytes in both files and a torn final journal record.
 func TestSyncDiscoveryResumeDifferential(t *testing.T) {
+	t.Parallel()
 	f := newFakeSync()
 	for i := 0; i < 33013; i++ {
 		n := fmt.Sprintf("metric.%06d", i)
@@ -117,6 +118,7 @@ func TestSyncDiscoveryResumeDifferential(t *testing.T) {
 }
 
 func TestSyncVerifyResumeDifferential(t *testing.T) {
+	t.Parallel()
 	baseline, o, _ := threeSources(t)
 	o.streams = 1
 	if err := runSync(context.Background(), o, baseline); err != nil {
@@ -177,6 +179,9 @@ func semanticSyncRows(t *testing.T, state string) []string {
 			continue
 		}
 		row.Time = ""
+		// Independent runs have distinct durable observation generations;
+		// compare their repair effects rather than those opaque identities.
+		row.Identity = ""
 		blob, _ := json.Marshal(row)
 		result = append(result, string(blob))
 	}
@@ -185,6 +190,7 @@ func semanticSyncRows(t *testing.T, state string) []string {
 }
 
 func TestCopyCatalogResumeDifferential(t *testing.T) {
+	t.Parallel()
 	names := copyNames("metric.", 23451)
 	var mu sync.Mutex
 	var cursors []string
@@ -257,6 +263,7 @@ func TestCopyCatalogResumeDifferential(t *testing.T) {
 }
 
 func TestProgressFileUpdatesWithoutJournalWrites(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "progress.json")
 	stop := startProgressFile(context.Background(), path, func() progressSnapshot {
 		return progressSnapshot{Phase: "discover", Discovered: 123, Cursors: map[string]string{"source": "last.name"}}
@@ -293,6 +300,7 @@ func (f noListingSync) List(context.Context, string, string, string, int) ([]str
 }
 
 func TestSyncLegacyCompletedStateStillResumes(t *testing.T) {
+	t.Parallel()
 	f, o, _ := threeSources(t)
 	if err := runSync(context.Background(), o, f); err != nil {
 		t.Fatal(err)
@@ -325,6 +333,7 @@ func TestSyncLegacyCompletedStateStillResumes(t *testing.T) {
 }
 
 func TestResumeStateRejectsConcurrentWriters(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"sync", "copy"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state")

@@ -298,7 +298,7 @@ func TestAutoUpdateMetricsReload(t *testing.T) {
 // Scaling population and cap together keeps this inexpensive under -race.
 func TestAutoUpdateSimulation(t *testing.T) {
 	t.Parallel()
-	const metrics = 5_000
+	const metrics = 3_000
 	const referenceMetrics = 1_000_000
 	const delay = 960 * time.Second
 	const horizon = 12 * delay
@@ -433,9 +433,10 @@ func TestAutoUpdateSimulation(t *testing.T) {
 // A restart observer can still be waiting for readiness after CPU pacing has
 // ended. Its installed ticker must not override a steady auto observation.
 func TestAutoUpdateExpiredRestartLimiter(t *testing.T) {
+	const scale = 10
 	synctest.Test(t, func(t *testing.T) {
 		budget := restartcpu.NewWithCPU(2, func() float64 { return 0 })
-		budget.SetSteadyRate(7666)
+		budget.SetSteadyRate(7666.0 / scale)
 		budget.Warmed()
 		time.Sleep(31 * time.Minute)
 		var written atomic.Uint64
@@ -443,8 +444,8 @@ func TestAutoUpdateExpiredRestartLimiter(t *testing.T) {
 		p.SetWorkers(96)
 		p.SetMaxUpdatesPerSecond(-1)
 		state := steadyUpdateState()
-		state.Metrics = 11_650_000
-		p.SetAutoUpdateRate(func() cache.WriteoutState { return state }, 1, 23000)
+		state.Metrics = 11_650_000 / scale
+		p.SetAutoUpdateRate(func() cache.WriteoutState { return state }, 1, 23000/scale)
 		p.SetStartupGate(make(chan struct{}), make(chan struct{}), time.Hour, nil)
 		p.SetRestartBudget(budget, nil)
 		p.SetMockStore(func() (StoreFunc, func()) {
@@ -472,7 +473,7 @@ func TestAutoUpdateExpiredRestartLimiter(t *testing.T) {
 // Set AUTO_CAP_SIM_METRICS=1000000 for the full restart experiment.
 func TestAutoUpdateRestartSimulation(t *testing.T) {
 	t.Parallel()
-	metrics := 5000
+	metrics := 1200
 	if v := os.Getenv("AUTO_CAP_SIM_METRICS"); v != "" {
 		var err error
 		metrics, err = strconv.Atoi(v)

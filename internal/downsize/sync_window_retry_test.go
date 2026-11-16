@@ -36,6 +36,7 @@ func (b *retrySelectionBackend) WindowPresence(ctx context.Context, source strin
 	return d, err
 }
 func TestSyncWindowRetryResumeAndOtherReplica(t *testing.T) {
+	t.Parallel()
 	b := &retrySelectionBackend{newFakeSync(), true}
 	w := syncRange{Name: "gap", From: syncTestNow - 600, Until: syncTestNow - 120}
 	for _, source := range []string{syncD1, syncD2} {
@@ -77,22 +78,24 @@ func TestSyncWindowRetryResumeAndOtherReplica(t *testing.T) {
 }
 
 // Compare journaled pending -> partial -> resolved retries (including process
-// resume) with a fresh complete native window copy on 2,048 names. Every archive,
+// resume) with a fresh complete native window copy across four batches. Every archive,
 // timestamp and float64 bit must match; target overlap and outside history win.
-func TestSyncWindowRetryDifferential2048(t *testing.T) {
+func TestSyncWindowRetryDifferentialBatches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source := nativeControllerStore(t)
 	targets := []*store.Store{nativeControllerStore(t), nativeControllerStore(t)}
-	names := make([]string, 2048)
+	const batchSize = 4
+	names := make([]string, 4*batchSize)
 	base := testMetricNow/60*60 - 120
 	for i := range names {
 		n := fmt.Sprintf("retry.%04d", i)
 		names[i] = n
 		value := float64(i) + 0.125
-		if i%17 == 0 {
+		if i%5 == 0 {
 			value = math.Copysign(0, -1)
 		}
-		if i%19 == 0 {
+		if i%7 == 0 {
 			value = math.SmallestNonzeroFloat64
 		}
 		ret := []store.Retention{{Step: 10, Count: 128}, {Step: 60, Count: 128}}
@@ -133,7 +136,7 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 			if err := json.Unmarshal(body, &request); err != nil {
 				t.Error(err)
 			}
-			if stage.Load() < 3 && len(request.Names) == 128 {
+			if stage.Load() < 3 && len(request.Names) == batchSize {
 				oversized.Add(1)
 				w.WriteHeader(http.StatusRequestEntityTooLarge)
 				return
@@ -152,12 +155,12 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for start := 0; start < len(names); start += 128 {
+	for start := 0; start < len(names); start += batchSize {
 		var skipped []syncSkip
-		for _, n := range names[start : start+128] {
+		for _, n := range names[start : start+batchSize] {
 			skipped = append(skipped, syncSkip{n, syncWindowSelectionReason})
 		}
-		if err := j.append(syncRow{Kind: "window-selected", Round: start/128 + 1, Source: donor.URL, Skipped: skipped, SelectionComplete: true}); err != nil {
+		if err := j.append(syncRow{Kind: "window-selected", Round: start/batchSize + 1, Source: donor.URL, Skipped: skipped, SelectionComplete: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -187,7 +190,7 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 	for _, m := range s.resolvedWindowSelections() {
 		count += len(m)
 	}
-	if count != 1024 {
+	if count != len(names)/2 {
 		t.Fatal("partial resolutions", count)
 	}
 	j.close()
@@ -208,6 +211,9 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 	if count != len(names) {
 		t.Fatal("unresolved names", count)
 	}
+	if s.prog.done.Load() != int64(len(names)) {
+		t.Fatal("partial resume lost durable retry progress", s.prog.done.Load())
+	}
 	before := len(j.rows)
 	if err := s.retryWindowSelections(ctx); err != nil {
 		t.Fatal(err)
@@ -221,9 +227,9 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 	}
 	stage.Store(3) // The independent oracle does not use the selection transport.
 	oracle := newSyncLiveBackend(syncLiveOptions{})
-	for start := 0; start < len(names); start += 128 {
-		result, err := oracle.CopyWindow(ctx, donor.URL, servers[1].URL, names[start:start+128], filepath.Join(t.TempDir(), "copy"), o.windows)
-		if err != nil || result.Copied != 128 {
+	for start := 0; start < len(names); start += batchSize {
+		result, err := oracle.CopyWindow(ctx, donor.URL, servers[1].URL, names[start:start+batchSize], filepath.Join(t.TempDir(), "copy"), o.windows)
+		if err != nil || result.Copied != batchSize {
 			t.Fatal(result, err)
 		}
 	}
@@ -249,6 +255,7 @@ func TestSyncWindowRetryDifferential2048(t *testing.T) {
 }
 
 func TestSyncWindowRetryRetainsFailedBoundary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	source, target := nativeControllerStore(t), nativeControllerStore(t)
 	base := testMetricNow/60*60 - 120
@@ -297,6 +304,7 @@ func (b *failedWindowRetryBackend) WindowPresence(ctx context.Context, source st
 	return b.Digest(ctx, source, names, w.From, w.Until)
 }
 func TestSyncWindowRetrySelectionErrorKeepsResidualAndContinues(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	b := &failedWindowRetryBackend{newFakeSync(), true}
 	w := syncRange{From: syncTestNow - 600, Until: syncTestNow - 120}

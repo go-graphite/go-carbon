@@ -7,6 +7,7 @@ import (
 )
 
 func TestPermanentMetricNameRejection(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		err  error
 		want bool

@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -45,13 +46,16 @@ func TestAutoUpdateAppReloadThroughRestartEnd(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
 	}
+	// Admission counts metric writes. Keep each metric at the batching
+	// threshold while avoiding 960 identical points per metric.
+	const batchPoints = 16
 	for _, initial := range []int{50, -1} {
 		t.Run(strconv.Itoa(initial), func(t *testing.T) {
 			path, cfg := sharedAppConfig(t)
 			cfg.Carbonserver.Enabled, cfg.Buckyd.Enabled = false, false
 			cfg.Common.MetricInterval = &Duration{time.Hour}
 			cfg.Cache.MaxSize = 0
-			cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = 960, Duration{1800 * time.Second}
+			cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = batchPoints, Duration{1800 * time.Second}
 			cfg.Whisper.MaxUpdatesPerSecond = initial
 			cfg.Whisper.MaxUpdatesPerSecondAutoMin, cfg.Whisper.MaxUpdatesPerSecondAutoMax = 27, 27
 			cfg.Whisper.Workers = 4
@@ -73,14 +77,16 @@ func TestAutoUpdateAppReloadThroughRestartEnd(t *testing.T) {
 				app.restartBudget = budget
 				app.Cache = cache.New()
 				app.Cache.SetMaxSize(0)
-				if err := app.Cache.SetWriteoutBatching(960, 1800*time.Second); err != nil {
+				if err := app.Cache.SetWriteoutBatching(batchPoints, 1800*time.Second); err != nil {
 					t.Fatal(err)
 				}
 				app.Cache.SetWriteoutPacing(initial == -1)
 				var err error
-				app.MetricStore, err = store.Open(cfg.Whisper.StoreDir, store.Options{
+				// This checks admission and reload against the real store, without
+				// making each metadata create wait for a device flush.
+				app.MetricStore, err = store.Open(cfg.Whisper.StoreDir, (store.Options{
 					CacheSize: 1 << 20, MemTableSize: 1 << 20, MetadataCacheSize: 1 << 20,
-				})
+				}).WithFS(vfs.NewMem()))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -88,7 +94,7 @@ func TestAutoUpdateAppReloadThroughRestartEnd(t *testing.T) {
 				app.metadataPrewarmReady, app.metadataPrewarmGate = make(chan struct{}), make(chan struct{})
 				close(app.metadataPrewarmReady)
 				close(app.metadataPrewarmGate)
-				data := make([]points.Point, 960)
+				data := make([]points.Point, batchPoints)
 				for i := range data {
 					data[i] = points.Point{Value: 1, Timestamp: time.Now().Unix()}
 				}
