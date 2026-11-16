@@ -297,7 +297,11 @@ func (w *rollupHistoryWorkspace) sealInto(records []sealrollup.Record, out [][]b
 }
 
 func historyDirectory(dst []byte, n int) []byte {
-	dst = append(dst, make([]byte, historyTileHeader+n*historyTileEntry)...)
+	size := historyTileHeader + n*historyTileEntry
+	start := len(dst)
+	dst = slices.Grow(dst, size)
+	dst = dst[:start+size]
+	clear(dst[start:])
 	dst[0] = 0xff
 	binary.BigEndian.PutUint32(dst[1:], uint32(n))
 	return dst

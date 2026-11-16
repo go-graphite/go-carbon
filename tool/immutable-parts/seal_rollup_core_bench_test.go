@@ -192,7 +192,6 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	}
 	b.ReportAllocs()
 	sealBenchmarkBarrier(b)
-	stopProfile := sealBenchmarkProfile(b)
 	gcStart := sealBenchmarkGCCPU()
 	classes := []runtimemetrics.Sample{
 		{Name: "/cpu/classes/gc/mark/assist:cpu-seconds"},
@@ -222,6 +221,8 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 		}
 	}
 	writeHeap("-before")
+	stopProfile := sealBenchmarkProfile(b)
+	sealOnlyProfile := os.Getenv("SEAL_BENCH_PROFILE_SEALS_ONLY") == "1"
 	b.ResetTimer()
 	ioStart := sealProcessWritten()
 	start := atomicCPU()
@@ -234,6 +235,14 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	}
+	sealCPU := atomicCPU() - start
+	sealWall := b.Elapsed()
+	if sealOnlyProfile {
+		b.StopTimer()
+		stopProfile()
+		stopProfile = func() {}
+		b.StartTimer()
 	}
 	if heapProfile != "" {
 		b.StopTimer()
@@ -298,6 +307,8 @@ func BenchmarkCoreRollupProductionDensity(b *testing.B) {
 	}
 	b.ReportMetric(points/b.Elapsed().Seconds(), "points/s")
 	b.ReportMetric(float64(cpu)/points, "cpu-ns/point")
+	b.ReportMetric(float64(sealCPU)/points, "seal-cpu-ns/point")
+	b.ReportMetric(float64(sealWall.Nanoseconds())/points, "seal-wall-ns/point")
 	b.ReportMetric(gcCPU*1e9/points, "gc-cpu-ns/point")
 	b.ReportMetric(assistCPU*1e9/points, "gc-assist-ns/point")
 	b.ReportMetric(dedicatedCPU*1e9/points, "gc-dedicated-ns/point")
