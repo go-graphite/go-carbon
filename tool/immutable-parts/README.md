@@ -381,3 +381,5 @@ both raw and metadata-backed rendered oracles. Receipts include the journal
 identity; recovered unsynced suffixes may extend them. They prove process-kill
 recovery after successful `Sync`, not storage power-loss behavior. Recovered
 prefix scans use at most eight workers with one reusable row buffer per worker.
+
+Fixture preparation can set `PARTLOG_BENCH_WRITE_RATE` to a positive aggregate points/second ceiling. After an interrupted metadata-bearing fixture, `PARTLOG_BENCH_RESUME=1` checks the original catalog and every retained row before continuing each producer prefix. It rejects changed declarations, offsets and corrupt prefixes. Pacing and fixture generation remain outside replay timing.

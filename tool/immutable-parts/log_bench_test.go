@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -306,5 +307,58 @@ func TestReplayCorpusIdentityAndPolicyValidation(t *testing.T) {
 	}
 	if err = writeReplayCorpus(root, c.Identity, c.Historical, c.Metrics, c.Producers); err == nil {
 		t.Fatal("overwrote original catalog")
+	}
+}
+
+func TestFixtureResume(t *testing.T) {
+	root := t.TempDir()
+	const total, metrics, producers = 100003, 420, 3
+	journal, err := partlog.Open(filepath.Join(root, "log"), partlog.Options{Streams: producers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writeReplayCorpus(root, journal.Identity(), total, metrics, producers); err != nil {
+		t.Fatal(err)
+	}
+	for p := range producers {
+		var rows []row
+		for i := 0; i < 17+p; i++ {
+			seq := uint64(i*producers + p)
+			rows = append(rows, row{ID: seq % metrics, Time: 1800000000 + int64(seq/6000000), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq})
+		}
+		if _, err = journal.Append(p, 1800000000, encodeLogRows(rows)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PARTLOG_BENCH_METADATA", "1")
+	t.Setenv("PARTLOG_BENCH_RESUME", "1")
+	t.Setenv("PARTLOG_BENCH_WRITE_RATE", "1000000000")
+	if err = logBacklogBenchmark(root, "write", total, metrics, producers, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = retainedLiveCounts(root, total, producers); err != nil {
+		t.Fatal(err)
+	}
+	if err = logBacklogBenchmark(root, "decode", total, metrics, producers, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err = logBacklogBenchmark(root, "write", total+1, metrics, producers, 2); err == nil {
+		t.Fatal("resumed with a changed historical declaration")
+	}
+	journal, err = partlog.Open(filepath.Join(root, "log"), partlog.Options{Streams: producers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = journal.Append(0, 1800000000, encodeLogRows([]row{{Seq: 0, Bits: 1}})); err != nil {
+		t.Fatal(err)
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = logBacklogBenchmark(root, "write", total, metrics, producers, 2); err == nil {
+		t.Fatal("resumed a corrupt retained prefix")
 	}
 }

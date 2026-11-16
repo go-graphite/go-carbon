@@ -80,7 +80,27 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 		if e != nil {
 			return e
 		}
-		if os.Getenv("PARTLOG_BENCH_METADATA") == "1" {
+		resume := os.Getenv("PARTLOG_BENCH_RESUME") == "1"
+		var writeRate uint64
+		if raw := os.Getenv("PARTLOG_BENCH_WRITE_RATE"); raw != "" {
+			writeRate, e = strconv.ParseUint(raw, 10, 64)
+			if e != nil || writeRate == 0 {
+				_ = log.Close()
+				return errors.New("invalid fixture write rate")
+			}
+		}
+		if resume && offset != 0 {
+			_ = log.Close()
+			return errors.New("fixture resume cannot use an offset")
+		}
+		if resume {
+			c, err := readReplayCorpus(root)
+			if err != nil || c.Historical != total || c.Metrics != metrics || c.Producers != producers {
+				_ = log.Close()
+				return errors.Join(errors.New("fixture resume metadata mismatch"), err)
+			}
+		}
+		if os.Getenv("PARTLOG_BENCH_METADATA") == "1" && !resume {
 			if e = writeReplayCorpus(root, log.Identity(), total, metrics, producers); e != nil {
 				_ = log.Close()
 				return e
@@ -93,13 +113,44 @@ func logBacklogBenchmark(root, phase string, total, metrics uint64, producers, o
 				const batch = 32768
 				storage := make([]row, batch)
 				var payload []byte
-				for sent := uint64(0); ; {
+				var sent uint64
+				if resume {
+					e := log.Replay(p, 0, func(r partlog.Record) error {
+						rows, err := decodeLogRowsInto(storage[:0], r.Payload)
+						storage = rows[:cap(rows)]
+						if err != nil {
+							return err
+						}
+						for _, point := range rows {
+							seq := sent*uint64(producers) + uint64(p)
+							want := row{ID: seq % metrics, Time: 1800000000 + int64(seq/6000000), Bits: math.Float64bits(float64(seq % 100003)), Seq: seq}
+							if seq >= total || point != want {
+								return errors.New("invalid retained fixture prefix")
+							}
+							sent++
+						}
+						return nil
+					})
+					if e != nil {
+						done <- e
+						return
+					}
+					count.Add(sent)
+				}
+				resumed, writeStart := sent, time.Now()
+				for {
 					first := sent*uint64(producers) + uint64(p)
 					if first >= total {
 						done <- nil
 						return
 					}
 					n := min(uint64(batch), (total-first+uint64(producers)-1)/uint64(producers))
+					if writeRate > 0 {
+						deadline := writeStart.Add(time.Duration(float64(sent-resumed) * float64(producers) / float64(writeRate) * float64(time.Second)))
+						if wait := time.Until(deadline); wait > 0 {
+							time.Sleep(wait)
+						}
+					}
 					rows := storage[:n]
 					for i := range rows {
 						seq := offset + (sent+uint64(i))*uint64(producers) + uint64(p)
