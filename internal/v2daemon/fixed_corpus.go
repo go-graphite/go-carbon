@@ -1,0 +1,291 @@
+package v2daemon
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime/pprof"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/go-graphite/go-carbon/internal/partlog"
+	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/points"
+)
+
+// Fixture reproduces the accepted input in v2backend/fixed_corpus_test.go.
+// The formula, per-name order, stamps, values and four-update barriers are copied,
+// not imported from the adapter. Geometry is identical in every layer.
+type Fixture struct {
+	CPUProfile                                               string
+	Names, Rounds, Producers, Shards, BatchSize, SampleNames int
+}
+
+func DefaultFixture() Fixture {
+	return Fixture{Names: 1 << 20, Rounds: 256, Producers: 48, Shards: 12, BatchSize: 32768, SampleNames: 3}
+}
+func fixtureName(id int) string {
+	return fmt.Sprintf("bench.namespace%d.cluster1.host%07d.component.requests.value", id%4, id)
+}
+func fixturePoint(id, round int) points.Point {
+	return points.Point{Timestamp: 1794700799 + int64(round), Value: float64(id%100003) + .125}
+}
+func procWritten() (uint64, error) {
+	b, err := os.ReadFile("/proc/self/io")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "write_bytes:") {
+			return strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, "write_bytes:")), 10, 64)
+		}
+	}
+	return 0, errors.New("missing process write counter")
+}
+func processCPU() (float64, error) {
+	var u syscall.Rusage
+	err := syscall.Getrusage(syscall.RUSAGE_SELF, &u)
+	return float64(u.Utime.Sec+u.Stime.Sec) + float64(u.Utime.Usec+u.Stime.Usec)/1e6, err
+}
+func sizes(root string) (all, catalog, journal int64, err error) {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, e error) error {
+		if e != nil {
+			return e
+		}
+		if !info.IsDir() {
+			all += info.Size()
+			if strings.Contains(path, string(filepath.Separator)+"catalog"+string(filepath.Separator)) {
+				catalog += info.Size()
+			} else if strings.HasSuffix(path, "segment.pdc4") {
+				journal += info.Size()
+			}
+		}
+		return nil
+	})
+	return
+}
+func parallel(producers int, fn func(int) error) error {
+	errs := make([]error, producers)
+	var wg sync.WaitGroup
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func(p int) { defer wg.Done(); errs[p] = fn(p) }(p)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// RunFixed writes one finite corpus, closes all resources, then verifies reopened
+// snapshots. Read-back is outside timed intake/close and process CPU accounting.
+func RunFixed(root string, layer int, f Fixture, out io.Writer) (result map[string]any, err error) {
+	if f.Names < 1 || f.Rounds < 4 || f.Rounds%4 != 0 || f.Producers < 1 || f.Shards < 1 || f.BatchSize < 1 || f.BatchSize > 32768 || f.SampleNames < 1 {
+		return nil, errors.New("invalid fixture")
+	}
+	// Name allocation and identical reusable generator buffers are outside timing.
+	names := make([]string, f.Names)
+	for i := range names {
+		names[i] = fixtureName(i)
+	}
+	type input struct {
+		names []string
+		data  []points.Point
+		seq   []uint64
+		rows  []v2core.Row
+	}
+	inputs := make([]input, f.Producers)
+	for p := range inputs {
+		inputs[p] = input{make([]string, 0, f.BatchSize), make([]points.Point, 0, f.BatchSize), make([]uint64, 0, f.BatchSize), make([]v2core.Row, 0, f.BatchSize)}
+	}
+	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards}
+	var profile *os.File
+	if f.CPUProfile != "" {
+		var x error
+		profile, x = os.Create(f.CPUProfile)
+		if x != nil {
+			return nil, x
+		}
+		if x = pprof.StartCPUProfile(profile); x != nil {
+			_ = profile.Close()
+			return nil, x
+		}
+		defer func() {
+			if profile != nil {
+				pprof.StopCPUProfile()
+				err = errors.Join(err, profile.Close())
+			}
+		}()
+	}
+	startCPU, e := processCPU()
+	if e != nil {
+		return nil, e
+	}
+	startWrite, e := procWritten()
+	if e != nil {
+		return nil, e
+	}
+	start := time.Now()
+	s, e := Open(root, cfg)
+	if e != nil {
+		return nil, e
+	}
+	defer func() {
+		if s != nil {
+			err = errors.Join(err, s.Close())
+		}
+	}()
+	for seal := 0; seal < f.Rounds/4; seal++ {
+		e = parallel(f.Producers, func(p int) error {
+			in := &inputs[p]
+			producer := s.Producers[p]
+			flush := func() error {
+				if len(in.rows) == 0 {
+					return nil
+				}
+				var x error
+				if layer == 0 {
+					x = producer.AppendNumeric(in.rows)
+				} else {
+					x = producer.Append(in.names, in.data, in.seq, 1794700800+int64((seal+1)*4))
+				}
+				clear(in.names)
+				in.names = in.names[:0]
+				in.data = in.data[:0]
+				in.seq = in.seq[:0]
+				in.rows = in.rows[:0]
+				return x
+			}
+			for round := seal * 4; round < (seal+1)*4; round++ {
+				for id := p; id < f.Names; id += f.Producers {
+					point := fixturePoint(id, round)
+					in.names = append(in.names, names[id])
+					in.data = append(in.data, point)
+					in.seq = append(in.seq, uint64(round+1))
+					in.rows = append(in.rows, v2core.Row{ID: uint64(id + 1), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: uint64(round + 1)})
+					if len(in.rows) == f.BatchSize {
+						if x := flush(); x != nil {
+							return x
+						}
+					}
+				}
+			}
+			if x := flush(); x != nil {
+				return x
+			}
+			return producer.Seal()
+		})
+		if e != nil {
+			return nil, e
+		}
+		if seal%8 == 7 {
+			if e = json.NewEncoder(out).Encode(map[string]any{"progress_seals": seal + 1, "points": (seal + 1) * 4 * f.Names, "seconds": time.Since(start).Seconds()}); e != nil {
+				return nil, e
+			}
+		}
+	}
+	intake := time.Since(start).Seconds()
+	if e = parallel(f.Producers, func(p int) error { return s.Producers[p].Drain() }); e != nil {
+		return nil, e
+	}
+	var ingest, compact, flushed, debt, groups, forced, encoded uint64
+	var active int64
+	for _, db := range s.Core.DBs() {
+		m := db.Metrics()
+		for _, l := range m.Levels {
+			ingest += l.BytesIngested
+			compact += l.BytesCompacted
+			flushed += l.BytesFlushed
+		}
+		debt += m.Compact.EstimatedDebt
+		active += m.Compact.NumInProgress
+	}
+	for _, p := range s.Producers {
+		groups += p.SyncGroups
+		forced += p.ForcedGroups
+		encoded += p.JournalBytes
+	}
+	if e = s.Close(); e != nil {
+		return nil, e
+	}
+	s = nil
+	complete := time.Since(start).Seconds()
+	endCPU, e := processCPU()
+	if e != nil {
+		return nil, e
+	}
+	endWrite, e := procWritten()
+	if e != nil {
+		return nil, e
+	}
+	if profile != nil {
+		pprof.StopCPUProfile()
+		if e = profile.Close(); e != nil {
+			return nil, e
+		}
+		profile = nil
+	}
+	rest, catalog, journal, e := sizes(root)
+	if e != nil {
+		return nil, e
+	}
+	count := float64(f.Names) * float64(f.Rounds)
+	result = map[string]any{"layer": layer, "names": f.Names, "rounds": f.Rounds, "producers": f.Producers, "shards": f.Shards, "barriers": f.Rounds / 4, "points": uint64(count), "intake_seconds": intake, "complete_seconds": complete, "intake_points_per_second": count / intake, "complete_points_per_second": count / complete, "cpu_ns_per_point": (endCPU - startCPU) * 1e9 / count, "written_B_per_point": float64(endWrite-startWrite) / count, "ingested_SST_before_close_B_per_point": float64(ingest) / count, "compaction_before_close_B_per_point": float64(compact) / count, "flush_before_close_B_per_point": float64(flushed) / count, "catalog_B_per_point": float64(catalog) / count, "journal_B_per_point": float64(journal) / count, "at_rest_B_per_point": float64(rest) / count, "estimated_debt_before_close": debt, "active_compactions_before_close": active, "journal_sync_groups": groups, "forced_groups": forced, "encoded_journal_bytes": encoded, "sync_groups_per_stream_second": float64(groups) / float64(f.Producers) / complete}
+	// Reopen the same core API; no second reader or key translation is introduced.
+	reader, e := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg), v2core.Hooks{})
+	if e != nil {
+		return result, e
+	}
+	defer func() { err = errors.Join(err, reader.Close()) }()
+	for i := 0; i < f.SampleNames; i++ {
+		id := i * (f.Names - 1) / max(1, f.SampleNames-1)
+		if layer > 0 {
+			p := id % f.Producers
+			local := uint64(id/f.Producers + 1)
+			catalog, x := partlog.OpenNameCatalog(filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", p), "catalog"))
+			if x != nil {
+				return result, x
+			}
+			name, _, ok := catalog.Lookup(local)
+			x = catalog.Close()
+			if x != nil {
+				return result, x
+			}
+			if !ok || name != names[id] || NumericID(local, p, f.Producers) != uint64(id+1) {
+				return result, fmt.Errorf("persisted sample name/ID mismatch %s", names[id])
+			}
+		}
+		snap := reader.DBs()[v2core.Shard(uint64(id+1), f.Shards)].NewSnapshot()
+		rows, x := v2core.Read(snap, uint64(id+1))
+		x = errors.Join(x, snap.Close())
+		if x != nil {
+			return result, x
+		}
+		if len(rows) != f.Rounds {
+			return result, fmt.Errorf("name %s: %d points, want %d", names[id], len(rows), f.Rounds)
+		}
+		for round, row := range rows {
+			point := fixturePoint(id, round)
+			want := v2core.Row{ID: uint64(id + 1), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: uint64(round + 1)}
+			if row != want {
+				return result, fmt.Errorf("name %s round %d: got %#v want %#v", names[id], round, row, want)
+			}
+		}
+	}
+	if layer == 2 {
+		if e = verifyJournal(root, f, names); e != nil {
+			return result, e
+		}
+		result["exact_journal_points"] = f.Names * f.Rounds
+	}
+	result["exact_sample_names"] = f.SampleNames
+	result["exact_sample_points"] = f.SampleNames * f.Rounds
+	result["readback"] = "exact after close/reopen; outside measured interval"
+	err = json.NewEncoder(out).Encode(result)
+	return
+}
