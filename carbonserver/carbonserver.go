@@ -356,6 +356,7 @@ type CarbonserverListener struct {
 	realtimeIndex   int
 	newMetricsQueue *helper.MetricQueue
 
+	v2Catalog    atomic.Pointer[v2CatalogBinding]
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
 	// Serializes index writers; readers use atomic trie links and publication.
@@ -2139,6 +2140,13 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	started := time.Now()
 	defer listener.logSlowGlobExpansion(logger, query, started, &matchedCount)
 
+	if binding := listener.v2Catalog.Load(); binding != nil {
+		response := listener.expandV2Catalog(binding, query)
+		matchedCount = len(response.Files)
+		resultCh <- response
+		return
+	}
+
 	if listener.trieIndex && listener.CurrentFileIndex() != nil {
 		files, leafs, nodes, lookups, err := listener.expandGlobsTrie(query)
 		resultCh <- &ExpandedGlobResponse{query, files, leafs, nodes, lookups, err}
@@ -2620,7 +2628,7 @@ func (listener *CarbonserverListener) checkRequestCtx(ctx context.Context) error
 }
 
 func (listener *CarbonserverListener) shouldBlockForIndex() bool {
-	return listener.NoServiceWhenIndexIsNotReady && listener.CurrentFileIndex() == nil
+	return listener.NoServiceWhenIndexIsNotReady && listener.v2Catalog.Load() == nil && listener.CurrentFileIndex() == nil
 }
 
 func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.HandlerFunc {

@@ -19,6 +19,9 @@ import (
 // Incremental conversion preserves the ordinary filesystem index contract and
 // exact values, so its discovery caches retain the existing TTL policy.
 func (listener *CarbonserverListener) usesSharedCatalogCachePolicy() bool {
+	if listener.v2Catalog.Load() != nil {
+		return true
+	}
 	db := listener.getMetricStore()
 	return db != nil && db.IncrementalSource() == ""
 }
