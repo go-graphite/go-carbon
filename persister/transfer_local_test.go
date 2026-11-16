@@ -54,6 +54,9 @@ func (c *transferLocalCodec) Update(ctx context.Context, io store.ContinuationIO
 // boundary are exercised without sleeps. The absent cached name reproduces the
 // same eight-failure symptom without any request cancellation.
 func TestTransferFlushLocalInterleavings(t *testing.T) {
+	if isolatedStorageTest(t) {
+		return
+	}
 	stages := []string{"before_request", "before_update", "after_commit", "absent_cached", "absent_unqueued", "success"}
 	for i := 1; i <= 8; i++ {
 		stages = append(stages, fmt.Sprintf("pop_%d", i), fmt.Sprintf("prepare_%d", i), fmt.Sprintf("confirm_%d", i))

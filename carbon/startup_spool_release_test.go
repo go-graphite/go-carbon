@@ -336,11 +336,12 @@ func TestStartupSpoolReleaseCrashProcess(t *testing.T) {
 }
 
 func TestStartupSpoolReleaseCrashBitDifferential(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
+	parallelTestMatrix(t) // Each crash stage owns independent files and globals.
 	for _, stage := range []string{"before_replay", "after_replay_before_persist", "after_confirm_before_sync", "after_persist", "after_unlink", "after_directory_sync", "after_release"} {
 		t.Run(stage, func(t *testing.T) {
+			if isolatedTestProcess(t) {
+				return
+			}
 			root := t.TempDir()
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()

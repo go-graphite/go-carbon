@@ -122,7 +122,9 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 		{"successor never asks", true, true, false, "silent", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if isolatedTestProcess(t) {
+			// Capability probes and connected clients have wall-clock bounds.
+			// Keep unrelated storage startups outside this handoff interval.
+			if isolatedTestProcessSerial(t) {
 				return
 			}
 			defer zapwriter.Test()()
@@ -237,7 +239,9 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 			handoff.PeerExecutable = func(*net.UnixConn) (string, error) { return successor, nil }
 			t.Cleanup(func() { handoff.PeerExecutable = savedPeer })
 
-			const clients, perClient = 6, 1500
+			// Keep all connections and the 32-point post-stop suffix; sequence
+			// length does not control a capacity or admission boundary here.
+			const clients, perClient = 6, 128
 			base := time.Now().Unix() - perClient - 10
 			var wg sync.WaitGroup
 			var failed sync.Map

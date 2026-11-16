@@ -26,6 +26,9 @@ import (
 // through an overlay against both revisions. FIFO promotion is driven by the
 // real append/replay owners; the receipts include pre- and post-promotion input.
 func TestReplayFixBitDifferential(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	s, err := openStartupInputWithPolicy(filepath.Join(t.TempDir(), "input.1.2.tail.bin"), chooseStartupPolicy(4, 1<<30, 1<<30))
 	if err != nil {
 		t.Fatal(err)
