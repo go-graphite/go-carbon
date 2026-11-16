@@ -9,7 +9,9 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net"
@@ -17,11 +19,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
 )
 
 func TestCopyManifestAuthenticationAndResume(t *testing.T) {
@@ -207,4 +211,183 @@ func TestCopyReceiptLogicalIdentity(t *testing.T) {
 	if _, err = copyReceiptKey(b); err == nil {
 		t.Fatal("corrupt logical receipt accepted")
 	}
+}
+
+// The transport is interrupted with several workers active, then both Pebble
+// and the receipt ledger are reopened. Count actual wire requests and bytes.
+func TestCopyResumableInterruptedTransfer(t *testing.T) {
+	for _, streams := range []int{1, 8, 32} {
+		t.Run(fmt.Sprint(streams), func(t *testing.T) {
+			root := t.TempDir()
+			donor := copyTestDB(t, filepath.Join(root, "donor"))
+			defer donor.Close()
+			source := copyFixture(t, root, streams*4, 16, 256, []*pebble.DB{donor})
+			targetPath := filepath.Join(root, "target")
+			target := copyTestDB(t, targetPath)
+			defer func() { target.Close() }()
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var once sync.Once
+			var mu sync.Mutex
+			requests := make(map[int]int)
+			var wire uint64
+			var first atomic.Bool
+			first.Store(true)
+			var handlers sync.WaitGroup
+			acceptDone := make(chan struct{})
+			go func() {
+				defer close(acceptDone)
+				for {
+					c, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					handlers.Add(1)
+					go func() {
+						defer handlers.Done()
+						conn := &copyAuditConn{Conn: c}
+						conn.request = func(pi int) {
+							mu.Lock()
+							requests[pi]++
+							mu.Unlock()
+							if first.Load() && pi >= streams*2 {
+								once.Do(cancel)
+							}
+						}
+						conn.payload = func(n int) { mu.Lock(); wire += uint64(n); mu.Unlock() }
+						_ = copyServeConn(conn, source)
+					}()
+				}
+			}()
+			ledgerDir := filepath.Join(root, "ledger")
+			newLedger := func() *copyDoneLedger {
+				return &copyDoneLedger{Dir: ledgerDir, Generation: func(int) (string, error) { return "fixture-durable-incarnation", nil }, Reconcile: func(pi int) (bool, error) {
+					m := source[pi].Manifest
+					lo, err := partsformat.PartitionPrefixForGroup(m.Group, m.VShard, m.Partition)
+					if err != nil {
+						return false, err
+					}
+					return copyRangeDigest(t, donor, lo, partsformat.PrefixEnd(lo)) == copyRangeDigest(t, target, lo, partsformat.PrefixEnd(lo)), nil
+				}}
+			}
+			plan := make([]int, len(source))
+			for i := range plan {
+				plan[i] = i
+			}
+			start := time.Now()
+			_, err = copyTransferResumable(ctx, listener.Addr().String(), source, plan, streams, []*pebble.DB{target}, root, newLedger())
+			if err == nil || ctx.Err() == nil {
+				t.Fatal("transfer was not interrupted", err)
+			}
+			done := make(map[int]bool)
+			for pi, p := range source {
+				key, err := copyReceiptKey(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := os.ReadFile(filepath.Join(ledgerDir, hex.EncodeToString(key[:])+".json"))
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var r copyReceipt
+				if err = json.Unmarshal(b, &r); err != nil {
+					t.Fatal(err)
+				}
+				done[pi] = r.Done
+			}
+			finished := 0
+			for _, v := range done {
+				if v {
+					finished++
+				}
+			}
+			if finished == 0 || finished == len(source) {
+				t.Fatal("not a mid-transfer interruption", finished)
+			}
+			if err = target.Close(); err != nil {
+				t.Fatal(err)
+			}
+			target = copyTestDB(t, targetPath)
+			first.Store(false)
+			st, err := copyTransferResumable(context.Background(), listener.Addr().String(), source, plan, streams, []*pebble.DB{target}, root, newLedger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if copyDBDigest(t, donor) != copyDBDigest(t, target) {
+				t.Fatal("resumed target differs")
+			}
+			if err = listener.Close(); err != nil {
+				t.Fatal(err)
+			}
+			<-acceptDone
+			handlers.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			repeated := 0
+			var unique, maxPart uint64
+			for pi, p := range source {
+				n := requests[pi]
+				if n < 1 || n > 2 {
+					t.Fatal("invalid request count", pi, n)
+				}
+				if done[pi] && n != 1 {
+					t.Fatal("finished partition resent", pi, n)
+				}
+				if n == 2 {
+					repeated++
+				}
+				for _, f := range p.Files {
+					unique += f.Part.Bytes
+					if f.Part.Bytes > maxPart {
+						maxPart = f.Part.Bytes
+					}
+				}
+			}
+			if repeated > streams || wire > unique+uint64(streams)*maxPart {
+				t.Fatal("resend exceeds one in-flight partition per stream", repeated, wire, unique)
+			}
+			b, _ := json.Marshal(map[string]any{"phase": "interrupt_resume", "streams": streams, "finished_before_interrupt": finished, "repeated_partitions": repeated, "wire_bytes": wire, "unique_bytes": unique, "extra_wire_bytes": int64(wire) - int64(unique), "max_resend_bytes": uint64(streams) * maxPart, "resume_bytes": st.Bytes, "seconds": time.Since(start).Seconds(), "exact": true, "sample_decode": false})
+			fmt.Println("COPY_RESUME_JSON " + string(b))
+		})
+	}
+}
+
+type copyAuditConn struct {
+	net.Conn
+	request     func(int)
+	payload     func(int)
+	header      [8]byte
+	readN       int
+	replyHeader bool
+}
+
+func (c *copyAuditConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		copy(c.header[c.readN:], b[:n])
+		c.readN += n
+		if c.readN == 8 {
+			c.request(int(binary.BigEndian.Uint32(c.header[:4])))
+			c.readN = 0
+			c.replyHeader = true
+		}
+	}
+	return n, err
+}
+func (c *copyAuditConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if c.replyHeader {
+		c.replyHeader = false
+	} else {
+		c.payload(n)
+	}
+	return n, err
 }
