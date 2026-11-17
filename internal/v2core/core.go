@@ -1206,14 +1206,14 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				now = r.now()
 			}
 			due := false
-			for _, m := range r.metrics {
+			for _, m := range r.idleCandidates() {
 				if !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
 					due = true
 					break
 				}
 			}
-			for _, b := range batches {
-				if r.metrics[b.ID] == nil {
+			for i := range batches {
+				if b := &batches[i]; r.metrics[b.ID] == nil && r.needsMetadataSeal(b) {
 					due = true // establish metadata before its inactivity window can end
 					break
 				}
