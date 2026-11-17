@@ -36,7 +36,7 @@ func TestPortableRollupPartPublishedGCP3Compatibility(t *testing.T) {
 	}
 	w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
 	for _, kv := range file {
-		if err = w.Set(kv.Key, kv.Value); err != nil {
+		if err = w.Set(kv.Key, kv.encodedValue()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -51,7 +51,7 @@ func TestPortableRollupPartPublishedGCP3Compatibility(t *testing.T) {
 			if e != nil {
 				return e
 			}
-			if i >= len(file) || !bytes.Equal(key, file[i].Key) || !bytes.Equal(value, file[i].Value) {
+			if i >= len(file) || !bytes.Equal(key, file[i].Key) || !bytes.Equal(value, file[i].encodedValue()) {
 				t.Fatal("published key/value changed")
 			}
 			i++
@@ -134,7 +134,7 @@ func TestPortableDenseRollupPartPublishedGCP3Compatibility(t *testing.T) {
 	}
 	w := sstable.NewWriter(objstorageprovider.NewFileWritable(f), sstable.WriterOptions{Compression: sstable.SnappyCompression})
 	for _, kv := range file {
-		if err = w.Set(kv.Key, kv.Value); err != nil {
+		if err = w.Set(kv.Key, kv.encodedValue()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -149,7 +149,7 @@ func TestPortableDenseRollupPartPublishedGCP3Compatibility(t *testing.T) {
 			if e != nil {
 				return e
 			}
-			if i >= len(file) || !bytes.Equal(key, file[i].Key) || !bytes.Equal(value, file[i].Value) {
+			if i >= len(file) || !bytes.Equal(key, file[i].Key) || !bytes.Equal(value, file[i].encodedValue()) {
 				t.Fatal("published key/value changed")
 			}
 			i++
@@ -228,7 +228,7 @@ func TestPortableDenseNewestSingletonWins(t *testing.T) {
 	for _, kv := range plan.Files[0] {
 		k, _ := v2part.Decode(kv.Key)
 		k.Part = v2part.PartID{8}
-		value := bytes.Clone(kv.Value)
+		value := bytes.Clone(kv.encodedValue())
 		if k.Archive == v2part.MetadataArchive {
 			m, err := DecodeRollupMetadata(value)
 			if err != nil {
@@ -328,12 +328,12 @@ func TestDenseRuntimeSealExport(t *testing.T) {
 		}
 		if key.Archive == v2part.MetadataArchive {
 			count++
-			if !bytes.Equal(actual[string(kv.Key)], kv.Value) {
+			if !bytes.Equal(actual[string(kv.Key)], kv.encodedValue()) {
 				t.Fatal("metadata changed")
 			}
 			continue
 		}
-		records, err := v2part.DecodeSlots(key.Archive, key.BlockStart, kv.Value)
+		records, err := v2part.DecodeSlots(key.Archive, key.BlockStart, kv.encodedValue())
 		if err != nil {
 			t.Fatal(err)
 		}

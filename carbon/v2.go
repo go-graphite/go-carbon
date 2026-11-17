@@ -29,13 +29,18 @@ import (
 // v2Config is restart-only. The experimental engine has its own mandatory log
 // underneath Path, independent of the classic dump/input-log switches.
 type v2Config struct {
+	BaselinePath string `toml:"baseline-path"`
+
 	Enabled         bool   `toml:"enabled"`
+	Mode            string `toml:"mode"`
 	Path            string `toml:"path"`
 	Producers       int    `toml:"producers"`
 	Shards          int    `toml:"shards"`
 	ReadBudgetBytes int64  `toml:"read-budget-bytes"`
 }
 type v2Runtime struct {
+	mode    string
+	metrics *v2ModeMetrics
 	quotas  *carbonserver.V2Quotas
 	store   *v2daemon.Store
 	reader  *v2read.Reader
@@ -47,6 +52,11 @@ type v2Runtime struct {
 
 func (app *App) startV2() error {
 	c := app.Config
+	mode, err := v2StorageMode(c.V2)
+	if err != nil {
+		return err
+	}
+	dual := mode != v2Only
 	if c.Common.MaxCPU > 0 {
 		runtime.GOMAXPROCS(c.Common.MaxCPU)
 	}
@@ -76,6 +86,7 @@ func (app *App) startV2() error {
 	if c.Whisper.Aggregation == nil || len(c.Whisper.Schemas) == 0 {
 		return errors.New("v2 requires loaded schema and aggregation policies")
 	}
+	var core *cache.Cache
 	n := c.V2.Producers
 	if n == 0 {
 		n = runtime.GOMAXPROCS(0)
@@ -92,12 +103,12 @@ func (app *App) startV2() error {
 	if err != nil {
 		return err
 	}
-	v := &v2Runtime{reader: r, stop: make(chan struct{})}
+	v := &v2Runtime{mode: mode, reader: r, stop: make(chan struct{}), metrics: &v2ModeMetrics{mode: mode}}
 	app.v2 = v
 	// Replay must complete before wall-clock expiry may create new reset barriers.
 	var recovered atomic.Bool
 	var intake atomic.Pointer[v2recv.Server]
-	hooks := v2core.Hooks{PublishBatches: r.Publish, DenseRollups: true}
+	hooks := v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
@@ -113,9 +124,57 @@ func (app *App) startV2() error {
 			return ttl > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= ttl
 		}
 	}
-	v.store, err = v2daemon.Open(c.V2.Path, v2daemon.Config{Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks})
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks}
+	storeConfig.Prepare = func() error {
+		if err := app.prepareV2Fallback(mode); err != nil {
+			return err
+		}
+		if dual {
+			if !c.Whisper.Enabled || c.Tags.Enabled || c.Whisper.StoreLiveMigration || c.Whisper.StoreIncrementalMigration || c.Whisper.StoreMetadataCachePrewarm || c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
+				return errors.New("v2 dual write requires an enabled stable classic engine; disable tags, migration, metadata prewarm and expiry")
+			}
+			core, err = app.startStorage()
+			if err != nil {
+				return err
+			}
+			if err = app.startPersister(); err != nil {
+				return err
+			}
+			close(app.metadataPrewarmReady)
+		} else {
+			core = cache.New()
+			app.Cache = core
+		}
+
+		return nil
+	}
+	if dual {
+		storeConfig.DurableApplications = func(producer int, batches []v2core.Batch) error { return v.mirrorClassic(core)(producer, batches) }
+	}
+	v.store, err = v2daemon.Open(c.V2.Path, storeConfig)
 	if err != nil {
 		return err
+	}
+	if dual {
+		deadline := time.Now().Add(5 * time.Minute)
+		diagnosticAt := time.Now().Add(5 * time.Second)
+		for !core.IsEmpty() {
+			if !diagnosticAt.IsZero() && time.Now().After(diagnosticAt) {
+				// One bounded diagnostic per startup, including an idle queue
+				// with unconfirmed batches that cannot be offered again.
+				pebbleWrites, whisperWrites := app.Persister.WriteStats()
+				zapwriter.Logger("v2").Warn("waiting for classic replay drain",
+					zap.Int64("cache-points", core.Size()), zap.Int32("unconfirmed", core.NotConfirmedLength()),
+					zap.Any("writeout", core.WriteoutState()), zap.String("queue", core.WriteoutQueue().DebugState()),
+					zap.Any("pebble-writes", pebbleWrites), zap.Any("whisper-writes", whisperWrites),
+					zap.Uint64("committed-points", app.Persister.CommittedPoints()))
+				diagnosticAt = time.Time{}
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("classic replay did not drain; refusing to serve: points=%d unconfirmed=%d writeout=%+v committed=%d", core.Size(), core.NotConfirmedLength(), core.WriteoutState(), app.Persister.CommittedPoints())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	classicNames, err := app.openV2Classic()
 	if err != nil {
@@ -154,15 +213,38 @@ func (app *App) startV2() error {
 	if err = refresh(); err != nil {
 		return err
 	}
-	core := cache.New()
-	app.Cache = core
 	queue, err := app.configureCarbonserver(core)
 	if err != nil {
 		return err
 	}
-	app.Carbonserver.SetV2UnionReader(r)
-	if err = app.Carbonserver.SetV2Catalog(&v.catalog); err != nil {
-		return err
+	if mode != v2Shadow {
+		app.Carbonserver.SetV2UnionReader(r)
+	}
+	app.Carbonserver.RegisterInternalInfoHandler("v2-storage", func() map[string]interface{} { return map[string]interface{}{"mode": mode, "classic-dual-write": dual} })
+	if c.Prometheus.Enabled {
+		if err := app.PromRegisterer.Register(v.metrics); err != nil {
+			return err
+		}
+		v.metrics.unregister = func() { app.PromRegisterer.Unregister(v.metrics) }
+	}
+	if mode != v2Shadow {
+		if err = app.Carbonserver.SetV2Catalog(&v.catalog); err != nil {
+			return err
+		}
+	}
+	if mode == v2ServingDual {
+		for _, name := range classicNames {
+			policy, err := r.Metadata(context.Background(), name)
+			if errors.Is(err, v2read.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if err := app.Carbonserver.ValidateV2UnionPolicy(name, policy); err != nil {
+				return err
+			}
+		}
 	}
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
@@ -185,8 +267,10 @@ func (app *App) startV2() error {
 		for _, archive := range cfg.Archives {
 			policy.Archives = append(policy.Archives, v2read.Archive{Step: archive.Step, Points: archive.Count})
 		}
-		if err := app.Carbonserver.ValidateV2UnionPolicy(name, policy); err != nil {
-			return nil, err
+		if mode != v2Shadow {
+			if err := app.Carbonserver.ValidateV2UnionPolicy(name, policy); err != nil {
+				return nil, err
+			}
 		}
 		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "local", Config: cfg})
 	}
@@ -235,6 +319,9 @@ func (v *v2Runtime) stopIntake() {
 }
 func (v *v2Runtime) close() {
 	v.stopIntake()
+	if v.metrics.unregister != nil {
+		v.metrics.unregister()
+	}
 	close(v.stop)
 	v.wg.Wait()
 	v.reader.Close()

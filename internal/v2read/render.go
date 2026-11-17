@@ -133,6 +133,34 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 	if firstSlot < 0 {
 		firstSlot += a.Points
 	}
+	// A resolved source already owns one authoritative winner per physical
+	// slot. Use that slot directly instead of arbitrating every sample again.
+	if len(h.v.view.Blocks) == 1 && len(h.v.view.Parts) == 0 && len(h.v.view.Head) == 0 {
+		if source, ok := h.v.view.Blocks[0].(*resolvedSource); ok && source.id == m.ID {
+			archive := source.archive(a.Step)
+			ranges, count := SlotRanges(a, start, end)
+			for _, interval := range ranges[:count] {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				for i := source.lower(archive, interval.From); i < len(source.records) && source.records[i].Archive == archive && source.records[i].Slot < interval.Until; i++ {
+					record := source.records[i]
+					j := record.Slot - firstSlot
+					if j < 0 {
+						j += a.Points
+					}
+					seen[j] = true
+					workspace.touched = append(workspace.touched, uint32(j))
+					value := math.NaN()
+					if record.Sample.Time == start+j*a.Step {
+						value = math.Float64frombits(record.Sample.Bits)
+					}
+					out.Values[j] = value
+				}
+			}
+			return out, ctx.Err()
+		}
+	}
 	// Sources check cancellation at block boundaries. Per-sample polling takes
 	// a cancel-context mutex for every version, even for fully cached blocks.
 	emit := func(p Sample) error {

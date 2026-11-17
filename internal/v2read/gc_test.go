@@ -18,7 +18,7 @@ func TestRetirementPublishesNewSealedGenerationWithoutInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := v2core.Open(root, testConfig(), v2core.Hooks{PublishBatches: r.Publish})
+	e, err := v2core.Open(root, testConfig(), v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory})
 	if err != nil {
 		t.Fatal(err)
 	}

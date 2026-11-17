@@ -14,9 +14,13 @@ import (
 )
 
 func TestRollupMetadataBinaryLegacyAndFraming(t *testing.T) {
-	for _, version := range []uint8{1, 2} {
+	for _, version := range []uint8{1, 2, 3} {
 		m := RollupMetadata{Version: version, ID: 8, Policy: []byte("canonical\x00policy"), LastUpdate: -123, Revision: 9, Frontier: sealrollup.Frontier{Order: 7, MaxTime: 99, Policy: [32]byte{1, 255}}}
-		if version == 2 {
+		if version == 3 {
+			m.Version = 2
+			m.BaselineOrder = 3
+		}
+		if version >= 2 {
 			m.Expired = true
 			m.ResetOrder = 7
 		}
@@ -105,7 +109,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 				t.Fatalf("mixed group %v", e)
 			}
 			shards[k.VShard] = true
-			saved = append(saved, bytes.Clone(kv.Key), bytes.Clone(kv.Value))
+			saved = append(saved, bytes.Clone(kv.Key), bytes.Clone(kv.encodedValue()))
 		}
 		if len(shards) < 32 {
 			t.Fatal("fixture did not span vshards")
@@ -117,7 +121,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 	n := 0
 	for _, file := range plan.Files {
 		for _, kv := range file {
-			if !bytes.Equal(saved[n], kv.Key) || !bytes.Equal(saved[n+1], kv.Value) {
+			if !bytes.Equal(saved[n], kv.Key) || !bytes.Equal(saved[n+1], kv.encodedValue()) {
 				t.Fatal("pending bytes changed")
 			}
 			n += 2

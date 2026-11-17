@@ -16,6 +16,9 @@ var rollupMetadataMagic = []byte{'R', 'U', 'M', 1}
 // The caller owns dst through durable publication. Old JSON rows remain readable.
 func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	dst = append(dst, rollupMetadataMagic...)
+	if m.BaselineOrder > 0 {
+		dst[len(dst)-1] = 2
+	}
 	dst = append(dst, m.Version)
 	flags := byte(0)
 	if m.Expired {
@@ -24,6 +27,9 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	dst = append(dst, flags)
 	for _, n := range []uint64{m.ID, m.Frontier.Order, uint64(m.Frontier.MaxTime), uint64(m.LastUpdate), m.Revision, m.ResetOrder} {
 		dst = binary.BigEndian.AppendUint64(dst, n)
+	}
+	if m.BaselineOrder > 0 {
+		dst = binary.BigEndian.AppendUint64(dst, m.BaselineOrder)
 	}
 	dst = append(dst, m.Frontier.Policy[:]...)
 	dst = binary.BigEndian.AppendUint32(dst, uint32(len(m.Policy)))
@@ -34,12 +40,15 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 // policy bytes are detached from the iterator buffer and safe after Next/Close.
 func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 	var m RollupMetadata
-	if !bytes.HasPrefix(data, rollupMetadataMagic) {
+	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] != 1 && data[3] != 2) {
 		err := json.Unmarshal(data, &m)
 		return m, err
 	}
-	const header = 90
-	if len(data) < header || data[5] > 1 || uint64(binary.BigEndian.Uint32(data[86:90])) != uint64(len(data)-header) {
+	header := 90
+	if data[3] == 2 {
+		header = 98
+	}
+	if len(data) < header || data[5] > 1 || uint64(binary.BigEndian.Uint32(data[header-4:header])) != uint64(len(data)-header) {
 		return m, errors.New("invalid binary rollup metadata")
 	}
 	m.Version = data[4]
@@ -49,15 +58,14 @@ func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 	m.LastUpdate = int64(binary.BigEndian.Uint64(data[30:38]))
 	m.Revision = binary.BigEndian.Uint64(data[38:46])
 	m.ResetOrder = binary.BigEndian.Uint64(data[46:54])
-	copy(m.Frontier.Policy[:], data[54:86])
+	offset := 54
+	if data[3] == 2 {
+		m.BaselineOrder = binary.BigEndian.Uint64(data[54:62])
+		offset = 62
+	}
+	copy(m.Frontier.Policy[:], data[offset:offset+32])
 	m.Policy = bytes.Clone(data[header:])
 	return m, nil
-}
-
-func (r *coreRollups) appendRecord(record sealrollup.Record) []byte {
-	start := len(r.arena)
-	r.arena = sealrollup.AppendRecord(r.arena, record)
-	return r.arena[start:len(r.arena):len(r.arena)]
 }
 
 // One serial owner exclusively holds these arenas until its ingest resolves.
@@ -68,6 +76,8 @@ func (r *coreRollups) release() {
 	}
 	clear(r.stages)
 	r.stages = r.stages[:0]
+	clear(r.ordered)
+	r.ordered = r.ordered[:0]
 	clear(r.batches)
 	r.batches = r.batches[:0]
 	clear(r.positions)
@@ -78,7 +88,6 @@ func (r *coreRollups) release() {
 		r.files[group] = file[:0]
 	}
 	r.samples = r.samples[:0]
-	r.records = r.records[:0]
 	r.arena = r.arena[:0]
 	r.pending = false
 }

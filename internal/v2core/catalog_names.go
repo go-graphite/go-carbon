@@ -17,7 +17,7 @@ import (
 // Numeric/L1/L2 data have no canonical core catalog and are not discovered here.
 func ScanCatalogNames(ctx context.Context, snapshot *pebble.Snapshot, visit func(string) error) error {
 	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: partsformat.PrefixEnd(prefix)})
+	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: partsformat.PrefixEnd(prefix)})
 	if err != nil {
 		return err
 	}

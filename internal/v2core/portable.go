@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -32,6 +33,18 @@ func WriteDenseRollupPart(path string, file []KV, source v2part.Provenance) (v2p
 func writePortableRollupPart(path string, file []KV, source v2part.Provenance, dense bool) (v2part.Descriptor, error) {
 	if len(file) == 0 {
 		return v2part.Descriptor{}, errors.New("empty rollup file")
+	}
+	// Portable compatibility exports materialize singleton values. Runtime seals
+	// pass typed records straight to writePlannedRollupPart instead.
+	for i, kv := range file {
+		if kv.Record != nil {
+			file = slices.Clone(file)
+			for j := i; j < len(file); j++ {
+				file[j].Value = file[j].encodedValue()
+				file[j].Record = nil
+			}
+			break
+		}
 	}
 	if dense {
 		// Runtime seals may already contain dense runs. Normalize their logical
@@ -99,7 +112,7 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 		if d.meta, e = DecodeRollupMetadata(kv.Value); e != nil {
 			return v2part.Descriptor{}, e
 		}
-		if (d.meta.Version != 1 && d.meta.Version != 2) || d.meta.Frontier.Order == 0 || (d.meta.Version == 1 && (d.meta.ResetOrder != 0 || d.meta.Expired)) || d.meta.ResetOrder > d.meta.Frontier.Order || (d.meta.Expired && d.meta.ResetOrder != d.meta.Frontier.Order) {
+		if d.meta.BaselineOrder > d.meta.Frontier.Order || (d.meta.Version != 1 && d.meta.Version != 2) || d.meta.Frontier.Order == 0 || (d.meta.Version == 1 && (d.meta.ResetOrder != 0 || d.meta.Expired)) || d.meta.ResetOrder > d.meta.Frontier.Order || (d.meta.Expired && d.meta.ResetOrder != d.meta.Frontier.Order) {
 			return v2part.Descriptor{}, errors.New("unsupported rollup metadata")
 		}
 		if e = json.Unmarshal(d.meta.Policy, &d.policy); e != nil {

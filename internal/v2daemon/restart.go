@@ -132,6 +132,11 @@ func (p *Producer) recoverProducer(dir string) error {
 				}
 				p.applyOrder = b.Order
 			}
+			if p.durableApplications != nil {
+				if err := p.durableApplications(p.index, batches); err != nil {
+					return err
+				}
+			}
 			if err = p.engine.AppendBatchesPipelined(p.index, batches, cursor, false); err != nil {
 				return err
 			}
