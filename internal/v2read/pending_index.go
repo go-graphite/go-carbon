@@ -1,9 +1,7 @@
 package v2read
 
 import (
-	"cmp"
 	"encoding/json"
-	"hash/maphash"
 	"slices"
 	"sync"
 
@@ -23,20 +21,17 @@ type pendingIndex struct {
 type pendingChunk struct {
 	start, end int
 	once       sync.Once
-	keys       []pendingKey
-	err        error
-}
-
-type pendingKey struct {
-	hash uint64
-	pos  int32
+	// hashes[i] is the name hash of pending[start+i]; heads/next chain equal
+	// buckets so lookups need no sort and no name bytes.
+	hashes []uint64
+	heads  []int32
+	next   []int32
+	err    error
 }
 
 // maxPendingChunks bounds lookup work for owners that publish often but rarely
 // seal; past it the next generation indexes its whole head as one chunk.
 const maxPendingChunks = 64
-
-var pendingSeed = maphash.MakeSeed()
 
 // samePendingBatch reports whether two published descriptors are the same
 // owner application. Point arenas are detached and immutable per packet.
@@ -80,26 +75,46 @@ func pendingName(b *v2core.Batch) (string, error) {
 	return string(p.Name), nil
 }
 
+// pendingHash is the hash of pendingName without reading name bytes when the
+// batch carries a registered identity.
+func pendingHash(b *v2core.Batch) (uint64, error) {
+	if b.Registered != nil {
+		return b.Registered.NameHash(), nil
+	}
+	name, err := pendingName(b)
+	return v2core.NameHash(name), err
+}
+
 // load indexes pending[start:end]. Every holder of the chunk publishes the
 // same batches at these positions, so any holder's slice may build it.
 func (c *pendingChunk) load(pending []v2core.Batch) error {
 	c.once.Do(func() {
-		keys := make([]pendingKey, c.end-c.start)
-		for i := c.start; i < c.end; i++ {
-			name, err := pendingName(&pending[i])
+		n := c.end - c.start
+		hashes := make([]uint64, n)
+		for i := range hashes {
+			h, err := pendingHash(&pending[c.start+i])
 			if err != nil {
 				c.err = err
 				return
 			}
-			keys[i-c.start] = pendingKey{hash: maphash.String(pendingSeed, name), pos: int32(i)}
+			hashes[i] = h
 		}
-		slices.SortFunc(keys, func(a, b pendingKey) int {
-			if c := cmp.Compare(a.hash, b.hash); c != 0 {
-				return c
-			}
-			return cmp.Compare(a.pos, b.pos)
-		})
-		c.keys = keys
+		size := 1
+		for size < 2*n {
+			size <<= 1
+		}
+		heads := make([]int32, size)
+		for i := range heads {
+			heads[i] = -1
+		}
+		next := make([]int32, n)
+		mask := uint64(size - 1)
+		for i := n - 1; i >= 0; i-- { // descending inserts leave each chain ascending
+			b := hashes[i] & mask
+			next[i] = heads[b]
+			heads[b] = int32(i)
+		}
+		c.hashes, c.heads, c.next = hashes, heads, next
 	})
 	return c.err
 }
@@ -112,17 +127,19 @@ func (x *pendingIndex) candidates(pending []v2core.Batch, names []string) ([]int
 	}
 	hashes := make([]uint64, len(names))
 	for i, n := range names {
-		hashes[i] = maphash.String(pendingSeed, n)
+		hashes[i] = v2core.NameHash(n)
 	}
 	var out []int32
 	for _, c := range x.chunks {
 		if err := c.load(pending); err != nil {
 			return nil, err
 		}
+		mask := uint64(len(c.heads) - 1)
 		for _, h := range hashes {
-			i, _ := slices.BinarySearchFunc(c.keys, h, func(k pendingKey, h uint64) int { return cmp.Compare(k.hash, h) })
-			for ; i < len(c.keys) && c.keys[i].hash == h; i++ {
-				out = append(out, c.keys[i].pos)
+			for j := c.heads[h&mask]; j >= 0; j = c.next[j] {
+				if c.hashes[j] == h {
+					out = append(out, int32(c.start)+j)
+				}
 			}
 		}
 	}
