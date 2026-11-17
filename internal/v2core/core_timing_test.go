@@ -80,3 +80,44 @@ func TestCoreVisibleObserverCoversSealedAndPending(t *testing.T) {
 		})
 	}
 }
+
+// Pending publications share the owner's one-second cadence. Mandatory seal
+// publication still happens immediately and contains every original batch.
+func TestCorePendingPublicationCoalesces(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := coreConfig{Producers: 1, Shards: 1, MaxRows: 2048, PartitionSeconds: 60}
+	o := &coreOwner{db: db, dir: dir, cfg: cfg, sealRows: 2048}
+	o.meta = coreFrontier{Version: 1, Config: cfg, Cursors: []uint64{0}, ExpiredBefore: -1 << 63}
+	o.publishFrontier(o.meta)
+	defer func() { o.pub.clear(); db.Close() }()
+	calls := 0
+	o.batchHook = func(pin *pebble.Snapshot, _ []coreBatch, _ uint64) error { calls++; return pin.Close() }
+	q := newCoreQueue(coreQueueBytes)
+	o.queues = []*coreQueue{q}
+	poll := o.poller()
+	for i := uint64(1); i <= 32; i++ {
+		point := row{ID: 1, Time: int64(i), Bits: i, Seq: i}
+		if !q.tryPush(&corePacket{rows: []row{point}, batches: []coreBatch{{ID: 1, Order: i, Points: []row{point}}}, cursor: i}) {
+			t.Fatal("queue full")
+		}
+		poll()
+	}
+	if calls != 1 {
+		t.Fatal("republished growing head on every packet", calls)
+	}
+	ack := make(chan error, 1)
+	if !q.tryPush(&corePacket{cursor: 32, seal: true, ack: ack}) {
+		t.Fatal("queue full")
+	}
+	poll()
+	if err = <-ack; err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || o.frontier.Load().Cursors[0] != 32 {
+		t.Fatal("seal did not publish every packet", calls)
+	}
+}

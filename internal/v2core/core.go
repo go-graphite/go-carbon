@@ -797,7 +797,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
 	deadline := time.Now().Add(time.Second)
-	var headPublication time.Time
+	var headPublication, batchPublication time.Time
 	publishBatches := func() error {
 		if o.batchHook == nil {
 			return nil
@@ -805,6 +805,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// submitPacketMode already detached Points and Policy. Owners never mutate
 		// those arenas; only the descriptor slice grows. Retain their immutable
 		// storage instead of copying the full head for every publication.
+		// Pending heads grow until the owner seals. Re-cloning the entire
+		// head on every small packet makes publication quadratic in intake.
+		batchPublication = time.Now()
 		err := o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.readGeneration)
 		if err == nil && o.visible != nil {
 			o.visible(batches)
@@ -969,7 +972,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				headPublication = time.Now()
 			}
 		}
-		if failure == nil && found && !sealPending {
+		if failure == nil && found && !sealPending && time.Since(batchPublication) >= time.Second {
 			failure = publishBatches()
 		}
 		if failure != nil {

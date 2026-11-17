@@ -4,6 +4,7 @@ package v2recv
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -68,9 +69,16 @@ type Server struct {
 	conns    map[net.Conn]struct{}
 	err      error
 	stats    counters
-	pending  sync.Map // name -> *atomic.Int64; negative cells are retired before deletion
+	pending  []pendingShard // stable owner routing also shards expiry reservations
 	finish   sync.Once
 	finished chan struct{}
+}
+
+// Counts are protected by the same owner shard for admission and durable release.
+// This avoids allocating a sync.Map cell for every newly pending metric.
+type pendingShard struct {
+	mu    sync.Mutex
+	names map[string]int64
 }
 
 func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
@@ -132,13 +140,15 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 			return nil, errors.New("nil owner")
 		}
 	}
-	for _, o := range owners {
+	s.pending = make([]pendingShard, len(owners))
+	for owner, o := range owners {
+		s.pending[owner].names = make(map[string]int64)
 		q := make(chan batch, cfg.QueueDepth)
 		control := make(chan ownerCall)
 		s.controls = append(s.controls, control)
 		s.queues = append(s.queues, q)
 		s.workers.Add(1)
-		go s.work(o, q, control)
+		go s.work(len(s.queues)-1, o, q, control)
 	}
 	s.accept.Add(1)
 	go s.listen()
@@ -148,26 +158,24 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 // Pending fences inactivity expiry against decoded, queued and journal-buffered
 // input. Counts are released only after the producer's successful durable Drain.
 func (s *Server) Pending(name string) bool {
-	value, ok := s.pending.Load(name)
-	return ok && value.(*atomic.Int64).Load() > 0
-}
-func (s *Server) pendingAdd(name string, n int64) {
-	for {
-		value, ok := s.pending.Load(name)
-		if !ok {
-			value, _ = s.pending.LoadOrStore(name, &atomic.Int64{})
-		}
-		cell := value.(*atomic.Int64)
-		for old := cell.Load(); old >= 0; old = cell.Load() {
-			if cell.CompareAndSwap(old, old+n) {
-				if old+n == 0 && cell.CompareAndSwap(0, -1) {
-					s.pending.CompareAndDelete(name, value)
-				}
-				return
-			}
-		}
-		s.pending.CompareAndDelete(name, value)
+	if len(s.pending) == 0 {
+		return false
 	}
+	shard := &s.pending[OwnerFor(name, len(s.pending))]
+	shard.mu.Lock()
+	n := shard.names[name]
+	shard.mu.Unlock()
+	return n > 0
+}
+func (s *Server) pendingAdd(owner int, name string, n int64) {
+	shard := &s.pending[owner]
+	shard.mu.Lock()
+	if next := shard.names[name] + n; next == 0 {
+		delete(shard.names, name)
+	} else {
+		shard.names[name] = next
+	}
+	shard.mu.Unlock()
 }
 
 func (s *Server) Stats() Stats {
@@ -191,7 +199,7 @@ func (s *Server) fail(err error) {
 		s.mu.Unlock()
 	})
 }
-func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
+func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCall) {
 	defer s.workers.Done()
 	tick := time.NewTicker(s.cfg.SyncInterval)
 	defer tick.Stop()
@@ -200,11 +208,38 @@ func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
 	buffered := map[string]int64{}
 	releaseBuffered := func() {
 		for name, n := range buffered {
-			s.pendingAdd(name, -n)
+			s.pendingAdd(owner, name, -n)
 			delete(buffered, name)
 		}
 	}
+	// Socket flushes can contain one point per owner. Accumulate on the
+	// existing serial worker, bounded by BatchSize and the existing sync tick.
+	// Per-name order and decoded expiry reservations survive this coalescing.
+	var pending batch
+	sequence := make([]uint64, 0, s.cfg.BatchSize)
+	appendPending := func() {
+		if failed || len(pending.data) == 0 {
+			return
+		}
+		sequence = sequence[:0]
+		for range pending.data {
+			seq++
+			sequence = append(sequence, seq)
+		}
+		if err := o.Append(pending.names, pending.data, sequence, time.Now().Unix()); err != nil {
+			failed = true
+			s.stats.rejected.Add(uint64(len(pending.data)))
+			s.stats.sink.Add(1)
+			s.fail(err)
+		} else {
+			s.stats.accepted.Add(uint64(len(pending.data)))
+		}
+		clear(pending.names)
+		pending.names = pending.names[:0]
+		pending.data = pending.data[:0]
+	}
 	syncOwner := func() {
+		appendPending()
 		if !failed {
 			if err := errors.Join(o.Seal(), o.Drain()); err != nil {
 				failed = true
@@ -218,6 +253,7 @@ func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
 	for {
 		select {
 		case call := <-control:
+			appendPending()
 			if failed {
 				call.ack <- errors.New("receiver owner failed")
 			} else {
@@ -230,7 +266,7 @@ func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
 			}
 			if failed {
 				for _, name := range b.names {
-					s.pendingAdd(name, -1)
+					s.pendingAdd(owner, name, -1)
 				}
 				s.stats.rejected.Add(uint64(len(b.data)))
 				continue
@@ -238,18 +274,18 @@ func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
 			for _, name := range b.names {
 				buffered[name]++
 			}
-			sequence := make([]uint64, len(b.data))
-			for i := range sequence {
-				seq++
-				sequence[i] = seq
-			}
-			if err := o.Append(b.names, b.data, sequence, time.Now().Unix()); err != nil {
-				failed = true
-				s.stats.rejected.Add(uint64(len(b.data)))
-				s.stats.sink.Add(1)
-				s.fail(err)
-			} else {
-				s.stats.accepted.Add(uint64(len(b.data)))
+			for len(b.data) > 0 {
+				n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
+				pending.names = append(pending.names, b.names[:n]...)
+				pending.data = append(pending.data, b.data[:n]...)
+				b.names, b.data = b.names[n:], b.data[n:]
+				if len(pending.data) == s.cfg.BatchSize {
+					appendPending()
+				}
+				if failed {
+					s.stats.rejected.Add(uint64(len(b.data)))
+					break
+				}
 			}
 		case <-tick.C:
 			syncOwner()
@@ -380,7 +416,7 @@ func (s *Server) read(c net.Conn) error {
 			return nil
 		case <-s.done:
 			for _, name := range b.names {
-				s.pendingAdd(name, -1)
+				s.pendingAdd(i, name, -1)
 			}
 			s.stats.rejected.Add(uint64(len(b.data)))
 			buffers[i] = batch{}
@@ -401,7 +437,7 @@ func (s *Server) read(c net.Conn) error {
 			s.stats.rejected.Add(1)
 			return
 		}
-		s.pendingAdd(ref.name, 1)
+		s.pendingAdd(ref.owner, ref.name, 1)
 		b := &buffers[ref.owner]
 		b.names = append(b.names, ref.name)
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})
@@ -462,6 +498,7 @@ func (s *Server) read(c net.Conn) error {
 		source = z
 	}
 	plain := bufio.NewReaderSize(source, 64<<10)
+	var previous reference
 	for {
 		line, err := plain.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
@@ -491,8 +528,13 @@ func (s *Server) read(c net.Conn) error {
 				s.stats.rejected.Add(1)
 				s.cfg.Logger.Error("v2 invalid plaintext point", "error", e)
 			} else {
-				n := string(name)
-				add(reference{n, OwnerFor(n, len(s.queues))}, value, ts)
+				// Relay groups often contain several points for one name. Reuse
+				// its immutable name and stable owner until the name changes.
+				if !bytes.Equal(name, []byte(previous.name)) {
+					n := string(name)
+					previous = reference{n, OwnerFor(n, len(s.queues))}
+				}
+				add(previous, value, ts)
 			}
 		}
 		if appendErr != nil {
