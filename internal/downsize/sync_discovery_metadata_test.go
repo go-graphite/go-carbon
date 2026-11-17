@@ -134,6 +134,8 @@ func TestScopedDiscoveryEmptyTargetSkipsMetadata(t *testing.T) {
 type emptyTargetDiscovery struct{ *metadataDiscovery }
 
 func (b *emptyTargetDiscovery) EmptyTarget(context.Context, string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return len(b.store(syncT).archives) == 0, nil
 }
 
