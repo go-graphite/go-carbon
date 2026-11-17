@@ -156,7 +156,8 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 }
 
 // Pending fences inactivity expiry against decoded, queued and journal-buffered
-// input. Counts are released only after the producer's successful durable Drain.
+// input. Counts track name/batch reservations, not individual points, and are
+// released only after the producer's successful durable Drain.
 func (s *Server) Pending(name string) bool {
 	if len(s.pending) == 0 {
 		return false
@@ -174,6 +175,20 @@ func (s *Server) pendingAdd(owner int, name string, n int64) {
 		delete(shard.names, name)
 	} else {
 		shard.names[name] = next
+	}
+	shard.mu.Unlock()
+}
+
+// pendingRelease retires an entire batch or durable prefix under one shard lock.
+func (s *Server) pendingRelease(owner int, names map[string]int64) {
+	shard := &s.pending[owner]
+	shard.mu.Lock()
+	for name, n := range names {
+		if next := shard.names[name] - n; next == 0 {
+			delete(shard.names, name)
+		} else {
+			shard.names[name] = next
+		}
 	}
 	shard.mu.Unlock()
 }
@@ -206,11 +221,10 @@ func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCa
 	var seq uint64
 	failed := false
 	buffered := map[string]int64{}
+	batchNames := map[string]int64{}
 	releaseBuffered := func() {
-		for name, n := range buffered {
-			s.pendingAdd(owner, name, -n)
-			delete(buffered, name)
-		}
+		s.pendingRelease(owner, buffered)
+		clear(buffered)
 	}
 	// Socket flushes can contain one point per owner. Accumulate on the
 	// existing serial worker, bounded by BatchSize and the existing sync tick.
@@ -264,15 +278,19 @@ func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCa
 				syncOwner()
 				return
 			}
-			if failed {
-				for _, name := range b.names {
-					s.pendingAdd(owner, name, -1)
+			clear(batchNames)
+			for i, name := range b.names {
+				if i == 0 || name != b.names[i-1] {
+					batchNames[name] = 1
 				}
+			}
+			if failed {
+				s.pendingRelease(owner, batchNames)
 				s.stats.rejected.Add(uint64(len(b.data)))
 				continue
 			}
-			for _, name := range b.names {
-				buffered[name]++
+			for name, n := range batchNames {
+				buffered[name] += n
 			}
 			for len(b.data) > 0 {
 				n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
@@ -405,6 +423,10 @@ func (s *Server) read(c net.Conn) error {
 		return err
 	}
 	buffers := make([]batch, len(s.queues))
+	// Scratch sets are connection-local and reused after queue transfer. The
+	// serial worker reconstructs each batch's distinct names from its immutable
+	// name slice; no reservation map travels with or allocates for every batch.
+	reserved := make([]map[string]int64, len(s.queues))
 	flush := func(i int) error {
 		b := buffers[i]
 		if len(b.data) == 0 {
@@ -413,11 +435,11 @@ func (s *Server) read(c net.Conn) error {
 		select {
 		case s.queues[i] <- b:
 			buffers[i] = batch{}
+			clear(reserved[i])
 			return nil
 		case <-s.done:
-			for _, name := range b.names {
-				s.pendingAdd(i, name, -1)
-			}
+			s.pendingRelease(i, reserved[i])
+			clear(reserved[i])
 			s.stats.rejected.Add(uint64(len(b.data)))
 			buffers[i] = batch{}
 			return errors.New("receiver stopped")
@@ -437,8 +459,21 @@ func (s *Server) read(c net.Conn) error {
 			s.stats.rejected.Add(1)
 			return
 		}
-		s.pendingAdd(ref.owner, ref.name, 1)
 		b := &buffers[ref.owner]
+		// Adjacent points usually share a relay name. Neither their decode nor
+		// the owner worker needs a per-point shared-map update. Reserve before
+		// exposing even the first decoded point to queues or a blocked flush.
+		if len(b.names) == 0 || b.names[len(b.names)-1] != ref.name {
+			names := reserved[ref.owner]
+			if names == nil {
+				names = make(map[string]int64)
+				reserved[ref.owner] = names
+			}
+			if _, ok := names[ref.name]; !ok {
+				s.pendingAdd(ref.owner, ref.name, 1)
+				names[ref.name] = 1
+			}
+		}
 		b.names = append(b.names, ref.name)
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})
 		if len(b.data) >= s.cfg.BatchSize {

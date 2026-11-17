@@ -149,3 +149,76 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 		t.Fatal("reservations retained after drain")
 	}
 }
+
+// The first batch is queued while a second batch is decoded and blocked on the
+// same queue. Repeated names must reserve once per batch, and retiring either
+// batch must not uncover the other batch to inactivity expiry.
+func TestPendingBatchesFenceDecodedQueueAndAbort(t *testing.T) {
+	for _, abort := range []bool{false, true} {
+		t.Run(fmt.Sprint(abort), func(t *testing.T) {
+			s := &Server{cfg: Config{BatchSize: 64, MaxLineBytes: 1 << 20}, pending: []pendingShard{{names: make(map[string]int64)}}, queues: []chan batch{make(chan batch, 1)}, done: make(chan struct{})}
+			input, output := net.Pipe()
+			defer input.Close()
+			defer output.Close()
+			readDone := make(chan error, 1)
+			go func() { readDone <- s.read(input) }()
+			if _, err := io.WriteString(output, "a 1 1000\na 2 1001\nb 3 1002\na 4 1003\n"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(output, "a 5 1004\na 6 1005\na 7 1006\n"); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(time.Second)
+			for {
+				s.pending[0].mu.Lock()
+				n := s.pending[0].names["a"]
+				s.pending[0].mu.Unlock()
+				if n == 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("decoded batch not fenced", n)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if len(s.queues[0]) != 1 || !s.Pending("a") || !s.Pending("b") {
+				t.Fatal("lost decoded/queued reservation")
+			}
+			if abort {
+				close(s.done)
+				if err := <-readDone; err == nil {
+					t.Fatal("abort succeeded")
+				}
+			}
+			first := <-s.queues[0]
+			if len(first.data) != 4 {
+				t.Fatal("per-point reservations survived batching", map[string]int64{"a": 1, "b": 1})
+			}
+			s.pendingRelease(0, map[string]int64{"a": 1, "b": 1})
+			if s.Pending("b") {
+				t.Fatal("retired name retained")
+			}
+			if abort {
+				if s.Pending("a") {
+					t.Fatal("aborted decoded batch retained")
+				}
+				return
+			}
+			if !s.Pending("a") {
+				t.Fatal("retiring first batch uncovered second batch")
+			}
+			output.Close()
+			if err := <-readDone; err != nil {
+				t.Fatal(err)
+			}
+			second := <-s.queues[0]
+			if len(second.data) != 3 {
+				t.Fatal("second batch changed")
+			}
+			s.pendingRelease(0, map[string]int64{"a": 1})
+			if s.Pending("a") {
+				t.Fatal("drained batches retained")
+			}
+		})
+	}
+}
