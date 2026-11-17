@@ -311,6 +311,13 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if archive > 0 && len(m.origins) > 1 {
 		return errors.New("mixed-origin coarse reads require installed rollup rebuild authority")
 	}
+	return s.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, _ partOrigin) error { return yield(record) })
+}
+
+// scanArchiveParts resolves immutable parts without applying move repairs. The
+// move reader overlays its small repair set on this same cached range resolver.
+func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
+	m := s.metrics[name]
 	cacheKey := archiveRange{name, archive, first, last}
 	// Keep a small bounded history: concurrent requests can pin different
 	// generations. A single latest entry forces older pins into full rescans.
@@ -346,7 +353,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if cached != nil && len(cached.parts) == len(parts) {
 		for _, record := range cached.records {
 			if recordVisible(m, cachedOrigin(cached.origins, record.Slot), record.Order) {
-				if err := yield(record); err != nil {
+				if err := yield(record, cachedOrigin(cached.origins, record.Slot)); err != nil {
 					return err
 				}
 			}
@@ -539,7 +546,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	}
 	s.cache.mu.Unlock()
 	for _, record := range result.records {
-		if err = yield(record); err != nil {
+		if err = yield(record, cachedOrigin(result.origins, record.Slot)); err != nil {
 			return err
 		}
 	}

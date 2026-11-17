@@ -57,7 +57,7 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if request.Now == 0 {
 				request.Now = time.Now().Unix()
 			}
-			if request.Now < 1 {
+			if request.Now < 1 || request.Now > 1<<32-1 {
 				return errors.New("invalid move clock")
 			}
 			b, err := json.Marshal(request)
@@ -77,7 +77,19 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err = p.Close(); err != nil {
 				return err
 			}
-			return writeMoveFile(dir, "request.json", b)
+			// The prepared inventory owns retained links. Transport paths may
+			// disappear as soon as prepare acknowledges, including after restart.
+			for i := range request.Parts {
+				request.Parts[i].Path = filepath.Join(dir, fmt.Sprintf("%x.sst", request.Parts[i].Descriptor.SHA256))
+			}
+			b, err = json.Marshal(request)
+			if err != nil {
+				return err
+			}
+			if err = writeMoveFile(dir, "request.json", b); err != nil {
+				return err
+			}
+			return syncDir(filepath.Dir(a.root))
 		}
 		id := r.URL.Query().Get("id")
 		if b, err := hex.DecodeString(id); err != nil || len(b) != 32 || hex.EncodeToString(b) != id {

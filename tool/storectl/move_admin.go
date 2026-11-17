@@ -20,12 +20,20 @@ import (
 )
 
 func copiedMoveParts(dir string) ([]v2core.MovePart, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
 	manifest, err := readPartSnapshot(filepath.Join(dir, "snapshot.json"))
 	if err != nil {
 		return nil, err
 	}
 	var parts []v2core.MovePart
 	for _, file := range manifest.Parts {
+		// SSTs can be much larger than the bounded descriptor JSON.
+		if file.Bytes > v2part.MaxDescriptorBytes {
+			continue
+		}
 		b, err := os.ReadFile(filepath.Join(dir, file.ID+".part"))
 		if err != nil {
 			return nil, err

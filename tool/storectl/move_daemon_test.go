@@ -67,26 +67,29 @@ func TestMoveDaemonProcess(t *testing.T) {
 	}
 	defer s.Close()
 	if count == 3 {
-		old := (time.Now().Unix()/86400 - 365) * 86400
+		today := time.Now().Unix() / 86400 * 86400
 		orders := make([]uint64, count)
 		for n := 0; n < 12; n++ {
 			name := fmt.Sprintf("move.mature.%02d", n)
 			producer := s.Producers[v2recv.OwnerFor(name, count)]
 			// Restart only happens on B. These initial source/reference inputs
-			// use a year-old clock and have no retained raw at adoption.
+			// span nearly two years and have no retained raw at adoption.
 			policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 7 * 86400}, {Step: 10, Count: 2 * 365 * 8640}}}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			for window := 0; window < 3; window++ {
-				samples := []points.Point{}
-				for i := 0; i < 5; i++ {
-					samples = append(samples, points.Point{Timestamp: old + int64(window*10+i), Value: float64(n + window + i + 1)})
-				}
-				index := v2recv.OwnerFor(name, count)
-				orders[index]++
-				if err := producer.AppendApplications([]v2daemon.Application{{Name: name, Policy: policy, Order: orders[index], Clock: old + 30, Points: samples, Sequence: []uint64{1, 2, 3, 4, 5}}}); err != nil {
-					t.Fatal(err)
+			for _, age := range []int64{729, 365, 8} {
+				old := today - age*86400
+				for window := 0; window < 3; window++ {
+					samples := []points.Point{}
+					for i := 0; i < 5; i++ {
+						samples = append(samples, points.Point{Timestamp: old + int64(window*10+i), Value: float64(n + window + i + 1)})
+					}
+					index := v2recv.OwnerFor(name, count)
+					orders[index]++
+					if err := producer.AppendApplications([]v2daemon.Application{{Name: name, Policy: policy, Order: orders[index], Clock: old + 30, Points: samples, Sequence: []uint64{1, 2, 3, 4, 5}}}); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 		}
@@ -201,7 +204,7 @@ type moveChild struct {
 func startMoveChild(t *testing.T, root, tcp string, crash bool) *moveChild {
 	t.Helper()
 	_ = os.Remove(filepath.Join(root, "addresses.json"))
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMoveDaemonProcess$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMoveDaemonProcess$", "-test.timeout=4m")
 	cmd.Env = append(os.Environ(), "MOVE_DAEMON_ROOT="+root, "MOVE_DAEMON_TCP="+tcp, "MOVE_DAEMON_CRASH="+fmt.Sprint(map[bool]int{true: 1, false: 0}[crash]))
 	log, err := os.Create(filepath.Join(root, fmt.Sprintf("daemon-%d.log", time.Now().UnixNano())))
 	if err != nil {
@@ -295,7 +298,7 @@ func copyMoveWithKill(t *testing.T, snapshot moveSnapshot, target string) {
 		handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPartReceiverProcess$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPartReceiverProcess$", "-test.timeout=2m")
 	cmd.Env = append(os.Environ(), "PART_COPY_CHILD=1", "PART_COPY_URL="+server.URL, "PART_COPY_DIR="+target)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -366,7 +369,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	go func() {
 		defer producer.Done()
 		for i := 10; !stop.Load(); i++ {
-			line := fmt.Sprintf("move.metric %d %d\n", i, base+int64(i))
+			line := fmt.Sprintf("move.metric %d %d\nmove.other.%02d %d %d\n", i, base+int64(i), i%12, i, base+int64(i))
 			for _, conn := range []net.Conn{ca, cb, cr} {
 				_, _ = io.WriteString(conn, line)
 			}
@@ -415,7 +418,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	}
 	// OnOwner serializes callbacks with intake, but can run ahead of input
 	// still queued by the TCP reader. Fence the historical prefix explicitly.
-	waitAccepted(a, 142)
+	waitAccepted(a, 131+2*(20-9))
 	var snapshot moveSnapshot
 	moveGet(t, a.addr.HTTP, "/snapshot", &snapshot)
 	target := t.TempDir()
@@ -496,7 +499,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	write(cr, "move.metric", 4, last)
 	write(ca, "move.metric", 3, last)
 	for _, c := range []*moveChild{a, reference, b} {
-		want := uint64(produced.Load() + 123)
+		want := uint64(131 + 2*(produced.Load()-9) + 1)
 		if c == b {
 			want = 1
 		}
@@ -535,8 +538,8 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	}
 	for n := 0; n < 12; n++ {
 		values := got[fmt.Sprintf("move.mature.%02d", n)]
-		if len(values) != 3 {
-			t.Fatalf("mature history expected three coarse windows and no raw: %v", values)
+		if len(values) != 9 {
+			t.Fatalf("mature history expected nine coarse windows and no raw: %v", values)
 		}
 		for key := range values {
 			if !strings.HasPrefix(key, "1/") {
@@ -544,7 +547,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("exact slots=%d names=%d source producers/owners=3 target=4 raw=7d coarse=2y incremental copied=%d skipped=%d; copier/receiver SIGKILL and move-level resume passed", total, len(got), copyResult.Parts, copyResult.Skipped)
+	t.Logf("exact slots=%d names=%d source producers/owners=3 target=4 raw=7d coarse=2y mature=8/365/729d incremental copied=%d skipped=%d; copier/receiver SIGKILL and move-level resume passed", total, len(got), copyResult.Parts, copyResult.Skipped)
 }
 
 func movePrepare(t *testing.T, base, dir string) string {

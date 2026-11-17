@@ -90,8 +90,10 @@ func (p *PreparedMove) Policies() map[string][]byte {
 
 var moveAuthorityPrefix = []byte{255, 'V', '2', 'A', 0}
 
-// moveAuthority binds local identity and a coarse baseline in the same manifest
-// edit as the imported parts. Raw bytes retain their original class and order.
+// moveAuthority binds local identity and boundary repairs in the same manifest
+// edit as the imported parts. Version 1 stored a full coarse baseline; version 2
+// retains untouched history in the original parts. Raw bytes retain their
+// original class and order.
 // AtOrder is exclusively a receiving-stream counter; it never advances replay.
 type moveAuthority struct {
 	Version int
@@ -146,126 +148,51 @@ type moveWinner struct {
 	origin partOrigin
 }
 
-// collectMoveRaw uses the same physical-slot precedence as reads and recovery.
-// It reads immutable snapshots, never the live reducer.
+// collectMoveArchive shares the ordinary physical-slot resolver with reads.
+// Separate source producers have disjoint names; their counters never compete.
 func collectMoveArchive(ctx context.Context, index *RollupSnapshot, name string, archive int, winners map[int64]moveWinner) error {
 	m := index.metrics[name]
 	if m == nil {
 		return nil
 	}
-	if archive > 0 && m.authority != nil {
-		// The installed baseline includes earlier boundary repairs. Preserve
-		// its source class for future incremental attachments.
-		a := m.authority
-		for i, record := range a.Coarse {
-			if record.Archive != archive {
-				continue
+	yield := func(record sealrollup.Record, origin partOrigin) error {
+		old, exists := winners[record.Slot]
+		if exists {
+			newer, err := newerOrigin(origin, record, old.origin, old.record)
+			if err != nil {
+				return err
 			}
-			origin := partOrigin{Class: LivePart}
-			if len(a.Origins) == len(a.Coarse) {
-				origin = a.Origins[i]
-			}
-			old, exists := winners[record.Slot]
-			newer := !exists
-			var err error
-			if exists {
-				newer, err = newerOrigin(origin, record, old.origin, old.record)
-				if err != nil {
-					return err
-				}
-			}
-			if newer {
-				winners[record.Slot] = moveWinner{record, origin}
-			}
-		}
-		live := *m
-		live.authority = nil
-		live.copied = false
-		live.origins = nil
-		live.parts = nil
-		for _, part := range m.parts {
-			if part.origin.Class == LivePart {
-				live.parts = append(live.parts, part)
-			}
-		}
-		tmp := &RollupSnapshot{snapshot: index.snapshot, metrics: map[string]*snapshotMetric{name: &live}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
-		return tmp.ScanArchive(ctx, name, archive, 0, m.latest.policy.Config.Archives[archive].Count, func(record sealrollup.Record) error {
-			if record.Order <= a.AtOrder {
+			if !newer {
 				return nil
 			}
-			origin := partOrigin{Class: LivePart}
-			old, exists := winners[record.Slot]
-			if exists {
-				newer, err := newerOrigin(origin, record, old.origin, old.record)
-				if err != nil {
-					return err
-				}
-				if !newer {
-					return nil
-				}
-			}
-			winners[record.Slot] = moveWinner{record, origin}
-			return nil
-		})
-	}
-	it, err := newArchiveIter(ctx, index.snapshot, nil)
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-	for _, part := range m.parts {
-		k := part.part.key
-		k.Metric = part.policy.Name
-		k.Archive = uint32(archive)
-		k.BlockStart = 0
-		k.Ordinal = 0
-		lower, err := v2part.Encode(k)
-		if err != nil {
-			return err
 		}
-		prefix := lower[:len(lower)-12]
-		for ok := it.SeekGE(lower); ok && bytes.HasPrefix(it.Key(), prefix); ok = it.Next() {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			key, err := v2part.Decode(it.Key())
-			if err != nil {
-				return err
-			}
-			records, err := v2part.DecodeSlots(uint32(archive), key.BlockStart, it.Value())
-			if err != nil {
-				return err
-			}
-			for _, record := range records {
-				if !recordVisible(m, part.origin, record.Order) {
-					continue
-				}
-				old, exists := winners[record.Slot]
-				newer := !exists
-				if exists {
-					newer, err = newerOrigin(part.origin, record, old.origin, old.record)
-					if err != nil {
-						return err
-					}
-				}
-				if newer {
-					winners[record.Slot] = moveWinner{record, part.origin}
-				} else if part.origin == old.origin && record.Sample.Time == old.record.Sample.Time && record.Order == old.record.Order && record != old.record {
-					return errors.New("conflicting move raw order")
-				}
-			}
-		}
+		winners[record.Slot] = moveWinner{record, origin}
+		return nil
 	}
-	return it.Error()
+	if archive > 0 && m.authority != nil {
+		return index.scanMoveArchive(ctx, name, archive, 0, m.latest.policy.Config.Archives[archive].Count, yield)
+	}
+	return index.scanArchiveParts(ctx, name, archive, 0, m.latest.policy.Config.Archives[archive].Count, yield)
 }
 
 func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids map[string]uint64, now int64, owner, owners int) error {
 	if prepared == nil || prepared.snapshot == nil {
 		return errors.New("closed move preparation")
 	}
+	wanted := map[archivePartIdentity]bool{}
+	for name := range ids {
+		if metric := prepared.index.metrics[name]; metric != nil {
+			for _, part := range metric.parts {
+				wanted[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
+			}
+		}
+	}
 	var incoming []MovePart
 	var metadata []coreKV
 	for _, part := range prepared.parts {
+		if !wanted[archivePartIdentity{part.Descriptor.Scope.Group, part.Descriptor.Scope.Part}] {
+			continue
+		}
 		k, err := v2part.Decode(part.Descriptor.FirstKey)
 		if err != nil {
 			return err
@@ -339,7 +266,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		winning := []sealrollup.Record{}
 		targetRaw := []sealrollup.Record{}
-		origins := map[[2]int64]partOrigin{}
+		original := map[[2]int64]moveWinner{}
 		for archive := range policy.Config.Archives {
 			winners := map[int64]moveWinner{}
 			if err = collectMoveArchive(ctx, prepared.index, name, archive, winners); err != nil {
@@ -350,7 +277,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 			for _, winner := range winners {
 				winning = append(winning, winner.record)
-				origins[[2]int64{int64(archive), winner.record.Slot}] = winner.origin
+				original[[2]int64{int64(archive), winner.record.Slot}] = winner
 			}
 			if archive == 0 {
 				localRaw := map[int64]moveWinner{}
@@ -383,18 +310,29 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		m.meta = local
-		authority := moveAuthority{Version: 1, Meta: local, AtOrder: local.Frontier.Order}
+		// Version 2 stores only repaired windows. Mature history remains in
+		// its original immutable parts; version 1 full baselines remain readable.
+		authority := moveAuthority{Version: 2, Meta: local, AtOrder: local.Frontier.Order}
+		priorRepairs := map[[2]int64]sealrollup.Record{}
+		if existing := current.metrics[name]; existing != nil && existing.authority != nil {
+			for _, r := range existing.authority.Coarse {
+				priorRepairs[[2]int64{int64(r.Archive), r.Slot}] = r
+			}
+		}
 		for _, record := range rebuilt {
 			m.slots.Install(record.Delta)
 			m.meta.Frontier.MaxTime = max(m.meta.Frontier.MaxTime, record.Sample.Time)
 			if record.Archive > 0 {
+				key := [2]int64{int64(record.Archive), record.Slot}
+				prior, exists := original[key]
+				oldRepair, hadRepair := priorRepairs[key]
+				if exists && prior.record == record && (!hadRepair || oldRepair != record) {
+					continue
+				}
 				authority.Coarse = append(authority.Coarse, record)
 				origin := partOrigin{Class: LivePart}
-				for _, prior := range winning {
-					if prior == record {
-						origin = origins[[2]int64{int64(record.Archive), record.Slot}]
-						break
-					}
+				if exists && prior.record == record {
+					origin = prior.origin
 				}
 				authority.Origins = append(authority.Origins, origin)
 			}
@@ -476,7 +414,7 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if a.Version != 1 || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.meta.Policy) || a.Meta.Frontier.Order != a.AtOrder {
+		if (a.Version != 1 && a.Version != 2) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.meta.Policy) || a.Meta.Frontier.Order != a.AtOrder {
 			return errors.New("invalid move authority")
 		}
 		if m.origin.Class == LivePart {
@@ -499,50 +437,64 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 }
 
 func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
+	return s.scanMoveArchive(ctx, name, archive, first, last, func(record sealrollup.Record, _ partOrigin) error { return yield(record) })
+}
+
+func (s *RollupSnapshot) scanMoveArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
 	m := s.metrics[name]
 	a := m.authority
-	winners := map[int64]sealrollup.Record{}
-	if m.latest.meta.ResetOrder <= a.AtOrder {
-		for _, record := range a.Coarse {
-			if record.Archive == archive && record.Slot >= first && record.Slot < last {
-				winners[record.Slot] = record
+	winners := map[int64]moveWinner{}
+	base := s
+	if a.Version == 1 {
+		// Legacy authorities contain the entire baseline. Only subsequent local
+		// replacements compete with it; old underlying coarse rows stay masked.
+		live := *m
+		live.parts = nil
+		live.copied = false
+		live.origins = nil
+		for _, part := range m.parts {
+			if part.origin.Class == LivePart {
+				live.parts = append(live.parts, part)
 			}
 		}
+		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
 	}
-	// Resolve post-adoption live replacements with the ordinary single-stream
-	// reader, then overlay them on the rebuilt boundary baseline.
-	live := *m
-	live.parts = nil
-	live.authority = nil
-	live.copied = false
-	live.origins = nil
-	for _, part := range m.parts {
-		if part.origin.Class == LivePart {
-			live.parts = append(live.parts, part)
-		}
-	}
-	tmp := &RollupSnapshot{snapshot: s.snapshot, metrics: map[string]*snapshotMetric{name: &live}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
-	if err := tmp.ScanArchive(ctx, name, archive, first, last, func(record sealrollup.Record) error {
-		if record.Order > a.AtOrder {
-			old, exists := winners[record.Slot]
-			// The baseline's projection order can be synthetic when a newly
-			// adopted name has no receiving input yet. Its receiving age is
-			// AtOrder, so the first local application must be able to replace it.
-			old.Order = a.AtOrder
-			newer, err := newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
-			if err != nil {
-				return err
-			}
-			if !exists || newer {
-				winners[record.Slot] = record
-			}
+	if err := base.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, origin partOrigin) error {
+		if a.Version != 1 || record.Order > a.AtOrder {
+			winners[record.Slot] = moveWinner{record, origin}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	for _, record := range winners {
-		if err := yield(record); err != nil {
+	if m.latest.meta.ResetOrder <= a.AtOrder {
+		for i, record := range a.Coarse {
+			if record.Archive != archive || record.Slot < first || record.Slot >= last {
+				continue
+			}
+			origin := partOrigin{Class: LivePart}
+			if len(a.Origins) == len(a.Coarse) {
+				origin = a.Origins[i]
+			}
+			old, exists := winners[record.Slot]
+			if exists {
+				comparison := record
+				if origin.Class == LivePart {
+					comparison.Order = a.AtOrder
+				}
+				newer, err := newerOrigin(origin, comparison, old.origin, old.record)
+				if err != nil {
+					return err
+				}
+				if !newer && !(origin == old.origin && comparison.Sample.Time == old.record.Sample.Time && comparison.Order == old.record.Order) {
+					continue
+				}
+			}
+			winners[record.Slot] = moveWinner{record, origin}
+		}
+	}
+	for _, winner := range winners {
+		if err := yield(winner.record, winner.origin); err != nil {
 			return err
 		}
 	}
