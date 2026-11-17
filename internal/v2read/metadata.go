@@ -38,13 +38,13 @@ func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpir
 		return Metric{}, masked, err
 	}
 	defer releaseOwners(pins)
-	for _, g := range pins {
-		if g == nil {
+	views, errs := viewsForNames(ctx, pins, []string{name})
+	for i, g := range views {
+		if pins[i] == nil {
 			continue
 		}
-		g, err = g.forNames(ctx, []string{name})
-		if err != nil {
-			return Metric{}, masked, err
+		if errs[i] != nil {
+			return Metric{}, masked, errs[i]
 		}
 		m := g.metrics[name]
 		if m == nil {

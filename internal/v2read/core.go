@@ -39,6 +39,7 @@ type generation struct {
 	refs    atomic.Int64
 	sealed  *sealedData
 	pending []v2core.Batch
+	index   *pendingIndex
 	once    sync.Once
 	metrics map[string]*metricState
 	err     error
@@ -125,6 +126,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	// may race publication; a failed retain means a fresh sealed resource is needed.
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
+		g.index = nextPendingIndex(old.index, old.pending, pending)
 		if old.sealed.number == number && old.sealed.inventory == inventory {
 			g.sealed = old.sealed
 			g.sealed.refs.Add(1)
@@ -140,6 +142,9 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 			g.sealed.refs.Store(1)
 		}
 		old.release()
+	}
+	if g.index == nil {
+		g.index = nextPendingIndex(nil, nil, pending)
 	}
 	if g.sealed != nil && g.sealed.snapshot != snapshot {
 		_ = snapshot.Close()
@@ -390,14 +395,10 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 		}
 	}
-	views := make([]*generation, len(pinned))
-	for i, g := range pinned {
-		if g != nil {
-			q, err := g.forNames(ctx, names)
-			if err != nil {
-				return err
-			}
-			views[i] = q
+	views, errs := viewsForNames(ctx, pinned, names)
+	for _, err := range errs {
+		if err != nil {
+			return err
 		}
 	}
 	for _, name := range names {
@@ -522,6 +523,21 @@ func aggregationName(method sealrollup.Method) string {
 	return ""
 }
 
+// viewsForNames resolves request views of independent owners concurrently.
+// Callers consume errs in owner order, exactly as a sequential loop would.
+func viewsForNames(ctx context.Context, pinned []*generation, names []string) ([]*generation, []error) {
+	views := make([]*generation, len(pinned))
+	errs := make([]error, len(pinned))
+	var wg sync.WaitGroup
+	for i, g := range pinned {
+		if g != nil {
+			wg.Go(func() { views[i], errs[i] = g.forNames(ctx, names) })
+		}
+	}
+	wg.Wait()
+	return views, errs
+}
+
 // forNames creates request-local metadata; no request waits for a whole-store
 // generation loader. The caller retains the publication through this call.
 func (g *generation) forNames(ctx context.Context, names []string) (*generation, error) {
@@ -539,24 +555,25 @@ func (g *generation) forNames(ctx context.Context, names []string) (*generation,
 	for _, n := range names {
 		wanted[n] = true
 	}
+	pendingIdx := g.index
+	if pendingIdx == nil {
+		pendingIdx = nextPendingIndex(nil, nil, g.pending)
+	}
+	positions, err := pendingIdx.candidates(g.pending, names)
+	if err != nil {
+		return nil, err
+	}
 	var pending []v2core.Batch
-	for _, b := range g.pending {
+	for _, i := range positions {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if b.Registered != nil {
-			if wanted[b.Registered.Name()] {
-				pending = append(pending, b)
-			}
-			continue
-		}
-		raw := b.Policy
-		var p v2core.RollupPolicy
-		if err := json.Unmarshal(raw, &p); err != nil {
+		name, err := pendingName(&g.pending[i])
+		if err != nil {
 			return nil, err
 		}
-		if wanted[string(p.Name)] {
-			pending = append(pending, b)
+		if wanted[name] {
+			pending = append(pending, g.pending[i])
 		}
 	}
 	q := &generation{pending: pending, sealed: &sealedData{index: index, reader: g.sealed.reader, cache: g.sealed.cache, number: g.sealed.number}}
