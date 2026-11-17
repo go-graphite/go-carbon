@@ -174,3 +174,32 @@ func BenchmarkRollupMetadataBinary(b *testing.B) {
 		buf = AppendRollupMetadata(buf[:0], m)
 	}
 }
+
+// Registered identities must emit the identical on-disk envelope, including
+// escaped names and the optional baseline header, without a plain-name copy.
+func TestRollupIdentityMetadataEncoding(t *testing.T) {
+	for _, name := range []string{"namespace.metric", "quoted.\"metric\\name", "html.<metric>&", "unicode.метрика"} {
+		_, raw := rollupTestPolicy(t, name, "1s:1h,1m:1d", sealrollup.Last, .5)
+		h, err := (&PolicyCatalog{}).intern(7, name, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, baseline := range []uint64{0, 1} {
+			meta := RollupMetadata{Version: 2, ID: 7, Policy: raw, BaselineOrder: baseline, ResetOrder: 3, Expired: true, LastUpdate: -1, Revision: 19, Frontier: sealrollup.Frontier{Order: 5, MaxTime: -123, Policy: h.policy.prepared.Digest()}}
+			prefix := []byte("existing arena prefix")
+			want := AppendRollupMetadata(bytes.Clone(prefix), meta)
+			buf := make([]byte, len(prefix), len(want)+64)
+			copy(buf, prefix)
+			got := h.appendMetadata(buf, meta)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("metadata encoding changed for %q baseline%d", name, baseline)
+			}
+			if h.plain {
+				allocs := testing.AllocsPerRun(100, func() { buf = h.appendMetadata(buf[:len(prefix)], meta) })
+				if allocs != 0 {
+					t.Fatalf("plain metadata allocates %.0f times", allocs)
+				}
+			}
+		}
+	}
+}
