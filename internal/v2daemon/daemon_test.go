@@ -23,7 +23,7 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 		t.Run(fmt.Sprint(layer), func(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
-			cfg := Config{Layer: layer, Producers: 2, Shards: 2, coreMaxRows: 256, GroupInterval: time.Hour}
+			cfg := Config{Layer: layer, Producers: 2, Shards: 2, MaxCoreRows: 256, GroupInterval: time.Hour}
 			s, err := Open(root, cfg)
 			if err != nil {
 				t.Fatal(err)

@@ -127,7 +127,7 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	for p := range inputs {
 		inputs[p] = input{names: make([]string, 0, f.BatchSize), data: make([]points.Point, 0, f.BatchSize), seq: make([]uint64, 0, f.BatchSize), rows: make([]v2core.Row, 0, f.BatchSize), apps: make([]Application, 0, f.BatchSize)}
 	}
-	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards, coreMaxRows: f.coreMaxRows}
+	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards, MaxCoreRows: f.coreMaxRows}
 	var block *os.File
 	stopBlock := func() error {
 		if block == nil {

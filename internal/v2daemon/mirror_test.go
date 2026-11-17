@@ -19,7 +19,7 @@ func TestDurableApplicationsMirrorAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	cfg := Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour, coreMaxRows: 256}
+	cfg := Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour, MaxCoreRows: 256}
 	prepared := false
 	cfg.Prepare = func() error { prepared = true; return nil }
 	cfg.DurableApplications = func(producer int, b []v2core.Batch) error {

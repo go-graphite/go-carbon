@@ -11,7 +11,7 @@ import (
 )
 
 func TestApplicationReceiverQuotaAndPolicyCache(t *testing.T) {
-	s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1, coreMaxRows: 16, GroupInterval: time.Hour})
+	s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1, MaxCoreRows: 16, GroupInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

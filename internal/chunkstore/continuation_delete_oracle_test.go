@@ -3,13 +3,13 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
 	"math/rand"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -33,7 +33,9 @@ type continuationOracleFixture struct {
 // old reader snapshots, flush/compaction and reopen. The map is independent of
 // both implementations and includes keys outside each deleted prefix.
 func TestContinuationPrefixDeletionMatchesRangeOracle(t *testing.T) {
-	t.Parallel()
+	// The first three rounds hold million-key indexed batches. Keep their
+	// bounded parallel group separate from the package's other parallel tests
+	// so race instrumentation does not multiply the live fixture footprint.
 	rng := rand.New(rand.NewSource(202610240058))
 	want := map[string]string{}
 	for round := 0; round < continuationOracleRounds; round++ {
@@ -146,10 +148,11 @@ func checkContinuationPrefixDeletionMatchesRangeOracle(t *testing.T, selectedRou
 			capacity := 0
 			if round < len(boundarySizes) && i == 0 {
 				size := boundarySizes[round]
-				digits := len(strconv.Itoa(size - 1))
-				keyBytes := len(continuationPrefix(m.ID, m.Generation)) + len("large/") + max(5, digits)
+				keyBytes := len(continuationPrefix(m.ID, m.Generation)) + len("large/") + 4
+				// Fixed-width ordinal keys and one-byte values keep this
+				// cardinality boundary small; payload contents are all deleted.
 				// Each record has a kind and one-byte key/value lengths.
-				capacity = size*(3+keyBytes+len(strconv.Itoa(round))+1+digits) + (64 << 10)
+				capacity = size*(3+keyBytes+1) + (64 << 10)
 				if i == 0 && size <= continuationPointDeleteLimit {
 					capacity += size * (2 + keyBytes)
 				}
@@ -200,16 +203,11 @@ func checkContinuationPrefixDeletionMatchesRangeOracle(t *testing.T, selectedRou
 		// The remaining rounds retain the same randomized operations and
 		// held-snapshot/flush/compaction/reopen checks on a small batch.
 		if round < len(boundarySizes) {
-			key := make([]byte, len("large/"), 32)
+			key := make([]byte, len("large/")+4)
 			copy(key, "large/")
-			var decimal [20]byte
-			value := []byte(fmt.Sprint(round, ":"))
-			valuePrefix := len(value)
+			value := []byte("x")
 			for i := 0; i < boundarySizes[round]; i++ {
-				digits := strconv.AppendInt(decimal[:0], int64(i), 10)
-				key = append(key[:len("large/")], "00000"[:max(0, 5-len(digits))]...)
-				key = append(key, digits...)
-				value = strconv.AppendInt(value[:valuePrefix], int64(i), 10)
+				binary.BigEndian.PutUint32(key[len("large/"):], uint32(i))
 				if err := ios[0].Set(key, value); err != nil {
 					t.Fatal(err)
 				}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -40,12 +41,33 @@ type baselineClassic struct {
 // NativeRecords/CoreWriter conversion -> atomic daemon install -> original
 // journal applications -> pending/sealed reader -> retained-journal replay.
 func TestInstalledBaselineClassicInventory(t *testing.T) {
+	// Keep the complete schema × method × xFilesFactor matrix, but install
+	// bounded inventories. Each fetch opens and validates the installed part;
+	// one descriptor containing the whole matrix makes this oracle quadratic.
+	const schemasPerInventory = 4
+	inventories := (len(boundarySchemas) + schemasPerInventory - 1) / schemasPerInventory
+	for first := 0; first < inventories; first++ {
+		t.Run(fmt.Sprintf("inventory=%d", first), func(t *testing.T) {
+			t.Parallel()
+			// Advance publication/seal timers when the owners are idle; keep
+			// all real file, conversion, install and replay operations.
+			synctest.Test(t, func(t *testing.T) {
+				checkInstalledBaselineClassicInventory(t, first, inventories)
+			})
+		})
+	}
+}
+
+func checkInstalledBaselineClassicInventory(t *testing.T, first, stride int) {
 	const now = int64(1794700837)
 	ctx := context.Background()
 	directory := t.TempDir()
 	source := baselineFixtures{}
 	fixtures := []baselineClassic{}
-	for si, def := range boundarySchemas {
+	// Stripe definitions so neighboring wide-fan-in schemas do not all
+	// inflate the same descriptor and pending head.
+	for si := first; si < len(boundarySchemas); si += stride {
+		def := boundarySchemas[si]
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			for xi, xff := range []float32{0, .5, math.Nextafter32(.5, 1), 1} {
 				name := fmt.Sprintf("fixture.%03d.%d.%d", si, method, xi)
@@ -131,7 +153,7 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 		t.Fatal(receipts, err)
 	}
 	root := filepath.Join(directory, "runtime")
-	cfg := v2daemon.Config{Layer: 3, Producers: 3, Shards: 2, GroupInterval: time.Hour, BaselinePath: filepath.Dir(receipts[0])}
+	cfg := v2daemon.Config{Layer: 3, Producers: 3, Shards: 2, MaxCoreRows: 8192, GroupInterval: time.Hour, BaselinePath: filepath.Dir(receipts[0])}
 	var store *v2daemon.Store
 	var reader *Reader
 	var pendingObserved atomic.Bool
@@ -216,12 +238,13 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 	}
 	compare("installed")
 	for round := 0; round < 2; round++ {
+		applications := make([][]v2daemon.Application, len(store.Producers))
 		for fi, fixture := range fixtures {
 			samples := fixture.corrections
 			if round == 1 {
 				samples = []sealrollup.Sample{{Time: samples[0].Time, Bits: math.Float64bits(23)}}
 			}
-			p := store.Producers[v2recv.OwnerFor(fixture.name, 3)]
+			producer := v2recv.OwnerFor(fixture.name, len(store.Producers))
 			app := v2daemon.Application{Name: fixture.name, Policy: fixture.policy, Clock: now, Points: make([]points.Point, len(samples)), Sequence: make([]uint64, len(samples))}
 			// Orders are producer-local; each fixture has exactly one application per round.
 			app.Order = 100 + uint64(round*len(fixtures)) + uint64(fi) + 1
@@ -231,9 +254,7 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 				app.Sequence[i] = uint64(round*10000 + i + 1)
 				classicPoints[i] = &whisper.TimeSeriesPoint{Time: int(s.Time), Value: app.Points[i].Value}
 			}
-			if err := p.AppendApplications([]v2daemon.Application{app}); err != nil {
-				t.Fatal(err)
-			}
+			applications[producer] = append(applications[producer], app)
 			w, err := whisper.OpenWithOptions(fixture.path, &whisper.Options{Now: func() time.Time { return time.Unix(now, 0) }})
 			if err != nil {
 				t.Fatal(err)
@@ -245,7 +266,15 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for _, p := range store.Producers {
+		// Group admission retains each original application/order, without
+		// publishing a growing pending tail once per fixture.
+		for producer, p := range store.Producers {
+			if len(applications[producer]) == 0 {
+				continue
+			}
+			if err := p.AppendApplications(applications[producer]); err != nil {
+				t.Fatal(err)
+			}
 			if err := p.Drain(); err != nil {
 				t.Fatal(err)
 			}

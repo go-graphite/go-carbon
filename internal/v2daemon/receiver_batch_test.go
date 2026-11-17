@@ -33,7 +33,7 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 				t.Fatal(err)
 			}
 			r.Identities = &v2core.PolicyCatalog{}
-			s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 3, Shards: 2, coreMaxRows: 4096, GroupInterval: time.Hour, Hooks: v2core.Hooks{Identities: r.Identities, PublishBatches: r.Publish}})
+			s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 3, Shards: 2, MaxCoreRows: 4096, GroupInterval: time.Hour, Hooks: v2core.Hooks{Identities: r.Identities, PublishBatches: r.Publish}})
 			if err != nil {
 				r.Close()
 				t.Fatal(err)
@@ -158,7 +158,7 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 }
 
 func TestApplicationOwnerExpiryDrainFences(t *testing.T) {
-	s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1, coreMaxRows: 4096, GroupInterval: time.Hour})
+	s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1, MaxCoreRows: 4096, GroupInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

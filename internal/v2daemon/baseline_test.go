@@ -94,7 +94,7 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 	directory, policy := convertedBaselineFixture(t)
 	root := t.TempDir()
 	replayRoot := t.TempDir()
-	cfg := Config{Layer: 3, Producers: 2, Shards: 2, coreMaxRows: 128, GroupInterval: time.Hour, BaselinePath: directory}
+	cfg := Config{Layer: 3, Producers: 2, Shards: 2, MaxCoreRows: 128, GroupInterval: time.Hour, BaselinePath: directory}
 	// An independently installed baseline has no post-fence applications. Copying
 	// only the original journal into it forces actual replay reduction after crash.
 	initial, err := Open(replayRoot, cfg)
@@ -223,7 +223,7 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 
 func TestBaselineInstallRejectsPartialAndPostAdmission(t *testing.T) {
 	if stage := os.Getenv("V2_BASELINE_CRASH_STAGE"); stage != "" {
-		cfg := Config{Layer: 3, Producers: 2, Shards: 2, coreMaxRows: 128, BaselinePath: os.Getenv("V2_BASELINE_SOURCE")}
+		cfg := Config{Layer: 3, Producers: 2, Shards: 2, MaxCoreRows: 128, BaselinePath: os.Getenv("V2_BASELINE_SOURCE")}
 		cfg.Hooks.Stage = func(s string) {
 			if s == stage {
 				os.Exit(87)
@@ -236,7 +236,7 @@ func TestBaselineInstallRejectsPartialAndPostAdmission(t *testing.T) {
 	for _, stage := range []string{"baseline-ready", "baseline-installed"} {
 		t.Run(stage, func(t *testing.T) {
 			root := t.TempDir()
-			cfg := Config{Layer: 3, Producers: 2, Shards: 2, coreMaxRows: 128, BaselinePath: directory}
+			cfg := Config{Layer: 3, Producers: 2, Shards: 2, MaxCoreRows: 128, BaselinePath: directory}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestBaselineInstallRejectsPartialAndPostAdmission$")
 			cmd.Env = append(os.Environ(), "V2_BASELINE_CRASH_STAGE="+stage, "V2_BASELINE_SOURCE="+directory, "V2_BASELINE_ROOT="+root)
 			var exit *exec.ExitError
@@ -265,7 +265,7 @@ func TestBaselineInstallRejectsPartialAndPostAdmission(t *testing.T) {
 		})
 	}
 	root := t.TempDir()
-	cfg := Config{Layer: 3, Producers: 1, Shards: 1, coreMaxRows: 128}
+	cfg := Config{Layer: 3, Producers: 1, Shards: 1, MaxCoreRows: 128}
 	s, err := Open(root, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +314,7 @@ func TestBaselineMissingPartNeverPublishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	publications := 0
-	cfg := Config{Layer: 3, Producers: 1, Shards: 1, coreMaxRows: 128, BaselinePath: directory, Hooks: v2core.Hooks{PublishBatches: func(_ int, s *pebble.Snapshot, _ []v2core.Batch, _ uint64) error { publications++; return s.Close() }}}
+	cfg := Config{Layer: 3, Producers: 1, Shards: 1, MaxCoreRows: 128, BaselinePath: directory, Hooks: v2core.Hooks{PublishBatches: func(_ int, s *pebble.Snapshot, _ []v2core.Batch, _ uint64) error { publications++; return s.Close() }}}
 	if store, err := Open(t.TempDir(), cfg); err == nil {
 		_ = store.Close()
 		t.Fatal("missing baseline part accepted")

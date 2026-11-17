@@ -54,7 +54,7 @@ func TestStoreNameScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Identities = &v2core.PolicyCatalog{}
-	s, err := Open(dir, Config{Layer: 3, Producers: 4, Shards: 4, MaxPendingRows: 32768, coreMaxRows: 32768, Hooks: v2core.Hooks{Identities: r.Identities, DenseRollups: true, PublishBatches: r.Publish}})
+	s, err := Open(dir, Config{Layer: 3, Producers: 4, Shards: 4, MaxPendingRows: 32768, MaxCoreRows: 32768, Hooks: v2core.Hooks{Identities: r.Identities, DenseRollups: true, PublishBatches: r.Publish}})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)

@@ -24,7 +24,7 @@ func TestRegisteredApplicationsJournalCore(t *testing.T) {
 func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 	t.Parallel()
 	root := t.TempDir()
-	cfg := Config{Layer: 3, Producers: 1, Shards: 2, coreMaxRows: 256, GroupInterval: time.Hour}
+	cfg := Config{Layer: 3, Producers: 1, Shards: 2, MaxCoreRows: 256, GroupInterval: time.Hour}
 	s, err := Open(root, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestRegisteredApplicationScope(t *testing.T) {
 	for _, mode := range []string{"producer", "zero", "name", "policy", "restart"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
-			cfg := Config{Layer: 3, Producers: 2, Shards: 1, coreMaxRows: 16, GroupInterval: time.Hour}
+			cfg := Config{Layer: 3, Producers: 2, Shards: 1, MaxCoreRows: 16, GroupInterval: time.Hour}
 			s, err := Open(root, cfg)
 			if err != nil {
 				t.Fatal(err)
