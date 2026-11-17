@@ -140,7 +140,7 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 	if err := d.Validate(); err != nil {
 		return false, err
 	}
-	if d.Scope.Partition != 0 || d.Scope.VShard != v2part.GroupVShard || d.Encoding != v2part.DenseEncoding {
+	if d.Scope.VShard != v2part.GroupVShard || d.Encoding != v2part.DenseEncoding {
 		return false, errors.New("copied catalog requires a dense group rollup part")
 	}
 	k, err := v2part.Decode(d.FirstKey)
@@ -245,7 +245,7 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 	}
 	names := map[v2part.ID]*limits{}
 	err := v2part.Read(ctx, path, &d, func(k v2part.Key, b []byte) error {
-		if k.Partition != 0 || k.Ordinal != 0 {
+		if k.Ordinal != 0 {
 			return errors.New("invalid copied rollup key")
 		}
 		entry := names[k.Metric]

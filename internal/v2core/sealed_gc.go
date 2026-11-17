@@ -330,12 +330,54 @@ func (e *coreEngine) runPartGC() {
 				if o.gc == nil {
 					continue
 				}
+				// Only durable application time can authorize age retirement.
+				// Wall time would delete historical source data during log replay.
+				clock := o.frontier.Load().ArchiveClock
+				if err := o.expireSealedParts(clock); err != nil {
+					e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
+				}
 				if _, err := o.gc.sweep(); err != nil {
 					e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
 				}
 			}
 		}
 	}
+}
+
+// A part whose latest record and envelope expiry precede the durable owner
+// ArchiveClock holds nothing a reader may still return: drop it whole, as
+// ClickHouse drops a part past its max TTL. The newest envelope of a metric
+// expires no earlier than any record it can mask. Imported parts keep their
+// move-catalog authority and are not retired here.
+func (o *coreOwner) expireSealedParts(now int64) error {
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	var ids []v2part.Digest
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			return err
+		}
+		if d.Coverage.MaxExpiry == 0 || d.Coverage.MaxExpiry >= now || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+			continue
+		}
+		ids = append(ids, d.SHA256)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := o.gc.retire(ids, func(d v2part.Descriptor) error {
+		if d.Coverage.MaxExpiry == 0 || d.Coverage.MaxExpiry >= now {
+			return errors.New("part overlaps retained time")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	o.gcDirty.Store(true)
+	coreWake(o.work)
+	return nil
 }
 
 // PartGCStats reports original-link removal, not physical filesystem space:

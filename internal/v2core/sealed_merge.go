@@ -29,6 +29,23 @@ import (
 
 const sealedMergeFanIn = 16
 
+// Bound the sum of compressed inputs, rather than just each input. One owner
+// has at most one merge in flight. The output may be smaller after pruning.
+// The default matches ClickHouse max_bytes_to_merge_at_max_space_in_pool
+// (150 GiB; VictoriaMetrics allows up to 1e12 B): monthly partitions then stay
+// at O(log16 bytes) parts per owner instead of a terminal tier of capped parts.
+func mergeMaxBytes() (uint64, error) {
+	n := uint64(150 << 30)
+	if s := os.Getenv("CORE_MERGE_MAX_BYTES"); s != "" {
+		var err error
+		n, err = strconv.ParseUint(s, 10, 64)
+		if err != nil || n == 0 {
+			return 0, errors.New("CORE_MERGE_MAX_BYTES must be a positive byte count")
+		}
+	}
+	return n, nil
+}
+
 // Runtime tuning does not change the persisted routing/configuration contract.
 func mergeWorkerCount(owners int) (int, error) {
 	// At most half of scheduler CPUs, with one worker for small stores.
@@ -92,11 +109,17 @@ func (e *coreEngine) runPartMerges(workers int) {
 }
 
 // Each size tier spans a factor of sixteen and retains at most fifteen quiescent
-// local parts per group. With merge service keeping up, count is O(log bytes).
+// local parts per group/partition below the cap. Terminal parts trade bounded
+// rewrite size for a larger read inventory until their time partition expires.
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	type tier struct {
-		group v2part.Group
-		size  int
+		group     v2part.Group
+		partition int64
+		size      int
+	}
+	limit, err := mergeMaxBytes()
+	if err != nil {
+		return nil, err
 	}
 	tiers := map[tier][]v2part.Descriptor{}
 	o.gc.mu.Lock()
@@ -107,7 +130,7 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 		if err != nil {
 			return nil, err
 		}
-		if d.Scope.Partition != 0 || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+		if d.Bytes > limit || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
 		k, err := v2part.Decode(d.FirstKey)
@@ -121,19 +144,83 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 		if origin.Class != LivePart {
 			continue
 		}
-		t := tier{d.Scope.Group, (bits.Len64(d.Bytes) - 1) / 4}
+		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
 		tiers[t] = append(tiers[t], d)
 	}
 	var chosen []v2part.Descriptor
 	var best tier
 	for t, parts := range tiers {
-		if len(parts) >= sealedMergeFanIn && (chosen == nil || t.size < best.size || (t.size == best.size && t.group < best.group)) {
+		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
+			if a.Bytes < b.Bytes {
+				return -1
+			}
+			if a.Bytes > b.Bytes {
+				return 1
+			}
+			return bytes.Compare(a.SHA256[:], b.SHA256[:])
+		})
+		var total uint64
+		if len(parts) < sealedMergeFanIn {
+			continue
+		}
+		fits := true
+		total = 0
+		for _, d := range parts[:sealedMergeFanIn] {
+			if d.Bytes > limit-total {
+				fits = false
+				break
+			}
+			total += d.Bytes
+		}
+		if fits && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
 			chosen, best = parts, t
 		}
 	}
-	slices.SortFunc(chosen, func(a, b v2part.Descriptor) int { return bytes.Compare(a.SHA256[:], b.SHA256[:]) })
 	if len(chosen) > sealedMergeFanIn {
 		chosen = chosen[:sealedMergeFanIn]
+	}
+	return chosen, nil
+}
+
+// ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per
+// four hours, so expiry work stays a small, bounded share of merge service.
+const ttlRewriteSeconds = 4 * 3600
+
+// When no size-tier merge is due, rewrite the local part whose earliest data
+// expiry has passed (ClickHouse TTL merge). Parts whose latest expiry has
+// passed are dropped whole by GC instead and are not rewritten.
+func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64) ([]v2part.Descriptor, error) {
+	limit, err := mergeMaxBytes()
+	if err != nil {
+		return nil, err
+	}
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	var chosen []v2part.Descriptor
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			return nil, err
+		}
+		c := d.Coverage
+		if c.MinExpiry == 0 || c.MinExpiry >= clock || c.MaxExpiry < clock || d.Bytes > limit || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+			continue
+		}
+		if chosen != nil && (c.MinExpiry > chosen[0].Coverage.MinExpiry || c.MinExpiry == chosen[0].Coverage.MinExpiry && bytes.Compare(d.SHA256[:], chosen[0].SHA256[:]) > 0) {
+			continue
+		}
+		k, err := v2part.Decode(d.FirstKey)
+		if err != nil {
+			return nil, err
+		}
+		origin, err := readPartOrigin(snapshot, k)
+		if err != nil {
+			return nil, err
+		}
+		if origin.Class == LivePart {
+			chosen = []v2part.Descriptor{d}
+		}
 	}
 	return chosen, nil
 }
@@ -265,7 +352,9 @@ func mergeSlotLess(a, b sealrollup.Record) bool {
 // Merge same-source local originals with the shared timestamp/class/order rule.
 // Resolved coarse records are copied, never aggregated. Publication and GC stay
 // outside this streaming rewrite and retain the ordinary snapshot fences.
-func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+// A nonzero ttl is the durable owner ArchiveClock of a TTL rewrite: records
+// whose expiry precedes it are dropped as whole-part retirement would.
+func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, ttl int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if _, err = rand.Read(spec.Scope.Part[:]); err != nil {
 		return v2part.Descriptor{}, err
@@ -296,6 +385,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		return v2part.Descriptor{}, err
 	}
 	defer writer.Abort()
+	limit, err := mergeMaxBytes()
+	if err != nil {
+		return v2part.Descriptor{}, err
+	}
+	writer.LimitBytes(limit)
 	// Pebble's forward compaction iterator recycles compressed and decoded SST
 	// blocks. A normal read iterator allocates/frees C memory for every block.
 	// All inputs are advanced by this goroutine; this pool is never concurrent.
@@ -346,6 +440,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	var records mergeRecordHeap
 	var key, metaBytes []byte
 	var policy RollupPolicy
+	var expiry expiryBounds
 	for len(h) > 0 {
 		if err = ctx.Err(); err != nil {
 			return v2part.Descriptor{}, err
@@ -373,6 +468,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		if err = json.Unmarshal(metadata.Policy, &policy); err != nil {
 			return v2part.Descriptor{}, err
 		}
+		floor := max(metadata.LastUpdate/1e9, ttl)
 		key, err = v2part.Encode(c.key)
 		if err != nil {
 			return v2part.Descriptor{}, err
@@ -390,6 +486,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 			setSlot(uint32(winner.Archive), winner.Slot)
 			occupied = false
+			expiry.data(rollupRecordExpiry(policy.Config, winner))
 			return writer.SetRecordEncoded(key, winner)
 		}
 		records = records[:0]
@@ -414,7 +511,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(policy.Config, item) < floor {
 						untouched = false
 						break
 					}
@@ -424,14 +521,16 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 				if err = flush(); err != nil {
 					return v2part.Descriptor{}, err
 				}
+				for _, item := range input.records {
+					expiry.data(rollupRecordExpiry(policy.Config, item))
+				}
 				b := input.blocks[input.block-1]
 				setSlot(b.archive, b.slot)
 				if err = writer.SetSlotsEncoded(key, input.arena[b.start:b.end]); err != nil {
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder {
-				// Age-only slots remain available for cold older-window corrections.
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(policy.Config, r) >= floor {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -464,6 +563,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			return v2part.Descriptor{}, err
 		}
 		setSlot(v2part.MetadataArchive, 0)
+		expiry.envelope(rollupMetricExpiry(policy.Config, metadata.Frontier.MaxTime))
 		metaBytes = AppendRollupMetadata(metaBytes[:0], *metadata)
 		if err = writer.SetEncoded(key, metaBytes); err != nil {
 			return v2part.Descriptor{}, err
@@ -481,6 +581,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 		}
 	}
+	writer.SetExpiry(expiry.min, expiry.max)
 	d, err := writer.Close()
 	if err != nil {
 		return d, err
@@ -496,8 +597,22 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	o.gc.mu.Unlock()
 	defer snapshot.Close()
 	inputs, err := o.selectMerge(snapshot)
-	if err != nil || len(inputs) == 0 {
+	if err != nil {
 		return false, err
+	}
+	var ttl int64
+	if len(inputs) == 0 {
+		now := time.Now().Unix()
+		if now < o.ttlNext.Load() {
+			return false, nil
+		}
+		clock := o.frontier.Load().ArchiveClock
+		inputs, err = o.selectTTLRewrite(snapshot, clock)
+		if err != nil || len(inputs) == 0 {
+			return false, err
+		}
+		ttl = clock
+		o.ttlNext.Store(now + ttlRewriteSeconds)
 	}
 	stage, err := os.MkdirTemp(o.dir, ".merge-")
 	if err != nil {
@@ -505,8 +620,8 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, stop)
-	if errors.Is(err, context.Canceled) {
+	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, ttl, stop)
+	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
 	if err != nil {

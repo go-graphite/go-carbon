@@ -45,6 +45,7 @@ type coreConfig struct {
 	RawCodec                   string
 }
 type coreFrontier struct {
+	ArchiveClock  int64 `json:",omitempty"`
 	Version       int
 	Config        coreConfig
 	Cursors       []uint64
@@ -212,6 +213,7 @@ type coreOwner struct {
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
+	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
 	maintenance bool
 
 	stage      func(string)
@@ -300,6 +302,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 	} else if cfg.RollupRoutingVersion != 0 {
 		return nil, errors.New("rollup routing requires rollups")
+	}
+	if _, err := mergeMaxBytes(); err != nil {
+		return nil, err
 	}
 	mergeWorkers, err := mergeWorkerCount(int(cfg.Shards))
 	if err != nil {
@@ -978,6 +983,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
+		for _, b := range batches {
+			next.ArchiveClock = max(next.ArchiveClock, b.Clock)
+		}
 		next.NextPart++
 		n, err := o.sealBatches(head, batches, next)
 		if err != nil {

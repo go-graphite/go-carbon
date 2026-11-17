@@ -232,6 +232,15 @@ type DenseWriter struct {
 	closed bool
 }
 
+// LimitBytes bounds compressed staging output, including SST indexes/footer.
+// Call before the first Set. Exceeding it aborts this proposal, never inputs.
+func (w *DenseWriter) LimitBytes(n uint64) { w.writer.out.limit = n }
+
+// SetExpiry records expiry bounds measured while streaming. Call before Close.
+func (w *DenseWriter) SetExpiry(minExpiry, maxExpiry int64) {
+	w.writer.spec.MinExpiry, w.writer.spec.MaxExpiry = minExpiry, maxExpiry
+}
+
 type denseWorkspace struct {
 	decoder keyDecoder
 	first   []byte

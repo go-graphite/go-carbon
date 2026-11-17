@@ -22,7 +22,7 @@ the LSM. Planning or ingest failure
 publishes none of that state. Reopen recovers from one immutable snapshot.
 
 Archive records use `partsformat` GCP3 keys, with exact placement group above
-CRC32C(name)%4096, partition 0, a random immutable part UUID, exact name, archive,
+CRC32C(name)%4096, time partition, an immutable part UUID, exact name, archive,
 physical ring slot in BlockStart, and ordinal 0. Each dense archive part spans the routed vshards of one placement group and
 one partition. Keys remain sorted in the published GCP3 order. Archive max-u32 is reserved for version-1
 policy/frontier/activity metadata in this offline experiment. Other values use
@@ -30,8 +30,40 @@ policy/frontier/activity metadata in this offline experiment. Other values use
 physical slot before time filtering, including occupied NaNs. No partial sums
 or averages are merged. The reader validates metadata against the policy digest.
 
-Partition 0 intentionally identifies the complete physical ring, not an event
-time bucket. This change does not authorize deleting ring data by time partition.
+Partition 0 retains legacy ring data and independently published metadata.
+New records use UTC daily expiry partitions: sample time + archive retention +
+the next coarse step (when present), rounded down to a day. The extra step keeps
+source samples through the last coarse window that may need a late correction.
+Each data part also carries its metadata envelope for unchanged portable-part
+validation. Readers, recovery and moves resolve physical ring winners across
+all partitions before filtering times; resolved coarse values are never reduced
+again by merging. Existing stores keep their partition-zero files; ordinary
+merges prune their expired records without a wholesale conversion.
+
+`CORE_MERGE_MAX_BYTES` is a positive runtime byte count, default 1073741824
+(1GiB). Automatic merges require sixteen same-source local parts in the same
+group, partition and size tier whose total compressed bytes fit the cap. A part
+above it is never selected. The output writer enforces the same limit including
+SST indexes/footer and aborts an oversized proposal without publishing it.
+Thus new staged SST space is at most one cap per active merge worker; old inputs
+remain protected by existing snapshot/grace fences. This does not bound disk
+held by readers or exported hard links, and the fixed cap is not a free-space
+reservation. A smaller cap trades lower rewrite work for more terminal parts.
+
+Merges prune records only after their conservative expiry is before the metric's
+durable application clock. Background GC retires positive expiry partitions
+once their complete day precedes the owner's durably committed `ArchiveClock`.
+Wall time cannot authorize this during historical log replay. An idle owner
+retains data until another application advances its clock. Partition zero is
+never age-dropped, preserving reset/frontier/discovery authority. Retirement
+publishes binding removals atomically and unlinks after the existing reader
+fence and grace period. Imported files keep move-catalog authority and are not
+rewritten or age-retired by the receiver's local-original policy.
+
+Older binaries reject nonzero rollup partitions: upgrade readers and writers
+together; a rollback needs a compatible reader. The rollup16 closed-window
+planner can continue supplying the same canonical records; no aggregation is
+introduced here.
 Numeric raw keys and the input journal remain the existing core experiment.
 Whole-engine portable copy, catalogue/frontier movement, tombstones, retained
 SST lifetime and online readers are not qualified by these archive keys.

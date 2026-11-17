@@ -184,7 +184,7 @@ func (r *rollupHistoryReader) open() error {
 			part = &rollupHistoryPart{descriptor: d}
 			known[d.SHA256] = part
 		}
-		r.parts[scope[:n]] = append(r.parts[scope[:n]], part)
+		r.parts[scope[:n-8]] = append(r.parts[scope[:n-8]], part)
 	}
 	return nil
 }
@@ -228,7 +228,7 @@ func (r *rollupHistoryReader) load(m *rollupMetric, a int, start, end int64) ([]
 		if err != nil {
 			return err
 		}
-		for _, part := range r.parts[string(scope)] {
+		for _, part := range r.parts[string(scope[:len(scope)-8])] {
 			// Older logical timestamps cannot mask a winner in this window. Newer
 			// parts remain eligible even outside end: resolve ring epochs first.
 			if part.descriptor.Coverage.MaxTime < start {
@@ -253,7 +253,7 @@ func (r *rollupHistoryReader) load(m *rollupMetric, a int, start, end int64) ([]
 				r.opened.MoveToFront(part.age)
 			}
 			it := part.iterator
-			key := v2part.Key{Group: m.policy.Group, VShard: m.vshard, Part: part.descriptor.Scope.Part, Metric: m.policy.Name, Archive: uint32(a), BlockStart: first}
+			key := v2part.Key{Group: m.policy.Group, VShard: m.vshard, Partition: part.descriptor.Scope.Partition, Part: part.descriptor.Scope.Part, Metric: m.policy.Name, Archive: uint32(a), BlockStart: first}
 			lower, err := v2part.Encode(key)
 			if err != nil {
 				return err

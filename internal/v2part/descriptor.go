@@ -35,6 +35,12 @@ type Coverage struct {
 	Names    uint64
 	Records  uint64
 	Policies []ArchivePolicy
+	// Expiry bounds in event seconds, computed by the producer from each
+	// record's retention. MinExpiry covers data records only (zero: none or
+	// unknown); MaxExpiry also covers metric envelopes (zero: unknown, never
+	// retired by age). Older producers omit both.
+	MinExpiry int64 `json:",omitempty"`
+	MaxExpiry int64 `json:",omitempty"`
 }
 
 // Spec is supplied before a sorted stream is written. Coverage times and policy
@@ -47,6 +53,9 @@ type Spec struct {
 	MinTime  int64
 	MaxTime  int64
 	Policies []ArchivePolicy
+	// See Coverage.MinExpiry/MaxExpiry.
+	MinExpiry int64
+	MaxExpiry int64
 }
 
 type Descriptor struct {
@@ -84,6 +93,9 @@ func validateSpec(s Spec) error {
 	}
 	if s.MinTime > s.MaxTime || s.Source.MinOrder > s.Source.MaxOrder {
 		return errors.New("inverted part coverage")
+	}
+	if s.MinExpiry < 0 || s.MaxExpiry < 0 || (s.MinExpiry != 0 && (s.MaxExpiry == 0 || s.MinExpiry > s.MaxExpiry)) {
+		return errors.New("invalid part expiry bounds")
 	}
 	for _, p := range s.Policies {
 		if p.Archive == MetadataArchive || len(p.Definition) == 0 || sha256.Sum256(p.Definition) != p.Digest {
@@ -135,7 +147,7 @@ func (d Descriptor) Validate() error {
 }
 
 func (d Descriptor) spec() Spec {
-	return Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies}
+	return Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies, MinExpiry: d.Coverage.MinExpiry, MaxExpiry: d.Coverage.MaxExpiry}
 }
 
 func canonicalPolicies(in []ArchivePolicy) ([]ArchivePolicy, error) {
