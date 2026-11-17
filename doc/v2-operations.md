@@ -103,3 +103,50 @@ Seal total includes rollup planning and publication. These nested stage
 quantiles have different weighting from visibility and cannot be added together.
 The observer keeps bounded histograms and producer frontiers per owner and
 creates no input queue or publication barrier.
+
+## Adopt a copied range
+
+The experimental unplaced L3 daemon exposes move control on its existing
+carbonserver HTTP listener. First receive a coherent, whole-file snapshot into
+a local directory on the receiving daemon's filesystem. Then run:
+
+```sh
+storectl move --url http://127.0.0.1:8080 --action prepare \
+  --parts-dir /absolute/path/to/received-snapshot
+# Save the returned ID, then use it for retries after a daemon restart.
+storectl move --url http://127.0.0.1:8080 --action adopt --id <ID>
+storectl move --url http://127.0.0.1:8080 --action status --id <ID>
+```
+
+These call `POST /admin/v2/move/prepare`,
+`POST /admin/v2/move/adopt?id=<ID>` and
+`GET /admin/v2/move/status?id=<ID>`. Preparation verifies and pins the files;
+after it acknowledges, the transport's original links may be removed. The
+inventory and original adoption clock survive restart. `Done` becomes true
+only after all target owners activate and the move-level marker is synced.
+Retry `adopt` with the same ID after interruption; completed owners skip their
+already installed parts. Discovery includes adopted names on its normal
+one-second refresh.
+
+Names use the receiving daemon's producer catalog and owner placement, which
+may differ from the donor's geometry. Each receiving owner atomically activates
+its bindings, receiving identities and boundary repairs. Other owners can
+continue intake. Visibility across different owners is gradual until `Done`;
+this endpoint alone does not switch external routing or retire the donor.
+
+Copied SST bytes stay unchanged. Mature coarse history needs no raw coverage:
+the ordinary newest-timestamp slot rule selects between copied and target
+coarse slots, with receiving live class breaking equal timestamps. Only coarse
+windows touched by retained receiving raw are recomputed from resolved raw
+slots. If such a window crosses a fine retention cutoff, its older neighbors
+must still be present; otherwise adoption fails before activation instead of
+installing a partial aggregate. This check does not apply to untouched mature
+windows. The catalog stores repairs rather than duplicating old history.
+Version-1 move baselines remain readable; older binaries reject the new
+version-2 authority, so do not downgrade a root after adoption.
+
+The endpoint currently requires unplaced L3 intake. Source producers must own
+disjoint canonical names; competing donor streams for the same name, moving
+previously adopted stores, and lifecycle-reset reconciliation are outside this
+protocol. Prepared state and links remain under `<v2.path>/moves/<ID>` for
+retry; there is no automatic administrative move-state cleanup yet.

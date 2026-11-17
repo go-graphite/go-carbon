@@ -124,6 +124,36 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Distinct subranges must reuse the full immutable archive result,
+			// including its newly appended part, without filling the range cache
+			// with duplicate subsets or opening another archive iterator.
+			cachedEntries := index.cache.count
+			cachedOnly := *index
+			cachedOnly.snapshot = nil // a complete cache hit needs no storage access
+			for archive := range policy.Config.Archives {
+				for first := int64(0); first < 20; first++ {
+					last := first + 3
+					var subset []sealrollup.Record
+					err = cachedOnly.ScanArchive(ctx, string(policy.Name), archive, first, last, func(r sealrollup.Record) error {
+						subset = append(subset, r)
+						return nil
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var expected []sealrollup.Record
+					for _, r := range all {
+						if r.Archive == archive && r.Slot >= first && r.Slot < last {
+							expected = append(expected, r)
+						}
+					}
+					slices.SortFunc(subset, func(a, b sealrollup.Record) int { return int(a.Slot - b.Slot) })
+					slices.SortFunc(expected, func(a, b sealrollup.Record) int { return int(a.Slot - b.Slot) })
+					if !slices.Equal(subset, expected) || index.cache.count != cachedEntries {
+						t.Fatal("cached subrange changed winners or retained duplicate records")
+					}
+				}
+			}
 			less := func(a, b sealrollup.Record) int {
 				if a.Archive != b.Archive {
 					return a.Archive - b.Archive

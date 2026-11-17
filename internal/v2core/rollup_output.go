@@ -11,7 +11,6 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -52,7 +51,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		}
 		changed := false
 		for _, p := range b.Points {
-			if p.Time >= b.Now-m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Step*m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Count {
+			if p.Time >= b.Now-m.schema().Archives[len(m.schema().Archives)-1].Step*m.schema().Archives[len(m.schema().Archives)-1].Count {
 				changed = true
 				break
 			}
@@ -83,12 +82,12 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	if !coverage.seen[digest] {
 		policies := r.definitions[digest]
 		if policies == nil {
-			definition, err := json.Marshal(m.policy.Config)
+			definition, err := json.Marshal(m.schema())
 			if err != nil {
 				return err
 			}
 			hash := sha256.Sum256(definition)
-			for archive := range m.policy.Config.Archives {
+			for archive := range m.schema().Archives {
 				policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
 			}
 			r.definitions[digest] = policies
@@ -152,7 +151,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			slices.SortFunc(lane.ordered, compareRollupStages)
 			for _, s := range lane.ordered {
 				m := s.metric
-				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.meta.Frontier, m.slots.View, m.slots.Range, s.batches, &lane.workspace)
+				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, m.slots.View, m.slots.Range, s.batches, &lane.workspace)
 				if err != nil {
 					lane.err = err
 					return
@@ -276,12 +275,9 @@ func (r *coreRollups) commitStages() {
 					m.slots.Install(record.Delta)
 				}
 				if s.next.Expired {
-					m.slots = sealrollup.NewSlots(m.policy.Config.Archives)
+					m.slots = *m.prepared.NewSlots()
 				}
-				m.meta = s.next
-				if s.registered != nil {
-					m.registered = s.registered
-				}
+				m.meta = compactMetadata(s.next)
 			}
 		}
 		if len(r.lanes) == 1 {

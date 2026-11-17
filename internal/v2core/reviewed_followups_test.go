@@ -44,27 +44,29 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	metric := recovered.metrics[7]
-	if metric == nil || metric.registered != nil {
-		t.Fatal("expected recovered metric without a live catalog handle")
+	if metric == nil || metric.PolicyIdentity == nil {
+		t.Fatal("expected recovered metric with shared immutable identity")
 	}
 	// Journal replay admits canonical bytes before live producer registration.
 	if err = core.AppendBatches(0, []Batch{batch(2, encoded, nil)}, 2, true); err != nil {
 		t.Fatal(err)
 	}
-	if core.routers[0].rollupRoutes[7].registered != nil {
-		t.Fatal("byte replay unexpectedly registered a live handle")
+	identity := core.identities.lookup(7)
+	if identity == nil {
+		t.Fatal("replay did not intern identity")
 	}
 	if err = core.AppendBatches(0, []Batch{batch(3, nil, wrong)}, 3, true); err == nil {
 		t.Fatal("accepted changed live policy after replay")
 	}
-	if core.routers[0].rollupRoutes[7].registered != nil {
-		t.Fatal("rejected policy registered its route")
+	if core.identities.lookup(7) != identity {
+		t.Fatal("rejected policy replaced shared identity")
 	}
 	if err = core.AppendBatches(0, []Batch{batch(3, nil, registered)}, 3, true); err != nil {
 		t.Fatal(err)
 	}
-	if core.routers[0].rollupRoutes[7].registered != registered {
-		t.Fatal("matching live handle did not bind the replay-created route")
+	shared, err := core.RegisterApplicationPolicy(7, "restart.metric", encoded)
+	if err != nil || shared != identity {
+		t.Fatal("matching live registration did not reuse replay identity", err)
 	}
 	// The owner must retain recovered state until this matching seal commits.
 	in := SealInput{Batches: []Batch{batch(4, encoded, registered)}}
@@ -72,25 +74,26 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metric.registered != nil {
-		t.Fatal("planning bound recovered metric before commit")
+	recoveredIdentity := metric.PolicyIdentity
+	if metric.meta.Frontier.Order != 1 {
+		t.Fatal("planning changed recovered frontier")
 	}
 	plan.Abort()
-	if metric.registered != nil || metric.meta.Frontier.Order != 1 {
+	if metric.PolicyIdentity != recoveredIdentity || metric.meta.Frontier.Order != 1 {
 		t.Fatal("aborted seal changed recovered metric")
 	}
 	if _, err = recovered.plan(SealInput{Batches: []Batch{batch(4, changed, wrong)}}); err == nil {
 		t.Fatal("accepted changed policy for recovered metric")
 	}
-	if metric.registered != nil {
-		t.Fatal("failed plan bound recovered metric")
+	if metric.PolicyIdentity != recoveredIdentity {
+		t.Fatal("failed plan replaced recovered identity")
 	}
 	plan, err = recovered.plan(in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan.Commit()
-	if metric.registered != registered || metric.meta.Frontier.Order != 4 {
+	if metric.PolicyIdentity != recoveredIdentity || metric.meta.Frontier.Order != 4 {
 		t.Fatal("committed matching seal did not bind recovered metric")
 	}
 }

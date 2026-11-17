@@ -358,6 +358,7 @@ type CarbonserverListener struct {
 	realtimeIndex   int
 	newMetricsQueue *helper.MetricQueue
 
+	v2MoveAdmin  http.Handler
 	v2Reader     *v2read.Reader
 	v2Union      bool
 	v2Catalog    atomic.Pointer[v2CatalogBinding]
@@ -2901,6 +2902,9 @@ func (listener *CarbonserverListener) newHTTPMux() *http.ServeMux {
 	mux.HandleFunc("/forcescan", listener.forceScanHandler)
 	mux.HandleFunc("/admin/quota", listener.quotaHandler)
 	mux.HandleFunc("/admin/info", listener.adminInfoHandler)
+	if listener.v2MoveAdmin != nil {
+		mux.Handle("/admin/v2/move/", listener.v2MoveAdmin)
+	}
 	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "User-agent: *\nDisallow: /") })
 	return mux
 }
@@ -3326,4 +3330,9 @@ func (listener *CarbonserverListener) WaitForWarmup() {
 	if listener.indexWarmupDone != nil {
 		<-listener.indexWarmupDone
 	}
+}
+
+// SetV2MoveAdmin installs administrative control before the HTTP listener starts.
+func (listener *CarbonserverListener) SetV2MoveAdmin(handler http.Handler) {
+	listener.v2MoveAdmin = handler
 }

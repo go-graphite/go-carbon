@@ -21,3 +21,11 @@ func (c *NameCatalog) copyDefinition(definition []byte) []byte {
 	end := len(c.definitionArena)
 	return c.definitionArena[start:end:end]
 }
+
+func (c *NameCatalog) bindEntry(id uint64, name string, definition []byte) (catalogEntry, error) {
+	if c.bindDefinition != nil {
+		name, definition, err := c.bindDefinition(id, name, definition)
+		return catalogEntry{key: name, definition: definition}, err
+	}
+	return catalogEntry{key: name, definition: c.copyDefinition(definition)}, nil
+}

@@ -8,8 +8,11 @@ import "slices"
 // fine-retention array on every new timestamp. Storage is proportional to
 // occupied slots; this index does not provide a bounded sealed-block cache.
 type Slots struct {
-	archives []Archive
-	data     []slotSpan
+	archives      *[]Archive
+	data          []slotSpan
+	single        slotSample
+	singleArchive int
+	hasSingle     bool
 }
 
 // Bounds are physical slot numbers, independent of sample timestamps. Keeping
@@ -26,7 +29,8 @@ type slotSample struct {
 
 // NewSlots requires archives from a validated Config.
 func NewSlots(archives []Archive) *Slots {
-	return &Slots{archives: slices.Clone(archives), data: make([]slotSpan, len(archives))}
+	owned := slices.Clone(archives)
+	return &Slots{archives: &owned}
 }
 func slotCompare(a, b slotSample) int {
 	if a.slot < b.slot {
@@ -55,6 +59,18 @@ func (s *slotSpan) position(physical int64) (int, bool) {
 }
 
 func (s *Slots) Install(d Delta) {
+	if s.data == nil {
+		if !s.hasSingle || (s.singleArchive == d.Archive && s.single.slot == d.Slot) {
+			s.single = slotSample{d.Slot, d.Sample}
+			s.singleArchive = d.Archive
+			s.hasSingle = true
+			return
+		}
+		s.data = make([]slotSpan, len(*s.archives))
+		s.data[s.singleArchive] = slotSpan{data: []slotSample{s.single}, first: s.single.slot, last: s.single.slot}
+		s.hasSingle = false
+	}
+
 	span := &s.data[d.Archive]
 	ps := span.data
 	v := slotSample{d.Slot, d.Sample}
@@ -68,6 +84,13 @@ func (s *Slots) Install(d Delta) {
 	span.data = ps
 }
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
+	if s.data == nil {
+		if s.hasSingle && s.singleArchive == a && s.single.slot == physical {
+			return s.single.sample, true
+		}
+		return Sample{}, false
+	}
+
 	span := &s.data[a]
 	i, ok := span.position(physical)
 	if !ok {
@@ -78,14 +101,20 @@ func (s *Slots) View(a int, physical int64) (Sample, bool) {
 
 // Range requires aligned bounds spanning at most one archive retention.
 func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
-	ar := s.archives[a]
+	if s.data == nil {
+		if s.hasSingle && s.singleArchive == a && s.single.sample.Time >= start && s.single.sample.Time < end {
+			return append(dst, s.single.sample)
+		}
+		return dst
+	}
+
+	ar := (*s.archives)[a]
 	lo := slot(start, ar)
 	count := (end - start) / ar.Step
 	hi := lo + count
 	appendRange := func(first, last int64) {
-		span := &s.data[a]
-		ps := span.data
-		i, _ := span.position(first)
+		ps := s.data[a].data
+		i, _ := s.data[a].position(first)
 		for ; i < len(ps) && ps[i].slot < last; i++ {
 			p := ps[i].sample
 			if p.Time >= start && p.Time < end {
@@ -99,3 +128,15 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 	}
 	return dst
 }
+
+// NewSlots borrows the archives already owned by this immutable prepared schema.
+// Slot values remain private to the caller; schema slices never escape.
+func (p *Prepared) NewSlots() *Slots {
+	return &Slots{archives: &p.config.Archives}
+}
+
+// Digest returns the immutable schema identity validated by Prepare.
+func (p *Prepared) Digest() [32]byte { return p.policy }
+
+// Config borrows this validated immutable schema; callers must not mutate Archives.
+func (p *Prepared) Config() Config { return p.config }

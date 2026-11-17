@@ -61,13 +61,10 @@ type RollupMetadata struct {
 }
 
 type rollupMetric struct {
-	registered  *ApplicationPolicy
-	policy      RollupPolicy
-	meta        RollupMetadata
-	slots       *sealrollup.Slots
-	prepared    *sealrollup.Prepared
+	*PolicyIdentity
+	meta        metricMetadata
+	slots       sealrollup.Slots
 	keyTemplate []byte
-	prefix      string
 	partOffset  int
 	vshard      uint16
 	ordinal     uint64
@@ -77,6 +74,7 @@ type rollupCoverage struct {
 	seen map[[32]byte]bool
 }
 type coreRollups struct {
+	identities  *PolicyCatalog
 	lanes       []rollupPlannerLane
 	parallelism int
 	expire      func(RollupPolicy, RollupMetadata, time.Time) bool
@@ -85,14 +83,12 @@ type coreRollups struct {
 	stage          func(string)
 	metrics        map[uint64]*rollupMetric
 	names          map[partsformat.ID]uint64
-	prepared       map[[32]byte]*sealrollup.Prepared
 	stages         []rollupStage
 	ordered        []*rollupStage
 	positions      map[uint64]int
 	batchPositions []int
 	ordinalsReady  bool
 	pendingNames   map[partsformat.ID]uint64
-	stagedPolicies map[[32]byte]*sealrollup.Prepared
 	samples        []sealrollup.Sample
 	batches        []sealrollup.Batch
 	files          map[string][]coreKV
@@ -109,50 +105,21 @@ type coreRollups struct {
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{metrics: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}, prepared: map[[32]byte]*sealrollup.Prepared{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}}
 }
-func (r *coreRollups) metric(id uint64, policy []byte, staged map[[32]byte]*sealrollup.Prepared) (*rollupMetric, error) {
-	var p RollupPolicy
-	if err := json.Unmarshal(policy, &p); err != nil {
-		return nil, err
-	}
-	encoded, err := EncodeRollupPolicy(p)
+func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
+	h, err := r.identities.intern(id, "", policy)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(encoded, policy) {
-		return nil, errors.New("noncanonical rollup policy")
-	}
-	digest, err := sealrollup.PolicyDigest(p.Config)
+	key, err := partsformat.Encode(partsformat.Key{Group: h.policy.Group, VShard: partsformat.Route(h.policy.Name), Metric: h.policy.Name})
 	if err != nil {
 		return nil, err
 	}
-	prepared := r.prepared[digest]
-	if prepared == nil {
-		prepared = staged[digest]
-	}
-	if prepared == nil {
-		prepared, err = sealrollup.Prepare(p.Config)
-		if err != nil {
-			return nil, err
-		}
-	}
-	staged[digest] = prepared
-	// Identity/routing is immutable. Validate and encode it once, then only
-	// fill the part/archive/slot fields of each detached output key.
-	template, err := partsformat.Encode(partsformat.Key{Group: p.Group, VShard: partsformat.Route(p.Name), Metric: p.Name})
-	if err != nil {
-		return nil, err
-	}
-	prefix, err := partsformat.PartitionPrefixForGroup(p.Group, partsformat.Route(p.Name), 0)
-	if err != nil {
-		return nil, err
-	}
-	return &rollupMetric{policy: p, meta: RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(policy)}, slots: sealrollup.NewSlots(p.Config.Archives), prepared: prepared, keyTemplate: template, prefix: string(prefix), partOffset: len(prefix), vshard: partsformat.Route(p.Name)}, nil
+	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.prepared.NewSlots(), keyTemplate: key, partOffset: len(key) - len(h.policy.Name) - 36, vshard: partsformat.Route(h.policy.Name)}, nil
 }
 
 type rollupStage struct {
-	registered *ApplicationPolicy
 	metric     *rollupMetric
 	next       RollupMetadata
 	batches    []sealrollup.Batch
@@ -191,11 +158,6 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		names = map[partsformat.ID]uint64{}
 		r.pendingNames = names
 	}
-	stagedPolicies := r.stagedPolicies
-	if stagedPolicies == nil {
-		stagedPolicies = map[[32]byte]*sealrollup.Prepared{}
-		r.stagedPolicies = stagedPolicies
-	}
 	// At most one stage per input application. Retain capacity between seals.
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
@@ -208,11 +170,14 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			fresh := m == nil
 			if fresh {
 				var err error
-				m, err = r.metric(b.ID, b.Policy, stagedPolicies)
+				policy := b.Policy
+				if b.Registered != nil {
+					policy = b.Registered.definition
+				}
+				m, err = r.metric(b.ID, policy)
 				if err != nil {
 					return coreSealPlan{}, err
 				}
-				m.registered = b.Registered
 				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
 					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
 				}
@@ -222,18 +187,15 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				names[m.policy.Name] = b.ID
 				freshCount++
 			}
-			stages = append(stages, rollupStage{metric: m, next: m.meta, fresh: fresh})
+			stages = append(stages, rollupStage{metric: m, next: m.metadata(), fresh: fresh})
 			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
 			positions[b.ID] = i
 		}
 		r.batchPositions[bi] = i
 		s := &stages[i]
-		if (b.Registered == nil || b.Registered != s.metric.registered) && !bytes.Equal(b.Policy, s.metric.meta.Policy) {
+		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !bytes.Equal(b.Policy, s.metric.definition) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
-		}
-		if b.Registered != nil {
-			s.registered = b.Registered
 		}
 		stages[i].batchCount++
 	}
@@ -288,8 +250,8 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil {
 		for id, m := range r.metrics {
-			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.policy, m.meta, now) {
-				stages = append(stages, rollupStage{metric: m, next: m.meta})
+			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.rollupPolicy(), m.metadata(), now) {
+				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
 			}
 		}
 	}
@@ -298,7 +260,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	for i := range stages {
 		s := &stages[i]
 		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.policy, s.next, now) {
+		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = 2
@@ -328,9 +290,8 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		for _, s := range stages {
 			m := s.metric
 			if s.fresh {
-				r.metrics[m.meta.ID] = m
-				r.names[m.policy.Name] = m.meta.ID
-				r.prepared[m.meta.Frontier.Policy] = m.prepared
+				r.metrics[m.id] = m
+				r.names[m.policy.Name] = m.id
 			}
 		}
 	}
@@ -342,16 +303,21 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 // by logical timestamp, then class and source-local order, before time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	return scanRollups(snapshot, nil, visit)
+}
+func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
 		return err
 	} else if copied {
 		return scanCopiedRollups(snapshot, visit)
 	}
 	type entry struct {
-		group   partsformat.Group
-		policy  RollupPolicy
-		meta    RollupMetadata
-		records map[[2]int64]sealrollup.Record
+		group     partsformat.Group
+		identity  *PolicyIdentity
+		meta      metricMetadata
+		records   map[[2]int64]sealrollup.Record
+		single    [1]sealrollup.Record
+		hasSingle bool
 	}
 	series := map[partsformat.ID]*entry{}
 	iter, err := newArchiveIter(context.Background(), snapshot, &pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})})
@@ -366,38 +332,98 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 		}
 		e := series[k.Metric]
 		if e == nil {
-			e = &entry{group: k.Group, records: map[[2]int64]sealrollup.Record{}}
+			e = &entry{group: k.Group}
 			series[k.Metric] = e
 		}
 		if k.Partition != 0 || k.Ordinal != 0 || e.group != k.Group {
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {
-			m, decodeErr := DecodeRollupMetadata(iter.Value())
+			m, decodeErr := decodeRollupMetadataView(iter.Value())
+			if identities == nil {
+				m.Policy = bytes.Clone(m.Policy)
+			}
 			if decodeErr != nil {
 				err = decodeErr
 				return err
 			}
 			if m.Frontier.Order > e.meta.Frontier.Order || (m.Frontier.Order == e.meta.Frontier.Order && m.Revision > e.meta.Revision) {
-				e.meta = m
-				if err = json.Unmarshal(m.Policy, &e.policy); err != nil {
-					return err
+				var h *PolicyIdentity
+				if identities != nil {
+					h, err = identities.intern(m.ID, string(k.Metric), m.Policy)
+				} else {
+					var policy RollupPolicy
+					if err = json.Unmarshal(m.Policy, &policy); err == nil {
+						var prepared *sealrollup.Prepared
+						prepared, err = sealrollup.Prepare(policy.Config)
+						if err == nil {
+							h = &PolicyIdentity{id: m.ID, policy: policyName{Name: policy.Name, Group: policy.Group}, definition: m.Policy, prepared: prepared}
+						}
+					}
 				}
-			}
-		} else {
-			decoded, err := partsformat.DecodeSlots(k.Archive, k.BlockStart, iter.Value())
-			if err != nil {
-				return err
-			}
-			for _, record := range decoded {
-				slot := [2]int64{int64(k.Archive), record.Slot}
-				old, ok := e.records[slot]
-				newer, err := newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
 				if err != nil {
 					return err
 				}
-				if !ok || newer {
+				if h.prepared.Digest() != m.Frontier.Policy {
+					return errors.New("rollup policy/frontier mismatch")
+				}
+				e.identity, e.meta = h, compactMetadata(m)
+			}
+		} else {
+			// Legacy singleton rows need no temporary decoded slice. Dense runs
+			// retain their bounded decoder; slot replacement resolves once below.
+			install := func(record sealrollup.Record) error {
+				slot := [2]int64{int64(record.Archive), record.Slot}
+				if e.records == nil {
+					if !e.hasSingle {
+						e.single[0], e.hasSingle = record, true
+						return nil
+					}
+					old := e.single[0]
+					if old.Archive == record.Archive && old.Slot == record.Slot {
+						newer, err := newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
+						if err != nil {
+							return err
+						}
+						if newer {
+							e.single[0] = record
+						}
+						return nil
+					}
+					e.records = map[[2]int64]sealrollup.Record{{int64(old.Archive), old.Slot}: old}
+				}
+				old, ok := e.records[slot]
+				newer := !ok
+				if ok {
+					var err error
+					newer, err = newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
+					if err != nil {
+						return err
+					}
+				}
+				if newer {
 					e.records[slot] = record
+				}
+				return nil
+			}
+			value := iter.Value()
+			if len(value) == 26 && value[0] == 1 {
+				record, err := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, value)
+				if err != nil {
+					return err
+				}
+				if err := install(record); err != nil {
+					return err
+				}
+			} else {
+				decoded, err := partsformat.DecodeSlots(k.Archive, k.BlockStart, value)
+				if err != nil {
+					return err
+				}
+				for _, record := range decoded {
+					if err := install(record); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -406,28 +432,39 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 		return err
 	}
 	for name, e := range series {
-		if (e.meta.Version != 1 && e.meta.Version != 2) || e.policy.Group != e.group || e.policy.Name != name || e.meta.ID == 0 || e.meta.Frontier.Order == 0 {
+		if e.identity == nil {
 			return fmt.Errorf("missing rollup metadata for %s", name)
 		}
-		if e.meta.BaselineOrder > e.meta.Frontier.Order {
+		policy, meta := e.identity.rollupPolicy(), e.identity.metadata(e.meta)
+		if (meta.Version != 1 && meta.Version != 2) || policy.Group != e.group || policy.Name != name || meta.ID == 0 || meta.Frontier.Order == 0 {
+			return fmt.Errorf("missing rollup metadata for %s", name)
+		}
+		if meta.BaselineOrder > meta.Frontier.Order {
 			return errors.New("baseline exceeds rollup frontier")
 		}
-		if (e.meta.Version == 1 && (e.meta.ResetOrder != 0 || e.meta.Expired)) || e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
+		if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
 			return errors.New("invalid rollup reset frontier")
 		}
-		digest, err := sealrollup.PolicyDigest(e.policy.Config)
-		if err != nil {
-			return err
+		var records []sealrollup.Record
+		if e.records == nil {
+			records = e.single[:0]
+			if e.hasSingle {
+				r := e.single[0]
+				if r.Archive >= len(policy.Config.Archives) || r.Slot >= policy.Config.Archives[r.Archive].Count || r.Order > meta.Frontier.Order {
+					return errors.New("invalid rollup slot/frontier")
+				}
+				if r.Order > meta.ResetOrder {
+					records = append(records, r)
+				}
+			}
+		} else {
+			records = make([]sealrollup.Record, 0, len(e.records))
 		}
-		if digest != e.meta.Frontier.Policy {
-			return errors.New("rollup policy/frontier mismatch")
-		}
-		records := make([]sealrollup.Record, 0, len(e.records))
 		for slot, record := range e.records {
-			if slot[0] >= int64(len(e.policy.Config.Archives)) || slot[1] >= e.policy.Config.Archives[slot[0]].Count || record.Order > e.meta.Frontier.Order {
+			if slot[0] >= int64(len(policy.Config.Archives)) || slot[1] >= policy.Config.Archives[slot[0]].Count || record.Order > meta.Frontier.Order {
 				return errors.New("invalid rollup slot/frontier")
 			}
-			if record.Order > e.meta.ResetOrder {
+			if record.Order > meta.ResetOrder {
 				records = append(records, record)
 			}
 		}
@@ -446,7 +483,7 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			}
 			return 0
 		})
-		if err = visit(e.policy, e.meta, records); err != nil {
+		if err = visit(policy, meta, records); err != nil {
 			return err
 		}
 	}
@@ -474,15 +511,18 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 			}
 			return 0
 		})
-		if err = visit(metric.latest.policy, metric.latest.meta, records); err != nil {
+		if err = visit(metric.latest.rollupPolicy(), metric.latest.metadata(), records); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
+func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups, error) {
 	r := newCoreRollups()
+	if len(catalogs) > 0 {
+		r.identities = catalogs[0]
+	}
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
 	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
@@ -493,20 +533,21 @@ func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 			return nil, err
 		}
 		for _, m := range index.metrics {
-			if m.copied && m.authority == nil {
+			if index.moves[m] != nil && index.moves[m].copied && index.moves[m].authority == nil {
 				return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
 			}
 		}
 	}
-	err := ScanRollups(snapshot, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
-		m, err := r.metric(meta.ID, meta.Policy, r.prepared)
+	err := scanRollups(snapshot, r.identities, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
+		m, err := r.metric(meta.ID, meta.Policy)
 		if err != nil {
 			return err
 		}
 		if r.metrics[meta.ID] != nil {
 			return errors.New("duplicate recovered rollup ID")
 		}
-		m.meta = meta
+		meta.Policy = m.definition
+		m.meta = compactMetadata(meta)
 		for _, record := range records {
 			m.slots.Install(record.Delta)
 		}
@@ -514,8 +555,27 @@ func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.
 		r.names[m.policy.Name] = meta.ID
-		r.prepared[meta.Frontier.Policy] = m.prepared
 		return nil
 	})
 	return r, err
+}
+
+// Match GCP3 key ordering without retaining a complete key for every name.
+func compareRollupIdentity(a, b *rollupMetric) int {
+	if len(a.policy.Group) != len(b.policy.Group) {
+		return len(a.policy.Group) - len(b.policy.Group)
+	}
+	if c := bytes.Compare([]byte(a.policy.Group), []byte(b.policy.Group)); c != 0 {
+		return c
+	}
+	if c := int(partsformat.Route(a.policy.Name)) - int(partsformat.Route(b.policy.Name)); c != 0 {
+		return c
+	}
+	if len(a.policy.Name) < len(b.policy.Name) {
+		return -1
+	}
+	if len(a.policy.Name) > len(b.policy.Name) {
+		return 1
+	}
+	return bytes.Compare([]byte(a.policy.Name), []byte(b.policy.Name))
 }

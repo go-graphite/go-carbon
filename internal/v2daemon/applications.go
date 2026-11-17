@@ -61,7 +61,7 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	var registered *v2core.ApplicationPolicy
 	// Classic mirroring consumes canonical bytes before core submission.
 	if p.layer == 3 && p.durableApplications == nil {
-		registered, err = v2core.NewApplicationPolicy(name, policy)
+		registered, err = p.engine.RegisterApplicationPolicy(NumericID(id, p.index, p.count), name, policy)
 		if err != nil {
 			return nil, err
 		}

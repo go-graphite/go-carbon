@@ -66,6 +66,9 @@ type coreSealPlan struct {
 	Abort func()
 }
 type coreHooks struct {
+	// Identities shares canonical journal metadata with the writer and reader.
+	Identities *PolicyCatalog
+
 	// PartSource identifies the durable original ordering stream for sealed parts.
 	// Zero uses the persisted journal identity (or an offline incarnation).
 	PartSource v2part.Provenance

@@ -103,13 +103,14 @@ func (app *App) startV2() error {
 	if err != nil {
 		return err
 	}
+	r.Identities = &v2core.PolicyCatalog{}
 	v := &v2Runtime{mode: mode, reader: r, stop: make(chan struct{}), metrics: &v2ModeMetrics{mode: mode}}
 	app.v2 = v
 	// Replay must complete before wall-clock expiry may create new reset barriers.
 	var recovered atomic.Bool
 	var intake atomic.Pointer[v2recv.Server]
 	telemetry := newV2WriteTelemetry(shards, n)
-	hooks := v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: telemetry.visible}
+	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: telemetry.visible}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
@@ -254,6 +255,13 @@ func (app *App) startV2() error {
 			}
 		}
 	}
+	app.Carbonserver.SetV2MoveAdmin(v2daemon.NewMoveAdmin(c.V2.Path, v.store, func(index int, run func() error) error {
+		receiver := intake.Load()
+		if receiver == nil {
+			return errors.New("v2 intake not ready")
+		}
+		return receiver.OnOwner(index, run)
+	}))
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
 	}
