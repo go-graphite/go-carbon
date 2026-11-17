@@ -67,7 +67,6 @@ type rollupMetric struct {
 	keyTemplate []byte
 	partOffset  int
 	vshard      uint16
-	ordinal     uint64
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -87,7 +86,6 @@ type coreRollups struct {
 	ordered        []*rollupStage
 	positions      map[uint64]int
 	batchPositions []int
-	ordinalsReady  bool
 	pendingNames   map[partsformat.ID]uint64
 	samples        []sealrollup.Sample
 	batches        []sealrollup.Batch
@@ -162,7 +160,6 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
 	r.batchPositions = slices.Grow(r.batchPositions[:0], len(in.Batches))[:len(in.Batches)]
-	freshCount := 0
 	for bi, b := range in.Batches {
 		i, ok := positions[b.ID]
 		if !ok {
@@ -185,7 +182,6 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 					return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
 				}
 				names[m.policy.Name] = b.ID
-				freshCount++
 			}
 			stages = append(stages, rollupStage{metric: m, next: m.metadata(), fresh: fresh})
 			stages[len(stages)-1].next.Expired = false
@@ -224,24 +220,6 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 		offset += len(b.Points)
 		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
-	}
-	// Canonical byte ordering is immutable. Derive its scalar ordinal only
-	// when the catalog grows (or after recovery), rather than per seal.
-	if freshCount != 0 || !r.ordinalsReady {
-		metrics := make([]*rollupMetric, 0, len(r.metrics)+freshCount)
-		for _, m := range r.metrics {
-			metrics = append(metrics, m)
-		}
-		for i := range stages {
-			if stages[i].fresh {
-				metrics = append(metrics, stages[i].metric)
-			}
-		}
-		slices.SortFunc(metrics, compareRollupMetrics)
-		for i, m := range metrics {
-			m.ordinal = uint64(i)
-		}
-		r.ordinalsReady = true
 	}
 	// Idle maintenance visits only live metadata; no point/store reads occur.
 	now := time.Now()

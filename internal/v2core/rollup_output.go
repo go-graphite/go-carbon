@@ -1,7 +1,6 @@
 package v2core
 
 import (
-	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -235,7 +234,9 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 }
 
 func compareRollupStages(a, b *rollupStage) int {
-	return cmp.Compare(a.metric.ordinal, b.metric.ordinal)
+	// Only metrics participating in this part need ordering. Historical names
+	// cannot change their relative canonical order.
+	return compareRollupMetrics(a.metric, b.metric)
 }
 
 func compareRollupMetrics(x, y *rollupMetric) int {
