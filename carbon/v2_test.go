@@ -68,6 +68,20 @@ func v2HTTP(t *testing.T, app *App, path string) []byte {
 	}
 	return b
 }
+
+// waitV2CatalogName waits for the background maintenance owner to publish
+// name: startup discovery is published off the request path,
+// bounded by the same 2.2 s visibility contract as live names.
+func waitV2CatalogName(t *testing.T, app *App, name string) {
+	t.Helper()
+	deadline := time.Now().Add(2200 * time.Millisecond)
+	for !slices.Contains(slices.Collect(app.v2.catalog.Snapshot().Names()), name) {
+		if time.Now().After(deadline) {
+			t.Fatalf("catalog did not publish %q within 2.2s", name)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 func TestV2TCPRenderFindInfoRestart(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
@@ -376,6 +390,9 @@ func testV2RuntimeSIGKILLWithActiveTCP(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	defer app.Stop()
+	if mode != v2Shadow {
+		waitV2CatalogName(t, app, "crash.durable")
+	}
 	b := v2HTTP(t, app, "/metrics/find/?format=json&query=crash.durable")
 	if !strings.Contains(string(b), "crash.durable") {
 		t.Fatalf("lost durable name: %s", b)
