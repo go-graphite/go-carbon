@@ -21,6 +21,9 @@ import (
 // Stop producers, close Reader, wait for Fetch consumers, then close the engine.
 // The engine owns the underlying Pebble databases; Close rejects later handoffs.
 type Reader struct {
+	// Identities is fixed before opening the engine or publishing snapshots.
+	Identities *v2core.PolicyCatalog
+
 	reads readCounters
 
 	closed    atomic.Bool
@@ -164,7 +167,7 @@ func (r *Reader) Close() {
 func (s *sealedData) load() {
 	s.cache.mu.Lock()
 	defer s.cache.mu.Unlock()
-	s.index, s.err = v2core.NewRollupSnapshotWithInventory(context.Background(), s.snapshot, s.cache.index, s.inventory, s.cache.limit)
+	s.index, s.err = v2core.NewRollupSnapshotWithCatalogAndInventory(context.Background(), s.snapshot, s.cache.index, s.reader.Identities, s.inventory, s.cache.limit)
 	if s.err != nil {
 		return
 	}

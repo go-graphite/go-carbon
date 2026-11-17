@@ -33,6 +33,13 @@ func TestStoreNameScale(t *testing.T) {
 	if err != nil || n < 1 || n > 20_000_000 || !filepath.IsAbs(dir) || (phase != "create" && phase != "recover") {
 		t.Fatal("requires V2_STORE_SCALE_NAMES=1..20000000, absolute V2_STORE_SCALE_DIR and create/recover V2_STORE_SCALE_PHASE")
 	}
+	pointCount := 1
+	if raw := os.Getenv("V2_STORE_SCALE_POINTS"); raw != "" {
+		pointCount, err = strconv.Atoi(raw)
+		if err != nil || pointCount < 1 || pointCount > 4096 {
+			t.Fatal("V2_STORE_SCALE_POINTS must be 1..4096")
+		}
+	}
 	if phase == "create" {
 		if _, err := os.Stat(filepath.Join(dir, "restart.json")); !os.IsNotExist(err) {
 			t.Fatal("create requires a fresh root")
@@ -46,7 +53,8 @@ func TestStoreNameScale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(dir, Config{Layer: 3, Producers: 4, Shards: 4, MaxPendingRows: 32768, coreMaxRows: 32768, Hooks: v2core.Hooks{DenseRollups: true, PublishBatches: r.Publish}})
+	r.Identities = &v2core.PolicyCatalog{}
+	s, err := Open(dir, Config{Layer: 3, Producers: 4, Shards: 4, MaxPendingRows: 32768, coreMaxRows: 32768, Hooks: v2core.Hooks{Identities: r.Identities, DenseRollups: true, PublishBatches: r.Publish}})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)
@@ -76,8 +84,14 @@ func TestStoreNameScale(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				apps = append(apps, Application{Name: name, Policy: policy, Order: uint64(i + 1), Clock: 1_800_000_000, Points: []points.Point{{Timestamp: 1_800_000_000, Value: float64(i)}}, Sequence: []uint64{uint64(i + 1)}})
-				if len(apps) == 4096 || i+4 >= n {
+				ps := make([]points.Point, pointCount)
+				seq := make([]uint64, pointCount)
+				for j := range ps {
+					ps[j] = points.Point{Timestamp: 1_800_000_000 + int64(j)*10, Value: float64(i + j)}
+					seq[j] = uint64(i*pointCount + j + 1)
+				}
+				apps = append(apps, Application{Name: name, Policy: policy, Order: uint64(i + 1), Clock: 1_800_000_000 + int64(pointCount-1)*10, Points: ps, Sequence: seq})
+				if len(apps)*pointCount >= 4096 || i+4 >= n {
 					if err := p.AppendApplications(apps); err != nil {
 						t.Fatal(err)
 					}
@@ -127,7 +141,7 @@ func TestStoreNameScale(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	result := map[string]any{"when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "phase": phase, "names": n, "core_open_seconds": opened.Seconds(), "discovery_ready_seconds": elapsed.Seconds(), "heap_alloc": memory.HeapAlloc, "heap_bytes_per_name": float64(int64(memory.HeapAlloc)-int64(before.HeapAlloc)) / float64(n), "heap_objects": memory.HeapObjects, "peak_rss_bytes": peak, "scope": "journal_core_reader_discovery_one_point_per_name", "shards": 4, "producers": 4, "core_max_rows": 32768, "gomemlimit": os.Getenv("GOMEMLIMIT")}
+	result := map[string]any{"when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "phase": phase, "names": n, "points_per_name": pointCount, "core_open_seconds": opened.Seconds(), "discovery_ready_seconds": elapsed.Seconds(), "heap_alloc": memory.HeapAlloc, "heap_bytes_per_name": float64(int64(memory.HeapAlloc)-int64(before.HeapAlloc)) / float64(n), "heap_objects": memory.HeapObjects, "total_alloc_bytes": memory.TotalAlloc - before.TotalAlloc, "mallocs": memory.Mallocs - before.Mallocs, "peak_rss_bytes": peak, "scope": "journal_core_reader_discovery", "shards": 4, "producers": 4, "core_max_rows": 32768, "gomemlimit": os.Getenv("GOMEMLIMIT")}
 	b, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)

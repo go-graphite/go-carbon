@@ -39,6 +39,16 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 // DecodeRollupMetadata accepts binary rows and legacy JSON metadata. Returned
 // policy bytes are detached from the iterator buffer and safe after Next/Close.
 func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
+	m, err := decodeRollupMetadataView(data)
+	if err == nil && len(data) >= 4 && bytes.Equal(data[:3], rollupMetadataMagic[:3]) && (data[3] == 1 || data[3] == 2) {
+		m.Policy = bytes.Clone(m.Policy)
+	}
+	return m, err
+}
+
+// The policy view is valid only until the iterator moves. Intern it before
+// retaining metadata; the catalog owns the immutable definition returned.
+func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 	var m RollupMetadata
 	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] != 1 && data[3] != 2) {
 		err := json.Unmarshal(data, &m)
@@ -64,7 +74,7 @@ func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 		offset = 62
 	}
 	copy(m.Frontier.Policy[:], data[offset:offset+32])
-	m.Policy = bytes.Clone(data[header:])
+	m.Policy = data[header:]
 	return m, nil
 }
 
@@ -82,7 +92,6 @@ func (r *coreRollups) release() {
 	r.batches = r.batches[:0]
 	clear(r.positions)
 	clear(r.pendingNames)
-	clear(r.stagedPolicies)
 	for group, file := range r.files {
 		clear(file)
 		r.files[group] = file[:0]

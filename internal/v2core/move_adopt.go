@@ -83,7 +83,7 @@ func (p *PreparedMove) Close() error {
 func (p *PreparedMove) Policies() map[string][]byte {
 	out := map[string][]byte{}
 	for name, m := range p.index.metrics {
-		out[name] = bytes.Clone(m.latest.meta.Policy)
+		out[name] = bytes.Clone(m.latest.definition)
 	}
 	return out
 }
@@ -142,14 +142,14 @@ func validateMoveFineCoverage(ctx context.Context, index *RollupSnapshot, name s
 	if m == nil {
 		return nil
 	}
-	fine := m.latest.policy.Config.Archives[0]
+	fine := m.latest.schema().Archives[0]
 	it, err := newArchiveIter(ctx, index.snapshot, nil)
 	if err != nil {
 		return err
 	}
 	defer it.Close()
 	for _, part := range m.parts {
-		for archive, a := range m.latest.policy.Config.Archives {
+		for archive, a := range m.latest.schema().Archives {
 			if archive == 0 {
 				continue
 			}
@@ -180,7 +180,7 @@ func validateMoveFineCoverage(ctx context.Context, index *RollupSnapshot, name s
 					return err
 				}
 				for _, record := range records {
-					if recordVisible(m, part.origin, record.Order) && record.Sample.Time < cutoff {
+					if index.recordVisible(m, part.part.origin, record.Order) && record.Sample.Time < cutoff {
 						return errors.New("move coarse history extends outside complete fine coverage")
 					}
 				}
@@ -226,20 +226,20 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 				return err
 			}
 			for _, record := range records {
-				if !recordVisible(m, part.origin, record.Order) {
+				if !index.recordVisible(m, part.part.origin, record.Order) {
 					continue
 				}
 				old, exists := winners[record.Slot]
 				newer := !exists
 				if exists {
-					newer, err = newerOrigin(part.origin, record, old.origin, old.record)
+					newer, err = newerOrigin(part.part.origin, record, old.origin, old.record)
 					if err != nil {
 						return err
 					}
 				}
 				if newer {
-					winners[record.Slot] = moveWinner{record, part.origin}
-				} else if part.origin == old.origin && record.Sample.Time == old.record.Sample.Time && record.Order == old.record.Order && record != old.record {
+					winners[record.Slot] = moveWinner{record, part.part.origin}
+				} else if part.part.origin == old.origin && record.Sample.Time == old.record.Sample.Time && record.Order == old.record.Order && record != old.record {
 					return errors.New("conflicting move raw order")
 				}
 			}
@@ -308,10 +308,11 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 	}
 	next := newCoreRollups()
+	next.identities = o.rollups.identities
+	next.parallelism = o.rollups.parallelism
 	for id, m := range o.rollups.metrics {
 		next.metrics[id] = m
 		next.names[m.policy.Name] = id
-		next.prepared[m.meta.Frontier.Policy] = m.prepared
 	}
 	next.stage, next.expire, next.now = o.rollups.stage, o.rollups.expire, o.rollups.now
 	for name, donor := range prepared.index.metrics {
@@ -319,7 +320,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if id == 0 {
 			return errors.New("missing receiving numeric identity")
 		}
-		policy := donor.latest.policy
+		policy := donor.latest.rollupPolicy()
 		// This first attachment requires a proof of full fine coverage. Longer
 		// coarse histories need a separate boundary inventory; do not guess.
 		fine := policy.Config.Archives[0]
@@ -328,7 +329,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 				return errors.New("move needs complete retained fine coverage of coarse archives")
 			}
 		}
-		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.meta.Policy, donor.latest.meta.Policy) {
+		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.definition, donor.latest.definition) {
 			return errors.New("move policy mismatch")
 		}
 		if err = validateMoveFineCoverage(ctx, prepared.index, name, now); err != nil {
@@ -348,13 +349,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		for _, winner := range winners {
 			raw = append(raw, winner.record)
 		}
-		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.meta.Policy), Revision: 1, LastUpdate: now * 1e9}
-		local.Frontier.Policy = donor.latest.meta.Frontier.Policy
+		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.definition), Revision: 1, LastUpdate: now * 1e9}
+		local.Frontier.Policy = donor.latest.prepared.Digest()
 		if old := o.rollups.metrics[id]; old != nil {
-			if !bytes.Equal(old.meta.Policy, local.Policy) {
+			if !bytes.Equal(old.definition, local.Policy) {
 				return errors.New("receiving ID belongs to another name")
 			}
-			local = old.meta
+			local = old.metadata()
 		}
 		local.LastUpdate = max(local.LastUpdate, donor.latest.meta.LastUpdate)
 		local.Revision++
@@ -362,11 +363,11 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if err != nil {
 			return err
 		}
-		m, err := next.metric(id, local.Policy, next.prepared)
+		m, err := next.metric(id, local.Policy)
 		if err != nil {
 			return err
 		}
-		m.meta = local
+		m.meta = compactMetadata(local)
 		authority := moveAuthority{Version: 1, Meta: local, AtOrder: local.Frontier.Order}
 		for _, record := range rebuilt {
 			m.slots.Install(record.Delta)
@@ -375,10 +376,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 				authority.Coarse = append(authority.Coarse, record)
 			}
 		}
-		authority.Meta = m.meta
+		authority.Meta = m.metadata()
 		next.metrics[id] = m
 		next.names[policy.Name] = id
-		next.prepared[local.Frontier.Policy] = m.prepared
 		value, err := json.Marshal(authority)
 		if err != nil {
 			return err
@@ -436,7 +436,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 
 func (s *RollupSnapshot) loadMoveAuthorities() error {
 	for name, m := range s.metrics {
-		if !m.copied {
+		if s.moves[m] == nil || !s.moves[m].copied {
 			continue
 		}
 		value, closer, err := s.snapshot.Get(moveAuthorityKey(name))
@@ -452,31 +452,33 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if a.Version != 1 || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.meta.Policy) || a.Meta.Frontier.Order != a.AtOrder {
+		if a.Version != 1 || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definition) || a.Meta.Frontier.Order != a.AtOrder {
 			return errors.New("invalid move authority")
 		}
-		if m.origin.Class == LivePart {
-			if m.latest.meta.ID != a.Meta.ID {
+		if s.moves[m].origin.Class == LivePart {
+			if m.latest.id != a.Meta.ID {
 				return errors.New("move receiving identity changed")
 			}
 			if m.latest.meta.Frontier.Order <= a.AtOrder {
 				latest := *m.latest
-				latest.meta = a.Meta
+				latest.meta = compactMetadata(a.Meta)
+				latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, definition: latest.definition, prepared: latest.prepared}
 				m.latest = &latest
 			}
 		} else {
 			latest := *m.latest
-			latest.meta = a.Meta
+			latest.meta = compactMetadata(a.Meta)
+			latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, definition: latest.definition, prepared: latest.prepared}
 			m.latest = &latest
 		}
-		m.authority = &a
+		s.moves[m].authority = &a
 	}
 	return nil
 }
 
 func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
 	m := s.metrics[name]
-	a := m.authority
+	a := s.moves[m].authority
 	winners := map[int64]sealrollup.Record{}
 	if m.latest.meta.ResetOrder <= a.AtOrder {
 		for _, record := range a.Coarse {
@@ -489,11 +491,9 @@ func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, arc
 	// reader, then overlay them on the rebuilt boundary baseline.
 	live := *m
 	live.parts = nil
-	live.authority = nil
-	live.copied = false
-	live.origins = nil
+
 	for _, part := range m.parts {
-		if part.origin.Class == LivePart {
+		if part.part.origin.Class == LivePart {
 			live.parts = append(live.parts, part)
 		}
 	}
