@@ -22,6 +22,8 @@ import (
 // caller. Every later application must be ordered strictly after Order.
 // Group/Part describe the baseline's new physical identity, permitting the
 // resolved slots of different native source tables to share one dense part.
+// As in a live seal, records go to the UTC month partition of their sample time
+// (v2core.RollupMonthPartition), each partition carrying the metric envelope.
 type NativeBaseline struct {
 	Snapshot v2part.Digest
 	Source   v2part.Provenance
@@ -67,7 +69,9 @@ func NativeRecords(snapshot chunkstore.Snapshot, baseline NativeBaseline) ([]Rec
 	meta := v2core.RollupMetadata{Version: 1, ID: m.ID, Policy: encoded, Revision: m.Revision, LastUpdate: m.LastUpdate.UnixNano(), Frontier: sealrollup.Frontier{Order: baseline.Order, Policy: digest}}
 	key := v2part.Key{Group: baseline.Group, VShard: v2part.Route(policy.Name), Part: baseline.Part, Metric: policy.Name}
 	var records []Record
-	put := func(archive uint32, slot int64, value []byte) error {
+	var partitions []int64
+	put := func(partition int64, archive uint32, slot int64, value []byte) error {
+		key.Partition = partition
 		key.Archive, key.BlockStart = archive, slot
 		encoded, err := v2part.Encode(key)
 		if err == nil {
@@ -92,14 +96,25 @@ func NativeRecords(snapshot chunkstore.Snapshot, baseline NativeBaseline) ([]Rec
 			occupied[slot] = true
 			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, point.Timestamp)
 			r := sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: slot, Order: baseline.Order, Sample: sealrollup.Sample{Time: point.Timestamp, Bits: math.Float64bits(point.Value), Sequence: baseline.Order}}}
-			if err := put(uint32(archive), slot, sealrollup.EncodeRecord(r)); err != nil {
+			partition := v2core.RollupMonthPartition(point.Timestamp)
+			if !slices.Contains(partitions, partition) {
+				partitions = append(partitions, partition)
+			}
+			if err := put(partition, uint32(archive), slot, sealrollup.EncodeRecord(r)); err != nil {
 				return nil, err
 			}
 		}
 	}
+	// As in a live seal, the envelope goes with every partition written and
+	// with the month of the newest sample.
+	if home := v2core.RollupMonthPartition(meta.Frontier.MaxTime); !slices.Contains(partitions, home) {
+		partitions = append(partitions, home)
+	}
 	encoded = v2core.AppendRollupMetadata(nil, meta)
-	if err := put(v2part.MetadataArchive, 0, encoded); err != nil {
-		return nil, err
+	for _, partition := range partitions {
+		if err := put(partition, v2part.MetadataArchive, 0, encoded); err != nil {
+			return nil, err
+		}
 	}
 	slices.SortFunc(records, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
 	return records, nil

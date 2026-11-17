@@ -323,3 +323,78 @@ func TestBaselineMissingPartNeverPublishes(t *testing.T) {
 		t.Fatal("partial baseline was published")
 	}
 }
+
+// Native history spanning a month boundary converts into one part per UTC
+// month, each with the metric envelope, exactly as a live seal lays it out.
+// Install must accept the repeated envelope and keep every stored sample.
+func TestBaselineInstallAcrossMonthPartitions(t *testing.T) {
+	const now, october = int64(1794700860), int64(1792454400) // 2026-11-15, 2026-10-20 UTC
+	retentions := []chunkstore.Retention{{Step: 60, Count: 120}, {Step: 3600, Count: 2400}}
+	snapshot := chunkstore.Snapshot{Metadata: chunkstore.Metadata{ID: 988, Revision: 1, LastUpdate: time.Unix(now, 0), MetricConfig: chunkstore.MetricConfig{Name: "baseline.months", Retentions: retentions, AggregationMethod: chunkstore.Average}}}
+	snapshot.Archives = []chunkstore.Archive{{Retention: retentions[0], Points: []chunkstore.Point{{Timestamp: now - 60, Value: 2}}}, {Retention: retentions[1], Points: []chunkstore.Point{{Timestamp: october, Value: 5}, {Timestamp: now - 60 - 3600, Value: 7}}}}
+	sum := sha256.Sum256([]byte("immutable-classic-months"))
+	plan := v2convert.NativeCheckpointPlan{Version: 1, Now: now, Names: []string{"baseline.months"}, Files: []v2convert.File{{Name: "CHUNKSTORE", SHA256: hex.EncodeToString(sum[:]), Bytes: 1}, {Name: "CURRENT", SHA256: hex.EncodeToString(sum[:]), Bytes: 1}}, Baseline: v2convert.NativeBaseline{Source: v2part.Provenance{Incarnation: v2part.PartID{3}, Stream: "fenced-fixture"}, Group: "local", Part: v2part.PartID{5}, Order: 100}}
+	var err error
+	if plan.Baseline.Snapshot, err = plan.InventoryDigest(); err != nil {
+		t.Fatal(err)
+	}
+	output := t.TempDir()
+	receipt, err := v2convert.ConvertNativeCheckpoint(context.Background(), singleBaselineSnapshot{snapshot}, plan, output, 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, err := filepath.Glob(filepath.Join(output, "*", "receipt.json"))
+	if err != nil || len(receipts) != 1 {
+		t.Fatal(receipts, err)
+	}
+	directory := filepath.Dir(receipts[0])
+	partitions := map[int64]bool{}
+	for _, f := range receipt.Files {
+		if !strings.HasSuffix(f.Name, ".descriptor") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(directory, f.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := v2part.ParseDescriptor(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Coverage.MinExpiry == 0 || d.Coverage.MaxExpiry == 0 || len(d.VShards) != 1 {
+			t.Fatalf("converted part lacks live expiry/inventory: %+v", d.Coverage)
+		}
+		partitions[d.Scope.Partition] = true
+	}
+	if len(partitions) != 2 || !partitions[v2core.RollupMonthPartition(october)] || !partitions[v2core.RollupMonthPartition(now)] {
+		t.Fatalf("month partitions %v", partitions)
+	}
+	root := t.TempDir()
+	store, err := Open(root, Config{Layer: 3, Producers: 2, Shards: 2, MaxCoreRows: 128, GroupInterval: time.Hour, BaselinePath: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	found := map[int64]uint64{}
+	names := 0
+	for _, db := range store.Core.DBs() {
+		snap := db.NewSnapshot()
+		err := v2core.ScanRollups(snap, func(p v2core.RollupPolicy, m v2core.RollupMetadata, records []sealrollup.Record) error {
+			names++
+			if m.BaselineOrder != 100 || m.Frontier.MaxTime != now-60 {
+				return fmt.Errorf("baseline metadata %+v", m)
+			}
+			for _, r := range records {
+				found[r.Sample.Time] = r.Sample.Bits
+			}
+			return nil
+		})
+		_ = snap.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if names != 1 || len(found) != 3 || found[october] != math.Float64bits(5) || found[now-60] != math.Float64bits(2) || found[now-60-3600] != math.Float64bits(7) {
+		t.Fatalf("installed baseline names=%d samples=%v", names, found)
+	}
+}

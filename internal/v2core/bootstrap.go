@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -48,13 +49,19 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 			if err != nil {
 				return err
 			}
-			if ids[k.Metric] != 0 || m.ID == 0 {
+			// The envelope repeats once per month partition; copies must agree.
+			if m.ID == 0 || (ids[k.Metric] != 0 && ids[k.Metric] != m.ID) {
 				return errors.New("duplicate baseline metadata")
 			}
 			ids[k.Metric] = m.ID
 		}
 	}
-	files := make([][]KV, cfg.Shards)
+	// One part per owner and partition scope, as a live seal writes them.
+	type scope struct {
+		partition int64
+		part      v2part.PartID
+	}
+	files := make([]map[scope][]KV, cfg.Shards)
 	for _, kv := range rows {
 		k, _ := v2part.Decode(kv.Key)
 		id := ids[k.Metric]
@@ -62,10 +69,14 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 			return errors.New("baseline slots lack metadata")
 		}
 		owner := int(v2part.Route(k.Metric)) % cfg.Shards
-		files[owner] = append(files[owner], kv)
+		if files[owner] == nil {
+			files[owner] = map[scope][]KV{}
+		}
+		s := scope{k.Partition, k.Part}
+		files[owner][s] = append(files[owner][s], kv)
 	}
 	cfg.Owners = 0
-	for owner, file := range files {
+	for owner, scoped := range files {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", owner))
 		db, err := pebble.Open(dir, &pebble.Options{MemTableSize: 1 << 20})
 		if err != nil {
@@ -73,13 +84,24 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 		}
 		next := coreFrontier{Version: 1, Config: cfg, Cursors: make([]uint64, cfg.Producers), NextPart: 1, ExpiredBefore: -1 << 63}
 		o := &coreOwner{db: db, dir: dir, cfg: cfg, partSource: source, stage: stage}
-		slices.SortFunc(file, func(a, b KV) int { return bytes.Compare(a.Key, b.Key) })
-		o.plan = func(coreSealInput) (coreSealPlan, error) {
-			p := coreSealPlan{}
-			if len(file) > 0 {
-				p.Files = [][]KV{file}
+		scopes := make([]scope, 0, len(scoped))
+		for s := range scoped {
+			scopes = append(scopes, s)
+		}
+		slices.SortFunc(scopes, func(a, b scope) int {
+			if a.partition != b.partition {
+				return cmp.Compare(a.partition, b.partition)
 			}
-			return p, nil
+			return bytes.Compare(a.part[:], b.part[:])
+		})
+		var plan [][]KV
+		for _, s := range scopes {
+			file := scoped[s]
+			slices.SortFunc(file, func(a, b KV) int { return bytes.Compare(a.Key, b.Key) })
+			plan = append(plan, file)
+		}
+		o.plan = func(coreSealInput) (coreSealPlan, error) {
+			return coreSealPlan{Files: plan}, nil
 		}
 		_, err = o.sealBatches(nil, nil, next)
 		if err == nil {

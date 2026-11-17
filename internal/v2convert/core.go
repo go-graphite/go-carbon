@@ -34,7 +34,7 @@ func (CoreRecords) Convert(e Entry) (Record, error) {
 	if err != nil {
 		return Record{}, fmt.Errorf("source is not current core GCP3: %w", err)
 	}
-	if k.Partition != 0 {
+	if !validPartition(k.Partition) {
 		return Record{}, errors.New("unsupported core rollup partition")
 	}
 	if k.Archive == math.MaxUint32 {
@@ -46,6 +46,9 @@ func (CoreRecords) Convert(e Entry) (Record, error) {
 	}
 	return Record{e.Key, e.Value}, nil
 }
+
+// Live seals partition by UTC calendar month; zero is the pre-partition layout.
+func validPartition(p int64) bool { return p == 0 || v2core.RollupMonthPartition(p) == p }
 
 // Expand is the shared dense/source adapter. It reconstructs the same logical
 // singleton stream, so an already-dense part can be repacked and reverified.
@@ -61,7 +64,7 @@ func (c CoreRecords) Expand(e Entry, emit func(Record) error) error {
 		}
 		return emit(r)
 	}
-	if k.Ordinal != 0 || k.Partition != 0 || e.Trailer>>8 != 0 {
+	if k.Ordinal != 0 || !validPartition(k.Partition) || e.Trailer>>8 != 0 {
 		return errors.New("unsupported materialized source key/sequence")
 	}
 	records, err := v2part.DecodeSlots(k.Archive, k.BlockStart, e.Value)
