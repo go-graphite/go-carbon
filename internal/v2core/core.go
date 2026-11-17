@@ -43,6 +43,9 @@ type coreConfig struct {
 	PartitionSeconds           int64
 	BlindBatch                 bool
 	RawCodec                   string
+	// DeferMerges holds background part merges until ResumeMerges or Close, so
+	// crash replay does not rewrite parts it is still sealing. Runtime only.
+	DeferMerges bool `json:"-"`
 }
 type coreFrontier struct {
 	ArchiveClock  int64 `json:",omitempty"`
@@ -255,6 +258,8 @@ type coreEngine struct {
 	gcStop    chan struct{}
 	gcDone    chan struct{}
 	mergeDone chan struct{}
+	mergeHold chan struct{}
+	resumed   atomic.Bool
 	gcFailure atomic.Pointer[coreFailure]
 
 	owners       []*coreOwner
@@ -353,6 +358,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
 	diskConfig.SealInterval = 0
 	diskConfig.SealMaxRows = 0
+	diskConfig.DeferMerges = false
 	identities := hooks.Identities
 	if identities == nil {
 		identities = &PolicyCatalog{}
@@ -565,6 +571,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	e.gcStop, e.gcDone = make(chan struct{}), make(chan struct{})
 	go e.runPartGC()
 	e.mergeDone = make(chan struct{})
+	if e.cfg.DeferMerges {
+		e.mergeHold = make(chan struct{})
+	}
 	for _, o := range e.owners {
 		if mergeWorkers > 0 {
 			o.mergeStop = e.gcStop

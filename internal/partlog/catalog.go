@@ -367,6 +367,15 @@ func (c *NameCatalog) Lookup(id uint64) (string, []byte, bool) {
 	e := c.entries[id]
 	return e.key, e.definitionBytes(), true
 }
+// Matches reports whether id is bound to exactly name and definition, without
+// reconstructing the definition bytes.
+func (c *NameCatalog) Matches(id uint64, name string, definition []byte) bool {
+	if id == 0 || id >= uint64(len(c.entries)) {
+		return false
+	}
+	e := c.entries[id]
+	return e.key == name && e.definitionEqual(definition)
+}
 func (c *NameCatalog) Epoch() [16]byte { return c.epoch }
 func (c *NameCatalog) Count() uint64   { return uint64(len(c.entries) - 1) }
 func (c *NameCatalog) Sync() error {

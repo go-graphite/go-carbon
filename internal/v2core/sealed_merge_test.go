@@ -439,3 +439,43 @@ func TestSealedMergeWorkerBudget(t *testing.T) {
 		t.Setenv("CORE_MERGE_WORKERS", "")
 	}
 }
+
+// Replay seals append parts while merges wait; ResumeMerges releases the
+// ordinary background bound and Close never waits on a held merge pass.
+func TestSealedMergeDeferredUntilResume(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "1")
+	cfg := adoptConfig()
+	cfg.DeferMerges = true
+	e, err := openCoreWithHooks(t.TempDir(), cfg, coreHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	for n := uint64(1); n <= 40; n++ {
+		mergeAppend(t, e, n)
+	}
+	time.Sleep(100 * time.Millisecond)
+	held := mergeCount(e.owners[0])
+	if held <= 12 {
+		t.Fatalf("merges ran while deferred: live parts=%d", held)
+	}
+	e.ResumeMerges()
+	e.ResumeMerges()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && mergeCount(e.owners[0]) > 12 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := mergeCount(e.owners[0]); got > 12 {
+		t.Fatalf("resumed backlog=%d (held %d)", got, held)
+	}
+	if failure := e.gcFailure.Load(); failure != nil {
+		t.Fatal(failure.err)
+	}
+	held2, err := openCoreWithHooks(t.TempDir(), cfg, coreHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := held2.close(); err != nil {
+		t.Fatal(err)
+	}
+}
