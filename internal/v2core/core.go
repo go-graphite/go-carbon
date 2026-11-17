@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/v2part"
+	"golang.org/x/sync/errgroup"
 )
 
 var coreMetaKey = []byte{0xff, 'f'}
@@ -354,6 +355,10 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	e := &coreEngine{identities: identities, readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
+			if o == nil {
+				continue
+			}
+			o.pub.clear()
 			_ = o.db.Close()
 		}
 		return nil, err
@@ -366,147 +371,166 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			return nil, err
 		}
 	}
+	e.owners = make([]*coreOwner, cfg.Shards)
+	// Limit concurrent Pebble opens, rollup reconstruction and part validation.
+	// No owner/merge/GC workers start until every owner has opened successfully.
+	var opening errgroup.Group
+	opening.SetLimit(min(16, runtime.GOMAXPROCS(0)))
 	for s := 0; s < cfg.Shards; s++ {
-		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
-		opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+		opening.Go(func() error {
+			dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
+			opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
 
-		opts.Experimental.TableCacheShards = 1
-		opts.BytesPerSync = 64 << 20
-		opts.EventListener = &pebble.EventListener{
-			TableCreated: func(info pebble.TableCreateInfo) {
-				if hooks.Stage != nil && info.Reason == "ingesting" {
-					hooks.Stage("ingest")
-				}
-			},
-			WriteStallBegin: func(pebble.WriteStallBeginInfo) { e.stalls.Add(1) },
-			CompactionBegin: func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_begin", dir, info.JobID) },
-			CompactionEnd:   func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_end", dir, info.JobID) },
-		}
-		db, err := pebble.Open(dir, opts)
-		if err != nil {
-			return fail(err)
-		}
-		o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
-		if hooks.Visible != nil {
-			o.visible = func(b []coreBatch) { hooks.Visible(s, b) }
-		}
-		sealMaxRows := cfg.SealMaxRows
-		if sealMaxRows == 0 {
-			sealMaxRows = 128 << 10
-		}
-		o.sealRows = min(cfg.MaxRows, sealMaxRows)
-		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
-			// Include the process phase: one DB per process must stagger too.
-			// This changes execution boundaries, never the persisted format.
-			phase := (sealPhase + 1024*s/cfg.Shards) % 1024
-			o.sealRows -= (o.sealRows / 4) * phase / 1024
-		}
-		o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
-		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
-		o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
-		o.radixSort = os.Getenv("CORE_RADIX_SORT") == "1"
-		e.owners = append(e.owners, o)
-		if hook != nil {
-			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
-		}
-		if hooks.PublishBatchesWithInventory != nil {
-			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
-				// Replace the provisional pin with one captured under the GC binding
-				// fence. No reader acquires this owner/GC mutex.
-				_ = snap.Close()
-				if o.gc == nil {
-					return hooks.PublishBatchesWithInventory(s, o.db.NewSnapshot(), batches, generation, nil)
-				}
-				o.gc.mu.Lock()
-				pin, inventory := o.db.NewSnapshot(), o.gc.inventory
-				o.gc.mu.Unlock()
-				return hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+			opts.Experimental.TableCacheShards = 1
+			opts.BytesPerSync = 64 << 20
+			opts.EventListener = &pebble.EventListener{
+				TableCreated: func(info pebble.TableCreateInfo) {
+					if hooks.Stage != nil && info.Reason == "ingesting" {
+						hooks.Stage("ingest")
+					}
+				},
+				WriteStallBegin: func(pebble.WriteStallBeginInfo) { e.stalls.Add(1) },
+				CompactionBegin: func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_begin", dir, info.JobID) },
+				CompactionEnd:   func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_end", dir, info.JobID) },
 			}
-		} else if hooks.PublishBatches != nil {
-			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
-				return hooks.PublishBatches(s, snap, batches, generation)
+			db, err := pebble.Open(dir, opts)
+			if err != nil {
+				return err
 			}
-		}
-		if hooks.PlanSeal != nil {
-			o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
-		}
-		o.meta = coreFrontier{Version: 1, Config: diskConfig, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
-		b, c, err := db.Get(coreMetaKey)
-		if err == nil {
-			err = json.Unmarshal(b, &o.meta)
-			_ = c.Close()
-		} else if errors.Is(err, pebble.ErrNotFound) {
-			err = nil
-		}
-		if err != nil {
-			return fail(err)
-		}
-		if (o.meta.Version != 1 && o.meta.Version != 2) || o.meta.Config != diskConfig || len(o.meta.Cursors) != cfg.Producers {
-			return fail(errors.New("owner format/config mismatch"))
-		}
-		o.publishFrontier(o.meta)
-		if cfg.Rollups && readOnly {
-			value, closer, err := db.Get(rollupDirectoryKey)
+			o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+			if hooks.Visible != nil {
+				o.visible = func(b []coreBatch) { hooks.Visible(s, b) }
+			}
+			sealMaxRows := cfg.SealMaxRows
+			if sealMaxRows == 0 {
+				sealMaxRows = 128 << 10
+			}
+			o.sealRows = min(cfg.MaxRows, sealMaxRows)
+			if os.Getenv("CORE_STAGGER_SEAL") == "1" {
+				// Include the process phase: one DB per process must stagger too.
+				// This changes execution boundaries, never the persisted format.
+				phase := (sealPhase + 1024*s/cfg.Shards) % 1024
+				o.sealRows -= (o.sealRows / 4) * phase / 1024
+			}
+			o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
+			o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
+			o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
+			o.radixSort = os.Getenv("CORE_RADIX_SORT") == "1"
+			e.owners[s] = o
+			if hook != nil {
+				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
+			}
+			if hooks.PublishBatchesWithInventory != nil {
+				o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
+					// Replace the provisional pin with one captured under the GC binding
+					// fence. No reader acquires this owner/GC mutex.
+					_ = snap.Close()
+					if o.gc == nil {
+						return hooks.PublishBatchesWithInventory(s, o.db.NewSnapshot(), batches, generation, nil)
+					}
+					o.gc.mu.Lock()
+					pin, inventory := o.db.NewSnapshot(), o.gc.inventory
+					o.gc.mu.Unlock()
+					return hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+				}
+			} else if hooks.PublishBatches != nil {
+				o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
+					return hooks.PublishBatches(s, snap, batches, generation)
+				}
+			}
+			if hooks.PlanSeal != nil {
+				o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
+			}
+			o.meta = coreFrontier{Version: 1, Config: diskConfig, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
+			b, c, err := db.Get(coreMetaKey)
 			if err == nil {
-				absolute, e := filepath.Abs(dir)
-				if e == nil && string(value) != absolute {
-					e = errors.New("relocated archive owner must be opened writable once to rebind its local directory")
-				}
-				e = errors.Join(e, closer.Close())
-				if e != nil {
-					return fail(e)
-				}
-			} else if !errors.Is(err, pebble.ErrNotFound) {
-				return fail(err)
+				err = json.Unmarshal(b, &o.meta)
+				_ = c.Close()
+			} else if errors.Is(err, pebble.ErrNotFound) {
+				err = nil
 			}
-		}
-		if cfg.Rollups && !readOnly {
-			absolute, err := filepath.Abs(dir)
 			if err != nil {
-				return fail(err)
+				return err
 			}
-			if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
-				return fail(err)
+			if (o.meta.Version != 1 && o.meta.Version != 2) || o.meta.Config != diskConfig || len(o.meta.Cursors) != cfg.Producers {
+				return errors.New("owner format/config mismatch")
 			}
-			r, err := recoverCoreRollups(db, identities)
-			if err != nil {
-				return fail(err)
-			}
-			r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
-			r.stage = hooks.Stage
-			r.expire = hooks.Expire
-			r.now = hooks.Now
-			o.maintenance = hooks.Expire != nil
-			o.plan = r.plan
-			o.rollups = r
-		}
-		// Only uncommitted staging files remain after successful atomic ingestion.
-		files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
-		if err != nil {
-			return fail(err)
-		}
-		for _, p := range files {
-			if err = os.Remove(p); err != nil {
-				return fail(err)
-			}
-		}
-		if cfg.Rollups {
-			if !readOnly {
-				if err = cleanupSealedMerges(dir); err != nil {
-					return fail(err)
+			o.publishFrontier(o.meta)
+			if cfg.Rollups && readOnly {
+				value, closer, err := db.Get(rollupDirectoryKey)
+				if err == nil {
+					absolute, e := filepath.Abs(dir)
+					if e == nil && string(value) != absolute {
+						e = errors.New("relocated archive owner must be opened writable once to rebind its local directory")
+					}
+					e = errors.Join(e, closer.Close())
+					if e != nil {
+						return e
+					}
+				} else if !errors.Is(err, pebble.ErrNotFound) {
+					return err
 				}
 			}
-			if o.gc, err = openSealedPartGC(db, dir, hooks.Stage); err != nil {
-				return fail(err)
+			if cfg.Rollups && !readOnly {
+				absolute, err := filepath.Abs(dir)
+				if err != nil {
+					return err
+				}
+				if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
+					return err
+				}
+				r, err := recoverCoreRollups(db, identities)
+				if err != nil {
+					return err
+				}
+				r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
+				r.stage = hooks.Stage
+				r.expire = hooks.Expire
+				r.now = hooks.Now
+				o.maintenance = hooks.Expire != nil
+				o.plan = r.plan
+				o.rollups = r
 			}
-		}
-		for range cfg.Producers {
-			// The producer lease budget bounds total admitted bytes. Let each
-			// edge hold its fair share when larger credit is requested.
-			queueBytes := max(uint64(coreQueueBytes), streamBytes/uint64(cfg.Shards))
-			o.queues = append(o.queues, newCoreQueue(queueBytes))
-		}
+			// Only uncommitted staging files remain after successful atomic ingestion.
+			files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
+			if err != nil {
+				return err
+			}
+			for _, p := range files {
+				if err = os.Remove(p); err != nil {
+					return err
+				}
+			}
+			if cfg.Rollups {
+				if !readOnly {
+					if err = cleanupSealedMerges(dir); err != nil {
+						return err
+					}
+				}
+				if o.gc, err = openSealedPartGC(db, dir, hooks.Stage); err != nil {
+					return err
+				}
+			}
+			for range cfg.Producers {
+				// The producer lease budget bounds total admitted bytes. Let each
+				// edge hold its fair share when larger credit is requested.
+				queueBytes := max(uint64(coreQueueBytes), streamBytes/uint64(cfg.Shards))
+				o.queues = append(o.queues, newCoreQueue(queueBytes))
+			}
+			o.readGeneration = o.meta.NextPart
+			o.pub.publish(o.db.NewSnapshot())
+			if o.batchHook != nil {
+				if err := o.batchHook(o.db.NewSnapshot(), nil, o.readGeneration); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 	}
+	if err := opening.Wait(); err != nil {
+		return fail(err)
+	}
+
 	workers := cfg.Owners
 	if workers == 0 {
 		workers = cfg.Shards
@@ -523,13 +547,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 	}
 	for i, o := range e.owners {
-		o.readGeneration = o.meta.NextPart
-		o.pub.publish(o.db.NewSnapshot())
-		if o.batchHook != nil {
-			if err := o.batchHook(o.db.NewSnapshot(), nil, o.readGeneration); err != nil {
-				return fail(err)
-			}
-		}
 		groups[i%workers] = append(groups[i%workers], o)
 	}
 	// One notification per execution group; rings and readiness bits remain
