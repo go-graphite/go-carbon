@@ -63,9 +63,8 @@ type RollupMetadata struct {
 
 type rollupMetric struct {
 	*PolicyIdentity
-	registered *ApplicationPolicy
-	meta       metricMetadata
-	slots      *sealrollup.Slots
+	meta  metricMetadata
+	slots *sealrollup.Slots
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -210,7 +209,6 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				if err != nil {
 					return coreSealPlan{}, err
 				}
-				m.registered = b.Registered
 			}
 			if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
 				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
@@ -225,7 +223,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			positions[b.ID] = i
 		}
 		s := &stages[i]
-		if (b.Registered == nil || b.Registered != s.metric.registered) && !bytes.Equal(b.Policy, s.metric.definition) {
+		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !bytes.Equal(b.Policy, s.metric.definition) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
 		stages[i].batchCount++

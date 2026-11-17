@@ -72,7 +72,7 @@ func TestApplicationPolicyOwnsCanonicalDefinition(t *testing.T) {
 		t.Fatal(e)
 	}
 	clear(encoded)
-	if !bytes.Equal(p.policy, original) || p.vshard != v2part.Route("namespace.metric") {
+	if !bytes.Equal(p.definition, original) || v2part.Route(p.policy.Name) != v2part.Route("namespace.metric") {
 		t.Fatal("registered policy aliases caller or changes route")
 	}
 	if _, e = NewApplicationPolicy("another.metric", original); e == nil {
