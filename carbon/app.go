@@ -935,7 +935,7 @@ func (app *App) Start() (err error) {
 			return e
 		}
 		if len(entries) > 0 {
-			return errors.New("classic write fallback with retained v2 history requires union write-epoch support")
+			return errors.New("classic-only startup would hide retained v2 history; use v2.mode=shadow during a dual-write hold, or restore and verify classic after v2-only")
 		}
 	}
 	// ParseConfig already took this snapshot. Embedded callers may supply or
