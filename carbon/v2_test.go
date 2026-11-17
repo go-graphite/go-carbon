@@ -275,6 +275,13 @@ func TestV2CrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := v2TestApp(t, root)
+	app.Config.V2.Mode = os.Getenv("V2_WIRE_MODE")
+	if app.Config.V2.Mode == v2ServingDual {
+		app.Config.Whisper.Schemas[0].Retentions = app.Config.Whisper.Schemas[0].Retentions[:1]
+	}
+	if app.Config.V2.Mode == v2Shadow {
+		app.Config.Carbonserver.ScanFrequency = &Duration{20 * time.Millisecond}
+	}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +312,8 @@ func TestV2CrashChild(t *testing.T) {
 		}
 	}
 }
-func TestV2RuntimeSIGKILLWithActiveTCP(t *testing.T) {
+func TestV2RuntimeSIGKILLWithActiveTCP(t *testing.T) { testV2RuntimeSIGKILLWithActiveTCP(t, v2Only) }
+func testV2RuntimeSIGKILLWithActiveTCP(t *testing.T, mode string) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -318,7 +326,7 @@ func TestV2RuntimeSIGKILLWithActiveTCP(t *testing.T) {
 	}
 	defer log.Close()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestV2CrashChild$", "-test.timeout=30s")
-	cmd.Env = append(os.Environ(), "V2_WIRE_CRASH_ROOT="+root, "V2_WIRE_CRASH_STAMP="+strconv.FormatInt(stamp, 10))
+	cmd.Env = append(os.Environ(), "V2_WIRE_MODE="+mode, "V2_WIRE_CRASH_ROOT="+root, "V2_WIRE_CRASH_STAMP="+strconv.FormatInt(stamp, 10))
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
@@ -349,6 +357,13 @@ func TestV2RuntimeSIGKILLWithActiveTCP(t *testing.T) {
 		t.Fatalf("wrong exit: %v", err)
 	}
 	app := v2TestApp(t, root)
+	app.Config.V2.Mode = mode
+	if mode == v2ServingDual {
+		app.Config.Whisper.Schemas[0].Retentions = app.Config.Whisper.Schemas[0].Retentions[:1]
+	}
+	if mode == v2Shadow {
+		app.Config.Carbonserver.ScanFrequency = &Duration{20 * time.Millisecond}
+	}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}

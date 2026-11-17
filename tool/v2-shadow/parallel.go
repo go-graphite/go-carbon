@@ -53,6 +53,7 @@ type frameWork struct {
 	warm   bool
 	fence  chan error
 	stamp  appendStamp
+	readAt time.Time
 }
 type partitionWorker struct {
 	input             chan frameWork
@@ -60,6 +61,9 @@ type partitionWorker struct {
 	skipped           atomic.Uint64
 	pending           []visibilityFrame
 	latency           *visibilityHistogram
+	policyFiles       *classicPolicyFiles
+	stages            *stageTimings
+	admittedAt        []visibilityFrame
 }
 
 func (w *partitionWorker) run(p *v2daemon.Producer, policies map[string][]byte, layer int, base string, full bool, core *v2core.Engine, index int, failed chan<- error, wg *sync.WaitGroup) {
@@ -87,6 +91,9 @@ func (w *partitionWorker) run(p *v2daemon.Producer, policies map[string][]byte, 
 	}
 	for work := range w.input {
 		if work.fence != nil {
+			fenceStart := time.Now()
+			w.stages.buffer.record(w.admittedAt, fenceStart)
+			w.admittedAt = w.admittedAt[:0]
 			e := p.Seal()
 			if e == nil {
 				e = p.Drain()
@@ -138,7 +145,19 @@ func (w *partitionWorker) run(p *v2daemon.Producer, policies map[string][]byte, 
 				}
 			}
 			if len(missing) > 0 {
-				fresh, err := fetchPolicies(client, base, missing)
+				var fresh map[string][]byte
+				var err error
+				if w.policyFiles != nil {
+					fresh = make(map[string][]byte, len(missing))
+					for _, name := range missing {
+						fresh[name], err = w.policyFiles.policy(name)
+						if err != nil {
+							break
+						}
+					}
+				} else {
+					fresh, err = fetchPolicies(client, base, missing)
+				}
 				if err != nil {
 					sendError(err)
 					return
@@ -208,6 +227,11 @@ func (w *partitionWorker) run(p *v2daemon.Producer, policies map[string][]byte, 
 			sendError(e)
 			return
 		}
+		admittedAt := time.Now()
+		if seq > before {
+			w.stages.admission.record([]visibilityFrame{{Stamp: appendStamp{work.readAt, work.readAt}, Points: seq - before}}, admittedAt)
+			w.admittedAt = append(w.admittedAt, visibilityFrame{Stamp: appendStamp{admittedAt, admittedAt}, Points: seq - before})
+		}
 		w.admitted.Store(seq)
 		if seq > before {
 			w.pending = append(w.pending, visibilityFrame{work.stamp, seq - before})
@@ -243,6 +267,13 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 	if rel, e := filepath.Rel(dest, src); e != nil || rel == "." || (!bytes.HasPrefix([]byte(rel), []byte("../"))) {
 		return errors.New("source/output overlap")
 	}
+	policyFiles, e := readClassicPolicyFiles(*classicSchemasPath, *classicAggregationPath)
+	if e != nil {
+		return e
+	}
+	if policyFiles != nil && (!full || layer != 3) {
+		return errors.New("classic policy files require full-l3")
+	}
 	policies := map[string][]byte{}
 	var candidates []candidate
 	if policyFile != "" {
@@ -262,6 +293,12 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 			if e != nil {
 				return e
 			}
+			if policyFiles != nil {
+				b, e = policyFiles.policy(name)
+				if e != nil {
+					return e
+				}
+			}
 			policies[name] = b
 			candidates = append(candidates, candidate{1, name})
 		}
@@ -270,7 +307,8 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 	if e = os.Mkdir(out, 0700); e != nil {
 		return e
 	}
-	store, e := v2daemon.Open(out, v2daemon.Config{Layer: layer, Producers: workers, Shards: shards, MaxPendingRows: 2 << 20, GroupInterval: time.Second})
+	stages := &stageTimings{}
+	store, e := v2daemon.Open(out, v2daemon.Config{Hooks: v2core.Hooks{SealTiming: stages.observe}, Layer: layer, Producers: workers, Shards: shards, MaxPendingRows: 2 << 20, GroupInterval: time.Second})
 	if e != nil {
 		return e
 	}
@@ -285,7 +323,7 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 	var wg sync.WaitGroup
 	ws := make([]*partitionWorker, workers)
 	for i := range ws {
-		ws[i] = &partitionWorker{input: make(chan frameWork, 2), latency: latency}
+		ws[i] = &partitionWorker{input: make(chan frameWork, 2), latency: latency, policyFiles: policyFiles, stages: stages}
 		wg.Add(1)
 		localPolicies := map[string][]byte{}
 		for name, b := range policies {
@@ -365,7 +403,7 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 	warmStart := time.Now()
 	nextSample := time.Now()
 	nextSeal := time.Now()
-	var offered, sourceBytes uint64
+	var offered, sourceBytes, observedStart uint64
 	rotation := 0
 	totals := &totals{}
 	jobs := make(chan compareJob, 1)
@@ -408,7 +446,7 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 				admitted += w.admitted.Load()
 				skipped += w.skipped.Load()
 			}
-			emit(map[string]any{"stage": "parallel_sample", "context": contextLoad(), "seconds": now.Sub(start).Seconds(), "offered_points": offered, "decoded_points": decoded, "admitted_points": admitted, "skipped_points": skipped, "admission_pending_points": offered - admitted - skipped, "append_to_visible": latency.report(), "append_observer": clock.report(), "source_path": path, "source_offset": offset, "source_bytes": sourceBytes, "source_lag_seconds": now.Sub(lastEOF).Seconds(), "source_backlog": sourceBacklog(source, path, offset)})
+			emit(map[string]any{"stage": "parallel_sample", "context": contextLoad(), "seconds": now.Sub(start).Seconds(), "offered_points": offered, "source_dispatched_points": offered, "source_observed_points_delta": clock.report()["observed_points"].(uint64) - observedStart, "decoded_points": decoded, "admitted_points": admitted, "skipped_points": skipped, "admission_pending_points": offered - admitted - skipped, "append_to_visible": latency.report(), "stage_timings": stages.report(), "append_observer": clock.report(), "source_path": path, "source_offset": offset, "source_bytes": sourceBytes, "source_lag_seconds": now.Sub(lastEOF).Seconds(), "source_backlog": sourceBacklog(source, path, offset)})
 			until := lastEOF.Add(-lag).Unix()
 			if !capacity && until > start.Unix()+60 && len(jobs) == 0 {
 				if e = fence(); e != nil {
@@ -468,6 +506,7 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 			if warm {
 				warm = false
 				start = lastEOF
+				observedStart = clock.report()["observed_points"].(uint64)
 				deadline = start.Add(duration)
 				nextSample = start.Add(interval)
 				nextSeal = start.Add(time.Second)
@@ -501,8 +540,12 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 				return e
 			}
 		}
+		readAt := time.Now()
+		if !warm {
+			stages.tail.record([]visibilityFrame{{Stamp: stamp, Points: uint64(binary.LittleEndian.Uint32(h[24:]))}}, readAt)
+		}
 		select {
-		case ws[partition%workers].input <- frameWork{header: header, frame: frame, warm: warm, stamp: stamp}:
+		case ws[partition%workers].input <- frameWork{header: header, frame: frame, warm: warm, stamp: stamp, readAt: readAt}:
 		case e := <-failed:
 			return e
 		}
@@ -519,7 +562,7 @@ func runParallel(source, out, base, policyFile string, duration, interval, lag t
 	for _, w := range ws {
 		admitted += w.admitted.Load()
 	}
-	emit(map[string]any{"stage": "intake_complete", "append_to_visible": latency.report(), "append_observer": clock.report(), "context": contextLoad(), "points": admitted, "offered_points": offered, "seconds": time.Since(start).Seconds(), "source_path": path, "source_offset": offset})
+	emit(map[string]any{"stage": "intake_complete", "append_to_visible": latency.report(), "stage_timings": stages.report(), "append_observer": clock.report(), "context": contextLoad(), "points": admitted, "offered_points": offered, "source_dispatched_points": offered, "source_observed_points_delta": clock.report()["observed_points"].(uint64) - observedStart, "seconds": time.Since(start).Seconds(), "source_path": path, "source_offset": offset})
 	return nil
 }
 

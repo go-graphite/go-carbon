@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -215,6 +216,13 @@ QueueLoop:
 
 func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
 	return q.get(abort)
+}
+
+// DebugState reports bounded queue diagnostics without visiting metric names.
+func (q *WriteoutQueue) DebugState() string {
+	q.RLock()
+	defer q.RUnlock()
+	return fmt.Sprintf("planned=%d retained=%d refresh=%s wake=%d", len(q.queue), len(q.retained), q.refreshAt, q.wakeAt.Load())
 }
 
 // TryGet takes an already queued, ready metric without waiting for a rebuild.

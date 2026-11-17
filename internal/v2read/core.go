@@ -21,6 +21,8 @@ import (
 // Stop producers, close Reader, wait for Fetch consumers, then close the engine.
 // The engine owns the underlying Pebble databases; Close rejects later handoffs.
 type Reader struct {
+	reads readCounters
+
 	closed    atomic.Bool
 	owners    []atomic.Pointer[generation]
 	caches    []sealedCache
@@ -64,7 +66,6 @@ type sealedData struct {
 	snapshot  *pebble.Snapshot
 	inventory *v2core.RollupInventory
 	once      sync.Once
-	metrics   sync.Map
 	err       error
 }
 
@@ -170,16 +171,13 @@ func (s *sealedData) load() {
 	s.cache.index = s.index
 }
 func (s *sealedData) lookup(name string) *metricState {
-	if m, ok := s.metrics.Load(name); ok {
-		return m.(*metricState)
-	}
 	p, meta, ok := s.index.LookupMetadata(name)
 	if !ok {
 		return nil
 	}
-	m := &metricState{policy: p, meta: meta, sealed: s.index, name: name, reader: s.reader, resource: s}
-	actual, _ := s.metrics.LoadOrStore(name, m)
-	return actual.(*metricState)
+	// Keep request state local; decoded sources and reductions already use
+	// the bounded sealedCache. A name sweep must not grow another permanent map.
+	return &metricState{policy: p, meta: meta, sealed: s.index, name: name, reader: s.reader, resource: s}
 }
 
 func (g *generation) load() {
@@ -311,6 +309,8 @@ func (r *Reader) FetchMany(ctx context.Context, names []string, from, until, now
 }
 
 func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now int64, consume func(string, *Series) error, mask func(bool)) error {
+	started := time.Now()
+	defer func() { r.reads.observe(time.Since(started)) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -359,7 +359,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			return ErrNotFound
 		}
 		if mask != nil {
-			mask(metric.meta.Expired || metric.meta.ResetOrder > 0)
+			mask(metric.meta.BaselineOrder > 0 || metric.meta.Expired || metric.meta.ResetOrder > 0)
 		}
 		if metric.meta.Expired {
 			return ErrNotFound

@@ -18,6 +18,8 @@ var (
 
 type Archive struct{ Step, Points int64 }
 type Metric struct {
+	BaselineOrder uint64
+
 	ID                uint64
 	Archives          []Archive
 	AggregationMethod string
