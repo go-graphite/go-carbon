@@ -10,9 +10,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/bits"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -27,13 +29,16 @@ import (
 const sealedMergeFanIn = 16
 
 // Runtime tuning does not change the persisted routing/configuration contract.
-func mergeWorkerCount() (int, error) {
-	n := 2
+func mergeWorkerCount(owners int) (int, error) {
+	// At most one eighth of scheduler CPUs, with one worker for small stores.
+	// Each owner is visited by exactly one worker; more workers cannot help it.
+	limit := min(owners, max(1, runtime.GOMAXPROCS(0)/8))
+	n := limit
 	if s := os.Getenv("CORE_MERGE_WORKERS"); s != "" {
 		var err error
 		n, err = strconv.Atoi(s)
-		if err != nil || n < 0 || n > 4 {
-			return 0, errors.New("CORE_MERGE_WORKERS must be between 0 and 4")
+		if err != nil || n < 0 || n > limit {
+			return 0, fmt.Errorf("CORE_MERGE_WORKERS must be between 0 and %d (owners and CPU budget)", limit)
 		}
 	}
 	return n, nil
@@ -46,6 +51,7 @@ func (e *coreEngine) runPartMerges(workers int) {
 		wg.Go(func() {
 			ticker := time.NewTicker(20 * time.Millisecond)
 			defer ticker.Stop()
+			unchanged := make(map[*coreOwner]*RollupInventory)
 			for {
 				for i := worker; i < len(e.owners); i += workers {
 					select {
@@ -57,10 +63,20 @@ func (e *coreEngine) runPartMerges(workers int) {
 					if o.gc == nil || !o.cfg.Rollups {
 						continue
 					}
-					if _, err := o.mergeSealedParts(e.gcStop); err != nil {
+					o.gc.mu.Lock()
+					inventory := o.gc.inventory
+					o.gc.mu.Unlock()
+					if unchanged[o] == inventory {
+						continue
+					}
+					changed, err := o.mergeSealedParts(e.gcStop)
+					if err != nil {
 						o.gc.mergeFailure.CompareAndSwap(nil, &coreFailure{err: err})
 						e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
 						return
+					}
+					if !changed {
+						unchanged[o] = inventory
 					}
 				}
 				select {
@@ -76,11 +92,7 @@ func (e *coreEngine) runPartMerges(workers int) {
 
 // Each size tier spans a factor of sixteen and retains at most fifteen quiescent
 // local parts per group. With merge service keeping up, count is O(log bytes).
-func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot, minimum ...int) ([]v2part.Descriptor, error) {
-	needed := sealedMergeFanIn
-	if len(minimum) > 0 {
-		needed = minimum[0]
-	}
+func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	type tier struct {
 		group v2part.Group
 		size  int
@@ -114,7 +126,7 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot, minimum ...int) ([]v2
 	var chosen []v2part.Descriptor
 	var best tier
 	for t, parts := range tiers {
-		if len(parts) >= needed && (chosen == nil || t.size < best.size || (t.size == best.size && t.group < best.group)) {
+		if len(parts) >= sealedMergeFanIn && (chosen == nil || t.size < best.size || (t.size == best.size && t.group < best.group)) {
 			chosen, best = parts, t
 		}
 	}
@@ -128,6 +140,7 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot, minimum ...int) ([]v2
 type mergeCursor struct {
 	reader     *sstable.Reader
 	cursor     *tableCursor
+	metadata   *tableCursor
 	key        v2part.Key
 	encoded    []byte
 	value      []byte
@@ -219,7 +232,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	var cursors []*mergeCursor
 	defer func() {
 		for _, c := range cursors {
-			err = errors.Join(err, c.cursor.Close(), c.reader.Close())
+			err = errors.Join(err, c.cursor.Close(), c.metadata.Close(), c.reader.Close())
 		}
 	}()
 	var h mergeHeap
@@ -242,7 +255,13 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			_ = reader.Close()
 			return v2part.Descriptor{}, e
 		}
-		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, part: spec.Scope.Part, sourcePart: d.Scope.Part}
+		metadataIter, e := reader.NewIter(nil, nil)
+		if e != nil {
+			_ = it.Close()
+			_ = reader.Close()
+			return v2part.Descriptor{}, e
+		}
+		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, metadata: &tableCursor{it: metadataIter}, part: spec.Scope.Part, sourcePart: d.Scope.Part}
 		cursors = append(cursors, c)
 		valid, e := c.advance(true)
 		if e != nil {
@@ -300,6 +319,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	loadMetadata := func() error {
 		metadata = nil
 		for _, input := range cursors {
+			// At the first heap key for this name, only cursors positioned at
+			// this name can contain it. Other inputs are already past it.
+			if input.key.Metric != metric.Metric || input.key.VShard != metric.VShard {
+				continue
+			}
 			k := metric
 			k.Part = input.sourcePart
 			k.Archive = v2part.MetadataArchive
@@ -308,27 +332,22 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			if e != nil {
 				return e
 			}
-			it, e := input.reader.NewIter(nil, nil)
-			if e != nil {
-				return e
-			}
-			lookup := &tableCursor{it: it}
+			// Keep one seek iterator per input so neighboring metadata lookups
+			// reuse decoded SST blocks instead of decompressing each anew.
+			lookup := input.metadata
 			if lookup.SeekGE(encoded) && bytes.Equal(lookup.Key(), encoded) {
 				m, decodeErr := DecodeRollupMetadata(lookup.Value())
 				if decodeErr != nil {
-					_ = lookup.Close()
 					return decodeErr
 				}
 				if metadata != nil && (m.ID != metadata.ID || !bytes.Equal(m.Policy, metadata.Policy)) {
-					_ = lookup.Close()
 					return errors.New("merge changed metric identity/policy")
 				}
 				if metadata == nil || m.Frontier.Order > metadata.Frontier.Order || (m.Frontier.Order == metadata.Frontier.Order && m.Revision > metadata.Revision) {
 					metadata = &m
 				}
 			}
-			e = errors.Join(lookup.Error(), lookup.Close())
-			if e != nil {
+			if e = lookup.Error(); e != nil {
 				return e
 			}
 		}
@@ -400,7 +419,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		}
 		processed++
 		if processed%4096 == 0 {
-			// Two workers by default, plus a cooperative pause for intake.
+			// Bounded workers plus a cooperative pause for intake.
 			timer := time.NewTimer(time.Millisecond)
 			select {
 			case <-stop:
@@ -541,44 +560,21 @@ func cleanupSealedMerges(dir string) error {
 	return nil
 }
 
-// Like the insertion budget in immutable-part stores, this is a last-resort
-// bound when disk service cannot keep up. Wait BEFORE taking the file lock, so
-// the merger can publish. Normal seals have priority until two full merge sets
-// accumulate in one size tier. Comparison mode (zero workers) has no such gate.
-func (o *coreOwner) awaitSealedMergeBudget() error {
+// Observe the soft inventory target without waiting, scanning descriptors or
+// opening snapshots on the seal path. A slow merger may accumulate more parts;
+// intake must continue. LiveParts and this counter make that pressure visible.
+func (o *coreOwner) observeSealedMergeBudget() error {
 	if o.mergeStop == nil || o.gc == nil {
 		return nil
 	}
-	for {
-		select {
-		case <-o.mergeStop:
-			return nil
-		default:
-		}
-		if failure := o.gc.mergeFailure.Load(); failure != nil {
-			return failure.err
-		}
-		o.gc.mu.Lock()
-		if len(o.gc.inventory.bindings) < 2*sealedMergeFanIn {
-			o.gc.mu.Unlock()
-			return nil
-		}
-		snapshot := o.db.NewSnapshot()
-		o.gc.mu.Unlock()
-		inputs, err := o.selectMerge(snapshot, 2*sealedMergeFanIn)
-		err = errors.Join(err, snapshot.Close())
-		if err != nil {
-			return err
-		}
-		if len(inputs) == 0 {
-			return nil
-		}
-		timer := time.NewTimer(5 * time.Millisecond)
-		select {
-		case <-o.mergeStop:
-			timer.Stop()
-			return nil
-		case <-timer.C:
-		}
+	if failure := o.gc.mergeFailure.Load(); failure != nil {
+		return failure.err
 	}
+	o.gc.mu.Lock()
+	above := len(o.gc.inventory.bindings) >= 2*sealedMergeFanIn
+	o.gc.mu.Unlock()
+	if above {
+		o.gc.mergeOverBudgetSeals.Add(1)
+	}
+	return nil
 }

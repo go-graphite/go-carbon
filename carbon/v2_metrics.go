@@ -10,6 +10,12 @@ import (
 // lock, name scan or data read is needed, even with a large catalog.
 type v2Collector struct{ app *App }
 
+var v2MergeDescs = struct{ live, pressure, runs *prometheus.Desc }{
+	prometheus.NewDesc("v2_sealed_parts", "Catalog-live sealed parts, excluding retired originals waiting for GC.", nil, nil),
+	prometheus.NewDesc("v2_merge_over_budget_seals_total", "Seals admitted while owner inventory exceeds the soft target of 32 parts; intake continues.", nil, nil),
+	prometheus.NewDesc("v2_merge_runs_total", "Completed atomic sealed-part replacements.", nil, nil),
+}
+
 var v2GCDescs = struct{ pending, removed, unlinked *prometheus.Desc }{
 	prometheus.NewDesc("v2_part_gc_pending_parts", "Retired sealed parts awaiting original-link removal.", nil, nil),
 	prometheus.NewDesc("v2_part_gc_removed_parts_total", "Retired parts whose original links were removed in this process.", nil, nil),
@@ -42,7 +48,7 @@ func (*v2Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- v2MoveDesc
 	ch <- v2MoveOwnerDesc
 	ch <- v2MoveRegressionDesc
-	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked} {
+	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked, v2MergeDescs.live, v2MergeDescs.pressure, v2MergeDescs.runs} {
 		ch <- d
 	}
 	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.names, v2Descs.rollupLag} {
@@ -62,12 +68,18 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	emit := func(d *prometheus.Desc, kind prometheus.ValueType, value float64) {
 		ch <- prometheus.MustNewConstMetric(d, kind, value)
 	}
-	var pendingGC, removedGC, unlinkedGC uint64
+	var pendingGC, removedGC, unlinkedGC, liveParts, pressure, runs uint64
 	for _, gc := range v.store.Core.PartGCStats() {
+		liveParts += gc.LiveParts
+		pressure += gc.MergeOverBudgetSeals
+		runs += gc.MergeRuns
 		pendingGC += gc.PendingParts
 		removedGC += gc.RemovedParts
 		unlinkedGC += gc.UnlinkedFileBytes
 	}
+	emit(v2MergeDescs.live, prometheus.GaugeValue, float64(liveParts))
+	emit(v2MergeDescs.pressure, prometheus.CounterValue, float64(pressure))
+	emit(v2MergeDescs.runs, prometheus.CounterValue, float64(runs))
 	emit(v2GCDescs.pending, prometheus.GaugeValue, float64(pendingGC))
 	emit(v2GCDescs.removed, prometheus.CounterValue, float64(removedGC))
 	emit(v2GCDescs.unlinked, prometheus.CounterValue, float64(unlinkedGC))
