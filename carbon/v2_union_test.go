@@ -83,6 +83,7 @@ func TestV2UnionClassicTCPRestart(t *testing.T) {
 				}
 			}()
 			// Existing history and discovery must work before the first v2 admission.
+			waitV2CatalogName(t, app, "union.old")
 			if b := v2HTTP(t, app, "/metrics/find/?format=json&query=union.*"); !strings.Contains(string(b), "union.old") {
 				t.Fatalf("classic startup discovery: %s", b)
 			}
@@ -111,6 +112,9 @@ func TestV2UnionClassicTCPRestart(t *testing.T) {
 			}
 			check := func() {
 				t.Helper()
+				for _, name := range []string{"union.old", "union.overlap", "union.new"} {
+					waitV2CatalogName(t, app, name)
+				}
 				for _, name := range []string{"union.old", "union.overlap", "union.new"} {
 					v2HTTP(t, app, "/info/?format=json&target="+name)
 					b := v2HTTP(t, app, fmt.Sprintf("/render/?format=json&target=%s&from=%d&until=%d", name, stamp-60, stamp+120))
