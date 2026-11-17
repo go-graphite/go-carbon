@@ -142,6 +142,9 @@ func (s *sealedData) metricVersion(name string) any {
 }
 
 func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
+	return s.resolvedContext(context.Background(), name, policy, meta)
+}
+func (s *sealedData) resolvedContext(ctx context.Context, name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
 	c := s.cache
 	version := s.metricVersion(name)
 	c.fullMu.Lock()
@@ -152,7 +155,7 @@ func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2co
 		}
 	}
 	c.fullMu.Unlock()
-	records, err := s.index.Records(context.Background(), name)
+	records, err := s.index.Records(ctx, name)
 	if err != nil {
 		return nil, err
 	}

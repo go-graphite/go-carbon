@@ -28,8 +28,20 @@ func WithRollupDirectory(ctx context.Context, directory string) context.Context 
 // archiveIter merges the legacy LSM namespace and descriptor-published immutable
 // originals. No row is inserted into the LSM. Iterator ownership pins all file
 // handles until Close; publication is determined exclusively by the snapshot.
+type archiveCursor interface {
+	First() bool
+	SeekGE([]byte) bool
+	SeekLT([]byte) bool
+	Next() bool
+	Valid() bool
+	Key() []byte
+	Value() []byte
+	Error() error
+	Close() error
+}
+
 type archiveIter struct {
-	iterators  []*pebble.Iterator
+	iterators  []archiveCursor
 	selected   int
 	reverse    bool
 	err        error
@@ -68,6 +80,17 @@ func newArchiveIter(ctx context.Context, snapshot *pebble.Snapshot, opts *pebble
 	return newArchiveIterSelected(ctx, snapshot, opts, nil)
 }
 func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts *pebble.IterOptions, selected map[archivePartIdentity]bool, exact ...v2part.Descriptor) (_ *archiveIter, err error) {
+	if parts, _ := ctx.Value(openedPartsContext{}).(*OpenedRollupParts); parts != nil {
+		if len(exact) > 0 {
+			selected = make(map[archivePartIdentity]bool, len(exact))
+			for _, d := range exact {
+				selected[archivePartIdentity{d.Scope.Group, d.Scope.Part}] = true
+			}
+		}
+		if selected != nil {
+			return parts.archiveIter(ctx, snapshot, selected)
+		}
+	}
 	out := &archiveIter{selected: -1}
 	defer func() {
 		if err != nil {
