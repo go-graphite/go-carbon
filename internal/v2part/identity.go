@@ -5,6 +5,7 @@ package v2part
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 
 	"github.com/go-graphite/go-carbon/internal/partsformat"
@@ -67,4 +68,31 @@ func (s Scope) ValidateRange(first, last []byte) error {
 		return errors.New("part key range outside scope")
 	}
 	return nil
+}
+
+// keyDecoder retains only a fully validated immutable identity prefix. GCP3's
+// final 16 bytes contain archive, physical slot and ordinal; changing any byte
+// before that boundary requires normal full validation, including route hashing.
+// Prefix bytes and strings are owned, so callers can reuse their input buffer.
+type keyDecoder struct {
+	prefix []byte
+	key    Key
+}
+
+func (d *keyDecoder) decode(encoded []byte) (Key, error) {
+	if len(encoded) >= 54 && len(d.prefix) == len(encoded)-16 && bytes.Equal(d.prefix, encoded[:len(encoded)-16]) {
+		k := d.key
+		tail := encoded[len(encoded)-16:]
+		k.Archive = binary.BigEndian.Uint32(tail)
+		k.BlockStart = int64(binary.BigEndian.Uint64(tail[4:]) ^ (1 << 63))
+		k.Ordinal = binary.BigEndian.Uint32(tail[12:])
+		return k, nil
+	}
+	k, err := Decode(encoded)
+	if err != nil {
+		return Key{}, err
+	}
+	d.prefix = append(d.prefix[:0], encoded[:len(encoded)-16]...)
+	d.key = k
+	return k, nil
 }

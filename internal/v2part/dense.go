@@ -24,13 +24,17 @@ var denseMagic = []byte{'G', 'C', 'D', 1}
 // an event-time ring wrap. No arithmetic on float values is used unless exact
 // integer reconstruction has been checked bit for bit.
 func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
+	return appendSlots(nil, records)
+}
+
+func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
 	integer := true
 	for i, r := range records {
-		if _, err := sealrollup.DecodeRecord(r.Archive, r.Slot, sealrollup.EncodeRecord(r)); err != nil {
-			return nil, err
+		if !validSlotRecord(r) {
+			return nil, errors.New("invalid sealed archive record clock/order/slot")
 		}
 		if i > 0 && (r.Archive != records[0].Archive || r.Slot <= records[i-1].Slot) {
 			return nil, errors.New("unordered dense slots")
@@ -40,7 +44,7 @@ func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
 			integer = false
 		}
 	}
-	out := append([]byte(nil), denseMagic...)
+	out = append(out, denseMagic...)
 	mode := byte(0)
 	if integer {
 		mode = 1
@@ -211,6 +215,9 @@ func DecodeSlots(archive uint32, firstSlot int64, data []byte) ([]sealrollup.Rec
 // validation remain the shared Writer's responsibility.
 type DenseWriter struct {
 	writer  *Writer
+	decoder keyDecoder
+	first   []byte
+	encoded []byte
 	key     Key
 	records []sealrollup.Record
 	last    []byte
@@ -230,9 +237,10 @@ func (w *DenseWriter) flush() error {
 	if len(w.records) == 0 {
 		return nil
 	}
-	b, e := EncodeSlots(w.records)
+	b, e := appendSlots(w.encoded[:0], w.records)
+	w.encoded = b
 	if e == nil {
-		e = w.writer.Set(w.key, b)
+		e = w.writer.setDecoded(w.first, w.key, b)
 	}
 	w.records = w.records[:0]
 	return e
@@ -247,20 +255,51 @@ func (w *DenseWriter) SetEncoded(key, value []byte) error {
 	w.err = w.set(key, value)
 	return w.err
 }
+
+// SetRecordEncoded accepts a planner's exact scalar record without framing it as
+// a singleton value first. The untrusted key, scalar bounds, archive and physical
+// slot are validated exactly as in SetEncoded; no caller buffers are retained.
+func (w *DenseWriter) SetRecordEncoded(key []byte, record sealrollup.Record) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	k, err := w.decodeInput(key)
+	if err == nil && (k.Archive == MetadataArchive || k.Ordinal != 0 || record.Archive < 0 || uint64(record.Archive) != uint64(k.Archive) || record.Slot != k.BlockStart || !validSlotRecord(record)) {
+		err = errors.New("dense scalar record does not match valid archive key")
+	}
+	if err == nil {
+		err = w.appendRecord(key, k, record)
+	}
+	w.err = err
+	return err
+}
+func validSlotRecord(r sealrollup.Record) bool {
+	return r.Archive >= 0 && r.Slot >= 0 && r.Order != 0 && r.Sample.Time > 0 && r.Sample.Time <= math.MaxUint32
+}
+func (w *DenseWriter) decodeInput(key []byte) (Key, error) {
+	k, err := w.decoder.decode(key)
+	if err != nil {
+		return Key{}, err
+	}
+	if !w.writer.spec.Scope.contains(k) || (len(w.last) > 0 && bytes.Compare(w.last, key) >= 0) {
+		return Key{}, errors.New("unordered or foreign dense input")
+	}
+	w.last = append(w.last[:0], key...)
+	return k, nil
+}
 func (w *DenseWriter) set(key, value []byte) error {
-	k, e := Decode(key)
+	k, e := w.decodeInput(key)
 	if e != nil {
 		return e
 	}
-	if !w.writer.spec.Scope.contains(k) || (len(w.last) > 0 && bytes.Compare(w.last, key) >= 0) {
-		return errors.New("unordered or foreign dense input")
-	}
-	w.last = append(w.last[:0], key...)
 	if k.Archive == MetadataArchive {
 		if e = w.flush(); e != nil {
 			return e
 		}
-		return w.writer.SetEncoded(key, value)
+		return w.writer.setDecoded(key, k, value)
 	}
 	if k.Ordinal != 0 {
 		return errors.New("dense input requires ordinal zero")
@@ -269,13 +308,17 @@ func (w *DenseWriter) set(key, value []byte) error {
 	if e != nil {
 		return e
 	}
+	return w.appendRecord(key, k, r)
+}
+func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error {
 	if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
-		if e = w.flush(); e != nil {
+		if e := w.flush(); e != nil {
 			return e
 		}
 	}
 	if len(w.records) == 0 {
 		w.key = k
+		w.first = append(w.first[:0], key...)
 	}
 	w.records = append(w.records, r)
 	return nil

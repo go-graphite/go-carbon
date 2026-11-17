@@ -22,6 +22,7 @@ import (
 // The caller retains snapshot until all directory consumers have returned.
 type RollupSnapshot struct {
 	snapshot       *pebble.Snapshot
+	directory      string
 	parts          map[string]*readPart
 	metrics        map[string]*snapshotMetric
 	cache          *rollupRangeCache
@@ -97,7 +98,8 @@ func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapsh
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
-	out := &RollupSnapshot{snapshot: snapshot, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
+	out := &RollupSnapshot{snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -112,7 +114,7 @@ func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapsh
 	}
 	out.inventory = inventory
 	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +351,14 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 			}
 		}
 	}
-	it, err := s.snapshot.NewIter(nil)
+	if s.directory != "" {
+		ctx = WithRollupDirectory(ctx, s.directory)
+	}
+	selected := make(map[archivePartIdentity]bool, len(m.parts))
+	for _, part := range m.parts {
+		selected[archivePartIdentity{part.key.Group, part.key.Part}] = true
+	}
+	it, err := newArchiveIterSelected(ctx, s.snapshot, nil, selected)
 	if err != nil {
 		return err
 	}
@@ -537,7 +546,7 @@ func (s *RollupSnapshot) Records(ctx context.Context, name string) ([]sealrollup
 }
 
 // readRollupPart decodes metadata only for one newly visible routed part.
-func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte) (*readPart, error) {
+func readRollupPart(ctx context.Context, it *archiveIter, scope []byte) (*readPart, error) {
 	if !it.SeekGE(scope) || !bytes.HasPrefix(it.Key(), scope) {
 		return nil, fmt.Errorf("missing rollup part %x", scope)
 	}

@@ -23,7 +23,7 @@ func TestCoreReplacementAtomic(t *testing.T) {
 				if owner != 0 || len(in.Batches) != 1 || string(in.Batches[0].Policy) != "opaque-frame-receipt" || in.Batches[0].Clock != 1234 {
 					t.Errorf("lost original boundary: %+v", in)
 				}
-				return coreSealPlan{ReplaceRaw: true, Files: [][]coreKV{{{[]byte("G-data"), []byte("exact-replacement")}}, {{[]byte("I-catalog"), []byte("canonical-name")}}, {{[]byte("R-receipt"), slices.Clone(in.Batches[0].Policy)}}, {{[]byte{255, 'V', '2', '/'}, []byte("checkpoint")}}}, Commit: func() {
+				return coreSealPlan{ReplaceRaw: true, Files: [][]coreKV{{{[]byte("G-data"), []byte("exact-replacement"), nil}}, {{[]byte("I-catalog"), []byte("canonical-name"), nil}}, {{[]byte("R-receipt"), slices.Clone(in.Batches[0].Policy), nil}}, {{[]byte{255, 'V', '2', '/'}, []byte("checkpoint"), nil}}}, Commit: func() {
 					commits++
 					for _, key := range []string{"G-data", "I-catalog", "R-receipt", string(coreMetaKey)} {
 						_, c, err := e.owners[0].db.Get([]byte(key))
@@ -109,7 +109,7 @@ func TestCoreReplacementAbort(t *testing.T) {
 				case "planner":
 					return p, sentinel
 				case "reserved":
-					p.Files = [][]coreKV{{{[]byte{1}, []byte("invalid")}}}
+					p.Files = [][]coreKV{{{[]byte{1}, []byte("invalid"), nil}}}
 				}
 				return p, nil
 			}})
