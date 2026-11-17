@@ -128,6 +128,15 @@ func InstallCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v
 }
 
 func installCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending bool) (bool, error) {
+	return installCopiedPartVerified(ctx, db, dir, path, d, pending, false)
+}
+
+// VerifyMovePart certifies transport bytes and rollup semantics once before a durable receipt.
+func VerifyMovePart(ctx context.Context, path string, d v2part.Descriptor) error {
+	return validateCopiedRollupPart(ctx, path, d)
+}
+
+func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending, verified bool) (bool, error) {
 	if err := d.Validate(); err != nil {
 		return false, err
 	}
@@ -183,8 +192,10 @@ func installCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v
 		return false, errors.New("cannot reclassify an existing live part")
 	}
 	// SHA256 and all interior keys are checked before any visible mutation.
-	if err = validateCopiedRollupPart(ctx, path, d); err != nil {
-		return false, err
+	if !verified {
+		if err = validateCopiedRollupPart(ctx, path, d); err != nil {
+			return false, err
+		}
 	}
 	if err = ctx.Err(); err != nil {
 		return false, err
