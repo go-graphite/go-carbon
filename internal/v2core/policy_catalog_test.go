@@ -3,6 +3,7 @@ package v2core
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -89,5 +90,19 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPolicyCatalogMetadataRoundTrip(t *testing.T) {
+	_, raw := rollupTestPolicy(t, "shared.metric", "1s:1d", sealrollup.Last, .5)
+	h, err := (&PolicyCatalog{}).intern(7, "shared.metric", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, baseline := range []uint64{0, 3} {
+		want := RollupMetadata{Version: 2, ID: 7, Policy: h.definition, BaselineOrder: baseline, ResetOrder: 4, LastUpdate: 100, Revision: 8, Frontier: sealrollup.Frontier{Order: 9, MaxTime: 99, Policy: h.prepared.Digest()}}
+		if got := h.metadata(compactMetadata(want)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("compact metadata lost state: got %+v want %+v", got, want)
+		}
 	}
 }

@@ -29,6 +29,8 @@ import (
 // v2Config is restart-only. The experimental engine has its own mandatory log
 // underneath Path, independent of the classic dump/input-log switches.
 type v2Config struct {
+	BaselinePath string `toml:"baseline-path"`
+
 	Enabled         bool   `toml:"enabled"`
 	Mode            string `toml:"mode"`
 	Path            string `toml:"path"`
@@ -123,7 +125,7 @@ func (app *App) startV2() error {
 			return ttl > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= ttl
 		}
 	}
-	storeConfig := v2daemon.Config{Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks}
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err

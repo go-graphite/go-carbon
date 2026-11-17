@@ -8,7 +8,7 @@ import "slices"
 // fine-retention array on every new timestamp. Storage is proportional to
 // occupied slots; this index does not provide a bounded sealed-block cache.
 type Slots struct {
-	archives      []Archive
+	archives      *[]Archive
 	data          [][]slotSample
 	single        slotSample
 	singleArchive int
@@ -21,7 +21,8 @@ type slotSample struct {
 
 // NewSlots requires archives from a validated Config.
 func NewSlots(archives []Archive) *Slots {
-	return &Slots{archives: slices.Clone(archives)}
+	owned := slices.Clone(archives)
+	return &Slots{archives: &owned}
 }
 func slotCompare(a, b slotSample) int {
 	if a.slot < b.slot {
@@ -40,7 +41,7 @@ func (s *Slots) Install(d Delta) {
 			s.hasSingle = true
 			return
 		}
-		s.data = make([][]slotSample, len(s.archives))
+		s.data = make([][]slotSample, len(*s.archives))
 		s.data[s.singleArchive] = []slotSample{s.single}
 		s.hasSingle = false
 	}
@@ -80,7 +81,7 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 		return dst
 	}
 
-	ar := s.archives[a]
+	ar := (*s.archives)[a]
 	lo := slot(start, ar)
 	count := (end - start) / ar.Step
 	hi := lo + count
@@ -104,7 +105,7 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 // NewSlots borrows the archives already owned by this immutable prepared schema.
 // Slot values remain private to the caller; schema slices never escape.
 func (p *Prepared) NewSlots() *Slots {
-	return &Slots{archives: p.config.Archives}
+	return &Slots{archives: &p.config.Archives}
 }
 
 // Digest returns the immutable schema identity validated by Prepare.

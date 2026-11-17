@@ -130,10 +130,11 @@ func (e *coreEngine) BindDefinition(id uint64, name string, definition []byte) (
 // Only mutable lifecycle/frontier scalars belong in each owner/part directory.
 // Identity, raw policy and schema digest are reconstructed from the shared handle.
 type metricMetadata struct {
-	ResetOrder uint64
-	LastUpdate int64
-	Revision   uint64
-	Frontier   struct {
+	BaselineOrder uint64
+	ResetOrder    uint64
+	LastUpdate    int64
+	Revision      uint64
+	Frontier      struct {
 		Order   uint64
 		MaxTime int64
 	}
@@ -143,6 +144,7 @@ type metricMetadata struct {
 
 func compactMetadata(m RollupMetadata) metricMetadata {
 	var out metricMetadata
+	out.BaselineOrder = m.BaselineOrder
 	out.ResetOrder = m.ResetOrder
 	out.LastUpdate = m.LastUpdate
 	out.Revision = m.Revision
@@ -153,7 +155,7 @@ func compactMetadata(m RollupMetadata) metricMetadata {
 	return out
 }
 func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
-	return RollupMetadata{ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Policy: h.definition, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
+	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Policy: h.definition, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
 func (m *rollupMetric) metadata() RollupMetadata   { return m.PolicyIdentity.metadata(m.meta) }
 func (m *readPartMetric) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }

@@ -44,6 +44,10 @@ type batch struct {
 	names []string
 	data  []points.Point
 }
+type ownerCall struct {
+	run func() error
+	ack chan error
+}
 type counters struct{ accepted, rejected, parse, transport, sink, wire, connections atomic.Uint64 }
 type Stats struct{ Accepted, Rejected, ParseErrors, TransportErrors, SinkErrors, WireBytes, Connections uint64 }
 
@@ -53,6 +57,7 @@ type Server struct {
 	cfg      Config
 	listener net.Listener
 	queues   []chan batch
+	controls []chan ownerCall
 	owners   []Owner
 	done     chan struct{}
 	stop     sync.Once
@@ -129,9 +134,11 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	}
 	for _, o := range owners {
 		q := make(chan batch, cfg.QueueDepth)
+		control := make(chan ownerCall)
+		s.controls = append(s.controls, control)
 		s.queues = append(s.queues, q)
 		s.workers.Add(1)
-		go s.work(o, q)
+		go s.work(o, q, control)
 	}
 	s.accept.Add(1)
 	go s.listen()
@@ -184,7 +191,7 @@ func (s *Server) fail(err error) {
 		s.mu.Unlock()
 	})
 }
-func (s *Server) work(o Owner, q <-chan batch) {
+func (s *Server) work(o Owner, q <-chan batch, control <-chan ownerCall) {
 	defer s.workers.Done()
 	tick := time.NewTicker(s.cfg.SyncInterval)
 	defer tick.Stop()
@@ -210,6 +217,12 @@ func (s *Server) work(o Owner, q <-chan batch) {
 	}
 	for {
 		select {
+		case call := <-control:
+			if failed {
+				call.ack <- errors.New("receiver owner failed")
+			} else {
+				call.ack <- call.run()
+			}
 		case b, ok := <-q:
 			if !ok {
 				syncOwner()
@@ -333,7 +346,8 @@ type reference struct {
 	owner int
 }
 
-func ownerFor(name string, n int) int {
+// OwnerFor returns the stable producer used by unplaced TCP intake.
+func OwnerFor(name string, n int) int {
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(name); i++ {
 		h ^= uint64(name[i])
@@ -415,7 +429,7 @@ func (s *Server) read(c net.Conn) error {
 			_, err = d.ReadFrame(r, func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 				if *slot == nil {
 					n := string(name)
-					*slot = reference{n, ownerFor(n, len(s.queues))}
+					*slot = reference{n, OwnerFor(n, len(s.queues))}
 				}
 				add((*slot).(reference), value, ts)
 			})
@@ -478,7 +492,7 @@ func (s *Server) read(c net.Conn) error {
 				s.cfg.Logger.Error("v2 invalid plaintext point", "error", e)
 			} else {
 				n := string(name)
-				add(reference{n, ownerFor(n, len(s.queues))}, value, ts)
+				add(reference{n, OwnerFor(n, len(s.queues))}, value, ts)
 			}
 		}
 		if appendErr != nil {
