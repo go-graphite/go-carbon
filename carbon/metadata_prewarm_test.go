@@ -569,6 +569,9 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 }
 
 func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	_, cfg := sharedAppConfig(t)
 	cfg.Whisper.StoreMetadataCachePrewarm = true
 	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)

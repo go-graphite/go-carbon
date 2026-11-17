@@ -317,6 +317,9 @@ func TestIncrementalPendingCleanupRunsWithZeroWorkersAndNoAdmissionSpace(t *test
 }
 
 func TestIncrementalDiskReservationsDoNotOvercommitOrDeadlock(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	directory := t.TempDir()
 	const reservation = 600
 	m := &incrementalStoreMigration{diskFree: func(string) (uint64, error) { return 1000, nil }}

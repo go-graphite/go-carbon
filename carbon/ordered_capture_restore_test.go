@@ -112,7 +112,7 @@ func TestOrderedRestoreWithRetainedCapturePressure(t *testing.T) {
 	// A previous process's closed epoch is adopted ahead of current input.
 	// It need not share the successor's partition count.
 	batch := points.OnePoint(metric, 2, stamp)
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -29,7 +29,7 @@ func TestStartupHistoryListsEveryLockedOlderPartition(t *testing.T) {
 	app := New("")
 	app.Config = NewConfig()
 	app.startupInput = s
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestStartupHistoryBacklogTracksAppliedFrames(t *testing.T) {
 	app := New("")
 	app.Config = NewConfig()
 	app.startupInput = s
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}

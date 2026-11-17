@@ -101,8 +101,9 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	// Longer valid metric segments keep each stream above the default 8MiB
 	// RAM allowance with fewer points and durable capture batches.
-	const clients, records = 2, 8000
-	metricPath := strings.Repeat(strings.Repeat("longsegment", 8)+".", 12)
+	const clients, records = 2, 12000
+	// Keep the legacy lookup path below macOS PATH_MAX during incremental routing.
+	metricPath := strings.Repeat(strings.Repeat("longsegment", 8)+".", 8)
 	stamp := time.Now().Unix() - 5
 	// Drive the actual plaintext receiver in process. The socket transfer is
 	// exercised above; kernel loopback throughput must not decide whether the

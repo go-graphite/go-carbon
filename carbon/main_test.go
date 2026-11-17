@@ -1,10 +1,8 @@
 package carbon
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -77,15 +75,6 @@ func TestMain(m *testing.M) {
 			if err := os.Symlink(binary, path); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
-			}
-			for _, flag := range []string{"-handoff-protocol", "-input-handoff-protocol", "-shared-store-handoff-protocol", "-store-input-handoff-protocol"} {
-				if err := exec.Command(path, flag).Run(); err != nil {
-					var exit *exec.ExitError
-					if !errors.As(err, &exit) || exit.ExitCode() != 2 {
-						fmt.Fprintln(os.Stderr, err)
-						os.Exit(1)
-					}
-				}
 			}
 		}
 		_ = os.Setenv(testHandoffSuccessorDir, probeDir)

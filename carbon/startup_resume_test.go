@@ -83,7 +83,7 @@ func startupResumeGracefulPartialHistory(t *testing.T, newFormat bool) {
 	defer zapwriter.Test()()
 	s, _ := captureFixture(t)
 	want := releaseCrashPoints()
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestStartupHistoryDurabilityCrashProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := releaseCrashPoints()
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +468,9 @@ func TestStartupResumeGracefulLiveShard(t *testing.T) {
 }
 
 func TestStartupResumeSelectsCursorWithoutOriginalManifest(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	s, _ := captureFixture(t)
 	core := cache.New()
