@@ -564,7 +564,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		for _, b := range batches {
 			policy := b.Policy
 			if b.Registered != nil {
-				if len(b.Registered.definition) == 0 {
+				if b.Registered.policy.policyDefinition == nil {
 					return errors.New("uninitialized application policy")
 				}
 				if len(policy) != 0 {
@@ -573,7 +573,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 				if b.Registered.catalog == e.identities && b.Registered.id == b.ID {
 					continue
 				}
-				policy = b.Registered.definition
+				policy = b.Registered.definitionBytes()
 			}
 			if _, err := e.identities.intern(b.ID, "", policy); err != nil {
 				return err
@@ -769,12 +769,8 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			b.Points = pointArena[pointOffset : pointOffset+n : pointOffset+n]
 			pointOffset += n
 			if e.cfg.Rollups {
-				// The shared identity owns the validated canonical bytes.
-				if b.Registered != nil && b.Registered.catalog == e.identities && b.Registered.id == b.ID {
-					b.Policy = b.Registered.definition
-				} else {
-					b.Policy = e.identities.lookup(b.ID).definition
-				}
+				b.Registered = e.identities.lookup(b.ID)
+				b.Policy = nil
 			} else {
 				n = copy(policyArena[policyOffset:], b.Policy)
 				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]

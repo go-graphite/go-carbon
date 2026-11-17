@@ -46,7 +46,7 @@ func TestPolicyCatalogEncodingOracle(t *testing.T) {
 		if (err == nil) != want {
 			t.Fatalf("case %d accepted=%v want=%v raw=%q err=%v", i, err == nil, want, raw, err)
 		}
-		if want && (h.rollupPolicy().Name != policy.Name || !bytes.Equal(h.definition, raw)) {
+		if want && (h.rollupPolicy().Name != policy.Name || !bytes.Equal(h.definitionBytes(), raw)) {
 			t.Fatalf("case %d differs from JSON oracle", i)
 		}
 	}

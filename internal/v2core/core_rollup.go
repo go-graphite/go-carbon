@@ -62,11 +62,9 @@ type RollupMetadata struct {
 
 type rollupMetric struct {
 	*PolicyIdentity
-	meta        metricMetadata
-	slots       sealrollup.Slots
-	keyTemplate []byte
-	partOffset  int
-	vshard      uint16
+	meta   metricMetadata
+	slots  sealrollup.Slots
+	vshard uint16
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -111,11 +109,7 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := partsformat.Encode(partsformat.Key{Group: h.policy.Group, VShard: partsformat.Route(h.policy.Name), Metric: h.policy.Name})
-	if err != nil {
-		return nil, err
-	}
-	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.prepared.NewSlots(), keyTemplate: key, partOffset: len(key) - len(h.policy.Name) - 36, vshard: partsformat.Route(h.policy.Name)}, nil
+	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}, nil
 }
 
 type rollupStage struct {
@@ -171,7 +165,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				var err error
 				policy := b.Policy
 				if b.Registered != nil {
-					policy = b.Registered.definition
+					policy = b.Registered.definitionBytes()
 				}
 				m, err = r.metric(b.ID, policy)
 				if err != nil {
@@ -192,7 +186,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 		r.batchPositions[bi] = i
 		s := &stages[i]
-		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !bytes.Equal(b.Policy, s.metric.definition) {
+		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !s.metric.definitionEqual(b.Policy) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
 		stages[i].batchCount++
@@ -337,14 +331,14 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 						var prepared *sealrollup.Prepared
 						prepared, err = sealrollup.Prepare(policy.Config)
 						if err == nil {
-							h = &PolicyIdentity{id: m.ID, policy: policyName{Name: policy.Name, Group: policy.Group}, definition: m.Policy, prepared: prepared}
+							h = detachedPolicy(m.ID, policy, m.Policy, prepared)
 						}
 					}
 				}
 				if err != nil {
 					return err
 				}
-				if h.prepared.Digest() != m.Frontier.Policy {
+				if h.policy.prepared.Digest() != m.Frontier.Policy {
 					return errors.New("rollup policy/frontier mismatch")
 				}
 				e.identity, e.meta = h, compactMetadata(m)
@@ -527,7 +521,7 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		if r.metrics[meta.ID] != nil {
 			return errors.New("duplicate recovered rollup ID")
 		}
-		meta.Policy = m.definition
+		meta.Policy = m.definitionBytes()
 		m.meta = compactMetadata(meta)
 		m.slots.KeepRecent(meta.Frontier.MaxTime)
 		for _, record := range records {

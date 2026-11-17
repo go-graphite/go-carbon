@@ -96,7 +96,7 @@ func (p *PreparedMove) Close() error {
 func (p *PreparedMove) Policies() map[string][]byte {
 	out := map[string][]byte{}
 	for name, m := range p.index.metrics {
-		out[name] = bytes.Clone(m.latest.definition)
+		out[name] = bytes.Clone(m.latest.definitionBytes())
 	}
 	return out
 }
@@ -208,7 +208,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	wanted := map[archivePartIdentity]bool{}
 	for name := range ids {
 		if metric := prepared.index.metrics[name]; metric != nil {
-			for _, part := range metric.parts {
+			for _, part := range prepared.index.metricParts(metric) {
 				wanted[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
 			}
 		}
@@ -289,7 +289,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			continue
 		}
 		policy := donor.latest.rollupPolicy()
-		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.definition, donor.latest.definition) {
+		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.definitionBytes(), donor.latest.definitionBytes()) {
 			return errors.New("move policy mismatch")
 		}
 		winning := []sealrollup.Record{}
@@ -319,10 +319,10 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 				}
 			}
 		}
-		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.definition), Revision: 1, LastUpdate: now * 1e9}
-		local.Frontier.Policy = donor.latest.prepared.Digest()
+		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.definitionBytes()), Revision: 1, LastUpdate: now * 1e9}
+		local.Frontier.Policy = donor.latest.policy.prepared.Digest()
 		if old := o.rollups.metrics[id]; old != nil {
-			if !bytes.Equal(old.definition, local.Policy) {
+			if !bytes.Equal(old.definitionBytes(), local.Policy) {
 				return errors.New("receiving ID belongs to another name")
 			}
 			local = old.metadata()
@@ -449,7 +449,7 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if (a.Version != 1 && a.Version != 2) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definition) || a.Meta.Frontier.Order != a.AtOrder {
+		if (a.Version != 1 && a.Version != 2) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || a.Meta.Frontier.Order != a.AtOrder {
 			return errors.New("invalid move authority")
 		}
 		if s.moves[m].origin.Class == LivePart {
@@ -457,16 +457,16 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 				return errors.New("move receiving identity changed")
 			}
 			if m.latest.meta.Frontier.Order <= a.AtOrder {
-				latest := *m.latest
+				latest := m.latest
 				latest.meta = compactMetadata(a.Meta)
-				latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, definition: latest.definition, prepared: latest.prepared}
-				m.latest = &latest
+				latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}
+				m.latest = latest
 			}
 		} else {
-			latest := *m.latest
+			latest := m.latest
 			latest.meta = compactMetadata(a.Meta)
-			latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, definition: latest.definition, prepared: latest.prepared}
-			m.latest = &latest
+			latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}
+			m.latest = latest
 		}
 		s.moves[m].authority = &a
 	}
@@ -486,13 +486,13 @@ func (s *RollupSnapshot) scanMoveArchive(ctx context.Context, name string, archi
 		// Legacy authorities contain the entire baseline. Only subsequent local
 		// replacements compete with it; old underlying coarse rows stay masked.
 		live := *m
-		live.parts = nil
-		for _, part := range m.parts {
+		var liveParts []*readPartMetric
+		for _, part := range s.metricParts(m) {
 			if part.part.origin.Class == LivePart {
-				live.parts = append(live.parts, part)
+				liveParts = append(liveParts, part)
 			}
 		}
-		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
+		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, partOverrides: map[*snapshotMetric][]*readPartMetric{&live: liveParts}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
 	}
 	if err := base.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, origin partOrigin) error {
 		if a.Version != 1 || record.Order > a.AtOrder {

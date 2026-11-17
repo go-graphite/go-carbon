@@ -1,7 +1,6 @@
 package partlog
 
 import (
-	"bytes"
 	"encoding/binary"
 	"hash/crc32"
 	"sort"
@@ -32,8 +31,9 @@ func (c *NameCatalog) flushGroup() error {
 		raw = binary.AppendUvarint(raw, uint64(prefix))
 		raw = binary.AppendUvarint(raw, uint64(len(e.key)-prefix))
 		raw = append(raw, e.key[prefix:]...)
-		raw = binary.AppendUvarint(raw, uint64(len(e.definition)))
-		raw = append(raw, e.definition...)
+		definition := e.definitionBytes()
+		raw = binary.AppendUvarint(raw, uint64(len(definition)))
+		raw = append(raw, definition...)
 		previous = e.key
 	}
 	if c.groupEncoder == nil {
@@ -126,7 +126,7 @@ func (c *NameCatalog) readGroup(body []byte) error {
 		}
 		if b.id < uint64(len(c.entries)) {
 			old := c.entries[b.id]
-			if old.key != b.key || !bytes.Equal(old.definition, b.def) {
+			if old.key != b.key || !old.definitionEqual(b.def) {
 				return errCatalog
 			}
 		} else {

@@ -1,5 +1,7 @@
 package partlog
 
+import "bytes"
+
 // Definitions are immutable for a catalog epoch and live exactly as long as
 // their bindings. Pack them into byte pages instead of a heap allocation per
 // metric. Returned slices have no spare capacity; appending cannot overwrite
@@ -22,10 +24,47 @@ func (c *NameCatalog) copyDefinition(definition []byte) []byte {
 	return c.definitionArena[start:end:end]
 }
 
+// Split definitions only when their leading name is exactly the catalog key.
+// This is a lossless byte representation, independent of policy interpretation.
+// Group/checkpoint encoders reconstruct the original bytes at the disk boundary.
+const definitionNamePrefix = `{"Name":"`
+
+func (e catalogEntry) definitionBytes() []byte {
+	if !e.split {
+		return e.definition
+	}
+	out := make([]byte, 0, len(definitionNamePrefix)+len(e.key)+len(e.definition))
+	out = append(out, definitionNamePrefix...)
+	out = append(out, e.key...)
+	return append(out, e.definition...)
+}
+func (e catalogEntry) definitionEqual(raw []byte) bool {
+	if !e.split {
+		return bytes.Equal(e.definition, raw)
+	}
+	n := len(definitionNamePrefix) + len(e.key)
+	return len(raw) == n+len(e.definition) && bytes.HasPrefix(raw, []byte(definitionNamePrefix)) && string(raw[len(definitionNamePrefix):n]) == e.key && bytes.Equal(raw[n:], e.definition)
+}
 func (c *NameCatalog) bindEntry(id uint64, name string, definition []byte) (catalogEntry, error) {
 	if c.bindDefinition != nil {
-		name, definition, err := c.bindDefinition(id, name, definition)
-		return catalogEntry{key: name, definition: definition}, err
+		var err error
+		name, definition, err = c.bindDefinition(id, name, definition)
+		if err != nil {
+			return catalogEntry{}, err
+		}
+	}
+	n := len(definitionNamePrefix) + len(name)
+	// JSON escapes cannot compare equal to the literal key, so use generic storage.
+	if len(definition) > n && bytes.HasPrefix(definition, []byte(definitionNamePrefix)) && string(definition[len(definitionNamePrefix):n]) == name && definition[n] == '"' {
+		if c.definitionSuffixes == nil {
+			c.definitionSuffixes = map[string][]byte{}
+		}
+		suffix := c.definitionSuffixes[string(definition[n:])]
+		if suffix == nil {
+			suffix = c.copyDefinition(definition[n:])
+			c.definitionSuffixes[string(suffix)] = suffix
+		}
+		return catalogEntry{key: name, definition: suffix, split: true}, nil
 	}
 	return catalogEntry{key: name, definition: c.copyDefinition(definition)}, nil
 }

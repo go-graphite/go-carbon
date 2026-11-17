@@ -200,6 +200,9 @@ func (g *generation) load() {
 	}
 	g.metrics = make(map[string]*metricState)
 	for _, b := range g.pending {
+		if b.Registered != nil && len(b.Policy) == 0 {
+			b.Policy = b.Registered.Definition()
+		}
 		var p v2core.RollupPolicy
 		if g.err = json.Unmarshal(b.Policy, &p); g.err != nil {
 			return
