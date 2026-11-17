@@ -16,6 +16,10 @@ import (
 // This fixture deliberately uses only pre-history-cache APIs so it can also run
 // against an overlay of the unchanged reducer runtime.
 func TestRollupHistoryDifferential(t *testing.T) {
+	// This golden guards the no-merge physical layout, including superseded
+	// replacements. Compaction legitimately changes that layout. Logical exactness
+	// with merges, retirement and reopen is TestSealedMergeHistoryDifferential.
+	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {

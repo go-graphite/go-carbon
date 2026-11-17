@@ -96,12 +96,17 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 // before decoding, rejects overflow/trailing bytes and never treats absence as
 // a NaN sentinel. Returned records own all their scalar state.
 func DecodeSlots(archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
+	return DecodeSlotsInto(nil, archive, firstSlot, data)
+}
+
+// DecodeSlotsInto is DecodeSlots with caller-owned reusable scalar storage.
+func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
 	if !bytes.HasPrefix(data, denseMagic) {
 		r, e := sealrollup.DecodeRecord(int(archive), firstSlot, data)
 		if e != nil {
 			return nil, e
 		}
-		return []sealrollup.Record{r}, nil
+		return append(dst[:0], r), nil
 	}
 	bad := errors.New("invalid dense archive run")
 	if len(data) < 6 || data[4] > 1 || archive == MetadataArchive || firstSlot < 0 {
@@ -121,7 +126,13 @@ func DecodeSlots(archive uint32, firstSlot int64, data []byte) ([]sealrollup.Rec
 	if !ok || count == 0 || count > MaxDenseSlots || count > uint64(len(p)) {
 		return nil, bad
 	}
-	rs := make([]sealrollup.Record, int(count))
+	var rs []sealrollup.Record
+	if cap(dst) >= int(count) {
+		rs = dst[:int(count)]
+		clear(rs)
+	} else {
+		rs = make([]sealrollup.Record, int(count))
+	}
 	var slot int64
 	for i := range rs {
 		v, ok := take()
@@ -299,6 +310,37 @@ func (w *DenseWriter) SetRecordEncoded(key []byte, record sealrollup.Record) err
 	w.err = err
 	return err
 }
+
+// SetSlotsEncoded copies a complete non-overlapping dense run without
+// repacking its values. Validation uses the writer's reusable scalar buffer;
+// pending singleton output is flushed first. Caller buffers are not retained.
+func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	k, err := w.decodeInput(key)
+	if err == nil && (k.Archive == MetadataArchive || k.Ordinal != 0) {
+		err = errors.New("dense run requires archive and ordinal zero")
+	}
+	if err == nil {
+		err = w.flush()
+	}
+	if err == nil {
+		w.records, err = DecodeSlotsInto(w.records[:0], k.Archive, k.BlockStart, value)
+	}
+	if err == nil {
+		// Future inputs must start after this run's last physical slot.
+		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
+		err = w.writer.setDecoded(key, k, value)
+	}
+	w.records = w.records[:0]
+	w.err = err
+	return err
+}
+
 func validSlotRecord(r sealrollup.Record) bool {
 	return r.Archive >= 0 && r.Slot >= 0 && r.Order != 0 && r.Sample.Time > 0 && r.Sample.Time <= math.MaxUint32
 }
