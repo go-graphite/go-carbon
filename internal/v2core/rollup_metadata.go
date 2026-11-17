@@ -64,12 +64,6 @@ func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 	return m, nil
 }
 
-func (r *coreRollups) appendRecord(record sealrollup.Record) []byte {
-	start := len(r.arena)
-	r.arena = sealrollup.AppendRecord(r.arena, record)
-	return r.arena[start:len(r.arena):len(r.arena)]
-}
-
 // One serial owner exclusively holds these arenas until its ingest resolves.
 func (r *coreRollups) release() {
 	for _, coverage := range r.coverage {
@@ -78,6 +72,8 @@ func (r *coreRollups) release() {
 	}
 	clear(r.stages)
 	r.stages = r.stages[:0]
+	clear(r.ordered)
+	r.ordered = r.ordered[:0]
 	clear(r.batches)
 	r.batches = r.batches[:0]
 	clear(r.positions)
@@ -87,7 +83,6 @@ func (r *coreRollups) release() {
 		r.files[group] = file[:0]
 	}
 	r.samples = r.samples[:0]
-	r.records = r.records[:0]
 	r.arena = r.arena[:0]
 	r.pending = false
 }

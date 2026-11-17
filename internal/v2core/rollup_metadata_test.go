@@ -105,7 +105,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 				t.Fatalf("mixed group %v", e)
 			}
 			shards[k.VShard] = true
-			saved = append(saved, bytes.Clone(kv.Key), bytes.Clone(kv.Value))
+			saved = append(saved, bytes.Clone(kv.Key), bytes.Clone(kv.encodedValue()))
 		}
 		if len(shards) < 32 {
 			t.Fatal("fixture did not span vshards")
@@ -117,7 +117,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 	n := 0
 	for _, file := range plan.Files {
 		for _, kv := range file {
-			if !bytes.Equal(saved[n], kv.Key) || !bytes.Equal(saved[n+1], kv.Value) {
+			if !bytes.Equal(saved[n], kv.Key) || !bytes.Equal(saved[n+1], kv.encodedValue()) {
 				t.Fatal("pending bytes changed")
 			}
 			n += 2

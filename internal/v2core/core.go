@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync/atomic"
@@ -75,6 +76,7 @@ const (
 )
 
 type coreRouter struct {
+	batchRows                   []row
 	slots                       []coreDispatch
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
@@ -192,7 +194,8 @@ type coreOwner struct {
 	partSource  v2part.Provenance
 	maintenance bool
 
-	stage func(string)
+	stage      func(string)
+	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
@@ -336,16 +339,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	for s := 0; s < cfg.Shards; s++ {
 		dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
 		opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
-		if cfg.Rollups {
-			// Preserve dense part compression when the LSM rewrites group-wide
-			// ranges; default small Snappy blocks undo most of the SST byte saving.
-			opts.Levels = make([]pebble.LevelOptions, 7)
-			for i := range opts.Levels {
-				opts.Levels[i].Compression = pebble.ZstdCompression
-				opts.Levels[i].BlockSize = 256 << 10
-				opts.Levels[i].BlockRestartInterval = 64
-			}
-		}
+
 		opts.Experimental.TableCacheShards = 1
 		opts.BytesPerSync = 64 << 20
 		opts.EventListener = &pebble.EventListener{
@@ -362,7 +356,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{partSource: partSource, stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -378,7 +372,20 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 		}
-		if hooks.PublishBatches != nil {
+		if hooks.PublishBatchesWithInventory != nil {
+			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
+				// Replace the provisional pin with one captured under the GC binding
+				// fence. No reader acquires this owner/GC mutex.
+				_ = snap.Close()
+				if o.gc == nil {
+					return hooks.PublishBatchesWithInventory(s, o.db.NewSnapshot(), batches, generation, nil)
+				}
+				o.gc.mu.Lock()
+				pin, inventory := o.db.NewSnapshot(), o.gc.inventory
+				o.gc.mu.Unlock()
+				return hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+			}
+		} else if hooks.PublishBatches != nil {
 			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
 				return hooks.PublishBatches(s, snap, batches, generation)
 			}
@@ -401,11 +408,34 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			return fail(errors.New("owner format/config mismatch"))
 		}
 		o.publishFrontier(o.meta)
+		if cfg.Rollups && readOnly {
+			value, closer, err := db.Get(rollupDirectoryKey)
+			if err == nil {
+				absolute, e := filepath.Abs(dir)
+				if e == nil && string(value) != absolute {
+					e = errors.New("relocated archive owner must be opened writable once to rebind its local directory")
+				}
+				e = errors.Join(e, closer.Close())
+				if e != nil {
+					return fail(e)
+				}
+			} else if !errors.Is(err, pebble.ErrNotFound) {
+				return fail(err)
+			}
+		}
 		if cfg.Rollups && !readOnly {
+			absolute, err := filepath.Abs(dir)
+			if err != nil {
+				return fail(err)
+			}
+			if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
+				return fail(err)
+			}
 			r, err := recoverCoreRollups(db, identities)
 			if err != nil {
 				return fail(err)
 			}
+			r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
 			r.stage = hooks.Stage
 			r.expire = hooks.Expire
 			r.now = hooks.Now
@@ -504,7 +534,17 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	router := &e.routers[producer]
 	if e.cfg.Rollups {
 		for _, b := range batches {
-			if _, err := e.identities.intern(b.ID, "", b.Policy); err != nil {
+			policy := b.Policy
+			if b.Registered != nil {
+				if len(b.Registered.policy) == 0 {
+					return errors.New("uninitialized application policy")
+				}
+				if len(policy) != 0 {
+					return errors.New("registered policy with mutable definition")
+				}
+				policy = b.Registered.policy
+			}
+			if _, err := e.identities.intern(b.ID, "", policy); err != nil {
 				return err
 			}
 		}
@@ -1023,6 +1063,15 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		defer o.gc.fileMu.Unlock()
 	}
 	sealStart := time.Now()
+	planEnd := sealStart
+	defer func() {
+		if o.sealTiming != nil {
+			end := time.Now()
+			o.sealTiming("seal_total", end.Sub(sealStart))
+			o.sealTiming("rollup_plan", planEnd.Sub(sealStart))
+			o.sealTiming("publication", end.Sub(planEnd))
+		}
+	}()
 	if o.stage != nil {
 		o.stage("seal")
 	}
@@ -1054,7 +1103,8 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return 0, errors.New("raw replacement requires output for nonempty input")
 		}
 	}
-	phaseStart := time.Now()
+	planEnd = time.Now()
+	phaseStart := planEnd
 	if plan.ReplaceRaw {
 		// The replacement planner owns ordering and retention in its format.
 	} else if o.stage != nil {
@@ -1088,7 +1138,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	batch := o.db.NewBatch()
 	defer batch.Close()
 	var writer *sstable.Writer
-	var paths []string
+	var paths, stagedPaths []string
 	var total uint64
 	stage := func(suffix string) (*sstable.Writer, string, error) {
 		path := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-%s.sst", o.meta.NextPart, suffix))
@@ -1097,10 +1147,11 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return nil, "", err
 		}
 		paths = append(paths, path)
+		stagedPaths = append(stagedPaths, path)
 		return sstable.NewWriter(objstorageprovider.NewFileWritable(o.stageFile(f)), sstable.WriterOptions{Compression: sstable.SnappyCompression}), path, nil
 	}
 	defer func() {
-		for _, p := range paths {
+		for _, p := range stagedPaths {
 			_ = os.Remove(p)
 		}
 	}()
@@ -1223,7 +1274,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	for i, file := range plan.Files {
 		if isRollupFile(file) {
 			xp := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
-			paths = append(paths, xp)
+			stagedPaths = append(stagedPaths, xp)
 			var d v2part.Descriptor
 			var e error
 			if len(plan.PartSpecs) == len(plan.Files) {
@@ -1306,7 +1357,17 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	o.encodeNS.Add(uint64(time.Since(phaseStart)))
 	ingestStart := time.Now()
 	defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
-	if err = o.db.Ingest(paths); err != nil {
+	if o.gc != nil {
+		o.gc.mu.Lock()
+	}
+	err = o.db.Ingest(paths)
+	if o.gc != nil {
+		if err == nil {
+			o.gc.inventory = o.gc.inventory.with(descriptors, nil)
+		}
+		o.gc.mu.Unlock()
+	}
+	if err != nil {
 		return 0, err
 	}
 	durable = true

@@ -50,7 +50,7 @@ func TestClassicPendingAndSealed(t *testing.T) {
 					}
 					defer classic.Close()
 					reader, _ := New(1, 1<<30, 64<<20)
-					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatches: reader.Publish})
+					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -136,7 +136,7 @@ func TestClassicPendingAndSealed(t *testing.T) {
 
 func TestConcurrentPublicationAndClose(t *testing.T) {
 	reader, _ := New(1, 1<<28, 1<<20)
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatches: reader.Publish})
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestConcurrentPublicationAndClose(t *testing.T) {
 func TestPinnedCallbackDoesNotBlockWriter(t *testing.T) {
 	reader, _ := New(1, 1<<28, 1<<20)
 	reader.Now = func() time.Time { return time.Unix(1000, 0) }
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatches: reader.Publish})
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
 	if err != nil {
 		t.Fatal(err)
 	}

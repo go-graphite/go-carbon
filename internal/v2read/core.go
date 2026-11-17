@@ -56,16 +56,20 @@ type sealedCache struct {
 	orderMu        sync.Mutex
 	ordered        []orderedSamples
 	orderedBytes   int64
+	renderMu       sync.Mutex
+	rendered       []renderedEntry
+	renderedBytes  int64
 }
 type sealedData struct {
-	cache    *sealedCache
-	index    *v2core.RollupSnapshot
-	refs     atomic.Int64
-	number   uint64
-	reader   *Reader
-	snapshot *pebble.Snapshot
-	once     sync.Once
-	err      error
+	cache     *sealedCache
+	index     *v2core.RollupSnapshot
+	refs      atomic.Int64
+	number    uint64
+	reader    *Reader
+	snapshot  *pebble.Snapshot
+	inventory *v2core.RollupInventory
+	once      sync.Once
+	err       error
 }
 
 type metricState struct {
@@ -97,6 +101,11 @@ func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
 // snapshot and the detached batch arena transfers even when this returns an error.
 // It does no archive scan or reduction on the writer. Owners serialize callbacks.
 func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.Batch, number uint64) error {
+	return r.PublishWithInventory(owner, snapshot, pending, number, nil)
+}
+
+// PublishWithInventory transfers the core's coherent immutable binding set.
+func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pending []v2core.Batch, number uint64, inventory *v2core.RollupInventory) error {
 	if r.closed.Load() {
 		return snapshot.Close()
 	}
@@ -109,7 +118,7 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 	// may race publication; a failed retain means a fresh sealed resource is needed.
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
-		if old.sealed.number == number {
+		if old.sealed.number == number && old.sealed.inventory == inventory {
 			g.sealed = old.sealed
 			g.sealed.refs.Add(1)
 		}
@@ -118,7 +127,7 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 	if g.sealed != nil {
 		_ = snapshot.Close()
 	} else {
-		g.sealed = &sealedData{snapshot: snapshot, number: number, cache: &r.caches[owner], reader: r}
+		g.sealed = &sealedData{snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
 		g.sealed.refs.Store(1)
 	}
 	g.refs.Store(1)
@@ -158,7 +167,7 @@ func (r *Reader) Close() {
 func (s *sealedData) load() {
 	s.cache.mu.Lock()
 	defer s.cache.mu.Unlock()
-	s.index, s.err = v2core.NewRollupSnapshotWithCatalog(context.Background(), s.snapshot, s.cache.index, s.reader.Identities, s.cache.limit)
+	s.index, s.err = v2core.NewRollupSnapshotWithCatalogAndInventory(context.Background(), s.snapshot, s.cache.index, s.reader.Identities, s.inventory, s.cache.limit)
 	if s.err != nil {
 		return
 	}
@@ -368,6 +377,33 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		} else {
 			source = &sealedSource{metric: metric}
 		}
+		// Exact repeated requests can serialize the same immutable resolved
+		// values. The bounded cache owns no generation or snapshot reference.
+		if metric.frozen != nil {
+			if cached := metric.resource.cache.renderedSeries(metric.frozen, from, until, now); cached != nil {
+				retained := metric.frozen.RetainedBytes() + 4*metric.resource.cache.limit + r.WorkBytes
+				if metric.sealed != nil {
+					retained += metric.sealed.RetainedBytes()
+				}
+				if int64(len(cached.Values)) > r.WorkBytes/32 {
+					return ErrAdmission
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !r.Budget.take(retained) {
+					return ErrAdmission
+				}
+				err := func() error {
+					defer r.Budget.used.Add(-retained)
+					return consume(name, cached)
+				}()
+				if err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		archives := make([]Archive, len(metric.policy.Config.Archives))
 		for i, a := range metric.policy.Config.Archives {
 			archives[i] = Archive{Step: a.Step, Points: a.Count}
@@ -375,9 +411,9 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		m := Metric{ID: metric.meta.ID, Archives: archives, XFilesFactor: metric.policy.Config.XFilesFactor, AggregationMethod: aggregationName(metric.policy.Config.Method)}
 		catalog := CatalogFuncs{LookupFunc: func(n string) (Metric, bool) { return m, n == name }}
 		var p Publication
-		retained := int64(0)
+		retained := 4 * metric.resource.cache.limit
 		if metric.sealed != nil {
-			retained = metric.sealed.RetainedBytes() + 3*metric.resource.cache.limit
+			retained += metric.sealed.RetainedBytes()
 		}
 		if metric.frozen != nil {
 			retained += metric.frozen.RetainedBytes()
@@ -393,6 +429,9 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			s, e := h.Render(ctx, name, from, until, now)
 			if e != nil {
 				return e
+			}
+			if metric.frozen != nil && s != nil {
+				metric.resource.cache.rememberRendered(metric.frozen, from, until, now, s)
 			}
 			return consume(name, s)
 		}()

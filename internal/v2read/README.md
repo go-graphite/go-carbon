@@ -11,7 +11,7 @@ interfaces do not fit the core-first snapshot boundary.
 reader, err := v2read.New(shards, 1<<30, 64<<20)
 // Handle err.
 engine, err := v2core.Open(root, config, v2core.Hooks{
-    PublishBatches: reader.Publish,
+    PublishBatchesWithInventory: reader.PublishWithInventory,
 })
 // config.Rollups must be true. Submit the original applications with
 // engine.AppendBatches / AppendBatchesPipelined, preserving Order and Clock.
@@ -120,3 +120,15 @@ share directory metadata, while each snapshot keeps its own lifetime. Named fetc
 look up metadata lazily; discovery still enumerates the pinned directory. Original
 part-directory enumeration remains necessary when the sealed generation changes;
 this is not an archive-file manifest or a change to persisted part authority.
+
+Core-backed readers use `PublishBatchesWithInventory: reader.PublishWithInventory`.
+The core captures an immutable descriptor-binding map with the Pebble snapshot;
+seals extend it and retirement removes bindings under the existing GC fence.
+The reader still supports `Publish` and bare GCP3 snapshots by enumerating the
+pinned binding namespace. Existing parts share decoded metadata; only new parts
+are opened. Binding maps are shallow copies, not a new persistent index format.
+
+Resolved archive records use each name's immutable part-set identity, so sealing
+another name does not trigger an archive scan. A bounded owner-local cache also
+reuses detached render results for the exact resolved source, range and clock.
+It retains scalar records and values only, never snapshot pins or writer state.

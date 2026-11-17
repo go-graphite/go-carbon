@@ -23,10 +23,12 @@ type RollupSnapshot struct {
 	identities *PolicyCatalog
 
 	snapshot       *pebble.Snapshot
+	directory      string
 	parts          map[string]*readPart
 	metrics        map[string]*snapshotMetric
 	cache          *rollupRangeCache
 	directoryBytes int64
+	bindingSet     *RollupInventory
 	inventory      map[string][]string // descriptor binding -> immutable routed part scopes
 }
 
@@ -77,10 +79,17 @@ type snapshotMetric struct {
 }
 
 func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalog(ctx, snapshot, prior, nil, cacheLimit...)
+	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, nil, cacheLimit...)
+}
+func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, cacheLimit ...int64) (*RollupSnapshot, error) {
+	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, identities, nil, cacheLimit...)
+}
+func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
+	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, bindings, cacheLimit...)
 }
 
-func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, cacheLimit ...int64) (*RollupSnapshot, error) {
+// NewRollupSnapshotWithCatalogAndInventory reuses immutable identities and the owner binding set.
+func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
 	if identities == nil && prior != nil {
 		identities = prior.identities
 	}
@@ -91,7 +100,8 @@ func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
-	out := &RollupSnapshot{identities: identities, snapshot: snapshot, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
+	out := &RollupSnapshot{identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -100,13 +110,13 @@ func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot
 
 	// The descriptor namespace is published atomically with the data. Walking
 	// these small adjacent keys avoids seeking every old scope through the SSTs.
-	inventory, scopes, err := rollupInventory(ctx, snapshot, prior)
+	inventory, scopes, err := rollupInventory(ctx, snapshot, prior, bindings)
 	if err != nil {
 		return nil, err
 	}
 	out.inventory = inventory
 	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +258,13 @@ func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot
 // RetainedBytes conservatively charges directory storage plus the maximum
 // bounded range cache. Shared immutable entries are charged independently by
 // each pinned generation; SST and pending-arena accounting remains external.
-func (s *RollupSnapshot) RetainedBytes() int64 { return s.directoryBytes + s.cache.limit }
+func (s *RollupSnapshot) RetainedBytes() int64 {
+	n := s.directoryBytes + s.cache.limit
+	if s.bindingSet != nil {
+		n += s.bindingSet.bytes
+	}
+	return n
+}
 
 // Metadata visits only the directory, never archive values.
 func (s *RollupSnapshot) Metadata(visit func(string, RollupPolicy, RollupMetadata)) {
@@ -265,6 +281,16 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 		return RollupPolicy{}, RollupMetadata{}, false
 	}
 	return m.latest.rollupPolicy(), m.latest.metadata(), true
+}
+
+// MetricVersion identifies an immutable name's complete part set and metadata.
+// It owns no snapshot; equality proves archive records are unchanged, including
+// reset, retirement and rewind. Consumers may retain it in bounded caches.
+func (s *RollupSnapshot) MetricVersion(name string) any {
+	if m := s.metrics[name]; m != nil {
+		return m
+	}
+	return nil
 }
 
 // ScanArchive seeks only the named archive's physical interval in each part.
@@ -326,7 +352,14 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 			}
 		}
 	}
-	it, err := s.snapshot.NewIter(nil)
+	if s.directory != "" {
+		ctx = WithRollupDirectory(ctx, s.directory)
+	}
+	selected := make(map[archivePartIdentity]bool, len(m.parts))
+	for _, part := range m.parts {
+		selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
+	}
+	it, err := newArchiveIterSelected(ctx, s.snapshot, nil, selected)
 	if err != nil {
 		return err
 	}
@@ -500,7 +533,7 @@ func (s *RollupSnapshot) Records(ctx context.Context, name string) ([]sealrollup
 }
 
 // readRollupPart decodes metadata only for one newly visible routed part.
-func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte, identities *PolicyCatalog) (*readPart, error) {
+func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identities *PolicyCatalog) (*readPart, error) {
 	if !it.SeekGE(scope) || !bytes.HasPrefix(it.Key(), scope) {
 		return nil, fmt.Errorf("missing rollup part %x", scope)
 	}

@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -9,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -60,25 +63,25 @@ type RollupMetadata struct {
 
 type rollupMetric struct {
 	*PolicyIdentity
-	meta  metricMetadata
-	slots *sealrollup.Slots
+	registered *ApplicationPolicy
+	meta       metricMetadata
+	slots      *sealrollup.Slots
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
 	seen map[[32]byte]bool
 }
 type coreRollups struct {
-	identities *PolicyCatalog
-
-	expire func(RollupPolicy, RollupMetadata, time.Time) bool
-	now    func() time.Time
-
+	identities   *PolicyCatalog
+	lanes        []rollupPlannerLane
+	parallelism  int
+	expire       func(RollupPolicy, RollupMetadata, time.Time) bool
+	now          func() time.Time
 	stage        func(string)
 	metrics      map[uint64]*rollupMetric
 	names        map[partsformat.ID]uint64
-	workspace    sealrollup.Workspace
-	records      []sealrollup.Record
 	stages       []rollupStage
+	ordered      []*rollupStage
 	positions    map[uint64]int
 	pendingNames map[partsformat.ID]uint64
 	samples      []sealrollup.Sample
@@ -114,6 +117,61 @@ type rollupStage struct {
 	records    []sealrollup.Record
 	fresh      bool
 	batchCount int
+}
+
+type rollupPlannerLane struct {
+	workspace sealrollup.Workspace
+	records   []sealrollup.Record
+	err       error
+}
+
+// Preparation reads disjoint metric state and retains each lane's output until
+// the owner commits. Only the owner publishes files and advances frontiers.
+func (r *coreRollups) prepareStages(stages []rollupStage) error {
+	workers := r.parallelism
+	if workers == 0 {
+		workers = min(8, runtime.GOMAXPROCS(0))
+	}
+	workers = min(workers, max(1, len(stages)/128))
+	if len(r.lanes) < workers {
+		r.lanes = make([]rollupPlannerLane, workers)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		prepare := func() {
+			lane := &r.lanes[i]
+			lane.records, lane.err = lane.records[:0], nil
+			for j := len(stages) * i / workers; j < len(stages)*(i+1)/workers; j++ {
+				s := &stages[j]
+				m := s.metric
+				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, m.slots.View, m.slots.Range, s.batches, &lane.workspace)
+				if err != nil {
+					lane.err = err
+					return
+				}
+				s.records = plan.Records
+				s.next.Frontier = plan.Next
+				if len(plan.Records) <= cap(lane.records)-len(lane.records) {
+					lane.records = lane.records[:len(lane.records)+len(plan.Records)]
+				} else {
+					lane.records = append(lane.records, plan.Records...)
+				}
+			}
+		}
+		if workers == 1 {
+			prepare()
+		} else {
+			wg.Add(1)
+			go func() { defer wg.Done(); prepare() }()
+		}
+	}
+	wg.Wait()
+	for i := 0; i < workers; i++ {
+		if r.lanes[i].err != nil {
+			return r.lanes[i].err
+		}
+	}
+	return nil
 }
 
 func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
@@ -152,6 +210,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				if err != nil {
 					return coreSealPlan{}, err
 				}
+				m.registered = b.Registered
 			}
 			if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
 				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
@@ -166,7 +225,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			positions[b.ID] = i
 		}
 		s := &stages[i]
-		if !bytes.Equal(b.Policy, s.metric.definition) {
+		if (b.Registered == nil || b.Registered != s.metric.registered) && !bytes.Equal(b.Policy, s.metric.definition) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
 		stages[i].batchCount++
@@ -215,8 +274,14 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	if r.coverage == nil {
 		r.coverage = map[string]*rollupCoverage{}
 	}
-	// Sorting identities is cheaper than sorting every archive replacement key.
-	slices.SortFunc(stages, func(a, b rollupStage) int { return compareRollupIdentity(a.metric, b.metric) })
+	r.ordered = slices.Grow(r.ordered[:0], len(stages))
+	for i := range stages {
+		r.ordered = append(r.ordered, &stages[i])
+	}
+	slices.SortFunc(r.ordered, func(a, b *rollupStage) int { return compareRollupIdentity(a.metric, b.metric) })
+	if err := r.prepareStages(stages); err != nil {
+		return coreSealPlan{}, err
+	}
 	files := r.files
 	if files == nil {
 		files = map[string][]coreKV{}
@@ -252,24 +317,11 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 
 		return nil
 	}
-	for i := range stages {
-		s := &stages[i]
+	for _, s := range r.ordered {
 		m := s.metric
-		plan, err := m.prepared.PlanInto(r.records[len(r.records):], m.metadata().Frontier, m.slots.View, m.slots.Range, s.batches, &r.workspace)
-		if err != nil {
-			return coreSealPlan{}, err
-		}
 		if r.stage != nil {
 			r.stage("rollup")
 		}
-		// Each metric owns a disjoint tail until Commit/Abort; no record clones.
-		s.records = plan.Records
-		if len(plan.Records) <= cap(r.records)-len(r.records) {
-			r.records = r.records[:len(r.records)+len(plan.Records)]
-		} else {
-			r.records = append(r.records, plan.Records...)
-		}
-		s.next.Frontier = plan.Next
 		for _, b := range s.batches {
 			if s.next.Revision == 0 {
 				s.next.Revision = 1
@@ -302,10 +354,14 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			s.next.Revision++
 		}
 		// Physical dense packing belongs exclusively to the shared v2part writer.
-		for _, record := range s.records {
-			if err := put(m, uint32(record.Archive), record.Slot, r.appendRecord(record)); err != nil {
+		for i := range s.records {
+			record := &s.records[i]
+			if err := put(m, uint32(record.Archive), record.Slot, nil); err != nil {
 				return coreSealPlan{}, err
 			}
+			group := string(m.policy.Group)
+			file := files[group]
+			file[len(file)-1].Record = record
 		}
 		group := string(m.policy.Group)
 		coverage := r.coverage[group]
@@ -412,7 +468,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 		hasSingle bool
 	}
 	series := map[partsformat.ID]*entry{}
-	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})})
+	iter, err := newArchiveIter(context.Background(), snapshot, &pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})})
 	if err != nil {
 		return err
 	}
