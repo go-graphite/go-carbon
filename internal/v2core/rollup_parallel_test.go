@@ -79,3 +79,46 @@ func TestApplicationPolicyOwnsCanonicalDefinition(t *testing.T) {
 		t.Fatal("accepted mismatched identity")
 	}
 }
+
+func TestRollupOrdinalsPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
+	r := newCoreRollups()
+	r.parallelism = 4
+	policies := make([][]byte, 512)
+	for i := range policies {
+		p, _ := rollupTestPolicy(t, fmt.Sprintf("namespace.metric.%03d", 511-i), "1s:1h,1m:1d", sealrollup.Last, .5)
+		if i%2 == 0 {
+			p.Group = "another-group"
+		}
+		var err error
+		policies[i], err = EncodeRollupPolicy(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for epoch := uint64(1); epoch <= 4; epoch++ {
+		count := 256
+		if epoch > 1 {
+			count = 512
+		}
+		batches := make([]Batch, count)
+		for i := range batches {
+			batches[i] = Batch{ID: uint64(i + 1), Policy: policies[i], Order: epoch, Clock: 1000 + int64(epoch), Points: []Row{{Time: 990 + int64(epoch), Seq: epoch}}}
+		}
+		plan, err := r.plan(SealInput{Batches: batches})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range plan.Files {
+			for i := 1; i < len(file); i++ {
+				if bytes.Compare(file[i-1].Key, file[i].Key) >= 0 {
+					t.Fatalf("unordered output at epoch%d entry%d", epoch, i)
+				}
+			}
+		}
+		if epoch == 2 {
+			plan.Abort()
+		} else {
+			plan.Commit()
+		}
+	}
+}

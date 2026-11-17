@@ -1,7 +1,6 @@
 package v2daemon
 
 import (
-	"bytes"
 	"errors"
 	"net"
 
@@ -16,7 +15,7 @@ type PolicyResolver func(string) ([]byte, error)
 type applicationOwner struct {
 	p          *Producer
 	resolve    PolicyResolver
-	policies   map[string][]byte
+	policies   map[string]*RegisteredApplication
 	throttle   func(*points.Points, bool) bool
 	fenceDrain bool
 }
@@ -24,24 +23,26 @@ type applicationOwner struct {
 func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint64, clock int64) error {
 	apps := make([]Application, 0, len(names))
 	for i, name := range names {
-		policy := o.policies[name]
-		if policy == nil {
-			var err error
-			policy, err = o.resolve(name)
+		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
+			continue
+		}
+		registered := o.policies[name]
+		if registered == nil {
+			policy, err := o.resolve(name)
+			if err != nil {
+				return err
+			}
+			registered, err = o.p.RegisterApplication(name, policy)
 			if err != nil {
 				return err
 			}
 			if o.policies == nil {
-				o.policies = map[string][]byte{}
+				o.policies = map[string]*RegisteredApplication{}
 			}
-			policy = bytes.Clone(policy)
-			o.policies[name] = policy
-		}
-		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
-			continue
+			o.policies[name] = registered
 		}
 		order := o.p.applyOrder + uint64(len(apps)) + 1
-		apps = append(apps, Application{Name: name, Policy: policy, Order: order, Clock: clock, Points: data[i : i+1], Sequence: []uint64{order}})
+		apps = append(apps, Application{Registered: registered, Order: order, Clock: clock, Points: data[i : i+1], Sequence: []uint64{order}})
 	}
 	if len(apps) == 0 {
 		return nil

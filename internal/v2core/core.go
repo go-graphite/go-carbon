@@ -549,6 +549,9 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 				if len(policy) != 0 {
 					return errors.New("registered policy with mutable definition")
 				}
+				if b.Registered.catalog == e.identities && b.Registered.id == b.ID {
+					continue
+				}
 				policy = b.Registered.definition
 			}
 			if _, err := e.identities.intern(b.ID, "", policy); err != nil {
@@ -565,6 +568,14 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			return 0, errors.New("rollup row requires original application policy")
 		}
 		return int(partsformat.Route(h.policy.Name)) % e.cfg.Shards, nil
+	}
+	// A registered batch borrows the shared catalog identity. Do not repeat
+	// contended catalog lookups or name hashing for every admitted point.
+	routeBatch := func(b coreBatch) (int, error) {
+		if e.cfg.Rollups && b.Registered != nil && b.Registered.catalog == e.identities && b.Registered.id == b.ID {
+			return int(b.Registered.vshard) % e.cfg.Shards, nil
+		}
+		return routeID(b.ID)
 	}
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
@@ -635,14 +646,38 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		d.routes = make([]int, len(rows))
 	}
 	routes := d.routes[:len(rows)]
-	for i, r := range rows {
-		s, err := routeID(r.ID)
-		if err != nil {
-			return err
+	if e.cfg.Rollups && len(batches) != 0 {
+		// submitBatchesMode flattens original applications in this exact order.
+		// Keep the ID/length guard here so the routing hint cannot misroute a row.
+		offset := 0
+		for _, b := range batches {
+			owner, err := routeBatch(b)
+			if err != nil {
+				return err
+			}
+			for range b.Points {
+				if offset >= len(rows) || rows[offset].ID != b.ID {
+					return errors.New("mixed metric routing batch")
+				}
+				routes[offset] = owner
+				counts[owner]++
+				offset++
+			}
 		}
-		routes[i] = s
-		counts[s]++
+		if offset != len(rows) {
+			return errors.New("incomplete metric routing batch")
+		}
+	} else {
+		for i, r := range rows {
+			owner, err := routeID(r.ID)
+			if err != nil {
+				return err
+			}
+			routes[i] = owner
+			counts[owner]++
+		}
 	}
+
 	for _, count := range counts {
 		if count > e.cfg.MaxRows {
 			return errors.New("producer batch exceeds owner head bound")
@@ -685,7 +720,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		clear(counts)
 		pointCount, policyBytes := 0, 0
 		for _, b := range batches {
-			owner, err := routeID(b.ID)
+			owner, err := routeBatch(b)
 			if err != nil {
 				return err
 			}
@@ -705,7 +740,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		}
 		pointOffset, policyOffset := 0, 0
 		for _, b := range batches {
-			owner, err := routeID(b.ID)
+			owner, err := routeBatch(b)
 			if err != nil {
 				return err
 			}
@@ -713,8 +748,12 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			b.Points = pointArena[pointOffset : pointOffset+n : pointOffset+n]
 			pointOffset += n
 			if e.cfg.Rollups {
-				// The producer-local route owns its validated canonical bytes.
-				b.Policy = e.identities.lookup(b.ID).definition
+				// The shared identity owns the validated canonical bytes.
+				if b.Registered != nil && b.Registered.catalog == e.identities && b.Registered.id == b.ID {
+					b.Policy = b.Registered.definition
+				} else {
+					b.Policy = e.identities.lookup(b.ID).definition
+				}
 			} else {
 				n = copy(policyArena[policyOffset:], b.Policy)
 				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]
@@ -1141,7 +1180,9 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}
 	planEnd = time.Now()
-	phaseStart := planEnd
+	rollupWrites := o.startRollupPartWrites(plan)
+	defer rollupWrites.cleanup()
+	phaseStart := time.Now()
 	if plan.ReplaceRaw {
 		// The replacement planner owns ordering and retention in its format.
 	} else if o.stage != nil {
@@ -1278,7 +1319,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	if o.cfg.BlindBatch && !o.cfg.Rollups {
 		for _, file := range plan.Files {
 			for _, kv := range file {
-				if err = batch.Set(kv.Key, kv.Value, nil); err != nil {
+				if err = batch.Set(kv.Key, kv.encodedValue(), nil); err != nil {
 					return 0, err
 				}
 			}
@@ -1310,18 +1351,10 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	}()
 	for i, file := range plan.Files {
 		if isRollupFile(file) {
-			xp := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
-			stagedPaths = append(stagedPaths, xp)
-			var d v2part.Descriptor
-			var e error
-			if len(plan.PartSpecs) == len(plan.Files) {
-				spec := plan.PartSpecs[i]
-				spec.Source.Incarnation = o.partSource.Incarnation
-				spec.Source.Stream = o.partSource.Stream
-				d, e = writePlannedRollupPart(xp, file, spec)
-			} else {
-				d, e = WriteDenseRollupPart(xp, file, o.partSource)
-			}
+			<-rollupWrites.done
+			result := rollupWrites.results[i]
+			xp, d, e := result.path, result.descriptor, result.err
+
 			if e != nil {
 				return 0, e
 			}

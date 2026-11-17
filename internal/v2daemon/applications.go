@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"math"
+	"math/bits"
 	"slices"
 	"time"
 
@@ -21,12 +22,56 @@ import (
 // Policy includes the immutable schema/aggregation and portable identity.
 // Sequence preserves source point order even across equal timestamps.
 type Application struct {
-	Name     string
-	Policy   []byte
-	Order    uint64
-	Clock    int64
-	Points   []points.Point
-	Sequence []uint64
+	// Registered replaces Name and Policy after RegisterApplication validates them.
+	Registered *RegisteredApplication
+	Name       string
+	Policy     []byte
+	Order      uint64
+	Clock      int64
+	Points     []points.Point
+	Sequence   []uint64
+}
+
+// RegisteredApplication is an immutable producer-local catalog identity. It
+// cannot cross a producer, restart, or catalog epoch. Callers retain the handle
+// instead of resubmitting names and definitions for each original application.
+type RegisteredApplication struct {
+	producer *Producer
+	id       uint64
+	name     string
+	policy   *v2core.ApplicationPolicy
+}
+
+// RegisterApplication validates canonical identity and collision/definition
+// equality at admission. It retains no caller-owned policy bytes.
+func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredApplication, error) {
+	if p.failed != nil {
+		return nil, p.failed
+	}
+	if p.layer < 2 {
+		return nil, errors.New("application registration requires a journal")
+	}
+	id, err := p.catalog.Intern(name, policy)
+	if err != nil {
+		return nil, err
+	}
+	if r := p.applicationPolicies[id]; r != nil {
+		return r, nil
+	}
+	var registered *v2core.ApplicationPolicy
+	// Classic mirroring consumes canonical bytes before core submission.
+	if p.layer == 3 && p.durableApplications == nil {
+		registered, err = p.engine.RegisterApplicationPolicy(NumericID(id, p.index, p.count), name, policy)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.applicationPolicies == nil {
+		p.applicationPolicies = make(map[uint64]*RegisteredApplication)
+	}
+	r := &RegisteredApplication{producer: p, id: id, name: name, policy: registered}
+	p.applicationPolicies[id] = r
+	return r, nil
 }
 
 // AppendApplications retains explicit original applications in the existing
@@ -45,7 +90,7 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 	}
 	n, order := 0, p.applyOrder
 	for _, a := range apps {
-		if a.Name == "" || a.Order <= order || len(a.Points) == 0 || len(a.Points) != len(a.Sequence) || len(a.Points) > 32768 || n > 32768-len(a.Points) {
+		if (a.Registered == nil && a.Name == "") || (a.Registered != nil && (a.Registered.producer != p || a.Name != "" || len(a.Policy) != 0)) || a.Order <= order || len(a.Points) == 0 || len(a.Points) != len(a.Sequence) || len(a.Points) > 32768 || n > 32768-len(a.Points) {
 			return p.fail(errors.New("invalid original application"))
 		}
 
@@ -78,41 +123,42 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		rows = rows[:0]
 	}
 	for i, a := range apps {
-		id, err := p.catalog.Intern(a.Name, a.Policy)
-		if err != nil {
-			return p.fail(err)
-		}
-		var registered *v2core.ApplicationPolicy
-		// Classic mirroring consumes canonical policy bytes before core submission.
-		// Keep the byte-policy path for that sink; registered batches omit Policy.
-		if p.layer == 3 && p.durableApplications == nil {
-			registered, err = p.engine.RegisterApplicationPolicy(NumericID(id, p.index, p.count), a.Name, a.Policy)
+		registered := a.Registered
+		if registered == nil {
+			var err error
+			registered, err = p.RegisterApplication(a.Name, a.Policy)
 			if err != nil {
 				return p.fail(err)
 			}
 		}
+		id := registered.id
 		ids[i] = id
-		frames[i] = partlog.DictionaryFrame{Key: a.Name, Definition: a.Policy, Clock: a.Clock, Points: a.Points}
+		frames[i] = partlog.CatalogFrame{ID: id, Clock: a.Clock, Points: a.Points}
 		start := len(rows)
 		for j, point := range a.Points {
 			rows = append(rows, v2core.Row{ID: NumericID(id, p.index, p.count), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
 		}
-		// Catalog definitions are immutable and survive Drain and encoder reuse.
-		// Intern already checked the caller's bytes against this owned copy.
-		_, canonical, _ := p.catalog.Lookup(id)
-		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Policy: canonical, Points: rows[start:len(rows):len(rows)]}
-		if registered != nil {
-			batches[i].Registered = registered
-			batches[i].Policy = nil
+		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)], Registered: registered.policy}
+		if registered.policy == nil {
+			// Classic mirroring and the non-rollup compatibility path consume
+			// immutable catalog bytes; direct L3 carries its validated handle.
+			_, batches[i].Policy, _ = p.catalog.Lookup(id)
 		}
 	}
 	start := time.Now()
-	encoded, err := p.encoder.EncodeIDs(frames, ids)
+	encoded, err := p.encoder.EncodeFrames(frames)
 	if err != nil {
 		return p.fail(err)
 	}
 	cursor := p.cursor + uint64(n)
-	record := encodeApplications(cursor, ids, batches, encoded)
+	var record []byte
+	if stamp == nil && len(p.spareRecords) > 0 {
+		last := len(p.spareRecords) - 1
+		record = p.spareRecords[last][:0]
+		p.spareRecords[last] = nil
+		p.spareRecords = p.spareRecords[:last]
+	}
+	record = appendApplicationRecord(record, cursor, ids, batches, encoded)
 	if stamp != nil {
 		record = encodePlacementEnvelope(*stamp, record)
 	}
@@ -141,7 +187,23 @@ var applicationCRC = crc32.MakeTable(crc32.Castagnoli)
 // The existing PDC4 point codec is nested unchanged. The outer checksum binds
 // source IDs, application orders and sequences to those original PDC4 frames.
 func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
-	b := append([]byte(nil), applicationMagic...)
+	return appendApplicationRecord(nil, cursor, ids, batches, pdc4)
+}
+
+func applicationVarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
+
+// Append into producer-owned storage retained until the journal fsync succeeds.
+// Reserve the complete envelope once, including all original sequence varints.
+func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
+	size := len(applicationMagic) + applicationVarintLen(cursor) + applicationVarintLen(uint64(len(batches))) + applicationVarintLen(uint64(len(pdc4))) + len(pdc4) + 4
+	for i, a := range batches {
+		size += applicationVarintLen(ids[i]) + applicationVarintLen(a.Order) + applicationVarintLen(uint64(len(a.Points)))
+		for _, p := range a.Points {
+			size += applicationVarintLen(p.Seq)
+		}
+	}
+	start := len(dst)
+	b := append(slices.Grow(dst, size), applicationMagic...)
 	b = binary.AppendUvarint(b, cursor)
 	b = binary.AppendUvarint(b, uint64(len(batches)))
 	for i, a := range batches {
@@ -154,7 +216,7 @@ func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc
 	}
 	b = binary.AppendUvarint(b, uint64(len(pdc4)))
 	b = append(b, pdc4...)
-	return binary.LittleEndian.AppendUint32(b, crc32.Checksum(b, applicationCRC))
+	return binary.LittleEndian.AppendUint32(b, crc32.Checksum(b[start:], applicationCRC))
 }
 
 // DecodeApplications verifies a journal application packet against the synced

@@ -45,6 +45,13 @@ func TestCoreRollupPortableOwner(t *testing.T) {
 		for i := range names {
 			id := uint64(i + 1)
 			b := Batch{ID: id, Policy: policies[i], Order: uint64(epoch + 1), Clock: 1000 + int64(epoch), Points: []Row{{ID: id, Time: 999 + int64(epoch), Bits: math.Float64bits(float64(i)), Seq: uint64(epoch + 1)}}}
+			if epoch == 1 {
+				b.Registered, err = e.RegisterApplicationPolicy(id, names[i], policies[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.Policy = nil
+			}
 			if err = e.AppendBatches(i, []Batch{b}, uint64(epoch+1), true); err != nil {
 				t.Fatal(err)
 			}

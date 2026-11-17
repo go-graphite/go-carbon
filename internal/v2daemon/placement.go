@@ -62,7 +62,14 @@ func (p *Producer) AppendApplicationsPlaced(stamp v2placement.Stamp, apps []Appl
 	}
 	defer release()
 	for _, app := range apps {
-		if e = p.placement.CheckNames([]string{app.Name}); e != nil {
+		name := app.Name
+		if app.Registered != nil {
+			if app.Registered.producer != p || app.Name != "" || len(app.Policy) != 0 {
+				return fmt.Errorf("invalid registered application")
+			}
+			name = app.Registered.name
+		}
+		if e = p.placement.CheckNames([]string{name}); e != nil {
 			return e
 		}
 	}

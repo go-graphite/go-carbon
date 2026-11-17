@@ -9,11 +9,19 @@ import "slices"
 // occupied slots; this index does not provide a bounded sealed-block cache.
 type Slots struct {
 	archives      *[]Archive
-	data          [][]slotSample
+	data          []slotSpan
 	single        slotSample
 	singleArchive int
 	hasSingle     bool
 }
+
+// Bounds are physical slot numbers, independent of sample timestamps. Keeping
+// them beside the slice avoids two dependent sample loads on every lookup.
+type slotSpan struct {
+	data        []slotSample
+	first, last int64
+}
+
 type slotSample struct {
 	slot   int64
 	sample Sample
@@ -33,6 +41,23 @@ func slotCompare(a, b slotSample) int {
 	}
 	return 0
 }
+
+// Contiguous occupied slots already encode their position. Keep the sparse
+// representation for holes and long retentions, without a second index.
+func (s *slotSpan) position(physical int64) (int, bool) {
+	n := len(s.data)
+	if n == 0 || physical < s.first {
+		return 0, false
+	}
+	if physical > s.last {
+		return n, false
+	}
+	if s.last-s.first == int64(n-1) {
+		return int(physical - s.first), true
+	}
+	return slices.BinarySearchFunc(s.data, slotSample{slot: physical}, slotCompare)
+}
+
 func (s *Slots) Install(d Delta) {
 	if s.data == nil {
 		if !s.hasSingle || (s.singleArchive == d.Archive && s.single.slot == d.Slot) {
@@ -41,20 +66,22 @@ func (s *Slots) Install(d Delta) {
 			s.hasSingle = true
 			return
 		}
-		s.data = make([][]slotSample, len(*s.archives))
-		s.data[s.singleArchive] = []slotSample{s.single}
+		s.data = make([]slotSpan, len(*s.archives))
+		s.data[s.singleArchive] = slotSpan{data: []slotSample{s.single}, first: s.single.slot, last: s.single.slot}
 		s.hasSingle = false
 	}
 
-	ps := s.data[d.Archive]
+	span := &s.data[d.Archive]
+	ps := span.data
 	v := slotSample{d.Slot, d.Sample}
-	i, found := slices.BinarySearchFunc(ps, v, slotCompare)
+	i, found := span.position(d.Slot)
 	if found {
 		ps[i] = v
 	} else {
 		ps = slices.Insert(ps, i, v)
+		span.first, span.last = ps[0].slot, ps[len(ps)-1].slot
 	}
-	s.data[d.Archive] = ps
+	span.data = ps
 }
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
 	if s.data == nil {
@@ -64,12 +91,12 @@ func (s *Slots) View(a int, physical int64) (Sample, bool) {
 		return Sample{}, false
 	}
 
-	ps := s.data[a]
-	i, ok := slices.BinarySearchFunc(ps, slotSample{slot: physical}, slotCompare)
+	span := &s.data[a]
+	i, ok := span.position(physical)
 	if !ok {
 		return Sample{}, false
 	}
-	return ps[i].sample, true
+	return span.data[i].sample, true
 }
 
 // Range requires aligned bounds spanning at most one archive retention.
@@ -86,8 +113,8 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 	count := (end - start) / ar.Step
 	hi := lo + count
 	appendRange := func(first, last int64) {
-		ps := s.data[a]
-		i, _ := slices.BinarySearchFunc(ps, slotSample{slot: first}, slotCompare)
+		ps := s.data[a].data
+		i, _ := s.data[a].position(first)
 		for ; i < len(ps) && ps[i].slot < last; i++ {
 			p := ps[i].sample
 			if p.Time >= start && p.Time < end {

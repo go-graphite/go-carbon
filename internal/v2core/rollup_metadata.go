@@ -80,6 +80,11 @@ func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 
 // One serial owner exclusively holds these arenas until its ingest resolves.
 func (r *coreRollups) release() {
+	for i := range r.lanes {
+		r.lanes[i].output.release()
+		clear(r.lanes[i].ordered)
+		r.lanes[i].ordered = r.lanes[i].ordered[:0]
+	}
 	for _, coverage := range r.coverage {
 		clear(coverage.seen)
 		coverage.spec.Policies = nil

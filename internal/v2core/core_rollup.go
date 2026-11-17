@@ -4,15 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"runtime"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -66,33 +62,40 @@ type RollupMetadata struct {
 
 type rollupMetric struct {
 	*PolicyIdentity
-	meta  metricMetadata
-	slots sealrollup.Slots
+	meta        metricMetadata
+	slots       sealrollup.Slots
+	keyTemplate []byte
+	partOffset  int
+	vshard      uint16
+	ordinal     uint64
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
 	seen map[[32]byte]bool
 }
 type coreRollups struct {
-	identities   *PolicyCatalog
-	lanes        []rollupPlannerLane
-	parallelism  int
-	expire       func(RollupPolicy, RollupMetadata, time.Time) bool
-	now          func() time.Time
-	stage        func(string)
-	metrics      map[uint64]*rollupMetric
-	names        map[partsformat.ID]uint64
-	stages       []rollupStage
-	ordered      []*rollupStage
-	positions    map[uint64]int
-	pendingNames map[partsformat.ID]uint64
-	samples      []sealrollup.Sample
-	batches      []sealrollup.Batch
-	files        map[string][]coreKV
-	arena        []byte
-	pending      bool
-	definitions  map[[32]byte][]partsformat.ArchivePolicy
-	coverage     map[string]*rollupCoverage
+	identities  *PolicyCatalog
+	lanes       []rollupPlannerLane
+	parallelism int
+	expire      func(RollupPolicy, RollupMetadata, time.Time) bool
+	now         func() time.Time
+
+	stage          func(string)
+	metrics        map[uint64]*rollupMetric
+	names          map[partsformat.ID]uint64
+	stages         []rollupStage
+	ordered        []*rollupStage
+	positions      map[uint64]int
+	batchPositions []int
+	ordinalsReady  bool
+	pendingNames   map[partsformat.ID]uint64
+	samples        []sealrollup.Sample
+	batches        []sealrollup.Batch
+	files          map[string][]coreKV
+	arena          []byte
+	pending        bool
+	definitions    map[[32]byte][]partsformat.ArchivePolicy
+	coverage       map[string]*rollupCoverage
 }
 
 // Archive max-u32 is reserved within the core's GCP3 rollup experiment for the
@@ -109,7 +112,11 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.prepared.NewSlots()}, nil
+	key, err := partsformat.Encode(partsformat.Key{Group: h.policy.Group, VShard: partsformat.Route(h.policy.Name), Metric: h.policy.Name})
+	if err != nil {
+		return nil, err
+	}
+	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.prepared.NewSlots(), keyTemplate: key, partOffset: len(key) - len(h.policy.Name) - 36, vshard: partsformat.Route(h.policy.Name)}, nil
 }
 
 type rollupStage struct {
@@ -122,58 +129,11 @@ type rollupStage struct {
 }
 
 type rollupPlannerLane struct {
+	ordered   []*rollupStage
+	output    rollupOutput
 	workspace sealrollup.Workspace
 	records   []sealrollup.Record
 	err       error
-}
-
-// Preparation reads disjoint metric state and retains each lane's output until
-// the owner commits. Only the owner publishes files and advances frontiers.
-func (r *coreRollups) prepareStages(stages []rollupStage) error {
-	workers := r.parallelism
-	if workers == 0 {
-		workers = min(8, runtime.GOMAXPROCS(0))
-	}
-	workers = min(workers, max(1, len(stages)/128))
-	if len(r.lanes) < workers {
-		r.lanes = make([]rollupPlannerLane, workers)
-	}
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		prepare := func() {
-			lane := &r.lanes[i]
-			lane.records, lane.err = lane.records[:0], nil
-			for j := len(stages) * i / workers; j < len(stages)*(i+1)/workers; j++ {
-				s := &stages[j]
-				m := s.metric
-				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, m.slots.View, m.slots.Range, s.batches, &lane.workspace)
-				if err != nil {
-					lane.err = err
-					return
-				}
-				s.records = plan.Records
-				s.next.Frontier = plan.Next
-				if len(plan.Records) <= cap(lane.records)-len(lane.records) {
-					lane.records = lane.records[:len(lane.records)+len(plan.Records)]
-				} else {
-					lane.records = append(lane.records, plan.Records...)
-				}
-			}
-		}
-		if workers == 1 {
-			prepare()
-		} else {
-			wg.Add(1)
-			go func() { defer wg.Done(); prepare() }()
-		}
-	}
-	wg.Wait()
-	for i := 0; i < workers; i++ {
-		if r.lanes[i].err != nil {
-			return r.lanes[i].err
-		}
-	}
-	return nil
 }
 
 func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
@@ -201,30 +161,38 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	// At most one stage per input application. Retain capacity between seals.
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
-	for _, b := range in.Batches {
+	r.batchPositions = slices.Grow(r.batchPositions[:0], len(in.Batches))[:len(in.Batches)]
+	freshCount := 0
+	for bi, b := range in.Batches {
 		i, ok := positions[b.ID]
 		if !ok {
 			m := r.metrics[b.ID]
 			fresh := m == nil
 			if fresh {
 				var err error
-				m, err = r.metric(b.ID, b.Policy)
+				policy := b.Policy
+				if b.Registered != nil {
+					policy = b.Registered.definition
+				}
+				m, err = r.metric(b.ID, policy)
 				if err != nil {
 					return coreSealPlan{}, err
 				}
+				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
+					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
+				}
+				if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
+					return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
+				}
+				names[m.policy.Name] = b.ID
+				freshCount++
 			}
-			if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
-				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
-			}
-			if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
-				return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
-			}
-			names[m.policy.Name] = b.ID
 			stages = append(stages, rollupStage{metric: m, next: m.metadata(), fresh: fresh})
 			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
 			positions[b.ID] = i
 		}
+		r.batchPositions[bi] = i
 		s := &stages[i]
 		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !bytes.Equal(b.Policy, s.metric.definition) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
@@ -248,14 +216,32 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		offset += n
 	}
 	offset = 0
-	for _, b := range in.Batches {
-		s := &stages[positions[b.ID]]
+	for bi, b := range in.Batches {
+		s := &stages[r.batchPositions[bi]]
 		ps := samples[offset : offset+len(b.Points) : offset+len(b.Points)]
 		for j, p := range b.Points {
 			ps[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
 		offset += len(b.Points)
 		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
+	}
+	// Canonical byte ordering is immutable. Derive its scalar ordinal only
+	// when the catalog grows (or after recovery), rather than per seal.
+	if freshCount != 0 || !r.ordinalsReady {
+		metrics := make([]*rollupMetric, 0, len(r.metrics)+freshCount)
+		for _, m := range r.metrics {
+			metrics = append(metrics, m)
+		}
+		for i := range stages {
+			if stages[i].fresh {
+				metrics = append(metrics, stages[i].metric)
+			}
+		}
+		slices.SortFunc(metrics, compareRollupMetrics)
+		for i, m := range metrics {
+			m.ordinal = uint64(i)
+		}
+		r.ordinalsReady = true
 	}
 	// Idle maintenance visits only live metadata; no point/store reads occur.
 	now := time.Now()
@@ -269,80 +255,11 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 		}
 	}
-	if r.definitions == nil {
-		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
-	}
-	if r.coverage == nil {
-		r.coverage = map[string]*rollupCoverage{}
-	}
-	r.ordered = slices.Grow(r.ordered[:0], len(stages))
+	// Expiry callbacks retain their serial owner contract. Idle plans do not
+	// advance order, so the persisted reset frontier is already known here.
 	for i := range stages {
-		r.ordered = append(r.ordered, &stages[i])
-	}
-	slices.SortFunc(r.ordered, func(a, b *rollupStage) int { return compareRollupIdentity(a.metric, b.metric) })
-	if err := r.prepareStages(stages); err != nil {
-		return coreSealPlan{}, err
-	}
-	files := r.files
-	if files == nil {
-		files = map[string][]coreKV{}
-		r.files = files
-	}
-	var part partsformat.PartID
-	if len(stages) > 0 {
-		if _, err := rand.Read(part[:]); err != nil {
-			return coreSealPlan{}, err
-		}
-	}
-	var keyMetric *rollupMetric
-	var keyTemplate []byte
-	put := func(m *rollupMetric, archive uint32, slot int64, value []byte) error {
-		start := len(r.arena)
-		if keyMetric != m {
-			var err error
-			keyTemplate, err = partsformat.Encode(partsformat.Key{Group: m.policy.Group, VShard: partsformat.Route(m.policy.Name), Metric: m.policy.Name})
-			if err != nil {
-				return err
-			}
-			keyMetric = m
-		}
-		r.arena = append(r.arena, keyTemplate...)
-		encoded := r.arena[start:len(r.arena):len(r.arena)]
-		partOffset := len(encoded) - len(m.policy.Name) - 36
-		copy(encoded[partOffset:partOffset+16], part[:])
-		tail := len(encoded) - 16
-		binary.BigEndian.PutUint32(encoded[tail:], archive)
-		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
-		group := string(m.policy.Group)
-		files[group] = append(files[group], coreKV{Key: encoded, Value: value})
-
-		return nil
-	}
-	for _, s := range r.ordered {
+		s := &stages[i]
 		m := s.metric
-		if r.stage != nil {
-			r.stage("rollup")
-		}
-		for _, b := range s.batches {
-			if s.next.Revision == 0 {
-				s.next.Revision = 1
-				s.next.LastUpdate = b.Now * 1e9
-			}
-			changed := false
-			for _, p := range b.Points {
-				if p.Time >= b.Now-m.schema().Archives[len(m.schema().Archives)-1].Step*m.schema().Archives[len(m.schema().Archives)-1].Count {
-					changed = true
-					break
-				}
-			}
-			if changed {
-				if s.next.Revision == math.MaxUint64 {
-					return coreSealPlan{}, errors.New("metric revision exhausted")
-				}
-				s.next.Revision++
-				s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
-			}
-		}
 		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
@@ -354,95 +271,24 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			}
 			s.next.Revision++
 		}
-		// Physical dense packing belongs exclusively to the shared v2part writer.
-		for i := range s.records {
-			record := &s.records[i]
-			if err := put(m, uint32(record.Archive), record.Slot, nil); err != nil {
-				return coreSealPlan{}, err
-			}
-			group := string(m.policy.Group)
-			file := files[group]
-			file[len(file)-1].Record = record
-		}
-		group := string(m.policy.Group)
-		coverage := r.coverage[group]
-		if coverage == nil {
-			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
-			r.coverage[group] = coverage
-		}
-		if len(coverage.seen) == 0 {
-			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: part}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
-			coverage.spec.Source.MinOrder = math.MaxUint64
-		}
-		digest := s.next.Frontier.Policy
-		if !coverage.seen[digest] {
-			policies := r.definitions[digest]
-			if policies == nil {
-				definition, err := json.Marshal(m.schema())
-				if err != nil {
-					return coreSealPlan{}, err
-				}
-				hash := sha256.Sum256(definition)
-				for archive := range m.schema().Archives {
-					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
-				}
-				r.definitions[digest] = policies
-			}
-			coverage.spec.Policies = append(coverage.spec.Policies, policies...)
-			coverage.seen[digest] = true
-		}
-		coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
-		coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
-		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
-		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
-		for _, record := range s.records {
-			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
-			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
-			coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
-			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
-		}
-		start := len(r.arena)
-		r.arena = AppendRollupMetadata(r.arena, s.next)
-		metadata := r.arena[start:len(r.arena):len(r.arena)]
-		if err := put(m, rollupMetadataArchive, 0, metadata); err != nil {
+	}
+	var part partsformat.PartID
+	if len(stages) > 0 {
+		if _, err := rand.Read(part[:]); err != nil {
 			return coreSealPlan{}, err
 		}
 	}
-	keys := make([]string, 0, len(files))
-	for k, file := range files {
-		if len(file) == 0 {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	out := coreSealPlan{}
-	for _, k := range keys {
-		file := files[k]
-
-		first, err := partsformat.Decode(file[0].Key)
-		if err != nil {
-			return coreSealPlan{}, err
-		}
-		if err = (partsformat.Scope{Group: first.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: first.Part}).ValidateRange(file[0].Key, file[len(file)-1].Key); err != nil {
-			return coreSealPlan{}, err
-		}
-		out.Files = append(out.Files, file)
-		out.PartSpecs = append(out.PartSpecs, r.coverage[k].spec)
+	out, err := r.planStages(stages, part)
+	if err != nil {
+		return coreSealPlan{}, err
 	}
 	r.stages = stages
 	out.Abort = r.release
 	out.Commit = func() {
 		defer r.release()
+		r.commitStages()
 		for _, s := range stages {
 			m := s.metric
-			for _, record := range s.records {
-				m.slots.Install(record.Delta)
-			}
-			if s.next.Expired {
-				m.slots = *m.prepared.NewSlots()
-			}
-			m.meta = compactMetadata(s.next)
 			if s.fresh {
 				r.metrics[m.id] = m
 				r.names[m.policy.Name] = m.id
