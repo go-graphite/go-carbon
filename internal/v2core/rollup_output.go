@@ -22,7 +22,7 @@ type rollupOutput struct {
 	coverage    map[string]*rollupCoverage
 }
 
-func (r *rollupOutput) build(ordered []*rollupStage, part partsformat.PartID, stage func(string)) error {
+func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
 		r.files = map[string][]coreKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
@@ -39,79 +39,77 @@ func (r *rollupOutput) build(ordered []*rollupStage, part partsformat.PartID, st
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
 		return encoded
 	}
-	for _, s := range ordered {
-		m := s.metric
-		group := string(m.policy.Group)
-		file := files[group]
-		if stage != nil {
-			stage("rollup")
-		}
-		for _, b := range s.batches {
-			if s.next.Revision == 0 {
-				s.next.Revision = 1
-				s.next.LastUpdate = b.Now * 1e9
-			}
-			changed := false
-			for _, p := range b.Points {
-				if p.Time >= b.Now-m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Step*m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Count {
-					changed = true
-					break
-				}
-			}
-			if changed {
-				if s.next.Revision == math.MaxUint64 {
-					return errors.New("metric revision exhausted")
-				}
-				s.next.Revision++
-				s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
-			}
-		}
-		// Physical dense packing belongs exclusively to the shared v2part writer.
-		for i := range s.records {
-			record := &s.records[i]
-			file = append(file, coreKV{Key: key(m, uint32(record.Archive), record.Slot), Record: record})
-		}
-		coverage := r.coverage[group]
-		if coverage == nil {
-			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
-			r.coverage[group] = coverage
-		}
-		if len(coverage.seen) == 0 {
-			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: part}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
-			coverage.spec.Source.MinOrder = math.MaxUint64
-		}
-		digest := s.next.Frontier.Policy
-		if !coverage.seen[digest] {
-			policies := r.definitions[digest]
-			if policies == nil {
-				definition, err := json.Marshal(m.policy.Config)
-				if err != nil {
-					return err
-				}
-				hash := sha256.Sum256(definition)
-				for archive := range m.policy.Config.Archives {
-					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
-				}
-				r.definitions[digest] = policies
-			}
-			coverage.spec.Policies = append(coverage.spec.Policies, policies...)
-			coverage.seen[digest] = true
-		}
-		coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
-		coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
-		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
-		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
-		for _, record := range s.records {
-			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
-			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
-			coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
-			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
-		}
-		start := len(r.arena)
-		r.arena = AppendRollupMetadata(r.arena, s.next)
-		metadata := r.arena[start:len(r.arena):len(r.arena)]
-		files[group] = append(file, coreKV{Key: key(m, rollupMetadataArchive, 0), Value: metadata})
+	m := s.metric
+	group := string(m.policy.Group)
+	file := files[group]
+	if stage != nil {
+		stage("rollup")
 	}
+	for _, b := range s.batches {
+		if s.next.Revision == 0 {
+			s.next.Revision = 1
+			s.next.LastUpdate = b.Now * 1e9
+		}
+		changed := false
+		for _, p := range b.Points {
+			if p.Time >= b.Now-m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Step*m.policy.Config.Archives[len(m.policy.Config.Archives)-1].Count {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			if s.next.Revision == math.MaxUint64 {
+				return errors.New("metric revision exhausted")
+			}
+			s.next.Revision++
+			s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
+		}
+	}
+	// Physical dense packing belongs exclusively to the shared v2part writer.
+	for i := range s.records {
+		record := &s.records[i]
+		file = append(file, coreKV{Key: key(m, uint32(record.Archive), record.Slot), Record: record})
+	}
+	coverage := r.coverage[group]
+	if coverage == nil {
+		coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
+		r.coverage[group] = coverage
+	}
+	if len(coverage.seen) == 0 {
+		coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: part}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+		coverage.spec.Source.MinOrder = math.MaxUint64
+	}
+	digest := s.next.Frontier.Policy
+	if !coverage.seen[digest] {
+		policies := r.definitions[digest]
+		if policies == nil {
+			definition, err := json.Marshal(m.policy.Config)
+			if err != nil {
+				return err
+			}
+			hash := sha256.Sum256(definition)
+			for archive := range m.policy.Config.Archives {
+				policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
+			}
+			r.definitions[digest] = policies
+		}
+		coverage.spec.Policies = append(coverage.spec.Policies, policies...)
+		coverage.seen[digest] = true
+	}
+	coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
+	coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
+	coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
+	coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
+	for _, record := range s.records {
+		coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
+		coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
+		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
+		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
+	}
+	start := len(r.arena)
+	r.arena = AppendRollupMetadata(r.arena, s.next)
+	metadata := r.arena[start:len(r.arena):len(r.arena)]
+	files[group] = append(file, coreKV{Key: key(m, rollupMetadataArchive, 0), Value: metadata})
 
 	return nil
 }
@@ -166,8 +164,12 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 				} else {
 					lane.records = append(lane.records, plan.Records...)
 				}
+				// Build while this metric's policy, metadata and batches are hot.
+				// The lane still retains all arenas until the owner joins ingest.
+				if lane.err = lane.output.appendStage(s, part, r.stage); lane.err != nil {
+					return
+				}
 			}
-			lane.err = lane.output.build(lane.ordered, part, r.stage)
 		}
 		if workers == 1 {
 			work()
