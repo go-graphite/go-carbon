@@ -108,6 +108,7 @@ func (r *coreRollups) release() {
 	r.batches = r.batches[:0]
 	clear(r.positions)
 	clear(r.pendingNames)
+	r.order.reset()
 	for group, file := range r.files {
 		clear(file)
 		r.files[group] = file[:0]

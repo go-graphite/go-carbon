@@ -17,7 +17,7 @@ import (
 )
 
 type rollupOutput struct {
-	files       map[string][]coreKV
+	files       map[string]*[]coreKV
 	arena       []byte
 	definitions map[[32]byte][]partsformat.ArchivePolicy
 	coverage    map[string]*rollupCoverage
@@ -28,6 +28,29 @@ type rollupOutput struct {
 	lastGroup        string
 	lastPartition    int64
 	lastFileID       string
+	// Stages arrive sorted by group and mostly share one month: keep the
+	// current file and coverage rather than hashing the file ID per stage.
+	curFileID   string
+	curFile     *[]coreKV
+	curCoverage *rollupCoverage
+}
+
+func (r *rollupOutput) file(fileID string) (*[]coreKV, *rollupCoverage) {
+	if r.curFile != nil && fileID == r.curFileID {
+		return r.curFile, r.curCoverage
+	}
+	file := r.files[fileID]
+	if file == nil {
+		file = new([]coreKV)
+		r.files[fileID] = file
+	}
+	coverage := r.coverage[fileID]
+	if coverage == nil {
+		coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
+		r.coverage[fileID] = coverage
+	}
+	r.curFileID, r.curFile, r.curCoverage = fileID, file, coverage
+	return file, coverage
 }
 
 func (r *rollupOutput) monthPartition(t int64) int64 {
@@ -50,11 +73,10 @@ func (r *rollupOutput) fileID(group string, partition int64) string {
 
 func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
-		r.files = map[string][]coreKV{}
+		r.files = map[string]*[]coreKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
 		r.coverage = map[string]*rollupCoverage{}
 	}
-	files := r.files
 	key := func(m *rollupMetric, partition int64, archive uint32, slot int64) []byte {
 		physicalPart := part
 		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
@@ -77,6 +99,9 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	if stage != nil {
 		stage("rollup")
 	}
+	schema := m.schema()
+	last := schema.Archives[len(schema.Archives)-1]
+	horizon := last.Step * last.Count
 	for _, b := range s.batches {
 		if s.next.Revision == 0 {
 			s.next.Revision = 1
@@ -84,7 +109,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		}
 		changed := false
 		for _, p := range b.Points {
-			if p.Time >= b.Now-m.schema().Archives[len(m.schema().Archives)-1].Step*m.schema().Archives[len(m.schema().Archives)-1].Count {
+			if p.Time >= b.Now-horizon {
 				changed = true
 				break
 			}
@@ -100,7 +125,6 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	// Records go to the calendar month of their sample time; the envelope goes
 	// with every partition written and with the month of the newest sample, so
 	// the newest envelope survives as long as any data it can mask.
-	schema := m.schema()
 	home := r.monthPartition(s.next.Frontier.MaxTime)
 	envelopeExpiry := rollupMetricExpiry(schema, s.next.Frontier.MaxTime)
 	partitions := append(r.partitions[:0], home)
@@ -114,14 +138,9 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	r.arena = m.appendMetadata(r.arena, s.next)
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	for _, partition := range partitions {
-		fileID := r.fileID(group, partition)
+		filePtr, coverage := r.file(r.fileID(group, partition))
 		physicalPart := part
 		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
-		coverage := r.coverage[fileID]
-		if coverage == nil {
-			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
-			r.coverage[fileID] = coverage
-		}
 		if len(coverage.seen) == 0 {
 			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
 			coverage.spec.Source.MinOrder = math.MaxUint64
@@ -150,7 +169,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
 		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
 		// Physical dense packing belongs exclusively to the shared v2part writer.
-		file := files[fileID]
+		file := *filePtr
 		for i := range s.records {
 			record := &s.records[i]
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
@@ -164,17 +183,18 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		files[fileID] = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata})
+		*filePtr = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata})
 	}
 
 	return nil
 }
 
 func (r *rollupOutput) release() {
-	for group, file := range r.files {
-		clear(file)
-		r.files[group] = file[:0]
+	for _, file := range r.files {
+		clear(*file)
+		*file = (*file)[:0]
 	}
+	r.curFileID, r.curFile, r.curCoverage = "", nil, nil
 	for _, c := range r.coverage {
 		clear(c.seen)
 		c.spec.Policies = nil
@@ -196,10 +216,14 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	for i := range r.lanes {
 		r.lanes[i].ordered = r.lanes[i].ordered[:0]
 	}
-	prepareRollupStageOrder(stages)
+	// plan assigned sort keys while each metric was hot; only group ranks
+	// remain, and lanes follow the vshard already held in the route key.
+	rank := r.order.ranks()
 	for i := range stages {
-		lane := int(stages[i].metric.vshard) * workers / 4096
-		r.lanes[lane].ordered = append(r.lanes[lane].ordered, &stages[i])
+		s := &stages[i]
+		s.sortGroup = rank[s.sortGroup]
+		lane := int(s.sortRouteName>>32) * workers / 4096
+		r.lanes[lane].ordered = append(r.lanes[lane].ordered, rollupStageRef{group: s.sortGroup, route: s.sortRouteName, prefix: s.sortPrefix, rollupStage: s})
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -208,8 +232,9 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			history := rollupHistoryReader{db: r.db}
 			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
-			slices.SortFunc(lane.ordered, compareRollupStages)
-			for _, s := range lane.ordered {
+			lane.ordered, lane.scratch = sortRollupStageRefs(lane.ordered, lane.scratch, &lane.counts, len(r.order.groups))
+			for _, ref := range lane.ordered {
+				s := ref.rollupStage
 				m := s.metric
 				view, ranges := m.slots.View, m.slots.Range
 				var readErr error
@@ -275,10 +300,10 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	for i := 0; i < workers; i++ {
 		lane := &r.lanes[i]
 		for group, file := range lane.output.files {
-			if len(file) == 0 {
+			if len(*file) == 0 {
 				continue
 			}
-			r.files[group] = append(r.files[group], file...)
+			r.files[group] = append(r.files[group], *file...)
 			src := lane.output.coverage[group]
 			dst := r.coverage[group]
 			if dst == nil {
@@ -319,42 +344,180 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	return out, nil
 }
 
-func prepareRollupStageOrder(stages []rollupStage) {
-	// Compute the canonical group and name prefixes once per participating
-	// stage, rather than chasing catalog pointers for every sort comparison.
-	groups := make(map[partsformat.Group]uint32)
-	for i := range stages {
-		groups[stages[i].metric.policy.Group] = 0
-	}
-	orderedGroups := make([]partsformat.Group, 0, len(groups))
-	for group := range groups {
-		orderedGroups = append(orderedGroups, group)
-	}
-	slices.SortFunc(orderedGroups, func(a, b partsformat.Group) int {
-		if len(a) != len(b) {
-			return len(a) - len(b)
+// rollupStageOrder assigns canonical sort keys while each stage's metric and
+// name are hot, so planning never revisits catalog pointers to sort.
+// Groups get provisional first-seen ids here; ranks orders them canonically.
+type rollupStageOrder struct {
+	groups []partsformat.Group
+	index  map[partsformat.Group]uint32
+	last   uint32
+	rank   []uint32
+}
+
+func (o *rollupStageOrder) reset() {
+	clear(o.groups)
+	o.groups = o.groups[:0]
+	clear(o.index)
+	o.last = 0
+}
+
+func (o *rollupStageOrder) key(s *rollupStage) {
+	m := s.metric
+	g := m.policy.Group
+	id := o.last
+	if int(id) >= len(o.groups) || o.groups[id] != g {
+		found := false
+		if o.index != nil {
+			id, found = o.index[g]
+		} else {
+			for i := range o.groups {
+				if o.groups[i] == g {
+					id, found = uint32(i), true
+					break
+				}
+			}
 		}
-		if a < b {
+		if !found {
+			id = uint32(len(o.groups))
+			o.groups = append(o.groups, g)
+			if o.index != nil {
+				o.index[g] = id
+			} else if len(o.groups) > 8 {
+				o.index = make(map[partsformat.Group]uint32, len(o.groups))
+				for i, group := range o.groups {
+					o.index[group] = uint32(i)
+				}
+			}
+		}
+		o.last = id
+	}
+	s.sortGroup = id
+	s.sortName = string(m.policy.Name)
+	s.sortRouteName = uint64(m.vshard)<<32 | uint64(len(s.sortName))
+	var prefix [16]byte
+	copy(prefix[:], s.sortName)
+	s.sortPrefix = [2]uint64{binary.BigEndian.Uint64(prefix[:8]), binary.BigEndian.Uint64(prefix[8:])}
+}
+
+// ranks maps provisional group ids to the canonical (length, bytes) order.
+func (o *rollupStageOrder) ranks() []uint32 {
+	ids := make([]uint32, len(o.groups))
+	for i := range ids {
+		ids[i] = uint32(i)
+	}
+	slices.SortFunc(ids, func(a, b uint32) int {
+		x, y := o.groups[a], o.groups[b]
+		if len(x) != len(y) {
+			return len(x) - len(y)
+		}
+		if x < y {
 			return -1
 		}
-		if a > b {
+		if x > y {
 			return 1
 		}
 		return 0
 	})
-	for i, group := range orderedGroups {
-		groups[group] = uint32(i)
+	o.rank = slices.Grow(o.rank[:0], len(ids))[:len(ids)]
+	for rank, id := range ids {
+		o.rank[id] = uint32(rank)
 	}
+	return o.rank
+}
+
+func prepareRollupStageOrder(stages []rollupStage) {
+	var o rollupStageOrder
 	for i := range stages {
-		s := &stages[i]
-		m := s.metric
-		s.sortGroup = groups[m.policy.Group]
-		s.sortName = string(m.policy.Name)
-		s.sortRouteName = uint64(m.vshard)<<32 | uint64(len(s.sortName))
-		var prefix [16]byte
-		copy(prefix[:], s.sortName)
-		s.sortPrefix = [2]uint64{binary.BigEndian.Uint64(prefix[:8]), binary.BigEndian.Uint64(prefix[8:])}
+		o.key(&stages[i])
 	}
+	rank := o.ranks()
+	for i := range stages {
+		stages[i].sortGroup = rank[stages[i].sortGroup]
+	}
+}
+
+// rollupStageRef carries a stage's sort keys inline, so sorting compares a
+// contiguous array and touches stage memory only for long equal prefixes.
+type rollupStageRef struct {
+	group  uint32
+	route  uint64
+	prefix [2]uint64
+	*rollupStage
+}
+
+// sortRollupStageRefs buckets refs by (group rank, vshard) in one counting
+// pass, then sorts each small bucket by length, prefix and name. The result is
+// the compareRollupStageRefs order; scratch is returned for reuse.
+func sortRollupStageRefs(refs, scratch []rollupStageRef, counts *[]int, groups int) ([]rollupStageRef, []rollupStageRef) {
+	const vshards = 4096
+	if len(refs) < 256 || groups > 16 {
+		slices.SortFunc(refs, compareRollupStageRefs)
+		return refs, scratch
+	}
+	buckets := groups * vshards
+	count := slices.Grow((*counts)[:0], buckets+1)[:buckets+1]
+	clear(count)
+	*counts = count
+	for i := range refs {
+		vshard := refs[i].route >> 32
+		if vshard >= vshards || int(refs[i].group) >= groups {
+			slices.SortFunc(refs, compareRollupStageRefs)
+			return refs, scratch
+		}
+		count[int(refs[i].group)*vshards+int(vshard)+1]++
+	}
+	for i := 1; i <= buckets; i++ {
+		count[i] += count[i-1]
+	}
+	out := slices.Grow(scratch[:0], len(refs))[:len(refs)]
+	for i := range refs {
+		b := int(refs[i].group)*vshards + int(refs[i].route>>32)
+		out[count[b]] = refs[i]
+		count[b]++
+	}
+	start := 0
+	for b := 0; b < buckets; b++ {
+		end := count[b]
+		if end-start > 1 {
+			slices.SortFunc(out[start:end], compareRollupStageRefs)
+		}
+		start = end
+	}
+	clear(refs)
+	return out, refs[:0]
+}
+
+func compareRollupStageRefs(a, b rollupStageRef) int {
+	if a.group != b.group {
+		if a.group < b.group {
+			return -1
+		}
+		return 1
+	}
+	if a.route != b.route {
+		if a.route < b.route {
+			return -1
+		}
+		return 1
+	}
+	for i := range a.prefix {
+		if a.prefix[i] != b.prefix[i] {
+			if a.prefix[i] < b.prefix[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	if a.route&math.MaxUint32 <= 16 {
+		return 0
+	}
+	if a.sortName[16:] < b.sortName[16:] {
+		return -1
+	}
+	if a.sortName[16:] > b.sortName[16:] {
+		return 1
+	}
+	return 0
 }
 
 func compareRollupStages(a, b *rollupStage) int {
@@ -424,7 +587,8 @@ func (r *coreRollups) commitStages() {
 	var wg sync.WaitGroup
 	for i := range r.lanes {
 		work := func() {
-			for _, s := range r.lanes[i].ordered {
+			for _, ref := range r.lanes[i].ordered {
+				s := ref.rollupStage
 				m := s.metric
 				if r.db != nil {
 					m.slots.KeepRecent(s.next.Frontier.MaxTime)
