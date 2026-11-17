@@ -51,7 +51,11 @@ func (h *PolicyIdentity) Definition() []byte { return h.definitionBytes() }
 // definitionBytes reconstructs the unchanged canonical journal/part encoding.
 // Ordinary routing and registered application lookup need only the handle.
 func (h *PolicyIdentity) definitionBytes() []byte {
-	out := make([]byte, 0, len(h.policy.Name)+len(h.policy.suffix)+16)
+	return h.appendDefinition(make([]byte, 0, len(h.policy.Name)+len(h.policy.suffix)+16))
+}
+
+// appendDefinition writes the canonical definition directly into an owner arena.
+func (h *PolicyIdentity) appendDefinition(out []byte) []byte {
 	out = append(out, `{"Name":"`...)
 	if h.plain {
 		out = append(out, h.policy.Name...)
@@ -230,7 +234,14 @@ func compactMetadata(m RollupMetadata) metricMetadata {
 	return out
 }
 func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
-	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Policy: h.definitionBytes(), Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
+	out := h.metadataScalars(m)
+	out.Policy = h.definitionBytes()
+	return out
+}
+
+// Planning carries immutable identity separately until the part is encoded.
+func (h *PolicyIdentity) metadataScalars(m metricMetadata) RollupMetadata {
+	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
 func (m *rollupMetric) metadata() RollupMetadata    { return m.PolicyIdentity.metadata(m.meta) }
 func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }

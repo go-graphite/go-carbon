@@ -36,6 +36,17 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	return append(dst, m.Policy...)
 }
 
+// appendMetadata emits exactly the public metadata encoding, with the policy
+// appended directly from its immutable identity rather than a temporary copy.
+func (h *PolicyIdentity) appendMetadata(dst []byte, m RollupMetadata) []byte {
+	m.Policy = nil
+	dst = AppendRollupMetadata(dst, m)
+	start := len(dst)
+	dst = h.appendDefinition(dst)
+	binary.BigEndian.PutUint32(dst[start-4:start], uint32(len(dst)-start))
+	return dst
+}
+
 // DecodeRollupMetadata accepts binary rows and legacy JSON metadata. Returned
 // policy bytes are detached from the iterator buffer and safe after Next/Close.
 func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {

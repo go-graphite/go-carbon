@@ -109,7 +109,11 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}, nil
+	return newRollupMetric(h), nil
+}
+
+func newRollupMetric(h *PolicyIdentity) *rollupMetric {
+	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
 }
 
 type rollupStage struct {
@@ -162,14 +166,18 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			m := r.metrics[b.ID]
 			fresh := m == nil
 			if fresh {
-				var err error
-				policy := b.Policy
-				if b.Registered != nil {
-					policy = b.Registered.definitionBytes()
-				}
-				m, err = r.metric(b.ID, policy)
-				if err != nil {
-					return coreSealPlan{}, err
+				if h := b.Registered; h != nil && h.catalog == r.identities && h.id == b.ID {
+					m = newRollupMetric(h)
+				} else {
+					policy := b.Policy
+					if h != nil {
+						policy = h.definitionBytes()
+					}
+					var err error
+					m, err = r.metric(b.ID, policy)
+					if err != nil {
+						return coreSealPlan{}, err
+					}
 				}
 				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
 					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
@@ -179,7 +187,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				}
 				names[m.policy.Name] = b.ID
 			}
-			stages = append(stages, rollupStage{metric: m, next: m.metadata(), fresh: fresh})
+			stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh})
 			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
 			positions[b.ID] = i

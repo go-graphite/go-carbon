@@ -111,7 +111,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 	}
 	start := len(r.arena)
-	r.arena = AppendRollupMetadata(r.arena, s.next)
+	r.arena = m.appendMetadata(r.arena, s.next)
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	files[group] = append(file, coreKV{Key: key(m, rollupMetadataArchive, 0), Value: metadata})
 
@@ -139,7 +139,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	}
 	workers = min(workers, max(1, len(stages)/128))
 	if len(r.lanes) < workers {
-		r.lanes = make([]rollupPlannerLane, workers)
+		r.lanes = slices.Grow(r.lanes, workers-len(r.lanes))[:workers]
 	}
 	for i := range r.lanes {
 		r.lanes[i].ordered = r.lanes[i].ordered[:0]
@@ -176,7 +176,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						return append(dst, result...)
 					}
 				}
-				plan, err := m.policy.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, view, ranges, s.batches, &lane.workspace)
+				plan, err := m.policy.prepared.PlanInto(lane.records[len(lane.records):], s.next.Frontier, view, ranges, s.batches, &lane.workspace)
 				if readErr != nil {
 					lane.err = readErr
 					return
@@ -270,14 +270,17 @@ func compareRollupStages(a, b *rollupStage) int {
 }
 
 func compareRollupMetrics(x, y *rollupMetric) int {
-	if len(x.policy.Group) != len(y.policy.Group) {
-		return len(x.policy.Group) - len(y.policy.Group)
-	}
-	if x.policy.Group < y.policy.Group {
-		return -1
-	}
-	if x.policy.Group > y.policy.Group {
-		return 1
+	// Most comparisons share one interned definition, including its group.
+	if x.policy.policyDefinition != y.policy.policyDefinition {
+		if len(x.policy.Group) != len(y.policy.Group) {
+			return len(x.policy.Group) - len(y.policy.Group)
+		}
+		if x.policy.Group < y.policy.Group {
+			return -1
+		}
+		if x.policy.Group > y.policy.Group {
+			return 1
+		}
 	}
 	if x.vshard != y.vshard {
 		return int(x.vshard) - int(y.vshard)
