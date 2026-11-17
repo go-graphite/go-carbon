@@ -3,11 +3,13 @@ package v2read
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,6 +200,34 @@ func TestPendingIndexRendersMatchClassic(t *testing.T) {
 		defer w.Close()
 		ms[i] = metric{name: string(p.Name), policy: encoded, classic: w}
 	}
+	// Concurrent readers scan every name's pending head while the owners keep
+	// appending, publishing and sealing. Publications share the owner's
+	// backing array, so the race detector checks no published batch is written.
+	names := make([]string, len(ms))
+	for i := range ms {
+		names[i] = ms[i].name
+	}
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 2 {
+		readers.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, name := range names {
+					err := reader.FetchMany(context.Background(), []string{name}, now-7200, now+600, now+600, func(string, *Series) error { return nil })
+					if err != nil && !errors.Is(err, ErrNotFound) {
+						t.Error(err)
+						return
+					}
+				}
+			}
+		})
+	}
+	defer func() { close(stop); readers.Wait() }()
 	cursor := uint64(0)
 	written := make([]bool, metrics)
 	seq := uint64(0)

@@ -967,15 +967,17 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return nil
 		}
 		// submitPacketMode already detached Points and Policy. Owners never mutate
-		// those arenas; only the descriptor slice grows. Retain their immutable
-		// storage instead of copying the full head for every publication.
-		// Pending heads grow until the owner seals. Re-cloning the entire
-		// head on every small packet makes publication quadratic in intake.
+		// those arenas, and between seals they only append descriptors; a seal
+		// starts a new backing array instead of reusing or clearing the old one.
+		// So a full slice expression publishes an immutable prefix that readers
+		// share with the owner: publication costs O(new batches), not O(head).
 		batchPublication = time.Now()
+		prev := publishedBatches
 		publishedBatches = len(batches)
-		err := o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.readGeneration)
+		published := batches[:len(batches):len(batches)]
+		err := o.batchHook(o.db.NewSnapshot(), published, o.readGeneration)
 		if err == nil && o.visible != nil {
-			o.visible(batches)
+			o.visible(published[prev:])
 		}
 		return err
 	}
@@ -1019,8 +1021,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.meta = next
 		o.readGeneration++
 		o.publishFrontier(next)
+		// Readers may still hold the published prefix of sealedBatches. Never
+		// overwrite or clear it; the next head appends to a fresh array.
 		sealedBatches := batches
-		batches = batches[:0]
+		batches = make([]coreBatch, 0, len(sealedBatches))
+		publishedBatches = 0
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
 		o.bytes.Add(n)
@@ -1035,7 +1040,6 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if o.visible != nil {
 			o.visible(sealedBatches)
 		}
-		clear(sealedBatches)
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}
