@@ -259,7 +259,7 @@ func startMoveChild(t *testing.T, root, tcp string, crash bool) *moveChild {
 		if err == nil && json.Unmarshal(b, &c.addr) == nil {
 			return c
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatal("daemon did not open ports")
 	return nil
@@ -410,7 +410,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 			}
 			// Exercise concurrent intake without turning this correctness test
 			// into an unbounded queue of tiny durable seals on a loaded laptop.
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 	}()
 	t.Cleanup(func() { stop.Store(true); producer.Wait() })
