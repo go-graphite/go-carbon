@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -57,6 +58,9 @@ func (s *RollupInventory) with(added []coreKV, removed map[v2part.Digest]bool) *
 }
 
 func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, known *RollupInventory) (map[string][]string, []string, error) {
+	if prior == nil {
+		return initialRollupInventory(ctx, snapshot)
+	}
 	inventory := map[string][]string{}
 	var scopes []string
 	var data *archiveIter
@@ -167,5 +171,95 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 	if !authoritative {
 		inventory = nil
 	}
+	slices.Sort(scopes)
 	return inventory, scopes, it.Error()
+}
+
+// Startup walks physical scopes in key order once. Probing every virtual shard
+// separately for every descriptor rereads SST blocks after the working set grows
+// beyond the block cache. Atomic bindings still decide which scopes are live.
+func initialRollupInventory(ctx context.Context, snapshot *pebble.Snapshot) (map[string][]string, []string, error) {
+	type identity struct {
+		group     v2part.Group
+		partition int64
+		part      v2part.PartID
+	}
+	type binding struct {
+		id    string
+		scope v2part.Scope
+	}
+	pending := map[identity][]binding{}
+	inventory := map[string][]string{}
+	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer it.Close()
+	for it.First(); it.Valid(); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		d, err := v2part.ParseDescriptor(it.Value())
+		if err != nil {
+			return nil, nil, err
+		}
+		if !bytes.Equal(it.Key()[len(sealedPartPrefix):], d.SHA256[:]) || d.Scope.Partition != 0 {
+			return nil, nil, errors.New("invalid sealed descriptor binding")
+		}
+		id := string(it.Key())
+		k := identity{d.Scope.Group, d.Scope.Partition, d.Scope.Part}
+		pending[k] = append(pending[k], binding{id, d.Scope})
+		inventory[id] = nil
+	}
+	if err := it.Error(); err != nil {
+		return nil, nil, err
+	}
+	if len(inventory) == 0 {
+		_, closer, err := snapshot.Get(coreMetaKey)
+		if err == nil {
+			return inventory, nil, closer.Close()
+		}
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	prefix := []byte{'G', 'C', 'P', 3}
+	data, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer data.Close()
+	var scopes []string
+	for valid := data.First(); valid; {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		key, err := v2part.Decode(data.Key())
+		if err != nil {
+			return nil, nil, err
+		}
+		scope, err := v2part.PartitionPrefixForGroup(key.Group, key.VShard, key.Partition)
+		if err != nil {
+			return nil, nil, err
+		}
+		scope = append(scope, key.Part[:]...)
+		for _, b := range pending[identity{key.Group, key.Partition, key.Part}] {
+			if b.scope.VShard == v2part.GroupVShard || b.scope.VShard == key.VShard {
+				id := string(scope)
+				inventory[b.id] = append(inventory[b.id], id)
+				scopes = append(scopes, id)
+			}
+		}
+		valid = data.SeekGE(v2part.PrefixEnd(scope))
+	}
+	if err := data.Error(); err != nil {
+		return nil, nil, err
+	}
+	for _, scopes := range inventory {
+		if len(scopes) == 0 {
+			return nil, nil, errors.New("sealed descriptor has no rollup scopes")
+		}
+	}
+	return inventory, scopes, nil
 }

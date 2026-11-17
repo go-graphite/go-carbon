@@ -76,7 +76,6 @@ type Producer struct {
 	spareBatches                                                 [][]v2core.Batch
 	applicationFrames                                            []partlog.DictionaryFrame
 	applicationIDs                                               []uint64
-	applicationPolicies                                          map[uint64]*v2core.ApplicationPolicy
 	cursor                                                       uint64
 	applyOrder                                                   uint64
 	pendingRows                                                  int
@@ -158,7 +157,13 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 			continue
 		}
 		dir := filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
-		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
+		if c.Layer == 3 {
+			p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"), func(id uint64, name string, definition []byte) (string, []byte, error) {
+				return e.BindDefinition(NumericID(id, i, c.Producers), name, definition)
+			})
+		} else {
+			p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
+		}
 		if err != nil {
 			_ = s.Close()
 			return nil, err

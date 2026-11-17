@@ -220,7 +220,9 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.metrics) != 0 || len(r.prepared) != 0 {
+	// Interned immutable definitions may be shared before ingest. Mutable
+	// slots/frontiers are published only by the successful commit callback.
+	if len(r.metrics) != 0 {
 		t.Fatal("planner published before ingest")
 	}
 	if plan.Abort != nil {
@@ -278,7 +280,7 @@ func TestCoreRollupIngestFailureDoesNotPublish(t *testing.T) {
 	if _, err = owner.sealBatches(rows, batches, Frontier{Version: 1, Config: cfg, Cursors: []uint64{1}, NextPart: 1}); err == nil {
 		t.Fatal("read-only ingest succeeded")
 	}
-	if len(r.metrics) != 0 || len(r.prepared) != 0 {
+	if len(r.metrics) != 0 {
 		t.Fatal("ingest failure published slots/frontier/activity")
 	}
 	snapshot := db.NewSnapshot()

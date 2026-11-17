@@ -2,8 +2,11 @@ package v2read
 
 import (
 	"context"
-	"github.com/go-graphite/go-carbon/internal/v2core"
+	"runtime"
 	"slices"
+	"sync"
+
+	"github.com/go-graphite/go-carbon/internal/v2core"
 )
 
 // Metadata pins exactly the same publication used by render. It does not need
@@ -88,8 +91,16 @@ func (r *Reader) Names(ctx context.Context) ([]string, error) {
 // NamesWithMasks projects visible names and classic reset barriers together.
 // Each owner is pinned once; masks never sample a later publication than names.
 func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool, error) {
-	masks := make(map[string]bool)
-	var names []string
+	// Pin each publication once before loading independent owner directories.
+	// A fixed worker bound keeps discovery from fanning out with shard count.
+	pins := make([]*generation, len(r.owners))
+	defer func() {
+		for _, g := range pins {
+			if g != nil {
+				g.release()
+			}
+		}
+	}()
 	for i := range r.owners {
 		for {
 			if err := ctx.Err(); err != nil {
@@ -99,35 +110,54 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 			if g == nil {
 				break
 			}
-			if !g.retain() {
-				continue
+			if g.retain() {
+				pins[i] = g
+				break
 			}
-			g.once.Do(g.load)
-			if g.err != nil {
-				g.release()
-				return nil, nil, g.err
-			}
-			g.sealed.index.Metadata(func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
-				if pending := g.metrics[n]; pending != nil {
-					meta = pending.meta
-				}
-				if meta.BaselineOrder > 0 || meta.Expired || meta.ResetOrder > 0 {
-					masks[n] = true
-				}
-				if !meta.Expired {
-					names = append(names, n)
-				}
-			})
-			for n, m := range g.metrics {
-				if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
-					masks[n] = true
-				}
-				if !m.meta.Expired {
-					names = append(names, n)
+		}
+	}
+	workers := min(4, runtime.GOMAXPROCS(0), len(pins))
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Go(func() {
+			for i := worker; i < len(pins); i += workers {
+				if g := pins[i]; g != nil {
+					g.once.Do(g.load)
 				}
 			}
-			g.release()
-			break
+		})
+	}
+	wg.Wait()
+	masks := make(map[string]bool)
+	var names []string
+	for _, g := range pins {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if g == nil {
+			continue
+		}
+		if g.err != nil {
+			return nil, nil, g.err
+		}
+		g.sealed.index.Metadata(func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
+			if pending := g.metrics[n]; pending != nil {
+				meta = pending.meta
+			}
+			if meta.BaselineOrder > 0 || meta.Expired || meta.ResetOrder > 0 {
+				masks[n] = true
+			}
+			if !meta.Expired {
+				names = append(names, n)
+			}
+		})
+		for n, m := range g.metrics {
+			if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
+				masks[n] = true
+			}
+			if !m.meta.Expired {
+				names = append(names, n)
+			}
 		}
 	}
 	slices.Sort(names)

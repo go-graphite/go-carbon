@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -26,6 +27,8 @@ type catalogEntry struct {
 // Checkpoint durably replaces the catalog prefix before reclaiming its WAL.
 // Predictor epochs must start at every independently retained segment boundary.
 type NameCatalog struct {
+	bindDefinition func(uint64, string, []byte) (string, []byte, error)
+
 	definitionArena []byte
 
 	buffer         *bufio.Writer
@@ -114,11 +117,14 @@ func writeCatalogBytes(f *os.File, b []byte) error {
 // OpenNameCatalog recovers a durable checkpoint plus its append-only suffix.
 // Only a physically incomplete final WAL record is discarded. CRC failures,
 // ID holes, conflicting definitions and epoch mismatches fail closed.
-func OpenNameCatalog(dir string) (*NameCatalog, error) {
+func OpenNameCatalog(dir string, bind ...func(uint64, string, []byte) (string, []byte, error)) (*NameCatalog, error) {
 	if e := makeCatalogDir(filepath.Clean(dir)); e != nil {
 		return nil, e
 	}
 	c := &NameCatalog{dir: dir, entries: []catalogEntry{{}}}
+	if len(bind) > 0 {
+		c.bindDefinition = bind[0]
+	}
 	checkpoint, err := os.Open(filepath.Join(dir, "catalog.checkpoint"))
 	hasCheckpoint := err == nil
 	if err != nil && !os.IsNotExist(err) {
@@ -196,6 +202,8 @@ func OpenNameCatalog(dir string) (*NameCatalog, error) {
 	if _, err = c.wal.Seek(0, io.SeekEnd); err != nil {
 		return fail(err)
 	}
+	// Recovery knows the cardinality; release geometric growth slack.
+	c.entries = slices.Clone(c.entries)
 	c.buffer = bufio.NewWriterSize(c.wal, 1<<20)
 	return c, nil
 }
@@ -294,7 +302,11 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 			return 0, errCatalog
 		}
 		c.ids.insert(hash, id)
-		c.entries = append(c.entries, catalogEntry{key: key, definition: c.copyDefinition(def)})
+		entry, err := c.bindEntry(id, key, def)
+		if err != nil {
+			return 0, err
+		}
+		c.entries = append(c.entries, entry)
 	}
 	return int64(size) + 12, nil
 }
@@ -337,7 +349,12 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 	}
 	c.dirty = true
 	c.ids.insert(hash, id)
-	c.entries = append(c.entries, catalogEntry{key: key, definition: c.copyDefinition(definition)})
+	entry, err := c.bindEntry(id, key, definition)
+	if err != nil {
+		c.failed = err
+		return 0, err
+	}
+	c.entries = append(c.entries, entry)
 	return id, nil
 }
 
