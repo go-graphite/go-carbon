@@ -88,8 +88,10 @@ func TestCoreRollupClassicRestart(t *testing.T) {
 					advance := policy.Config.Archives[0].Step * policy.Config.Archives[0].Count
 					groups := [][]Row{dense, late, {{ID: 7, Time: start + advance, Bits: math.Float64bits(17), Seq: 201}}, {{ID: 7, Time: start + step, Bits: math.Float64bits(127), Seq: 202}}, {{ID: 7, Time: clock - 2*step, Bits: math.Float64bits(11), Seq: 203}}}
 					clocks := []int64{clock, clock, clock + advance, clock + advance, clock - 10*step}
+					archiveClock := int64(0)
 					for i, rows := range groups {
 						clock = clocks[i]
+						archiveClock = max(archiveClock, clock)
 						ptrs := make([]*whisper.TimeSeriesPoint, len(rows))
 						np := make([]chunkstore.Point, len(rows))
 						for j, p := range rows {
@@ -112,7 +114,7 @@ func TestCoreRollupClassicRestart(t *testing.T) {
 							}
 							snap := core.DBs()[0].NewSnapshot()
 							err = ScanRollups(snap, func(p RollupPolicy, m RollupMetadata, records []sealrollup.Record) error {
-								checkCoreClassicSlots(t, path, p.Config, records)
+								checkCoreClassicSlots(t, path, p.Config, records, archiveClock)
 								for _, span := range []int64{120 * step, p.Config.Archives[0].Step*p.Config.Archives[0].Count + step} {
 									from, until := clock-span, clock
 									series, err := classic.Fetch(int(from), int(until))
@@ -134,6 +136,10 @@ func TestCoreRollupClassicRestart(t *testing.T) {
 									}
 									for j, value := range series.Values() {
 										stamp := int64(series.FromTime() + j*series.Step())
+										// A rewound classic clock still renders slots v2 retired.
+										if rollupRecordExpiry(p.Config, sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Sample: sealrollup.Sample{Time: stamp}}}) < archiveClock {
+											continue
+										}
 										bits, ok := lookup[stamp]
 										if !ok {
 											bits = math.Float64bits(math.NaN())
@@ -175,7 +181,10 @@ func TestCoreRollupClassicRestart(t *testing.T) {
 	}
 }
 
-func checkCoreClassicSlots(t *testing.T, path string, c sealrollup.Config, records []sealrollup.Record) {
+// Classic keeps expired slots physically; v2 age retirement may drop them, or
+// expose an older copy, once their expiry precedes the durable ArchiveClock.
+// Neither is readable, so only retained slots are compared.
+func checkCoreClassicSlots(t *testing.T, path string, c sealrollup.Config, records []sealrollup.Record, archiveClock int64) {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -200,7 +209,14 @@ func checkCoreClassicSlots(t *testing.T, path string, c sealrollup.Config, recor
 			}
 			bits := binary.BigEndian.Uint64(raw[i+4:])
 			slot := (ts / a.Step) % a.Count
+			expired := func(ts int64) bool {
+				return rollupRecordExpiry(c, sealrollup.Record{Delta: sealrollup.Delta{Archive: ai, Sample: sealrollup.Sample{Time: ts}}}) < archiveClock
+			}
 			r, ok := stored[key{ai, slot}]
+			if expired(ts) && (!ok || expired(r.Sample.Time)) {
+				delete(stored, key{ai, slot})
+				continue
+			}
 			if !ok || r.Sample.Time != ts || r.Sample.Bits != bits {
 				t.Fatalf("archive%d slot%d classic(%d,%x) core%+v", ai, slot, ts, bits, r)
 			}

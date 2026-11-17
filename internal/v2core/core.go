@@ -217,6 +217,7 @@ type coreOwner struct {
 
 	partSource  v2part.Provenance
 	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
+	retireNow   func() time.Time
 	maintenance bool
 
 	stage      func(string)
@@ -498,6 +499,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				r.stage = hooks.Stage
 				r.expire = hooks.Expire
 				r.now = hooks.Now
+				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
 				o.plan = r.plan
 				o.rollups = r

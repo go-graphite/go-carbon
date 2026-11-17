@@ -332,8 +332,7 @@ func (e *coreEngine) runPartGC() {
 				}
 				// Only durable application time can authorize age retirement.
 				// Wall time would delete historical source data during log replay.
-				clock := o.frontier.Load().ArchiveClock
-				if err := o.expireSealedParts(clock); err != nil {
+				if err := o.expireSealedParts(o.retireClock()); err != nil {
 					e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
 				}
 				if _, err := o.gc.sweep(); err != nil {
@@ -342,6 +341,16 @@ func (e *coreEngine) runPartGC() {
 			}
 		}
 	}
+}
+
+// Age retirement uses the durable ArchiveClock, never ahead of an injected
+// Hooks.Now: fixtures and classic oracles replay history behind it.
+func (o *coreOwner) retireClock() int64 {
+	clock := o.frontier.Load().ArchiveClock
+	if o.retireNow != nil {
+		clock = min(clock, o.retireNow().Unix())
+	}
+	return clock
 }
 
 // A part whose latest record and envelope expiry precede the durable owner

@@ -50,7 +50,10 @@ func TestClassicPendingAndSealed(t *testing.T) {
 					}
 					defer classic.Close()
 					reader, _ := New(1, 1<<30, 64<<20)
-					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
+					// The oracle rewinds its clock a day below the newest batch clock.
+					// Classic never deletes, so hold v2 age retirement (ArchiveClock)
+					// below the oracle's history to compare every slot it renders.
+					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory, Now: func() time.Time { return time.Unix(1, 0) }})
 					if err != nil {
 						t.Fatal(err)
 					}

@@ -671,7 +671,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 		if now < o.ttlNext.Load() {
 			return false, nil
 		}
-		clock := o.frontier.Load().ArchiveClock
+		clock := o.retireClock()
 		inputs, err = o.selectTTLRewrite(snapshot, clock, limit)
 		if err != nil || len(inputs) == 0 {
 			return false, err
