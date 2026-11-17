@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/v2core"
-	"github.com/go-graphite/go-carbon/internal/v2part"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 func moveProgressFixture(t *testing.T) (*MoveAdmin, *Store, *moveRecord) {

@@ -2,10 +2,11 @@ package carbon
 
 import (
 	"fmt"
+	"strconv"
+
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/v2daemon"
 	"github.com/prometheus/client_golang/prometheus"
-	"strconv"
 )
 
 var v2MoveValues = []string{"phase", "parts_done", "parts_total", "bytes_done", "bytes_total", "megabytes_per_second", "eta_seconds", "failures", "bytes_transferred", "verifications"}
