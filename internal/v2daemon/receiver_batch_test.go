@@ -33,7 +33,8 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 				t.Fatal(err)
 			}
 			r.Identities = &v2core.PolicyCatalog{}
-			s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 3, Shards: 2, MaxCoreRows: 4096, GroupInterval: time.Hour, Hooks: v2core.Hooks{Identities: r.Identities, PublishBatches: r.Publish}})
+			// Keep the historical seal-layout fixture independent of idle ticks.
+			s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 3, Shards: 2, MaxCoreRows: 4096, GroupInterval: time.Hour, Hooks: v2core.Hooks{Identities: r.Identities, PublishBatches: r.Publish, Now: func() time.Time { return time.Unix(1, 0) }}})
 			if err != nil {
 				r.Close()
 				t.Fatal(err)
