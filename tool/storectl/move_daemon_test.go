@@ -388,9 +388,11 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 				_, _ = io.WriteString(conn, line)
 			}
 			produced.Store(int64(i))
-			if i%10 == 0 {
+			if i%50 == 0 {
 				// Bound queued work by the two continuously available daemons'
-				// durable progress. B may be killed at any point in this loop.
+				// durable progress. Keep writing throughout copy/restart, with
+				// at most 100 points queued between these explicit durable fences.
+				// B may be killed at any point in this loop.
 				client := http.Client{Timeout: 30 * time.Second}
 				for _, child := range []*moveChild{a, reference} {
 					response, err := client.Get(child.addr.HTTP + "/flush")
@@ -463,15 +465,21 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	// Kill the actual receiving daemon after its atomic manifest edit, before
 	// reducer publication or the administrative response can complete.
 	adoptDone := make(chan struct{})
+	var adoptErr error
 	go func() {
 		defer close(adoptDone)
 		var output bytes.Buffer
-		_ = moveAdmin([]string{"--url", b.addr.HTTP, "--action", "adopt", "--id", crashMoveID}, &output)
+		adoptErr = moveAdmin([]string{"--url", b.addr.HTTP, "--action", "adopt", "--id", crashMoveID}, &output)
 	}()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filepath.Join(b.root, "adopt-committed")); err == nil {
 			break
+		}
+		select {
+		case <-adoptDone:
+			t.Fatalf("adopt returned before crash boundary: %v", adoptErr)
+		default:
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

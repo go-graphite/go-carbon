@@ -337,6 +337,9 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						return e
 					}
 					m.Parts[i].State = "received"
+					if m.Phase == "pending" {
+						m.Phase = "received"
+					}
 					for j := range m.Parts[i].Owners {
 						m.Parts[i].Owners[j] = "received"
 					}
@@ -355,7 +358,16 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					request.Parts[i].Path = filepath.Join(a.root, id, files[i].Name+".part")
 				}
 				m.Request.Parts = request.Parts
-				return a.save(m)
+				if e = a.save(m); e != nil {
+					return e
+				}
+				// Preserve prepare's original boundary: build the offline read index
+				// before returning, outside the serial owner's activation window.
+				prepared, e := v2core.PrepareVerifiedMove(r.Context(), filepath.Join(a.root, id), m.Request.Parts)
+				if e != nil {
+					return e
+				}
+				return prepared.Close()
 			}
 			return nil
 		}
