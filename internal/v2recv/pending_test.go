@@ -1,112 +1,17 @@
 package v2recv
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 )
-
-type pendingOwner struct {
-	appended              chan struct{}
-	draining              chan struct{}
-	release               chan struct{}
-	appendOnce, drainOnce sync.Once
-}
-
-func (o *pendingOwner) Append(_ []string, _ []points.Point, _ []uint64, _ int64) error {
-	o.appendOnce.Do(func() { close(o.appended) })
-	return nil
-}
-func (o *pendingOwner) Seal() error { return nil }
-func (o *pendingOwner) Drain() error {
-	select {
-	case <-o.appended:
-		o.drainOnce.Do(func() { close(o.draining); <-o.release })
-	default:
-	}
-	return nil
-}
-func TestPendingHeldThroughDurableDrain(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	o := &pendingOwner{appended: make(chan struct{}), draining: make(chan struct{}), release: make(chan struct{})}
-	s, err := Start(l, []Owner{o}, Config{BatchSize: 1, SyncInterval: 10 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var once sync.Once
-	release := func() { once.Do(func() { close(o.release) }) }
-	defer func() {
-		release()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := s.Wait(ctx); err != nil {
-			t.Error(err)
-		}
-	}()
-	c, err := net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = fmt.Fprintln(c, "pending.metric 1 1700000000"); err != nil {
-		t.Fatal(err)
-	}
-	c.Close()
-	select {
-	case <-o.draining:
-	case <-time.After(time.Second):
-		t.Fatal("no drain")
-	}
-	if !s.Pending("pending.metric") {
-		t.Fatal("expiry reservation released before durable drain")
-	}
-	release()
-	deadline := time.Now().Add(time.Second)
-	for s.Pending("pending.metric") {
-		if time.Now().After(deadline) {
-			t.Fatal("durable drain retained expiry reservation")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-func TestPendingConcurrentRetirement(t *testing.T) {
-	s := &Server{pending: make([]pendingShard, 4)}
-	for i := range s.pending {
-		s.pending[i].names = make(map[string]int64)
-	}
-	var wg sync.WaitGroup
-	for worker := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range 1000 {
-				name := fmt.Sprintf("pending.shared.%d", (j+worker)%17)
-				owner := OwnerFor(name, len(s.pending))
-				s.pendingAdd(owner, name, 1)
-				if !s.Pending(name) {
-					t.Error("lost live reservation")
-				}
-				s.pendingAdd(owner, name, -1)
-			}
-		}()
-	}
-	wg.Wait()
-	for i := range s.pending {
-		if len(s.pending[i].names) != 0 {
-			t.Fatal("retained retired names")
-		}
-	}
-}
 
 type coalescingOwner struct {
 	calls []int
@@ -123,17 +28,16 @@ func (o *coalescingOwner) Append(names []string, data []points.Point, _ []uint64
 func (o *coalescingOwner) Seal() error  { return nil }
 func (o *coalescingOwner) Drain() error { return nil }
 func TestOwnerCoalescesSocketFragments(t *testing.T) {
-	s := &Server{cfg: Config{BatchSize: 8, SyncInterval: time.Hour}, pending: []pendingShard{{names: make(map[string]int64)}}}
+	s := &Server{cfg: Config{BatchSize: 8, SyncInterval: time.Hour}}
 	q := make(chan *batch, 17)
 	o := &coalescingOwner{}
 	for i := range 17 {
 		name := fmt.Sprintf("fragment.%d", i/3)
-		s.pendingAdd(0, name, 1)
-		q <- &batch{distinct: []string{name}, names: []string{name}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
+		q <- &batch{names: []string{name}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
 	}
 	close(q)
 	s.workers.Add(1)
-	s.work(0, o, q, make(chan ownerCall))
+	s.work(o, q, make(chan ownerCall))
 	if fmt.Sprint(o.calls) != "[8 8 1]" {
 		t.Fatal("socket fragments escaped coalescing", o.calls)
 	}
@@ -145,80 +49,214 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 			t.Fatal("changed point order/bits", i)
 		}
 	}
-	if len(s.pending[0].names) != 0 {
-		t.Fatal("reservations retained after drain")
+}
+
+type fenceOwner struct {
+	appended, durable atomic.Int64
+	block, entered    chan struct{}
+	once              sync.Once
+}
+
+func (o *fenceOwner) Append(names []string, _ []points.Point, _ []uint64, _ int64) error {
+	if o.block != nil {
+		o.once.Do(func() { close(o.entered); <-o.block })
+	}
+	o.appended.Add(int64(len(names)))
+	return nil
+}
+func (o *fenceOwner) Seal() error  { return nil }
+func (o *fenceOwner) Drain() error { o.durable.Store(o.appended.Load()); return nil }
+
+func TestPendingHeldThroughDurableDrain(t *testing.T) {
+	o := &fenceOwner{}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Start(l, []Owner{o}, Config{BatchSize: 64, SyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(c, "pending.metric 1 1700000000")
+	c.Close()
+	// EOF proves the complete decoded prefix has entered the owner queue.
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.mu.Lock()
+		n := len(s.conns)
+		s.mu.Unlock()
+		if n == 0 && s.Stats().Connections > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("handler retained")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err = s.Fence(func() error {
+		if o.durable.Load() != 1 {
+			t.Error("maintenance preceded durable drain", o.durable.Load())
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Wait(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// The first batch is queued while a second batch is decoded and blocked on the
-// same queue. Repeated names must reserve once per batch, and retiring either
-// batch must not uncover the other batch to inactivity expiry.
+// Repeated maintenance races actual concurrent socket intake of the same name.
+// Each checkpoint must cover every application already appended by the owner.
+func TestPendingConcurrentRetirement(t *testing.T) {
+	o := &fenceOwner{}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Start(l, []Owner{o}, Config{BatchSize: 8, QueueDepth: 1, SyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, e := net.Dial("tcp", l.Addr().String())
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			defer c.Close()
+			for range 100 {
+				if _, e = fmt.Fprintln(c, "same.name 1 1700000000"); e != nil {
+					t.Error(e)
+					return
+				}
+			}
+		}()
+	}
+	for range 20 {
+		if err = s.Fence(func() error {
+			if o.durable.Load() != o.appended.Load() {
+				t.Error("expiry crossed non-durable input")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wg.Wait()
+	if err = s.Wait(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if o.durable.Load() != 800 {
+		t.Fatal("lost concurrent input", o.durable.Load())
+	}
+}
+
 func TestPendingBatchesFenceDecodedQueueAndAbort(t *testing.T) {
 	for _, abort := range []bool{false, true} {
 		t.Run(fmt.Sprint(abort), func(t *testing.T) {
-			s := &Server{cfg: Config{BatchSize: 64, MaxLineBytes: 1 << 20}, pending: []pendingShard{{names: make(map[string]int64)}}, queues: []chan *batch{make(chan *batch, 1)}, done: make(chan struct{})}
+			o := &fenceOwner{block: make(chan struct{}), entered: make(chan struct{})}
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := Start(l, []Owner{o}, Config{BatchSize: 1, QueueDepth: 1, SyncInterval: time.Hour, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A pipe makes the input-read boundary observable without socket buffering.
 			input, output := net.Pipe()
-			defer input.Close()
-			defer output.Close()
 			readDone := make(chan error, 1)
 			go func() { readDone <- s.read(input) }()
-			if _, err := io.WriteString(output, "a 1 1000\na 2 1001\nb 3 1002\na 4 1003\n"); err != nil {
+			if _, err = io.WriteString(output, "same.name 1 1000\n"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := io.WriteString(output, "a 5 1004\na 6 1005\na 7 1006\n"); err != nil {
+			<-o.entered
+			if _, err = io.WriteString(output, "same.name 2 1001\n"); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(time.Second)
-			for {
-				s.pending[0].mu.Lock()
-				n := s.pending[0].names["a"]
-				s.pending[0].mu.Unlock()
-				if n == 2 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("decoded batch not fenced", n)
-				}
-				time.Sleep(time.Millisecond)
+			if _, err = io.WriteString(output, "same.name 3 1002\n"); err != nil {
+				t.Fatal(err)
 			}
-			if len(s.queues[0]) != 1 || !s.Pending("a") || !s.Pending("b") {
-				t.Fatal("lost decoded/queued reservation")
-			}
-			if abort {
-				close(s.done)
-				if err := <-readDone; err == nil {
-					t.Fatal("abort succeeded")
-				}
-			}
-			first := <-s.queues[0]
-			if len(first.data) != 4 {
-				t.Fatal("per-point reservations survived batching", map[string]int64{"a": 1, "b": 1})
-			}
-			s.pendingRelease(0, map[string]int64{"a": 1, "b": 1})
-			if s.Pending("b") {
-				t.Fatal("retired name retained")
+			// Taking a fourth read requires flushing the third decoded point first.
+			fourth := make(chan struct{})
+			go func() { io.WriteString(output, "same.name 4 1003\n"); close(fourth) }()
+			fenced := make(chan error, 1)
+			go func() {
+				fenced <- s.Fence(func() error {
+					if o.durable.Load() < 2 {
+						t.Error("queued input not drained")
+					}
+					return nil
+				})
+			}()
+			select {
+			case <-fenced:
+				t.Fatal("maintenance passed blocked decoded/queued input")
+			case <-time.After(10 * time.Millisecond):
 			}
 			if abort {
-				if s.Pending("a") {
-					t.Fatal("aborted decoded batch retained")
-				}
-				return
+				s.Abort(fmt.Errorf("test abort"))
 			}
-			if !s.Pending("a") {
-				t.Fatal("retiring first batch uncovered second batch")
-			}
+			close(o.block)
 			output.Close()
-			if err := <-readDone; err != nil {
+			<-fourth
+			<-readDone
+			input.Close()
+			err = <-fenced
+			if !abort && err != nil {
 				t.Fatal(err)
 			}
-			second := <-s.queues[0]
-			if len(second.data) != 3 {
-				t.Fatal("second batch changed")
-			}
-			s.pendingRelease(0, map[string]int64{"a": 1})
-			if s.Pending("a") {
-				t.Fatal("drained batches retained")
+			if e := s.Wait(t.Context()); !abort && e != nil {
+				t.Fatal(e)
 			}
 		})
+	}
+}
+
+// An incomplete next line leaves an already decoded point in a local batch
+// while the socket waits for more bytes. Expiry must flush it without EOF.
+func TestPendingDecodedIdleFence(t *testing.T) {
+	o := &fenceOwner{}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Start(l, []Owner{o}, Config{BatchSize: 64, SyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, output := net.Pipe()
+	readDone := make(chan error, 1)
+	go func() { readDone <- s.read(input) }()
+	if _, err = io.WriteString(output, "same.name 1 1000\nnext.incomplete"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for o.durable.Load() == 0 {
+		if err = s.Fence(func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("decoded point remained behind idle socket")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if o.durable.Load() != 1 {
+		t.Fatal(o.durable.Load())
+	}
+	output.Close()
+	<-readDone
+	input.Close()
+	if err = s.Wait(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }

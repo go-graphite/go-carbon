@@ -84,7 +84,7 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	emit(v2Descs.obsolete, prometheus.GaugeValue, float64(s.ObsoleteBytes))
 	emit(v2Descs.live, prometheus.GaugeValue, float64(s.LiveBytes))
 	emit(v2Descs.dual, prometheus.GaugeValue, 0)
-	emit(v2Descs.names, prometheus.GaugeValue, float64(v.catalog.Snapshot().Len()))
+	emit(v2Descs.names, prometheus.GaugeValue, float64(v.catalog.Catalog.Snapshot().Len()))
 	for level, count := range s.Parts {
 		ch <- prometheus.MustNewConstMetric(v2Descs.parts, prometheus.GaugeValue, float64(count), strconv.Itoa(level))
 	}

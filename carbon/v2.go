@@ -45,7 +45,7 @@ type v2Runtime struct {
 	store   *v2daemon.Store
 	moves   *v2daemon.MoveAdmin
 	reader  *v2read.Reader
-	catalog v2index.Catalog
+	catalog v2LazyCatalog
 	server  *v2recv.Server
 	stop    chan struct{}
 	wg      sync.WaitGroup
@@ -109,6 +109,7 @@ func (app *App) startV2() error {
 	app.v2 = v
 	// Replay must complete before wall-clock expiry may create new reset barriers.
 	var recovered atomic.Bool
+	var expiryNeeded, expiryAllowed atomic.Bool
 	var intake atomic.Pointer[v2recv.Server]
 	telemetry := newV2WriteTelemetry(shards, n)
 	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: telemetry.visible}
@@ -117,14 +118,18 @@ func (app *App) startV2() error {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
 				return false
 			}
-			if server := intake.Load(); server != nil && server.Pending(string(p.Name)) {
-				return false
-			}
 			ttl := c.Whisper.StoreExpiration.Value()
 			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
 				ttl = c.Whisper.ExpirationRules[i].TTL()
 			}
-			return ttl > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= ttl
+			if ttl <= 0 || now.Sub(time.Unix(0, m.LastUpdate)) < ttl {
+				return false
+			}
+			if expiryAllowed.Load() {
+				return true
+			}
+			expiryNeeded.Store(true)
+			return false
 		}
 	}
 	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks}
@@ -188,7 +193,10 @@ func (app *App) startV2() error {
 		return err
 	}
 	v.quotas = quotas
+	var refreshMu sync.Mutex
 	refresh := func() error {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
 		var quotaFence uint64
 		if v.quotas != nil {
 			quotaFence = v.quotas.Fence()
@@ -207,11 +215,17 @@ func (app *App) startV2() error {
 		if err := publishV2Quotas(v.quotas, quotaFence, r, names, historicalQuota); err != nil {
 			return err
 		}
-		old := v.catalog.Snapshot()
+		old := v.catalog.Catalog.Snapshot()
 		if old.Revision() > 0 && old.EqualNames(names) {
 			return nil
 		}
 		return v.catalog.Publish(old.Revision()+1, names)
+	}
+	v.catalog.refresh = refresh
+	v.catalog.fail = func(err error) {
+		if server := intake.Load(); server != nil {
+			server.Abort(err)
+		}
 	}
 	if err = refresh(); err != nil {
 		return err
@@ -317,7 +331,35 @@ func (app *App) startV2() error {
 			case <-v.stop:
 				return
 			case <-ticker.C:
-				if err := refresh(); err != nil {
+				maintain := func() error {
+					if expiryNeeded.Swap(false) {
+						if err := v.server.Fence(func() error {
+							// Confirm the durable name frontier before retiring
+							// quota reservations in the post-expiry projection.
+							if v.quotas != nil {
+								if err := refresh(); err != nil {
+									return err
+								}
+							}
+							expiryAllowed.Store(true)
+							defer expiryAllowed.Store(false)
+							for i, p := range v.store.Producers {
+								if err := v.server.OnOwner(i, p.Flush); err != nil {
+									return err
+								}
+							}
+							if v.quotas != nil {
+								return refresh()
+							}
+							return nil
+						}); err != nil {
+							return err
+						}
+					}
+
+					return nil
+				}
+				if err := maintain(); err != nil {
 					zapwriter.Logger("v2").Error("v2 discovery publication failed", zap.Error(err))
 					v.server.Abort(err)
 					return
@@ -349,4 +391,21 @@ func (v *v2Runtime) close() {
 			zapwriter.Logger("v2").Error("v2 store shutdown failed", zap.Error(err))
 		}
 	}
+}
+
+// v2LazyCatalog keeps idle discovery off the write path. Catalog snapshots used
+// by telemetry remain cheap; only a discovery consumer asks for a fresh view.
+type v2LazyCatalog struct {
+	v2index.Catalog
+	refresh func() error
+	fail    func(error)
+}
+
+func (s *v2LazyCatalog) Snapshot() *v2index.Snapshot {
+	if s.refresh != nil {
+		if err := s.refresh(); err != nil {
+			s.fail(err)
+		}
+	}
+	return s.Catalog.Snapshot()
 }
