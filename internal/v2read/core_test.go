@@ -53,6 +53,8 @@ func TestClassicPendingAndSealed(t *testing.T) {
 					// The oracle rewinds its clock a day below the newest batch clock.
 					// Classic never deletes, so hold v2 age retirement (ArchiveClock)
 					// below the oracle's history to compare every slot it renders.
+					// It also holds idle closure below the data watermark: after each seal,
+					// all current coarse windows must still be projected from source slots.
 					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory, Now: func() time.Time { return time.Unix(1, 0) }})
 					if err != nil {
 						t.Fatal(err)

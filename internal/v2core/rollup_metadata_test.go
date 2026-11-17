@@ -14,11 +14,16 @@ import (
 )
 
 func TestRollupMetadataBinaryLegacyAndFraming(t *testing.T) {
-	for _, version := range []uint8{1, 2, 3} {
+	for _, version := range []uint8{1, 2, 3, 4} {
 		m := RollupMetadata{Version: version, ID: 8, Policy: []byte("canonical\x00policy"), LastUpdate: -123, Revision: 9, Frontier: sealrollup.Frontier{Order: 7, MaxTime: 99, Policy: [32]byte{1, 255}}}
 		if version == 3 {
 			m.Version = 2
 			m.BaselineOrder = 3
+		}
+		if version == 4 {
+			m.Version = 3
+			m.ClosedThrough = 120
+			m.BaselineOrder = 2
 		}
 		if version >= 2 {
 			m.Expired = true

@@ -44,6 +44,7 @@ func EncodeRollupPolicy(p RollupPolicy) ([]byte, error) {
 // LastUpdate is the original admission clock in nanoseconds, clamped against
 // backward clocks just as chunkstore activity is. Revision starts at creation.
 type RollupMetadata struct {
+	ClosedThrough int64 `json:",omitempty"`
 	// BaselineOrder certifies original classic slots installed before intake.
 	BaselineOrder uint64 `json:",omitempty"`
 
@@ -234,14 +235,14 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		offset += len(b.Points)
 		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
 	}
-	// Idle maintenance visits only live metadata; no point/store reads occur.
+	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
 	now := time.Now()
 	if r.now != nil {
 		now = r.now()
 	}
-	if r.expire != nil {
+	if r.expire != nil || r.db != nil {
 		for id, m := range r.metrics {
-			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.rollupPolicy(), m.metadata(), now) {
+			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
 				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
 				r.order.key(&stages[len(stages)-1])
 			}
@@ -255,7 +256,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
-			s.next.Version = 2
+			s.next.Version = max(2, s.next.Version)
 			s.next.Expired = true
 			s.next.ResetOrder = s.next.Frontier.Order
 			if s.next.Revision == math.MaxUint64 {
@@ -295,7 +296,12 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 // by logical timestamp, then class and source-local order, before time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
-	return scanRollups(snapshot, nil, visit)
+	return scanRollups(snapshot, nil, func(p RollupPolicy, m RollupMetadata, records []sealrollup.Record) error {
+		if m.Version == 3 && !m.Expired {
+			records = sealrollup.ProjectOpen(p.Config, m.Frontier.MaxTime, m.ClosedThrough, records)
+		}
+		return visit(p, m, records)
+	})
 }
 func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
@@ -339,7 +345,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 				err = decodeErr
 				return err
 			}
-			if m.Frontier.Order > e.meta.Frontier.Order || (m.Frontier.Order == e.meta.Frontier.Order && m.Revision > e.meta.Revision) {
+			if compactMetadata(m).after(e.meta) {
 				var h *PolicyIdentity
 				if identities != nil {
 					h, err = identities.intern(m.ID, string(k.Metric), m.Policy)
@@ -428,7 +434,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 			return fmt.Errorf("missing rollup metadata for %s", name)
 		}
 		policy, meta := e.identity.rollupPolicy(), e.identity.metadata(e.meta)
-		if (meta.Version != 1 && meta.Version != 2) || policy.Group != e.group || policy.Name != name || meta.ID == 0 || meta.Frontier.Order == 0 {
+		if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || policy.Group != e.group || policy.Name != name || meta.ID == 0 || meta.Frontier.Order == 0 {
 			return fmt.Errorf("missing rollup metadata for %s", name)
 		}
 		if meta.BaselineOrder > meta.Frontier.Order {

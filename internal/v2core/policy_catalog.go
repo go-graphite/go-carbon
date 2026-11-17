@@ -224,6 +224,7 @@ func (e *coreEngine) BindDefinition(id uint64, name string, definition []byte) (
 // Only mutable lifecycle/frontier scalars belong in each owner/part directory.
 // Identity, raw policy and schema digest are reconstructed from the shared handle.
 type metricMetadata struct {
+	ClosedThrough int64
 	BaselineOrder uint64
 	ResetOrder    uint64
 	LastUpdate    int64
@@ -238,6 +239,7 @@ type metricMetadata struct {
 
 func compactMetadata(m RollupMetadata) metricMetadata {
 	var out metricMetadata
+	out.ClosedThrough = m.ClosedThrough
 	out.BaselineOrder = m.BaselineOrder
 	out.ResetOrder = m.ResetOrder
 	out.LastUpdate = m.LastUpdate
@@ -256,7 +258,7 @@ func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
 
 // Planning carries immutable identity separately until the part is encoded.
 func (h *PolicyIdentity) metadataScalars(m metricMetadata) RollupMetadata {
-	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
+	return RollupMetadata{ClosedThrough: m.ClosedThrough, BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
 func (m *rollupMetric) metadata() RollupMetadata    { return m.PolicyIdentity.metadata(m.meta) }
 func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
@@ -291,4 +293,10 @@ func canonicalNameEnd(definition []byte) int {
 		}
 	}
 	return 0
+}
+
+// Idle closure changes no input activity revision or source order. Its committed
+// watermark breaks otherwise equal metadata ties, including after merge/reopen.
+func (m metricMetadata) after(other metricMetadata) bool {
+	return m.Frontier.Order > other.Frontier.Order || m.Frontier.Order == other.Frontier.Order && (m.Revision > other.Revision || m.Revision == other.Revision && m.ClosedThrough > other.ClosedThrough)
 }

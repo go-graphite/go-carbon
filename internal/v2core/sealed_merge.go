@@ -514,7 +514,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			if m.ID != metadata.ID || !bytes.Equal(m.Policy, metadata.Policy) {
 				return v2part.Descriptor{}, errors.New("merge changed metric identity/policy")
 			}
-			if m.Frontier.Order > metadata.Frontier.Order || m.Frontier.Order == metadata.Frontier.Order && m.Revision > metadata.Revision {
+			if compactMetadata(*m).after(compactMetadata(*metadata)) {
 				metadata = m
 			}
 		}
