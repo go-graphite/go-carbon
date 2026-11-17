@@ -3,10 +3,10 @@ package v2daemon
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"hash/crc32"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
@@ -55,9 +55,17 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 	if p.cursor > math.MaxUint64-uint64(n) {
 		return p.fail(errors.New("application cursor exhausted"))
 	}
-	frames := make([]partlog.DictionaryFrame, len(apps))
-	ids := make([]uint64, len(apps))
-	batches := make([]v2core.Batch, len(apps))
+	p.applicationFrames = slices.Grow(p.applicationFrames[:0], len(apps))[:len(apps)]
+	p.applicationIDs = slices.Grow(p.applicationIDs[:0], len(apps))[:len(apps)]
+	frames, ids := p.applicationFrames, p.applicationIDs
+	defer clear(frames)
+	var batches []v2core.Batch
+	if last := len(p.spareBatches); last > 0 {
+		batches = p.spareBatches[last-1]
+		p.spareBatches[last-1] = nil
+		p.spareBatches = p.spareBatches[:last-1]
+	}
+	batches = slices.Grow(batches[:0], len(apps))[:len(apps)]
 	var rows []v2core.Row
 	if last := len(p.spareRows); last > 0 {
 		rows = p.spareRows[last-1]
@@ -70,19 +78,22 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		rows = rows[:0]
 	}
 	for i, a := range apps {
-		previousCount := p.catalog.Count()
 		id, err := p.catalog.Intern(a.Name, a.Policy)
 		if err != nil {
 			return p.fail(err)
 		}
-		if p.layer == 3 && id > previousCount {
-			var policy v2core.RollupPolicy
-			if err := json.Unmarshal(a.Policy, &policy); err != nil || string(policy.Name) != a.Name {
-				return p.fail(errors.New("application identity/policy mismatch"))
+		var registered *v2core.ApplicationPolicy
+		if p.layer == 3 {
+			if p.applicationPolicies == nil {
+				p.applicationPolicies = make(map[uint64]*v2core.ApplicationPolicy)
 			}
-			canonical, err := v2core.EncodeRollupPolicy(policy)
-			if err != nil || !bytes.Equal(canonical, a.Policy) {
-				return p.fail(errors.New("invalid application policy"))
+			registered = p.applicationPolicies[id]
+			if registered == nil {
+				registered, err = v2core.NewApplicationPolicy(a.Name, a.Policy)
+				if err != nil {
+					return p.fail(err)
+				}
+				p.applicationPolicies[id] = registered
 			}
 		}
 		ids[i] = id
@@ -91,7 +102,14 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		for j, point := range a.Points {
 			rows = append(rows, v2core.Row{ID: NumericID(id, p.index, p.count), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
 		}
-		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Policy: bytes.Clone(a.Policy), Points: rows[start:len(rows):len(rows)]}
+		// Catalog definitions are immutable and survive Drain and encoder reuse.
+		// Intern already checked the caller's bytes against this owned copy.
+		_, canonical, _ := p.catalog.Lookup(id)
+		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Policy: canonical, Points: rows[start:len(rows):len(rows)]}
+		if registered != nil {
+			batches[i].Registered = registered
+			batches[i].Policy = nil
+		}
 	}
 	start := time.Now()
 	encoded, err := p.encoder.EncodeIDs(frames, ids)

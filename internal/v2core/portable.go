@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -32,6 +33,18 @@ func WriteDenseRollupPart(path string, file []KV, source v2part.Provenance) (v2p
 func writePortableRollupPart(path string, file []KV, source v2part.Provenance, dense bool) (v2part.Descriptor, error) {
 	if len(file) == 0 {
 		return v2part.Descriptor{}, errors.New("empty rollup file")
+	}
+	// Portable compatibility exports materialize singleton values. Runtime seals
+	// pass typed records straight to writePlannedRollupPart instead.
+	for i, kv := range file {
+		if kv.Record != nil {
+			file = slices.Clone(file)
+			for j := i; j < len(file); j++ {
+				file[j].Value = file[j].encodedValue()
+				file[j].Record = nil
+			}
+			break
+		}
 	}
 	if dense {
 		// Runtime seals may already contain dense runs. Normalize their logical

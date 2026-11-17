@@ -73,6 +73,10 @@ type Producer struct {
 	packets                                                      []packet
 	records                                                      [][]byte
 	spareRows                                                    [][]v2core.Row
+	spareBatches                                                 [][]v2core.Batch
+	applicationFrames                                            []partlog.DictionaryFrame
+	applicationIDs                                               []uint64
+	applicationPolicies                                          map[uint64]*v2core.ApplicationPolicy
 	cursor                                                       uint64
 	applyOrder                                                   uint64
 	pendingRows                                                  int
@@ -343,6 +347,10 @@ func (p *Producer) Drain() error {
 		}
 		if packet.rows != nil {
 			p.spareRows = append(p.spareRows, packet.rows[:0])
+		}
+		if packet.batches != nil {
+			clear(packet.batches)
+			p.spareBatches = append(p.spareBatches, packet.batches[:0])
 		}
 	}
 	p.CoreSubmitTime += time.Since(start)

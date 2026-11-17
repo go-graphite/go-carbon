@@ -15,6 +15,7 @@ import (
 func main() {
 	layer := flag.Int("layer", 0, "0=core, 1=catalog, 2=journal, 3=canonical rollups")
 	root := flag.String("root", "", "fresh output directory")
+	verifyArchives := flag.Bool("verify-archives", false, "verify every classic archive slot after timed close/reopen")
 	profile := flag.String("cpuprofile", "", "optional timed intake/close CPU profile")
 	block := flag.String("blockprofile", "", "optional timed intake/close blocking profile")
 	diagnostics := flag.String("pprof", "", "optional loopback benchmark diagnostics address")
@@ -37,6 +38,7 @@ func main() {
 		os.Exit(2)
 	}
 	fixture := v2daemon.DefaultFixture()
+	fixture.DeferArchiveOracle = !*verifyArchives
 	fixture.CPUProfile = *profile
 	fixture.BlockProfile = *block
 	if _, err := v2daemon.RunFixed(*root, *layer, fixture, os.Stdout); err != nil {
