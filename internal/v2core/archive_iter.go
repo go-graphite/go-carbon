@@ -67,7 +67,7 @@ type archivePartIdentity struct {
 func newArchiveIter(ctx context.Context, snapshot *pebble.Snapshot, opts *pebble.IterOptions) (*archiveIter, error) {
 	return newArchiveIterSelected(ctx, snapshot, opts, nil)
 }
-func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts *pebble.IterOptions, selected map[archivePartIdentity]bool) (_ *archiveIter, err error) {
+func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts *pebble.IterOptions, selected map[archivePartIdentity]bool, exact ...v2part.Descriptor) (_ *archiveIter, err error) {
 	out := &archiveIter{selected: -1}
 	defer func() {
 		if err != nil {
@@ -93,11 +93,14 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 			return nil, e
 		}
 	}
-	manifests, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
-	if err != nil {
-		return nil, err
+	var manifests *pebble.Iterator
+	if len(exact) == 0 {
+		manifests, err = snapshot.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
+		if err != nil {
+			return nil, err
+		}
+		defer manifests.Close()
 	}
-	defer manifests.Close()
 	var files [][]sstable.ReadableFile
 	var opened []*archiveFile
 	defer func() {
@@ -109,16 +112,36 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 			}
 		}
 	}()
-	for manifests.First(); manifests.Valid(); manifests.Next() {
+	// Directory loading already validated exact descriptors against its pinned
+	// inventory. Reuse them instead of decoding the whole manifest per new file.
+	for n := 0; ; n++ {
 		if err = ctx.Err(); err != nil {
 			return nil, err
 		}
-		d, e := v2part.ParseDescriptor(manifests.Value())
-		if e != nil {
-			return nil, e
-		}
-		if !bytes.Equal(manifests.Key()[len(sealedPartPrefix):], d.SHA256[:]) {
-			return nil, errors.New("archive descriptor binding mismatch")
+		var d v2part.Descriptor
+		if manifests == nil {
+			if n >= len(exact) {
+				break
+			}
+			d = exact[n]
+		} else {
+			valid := false
+			if n == 0 {
+				valid = manifests.First()
+			} else {
+				valid = manifests.Next()
+			}
+			if !valid {
+				break
+			}
+			var e error
+			d, e = v2part.ParseDescriptor(manifests.Value())
+			if e != nil {
+				return nil, e
+			}
+			if !bytes.Equal(manifests.Key()[len(sealedPartPrefix):], d.SHA256[:]) {
+				return nil, errors.New("archive descriptor binding mismatch")
+			}
 		}
 		if selected != nil && !selected[archivePartIdentity{d.Scope.Group, d.Scope.Part}] {
 			continue
@@ -144,8 +167,10 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 		}
 		files = append(files, []sstable.ReadableFile{f})
 	}
-	if err = manifests.Error(); err != nil {
-		return nil, err
+	if manifests != nil {
+		if err = manifests.Error(); err != nil {
+			return nil, err
+		}
 	}
 	if len(files) > 0 {
 		external, e := pebble.NewExternalIterWithContext(ctx, (&pebble.Options{}).EnsureDefaults(), opts, files)

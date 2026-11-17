@@ -57,18 +57,10 @@ func (s *RollupInventory) with(added []coreKV, removed map[v2part.Digest]bool) *
 	return out
 }
 
-func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, known *RollupInventory) (map[string][]string, []string, error) {
-	if prior == nil {
-		return initialRollupInventory(ctx, snapshot)
-	}
+func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, known *RollupInventory, selected ...map[string]v2part.Descriptor) (map[string][]string, []string, error) {
 	inventory := map[string][]string{}
 	var scopes []string
-	var data *archiveIter
-	defer func() {
-		if data != nil {
-			_ = data.Close()
-		}
-	}()
+	var legacy map[string][]string
 	// Pending-only publications may share the complete immutable inventory.
 	if known != nil && prior != nil && known == prior.bindingSet {
 		for _, ids := range prior.inventory {
@@ -97,47 +89,45 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 		if d.Scope.Partition != 0 {
 			return errors.New("unexpected rollup partition")
 		}
-		first, err := v2part.Decode(d.FirstKey)
-		if err != nil {
-			return err
-		}
-		last, err := v2part.Decode(d.LastKey)
-		if err != nil {
-			return err
-		}
-		if data == nil {
-			data, err = newArchiveIter(ctx, snapshot, nil)
-			if err != nil {
-				return err
-			}
-		}
 		var added []string
-		for v := uint32(first.VShard); v <= uint32(last.VShard); v++ {
-			scope, err := v2part.PartitionPrefixForGroup(d.Scope.Group, uint16(v), 0)
+		shards := d.VShards
+		if len(shards) == 0 && d.Scope.VShard != v2part.GroupVShard {
+			shards = []uint16{d.Scope.VShard}
+		}
+		for _, v := range shards {
+			scope, err := v2part.PartitionPrefixForGroup(d.Scope.Group, v, 0)
 			if err != nil {
 				return err
 			}
 			scope = append(scope, d.Scope.Part[:]...)
-			if data.SeekGE(scope) && bytes.HasPrefix(data.Key(), scope) {
-				added = append(added, string(scope))
+			added = append(added, string(scope))
+		}
+		if len(shards) == 0 {
+			// Older group descriptors lack the seal-derived inventory. Walk
+			// actual physical scopes once, never every absent vshard per part.
+			if legacy == nil {
+				legacy, _, err = initialRollupInventory(ctx, snapshot)
 			}
-			if err := data.Error(); err != nil {
+			if err != nil {
 				return err
 			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+			added = legacy[id]
 		}
 		if len(added) == 0 {
 			return errors.New("sealed descriptor has no rollup scopes")
 		}
 		inventory[id] = added
+		if len(selected) > 0 {
+			for _, scope := range added {
+				selected[0][scope] = d
+			}
+		}
 		scopes = append(scopes, added...)
 		return nil
 	}
 	if known != nil {
-		// Iteration touches only in-memory identities for old parts. Descriptor
-		// decoding and routed-scope seeks happen exclusively for new parts.
+		// Old parts share their immutable scopes. New seals carry exact shards
+		// in their descriptor, so inventory loading performs no archive seeks.
 		for id, value := range known.bindings {
 			if err := consume(id, value); err != nil {
 				return nil, nil, err
@@ -175,7 +165,7 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 	return inventory, scopes, it.Error()
 }
 
-// Startup walks physical scopes in key order once. Probing every virtual shard
+// Legacy descriptors walk physical scopes in key order once. Probing every virtual shard
 // separately for every descriptor rereads SST blocks after the working set grows
 // beyond the block cache. Atomic bindings still decide which scopes are live.
 func initialRollupInventory(ctx context.Context, snapshot *pebble.Snapshot) (map[string][]string, []string, error) {

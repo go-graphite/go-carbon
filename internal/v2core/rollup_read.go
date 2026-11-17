@@ -127,17 +127,21 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 
 	// The descriptor namespace is published atomically with the data. Walking
 	// these small adjacent keys avoids seeking every old scope through the SSTs.
-	inventory, scopes, err := rollupInventory(ctx, snapshot, prior, bindings)
+	selected := map[string]v2part.Descriptor{}
+	inventory, scopes, err := rollupInventory(ctx, snapshot, prior, bindings, selected)
 	if err != nil {
 		return nil, err
 	}
 	out.inventory = inventory
 	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
-	if err != nil {
-		return nil, err
+	var it *archiveIter
+	if inventory == nil {
+		it, err = newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+		if err != nil {
+			return nil, err
+		}
+		defer it.Close()
 	}
-	defer it.Close()
 	if inventory == nil {
 		// Bare GCP3 fixtures have no core frontier or atomic inventory bindings.
 		for valid := it.First(); valid; {
@@ -164,6 +168,30 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 	}
 
+	// A part's own directory is read through only that file. Merging every
+	// live file for each metadata seek makes sparse catch-up quadratic.
+	loaded := map[string]*readPart{}
+	byPart := map[v2part.Digest][]string{}
+	for scope, descriptor := range selected {
+		byPart[descriptor.SHA256] = append(byPart[descriptor.SHA256], scope)
+	}
+	for _, ids := range byPart {
+		partIt, err := newArchiveIterSelected(ctx, snapshot, nil, nil, selected[ids[0]])
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			loaded[id], err = readRollupPart(ctx, partIt, []byte(id), identities)
+			if err != nil {
+				_ = partIt.Close()
+				return nil, err
+			}
+		}
+		if err := partIt.Close(); err != nil {
+			return nil, err
+		}
+	}
+
 	changed := map[string]bool{}
 	added := map[string]*readPart{}
 	for _, id := range scopes {
@@ -172,6 +200,12 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 			part = prior.parts[id]
 		}
 		if part == nil {
+			part = loaded[id]
+		}
+		if part == nil {
+			if it == nil {
+				return nil, errors.New("missing rollup scope descriptor")
+			}
 			part, err = readRollupPart(ctx, it, []byte(id), identities)
 			if err != nil {
 				return nil, err

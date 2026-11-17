@@ -46,6 +46,7 @@ type generation struct {
 type sealedCache struct {
 	mu             sync.Mutex // read-side only; Publish never acquires this lock
 	index          *v2core.RollupSnapshot
+	number         uint64
 	limit          int64
 	fullMu         sync.Mutex
 	full           []resolvedEntry
@@ -165,13 +166,21 @@ func (r *Reader) Close() {
 	}
 }
 func (s *sealedData) load() {
+	// The prior directory is immutable. Keep it usable while this generation
+	// loads; sealedData.once coordinates only readers of this same generation.
 	s.cache.mu.Lock()
-	defer s.cache.mu.Unlock()
-	s.index, s.err = v2core.NewRollupSnapshotWithCatalogAndInventory(context.Background(), s.snapshot, s.cache.index, s.reader.Identities, s.inventory, s.cache.limit)
+	prior := s.cache.index
+	s.cache.mu.Unlock()
+	s.index, s.err = v2core.NewRollupSnapshotWithCatalogAndInventory(context.Background(), s.snapshot, prior, s.reader.Identities, s.inventory, s.cache.limit)
 	if s.err != nil {
 		return
 	}
-	s.cache.index = s.index
+	s.cache.mu.Lock()
+	// An older pinned generation may finish after a newer publication.
+	if s.cache.index == nil || s.number >= s.cache.number {
+		s.cache.index, s.cache.number = s.index, s.number
+	}
+	s.cache.mu.Unlock()
 }
 func (s *sealedData) lookup(name string) *metricState {
 	p, meta, ok := s.index.LookupMetadata(name)

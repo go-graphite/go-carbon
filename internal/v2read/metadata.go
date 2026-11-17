@@ -35,43 +35,31 @@ func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpir
 	masked := false
 	var result Metric
 	found := false
-	for i := range r.owners {
-		if err := ctx.Err(); err != nil {
-			return Metric{}, masked, err
+	pins, err := r.loadOwners(ctx)
+	if err != nil {
+		return Metric{}, masked, err
+	}
+	defer releaseOwners(pins)
+	for _, g := range pins {
+		if g == nil {
+			continue
 		}
-		for {
-			g := r.owners[i].Load()
-			if g == nil {
-				break
+		m := g.metrics[name]
+		if m == nil {
+			m = g.sealed.lookup(name)
+		}
+		if m != nil {
+			masked = masked || m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0
+		}
+		if m != nil && (includeExpired || !m.meta.Expired) {
+			if found {
+				return Metric{}, masked, ErrNotFound
 			}
-			if !g.retain() {
-				continue
+			found = true
+			result = Metric{BaselineOrder: m.meta.BaselineOrder, ID: m.meta.ID, XFilesFactor: m.policy.Config.XFilesFactor, AggregationMethod: aggregationName(m.policy.Config.Method)}
+			for _, a := range m.policy.Config.Archives {
+				result.Archives = append(result.Archives, Archive{Step: a.Step, Points: a.Count})
 			}
-			g.once.Do(g.load)
-			if g.err != nil {
-				g.release()
-				return Metric{}, masked, g.err
-			}
-			m := g.metrics[name]
-			if m == nil {
-				m = g.sealed.lookup(name)
-			}
-			if m != nil {
-				masked = masked || m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0
-			}
-			if m != nil && (includeExpired || !m.meta.Expired) {
-				if found {
-					g.release()
-					return Metric{}, masked, ErrNotFound
-				}
-				found = true
-				result = Metric{BaselineOrder: m.meta.BaselineOrder, ID: m.meta.ID, XFilesFactor: m.policy.Config.XFilesFactor, AggregationMethod: aggregationName(m.policy.Config.Method)}
-				for _, a := range m.policy.Config.Archives {
-					result.Archives = append(result.Archives, Archive{Step: a.Step, Points: a.Count})
-				}
-			}
-			g.release()
-			break
 		}
 	}
 	if !found {
@@ -91,43 +79,11 @@ func (r *Reader) Names(ctx context.Context) ([]string, error) {
 // NamesWithMasks projects visible names and classic reset barriers together.
 // Each owner is pinned once; masks never sample a later publication than names.
 func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool, error) {
-	// Pin each publication once before loading independent owner directories.
-	// A fixed worker bound keeps discovery from fanning out with shard count.
-	pins := make([]*generation, len(r.owners))
-	defer func() {
-		for _, g := range pins {
-			if g != nil {
-				g.release()
-			}
-		}
-	}()
-	for i := range r.owners {
-		for {
-			if err := ctx.Err(); err != nil {
-				return nil, nil, err
-			}
-			g := r.owners[i].Load()
-			if g == nil {
-				break
-			}
-			if g.retain() {
-				pins[i] = g
-				break
-			}
-		}
+	pins, err := r.loadOwners(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
-	workers := min(4, runtime.GOMAXPROCS(0), len(pins))
-	var wg sync.WaitGroup
-	for worker := range workers {
-		wg.Go(func() {
-			for i := worker; i < len(pins); i += workers {
-				if g := pins[i]; g != nil {
-					g.once.Do(g.load)
-				}
-			}
-		})
-	}
-	wg.Wait()
+	defer releaseOwners(pins)
 	masks := make(map[string]bool)
 	var names []string
 	for _, g := range pins {
@@ -162,6 +118,65 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 	}
 	slices.Sort(names)
 	return slices.Compact(names), masks, nil
+}
+
+// loadOwners pins each owner's publication and loads independent directories
+// with the same bounded parallelism for discovery and metadata requests.
+func (r *Reader) loadOwners(ctx context.Context) ([]*generation, error) {
+	// Pin each publication once before loading independent owner directories.
+	// A fixed worker bound keeps discovery from fanning out with shard count.
+	pins := make([]*generation, len(r.owners))
+	ok := false
+	defer func() {
+		if !ok {
+			releaseOwners(pins)
+		}
+	}()
+	for i := range r.owners {
+		for {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			g := r.owners[i].Load()
+			if g == nil {
+				break
+			}
+			if g.retain() {
+				pins[i] = g
+				break
+			}
+		}
+	}
+	workers := min(4, runtime.GOMAXPROCS(0), len(pins))
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Go(func() {
+			for i := worker; i < len(pins); i += workers {
+				if g := pins[i]; g != nil {
+					g.once.Do(g.load)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	for _, g := range pins {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if g != nil && g.err != nil {
+			return nil, g.err
+		}
+	}
+	ok = true
+	return pins, nil
+}
+
+func releaseOwners(pins []*generation) {
+	for _, g := range pins {
+		if g != nil {
+			g.release()
+		}
+	}
 }
 
 // Masked reports durable whole-name reset authority from the same pinned
