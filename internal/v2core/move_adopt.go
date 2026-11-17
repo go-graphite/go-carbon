@@ -275,6 +275,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 	}
 	next := newCoreRollups()
+	next.db = o.rollups.db
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
 	for id, m := range o.rollups.metrics {
@@ -365,6 +366,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 		}
 		authority.Meta = m.metadata()
+		if next.db != nil {
+			m.slots.KeepRecent(m.meta.Frontier.MaxTime)
+		}
 		next.metrics[id] = m
 		next.names[policy.Name] = id
 		value, err := json.Marshal(authority)

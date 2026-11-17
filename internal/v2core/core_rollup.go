@@ -73,6 +73,7 @@ type rollupCoverage struct {
 	seen map[[32]byte]bool
 }
 type coreRollups struct {
+	db          *pebble.DB // nil only for standalone, non-durable planner fixtures
 	identities  *PolicyCatalog
 	lanes       []rollupPlannerLane
 	parallelism int
@@ -127,6 +128,7 @@ type rollupStage struct {
 }
 
 type rollupPlannerLane struct {
+	windows   rollupWindowCache
 	ordered   []*rollupStage
 	output    rollupOutput
 	workspace sealrollup.Workspace
@@ -498,6 +500,7 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 
 func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups, error) {
 	r := newCoreRollups()
+	r.db = db
 	if len(catalogs) > 0 {
 		r.identities = catalogs[0]
 	}
@@ -526,9 +529,11 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		}
 		meta.Policy = m.definition
 		m.meta = compactMetadata(meta)
+		m.slots.KeepRecent(meta.Frontier.MaxTime)
 		for _, record := range records {
-			m.slots.Install(record.Delta)
+			m.slots.InstallRecent(record.Delta)
 		}
+		m.slots.KeepRecent(meta.Frontier.MaxTime)
 		r.metrics[meta.ID] = m
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.

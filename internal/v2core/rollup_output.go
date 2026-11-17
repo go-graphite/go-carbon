@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -146,11 +147,35 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	for i := 0; i < workers; i++ {
 		work := func() {
 			lane := &r.lanes[i]
+			history := rollupHistoryReader{db: r.db}
+			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
 			slices.SortFunc(lane.ordered, compareRollupStages)
 			for _, s := range lane.ordered {
 				m := s.metric
-				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, m.slots.View, m.slots.Range, s.batches, &lane.workspace)
+				view, ranges := m.slots.View, m.slots.Range
+				var readErr error
+				if r.db != nil {
+					// Every installed sample is at/before Frontier.MaxTime; the
+					// correction bit already covers equal-time replacements.
+					view = nil
+					ranges = func(a int, start, end int64, dst []sealrollup.Sample) []sealrollup.Sample {
+						if readErr != nil {
+							return dst
+						}
+						if result, ok := m.slots.RecentRange(a, start, end, dst); ok {
+							return result
+						}
+						result, err := lane.windows.rangeSamples(&history, m, a, start, end)
+						readErr = err
+						return append(dst, result...)
+					}
+				}
+				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, view, ranges, s.batches, &lane.workspace)
+				if readErr != nil {
+					lane.err = readErr
+					return
+				}
 				if err != nil {
 					lane.err = err
 					return
@@ -272,8 +297,19 @@ func (r *coreRollups) commitStages() {
 		work := func() {
 			for _, s := range r.lanes[i].ordered {
 				m := s.metric
+				if r.db != nil {
+					m.slots.KeepRecent(s.next.Frontier.MaxTime)
+				}
 				for _, record := range s.records {
-					m.slots.Install(record.Delta)
+					if r.db != nil {
+						m.slots.InstallRecent(record.Delta)
+					} else {
+						m.slots.Install(record.Delta)
+					}
+				}
+				if r.db != nil {
+					m.slots.KeepRecent(s.next.Frontier.MaxTime)
+					r.lanes[i].windows.commit(m, s.records, s.next.Expired)
 				}
 				if s.next.Expired {
 					m.slots = *m.prepared.NewSlots()

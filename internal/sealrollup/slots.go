@@ -1,12 +1,16 @@
 package sealrollup
 
-import "slices"
+import (
+	"math"
+	"slices"
+)
 
 // Slots is an owner-local sparse physical ring index. A lookup or range is
 // immutable while Plan runs; install replacements only after durable ingest.
 // Physical ordering makes wrap an in-place replacement, without moving a full
 // fine-retention array on every new timestamp. Storage is proportional to
-// occupied slots; this index does not provide a bounded sealed-block cache.
+// occupied slots unless the caller uses InstallRecent/KeepRecent and reloads
+// incomplete windows from durable storage.
 type Slots struct {
 	archives      *[]Archive
 	data          []slotSpan
@@ -20,6 +24,8 @@ type Slots struct {
 type slotSpan struct {
 	data        []slotSample
 	first, last int64
+	// Samples before floor may have been evicted, including absent slots.
+	floor int64
 }
 
 type slotSample struct {
@@ -83,6 +89,19 @@ func (s *Slots) Install(d Delta) {
 	}
 	span.data = ps
 }
+
+// InstallRecent installs only source samples inside the resident horizon.
+// KeepRecent must establish the horizon before a committed batch is installed.
+func (s *Slots) InstallRecent(d Delta) {
+	if d.Archive == len(*s.archives)-1 {
+		return
+	}
+	if s.data != nil && d.Sample.Time < s.data[d.Archive].floor {
+		return
+	}
+	s.Install(d)
+}
+
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
 	if s.data == nil {
 		if s.hasSingle && s.singleArchive == a && s.single.slot == physical {
@@ -127,6 +146,60 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 		appendRange(0, hi-ar.Count)
 	}
 	return dst
+}
+
+// RecentRange reports whether the complete window is still resident. A miss
+// must be resolved from durable physical-slot winners, never partial aggregates.
+func (s *Slots) RecentRange(a int, start, end int64, dst []Sample) ([]Sample, bool) {
+	if s.data != nil && start < s.data[a].floor {
+		return dst, false
+	}
+	return s.Range(a, start, end, dst), true
+}
+
+// KeepRecent retains every fine sample of the current coarse window, plus
+// two preceding source intervals. The terminal archive is never a source.
+// A floor records completeness even when a window had no occupied samples.
+// Compact backing arrays as well as lengths: old retention capacity must die.
+func (s *Slots) KeepRecent(maxTime int64) {
+	ars := *s.archives
+	if len(ars) == 1 {
+		s.data, s.hasSingle = nil, false
+		return
+	}
+	if s.data == nil {
+		s.data = make([]slotSpan, len(ars))
+		if s.hasSingle {
+			s.data[s.singleArchive] = slotSpan{data: []slotSample{s.single}, first: s.single.slot, last: s.single.slot}
+			s.hasSingle = false
+		}
+	}
+	for a := range ars {
+		span := &s.data[a]
+		if a == len(ars)-1 {
+			*span = slotSpan{floor: math.MaxInt64}
+			continue
+		}
+		step := ars[a+1].Step
+		span.floor = max(span.floor, maxTime-maxTime%step-2*ars[a].Step)
+		kept := span.data[:0]
+		for _, p := range span.data {
+			if p.sample.Time >= span.floor {
+				kept = append(kept, p)
+			}
+		}
+		// Release old retention-sized arrays and unusually dense past windows.
+		// Normal appends reuse capacity within the current window.
+		if cap(kept) > 2*len(kept)+8 {
+			compact := make([]slotSample, len(kept), 2*len(kept)+8)
+			copy(compact, kept)
+			kept = compact
+		}
+		span.data = kept
+		if len(kept) > 0 {
+			span.first, span.last = kept[0].slot, kept[len(kept)-1].slot
+		}
+	}
 }
 
 // NewSlots borrows the archives already owned by this immutable prepared schema.
