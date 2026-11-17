@@ -15,6 +15,10 @@ import (
 // may be borrowed by catalogs, dispatches and pinned read generations. Callers
 // must never modify the returned definition or schema slices.
 type PolicyIdentity struct {
+	// Admission provenance permits direct use only by the catalog that validated
+	// this ID. Foreign/detached handles still take canonical equality checks.
+	catalog    *PolicyCatalog
+	vshard     uint16
 	id         uint64
 	policy     policyName
 	definition []byte
@@ -60,7 +64,7 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 				return nil, errors.New("noncanonical rollup policy")
 			}
 			owned := bytes.Clone(definition)
-			h := &PolicyIdentity{id: id, policy: policyName{Name: partsformat.ID(unsafe.String(&owned[start], nameEnd-start)), Group: template.policy.Group}, definition: owned[:len(owned):len(owned)], prepared: template.prepared}
+			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(unsafe.String(&owned[start], nameEnd-start))), id: id, policy: policyName{Name: partsformat.ID(unsafe.String(&owned[start], nameEnd-start)), Group: template.policy.Group}, definition: owned[:len(owned):len(owned)], prepared: template.prepared}
 			c.ids[id] = h
 			return h, nil
 		}
@@ -96,7 +100,7 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 	if len(canonical) > nameStart+len(p.Name) && bytes.Equal(canonical[:nameStart], []byte(`{"Name":"`)) && bytes.Equal(canonical[nameStart:nameStart+len(p.Name)], []byte(p.Name)) && canonical[nameStart+len(p.Name)] == '"' {
 		p.Name = partsformat.ID(unsafe.String(&canonical[nameStart], len(p.Name)))
 	}
-	h := &PolicyIdentity{id: id, policy: policyName{Name: p.Name, Group: p.Group}, definition: canonical[:len(canonical):len(canonical)], prepared: prepared}
+	h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(p.Name), id: id, policy: policyName{Name: p.Name, Group: p.Group}, definition: canonical[:len(canonical):len(canonical)], prepared: prepared}
 	if c.ids == nil {
 		c.ids = make(map[uint64]*PolicyIdentity)
 		c.schemas = make(map[[32]byte]*PolicyIdentity)

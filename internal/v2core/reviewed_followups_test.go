@@ -14,7 +14,9 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, changed := rollupTestPolicy(t, "restart.metric", "1s:1h,1m:1d", sealrollup.Last, .5)
-	wrong, err := NewApplicationPolicy("restart.metric", changed)
+	// A foreign catalog can allocate the same numeric ID for different bytes.
+	// An ID match alone must never authorize the direct routing path.
+	wrong, err := (&PolicyCatalog{}).intern(7, "restart.metric", changed)
 	if err != nil {
 		t.Fatal(err)
 	}

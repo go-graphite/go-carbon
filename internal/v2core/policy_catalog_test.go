@@ -22,7 +22,7 @@ func TestPolicyCatalogImmutableOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			clear(raw)
-			if string(h.policy.Name) != name || !bytes.Equal(h.definition, original) {
+			if h.catalog != c || string(h.policy.Name) != name || !bytes.Equal(h.definition, original) {
 				t.Fatal("borrowed caller memory")
 			}
 			_ = append(h.definition, 255)
