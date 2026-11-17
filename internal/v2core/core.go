@@ -192,6 +192,8 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	bufferedPoints atomic.Int64
+	bufferedSince  atomic.Int64
 	rollups        *coreRollups
 	gc             *sealedPartGC
 	gcDirty        atomic.Bool
@@ -867,6 +869,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.parts.Add(1)
 		o.bytes.Add(n)
 		head = head[:0]
+		o.bufferedPoints.Store(0)
+		o.bufferedSince.Store(0)
 		deadline = time.Now().Add(time.Second)
 		o.pub.publish(o.db.NewSnapshot())
 		if err := publishBatches(); err != nil {
@@ -939,7 +943,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					failure = flush()
 				}
 				if failure == nil {
+					if len(head) == 0 && len(p.rows) > 0 {
+						o.bufferedSince.Store(time.Now().UnixNano())
+					}
 					head = append(head, p.rows...)
+					o.bufferedPoints.Store(int64(len(head)))
 					batches = append(batches, p.batches...)
 					pending[producer] = p.cursor
 				}

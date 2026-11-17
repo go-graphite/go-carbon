@@ -75,7 +75,8 @@ func (r *wspConfigRetriever) MetricAggrConf(metric string) (whisper.AggregationM
 }
 
 type App struct {
-	v2 *v2Runtime
+	v2              *v2Runtime
+	v2CollectorOnce sync.Once
 	sync.RWMutex
 	ConfigFilename         string
 	Config                 *Config

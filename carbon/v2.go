@@ -29,6 +29,8 @@ import (
 // v2Config is restart-only. The experimental engine has its own mandatory log
 // underneath Path, independent of the classic dump/input-log switches.
 type v2Config struct {
+	BaselinePath string `toml:"baseline-path"`
+
 	Enabled         bool   `toml:"enabled"`
 	Mode            string `toml:"mode"`
 	Path            string `toml:"path"`
@@ -122,7 +124,7 @@ func (app *App) startV2() error {
 			return ttl > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= ttl
 		}
 	}
-	storeConfig := v2daemon.Config{Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks}
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, Hooks: hooks}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
@@ -203,7 +205,7 @@ func (app *App) startV2() error {
 			return err
 		}
 		old := v.catalog.Snapshot()
-		if old.Revision() > 0 && slices.Equal(slices.Collect(old.Names()), names) {
+		if old.Revision() > 0 && old.EqualNames(names) {
 			return nil
 		}
 		return v.catalog.Publish(old.Revision()+1, names)
@@ -282,6 +284,9 @@ func (app *App) startV2() error {
 		return err
 	}
 	intake.Store(v.server)
+	if c.Prometheus.Enabled {
+		app.v2CollectorOnce.Do(func() { app.PromRegisterer.MustRegister(&v2Collector{app: app}) })
+	}
 	recovered.Store(true)
 	v.wg.Add(1)
 	go func() {

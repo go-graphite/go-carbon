@@ -25,6 +25,10 @@ func (s *Snapshot) Revision() uint64        { return s.revision }
 func (s *Snapshot) Len() int                { return len(s.names) }
 func (s *Snapshot) Names() iter.Seq[string] { return slices.Values(s.names) }
 
+// EqualNames compares a sorted, unique candidate without materializing another
+// copy of this immutable view. This is used by the periodic discovery refresh.
+func (s *Snapshot) EqualNames(names []string) bool { return slices.Equal(s.names, names) }
+
 // Catalog is a single-control-owner projection; Snapshot is safe concurrently.
 // Publish/Apply belong at the catalog publication boundary, never per point.
 // Persisted catalog recovery must finish before attaching discovery.
