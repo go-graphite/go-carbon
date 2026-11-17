@@ -2146,7 +2146,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	defer listener.logSlowGlobExpansion(logger, query, started, &matchedCount)
 
 	if binding := listener.v2Catalog.Load(); binding != nil {
-		response := listener.expandV2Catalog(binding, query)
+		response := listener.expandV2CatalogContext(ctx, binding, query)
 		matchedCount = len(response.Files)
 		resultCh <- response
 		return

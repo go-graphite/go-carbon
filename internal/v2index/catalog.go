@@ -3,6 +3,7 @@
 package v2index
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"slices"
@@ -31,7 +32,7 @@ func (s *Snapshot) EqualNames(names []string) bool { return slices.Equal(s.names
 
 // Catalog is a single-control-owner projection; Snapshot is safe concurrently.
 // Publish/Apply belong at the catalog publication boundary, never per point.
-// Persisted catalog recovery must finish before attaching discovery.
+// Recovery may publish its first view after discovery is attached.
 type Catalog struct{ current atomic.Pointer[Snapshot] }
 
 func (c *Catalog) Snapshot() *Snapshot {
@@ -72,6 +73,20 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 // Removal wins within a batch. The serial owner must fence stale expiry against
 // recreated names before calling Apply. This projection cannot decide liveness.
 func (c *Catalog) Apply(revision uint64, add, remove []string) error {
+	return c.ApplyBeforePublish(revision, add, remove, nil)
+}
+
+// ApplyBeforePublish prepares the incremental membership merge privately. The
+// callback fences dependent quota state before the immutable view is exposed.
+func (c *Catalog) ApplyBeforePublish(revision uint64, add, remove []string, before func(*Snapshot) error) error {
+	return c.ApplyBeforePublishContext(context.Background(), revision, add, remove, before)
+}
+
+// ApplyBeforePublishContext also cancels a large merge during daemon shutdown.
+func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64, add, remove []string, before func(*Snapshot) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	old := c.Snapshot()
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
@@ -85,6 +100,11 @@ func (c *Catalog) Apply(revision uint64, add, remove []string) error {
 	next := make([]string, 0, len(old.names)+len(additions))
 	i, j, k := 0, 0, 0
 	for i < len(old.names) || j < len(additions) {
+		if (i+j)&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		var name string
 		if j == len(additions) || i < len(old.names) && old.names[i] < additions[j] {
 			name = old.names[i]
@@ -103,6 +123,15 @@ func (c *Catalog) Apply(revision uint64, add, remove []string) error {
 			next = append(next, name)
 		}
 	}
-	c.current.Store(&Snapshot{revision: revision, names: next})
+	if slices.Equal(old.names, next) {
+		return nil
+	}
+	snapshot := &Snapshot{revision: revision, names: next}
+	if before != nil {
+		if err := before(snapshot); err != nil {
+			return err
+		}
+	}
+	c.current.Store(snapshot)
 	return nil
 }

@@ -76,17 +76,24 @@ func (app *App) newV2Quotas(classicNames []string) (*carbonserver.V2Quotas, map[
 }
 
 func publishV2Quotas(q *carbonserver.V2Quotas, fence uint64, r *v2read.Reader, names []string, historic map[string]carbonserver.V2QuotaMetric) error {
+	return publishV2QuotasContext(context.Background(), q, fence, r, names, historic)
+}
+
+func publishV2QuotasContext(ctx context.Context, q *carbonserver.V2Quotas, fence uint64, r *v2read.Reader, names []string, historic map[string]carbonserver.V2QuotaMetric) error {
 	if q == nil {
 		return nil
 	}
 	metrics := make([]carbonserver.V2QuotaMetric, 0, len(names))
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Historical and v2 policies are checked equal at first overlap admission.
 		if m, ok := historic[name]; ok {
 			metrics = append(metrics, m)
 			continue
 		}
-		m, err := r.Metadata(context.Background(), name)
+		m, err := r.Metadata(ctx, name)
 		if err == v2read.ErrNotFound {
 			continue
 		} // concurrent expiry; next refresh removes it

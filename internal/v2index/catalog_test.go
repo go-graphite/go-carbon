@@ -1,12 +1,32 @@
 package v2index
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
 	"sync"
 	"testing"
 )
+
+func TestCatalogMergeCancellation(t *testing.T) {
+	c := &Catalog{}
+	if err := c.Publish(1, []string{"existing.name"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.ApplyBeforePublishContext(ctx, 2, []string{"new.name"}, nil, func(*Snapshot) error {
+		t.Fatal("canceled merge reached quota publication")
+		return nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if c.Snapshot().Revision() != 1 {
+		t.Fatal("canceled merge changed the published snapshot")
+	}
+}
 
 func TestCatalogPublication(t *testing.T) {
 	c := &Catalog{}

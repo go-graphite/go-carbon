@@ -44,7 +44,7 @@ func TestV2FindDifferential(t *testing.T) {
 		files = append(files, p)
 	}
 	slices.Sort(files)
-	queries := []string{"*", "services.*", "services.svc00", "services.svc00.nodes.*", "services.svc00.nodes.host000.cpu.{user,system}", "services.{svc00,svc01}.nodes.host00?.*.?ser", "services.svc[0-1][0-9].nodes.*.requests.*", "{services.svc00.nodes.host000.cpu,unicode.日本}.cpu", "collision", "collision.*", "standalone", "missing.*", "metric;a=1;z=2", "dash-name.*.*", "services.{svc00,svc01}.nodes.{host000,host001}.latency.p99"}
+	queries := []string{"", " ** ", "unicode.??.cpu", "unicode.??????.cpu", "services.svc[", "[", "*", "services.*", "services.svc00", "services.svc00.nodes.*", "services.svc00.nodes.host000.cpu.{user,system}", "services.{svc00,svc01}.nodes.host00?.*.?ser", "services.svc[0-1][0-9].nodes.*.requests.*", "{services.svc00.nodes.host000.cpu,unicode.日本}.cpu", "collision", "collision.*", "standalone", "missing.*", "metric;a=1;z=2", "dash-name.*.*", "services.{svc00,svc01}.nodes.{host000,host001}.latency.p99"}
 	for service := range 16 {
 		for host := range 32 {
 			queries = append(queries, fmt.Sprintf("services.svc%02d.nodes.host%03d.*.*", service, host))

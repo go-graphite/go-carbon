@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,13 @@ func TestV2MoveAdminHTTP(t *testing.T) {
 	}
 	if status := call("adopt", prepared.ID, nil); !status.Done {
 		t.Fatal("adopt incomplete")
+	}
+	visibleDeadline := time.Now().Add(2200 * time.Millisecond)
+	for !slices.Contains(slices.Collect(app.v2.catalog.Snapshot().Names()), name) {
+		if time.Now().After(visibleDeadline) {
+			t.Fatal("live adopted name did not reach discovery within 2.2s")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if status := call("adopt", prepared.ID, nil); !status.Done {
 		t.Fatal("adopt retry incomplete")

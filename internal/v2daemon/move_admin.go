@@ -69,11 +69,20 @@ type moveRecord struct {
 // The operation mutex excludes concurrent writers. Readers use atomic disk
 // snapshots, so status and collection remain available during long transfers.
 type MoveAdmin struct {
-	mu       sync.Mutex
-	root     string
-	store    *Store
-	onOwner  func(int, func() error) error
-	rejected atomic.Uint64
+	mu           sync.Mutex
+	root         string
+	store        *Store
+	onOwner      func(int, func() error) error
+	namesVisible func([]string)
+	rejected     atomic.Uint64
+}
+
+// SetNamesVisible attaches the application's discovery projection. Notifications
+// follow successful adoption, including copied names that never enter intake.
+func (a *MoveAdmin) SetNamesVisible(notify func([]string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.namesVisible = notify
 }
 
 func NewMoveAdmin(root string, store *Store, onOwner func(int, func() error) error) *MoveAdmin {
@@ -676,7 +685,17 @@ func (a *MoveAdmin) adopt(ctx context.Context, p *v2core.PreparedMove, now int64
 			return e
 		}
 	}
-	return a.onOwner(0, func() error { return a.store.Core.AdoptMove(ctx, p, ids, now) })
+	if err := a.onOwner(0, func() error { return a.store.Core.AdoptMove(ctx, p, ids, now) }); err != nil {
+		return err
+	}
+	if a.namesVisible != nil {
+		names := make([]string, 0, len(ids))
+		for name := range ids {
+			names = append(names, name)
+		}
+		a.namesVisible(names)
+	}
+	return nil
 }
 func writeMoveFile(dir, name string, b []byte) error {
 	f, e := os.CreateTemp(dir, ".move-")

@@ -1,32 +1,25 @@
 package carbonserver
 
 import (
+	"context"
 	"errors"
-	"fmt"
-	"sync"
+	"slices"
+	"strings"
 	"sync/atomic"
 
-	"github.com/dgryski/go-trigram"
 	"github.com/go-graphite/go-carbon/internal/v2index"
 	"go.uber.org/zap"
 )
 
-// v2CatalogBinding builds off the catalog writer path and pins each find image.
-// Only index builders serialize; catalog publishers and existing readers don't.
+// v2CatalogBinding pins immutable catalog publications without a build mutex.
 type v2CatalogBinding struct {
 	source v2index.Source
-	mu     sync.Mutex
 	image  atomic.Pointer[v2CatalogImage]
 }
-type v2CatalogImage struct {
-	snapshot *v2index.Snapshot
-	listener *CarbonserverListener
-}
+type v2CatalogImage struct{ snapshot *v2index.Snapshot }
 
-// SetV2Catalog attaches a live host-wide catalog before serving requests. The
-// source owns admission/expiry fencing and durable recovery. Discovery uses the
-// configured classic backend, with no filesystem fallback or stale-result TTL.
-// Passing nil detaches it. Call before Start, like the other listener setters.
+// SetV2Catalog attaches the published name projection. Requests only pin a
+// snapshot: neither attaching nor querying constructs another whole-name index.
 func (l *CarbonserverListener) SetV2Catalog(source v2index.Source) error {
 	if source == nil {
 		l.v2Catalog.Store(nil)
@@ -39,89 +32,106 @@ func (l *CarbonserverListener) SetV2Catalog(source v2index.Source) error {
 	l.v2Catalog.Store(binding)
 	return nil
 }
-
-func (b *v2CatalogBinding) load(l *CarbonserverListener) (*v2CatalogImage, error) {
+func (b *v2CatalogBinding) load(_ *CarbonserverListener) (*v2CatalogImage, error) {
 	snapshot := b.source.Snapshot()
 	if snapshot == nil {
 		return nil, errors.New("v2 index: nil catalog snapshot")
 	}
-	if image := b.image.Load(); image != nil && image.snapshot.Revision() == snapshot.Revision() {
-		return image, nil
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	// Re-read after waiting so a delayed query cannot republish an older image.
-	snapshot = b.source.Snapshot()
-	if snapshot == nil {
-		return nil, errors.New("v2 index: nil catalog snapshot")
-	}
-	if image := b.image.Load(); image != nil && image.snapshot.Revision() == snapshot.Revision() {
-		return image, nil
-	}
-	next, err := buildV2CatalogImage(snapshot, l)
-	if err != nil {
-		return nil, err
-	}
-	b.image.Store(next)
-	return next, nil
-}
-
-// Ported from the parts operational-parity adapter. Only the name projection is
-// needed here: quotas and physical metadata remain with their existing owners.
-func buildV2CatalogImage(snapshot *v2index.Snapshot, parent *CarbonserverListener) (*v2CatalogImage, error) {
-	l := &CarbonserverListener{logger: zap.NewNop(), accessLogger: zap.NewNop(), trieIndex: parent.trieIndex, trigramIndex: !parent.trieIndex, maxGlobs: parent.maxGlobs, maxMetricsGlobbed: parent.maxMetricsGlobbed, failOnMaxGlobs: parent.failOnMaxGlobs}
-	fidx := &fileIndex{}
-	if l.trieIndex {
-		fidx.trieIdx = newTrie(".wsp", 0, nil)
-	}
-	// Sorted canonical names make paths for common parents adjacent. Remembering
-	// the last path per depth avoids a second million-entry namespace map.
-	var last []string
-	for name := range snapshot.Names() {
-		path := metricStoreVirtualPath(name)
-		if l.trieIndex {
-			if _, err := fidx.trieIdx.insert(path, 0, 0, 0, 0); err != nil {
-				return nil, fmt.Errorf("v2 index %q: %w", name, err)
-			}
-		} else {
-			paths := metricStoreTrigramPaths(path)
-			for depth, p := range paths {
-				if depth >= len(last) {
-					last = append(last, p)
-					fidx.files = append(fidx.files, p)
-				} else if last[depth] != p {
-					last[depth] = p
-					fidx.files = append(fidx.files, p)
-				}
-			}
-		}
-	}
-	if !l.trieIndex {
-		fidx.idx = trigram.NewIndex(fidx.files)
-		fidx.idx.Prune(0.95)
-	}
-	l.UpdateFileIndex(fidx)
-	return &v2CatalogImage{snapshot: snapshot, listener: l}, nil
+	image := &v2CatalogImage{snapshot: snapshot}
+	b.image.Store(image)
+	return image, nil
 }
 
 func (l *CarbonserverListener) expandV2Catalog(binding *v2CatalogBinding, query string) *ExpandedGlobResponse {
+	return l.expandV2CatalogContext(context.Background(), binding, query)
+}
+func (l *CarbonserverListener) expandV2CatalogContext(ctx context.Context, binding *v2CatalogBinding, query string) *ExpandedGlobResponse {
 	image, err := binding.load(l)
 	if err != nil {
 		return &ExpandedGlobResponse{Name: query, Err: err}
 	}
-	pinned := image.listener
-	if pinned.trieIndex {
-		files, leafs, nodes, lookups, err := pinned.expandGlobsTrie(query)
-		return &ExpandedGlobResponse{query, files, leafs, nodes, lookups, err}
+	logger := l.logger
+	if logger == nil {
+		logger = zap.NewNop()
 	}
-	globs, err := pinned.globPatterns(query, pinned.logger)
+	var globs []string
+	if l.trieIndex {
+		normalized := strings.TrimSpace(query)
+		if normalized == "" {
+			normalized = "*"
+		}
+		globs, err = l.expandGlobBraces([]string{strings.ReplaceAll(normalized, ".", "/")})
+	} else {
+		globs, err = l.globPatterns(query, logger)
+	}
 	if err != nil {
 		return &ExpandedGlobResponse{Name: query, Err: err}
 	}
-	files := pinned.matchGlobIndex(pinned.CurrentFileIndex(), globs, false)
+	paths := make(map[string]struct{})
+	for _, glob := range globs {
+		if !l.trieIndex {
+			err = image.snapshot.MatchPaths(ctx, glob, func(path string) error { paths[path] = struct{}{}; return nil })
+		} else {
+			parts := strings.Split(glob, "/")
+			matchers := make([]*gmatcher, len(parts))
+			for i, part := range parts {
+				matchers[i], err = newGlobState(part, l.expandGlobBraces)
+				if err != nil {
+					return &ExpandedGlobResponse{Name: query, Err: err}
+				}
+			}
+			err = image.snapshot.VisitPaths(ctx, glob, func(path string) error {
+				candidate := strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".wsp")
+				components := strings.Split(candidate, "/")
+				if len(components) != len(matchers) {
+					return nil
+				}
+				for i, component := range components {
+					state := matchers[i].dstates[0]
+					for j := 0; j < len(component); j++ {
+						state = state.step(component[j])
+						if len(state.gstates) == 0 {
+							return nil
+						}
+					}
+					if !state.matched() {
+						return nil
+					}
+				}
+				paths[path] = struct{}{}
+				return nil
+			})
+		}
+		if err != nil {
+			return &ExpandedGlobResponse{Name: query, Err: err}
+		}
+	}
+	files := make([]string, 0, len(paths))
+	for path := range paths {
+		files = append(files, path)
+	}
+	slices.Sort(files)
+	if l.trieIndex {
+		slices.SortFunc(files, func(a, b string) int {
+			aa, bb := strings.TrimSuffix(a, ".wsp"), strings.TrimSuffix(b, ".wsp")
+			if n := strings.Compare(aa, bb); n != 0 {
+				return n
+			}
+			// Classic trie emits a leaf before the directory of the same name.
+			return -strings.Compare(a, b)
+		})
+		limit := max(1, l.maxMetricsGlobbed)
+		if len(files) > limit {
+			if strings.TrimSuffix(files[limit-1], ".wsp") == strings.TrimSuffix(files[limit], ".wsp") {
+				limit++
+			}
+			files = files[:limit]
+		}
+	}
 	leafs := make([]bool, len(files))
 	for i, path := range files {
-		files[i], leafs[i] = pinned.normalizeGlobFile(path, nil)
+		leafs[i] = strings.HasSuffix(path, ".wsp")
+		files[i] = strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".wsp"), "/", ".")
 	}
 	return &ExpandedGlobResponse{query, files, leafs, nil, 0, nil}
 }
