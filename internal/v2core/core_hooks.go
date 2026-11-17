@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -19,14 +20,30 @@ type coreBatch struct {
 	Order  uint64
 	Clock  int64
 	Policy []byte
-	Points []row
+	// Registered carries an immutable definition across the application boundary.
+	// Policy must be nil when Registered is supplied.
+	Registered *ApplicationPolicy
+	Points     []row
 }
 type coreSealInput struct {
 	Rows    []row
 	Batches []coreBatch
 	Next    coreFrontier
 }
-type coreKV struct{ Key, Value []byte }
+type coreKV struct {
+	Key, Value []byte
+	// Record is immutable planner-owned storage valid through Commit/Abort.
+	// The shared writer packs it directly; metadata continues to use Value.
+	Record *sealrollup.Record
+}
+
+func (kv coreKV) encodedValue() []byte {
+	if kv.Record != nil {
+		return sealrollup.EncodeRecord(*kv.Record)
+	}
+	return kv.Value
+}
+
 type coreSealPlan struct {
 	// ReplaceRaw suppresses numeric sorting and raw output. The caller supplies
 	// the authoritative replacement, catalogue and receipt keys in Files. A
@@ -117,7 +134,14 @@ func (e *coreEngine) submitBatchesMode(producer int, batches []coreBatch, cursor
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return errors.New("invalid batch producer/cursor")
 	}
-	var rows []row
+	// Submission detaches every row before returning. Reuse producer-local
+	// flattening storage instead of growing a new slice for every packet.
+	router := &e.routers[producer]
+	n := 0
+	for _, b := range batches {
+		n += len(b.Points)
+	}
+	rows := slices.Grow(router.batchRows[:0], n)
 	for _, b := range batches {
 		for _, r := range b.Points {
 			if r.ID != b.ID {
@@ -126,6 +150,7 @@ func (e *coreEngine) submitBatchesMode(producer int, batches []coreBatch, cursor
 			rows = append(rows, r)
 		}
 	}
+	router.batchRows = rows
 	return e.submitPacketMode(producer, rows, batches, cursor, seal, waitSeal)
 }
 func (o *coreOwner) publishFrontier(f coreFrontier) {

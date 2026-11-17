@@ -75,7 +75,7 @@ func TestDenseBitExact(t *testing.T) {
 }
 
 // Compare full SST bytes with the existing native exact 128-slot block encoder,
-// using identical outer SST compression. This is a local synthetic density
+// using standard Zstd outer SST compression. This is a local synthetic density
 // qualification, not a native source-visibility adapter or captured-data proof.
 func TestDenseLadderBytes(t *testing.T) {
 	ladders := [][][2]int64{{{60, 43200}, {3600, 8760}, {86400, 3650}}, {{60, 20160}, {1800, 35040}}}

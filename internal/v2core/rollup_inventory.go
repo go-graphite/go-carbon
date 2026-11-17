@@ -59,7 +59,7 @@ func (s *RollupInventory) with(added []coreKV, removed map[v2part.Digest]bool) *
 func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, known *RollupInventory) (map[string][]string, []string, error) {
 	inventory := map[string][]string{}
 	var scopes []string
-	var data *pebble.Iterator
+	var data *archiveIter
 	defer func() {
 		if data != nil {
 			_ = data.Close()
@@ -102,7 +102,7 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 			return err
 		}
 		if data == nil {
-			data, err = snapshot.NewIter(nil)
+			data, err = newArchiveIter(ctx, snapshot, nil)
 			if err != nil {
 				return err
 			}

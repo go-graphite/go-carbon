@@ -16,13 +16,15 @@ A serial core owner prepares each policy once, reuses a reducer Workspace and
 record arena, and supplies immutable sparse Slots. Planning groups by metric
 without merging applications. All canonical replacement records detach before
 scratch reuse. Commit installs slots/frontiers/activity only after the existing
-atomic raw/archive/frontier SST ingest succeeds. Planning or ingest failure
+atomic raw/part-descriptor/frontier SST ingest succeeds. Archive originals are
+closed, synced and retained before that publication; their rows never enter
+the LSM. Planning or ingest failure
 publishes none of that state. Reopen recovers from one immutable snapshot.
 
 Archive records use `partsformat` GCP3 keys, with exact placement group above
 CRC32C(name)%4096, partition 0, a random immutable part UUID, exact name, archive,
-physical ring slot in BlockStart, and ordinal 0. Each extension SST stays inside
-one (group,vshard,partition) range. Archive max-u32 is reserved for version-1
+physical ring slot in BlockStart, and ordinal 0. Each dense archive part spans the routed vshards of one placement group and
+one partition. Keys remain sorted in the published GCP3 order. Archive max-u32 is reserved for version-1
 policy/frontier/activity metadata in this offline experiment. Other values use
 `sealrollup.EncodeRecord`. Greatest original replacement Order wins for a
 physical slot before time filtering, including occupied NaNs. No partial sums
@@ -53,15 +55,14 @@ therefore share one physical owner. Numeric raw-only layers retain their origina
 ID routing. The marker is part of the durable core configuration; old rollup roots
 without this marker fail configuration validation rather than silently changing
 ownership. Read consumers must use name routing for canonical layers. Placement
-group remains above virtual shard in every GCP3 key; no SST crosses either a
-placement-group or virtual-shard/partition boundary.
+group remains above virtual shard in every GCP3 key; no archive file crosses a placement-group or partition boundary.
 
 The producer caches validated immutable identity routes without a shared lock.
 Each seal allocates sample and original-application descriptor arenas together;
 it preserves every original batch boundary and order. Per-metric key templates
 cache validated immutable identity bytes; output keys remain detached, with only
 part UUID, archive and physical slot filled during the seal. Archive, metadata,
-raw rows and owner frontier still publish in the same atomic ingest.
+raw rows and owner frontier publish through descriptors in one atomic ingest.
 
 `OpenReadOnly` opens Pebble in read-only mode and refuses core admission. It
 publishes persisted snapshots without reconstructing writable reducer state.
@@ -71,3 +72,28 @@ the existing restart differential tests. `DefaultFixture.DeferArchiveOracle`
 explicitly defers the production-size classic archive scan. Literal small
 fixtures keep their complete archive/metadata oracle. The result labels this
 deferral and never reports an archive-oracle pass for that run.
+
+
+## Authoritative archive files
+
+A pinned Pebble snapshot binds immutable `parts/<SHA256>.sst` originals through
+its descriptor namespace. `ScanRollups`, `ScanCatalogNames` and `RollupSnapshot`
+read that exact inventory using the standard external SST iterator. Recovery
+resolves the greatest original order/revision and reset frontier from the same
+files before replay. The legacy in-LSM GCP3 namespace remains readable, with
+identical duplicate keys deduplicated and conflicting duplicate values rejected.
+No new archive output is ingested or compacted by Pebble; only raw rows, small
+part descriptors and the owner frontier participate in its atomic manifest edit.
+Overlapping virtual-shard ranges in packed archive files therefore create no LSM
+archive compaction work. Placement-group copies still transfer original files
+and descriptor sidecars by complete-file checksum.
+
+The snapshot includes a separate local owner-directory locator. Writable Open
+rebinds this locator before recovery after a complete root move. A relocated
+`OpenReadOnly` fails closed until that writable rebind; callers opening naked
+copied snapshots can pass `WithRollupDirectory(ctx, localOwnerDirectory)` to the
+unchanged `NewRollupSnapshot` API. Locators never enter portable descriptors or
+part identities. Readers own external file handles until their iterator closes;
+committed originals are retained for pinned snapshots, and unpublished originals
+are removed only during exclusive writable startup. Missing committed originals
+are errors, even when older LSM archive versions remain available.
