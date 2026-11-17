@@ -608,7 +608,8 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
-	out := &RollupSnapshot{snapshot: snapshot, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
+	out := &RollupSnapshot{snapshot: snapshot, directory: directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	var err error
 	out.hasCopied, err = snapshotHasCopiedParts(snapshot)
 	if err != nil {
@@ -620,7 +621,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 		out.cache = &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
 	}
 	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
 	if err != nil {
 		return nil, err
 	}

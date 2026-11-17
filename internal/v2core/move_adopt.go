@@ -143,7 +143,7 @@ func validateMoveFineCoverage(ctx context.Context, index *RollupSnapshot, name s
 		return nil
 	}
 	fine := m.policy.Config.Archives[0]
-	it, err := index.snapshot.NewIter(nil)
+	it, err := newArchiveIter(ctx, index.snapshot, nil)
 	if err != nil {
 		return err
 	}
@@ -196,7 +196,7 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 	if m == nil {
 		return nil
 	}
-	it, err := index.snapshot.NewIter(nil)
+	it, err := newArchiveIter(ctx, index.snapshot, nil)
 	if err != nil {
 		return err
 	}
