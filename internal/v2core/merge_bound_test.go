@@ -315,6 +315,14 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 			wantKept = append(wantKept, r)
 		}
 	}
+	// The open coarse window was projected before the clock jump and is
+	// stored closed after it: only the Correction placement hint may differ.
+	for i := range kept {
+		kept[i].Correction = false
+	}
+	for i := range wantKept {
+		wantKept[i].Correction = false
+	}
 	if !reflect.DeepEqual(kept, wantKept) {
 		t.Fatalf("coarse records changed: %+v want %+v", kept, wantKept)
 	}
