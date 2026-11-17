@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
 	"reflect"
 	"slices"
 	"testing"
@@ -15,12 +14,6 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
-
-// V2CORE_TEST_OMIT_BASE_ROWS=1 reruns every rollup test without base rows.
-func TestMain(m *testing.M) {
-	testOmitBaseRows = os.Getenv("V2CORE_TEST_OMIT_BASE_ROWS") == "1"
-	os.Exit(m.Run())
-}
 
 // Archive records are the only render source. Stores with and without raw base
 // rows must hold identical records through randomized multi- and single-archive
@@ -53,7 +46,7 @@ func TestOmitBaseRowsRenderDifferential(t *testing.T) {
 	roots := []string{t.TempDir(), t.TempDir()}
 	open := func(i int, omit bool) *coreEngine {
 		c := cfg
-		c.OmitBaseRows = omit
+		c.KeepBaseRows = !omit
 		e, err := openCore(roots[i], c)
 		if err != nil {
 			t.Fatal(err)
@@ -189,13 +182,4 @@ func TestOmitBaseRowsRenderDifferential(t *testing.T) {
 		mergeDrain(t, e.owners[0])
 	}
 	compare("merged")
-}
-
-// Without rollups base rows are the only data; the setting is refused there.
-func TestOmitBaseRowsRequiresRollups(t *testing.T) {
-	cfg := coreTestConfig()
-	cfg.OmitBaseRows = true
-	if _, err := openCore(t.TempDir(), cfg); err != os.ErrInvalid {
-		t.Fatalf("open without rollups: %v", err)
-	}
 }
