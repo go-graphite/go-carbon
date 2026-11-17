@@ -123,3 +123,30 @@ cover real TCP -> HTTP render/find/info, independent Whisper values, Whisper and
 shared-store union, restart with an open sender, quota rejection/release, actual
 expiry and resumed-name masking. These local tests do not authorize or qualify a
 production canary, relay change, live copy adoption or general rollback.
+
+## Sealed archive merging
+
+Writable v2 owners automatically merge sixteen local archive parts in the same
+size tier into one immutable part. Tiers span a factor of sixteen in file bytes;
+when merge service keeps up, each group retains at most fifteen local parts per
+tier. Two background workers serve all owners by default. Set the restart-only
+`CORE_MERGE_WORKERS` environment variable to `0` to disable merges for comparison,
+or `1` through `4` to bound concurrent merge work. Workers yield for 1ms after
+each 4096 input records and stop before owner shutdown. If a tier accumulates
+two complete merge sets, the next seal waits for replacement before taking its
+file-publication lock. This bounds overload instead of retaining an unlimited
+backlog; ordinary intake keeps priority below that threshold.
+
+The existing descriptor catalog atomically replaces all inputs with the synced
+output. Old snapshots keep their input files behind the existing GC fence and
+one-minute grace. Interrupted output is an unpublished orphan and is collected
+on restart; interrupted private merge directories are removed before opening
+readers. `PartGCStats` reports live original parts, completed merge runs, and
+input/output bytes in addition to retirement statistics.
+
+Merges preserve original timestamps, value bits, correction flags and source
+orders. They copy authoritative coarse slots directly. Durable reset and expiry
+masks remove obsolete records before winner selection. Age-only slots remain
+available because later coarse boundary calculations may need their exact
+values. Copied parts keep their original move catalog and authority; background
+merges combine only local originals from the owner's persisted source stream.
