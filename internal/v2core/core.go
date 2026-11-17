@@ -197,6 +197,7 @@ type coreOwner struct {
 	maintenance bool
 
 	stage      func(string)
+	visible    func([]coreBatch)
 	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
@@ -359,6 +360,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			return fail(err)
 		}
 		o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		if hooks.Visible != nil {
+			o.visible = func(b []coreBatch) { hooks.Visible(s, b) }
+		}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -801,7 +805,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// submitPacketMode already detached Points and Policy. Owners never mutate
 		// those arenas; only the descriptor slice grows. Retain their immutable
 		// storage instead of copying the full head for every publication.
-		return o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.readGeneration)
+		err := o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.readGeneration)
+		if err == nil && o.visible != nil {
+			o.visible(batches)
+		}
+		return err
 	}
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
@@ -832,7 +840,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.meta = next
 		o.readGeneration++
 		o.publishFrontier(next)
-		clear(batches)
+		sealedBatches := batches
 		batches = batches[:0]
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
@@ -845,6 +853,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if err := publishBatches(); err != nil {
 			return err
 		}
+		if o.visible != nil {
+			o.visible(sealedBatches)
+		}
+		clear(sealedBatches)
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}

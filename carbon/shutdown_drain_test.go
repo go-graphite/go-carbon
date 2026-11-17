@@ -79,6 +79,9 @@ func testShutdownWaitsForActiveRead(t *testing.T) {
 
 // TestDumpStopServesReadsDuringInputCleanup checks new reads during blocked cleanup.
 func TestDumpStopServesReadsDuringInputCleanup(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	app, started, unblock, readDone := startBlockedShutdownRead(t)
 	<-started
 	inputStarted, releaseInput := make(chan struct{}), make(chan struct{})

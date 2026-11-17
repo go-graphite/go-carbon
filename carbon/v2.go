@@ -109,7 +109,8 @@ func (app *App) startV2() error {
 	// Replay must complete before wall-clock expiry may create new reset barriers.
 	var recovered atomic.Bool
 	var intake atomic.Pointer[v2recv.Server]
-	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true}
+	telemetry := newV2WriteTelemetry(shards, n)
+	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: telemetry.visible}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
@@ -221,6 +222,13 @@ func (app *App) startV2() error {
 	if mode != v2Shadow {
 		app.Carbonserver.SetV2UnionReader(r)
 	}
+	app.Carbonserver.RegisterInternalInfoHandler("v2-write", func() map[string]interface{} {
+		out := telemetry.report()
+		if server := intake.Load(); server != nil {
+			out["receiver"] = server.Stats()
+		}
+		return out
+	})
 	app.Carbonserver.RegisterInternalInfoHandler("v2-storage", func() map[string]interface{} { return map[string]interface{}{"mode": mode, "classic-dual-write": dual} })
 	if c.Prometheus.Enabled {
 		if err := app.PromRegisterer.Register(v.metrics); err != nil {

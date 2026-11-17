@@ -1,6 +1,7 @@
 package v2daemon
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 	"time"
@@ -24,6 +25,9 @@ func TestDurableApplicationsMirrorAndReplay(t *testing.T) {
 	cfg.DurableApplications = func(producer int, b []v2core.Batch) error {
 		if !prepared || producer != 0 || len(b) != 1 || len(b[0].Points) != 1 || b[0].Order != 1 {
 			t.Fatal("invalid mirror application")
+		}
+		if !bytes.Equal(b[0].Policy, policy) {
+			t.Fatal("mirror must receive canonical policy on live input and replay")
 		}
 		calls++
 		return nil

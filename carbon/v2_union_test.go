@@ -18,6 +18,9 @@ import (
 )
 
 func TestV2UnionClassicTCPRestart(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, backend := range []string{"whisper", "pebble-chunk"} {
 		t.Run(backend, func(t *testing.T) {
 			root := t.TempDir()
@@ -156,6 +159,9 @@ func TestV2UnionClassicTCPRestart(t *testing.T) {
 }
 
 func TestV2UnionExpiryDoesNotResurrectClassic(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	setup := func() *App {
 		app := v2TestApp(t, root)

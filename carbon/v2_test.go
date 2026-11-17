@@ -68,6 +68,9 @@ func v2HTTP(t *testing.T, app *App, path string) []byte {
 	return b
 }
 func TestV2TCPRenderFindInfoRestart(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	app := v2TestApp(t, root)
 	if err := app.Start(); err != nil {
@@ -214,6 +217,9 @@ func TestV2TCPRenderFindInfoRestart(t *testing.T) {
 	check()
 }
 func TestV2LifecycleConfigurationAccepted(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, mode := range []string{"expiry", "quota"} {
 		t.Run(mode, func(t *testing.T) {
 			app := v2TestApp(t, t.TempDir())
@@ -235,6 +241,9 @@ func TestV2LifecycleConfigurationAccepted(t *testing.T) {
 }
 
 func TestV2RejectsCorruptClassicAndPhysicalQuota(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, mode := range []string{"classic", "physical-quota"} {
 		t.Run(mode, func(t *testing.T) {
 			app := v2TestApp(t, t.TempDir())
@@ -305,6 +314,9 @@ func TestV2CrashChild(t *testing.T) {
 }
 func TestV2RuntimeSIGKILLWithActiveTCP(t *testing.T) { testV2RuntimeSIGKILLWithActiveTCP(t, v2Only) }
 func testV2RuntimeSIGKILLWithActiveTCP(t *testing.T, mode string) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	now := time.Now().Unix()
 	stamp := now - now%60 - 120
@@ -367,6 +379,9 @@ func testV2RuntimeSIGKILLWithActiveTCP(t *testing.T, mode string) {
 }
 
 func TestV2RejectsClassicOnlyFallbackWithRetainedHistory(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	app := v2TestApp(t, root)
 	if err := app.Start(); err != nil {
@@ -383,6 +398,9 @@ func TestV2RejectsClassicOnlyFallbackWithRetainedHistory(t *testing.T) {
 }
 
 func TestV2RejectsPhysicalRootAliases(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	app := v2TestApp(t, root)
 	alias := filepath.Join(root, "alias")

@@ -14,6 +14,9 @@ import (
 )
 
 func TestV2TCPUnionQuotaRestartExpiry(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	setup := func() *App {
 		app := v2TestApp(t, root)
