@@ -311,6 +311,24 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if archive > 0 && len(m.origins) > 1 {
 		return errors.New("mixed-origin coarse reads require installed rollup rebuild authority")
 	}
+	// A full archive already owns every physical-slot winner for this name.
+	// Reuse it for narrower ranges instead of reconstructing identical immutable
+	// parts under a different range key. The full scan below still validates
+	// part membership and decodes only additions after publication changes.
+	archiveCount := m.latest.policy.Config.Archives[archive].Count
+	if first != 0 || last != archiveCount {
+		s.cache.mu.Lock()
+		covered := len(s.cache.entries[archiveRange{name, archive, 0, archiveCount}]) > 0
+		s.cache.mu.Unlock()
+		if covered {
+			return s.ScanArchive(ctx, name, archive, 0, archiveCount, func(record sealrollup.Record) error {
+				if record.Slot >= first && record.Slot < last {
+					return yield(record)
+				}
+				return nil
+			})
+		}
+	}
 	cacheKey := archiveRange{name, archive, first, last}
 	// Keep a small bounded history: concurrent requests can pin different
 	// generations. A single latest entry forces older pins into full rescans.
