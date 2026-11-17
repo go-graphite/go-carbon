@@ -10,6 +10,7 @@ import (
 	"hash/crc32"
 	"slices"
 	"strings"
+	"unsafe"
 )
 
 const VirtualShards = 4096
@@ -77,7 +78,8 @@ func GroupRange(group Group) ([]byte, []byte, error) {
 }
 
 func Route(id ID) uint16 {
-	return uint16(crc32.Checksum([]byte(id), routingTable) & (VirtualShards - 1))
+	// Checksum only reads its input; avoid copying every metric name to hash it.
+	return uint16(crc32.Checksum(unsafe.Slice(unsafe.StringData(string(id)), len(id)), routingTable) & (VirtualShards - 1))
 }
 
 // PartID must be globally unique across all writers, restarts and shard moves.

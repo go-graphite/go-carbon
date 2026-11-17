@@ -506,8 +506,6 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte, iden
 	}
 	id := string(scope)
 	part := &readPart{id: id, ids: map[string]struct{}{id: {}}, metrics: map[string]*readPartMetric{}}
-	// Construction-only, bounded schema sharing. No writer-owned slices escape.
-	configs := make(map[[32]byte]sealrollup.Config)
 	end := v2part.PrefixEnd(scope)
 	for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 		if err := ctx.Err(); err != nil {
@@ -532,7 +530,7 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte, iden
 		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
 			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 		}
-		meta, decodeErr := DecodeRollupMetadata(it.Value())
+		meta, decodeErr := decodeRollupMetadataView(it.Value())
 		if decodeErr != nil {
 			err = decodeErr
 			return nil, err
@@ -549,23 +547,13 @@ func readRollupPart(ctx context.Context, it *pebble.Iterator, scope []byte, iden
 		if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
 			return nil, errors.New("invalid rollup reset frontier")
 		}
-		digest, err := sealrollup.PolicyDigest(policy.Config)
-		if err != nil {
-			return nil, err
-		}
-		if digest != meta.Frontier.Policy {
+		if h.prepared.Digest() != meta.Frontier.Policy {
 			return nil, errors.New("rollup policy/frontier mismatch")
 		}
 		if len(part.metrics) == 0 {
 			part.key = key
 			part.key.Metric = ""
 		}
-		if config, ok := configs[digest]; ok {
-			policy.Config = config
-		} else if len(configs) < 64 {
-			configs[digest] = policy.Config
-		}
-		policy.Group = part.key.Group
 		part.metrics[string(policy.Name)] = &readPartMetric{part: part, PolicyIdentity: h, meta: compactMetadata(meta)}
 		// The last 16 bytes are archive, physical slot and ordinal.
 		it.Next()

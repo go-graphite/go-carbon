@@ -404,10 +404,12 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 }
 func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	type entry struct {
-		group   partsformat.Group
-		policy  RollupPolicy
-		meta    RollupMetadata
-		records map[[2]int64]sealrollup.Record
+		group     partsformat.Group
+		policy    RollupPolicy
+		meta      RollupMetadata
+		records   map[[2]int64]sealrollup.Record
+		single    [1]sealrollup.Record
+		hasSingle bool
 	}
 	series := map[partsformat.ID]*entry{}
 	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})})
@@ -422,14 +424,17 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 		}
 		e := series[k.Metric]
 		if e == nil {
-			e = &entry{group: k.Group, records: map[[2]int64]sealrollup.Record{}}
+			e = &entry{group: k.Group}
 			series[k.Metric] = e
 		}
 		if k.Partition != 0 || k.Ordinal != 0 || e.group != k.Group {
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {
-			m, decodeErr := DecodeRollupMetadata(iter.Value())
+			m, decodeErr := decodeRollupMetadataView(iter.Value())
+			if identities == nil {
+				m.Policy = bytes.Clone(m.Policy)
+			}
 			if decodeErr != nil {
 				err = decodeErr
 				return err
@@ -448,14 +453,42 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 				}
 			}
 		} else {
-			decoded, err := partsformat.DecodeSlots(k.Archive, k.BlockStart, iter.Value())
-			if err != nil {
-				return err
-			}
-			for _, record := range decoded {
-				slot := [2]int64{int64(k.Archive), record.Slot}
+			// Legacy singleton rows need no temporary decoded slice. Dense runs
+			// retain their bounded decoder; slot replacement resolves once below.
+			install := func(record sealrollup.Record) {
+				slot := [2]int64{int64(record.Archive), record.Slot}
+				if e.records == nil {
+					if !e.hasSingle {
+						e.single[0], e.hasSingle = record, true
+						return
+					}
+					old := e.single[0]
+					if old.Archive == record.Archive && old.Slot == record.Slot {
+						if record.Order > old.Order {
+							e.single[0] = record
+						}
+						return
+					}
+					e.records = map[[2]int64]sealrollup.Record{{int64(old.Archive), old.Slot}: old}
+				}
 				if old, ok := e.records[slot]; !ok || record.Order > old.Order {
 					e.records[slot] = record
+				}
+			}
+			value := iter.Value()
+			if len(value) == 26 && value[0] == 1 {
+				record, err := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, value)
+				if err != nil {
+					return err
+				}
+				install(record)
+			} else {
+				decoded, err := partsformat.DecodeSlots(k.Archive, k.BlockStart, value)
+				if err != nil {
+					return err
+				}
+				for _, record := range decoded {
+					install(record)
 				}
 			}
 		}
@@ -470,14 +503,33 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 		if (e.meta.Version == 1 && (e.meta.ResetOrder != 0 || e.meta.Expired)) || e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
 			return errors.New("invalid rollup reset frontier")
 		}
-		digest, err := sealrollup.PolicyDigest(e.policy.Config)
-		if err != nil {
-			return err
+		var digest [32]byte
+		if identities != nil {
+			digest = identities.lookup(e.meta.ID).prepared.Digest()
+		} else {
+			digest, err = sealrollup.PolicyDigest(e.policy.Config)
+			if err != nil {
+				return err
+			}
 		}
 		if digest != e.meta.Frontier.Policy {
 			return errors.New("rollup policy/frontier mismatch")
 		}
-		records := make([]sealrollup.Record, 0, len(e.records))
+		var records []sealrollup.Record
+		if e.records == nil {
+			records = e.single[:0]
+			if e.hasSingle {
+				r := e.single[0]
+				if r.Archive >= len(e.policy.Config.Archives) || r.Slot >= e.policy.Config.Archives[r.Archive].Count || r.Order > e.meta.Frontier.Order {
+					return errors.New("invalid rollup slot/frontier")
+				}
+				if r.Order > e.meta.ResetOrder {
+					records = append(records, r)
+				}
+			}
+		} else {
+			records = make([]sealrollup.Record, 0, len(e.records))
+		}
 		for slot, record := range e.records {
 			if slot[0] >= int64(len(e.policy.Config.Archives)) || slot[1] >= e.policy.Config.Archives[slot[0]].Count || record.Order > e.meta.Frontier.Order {
 				return errors.New("invalid rollup slot/frontier")

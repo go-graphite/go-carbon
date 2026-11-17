@@ -33,6 +33,16 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 // DecodeRollupMetadata accepts binary rows and legacy JSON metadata. Returned
 // policy bytes are detached from the iterator buffer and safe after Next/Close.
 func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
+	m, err := decodeRollupMetadataView(data)
+	if err == nil && bytes.HasPrefix(data, rollupMetadataMagic) {
+		m.Policy = bytes.Clone(m.Policy)
+	}
+	return m, err
+}
+
+// The policy view is valid only until the iterator moves. Intern it before
+// retaining metadata; the catalog owns the immutable definition returned.
+func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 	var m RollupMetadata
 	if !bytes.HasPrefix(data, rollupMetadataMagic) {
 		err := json.Unmarshal(data, &m)
@@ -50,7 +60,7 @@ func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 	m.Revision = binary.BigEndian.Uint64(data[38:46])
 	m.ResetOrder = binary.BigEndian.Uint64(data[46:54])
 	copy(m.Frontier.Policy[:], data[54:86])
-	m.Policy = bytes.Clone(data[header:])
+	m.Policy = data[header:]
 	return m, nil
 }
 

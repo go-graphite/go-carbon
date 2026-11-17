@@ -25,9 +25,10 @@ type PolicyIdentity struct {
 // Numeric IDs are allocated by the journal; this directory adds no name index.
 // It replaces the router's separate all-ID policy copies.
 type PolicyCatalog struct {
-	mu      sync.RWMutex
-	ids     map[uint64]*PolicyIdentity
-	schemas map[[32]byte]*PolicyIdentity
+	mu        sync.RWMutex
+	ids       map[uint64]*PolicyIdentity
+	schemas   map[[32]byte]*PolicyIdentity
+	encodings map[string]*PolicyIdentity
 }
 
 func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -47,6 +48,22 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 			return nil, errors.New("stored rollup policy changed")
 		}
 		return old, nil
+	}
+	// Repeated schemas differ only in their canonical, unescaped metric name.
+	// Reuse a previously validated suffix; uncommon/escaped names retain the
+	// complete JSON oracle below. This cache has the same fixed bound as schemas.
+	nameEnd := canonicalNameEnd(definition)
+	if id != 0 && nameEnd > 0 {
+		if template := c.encodings[string(definition[nameEnd:])]; template != nil {
+			const start = len(`{"Name":"`)
+			if name != "" && name != string(definition[start:nameEnd]) {
+				return nil, errors.New("noncanonical rollup policy")
+			}
+			owned := bytes.Clone(definition)
+			h := &PolicyIdentity{id: id, policy: policyName{Name: partsformat.ID(unsafe.String(&owned[start], nameEnd-start)), Group: template.policy.Group}, definition: owned[:len(owned):len(owned)], prepared: template.prepared}
+			c.ids[id] = h
+			return h, nil
+		}
 	}
 	var p RollupPolicy
 	if err := json.Unmarshal(definition, &p); err != nil {
@@ -73,7 +90,6 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 			return nil, err
 		}
 	}
-	canonical = bytes.Clone(canonical)
 	// Canonical JSON starts with Name. For an unescaped name, borrow the
 	// immutable definition bytes rather than retaining another name allocation.
 	const nameStart = len(`{"Name":"`)
@@ -84,8 +100,12 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 	if c.ids == nil {
 		c.ids = make(map[uint64]*PolicyIdentity)
 		c.schemas = make(map[[32]byte]*PolicyIdentity)
+		c.encodings = make(map[string]*PolicyIdentity)
 	}
 	c.ids[id] = h
+	if nameEnd > 0 && len(c.encodings) < 64 {
+		c.encodings[string(canonical[nameEnd:])] = h
+	}
 	// Schema reuse is bounded; it does not keep a second all-name directory.
 	if len(c.schemas) < 64 {
 		c.schemas[digest] = h
@@ -146,4 +166,26 @@ type policyName struct {
 func (h *PolicyIdentity) schema() sealrollup.Config { return h.prepared.Config() }
 func (h *PolicyIdentity) rollupPolicy() RollupPolicy {
 	return RollupPolicy{Name: h.policy.Name, Group: h.policy.Group, Config: h.schema()}
+}
+
+// Only plain ASCII names take the suffix fast path. JSON escaping, UTF-8
+// replacement, HTML escaping and unusual input all go through encoding/json.
+func canonicalNameEnd(definition []byte) int {
+	const prefix = `{"Name":"`
+	if !bytes.HasPrefix(definition, []byte(prefix)) {
+		return 0
+	}
+	for i := len(prefix); i < len(definition); i++ {
+		c := definition[i]
+		if c == '"' {
+			if i == len(prefix) || i-len(prefix) > partsformat.MaxNameBytes {
+				return 0
+			}
+			return i
+		}
+		if c < 0x20 || c >= 0x7f || c == '\\' || c == '<' || c == '>' || c == '&' {
+			return 0
+		}
+	}
+	return 0
 }
