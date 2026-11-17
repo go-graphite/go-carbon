@@ -59,7 +59,8 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 		return r, nil
 	}
 	var registered *v2core.ApplicationPolicy
-	if p.layer == 3 {
+	// Classic mirroring consumes canonical bytes before core submission.
+	if p.layer == 3 && p.durableApplications == nil {
 		registered, err = v2core.NewApplicationPolicy(name, policy)
 		if err != nil {
 			return nil, err
@@ -139,8 +140,8 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		}
 		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)], Registered: registered.policy}
 		if registered.policy == nil {
-			// The non-rollup compatibility path still supplies the immutable
-			// catalog definition. L3 carries its validated handle directly.
+			// Classic mirroring and the non-rollup compatibility path consume
+			// immutable catalog bytes; direct L3 carries its validated handle.
 			_, batches[i].Policy, _ = p.catalog.Lookup(id)
 		}
 	}

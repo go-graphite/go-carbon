@@ -25,6 +25,9 @@ func (c *statusColdCodec) Repack(ctx context.Context, _ store.ContinuationIO, _ 
 }
 
 func TestCollectorColdPackFailureLatch(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	ctx := context.Background()
 	now := time.Unix(1700120040, 0)
 	codec := &statusColdCodec{}
@@ -123,6 +126,9 @@ func TestCollectorColdPackFailureLatch(t *testing.T) {
 }
 
 func TestCollectorColdPackLifecycle(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	ctx := context.Background()
 	now := time.Unix(1700120040, 0)
 	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, Now: func() time.Time { return now }})
