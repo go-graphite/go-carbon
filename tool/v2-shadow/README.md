@@ -27,3 +27,93 @@ windows begin 60s later. Comparison end is the last observed live-edge time minu
 `-lag`; the harness refuses snapshots over 10s since reaching that edge or with
 any newer segment outstanding. JSONL exposes both bounds. The external supervisor
 must still fence classic PID/start-time changes for the whole run.
+
+Use `-capacity-only -sample-every 1 -compare-interval 1s` for a full-stream
+admission run without broad parity scans. Each sample reports backlog bytes and
+successor segments, elapsed time since the last observed live EOF, and self CPU
+counters. EOF age measures source freshness, not per-point end-to-end latency.
+Measure the classic receiver counter over the same window externally. Capacity
+mode can succeed without comparisons; it never implies read parity.
+
+Use `-layer 3 -sample-every 256 -sample 192` for a separate sampled L3 run. Policies
+come from the classic read-only `/info` API, including tags, retention ladders,
+aggregation and XFF. Receiver groups are reconstructed applications using the
+shadow admission clock; the source journal does not carry classic persister apply
+boundaries/clocks. This mode cannot certify original application or metadata
+parity. It emits each policy for a schema/method census and per-name archive
+coverage. The sampled L3 run must not be presented as full-stream L3 throughput.
+
+L3 comparisons pin immutable core snapshots and use `RollupSnapshot`. A classic
+lookback beyond each finer retention selects its next archive; returned step is
+checked explicitly. Only completed intervals strictly inside the fresh run count.
+Archives with no such interval contribute no coverage. Values, presence and
+float64 bits are compared with the same endpoint rules as raw checks. Every
+initial difference/failure stays in totals; reconstruction ambiguity is never a
+successful parity result. Compare the policy census and tagged/sparse/dense
+coverage against the intended population before making a coverage claim.
+
+To remove synchronous policy discovery from a measured L3 window, first collect
+`policy` receipts in a discovery run, save their exact canonical objects as a JSON
+name-to-policy map, then start a fresh run with `-policies policies.json
+-sample-every 1`. Only that fixed population is admitted. Report discovery and
+measurement separately, including the actual observed policy population and
+missing strata. File-size backlog counters in older receipts include preallocated
+space; the current field explicitly labels that upper bound. Successor-segment
+counts and live-EOF freshness must also be inspected.
+
+Frozen rechecks also accept saved `l3_comparison` objects from a stopped L3 root.
+The read-only recheck preserves names/windows and emits each completed slot's
+presence and value bits, so convergence can be checked against the initial
+examples. It does not reconstruct missing classic application metadata.
+
+Partition-parallel admission uses `-workers 16 -capacity-only -layer 2`.
+Each source partition stays on one decoder and one producer-local catalog. The
+bounded frame queues retain original bytes; the existing `SegmentReplay` checks
+payloads and dictionary continuity through a decoder-local `ReaderAt` view.
+Metric groups are submitted together rather than expanded into per-point
+applications. The source is opened read-only, including during warmup.
+
+For a fixed policy cohort, use `-workers 16 -layer 3 -policies policies.json`.
+Single-archive policies compare their finest archive too; multi-archive policies
+compare completed coarse intervals. Receiver groups and current clocks remain a
+reconstruction, so every difference requires original classic application
+metadata or measured classic convergence to the exact frozen v2 bits.
+`-classic-receipts differences.json` reobserves an array of saved differences
+through the classic read API without opening a v2 store. Each entry may specify `step`; omitted steps retain the legacy 60-second
+archive choice. The policy read API determines the lookback needed to select it. The receipt records both the original expectation
+and new observed value/presence, and never waives an unresolved difference.
+
+`offered_points` counts validated source frame headers dispatched by this
+reader; `admitted_points` counts points accepted by the private daemon. Live
+classic intake must also be measured independently from its bracketing counters:
+a lagging reader's own offered count is not the full offered stream. Source lag
+is time since the scanner last reached logical EOF, not a per-point append clock.
+Report pending admission and actual source backlog beside this proxy. All
+shared-host measurements require CPU affinity and co-tenant context.
+
+Use `-recheck-quiet` for large frozen cohorts: all differences remain, while
+equal-slot observations are omitted from the receipt to bound output size.
+
+Full-stream L3 admission is explicit: `-workers 16 -layer 3 -full-l3
+-capacity-only`. Optional `-policies` seeds the exact-name cache; every other
+name requires its stored policy from batched read-only `/info` requests. Missing
+or invalid metadata fails admission; there is no inferred or default policy.
+Policy discovery is part of the measured cost. This mode qualifies admission
+only; rotating parity comparisons remain a separate deliberate cohort.
+
+Parallel runs independently observe complete source frames, validating header
+and payload CRCs without decoding or writing the source. The journal contains
+no per-frame append clock. Each frame's append-completion time is conservatively
+bounded by the last unsuccessful read (while no successor exists) and the first
+CRC-valid read. Across rollover the earlier lower bound is preserved. A bounded
+stamp table fails rather than silently dropping observations. The point-weighted
+`append_to_visible` histogram reports lower and upper p50/p99 bounds in 10ms
+buckets, through a synchronous core publication fence after producer sync.
+Only an upper p99 below the target with zero unbounded points can qualify the
+latency gate. The overflow bucket means greater than 120s; it is not an exact
+latency. The source observer has its own point census and EOF frontier in every
+sample. `source_lag_seconds` remains the older scanner-EOF proxy.
+
+`skipped_points` is separate from `admission_pending_points`; fixed-policy
+filtering no longer appears as producer debt. All reported shared-host results
+remain provisional and include co-tenant load.
