@@ -48,6 +48,10 @@ func rollupMonthPartition(t int64) int64 {
 	return time.Date(y, m, 1, 0, 0, 0, 0, time.UTC).Unix()
 }
 
+// RollupMonthPartition is the live seal's partition of a sample time.
+// Converters must use it so a baseline and a live seal stay byte-identical.
+func RollupMonthPartition(t int64) int64 { return rollupMonthPartition(t) }
+
 // expiryBounds accumulates Coverage.MinExpiry (data) and MaxExpiry (data and
 // envelopes); zero means none seen.
 type expiryBounds struct{ min, max int64 }

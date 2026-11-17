@@ -60,7 +60,12 @@ func installBaseline(root string, c Config) (uint64, error) {
 	const maxBaselineBytes = 256 << 20
 	used := 0
 	var rows []v2core.KV
-	metadata := map[string]int{}
+	// A metric's envelope repeats once per month partition it covers.
+	metadata := map[string][]int{}
+	envelopes := map[struct {
+		name      string
+		partition int64
+	}]bool{}
 	listed := map[string]bool{}
 	for _, name := range receipt.Names {
 		if name == "" || listed[name] {
@@ -103,10 +108,15 @@ func installBaseline(root string, c Config) (uint64, error) {
 				return errors.New("baseline record outside certified selection")
 			}
 			if k.Archive == v2part.MetadataArchive {
-				if _, ok := metadata[string(k.Metric)]; ok {
+				id := struct {
+					name      string
+					partition int64
+				}{string(k.Metric), k.Partition}
+				if envelopes[id] {
 					return errors.New("duplicate baseline metadata")
 				}
-				metadata[string(k.Metric)] = len(rows)
+				envelopes[id] = true
+				metadata[string(k.Metric)] = append(metadata[string(k.Metric)], len(rows))
 			}
 			rows = append(rows, v2core.KV{Key: bytes.Clone(row.Key), Value: bytes.Clone(row.Value)})
 			return nil
@@ -140,8 +150,13 @@ func installBaseline(root string, c Config) (uint64, error) {
 	names := slices.Clone(receipt.Names)
 	slices.Sort(names)
 	for _, name := range names {
-		index := metadata[name]
-		m, err := v2core.DecodeRollupMetadata(rows[index].Value)
+		indexes := metadata[name]
+		for _, index := range indexes[1:] {
+			if !bytes.Equal(rows[index].Value, rows[indexes[0]].Value) {
+				return 0, errors.New("baseline envelope copies differ")
+			}
+		}
+		m, err := v2core.DecodeRollupMetadata(rows[indexes[0]].Value)
 		if err != nil {
 			return 0, err
 		}
@@ -160,7 +175,10 @@ func installBaseline(root string, c Config) (uint64, error) {
 		}
 		m.ID = NumericID(id, producer, c.Producers)
 		m.BaselineOrder = receipt.Baseline.Order
-		rows[index].Value = v2core.AppendRollupMetadata(nil, m)
+		value := v2core.AppendRollupMetadata(nil, m)
+		for _, index := range indexes {
+			rows[index].Value = value
+		}
 	}
 	for i, catalog := range catalogs {
 		if err := catalog.Sync(); err != nil {

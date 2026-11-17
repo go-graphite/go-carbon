@@ -152,6 +152,10 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 			}
 		}
 	}
+	// Dense parts carry the live seal's expiry bounds: envelopes for metadata,
+	// per-record retention for data (see rollupRecordExpiry/rollupMetricExpiry).
+	var expiry expiryBounds
+	var shards []uint16
 	for _, kv := range file {
 		k, e := v2part.Decode(kv.Key)
 		if e != nil {
@@ -160,6 +164,9 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 		d, ok := definitions[k.Metric]
 		if !ok {
 			return v2part.Descriptor{}, errors.New("rollup record lacks policy metadata")
+		}
+		if len(shards) == 0 || shards[len(shards)-1] != k.VShard {
+			shards = append(shards, k.VShard)
 		}
 		t, order := d.meta.Frontier.MaxTime, d.meta.Frontier.Order
 		if k.Archive != v2part.MetadataArchive {
@@ -174,6 +181,9 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 				return v2part.Descriptor{}, errors.New("rollup order exceeds metadata frontier")
 			}
 			t, order = r.Sample.Time, r.Order
+			expiry.data(rollupRecordExpiry(d.policy.Config, r))
+		} else {
+			expiry.envelope(rollupMetricExpiry(d.policy.Config, d.meta.Frontier.MaxTime))
 		}
 		spec.MinTime = min(spec.MinTime, t)
 		spec.MaxTime = max(spec.MaxTime, t)
@@ -186,6 +196,7 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 		Abort() error
 	}
 	if dense {
+		spec.MinExpiry, spec.MaxExpiry = expiry.min, expiry.max
 		w, err = v2part.NewDenseWriter(path, spec)
 	} else {
 		w, err = v2part.NewWriter(path, spec)
@@ -199,5 +210,12 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 			return v2part.Descriptor{}, err
 		}
 	}
-	return w.Close()
+	d, err := w.Close()
+	if err != nil || !dense {
+		return d, err
+	}
+	// Like live seals and merges, dense group files record their exact routed
+	// inventory, so readers skip the scan fallback for converted parts.
+	d.VShards = shards
+	return d, d.Validate()
 }
