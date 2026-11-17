@@ -62,6 +62,8 @@ func run(args []string) error {
 	}
 	if len(args) > 0 {
 		switch args[0] {
+		case "move":
+			return moveAdmin(args[1:], os.Stdout)
 		case "move-stage":
 			return moveStage(args[1:], os.Stdout)
 		case "placement":

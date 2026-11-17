@@ -255,6 +255,13 @@ func (app *App) startV2() error {
 			}
 		}
 	}
+	app.Carbonserver.SetV2MoveAdmin(v2daemon.NewMoveAdmin(c.V2.Path, v.store, func(index int, run func() error) error {
+		receiver := intake.Load()
+		if receiver == nil {
+			return errors.New("v2 intake not ready")
+		}
+		return receiver.OnOwner(index, run)
+	}))
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
 	}

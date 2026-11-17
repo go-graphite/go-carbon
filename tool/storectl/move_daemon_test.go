@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2daemon"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/go-graphite/go-carbon/internal/v2recv"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 type moveAddresses struct{ TCP, HTTP string }
@@ -33,38 +35,22 @@ type moveSnapshot struct {
 	Manifest  v2core.PartSnapshot
 }
 
-func copiedMoveParts(dir string) ([]v2core.MovePart, error) {
-	manifest, err := readPartSnapshot(filepath.Join(dir, "snapshot.json"))
-	if err != nil {
-		return nil, err
-	}
-	var out []v2core.MovePart
-	for _, file := range manifest.Parts {
-		b, err := os.ReadFile(filepath.Join(dir, file.ID+".part"))
-		if err != nil {
-			return nil, err
-		}
-		d, err := v2part.ParseDescriptor(b)
-		if err != nil {
-			continue
-		}
-		out = append(out, v2core.MovePart{Path: filepath.Join(dir, fmt.Sprintf("%x.part", d.SHA256)), Descriptor: d})
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no copied descriptors")
-	}
-	return out, nil
-}
-
 // Each child is a real running journal/core/TCP daemon on private ephemeral
-// ports. The HTTP adapter is local test control, not a production admin API.
+// ports. Prepare/adopt/status use the same admin handler as the daemon listener.
 func TestMoveDaemonProcess(t *testing.T) {
 	root := os.Getenv("MOVE_DAEMON_ROOT")
 	if root == "" {
 		return
 	}
 	ctx := context.Background()
-	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Second, Hooks: v2core.Hooks{Stage: func(stage string) {
+	count := 3
+	if os.Getenv("MOVE_DAEMON_CRASH") == "1" {
+		_ = os.WriteFile(filepath.Join(root, "target"), []byte("4"), 0600)
+	}
+	if _, err := os.Stat(filepath.Join(root, "target")); err == nil {
+		count = 4
+	}
+	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: count, Shards: count, GroupInterval: time.Second, Hooks: v2core.Hooks{Stage: func(stage string) {
 		if stage == "move-after-ingest" && os.Getenv("MOVE_DAEMON_CRASH") == "1" {
 			if _, err := os.Stat(filepath.Join(root, "arm-crash")); err != nil {
 				return
@@ -80,6 +66,39 @@ func TestMoveDaemonProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if count == 3 {
+		today := time.Now().Unix() / 86400 * 86400
+		orders := make([]uint64, count)
+		for n := 0; n < 12; n++ {
+			name := fmt.Sprintf("move.mature.%02d", n)
+			producer := s.Producers[v2recv.OwnerFor(name, count)]
+			// Restart only happens on B. These initial source/reference inputs
+			// span nearly two years and have no retained raw at adoption.
+			policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 7 * 86400}, {Step: 10, Count: 2 * 365 * 8640}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, age := range []int64{729, 365, 8} {
+				old := today - age*86400
+				for window := 0; window < 3; window++ {
+					samples := []points.Point{}
+					for i := 0; i < 5; i++ {
+						samples = append(samples, points.Point{Timestamp: old + int64(window*10+i), Value: float64(n + window + i + 1)})
+					}
+					index := v2recv.OwnerFor(name, count)
+					orders[index]++
+					if err := producer.AppendApplications([]v2daemon.Application{{Name: name, Policy: policy, Order: orders[index], Clock: old + 30, Points: samples, Sequence: []uint64{1, 2, 3, 4, 5}}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+		for _, p := range s.Producers {
+			if err := p.Flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	address := os.Getenv("MOVE_DAEMON_TCP")
 	if address == "" {
 		address = "127.0.0.1:0"
@@ -89,7 +108,7 @@ func TestMoveDaemonProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	receiver, err := s.ReceiveApplicationsTCP(l, v2recv.Config{SyncInterval: time.Second, BatchSize: 1}, func(name string) ([]byte, error) {
-		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 120000}, {Step: 10, Count: 24000}}}})
+		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 7 * 86400}, {Step: 10, Count: 2 * 365 * 8640}}}})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +125,14 @@ func TestMoveDaemonProcess(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(value)
 	}
-	flush := func() error { return receiver.OnOwner(0, func() error { return s.Producers[0].Flush() }) }
+	flush := func() error {
+		for i, p := range s.Producers {
+			if err := receiver.OnOwner(i, func() error { return p.Flush() }); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	mux.HandleFunc("/flush", func(w http.ResponseWriter, r *http.Request) { respond(w, true, flush()) })
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) { respond(w, receiver.Stats(), nil) })
 	mux.HandleFunc("/arm", func(w http.ResponseWriter, r *http.Request) {
@@ -116,43 +142,48 @@ func TestMoveDaemonProcess(t *testing.T) {
 		err := flush()
 		var result moveSnapshot
 		if err == nil {
-			snapshot := s.Core.DBs()[0].NewSnapshot()
-			defer snapshot.Close()
+
+			var readers moveSnapshotReaders
+			for owner, db := range s.Core.DBs() {
+				snapshot := db.NewSnapshot()
+				defer snapshot.Close()
+				readers = append(readers, v2core.SealedSnapshotReader{Snapshot: snapshot, Directory: filepath.Join(root, "placement-group-00000001", "core", fmt.Sprintf("owner-%03d", owner))})
+			}
 			result.Directory = filepath.Join(root, fmt.Sprintf("snapshot-%d", time.Now().UnixNano()))
-			result.Manifest, err = v2core.LinkPartSnapshot(ctx, result.Directory, v2core.SealedSnapshotReader{Snapshot: snapshot, Directory: filepath.Join(root, "placement-group-00000001", "core", "owner-000")})
+			result.Manifest, err = v2core.LinkPartSnapshot(ctx, result.Directory, readers)
 		}
 		respond(w, result, err)
 	})
-	mux.HandleFunc("/adopt", func(w http.ResponseWriter, r *http.Request) {
-		parts, err := copiedMoveParts(r.URL.Query().Get("dir"))
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-		prepared, err := v2core.PrepareMove(ctx, filepath.Join(root, "prepared"), parts)
-		if err != nil {
-			respond(w, nil, err)
-			return
-		}
-		defer prepared.Close()
-		err = receiver.OnOwner(0, func() error { return s.Producers[0].AdoptMove(ctx, prepared, time.Now().Unix()) })
-		respond(w, true, err)
-	})
+	mux.Handle("/admin/v2/move/", v2daemon.NewMoveAdmin(root, s, receiver.OnOwner))
 	mux.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
 		out := map[string]map[string]uint64{}
-		snapshot := s.Core.DBs()[0].NewSnapshot()
-		defer snapshot.Close()
-		err := v2core.ScanRollups(snapshot, func(policy v2core.RollupPolicy, _ v2core.RollupMetadata, records []sealrollup.Record) error {
-			if !strings.HasPrefix(string(policy.Name), "move.") {
+
+		var err error
+		for _, db := range s.Core.DBs() {
+			snapshot := db.NewSnapshot()
+			err = v2core.ScanRollups(snapshot, func(policy v2core.RollupPolicy, _ v2core.RollupMetadata, records []sealrollup.Record) error {
+				if !strings.HasPrefix(string(policy.Name), "move.") {
+					return nil
+				}
+				if _, exists := out[string(policy.Name)]; exists {
+					return fmt.Errorf("name exposed by multiple receiving owners: %s", policy.Name)
+				}
+				values := map[string]uint64{}
+				out[string(policy.Name)] = values
+				for _, record := range records {
+					a := policy.Config.Archives[record.Archive]
+					if record.Sample.Time < time.Now().Unix()-a.Step*a.Count {
+						continue
+					}
+					values[fmt.Sprintf("%d/%d", record.Archive, record.Sample.Time)] = record.Sample.Bits
+				}
 				return nil
+			})
+			snapshot.Close()
+			if err != nil {
+				break
 			}
-			values := map[string]uint64{}
-			out[string(policy.Name)] = values
-			for _, record := range records {
-				values[fmt.Sprintf("%d/%d", record.Archive, record.Sample.Time)] = record.Sample.Bits
-			}
-			return nil
-		})
+		}
 		respond(w, out, err)
 	})
 	server := &http.Server{Handler: mux}
@@ -173,7 +204,7 @@ type moveChild struct {
 func startMoveChild(t *testing.T, root, tcp string, crash bool) *moveChild {
 	t.Helper()
 	_ = os.Remove(filepath.Join(root, "addresses.json"))
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMoveDaemonProcess$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMoveDaemonProcess$", "-test.timeout=4m")
 	cmd.Env = append(os.Environ(), "MOVE_DAEMON_ROOT="+root, "MOVE_DAEMON_TCP="+tcp, "MOVE_DAEMON_CRASH="+fmt.Sprint(map[bool]int{true: 1, false: 0}[crash]))
 	log, err := os.Create(filepath.Join(root, fmt.Sprintf("daemon-%d.log", time.Now().UnixNano())))
 	if err != nil {
@@ -267,7 +298,7 @@ func copyMoveWithKill(t *testing.T, snapshot moveSnapshot, target string) {
 		handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPartReceiverProcess$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPartReceiverProcess$", "-test.timeout=2m")
 	cmd.Env = append(os.Environ(), "PART_COPY_CHILD=1", "PART_COPY_URL="+server.URL, "PART_COPY_DIR="+target)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -320,6 +351,16 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 		write(ca, "move.metric", float64(i), base+int64(i))
 		write(cr, "move.metric", float64(i), base+int64(i))
 	}
+	for n := 0; n < 12; n++ {
+		name := fmt.Sprintf("move.other.%02d", n)
+		for i := 0; i < 10; i++ {
+			write(ca, name, float64(n+i), base+int64(i))
+			write(cr, name, float64(n+i), base+int64(i))
+			if i >= 5 {
+				write(cb, name, float64(n+i), base+int64(i))
+			}
+		}
+	}
 	var stop atomic.Bool
 	var produced atomic.Int64
 	produceErr := make(chan error, 1)
@@ -328,7 +369,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	go func() {
 		defer producer.Done()
 		for i := 10; !stop.Load(); i++ {
-			line := fmt.Sprintf("move.metric %d %d\n", i, base+int64(i))
+			line := fmt.Sprintf("move.metric %d %d\nmove.other.%02d %d %d\n", i, base+int64(i), i%12, i, base+int64(i))
 			for _, conn := range []net.Conn{ca, cb, cr} {
 				_, _ = io.WriteString(conn, line)
 			}
@@ -377,12 +418,12 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	}
 	// OnOwner serializes callbacks with intake, but can run ahead of input
 	// still queued by the TCP reader. Fence the historical prefix explicitly.
-	waitAccepted(a, 22)
+	waitAccepted(a, 131+2*(20-9))
 	var snapshot moveSnapshot
 	moveGet(t, a.addr.HTTP, "/snapshot", &snapshot)
 	target := t.TempDir()
 	copyMoveWithKill(t, snapshot, target)
-	moveGet(t, b.addr.HTTP, "/adopt?dir="+target, nil)
+	moveAdopt(t, b.addr.HTTP, target)
 	var initial map[string]map[string]uint64
 	moveGet(t, b.addr.HTTP, "/read", &initial)
 	for i := 0; i < 10; i++ {
@@ -403,16 +444,15 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	if _, err := receivePartSnapshot(ctx, crashCopy.Client(), crashCopy.URL, "", target, 1); err != nil {
 		t.Fatal(err)
 	}
+	crashMoveID := movePrepare(t, b.addr.HTTP, target)
 	moveGet(t, b.addr.HTTP, "/arm", nil)
 	// Kill the actual receiving daemon after its atomic manifest edit, before
 	// reducer publication or the administrative response can complete.
 	adoptDone := make(chan struct{})
 	go func() {
 		defer close(adoptDone)
-		response, err := http.Get(b.addr.HTTP + "/adopt?dir=" + target)
-		if err == nil {
-			response.Body.Close()
-		}
+		var output bytes.Buffer
+		_ = moveAdmin([]string{"--url", b.addr.HTTP, "--action", "adopt", "--id", crashMoveID}, &output)
 	}()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -431,6 +471,18 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	<-adoptDone
 	oldTCP := b.addr.TCP
 	b = startMoveChild(t, b.root, oldTCP, false)
+	var status bytes.Buffer
+	if err := moveAdmin([]string{"--url", b.addr.HTTP, "--action", "status", "--id", crashMoveID}, &status); err != nil {
+		t.Fatal(err)
+	}
+	var resumed v2daemon.MoveStatus
+	if err := json.Unmarshal(status.Bytes(), &resumed); err != nil || resumed.Done {
+		t.Fatalf("partial owner activation marked complete: %s %v", status.String(), err)
+	}
+	status.Reset()
+	if err := moveAdmin([]string{"--url", b.addr.HTTP, "--action", "adopt", "--id", crashMoveID}, &status); err != nil {
+		t.Fatal(err)
+	}
 	// Keep A and the reference writing during receiver death/replay. A final
 	// incremental pass repairs the fresh slots that B missed during that time.
 	stop.Store(true)
@@ -447,7 +499,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	write(cr, "move.metric", 4, last)
 	write(ca, "move.metric", 3, last)
 	for _, c := range []*moveChild{a, reference, b} {
-		want := uint64(produced.Load() + 3)
+		want := uint64(131 + 2*(produced.Load()-9) + 1)
 		if c == b {
 			want = 1
 		}
@@ -465,7 +517,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	if copyResult.Skipped == 0 {
 		t.Fatal("incremental copy resent every verified part")
 	}
-	moveGet(t, b.addr.HTTP, "/adopt?dir="+target, nil)
+	moveAdopt(t, b.addr.HTTP, target)
 	// Retry must skip the verified physical files, including after daemon death.
 	retry, err := receivePartSnapshot(ctx, server2.Client(), server2.URL, "", target, 1)
 	if err != nil || retry.Bytes != 0 || retry.Skipped != len(snapshot.Manifest.Parts) {
@@ -480,5 +532,63 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	if got["move.metric"][fmt.Sprintf("0/%d", last)] != math.Float64bits(4) {
 		t.Fatal("late A copy rolled back B-only input")
 	}
-	t.Logf("exact slots=%d source points=%d incremental copied=%d skipped=%d; receiver SIGKILL/replay passed", len(got["move.metric"]), produced.Load()+2, copyResult.Parts, copyResult.Skipped)
+	total := 0
+	for _, values := range got {
+		total += len(values)
+	}
+	for n := 0; n < 12; n++ {
+		values := got[fmt.Sprintf("move.mature.%02d", n)]
+		if len(values) != 9 {
+			t.Fatalf("mature history expected nine coarse windows and no raw: %v", values)
+		}
+		for key := range values {
+			if !strings.HasPrefix(key, "1/") {
+				t.Fatalf("expired mature raw visible: %s", key)
+			}
+		}
+	}
+	t.Logf("exact slots=%d names=%d source producers/owners=3 target=4 raw=7d coarse=2y mature=8/365/729d incremental copied=%d skipped=%d; copier/receiver SIGKILL and move-level resume passed", total, len(got), copyResult.Parts, copyResult.Skipped)
+}
+
+func movePrepare(t *testing.T, base, dir string) string {
+	t.Helper()
+	var output bytes.Buffer
+	if err := moveAdmin([]string{"--url", base, "--action", "prepare", "--parts-dir", dir}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var status v2daemon.MoveStatus
+	if err := json.Unmarshal(output.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	return status.ID
+}
+func moveAdopt(t *testing.T, base, dir string) {
+	t.Helper()
+	id := movePrepare(t, base, dir)
+	var output bytes.Buffer
+	if err := moveAdmin([]string{"--url", base, "--action", "adopt", "--id", id}, &output); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := moveAdmin([]string{"--url", base, "--action", "status", "--id", id}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var status v2daemon.MoveStatus
+	if err := json.Unmarshal(output.Bytes(), &status); err != nil || !status.Done {
+		t.Fatalf("move status: %s %v", output.String(), err)
+	}
+}
+
+type moveSnapshotReaders []v2core.SealedSnapshotReader
+
+func (readers moveSnapshotReaders) ReadPartFiles(ctx context.Context) ([]v2core.SnapshotPart, error) {
+	var out []v2core.SnapshotPart
+	for _, reader := range readers {
+		files, err := reader.ReadPartFiles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, files...)
+	}
+	return out, nil
 }

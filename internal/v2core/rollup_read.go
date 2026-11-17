@@ -330,19 +330,24 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if archive > 0 && s.moves[m] != nil && len(s.moves[m].origins) > 1 {
 		return errors.New("mixed-origin coarse reads require installed rollup rebuild authority")
 	}
-	// A full archive already owns every physical-slot winner for this name.
-	// Reuse it for narrower ranges instead of reconstructing identical immutable
-	// parts under a different range key. The full scan below still validates
-	// part membership and decodes only additions after publication changes.
-	archiveCount := m.latest.policy.Config.Archives[archive].Count
+	return s.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, _ partOrigin) error { return yield(record) })
+}
+
+// scanArchiveParts resolves immutable parts without applying move repairs. The
+// move reader overlays its small repair set on this same cached range resolver.
+func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
+	m := s.metrics[name]
+	// Reuse a cached full archive for covered ranges, preserving origins for
+	// the move repair resolver as well as ordinary reads.
+	archiveCount := m.latest.schema().Archives[archive].Count
 	if first != 0 || last != archiveCount {
 		s.cache.mu.Lock()
 		covered := len(s.cache.entries[archiveRange{name, archive, 0, archiveCount}]) > 0
 		s.cache.mu.Unlock()
 		if covered {
-			return s.ScanArchive(ctx, name, archive, 0, archiveCount, func(record sealrollup.Record) error {
+			return s.scanArchiveParts(ctx, name, archive, 0, archiveCount, func(record sealrollup.Record, origin partOrigin) error {
 				if record.Slot >= first && record.Slot < last {
-					return yield(record)
+					return yield(record, origin)
 				}
 				return nil
 			})
@@ -383,7 +388,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	if cached != nil && len(cached.parts) == len(parts) {
 		for _, record := range cached.records {
 			if s.recordVisible(m, cachedOrigin(cached.origins, record.Slot), record.Order) {
-				if err := yield(record); err != nil {
+				if err := yield(record, cachedOrigin(cached.origins, record.Slot)); err != nil {
 					return err
 				}
 			}
@@ -576,7 +581,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 	}
 	s.cache.mu.Unlock()
 	for _, record := range result.records {
-		if err = yield(record); err != nil {
+		if err = yield(record, cachedOrigin(result.origins, record.Slot)); err != nil {
 			return err
 		}
 	}
@@ -746,6 +751,16 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 				}
 				if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 					return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
+				}
+				if origin.Class == CopiedPart {
+					visible, err := copiedNameVisible(snapshot, key)
+					if err != nil {
+						return nil, err
+					}
+					if !visible {
+						it.SeekGE(v2part.PrefixEnd(encoded[:len(encoded)-16]))
+						continue
+					}
 				}
 				meta, decodeErr := DecodeRollupMetadata(it.Value())
 				if err = decodeErr; err != nil {
