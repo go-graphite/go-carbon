@@ -89,6 +89,9 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if h.NameHash() != v2core.NameHash(n) {
+			t.Fatalf("cached name hash differs for %s", n)
+		}
 		registered[i] = h
 	}
 	var head []v2core.Batch
