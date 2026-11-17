@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
 	batches := []v2core.Batch{{ID: 7, Policy: raw, Clock: 1700000000}}
 	u.visible(0, batches)
 	u.visible(0, batches)
-	add, stamps, remove := u.drain()
+	add, stamps, remove, _ := u.drain(0)
 	if !slices.Equal(add, []string{"name.metric"}) || len(remove) != 0 {
 		t.Fatal(add, remove)
 	}
@@ -28,7 +29,7 @@ func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
 	u.expire(7, "name.metric")
 	u.visible(0, batches)
 	u.visible(0, batches)
-	add, _, remove = u.drain()
+	add, _, remove, _ = u.drain(0)
 	if !slices.Equal(add, []string{"name.metric"}) || !slices.Equal(remove, add) {
 		t.Fatal(add, remove)
 	}
@@ -37,9 +38,9 @@ func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
 func TestV2CatalogUpdatesRetry(t *testing.T) {
 	u := newV2CatalogUpdates(1)
 	u.changed([]string{"copied.name"})
-	added, stamps, changed := u.drain()
+	added, stamps, changed, _ := u.drain(0)
 	u.retry(append(added, "new.name"), stamps, changed)
-	added, stamps, changed = u.drain()
+	added, stamps, changed, _ = u.drain(0)
 	if !slices.Equal(added, []string{"new.name"}) || !slices.Equal(changed, []string{"copied.name"}) || len(stamps) != 1 || stamps[0].visible != 0 {
 		t.Fatal(added, stamps, changed)
 	}
@@ -58,5 +59,30 @@ func TestV2CatalogTelemetryStamps(t *testing.T) {
 	}
 	if h := r["reader_visible_to_published"].(map[string]interface{}); h["count"] != uint64(1) {
 		t.Fatal(h)
+	}
+}
+
+func TestV2CatalogUpdatesDrainChunks(t *testing.T) {
+	u := newV2CatalogUpdates(1)
+	var want []string
+	for i := range 10 {
+		want = append(want, fmt.Sprintf("a.%d", i))
+	}
+	u.retry(want, nil, nil)
+	var got []string
+	for {
+		add, stamps, _, more := u.drain(3)
+		if len(add) > 3 || len(stamps) != len(add) {
+			t.Fatalf("chunk %d names %d stamps", len(add), len(stamps))
+		}
+		// Callers append confirmed names; that must not clobber the backlog.
+		_ = append(add, "x")
+		got = append(got, add...)
+		if !more {
+			break
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }

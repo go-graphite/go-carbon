@@ -211,7 +211,14 @@ func (app *App) startV2() error {
 	initialized := false
 	// Only the maintenance owner refreshes. Requests load Catalog.Snapshot and
 	// never call discovery, take a refresh mutex, or wait for this work.
-	refresh := func() (refreshErr error) {
+	// Without quotas (whose projection needs every name at once) a backlog is
+	// published in bounded chunks, back to back, so no publication is long.
+	chunk := v2CatalogChunk
+	if v.quotas != nil {
+		chunk = 0
+	}
+	var moreQueued bool
+	refreshOnce := func() (refreshErr error) {
 		var quotaFence uint64
 		if v.quotas != nil {
 			quotaFence = v.quotas.Fence()
@@ -238,7 +245,10 @@ func (app *App) startV2() error {
 			initialized = true
 			return nil
 		}
-		add, stamps, expired := updates.drain()
+		var add []string
+		var stamps []v2NameStamp
+		var expired []string
+		add, stamps, expired, moreQueued = updates.drain(chunk)
 		defer func() {
 			if refreshErr != nil {
 				updates.retry(add, stamps, expired)
@@ -272,6 +282,17 @@ func (app *App) startV2() error {
 		next := v.catalog.Snapshot()
 		catalogTelemetry.published(start, add, stamps, next.Levels(), next.Len())
 		return nil
+	}
+	refresh := func() error {
+		for {
+			moreQueued = false
+			if err := refreshOnce(); err != nil || !moreQueued {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 	}
 	// Quotas require recovered reservations before admission. Without quotas,
 	// startup discovery belongs to the background worker (also compatible with

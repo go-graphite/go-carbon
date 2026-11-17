@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,12 +78,33 @@ func (u *v2CatalogUpdates) expire(id uint64, name string) {
 	u.expired = append(u.expired, name)
 	u.mu.Unlock()
 }
-func (u *v2CatalogUpdates) drain() (added []string, stamps []v2NameStamp, expired []string) {
+
+// v2CatalogChunk bounds the names one catalog publication takes, so a
+// fresh store's multi-million-name backlog becomes visible in many short
+// publications instead of one long clone, sort and merge.
+const v2CatalogChunk = 256 << 10
+
+// drain takes up to limit added and limit expired names (0 = all) and reports
+// whether more are queued. The remainder keeps its arrival order.
+func (u *v2CatalogUpdates) drain(limit int) (added []string, stamps []v2NameStamp, expired []string, more bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	added, stamps, expired = u.added, u.stamps, u.expired
-	u.added, u.stamps, u.expired = nil, nil, nil
-	return
+	if limit <= 0 || len(u.added) <= limit {
+		added, stamps = u.added, u.stamps
+		u.added, u.stamps = nil, nil
+	} else {
+		// Full slice expressions: callers append to the returned slices.
+		added, stamps = u.added[:limit:limit], u.stamps[:limit:limit]
+		u.added, u.stamps = u.added[limit:], u.stamps[limit:]
+	}
+	if limit <= 0 || len(u.expired) <= limit {
+		expired = u.expired
+		u.expired = nil
+	} else {
+		expired = u.expired[:limit:limit]
+		u.expired = u.expired[limit:]
+	}
+	return added, stamps, expired, len(u.added) > 0 || len(u.expired) > 0
 }
 
 // Copied names and expiry candidates both need committed metadata confirmation.
@@ -124,7 +146,13 @@ type v2CatalogTelemetry struct {
 	levels, names                             int
 	recent                                    [256]v2NameTrace
 	next                                      int
+	probes                                    [256]v2NameTrace
+	probeNext                                 int
 }
+
+// v2ProbeMarker selects synthetic visibility-probe names; they get their own
+// trace ring so a busy stream cannot overwrite them within milliseconds.
+const v2ProbeMarker = ".visibility."
 
 func (t *v2CatalogTelemetry) published(start time.Time, added []string, stamps []v2NameStamp, levels, names int) {
 	now := time.Now()
@@ -141,7 +169,13 @@ func (t *v2CatalogTelemetry) published(start time.Time, added []string, stamps [
 		}
 		t.visibleToPublished.add(now.Sub(time.Unix(0, s.visible)), 1)
 		t.registeredToPublished.add(now.Sub(time.Unix(s.registered, 0)), 1)
-		t.recent[t.next] = v2NameTrace{added[i], s.registered, s.visible / 1e6, now.UnixMilli()}
+		trace := v2NameTrace{added[i], s.registered, s.visible / 1e6, now.UnixMilli()}
+		if strings.Contains(added[i], v2ProbeMarker) {
+			t.probes[t.probeNext] = trace
+			t.probeNext = (t.probeNext + 1) % len(t.probes)
+			continue
+		}
+		t.recent[t.next] = trace
 		t.next = (t.next + 1) % len(t.recent)
 	}
 }
@@ -152,6 +186,11 @@ func (t *v2CatalogTelemetry) report() map[string]interface{} {
 	recent := make([]v2NameTrace, 0, len(t.recent))
 	for i := range t.recent {
 		if r := t.recent[(t.next+i)%len(t.recent)]; r.Name != "" {
+			recent = append(recent, r)
+		}
+	}
+	for i := range t.probes {
+		if r := t.probes[(t.probeNext+i)%len(t.probes)]; r.Name != "" {
 			recent = append(recent, r)
 		}
 	}

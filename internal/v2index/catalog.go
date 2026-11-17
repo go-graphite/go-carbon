@@ -168,7 +168,17 @@ func (c *Catalog) ApplyBeforePublish(revision uint64, add, remove []string, befo
 func contains(level, keys []string, found func(int)) {
 	lo := 0
 	for i, key := range keys {
-		lo += sort.SearchStrings(level[lo:], key)
+		// Gallop from the previous match: sorted keys in a large level
+		// are usually close together, so this beats a full binary search.
+		step := 1
+		hi := lo
+		for hi < len(level) && level[hi] < key {
+			lo = hi + 1
+			hi += step
+			step <<= 1
+		}
+		hi = min(hi+1, len(level))
+		lo += sort.SearchStrings(level[lo:hi], key)
 		if lo == len(level) {
 			return
 		}
