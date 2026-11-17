@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -260,6 +261,16 @@ type coreOwner struct {
 	sealRows                     int
 	sealCalls, sealNS            atomic.Uint64
 	sealing                      atomic.Bool
+	// syncSeal keeps threshold seals on the owner loop (CORE_SYNC_SEAL=1).
+	// Otherwise a threshold seal freezes the head and seals it in the
+	// background while intake and pending publication continue.
+	syncSeal bool
+	// sealPubMu orders a seal's atomic part publication against pending
+	// publications. A pin taken under it either predates the part and still
+	// carries the frozen batches, or includes the part (sealDurable) and omits
+	// them, so no point is ever invisible or counted twice.
+	sealPubMu   sync.Mutex
+	sealDurable bool
 	trace                        bool
 }
 type coreFailure struct{ err error }
@@ -442,6 +453,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
 			o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
 			o.radixSort = os.Getenv("CORE_RADIX_SORT") == "1"
+			o.syncSeal = os.Getenv("CORE_SYNC_SEAL") == "1"
 			e.owners[s] = o
 			if hook != nil {
 				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
@@ -962,6 +974,24 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	maintenanceDeadline := time.Now().Add(time.Second)
 	var headPublication, batchPublication time.Time
 	publishedBatches := 0
+	type sealResult struct {
+		n   uint64
+		err error
+	}
+	// At most one frozen head per owner seals in the background. Its batches
+	// are the immutable prefix batches[:len(flight.batches)] of the owner's
+	// array; intake appends after them until the part is published.
+	type sealFlight struct {
+		rows    []row
+		batches []coreBatch
+		next    coreFrontier
+		done    chan sealResult
+	}
+	var flight *sealFlight
+	var spareRows []row
+	var headSince int64
+	// Row-hook publication clones the head; it keeps synchronous seals.
+	asyncSeal := !o.syncSeal && o.hook == nil
 	publishBatches := func() error {
 		if o.batchHook == nil {
 			return nil
@@ -975,11 +1005,124 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		prev := publishedBatches
 		publishedBatches = len(batches)
 		published := batches[:len(batches):len(batches)]
-		err := o.batchHook(o.db.NewSnapshot(), published, o.readGeneration)
+		generation := o.readGeneration
+		if flight != nil {
+			// Pin under the seal's publication lock. Once the frozen part is
+			// durable the pin includes it, so its batches leave pending and the
+			// sealed view moves to the next generation in the same publication.
+			o.sealPubMu.Lock()
+			defer o.sealPubMu.Unlock()
+			if o.sealDurable {
+				frozen := len(flight.batches)
+				published = published[frozen:]
+				prev = max(0, prev-frozen)
+				generation++
+			}
+		}
+		err := o.batchHook(o.db.NewSnapshot(), published, generation)
 		if err == nil && o.visible != nil {
 			o.visible(published[prev:])
 		}
 		return err
+	}
+	// completeFlight retires a background seal exactly like a synchronous one:
+	// frontier, counters, then one publication whose pin includes the part and
+	// whose pending set no longer carries the frozen batches.
+	completeFlight := func(r sealResult) error {
+		f := flight
+		flight = nil
+		if r.err != nil {
+			return r.err
+		}
+		o.meta = f.next
+		o.readGeneration++
+		o.publishFrontier(f.next)
+		o.committed.Add(uint64(len(f.rows)))
+		o.parts.Add(1)
+		o.bytes.Add(r.n)
+		o.bufferedPoints.Store(int64(len(head)))
+		o.bufferedSince.Store(headSince)
+		// Move the intake tail to a fresh array. Readers that still pin the old
+		// one keep it; the retired prefix and its arenas go with them.
+		frozen := len(f.batches)
+		tail := batches[frozen:]
+		batches = make([]coreBatch, len(tail), max(frozen, 2*len(tail)))
+		copy(batches, tail)
+		publishedBatches = max(0, publishedBatches-frozen)
+		// The seal never retains its input rows; reuse them for the next head.
+		spareRows = f.rows[:0]
+		o.pub.publish(o.db.NewSnapshot())
+		if err := publishBatches(); err != nil {
+			return err
+		}
+		if o.visible != nil {
+			o.visible(f.batches)
+		}
+		return nil
+	}
+	awaitFlight := func() error {
+		if flight == nil {
+			return nil
+		}
+		return completeFlight(<-flight.done)
+	}
+	pollFlight := func() error {
+		if flight == nil {
+			return nil
+		}
+		select {
+		case r := <-flight.done:
+			return completeFlight(r)
+		default:
+			return nil
+		}
+	}
+	// startSeal freezes the head and seals it in the background. The owner
+	// keeps admitting rows into a new head and publishing it every second.
+	// Callers ensure no seal is in flight.
+	startSeal := func() error {
+		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
+			deadline = time.Now().Add(sealInterval)
+			return nil
+		}
+		if len(batches) > publishedBatches {
+			if err := publishBatches(); err != nil {
+				return err
+			}
+		}
+		next := o.meta
+		if o.maintenance {
+			next.Version = 2
+		}
+		next.Cursors = slices.Clone(pending)
+		for _, b := range batches {
+			next.ArchiveClock = max(next.ArchiveClock, b.Clock)
+		}
+		next.NextPart++
+		f := &sealFlight{rows: head, batches: batches[:len(batches):len(batches)], next: next, done: make(chan sealResult, 1)}
+		o.sealPubMu.Lock()
+		o.sealDurable = false
+		o.sealPubMu.Unlock()
+		flight = f
+		head = spareRows
+		if head == nil {
+			head = make([]row, 0, headCapacity)
+		}
+		spareRows = nil
+		headSince = 0
+		deadline = time.Now().Add(sealInterval)
+		work := o.work
+		go func() {
+			n, err := o.sealBatches(f.rows, f.batches, f.next)
+			f.done <- sealResult{n: n, err: err}
+			if work != nil {
+				select {
+				case work <- struct{}{}:
+				default:
+				}
+			}
+		}()
+		return nil
 	}
 	stopped := make([]bool, o.cfg.Producers)
 	left := len(stopped)
@@ -993,6 +1136,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	completions := make([]completion, 0, o.cfg.Producers)
 	readyProducers := make([]int, 0, o.cfg.Producers)
 	flush := func() error {
+		if err := awaitFlight(); err != nil {
+			return err
+		}
 		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
 			return nil
 		}
@@ -1045,8 +1191,32 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		return nil
 	}
+	// thresholdSeal applies the size and time thresholds. A due seal never blocks on
+	// the one in flight: intake continues and the next seal starts as soon as
+	// the frozen part is published. Only the hard MaxRows limit waits.
+	thresholdSeal := func() error {
+		if !asyncSeal {
+			return flush()
+		}
+		if err := pollFlight(); err != nil {
+			return err
+		}
+		if flight != nil {
+			return nil
+		}
+		return startSeal()
+	}
 	return func() (bool, bool) {
-		if failure == nil && o.gcDirty.Swap(false) {
+		if failure == nil && flight != nil {
+			failure = pollFlight()
+			if failure == nil && flight == nil && (len(head) >= o.sealRows || time.Now().After(deadline)) {
+				failure = startSeal()
+			}
+			if failure != nil {
+				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+			}
+		}
+		if failure == nil && flight == nil && o.gcDirty.Swap(false) {
 			o.readGeneration++
 			o.pub.publish(o.db.NewSnapshot())
 			failure = publishBatches()
@@ -1057,6 +1227,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if left == 0 {
 			if failure == nil {
 				failure = flush()
+			}
+			if flight != nil {
+				// Never close the database under a background seal.
+				<-flight.done
+				flight = nil
 			}
 			if failure != nil {
 				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
@@ -1111,14 +1286,29 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			}
 			if failure == nil && p.cursor > pending[producer] {
 				if len(head)+len(p.rows) > o.cfg.MaxRows {
-					failure = flush()
+					if asyncSeal {
+						// Backpressure: one frozen head in flight per owner.
+						failure = awaitFlight()
+						if failure == nil {
+							failure = startSeal()
+						}
+					} else {
+						failure = flush()
+					}
 				}
 				if failure == nil {
 					if len(head) == 0 && len(p.rows) > 0 {
-						o.bufferedSince.Store(time.Now().UnixNano())
+						headSince = time.Now().UnixNano()
+						if flight == nil {
+							o.bufferedSince.Store(headSince)
+						}
 					}
 					head = append(head, p.rows...)
-					o.bufferedPoints.Store(int64(len(head)))
+					buffered := len(head)
+					if flight != nil {
+						buffered += len(flight.rows)
+					}
+					o.bufferedPoints.Store(int64(buffered))
 					batches = append(batches, p.batches...)
 					pending[producer] = p.cursor
 				}
@@ -1135,7 +1325,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			}
 			sealPending = sealPending || seal
 			if failure == nil && (len(head) >= o.sealRows || time.Now().After(deadline)) {
-				failure = flush()
+				failure = thresholdSeal()
 			}
 			if failure == nil && o.hook != nil && !sealPending && time.Since(headPublication) >= time.Second {
 				failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
@@ -1184,14 +1374,19 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		completions = completions[:0]
 		if !found {
 			if failure == nil && time.Now().After(deadline) {
-				failure = flush()
+				if asyncSeal {
+					failure = thresholdSeal()
+				} else {
+					failure = flush()
+					deadline = time.Now().Add(sealInterval)
+				}
 				if failure != nil {
 					o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 				}
-				deadline = time.Now().Add(sealInterval)
 			}
 		}
-		if failure == nil && o.maintenance && !time.Now().Before(maintenanceDeadline) {
+		// Rollup metadata belongs to the seal planner while a seal is in flight.
+		if failure == nil && flight == nil && o.maintenance && !time.Now().Before(maintenanceDeadline) {
 			// Keep inactivity detection independent of the larger seal threshold.
 			// The application callback requests its existing intake fence before
 			// allowing expiry; only an allowed expiry or new metadata needs a seal.
@@ -1235,6 +1430,18 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				if next := headPublication.Add(time.Second); next.Before(o.nextPoll) {
 					o.nextPoll = next
 				}
+			}
+		}
+		if flight != nil {
+			// The seal goroutine wakes the execution group when it finishes; a due
+			// seal waits for that wake instead of spinning on a passed deadline.
+			now := time.Now()
+			limit := now.Add(time.Second)
+			if o.work == nil {
+				limit = now.Add(time.Millisecond)
+			}
+			if o.nextPoll.Before(now) || limit.Before(o.nextPoll) {
+				o.nextPoll = limit
 			}
 		}
 		if failure != nil {
@@ -1566,7 +1773,11 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		o.encodeNS.Add(uint64(time.Since(phaseStart)))
 		ingestStart := time.Now()
 		defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
-		if err = batch.Commit(pebble.Sync); err != nil {
+		o.sealPubMu.Lock()
+		err = batch.Commit(pebble.Sync)
+		o.sealDurable = err == nil
+		o.sealPubMu.Unlock()
+		if err != nil {
 			return 0, err
 		}
 		durable = true
@@ -1662,6 +1873,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	o.encodeNS.Add(uint64(time.Since(phaseStart)))
 	ingestStart := time.Now()
 	defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
+	o.sealPubMu.Lock()
 	if o.gc != nil {
 		o.gc.mu.Lock()
 	}
@@ -1672,6 +1884,8 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		o.gc.mu.Unlock()
 	}
+	o.sealDurable = err == nil
+	o.sealPubMu.Unlock()
 	if err != nil {
 		return 0, err
 	}
