@@ -5,7 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -20,6 +21,7 @@ import (
 // membership stays in the sorted SST, accessed through the pinned snapshot.
 // The caller retains snapshot until all directory consumers have returned.
 type RollupSnapshot struct {
+	opened     *OpenedRollupParts
 	identities *PolicyCatalog
 	// Copy-only state is absent from ordinary per-name directories.
 	moves            map[*snapshotMetric]*snapshotMove
@@ -31,7 +33,7 @@ type RollupSnapshot struct {
 	routes         map[partRoute][]*readPart
 	parts          map[string]*readPart
 	metrics        map[string]*snapshotMetric
-	cache          *rollupRangeCache
+	cache          *RollupReadCache
 	directoryBytes int64
 	bindingSet     *RollupInventory
 	inventory      map[string][]string // descriptor binding -> immutable routed part scopes
@@ -40,12 +42,19 @@ type RollupSnapshot struct {
 
 // Shared only by readers. Entries own scalar records and scope strings, never
 // snapshots, metadata objects, writer arenas or an earlier cache generation.
-type rollupRangeCache struct {
+type rollupRangeCache = RollupReadCache
+
+type RollupReadCache struct {
 	mu           sync.Mutex
 	entries      map[archiveRange][]*archiveResult
 	bytes, limit int64
 	clock        uint64
 	count        int
+}
+
+// NewRollupReadCache owns only bounded scalar records, never a generation pin.
+func NewRollupReadCache(limit int64) *RollupReadCache {
+	return &RollupReadCache{entries: map[archiveRange][]*archiveResult{}, limit: max(0, limit)}
 }
 
 const rollupReadCacheBytes = 16 << 20
@@ -134,7 +143,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
-		out.cache = &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
+		out.cache = &RollupReadCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
 	}
 
 	// The descriptor namespace is published atomically with the data. Walking
@@ -223,7 +232,13 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 	// Latest metadata is the only name-sized read structure. Each newly loaded
 	// part uses a transient sorted SST walk; its membership remains in the SST.
 	if prior != nil {
-		out.metrics = maps.Clone(prior.metrics)
+		out.metrics = make(map[string]*snapshotMetric, len(prior.metrics))
+		for name, m := range prior.metrics {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			out.metrics[name] = m
+		}
 	}
 	out.routes = map[partRoute][]*readPart{}
 	changed := false
@@ -320,9 +335,18 @@ func (s *RollupSnapshot) RetainedBytes() int64 {
 
 // Metadata visits only the directory, never archive values.
 func (s *RollupSnapshot) Metadata(visit func(string, RollupPolicy, RollupMetadata)) {
+	_ = s.MetadataContext(context.Background(), visit)
+}
+
+// MetadataContext permits discovery to leave its publication promptly on cancel.
+func (s *RollupSnapshot) MetadataContext(ctx context.Context, visit func(string, RollupPolicy, RollupMetadata)) error {
 	for name, m := range s.metrics {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		visit(name, m.latest.rollupPolicy(), m.latest.metadata())
 	}
+	return ctx.Err()
 }
 
 // LookupMetadata reads the immutable directory without constructing a second
@@ -340,6 +364,9 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 // reset, retirement and rewind. Consumers may retain it in bounded caches.
 func (s *RollupSnapshot) MetricVersion(name string) any {
 	if m := s.metrics[name]; m != nil {
+		if s.opened != nil {
+			return openedMetricVersion{state: m.latest, parts: s.metricPartIdentity(m)}
+		}
 		return m
 	}
 	return nil
@@ -456,7 +483,13 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	for _, part := range partList {
 		selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
 	}
-	it, err := newArchiveIterSelected(ctx, s.snapshot, nil, selected)
+	var it *archiveIter
+	var err error
+	if s.opened != nil {
+		it, err = s.opened.archiveIter(ctx, s.snapshot, selected)
+	} else {
+		it, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected)
+	}
 	if err != nil {
 		return err
 	}
@@ -507,6 +540,9 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			valid = it.SeekGE(lower)
 		}
 		for valid && bytes.HasPrefix(it.Key(), prefix) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			key, err = v2part.Decode(it.Key())
 			if err != nil {
 				return err
@@ -518,6 +554,9 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 				return errors.New("unexpected rollup ordinal")
 			}
 			emit := func(record sealrollup.Record) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if record.Slot >= m.latest.schema().Archives[archive].Count || record.Order > part.meta.Frontier.Order {
 					return errors.New("invalid rollup slot/frontier")
 				}
@@ -750,7 +789,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
-		out.cache = &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
+		out.cache = &RollupReadCache{entries: map[archiveRange][]*archiveResult{}, limit: limit}
 	}
 	prefix := []byte{'G', 'C', 'P', 3}
 	it, err := newArchiveIter(ctx, snapshot, &pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
@@ -932,4 +971,23 @@ func (s *RollupSnapshot) metricOrigin(m *snapshotMetric) partOrigin {
 		return partOrigin{Class: LivePart}
 	}
 	return s.moves[m].origin
+}
+
+type openedMetricVersion struct {
+	state readMetricState
+	parts string
+}
+
+func (s *RollupSnapshot) metricPartIdentity(m *snapshotMetric) string {
+	parts := s.metricParts(m)
+	ids := make([]string, 0, len(parts))
+	for _, p := range parts {
+		ids = append(ids, p.part.id)
+	}
+	slices.Sort(ids)
+	var b strings.Builder
+	for _, id := range ids {
+		b.WriteString(id)
+	}
+	return b.String()
 }

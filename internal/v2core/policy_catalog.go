@@ -48,6 +48,9 @@ type policyCatalogShard struct {
 // Registered batches retain the shared identity until a reader needs its bytes.
 func (h *PolicyIdentity) Definition() []byte { return h.definitionBytes() }
 
+// Name returns the immutable registered metric name without encoding its policy.
+func (h *PolicyIdentity) Name() string { return string(h.policy.Name) }
+
 // definitionBytes reconstructs the unchanged canonical journal/part encoding.
 // Ordinary routing and registered application lookup need only the handle.
 func (h *PolicyIdentity) definitionBytes() []byte {

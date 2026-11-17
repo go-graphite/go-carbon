@@ -44,6 +44,8 @@ type generation struct {
 	err     error
 }
 type sealedCache struct {
+	ranges         *v2core.RollupReadCache
+	loadGate       chan struct{}
 	mu             sync.Mutex // read-side only; Publish never acquires this lock
 	index          *v2core.RollupSnapshot
 	number         uint64
@@ -62,6 +64,7 @@ type sealedCache struct {
 	renderedBytes  int64
 }
 type sealedData struct {
+	parts     *v2core.OpenedRollupParts
 	cache     *sealedCache
 	index     *v2core.RollupSnapshot
 	refs      atomic.Int64
@@ -93,7 +96,10 @@ func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
 	}
 	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes, work: make(chan *sealrollup.Workspace, owners)}
 	for i := range r.caches {
+		r.caches[i].loadGate = make(chan struct{}, 1)
+		r.caches[i].loadGate <- struct{}{}
 		r.caches[i].limit = min(4<<20, budgetBytes/int64(owners)/32)
+		r.caches[i].ranges = v2core.NewRollupReadCache(r.caches[i].limit)
 	}
 	return r, nil
 }
@@ -123,12 +129,27 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 			g.sealed = old.sealed
 			g.sealed.refs.Add(1)
 		}
+		if g.sealed == nil && inventory != nil {
+			parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, old.sealed.parts, r.Identities, r.caches[owner].limit)
+			if err != nil {
+				old.release()
+				_ = snapshot.Close()
+				return err
+			}
+			g.sealed = &sealedData{parts: parts, snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
+			g.sealed.refs.Store(1)
+		}
 		old.release()
 	}
-	if g.sealed != nil {
+	if g.sealed != nil && g.sealed.snapshot != snapshot {
 		_ = snapshot.Close()
-	} else {
-		g.sealed = &sealedData{snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
+	} else if g.sealed == nil {
+		parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, nil, r.Identities, r.caches[owner].limit)
+		if err != nil {
+			_ = snapshot.Close()
+			return err
+		}
+		g.sealed = &sealedData{parts: parts, snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
 		g.sealed.refs.Store(1)
 	}
 	g.refs.Store(1)
@@ -145,6 +166,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 func (g *generation) release() {
 	if g.refs.Add(-1) == 0 {
 		if g.sealed.refs.Add(-1) == 0 {
+			g.sealed.parts.Close()
 			_ = g.sealed.snapshot.Close()
 		}
 	}
@@ -194,12 +216,19 @@ func (s *sealedData) lookup(name string) *metricState {
 
 func (g *generation) load() {
 	g.sealed.once.Do(g.sealed.load)
+	g.loadPending()
+}
+func (g *generation) loadPending() { g.loadPendingContext(context.Background()) }
+func (g *generation) loadPendingContext(ctx context.Context) {
 	if g.sealed.err != nil {
 		g.err = g.sealed.err
 		return
 	}
 	g.metrics = make(map[string]*metricState)
 	for _, b := range g.pending {
+		if g.err = ctx.Err(); g.err != nil {
+			return
+		}
 		if b.Registered != nil && len(b.Policy) == 0 {
 			b.Policy = b.Registered.Definition()
 		}
@@ -238,16 +267,25 @@ func (g *generation) load() {
 		}
 		batch := sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: make([]sealrollup.Sample, len(b.Points))}
 		for i, p := range b.Points {
+			if i%1024 == 0 {
+				if g.err = ctx.Err(); g.err != nil {
+					return
+				}
+			}
 			batch.Points[i] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
 		m.pending = append(m.pending, batch)
 		m.meta.Expired = false
 	}
 }
-func (m *metricState) resolve() {
+func (m *metricState) resolve() { m.resolveContext(context.Background()) }
+func (m *metricState) resolveContext(ctx context.Context) {
+	if m.err = ctx.Err(); m.err != nil {
+		return
+	}
 	var base *resolvedSource
 	if m.sealed != nil {
-		base, m.err = m.resource.resolved(m.name, m.policy, m.meta)
+		base, m.err = m.resource.resolvedContext(ctx, m.name, m.policy, m.meta)
 		if m.err != nil {
 			return
 		}
@@ -339,6 +377,9 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 	}()
 	for i := range r.owners {
 		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			g := r.owners[i].Load()
 			if g == nil {
 				break
@@ -349,13 +390,22 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 		}
 	}
+	views := make([]*generation, len(pinned))
+	for i, g := range pinned {
+		if g != nil {
+			q, err := g.forNames(ctx, names)
+			if err != nil {
+				return err
+			}
+			views[i] = q
+		}
+	}
 	for _, name := range names {
 		var metric *metricState
-		for _, g := range pinned {
+		for _, g := range views {
 			if g == nil {
 				continue
 			}
-			g.once.Do(g.load)
 			if g.err != nil {
 				return g.err
 			}
@@ -381,7 +431,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		}
 		var source Source
 		if len(metric.pending) > 0 || metric.sealed == nil {
-			metric.once.Do(metric.resolve)
+			metric.resolveContext(ctx)
 			if metric.err != nil {
 				return metric.err
 			}
@@ -470,4 +520,76 @@ func aggregationName(method sealrollup.Method) string {
 		return "first"
 	}
 	return ""
+}
+
+// forNames creates request-local metadata; no request waits for a whole-store
+// generation loader. The caller retains the publication through this call.
+func (g *generation) forNames(ctx context.Context, names []string) (*generation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if g.sealed.parts == nil {
+		return g.discover(ctx)
+	}
+	index, err := g.sealed.parts.SnapshotForNames(ctx, g.sealed.snapshot, names, g.sealed.cache.ranges)
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, n := range names {
+		wanted[n] = true
+	}
+	var pending []v2core.Batch
+	for _, b := range g.pending {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if b.Registered != nil {
+			if wanted[b.Registered.Name()] {
+				pending = append(pending, b)
+			}
+			continue
+		}
+		raw := b.Policy
+		var p v2core.RollupPolicy
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if wanted[string(p.Name)] {
+			pending = append(pending, b)
+		}
+	}
+	q := &generation{pending: pending, sealed: &sealedData{index: index, reader: g.sealed.reader, cache: g.sealed.cache, number: g.sealed.number}}
+	q.loadPendingContext(ctx)
+	return q, q.err
+}
+
+// Discovery alone enumerates names. Serialize its incremental refresh per owner
+// so overlapping generations never independently reload the same new parts.
+func (g *generation) discover(ctx context.Context) (*generation, error) {
+	s := g.sealed
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.cache.loadGate:
+	}
+	defer func() { s.cache.loadGate <- struct{}{} }()
+	s.cache.mu.Lock()
+	prior := s.cache.index
+	s.cache.mu.Unlock()
+	if s.parts != nil {
+		ctx = v2core.WithOpenedRollupParts(ctx, s.parts)
+	}
+	index, err := v2core.NewRollupSnapshotWithCatalogAndInventory(ctx, s.snapshot, prior, s.reader.Identities, s.inventory, s.cache.limit)
+	if err != nil {
+		return nil, err
+	}
+	s.cache.mu.Lock()
+	if s.cache.index == nil || s.number >= s.cache.number {
+		s.cache.index, s.cache.number = index, s.number
+	}
+	s.cache.mu.Unlock()
+	q := &generation{pending: g.pending, sealed: &sealedData{index: index, reader: s.reader, cache: s.cache, number: s.number}}
+	q.loadPendingContext(ctx)
+	return q, q.err
 }

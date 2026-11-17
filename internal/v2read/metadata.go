@@ -2,9 +2,7 @@ package v2read
 
 import (
 	"context"
-	"runtime"
 	"slices"
-	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
@@ -43,6 +41,10 @@ func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpir
 	for _, g := range pins {
 		if g == nil {
 			continue
+		}
+		g, err = g.forNames(ctx, []string{name})
+		if err != nil {
+			return Metric{}, masked, err
 		}
 		m := g.metrics[name]
 		if m == nil {
@@ -93,10 +95,11 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 		if g == nil {
 			continue
 		}
-		if g.err != nil {
-			return nil, nil, g.err
+		g, err = g.discover(ctx)
+		if err != nil {
+			return nil, nil, err
 		}
-		g.sealed.index.Metadata(func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
+		err = g.sealed.index.MetadataContext(ctx, func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
 			if pending := g.metrics[n]; pending != nil {
 				meta = pending.meta
 			}
@@ -107,6 +110,9 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 				names = append(names, n)
 			}
 		})
+		if err != nil {
+			return nil, nil, err
+		}
 		for n, m := range g.metrics {
 			if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
 				masks[n] = true
@@ -120,11 +126,9 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 	return slices.Compact(names), masks, nil
 }
 
-// loadOwners pins each owner's publication and loads independent directories
-// with the same bounded parallelism for discovery and metadata requests.
+// loadOwners pins publications without starting any directory work.
 func (r *Reader) loadOwners(ctx context.Context) ([]*generation, error) {
-	// Pin each publication once before loading independent owner directories.
-	// A fixed worker bound keeps discovery from fanning out with shard count.
+	// Requests own these pins until their synchronous work or callback ends.
 	pins := make([]*generation, len(r.owners))
 	ok := false
 	defer func() {
@@ -147,26 +151,6 @@ func (r *Reader) loadOwners(ctx context.Context) ([]*generation, error) {
 			}
 		}
 	}
-	workers := min(4, runtime.GOMAXPROCS(0), len(pins))
-	var wg sync.WaitGroup
-	for worker := range workers {
-		wg.Go(func() {
-			for i := worker; i < len(pins); i += workers {
-				if g := pins[i]; g != nil {
-					g.once.Do(g.load)
-				}
-			}
-		})
-	}
-	wg.Wait()
-	for _, g := range pins {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if g != nil && g.err != nil {
-			return nil, g.err
-		}
-	}
 	ok = true
 	return pins, nil
 }
@@ -182,35 +166,9 @@ func releaseOwners(pins []*generation) {
 // Masked reports durable whole-name reset authority from the same pinned
 // publication as the data. A reset keeps masking classic history after resume.
 func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
-	for i := range r.owners {
-		for {
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			g := r.owners[i].Load()
-			if g == nil {
-				break
-			}
-			if !g.retain() {
-				continue
-			}
-			g.once.Do(g.load)
-			if g.err != nil {
-				err := g.err
-				g.release()
-				return false, err
-			}
-			m := g.metrics[name]
-			if m == nil {
-				m = g.sealed.lookup(name)
-			}
-			masked := m != nil && (m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0)
-			g.release()
-			if masked {
-				return true, nil
-			}
-			break
-		}
+	_, masked, err := r.metadataWithMask(ctx, name, true)
+	if err == ErrNotFound {
+		err = nil
 	}
-	return false, nil
+	return masked, err
 }
