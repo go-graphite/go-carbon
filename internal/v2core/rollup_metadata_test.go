@@ -98,6 +98,9 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		}
 		fb, _ := os.ReadFile(fast)
 		sb, _ := os.ReadFile(slow)
+		// Planned sealing adds the exact inventory to the descriptor; the
+		// generic portable writer and the SST bytes stay backward compatible.
+		sd.VShards = fd.VShards
 		if !reflect.DeepEqual(fd, sd) || !bytes.Equal(fb, sb) {
 			t.Fatal("planned spec changed portable part bytes/descriptor")
 		}
@@ -113,6 +116,14 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		}
 		if len(shards) < 32 {
 			t.Fatal("fixture did not span vshards")
+		}
+		if len(fd.VShards) != len(shards) {
+			t.Fatal("seal inventory omitted routed shards")
+		}
+		for _, v := range fd.VShards {
+			if !shards[v] {
+				t.Fatal("seal inventory added an absent shard")
+			}
 		}
 	}
 	if _, e = r.plan(in); e == nil {

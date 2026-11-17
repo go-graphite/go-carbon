@@ -60,6 +60,9 @@ type Descriptor struct {
 	FirstKey   []byte
 	LastKey    []byte
 	Coverage   Coverage
+	// VShards is the sorted, exact routed inventory recorded by the seal
+	// writer. Omitted by older producers; readers retain their scan fallback.
+	VShards []uint16 `json:",omitempty"`
 }
 
 func validateSpec(s Spec) error {
@@ -117,6 +120,16 @@ func (d Descriptor) Validate() error {
 	}
 	if !d.Scope.contains(first) || !d.Scope.contains(last) || bytes.Compare(d.FirstKey, d.LastKey) > 0 {
 		return errors.New("part key range outside scope")
+	}
+	if len(d.VShards) > 0 {
+		if len(d.VShards) > VirtualShards || d.VShards[0] != first.VShard || d.VShards[len(d.VShards)-1] != last.VShard {
+			return errors.New("part vshard inventory outside key range")
+		}
+		for i, v := range d.VShards {
+			if v >= VirtualShards || (i > 0 && d.VShards[i-1] >= v) {
+				return errors.New("unordered part vshard inventory")
+			}
+		}
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -286,6 +287,7 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 	var first, last []byte
 	var lastName ID
 	var names, records uint64
+	var shards []uint16
 	for ik, value := it.First(); ik != nil; ik, value = it.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -314,6 +316,9 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 			names++
 			lastName = k.Metric
 		}
+		if expected != nil && len(expected.VShards) > 0 && (len(shards) == 0 || shards[len(shards)-1] != k.VShard) {
+			shards = append(shards, k.VShard)
+		}
 		last = append(last[:0], ik.UserKey...)
 		records++
 		data, _, e := value.Value(nil)
@@ -334,6 +339,9 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 	}
 	if expected != nil && (names != expected.Coverage.Names || records != expected.Coverage.Records || !bytes.Equal(first, expected.FirstKey) || !bytes.Equal(last, expected.LastKey)) {
 		return errors.New("part coverage count/key mismatch")
+	}
+	if expected != nil && len(expected.VShards) > 0 && !slices.Equal(shards, expected.VShards) {
+		return errors.New("part vshard inventory mismatch")
 	}
 	return nil
 }
