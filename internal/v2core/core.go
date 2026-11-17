@@ -198,7 +198,8 @@ type coreOwner struct {
 	partSource  v2part.Provenance
 	maintenance bool
 
-	stage func(string)
+	stage      func(string)
+	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
@@ -353,7 +354,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{partSource: partSource, stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -1079,6 +1080,15 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		defer o.gc.fileMu.Unlock()
 	}
 	sealStart := time.Now()
+	planEnd := sealStart
+	defer func() {
+		if o.sealTiming != nil {
+			end := time.Now()
+			o.sealTiming("seal_total", end.Sub(sealStart))
+			o.sealTiming("rollup_plan", planEnd.Sub(sealStart))
+			o.sealTiming("publication", end.Sub(planEnd))
+		}
+	}()
 	if o.stage != nil {
 		o.stage("seal")
 	}
@@ -1110,7 +1120,8 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return 0, errors.New("raw replacement requires output for nonempty input")
 		}
 	}
-	phaseStart := time.Now()
+	planEnd = time.Now()
+	phaseStart := planEnd
 	if plan.ReplaceRaw {
 		// The replacement planner owns ordering and retention in its format.
 	} else if o.stage != nil {

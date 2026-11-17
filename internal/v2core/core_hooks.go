@@ -82,6 +82,11 @@ type coreHooks struct {
 	// It runs on owner goroutines; callers must serialize their own observer.
 	Stage func(string)
 
+	// SealTiming observes completed owner-local seal phases, including failed attempts.
+	// Calls may overlap across owners; observers must synchronize themselves.
+	// seal_total contains rollup_plan and publication; these are not additive quantiles.
+	SealTiming func(phase string, elapsed time.Duration)
+
 	OwnerCPUs []int
 	Publish   func(int, *pebble.Snapshot, []row) error
 	// PublishBatches transfers an immutable snapshot and detached original pending
