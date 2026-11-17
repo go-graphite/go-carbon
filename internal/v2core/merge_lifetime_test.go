@@ -41,8 +41,9 @@ func TestMergeLifetimeFixture(t *testing.T) {
 		label := "old"
 		cap := uint64(1 << 50)
 		if bounded {
-			label = "bounded"
-			cap = 64 << 10
+			// Monthly partitions with the default (ClickHouse-sized) cap.
+			label = "month"
+			cap = 150 << 30
 		}
 		t.Setenv("CORE_MERGE_MAX_BYTES", fmt.Sprint(cap))
 		e := mergeFixture(t, t.TempDir(), nil)
@@ -168,7 +169,7 @@ func TestMergeLifetimeFixture(t *testing.T) {
 		if !bounded {
 			reference = got
 		} else if !reflect.DeepEqual(got, reference) {
-			t.Fatal("bounded/partitioned records differ bitwise")
+			t.Fatal("month-partitioned records differ bitwise")
 		}
 		stats := e.PartGCStats()[0]
 		r.MergeBytes = stats.MergeWrittenBytes
@@ -187,8 +188,10 @@ func TestMergeLifetimeFixture(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if results[1].MaxRewrites >= results[0].MaxRewrites || results[1].LargestMerge >= results[0].LargestMerge {
-		t.Fatal("bounds did not reduce lifetime rewrite/merge size")
+	// Monthly partitions must not fan out parts or add rewrites (#1543's
+	// expiry-day partitions left 83 quiescent parts here versus 4).
+	if results[1].MaxRewrites > results[0].MaxRewrites || 4*results[1].LiveParts > 5*results[0].LiveParts+4 {
+		t.Fatal("monthly partitions added rewrites or parts")
 	}
 
 }
