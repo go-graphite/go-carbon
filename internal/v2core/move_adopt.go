@@ -83,7 +83,7 @@ func (p *PreparedMove) Close() error {
 func (p *PreparedMove) Policies() map[string][]byte {
 	out := map[string][]byte{}
 	for name, m := range p.index.metrics {
-		out[name] = bytes.Clone(m.meta.Policy)
+		out[name] = bytes.Clone(m.latest.meta.Policy)
 	}
 	return out
 }
@@ -142,18 +142,19 @@ func validateMoveFineCoverage(ctx context.Context, index *RollupSnapshot, name s
 	if m == nil {
 		return nil
 	}
-	fine := m.policy.Config.Archives[0]
+	fine := m.latest.policy.Config.Archives[0]
 	it, err := newArchiveIter(ctx, index.snapshot, nil)
 	if err != nil {
 		return err
 	}
 	defer it.Close()
 	for _, part := range m.parts {
-		for archive, a := range m.policy.Config.Archives {
+		for archive, a := range m.latest.policy.Config.Archives {
 			if archive == 0 {
 				continue
 			}
-			k := part.key
+			k := part.part.key
+			k.Metric = part.policy.Name
 			k.Archive = uint32(archive)
 			k.BlockStart = 0
 			k.Ordinal = 0
@@ -202,7 +203,8 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 	}
 	defer it.Close()
 	for _, part := range m.parts {
-		k := part.key
+		k := part.part.key
+		k.Metric = part.policy.Name
 		k.Archive = 0
 		k.BlockStart = 0
 		k.Ordinal = 0
@@ -299,7 +301,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		key, _ := v2part.Decode(part.Descriptor.FirstKey)
 		for _, physical := range current.parts {
 			for _, metric := range physical.metrics {
-				if metric.key.Part == key.Part && metric.key.Group == key.Group {
+				if metric.part.key.Part == key.Part && metric.part.key.Group == key.Group {
 					return errors.New("cannot reclassify an existing live part")
 				}
 			}
@@ -317,7 +319,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if id == 0 {
 			return errors.New("missing receiving numeric identity")
 		}
-		policy := donor.policy
+		policy := donor.latest.policy
 		// This first attachment requires a proof of full fine coverage. Longer
 		// coarse histories need a separate boundary inventory; do not guess.
 		fine := policy.Config.Archives[0]
@@ -326,7 +328,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 				return errors.New("move needs complete retained fine coverage of coarse archives")
 			}
 		}
-		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.meta.Policy, donor.meta.Policy) {
+		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.meta.Policy, donor.latest.meta.Policy) {
 			return errors.New("move policy mismatch")
 		}
 		if err = validateMoveFineCoverage(ctx, prepared.index, name, now); err != nil {
@@ -346,15 +348,15 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		for _, winner := range winners {
 			raw = append(raw, winner.record)
 		}
-		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.meta.Policy), Revision: 1, LastUpdate: now * 1e9}
-		local.Frontier.Policy = donor.meta.Frontier.Policy
+		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.meta.Policy), Revision: 1, LastUpdate: now * 1e9}
+		local.Frontier.Policy = donor.latest.meta.Frontier.Policy
 		if old := o.rollups.metrics[id]; old != nil {
 			if !bytes.Equal(old.meta.Policy, local.Policy) {
 				return errors.New("receiving ID belongs to another name")
 			}
 			local = old.meta
 		}
-		local.LastUpdate = max(local.LastUpdate, donor.meta.LastUpdate)
+		local.LastUpdate = max(local.LastUpdate, donor.latest.meta.LastUpdate)
 		local.Revision++
 		rebuilt, err := PlanMoveRollupRebuild(policy, raw, now, max(uint64(1), local.Frontier.Order))
 		if err != nil {
@@ -450,18 +452,22 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if a.Version != 1 || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.meta.Policy) || a.Meta.Frontier.Order != a.AtOrder {
+		if a.Version != 1 || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.meta.Policy) || a.Meta.Frontier.Order != a.AtOrder {
 			return errors.New("invalid move authority")
 		}
 		if m.origin.Class == LivePart {
-			if m.meta.ID != a.Meta.ID {
+			if m.latest.meta.ID != a.Meta.ID {
 				return errors.New("move receiving identity changed")
 			}
-			if m.meta.Frontier.Order <= a.AtOrder {
-				m.meta = a.Meta
+			if m.latest.meta.Frontier.Order <= a.AtOrder {
+				latest := *m.latest
+				latest.meta = a.Meta
+				m.latest = &latest
 			}
 		} else {
-			m.meta = a.Meta
+			latest := *m.latest
+			latest.meta = a.Meta
+			m.latest = &latest
 		}
 		m.authority = &a
 	}
@@ -472,7 +478,7 @@ func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, arc
 	m := s.metrics[name]
 	a := m.authority
 	winners := map[int64]sealrollup.Record{}
-	if m.meta.ResetOrder <= a.AtOrder {
+	if m.latest.meta.ResetOrder <= a.AtOrder {
 		for _, record := range a.Coarse {
 			if record.Archive == archive && record.Slot >= first && record.Slot < last {
 				winners[record.Slot] = record

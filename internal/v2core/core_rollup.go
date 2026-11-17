@@ -651,7 +651,7 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 			}
 			return 0
 		})
-		if err = visit(metric.policy, metric.meta, records); err != nil {
+		if err = visit(metric.latest.policy, metric.latest.meta, records); err != nil {
 			return err
 		}
 	}
@@ -688,7 +688,9 @@ func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 			m.slots.Install(record.Delta)
 		}
 		r.metrics[meta.ID] = m
-		r.names[policy.Name] = meta.ID
+		// Keep the recovered reverse index on the same immutable name as the
+		// metric. ScanRollups' decoded policy is temporary construction state.
+		r.names[m.policy.Name] = meta.ID
 		r.prepared[meta.Frontier.Policy] = m.prepared
 		return nil
 	})
