@@ -130,7 +130,7 @@ Writable v2 owners automatically merge sixteen local archive parts in the same
 size tier into one immutable part. Tiers span a factor of sixteen in file bytes;
 when merge service keeps up, each group retains at most fifteen local parts per
 tier. Background workers scale with the owner count and `GOMAXPROCS`: one
-worker per eight scheduler CPUs, bounded by the number of owners (at least one
+worker per two scheduler CPUs, bounded by the number of owners (at least one
 worker on small stores). Set the restart-only `CORE_MERGE_WORKERS` environment
 variable to `0` to disable merges for comparison, or to a smaller positive worker
 count to reserve more CPU for intake. Counts above the owner/CPU budget fail

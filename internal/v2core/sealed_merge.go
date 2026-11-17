@@ -30,9 +30,9 @@ const sealedMergeFanIn = 16
 
 // Runtime tuning does not change the persisted routing/configuration contract.
 func mergeWorkerCount(owners int) (int, error) {
-	// At most one eighth of scheduler CPUs, with one worker for small stores.
+	// At most half of scheduler CPUs, with one worker for small stores.
 	// Each owner is visited by exactly one worker; more workers cannot help it.
-	limit := min(owners, max(1, runtime.GOMAXPROCS(0)/8))
+	limit := min(owners, max(1, runtime.GOMAXPROCS(0)/2))
 	n := limit
 	if s := os.Getenv("CORE_MERGE_WORKERS"); s != "" {
 		var err error

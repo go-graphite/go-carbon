@@ -424,7 +424,7 @@ func TestSealedMergeWorkerBudget(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "")
 	for _, owners := range []int{1, 16, 96} {
 		got, err := mergeWorkerCount(owners)
-		want := min(owners, max(1, runtime.GOMAXPROCS(0)/8))
+		want := min(owners, max(1, runtime.GOMAXPROCS(0)/2))
 		if err != nil || got != want {
 			t.Fatalf("owners=%d workers=%d want=%d err=%v", owners, got, want, err)
 		}
