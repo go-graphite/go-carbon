@@ -119,22 +119,24 @@ func TestRollupHistoryDifferential(t *testing.T) {
 					}
 				}
 				digest := fmt.Sprintf("%x", h.Sum(nil))
-				// Closed-window layout: open coarse replacements are projected at read
+				// Closed-window layout in monthly partitions (#1546 keys and envelopes);
+				// Hooks.Now caps age retirement, so the physical image is stable.
+				// Open coarse replacements are projected at read
 				// time. TestClosedHistoryLogicalDifferential proves the resolved values
 				// equal the original eager golden at every epoch and restart cut.
 				want := map[string]string{
-					"1|1s:1h,1m:1d,1h:1y":         "5ff4627495805dfa52671347ff9c9fda65844389d6eaf5e11c3793030135c222",
-					"1|10s:6h,5m:7d,1h:1y,1d:10y": "a1cdd4e044beb9c75df507f883b05cf88d8342dce193dc7fe8e5a1b7b87235e1",
-					"2|1s:1h,1m:1d,1h:1y":         "3803b50b07deb9babbfa7815a97177e3e7a47108f87f1378d3db55774203f140",
-					"2|10s:6h,5m:7d,1h:1y,1d:10y": "ba3b0de4e0ffc6ddbd9744226407af15b70cff4e4a0592ec6965549c16502137",
-					"3|1s:1h,1m:1d,1h:1y":         "abd5a6d99173f927f0e741c6fdc343a74ad21ba5d38339874d0b6571c551be87",
-					"3|10s:6h,5m:7d,1h:1y,1d:10y": "0d1f878a458e830802f1807a069af6927028a2cfe97da3cf468b8e0a260a389f",
-					"4|1s:1h,1m:1d,1h:1y":         "008bf53abf9608def2dc5f581f6a2fd4c8cce03f4cf000d4547fe290c5672005",
-					"4|10s:6h,5m:7d,1h:1y,1d:10y": "889ec59e38afa0b1836aefdfaf779a0130516cabcf233cbb95c579773fe85be8",
-					"5|1s:1h,1m:1d,1h:1y":         "4aad9a654fe1fee00c53bf117f0b5f758aa80bb3a929530c296a1de14b3143e8",
-					"5|10s:6h,5m:7d,1h:1y,1d:10y": "88c9def57cd5e9d5708ea4a03ed96121126de5a0156e749c24fb0e474a660059",
-					"6|1s:1h,1m:1d,1h:1y":         "944432f1baab5a0fce6ee9f3f9b7788d3a1f84181280c24efc558d16ef9b38d3",
-					"6|10s:6h,5m:7d,1h:1y,1d:10y": "c3bbff239946ea79ed39be7a002bf038069f2279ee358158b8a597570f1ce815"}[fmt.Sprintf("%d|%s", method, schema)]
+					"1|1s:1h,1m:1d,1h:1y":         "711d843de47a3543728e05a9cf3db2943a3e6df58c459d1d10ef860867bf8f86",
+					"1|10s:6h,5m:7d,1h:1y,1d:10y": "90a8a8637c45b3fcc696cbcecd43aa67848c67c275232d5778c51bba537d90c1",
+					"2|1s:1h,1m:1d,1h:1y":         "1689867a0ea6614475de9230b82f630baea11be8d17614816f75bf1254fe3d4c",
+					"2|10s:6h,5m:7d,1h:1y,1d:10y": "e20af49bc0966e7dc1547614b04532f9a9fda4abc9db88faf9ac8348591d9c6b",
+					"3|1s:1h,1m:1d,1h:1y":         "2aa37fd3ce0ff4d2f2bb36198408dcedf60cd308272161cbdfbe15e6730e7a00",
+					"3|10s:6h,5m:7d,1h:1y,1d:10y": "0d926c55f549bf6fa4eeb8de11933a80a8b97ec0644ed700348ea6e2eabd469e",
+					"4|1s:1h,1m:1d,1h:1y":         "766c834575f4b86cf29495746f74d9c7c6df9fdffc13321988f1c3ca21c162d6",
+					"4|10s:6h,5m:7d,1h:1y,1d:10y": "40fd7a65da98d4adbbb7c3e9b1b10b5d4017b277dadd758fbc992a4acd090be1",
+					"5|1s:1h,1m:1d,1h:1y":         "eb4b7a9b26aeb15803826f45c8f5d9d7f2f33f79071cacf04406d36640bd5029",
+					"5|10s:6h,5m:7d,1h:1y,1d:10y": "2e44270165585e6d4e76e3398d96097582995f926f89d7e0c6f58677bbafd9c1",
+					"6|1s:1h,1m:1d,1h:1y":         "371e618d44f5c031f82542b6b31157ab792a67d99461e3007316e14ca9de32a8",
+					"6|10s:6h,5m:7d,1h:1y,1d:10y": "8847ea828d04c7c7de06f703cda1f431ad2cb90772e8afe6ce43fe204b5c8adb"}[fmt.Sprintf("%d|%s", method, schema)]
 				if digest != want {
 					t.Fatalf("stored/read bit differential got %s want %s", digest, want)
 				}
