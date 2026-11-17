@@ -117,12 +117,16 @@ func newRollupMetric(h *PolicyIdentity) *rollupMetric {
 }
 
 type rollupStage struct {
-	metric     *rollupMetric
-	next       RollupMetadata
-	batches    []sealrollup.Batch
-	records    []sealrollup.Record
-	fresh      bool
-	batchCount int
+	sortGroup     uint32
+	sortRouteName uint64
+	sortPrefix    [2]uint64
+	sortName      string
+	metric        *rollupMetric
+	next          RollupMetadata
+	batches       []sealrollup.Batch
+	records       []sealrollup.Record
+	fresh         bool
+	batchCount    int
 }
 
 type rollupPlannerLane struct {

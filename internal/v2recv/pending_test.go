@@ -124,12 +124,12 @@ func (o *coalescingOwner) Seal() error  { return nil }
 func (o *coalescingOwner) Drain() error { return nil }
 func TestOwnerCoalescesSocketFragments(t *testing.T) {
 	s := &Server{cfg: Config{BatchSize: 8, SyncInterval: time.Hour}, pending: []pendingShard{{names: make(map[string]int64)}}}
-	q := make(chan batch, 17)
+	q := make(chan *batch, 17)
 	o := &coalescingOwner{}
 	for i := range 17 {
 		name := fmt.Sprintf("fragment.%d", i/3)
 		s.pendingAdd(0, name, 1)
-		q <- batch{names: []string{name}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
+		q <- &batch{distinct: []string{name}, names: []string{name}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
 	}
 	close(q)
 	s.workers.Add(1)
@@ -156,7 +156,7 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 func TestPendingBatchesFenceDecodedQueueAndAbort(t *testing.T) {
 	for _, abort := range []bool{false, true} {
 		t.Run(fmt.Sprint(abort), func(t *testing.T) {
-			s := &Server{cfg: Config{BatchSize: 64, MaxLineBytes: 1 << 20}, pending: []pendingShard{{names: make(map[string]int64)}}, queues: []chan batch{make(chan batch, 1)}, done: make(chan struct{})}
+			s := &Server{cfg: Config{BatchSize: 64, MaxLineBytes: 1 << 20}, pending: []pendingShard{{names: make(map[string]int64)}}, queues: []chan *batch{make(chan *batch, 1)}, done: make(chan struct{})}
 			input, output := net.Pipe()
 			defer input.Close()
 			defer output.Close()

@@ -3,6 +3,7 @@ package v2daemon
 import (
 	"errors"
 	"net"
+	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"github.com/go-graphite/go-carbon/points"
@@ -18,15 +19,24 @@ type applicationOwner struct {
 	policies   map[string]*RegisteredApplication
 	throttle   func(*points.Points, bool) bool
 	fenceDrain bool
+	apps       []Application
+	sequence   []uint64
 }
 
 func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint64, clock int64) error {
-	apps := make([]Application, 0, len(names))
+	o.apps = slices.Grow(o.apps[:0], len(names))
+	o.sequence = slices.Grow(o.sequence[:0], len(names))[:len(names)]
+	apps := o.apps[:0]
+	defer func() { clear(apps); o.apps = apps[:0] }()
+	var previous *RegisteredApplication
 	for i, name := range names {
 		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
 			continue
 		}
-		registered := o.policies[name]
+		registered := previous
+		if registered == nil || registered.name != name {
+			registered = o.policies[name]
+		}
 		if registered == nil {
 			policy, err := o.resolve(name)
 			if err != nil {
@@ -41,8 +51,11 @@ func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint6
 			}
 			o.policies[name] = registered
 		}
-		order := o.p.applyOrder + uint64(len(apps)) + 1
-		apps = append(apps, Application{Registered: registered, Order: order, Clock: clock, Points: data[i : i+1], Sequence: []uint64{order}})
+		previous = registered
+		index := len(apps)
+		order := o.p.applyOrder + uint64(index) + 1
+		o.sequence[index] = order
+		apps = append(apps, Application{Registered: registered, Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
 	}
 	if len(apps) == 0 {
 		return nil
