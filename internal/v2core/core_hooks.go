@@ -131,6 +131,29 @@ func validateCoreSealPlan(p coreSealPlan) error {
 		}
 		scopes[spec.Scope] = true
 	}
+	if len(p.PartSpecs) == 0 && len(p.Files) > 1 {
+		// Without planner specs, every GCP3 file is written by
+		// WriteDenseRollupPart as one group-wide part whose scope is the first
+		// key's group/partition/part; it is retained, never LSM-ingested.
+		// Baseline bootstrap writes one such part per month partition, and
+		// their vshard ranges interleave just like planned archive parts.
+		archives = true
+		for _, file := range p.Files {
+			if !isRollupFile(file) {
+				archives = false
+				break
+			}
+			k, err := v2part.Decode(file[0].Key)
+			if err != nil {
+				return err
+			}
+			scope := v2part.Scope{Group: k.Group, VShard: v2part.GroupVShard, Partition: k.Partition, Part: k.Part}
+			if scopes[scope] {
+				return errors.New("duplicate seal archive scope")
+			}
+			scopes[scope] = true
+		}
+	}
 	var last []byte
 	for _, file := range p.Files {
 		if len(file) == 0 {
