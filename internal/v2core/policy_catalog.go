@@ -6,54 +6,94 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// PolicyIdentity owns one immutable canonical name/schema/definition. Its bytes
-// may be borrowed by catalogs, dispatches and pinned read generations. Callers
-// must never modify the returned definition or schema slices.
+// PolicyIdentity owns an immutable name and borrows one shared schema/key prefix.
+// Journal and part boundaries reconstruct the original canonical definition.
 type PolicyIdentity struct {
-	// Admission provenance permits direct use only by the catalog that validated
-	// this ID. Foreign/detached handles still take canonical equality checks.
-	catalog    *PolicyCatalog
-	vshard     uint16
-	id         uint64
-	policy     policyName
-	definition []byte
-	prepared   *sealrollup.Prepared
+	catalog *PolicyCatalog
+	id      uint64
+	policy  policyName
+	vshard  uint16
+	plain   bool
 }
 
-// PolicyCatalog is scoped to one journal epoch/engine, never process global.
-// Numeric IDs are allocated by the journal; this directory adds no name index.
-// It replaces the router's separate all-ID policy copies.
+// Definitions and key prefixes belong to the catalog epoch, rather than a name.
+// Only the name and numeric identity vary between handles.
+type policyDefinition struct {
+	suffix    []byte
+	prepared  *sealrollup.Prepared
+	keyPrefix []byte
+	Group     partsformat.Group
+}
+type policyIDPage [1024]atomic.Pointer[PolicyIdentity]
+
+// PolicyCatalog is scoped to one journal epoch. Published pages and handles are
+// immutable; reads take no construction mutex, including during page growth.
 type PolicyCatalog struct {
-	// IDs are published once as immutable handles. sync.Map uses atomic trie
-	// reads; lookup never takes a catalog mutex or copies a growing directory.
-	ids sync.Map
-	// Construction caches follow the existing virtual-shard ownership. A
-	// different owner never holds the same schema-construction mutex.
-	shards [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
+	ids         sync.Map // page number -> *policyIDPage, not one map node per name
+	definitions sync.Map // canonical suffix -> *policyDefinition
+	shards      [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
 }
-
 type policyCatalogShard struct {
 	mu        sync.Mutex
 	schemas   map[[32]byte]*PolicyIdentity
 	encodings map[string]*PolicyIdentity
 }
 
+// Definition returns a caller-owned copy of the canonical journal definition.
+// Registered batches retain the shared identity until a reader needs its bytes.
+func (h *PolicyIdentity) Definition() []byte { return h.definitionBytes() }
+
+// definitionBytes reconstructs the unchanged canonical journal/part encoding.
+// Ordinary routing and registered application lookup need only the handle.
+func (h *PolicyIdentity) definitionBytes() []byte {
+	out := make([]byte, 0, len(h.policy.Name)+len(h.policy.suffix)+16)
+	out = append(out, `{"Name":"`...)
+	if h.plain {
+		out = append(out, h.policy.Name...)
+	} else {
+		name, _ := json.Marshal(string(h.policy.Name))
+		out = append(out, name[1:len(name)-1]...)
+	}
+	return append(out, h.policy.suffix...)
+}
+func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
+	if !h.plain {
+		return bytes.Equal(h.definitionBytes(), raw)
+	}
+	const prefix = `{"Name":"`
+	n := len(prefix) + len(h.policy.Name)
+	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && string(raw[len(prefix):n]) == string(h.policy.Name) && bytes.Equal(raw[n:], h.policy.suffix)
+}
+func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
+	name, _ := json.Marshal(string(p.Name))
+	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
+	prefix, _, _ := partsformat.GroupRange(p.Group)
+	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, keyPrefix: prefix, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name)}
+}
+
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
-	if (name != "" && string(old.policy.Name) != name) || !bytes.Equal(old.definition, definition) {
+	if (name != "" && string(old.policy.Name) != name) || !old.definitionEqual(definition) {
 		return nil, errors.New("stored rollup policy changed")
 	}
 	return old, nil
 }
 
 func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
-	old, _ := c.ids.LoadOrStore(h.id, h)
-	return policyIdentityMatches(old.(*PolicyIdentity), string(h.policy.Name), h.definition)
+	pageID := h.id >> 10
+	page, _ := c.ids.Load(pageID)
+	if page == nil {
+		page, _ = c.ids.LoadOrStore(pageID, &policyIDPage{})
+	}
+	slot := &page.(*policyIDPage)[h.id&1023]
+	if slot.CompareAndSwap(nil, h) {
+		return h, nil
+	}
+	return policyIdentityMatches(slot.Load(), string(h.policy.Name), h.definitionBytes())
 }
 
 func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -99,8 +139,8 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 			if name != "" && name != string(definition[start:nameEnd]) {
 				return nil, errors.New("noncanonical rollup policy")
 			}
-			owned := bytes.Clone(definition)
-			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(unsafe.String(&owned[start], nameEnd-start))), id: id, policy: policyName{Name: partsformat.ID(unsafe.String(&owned[start], nameEnd-start)), Group: template.policy.Group}, definition: owned[:len(owned):len(owned)], prepared: template.prepared}
+			ownedName := string(definition[start:nameEnd])
+			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true}
 			return c.publish(h)
 		}
 	}
@@ -122,20 +162,19 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 	var prepared *sealrollup.Prepared
 	if old := shard.schemas[digest]; old != nil {
 		p.Config = old.schema()
-		prepared = old.prepared
+		prepared = old.policy.prepared
 	} else {
 		prepared, err = sealrollup.Prepare(p.Config)
 		if err != nil {
 			return nil, err
 		}
 	}
-	// Canonical JSON starts with Name. For an unescaped name, borrow the
-	// immutable definition bytes rather than retaining another name allocation.
-	const nameStart = len(`{"Name":"`)
-	if len(canonical) > nameStart+len(p.Name) && bytes.Equal(canonical[:nameStart], []byte(`{"Name":"`)) && bytes.Equal(canonical[nameStart:nameStart+len(p.Name)], []byte(p.Name)) && canonical[nameStart+len(p.Name)] == '"' {
-		p.Name = partsformat.ID(unsafe.String(&canonical[nameStart], len(p.Name)))
-	}
-	h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(p.Name), id: id, policy: policyName{Name: p.Name, Group: p.Group}, definition: canonical[:len(canonical):len(canonical)], prepared: prepared}
+	h := detachedPolicy(id, p, canonical, prepared)
+	key := string(h.policy.suffix)
+	shared, _ := c.definitions.LoadOrStore(key, h.policy.policyDefinition)
+	h.policy.policyDefinition = shared.(*policyDefinition)
+	h.catalog = c
+
 	if nameEnd > 0 && len(shard.encodings) < 64 {
 		shard.encodings[string(canonical[nameEnd:])] = h
 	}
@@ -146,20 +185,21 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 	return c.publish(h)
 }
 func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
-	h, _ := c.ids.Load(id)
-	if h == nil {
+	page, _ := c.ids.Load(id >> 10)
+	if page == nil {
 		return nil
 	}
-	return h.(*PolicyIdentity)
+	return page.(*policyIDPage)[id&1023].Load()
 }
 
-// BindDefinition lets the journal borrow the engine's canonical identity.
+// BindDefinition shares the canonical name and validates the journal definition.
+// The journal stores its own shared suffix, rather than a full encoding per name.
 func (e *coreEngine) BindDefinition(id uint64, name string, definition []byte) (string, []byte, error) {
 	h, err := e.identities.intern(id, name, definition)
 	if err != nil {
 		return "", nil, err
 	}
-	return string(h.policy.Name), h.definition, nil
+	return string(h.policy.Name), h.definitionBytes(), nil
 }
 
 // Only mutable lifecycle/frontier scalars belong in each owner/part directory.
@@ -190,17 +230,17 @@ func compactMetadata(m RollupMetadata) metricMetadata {
 	return out
 }
 func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
-	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Policy: h.definition, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
+	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Policy: h.definitionBytes(), Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
-func (m *rollupMetric) metadata() RollupMetadata   { return m.PolicyIdentity.metadata(m.meta) }
-func (m *readPartMetric) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
+func (m *rollupMetric) metadata() RollupMetadata    { return m.PolicyIdentity.metadata(m.meta) }
+func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
 
 type policyName struct {
-	Name  partsformat.ID
-	Group partsformat.Group
+	Name partsformat.ID
+	*policyDefinition
 }
 
-func (h *PolicyIdentity) schema() sealrollup.Config { return h.prepared.Config() }
+func (h *PolicyIdentity) schema() sealrollup.Config { return h.policy.prepared.Config() }
 func (h *PolicyIdentity) rollupPolicy() RollupPolicy {
 	return RollupPolicy{Name: h.policy.Name, Group: h.policy.Group, Config: h.schema()}
 }

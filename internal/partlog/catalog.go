@@ -2,7 +2,6 @@ package partlog
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -19,6 +18,7 @@ import (
 type catalogEntry struct {
 	key        string
 	definition []byte
+	split      bool
 }
 
 // NameCatalog is single-owner, including its codecs. Each journal stream owns a
@@ -29,7 +29,8 @@ type catalogEntry struct {
 type NameCatalog struct {
 	bindDefinition func(uint64, string, []byte) (string, []byte, error)
 
-	definitionArena []byte
+	definitionArena    []byte
+	definitionSuffixes map[string][]byte
 
 	buffer         *bufio.Writer
 	dirty          bool
@@ -293,7 +294,7 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 	}
 	if id < uint64(len(c.entries)) {
 		old := c.entries[id]
-		if old.key != key || !bytes.Equal(old.definition, def) {
+		if old.key != key || !old.definitionEqual(def) {
 			return 0, errCatalog
 		}
 	} else {
@@ -321,7 +322,7 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 		return 0, c.failed
 	}
 	if id := c.ids.lookup(key, hash, c.entries); id != 0 {
-		if !bytes.Equal(c.entries[id].definition, definition) {
+		if !c.entries[id].definitionEqual(definition) {
 			return 0, fmt.Errorf("%w: changed definition", errCatalog)
 		}
 		return id, nil
@@ -364,7 +365,7 @@ func (c *NameCatalog) Lookup(id uint64) (string, []byte, bool) {
 		return "", nil, false
 	}
 	e := c.entries[id]
-	return e.key, e.definition, true
+	return e.key, e.definitionBytes(), true
 }
 func (c *NameCatalog) Epoch() [16]byte { return c.epoch }
 func (c *NameCatalog) Count() uint64   { return uint64(len(c.entries) - 1) }
@@ -433,7 +434,7 @@ func (c *NameCatalog) checkpoint() error {
 	}
 	for id := uint64(1); id <= c.Count(); id++ {
 		r := c.entries[id]
-		if _, e = compressed.Write(catalogRecord(id, r.key, r.definition)); e != nil {
+		if _, e = compressed.Write(catalogRecord(id, r.key, r.definitionBytes())); e != nil {
 			_ = compressed.Close()
 			return e
 		}

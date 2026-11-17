@@ -3,11 +3,9 @@ package v2core
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"sync"
 	"unsafe"
 
@@ -18,15 +16,19 @@ import (
 
 // RollupSnapshot is a directory over immutable part keys in a pinned snapshot.
 // Atomic bindings enumerate parts; only added parts seek over archive values.
-// A prior directory shares immutable per-part metadata; it never shares a snapshot or a writer-owned object.
+// A prior directory shares immutable scopes and latest metadata. Per-name part
+// membership stays in the sorted SST, accessed through the pinned snapshot.
 // The caller retains snapshot until all directory consumers have returned.
 type RollupSnapshot struct {
 	identities *PolicyCatalog
 	// Copy-only state is absent from ordinary per-name directories.
-	moves map[*snapshotMetric]*snapshotMove
+	moves            map[*snapshotMetric]*snapshotMove
+	sourceIdentities map[partOrigin]*PolicyCatalog
+	partOverrides    map[*snapshotMetric][]*readPartMetric
 
 	snapshot       *pebble.Snapshot
 	directory      string
+	routes         map[partRoute][]*readPart
 	parts          map[string]*readPart
 	metrics        map[string]*snapshotMetric
 	cache          *rollupRangeCache
@@ -64,28 +66,38 @@ type archiveResult struct {
 	age                uint64
 }
 
-type readPart struct {
-	id      string
-	key     v2part.Key          // immutable part scope; names come from the metric policy
-	ids     map[string]struct{} // shared singleton set for names with only this part
-	metrics map[string]*readPartMetric
-	bytes   int64
-	origin  partOrigin
+type partRoute struct {
+	group v2part.Group
+	shard uint16
 }
-type readPartMetric struct {
-	part *readPart
+
+type readPart struct {
+	first, last string
+	id          string
+	key         v2part.Key // immutable part scope; names come from the metric policy
+	metrics     map[string]*readPartMetric
+	bytes       int64
+	origin      partOrigin
+}
+type readMetricState struct {
 	*PolicyIdentity
 	meta metricMetadata
 }
-type snapshotMetric struct {
-	single  [1]*readPartMetric
-	latest  *readPartMetric
-	parts   []*readPartMetric
-	partIDs map[string]struct{}
+type readPartMetric struct {
+	part *readPart
+	readMetricState
+}
+
+// A generation owns one latest metadata value per name, independent of how
+// many immutable parts contain it. No separate per-part metric object survives.
+type snapshotMetric struct{ latest readMetricState }
+type sourceMetadata struct {
+	ID uint64
+	metricMetadata
 }
 type snapshotMove struct {
 	origin    partOrigin
-	origins   map[partOrigin]RollupMetadata
+	origins   map[partOrigin]sourceMetadata
 	copied    bool
 	authority *moveAuthority
 }
@@ -168,6 +180,22 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 	}
 
+	if prior != nil {
+		live := make(map[string]bool, len(scopes))
+		for _, id := range scopes {
+			live[id] = true
+		}
+		for id := range prior.parts {
+			if !live[id] {
+				fresh, err := NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, nil, identities, bindings, cacheLimit...)
+				if err == nil && prior.cache != nil && prior.cache.limit == limit {
+					fresh.cache = prior.cache
+				}
+				return fresh, err
+			}
+		}
+	}
+
 	// A part's own directory is read through only that file. Merging every
 	// live file for each metadata seek makes sparse catch-up quadratic.
 	loaded := map[string]*readPart{}
@@ -192,8 +220,13 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 	}
 
-	changed := map[string]bool{}
-	added := map[string]*readPart{}
+	// Latest metadata is the only name-sized read structure. Each newly loaded
+	// part uses a transient sorted SST walk; its membership remains in the SST.
+	if prior != nil {
+		out.metrics = maps.Clone(prior.metrics)
+	}
+	out.routes = map[partRoute][]*readPart{}
+	changed := false
 	for _, id := range scopes {
 		var part *readPart
 		if prior != nil {
@@ -215,95 +248,63 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 			return nil, errors.New("duplicate rollup scope binding")
 		}
 		out.parts[id] = part
+		route := partRoute{part.key.Group, part.key.VShard}
+		out.routes[route] = append(out.routes[route], part)
 		out.directoryBytes += part.bytes
-		if prior == nil || prior.parts[id] == nil {
-			added[id] = part
-			for name := range part.metrics {
-				changed[name] = true
-			}
+		if prior != nil && prior.parts[id] != nil {
+			continue
 		}
-
-	}
-	removed := map[string]bool{}
-	if prior != nil {
-		for id, part := range prior.parts {
-			if out.parts[id] == nil {
-				for name := range part.metrics {
-					changed[name] = true
-					removed[name] = true
-				}
-			}
-		}
-		if len(changed) == 0 {
-			out.metrics = prior.metrics
-			out.directoryBytes = prior.directoryBytes
-			return out, nil
-		}
-		out.metrics = maps.Clone(prior.metrics)
-	}
-	// Detach only affected entries before extending the immutable directory.
-	for name := range changed {
-		if prior != nil && !removed[name] {
-			if old := prior.metrics[name]; old != nil {
-				copy := *old
-				copy.parts = slices.Clone(old.parts)
-				copy.partIDs = maps.Clone(old.partIDs)
-				out.metrics[name] = &copy
-				continue
-			}
-		}
-		delete(out.metrics, name)
-	}
-	// Walk actual entries once, rather than probing every part for each name.
-	addPart := func(part *readPart, onlyRemoved bool) error {
+		changed = true
 		for name, pm := range part.metrics {
-			if onlyRemoved && !removed[name] {
-				continue
-			}
-			m := out.metrics[name]
-			if m == nil {
-				m = &snapshotMetric{latest: pm, partIDs: part.ids}
-				m.parts = m.single[:0]
-				out.metrics[name] = m
-			}
-			if m.latest.PolicyIdentity != pm.PolicyIdentity {
-				return errors.New("inconsistent rollup identity/policy")
-			}
-			if pm.meta.Frontier.Order > m.latest.meta.Frontier.Order || (pm.meta.Frontier.Order == m.latest.meta.Frontier.Order && pm.meta.Revision > m.latest.meta.Revision) {
-				m.latest = pm
-			}
-			if len(m.parts) > 0 {
-				// Detach the immutable singleton before adding a second part.
-				if len(m.parts) == 1 {
-					m.partIDs = maps.Clone(m.partIDs)
+			old := out.metrics[name]
+			latest := pm.readMetricState
+			if old != nil {
+				if old.latest.PolicyIdentity != pm.PolicyIdentity {
+					return nil, errors.New("inconsistent rollup identity/policy")
 				}
-				m.partIDs[part.id] = struct{}{}
-			}
-			m.parts = append(m.parts, pm)
-		}
-		return nil
-	}
-	for _, part := range added {
-		if err := addPart(part, false); err != nil {
-			return nil, err
-		}
-	}
-	if len(removed) > 0 {
-		for id, part := range out.parts {
-			if added[id] == nil {
-				if err := addPart(part, true); err != nil {
-					return nil, err
+				if old.latest.meta.Frontier.Order > pm.meta.Frontier.Order || (old.latest.meta.Frontier.Order == pm.meta.Frontier.Order && old.latest.meta.Revision >= pm.meta.Revision) {
+					latest = old.latest
 				}
 			}
+			out.metrics[name] = &snapshotMetric{latest: latest}
 		}
+		part.metrics = nil // retire every per-name/per-part object except latest metadata
 	}
-	for _, m := range out.metrics {
-		out.directoryBytes += int64(64 + len(m.parts)*48)
+	if !changed && prior != nil {
+		out.metrics = prior.metrics
 	}
+	out.directoryBytes += int64(len(out.metrics)) * int64(unsafe.Sizeof(snapshotMetric{})+64)
+
 	for id, scopes := range out.inventory {
 		out.directoryBytes += int64(64 + len(id) + len(scopes)*16)
 	}
 	return out, nil
+}
+
+// metricParts probes only the routed scopes whose sorted name bounds overlap.
+// Common parts retain no series directory: metadata is decoded by the request's
+// existing iterator. Source-local authority is kept separately for moved names.
+func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
+	if parts, ok := s.partOverrides[m]; ok {
+		return parts
+	}
+	name := string(m.latest.policy.Name)
+	scoped := s.routes[partRoute{m.latest.policy.Group, m.latest.vshard}]
+	out := make([]*readPartMetric, 0, len(scoped))
+	for _, p := range scoped {
+		if name < p.first || name > p.last {
+			continue
+		}
+		out = append(out, &readPartMetric{part: p, readMetricState: readMetricState{PolicyIdentity: m.latest.PolicyIdentity}})
+	}
+	return out
+}
+func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, p := range s.metricParts(m) {
+		ids[p.part.id] = struct{}{}
+	}
+	return ids
 }
 
 // RetainedBytes conservatively charges directory storage plus the maximum
@@ -395,7 +396,11 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	count := copy(candidates[:], s.cache.entries[cacheKey])
 	s.cache.mu.Unlock()
 	var cached *archiveResult
-	parts := m.partIDs
+	partList := s.metricParts(m)
+	parts := make(map[string]struct{}, len(partList))
+	for _, part := range partList {
+		parts[part.part.id] = struct{}{}
+	}
 	for _, candidate := range candidates[:count] {
 		// Cache aging uses an order only inside the same original stream.
 		// Changing the winning class/source invalidates that age comparison.
@@ -447,8 +452,8 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	if s.directory != "" {
 		ctx = WithRollupDirectory(ctx, s.directory)
 	}
-	selected := make(map[archivePartIdentity]bool, len(m.parts))
-	for _, part := range m.parts {
+	selected := make(map[archivePartIdentity]bool, len(partList))
+	for _, part := range partList {
 		selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
 	}
 	it, err := newArchiveIterSelected(ctx, s.snapshot, nil, selected)
@@ -456,7 +461,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		return err
 	}
 	defer it.Close()
-	for _, part := range m.parts {
+	for _, part := range partList {
 		if cached != nil {
 			if _, ok := cached.parts[part.part.id]; ok {
 				continue
@@ -464,6 +469,25 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		}
 		if err = ctx.Err(); err != nil {
 			return err
+		}
+		if part.meta.Frontier.Order == 0 {
+			key := part.part.key
+			key.Metric = m.latest.policy.Name
+			key.Archive = v2part.MetadataArchive
+			key.BlockStart = 0
+			key.Ordinal = 0
+			encoded, e := v2part.Encode(key)
+			if e != nil {
+				return e
+			}
+			if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
+				continue
+			}
+			meta, e := decodeRollupMetadataView(it.Value())
+			if e != nil {
+				return e
+			}
+			part.meta = compactMetadata(meta)
 		}
 		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
 			continue
@@ -645,7 +669,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		return nil, fmt.Errorf("missing rollup part %x", scope)
 	}
 	id := string(scope)
-	part := &readPart{origin: partOrigin{Class: LivePart}, id: id, ids: map[string]struct{}{id: {}}, metrics: map[string]*readPartMetric{}}
+	part := &readPart{origin: partOrigin{Class: LivePart}, id: id, metrics: map[string]*readPartMetric{}}
 	end := v2part.PrefixEnd(scope)
 	for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 		if err := ctx.Err(); err != nil {
@@ -680,31 +704,34 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			return nil, err
 		}
 		policy := h.rollupPolicy()
-		meta.Policy = h.definition
 		if (meta.Version != 1 && meta.Version != 2) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 			return nil, errors.New("invalid rollup metadata")
 		}
 		if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
 			return nil, errors.New("invalid rollup reset frontier")
 		}
-		if h.prepared.Digest() != meta.Frontier.Policy {
+		if h.policy.prepared.Digest() != meta.Frontier.Policy {
 			return nil, errors.New("rollup policy/frontier mismatch")
 		}
 		if len(part.metrics) == 0 {
 			part.key = key
 			part.key.Metric = ""
 		}
-		part.metrics[string(policy.Name)] = &readPartMetric{part: part, PolicyIdentity: h, meta: compactMetadata(meta)}
+		name := string(policy.Name)
+		if part.first == "" || name < part.first {
+			part.first = name
+		}
+		if name > part.last {
+			part.last = name
+		}
+		part.metrics[name] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
 		// The last 16 bytes are archive, physical slot and ordinal.
 		it.Next()
 		if it.Valid() && bytes.HasPrefix(it.Key(), encoded[:len(encoded)-16]) {
 			return nil, errors.New("unexpected keys after rollup metadata")
 		}
 	}
-	part.bytes = int64(128 + len(scope))
-	for name, pm := range part.metrics {
-		part.bytes += int64(512 + len(name)*2 + len(pm.definition)*2 + len(pm.policy.Group)*2 + len(pm.schema().Archives)*32)
-	}
+	part.bytes = int64(unsafe.Sizeof(readPart{}) + uintptr(len(scope)) + 64)
 	return part, it.Error()
 }
 
@@ -714,7 +741,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
-	out := &RollupSnapshot{snapshot: snapshot, directory: directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}, moves: map[*snapshotMetric]*snapshotMove{}}
+	out := &RollupSnapshot{snapshot: snapshot, directory: directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}, moves: map[*snapshotMetric]*snapshotMove{}, routes: map[partRoute][]*readPart{}, sourceIdentities: map[partOrigin]*PolicyCatalog{}}
 	var err error
 	out.hasCopied, err = snapshotHasCopiedParts(snapshot)
 	if err != nil {
@@ -752,8 +779,11 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 		if prior != nil {
 			part = prior.parts[scopeID]
 		}
+		if part != nil && part.metrics == nil {
+			part = nil
+		}
 		if part == nil {
-			part = &readPart{id: scopeID, ids: map[string]struct{}{scopeID: {}}, key: key, metrics: map[string]*readPartMetric{}}
+			part = &readPart{id: scopeID, key: key, metrics: map[string]*readPartMetric{}}
 			part.key.Metric = ""
 			origin := partOrigin{Class: LivePart}
 			if out.hasCopied {
@@ -800,48 +830,51 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 				if err = decodeErr; err != nil {
 					return nil, err
 				}
-				var policy RollupPolicy
-				if err = json.Unmarshal(meta.Policy, &policy); err != nil {
+				catalog := out.sourceIdentities[origin]
+				if catalog == nil && prior != nil {
+					catalog = prior.sourceIdentities[origin]
+				}
+				if catalog == nil {
+					catalog = &PolicyCatalog{}
+				}
+				out.sourceIdentities[origin] = catalog
+				h, err := catalog.intern(meta.ID, string(key.Metric), meta.Policy)
+				if err != nil {
 					return nil, err
 				}
+				policy := h.rollupPolicy()
 				if (meta.Version != 1 && meta.Version != 2) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 					return nil, errors.New("invalid rollup metadata")
 				}
 				if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
 					return nil, errors.New("invalid rollup reset frontier")
 				}
-				digest, err := sealrollup.PolicyDigest(policy.Config)
-				if err != nil {
-					return nil, err
-				}
-				if digest != meta.Frontier.Policy {
+				if h.policy.prepared.Digest() != meta.Frontier.Policy {
 					return nil, errors.New("rollup policy/frontier mismatch")
 				}
-				prepared, err := sealrollup.Prepare(policy.Config)
-				if err != nil {
-					return nil, err
+				name := string(policy.Name)
+				if part.first == "" || name < part.first {
+					part.first = name
 				}
-				part.metrics[string(key.Metric)] = &readPartMetric{part: part, PolicyIdentity: &PolicyIdentity{id: meta.ID, policy: policyName{Name: policy.Name, Group: policy.Group}, definition: meta.Policy, prepared: prepared}, meta: compactMetadata(meta)}
+				if name > part.last {
+					part.last = name
+				}
+				part.metrics[name] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
 				// The last 16 bytes are archive, physical slot and ordinal.
 				it.SeekGE(v2part.PrefixEnd(encoded[:len(encoded)-16]))
 			}
 		}
 		out.parts[scopeID] = part
-		out.directoryBytes += int64(128 + len(scopeID))
-		for name, pm := range part.metrics {
-			out.directoryBytes += int64(512 + len(name)*2 + len(pm.definition)*2 + len(pm.policy.Group)*2 + len(pm.schema().Archives)*32)
-			if pm.part.origin.Class == CopiedPart {
-				out.directoryBytes += int64(len(pm.part.origin.Stream) + 128)
-			}
-		}
+		out.routes[partRoute{part.key.Group, part.key.VShard}] = append(out.routes[partRoute{part.key.Group, part.key.VShard}], part)
+		out.directoryBytes += int64(unsafe.Sizeof(readPart{}) + uintptr(len(scopeID)) + 64)
 		for name, p := range part.metrics {
 			m := out.metrics[name]
 			if m == nil {
-				m = &snapshotMetric{latest: p, partIDs: map[string]struct{}{}}
-				out.moves[m] = &snapshotMove{origin: p.part.origin, origins: map[partOrigin]RollupMetadata{}}
+				m = &snapshotMetric{latest: p.readMetricState}
+				out.moves[m] = &snapshotMove{origin: p.part.origin, origins: map[partOrigin]sourceMetadata{}}
 				out.metrics[name] = m
 			}
-			if m.latest.policy.Group != p.policy.Group || !bytes.Equal(m.latest.definition, p.definition) {
+			if m.latest.policy.Group != p.policy.Group || !bytes.Equal(m.latest.definitionBytes(), p.definitionBytes()) {
 				return nil, errors.New("inconsistent rollup identity/policy")
 			}
 			out.moves[m].copied = out.moves[m].copied || p.part.origin.Class == CopiedPart
@@ -850,23 +883,24 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 				return nil, errors.New("source changed numeric metric identity")
 			}
 			if !seen || p.meta.Frontier.Order > old.Frontier.Order || (p.meta.Frontier.Order == old.Frontier.Order && p.meta.Revision > old.Revision) {
-				out.moves[m].origins[p.part.origin] = p.metadata()
+				out.moves[m].origins[p.part.origin] = sourceMetadata{ID: p.id, metricMetadata: p.meta}
 			}
 			newer, err := newerSource(p.part.origin, p.meta.Frontier.Order, out.moves[m].origin, m.latest.meta.Frontier.Order)
 			if err != nil {
 				return nil, err
 			}
 			if newer || (p.part.origin == out.moves[m].origin && p.meta.Frontier.Order == m.latest.meta.Frontier.Order && p.meta.Revision > m.latest.meta.Revision) {
-				m.latest, out.moves[m].origin = p, p.part.origin
+				m.latest, out.moves[m].origin = p.readMetricState, p.part.origin
 			}
-			m.parts = append(m.parts, p)
-			m.partIDs[p.part.id] = struct{}{}
 		}
+		part.metrics = nil
+
 		valid = it.SeekGE(v2part.PrefixEnd(scope))
 	}
 	if err = it.Error(); err != nil {
 		return nil, err
 	}
+	out.directoryBytes += int64(len(out.metrics)) * int64(unsafe.Sizeof(snapshotMetric{})+64+256)
 	if err := out.loadMoveAuthorities(); err != nil {
 		return nil, err
 	}

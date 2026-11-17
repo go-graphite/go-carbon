@@ -3,6 +3,7 @@ package v2core
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"sync"
@@ -22,10 +23,10 @@ func TestPolicyCatalogImmutableOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			clear(raw)
-			if h.catalog != c || string(h.policy.Name) != name || !bytes.Equal(h.definition, original) {
+			if h.catalog != c || string(h.policy.Name) != name || !bytes.Equal(h.definitionBytes(), original) {
 				t.Fatal("borrowed caller memory")
 			}
-			_ = append(h.definition, 255)
+			_ = append(h.definitionBytes(), 255)
 			var wg sync.WaitGroup
 			for range 8 {
 				wg.Go(func() {
@@ -76,8 +77,8 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "shared.metric" || &definition[0] != &h.definition[0] {
-		t.Fatal("journal binding copied policy")
+	if name != "shared.metric" || !bytes.Equal(definition, h.definitionBytes()) {
+		t.Fatal("journal binding changed policy")
 	}
 	if err := ScanRollups(snap, func(p RollupPolicy, m RollupMetadata, want []sealrollup.Record) error {
 		got, err := index.Records(context.Background(), string(p.Name))
@@ -100,9 +101,45 @@ func TestPolicyCatalogMetadataRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, baseline := range []uint64{0, 3} {
-		want := RollupMetadata{Version: 2, ID: 7, Policy: h.definition, BaselineOrder: baseline, ResetOrder: 4, LastUpdate: 100, Revision: 8, Frontier: sealrollup.Frontier{Order: 9, MaxTime: 99, Policy: h.prepared.Digest()}}
+		want := RollupMetadata{Version: 2, ID: 7, Policy: h.definitionBytes(), BaselineOrder: baseline, ResetOrder: 4, LastUpdate: 100, Revision: 8, Frontier: sealrollup.Frontier{Order: 9, MaxTime: 99, Policy: h.policy.prepared.Digest()}}
 		if got := h.metadata(compactMetadata(want)); !reflect.DeepEqual(got, want) {
 			t.Fatalf("compact metadata lost state: got %+v want %+v", got, want)
+		}
+	}
+}
+
+func TestPolicyCatalogSharedSchemasAndPagedIDs(t *testing.T) {
+	c := &PolicyCatalog{}
+	var shared *policyDefinition
+	for i := uint64(1); i <= 128; i++ {
+		name := fmt.Sprintf("shared.catalog.metric.%d", i)
+		_, raw := rollupTestPolicy(t, name, "1s:1d,1m:30d", sealrollup.Last, .5)
+		h, err := c.intern(i, name, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shared == nil {
+			shared = h.policy.policyDefinition
+		}
+		if h.policy.policyDefinition != shared {
+			t.Fatal("schema/key prefix was copied across virtual shards")
+		}
+		if got := h.definitionBytes(); !bytes.Equal(got, raw) {
+			t.Fatal("canonical bytes changed")
+		}
+		if c.lookup(i) != h {
+			t.Fatal("published handle changed")
+		}
+	}
+	for _, id := range []uint64{1023, 1024, 1025, ^uint64(0)} {
+		name := fmt.Sprintf("page.metric.%d", id)
+		_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
+		h, err := c.intern(id, name, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.lookup(id) != h || c.lookup(id-1) == h {
+			t.Fatal("atomic page boundary aliased identity")
 		}
 	}
 }

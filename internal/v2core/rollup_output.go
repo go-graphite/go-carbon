@@ -30,9 +30,14 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	files := r.files
 	key := func(m *rollupMetric, archive uint32, slot int64) []byte {
 		start := len(r.arena)
-		r.arena = append(r.arena, m.keyTemplate...)
+		r.arena = append(r.arena, m.policy.keyPrefix...)
+		r.arena = binary.BigEndian.AppendUint16(r.arena, m.vshard)
+		r.arena = binary.BigEndian.AppendUint64(r.arena, 1<<63)
+		r.arena = append(r.arena, part[:]...)
+		r.arena = binary.BigEndian.AppendUint32(r.arena, uint32(len(m.policy.Name)))
+		r.arena = append(r.arena, m.policy.Name...)
+		r.arena = append(r.arena, make([]byte, 16)...)
 		encoded := r.arena[start:len(r.arena):len(r.arena)]
-		copy(encoded[m.partOffset:m.partOffset+16], part[:])
 		tail := len(encoded) - 16
 		binary.BigEndian.PutUint32(encoded[tail:], archive)
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
@@ -171,7 +176,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						return append(dst, result...)
 					}
 				}
-				plan, err := m.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, view, ranges, s.batches, &lane.workspace)
+				plan, err := m.policy.prepared.PlanInto(lane.records[len(lane.records):], m.metadata().Frontier, view, ranges, s.batches, &lane.workspace)
 				if readErr != nil {
 					lane.err = readErr
 					return
@@ -312,7 +317,7 @@ func (r *coreRollups) commitStages() {
 					r.lanes[i].windows.commit(m, s.records, s.next.Expired)
 				}
 				if s.next.Expired {
-					m.slots = *m.prepared.NewSlots()
+					m.slots = *m.policy.prepared.NewSlots()
 				}
 				m.meta = compactMetadata(s.next)
 			}
