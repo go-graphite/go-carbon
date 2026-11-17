@@ -116,6 +116,7 @@ func (app *App) startV2() error {
 	var intake atomic.Pointer[v2recv.Server]
 	telemetry := newV2WriteTelemetry(shards, n)
 	updates := newV2CatalogUpdates(shards)
+	catalogTelemetry := &v2CatalogTelemetry{}
 	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: func(owner int, batches []v2core.Batch) {
 		telemetry.visible(owner, batches)
 		updates.visible(owner, batches)
@@ -237,10 +238,10 @@ func (app *App) startV2() error {
 			initialized = true
 			return nil
 		}
-		add, expired := updates.drain()
+		add, stamps, expired := updates.drain()
 		defer func() {
 			if refreshErr != nil {
-				updates.retry(add, expired)
+				updates.retry(add, stamps, expired)
 			}
 		}()
 		var remove []string
@@ -259,12 +260,18 @@ func (app *App) startV2() error {
 		if len(add) == 0 && len(remove) == 0 {
 			return ctx.Err()
 		}
-		return v.catalog.ApplyBeforePublishContext(ctx, old.Revision()+1, add, remove, func(next *v2index.Snapshot) error {
+		start := time.Now()
+		if err := v.catalog.ApplyBeforePublishContext(ctx, old.Revision()+1, add, remove, func(next *v2index.Snapshot) error {
 			if v.quotas == nil {
 				return ctx.Err()
 			}
 			return publishV2QuotasContext(ctx, v.quotas, quotaFence, r, slices.Collect(next.Names()), historicalQuota)
-		})
+		}); err != nil {
+			return err
+		}
+		next := v.catalog.Snapshot()
+		catalogTelemetry.published(start, add, stamps, next.Levels(), next.Len())
+		return nil
 	}
 	// Quotas require recovered reservations before admission. Without quotas,
 	// startup discovery belongs to the background worker (also compatible with
@@ -289,6 +296,7 @@ func (app *App) startV2() error {
 		}
 		return out
 	})
+	app.Carbonserver.RegisterInternalInfoHandler("v2-catalog", catalogTelemetry.report)
 	app.Carbonserver.RegisterInternalInfoHandler("v2-storage", func() map[string]interface{} { return map[string]interface{}{"mode": mode, "classic-dual-write": dual} })
 	if c.Prometheus.Enabled {
 		if err := app.PromRegisterer.Register(v.metrics); err != nil {
