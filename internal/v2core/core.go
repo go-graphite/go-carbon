@@ -536,13 +536,13 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		for _, b := range batches {
 			policy := b.Policy
 			if b.Registered != nil {
-				if len(b.Registered.policy) == 0 {
+				if len(b.Registered.definition) == 0 {
 					return errors.New("uninitialized application policy")
 				}
 				if len(policy) != 0 {
 					return errors.New("registered policy with mutable definition")
 				}
-				policy = b.Registered.policy
+				policy = b.Registered.definition
 			}
 			if _, err := e.identities.intern(b.ID, "", policy); err != nil {
 				return err
