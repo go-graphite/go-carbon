@@ -206,6 +206,8 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 					defer b.Close()
 					bIDs := CatalogEncoder{Catalog: c, Independent: independent, SeriesClocks: series, SparseClocks: sparse}
 					defer bIDs.Close()
+					bFrames := CatalogEncoder{Catalog: c, Independent: independent, SeriesClocks: series, SparseClocks: sparse}
+					defer bFrames.Close()
 					rng := rand.New(rand.NewSource(87153))
 					var kept, saved [][]byte
 					for record := 0; record < 17; record++ {
@@ -245,6 +247,20 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 						if e != nil || !bytes.Equal(want, gotIDs) {
 							t.Fatalf("record %d IDs changed bytes: %v", record, e)
 						}
+						resolved := make([]CatalogFrame, len(fs))
+						for i, f := range fs {
+							id, err := c.Intern(f.Key, f.Definition)
+							if err != nil {
+								t.Fatal(err)
+							}
+							resolved[i] = CatalogFrame{ID: id, Clock: f.Clock, Points: f.Points}
+						}
+						gotFrames, err := bFrames.EncodeFrames(resolved)
+						if err != nil || !bytes.Equal(want, gotFrames) {
+							t.Fatalf("record%d resolved changed bytes: %v", record, err)
+						}
+						kept = append(kept, gotFrames)
+						saved = append(saved, bytes.Clone(gotFrames))
 						kept = append(kept, gotIDs)
 						saved = append(saved, bytes.Clone(gotIDs))
 
@@ -409,4 +425,25 @@ func TestCatalogEncodePointsRejectsInvalid(t *testing.T) {
 		t.Fatal("failed catalog accepted")
 	}
 	c.failed = nil
+}
+
+func TestCatalogFramesRejectInvalid(t *testing.T) {
+	c := newTestCatalog(t)
+	id, err := c.Intern("one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fs := range [][]CatalogFrame{nil, {{ID: 0, Points: []points.Point{{}}}}, {{ID: id + 1, Points: []points.Point{{}}}}, {{ID: id}}} {
+		e := CatalogEncoder{Catalog: c}
+		if _, err := e.EncodeFrames(fs); err == nil {
+			t.Fatal("accepted invalid resolved frames", fs)
+		}
+		e.Close()
+	}
+	e := CatalogEncoder{Catalog: c}
+	defer e.Close()
+	c.failed = errCatalog
+	if _, err := e.EncodeFrames([]CatalogFrame{{ID: id, Points: []points.Point{{}}}}); err != errCatalog {
+		t.Fatal("lost sticky catalog error", err)
+	}
 }

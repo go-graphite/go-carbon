@@ -38,8 +38,21 @@ type CatalogEncoder struct {
 
 func IsCatalogRecord(b []byte) bool { return bytes.HasPrefix(b, catalogCodecMagic) }
 
+// CatalogFrame carries a previously interned stream-local numeric identity.
+// Names and immutable definitions were validated by NameCatalog.Intern at
+// admission; only the ID range and application payload need checking here.
+type CatalogFrame struct {
+	ID     uint64
+	Clock  int64
+	Points []points.Point
+}
+
+func (e *CatalogEncoder) EncodeFrames(fs []CatalogFrame) ([]byte, error) {
+	return e.encode(nil, nil, nil, 0, fs)
+}
+
 func (e *CatalogEncoder) Encode(fs []DictionaryFrame) ([]byte, error) {
-	return e.encode(fs, nil, nil, 0)
+	return e.encode(fs, nil, nil, 0, nil)
 }
 
 // EncodeIDs accepts IDs already resolved in this encoder's catalog. It validates
@@ -51,7 +64,7 @@ func (e *CatalogEncoder) EncodeIDs(fs []DictionaryFrame, ids []uint64) ([]byte, 
 	if len(ids) != len(fs) {
 		return nil, errPredictorV3
 	}
-	return e.encode(fs, ids, nil, 0)
+	return e.encode(fs, ids, nil, 0, nil)
 }
 
 // EncodePoints journals one point per already-resolved catalog ID at a common
@@ -63,11 +76,14 @@ func (e *CatalogEncoder) EncodePoints(ids []uint64, data []points.Point, clock i
 	if len(ids) != len(data) || len(data) == 0 {
 		return nil, errPredictorV3
 	}
-	return e.encode(nil, ids, data, clock)
+	return e.encode(nil, ids, data, clock, nil)
 }
 
-func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []points.Point, arrivalClock int64) ([]byte, error) {
+func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []points.Point, arrivalClock int64, resolved []CatalogFrame) ([]byte, error) {
 	count := len(fs)
+	if resolved != nil {
+		count = len(resolved)
+	}
 	if data != nil {
 		count = len(data)
 	}
@@ -97,7 +113,14 @@ func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []point
 	for frame := 0; frame < count; frame++ {
 		var f DictionaryFrame
 		var id uint64
-		if data != nil {
+		if resolved != nil {
+			r := resolved[frame]
+			id = r.ID
+			if id == 0 || id > e.Catalog.Count() || len(r.Points) == 0 || len(r.Points) > predictorV3MaxRaw {
+				return nil, errCatalog
+			}
+			f.Clock, f.Points = r.Clock, r.Points
+		} else if data != nil {
 			id = ids[frame]
 			if _, _, ok := e.Catalog.Lookup(id); !ok {
 				return nil, errCatalog

@@ -72,9 +72,9 @@ type Producer struct {
 	spareRecords                                                 [][]byte
 	spareRows                                                    [][]v2core.Row
 	spareBatches                                                 [][]v2core.Batch
-	applicationFrames                                            []partlog.DictionaryFrame
+	applicationFrames                                            []partlog.CatalogFrame
 	applicationIDs                                               []uint64
-	applicationPolicies                                          map[uint64]*v2core.ApplicationPolicy
+	applicationPolicies                                          map[uint64]*RegisteredApplication
 	cursor                                                       uint64
 	applyOrder                                                   uint64
 	pendingRows                                                  int

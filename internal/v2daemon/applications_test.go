@@ -17,7 +17,11 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
-func TestOriginalApplicationsJournalCore(t *testing.T) {
+func TestOriginalApplicationsJournalCore(t *testing.T) { testOriginalApplicationsJournalCore(t, false) }
+func TestRegisteredApplicationsJournalCore(t *testing.T) {
+	testOriginalApplicationsJournalCore(t, true)
+}
+func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 	t.Parallel()
 	root := t.TempDir()
 	cfg := Config{Layer: 3, Producers: 1, Shards: 2, coreMaxRows: 256, GroupInterval: time.Hour}
@@ -56,6 +60,22 @@ func TestOriginalApplicationsJournalCore(t *testing.T) {
 		}
 	}
 	p := s.Producers[0]
+	if useRegistered {
+		registered, err := p.RegisterApplication("test.a", a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := p.RegisterApplication("test.a", append([]byte(nil), a...))
+		if err != nil || registered != again {
+			t.Fatal("registration lost identity", err)
+		}
+		for _, i := range []int{0, 2} {
+			apps[i].Registered = registered
+			apps[i].Name = ""
+			apps[i].Policy = nil
+		}
+		clear(a) // registration and all later appends own the canonical definition
+	}
 	if err = p.AppendApplications(apps[:2]); err != nil {
 		t.Fatal(err)
 	}
@@ -190,5 +210,60 @@ func TestClassicFixtureShapes(t *testing.T) {
 		if len(slots) == 0 {
 			t.Fatal("empty classic fixture shape", shape)
 		}
+	}
+}
+
+func TestRegisteredApplicationScope(t *testing.T) {
+	for _, mode := range []string{"producer", "zero", "name", "policy", "restart"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := Config{Layer: 3, Producers: 2, Shards: 1, coreMaxRows: 16, GroupInterval: time.Hour}
+			s, err := Open(root, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: "scope", Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 120}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := s.Producers[0]
+			registered, err := p.RegisterApplication("scope", policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bad := append([]byte(nil), policy...)
+			bad[len(bad)-1] ^= 1
+			if _, err := p.RegisterApplication("scope", bad); err == nil {
+				t.Fatal("accepted changed catalog definition")
+			}
+			app := Application{Registered: registered, Order: 1, Clock: 1000, Points: []points.Point{{Timestamp: 999, Value: 1}}, Sequence: []uint64{1}}
+			switch mode {
+			case "producer":
+				p = s.Producers[1]
+			case "zero":
+				app.Registered = &RegisteredApplication{}
+			case "name":
+				app.Name = "scope"
+			case "policy":
+				app.Policy = policy
+			case "restart":
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := Open(root, cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = reopened.Close() }()
+				p = reopened.Producers[0]
+			}
+			if err := p.AppendApplications([]Application{app}); err == nil {
+				t.Fatal("accepted invalid registered application")
+			}
+			if p.cursor != 0 {
+				t.Fatal("invalid handle advanced cursor")
+			}
+		})
 	}
 }
