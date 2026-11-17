@@ -73,8 +73,8 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(plan.Files) != 4 {
-		t.Fatalf("files %d want metadata and expiry parts per placement group", len(plan.Files))
+	if len(plan.Files) != 2 {
+		t.Fatalf("files %d want one month part per placement group", len(plan.Files))
 	}
 	if e = validateCoreSealPlan(plan); e != nil {
 		t.Fatal(e)
@@ -104,9 +104,14 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		}
 		fb, _ := os.ReadFile(fast)
 		sb, _ := os.ReadFile(slow)
-		// Planned sealing adds the exact inventory to the descriptor; the
-		// generic portable writer and the SST bytes stay backward compatible.
+		// Planned sealing adds the exact inventory and expiry bounds to the
+		// descriptor; the generic portable writer (no expiry: never retired by
+		// age) and the SST bytes stay backward compatible.
+		if fd.Coverage.MaxExpiry == 0 {
+			t.Fatal("planned seal omitted expiry bounds")
+		}
 		sd.VShards = fd.VShards
+		sd.Coverage.MinExpiry, sd.Coverage.MaxExpiry = fd.Coverage.MinExpiry, fd.Coverage.MaxExpiry
 		if !reflect.DeepEqual(fd, sd) || !bytes.Equal(fb, sb) {
 			t.Fatal("planned spec changed portable part bytes/descriptor")
 		}
