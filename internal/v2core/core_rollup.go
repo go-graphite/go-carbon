@@ -467,8 +467,8 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 	}
 	type entry struct {
 		group     partsformat.Group
-		policy    RollupPolicy
-		meta      RollupMetadata
+		identity  *PolicyIdentity
+		meta      metricMetadata
 		records   map[[2]int64]sealrollup.Record
 		single    [1]sealrollup.Record
 		hasSingle bool
@@ -502,17 +502,26 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 				return err
 			}
 			if m.Frontier.Order > e.meta.Frontier.Order || (m.Frontier.Order == e.meta.Frontier.Order && m.Revision > e.meta.Revision) {
-				e.meta = m
+				var h *PolicyIdentity
 				if identities != nil {
-					h, err := identities.intern(m.ID, string(k.Metric), m.Policy)
-					if err != nil {
-						return err
+					h, err = identities.intern(m.ID, string(k.Metric), m.Policy)
+				} else {
+					var policy RollupPolicy
+					if err = json.Unmarshal(m.Policy, &policy); err == nil {
+						var prepared *sealrollup.Prepared
+						prepared, err = sealrollup.Prepare(policy.Config)
+						if err == nil {
+							h = &PolicyIdentity{id: m.ID, policy: policyName{Name: policy.Name, Group: policy.Group}, definition: m.Policy, prepared: prepared}
+						}
 					}
-					e.policy = h.rollupPolicy()
-					e.meta.Policy = h.definition
-				} else if err = json.Unmarshal(m.Policy, &e.policy); err != nil {
+				}
+				if err != nil {
 					return err
 				}
+				if h.prepared.Digest() != m.Frontier.Policy {
+					return errors.New("rollup policy/frontier mismatch")
+				}
+				e.identity, e.meta = h, compactMetadata(m)
 			}
 		} else {
 			// Legacy singleton rows need no temporary decoded slice. Dense runs
@@ -577,36 +586,28 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 		return err
 	}
 	for name, e := range series {
-		if (e.meta.Version != 1 && e.meta.Version != 2) || e.policy.Group != e.group || e.policy.Name != name || e.meta.ID == 0 || e.meta.Frontier.Order == 0 {
+		if e.identity == nil {
 			return fmt.Errorf("missing rollup metadata for %s", name)
 		}
-		if e.meta.BaselineOrder > e.meta.Frontier.Order {
+		policy, meta := e.identity.rollupPolicy(), e.identity.metadata(e.meta)
+		if (meta.Version != 1 && meta.Version != 2) || policy.Group != e.group || policy.Name != name || meta.ID == 0 || meta.Frontier.Order == 0 {
+			return fmt.Errorf("missing rollup metadata for %s", name)
+		}
+		if meta.BaselineOrder > meta.Frontier.Order {
 			return errors.New("baseline exceeds rollup frontier")
 		}
-		if (e.meta.Version == 1 && (e.meta.ResetOrder != 0 || e.meta.Expired)) || e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
+		if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
 			return errors.New("invalid rollup reset frontier")
-		}
-		var digest [32]byte
-		if identities != nil {
-			digest = identities.lookup(e.meta.ID).prepared.Digest()
-		} else {
-			digest, err = sealrollup.PolicyDigest(e.policy.Config)
-			if err != nil {
-				return err
-			}
-		}
-		if digest != e.meta.Frontier.Policy {
-			return errors.New("rollup policy/frontier mismatch")
 		}
 		var records []sealrollup.Record
 		if e.records == nil {
 			records = e.single[:0]
 			if e.hasSingle {
 				r := e.single[0]
-				if r.Archive >= len(e.policy.Config.Archives) || r.Slot >= e.policy.Config.Archives[r.Archive].Count || r.Order > e.meta.Frontier.Order {
+				if r.Archive >= len(policy.Config.Archives) || r.Slot >= policy.Config.Archives[r.Archive].Count || r.Order > meta.Frontier.Order {
 					return errors.New("invalid rollup slot/frontier")
 				}
-				if r.Order > e.meta.ResetOrder {
+				if r.Order > meta.ResetOrder {
 					records = append(records, r)
 				}
 			}
@@ -614,10 +615,10 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 			records = make([]sealrollup.Record, 0, len(e.records))
 		}
 		for slot, record := range e.records {
-			if slot[0] >= int64(len(e.policy.Config.Archives)) || slot[1] >= e.policy.Config.Archives[slot[0]].Count || record.Order > e.meta.Frontier.Order {
+			if slot[0] >= int64(len(policy.Config.Archives)) || slot[1] >= policy.Config.Archives[slot[0]].Count || record.Order > meta.Frontier.Order {
 				return errors.New("invalid rollup slot/frontier")
 			}
-			if record.Order > e.meta.ResetOrder {
+			if record.Order > meta.ResetOrder {
 				records = append(records, record)
 			}
 		}
@@ -636,7 +637,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 			}
 			return 0
 		})
-		if err = visit(e.policy, e.meta, records); err != nil {
+		if err = visit(policy, meta, records); err != nil {
 			return err
 		}
 	}
