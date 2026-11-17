@@ -2,6 +2,8 @@ package v2daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -81,11 +83,13 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 				}
 			}
 			im := image{records: make(map[string][]sealrollup.Delta)}
+			physical := make(map[string][]sealrollup.Record)
 			for _, db := range s.Core.DBs() {
 				snap := db.NewSnapshot()
 				err = v2core.ScanRollups(snap, func(p v2core.RollupPolicy, _ v2core.RollupMetadata, records []sealrollup.Record) error {
 					for _, record := range records {
 						im.records[string(p.Name)] = append(im.records[string(p.Name)], record.Delta)
+						physical[string(p.Name)] = append(physical[string(p.Name)], record)
 					}
 					return nil
 				})
@@ -119,9 +123,35 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 				}
 				im.reads = append(im.reads, values)
 			}
+			for _, records := range physical {
+				sort.Slice(records, func(i, j int) bool {
+					if records[i].Archive != records[j].Archive {
+						return records[i].Archive < records[j].Archive
+					}
+					return records[i].Slot < records[j].Slot
+				})
+			}
+			data, err := json.Marshal(struct {
+				Records map[string][]sealrollup.Record
+				Reads   [][]uint64
+			}{physical, im.reads})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("eager=%t full-records-read-sha256=%x", eager, sha256.Sum256(data))
 			images = append(images, im)
 		}()
 	}
+	// A stable digest also lets the admission/poller refactor compare the same
+	// stored deltas and read bits across revisions, independently of part UUIDs.
+	data, err := json.Marshal(struct {
+		Records map[string][]sealrollup.Delta
+		Reads   [][]uint64
+	}{images[0].records, images[0].reads})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("stored-read-sha256=%x", sha256.Sum256(data))
 	if !reflect.DeepEqual(images[0], images[1]) {
 		t.Fatalf("batching changed stored point bits or reads: %+v / %+v", images[0], images[1])
 	}

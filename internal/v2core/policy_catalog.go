@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -29,44 +30,78 @@ type PolicyIdentity struct {
 // Numeric IDs are allocated by the journal; this directory adds no name index.
 // It replaces the router's separate all-ID policy copies.
 type PolicyCatalog struct {
-	mu        sync.RWMutex
-	ids       map[uint64]*PolicyIdentity
+	// IDs are published once as immutable handles. sync.Map uses atomic trie
+	// reads; lookup never takes a catalog mutex or copies a growing directory.
+	ids sync.Map
+	// Construction caches follow the existing virtual-shard ownership. A
+	// different owner never holds the same schema-construction mutex.
+	shards [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
+}
+
+type policyCatalogShard struct {
+	mu        sync.Mutex
 	schemas   map[[32]byte]*PolicyIdentity
 	encodings map[string]*PolicyIdentity
 }
 
-func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
-	c.mu.RLock()
-	old := c.ids[id]
-	c.mu.RUnlock()
-	if old != nil {
-		if (name != "" && string(old.policy.Name) != name) || !bytes.Equal(old.definition, definition) {
-			return nil, errors.New("stored rollup policy changed")
-		}
-		return old, nil
+func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
+	if (name != "" && string(old.policy.Name) != name) || !bytes.Equal(old.definition, definition) {
+		return nil, errors.New("stored rollup policy changed")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if old := c.ids[id]; old != nil {
-		if (name != "" && string(old.policy.Name) != name) || !bytes.Equal(old.definition, definition) {
-			return nil, errors.New("stored rollup policy changed")
+	return old, nil
+}
+
+func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
+	old, _ := c.ids.LoadOrStore(h.id, h)
+	return policyIdentityMatches(old.(*PolicyIdentity), string(h.policy.Name), h.definition)
+}
+
+func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
+	if old := c.lookup(id); old != nil {
+		return policyIdentityMatches(old, name, definition)
+	}
+	// Routing is only a construction-lock choice, never an identity. Invalid or
+	// escaped encodings still go through the complete canonical JSON oracle.
+	nameEnd := canonicalNameEnd(definition)
+	routeName := name
+	if routeName == "" {
+		if nameEnd > 0 {
+			routeName = string(definition[len(`{"Name":"`):nameEnd])
+		} else {
+			var p RollupPolicy
+			if err := json.Unmarshal(definition, &p); err != nil {
+				return nil, err
+			}
+			routeName = string(p.Name)
 		}
-		return old, nil
+	}
+	slot := &c.shards[partsformat.Route(partsformat.ID(routeName))]
+	shard := slot.Load()
+	if shard == nil {
+		fresh := &policyCatalogShard{schemas: make(map[[32]byte]*PolicyIdentity), encodings: make(map[string]*PolicyIdentity)}
+		if slot.CompareAndSwap(nil, fresh) {
+			shard = fresh
+		} else {
+			shard = slot.Load()
+		}
+	}
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if old := c.lookup(id); old != nil {
+		return policyIdentityMatches(old, name, definition)
 	}
 	// Repeated schemas differ only in their canonical, unescaped metric name.
 	// Reuse a previously validated suffix; uncommon/escaped names retain the
 	// complete JSON oracle below. This cache has the same fixed bound as schemas.
-	nameEnd := canonicalNameEnd(definition)
 	if id != 0 && nameEnd > 0 {
-		if template := c.encodings[string(definition[nameEnd:])]; template != nil {
+		if template := shard.encodings[string(definition[nameEnd:])]; template != nil {
 			const start = len(`{"Name":"`)
 			if name != "" && name != string(definition[start:nameEnd]) {
 				return nil, errors.New("noncanonical rollup policy")
 			}
 			owned := bytes.Clone(definition)
 			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(unsafe.String(&owned[start], nameEnd-start))), id: id, policy: policyName{Name: partsformat.ID(unsafe.String(&owned[start], nameEnd-start)), Group: template.policy.Group}, definition: owned[:len(owned):len(owned)], prepared: template.prepared}
-			c.ids[id] = h
-			return h, nil
+			return c.publish(h)
 		}
 	}
 	var p RollupPolicy
@@ -85,7 +120,7 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 		return nil, err
 	}
 	var prepared *sealrollup.Prepared
-	if old := c.schemas[digest]; old != nil {
+	if old := shard.schemas[digest]; old != nil {
 		p.Config = old.schema()
 		prepared = old.prepared
 	} else {
@@ -101,25 +136,21 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 		p.Name = partsformat.ID(unsafe.String(&canonical[nameStart], len(p.Name)))
 	}
 	h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(p.Name), id: id, policy: policyName{Name: p.Name, Group: p.Group}, definition: canonical[:len(canonical):len(canonical)], prepared: prepared}
-	if c.ids == nil {
-		c.ids = make(map[uint64]*PolicyIdentity)
-		c.schemas = make(map[[32]byte]*PolicyIdentity)
-		c.encodings = make(map[string]*PolicyIdentity)
-	}
-	c.ids[id] = h
-	if nameEnd > 0 && len(c.encodings) < 64 {
-		c.encodings[string(canonical[nameEnd:])] = h
+	if nameEnd > 0 && len(shard.encodings) < 64 {
+		shard.encodings[string(canonical[nameEnd:])] = h
 	}
 	// Schema reuse is bounded; it does not keep a second all-name directory.
-	if len(c.schemas) < 64 {
-		c.schemas[digest] = h
+	if len(shard.schemas) < 64 {
+		shard.schemas[digest] = h
 	}
-	return h, nil
+	return c.publish(h)
 }
 func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.ids[id]
+	h, _ := c.ids.Load(id)
+	if h == nil {
+		return nil
+	}
+	return h.(*PolicyIdentity)
 }
 
 // BindDefinition lets the journal borrow the engine's canonical identity.
