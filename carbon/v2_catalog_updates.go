@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -124,7 +125,13 @@ type v2CatalogTelemetry struct {
 	levels, names                             int
 	recent                                    [256]v2NameTrace
 	next                                      int
+	probes                                    [256]v2NameTrace
+	probeNext                                 int
 }
+
+// v2ProbeMarker selects synthetic visibility-probe names; they get their own
+// trace ring so a busy stream cannot overwrite them within milliseconds.
+const v2ProbeMarker = ".visibility."
 
 func (t *v2CatalogTelemetry) published(start time.Time, added []string, stamps []v2NameStamp, levels, names int) {
 	now := time.Now()
@@ -141,7 +148,13 @@ func (t *v2CatalogTelemetry) published(start time.Time, added []string, stamps [
 		}
 		t.visibleToPublished.add(now.Sub(time.Unix(0, s.visible)), 1)
 		t.registeredToPublished.add(now.Sub(time.Unix(s.registered, 0)), 1)
-		t.recent[t.next] = v2NameTrace{added[i], s.registered, s.visible / 1e6, now.UnixMilli()}
+		trace := v2NameTrace{added[i], s.registered, s.visible / 1e6, now.UnixMilli()}
+		if strings.Contains(added[i], v2ProbeMarker) {
+			t.probes[t.probeNext] = trace
+			t.probeNext = (t.probeNext + 1) % len(t.probes)
+			continue
+		}
+		t.recent[t.next] = trace
 		t.next = (t.next + 1) % len(t.recent)
 	}
 }
@@ -152,6 +165,11 @@ func (t *v2CatalogTelemetry) report() map[string]interface{} {
 	recent := make([]v2NameTrace, 0, len(t.recent))
 	for i := range t.recent {
 		if r := t.recent[(t.next+i)%len(t.recent)]; r.Name != "" {
+			recent = append(recent, r)
+		}
+	}
+	for i := range t.probes {
+		if r := t.probes[(t.probeNext+i)%len(t.probes)]; r.Name != "" {
 			recent = append(recent, r)
 		}
 	}

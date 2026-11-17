@@ -110,7 +110,77 @@ func (c *cursor) skipTo(key string) {
 // Catalog is a single-control-owner projection; Snapshot is safe concurrently.
 // Publish/Apply belong at the catalog publication boundary, never per point.
 // Recovery may publish its first view after discovery is attached.
-type Catalog struct{ current atomic.Pointer[Snapshot] }
+type Catalog struct {
+	current atomic.Pointer[Snapshot]
+	bg      *bgMerge // owned by the serial Apply caller
+}
+
+// inlineMergeMax bounds a merge that may run on the publish path. Larger merges
+// run in one background goroutine (like the VictoriaMetrics mergeset big-part
+// merger) and are installed by a later Apply if their inputs are still current.
+var inlineMergeMax = 256 << 10
+
+// bgMergeHook lets tests stall the background merge.
+var bgMergeHook func()
+
+type bgMerge struct {
+	a, b []string
+	out  []string
+	done chan struct{}
+}
+
+func sameSlice(x, y []string) bool {
+	return len(x) == len(y) && (len(x) == 0 || &x[0] == &y[0])
+}
+
+// installBG swaps a finished background merge into levels when both pinned
+// inputs are still adjacent members; otherwise the result is discarded.
+func (c *Catalog) installBG(levels [][]string) [][]string {
+	if c.bg == nil {
+		return levels
+	}
+	select {
+	case <-c.bg.done:
+	default:
+		return levels
+	}
+	bg := c.bg
+	c.bg = nil
+	for i := 1; i < len(levels); i++ {
+		if sameSlice(levels[i-1], bg.a) && sameSlice(levels[i], bg.b) {
+			levels[i-1] = bg.out
+			return slices.Delete(levels, i, i+1)
+		}
+	}
+	return levels
+}
+
+// scheduleBG starts one background merge for the cheapest pair that violates
+// the fanout invariant but was too big to merge inline.
+func (c *Catalog) scheduleBG(levels [][]string) {
+	if c.bg != nil {
+		return
+	}
+	best := -1
+	for i := 1; i < len(levels); i++ {
+		if len(levels[i])*levelFanout >= len(levels[i-1]) && (best < 0 || len(levels[i])+len(levels[i-1]) < len(levels[best])+len(levels[best-1])) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return
+	}
+	bg := &bgMerge{a: levels[best-1], b: levels[best], done: make(chan struct{})}
+	c.bg = bg
+	hook := bgMergeHook
+	go func() {
+		defer close(bg.done)
+		if hook != nil {
+			hook()
+		}
+		bg.out, _ = merge(context.Background(), bg.a, bg.b)
+	}()
+}
 
 func (c *Catalog) Snapshot() *Snapshot {
 	if s := c.current.Load(); s != nil {
@@ -142,6 +212,7 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 	if err != nil {
 		return err
 	}
+	c.bg = nil
 	snapshot := &Snapshot{revision: revision, n: len(next)}
 	if len(next) > 0 {
 		snapshot.levels = [][]string{next}
@@ -227,6 +298,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 			levels = append(levels, level)
 		}
 	}
+	levels = c.installBG(levels)
 	fresh := additions[:0]
 	for i, name := range additions {
 		if !drop[i] {
@@ -249,14 +321,20 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		}
 	}
 	c.current.Store(snapshot)
+	c.scheduleBG(levels)
 	return nil
 }
 
 // compact merges a level into its predecessor until every level is more than
-// levelFanout times smaller than the one before it. The input slice is private.
+// levelFanout times smaller than the one before it, except pairs larger than
+// inlineMergeMax, which are left to the background merger. The input slice is private.
 func compact(ctx context.Context, levels [][]string) ([][]string, error) {
 	for i := len(levels) - 1; i > 0; {
 		if len(levels[i])*levelFanout < len(levels[i-1]) {
+			i--
+			continue
+		}
+		if len(levels[i-1])+len(levels[i]) > inlineMergeMax {
 			i--
 			continue
 		}
