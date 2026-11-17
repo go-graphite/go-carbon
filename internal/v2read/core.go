@@ -24,7 +24,10 @@ type Reader struct {
 	// Identities is fixed before opening the engine or publishing snapshots.
 	Identities *v2core.PolicyCatalog
 
-	reads readCounters
+	reads  readCounters
+	stages stageCounters
+	// scanAllOwners is the test oracle: every owner sees every name.
+	scanAllOwners bool
 
 	closed    atomic.Bool
 	owners    []atomic.Pointer[generation]
@@ -380,6 +383,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 		}
 	}()
+	stage := time.Now()
 	for i := range r.owners {
 		for {
 			if err := ctx.Err(); err != nil {
@@ -395,7 +399,10 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 		}
 	}
-	views, errs := viewsForNames(ctx, pinned, names)
+	r.stages.observe(StagePin, stage)
+	stage = time.Now()
+	views, errs := r.viewsForNames(ctx, pinned, names)
+	r.stages.observe(StageViews, stage)
 	for _, err := range errs {
 		if err != nil {
 			return err
@@ -432,7 +439,9 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		}
 		var source Source
 		if len(metric.pending) > 0 || metric.sealed == nil {
+			stage = time.Now()
 			metric.resolveContext(ctx)
+			r.stages.observe(StageResolve, stage)
 			if metric.err != nil {
 				return metric.err
 			}
@@ -459,6 +468,8 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 				}
 				err := func() error {
 					defer r.Budget.used.Add(-retained)
+					stage := time.Now()
+					defer func() { r.stages.observe(StageConsume, stage) }()
 					return consume(name, cached)
 				}()
 				if err != nil {
@@ -489,13 +500,17 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		}
 		err = func() error {
 			defer h.Close()
+			stage := time.Now()
 			s, e := h.Render(ctx, name, from, until, now)
+			r.stages.observe(StageRender, stage)
 			if e != nil {
 				return e
 			}
 			if metric.frozen != nil && s != nil {
 				metric.resource.cache.rememberRendered(metric.frozen, from, until, now, s)
 			}
+			stage = time.Now()
+			defer func() { r.stages.observe(StageConsume, stage) }()
 			return consume(name, s)
 		}()
 		if err != nil {
@@ -524,15 +539,32 @@ func aggregationName(method sealrollup.Method) string {
 }
 
 // viewsForNames resolves request views of independent owners concurrently.
-// Callers consume errs in owner order, exactly as a sequential loop would.
-func viewsForNames(ctx context.Context, pinned []*generation, names []string) ([]*generation, []error) {
+// Each name is looked up only on the owner that holds it (OwnerFor, the same
+// routing as intake); owners with no requested name get a nil view. An owner
+// whose sealed data has no part directory enumerates its names, so it receives
+// every name. Callers consume errs in owner order, as a sequential loop would.
+func (r *Reader) viewsForNames(ctx context.Context, pinned []*generation, names []string) ([]*generation, []error) {
 	views := make([]*generation, len(pinned))
 	errs := make([]error, len(pinned))
+	routed := splitByOwner(names, len(pinned))
+	if r.scanAllOwners {
+		for i := range routed {
+			routed[i] = names
+		}
+	}
 	var wg sync.WaitGroup
 	for i, g := range pinned {
-		if g != nil {
-			wg.Go(func() { views[i], errs[i] = g.forNames(ctx, names) })
+		if g == nil {
+			continue
 		}
+		own := routed[i]
+		if g.sealed.parts == nil {
+			own = names
+		}
+		if len(own) == 0 {
+			continue
+		}
+		wg.Go(func() { views[i], errs[i] = g.forNames(ctx, own, &r.stages) })
 	}
 	wg.Wait()
 	return views, errs
@@ -540,17 +572,20 @@ func viewsForNames(ctx context.Context, pinned []*generation, names []string) ([
 
 // forNames creates request-local metadata; no request waits for a whole-store
 // generation loader. The caller retains the publication through this call.
-func (g *generation) forNames(ctx context.Context, names []string) (*generation, error) {
+func (g *generation) forNames(ctx context.Context, names []string, st *stageCounters) (*generation, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if g.sealed.parts == nil {
 		return g.discover(ctx)
 	}
+	stage := time.Now()
 	index, err := g.sealed.parts.SnapshotForNames(ctx, g.sealed.snapshot, names, g.sealed.cache.ranges)
+	st.observe(StageSnapshot, stage)
 	if err != nil {
 		return nil, err
 	}
+	stage = time.Now()
 	wanted := make(map[string]bool, len(names))
 	for _, n := range names {
 		wanted[n] = true
@@ -576,8 +611,11 @@ func (g *generation) forNames(ctx context.Context, names []string) (*generation,
 			pending = append(pending, g.pending[i])
 		}
 	}
+	st.observe(StagePending, stage)
 	q := &generation{pending: pending, sealed: &sealedData{index: index, reader: g.sealed.reader, cache: g.sealed.cache, number: g.sealed.number}}
+	stage = time.Now()
 	q.loadPendingContext(ctx)
+	st.observe(StageLoadPending, stage)
 	return q, q.err
 }
 
