@@ -2,6 +2,7 @@ package v2daemon
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,7 +71,7 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 // recoverProducer ports the earlier loggedCore replay loop: ordered per-stream
 // decode -> the same AppendBatches queue -> synchronous final seal. Owners alone
 // decide which packets were already committed. Every segment resets predictors.
-func (p *Producer) recoverProducer(dir string) error {
+func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 	paths, err := filepath.Glob(filepath.Join(dir, "segment*.pdc4"))
 	if err != nil {
 		return err
@@ -84,6 +85,9 @@ func (p *Producer) recoverProducer(dir string) error {
 	for i, path := range paths {
 		decoder := partlog.CatalogDecoder{Catalog: p.catalog}
 		_, err = v2replay.Scan(path, i == len(paths)-1, func(record []byte) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			inner, stamp, err := decodePlacementEnvelope(record)
 			if err != nil {
 				return err

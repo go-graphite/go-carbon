@@ -5,12 +5,14 @@ package v2daemon
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/internal/v2placement"
 	"github.com/go-graphite/go-carbon/points"
+	"golang.org/x/sync/errgroup"
 )
 
 // Config is fixed for the lifetime of a store. Layer is 0 (numeric), 1 (names),
@@ -106,6 +109,12 @@ func coreConfig(c Config) v2core.Config {
 func Open(root string, c Config) (*Store, error) { return openWithHooks(root, c, c.Hooks) }
 
 func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
+	// Bound simultaneous decoder/catalog allocation as well as CPU use. The
+	// existing per-producer core queues retain their ordinary admission budget.
+	return openWithRecoveryWorkers(root, c, hooks, min(32, runtime.GOMAXPROCS(0)))
+}
+
+func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers int) (*Store, error) {
 	if c.DurableApplications != nil && c.Layer != 3 {
 		return nil, errors.New("classic mirror requires application journal layer")
 	}
@@ -152,6 +161,7 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{Core: e, cfg: c, lock: lock}
+	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
 		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
 		if c.Placement != nil {
@@ -160,31 +170,45 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 		}
 		p.durableApplications = c.DurableApplications
 		s.Producers = append(s.Producers, p)
-		if c.Layer == 0 {
-			continue
-		}
-		dir := filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
-		if c.Layer == 3 {
-			p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"), func(id uint64, name string, definition []byte) (string, []byte, error) {
-				return e.BindDefinition(NumericID(id, i, c.Producers), name, definition)
-			})
-		} else {
-			p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
-		}
-		if err != nil {
-			_ = s.Close()
-			return nil, err
-		}
-		p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
-		if c.Layer >= 2 {
-			err = p.recoverProducer(dir)
+	}
+	group, ctx := errgroup.WithContext(context.Background())
+	group.SetLimit(max(1, min(workers, c.Producers)))
+	for i, p := range s.Producers {
+		group.Go(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if c.Layer == 0 {
+				return nil
+			}
+			dir := filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
+			var err error
+			if c.Layer == 3 {
+				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"), func(id uint64, name string, definition []byte) (string, []byte, error) {
+					return e.BindDefinition(NumericID(id, i, c.Producers), name, definition)
+				})
+			} else {
+				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
+			}
+			if err == nil {
+				p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
+				if c.Layer >= 2 {
+					err = p.recoverProducer(ctx, dir)
+				}
+			}
 			if err != nil {
 				p.failed = err
-				_ = s.Close()
-				return nil, err
+				return fmt.Errorf("recover producer %d: %w", i, err)
 			}
-		}
+			return nil
+		})
 	}
+	// Join every worker before closing catalogs, queues or the root lock.
+	if err := group.Wait(); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+
 	return s, nil
 }
 func syncDir(dir string) error {
