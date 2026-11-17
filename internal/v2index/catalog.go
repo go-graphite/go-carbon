@@ -72,6 +72,12 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 // Removal wins within a batch. The serial owner must fence stale expiry against
 // recreated names before calling Apply. This projection cannot decide liveness.
 func (c *Catalog) Apply(revision uint64, add, remove []string) error {
+	return c.ApplyBeforePublish(revision, add, remove, nil)
+}
+
+// ApplyBeforePublish prepares the incremental membership merge privately. The
+// callback fences dependent quota state before the immutable view is exposed.
+func (c *Catalog) ApplyBeforePublish(revision uint64, add, remove []string, before func(*Snapshot) error) error {
 	old := c.Snapshot()
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
@@ -103,6 +109,15 @@ func (c *Catalog) Apply(revision uint64, add, remove []string) error {
 			next = append(next, name)
 		}
 	}
-	c.current.Store(&Snapshot{revision: revision, names: next})
+	if slices.Equal(old.names, next) {
+		return nil
+	}
+	snapshot := &Snapshot{revision: revision, names: next}
+	if before != nil {
+		if err := before(snapshot); err != nil {
+			return err
+		}
+	}
+	c.current.Store(snapshot)
 	return nil
 }

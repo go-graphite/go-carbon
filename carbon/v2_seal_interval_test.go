@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,13 @@ func TestV2SealIntervalPendingHTTP(t *testing.T) {
 			if _, e := app.v2.reader.Metadata(t.Context(), "seal.pending"); e != nil {
 				if time.Since(begin) > 2200*time.Millisecond {
 					t.Fatal("pending metadata visibility >2.2s", e)
+				}
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			if !slices.Contains(slices.Collect(app.v2.catalog.Snapshot().Names()), "seal.pending") {
+				if time.Since(begin) > 2200*time.Millisecond {
+					t.Fatal("pending catalog visibility >2.2s")
 				}
 				time.Sleep(10 * time.Millisecond)
 				continue

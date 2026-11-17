@@ -10,7 +10,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2read"
 )
 
-func TestV2DiscoveryRefreshOnRead(t *testing.T) {
+func TestV2DiscoveryRefreshInBackground(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -32,10 +32,10 @@ func TestV2DiscoveryRefreshOnRead(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Let more than one old refresh interval pass without a discovery request.
+	// New names publish without a discovery request.
 	time.Sleep(1200 * time.Millisecond)
-	if app.v2.catalog.Catalog.Snapshot().Len() != 0 {
-		t.Fatal("idle runtime rebuilt discovery")
+	if app.v2.catalog.Catalog.Snapshot().Len() != 1 {
+		t.Fatal("background catalog missed publication")
 	}
 	if b := v2HTTP(t, app, "/metrics/find/?format=json&query=lazy.*"); !strings.Contains(string(b), "lazy.name") {
 		t.Fatalf("next read missed publication: %s", b)

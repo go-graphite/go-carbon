@@ -47,9 +47,10 @@ type v2Runtime struct {
 	store   *v2daemon.Store
 	moves   *v2daemon.MoveAdmin
 	reader  *v2read.Reader
-	catalog v2LazyCatalog
+	catalog v2PublishedCatalog
 	server  *v2recv.Server
 	stop    chan struct{}
+	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 }
 
@@ -114,7 +115,11 @@ func (app *App) startV2() error {
 	var expiryNeeded, expiryAllowed atomic.Bool
 	var intake atomic.Pointer[v2recv.Server]
 	telemetry := newV2WriteTelemetry(shards, n)
-	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: telemetry.visible}
+	updates := newV2CatalogUpdates(shards)
+	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: func(owner int, batches []v2core.Batch) {
+		telemetry.visible(owner, batches)
+		updates.visible(owner, batches)
+	}}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
@@ -128,6 +133,7 @@ func (app *App) startV2() error {
 				return false
 			}
 			if expiryAllowed.Load() {
+				updates.expire(m.ID, string(p.Name))
 				return true
 			}
 			expiryNeeded.Store(true)
@@ -199,42 +205,69 @@ func (app *App) startV2() error {
 		return err
 	}
 	v.quotas = quotas
-	var refreshMu sync.Mutex
+	ctx, cancel := context.WithCancel(context.Background())
+	v.cancel = cancel
+	initialized := false
+	// Only the maintenance owner refreshes. Requests load Catalog.Snapshot and
+	// never call discovery, take a refresh mutex, or wait for this work.
 	refresh := func() error {
-		refreshMu.Lock()
-		defer refreshMu.Unlock()
 		var quotaFence uint64
 		if v.quotas != nil {
 			quotaFence = v.quotas.Fence()
 		}
-		names, masks, err := r.NamesWithMasks(context.Background())
-		if err != nil {
-			return err
-		}
-		for _, name := range classicNames {
-			if !masks[name] {
-				names = append(names, name)
+		old := v.catalog.Snapshot()
+		if !initialized {
+			names, masks, err := r.NamesWithMasks(ctx)
+			if err != nil {
+				return err
 			}
-		}
-		slices.Sort(names)
-		names = slices.Compact(names)
-		if err := publishV2Quotas(v.quotas, quotaFence, r, names, historicalQuota); err != nil {
-			return err
-		}
-		old := v.catalog.Catalog.Snapshot()
-		if old.Revision() > 0 && old.EqualNames(names) {
+			for _, name := range classicNames {
+				if !masks[name] {
+					names = append(names, name)
+				}
+			}
+			slices.Sort(names)
+			names = slices.Compact(names)
+			if err := publishV2QuotasContext(ctx, v.quotas, quotaFence, r, names, historicalQuota); err != nil {
+				return err
+			}
+			if err := v.catalog.Publish(old.Revision()+1, names); err != nil {
+				return err
+			}
+			initialized = true
 			return nil
 		}
-		return v.catalog.Publish(old.Revision()+1, names)
-	}
-	v.catalog.refresh = refresh
-	v.catalog.fail = func(err error) {
-		if server := intake.Load(); server != nil {
-			server.Abort(err)
+		add, expired := updates.drain()
+		var remove []string
+		// Expiry candidates come from the fenced seal owner. Confirm the committed
+		// reader state: a failed seal or a concurrent recreation must stay visible.
+		for _, name := range expired {
+			_, err := r.Metadata(ctx, name)
+			if errors.Is(err, v2read.ErrNotFound) {
+				remove = append(remove, name)
+			} else if err != nil {
+				return err
+			} else {
+				add = append(add, name)
+			}
 		}
+		if len(add) == 0 && len(remove) == 0 {
+			return ctx.Err()
+		}
+		return v.catalog.ApplyBeforePublish(old.Revision()+1, add, remove, func(next *v2index.Snapshot) error {
+			if v.quotas == nil {
+				return ctx.Err()
+			}
+			return publishV2QuotasContext(ctx, v.quotas, quotaFence, r, slices.Collect(next.Names()), historicalQuota)
+		})
 	}
-	if err = refresh(); err != nil {
-		return err
+	// Quotas require recovered reservations before admission. Without quotas,
+	// startup discovery belongs to the background worker (also compatible with
+	// parallel restart recovery); the first HTTP request never performs it.
+	if v.quotas != nil {
+		if err = refresh(); err != nil {
+			return err
+		}
 	}
 	queue, err := app.configureCarbonserver(core)
 	if err != nil {
@@ -331,10 +364,12 @@ func (app *App) startV2() error {
 	v.wg.Add(1)
 	go func() {
 		defer v.wg.Done()
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-v.stop:
 				return
 			case <-ticker.C:
@@ -345,6 +380,9 @@ func (app *App) startV2() error {
 							// quota reservations in the post-expiry projection.
 							if v.quotas != nil {
 								if err := refresh(); err != nil {
+									return err
+								}
+								if err := publishV2QuotasContext(ctx, v.quotas, v.quotas.Fence(), r, slices.Collect(v.catalog.Snapshot().Names()), historicalQuota); err != nil {
 									return err
 								}
 							}
@@ -364,9 +402,12 @@ func (app *App) startV2() error {
 						}
 					}
 
-					return nil
+					return refresh()
 				}
 				if err := maintain(); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
 					zapwriter.Logger("v2").Error("v2 discovery publication failed", zap.Error(err))
 					v.server.Abort(err)
 					return
@@ -386,6 +427,9 @@ func (v *v2Runtime) stopIntake() {
 	}
 }
 func (v *v2Runtime) close() {
+	if v.cancel != nil {
+		v.cancel()
+	}
 	v.stopIntake()
 	if v.metrics.unregister != nil {
 		v.metrics.unregister()
@@ -400,19 +444,6 @@ func (v *v2Runtime) close() {
 	}
 }
 
-// v2LazyCatalog keeps idle discovery off the write path. Catalog snapshots used
-// by telemetry remain cheap; only a discovery consumer asks for a fresh view.
-type v2LazyCatalog struct {
-	v2index.Catalog
-	refresh func() error
-	fail    func(error)
-}
-
-func (s *v2LazyCatalog) Snapshot() *v2index.Snapshot {
-	if s.refresh != nil {
-		if err := s.refresh(); err != nil {
-			s.fail(err)
-		}
-	}
-	return s.Catalog.Snapshot()
-}
+// v2PublishedCatalog exposes only the latest immutable publication to HTTP.
+// Its single background owner performs refresh and quota fencing.
+type v2PublishedCatalog struct{ v2index.Catalog }

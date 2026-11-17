@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -123,6 +124,13 @@ func TestV2TCPRenderFindInfoRestart(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	check := func() {
+		deadline := time.Now().Add(2200 * time.Millisecond)
+		for !slices.Contains(slices.Collect(app.v2.catalog.Snapshot().Names()), "wire.metric") {
+			if time.Now().After(deadline) {
+				t.Fatal("recovered catalog not published within 2.2s")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		b := v2HTTP(t, app, "/metrics/find/?format=json&query=wire.*")
 		if !strings.Contains(string(b), "wire.metric") {
 			t.Fatalf("find: %s", b)
