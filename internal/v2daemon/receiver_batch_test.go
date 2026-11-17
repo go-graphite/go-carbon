@@ -163,13 +163,13 @@ func TestApplicationOwnerExpiryDrainFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	o := &applicationOwner{p: s.Producers[0], fenceDrain: true, resolve: func(name string) ([]byte, error) {
+	o := &applicationOwner{p: s.Producers[0], resolve: func(name string) ([]byte, error) {
 		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: partsformat.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, Archives: []sealrollup.Archive{{Step: 1, Count: 120}}}})
 	}}
 	if err = o.Append([]string{"expiry.fenced"}, []points.Point{{Timestamp: 1000, Value: 1}}, nil, 1001); err != nil {
 		t.Fatal(err)
 	}
-	if err = o.Seal(); err != nil {
+	if err = o.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if err = o.Drain(); err != nil {

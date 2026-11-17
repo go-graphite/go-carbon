@@ -42,18 +42,18 @@ type Config struct {
 	Logger                                              *slog.Logger
 }
 type batch struct {
-	names    []string
-	data     []points.Point
-	distinct []string
+	names []string
+	data  []points.Point
 }
 type ownerCall struct {
-	run func() error
-	ack chan error
+	run   func() error
+	ack   chan error
+	drain bool
 }
 type counters struct{ accepted, rejected, parse, transport, sink, wire, connections atomic.Uint64 }
 type Stats struct{ Accepted, Rejected, ParseErrors, TransportErrors, SinkErrors, WireBytes, Connections uint64 }
 
-// Server has no writer-shared data lock. The mutex only protects connection
+// Server shares a buffer-level maintenance fence. The mutex protects connection
 // lifetime and the first terminal error; every owner has a private input queue.
 type Server struct {
 	cfg      Config
@@ -71,16 +71,10 @@ type Server struct {
 	conns    map[net.Conn]struct{}
 	err      error
 	stats    counters
-	pending  []pendingShard // stable owner routing also shards expiry reservations
+	intake   sync.RWMutex                   // held per input buffer, never per name or point
+	decoded  map[*fencedReader]func() error // protected by the exclusive intake fence
 	finish   sync.Once
 	finished chan struct{}
-}
-
-// Counts are protected by the same owner shard for admission and durable release.
-// This avoids allocating a sync.Map cell for every newly pending metric.
-type pendingShard struct {
-	mu    sync.Mutex
-	names map[string]int64
 }
 
 func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
@@ -142,57 +136,17 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 			return nil, errors.New("nil owner")
 		}
 	}
-	s.pending = make([]pendingShard, len(owners))
-	for owner, o := range owners {
-		s.pending[owner].names = make(map[string]int64)
+	for _, o := range owners {
 		q := make(chan *batch, cfg.QueueDepth)
 		control := make(chan ownerCall)
 		s.controls = append(s.controls, control)
 		s.queues = append(s.queues, q)
 		s.workers.Add(1)
-		go s.work(len(s.queues)-1, o, q, control)
+		go s.work(o, q, control)
 	}
 	s.accept.Add(1)
 	go s.listen()
 	return s, nil
-}
-
-// Pending fences inactivity expiry against decoded, queued and journal-buffered
-// input. Counts track name/batch reservations, not individual points, and are
-// released only after the producer's successful durable Drain.
-func (s *Server) Pending(name string) bool {
-	if len(s.pending) == 0 {
-		return false
-	}
-	shard := &s.pending[OwnerFor(name, len(s.pending))]
-	shard.mu.Lock()
-	n := shard.names[name]
-	shard.mu.Unlock()
-	return n > 0
-}
-func (s *Server) pendingAdd(owner int, name string, n int64) {
-	shard := &s.pending[owner]
-	shard.mu.Lock()
-	if next := shard.names[name] + n; next == 0 {
-		delete(shard.names, name)
-	} else {
-		shard.names[name] = next
-	}
-	shard.mu.Unlock()
-}
-
-// pendingRelease retires an entire batch or durable prefix under one shard lock.
-func (s *Server) pendingRelease(owner int, names map[string]int64) {
-	shard := &s.pending[owner]
-	shard.mu.Lock()
-	for name, n := range names {
-		if next := shard.names[name] - n; next == 0 {
-			delete(shard.names, name)
-		} else {
-			shard.names[name] = next
-		}
-	}
-	shard.mu.Unlock()
 }
 
 func (s *Server) Stats() Stats {
@@ -216,20 +170,15 @@ func (s *Server) fail(err error) {
 		s.mu.Unlock()
 	})
 }
-func (s *Server) work(owner int, o Owner, q <-chan *batch, control <-chan ownerCall) {
+func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 	defer s.workers.Done()
 	tick := time.NewTicker(s.cfg.SyncInterval)
 	defer tick.Stop()
 	var seq uint64
 	failed := false
-	buffered := map[string]int64{}
-	releaseBuffered := func() {
-		s.pendingRelease(owner, buffered)
-		clear(buffered)
-	}
 	// Socket flushes can contain one point per owner. Accumulate on the
 	// existing serial worker, bounded by BatchSize and the existing sync tick.
-	// Per-name order and decoded expiry reservations survive this coalescing.
+	// Per-name order survives this coalescing.
 	var pending batch
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
 	appendBatch := func(names []string, data []points.Point) {
@@ -263,14 +212,50 @@ func (s *Server) work(owner int, o Owner, q <-chan *batch, control <-chan ownerC
 				failed = true
 				s.stats.sink.Add(1)
 				s.fail(err)
-			} else {
-				releaseBuffered()
 			}
 		}
+	}
+	consume := func(b *batch) {
+		originalNames, originalData := b.names, b.data
+		recycle := func() {
+			clear(originalNames)
+			b.names, b.data = originalNames[:0], originalData[:0]
+			s.batches.Put(b)
+		}
+		if failed {
+			s.stats.rejected.Add(uint64(len(b.data)))
+			recycle()
+			return
+		}
+		if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
+			appendBatch(b.names, b.data)
+			b.names, b.data = b.names[:0], b.data[:0]
+		}
+		for len(b.data) > 0 {
+			n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
+			pending.names = append(pending.names, b.names[:n]...)
+			pending.data = append(pending.data, b.data[:n]...)
+			b.names, b.data = b.names[n:], b.data[n:]
+			if len(pending.data) == s.cfg.BatchSize {
+				appendPending()
+			}
+			if failed {
+				s.stats.rejected.Add(uint64(len(b.data)))
+				break
+			}
+		}
+		recycle()
 	}
 	for {
 		select {
 		case call := <-control:
+			// A fenced control holds intake exclusively, so this finite queue
+			// prefix cannot grow while it is drained.
+			if call.drain {
+				for len(q) > 0 {
+					consume(<-q)
+				}
+			}
 			appendPending()
 			if failed {
 				call.ack <- errors.New("receiver owner failed")
@@ -282,43 +267,7 @@ func (s *Server) work(owner int, o Owner, q <-chan *batch, control <-chan ownerC
 				syncOwner()
 				return
 			}
-			originalNames, originalData := b.names, b.data
-			recycle := func() {
-				clear(originalNames)
-				clear(b.distinct)
-				b.distinct = b.distinct[:0]
-				b.names, b.data = originalNames[:0], originalData[:0]
-				s.batches.Put(b)
-			}
-			if failed {
-				for _, name := range b.distinct {
-					s.pendingAdd(owner, name, -1)
-				}
-				s.stats.rejected.Add(uint64(len(b.data)))
-				recycle()
-				continue
-			}
-			for _, name := range b.distinct {
-				buffered[name]++
-			}
-			if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
-				appendBatch(b.names, b.data)
-				b.names, b.data = b.names[:0], b.data[:0]
-			}
-			for len(b.data) > 0 {
-				n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
-				pending.names = append(pending.names, b.names[:n]...)
-				pending.data = append(pending.data, b.data[:n]...)
-				b.names, b.data = b.names[n:], b.data[n:]
-				if len(pending.data) == s.cfg.BatchSize {
-					appendPending()
-				}
-				if failed {
-					s.stats.rejected.Add(uint64(len(b.data)))
-					break
-				}
-			}
-			recycle()
+			consume(b)
 		case <-tick.C:
 			syncOwner()
 		}
@@ -410,9 +359,8 @@ func (r countedReader) Read(b []byte) (int, error) {
 }
 
 type reference struct {
-	name       string
-	owner      int
-	generation uint64
+	name  string
+	owner int
 }
 
 // OwnerFor returns the stable producer used by unplaced TCP intake.
@@ -428,23 +376,7 @@ func (s *Server) read(c net.Conn) error {
 	if s.cfg.Placement != nil {
 		return s.readPlaced(c)
 	}
-	r := bufio.NewReaderSize(countedReader{c, &s.stats.wire}, 64<<10)
-	// Both protocols are selected on the same endpoint, as in receiver/tcp.
-	head, err := r.Peek(1)
-	if err == io.EOF {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
 	buffers := make([]*batch, len(s.queues))
-	generations := make([]uint64, len(s.queues))
-	for i := range generations {
-		generations[i] = 1
-	}
-	// Scratch sets are connection-local and reused after queue transfer. Each
-	// batch carries only its distinct names for durable reservation retirement.
-	reserved := make([]map[string]int64, len(s.queues))
 	flush := func(i int) error {
 		b := buffers[i]
 		if b == nil || len(b.data) == 0 {
@@ -453,15 +385,10 @@ func (s *Server) read(c net.Conn) error {
 		select {
 		case s.queues[i] <- b:
 			buffers[i] = nil
-			generations[i]++
-			clear(reserved[i])
 			return nil
 		case <-s.done:
-			s.pendingRelease(i, reserved[i])
-			clear(reserved[i])
 			s.stats.rejected.Add(uint64(len(b.data)))
 			buffers[i] = nil
-			generations[i]++
 			return errors.New("receiver stopped")
 		}
 	}
@@ -472,7 +399,30 @@ func (s *Server) read(c net.Conn) error {
 		}
 		return err
 	}
-	defer func() { _ = flushAll() }()
+	input := &fencedReader{Reader: countedReader{c, &s.stats.wire}, gate: &s.intake}
+	s.intake.Lock()
+	if s.decoded == nil {
+		s.decoded = make(map[*fencedReader]func() error)
+	}
+	s.decoded[input] = flushAll
+	s.intake.Unlock()
+	defer func() {
+		_ = flushAll()
+		input.release()
+		s.intake.Lock()
+		delete(s.decoded, input)
+		s.intake.Unlock()
+	}()
+	r := bufio.NewReaderSize(input, 64<<10)
+	// Both protocols are selected on the same endpoint, as in receiver/tcp.
+	head, err := r.Peek(1)
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
 	var appendErr error
 	add := func(ref *reference, value float64, ts int64) {
 		if appendErr != nil {
@@ -487,23 +437,6 @@ func (s *Server) read(c net.Conn) error {
 				b = &batch{names: make([]string, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
 			}
 			buffers[ref.owner] = b
-		}
-		// Dictionary references remember their owner batch generation, so repeated
-		// points skip the reservation map. Duplicate dictionary names still reserve
-		// only once through the connection-local set. Reserve before
-		// exposing even the first decoded point to queues or a blocked flush.
-		if ref.generation != generations[ref.owner] {
-			ref.generation = generations[ref.owner]
-			names := reserved[ref.owner]
-			if names == nil {
-				names = make(map[string]int64)
-				reserved[ref.owner] = names
-			}
-			if _, ok := names[ref.name]; !ok {
-				s.pendingAdd(ref.owner, ref.name, 1)
-				names[ref.name] = 1
-				b.distinct = append(b.distinct, ref.name)
-			}
 		}
 		b.names = append(b.names, ref.name)
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})
@@ -619,3 +552,28 @@ func (s *Server) Addr() net.Addr { return s.listener.Addr() }
 
 // Done closes after Wait has stopped handlers and drained owners.
 func (s *Server) Done() <-chan struct{} { return s.finished }
+
+// fencedReader holds a shared intake fence while a decoder consumes one network
+// buffer. Before waiting for more bytes it releases the fence. Maintenance can
+// then flush the registered decoded prefix. Partial wire records have not been
+// admitted; their callback runs
+// only after the next buffer reacquires the fence.
+type fencedReader struct {
+	io.Reader
+	gate *sync.RWMutex
+	held bool
+}
+
+func (r *fencedReader) release() {
+	if r.held {
+		r.held = false
+		r.gate.RUnlock()
+	}
+}
+func (r *fencedReader) Read(b []byte) (int, error) {
+	r.release()
+	n, err := r.Reader.Read(b)
+	r.gate.RLock()
+	r.held = true
+	return n, err
+}

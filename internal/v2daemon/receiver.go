@@ -14,13 +14,12 @@ import (
 // point is an explicit application; batching socket reads must not change it.
 type PolicyResolver func(string) ([]byte, error)
 type applicationOwner struct {
-	p          *Producer
-	resolve    PolicyResolver
-	policies   map[string]*RegisteredApplication
-	throttle   func(*points.Points, bool) bool
-	fenceDrain bool
-	apps       []Application
-	sequence   []uint64
+	p        *Producer
+	resolve  PolicyResolver
+	policies map[string]*RegisteredApplication
+	throttle func(*points.Points, bool) bool
+	apps     []Application
+	sequence []uint64
 }
 
 func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint64, clock int64) error {
@@ -62,26 +61,11 @@ func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint6
 	}
 	return o.p.AppendApplications(apps)
 }
-func (o *applicationOwner) Seal() error {
-	// Ordinary journal syncs leave part formation to the core's size/1s
-	// thresholds. One producer tick must not seal every core owner.
-	// Expiry still needs the existing synchronous frontier fence in Drain.
-	if o.fenceDrain {
-		return o.p.Seal()
-	}
-	return nil
-}
-func (o *applicationOwner) Drain() error {
-	if err := o.p.Drain(); err != nil {
-		return err
-	}
-	if o.fenceDrain && o.p.cursor > 0 {
-		// Pending expiry reservations release only after this producer's original
-		// cursor has reached every core owner, rather than just its journal fsync.
-		return o.p.engine.AppendBatches(o.p.index, nil, o.p.cursor, true)
-	}
-	return nil
-}
+
+// Ordinary ticks sync the journal; only maintenance requires a core frontier.
+func (o *applicationOwner) Seal() error  { return nil }
+func (o *applicationOwner) Drain() error { return o.p.Drain() }
+func (o *applicationOwner) Flush() error { return o.p.Flush() }
 
 func (s *Store) ReceiveTCP(l net.Listener, cfg v2recv.Config) (*v2recv.Server, error) {
 	if s.cfg.Placement != nil {
@@ -110,7 +94,7 @@ func (s *Store) ReceiveApplicationsTCPWithAdmission(l net.Listener, cfg v2recv.C
 	}
 	owners := make([]v2recv.Owner, len(s.Producers))
 	for i, p := range s.Producers {
-		owners[i] = &applicationOwner{p: p, resolve: resolve, throttle: throttle, fenceDrain: s.cfg.Hooks.Expire != nil}
+		owners[i] = &applicationOwner{p: p, resolve: resolve, throttle: throttle}
 	}
 	return v2recv.Start(l, owners, cfg)
 }
