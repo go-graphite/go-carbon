@@ -83,7 +83,9 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 			return p.fail(err)
 		}
 		var registered *v2core.ApplicationPolicy
-		if p.layer == 3 {
+		// Classic mirroring consumes canonical policy bytes before core submission.
+		// Keep the byte-policy path for that sink; registered batches omit Policy.
+		if p.layer == 3 && p.durableApplications == nil {
 			if p.applicationPolicies == nil {
 				p.applicationPolicies = make(map[uint64]*v2core.ApplicationPolicy)
 			}
