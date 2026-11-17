@@ -8,6 +8,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -28,12 +29,14 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		r.coverage = map[string]*rollupCoverage{}
 	}
 	files := r.files
-	key := func(m *rollupMetric, archive uint32, slot int64) []byte {
+	key := func(m *rollupMetric, partition int64, archive uint32, slot int64) []byte {
+		physicalPart := part
+		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
 		start := len(r.arena)
 		r.arena = append(r.arena, m.policy.keyPrefix...)
 		r.arena = binary.BigEndian.AppendUint16(r.arena, m.vshard)
-		r.arena = binary.BigEndian.AppendUint64(r.arena, 1<<63)
-		r.arena = append(r.arena, part[:]...)
+		r.arena = binary.BigEndian.AppendUint64(r.arena, uint64(partition)^(1<<63))
+		r.arena = append(r.arena, physicalPart[:]...)
 		r.arena = binary.BigEndian.AppendUint32(r.arena, uint32(len(m.policy.Name)))
 		r.arena = append(r.arena, m.policy.Name...)
 		r.arena = append(r.arena, make([]byte, 16)...)
@@ -45,7 +48,6 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	}
 	m := s.metric
 	group := string(m.policy.Group)
-	file := files[group]
 	if stage != nil {
 		stage("rollup")
 	}
@@ -69,51 +71,74 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
 		}
 	}
-	// Physical dense packing belongs exclusively to the shared v2part writer.
+	// Metadata is retained separately from expiring data. Each data part also
+	// carries its metric envelope so transport/read validation stays unchanged.
+	partitions := make([]int64, 1, 8)
 	for i := range s.records {
 		record := &s.records[i]
-		file = append(file, coreKV{Key: key(m, uint32(record.Archive), record.Slot), Record: record})
-	}
-	coverage := r.coverage[group]
-	if coverage == nil {
-		coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
-		r.coverage[group] = coverage
-	}
-	if len(coverage.seen) == 0 {
-		coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: 0, Part: part}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
-		coverage.spec.Source.MinOrder = math.MaxUint64
-	}
-	digest := s.next.Frontier.Policy
-	if !coverage.seen[digest] {
-		policies := r.definitions[digest]
-		if policies == nil {
-			definition, err := json.Marshal(m.schema())
-			if err != nil {
-				return err
-			}
-			hash := sha256.Sum256(definition)
-			for archive := range m.schema().Archives {
-				policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
-			}
-			r.definitions[digest] = policies
+		partition := rollupExpiryPartition(m.schema(), *record)
+		if !slices.Contains(partitions, partition) {
+			partitions = append(partitions, partition)
 		}
-		coverage.spec.Policies = append(coverage.spec.Policies, policies...)
-		coverage.seen[digest] = true
-	}
-	coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
-	coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
-	coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
-	coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
-	for _, record := range s.records {
-		coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
-		coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
-		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
-		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 	}
 	start := len(r.arena)
 	r.arena = m.appendMetadata(r.arena, s.next)
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
-	files[group] = append(file, coreKV{Key: key(m, rollupMetadataArchive, 0), Value: metadata})
+	for _, partition := range partitions {
+		fileID := group + "/" + strconv.FormatInt(partition, 10)
+		physicalPart := part
+		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
+		file := files[fileID]
+		for i := range s.records {
+			record := &s.records[i]
+			if rollupExpiryPartition(m.schema(), *record) != partition {
+				continue
+			}
+			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record})
+		}
+		coverage := r.coverage[fileID]
+		if coverage == nil {
+			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
+			r.coverage[fileID] = coverage
+		}
+		if len(coverage.seen) == 0 {
+			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+			coverage.spec.Source.MinOrder = math.MaxUint64
+		}
+		digest := s.next.Frontier.Policy
+		if !coverage.seen[digest] {
+			policies := r.definitions[digest]
+			if policies == nil {
+				definition, err := json.Marshal(m.schema())
+				if err != nil {
+					return err
+				}
+				hash := sha256.Sum256(definition)
+				for archive := range m.schema().Archives {
+					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
+				}
+				r.definitions[digest] = policies
+			}
+			coverage.spec.Policies = append(coverage.spec.Policies, policies...)
+			coverage.seen[digest] = true
+		}
+
+		coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
+		coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
+		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
+		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
+		for i := range s.records {
+			record := &s.records[i]
+			if rollupExpiryPartition(m.schema(), *record) != partition {
+				continue
+			}
+			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
+			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
+			coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
+			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
+		}
+		files[fileID] = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata})
+	}
 
 	return nil
 }
@@ -219,7 +244,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 		r.coverage = map[string]*rollupCoverage{}
 	}
 	// Concatenation follows deterministic disjoint vshard ranges; each group
-	// remains one physical part, regardless of planner parallelism.
+	// and partition remains one physical part regardless of planner parallelism.
 	for i := 0; i < workers; i++ {
 		lane := &r.lanes[i]
 		for group, file := range lane.output.files {

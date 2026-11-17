@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 func TestRollupWindowCacheCommitAndExpiry(t *testing.T) {
@@ -92,10 +93,28 @@ func TestRollupColdReadFailureDoesNotPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	files, err := filepath.Glob(filepath.Join(root, "owner-000", "parts", "*.sst"))
-	if err != nil || len(files) != 1 {
+	if err != nil || len(files) < 2 {
 		t.Fatalf("parts %v %v", files, err)
 	}
-	path := files[0]
+	var path string
+	for _, p := range files {
+		for _, v := range e.owners[0].gc.inventory.bindings {
+			d, err := v2part.ParseDescriptor(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Scope.Partition != 0 && filepath.Base(p) == filepath.Base(gcPath(e.owners[0].gc, d)) {
+				path = p
+				break
+			}
+		}
+		if path != "" {
+			break
+		}
+	}
+	if path == "" {
+		t.Fatal("no data partition")
+	}
 	if err = os.Rename(path, path+".held"); err != nil {
 		t.Fatal(err)
 	}

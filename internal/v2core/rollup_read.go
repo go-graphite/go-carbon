@@ -173,10 +173,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 			if err != nil {
 				return nil, err
 			}
-			if key.Partition != 0 {
-				return nil, errors.New("unexpected rollup partition")
-			}
-			scope, err := v2part.PartitionPrefixForGroup(key.Group, key.VShard, 0)
+			scope, err := v2part.PartitionPrefixForGroup(key.Group, key.VShard, key.Partition)
 			if err != nil {
 				return nil, err
 			}
@@ -805,10 +802,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 		if err != nil {
 			return nil, err
 		}
-		if key.Partition != 0 {
-			return nil, errors.New("unexpected rollup partition")
-		}
-		scope, err := v2part.PartitionPrefixForGroup(key.Group, key.VShard, 0)
+		scope, err := v2part.PartitionPrefixForGroup(key.Group, key.VShard, key.Partition)
 		if err != nil {
 			return nil, err
 		}

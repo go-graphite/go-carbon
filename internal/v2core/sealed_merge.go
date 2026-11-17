@@ -29,6 +29,20 @@ import (
 
 const sealedMergeFanIn = 16
 
+// Bound the sum of compressed inputs, rather than just each input. One owner
+// has at most one merge in flight. The output may be smaller after pruning.
+func mergeMaxBytes() (uint64, error) {
+	n := uint64(1 << 30)
+	if s := os.Getenv("CORE_MERGE_MAX_BYTES"); s != "" {
+		var err error
+		n, err = strconv.ParseUint(s, 10, 64)
+		if err != nil || n == 0 {
+			return 0, errors.New("CORE_MERGE_MAX_BYTES must be a positive byte count")
+		}
+	}
+	return n, nil
+}
+
 // Runtime tuning does not change the persisted routing/configuration contract.
 func mergeWorkerCount(owners int) (int, error) {
 	// At most half of scheduler CPUs, with one worker for small stores.
@@ -92,11 +106,17 @@ func (e *coreEngine) runPartMerges(workers int) {
 }
 
 // Each size tier spans a factor of sixteen and retains at most fifteen quiescent
-// local parts per group. With merge service keeping up, count is O(log bytes).
+// local parts per group/partition below the cap. Terminal parts trade bounded
+// rewrite size for a larger read inventory until their time partition expires.
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	type tier struct {
-		group v2part.Group
-		size  int
+		group     v2part.Group
+		partition int64
+		size      int
+	}
+	limit, err := mergeMaxBytes()
+	if err != nil {
+		return nil, err
 	}
 	tiers := map[tier][]v2part.Descriptor{}
 	o.gc.mu.Lock()
@@ -107,7 +127,7 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 		if err != nil {
 			return nil, err
 		}
-		if d.Scope.Partition != 0 || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+		if d.Bytes > limit || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
 		k, err := v2part.Decode(d.FirstKey)
@@ -121,17 +141,38 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 		if origin.Class != LivePart {
 			continue
 		}
-		t := tier{d.Scope.Group, (bits.Len64(d.Bytes) - 1) / 4}
+		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
 		tiers[t] = append(tiers[t], d)
 	}
 	var chosen []v2part.Descriptor
 	var best tier
 	for t, parts := range tiers {
-		if len(parts) >= sealedMergeFanIn && (chosen == nil || t.size < best.size || (t.size == best.size && t.group < best.group)) {
+		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
+			if a.Bytes < b.Bytes {
+				return -1
+			}
+			if a.Bytes > b.Bytes {
+				return 1
+			}
+			return bytes.Compare(a.SHA256[:], b.SHA256[:])
+		})
+		var total uint64
+		if len(parts) < sealedMergeFanIn {
+			continue
+		}
+		fits := true
+		total = 0
+		for _, d := range parts[:sealedMergeFanIn] {
+			if d.Bytes > limit-total {
+				fits = false
+				break
+			}
+			total += d.Bytes
+		}
+		if fits && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
 			chosen, best = parts, t
 		}
 	}
-	slices.SortFunc(chosen, func(a, b v2part.Descriptor) int { return bytes.Compare(a.SHA256[:], b.SHA256[:]) })
 	if len(chosen) > sealedMergeFanIn {
 		chosen = chosen[:sealedMergeFanIn]
 	}
@@ -296,6 +337,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		return v2part.Descriptor{}, err
 	}
 	defer writer.Abort()
+	limit, err := mergeMaxBytes()
+	if err != nil {
+		return v2part.Descriptor{}, err
+	}
+	writer.LimitBytes(limit)
 	// Pebble's forward compaction iterator recycles compressed and decoded SST
 	// blocks. A normal read iterator allocates/frees C memory for every block.
 	// All inputs are advanced by this goroutine; this pool is never concurrent.
@@ -414,7 +460,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(policy.Config, item) < metadata.LastUpdate/1e9 {
 						untouched = false
 						break
 					}
@@ -430,8 +476,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder {
-				// Age-only slots remain available for cold older-window corrections.
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(policy.Config, r) >= metadata.LastUpdate/1e9 {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -506,7 +551,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
 	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, stop)
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
 	if err != nil {

@@ -49,7 +49,8 @@ type coreSealPlan struct {
 	// the authoritative replacement, catalogue and receipt keys in Files. A
 	// nonempty input requires at least one file; empty cursor barriers need none.
 	ReplaceRaw bool
-	// Each file is nonempty, strictly sorted, and disjoint from other files.
+	// Each file is nonempty and strictly sorted. Extension LSM files have
+	// disjoint key ranges; external archive originals have distinct PartSpecs.
 	// Prefixes 0..2 are reserved for raw data. Prefix ff is reserved except
 	// ff V 2: this checkpoint namespace sorts strictly before frontier ff f.
 	Files [][]coreKV
@@ -115,6 +116,21 @@ func validateCoreSealPlan(p coreSealPlan) error {
 	if len(p.PartSpecs) != 0 && len(p.PartSpecs) != len(p.Files) {
 		return errors.New("seal part specs/files mismatch")
 	}
+	// Archive originals are separate immutable files, never ingested as data
+	// into the LSM. Their vshard ranges may interleave across time partitions;
+	// distinct complete scopes establish disjointness instead of min/max keys.
+	archives := len(p.PartSpecs) == len(p.Files)
+	scopes := map[v2part.Scope]bool{}
+	for i, spec := range p.PartSpecs {
+		if spec.Encoding != v2part.DenseEncoding || spec.Scope.VShard != v2part.GroupVShard || !isRollupFile(p.Files[i]) {
+			archives = false
+			break
+		}
+		if scopes[spec.Scope] {
+			return errors.New("duplicate seal archive scope")
+		}
+		scopes[spec.Scope] = true
+	}
 	var last []byte
 	for _, file := range p.Files {
 		if len(file) == 0 {
@@ -131,7 +147,7 @@ func validateCoreSealPlan(p coreSealPlan) error {
 				return errors.New("seal extension keys not strictly sorted")
 			}
 		}
-		if last != nil && bytes.Compare(last, file[0].Key) >= 0 {
+		if !archives && last != nil && bytes.Compare(last, file[0].Key) >= 0 {
 			return errors.New("seal extension file ranges overlap or are unordered")
 		}
 		last = file[len(file)-1].Key

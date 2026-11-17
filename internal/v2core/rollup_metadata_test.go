@@ -73,11 +73,17 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(plan.Files) != 2 {
-		t.Fatalf("files %d want one per placement group", len(plan.Files))
+	if len(plan.Files) != 4 {
+		t.Fatalf("files %d want metadata and expiry parts per placement group", len(plan.Files))
 	}
 	if e = validateCoreSealPlan(plan); e != nil {
 		t.Fatal(e)
+	}
+	duplicate := plan
+	duplicate.Files = append(append([][]coreKV(nil), plan.Files...), plan.Files[0])
+	duplicate.PartSpecs = append(append([]v2part.Spec(nil), plan.PartSpecs...), plan.PartSpecs[0])
+	if validateCoreSealPlan(duplicate) == nil {
+		t.Fatal("accepted duplicate archive scope")
 	}
 	var saved [][]byte
 	for i, file := range plan.Files {

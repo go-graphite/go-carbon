@@ -330,12 +330,53 @@ func (e *coreEngine) runPartGC() {
 				if o.gc == nil {
 					continue
 				}
+				// Only durable application time can authorize age retirement.
+				// Wall time would delete historical source data during log replay.
+				clock := o.frontier.Load().ArchiveClock
+				if err := o.expireSealedPartitions(clock); err != nil {
+					e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
+				}
 				if _, err := o.gc.sweep(); err != nil {
 					e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
 				}
 			}
 		}
 	}
+}
+
+// Data partitions contain only records whose conservative expiry day is the
+// partition key. Every seal also publishes the latest envelope in partition
+// zero, so retirement cannot erase the last reset/frontier authority. Imported
+// parts keep their move-catalog authority and are not retired here.
+func (o *coreOwner) expireSealedPartitions(now int64) error {
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	var ids []v2part.Digest
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			return err
+		}
+		if d.Scope.Partition <= 0 || d.Scope.Partition > now-rollupPartitionSeconds || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+			continue
+		}
+		ids = append(ids, d.SHA256)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := o.gc.retire(ids, func(d v2part.Descriptor) error {
+		if d.Scope.Partition <= 0 || d.Scope.Partition > now-rollupPartitionSeconds {
+			return errors.New("partition overlaps retained time")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	o.gcDirty.Store(true)
+	coreWake(o.work)
+	return nil
 }
 
 // PartGCStats reports original-link removal, not physical filesystem space:
