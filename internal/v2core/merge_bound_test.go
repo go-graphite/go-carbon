@@ -88,9 +88,9 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 
 func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
-	// Cross several UTC days while retaining all input archives.
+	// Straddle a UTC month boundary while retaining the coarse archive.
 	now := time.Now().Unix()
-	start := now - 3*86400
+	start := rollupMonthPartition(now-3*86400) - 86400
 	root := t.TempDir()
 	e := mergeFixture(t, root, nil)
 	defer func() {
@@ -99,7 +99,7 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 		}
 	}()
 	o := e.owners[0]
-	_, enc := rollupTestPolicy(t, "partition.metric", "1s:7d,1m:30d", sealrollup.Last, .5)
+	_, enc := rollupTestPolicy(t, "partition.metric", "1s:7d,1m:90d", sealrollup.Last, .5)
 	for n := uint64(1); n <= 48; n++ {
 		stamp := start + int64(n)*3600
 		err := e.submitBatches(0, []coreBatch{{ID: 7, Policy: enc, Order: n, Clock: stamp + 1, Points: []row{{ID: 7, Time: stamp, Bits: math.Float64bits(float64(n)), Seq: n}}}}, n, true)
@@ -122,7 +122,7 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 		seen[d.Scope.Partition] = true
 	}
 	o.gc.mu.Unlock()
-	if len(seen) < 4 || !seen[0] {
+	if len(seen) != 2 || seen[0] {
 		t.Fatalf("partitions=%v", seen)
 	}
 	mergeDrain(t, o)
@@ -167,7 +167,27 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	before := e.PartGCStats()[0]
 	pin = o.db.NewSnapshot()
 	defer pin.Close()
-	if err = o.expireSealedPartitions(now + 60*86400); err != nil {
+	var maxExpiry int64
+	o.gc.mu.Lock()
+	for _, v := range o.gc.inventory.bindings {
+		d, err := v2part.ParseDescriptor(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Coverage.MaxExpiry == 0 || d.Coverage.MinExpiry > d.Coverage.MaxExpiry {
+			t.Fatalf("expiry bounds %+v", d.Coverage)
+		}
+		maxExpiry = max(maxExpiry, d.Coverage.MaxExpiry)
+	}
+	o.gc.mu.Unlock()
+	// Whole-part drop happens strictly after the part's max expiry.
+	if err = o.expireSealedParts(maxExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if e.PartGCStats()[0].LiveParts == 0 {
+		t.Fatal("dropped part at its max expiry")
+	}
+	if err = o.expireSealedParts(maxExpiry + 1); err != nil {
 		t.Fatal(err)
 	}
 	after := e.PartGCStats()[0]
@@ -182,9 +202,11 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	if !reflect.DeepEqual(mergeRead(t, pin), want) {
 		t.Fatal("drop violated pin")
 	}
+	// Every envelope expires no earlier than the data it masks; once all data
+	// expired the name leaves the catalog, as an expired whisper file would.
 	var count int
-	if err = ScanCatalogNames(context.Background(), s, func(string) error { count++; return nil }); err != nil || count == 0 {
-		t.Fatalf("metadata authority lost %d %v", count, err)
+	if err = ScanCatalogNames(context.Background(), s, func(string) error { count++; return nil }); err != nil || count != 0 {
+		t.Fatalf("expired name remains %d %v", count, err)
 	}
 	b, _ := json.Marshal(after)
 	t.Log(string(b))
@@ -214,8 +236,8 @@ func TestMergeBoundPartitionMove(t *testing.T) {
 		parts = append(parts, MovePart{Path: gcPath(o.gc, d), Descriptor: d})
 	}
 	o.gc.mu.Unlock()
-	if len(parts) < 2 {
-		t.Fatal("fixture did not partition")
+	if len(parts) != 1 || parts[0].Descriptor.Scope.Partition != rollupMonthPartition(now-5) {
+		t.Fatal("fixture did not use the month partition")
 	}
 	prepared, err := PrepareMove(context.Background(), t.TempDir(), parts)
 	if err != nil {
@@ -232,5 +254,87 @@ func TestMergeBoundPartitionMove(t *testing.T) {
 	got := mergeRead(t, s)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("partition move changed records: got=%v want=%v", got, want)
+	}
+}
+
+// One part mixing 3 d and 1 y retention: a TTL rewrite drops exactly the
+// expired fine records, keeps the coarse ones bit-exact, and is not repeated.
+func TestMergeBoundTTLRewrite(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	now := time.Now().Unix() / 3600 * 3600
+	e := mergeFixture(t, t.TempDir(), nil)
+	defer e.close()
+	o := e.owners[0]
+	_, mixed := rollupTestPolicy(t, "ttl.mixed", "1m:3d,1h:1y", sealrollup.Last, 0)
+	_, long := rollupTestPolicy(t, "ttl.long", "1m:1y", sealrollup.Last, .5)
+	err := e.submitBatches(0, []coreBatch{{ID: 7, Policy: mixed, Order: 1, Clock: now, Points: []row{{ID: 7, Time: now - 7200, Bits: math.Float64bits(1), Seq: 1}, {ID: 7, Time: now - 60, Bits: math.Float64bits(2), Seq: 2}}}}, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := o.db.NewSnapshot()
+	want := mergeRead(t, s)
+	_ = s.Close()
+	var fine, coarse int
+	for _, r := range want {
+		if r.Archive == 0 {
+			fine++
+		} else {
+			coarse++
+		}
+	}
+	if fine == 0 || coarse == 0 {
+		t.Fatalf("fixture %+v", want)
+	}
+	clock := now + 4*86400
+	err = e.submitBatches(0, []coreBatch{{ID: 8, Policy: long, Order: 2, Clock: clock, Points: []row{{ID: 8, Time: clock - 60, Bits: math.Float64bits(3), Seq: 3}}}}, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := o.frontier.Load().ArchiveClock; got != clock {
+		t.Fatalf("clock %d", got)
+	}
+	before := e.PartGCStats()[0]
+	changed, err := o.mergeSealedParts(nil)
+	if err != nil || !changed {
+		t.Fatalf("ttl rewrite changed=%v %v", changed, err)
+	}
+	s = o.db.NewSnapshot()
+	defer s.Close()
+	var kept []sealrollup.Record
+	for _, r := range mergeRead(t, s) {
+		if r.Archive == 0 && r.Sample.Time < now {
+			t.Fatalf("expired record retained %+v", r)
+		}
+		if r.Sample.Time < now {
+			kept = append(kept, r)
+		}
+	}
+	var wantKept []sealrollup.Record
+	for _, r := range want {
+		if r.Archive != 0 {
+			wantKept = append(wantKept, r)
+		}
+	}
+	if !reflect.DeepEqual(kept, wantKept) {
+		t.Fatalf("coarse records changed: %+v want %+v", kept, wantKept)
+	}
+	o.gc.mu.Lock()
+	for _, v := range o.gc.inventory.bindings {
+		d, err := v2part.ParseDescriptor(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Coverage.MinExpiry != 0 && d.Coverage.MinExpiry < clock {
+			t.Fatalf("rewritten part still expired %+v", d.Coverage)
+		}
+	}
+	o.gc.mu.Unlock()
+	after := e.PartGCStats()[0]
+	if after.LiveParts != before.LiveParts {
+		t.Fatalf("parts %d -> %d", before.LiveParts, after.LiveParts)
+	}
+	o.ttlNext.Store(0)
+	if changed, err = o.mergeSealedParts(nil); err != nil || changed {
+		t.Fatalf("repeated ttl rewrite changed=%v %v", changed, err)
 	}
 }

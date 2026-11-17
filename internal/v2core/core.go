@@ -213,6 +213,7 @@ type coreOwner struct {
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
+	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
 	maintenance bool
 
 	stage      func(string)

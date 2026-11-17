@@ -333,7 +333,7 @@ func (e *coreEngine) runPartGC() {
 				// Only durable application time can authorize age retirement.
 				// Wall time would delete historical source data during log replay.
 				clock := o.frontier.Load().ArchiveClock
-				if err := o.expireSealedPartitions(clock); err != nil {
+				if err := o.expireSealedParts(clock); err != nil {
 					e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
 				}
 				if _, err := o.gc.sweep(); err != nil {
@@ -344,11 +344,12 @@ func (e *coreEngine) runPartGC() {
 	}
 }
 
-// Data partitions contain only records whose conservative expiry day is the
-// partition key. Every seal also publishes the latest envelope in partition
-// zero, so retirement cannot erase the last reset/frontier authority. Imported
-// parts keep their move-catalog authority and are not retired here.
-func (o *coreOwner) expireSealedPartitions(now int64) error {
+// A part whose latest record and envelope expiry precede the durable owner
+// ArchiveClock holds nothing a reader may still return: drop it whole, as
+// ClickHouse drops a part past its max TTL. The newest envelope of a metric
+// expires no earlier than any record it can mask. Imported parts keep their
+// move-catalog authority and are not retired here.
+func (o *coreOwner) expireSealedParts(now int64) error {
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -358,7 +359,7 @@ func (o *coreOwner) expireSealedPartitions(now int64) error {
 		if err != nil {
 			return err
 		}
-		if d.Scope.Partition <= 0 || d.Scope.Partition > now-rollupPartitionSeconds || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+		if d.Coverage.MaxExpiry == 0 || d.Coverage.MaxExpiry >= now || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
 		ids = append(ids, d.SHA256)
@@ -367,8 +368,8 @@ func (o *coreOwner) expireSealedPartitions(now int64) error {
 		return nil
 	}
 	if err := o.gc.retire(ids, func(d v2part.Descriptor) error {
-		if d.Scope.Partition <= 0 || d.Scope.Partition > now-rollupPartitionSeconds {
-			return errors.New("partition overlaps retained time")
+		if d.Coverage.MaxExpiry == 0 || d.Coverage.MaxExpiry >= now {
+			return errors.New("part overlaps retained time")
 		}
 		return nil
 	}); err != nil {

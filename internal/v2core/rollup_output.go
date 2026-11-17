@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
@@ -20,6 +21,31 @@ type rollupOutput struct {
 	arena       []byte
 	definitions map[[32]byte][]partsformat.ArchivePolicy
 	coverage    map[string]*rollupCoverage
+	partitions  []int64
+	// Cached current month and file name: stages arrive sorted by group, and
+	// live samples share one month, so lookups rarely allocate.
+	monthLo, monthHi int64
+	lastGroup        string
+	lastPartition    int64
+	lastFileID       string
+}
+
+func (r *rollupOutput) monthPartition(t int64) int64 {
+	if t >= r.monthLo && t < r.monthHi {
+		return r.monthLo
+	}
+	lo := rollupMonthPartition(t)
+	y, m, _ := time.Unix(lo, 0).UTC().Date()
+	r.monthLo, r.monthHi = lo, time.Date(y, m+1, 1, 0, 0, 0, 0, time.UTC).Unix()
+	return lo
+}
+
+func (r *rollupOutput) fileID(group string, partition int64) string {
+	if r.lastFileID == "" || group != r.lastGroup || partition != r.lastPartition {
+		r.lastGroup, r.lastPartition = group, partition
+		r.lastFileID = group + "/" + strconv.FormatInt(partition, 10)
+	}
+	return r.lastFileID
 }
 
 func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stage func(string)) error {
@@ -71,31 +97,26 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			s.next.LastUpdate = max(s.next.LastUpdate, b.Now*1e9)
 		}
 	}
-	// Metadata is retained separately from expiring data. Each data part also
-	// carries its metric envelope so transport/read validation stays unchanged.
-	partitions := make([]int64, 1, 8)
+	// Records go to the calendar month of their sample time; the envelope goes
+	// with every partition written and with the month of the newest sample, so
+	// the newest envelope survives as long as any data it can mask.
+	schema := m.schema()
+	home := r.monthPartition(s.next.Frontier.MaxTime)
+	envelopeExpiry := rollupMetricExpiry(schema, s.next.Frontier.MaxTime)
+	partitions := append(r.partitions[:0], home)
 	for i := range s.records {
-		record := &s.records[i]
-		partition := rollupExpiryPartition(m.schema(), *record)
-		if !slices.Contains(partitions, partition) {
-			partitions = append(partitions, partition)
+		if p := r.monthPartition(s.records[i].Sample.Time); !slices.Contains(partitions, p) {
+			partitions = append(partitions, p)
 		}
 	}
+	r.partitions = partitions
 	start := len(r.arena)
 	r.arena = m.appendMetadata(r.arena, s.next)
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	for _, partition := range partitions {
-		fileID := group + "/" + strconv.FormatInt(partition, 10)
+		fileID := r.fileID(group, partition)
 		physicalPart := part
 		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
-		file := files[fileID]
-		for i := range s.records {
-			record := &s.records[i]
-			if rollupExpiryPartition(m.schema(), *record) != partition {
-				continue
-			}
-			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record})
-		}
 		coverage := r.coverage[fileID]
 		if coverage == nil {
 			coverage = &rollupCoverage{seen: map[[32]byte]bool{}}
@@ -109,12 +130,12 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		if !coverage.seen[digest] {
 			policies := r.definitions[digest]
 			if policies == nil {
-				definition, err := json.Marshal(m.schema())
+				definition, err := json.Marshal(schema)
 				if err != nil {
 					return err
 				}
 				hash := sha256.Sum256(definition)
-				for archive := range m.schema().Archives {
+				for archive := range schema.Archives {
 					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
 				}
 				r.definitions[digest] = policies
@@ -122,21 +143,27 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Policies = append(coverage.spec.Policies, policies...)
 			coverage.seen[digest] = true
 		}
-
+		expiry := expiryBounds{coverage.spec.MinExpiry, coverage.spec.MaxExpiry}
+		expiry.envelope(envelopeExpiry)
 		coverage.spec.MinTime = min(coverage.spec.MinTime, s.next.Frontier.MaxTime)
 		coverage.spec.MaxTime = max(coverage.spec.MaxTime, s.next.Frontier.MaxTime)
 		coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, s.next.Frontier.Order)
 		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
+		// Physical dense packing belongs exclusively to the shared v2part writer.
+		file := files[fileID]
 		for i := range s.records {
 			record := &s.records[i]
-			if rollupExpiryPartition(m.schema(), *record) != partition {
+			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
+			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record})
+			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
 			coverage.spec.Source.MinOrder = min(coverage.spec.Source.MinOrder, record.Order)
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
+		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
 		files[fileID] = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata})
 	}
 
@@ -272,6 +299,9 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			dst.spec.MaxTime = max(dst.spec.MaxTime, src.spec.MaxTime)
 			dst.spec.Source.MinOrder = min(dst.spec.Source.MinOrder, src.spec.Source.MinOrder)
 			dst.spec.Source.MaxOrder = max(dst.spec.Source.MaxOrder, src.spec.Source.MaxOrder)
+			expiry := expiryBounds{dst.spec.MinExpiry, dst.spec.MaxExpiry}
+			expiry.join(expiryBounds{src.spec.MinExpiry, src.spec.MaxExpiry})
+			dst.spec.MinExpiry, dst.spec.MaxExpiry = expiry.min, expiry.max
 		}
 	}
 	keys := make([]string, 0, len(r.files))

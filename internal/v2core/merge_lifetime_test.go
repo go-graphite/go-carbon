@@ -62,13 +62,9 @@ func TestMergeLifetimeFixture(t *testing.T) {
 			}
 			partition := int64(0)
 			if bounded {
-				partition = rollupExpiryPartition(p.Config, rs[0])
+				partition = rollupMonthPartition(rs[0].Sample.Time)
 			}
-			partitions := []int64{partition}
-			if bounded && partition != 0 {
-				partitions = append(partitions, 0)
-			}
-			for _, partition := range partitions {
+			for _, partition := range []int64{partition} {
 				var part v2part.PartID
 				binary.BigEndian.PutUint64(part[:8], n^uint64(partition))
 				spec := v2part.Spec{Scope: v2part.Scope{Group: p.Group, VShard: v2part.GroupVShard, Partition: partition, Part: part}, Source: o.partSource, MinTime: stamp, MaxTime: stamp + width - 1}
