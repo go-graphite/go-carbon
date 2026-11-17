@@ -2,8 +2,10 @@ package v2core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -80,7 +82,7 @@ func TestApplicationPolicyOwnsCanonicalDefinition(t *testing.T) {
 	}
 }
 
-func TestRollupOrdinalsPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
+func TestRollupStagesPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 	r := newCoreRollups()
 	r.parallelism = 4
 	policies := make([][]byte, 512)
@@ -95,15 +97,26 @@ func TestRollupOrdinalsPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for epoch := uint64(1); epoch <= 4; epoch++ {
+	for epoch := uint64(1); epoch <= 6; epoch++ {
 		count := 256
 		if epoch > 1 {
 			count = 512
 		}
-		batches := make([]Batch, count)
-		for i := range batches {
-			batches[i] = Batch{ID: uint64(i + 1), Policy: policies[i], Order: epoch, Clock: 1000 + int64(epoch), Points: []Row{{Time: 990 + int64(epoch), Seq: epoch}}}
+		var batches []Batch
+		for i := range count {
+			// Later seals touch a sparse subset in reverse admission order,
+			// including names first encountered by the aborted second seal.
+			if epoch >= 4 && i%17 != 0 {
+				continue
+			}
+			bits := [...]uint64{0, 1 << 63, 1, 0x7ff8000000000042, 0x7ff0000000000000, 0xfff0000000000000}
+			batches = append(batches, Batch{ID: uint64(i + 1), Policy: policies[i], Order: epoch, Clock: 1000 + int64(epoch), Points: []Row{
+				{Time: 990 + int64(epoch), Seq: epoch*3 + 1, Bits: bits[i%len(bits)]},
+				{Time: 989, Seq: epoch*3 + 2, Bits: bits[(i+1)%len(bits)]},
+				{Time: 989, Seq: epoch*3 + 3, Bits: bits[(i+2)%len(bits)]},
+			}})
 		}
+		slices.Reverse(batches)
 		plan, err := r.plan(SealInput{Batches: batches})
 		if err != nil {
 			t.Fatal(err)
@@ -115,6 +128,25 @@ func TestRollupOrdinalsPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 				}
 			}
 		}
+		// The UUID is the only nondeterministic key field. Keep all stored
+		// values, including metadata and IEEE bits, in the cross-runtime oracle.
+		digest := sha256.New()
+		for _, file := range plan.Files {
+			for _, kv := range file {
+				key, err := v2part.Decode(kv.Key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key.Part = v2part.PartID{}
+				encoded, err := v2part.Encode(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest.Write(encoded)
+				digest.Write(kv.encodedValue())
+			}
+		}
+		t.Logf("epoch=%d ordered-record-sha256=%x", epoch, digest.Sum(nil))
 		if epoch == 2 {
 			plan.Abort()
 		} else {

@@ -870,7 +870,14 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	if o.ready == nil {
 		o.initQueueSignals(nil)
 	}
-	head := make([]row, 0, o.cfg.MaxRows)
+	headCapacity := o.cfg.MaxRows
+	if o.cfg.Rollups {
+		// Rollups normally seal on the one-second deadline, well below the
+		// hard row limit. Grow with actual intake instead of reserving the
+		// maximum buffer for every owner at startup.
+		headCapacity = min(headCapacity, 64<<10)
+	}
+	head := make([]row, 0, headCapacity)
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
 	deadline := time.Now().Add(time.Second)
