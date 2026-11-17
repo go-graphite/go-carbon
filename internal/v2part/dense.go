@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
@@ -210,19 +211,37 @@ func DecodeSlots(archive uint32, firstSlot int64, data []byte) ([]sealrollup.Rec
 	return rs, nil
 }
 
-// DenseWriter groups a sorted singleton stream into bounded runs. It owns no
-// cross-file buffers and never reads before writing. Scope and archive policy
-// validation remain the shared Writer's responsibility.
+// DenseWriter groups a sorted singleton stream into bounded runs. It reuses
+// scalar packing buffers across files; scope and archive policy validation
+// remain the shared Writer's responsibility.
 type DenseWriter struct {
-	writer  *Writer
+	writer *Writer
+	*denseWorkspace
+	err    error
+	closed bool
+}
+
+type denseWorkspace struct {
 	decoder keyDecoder
 	first   []byte
 	encoded []byte
 	key     Key
 	records []sealrollup.Record
 	last    []byte
-	err     error
-	closed  bool
+}
+
+var denseWorkspaces sync.Pool
+
+func (w *DenseWriter) releaseWorkspace() {
+	b := w.denseWorkspace
+	if b == nil {
+		return
+	}
+	b.decoder.key, b.key = Key{}, Key{}
+	b.decoder.prefix = b.decoder.prefix[:0]
+	b.first, b.encoded, b.records, b.last = b.first[:0], b.encoded[:0], b.records[:0], b.last[:0]
+	w.denseWorkspace = nil
+	denseWorkspaces.Put(b)
 }
 
 func NewDenseWriter(path string, spec Spec) (*DenseWriter, error) {
@@ -231,7 +250,11 @@ func NewDenseWriter(path string, spec Spec) (*DenseWriter, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &DenseWriter{writer: w}, nil
+	b, _ := denseWorkspaces.Get().(*denseWorkspace)
+	if b == nil {
+		b = &denseWorkspace{}
+	}
+	return &DenseWriter{writer: w, denseWorkspace: b}, nil
 }
 func (w *DenseWriter) flush() error {
 	if len(w.records) == 0 {
@@ -323,12 +346,17 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 	w.records = append(w.records, r)
 	return nil
 }
-func (w *DenseWriter) Abort() error { w.closed = true; return w.writer.Abort() }
+func (w *DenseWriter) Abort() error {
+	w.closed = true
+	defer w.releaseWorkspace()
+	return w.writer.Abort()
+}
 func (w *DenseWriter) Close() (Descriptor, error) {
 	if w.closed {
 		return Descriptor{}, io.ErrClosedPipe
 	}
 	w.closed = true
+	defer w.releaseWorkspace()
 	if w.err == nil {
 		w.err = w.flush()
 	}

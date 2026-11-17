@@ -144,6 +144,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	for i := range r.lanes {
 		r.lanes[i].ordered = r.lanes[i].ordered[:0]
 	}
+	prepareRollupStageOrder(stages)
 	for i := range stages {
 		lane := int(stages[i].metric.vshard) * workers / 4096
 		r.lanes[lane].ordered = append(r.lanes[lane].ordered, &stages[i])
@@ -263,10 +264,75 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	return out, nil
 }
 
+func prepareRollupStageOrder(stages []rollupStage) {
+	// Compute the canonical group and name prefixes once per participating
+	// stage, rather than chasing catalog pointers for every sort comparison.
+	groups := make(map[partsformat.Group]uint32)
+	for i := range stages {
+		groups[stages[i].metric.policy.Group] = 0
+	}
+	orderedGroups := make([]partsformat.Group, 0, len(groups))
+	for group := range groups {
+		orderedGroups = append(orderedGroups, group)
+	}
+	slices.SortFunc(orderedGroups, func(a, b partsformat.Group) int {
+		if len(a) != len(b) {
+			return len(a) - len(b)
+		}
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
+	})
+	for i, group := range orderedGroups {
+		groups[group] = uint32(i)
+	}
+	for i := range stages {
+		s := &stages[i]
+		m := s.metric
+		s.sortGroup = groups[m.policy.Group]
+		s.sortName = string(m.policy.Name)
+		s.sortRouteName = uint64(m.vshard)<<32 | uint64(len(s.sortName))
+		var prefix [16]byte
+		copy(prefix[:], s.sortName)
+		s.sortPrefix = [2]uint64{binary.BigEndian.Uint64(prefix[:8]), binary.BigEndian.Uint64(prefix[8:])}
+	}
+}
+
 func compareRollupStages(a, b *rollupStage) int {
-	// Only metrics participating in this part need ordering. Historical names
-	// cannot change their relative canonical order.
-	return compareRollupMetrics(a.metric, b.metric)
+	if a.sortGroup != b.sortGroup {
+		if a.sortGroup < b.sortGroup {
+			return -1
+		}
+		return 1
+	}
+	if a.sortRouteName != b.sortRouteName {
+		if a.sortRouteName < b.sortRouteName {
+			return -1
+		}
+		return 1
+	}
+	for i := range a.sortPrefix {
+		if a.sortPrefix[i] != b.sortPrefix[i] {
+			if a.sortPrefix[i] < b.sortPrefix[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	if len(a.sortName) <= 16 {
+		return 0
+	}
+	if a.sortName[16:] < b.sortName[16:] {
+		return -1
+	}
+	if a.sortName[16:] > b.sortName[16:] {
+		return 1
+	}
+	return 0
 }
 
 func compareRollupMetrics(x, y *rollupMetric) int {

@@ -42,8 +42,9 @@ type Config struct {
 	Logger                                              *slog.Logger
 }
 type batch struct {
-	names []string
-	data  []points.Point
+	names    []string
+	data     []points.Point
+	distinct []string
 }
 type ownerCall struct {
 	run func() error
@@ -57,7 +58,8 @@ type Stats struct{ Accepted, Rejected, ParseErrors, TransportErrors, SinkErrors,
 type Server struct {
 	cfg      Config
 	listener net.Listener
-	queues   []chan batch
+	queues   []chan *batch
+	batches  sync.Pool
 	controls []chan ownerCall
 	owners   []Owner
 	done     chan struct{}
@@ -143,7 +145,7 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	s.pending = make([]pendingShard, len(owners))
 	for owner, o := range owners {
 		s.pending[owner].names = make(map[string]int64)
-		q := make(chan batch, cfg.QueueDepth)
+		q := make(chan *batch, cfg.QueueDepth)
 		control := make(chan ownerCall)
 		s.controls = append(s.controls, control)
 		s.queues = append(s.queues, q)
@@ -214,14 +216,13 @@ func (s *Server) fail(err error) {
 		s.mu.Unlock()
 	})
 }
-func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCall) {
+func (s *Server) work(owner int, o Owner, q <-chan *batch, control <-chan ownerCall) {
 	defer s.workers.Done()
 	tick := time.NewTicker(s.cfg.SyncInterval)
 	defer tick.Stop()
 	var seq uint64
 	failed := false
 	buffered := map[string]int64{}
-	batchNames := map[string]int64{}
 	releaseBuffered := func() {
 		s.pendingRelease(owner, buffered)
 		clear(buffered)
@@ -231,23 +232,26 @@ func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCa
 	// Per-name order and decoded expiry reservations survive this coalescing.
 	var pending batch
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
+	appendBatch := func(names []string, data []points.Point) {
+		sequence = sequence[:0]
+		for range data {
+			seq++
+			sequence = append(sequence, seq)
+		}
+		if err := o.Append(names, data, sequence, time.Now().Unix()); err != nil {
+			failed = true
+			s.stats.rejected.Add(uint64(len(data)))
+			s.stats.sink.Add(1)
+			s.fail(err)
+		} else {
+			s.stats.accepted.Add(uint64(len(data)))
+		}
+	}
 	appendPending := func() {
 		if failed || len(pending.data) == 0 {
 			return
 		}
-		sequence = sequence[:0]
-		for range pending.data {
-			seq++
-			sequence = append(sequence, seq)
-		}
-		if err := o.Append(pending.names, pending.data, sequence, time.Now().Unix()); err != nil {
-			failed = true
-			s.stats.rejected.Add(uint64(len(pending.data)))
-			s.stats.sink.Add(1)
-			s.fail(err)
-		} else {
-			s.stats.accepted.Add(uint64(len(pending.data)))
-		}
+		appendBatch(pending.names, pending.data)
 		clear(pending.names)
 		pending.names = pending.names[:0]
 		pending.data = pending.data[:0]
@@ -278,19 +282,28 @@ func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCa
 				syncOwner()
 				return
 			}
-			clear(batchNames)
-			for i, name := range b.names {
-				if i == 0 || name != b.names[i-1] {
-					batchNames[name] = 1
-				}
+			originalNames, originalData := b.names, b.data
+			recycle := func() {
+				clear(originalNames)
+				clear(b.distinct)
+				b.distinct = b.distinct[:0]
+				b.names, b.data = originalNames[:0], originalData[:0]
+				s.batches.Put(b)
 			}
 			if failed {
-				s.pendingRelease(owner, batchNames)
+				for _, name := range b.distinct {
+					s.pendingAdd(owner, name, -1)
+				}
 				s.stats.rejected.Add(uint64(len(b.data)))
+				recycle()
 				continue
 			}
-			for name, n := range batchNames {
-				buffered[name] += n
+			for _, name := range b.distinct {
+				buffered[name]++
+			}
+			if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
+				appendBatch(b.names, b.data)
+				b.names, b.data = b.names[:0], b.data[:0]
 			}
 			for len(b.data) > 0 {
 				n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
@@ -305,6 +318,7 @@ func (s *Server) work(owner int, o Owner, q <-chan batch, control <-chan ownerCa
 					break
 				}
 			}
+			recycle()
 		case <-tick.C:
 			syncOwner()
 		}
@@ -396,8 +410,9 @@ func (r countedReader) Read(b []byte) (int, error) {
 }
 
 type reference struct {
-	name  string
-	owner int
+	name       string
+	owner      int
+	generation uint64
 }
 
 // OwnerFor returns the stable producer used by unplaced TCP intake.
@@ -422,26 +437,31 @@ func (s *Server) read(c net.Conn) error {
 	if err != nil {
 		return err
 	}
-	buffers := make([]batch, len(s.queues))
-	// Scratch sets are connection-local and reused after queue transfer. The
-	// serial worker reconstructs each batch's distinct names from its immutable
-	// name slice; no reservation map travels with or allocates for every batch.
+	buffers := make([]*batch, len(s.queues))
+	generations := make([]uint64, len(s.queues))
+	for i := range generations {
+		generations[i] = 1
+	}
+	// Scratch sets are connection-local and reused after queue transfer. Each
+	// batch carries only its distinct names for durable reservation retirement.
 	reserved := make([]map[string]int64, len(s.queues))
 	flush := func(i int) error {
 		b := buffers[i]
-		if len(b.data) == 0 {
+		if b == nil || len(b.data) == 0 {
 			return nil
 		}
 		select {
 		case s.queues[i] <- b:
-			buffers[i] = batch{}
+			buffers[i] = nil
+			generations[i]++
 			clear(reserved[i])
 			return nil
 		case <-s.done:
 			s.pendingRelease(i, reserved[i])
 			clear(reserved[i])
 			s.stats.rejected.Add(uint64(len(b.data)))
-			buffers[i] = batch{}
+			buffers[i] = nil
+			generations[i]++
 			return errors.New("receiver stopped")
 		}
 	}
@@ -454,16 +474,26 @@ func (s *Server) read(c net.Conn) error {
 	}
 	defer func() { _ = flushAll() }()
 	var appendErr error
-	add := func(ref reference, value float64, ts int64) {
+	add := func(ref *reference, value float64, ts int64) {
 		if appendErr != nil {
 			s.stats.rejected.Add(1)
 			return
 		}
-		b := &buffers[ref.owner]
-		// Adjacent points usually share a relay name. Neither their decode nor
-		// the owner worker needs a per-point shared-map update. Reserve before
+		b := buffers[ref.owner]
+		if b == nil {
+			if pooled := s.batches.Get(); pooled != nil {
+				b = pooled.(*batch)
+			} else {
+				b = &batch{names: make([]string, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
+			}
+			buffers[ref.owner] = b
+		}
+		// Dictionary references remember their owner batch generation, so repeated
+		// points skip the reservation map. Duplicate dictionary names still reserve
+		// only once through the connection-local set. Reserve before
 		// exposing even the first decoded point to queues or a blocked flush.
-		if len(b.names) == 0 || b.names[len(b.names)-1] != ref.name {
+		if ref.generation != generations[ref.owner] {
+			ref.generation = generations[ref.owner]
 			names := reserved[ref.owner]
 			if names == nil {
 				names = make(map[string]int64)
@@ -472,6 +502,7 @@ func (s *Server) read(c net.Conn) error {
 			if _, ok := names[ref.name]; !ok {
 				s.pendingAdd(ref.owner, ref.name, 1)
 				names[ref.name] = 1
+				b.distinct = append(b.distinct, ref.name)
 			}
 		}
 		b.names = append(b.names, ref.name)
@@ -500,9 +531,9 @@ func (s *Server) read(c net.Conn) error {
 			_, err = d.ReadFrame(r, func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 				if *slot == nil {
 					n := string(name)
-					*slot = reference{n, OwnerFor(n, len(s.queues))}
+					*slot = &reference{name: n, owner: OwnerFor(n, len(s.queues))}
 				}
-				add((*slot).(reference), value, ts)
+				add((*slot).(*reference), value, ts)
 			})
 			if err == io.EOF {
 				return flushAll()
@@ -567,9 +598,9 @@ func (s *Server) read(c net.Conn) error {
 				// its immutable name and stable owner until the name changes.
 				if !bytes.Equal(name, []byte(previous.name)) {
 					n := string(name)
-					previous = reference{n, OwnerFor(n, len(s.queues))}
+					previous = reference{name: n, owner: OwnerFor(n, len(s.queues))}
 				}
-				add(previous, value, ts)
+				add(&previous, value, ts)
 			}
 		}
 		if appendErr != nil {
