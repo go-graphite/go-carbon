@@ -319,6 +319,11 @@ func (e *coreEngine) RetireMovedParts(owner int, ids []v2part.Digest, old, next 
 
 func (e *coreEngine) runPartGC() {
 	defer close(e.gcDone)
+	// Read-only snapshots can outlive the retirement grace. Inventory remains
+	// available to readers, but reclamation belongs only to a writable engine.
+	if e.readOnly {
+		return
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
