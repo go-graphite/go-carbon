@@ -15,8 +15,7 @@ import (
 	"github.com/go-graphite/go-whisper"
 )
 
-// openV2Classic retains the historical engine read-only. The v2 selector never
-// starts a classic persister, migration, expiry worker or maintenance writer.
+// openV2Classic reuses the writable dual-write handle, or opens history read-only.
 func (app *App) openV2Classic() ([]string, error) {
 	c := app.Config
 	var names []string
@@ -27,20 +26,22 @@ func (app *App) openV2Classic() ([]string, error) {
 			return nil, err
 		}
 		if len(entries) > 0 {
-			opts := store.Options{ReadOnly: true, ExactBlocks: c.Whisper.StoreEncoding == "exact", ReadConcurrency: c.Whisper.StoreReadConcurrency, BlockLoadConcurrency: c.Whisper.StoreBlockLoadConcurrency, CacheSize: c.Whisper.StoreCacheSize, WALDir: c.Whisper.StoreWALDir}
-			if c.Whisper.StoreIncrementalMigration {
-				opts.IncrementalSource = c.Whisper.DataDir
-			}
-			app.MetricStore, err = store.Open(path, opts)
-			if errors.Is(err, store.ErrFormat) && opts.ExactBlocks {
-				// Read-only format validation happens before opening Pebble. The
-				// continuation codec also reads native formats v6 and later.
-				opts.Continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}
-				opts.TimeBuckets = true
+			if app.MetricStore == nil {
+				opts := store.Options{ReadOnly: true, ExactBlocks: c.Whisper.StoreEncoding == "exact", ReadConcurrency: c.Whisper.StoreReadConcurrency, BlockLoadConcurrency: c.Whisper.StoreBlockLoadConcurrency, CacheSize: c.Whisper.StoreCacheSize, WALDir: c.Whisper.StoreWALDir}
+				if c.Whisper.StoreIncrementalMigration {
+					opts.IncrementalSource = c.Whisper.DataDir
+				}
 				app.MetricStore, err = store.Open(path, opts)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("open historical classic store: %w", err)
+				if errors.Is(err, store.ErrFormat) && opts.ExactBlocks {
+					// Read-only format validation happens before opening Pebble. The
+					// continuation codec also reads native formats v6 and later.
+					opts.Continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}
+					opts.TimeBuckets = true
+					app.MetricStore, err = store.Open(path, opts)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("open historical classic store: %w", err)
+				}
 			}
 			if err := store.EachPage(context.Background(), app.MetricStore.ListCatalogPage, "", 4096, func(page []store.Metadata) error {
 				for _, m := range page {

@@ -90,7 +90,7 @@ func TestDenseGoldenBitExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vectors := map[string][]byte{"dense" + denseGoldenSuffix + ".sst": data, "dense" + denseGoldenSuffix + "-descriptor.json": descriptor}
+	vectors := map[string][]byte{"dense-pooled" + denseGoldenSuffix + ".sst": data, "dense-pooled" + denseGoldenSuffix + "-descriptor.json": descriptor}
 	for name, got := range vectors {
 		want, err := os.ReadFile(filepath.Join("testdata", name))
 		if err != nil {
@@ -106,6 +106,7 @@ func TestDenseGoldenBitExact(t *testing.T) {
 	// Verify and decode both compressor variants independently of the writer.
 	for _, suffix := range []string{"", "-nocgo"} {
 		checkDenseGolden(t, "dense"+suffix, input)
+		checkDenseGolden(t, "dense-pooled"+suffix, input)
 	}
 }
 

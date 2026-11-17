@@ -26,8 +26,15 @@ type Config struct {
 	Layer, Producers, Shards, MaxPendingRows int
 	GroupInterval                            time.Duration
 	// Placement requires stamped intake; one daemon root owns one PG.
-	Placement   Placement
-	Hooks       v2core.Hooks
+	Placement Placement
+	Hooks     v2core.Hooks
+	// DurableApplications receives the synced input prefix before core submission.
+	// It is also called during recovery, independently of core frontiers.
+	// Each producer calls serially; different producers may call concurrently.
+	// The callback must finish consuming its borrowed batches before returning.
+	DurableApplications func(int, []v2core.Batch) error
+	// Prepare runs under the root lock before opening core or replaying input.
+	Prepare     func() error
 	coreMaxRows int // private fixture bound; zero retains the experiment buffer size
 }
 
@@ -53,6 +60,7 @@ type Producer struct {
 	admission                                                    v2placement.Sink
 	placement                                                    Placement
 	engine                                                       *v2core.Engine
+	durableApplications                                          func(int, []v2core.Batch) error
 	index, count, layer, maxPending                              int
 	catalog                                                      *partlog.NameCatalog
 	encoder                                                      partlog.CatalogEncoder
@@ -61,6 +69,10 @@ type Producer struct {
 	packets                                                      []packet
 	records                                                      [][]byte
 	spareRows                                                    [][]v2core.Row
+	spareBatches                                                 [][]v2core.Batch
+	applicationFrames                                            []partlog.DictionaryFrame
+	applicationIDs                                               []uint64
+	applicationPolicies                                          map[uint64]*v2core.ApplicationPolicy
 	cursor                                                       uint64
 	applyOrder                                                   uint64
 	pendingRows                                                  int
@@ -84,6 +96,9 @@ func coreConfig(c Config) v2core.Config {
 func Open(root string, c Config) (*Store, error) { return openWithHooks(root, c, c.Hooks) }
 
 func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
+	if c.DurableApplications != nil && c.Layer != 3 {
+		return nil, errors.New("classic mirror requires application journal layer")
+	}
 	if c.Placement != nil && c.Layer < 2 {
 		return nil, errors.New("placement requires a durable journal layer")
 	}
@@ -110,6 +125,12 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c.Prepare != nil {
+		if err := c.Prepare(); err != nil {
+			_ = lock.Close()
+			return nil, err
+		}
+	}
 	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), hooks)
 	if err != nil {
 		_ = lock.Close()
@@ -122,6 +143,7 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 			p.placement = c.Placement
 			p.admission = c.Placement.Register()
 		}
+		p.durableApplications = c.DurableApplications
 		s.Producers = append(s.Producers, p)
 		if c.Layer == 0 {
 			continue
@@ -306,6 +328,11 @@ func (p *Producer) Drain() error {
 	}
 	start = time.Now()
 	for _, packet := range p.packets {
+		if len(packet.batches) > 0 && p.durableApplications != nil {
+			if err := p.durableApplications(p.index, packet.batches); err != nil {
+				return p.fail(err)
+			}
+		}
 		var err error
 		if packet.batches != nil || p.layer == 3 {
 			err = p.engine.AppendBatchesPipelined(p.index, packet.batches, packet.cursor, packet.seal)
@@ -317,6 +344,10 @@ func (p *Producer) Drain() error {
 		}
 		if packet.rows != nil {
 			p.spareRows = append(p.spareRows, packet.rows[:0])
+		}
+		if packet.batches != nil {
+			clear(packet.batches)
+			p.spareBatches = append(p.spareBatches, packet.batches[:0])
 		}
 	}
 	p.CoreSubmitTime += time.Since(start)
