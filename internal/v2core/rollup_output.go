@@ -313,8 +313,9 @@ func (r *coreRollups) commitStages() {
 					}
 				}
 				if r.db != nil {
-					m.slots.KeepRecent(s.next.Frontier.MaxTime)
-					r.lanes[i].windows.commit(m, s.records, s.next.Expired)
+					if len(r.lanes[i].windows.entries) != 0 {
+						r.lanes[i].windows.commit(m, s.records, s.next.Expired)
+					}
 				}
 				if s.next.Expired {
 					m.slots = *m.policy.prepared.NewSlots()
