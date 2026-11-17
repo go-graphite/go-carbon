@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -31,7 +32,7 @@ func TestRollupHistoryDifferential(t *testing.T) {
 				cfg.MaxRows = 1024
 
 				root := t.TempDir()
-				e, err := Open(root, cfg, Hooks{})
+				e, err := Open(root, cfg, Hooks{Now: func() time.Time { return time.Unix(1, 0) }})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -111,7 +112,7 @@ func TestRollupHistoryDifferential(t *testing.T) {
 						if err = e.Close(); err != nil {
 							t.Fatal(err)
 						}
-						e, err = Open(root, cfg, Hooks{})
+						e, err = Open(root, cfg, Hooks{Now: func() time.Time { return time.Unix(1, 0) }})
 						if err != nil {
 							t.Fatal(err)
 						}

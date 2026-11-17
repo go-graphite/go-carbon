@@ -131,6 +131,7 @@ func TestRollupStagesPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 		// The UUID is the only nondeterministic key field. Keep all stored
 		// values, including metadata and IEEE bits, in the cross-runtime oracle.
 		digest := sha256.New()
+		legacyDigest := sha256.New()
 		for _, file := range plan.Files {
 			for _, kv := range file {
 				key, err := v2part.Decode(kv.Key)
@@ -144,9 +145,29 @@ func TestRollupStagesPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 				}
 				digest.Write(encoded)
 				digest.Write(kv.encodedValue())
+				legacyDigest.Write(encoded)
+				value := kv.encodedValue()
+				if key.Archive == rollupMetadataArchive {
+					meta, err := DecodeRollupMetadata(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					meta.Version = 1
+					meta.ClosedThrough = 0
+					value = AppendRollupMetadata(nil, meta)
+				}
+				legacyDigest.Write(value)
 			}
 		}
 		t.Logf("epoch=%d ordered-record-sha256=%x", epoch, digest.Sum(nil))
+		// This fixture never meets the coarse XFF threshold. Its six original
+		// stored-record digests remain exact after removing only the new metadata
+		// envelope and closure watermark, which older readers cannot understand.
+		legacyWant := []string{"e11721303e3f2cf994e8a222eb226abf276be21c4a08b3089ecea66ba16ee5b1", "bfcae9042506b59d4a2e3ec0093aca20f0cfcf5f021f25bba3dd10df9e8c9632", "c52588bfee6ecb666cac8e891fac1ebaf133d1e73fe9029c7b9ef4b254d4c1f7", "ee9a265822d31d8698fccd61a2e8b7e2be93f9245ede776f56621a68980d8e64", "da551dd1f350ab6326fe6511561ecf30cff2bef3701e02c6ef2c9c7357267f42", "e46918ee8dd7b1d1ef736f1833bedc85796d0d7cf2f6bf4af5a01b689a5111a8"}[epoch-1]
+		if got := fmt.Sprintf("%x", legacyDigest.Sum(nil)); got != legacyWant {
+			t.Fatalf("legacy envelope digest %s want %s", got, legacyWant)
+		}
+		t.Logf("epoch=%d legacy-metadata-sha256=%x", epoch, legacyDigest.Sum(nil))
 		if epoch == 2 {
 			plan.Abort()
 		} else {
