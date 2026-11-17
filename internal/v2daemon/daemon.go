@@ -39,8 +39,10 @@ type Config struct {
 	// The callback must finish consuming its borrowed batches before returning.
 	DurableApplications func(int, []v2core.Batch) error
 	// Prepare runs under the root lock before opening core or replaying input.
-	Prepare     func() error
-	coreMaxRows int // private fixture bound; zero retains the experiment buffer size
+	Prepare func() error
+	// MaxCoreRows bounds each core owner's staging buffer. Zero retains the
+	// experiment default; small correctness fixtures can bound their memory.
+	MaxCoreRows int
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -91,7 +93,7 @@ type Producer struct {
 }
 
 func coreConfig(c Config) v2core.Config {
-	maxRows := c.coreMaxRows
+	maxRows := c.MaxCoreRows
 	if maxRows == 0 {
 		maxRows = 2 << 20
 	}
