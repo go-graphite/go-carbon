@@ -46,7 +46,17 @@ type coreConfig struct {
 	// DeferMerges holds background part merges until ResumeMerges or Close, so
 	// crash replay does not rewrite parts it is still sealing. Runtime only.
 	DeferMerges bool `json:"-"`
+	// OmitBaseRows stops writing numeric raw base rows in rollups mode. Archive
+	// records stay the only render, recovery, move and merge source; crash
+	// replay uses the input journal. Runtime-only: existing base rows remain
+	// readable and either setting reopens the same store.
+	OmitBaseRows bool `json:"-"`
 }
+
+// testOmitBaseRows reruns existing rollup tests without base rows; only
+// TestMain sets it.
+var testOmitBaseRows bool
+
 type coreFrontier struct {
 	ArchiveClock  int64 `json:",omitempty"`
 	Version       int
@@ -340,8 +350,11 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		streamBytes = n
 	}
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 || (cfg.OmitBaseRows && !cfg.Rollups) {
 		return nil, os.ErrInvalid
+	}
+	if testOmitBaseRows && cfg.Rollups {
+		cfg.OmitBaseRows = true
 	}
 	sealPhase := 0
 	if value := os.Getenv("CORE_SEAL_PHASE"); value != "" {
@@ -360,6 +373,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	diskConfig.SealInterval = 0
 	diskConfig.SealMaxRows = 0
 	diskConfig.DeferMerges = false
+	diskConfig.OmitBaseRows = false
 	identities := hooks.Identities
 	if identities == nil {
 		identities = &PolicyCatalog{}
@@ -1387,8 +1401,21 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	rollupWrites := o.startRollupPartWrites(plan)
 	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
-	if plan.ReplaceRaw {
-		// The replacement planner owns ordering and retention in its format.
+	omitRaw := plan.ReplaceRaw || o.cfg.OmitBaseRows
+	if o.cfg.OmitBaseRows && !plan.ReplaceRaw && len(head) > 0 {
+		// Keep the base-row admission rule without sorting or encoding rows.
+		// Partitions are monotonic in time, so the oldest row decides.
+		low := head[0].Time
+		for _, r := range head[1:] {
+			low = min(low, r.Time)
+		}
+		if corePartition(low, o.cfg.PartitionSeconds) < next.ExpiredBefore {
+			return 0, errors.New("late point targets expired partition")
+		}
+	}
+	if omitRaw {
+		// The replacement planner owns ordering and retention in its format;
+		// without base rows the archive planner already consumed the input.
 	} else if o.stage != nil {
 		observed := false
 		slices.SortFunc(head, func(a, b row) int {
@@ -1438,7 +1465,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	var path string
-	if !plan.ReplaceRaw && (!o.cfg.BlindBatch || o.cfg.Rollups) && len(head) > 0 {
+	if !omitRaw && (!o.cfg.BlindBatch || o.cfg.Rollups) && len(head) > 0 {
 		writer, path, err = stage("data")
 		if err != nil {
 			return 0, err
@@ -1452,7 +1479,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	}
 	var keyScratch [41]byte
 	var valueScratch [256 * 24]byte
-	for i := 0; !plan.ReplaceRaw && i < len(head); {
+	for i := 0; !omitRaw && i < len(head); {
 		partition := corePartition(head[i].Time, o.cfg.PartitionSeconds)
 		if partition < next.ExpiredBefore {
 			if writer != nil {
