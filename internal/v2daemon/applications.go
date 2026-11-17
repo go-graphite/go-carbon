@@ -290,12 +290,12 @@ func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, catalog 
 		return nil, 0, invalid
 	}
 	for i, f := range frames {
-		name, policy, ok := catalog.Lookup(ids[i])
-		if !ok || name != f.Key || !bytes.Equal(policy, f.Definition) || len(f.Points) != len(out[i].Points) {
+		if !catalog.Matches(ids[i], f.Key, f.Definition) || len(f.Points) != len(out[i].Points) {
 			return nil, 0, invalid
 		}
 		out[i].Clock = f.Clock
-		out[i].Policy = bytes.Clone(policy)
+		// Immutable catalog bytes; core copies policies into its own arena.
+		out[i].Policy = f.Definition
 		for j, p := range f.Points {
 			out[i].Points[j].ID = out[i].ID
 			out[i].Points[j].Time = p.Timestamp

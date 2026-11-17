@@ -64,6 +64,13 @@ func mergeWorkerCount(owners int) (int, error) {
 
 func (e *coreEngine) runPartMerges(workers int) {
 	defer close(e.mergeDone)
+	if e.mergeHold != nil {
+		select {
+		case <-e.mergeHold:
+		case <-e.gcStop:
+			return
+		}
+	}
 	var wg sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
 		wg.Go(func() {

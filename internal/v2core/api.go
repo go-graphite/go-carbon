@@ -93,6 +93,13 @@ func (e *coreEngine) AppendBatchesPipelined(producer int, batches []Batch, curso
 	return e.submitBatchesMode(producer, batches, cursor, seal, false)
 }
 
+// ResumeMerges releases merges held by DeferMerges. It is idempotent.
+func (e *coreEngine) ResumeMerges() {
+	if e.mergeHold != nil && e.resumed.CompareAndSwap(false, true) {
+		close(e.mergeHold)
+	}
+}
+
 // DurableFrontiers returns conservative owner snapshots safe during intake.
 // Log retirement must also respect the journal's own fsync frontier.
 func (e *coreEngine) DurableFrontiers() [][]uint64 { return e.durableFrontiers() }

@@ -109,9 +109,10 @@ func coreConfig(c Config) v2core.Config {
 func Open(root string, c Config) (*Store, error) { return openWithHooks(root, c, c.Hooks) }
 
 func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
-	// Bound simultaneous decoder/catalog allocation as well as CPU use. The
+	// One recovery worker per scheduler CPU: each producer replays serially, so
+	// a lower cap (32) left two thirds of a 96-CPU host idle during replay. The
 	// existing per-producer core queues retain their ordinary admission budget.
-	return openWithRecoveryWorkers(root, c, hooks, min(32, runtime.GOMAXPROCS(0)))
+	return openWithRecoveryWorkers(root, c, hooks, runtime.GOMAXPROCS(0))
 }
 
 func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers int) (*Store, error) {
@@ -155,7 +156,10 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		_ = lock.Close()
 		return nil, err
 	}
-	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), hooks)
+	// Merges wait until every producer has replayed; replay seals stay append-only.
+	cc := coreConfig(c)
+	cc.DeferMerges = true
+	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), cc, hooks)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
@@ -208,6 +212,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		_ = s.Close()
 		return nil, err
 	}
+	e.ResumeMerges()
 
 	return s, nil
 }

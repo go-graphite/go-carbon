@@ -288,6 +288,8 @@ type CatalogDecoder struct {
 	clock       int64
 	sequence    uint64
 	previousCRC uint32
+	// raw is reused per record: decoded frames never reference it.
+	raw []byte
 }
 
 func (d *CatalogDecoder) Decode(b []byte) ([]DictionaryFrame, error) {
@@ -316,7 +318,10 @@ func (d *CatalogDecoder) Decode(b []byte) ([]DictionaryFrame, error) {
 			return nil, err
 		}
 	}
-	raw, err := d.decoder.DecodeAll(b[37:len(b)-4], make([]byte, 0, n))
+	if cap(d.raw) < n {
+		d.raw = make([]byte, 0, n)
+	}
+	raw, err := d.decoder.DecodeAll(b[37:len(b)-4], d.raw[:0])
 	if err != nil {
 		return nil, err
 	}
@@ -359,12 +364,16 @@ func (d *CatalogDecoder) Decode(b []byte) ([]DictionaryFrame, error) {
 		delta := r.i()
 		id := uint64(previousID + delta)
 		previousID = int64(id)
-		key, definition, ok := d.Catalog.Lookup(id)
-		if r.err != nil || !ok {
+		if r.err != nil {
 			return nil, errPredictorV3
 		}
+		// Bindings are immutable: resolve each ID once per segment.
 		s := entries[id]
 		if s == nil {
+			key, definition, ok := d.Catalog.Lookup(id)
+			if !ok {
+				return nil, errPredictorV3
+			}
 			s = &predictorV3Entry{key: key, definition: definition}
 			entries[id] = s
 		}
