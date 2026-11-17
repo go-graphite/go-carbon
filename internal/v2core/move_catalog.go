@@ -32,6 +32,8 @@ type partImport struct {
 	Origin     partOrigin
 	Descriptor v2part.Descriptor
 	Pending    bool `json:",omitempty"`
+	Owner      int  `json:",omitempty"`
+	Owners     int  `json:",omitempty"`
 }
 
 type partOrigin struct {
@@ -313,4 +315,29 @@ func snapshotHasCopiedParts(snapshot *pebble.Snapshot) (bool, error) {
 	}
 	found := it.First()
 	return found, errors.Join(it.Error(), it.Close())
+}
+
+// copiedNameVisible limits a shared immutable file to the receiving owner's
+// canonical placement. Hard links let owners share the unchanged physical bytes.
+func copiedNameVisible(snapshot *pebble.Snapshot, k v2part.Key) (bool, error) {
+	key, err := moveCatalogKey(k)
+	if err != nil {
+		return false, err
+	}
+	b, closer, err := snapshot.Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer closer.Close()
+	var binding partImport
+	if err := json.Unmarshal(b, &binding); err != nil {
+		return false, err
+	}
+	if binding.Owners < 0 || binding.Owner < 0 || (binding.Owners > 0 && binding.Owner >= binding.Owners) {
+		return false, errors.New("invalid copied owner placement")
+	}
+	return binding.Owners == 0 || int(v2part.Route(k.Metric))%binding.Owners == binding.Owner, nil
 }

@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2recv"
 )
 
 // Flush seals every application accepted by this serial producer and waits for
@@ -30,7 +31,7 @@ func (p *Producer) Flush() error {
 // a crash resolves canonical names to the same receiving numeric identities.
 func (p *Producer) AdoptMove(ctx context.Context, prepared *v2core.PreparedMove, now int64) error {
 	if p.layer != 3 || p.count != 1 {
-		return errors.New("move adoption requires one L3 producer")
+		return errors.New("producer adoption requires one L3 producer; use MoveAdmin for multiple producers")
 	}
 	if p.failed != nil {
 		return p.failed
@@ -38,25 +39,35 @@ func (p *Producer) AdoptMove(ctx context.Context, prepared *v2core.PreparedMove,
 	if prepared == nil {
 		return errors.New("move preparation required")
 	}
+	ids, err := p.prepareMoveIDs(prepared)
+	if err != nil {
+		return err
+	}
+	return p.engine.AdoptMove(ctx, prepared, ids, now)
+}
+
+func (p *Producer) prepareMoveIDs(prepared *v2core.PreparedMove) (map[string]uint64, error) {
 	policies := prepared.Policies()
 	names := make([]string, 0, len(policies))
 	for name := range policies {
-		names = append(names, name)
+		if v2recv.OwnerFor(name, p.count) == p.index {
+			names = append(names, name)
+		}
 	}
 	slices.Sort(names)
 	ids := map[string]uint64{}
 	for _, name := range names {
 		id, err := p.catalog.Intern(name, policies[name])
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ids[name] = NumericID(id, p.index, p.count)
 	}
 	if err := p.catalog.Sync(); err != nil {
-		return p.fail(err)
+		return nil, p.fail(err)
 	}
-	if err := p.Drain(); err != nil {
-		return err
+	if err := p.Flush(); err != nil {
+		return nil, err
 	}
-	return p.engine.AdoptMove(ctx, prepared, ids, now)
+	return ids, nil
 }

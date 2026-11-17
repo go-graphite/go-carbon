@@ -711,6 +711,16 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 				if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 					return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 				}
+				if origin.Class == CopiedPart {
+					visible, err := copiedNameVisible(snapshot, key)
+					if err != nil {
+						return nil, err
+					}
+					if !visible {
+						it.SeekGE(v2part.PrefixEnd(encoded[:len(encoded)-16]))
+						continue
+					}
+				}
 				meta, decodeErr := DecodeRollupMetadata(it.Value())
 				if err = decodeErr; err != nil {
 					return nil, err

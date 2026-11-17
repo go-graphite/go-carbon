@@ -98,35 +98,47 @@ type moveAuthority struct {
 	Meta    RollupMetadata
 	AtOrder uint64
 	Coarse  []sealrollup.Record
+	Origins []partOrigin `json:",omitempty"`
 }
 
 func moveAuthorityKey(name string) []byte { return append(bytes.Clone(moveAuthorityPrefix), name...) }
 
-// AdoptMove runs on the existing owner queue after preceding intake is sealed.
-// The initial attachment implementation deliberately supports one serial
-// producer/owner. No producer-wide mutex is introduced into the write path.
+// AdoptMove runs once on each receiving core owner. The caller serializes
+// submissions from producer zero and has flushed every producer beforehand.
+// Completed owner attachments are idempotent across process death.
 func (e *coreEngine) AdoptMove(ctx context.Context, prepared *PreparedMove, ids map[string]uint64, now int64) error {
-	if !e.cfg.Rollups || e.cfg.Producers != 1 || len(e.owners) != 1 {
-		return errors.New("move adoption requires one rollup producer and owner")
+	if !e.cfg.Rollups || prepared == nil || prepared.snapshot == nil {
+		return errors.New("move requires open rollup preparation")
 	}
 	if err := e.submissionError(); err != nil {
 		return err
 	}
-	ack := make(chan error, 1)
-	o := e.owners[0]
-	packet := &corePacket{ack: ack, operation: func(o *coreOwner) error { return o.adoptMove(ctx, prepared, ids, now) }}
-	if err := o.queues[0].push(packet, o.dead); err != nil {
-		return err
+	for owner, o := range e.owners {
+		local := map[string]uint64{}
+		for name, id := range ids {
+			if int(v2part.Route(v2part.ID(name)))%len(e.owners) == owner {
+				local[name] = id
+			}
+		}
+		if len(local) == 0 {
+			continue
+		}
+		ack := make(chan error, 1)
+		packet := &corePacket{ack: ack, operation: func(o *coreOwner) error { return o.adoptMove(ctx, prepared, local, now, owner, len(e.owners)) }}
+		if err := o.queues[0].push(packet, o.dead); err != nil {
+			return err
+		}
+		coreWake(e.routers[0].wake)
+		select {
+		case err := <-ack:
+			if err != nil {
+				return err
+			}
+		case <-o.dead:
+			return errors.New("move owner stopped")
+		}
 	}
-	coreWake(e.routers[0].wake)
-	// Once queued, wait for the definitive outcome even when ctx is canceled.
-	// The owner checks cancellation before committing the atomic manifest edit.
-	select {
-	case err := <-ack:
-		return err
-	case <-o.dead:
-		return errors.New("move owner stopped")
-	}
+	return nil
 }
 
 type moveWinner struct {
@@ -134,68 +146,67 @@ type moveWinner struct {
 	origin partOrigin
 }
 
-// The first attachment handles recent histories whose complete coarse windows
-// still fit in retained fine data. Older coarse history needs a boundary
-// inventory; fail closed rather than replace it with a partial aggregate.
-func validateMoveFineCoverage(ctx context.Context, index *RollupSnapshot, name string, now int64) error {
-	m := index.metrics[name]
-	if m == nil {
-		return nil
-	}
-	fine := m.latest.policy.Config.Archives[0]
-	it, err := newArchiveIter(ctx, index.snapshot, nil)
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-	for _, part := range m.parts {
-		for archive, a := range m.latest.policy.Config.Archives {
-			if archive == 0 {
-				continue
-			}
-			k := part.part.key
-			k.Metric = part.policy.Name
-			k.Archive = uint32(archive)
-			k.BlockStart = 0
-			k.Ordinal = 0
-			lower, err := v2part.Encode(k)
-			if err != nil {
-				return err
-			}
-			prefix := lower[:len(lower)-12]
-			cutoff := now - fine.Step*fine.Count
-			if remainder := cutoff % a.Step; remainder != 0 {
-				cutoff += a.Step - remainder
-			}
-			for ok := it.SeekGE(lower); ok && bytes.HasPrefix(it.Key(), prefix); ok = it.Next() {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				key, err := v2part.Decode(it.Key())
-				if err != nil {
-					return err
-				}
-				records, err := v2part.DecodeSlots(uint32(archive), key.BlockStart, it.Value())
-				if err != nil {
-					return err
-				}
-				for _, record := range records {
-					if recordVisible(m, part.origin, record.Order) && record.Sample.Time < cutoff {
-						return errors.New("move coarse history extends outside complete fine coverage")
-					}
-				}
-			}
-		}
-	}
-	return it.Error()
-}
-
 // collectMoveRaw uses the same physical-slot precedence as reads and recovery.
 // It reads immutable snapshots, never the live reducer.
-func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, winners map[int64]moveWinner) error {
+func collectMoveArchive(ctx context.Context, index *RollupSnapshot, name string, archive int, winners map[int64]moveWinner) error {
 	m := index.metrics[name]
 	if m == nil {
 		return nil
+	}
+	if archive > 0 && m.authority != nil {
+		// The installed baseline includes earlier boundary repairs. Preserve
+		// its source class for future incremental attachments.
+		a := m.authority
+		for i, record := range a.Coarse {
+			if record.Archive != archive {
+				continue
+			}
+			origin := partOrigin{Class: LivePart}
+			if len(a.Origins) == len(a.Coarse) {
+				origin = a.Origins[i]
+			}
+			old, exists := winners[record.Slot]
+			newer := !exists
+			var err error
+			if exists {
+				newer, err = newerOrigin(origin, record, old.origin, old.record)
+				if err != nil {
+					return err
+				}
+			}
+			if newer {
+				winners[record.Slot] = moveWinner{record, origin}
+			}
+		}
+		live := *m
+		live.authority = nil
+		live.copied = false
+		live.origins = nil
+		live.parts = nil
+		for _, part := range m.parts {
+			if part.origin.Class == LivePart {
+				live.parts = append(live.parts, part)
+			}
+		}
+		tmp := &RollupSnapshot{snapshot: index.snapshot, metrics: map[string]*snapshotMetric{name: &live}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
+		return tmp.ScanArchive(ctx, name, archive, 0, m.latest.policy.Config.Archives[archive].Count, func(record sealrollup.Record) error {
+			if record.Order <= a.AtOrder {
+				return nil
+			}
+			origin := partOrigin{Class: LivePart}
+			old, exists := winners[record.Slot]
+			if exists {
+				newer, err := newerOrigin(origin, record, old.origin, old.record)
+				if err != nil {
+					return err
+				}
+				if !newer {
+					return nil
+				}
+			}
+			winners[record.Slot] = moveWinner{record, origin}
+			return nil
+		})
 	}
 	it, err := newArchiveIter(ctx, index.snapshot, nil)
 	if err != nil {
@@ -205,7 +216,7 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 	for _, part := range m.parts {
 		k := part.part.key
 		k.Metric = part.policy.Name
-		k.Archive = 0
+		k.Archive = uint32(archive)
 		k.BlockStart = 0
 		k.Ordinal = 0
 		lower, err := v2part.Encode(k)
@@ -221,7 +232,7 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 			if err != nil {
 				return err
 			}
-			records, err := v2part.DecodeSlots(0, key.BlockStart, it.Value())
+			records, err := v2part.DecodeSlots(uint32(archive), key.BlockStart, it.Value())
 			if err != nil {
 				return err
 			}
@@ -248,7 +259,7 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 	return it.Error()
 }
 
-func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids map[string]uint64, now int64) error {
+func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids map[string]uint64, now int64, owner, owners int) error {
 	if prepared == nil || prepared.snapshot == nil {
 		return errors.New("closed move preparation")
 	}
@@ -264,7 +275,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		d := part.Descriptor
-		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d})
+		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d, Owner: owner, Owners: owners})
 		if err != nil {
 			return err
 		}
@@ -274,6 +285,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			_ = closer.Close()
 			pending := old.Pending
 			old.Pending = false
+			if pending {
+				old.Owner, old.Owners = owner, owners
+			}
 			normalized, marshalErr := json.Marshal(old)
 			if decodeErr != nil || marshalErr != nil || !bytes.Equal(normalized, binding) {
 				return errors.New("copied part identity changed")
@@ -317,36 +331,38 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	for name, donor := range prepared.index.metrics {
 		id := ids[name]
 		if id == 0 {
-			return errors.New("missing receiving numeric identity")
+			continue
 		}
 		policy := donor.latest.policy
-		// This first attachment requires a proof of full fine coverage. Longer
-		// coarse histories need a separate boundary inventory; do not guess.
-		fine := policy.Config.Archives[0]
-		for _, archive := range policy.Config.Archives {
-			if archive.Step > fine.Step*fine.Count {
-				return errors.New("move needs complete retained fine coverage of coarse archives")
-			}
-		}
 		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.meta.Policy, donor.latest.meta.Policy) {
 			return errors.New("move policy mismatch")
 		}
-		if err = validateMoveFineCoverage(ctx, prepared.index, name, now); err != nil {
-			return err
-		}
-		if err = validateMoveFineCoverage(ctx, current, name, now); err != nil {
-			return err
-		}
-		winners := map[int64]moveWinner{}
-		if err = collectMoveRaw(ctx, prepared.index, name, winners); err != nil {
-			return err
-		}
-		if err = collectMoveRaw(ctx, current, name, winners); err != nil {
-			return err
-		}
-		var raw []sealrollup.Record
-		for _, winner := range winners {
-			raw = append(raw, winner.record)
+		winning := []sealrollup.Record{}
+		targetRaw := []sealrollup.Record{}
+		origins := map[[2]int64]partOrigin{}
+		for archive := range policy.Config.Archives {
+			winners := map[int64]moveWinner{}
+			if err = collectMoveArchive(ctx, prepared.index, name, archive, winners); err != nil {
+				return err
+			}
+			if err = collectMoveArchive(ctx, current, name, archive, winners); err != nil {
+				return err
+			}
+			for _, winner := range winners {
+				winning = append(winning, winner.record)
+				origins[[2]int64{int64(archive), winner.record.Slot}] = winner.origin
+			}
+			if archive == 0 {
+				localRaw := map[int64]moveWinner{}
+				if err = collectMoveArchive(ctx, current, name, 0, localRaw); err != nil {
+					return err
+				}
+				for _, winner := range localRaw {
+					if winner.origin.Class == LivePart {
+						targetRaw = append(targetRaw, winner.record)
+					}
+				}
+			}
 		}
 		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.meta.Policy), Revision: 1, LastUpdate: now * 1e9}
 		local.Frontier.Policy = donor.latest.meta.Frontier.Policy
@@ -358,7 +374,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		local.LastUpdate = max(local.LastUpdate, donor.latest.meta.LastUpdate)
 		local.Revision++
-		rebuilt, err := PlanMoveRollupRebuild(policy, raw, now, max(uint64(1), local.Frontier.Order))
+		rebuilt, err := PlanMoveRollupBoundary(policy, winning, targetRaw, now, max(uint64(1), local.Frontier.Order))
 		if err != nil {
 			return err
 		}
@@ -373,6 +389,14 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			m.meta.Frontier.MaxTime = max(m.meta.Frontier.MaxTime, record.Sample.Time)
 			if record.Archive > 0 {
 				authority.Coarse = append(authority.Coarse, record)
+				origin := partOrigin{Class: LivePart}
+				for _, prior := range winning {
+					if prior == record {
+						origin = origins[[2]int64{int64(record.Archive), record.Slot}]
+						break
+					}
+				}
+				authority.Origins = append(authority.Origins, origin)
 			}
 		}
 		authority.Meta = m.meta

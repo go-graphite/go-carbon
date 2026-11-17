@@ -19,6 +19,10 @@ import (
 // Raw records keep their exact original orders and IEEE bits. The returned
 // mixed-origin records must not be fed to a single-stream order comparator.
 func PlanMoveRollupRebuild(policy RollupPolicy, winning []sealrollup.Record, now int64, order uint64) ([]sealrollup.Record, error) {
+	return planMoveRollup(policy, winning, nil, now, order)
+}
+
+func planMoveRollup(policy RollupPolicy, winning, targetRaw []sealrollup.Record, now int64, order uint64) ([]sealrollup.Record, error) {
 	if err := policy.Config.Validate(); err != nil {
 		return nil, err
 	}
@@ -45,7 +49,16 @@ func PlanMoveRollupRebuild(policy RollupPolicy, winning []sealrollup.Record, now
 		}
 		all[k] = r
 		if r.Archive == 0 {
-			raw = append(raw, r.Sample)
+			touched := targetRaw == nil
+			for _, local := range targetRaw {
+				if local.Sample.Time == r.Sample.Time {
+					touched = true
+					break
+				}
+			}
+			if touched {
+				raw = append(raw, r.Sample)
+			}
 		}
 	}
 	slices.SortFunc(raw, func(a, b sealrollup.Sample) int {
@@ -100,4 +113,10 @@ func PlanMoveRollupRebuild(policy RollupPolicy, winning []sealrollup.Record, now
 		return 0
 	})
 	return out, nil
+}
+
+// PlanMoveRollupBoundary retains mature coarse slots and recomputes only windows
+// touched by the receiver's retained raw. Old coarse history needs no raw proof.
+func PlanMoveRollupBoundary(policy RollupPolicy, winning, targetRaw []sealrollup.Record, now int64, order uint64) ([]sealrollup.Record, error) {
+	return planMoveRollup(policy, winning, targetRaw, now, order)
 }
