@@ -39,6 +39,9 @@ var v2Descs = struct {
 }
 
 func (*v2Collector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- v2MoveDesc
+	ch <- v2MoveOwnerDesc
+	ch <- v2MoveRegressionDesc
 	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked} {
 		ch <- d
 	}
@@ -54,6 +57,7 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	if v == nil || v.store == nil || v.server == nil {
 		return
 	}
+	collectV2Moves(v.moves, ch)
 	s := v.store.Core.Observe()
 	emit := func(d *prometheus.Desc, kind prometheus.ValueType, value float64) {
 		ch <- prometheus.MustNewConstMetric(d, kind, value)

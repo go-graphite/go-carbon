@@ -24,6 +24,7 @@ import (
 func TestV2MoveAdminHTTP(t *testing.T) {
 	root := t.TempDir()
 	app := v2TestApp(t, root)
+	app.Config.Prometheus.Enabled = true
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +134,7 @@ func TestV2MoveAdminHTTP(t *testing.T) {
 	app.Stop()
 	app = nil
 	app = v2TestApp(t, root)
+	app.Config.Prometheus.Enabled = true
 	if err = app.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -142,12 +144,56 @@ func TestV2MoveAdminHTTP(t *testing.T) {
 	if status := call("adopt", prepared.ID, nil); !status.Done {
 		t.Fatal("adopt retry incomplete")
 	}
-	if status := call("status", prepared.ID, nil); !status.Done {
-		t.Fatal("done marker absent")
+	if status := call("status", prepared.ID, nil); !status.Done || status.Phase != "done" || status.PartsDone != status.PartsTotal || status.BytesDone != status.BytesTotal || status.MBps <= 0 || status.ETASeconds != 0 {
+		t.Fatalf("bad completion status: %+v", status)
 	}
+	families, err := app.PromRegistry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, family := range families {
+		if strings.HasPrefix(family.GetName(), "v2_move_") {
+			found[family.GetName()] = true
+		}
+	}
+	for _, name := range []string{"v2_move_progress", "v2_move_owner_state", "v2_move_regressions_total"} {
+		if !found[name] {
+			t.Errorf("missing move metric %s", name)
+		}
+	}
+	graphite := map[string]float64{}
+	v2MoveStats{app.v2.moves}.Stat(func(name string, value float64) { graphite[name] = value })
+	if graphite[prepared.ID+".phase"] != 5 || graphite[prepared.ID+".bytes_done"] <= 0 {
+		t.Fatalf("missing graphite progress: %v", graphite)
+	}
+	if app.Collector == nil || app.Collector.endpoint == MetricEndpointLocal {
+		t.Fatal("v2 graphite collector not connected to intake")
+	}
+	app.Collector.collect()
+	graphiteName := app.Collector.graphPrefix + ".v2.move." + prepared.ID + ".phase"
+	deadlineGraphite := time.Now().Add(8 * time.Second)
+	for {
+		found := false
+		for name := range app.v2.catalog.Snapshot().Names() {
+			if name == graphiteName {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadlineGraphite) {
+			t.Fatal("move Graphite stats did not reach v2 intake")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	app.Stop()
 	app = nil
 	app = v2TestApp(t, root)
+	app.Config.Prometheus.Enabled = true
 	if err = app.Start(); err != nil {
 		t.Fatal(err)
 	}

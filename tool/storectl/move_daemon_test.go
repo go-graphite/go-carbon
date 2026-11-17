@@ -51,6 +51,20 @@ func TestMoveDaemonProcess(t *testing.T) {
 		count = 4
 	}
 	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: count, Shards: count, GroupInterval: time.Second, Hooks: v2core.Hooks{Stage: func(stage string) {
+		if cut := os.Getenv("MOVE_PROGRESS_CUT"); cut != "" && stage == cut {
+			marker := filepath.Join(root, "cut-fired")
+			if _, err := os.Stat(marker); os.IsNotExist(err) {
+				_ = os.WriteFile(marker, []byte(stage), 0600)
+				deadline := time.Now().Add(90 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, e := os.Stat(filepath.Join(root, "cut-release")); e == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}
+
 		if stage == "move-after-ingest" && os.Getenv("MOVE_DAEMON_CRASH") == "1" {
 			if _, err := os.Stat(filepath.Join(root, "arm-crash")); err != nil {
 				return
@@ -245,7 +259,7 @@ func startMoveChild(t *testing.T, root, tcp string, crash bool) *moveChild {
 		if err == nil && json.Unmarshal(b, &c.addr) == nil {
 			return c
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatal("daemon did not open ports")
 	return nil
@@ -374,9 +388,11 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 				_, _ = io.WriteString(conn, line)
 			}
 			produced.Store(int64(i))
-			if i%10 == 0 {
+			if i%50 == 0 {
 				// Bound queued work by the two continuously available daemons'
-				// durable progress. B may be killed at any point in this loop.
+				// durable progress. Keep writing throughout copy/restart, with
+				// at most 100 points queued between these explicit durable fences.
+				// B may be killed at any point in this loop.
 				client := http.Client{Timeout: 30 * time.Second}
 				for _, child := range []*moveChild{a, reference} {
 					response, err := client.Get(child.addr.HTTP + "/flush")
@@ -394,7 +410,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 			}
 			// Exercise concurrent intake without turning this correctness test
 			// into an unbounded queue of tiny durable seals on a loaded laptop.
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 	}()
 	t.Cleanup(func() { stop.Store(true); producer.Wait() })
@@ -449,15 +465,21 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	// Kill the actual receiving daemon after its atomic manifest edit, before
 	// reducer publication or the administrative response can complete.
 	adoptDone := make(chan struct{})
+	var adoptErr error
 	go func() {
 		defer close(adoptDone)
 		var output bytes.Buffer
-		_ = moveAdmin([]string{"--url", b.addr.HTTP, "--action", "adopt", "--id", crashMoveID}, &output)
+		adoptErr = moveAdmin([]string{"--url", b.addr.HTTP, "--action", "adopt", "--id", crashMoveID}, &output)
 	}()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filepath.Join(b.root, "adopt-committed")); err == nil {
 			break
+		}
+		select {
+		case <-adoptDone:
+			t.Fatalf("adopt returned before crash boundary: %v", adoptErr)
+		default:
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

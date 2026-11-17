@@ -107,26 +107,77 @@ creates no input queue or publication barrier.
 ## Adopt a copied range
 
 The experimental unplaced L3 daemon exposes move control on its existing
-carbonserver HTTP listener. First receive a coherent, whole-file snapshot into
-a local directory on the receiving daemon's filesystem. Then run:
+carbonserver HTTP listener. Use a retained coherent snapshot served by the
+existing whole-file transport (`storectl sync --parts --snapshot-dir <snapshot>
+--part-listen 127.0.0.1:8090`). Copy and adopt with:
+
+```sh
+storectl move --url http://127.0.0.1:8080 --action copy \
+  --from http://127.0.0.1:8090
+# The first JSON line contains ID, before any file is transferred.
+# A replacement client resumes against the same retained donor snapshot:
+storectl move --url http://127.0.0.1:8080 --action copy \
+  --from http://127.0.0.1:8090 --id <ID>
+storectl move --url http://127.0.0.1:8080 --action status --id <ID>
+```
+
+The client streams `/snapshot.json` and `/parts/<checksum>` from the existing
+whole-file server into `POST /admin/v2/move/begin` and
+`PUT /admin/v2/move/part?id=<ID>&part=<checksum>` on the receiver. It holds no
+progress state. For a token-protected donor, pass `--part-token-file <file>`;
+the token is sent only to the donor and is never stored in the move record. `GET /admin/v2/move/status?id=<ID>` reports the phase, each file's
+name/size/checksum/state, per-owner states and staged/active parts and bytes,
+verified parts/bytes done and total, average decimal MB/s since move creation,
+ETA for remaining transport bytes, transferred bytes, verification count and
+failures with reasons. ETA is zero when throughput is unknown or copy is done;
+it does not estimate boundary-repair/activation time. Failures retain a total
+count and the latest 16 reasons.
+
+The receiver owns one fsynced, atomically renamed
+`<v2.path>/moves/<ID>/record.json`. Files advance through
+`pending → received → verified → staged → active` (staging/activation also have
+per-owner receipts). `received` means the whole file and its transport checksum
+are durable; `verified` additionally certifies descriptor/rollup semantics.
+An interrupted file can be resent. A received file waits for its descriptor
+without being resent; a verified file is neither fetched nor verified again.
+After restart the receiving owner catalog reconciles activation that committed
+just before its receipt. Already active owners are skipped. The same ID keeps
+the original adoption clock; an attempt to change it fails. Progress decreases
+are refused, logged at ERROR and counted; the client exits non-zero on errors.
+
+`POST /admin/v2/move/adopt?id=<ID>` can retry activation independently. `copy`
+with a finished ID needs no donor and is a no-op. After all owners activate, the
+receiver syncs a small done receipt, then releases transport links and the
+preparation read index. Startup repeats interrupted cleanup. The done receipt
+retains totals, owner completion states, throughput and failure history.
+Discovery includes adopted names on its normal one-second refresh.
+
+The local-directory compatibility path remains available:
 
 ```sh
 storectl move --url http://127.0.0.1:8080 --action prepare \
   --parts-dir /absolute/path/to/received-snapshot
-# Save the returned ID, then use it for retries after a daemon restart.
 storectl move --url http://127.0.0.1:8080 --action adopt --id <ID>
-storectl move --url http://127.0.0.1:8080 --action status --id <ID>
 ```
 
-These call `POST /admin/v2/move/prepare`,
-`POST /admin/v2/move/adopt?id=<ID>` and
-`GET /admin/v2/move/status?id=<ID>`. Preparation verifies and pins the files;
-after it acknowledges, the transport's original links may be removed. The
-inventory and original adoption clock survive restart. `Done` becomes true
-only after all target owners activate and the move-level marker is synced.
-Retry `adopt` with the same ID after interruption; completed owners skip their
-already installed parts. Discovery includes adopted names on its normal
-one-second refresh.
+Preparation verifies and pins the files before acknowledging; source links may
+then be removed. Existing legacy prepared requests import their verified
+certificate without rereading SSTs. The first move upgrades the root's restart
+format to version 2, so older daemons refuse it before opening stores. Unknown
+move-record versions likewise prevent writable startup and administrative
+changes. This is a forward-only format change, including after completion.
+
+With Prometheus enabled, `v2_move_progress{move,measure}` exposes `phase`,
+`parts_done`, `parts_total`, `bytes_done`, `bytes_total`,
+`megabytes_per_second`, `eta_seconds`, `failures`, `bytes_transferred` and
+`verifications`. `v2_move_owner_state{move,owner}` reports each owner;
+`v2_move_regressions_total` counts rejected regressions in this process.
+Phase/state numbers are pending=0, received=1, verified=2, staged=3, active=4,
+done=5. The existing Graphite collector exports the same observations under
+`v2.move.<ID>.*`, with `owner.<index>.state` and `v2.move.regressions`.
+Failure reasons remain in status, avoiding unbounded metric labels. With the
+local metric endpoint, the collector feeds the ordinary v2 TCP intake; remote
+metric endpoints continue to use the existing sender.
 
 Names use the receiving daemon's producer catalog and owner placement, which
 may differ from the donor's geometry. Each receiving owner atomically activates
@@ -148,5 +199,5 @@ version-2 authority, so do not downgrade a root after adoption.
 The endpoint currently requires unplaced L3 intake. Source producers must own
 disjoint canonical names; competing donor streams for the same name, moving
 previously adopted stores, and lifecycle-reset reconciliation are outside this
-protocol. Prepared state and links remain under `<v2.path>/moves/<ID>` for
-retry; there is no automatic administrative move-state cleanup yet.
+protocol. Incomplete state and links remain under `<v2.path>/moves/<ID>` for
+retry; completed moves retain only their small done receipt.
