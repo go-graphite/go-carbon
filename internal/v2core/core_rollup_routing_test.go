@@ -115,7 +115,7 @@ func TestCoreRollupKeyTemplatesRemainCanonical(t *testing.T) {
 						t.Fatal(err)
 					}
 					expected, err := partsformat.Encode(k)
-					if err != nil || !bytes.Equal(expected, kv.Key) || k.Group != p.Group || k.Metric != p.Name || k.Partition != 0 || k.Ordinal != 0 {
+					if err != nil || !bytes.Equal(expected, kv.Key) || k.Group != p.Group || k.Metric != p.Name || k.Ordinal != 0 {
 						t.Fatalf("noncanonical key: %+v %v", k, err)
 					}
 					count++

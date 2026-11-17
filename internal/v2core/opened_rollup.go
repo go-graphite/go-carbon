@@ -98,9 +98,6 @@ func OpenRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 			if len(id) != len(sealedPartPrefix)+32 || !bytes.Equal([]byte(id)[len(sealedPartPrefix):], d.SHA256[:]) {
 				return nil, errors.New("sealed descriptor binding mismatch")
 			}
-			if d.Scope.Partition != 0 {
-				return nil, errors.New("unexpected rollup partition")
-			}
 			if len(d.VShards) == 0 {
 				return nil, nil
 			}
@@ -179,7 +176,7 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			key := v2part.Key{Group: p.descriptor.Scope.Group, VShard: shard, Part: p.descriptor.Scope.Part, Metric: v2part.ID(name), Archive: v2part.MetadataArchive}
+			key := v2part.Key{Group: p.descriptor.Scope.Group, VShard: shard, Partition: p.descriptor.Scope.Partition, Part: p.descriptor.Scope.Part, Metric: v2part.ID(name), Archive: v2part.MetadataArchive}
 			encoded, err := v2part.Encode(key)
 			if err != nil {
 				return nil, err
@@ -223,7 +220,7 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			if err = it.Close(); err != nil {
 				return nil, err
 			}
-			scope, _ := v2part.PartitionPrefixForGroup(key.Group, shard, 0)
+			scope, _ := v2part.PartitionPrefixForGroup(key.Group, shard, key.Partition)
 			scope = append(scope, key.Part[:]...)
 			id := string(scope)
 			if out.parts[id] == nil {

@@ -39,9 +39,12 @@ type hashedOutput struct {
 	buf      *bufio.Writer
 	h        hash.Hash
 	n        uint64
+	limit    uint64
 	aborted  bool
 	released bool
 }
+
+var ErrPartSizeLimit = errors.New("sealed part byte limit exceeded")
 
 var partOutputBuffers = sync.Pool{New: func() any { return bufio.NewWriterSize(io.Discard, 256<<10) }}
 
@@ -56,6 +59,9 @@ func (o *hashedOutput) release() {
 func (o *hashedOutput) Write(b []byte) error {
 	if o.aborted {
 		return io.ErrClosedPipe
+	}
+	if o.limit != 0 && (o.n > o.limit || uint64(len(b)) > o.limit-o.n) {
+		return ErrPartSizeLimit
 	}
 	n, err := o.buf.Write(b)
 	_, _ = o.h.Write(b[:n])

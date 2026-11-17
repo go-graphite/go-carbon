@@ -97,7 +97,7 @@ type coreRollups struct {
 
 // Archive max-u32 is reserved within the core's GCP3 rollup experiment for the
 // per-metric policy/frontier/activity envelope. Other archives contain canonical
-// EncodeRecord values; BlockStart is the physical slot, Partition is zero.
+// EncodeRecord values; BlockStart is the physical slot, Partition is expiry day.
 // UUID precedes the metric, so each sealed version has a disjoint immutable key.
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
@@ -321,7 +321,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 			e = &entry{group: k.Group}
 			series[k.Metric] = e
 		}
-		if k.Partition != 0 || k.Ordinal != 0 || e.group != k.Group {
+		if k.Ordinal != 0 || e.group != k.Group {
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {

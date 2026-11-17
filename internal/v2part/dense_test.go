@@ -378,3 +378,30 @@ func TestDenseWriterRejectsInvalidAndClosedInput(t *testing.T) {
 		t.Fatal("existing file overwritten")
 	}
 }
+
+func TestDenseWriterByteLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "limited.sst")
+	spec := fixtureSpec()
+	spec.Scope.Partition = 0
+	spec.Scope.VShard = GroupVShard
+	w, err := NewDenseWriter(path, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.LimitBytes(1)
+	key, err := Encode(Key{Group: spec.Scope.Group, VShard: Route("limit.metric"), Part: spec.Scope.Part, Metric: "limit.metric", Archive: MetadataArchive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = w.SetEncoded(key, []byte("metadata"))
+	if err == nil {
+		_, err = w.Close()
+	}
+	if !errors.Is(err, ErrPartSizeLimit) {
+		t.Fatalf("limit error=%v", err)
+	}
+	_ = w.Abort()
+	if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging remains: %v", err)
+	}
+}
