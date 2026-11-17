@@ -7,6 +7,7 @@ import (
 	"container/heap"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -137,68 +138,133 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 	return chosen, nil
 }
 
-type mergeCursor struct {
-	reader     *sstable.Reader
-	cursor     *tableCursor
-	metadata   *tableCursor
-	key        v2part.Key
-	encoded    []byte
-	value      []byte
-	record     *sealrollup.Record
-	records    []sealrollup.Record
-	next       int
-	part       v2part.PartID
-	sourcePart v2part.PartID
+// The on-disk metadata sorts after a metric's runs. Buffer only that metric's
+// encoded values per input to see its durable masks, then merge its slots. Each
+// SST iterator moves strictly forward: there is no per-name metadata iterator or
+// seek, and memory does not grow with the number of names in the part.
+type mergeBlock struct {
+	archive    uint32
+	slot       int64
+	start, end int
 }
 
-func (c *mergeCursor) advance(first bool) (bool, error) {
-	if c.next < len(c.records) {
-		c.record = &c.records[c.next]
-		c.next++
-		c.key.BlockStart = c.record.Slot
-	} else {
-		c.records, c.record = nil, nil
-		var valid bool
-		if first {
-			valid = c.cursor.First()
-		} else {
-			valid = c.cursor.Next()
+type mergeCursor struct {
+	reader      *sstable.Reader
+	cursor      *tableCursor
+	key         v2part.Key
+	decoder     v2part.KeyDecoder
+	part        v2part.PartID
+	metadata    RollupMetadata
+	policyBytes []byte
+	arena       []byte
+	blocks      []mergeBlock
+	records     []sealrollup.Record
+	block, next int
+}
+
+func (c *mergeCursor) readMetric(first bool) (bool, error) {
+	valid := c.cursor.Next
+	if first {
+		valid = c.cursor.First
+	}
+	if !valid() {
+		return false, c.cursor.Error()
+	}
+	c.arena, c.blocks = c.arena[:0], c.blocks[:0]
+	c.records = c.records[:0]
+	c.block, c.next = 0, 0
+	k, err := c.decoder.Decode(c.cursor.Key())
+	if err != nil {
+		return false, err
+	}
+	c.key = k
+	c.key.Part = c.part
+	c.key.Archive, c.key.BlockStart, c.key.Ordinal = 0, 0, 0
+	for {
+		if k.Metric != c.key.Metric || k.VShard != c.key.VShard {
+			return false, errors.New("merge metric lacks metadata")
 		}
-		if !valid {
-			return false, c.cursor.Error()
-		}
-		k, err := v2part.Decode(c.cursor.Key())
-		if err != nil {
-			return false, err
-		}
-		c.key = k
-		c.key.Part = c.part
-		c.value = c.cursor.Value()
-		if k.Archive != v2part.MetadataArchive {
-			c.records, err = v2part.DecodeSlots(k.Archive, k.BlockStart, c.value)
+		if k.Archive == v2part.MetadataArchive {
+			c.metadata, err = decodeRollupMetadataView(c.cursor.Value())
 			if err != nil {
 				return false, err
 			}
-			c.record = &c.records[0]
-			c.next = 1
+			c.policyBytes = append(c.policyBytes[:0], c.metadata.Policy...)
+			c.metadata.Policy = c.policyBytes
+			return true, nil
+		}
+		if k.Ordinal != 0 {
+			return false, errors.New("merge requires dense ordinal zero")
+		}
+		start := len(c.arena)
+		c.arena = append(c.arena, c.cursor.Value()...)
+		c.blocks = append(c.blocks, mergeBlock{k.Archive, k.BlockStart, start, len(c.arena)})
+		if !c.cursor.Next() {
+			if err = c.cursor.Error(); err != nil {
+				return false, err
+			}
+			return false, errors.New("merge metric lacks metadata")
+		}
+		k, err = c.decoder.Decode(c.cursor.Key())
+		if err != nil {
+			return false, err
 		}
 	}
-	var err error
-	c.encoded, err = v2part.Encode(c.key)
-	return true, err
 }
+
+func (c *mergeCursor) advanceRecord(first bool) (bool, error) {
+	if !first {
+		c.next++
+	}
+	if c.next < len(c.records) {
+		return true, nil
+	}
+	if c.block == len(c.blocks) {
+		return false, nil
+	}
+	b := c.blocks[c.block]
+	c.block++
+	var err error
+	c.records, err = v2part.DecodeSlotsInto(c.records[:0], b.archive, b.slot, c.arena[b.start:b.end])
+	c.next = 0
+	return err == nil, err
+}
+
+func (c *mergeCursor) record() sealrollup.Record { return c.records[c.next] }
 
 type mergeHeap []*mergeCursor
 
-func (h mergeHeap) Len() int           { return len(h) }
-func (h mergeHeap) Less(i, j int) bool { return bytes.Compare(h[i].encoded, h[j].encoded) < 0 }
-func (h mergeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *mergeHeap) Push(v any)        { *h = append(*h, v.(*mergeCursor)) }
-func (h *mergeHeap) Pop() any          { old := *h; v := old[len(old)-1]; *h = old[:len(old)-1]; return v }
+func (h mergeHeap) Len() int { return len(h) }
+func (h mergeHeap) Less(i, j int) bool {
+	// All inputs share group/partition and normalize to the output part. GCP3
+	// orders the remaining identity by vshard, name byte length, then name bytes.
+	a, b := h[i].key, h[j].key
+	if a.VShard != b.VShard {
+		return a.VShard < b.VShard
+	}
+	if len(a.Metric) != len(b.Metric) {
+		return len(a.Metric) < len(b.Metric)
+	}
+	return a.Metric < b.Metric
+}
+func (h mergeHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *mergeHeap) Push(v any)   { *h = append(*h, v.(*mergeCursor)) }
+func (h *mergeHeap) Pop() any     { old := *h; v := old[len(old)-1]; *h = old[:len(old)-1]; return v }
 
-// Input iterators hold one dense run each; output holds one physical slot.
-// Metadata is point-seeked once per input/name, never buffered with its history. All comparison is integer/bitwise, with newerOrigin
-// as the single slot-winner rule. Coarse records are copied, never aggregated.
+type mergeRecordHeap []*mergeCursor
+
+func (h mergeRecordHeap) Len() int           { return len(h) }
+func (h mergeRecordHeap) Less(i, j int) bool { return mergeSlotLess(h[i].record(), h[j].record()) }
+func (h mergeRecordHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *mergeRecordHeap) Push(v any)        { *h = append(*h, v.(*mergeCursor)) }
+func (h *mergeRecordHeap) Pop() any          { old := *h; v := old[len(old)-1]; *h = old[:len(old)-1]; return v }
+func mergeSlotLess(a, b sealrollup.Record) bool {
+	return a.Archive < b.Archive || a.Archive == b.Archive && a.Slot < b.Slot
+}
+
+// Merge same-source local originals with the shared timestamp/class/order rule.
+// Resolved coarse records are copied, never aggregated. Publication and GC stay
+// outside this streaming rewrite and retain the ordinary snapshot fences.
 func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if _, err = rand.Read(spec.Scope.Part[:]); err != nil {
@@ -224,15 +290,23 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 		}
 	}
+
 	writer, err := v2part.NewDenseWriter(path, spec)
 	if err != nil {
 		return v2part.Descriptor{}, err
 	}
 	defer writer.Abort()
+	// Pebble's forward compaction iterator recycles compressed and decoded SST
+	// blocks. A normal read iterator allocates/frees C memory for every block.
+	// All inputs are advanced by this goroutine; this pool is never concurrent.
+	var readBuffers sstable.BufferPool
+	readBuffers.Init(2*len(inputs) + 2)
+	defer readBuffers.Release()
+	var bytesIterated uint64
 	var cursors []*mergeCursor
 	defer func() {
 		for _, c := range cursors {
-			err = errors.Join(err, c.cursor.Close(), c.metadata.Close(), c.reader.Close())
+			err = errors.Join(err, c.cursor.Close(), c.reader.Close())
 		}
 	}()
 	var h mergeHeap
@@ -250,20 +324,15 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
-		it, e := reader.NewIter(nil, nil)
+		it, e := reader.NewCompactionIter(&bytesIterated, sstable.TrivialReaderProvider{Reader: reader}, &readBuffers)
 		if e != nil {
 			_ = reader.Close()
 			return v2part.Descriptor{}, e
 		}
-		metadataIter, e := reader.NewIter(nil, nil)
-		if e != nil {
-			_ = it.Close()
-			_ = reader.Close()
-			return v2part.Descriptor{}, e
-		}
-		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, metadata: &tableCursor{it: metadataIter}, part: spec.Scope.Part, sourcePart: d.Scope.Part}
+
+		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, part: spec.Scope.Part}
 		cursors = append(cursors, c)
-		valid, e := c.advance(true)
+		valid, e := c.readMetric(true)
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
@@ -271,93 +340,12 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			heap.Push(&h, c)
 		}
 	}
-	var metric v2part.Key
-	var metadata *RollupMetadata
-	var policy RollupPolicy
-	var winner sealrollup.Record
-	var occupied bool
-	var shards []uint16
-	flushSlot := func() error {
-		if !occupied {
-			return nil
-		}
-		k := metric
-		k.Archive = uint32(winner.Archive)
-		k.BlockStart = winner.Slot
-		enc, e := v2part.Encode(k)
-		if e != nil {
-			return e
-		}
-		if e = writer.SetRecordEncoded(enc, winner); e != nil {
-			return e
-		}
-		occupied = false
-		return nil
-	}
-	flush := func() error {
-		if metric.Metric == "" {
-			return nil
-		}
-		if e := flushSlot(); e != nil {
-			return e
-		}
-		k := metric
-		k.Archive = v2part.MetadataArchive
-		k.BlockStart = 0
-		enc, e := v2part.Encode(k)
-		if e != nil {
-			return e
-		}
-		if e = writer.SetEncoded(enc, AppendRollupMetadata(nil, *metadata)); e != nil {
-			return e
-		}
-		if len(shards) == 0 || shards[len(shards)-1] != k.VShard {
-			shards = append(shards, k.VShard)
-		}
-		return nil
-	}
-	loadMetadata := func() error {
-		metadata = nil
-		for _, input := range cursors {
-			// At the first heap key for this name, only cursors positioned at
-			// this name can contain it. Other inputs are already past it.
-			if input.key.Metric != metric.Metric || input.key.VShard != metric.VShard {
-				continue
-			}
-			k := metric
-			k.Part = input.sourcePart
-			k.Archive = v2part.MetadataArchive
-			k.BlockStart = 0
-			encoded, e := v2part.Encode(k)
-			if e != nil {
-				return e
-			}
-			// Keep one seek iterator per input so neighboring metadata lookups
-			// reuse decoded SST blocks instead of decompressing each anew.
-			lookup := input.metadata
-			if lookup.SeekGE(encoded) && bytes.Equal(lookup.Key(), encoded) {
-				m, decodeErr := DecodeRollupMetadata(lookup.Value())
-				if decodeErr != nil {
-					return decodeErr
-				}
-				if metadata != nil && (m.ID != metadata.ID || !bytes.Equal(m.Policy, metadata.Policy)) {
-					return errors.New("merge changed metric identity/policy")
-				}
-				if metadata == nil || m.Frontier.Order > metadata.Frontier.Order || (m.Frontier.Order == metadata.Frontier.Order && m.Revision > metadata.Revision) {
-					metadata = &m
-				}
-			}
-			if e = lookup.Error(); e != nil {
-				return e
-			}
-		}
-		if metadata == nil {
-			return errors.New("merge metric lacks metadata")
-		}
-		return json.Unmarshal(metadata.Policy, &policy)
-	}
 
-	var processed int
+	var shards []uint16
+	var members []*mergeCursor
+	var records mergeRecordHeap
+	var key, metaBytes []byte
+	var policy RollupPolicy
 	for len(h) > 0 {
 		if err = ctx.Err(); err != nil {
 			return v2part.Descriptor{}, err
@@ -368,28 +356,84 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		default:
 		}
 		c := heap.Pop(&h).(*mergeCursor)
-		if c.key.Metric != metric.Metric || c.key.VShard != metric.VShard {
-			if err = flush(); err != nil {
-				return v2part.Descriptor{}, err
+		members = append(members[:0], c)
+		for len(h) > 0 && h[0].key.VShard == c.key.VShard && h[0].key.Metric == c.key.Metric {
+			members = append(members, heap.Pop(&h).(*mergeCursor))
+		}
+		metadata := &c.metadata
+		for _, input := range members[1:] {
+			m := &input.metadata
+			if m.ID != metadata.ID || !bytes.Equal(m.Policy, metadata.Policy) {
+				return v2part.Descriptor{}, errors.New("merge changed metric identity/policy")
 			}
-			metric = c.key
-			metric.Archive = 0
-			metric.BlockStart = 0
-			metric.Ordinal = 0
-			if err = loadMetadata(); err != nil {
-				return v2part.Descriptor{}, err
+			if m.Frontier.Order > metadata.Frontier.Order || m.Frontier.Order == metadata.Frontier.Order && m.Revision > metadata.Revision {
+				metadata = m
 			}
 		}
-		if c.record != nil {
-			r := *c.record
+		if err = json.Unmarshal(metadata.Policy, &policy); err != nil {
+			return v2part.Descriptor{}, err
+		}
+		key, err = v2part.Encode(c.key)
+		if err != nil {
+			return v2part.Descriptor{}, err
+		}
+		tail := key[len(key)-16:]
+		setSlot := func(archive uint32, slot int64) {
+			binary.BigEndian.PutUint32(tail, archive)
+			binary.BigEndian.PutUint64(tail[4:], uint64(slot)^(1<<63))
+		}
+		var winner sealrollup.Record
+		occupied := false
+		flush := func() error {
+			if !occupied {
+				return nil
+			}
+			setSlot(uint32(winner.Archive), winner.Slot)
+			occupied = false
+			return writer.SetRecordEncoded(key, winner)
+		}
+		records = records[:0]
+		for _, input := range members {
+			valid, e := input.advanceRecord(true)
+			if e != nil {
+				return v2part.Descriptor{}, e
+			}
+			if valid {
+				heap.Push(&records, input)
+			}
+		}
+		for len(records) > 0 {
+			input := heap.Pop(&records).(*mergeCursor)
+			r := input.record()
 			if r.Archive >= len(policy.Config.Archives) {
 				return v2part.Descriptor{}, errors.New("merge archive outside policy")
 			}
-			// Reset masks precede winner selection. Age-only slots stay: their
-			// exact boundary values may feed a later coarse window on recovery.
-			if !metadata.Expired && r.Order > metadata.ResetOrder {
+			// A whole non-overlapping run can keep its exact dense encoding. Durable
+			// reset/expiry masks must permit every slot; ties always use the slow path.
+			last := input.records[len(input.records)-1]
+			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
+			if untouched {
+				for _, item := range input.records {
+					if item.Order <= metadata.ResetOrder {
+						untouched = false
+						break
+					}
+				}
+			}
+			if untouched {
+				if err = flush(); err != nil {
+					return v2part.Descriptor{}, err
+				}
+				b := input.blocks[input.block-1]
+				setSlot(b.archive, b.slot)
+				if err = writer.SetSlotsEncoded(key, input.arena[b.start:b.end]); err != nil {
+					return v2part.Descriptor{}, err
+				}
+				input.next = len(input.records) - 1
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder {
+				// Age-only slots remain available for cold older-window corrections.
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
-					if err = flushSlot(); err != nil {
+					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
 					}
 				}
@@ -408,29 +452,34 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 					occupied = true
 				}
 			}
-		}
-
-		valid, e := c.advance(false)
-		if e != nil {
-			return v2part.Descriptor{}, e
-		}
-		if valid {
-			heap.Push(&h, c)
-		}
-		processed++
-		if processed%4096 == 0 {
-			// Bounded workers plus a cooperative pause for intake.
-			timer := time.NewTimer(time.Millisecond)
-			select {
-			case <-stop:
-				timer.Stop()
-				return v2part.Descriptor{}, context.Canceled
-			case <-timer.C:
+			valid, e := input.advanceRecord(false)
+			if e != nil {
+				return v2part.Descriptor{}, e
+			}
+			if valid {
+				heap.Push(&records, input)
 			}
 		}
-	}
-	if err = flush(); err != nil {
-		return v2part.Descriptor{}, err
+		if err = flush(); err != nil {
+			return v2part.Descriptor{}, err
+		}
+		setSlot(v2part.MetadataArchive, 0)
+		metaBytes = AppendRollupMetadata(metaBytes[:0], *metadata)
+		if err = writer.SetEncoded(key, metaBytes); err != nil {
+			return v2part.Descriptor{}, err
+		}
+		if len(shards) == 0 || shards[len(shards)-1] != c.key.VShard {
+			shards = append(shards, c.key.VShard)
+		}
+		for _, input := range members {
+			valid, e := input.readMetric(false)
+			if e != nil {
+				return v2part.Descriptor{}, e
+			}
+			if valid {
+				heap.Push(&h, input)
+			}
+		}
 	}
 	d, err := writer.Close()
 	if err != nil {
