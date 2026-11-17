@@ -175,7 +175,9 @@ With Prometheus enabled, `v2_move_progress{move,measure}` exposes `phase`,
 Phase/state numbers are pending=0, received=1, verified=2, staged=3, active=4,
 done=5. The existing Graphite collector exports the same observations under
 `v2.move.<ID>.*`, with `owner.<index>.state` and `v2.move.regressions`.
-Failure reasons remain in status, avoiding unbounded metric labels.
+Failure reasons remain in status, avoiding unbounded metric labels. With the
+local metric endpoint, the collector feeds the ordinary v2 TCP intake; remote
+metric endpoints continue to use the existing sender.
 
 Names use the receiving daemon's producer catalog and owner placement, which
 may differ from the donor's geometry. Each receiving owner atomically activates

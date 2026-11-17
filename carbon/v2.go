@@ -302,6 +302,7 @@ func (app *App) startV2() error {
 		return err
 	}
 	intake.Store(v.server)
+	app.Collector = NewCollector(app)
 	if c.Prometheus.Enabled {
 		app.v2CollectorOnce.Do(func() { app.PromRegisterer.MustRegister(&v2Collector{app: app}) })
 	}

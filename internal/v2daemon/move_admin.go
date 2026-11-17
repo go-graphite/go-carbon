@@ -314,6 +314,7 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return a.cleanup(m)
 			}
 			if action == "prepare" {
+				request.Now = m.Request.Now
 				if len(m.Request.Parts) == 0 {
 					m.Request = request
 					m.Request.Parts = append([]v2core.MovePart(nil), request.Parts...)

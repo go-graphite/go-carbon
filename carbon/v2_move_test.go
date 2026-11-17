@@ -167,6 +167,29 @@ func TestV2MoveAdminHTTP(t *testing.T) {
 	if graphite[prepared.ID+".phase"] != 5 || graphite[prepared.ID+".bytes_done"] <= 0 {
 		t.Fatalf("missing graphite progress: %v", graphite)
 	}
+	if app.Collector == nil || app.Collector.endpoint == MetricEndpointLocal {
+		t.Fatal("v2 graphite collector not connected to intake")
+	}
+	app.Collector.collect()
+	graphiteName := app.Collector.graphPrefix + ".v2.move." + prepared.ID + ".phase"
+	deadlineGraphite := time.Now().Add(8 * time.Second)
+	for {
+		found := false
+		for name := range app.v2.catalog.Snapshot().Names() {
+			if name == graphiteName {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadlineGraphite) {
+			t.Fatal("move Graphite stats did not reach v2 intake")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	app.Stop()
 	app = nil
 	app = v2TestApp(t, root)
