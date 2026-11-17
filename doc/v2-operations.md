@@ -80,3 +80,26 @@ Sealed-part retirement also exports `v2_part_gc_pending_parts`,
 The byte counter measures removed original links, not physical disk reclaimed:
 hard-link copies and reader pins can retain those blocks. Move progress and
 physical allocation reclamation remain outside this metric contract.
+
+### Visibility and seal latency
+
+`/admin/info?scopes=v2-write` exposes process-lifetime, point-weighted
+`append_to_visible` p50/p99 and operation-weighted `seal_total`, `rollup_plan`,
+and `publication` p50/p99. It also returns TCP receiver counters and the active
+producer/shard counts. This measures the real daemon path, including rollups;
+it does not require an in-process shadow dispatcher.
+
+The append clock is recorded when a receiver owner appends decoded points.
+Network, sender and receiver queue delays before that call are excluded. Compare
+`receiver.Accepted` with an independent arrival counter to detect upstream
+backlog. Visibility is observed only after successful reader publication;
+republishing the same owner head does not count its points again.
+
+The append clock has one-second resolution. Returned finite quantiles are
+conservative upper bounds with up to 1.01s of rounding for append-to-visible,
+and 10ms for stage durations. `overflow` counts observations at or above
+120.01s; a quantile in that bucket is `null`, since it has no finite upper bound.
+Seal total includes rollup planning and publication. These nested stage
+quantiles have different weighting from visibility and cannot be added together.
+The observer keeps bounded histograms and producer frontiers per owner and
+creates no input queue or publication barrier.

@@ -87,6 +87,10 @@ type coreHooks struct {
 	// seal_total contains rollup_plan and publication; these are not additive quantiles.
 	SealTiming func(phase string, elapsed time.Duration)
 
+	// Visible observes original batches after successful reader publication.
+	// Owners may call concurrently; batches are borrowed and can repeat.
+	Visible func(owner int, batches []coreBatch)
+
 	OwnerCPUs []int
 	Publish   func(int, *pebble.Snapshot, []row) error
 	// PublishBatches transfers an immutable snapshot and detached original pending
