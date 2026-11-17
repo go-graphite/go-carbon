@@ -177,11 +177,19 @@ func (s *Slots) KeepRecent(maxTime int64) {
 	for a := range ars {
 		span := &s.data[a]
 		if a == len(ars)-1 {
-			*span = slotSpan{floor: math.MaxInt64}
+			if span.floor != math.MaxInt64 {
+				*span = slotSpan{floor: math.MaxInt64}
+			}
 			continue
 		}
 		step := ars[a+1].Step
-		span.floor = max(span.floor, maxTime-maxTime%step-2*ars[a].Step)
+		floor := maxTime - maxTime%step - 2*ars[a].Step
+		// InstallRecent rejects samples below the established floor. Nothing
+		// can need eviction until the next coarse window opens.
+		if floor <= span.floor {
+			continue
+		}
+		span.floor = floor
 		kept := span.data[:0]
 		for _, p := range span.data {
 			if p.sample.Time >= span.floor {
