@@ -1530,4 +1530,10 @@ enabled = false
 path = ""
 producers = 0                     # 0: one serial producer per current Go CPU
 shards = 0                        # 0: one immutable-part owner per producer
+# Restart-only time threshold; 0s also selects 10s. Size may seal earlier:
+# seal-max-rows is a runtime threshold; the hard owner limit is 2097152 rows.
+# One original application can cross the threshold. Rows are 32 bytes plus batches.
+# Pending reads publish every 1s; the mandatory input log still fsyncs every 1s.
+seal-interval = "10s"
+seal-max-rows = 131072
 read-budget-bytes = 268435456

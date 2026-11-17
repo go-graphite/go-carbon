@@ -117,7 +117,8 @@ func TestCorePendingPublicationCoalesces(t *testing.T) {
 	if err = <-ack; err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 || o.frontier.Load().Cursors[0] != 32 {
+	// The final tail is published before seal work, then the cleared head after it.
+	if calls != 3 || o.frontier.Load().Cursors[0] != 32 {
 		t.Fatal("seal did not publish every packet", calls)
 	}
 }

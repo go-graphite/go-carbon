@@ -30,6 +30,9 @@ import (
 var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
+	// SealInterval is a runtime threshold, independent of the persisted format.
+	SealInterval               time.Duration `json:"-"`
+	SealMaxRows                int           `json:"-"`
 	Rollups                    bool
 	RollupRoutingVersion       uint8
 	AppendParts                bool
@@ -325,7 +328,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		streamBytes = n
 	}
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 {
 		return nil, os.ErrInvalid
 	}
 	sealPhase := 0
@@ -342,6 +345,8 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	}
 	diskConfig := cfg
 	diskConfig.Owners = 0 // execution geometry does not change routing or persisted bytes
+	diskConfig.SealInterval = 0
+	diskConfig.SealMaxRows = 0
 	identities := hooks.Identities
 	if identities == nil {
 		identities = &PolicyCatalog{}
@@ -385,12 +390,16 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if hooks.Visible != nil {
 			o.visible = func(b []coreBatch) { hooks.Visible(s, b) }
 		}
-		o.sealRows = cfg.MaxRows
+		sealMaxRows := cfg.SealMaxRows
+		if sealMaxRows == 0 {
+			sealMaxRows = 128 << 10
+		}
+		o.sealRows = min(cfg.MaxRows, sealMaxRows)
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
 			// This changes execution boundaries, never the persisted format.
 			phase := (sealPhase + 1024*s/cfg.Shards) % 1024
-			o.sealRows -= (cfg.MaxRows / 4) * phase / 1024
+			o.sealRows -= (o.sealRows / 4) * phase / 1024
 		}
 		o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
 		o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
@@ -889,7 +898,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	headCapacity := o.cfg.MaxRows
 	if o.cfg.Rollups {
-		// Rollups normally seal on the one-second deadline, well below the
+		// Rollups normally seal on a time or size threshold, below the
 		// hard row limit. Grow with actual intake instead of reserving the
 		// maximum buffer for every owner at startup.
 		headCapacity = min(headCapacity, 64<<10)
@@ -897,9 +906,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	head := make([]row, 0, headCapacity)
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
-	deadline := time.Now().Add(time.Second)
+	sealInterval := o.cfg.SealInterval
+	if sealInterval == 0 {
+		sealInterval = 10 * time.Second
+	}
+	deadline := time.Now().Add(sealInterval)
 	o.nextPoll = deadline
+	maintenanceDeadline := time.Now().Add(time.Second)
 	var headPublication, batchPublication time.Time
+	publishedBatches := 0
 	publishBatches := func() error {
 		if o.batchHook == nil {
 			return nil
@@ -910,6 +925,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// Pending heads grow until the owner seals. Re-cloning the entire
 		// head on every small packet makes publication quadratic in intake.
 		batchPublication = time.Now()
+		publishedBatches = len(batches)
 		err := o.batchHook(o.db.NewSnapshot(), slices.Clone(batches), o.readGeneration)
 		if err == nil && o.visible != nil {
 			o.visible(batches)
@@ -930,6 +946,13 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	flush := func() error {
 		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
 			return nil
+		}
+		// Publish the last intake tail before synchronous rollup/disk work. A
+		// larger seal must not postpone visibility until that work completes.
+		if len(batches) > publishedBatches {
+			if err := publishBatches(); err != nil {
+				return err
+			}
 		}
 		next := o.meta
 		if o.maintenance {
@@ -954,7 +977,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		head = head[:0]
 		o.bufferedPoints.Store(0)
 		o.bufferedSince.Store(0)
-		deadline = time.Now().Add(time.Second)
+		deadline = time.Now().Add(sealInterval)
 		o.pub.publish(o.db.NewSnapshot())
 		if err := publishBatches(); err != nil {
 			return err
@@ -1085,7 +1108,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				headPublication = time.Now()
 			}
 		}
-		if failure == nil && found && !sealPending && time.Since(batchPublication) >= time.Second {
+		if failure == nil && !found && o.hook != nil && len(head) > 0 && time.Since(headPublication) >= time.Second {
+			failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
+			headPublication = time.Now()
+		}
+		if failure == nil && !sealPending && len(batches) > publishedBatches && time.Since(batchPublication) >= time.Second {
 			failure = publishBatches()
 		}
 		if failure != nil {
@@ -1107,10 +1134,55 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				if failure != nil {
 					o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 				}
-				deadline = time.Now().Add(time.Second)
+				deadline = time.Now().Add(sealInterval)
 			}
 		}
+		if failure == nil && o.maintenance && !time.Now().Before(maintenanceDeadline) {
+			// Keep inactivity detection independent of the larger seal threshold.
+			// The application callback requests its existing intake fence before
+			// allowing expiry; only an allowed expiry or new metadata needs a seal.
+			r := o.rollups
+			now := time.Now()
+			if r.now != nil {
+				now = r.now()
+			}
+			due := false
+			for _, m := range r.metrics {
+				if !m.meta.Expired && r.expire(m.rollupPolicy(), m.metadata(), now) {
+					due = true
+					break
+				}
+			}
+			for _, b := range batches {
+				if r.metrics[b.ID] == nil {
+					due = true // establish metadata before its inactivity window can end
+					break
+				}
+			}
+			if due {
+				failure = flush()
+				if failure != nil {
+					o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+				}
+			}
+			maintenanceDeadline = time.Now().Add(time.Second)
+		}
 		o.nextPoll = deadline
+		if o.maintenance && maintenanceDeadline.Before(o.nextPoll) {
+			o.nextPoll = maintenanceDeadline
+		}
+		if len(head) > 0 {
+			if o.batchHook != nil && len(batches) > publishedBatches {
+				if next := batchPublication.Add(time.Second); next.Before(o.nextPoll) {
+					o.nextPoll = next
+				}
+			}
+			if o.hook != nil {
+				if next := headPublication.Add(time.Second); next.Before(o.nextPoll) {
+					o.nextPoll = next
+				}
+			}
+		}
 		if failure != nil {
 			o.nextPoll = time.Now().Add(time.Second)
 		}

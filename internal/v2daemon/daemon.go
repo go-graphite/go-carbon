@@ -30,6 +30,8 @@ type Config struct {
 
 	Layer, Producers, Shards, MaxPendingRows int
 	GroupInterval                            time.Duration
+	SealInterval                             time.Duration
+	SealMaxRows                              int
 	// Placement requires stamped intake; one daemon root owns one PG.
 	Placement Placement
 	Hooks     v2core.Hooks
@@ -97,7 +99,7 @@ func coreConfig(c Config) v2core.Config {
 	if maxRows == 0 {
 		maxRows = 2 << 20
 	}
-	return v2core.Config{Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	return v2core.Config{SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open recovers durable journal layers through the normal core write queues.

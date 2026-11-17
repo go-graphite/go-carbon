@@ -201,3 +201,27 @@ disjoint canonical names; competing donor streams for the same name, moving
 previously adopted stores, and lifecycle-reset reconciliation are outside this
 protocol. Incomplete state and links remain under `<v2.path>/moves/<ID>` for
 retry; completed moves retain only their small done receipt.
+
+### Seal threshold
+
+`[v2] seal-interval = "10s"` sets the restart-only maximum time between
+owner seals (zero selects the same default; negative values are rejected).
+`seal-max-rows = 131072` is the independent restart-only size threshold
+(zero selects this default; negative values are rejected). It limits synchronous
+seal work and retained pending samples. An original application remains intact,
+so a packet can cross this threshold; the existing 2,097,152-row hard limit still
+bounds staging to 64MiB per owner, plus detached original batches, policies and
+bounded dispatch queues. The usual 131,072-row threshold is 4MiB of row storage
+per owner before original-batch and packet overhead. No merge policy changes. Existing explicit control barriers still force seals.
+When inactivity expiry is configured, its metadata check retains a separate
+one-second cadence; new metadata and due fenced expiry may force an earlier seal.
+
+Pending heads publish independently every second, including idle tails. The
+last unpublished tail is also published before synchronous seal work starts. Fine
+and coarse reads combine pending original samples with sealed data; rollups
+are still computed exactly from fine samples at seal. The mandatory input log
+keeps its one-second fsync, so this changes replay work, not the durability
+window. A crash can now require replaying about ten seconds per owner instead
+of one, plus time spent sealing or queued behind storage; a size seal shortens
+that prefix. Measure replay time and buffered points during qualification.
+Changing this threshold does not change the on-disk format.
