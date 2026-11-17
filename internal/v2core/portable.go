@@ -112,7 +112,7 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 		if d.meta, e = DecodeRollupMetadata(kv.Value); e != nil {
 			return v2part.Descriptor{}, e
 		}
-		if (d.meta.Version != 1 && d.meta.Version != 2) || d.meta.Frontier.Order == 0 || (d.meta.Version == 1 && (d.meta.ResetOrder != 0 || d.meta.Expired)) || d.meta.ResetOrder > d.meta.Frontier.Order || (d.meta.Expired && d.meta.ResetOrder != d.meta.Frontier.Order) {
+		if d.meta.BaselineOrder > d.meta.Frontier.Order || (d.meta.Version != 1 && d.meta.Version != 2) || d.meta.Frontier.Order == 0 || (d.meta.Version == 1 && (d.meta.ResetOrder != 0 || d.meta.Expired)) || d.meta.ResetOrder > d.meta.Frontier.Order || (d.meta.Expired && d.meta.ResetOrder != d.meta.Frontier.Order) {
 			return v2part.Descriptor{}, errors.New("unsupported rollup metadata")
 		}
 		if e = json.Unmarshal(d.meta.Policy, &d.policy); e != nil {

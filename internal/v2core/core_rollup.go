@@ -48,6 +48,9 @@ func EncodeRollupPolicy(p RollupPolicy) ([]byte, error) {
 // LastUpdate is the original admission clock in nanoseconds, clamped against
 // backward clocks just as chunkstore activity is. Revision starts at creation.
 type RollupMetadata struct {
+	// BaselineOrder certifies original classic slots installed before intake.
+	BaselineOrder uint64 `json:",omitempty"`
+
 	// ResetOrder masks every older physical slot in all parts, including copies.
 	// The producer order frontier is retained across expiry and restart.
 	ResetOrder uint64 `json:",omitempty"`
@@ -582,6 +585,9 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 	for name, e := range series {
 		if (e.meta.Version != 1 && e.meta.Version != 2) || e.policy.Group != e.group || e.policy.Name != name || e.meta.ID == 0 || e.meta.Frontier.Order == 0 {
 			return fmt.Errorf("missing rollup metadata for %s", name)
+		}
+		if e.meta.BaselineOrder > e.meta.Frontier.Order {
+			return errors.New("baseline exceeds rollup frontier")
 		}
 		if (e.meta.Version == 1 && (e.meta.ResetOrder != 0 || e.meta.Expired)) || e.meta.ResetOrder > e.meta.Frontier.Order || (e.meta.Expired && e.meta.ResetOrder != e.meta.Frontier.Order) {
 			return errors.New("invalid rollup reset frontier")

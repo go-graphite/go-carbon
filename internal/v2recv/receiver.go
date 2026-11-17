@@ -346,7 +346,8 @@ type reference struct {
 	owner int
 }
 
-func ownerFor(name string, n int) int {
+// OwnerFor returns the stable producer used by unplaced TCP intake.
+func OwnerFor(name string, n int) int {
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(name); i++ {
 		h ^= uint64(name[i])
@@ -428,7 +429,7 @@ func (s *Server) read(c net.Conn) error {
 			_, err = d.ReadFrame(r, func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 				if *slot == nil {
 					n := string(name)
-					*slot = reference{n, ownerFor(n, len(s.queues))}
+					*slot = reference{n, OwnerFor(n, len(s.queues))}
 				}
 				add((*slot).(reference), value, ts)
 			})
@@ -491,7 +492,7 @@ func (s *Server) read(c net.Conn) error {
 				s.cfg.Logger.Error("v2 invalid plaintext point", "error", e)
 			} else {
 				n := string(name)
-				add(reference{n, ownerFor(n, len(s.queues))}, value, ts)
+				add(reference{n, OwnerFor(n, len(s.queues))}, value, ts)
 			}
 		}
 		if appendErr != nil {

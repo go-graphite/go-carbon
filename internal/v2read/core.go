@@ -359,7 +359,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			return ErrNotFound
 		}
 		if mask != nil {
-			mask(metric.meta.Expired || metric.meta.ResetOrder > 0)
+			mask(metric.meta.BaselineOrder > 0 || metric.meta.Expired || metric.meta.ResetOrder > 0)
 		}
 		if metric.meta.Expired {
 			return ErrNotFound

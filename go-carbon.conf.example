@@ -1518,6 +1518,10 @@ encoding-duration = "seconds"
 # refuses mixed classic roots, quota/expiry settings and other ingestion sinks.
 # Keep disabled until full lifecycle, placement and classic grouping qualification.
 [v2]
+# Verified immutable native conversion receipt directory. Installed atomically
+# before first admission; the installed root is self-contained on restart.
+# The fenced conversion plan must use Group="local".
+baseline-path = ""
 # Begin a new canary with shadow. Switch reads by restarting with
 # v2-serving-with-classic-dual-write; v2-only ends the classic rollback hold.
 # Empty mode preserves the existing v2-only behavior. See doc/v2-fallback.md.

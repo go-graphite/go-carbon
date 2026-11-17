@@ -23,6 +23,10 @@ import (
 // Config is fixed for the lifetime of a store. Layer is 0 (numeric), 1 (names),
 // 2 (journal), or 3 (rollups). Each producer has one caller, including Drain.
 type Config struct {
+	// BaselinePath names a verified converted native checkpoint, installed once
+	// before core publication, journal replay, or admission.
+	BaselinePath string
+
 	Layer, Producers, Shards, MaxPendingRows int
 	GroupInterval                            time.Duration
 	// Placement requires stamped intake; one daemon root owns one PG.
@@ -131,6 +135,11 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 			return nil, err
 		}
 	}
+	baselineOrder, err := installBaseline(root, c)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
 	e, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(c), hooks)
 	if err != nil {
 		_ = lock.Close()
@@ -138,7 +147,7 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 	}
 	s := &Store{Core: e, cfg: c, lock: lock}
 	for i := 0; i < c.Producers; i++ {
-		p := &Producer{engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
+		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
 		if c.Placement != nil {
 			p.placement = c.Placement
 			p.admission = c.Placement.Register()
