@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
@@ -15,6 +16,7 @@ type v2CatalogUpdates struct {
 	owners     []map[uint64]*[16]uint64
 	mu         sync.Mutex
 	added      []string
+	stamps     []v2NameStamp // aligned with added
 	expired    []string
 	expiredIDs sync.Map
 	hasExpiry  atomic.Bool
@@ -29,6 +31,8 @@ func newV2CatalogUpdates(owners int) *v2CatalogUpdates {
 }
 func (u *v2CatalogUpdates) visible(owner int, batches []v2core.Batch) {
 	var added []string
+	var stamps []v2NameStamp
+	now := time.Now().UnixNano()
 	for _, b := range batches {
 		page := u.owners[owner][b.ID>>10]
 		if page == nil {
@@ -57,10 +61,12 @@ func (u *v2CatalogUpdates) visible(owner int, batches []v2core.Batch) {
 			name = string(policy.Name)
 		}
 		added = append(added, name)
+		stamps = append(stamps, v2NameStamp{registered: b.Clock, visible: now})
 	}
 	if len(added) > 0 {
 		u.mu.Lock()
 		u.added = append(u.added, added...)
+		u.stamps = append(u.stamps, stamps...)
 		u.mu.Unlock()
 	}
 }
@@ -71,11 +77,11 @@ func (u *v2CatalogUpdates) expire(id uint64, name string) {
 	u.expired = append(u.expired, name)
 	u.mu.Unlock()
 }
-func (u *v2CatalogUpdates) drain() (added, expired []string) {
+func (u *v2CatalogUpdates) drain() (added []string, stamps []v2NameStamp, expired []string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	added, expired = u.added, u.expired
-	u.added, u.expired = nil, nil
+	added, stamps, expired = u.added, u.stamps, u.expired
+	u.added, u.stamps, u.expired = nil, nil, nil
 	return
 }
 
@@ -86,9 +92,72 @@ func (u *v2CatalogUpdates) changed(names []string) {
 	u.mu.Unlock()
 }
 
-func (u *v2CatalogUpdates) retry(added, expired []string) {
+// Stamps cover a prefix of added; reconfirmed copy/expiry names have none.
+func (u *v2CatalogUpdates) retry(added []string, stamps []v2NameStamp, expired []string) {
 	u.mu.Lock()
 	u.added = append(u.added, added...)
+	u.stamps = append(u.stamps, stamps...)
+	for len(u.stamps) < len(u.added) {
+		u.stamps = append(u.stamps, v2NameStamp{})
+	}
 	u.expired = append(u.expired, expired...)
 	u.mu.Unlock()
+}
+
+// v2NameStamp attributes new-name delay: registration clock (whole seconds,
+// from the admitted batch) and reader-visible time (publication callback).
+type v2NameStamp struct{ registered, visible int64 }
+
+type v2NameTrace struct {
+	Name                string `json:"name"`
+	RegisteredUnix      int64  `json:"registered_unix"`
+	ReaderVisibleUnixMs int64  `json:"reader_visible_unix_ms"`
+	PublishedUnixMs     int64  `json:"catalog_published_unix_ms"`
+}
+
+// v2CatalogTelemetry observes the single catalog owner; it never gates it.
+type v2CatalogTelemetry struct {
+	visibleToPublished, registeredToPublished v2WriteHistogram
+	mu                                        sync.Mutex
+	publications                              uint64
+	publishSeconds, publishMax                float64
+	levels, names                             int
+	recent                                    [256]v2NameTrace
+	next                                      int
+}
+
+func (t *v2CatalogTelemetry) published(start time.Time, added []string, stamps []v2NameStamp, levels, names int) {
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	d := now.Sub(start).Seconds()
+	t.publications++
+	t.publishSeconds += d
+	t.publishMax = max(t.publishMax, d)
+	t.levels, t.names = levels, names
+	for i, s := range stamps {
+		if s.visible == 0 {
+			continue
+		}
+		t.visibleToPublished.add(now.Sub(time.Unix(0, s.visible)), 1)
+		t.registeredToPublished.add(now.Sub(time.Unix(s.registered, 0)), 1)
+		t.recent[t.next] = v2NameTrace{added[i], s.registered, s.visible / 1e6, now.UnixMilli()}
+		t.next = (t.next + 1) % len(t.recent)
+	}
+}
+
+func (t *v2CatalogTelemetry) report() map[string]interface{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	recent := make([]v2NameTrace, 0, len(t.recent))
+	for i := range t.recent {
+		if r := t.recent[(t.next+i)%len(t.recent)]; r.Name != "" {
+			recent = append(recent, r)
+		}
+	}
+	return map[string]interface{}{
+		"publications": t.publications, "publish_seconds_total": t.publishSeconds, "publish_seconds_max": t.publishMax,
+		"levels": t.levels, "names": t.names, "recent": recent,
+		"reader_visible_to_published": t.visibleToPublished.report(), "registered_to_published": t.registeredToPublished.report(),
+	}
 }

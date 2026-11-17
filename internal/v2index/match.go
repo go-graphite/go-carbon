@@ -3,7 +3,6 @@ package v2index
 import (
 	"context"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -31,14 +30,16 @@ func (s *Snapshot) VisitPaths(ctx context.Context, glob string, yield func(strin
 	literal = strings.TrimSuffix(literal, ".wsp")
 	prefix := strings.ReplaceAll(literal, "/", ".")
 	depth := strings.Count(glob, "/") + 1
-	for i := sort.SearchStrings(s.names, prefix); i < len(s.names); {
+	c := s.seek(prefix)
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		name := s.names[i]
-		if !strings.HasPrefix(name, prefix) {
+		name, level := c.peek()
+		if level < 0 || !strings.HasPrefix(name, prefix) {
 			break
 		}
+		c.pos[level]++
 		path := strings.ReplaceAll(name, ".", "/") + ".wsp"
 		cut, seen := -1, 0
 		for j := range path {
@@ -50,13 +51,11 @@ func (s *Snapshot) VisitPaths(ctx context.Context, glob string, yield func(strin
 				}
 			}
 		}
-		i++
 		if cut >= 0 {
 			path = path[:cut]
 			// Every descendant of this directory produces the same candidate path.
 			directory := strings.ReplaceAll(path, "/", ".") + "."
-			end := directory[:len(directory)-1] + "/" // '.' + 1, exclusive prefix end
-			i += sort.Search(len(s.names)-i, func(j int) bool { return s.names[i+j] >= end })
+			c.skipTo(directory[:len(directory)-1] + "/") // '.' + 1, exclusive prefix end
 		}
 		if err := yield("/" + path); err != nil {
 			return err
