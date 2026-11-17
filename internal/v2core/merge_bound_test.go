@@ -338,3 +338,66 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 		t.Fatalf("repeated ttl rewrite changed=%v %v", changed, err)
 	}
 }
+
+type fakeFree uint64
+
+func (f fakeFree) Free(string) (uint64, error) { return uint64(f), nil }
+
+func withFreeSpace(t *testing.T, free uint64) {
+	old := diskSpace
+	diskSpace = fakeFree(free)
+	t.Cleanup(func() { diskSpace = old })
+}
+
+func TestMergeDiskGuard(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e := mergeFixture(t, t.TempDir(), nil)
+	defer e.close()
+	o := e.owners[0]
+	for n := uint64(1); n <= 16; n++ {
+		mergeAppend(t, e, n)
+	}
+	s := o.db.NewSnapshot()
+	defer s.Close()
+	withFreeSpace(t, 1<<40)
+	inputs, err := o.selectMerge(s)
+	if err != nil || len(inputs) != 16 {
+		t.Fatalf("plenty of space: %d %v", len(inputs), err)
+	}
+	var total uint64
+	for _, d := range inputs {
+		total += d.Bytes
+	}
+	// free/4 bound: exactly enough, then one byte short.
+	withFreeSpace(t, total*4)
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 16 {
+		t.Fatalf("free/4 exact: %d %v", len(inputs), err)
+	}
+	withFreeSpace(t, total*4-4)
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 0 {
+		t.Fatalf("free/4 ignored: %d %v", len(inputs), err)
+	}
+	// In-flight staged output counts against free space.
+	withFreeSpace(t, total*4+100)
+	mergeInflight.Add(101)
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 0 {
+		t.Fatalf("in-flight ignored: %d %v", len(inputs), err)
+	}
+	mergeInflight.Add(^uint64(100))
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 16 {
+		t.Fatalf("released in-flight: %d %v", len(inputs), err)
+	}
+	// Zero free space: no merge, no error, counted skip.
+	withFreeSpace(t, 0)
+	skips := MergeDiskSkips()
+	changed, err := o.mergeSealedParts(make(chan struct{}))
+	if err != nil || changed {
+		t.Fatalf("zero free: changed=%v err=%v", changed, err)
+	}
+	if MergeDiskSkips() != skips+1 {
+		t.Fatal("skip not counted")
+	}
+	if mergeInflight.Load() != 0 {
+		t.Fatalf("in-flight leaked: %d", mergeInflight.Load())
+	}
+}
