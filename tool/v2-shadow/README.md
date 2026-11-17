@@ -117,3 +117,37 @@ sample. `source_lag_seconds` remains the older scanner-EOF proxy.
 `skipped_points` is separate from `admission_pending_points`; fixed-policy
 filtering no longer appears as producer debt. All reported shared-host results
 remain provisional and include co-tenant load.
+
+
+Full-stream L3 can use read-only copies of the classic daemon's creation
+policies. Read their paths from its running configuration, preserve both files,
+and pass them together:
+
+```sh
+v2-shadow -source /path/to/input-log -out /scratch/fresh-l3 \
+  -workers 16 -shards 4 -layer 3 -full-l3 -duration 20m \
+  -classic-schemas /scratch/storage-schemas.conf \
+  -classic-aggregation /scratch/storage-aggregation.conf \
+  -policies /scratch/comparison-cohort.json
+```
+
+The persister's schema priority and aggregation matching select every name's
+creation policy, including names that classic has not created yet. This mode
+does not claim to recover historical policies from existing files. With
+`-full-l3`, `-policies` supplies the rotating comparison population; every input
+name is admitted and the paired files override policies in that population.
+Without the paired files, full L3 retains strict classic `/info` lookup.
+
+Parallel samples report `stage_timings`: input-tail, admission (including
+worker queue/decode/policy/producer work), admission-buffer wait until a fence,
+and owner seal phases. The first three are point-weighted; `seal_total`,
+`rollup_plan`, and `publication` are operation-weighted owner seals.
+`publication` includes part encoding, sync, ingest, and commit after planning.
+Seal total contains rollup planning and publication. Concurrent stages overlap;
+percentiles cannot be added or subtracted. Append-to-visible remains the
+conservative point-weighted source-append to synchronous publication bound.
+
+`offered_points` (also `source_dispatched_points`) counts the consumed source
+header prefix. It can understate live arrivals when admission falls behind.
+Use `source_observed_points_delta` for the independent observer's arrival
+window and report its cursor/window alongside the admitted rate.
