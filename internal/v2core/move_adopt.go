@@ -283,7 +283,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		incoming = append(incoming, part)
-		metadata = append(metadata, coreKV{key, binding})
+		metadata = append(metadata, coreKV{Key: key, Value: binding})
 	}
 	if len(incoming) == 0 {
 		return nil
@@ -381,7 +381,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if err != nil {
 			return err
 		}
-		metadata = append(metadata, coreKV{moveAuthorityKey(name), value})
+		metadata = append(metadata, coreKV{Key: moveAuthorityKey(name), Value: value})
 	}
 	stage, err := os.MkdirTemp(o.dir, ".move-adopt-")
 	if err != nil {
