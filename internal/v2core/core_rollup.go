@@ -428,8 +428,8 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	return out, nil
 }
 
-// ScanRollups reads one immutable core snapshot. It resolves the greatest
-// replacement order for each physical slot before callers apply time filters.
+// ScanRollups reads one immutable core snapshot. It resolves each physical slot
+// by logical timestamp, then class and source-local order, before time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
@@ -481,7 +481,12 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			}
 			for _, record := range decoded {
 				slot := [2]int64{int64(k.Archive), record.Slot}
-				if old, ok := e.records[slot]; !ok || record.Order > old.Order {
+				old, ok := e.records[slot]
+				newer, err := newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
+				if err != nil {
+					return err
+				}
+				if !ok || newer {
 					e.records[slot] = record
 				}
 			}

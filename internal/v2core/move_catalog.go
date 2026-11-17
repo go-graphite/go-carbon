@@ -22,6 +22,7 @@ import (
 const (
 	CopiedPart uint8 = iota
 	LivePart
+	hiddenPart
 )
 
 var movePartPrefix = []byte{255, 'V', '2', 'M', 0}
@@ -30,6 +31,7 @@ type partImport struct {
 	Version    int
 	Origin     partOrigin
 	Descriptor v2part.Descriptor
+	Pending    bool `json:",omitempty"`
 }
 
 type partOrigin struct {
@@ -82,12 +84,24 @@ func readPartOrigin(snapshot *pebble.Snapshot, k v2part.Key) (partOrigin, error)
 	if origin.Class != CopiedPart || origin.Incarnation == (v2part.PartID{}) || origin.Stream == "" || origin.Incarnation != binding.Descriptor.Source.Incarnation || origin.Stream != binding.Descriptor.Source.Stream {
 		return origin, errors.New("invalid copied-part precedence")
 	}
+	if binding.Pending {
+		origin.Class = hiddenPart
+	}
 	return origin, nil
 }
 
-// newerOrigin compares orders only within one original serial stream. The
-// receiver's live class wins without inspecting the donor's order counter.
-func newerOrigin(a partOrigin, ao uint64, b partOrigin, bo uint64) (bool, error) {
+// newerOrigin resolves one physical slot: the newest logical timestamp wins.
+// Class breaks equal timestamps; orders are comparable only within one source.
+func newerOrigin(a partOrigin, ar sealrollup.Record, b partOrigin, br sealrollup.Record) (bool, error) {
+	if ar.Sample.Time != br.Sample.Time {
+		return ar.Sample.Time > br.Sample.Time, nil
+	}
+	return newerSource(a, ar.Order, b, br.Order)
+}
+
+// Metadata has no physical slot or logical timestamp. Its authority remains
+// source-local, with the receiving catalog taking precedence over a donor.
+func newerSource(a partOrigin, ao uint64, b partOrigin, bo uint64) (bool, error) {
 	if a.Class != b.Class {
 		return a.Class > b.Class, nil
 	}
@@ -108,6 +122,10 @@ func newerOrigin(a partOrigin, ao uint64, b partOrigin, bo uint64) (bool, error)
 // consume it. A crash exposes both the data and precedence, or neither. Repeating
 // a completed installation is a no-op. No point keys or values are rewritten.
 func InstallCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor) (bool, error) {
+	return installCopiedPart(ctx, db, dir, path, d, false)
+}
+
+func installCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending bool) (bool, error) {
 	if err := d.Validate(); err != nil {
 		return false, err
 	}
@@ -123,7 +141,7 @@ func InstallCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v
 		return false, err
 	}
 	origin := partOrigin{Class: CopiedPart, Incarnation: d.Source.Incarnation, Stream: d.Source.Stream}
-	value, err := json.Marshal(partImport{Version: 1, Origin: origin, Descriptor: d})
+	value, err := json.Marshal(partImport{Version: 1, Origin: origin, Descriptor: d, Pending: pending})
 	if err != nil {
 		return false, err
 	}

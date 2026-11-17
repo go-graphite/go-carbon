@@ -35,6 +35,10 @@ func PlanMoveRollupRebuild(policy RollupPolicy, winning []sealrollup.Record, now
 		if r.Archive < 0 || r.Archive >= len(policy.Config.Archives) || r.Slot < 0 || r.Slot >= policy.Config.Archives[r.Archive].Count || r.Order == 0 {
 			return nil, errors.New("invalid winning move slot")
 		}
+		archive := policy.Config.Archives[r.Archive]
+		if r.Sample.Time < now-archive.Step*archive.Count {
+			continue
+		}
 		k := slot{r.Archive, r.Slot}
 		if _, exists := all[k]; exists {
 			return nil, errors.New("unresolved duplicate move slot")
@@ -63,7 +67,20 @@ func PlanMoveRollupRebuild(policy RollupPolicy, winning []sealrollup.Record, now
 	}
 	for _, r := range plan.Records {
 		if r.Archive != 0 {
-			all[slot{r.Archive, r.Slot}] = r
+			k := slot{r.Archive, r.Slot}
+			if old, exists := all[k]; exists && old.Sample.Time != r.Sample.Time {
+				newer, err := newerOrigin(partOrigin{Class: LivePart}, r, partOrigin{Class: LivePart}, old)
+				if err != nil {
+					return nil, err
+				}
+				if !newer {
+					continue
+				}
+			}
+			// For the same logical window this is a recomputation from resolved
+			// raw input, replacing a partial aggregate rather than competing
+			// with its unrelated original source order.
+			all[k] = r
 		}
 	}
 	out := make([]sealrollup.Record, 0, len(all))

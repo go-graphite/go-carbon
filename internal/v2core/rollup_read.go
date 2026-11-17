@@ -275,7 +275,7 @@ func (s *RollupSnapshot) MetricVersion(name string) any {
 // ScanArchive seeks only the named archive's physical interval in each part.
 // A predecessor seek includes dense runs beginning before first. The same
 // iterator/decoder is reused across parts; singleton records decode on the stack.
-// Winners resolve by order before timestamp filters. A bounded read-side cache
+// Winners resolve by logical timestamp before retention filters. A read-side cache
 // carries only immutable results and part identities across generations. New
 // snapshots decode only added parts; removed parts invalidate cached authority.
 func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
@@ -399,7 +399,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 					newer := !ok
 					if ok {
 						var e error
-						newer, e = newerOrigin(part.origin, record.Order, cachedOrigin(origins, record.Slot), old.Order)
+						newer, e = newerOrigin(part.origin, record, cachedOrigin(origins, record.Slot), old)
 						if e != nil {
 							return e
 						}
@@ -409,7 +409,7 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 						if origins != nil {
 							origins[record.Slot] = part.origin
 						}
-					} else if part.origin == cachedOrigin(origins, record.Slot) && record.Order == old.Order && record.Delta != old.Delta {
+					} else if part.origin == cachedOrigin(origins, record.Slot) && record.Sample.Time == old.Sample.Time && record.Order == old.Order && record.Delta != old.Delta {
 						return errors.New("conflicting rollup replacement order")
 					}
 					return nil
@@ -646,6 +646,10 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 					return nil, err
 				}
 			}
+			if origin.Class == hiddenPart {
+				valid = it.SeekGE(v2part.PrefixEnd(scope))
+				continue
+			}
 			end := v2part.PrefixEnd(scope)
 			for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 				if err := ctx.Err(); err != nil {
@@ -716,7 +720,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 			if !seen || p.meta.Frontier.Order > old.Frontier.Order || (p.meta.Frontier.Order == old.Frontier.Order && p.meta.Revision > old.Revision) {
 				m.origins[p.origin] = p.meta
 			}
-			newer, err := newerOrigin(p.origin, p.meta.Frontier.Order, m.origin, m.meta.Frontier.Order)
+			newer, err := newerSource(p.origin, p.meta.Frontier.Order, m.origin, m.meta.Frontier.Order)
 			if err != nil {
 				return nil, err
 			}

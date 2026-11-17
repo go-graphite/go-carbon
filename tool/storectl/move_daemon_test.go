@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestMoveDaemonProcess(t *testing.T) {
 		return
 	}
 	ctx := context.Background()
-	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: 10 * time.Millisecond, Hooks: v2core.Hooks{Stage: func(stage string) {
+	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Second, Hooks: v2core.Hooks{Stage: func(stage string) {
 		if stage == "move-after-ingest" && os.Getenv("MOVE_DAEMON_CRASH") == "1" {
 			if _, err := os.Stat(filepath.Join(root, "arm-crash")); err != nil {
 				return
@@ -87,7 +88,7 @@ func TestMoveDaemonProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver, err := s.ReceiveApplicationsTCP(l, v2recv.Config{SyncInterval: 10 * time.Millisecond, BatchSize: 1}, func(name string) ([]byte, error) {
+	receiver, err := s.ReceiveApplicationsTCP(l, v2recv.Config{SyncInterval: time.Second, BatchSize: 1}, func(name string) ([]byte, error) {
 		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 120000}, {Step: 10, Count: 24000}}}})
 	})
 	if err != nil {
@@ -185,7 +186,28 @@ func startMoveChild(t *testing.T, root, tcp string, crash bool) *moveChild {
 	}
 	_ = log.Close()
 	c := &moveChild{root: root, cmd: cmd}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Cleanup(func() {
+		if t.Failed() && cmd.ProcessState == nil {
+			// Dump only this test's own daemon, while the failed request is stalled.
+			_ = cmd.Process.Signal(syscall.SIGQUIT)
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		} else {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		if dir := os.Getenv("MOVE_DAEMON_EVIDENCE"); dir != "" {
+			if data, err := os.ReadFile(log.Name()); err == nil {
+				_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("daemon-%d.log", cmd.Process.Pid)), data, 0600)
+			}
+		}
+	})
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		b, err := os.ReadFile(filepath.Join(root, "addresses.json"))
@@ -300,6 +322,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	}
 	var stop atomic.Bool
 	var produced atomic.Int64
+	produceErr := make(chan error, 1)
 	var producer sync.WaitGroup
 	producer.Add(1)
 	go func() {
@@ -310,13 +333,51 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 				_, _ = io.WriteString(conn, line)
 			}
 			produced.Store(int64(i))
-			time.Sleep(5 * time.Millisecond)
+			if i%10 == 0 {
+				// Bound queued work by the two continuously available daemons'
+				// durable progress. B may be killed at any point in this loop.
+				client := http.Client{Timeout: 30 * time.Second}
+				for _, child := range []*moveChild{a, reference} {
+					response, err := client.Get(child.addr.HTTP + "/flush")
+					if err != nil {
+						produceErr <- err
+						return
+					}
+					_, _ = io.Copy(io.Discard, response.Body)
+					response.Body.Close()
+					if response.StatusCode != http.StatusOK {
+						produceErr <- fmt.Errorf("producer flush status %d", response.StatusCode)
+						return
+					}
+				}
+			}
+			// Exercise concurrent intake without turning this correctness test
+			// into an unbounded queue of tiny durable seals on a loaded laptop.
+			time.Sleep(20 * time.Millisecond)
 		}
 	}()
 	t.Cleanup(func() { stop.Store(true); producer.Wait() })
 	for produced.Load() < 20 {
 		time.Sleep(time.Millisecond)
 	}
+	waitAccepted := func(c *moveChild, want uint64) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			var stats v2recv.Stats
+			moveGet(t, c.addr.HTTP, "/stats", &stats)
+			if stats.Accepted >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("intake did not reach %d: %+v", want, stats)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	// OnOwner serializes callbacks with intake, but can run ahead of input
+	// still queued by the TCP reader. Fence the historical prefix explicitly.
+	waitAccepted(a, 22)
 	var snapshot moveSnapshot
 	moveGet(t, a.addr.HTTP, "/snapshot", &snapshot)
 	target := t.TempDir()
@@ -327,7 +388,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("0/%d", base+int64(i))
 		if value, ok := initial["move.metric"][key]; !ok || value != math.Float64bits(float64(i)) {
-			t.Fatalf("live adoption missing historical slot %s", key)
+			t.Fatalf("live adoption missing historical slot %s: %v", key, initial)
 		}
 	}
 	// Exercise the successful publication before arming the next attachment's
@@ -374,6 +435,11 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 	// incremental pass repairs the fresh slots that B missed during that time.
 	stop.Store(true)
 	producer.Wait()
+	select {
+	case err := <-produceErr:
+		t.Fatal(err)
+	default:
+	}
 	cb.Close()
 	cb = connect(b.addr.TCP)
 	last := base + produced.Load() + 1
@@ -385,18 +451,7 @@ func TestMoveOwnDaemonsDualWrite(t *testing.T) {
 		if c == b {
 			want = 1
 		}
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			var stats v2recv.Stats
-			moveGet(t, c.addr.HTTP, "/stats", &stats)
-			if stats.Accepted >= want {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("intake did not reach %d: %+v", want, stats)
-			}
-			time.Sleep(time.Millisecond)
-		}
+		waitAccepted(c, want)
 	}
 	moveGet(t, b.addr.HTTP, "/flush", nil)
 	moveGet(t, reference.addr.HTTP, "/flush", nil)

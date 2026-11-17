@@ -11,9 +11,8 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// These regressions intentionally fail until move precedence distinguishes a
-// logical timestamp from its reused physical ring slot. Class-first precedence
-// is sufficient for competing values of one timestamp, but loses fresh epochs.
+// A fresh logical timestamp wins its reused physical slot even when the old
+// epoch is local and the fresh epoch is copied.
 func ringEpochPart(t *testing.T, policy []byte, source byte, id, order uint64, clock, timestamp int64, value float64) moveFixture {
 	t.Helper()
 	r := newCoreRollups()
@@ -47,13 +46,28 @@ func TestMoveCopiedFreshRingEpoch(t *testing.T) {
 	defer db.Close()
 	policy := ringEpochPolicy(t)
 	ingestLiveMovePart(t, db, ringEpochPart(t, policy, 2, 7, 1, 1010, 1000, 2))
+	before := moveIndex(t, db, nil)
+	if moveRaw(t, before)[1000] != math.Float64bits(2) {
+		t.Fatal("missing old ring epoch")
+	}
 	fresh := ringEpochPart(t, policy, 1, 99, 100, 1110, 1100, 3)
 	if _, err := InstallCopiedPart(context.Background(), db, dir, fresh.path, fresh.descriptor); err != nil {
 		t.Fatal(err)
 	}
-	got := moveRaw(t, moveIndex(t, db, nil))
+	got := moveRaw(t, moveIndex(t, db, before))
 	if got[1100] != math.Float64bits(3) {
 		t.Fatalf("fresh copied t=1100 lost to expired live t=1000 in physical slot 0: %v", got)
+	}
+	if _, ok := got[1000]; ok {
+		t.Fatal("old logical epoch remains visible")
+	}
+	if moveRaw(t, before)[1000] != math.Float64bits(2) {
+		t.Fatal("pinned old epoch changed")
+	}
+	// A newer local order still cannot roll the ring back to an older epoch.
+	ingestLiveMovePart(t, db, ringEpochPart(t, policy, 2, 7, 2, 1010, 1000, 4))
+	if got := moveRaw(t, moveIndex(t, db, nil)); got[1100] != math.Float64bits(3) {
+		t.Fatalf("new local order hid newer copied epoch: %v", got)
 	}
 }
 

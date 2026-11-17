@@ -200,7 +200,7 @@ func TestMoveAdoptCrash(t *testing.T) {
 		}
 		return
 	}
-	for _, stage := range []string{"move-before-ingest", "move-after-ingest"} {
+	for _, stage := range []string{"move-staged-part", "move-before-ingest", "move-after-ingest"} {
 		t.Run(stage, func(t *testing.T) {
 			root := t.TempDir()
 			policy := adoptPolicy(t, sealrollup.Sum)
@@ -229,6 +229,14 @@ func TestMoveAdoptCrash(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer e.Close()
+			if stage != "move-after-ingest" {
+				_, records := adoptedRecords(t, e)
+				for _, record := range records {
+					if record.Archive == 0 && record.Sample.Time == 1001 {
+						t.Fatal("uncommitted staged part became visible after restart")
+					}
+				}
+			}
 			prepared, err := PrepareMove(context.Background(), prep, []MovePart{part})
 			if err != nil {
 				t.Fatal(err)
@@ -243,6 +251,32 @@ func TestMoveAdoptCrash(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMoveAdoptNewNameCoarseContinuation(t *testing.T) {
+	e, err := Open(t.TempDir(), adoptConfig(), Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	policy := adoptPolicy(t, sealrollup.Sum)
+	part := adoptDonor(t, policy, 100, moveSample(1000, 1), moveSample(1001, 2), moveSample(1002, 3), moveSample(1003, 4), moveSample(1004, 5))
+	prepared, err := PrepareMove(context.Background(), t.TempDir(), []MovePart{part})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	if err := e.AdoptMove(context.Background(), prepared, map[string]uint64{"move.metric": 7}, 1010); err != nil {
+		t.Fatal(err)
+	}
+	adoptLive(t, e, policy, 1, 1, moveSample(1005, 6))
+	_, records := adoptedRecords(t, e)
+	for _, record := range records {
+		if record.Archive == 1 && record.Sample.Time == 1000 && record.Sample.Bits == math.Float64bits(21) {
+			return
+		}
+	}
+	t.Fatalf("first local update did not replace adopted coarse baseline: %v", records)
 }
 
 func fmtPID() string { return fmt.Sprint(os.Getpid()) }

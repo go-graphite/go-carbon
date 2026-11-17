@@ -189,8 +189,8 @@ func validateMoveFineCoverage(ctx context.Context, index *RollupSnapshot, name s
 	return it.Error()
 }
 
-// collectMoveRaw compares class first, and compares source order only inside
-// one original stream. It reads immutable snapshots, never the live reducer.
+// collectMoveRaw uses the same physical-slot precedence as reads and recovery.
+// It reads immutable snapshots, never the live reducer.
 func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, winners map[int64]moveWinner) error {
 	m := index.metrics[name]
 	if m == nil {
@@ -230,14 +230,14 @@ func collectMoveRaw(ctx context.Context, index *RollupSnapshot, name string, win
 				old, exists := winners[record.Slot]
 				newer := !exists
 				if exists {
-					newer, err = newerOrigin(part.origin, record.Order, old.origin, old.record.Order)
+					newer, err = newerOrigin(part.origin, record, old.origin, old.record)
 					if err != nil {
 						return err
 					}
 				}
 				if newer {
 					winners[record.Slot] = moveWinner{record, part.origin}
-				} else if part.origin == old.origin && record.Order == old.record.Order && record != old.record {
+				} else if part.origin == old.origin && record.Sample.Time == old.record.Sample.Time && record.Order == old.record.Order && record != old.record {
 					return errors.New("conflicting move raw order")
 				}
 			}
@@ -262,17 +262,23 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		d := part.Descriptor
-		binding, err := json.Marshal(partImport{1, partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, d})
+		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d})
 		if err != nil {
 			return err
 		}
 		if value, closer, err := o.db.Get(key); err == nil {
-			same := bytes.Equal(value, binding)
+			var old partImport
+			decodeErr := json.Unmarshal(value, &old)
 			_ = closer.Close()
-			if !same {
+			pending := old.Pending
+			old.Pending = false
+			normalized, marshalErr := json.Marshal(old)
+			if decodeErr != nil || marshalErr != nil || !bytes.Equal(normalized, binding) {
 				return errors.New("copied part identity changed")
 			}
-			continue
+			if !pending {
+				continue
+			}
 		} else if !errors.Is(err, pebble.ErrNotFound) {
 			return err
 		}
@@ -382,13 +388,16 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		return err
 	}
 	defer os.RemoveAll(stage)
-	var files []string
-	for i, part := range incoming {
-		path := filepath.Join(stage, fmt.Sprintf("part-%06d.sst", i))
-		if err = os.Link(part.Path, path); err != nil {
+	// Pebble rejects overlapping local SST ranges in one Ingest. Stage each
+	// unchanged file with an atomic hidden binding, then activate every binding
+	// and reducer authority together. Interrupted staging remains invisible.
+	for _, part := range incoming {
+		if _, err = installCopiedPart(ctx, o.db, o.dir, part.Path, part.Descriptor, true); err != nil {
 			return err
 		}
-		files = append(files, path)
+		if o.stage != nil {
+			o.stage("move-staged-part")
+		}
 	}
 	slices.SortFunc(metadata, func(a, b coreKV) int { return bytes.Compare(a.Key, b.Key) })
 	path := filepath.Join(stage, "authority.sst")
@@ -406,14 +415,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	if err = w.Close(); err != nil {
 		return err
 	}
-	files = append(files, path)
 	if err = ctx.Err(); err != nil {
 		return err
 	}
 	if o.stage != nil {
 		o.stage("move-before-ingest")
 	}
-	if err = o.db.Ingest(files); err != nil {
+	if err = o.db.Ingest([]string{path}); err != nil {
 		return err
 	}
 	if o.stage != nil {
@@ -486,7 +494,18 @@ func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, arc
 	tmp := &RollupSnapshot{snapshot: s.snapshot, metrics: map[string]*snapshotMetric{name: &live}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
 	if err := tmp.ScanArchive(ctx, name, archive, first, last, func(record sealrollup.Record) error {
 		if record.Order > a.AtOrder {
-			winners[record.Slot] = record
+			old, exists := winners[record.Slot]
+			// The baseline's projection order can be synthetic when a newly
+			// adopted name has no receiving input yet. Its receiving age is
+			// AtOrder, so the first local application must be able to replace it.
+			old.Order = a.AtOrder
+			newer, err := newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
+			if err != nil {
+				return err
+			}
+			if !exists || newer {
+				winners[record.Slot] = record
+			}
 		}
 		return nil
 	}); err != nil {
