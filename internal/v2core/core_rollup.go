@@ -335,10 +335,15 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	return out, nil
 }
 
-// ScanRollups reads one immutable core snapshot. It resolves the greatest
-// replacement order for each physical slot before callers apply time filters.
+// ScanRollups reads one immutable core snapshot. It resolves each physical slot
+// by logical timestamp, then class and source-local order, before time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
+		return err
+	} else if copied {
+		return scanCopiedRollups(snapshot, visit)
+	}
 	type entry struct {
 		group   partsformat.Group
 		policy  RollupPolicy
@@ -383,7 +388,12 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 			}
 			for _, record := range decoded {
 				slot := [2]int64{int64(k.Archive), record.Slot}
-				if old, ok := e.records[slot]; !ok || record.Order > old.Order {
+				old, ok := e.records[slot]
+				newer, err := newerOrigin(partOrigin{Class: LivePart}, record, partOrigin{Class: LivePart}, old)
+				if err != nil {
+					return err
+				}
+				if !ok || newer {
 					e.records[slot] = record
 				}
 			}
@@ -436,10 +446,52 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 	}
 	return nil
 }
+func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, 0)
+	if err != nil {
+		return err
+	}
+	for name, metric := range index.metrics {
+		records, err := index.Records(context.Background(), name)
+		if err != nil {
+			return err
+		}
+		slices.SortFunc(records, func(a, b sealrollup.Record) int {
+			if a.Archive != b.Archive {
+				return a.Archive - b.Archive
+			}
+			if a.Slot < b.Slot {
+				return -1
+			}
+			if a.Slot > b.Slot {
+				return 1
+			}
+			return 0
+		})
+		if err = visit(metric.policy, metric.meta, records); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func recoverCoreRollups(db *pebble.DB) (*coreRollups, error) {
 	r := newCoreRollups()
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
+	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
+		return nil, err
+	} else if found {
+		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range index.metrics {
+			if m.copied && m.authority == nil {
+				return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
+			}
+		}
+	}
 	err := ScanRollups(snapshot, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
 		m, err := r.metric(meta.ID, meta.Policy, r.prepared)
 		if err != nil {

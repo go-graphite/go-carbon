@@ -47,6 +47,7 @@ type coreFrontier struct {
 	ExpiredBefore int64
 }
 type corePacket struct {
+	operation  func(*coreOwner) error
 	rows       []row
 	batches    []coreBatch
 	cursor     uint64
@@ -191,6 +192,7 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	rollups        *coreRollups
 	gc             *sealedPartGC
 	gcDirty        atomic.Bool
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
@@ -198,7 +200,8 @@ type coreOwner struct {
 	partSource  v2part.Provenance
 	maintenance bool
 
-	stage func(string)
+	stage      func(string)
+	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
@@ -353,7 +356,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if err != nil {
 			return fail(err)
 		}
-		o := &coreOwner{partSource: partSource, stage: hooks.Stage, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+		o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 		o.sealRows = cfg.MaxRows
 		if os.Getenv("CORE_STAGGER_SEAL") == "1" {
 			// Include the process phase: one DB per process must stagger too.
@@ -369,7 +372,20 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		if hook != nil {
 			o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 		}
-		if hooks.PublishBatches != nil {
+		if hooks.PublishBatchesWithInventory != nil {
+			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
+				// Replace the provisional pin with one captured under the GC binding
+				// fence. No reader acquires this owner/GC mutex.
+				_ = snap.Close()
+				if o.gc == nil {
+					return hooks.PublishBatchesWithInventory(s, o.db.NewSnapshot(), batches, generation, nil)
+				}
+				o.gc.mu.Lock()
+				pin, inventory := o.db.NewSnapshot(), o.gc.inventory
+				o.gc.mu.Unlock()
+				return hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+			}
+		} else if hooks.PublishBatches != nil {
 			o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
 				return hooks.PublishBatches(s, snap, batches, generation)
 			}
@@ -425,6 +441,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			r.now = hooks.Now
 			o.maintenance = hooks.Expire != nil
 			o.plan = r.plan
+			o.rollups = r
 		}
 		// Only uncommitted staging files remain after successful atomic ingestion.
 		files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
@@ -890,6 +907,25 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				continue
 			}
 			found = true
+			if p.operation != nil {
+				err := failure
+				if err == nil {
+					err = flush()
+				}
+				if err == nil {
+					err = p.operation(o)
+				}
+				if err == nil {
+					o.readGeneration++
+					o.pub.publish(o.db.NewSnapshot())
+					err = publishBatches()
+					if err == nil && o.hook != nil {
+						err = o.hook(o.db.NewSnapshot(), nil)
+					}
+				}
+				p.ack <- err
+				continue
+			}
 			if p.stop {
 				stopped[producer] = true
 				left--
@@ -1072,6 +1108,15 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		defer o.gc.fileMu.Unlock()
 	}
 	sealStart := time.Now()
+	planEnd := sealStart
+	defer func() {
+		if o.sealTiming != nil {
+			end := time.Now()
+			o.sealTiming("seal_total", end.Sub(sealStart))
+			o.sealTiming("rollup_plan", planEnd.Sub(sealStart))
+			o.sealTiming("publication", end.Sub(planEnd))
+		}
+	}()
 	if o.stage != nil {
 		o.stage("seal")
 	}
@@ -1103,6 +1148,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			return 0, errors.New("raw replacement requires output for nonempty input")
 		}
 	}
+	planEnd = time.Now()
 	rollupWrites := o.startRollupPartWrites(plan)
 	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
@@ -1350,7 +1396,17 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	o.encodeNS.Add(uint64(time.Since(phaseStart)))
 	ingestStart := time.Now()
 	defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
-	if err = o.db.Ingest(paths); err != nil {
+	if o.gc != nil {
+		o.gc.mu.Lock()
+	}
+	err = o.db.Ingest(paths)
+	if o.gc != nil {
+		if err == nil {
+			o.gc.inventory = o.gc.inventory.with(descriptors, nil)
+		}
+		o.gc.mu.Unlock()
+	}
+	if err != nil {
 		return 0, err
 	}
 	durable = true

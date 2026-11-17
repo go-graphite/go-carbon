@@ -82,6 +82,11 @@ type coreHooks struct {
 	// It runs on owner goroutines; callers must serialize their own observer.
 	Stage func(string)
 
+	// SealTiming observes completed owner-local seal phases, including failed attempts.
+	// Calls may overlap across owners; observers must synchronize themselves.
+	// seal_total contains rollup_plan and publication; these are not additive quantiles.
+	SealTiming func(phase string, elapsed time.Duration)
+
 	OwnerCPUs []int
 	Publish   func(int, *pebble.Snapshot, []row) error
 	// PublishBatches transfers an immutable snapshot and detached original pending
@@ -90,6 +95,9 @@ type coreHooks struct {
 	// The final argument identifies the sealed generation; pending-only updates
 	// retain it. It runs on the owner; readers never call back into owner state.
 	PublishBatches func(int, *pebble.Snapshot, []coreBatch, uint64) error
+	// PublishBatchesWithInventory is the same transfer with the immutable binding
+	// set captured atomically with snapshot. When set, it replaces PublishBatches.
+	PublishBatchesWithInventory func(int, *pebble.Snapshot, []coreBatch, uint64, *RollupInventory) error
 	// PlanSeal is pure: no publication/mutation until Commit. Input buffers are
 	// owner-local and valid only for this call. The planner must detach retained
 	// output. An error prevents raw data, archives and frontier from committing.

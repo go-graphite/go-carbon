@@ -3,6 +3,7 @@ package v2read
 import (
 	"context"
 	"fmt"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"math"
 	"slices"
@@ -187,5 +188,67 @@ func TestPendingOrderingStableAndBounded(t *testing.T) {
 	}
 	if got[0].Bits != 2 || got[1].Bits != 3 {
 		t.Fatal("eviction changed a pinned sample arena")
+	}
+}
+
+func TestResolvedCacheSharesOnlyUnchangedPartSets(t *testing.T) {
+	r, _ := New(1, 1<<30, 1<<20)
+	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	defer r.Close()
+	var pins []*generation
+	defer func() {
+		for _, g := range pins {
+			g.release()
+		}
+	}()
+	seal := func(name string, id, order uint64) *generation {
+		policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: partsformat.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 3600}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = e.AppendBatches(0, []v2core.Batch{{ID: id, Order: order, Clock: 1700000002, Policy: policy, Points: []v2core.Row{{ID: id, Time: 1700000000, Bits: order, Seq: order}}}}, order, true); err != nil {
+			t.Fatal(err)
+		}
+		g := r.owners[0].Load()
+		if !g.retain() {
+			t.Fatal("pin")
+		}
+		pins = append(pins, g)
+		g.once.Do(g.load)
+		if g.err != nil {
+			t.Fatal(g.err)
+		}
+		return g
+	}
+	first := seal("stable.a", 1, 1)
+	a := first.sealed.lookup("stable.a")
+	a.once.Do(a.resolve)
+	if a.err != nil {
+		t.Fatal(a.err)
+	}
+	second := seal("stable.b", 2, 2)
+	b := second.sealed.lookup("stable.a")
+	b.once.Do(b.resolve)
+	if b.err != nil {
+		t.Fatal(b.err)
+	}
+	if a.frozen != b.frozen {
+		t.Fatal("unchanged name rescanned after unrelated seal")
+	}
+	third := seal("stable.a", 1, 3)
+	c := third.sealed.lookup("stable.a")
+	c.once.Do(c.resolve)
+	if c.err != nil {
+		t.Fatal(c.err)
+	}
+	if c.frozen == b.frozen {
+		t.Fatal("changed name reused stale archives")
+	}
+	if a.frozen.records[0].Order != 1 || c.frozen.records[0].Order != 3 {
+		t.Fatal("pinned or current records changed")
 	}
 }
