@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -88,6 +89,9 @@ type coreRouter struct {
 // The producer and consumer own write/read respectively. A byte quota limits
 // queued payloads; pointer slots cover even the smallest (empty) packets.
 type coreQueue struct {
+	ready       *atomic.Uint64
+	readyMask   uint64
+	work        chan struct{}
 	slots       []atomic.Pointer[corePacket]
 	limit       uint64
 	written     uint64
@@ -120,6 +124,9 @@ func (q *coreQueue) pop() *corePacket {
 	if p != nil {
 		q.released.Add(p.size())
 		q.read++
+		if q.ready != nil && q.slots[q.read%uint64(len(q.slots))].Load() != nil {
+			q.ready.Or(q.readyMask)
+		}
 		coreWake(q.wake)
 	}
 	return p
@@ -136,6 +143,9 @@ func (q *coreQueue) tryPush(p *corePacket) bool {
 	}
 	q.written += n
 	q.write++
+	if q.ready != nil && q.ready.Or(q.readyMask)&q.readyMask == 0 {
+		coreWake(q.work)
+	}
 	return true
 }
 func (q *coreQueue) push(p *corePacket, dead <-chan struct{}) error {
@@ -186,6 +196,9 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	ready          []atomic.Uint64
+	work           chan struct{}
+	nextPoll       time.Time // execution-owner local seal deadline
 	bufferedPoints atomic.Int64
 	bufferedSince  atomic.Int64
 	rollups        *coreRollups
@@ -495,6 +508,14 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			}
 		}
 		groups[i%workers] = append(groups[i%workers], o)
+	}
+	// One notification per execution group; rings and readiness bits remain
+	// authoritative. Initialize before any producer or owner can run.
+	for _, group := range groups {
+		wake := make(chan struct{}, 1)
+		for _, o := range group {
+			o.initQueueSignals(wake)
+		}
 	}
 	e.gcStop, e.gcDone = make(chan struct{}), make(chan struct{})
 	go e.runPartGC()
@@ -831,11 +852,29 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	return nil
 }
+
+// Queue publication sets readiness after publishing its packet. The owner
+// atomically takes each word and visits only producers that can have work.
+func (o *coreOwner) initQueueSignals(work chan struct{}) {
+	o.work = work
+	o.ready = make([]atomic.Uint64, (len(o.queues)+63)/64)
+	for p, q := range o.queues {
+		q.ready, q.readyMask, q.work = &o.ready[p/64], uint64(1)<<(p%64), work
+		if q.slots[q.read%uint64(len(q.slots))].Load() != nil {
+			q.ready.Or(q.readyMask)
+		}
+	}
+}
+
 func (o *coreOwner) poller() func() (bool, bool) {
+	if o.ready == nil {
+		o.initQueueSignals(nil)
+	}
 	head := make([]row, 0, o.cfg.MaxRows)
 	pending := slices.Clone(o.meta.Cursors)
 	var batches []coreBatch
 	deadline := time.Now().Add(time.Second)
+	o.nextPoll = deadline
 	var headPublication, batchPublication time.Time
 	publishBatches := func() error {
 		if o.batchHook == nil {
@@ -862,7 +901,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		ack   chan error
 		lease *coreDispatch
 	}
-	completions := make([]completion, o.cfg.Producers)
+	completions := make([]completion, 0, o.cfg.Producers)
+	readyProducers := make([]int, 0, o.cfg.Producers)
 	flush := func() error {
 		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
 			return nil
@@ -925,7 +965,14 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return true, true
 		}
 		found, sealPending := false, false
-		for producer, q := range o.queues {
+		readyProducers = readyProducers[:0]
+		for word := range o.ready {
+			for ready := o.ready[word].Swap(0); ready != 0; ready &= ready - 1 {
+				readyProducers = append(readyProducers, word*64+bits.TrailingZeros64(ready))
+			}
+		}
+		for _, producer := range readyProducers {
+			q := o.queues[producer]
 			if stopped[producer] {
 				continue
 			}
@@ -996,9 +1043,12 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if failure != nil {
 				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 			}
-			completions[producer].ack = ack
-			if holdLease {
-				completions[producer].lease = lease
+			if ack != nil || holdLease {
+				c := completion{ack: ack}
+				if holdLease {
+					c.lease = lease
+				}
+				completions = append(completions, c)
 			}
 		}
 		// Concurrent producers may have a seal ready in the same poll. Ingest
@@ -1017,15 +1067,16 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if failure != nil {
 			o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 		}
-		for i, c := range completions {
+		for _, c := range completions {
 			if c.ack != nil {
 				c.ack <- failure
 			}
 			if c.lease != nil {
 				c.lease.release()
 			}
-			completions[i] = completion{}
 		}
+		clear(completions)
+		completions = completions[:0]
 		if !found {
 			if failure == nil && time.Now().After(deadline) {
 				failure = flush()
@@ -1034,6 +1085,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				}
 				deadline = time.Now().Add(time.Second)
 			}
+		}
+		o.nextPoll = deadline
+		if failure != nil {
+			o.nextPoll = time.Now().Add(time.Second)
 		}
 		return false, found
 	}
@@ -1056,6 +1111,9 @@ func runCoreOwnerGroup(owners []*coreOwner, cpus []int, index int) {
 		polls[i] = o.poller()
 	}
 	left := len(polls)
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	for left > 0 {
 		found := false
 		for i, poll := range polls {
@@ -1069,8 +1127,19 @@ func runCoreOwnerGroup(owners []*coreOwner, cpus []int, index int) {
 				left--
 			}
 		}
-		if !found {
-			time.Sleep(100 * time.Microsecond)
+		if !found && left > 0 {
+			deadline := time.Now().Add(time.Second)
+			for i, o := range owners {
+				if polls[i] != nil && o.nextPoll.Before(deadline) {
+					deadline = o.nextPoll
+				}
+			}
+			timer.Reset(max(0, time.Until(deadline)))
+			select {
+			case <-owners[0].work:
+			case <-timer.C:
+			}
+			timer.Stop()
 		}
 	}
 }

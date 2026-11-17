@@ -50,8 +50,10 @@ func TestPolicyCatalogEncodingOracle(t *testing.T) {
 			t.Fatalf("case %d differs from JSON oracle", i)
 		}
 	}
-	if len(c.encodings) > 64 || len(c.schemas) > 64 {
-		t.Fatal("unbounded schema cache")
+	for i := range c.shards {
+		if shard := c.shards[i].Load(); shard != nil && (len(shard.encodings) > 64 || len(shard.schemas) > 64) {
+			t.Fatal("unbounded schema cache")
+		}
 	}
 }
 

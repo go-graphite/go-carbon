@@ -267,6 +267,7 @@ func (e *coreEngine) RetireSealedParts(owner int, ids []v2part.Digest, authorize
 	err := e.owners[owner].gc.retire(ids, authorize)
 	if err == nil {
 		e.owners[owner].gcDirty.Store(true)
+		coreWake(e.owners[owner].work)
 	}
 	return err
 }
