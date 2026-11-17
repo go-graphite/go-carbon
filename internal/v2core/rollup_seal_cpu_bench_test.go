@@ -3,6 +3,7 @@ package v2core
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -63,7 +64,13 @@ func sealCPUFixture(tb testing.TB, shape sealCPUShape, names int) (*coreRollups,
 // BenchmarkSealCPU reports seal planning and archive part encoding per point.
 func BenchmarkSealCPU(b *testing.B) {
 	for _, shape := range sealCPUShapes {
-		for _, names := range []int{100000} {
+		sizes := []int{100000}
+		if os.Getenv("SEAL_CPU_BIG") != "" {
+			// Production owners hold ~180k names each while 64 owners share
+			// the caches; 1M names approximates that cache pressure locally.
+			sizes = append(sizes, 1000000)
+		}
+		for _, names := range sizes {
 			r, batches, points := sealCPUFixture(b, shape, names)
 			b.Run(fmt.Sprintf("plan/%s/%d", shape.name, names), func(b *testing.B) {
 				b.ReportAllocs()

@@ -83,6 +83,7 @@ type coreRollups struct {
 	names          map[partsformat.ID]uint64
 	stages         []rollupStage
 	ordered        []*rollupStage
+	order          rollupStageOrder
 	positions      map[uint64]int
 	batchPositions []int
 	pendingNames   map[partsformat.ID]uint64
@@ -131,7 +132,9 @@ type rollupStage struct {
 
 type rollupPlannerLane struct {
 	windows   rollupWindowCache
-	ordered   []*rollupStage
+	ordered   []rollupStageRef
+	scratch   []rollupStageRef
+	counts    []int
 	output    rollupOutput
 	workspace sealrollup.Workspace
 	records   []sealrollup.Record
@@ -150,6 +153,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 	}()
 	stages := r.stages[:0]
+	r.order.reset()
 	positions := r.positions
 	if positions == nil {
 		positions = map[uint64]int{}
@@ -192,8 +196,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				names[m.policy.Name] = b.ID
 			}
 			stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh})
-			stages[len(stages)-1].next.Expired = false
 			i = len(stages) - 1
+			stages[i].next.Expired = false
+			r.order.key(&stages[i])
 			positions[b.ID] = i
 		}
 		r.batchPositions[bi] = i
@@ -238,6 +243,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		for id, m := range r.metrics {
 			if _, seen := positions[id]; !seen && !m.meta.Expired && r.expire(m.rollupPolicy(), m.metadata(), now) {
 				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
+				r.order.key(&stages[len(stages)-1])
 			}
 		}
 	}
