@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,6 +98,9 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	// These short storage fixtures mostly wait for disk. Bound both the runner
+	// and process fanout explicitly; m.Run still parses an explicit -parallel.
+	_ = flag.Set("test.parallel", strconv.Itoa(cap(isolatedTestSlots)))
 	code := m.Run()
 	if probeDir != "" {
 		_ = os.RemoveAll(probeDir)

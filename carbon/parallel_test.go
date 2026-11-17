@@ -13,7 +13,7 @@ import (
 
 // Storage integration processes are memory intensive. Bound their fanout even
 // when the test binary inherits a large GOMAXPROCS or -test.parallel setting.
-var isolatedTestSlots = make(chan struct{}, 4)
+var isolatedTestSlots = make(chan struct{}, 6)
 var isolatedTestStorage sync.RWMutex
 
 const isolatedTestCase = "GRAPHITE_TEST_ISOLATED_CASE"
