@@ -204,6 +204,7 @@ type coreOwner struct {
 	rollups        *coreRollups
 	gc             *sealedPartGC
 	gcDirty        atomic.Bool
+	mergeStop      <-chan struct{}
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
@@ -247,6 +248,7 @@ type coreEngine struct {
 
 	gcStop    chan struct{}
 	gcDone    chan struct{}
+	mergeDone chan struct{}
 	gcFailure atomic.Pointer[coreFailure]
 
 	owners       []*coreOwner
@@ -294,6 +296,13 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 	} else if cfg.RollupRoutingVersion != 0 {
 		return nil, errors.New("rollup routing requires rollups")
+	}
+	mergeWorkers, err := mergeWorkerCount()
+	if err != nil {
+		return nil, err
+	}
+	if readOnly {
+		mergeWorkers = 0
 	}
 	hook := hooks.Publish
 	if cfg.RawCodec == "" {
@@ -473,6 +482,11 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			}
 		}
 		if cfg.Rollups {
+			if !readOnly {
+				if err = cleanupSealedMerges(dir); err != nil {
+					return fail(err)
+				}
+			}
 			if o.gc, err = openSealedPartGC(db, dir, hooks.Stage); err != nil {
 				return fail(err)
 			}
@@ -519,6 +533,13 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	}
 	e.gcStop, e.gcDone = make(chan struct{}), make(chan struct{})
 	go e.runPartGC()
+	e.mergeDone = make(chan struct{})
+	for _, o := range e.owners {
+		if mergeWorkers > 0 {
+			o.mergeStop = e.gcStop
+		}
+	}
+	go e.runPartMerges(mergeWorkers)
 	for i, group := range groups {
 		go runCoreOwnerGroup(group, hooks.OwnerCPUs, i)
 	}
@@ -1203,6 +1224,9 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 	return o.sealBatches(head, nil, next)
 }
 func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
+	if err := o.awaitSealedMergeBudget(); err != nil {
+		return 0, err
+	}
 	// GC must not unlink a replayed original between link reuse and atomic
 	// descriptor publication. This owner-local lock never reaches readers or
 	// producer buffers. Retirement itself can run from the seal Commit hook.
@@ -1525,6 +1549,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 func (e *coreEngine) close() error {
 	close(e.gcStop)
 	<-e.gcDone
+	<-e.mergeDone
 	var err error
 	if f := e.gcFailure.Load(); f != nil {
 		err = f.err

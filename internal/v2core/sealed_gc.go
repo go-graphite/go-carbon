@@ -31,18 +31,22 @@ type retiredPart struct {
 // deletion batch supplies the fence; snapshots at/before it can still name
 // retired files. No read-path lock or reader registration is required.
 type sealedPartGC struct {
-	pendingCount  atomic.Uint64
-	unlinkedBytes atomic.Uint64
-	removedParts  atomic.Uint64
-	fileMu        sync.Mutex // serializes seal file publication with unlink; readers never acquire it
-	mu            sync.Mutex
-	inventory     *RollupInventory // immutable; captured/updated under mu
-	db            *pebble.DB
-	dir           string
-	pending       map[v2part.Digest]retiredPart
-	grace         time.Duration
-	now           func() time.Time
-	stage         func(string)
+	mergeFailure      atomic.Pointer[coreFailure]
+	mergeRuns         atomic.Uint64
+	mergeReadBytes    atomic.Uint64
+	mergeWrittenBytes atomic.Uint64
+	pendingCount      atomic.Uint64
+	unlinkedBytes     atomic.Uint64
+	removedParts      atomic.Uint64
+	fileMu            sync.Mutex // serializes seal file publication with unlink; readers never acquire it
+	mu                sync.Mutex
+	inventory         *RollupInventory // immutable; captured/updated under mu
+	db                *pebble.DB
+	dir               string
+	pending           map[v2part.Digest]retiredPart
+	grace             time.Duration
+	now               func() time.Time
+	stage             func(string)
 }
 
 func partBinding(prefix []byte, id v2part.Digest) []byte {
@@ -337,6 +341,10 @@ func (e *coreEngine) runPartGC() {
 // Pebble or exported hardlinks may still own the same inode. Counters reset
 // on process restart; PendingParts includes startup orphans waiting for grace.
 type PartGCStats struct {
+	LiveParts         uint64
+	MergeRuns         uint64
+	MergeReadBytes    uint64
+	MergeWrittenBytes uint64
 	PendingParts      uint64
 	RemovedParts      uint64
 	UnlinkedFileBytes uint64
@@ -347,7 +355,10 @@ func (e *coreEngine) PartGCStats() []PartGCStats {
 	out := make([]PartGCStats, len(e.owners))
 	for i, o := range e.owners {
 		if o.gc != nil {
-			out[i] = PartGCStats{PendingParts: o.gc.pendingCount.Load(), RemovedParts: o.gc.removedParts.Load(), UnlinkedFileBytes: o.gc.unlinkedBytes.Load()}
+			o.gc.mu.Lock()
+			live := len(o.gc.inventory.bindings)
+			o.gc.mu.Unlock()
+			out[i] = PartGCStats{LiveParts: uint64(live), MergeRuns: o.gc.mergeRuns.Load(), MergeReadBytes: o.gc.mergeReadBytes.Load(), MergeWrittenBytes: o.gc.mergeWrittenBytes.Load(), PendingParts: o.gc.pendingCount.Load(), RemovedParts: o.gc.removedParts.Load(), UnlinkedFileBytes: o.gc.unlinkedBytes.Load()}
 		}
 		if failure := e.gcFailure.Load(); failure != nil {
 			out[i].Error = failure.err.Error()
