@@ -78,3 +78,17 @@ func (u *v2CatalogUpdates) drain() (added, expired []string) {
 	u.added, u.expired = nil, nil
 	return
 }
+
+// Copied names and expiry candidates both need committed metadata confirmation.
+func (u *v2CatalogUpdates) changed(names []string) {
+	u.mu.Lock()
+	u.expired = append(u.expired, names...)
+	u.mu.Unlock()
+}
+
+func (u *v2CatalogUpdates) retry(added, expired []string) {
+	u.mu.Lock()
+	u.added = append(u.added, added...)
+	u.expired = append(u.expired, expired...)
+	u.mu.Unlock()
+}

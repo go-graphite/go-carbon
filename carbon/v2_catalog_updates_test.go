@@ -1,10 +1,11 @@
 package carbon
 
 import (
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
-	"github.com/go-graphite/go-carbon/internal/v2core"
 	"slices"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2core"
 )
 
 func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
@@ -26,5 +27,16 @@ func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
 	add, remove = u.drain()
 	if !slices.Equal(add, []string{"name.metric"}) || !slices.Equal(remove, add) {
 		t.Fatal(add, remove)
+	}
+}
+
+func TestV2CatalogUpdatesRetry(t *testing.T) {
+	u := newV2CatalogUpdates(1)
+	u.changed([]string{"copied.name"})
+	added, changed := u.drain()
+	u.retry(append(added, "new.name"), changed)
+	added, changed = u.drain()
+	if !slices.Equal(added, []string{"new.name"}) || !slices.Equal(changed, []string{"copied.name"}) {
+		t.Fatal(added, changed)
 	}
 }

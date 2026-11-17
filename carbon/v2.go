@@ -210,7 +210,7 @@ func (app *App) startV2() error {
 	initialized := false
 	// Only the maintenance owner refreshes. Requests load Catalog.Snapshot and
 	// never call discovery, take a refresh mutex, or wait for this work.
-	refresh := func() error {
+	refresh := func() (refreshErr error) {
 		var quotaFence uint64
 		if v.quotas != nil {
 			quotaFence = v.quotas.Fence()
@@ -238,9 +238,14 @@ func (app *App) startV2() error {
 			return nil
 		}
 		add, expired := updates.drain()
+		defer func() {
+			if refreshErr != nil {
+				updates.retry(add, expired)
+			}
+		}()
 		var remove []string
-		// Expiry candidates come from the fenced seal owner. Confirm the committed
-		// reader state: a failed seal or a concurrent recreation must stay visible.
+		// Expiry and copy candidates need committed reader confirmation: a failed
+		// seal or a concurrent recreation must stay visible, and copies skip intake.
 		for _, name := range expired {
 			_, err := r.Metadata(ctx, name)
 			if errors.Is(err, v2read.ErrNotFound) {
@@ -254,7 +259,7 @@ func (app *App) startV2() error {
 		if len(add) == 0 && len(remove) == 0 {
 			return ctx.Err()
 		}
-		return v.catalog.ApplyBeforePublish(old.Revision()+1, add, remove, func(next *v2index.Snapshot) error {
+		return v.catalog.ApplyBeforePublishContext(ctx, old.Revision()+1, add, remove, func(next *v2index.Snapshot) error {
 			if v.quotas == nil {
 				return ctx.Err()
 			}
@@ -317,6 +322,7 @@ func (app *App) startV2() error {
 		}
 		return receiver.OnOwner(index, run)
 	})
+	v.moves.SetNamesVisible(updates.changed)
 	app.Carbonserver.SetV2MoveAdmin(v.moves)
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
