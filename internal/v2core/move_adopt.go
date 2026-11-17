@@ -28,13 +28,26 @@ type MovePart struct {
 // PreparedMove is an offline receiving catalog, independent of the live owner.
 // Keep it open until the serial producer's AdoptMove call returns.
 type PreparedMove struct {
-	db       *pebble.DB
-	snapshot *pebble.Snapshot
-	index    *RollupSnapshot
-	parts    []MovePart
+	db        *pebble.DB
+	snapshot  *pebble.Snapshot
+	index     *RollupSnapshot
+	parts     []MovePart
+	trusted   bool
+	Progress  func(owner int, checksum [32]byte, state string) error
+	SkipOwner func(int) bool
 }
 
 func PrepareMove(ctx context.Context, dir string, parts []MovePart) (*PreparedMove, error) {
+	return prepareMove(ctx, dir, parts, false)
+}
+
+// PrepareVerifiedMove reopens immutable, pinned files certified by the durable move record.
+// The caller must have completed VerifyMovePart before recording verified.
+func PrepareVerifiedMove(ctx context.Context, dir string, parts []MovePart) (*PreparedMove, error) {
+	return prepareMove(ctx, dir, parts, true)
+}
+
+func prepareMove(ctx context.Context, dir string, parts []MovePart, trusted bool) (*PreparedMove, error) {
 	if len(parts) == 0 {
 		return nil, errors.New("empty move inventory")
 	}
@@ -42,7 +55,7 @@ func PrepareMove(ctx context.Context, dir string, parts []MovePart) (*PreparedMo
 	if err != nil {
 		return nil, err
 	}
-	p := &PreparedMove{db: db}
+	p := &PreparedMove{db: db, trusted: trusted}
 	fail := func(err error) (*PreparedMove, error) { _ = p.Close(); return nil, err }
 	for _, part := range parts {
 		// The preparation root is caller-owned and can be reopened after a crash.
@@ -52,7 +65,7 @@ func PrepareMove(ctx context.Context, dir string, parts []MovePart) (*PreparedMo
 		if err = os.Link(part.Path, path); err != nil && !errors.Is(err, os.ErrExist) {
 			return fail(err)
 		}
-		if _, err = InstallCopiedPart(ctx, db, dir, path, part.Descriptor); err != nil {
+		if _, err = installCopiedPartVerified(ctx, db, dir, path, part.Descriptor, false, trusted); err != nil {
 			return fail(err)
 		}
 		part.Path = path
@@ -116,6 +129,9 @@ func (e *coreEngine) AdoptMove(ctx context.Context, prepared *PreparedMove, ids 
 		return err
 	}
 	for owner, o := range e.owners {
+		if prepared.SkipOwner != nil && prepared.SkipOwner(owner) {
+			continue
+		}
 		local := map[string]uint64{}
 		for name, id := range ids {
 			if int(v2part.Route(v2part.ID(name)))%len(e.owners) == owner {
@@ -123,6 +139,11 @@ func (e *coreEngine) AdoptMove(ctx context.Context, prepared *PreparedMove, ids 
 			}
 		}
 		if len(local) == 0 {
+			if prepared.Progress != nil {
+				if err := prepared.Progress(owner, [32]byte{}, "active"); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		ack := make(chan error, 1)
@@ -135,6 +156,11 @@ func (e *coreEngine) AdoptMove(ctx context.Context, prepared *PreparedMove, ids 
 		case err := <-ack:
 			if err != nil {
 				return err
+			}
+			if prepared.Progress != nil {
+				if err := prepared.Progress(owner, [32]byte{}, "active"); err != nil {
+					return err
+				}
 			}
 		case <-o.dead:
 			return errors.New("move owner stopped")
@@ -356,8 +382,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	// unchanged file with an atomic hidden binding, then activate every binding
 	// and reducer authority together. Interrupted staging remains invisible.
 	for _, part := range incoming {
-		if _, err = installCopiedPart(ctx, o.db, o.dir, part.Path, part.Descriptor, true); err != nil {
+		if _, err = installCopiedPartVerified(ctx, o.db, o.dir, part.Path, part.Descriptor, true, prepared.trusted); err != nil {
 			return err
+		}
+		if prepared.Progress != nil {
+			if err = prepared.Progress(owner, part.Descriptor.SHA256, "staged"); err != nil {
+				return err
+			}
 		}
 		if o.stage != nil {
 			o.stage("move-staged-part")

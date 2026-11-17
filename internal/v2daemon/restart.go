@@ -32,11 +32,18 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 	b, err := os.ReadFile(path)
 	if err == nil {
 		var got restartGeometry
-		if json.Unmarshal(b, &got) != nil || got != want {
+		if json.Unmarshal(b, &got) != nil || (got.Version != 1 && got.Version != 2) {
+			return fail(errors.New("unsupported restart format version"))
+		}
+		want.Version = got.Version
+		if got != want {
 			return fail(errors.New("restart geometry mismatch"))
 		}
 		if c.Layer < 2 {
 			return fail(errors.New("restart requires durable journal layer"))
+		}
+		if err = validateMoveRecords(root); err != nil {
+			return fail(err)
 		}
 		return f, true, nil
 	}

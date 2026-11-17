@@ -48,7 +48,15 @@ func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint6
 	}
 	return o.p.AppendApplications(apps)
 }
-func (o *applicationOwner) Seal() error { return o.p.Seal() }
+func (o *applicationOwner) Seal() error {
+	// Ordinary journal syncs leave part formation to the core's size/1s
+	// thresholds. One producer tick must not seal every core owner.
+	// Expiry still needs the existing synchronous frontier fence in Drain.
+	if o.fenceDrain {
+		return o.p.Seal()
+	}
+	return nil
+}
 func (o *applicationOwner) Drain() error {
 	if err := o.p.Drain(); err != nil {
 		return err

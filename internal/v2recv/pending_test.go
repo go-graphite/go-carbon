@@ -78,3 +78,74 @@ func TestPendingHeldThroughDurableDrain(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestPendingConcurrentRetirement(t *testing.T) {
+	s := &Server{pending: make([]pendingShard, 4)}
+	for i := range s.pending {
+		s.pending[i].names = make(map[string]int64)
+	}
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 1000 {
+				name := fmt.Sprintf("pending.shared.%d", (j+worker)%17)
+				owner := OwnerFor(name, len(s.pending))
+				s.pendingAdd(owner, name, 1)
+				if !s.Pending(name) {
+					t.Error("lost live reservation")
+				}
+				s.pendingAdd(owner, name, -1)
+			}
+		}()
+	}
+	wg.Wait()
+	for i := range s.pending {
+		if len(s.pending[i].names) != 0 {
+			t.Fatal("retained retired names")
+		}
+	}
+}
+
+type coalescingOwner struct {
+	calls []int
+	names []string
+	data  []points.Point
+}
+
+func (o *coalescingOwner) Append(names []string, data []points.Point, _ []uint64, _ int64) error {
+	o.calls = append(o.calls, len(data))
+	o.names = append(o.names, names...)
+	o.data = append(o.data, data...)
+	return nil
+}
+func (o *coalescingOwner) Seal() error  { return nil }
+func (o *coalescingOwner) Drain() error { return nil }
+func TestOwnerCoalescesSocketFragments(t *testing.T) {
+	s := &Server{cfg: Config{BatchSize: 8, SyncInterval: time.Hour}, pending: []pendingShard{{names: make(map[string]int64)}}}
+	q := make(chan batch, 17)
+	o := &coalescingOwner{}
+	for i := range 17 {
+		name := fmt.Sprintf("fragment.%d", i/3)
+		s.pendingAdd(0, name, 1)
+		q <- batch{names: []string{name}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
+	}
+	close(q)
+	s.workers.Add(1)
+	s.work(0, o, q, make(chan ownerCall))
+	if fmt.Sprint(o.calls) != "[8 8 1]" {
+		t.Fatal("socket fragments escaped coalescing", o.calls)
+	}
+	if s.Stats().Accepted != 17 {
+		t.Fatal(s.Stats())
+	}
+	for i := range 17 {
+		if o.names[i] != fmt.Sprintf("fragment.%d", i/3) || o.data[i].Timestamp != int64(i) || o.data[i].Value != float64(i)+.125 {
+			t.Fatal("changed point order/bits", i)
+		}
+	}
+	if len(s.pending[0].names) != 0 {
+		t.Fatal("reservations retained after drain")
+	}
+}
