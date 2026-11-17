@@ -9,31 +9,25 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	testPendingReadFormats(t)
 }
 
+// Senders in these matrices have explicit phase barriers. Bound storage
+// processes with the same pool as other fixtures instead of serializing whole
+// matrices behind a process-global lock.
 func TestStoreInputFallbackKeepsEveryPoint(t *testing.T) {
-	parallelTestMatrix(t)
-	// Own the storage pool across the whole matrix: unrelated fixtures must not
-	// consume the bounded sender buffer between its successive restart cases.
-	if isolatedTestProcessSerial(t) {
+	if isolatedTestProcess(t) {
 		return
 	}
 	testStoreInputFallbackKeepsEveryPoint(t)
 }
 
 func TestSharedStoreRestartHandsInputOver(t *testing.T) {
-	parallelTestMatrix(t)
-	// Keep one exclusive fixture across the matrix, including the intervals
-	// between cases, instead of reacquiring it behind unrelated startups.
-	if isolatedTestProcessSerial(t) {
+	if isolatedTestProcess(t) {
 		return
 	}
 	testSharedStoreRestartHandsInputOver(t)
 }
 
 func TestRestartHandsInputOver(t *testing.T) {
-	parallelTestMatrix(t)
-	// Capability probes and connected senders share a wall-clock outage
-	// budget. Keep unrelated process startups outside the complete matrix.
-	if isolatedTestProcessSerial(t) {
+	if isolatedTestProcess(t) {
 		return
 	}
 	testRestartHandsInputOver(t)

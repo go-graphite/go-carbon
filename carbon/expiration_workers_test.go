@@ -110,6 +110,9 @@ func (s *parallelExpirationStore) DeleteBatchIfUnchanged(ctx context.Context, ba
 }
 
 func TestExpirationParallelPressureStopsAdmission(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100000, 0)
 	db := expirationTestDB(t, &now)
 	const count = 7 * expirationDeleteBatchSize
@@ -151,6 +154,9 @@ func TestExpirationParallelPressureStopsAdmission(t *testing.T) {
 }
 
 func TestExpirationParallelPendingConflictsAndLimit(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100000, 0)
 	db := expirationTestDB(t, &now)
 	const count = 7 * expirationDeleteBatchSize
@@ -210,6 +216,9 @@ func TestExpirationParallelPendingConflictsAndLimit(t *testing.T) {
 }
 
 func TestExpirationParallelCancellationJoinsWorkers(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100000, 0)
 	db := expirationTestDB(t, &now)
 	for i := range 2 * expirationDeleteBatchSize {
@@ -239,6 +248,9 @@ func TestExpirationParallelCancellationJoinsWorkers(t *testing.T) {
 }
 
 func TestExpirationParallelSharesBudgetAndChecksPressureAfterPacing(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, paused := range []bool{false, true} {
 		t.Run(fmt.Sprintf("paused=%v", paused), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {

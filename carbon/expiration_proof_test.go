@@ -9,6 +9,9 @@ import (
 )
 
 func TestExpirationRecordsExactPolicy(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(1790000000, 0)
 	db := expirationTestDB(t, &now)
 	m := createExpirationMetric(t, db, "jobs.old")

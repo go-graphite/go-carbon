@@ -319,6 +319,9 @@ func TestInputLogConfigValidation(t *testing.T) {
 // A reload may not let points wait for writeout past the running log's
 // max-age, which only a restart changes.
 func TestInputLogWriteoutDelayReload(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	delay := func(d time.Duration) func(*Config) {
 		return func(cfg *Config) {

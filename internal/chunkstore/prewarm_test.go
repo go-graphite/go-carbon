@@ -213,12 +213,31 @@ func TestPrewarmMetadataStopsPromptly(t *testing.T) {
 				err   error
 			}
 			done := make(chan result, 1)
+			started := make(chan struct{})
+			names := func(yield func(string) bool) {
+				n := 0
+				endless(func(name string) bool {
+					more := yield(name)
+					n++
+					if n == 4 {
+						// The first batch was sent and its pacing wait completed.
+						close(started)
+					}
+					return more
+				})
+			}
 			// Paced at 1000 names/s, an endless prewarm would run forever.
 			go func() {
-				stats, err := db.PrewarmMetadata(ctx, endless, PrewarmOptions{Workers: 2, Rate: 1000, Batch: 4})
+				stats, err := db.PrewarmMetadata(ctx, names, PrewarmOptions{Workers: 2, Rate: 1000, Batch: 4})
 				done <- result{stats, err}
 			}()
-			time.Sleep(50 * time.Millisecond)
+			select {
+			case <-started:
+			case r := <-done:
+				t.Fatalf("prewarm stopped before its first batch: %+v, %v", r.stats, r.err)
+			case <-t.Context().Done():
+				t.Fatal("prewarm did not start")
+			}
 			stopped := time.Now()
 			switch how {
 			case "context":
