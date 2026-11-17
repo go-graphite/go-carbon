@@ -90,6 +90,9 @@ func NewCollector(app *App) *Collector {
 		RuntimeStat(sendCallback("runtime"))
 	})
 
+	if app.v2 != nil && app.v2.moves != nil {
+		c.stats = append(c.stats, moduleCallback("v2.move", v2MoveStats{app.v2.moves}))
+	}
 	if app.SocketStats != nil {
 		c.stats = append(c.stats, moduleCallback("tcp", app.SocketStats))
 	}

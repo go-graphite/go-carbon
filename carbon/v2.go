@@ -43,6 +43,7 @@ type v2Runtime struct {
 	metrics *v2ModeMetrics
 	quotas  *carbonserver.V2Quotas
 	store   *v2daemon.Store
+	moves   *v2daemon.MoveAdmin
 	reader  *v2read.Reader
 	catalog v2index.Catalog
 	server  *v2recv.Server
@@ -255,13 +256,14 @@ func (app *App) startV2() error {
 			}
 		}
 	}
-	app.Carbonserver.SetV2MoveAdmin(v2daemon.NewMoveAdmin(c.V2.Path, v.store, func(index int, run func() error) error {
+	v.moves = v2daemon.NewMoveAdmin(c.V2.Path, v.store, func(index int, run func() error) error {
 		receiver := intake.Load()
 		if receiver == nil {
 			return errors.New("v2 intake not ready")
 		}
 		return receiver.OnOwner(index, run)
-	}))
+	})
+	app.Carbonserver.SetV2MoveAdmin(v.moves)
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
 	}

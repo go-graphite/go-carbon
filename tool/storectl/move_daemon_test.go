@@ -51,6 +51,20 @@ func TestMoveDaemonProcess(t *testing.T) {
 		count = 4
 	}
 	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: count, Shards: count, GroupInterval: time.Second, Hooks: v2core.Hooks{Stage: func(stage string) {
+		if cut := os.Getenv("MOVE_PROGRESS_CUT"); cut != "" && stage == cut {
+			marker := filepath.Join(root, "cut-fired")
+			if _, err := os.Stat(marker); os.IsNotExist(err) {
+				_ = os.WriteFile(marker, []byte(stage), 0600)
+				deadline := time.Now().Add(90 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, e := os.Stat(filepath.Join(root, "cut-release")); e == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}
+
 		if stage == "move-after-ingest" && os.Getenv("MOVE_DAEMON_CRASH") == "1" {
 			if _, err := os.Stat(filepath.Join(root, "arm-crash")); err != nil {
 				return
