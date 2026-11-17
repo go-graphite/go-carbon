@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -44,6 +47,49 @@ func mergeMaxBytes() (uint64, error) {
 		}
 	}
 	return n, nil
+}
+
+// A big merge also needs room for its staged output. VictoriaMetrics caps one at
+// free disk / 4; so do we, counting the output of merges already running. The
+// configured cap stays as the writer-side hard limit.
+const mergeDiskFraction = 4
+
+type freeSpacer interface {
+	Free(dir string) (uint64, error)
+}
+
+type statfsSpace struct{}
+
+func (statfsSpace) Free(dir string) (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), nil
+}
+
+var (
+	diskSpace     freeSpacer    = statfsSpace{}
+	mergeInflight atomic.Uint64 // staged-output upper bound of running merges, all owners
+	mergeDiskSkip atomic.Uint64
+)
+
+// MergeDiskSkips counts selection rounds that found a merge but skipped it for lack of free disk.
+func MergeDiskSkips() uint64 { return mergeDiskSkip.Load() }
+
+// effectiveMergeLimit reads free space once and returns min(cap, (free-inflight)/4).
+// A statfs error leaves the configured cap in force; it never fails intake.
+func effectiveMergeLimit(dir string) (limit, configured uint64, err error) {
+	configured, err = mergeMaxBytes()
+	if err != nil {
+		return 0, 0, err
+	}
+	free, ferr := diskSpace.Free(dir)
+	if ferr != nil {
+		return configured, configured, nil
+	}
+	free -= min(free, mergeInflight.Load())
+	return min(configured, free/mergeDiskFraction), configured, nil
 }
 
 // Runtime tuning does not change the persisted routing/configuration contract.
@@ -119,14 +165,18 @@ func (e *coreEngine) runPartMerges(workers int) {
 // local parts per group/partition below the cap. Terminal parts trade bounded
 // rewrite size for a larger read inventory until their time partition expires.
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
+	limit, _, err := effectiveMergeLimit(o.dir)
+	if err != nil {
+		return nil, err
+	}
+	return o.selectMergeLimit(snapshot, limit)
+}
+
+func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
 	type tier struct {
 		group     v2part.Group
 		partition int64
 		size      int
-	}
-	limit, err := mergeMaxBytes()
-	if err != nil {
-		return nil, err
 	}
 	tiers := map[tier][]v2part.Descriptor{}
 	o.gc.mu.Lock()
@@ -196,11 +246,7 @@ const ttlRewriteSeconds = 4 * 3600
 // When no size-tier merge is due, rewrite the local part whose earliest data
 // expiry has passed (ClickHouse TTL merge). Parts whose latest expiry has
 // passed are dropped whole by GC instead and are not rewritten.
-func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64) ([]v2part.Descriptor, error) {
-	limit, err := mergeMaxBytes()
-	if err != nil {
-		return nil, err
-	}
+func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, limit uint64) ([]v2part.Descriptor, error) {
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -603,24 +649,42 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	snapshot := o.db.NewSnapshot()
 	o.gc.mu.Unlock()
 	defer snapshot.Close()
-	inputs, err := o.selectMerge(snapshot)
+	limit, configured, err := effectiveMergeLimit(o.dir)
+	if err != nil {
+		return false, err
+	}
+	inputs, err := o.selectMergeLimit(snapshot, limit)
 	if err != nil {
 		return false, err
 	}
 	var ttl int64
+	if len(inputs) == 0 && limit < configured {
+		// Disk-bound: tell "nothing due" from "due but no room".
+		if due, e := o.selectMergeLimit(snapshot, configured); e == nil && len(due) > 0 {
+			mergeDiskSkip.Add(1)
+			slog.Warn("v2 merge skipped: not enough free disk", "dir", o.dir, "merge_limit_bytes", limit, "configured_cap_bytes", configured)
+			return false, nil
+		}
+	}
 	if len(inputs) == 0 {
 		now := time.Now().Unix()
 		if now < o.ttlNext.Load() {
 			return false, nil
 		}
 		clock := o.frontier.Load().ArchiveClock
-		inputs, err = o.selectTTLRewrite(snapshot, clock)
+		inputs, err = o.selectTTLRewrite(snapshot, clock, limit)
 		if err != nil || len(inputs) == 0 {
 			return false, err
 		}
 		ttl = clock
 		o.ttlNext.Store(now + ttlRewriteSeconds)
 	}
+	var staged uint64
+	for _, d := range inputs {
+		staged += d.Bytes
+	}
+	mergeInflight.Add(staged)
+	defer mergeInflight.Add(^(staged - 1))
 	stage, err := os.MkdirTemp(o.dir, ".merge-")
 	if err != nil {
 		return false, err
