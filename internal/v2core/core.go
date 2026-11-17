@@ -297,7 +297,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	} else if cfg.RollupRoutingVersion != 0 {
 		return nil, errors.New("rollup routing requires rollups")
 	}
-	mergeWorkers, err := mergeWorkerCount()
+	mergeWorkers, err := mergeWorkerCount(int(cfg.Shards))
 	if err != nil {
 		return nil, err
 	}
@@ -1224,7 +1224,7 @@ func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
 	return o.sealBatches(head, nil, next)
 }
 func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
-	if err := o.awaitSealedMergeBudget(); err != nil {
+	if err := o.observeSealedMergeBudget(); err != nil {
 		return 0, err
 	}
 	// GC must not unlink a replayed original between link reuse and atomic

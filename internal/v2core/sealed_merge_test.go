@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -390,41 +392,50 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 	}
 }
 
-func TestSealedMergeOverloadWaitsWithoutHoldingFileLock(t *testing.T) {
+func TestSealedMergeOverloadKeepsIntakeMoving(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	e := mergeFixture(t, t.TempDir(), nil)
 	defer e.close()
 	o := e.owners[0]
+	// No merger runs: crossing the former hard limit must still seal promptly.
 	for n := uint64(1); n <= 2*sealedMergeFanIn; n++ {
 		mergeAppend(t, e, n)
 	}
-	stop := make(chan struct{})
-	defer close(stop)
-	o.mergeStop = stop
-	_, policy := rollupTestPolicy(t, "merge.metric", "1s:120,10s:1h", sealrollup.Last, .5)
-	done := make(chan error, 1)
-	go func() {
-		done <- e.submitBatches(0, []coreBatch{{ID: 7, Policy: policy, Order: 2*sealedMergeFanIn + 1, Clock: 1030, Points: []row{{ID: 7, Time: 1020, Bits: 1 << 63, Seq: 1000}}}}, 2*sealedMergeFanIn+1, true)
-	}()
+	o.mergeStop = make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); mergeAppend(t, e, 2*sealedMergeFanIn+1) }()
 	select {
-	case err := <-done:
-		t.Fatalf("overload seal did not wait: %v", err)
-	case <-time.After(30 * time.Millisecond):
-	}
-	// The blocked seal must leave file publication available to this merger.
-	changed, err := o.mergeSealedParts(nil)
-	if err != nil || !changed {
-		t.Fatalf("merge blocked by seal: %v %v", changed, err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
+	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("seal did not resume after replacement")
+		t.Fatal("seal stalled behind merge backlog")
 	}
-	if got := mergeCount(o); got > 2*sealedMergeFanIn {
-		t.Fatalf("overload budget exceeded: %d", got)
+	if got := mergeCount(o); got != 2*sealedMergeFanIn+1 {
+		t.Fatalf("parts=%d", got)
+	}
+	if got := e.PartGCStats()[0].MergeOverBudgetSeals; got != 1 {
+		t.Fatalf("pressure seals=%d", got)
+	}
+	if n := mergeDrain(t, o); n == 0 {
+		t.Fatal("backlog did not drain")
+	}
+}
+
+func TestSealedMergeWorkerBudget(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "")
+	for _, owners := range []int{1, 16, 96} {
+		got, err := mergeWorkerCount(owners)
+		want := min(owners, max(1, runtime.GOMAXPROCS(0)/2))
+		if err != nil || got != want {
+			t.Fatalf("owners=%d workers=%d want=%d err=%v", owners, got, want, err)
+		}
+		t.Setenv("CORE_MERGE_WORKERS", strconv.Itoa(want+1))
+		if _, err = mergeWorkerCount(owners); err == nil {
+			t.Fatal("CPU budget exceeded")
+		}
+		t.Setenv("CORE_MERGE_WORKERS", "0")
+		if got, err = mergeWorkerCount(owners); err != nil || got != 0 {
+			t.Fatalf("disable: %d %v", got, err)
+		}
+		t.Setenv("CORE_MERGE_WORKERS", "")
 	}
 }

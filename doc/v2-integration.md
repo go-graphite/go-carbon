@@ -129,13 +129,22 @@ production canary, relay change, live copy adoption or general rollback.
 Writable v2 owners automatically merge sixteen local archive parts in the same
 size tier into one immutable part. Tiers span a factor of sixteen in file bytes;
 when merge service keeps up, each group retains at most fifteen local parts per
-tier. Two background workers serve all owners by default. Set the restart-only
-`CORE_MERGE_WORKERS` environment variable to `0` to disable merges for comparison,
-or `1` through `4` to bound concurrent merge work. Workers yield for 1ms after
-each 4096 input records and stop before owner shutdown. If a tier accumulates
-two complete merge sets, the next seal waits for replacement before taking its
-file-publication lock. This bounds overload instead of retaining an unlimited
-backlog; ordinary intake keeps priority below that threshold.
+tier. Background workers scale with the owner count and `GOMAXPROCS`: one
+worker per two scheduler CPUs, bounded by the number of owners (at least one
+worker on small stores). Set the restart-only `CORE_MERGE_WORKERS` environment
+variable to `0` to disable merges for comparison, or to a smaller positive worker
+count to reserve more CPU for intake. Counts above the owner/CPU budget fail
+configuration validation. Workers yield for 1ms after each 4096 input records,
+stop before owner shutdown, and skip unchanged inventories with no merge set.
+
+The inventory target is soft: a seal never waits for a merge to catch up. Owners
+with 32 or more catalog-live parts increment `MergeOverBudgetSeals` while
+continuing intake. This total-inventory pressure signal includes all tiers and
+copied parts; it is not a per-tier backlog limit. `v2-write` reports per-owner
+`part_gc` statistics; Prometheus exports `v2_sealed_parts`,
+`v2_merge_over_budget_seals_total` and `v2_merge_runs_total`. Sustained growth means
+merge capacity or seal sizing needs attention; the target is not a hard disk or
+memory bound.
 
 The existing descriptor catalog atomically replaces all inputs with the synced
 output. Old snapshots keep their input files behind the existing GC fence and
