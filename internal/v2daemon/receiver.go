@@ -4,13 +4,13 @@ import (
 	"errors"
 	"net"
 	"slices"
-	"strings"
 
 	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"github.com/go-graphite/go-carbon/points"
 )
 
-// PolicyResolver returns the immutable policy for a newly admitted name.
+// PolicyResolver returns the immutable policy for a newly admitted name. It
+// borrows the name only until it returns, like v2recv.Owner.Append.
 // TCP contains points rather than classic persister UpdateMany boundaries. Each
 // point is an explicit application; batching socket reads must not change it.
 type PolicyResolver func(string) ([]byte, error)
@@ -38,7 +38,8 @@ func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint6
 			registered = o.policies[name]
 		}
 		if registered == nil {
-			name = strings.Clone(name) // retained; the receiver's batch text is borrowed
+			// name is borrowed from the batch text. Key the map by the handle's
+			// name, which is the catalog's identity string: one copy per name.
 			policy, err := o.resolve(name)
 			if err != nil {
 				return err
@@ -50,7 +51,7 @@ func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint6
 			if o.policies == nil {
 				o.policies = map[string]*RegisteredApplication{}
 			}
-			o.policies[name] = registered
+			o.policies[registered.name] = registered
 		}
 		previous = registered
 		index := len(apps)

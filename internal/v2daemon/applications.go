@@ -43,7 +43,9 @@ type RegisteredApplication struct {
 }
 
 // RegisterApplication validates canonical identity and collision/definition
-// equality at admission. It retains no caller-owned policy bytes.
+// equality at admission. It retains no caller-owned policy bytes. The handle's
+// name is the catalog's own string (the shared identity name on layer 3), never
+// the caller's, so name-keyed caches hold no second copy of each name.
 func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredApplication, error) {
 	if p.failed != nil {
 		return nil, p.failed
@@ -57,6 +59,9 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	}
 	if r := p.applicationPolicies[id]; r != nil {
 		return r, nil
+	}
+	if owned, ok := p.catalog.Key(id); ok {
+		name = owned
 	}
 	var registered *v2core.ApplicationPolicy
 	// Classic mirroring consumes canonical bytes before core submission.
