@@ -49,9 +49,9 @@ type v2VisibleOwner struct {
 	orders []uint64
 }
 type v2WriteTelemetry struct {
-	owners                                    []v2VisibleOwner
-	producers                                 int
-	visibleLatency, seal, rollup, publication v2WriteHistogram
+	owners                                                     []v2VisibleOwner
+	producers                                                  int
+	visibleLatency, visibleMidpoint, seal, rollup, publication v2WriteHistogram
 }
 
 func newV2WriteTelemetry(shards, producers int) *v2WriteTelemetry {
@@ -81,6 +81,9 @@ func (t *v2WriteTelemetry) visible(owner int, batches []v2core.Batch) {
 	copy(o.orders, next)
 	for clock, n := range counts {
 		t.visibleLatency.add(now.Sub(time.Unix(clock, 0)), n)
+		// The clock is the receive time floored to a second, so a point arrived
+		// 0.5 s after it on average: a sub-second estimate, not a bound.
+		t.visibleMidpoint.add(now.Sub(time.Unix(clock, 0))-500*time.Millisecond, n)
 	}
 }
 func (t *v2WriteTelemetry) observeStage(phase string, d time.Duration) {
@@ -94,5 +97,5 @@ func (t *v2WriteTelemetry) observeStage(phase string, d time.Duration) {
 	}
 }
 func (t *v2WriteTelemetry) report() map[string]interface{} {
-	return map[string]interface{}{"append_to_visible": t.visibleLatency.report(), "seal_total": t.seal.report(), "rollup_plan": t.rollup.report(), "publication": t.publication.report(), "clock_resolution_seconds": 1, "stage_bucket_seconds": 0.01, "visibility_weight": "points", "stage_weight": "owner seals", "producers": t.producers, "shards": len(t.owners)}
+	return map[string]interface{}{"append_to_visible": t.visibleLatency.report(), "append_to_visible_midpoint": t.visibleMidpoint.report(), "seal_total": t.seal.report(), "rollup_plan": t.rollup.report(), "publication": t.publication.report(), "clock_resolution_seconds": 1, "stage_bucket_seconds": 0.01, "visibility_weight": "points", "stage_weight": "owner seals", "producers": t.producers, "shards": len(t.owners)}
 }

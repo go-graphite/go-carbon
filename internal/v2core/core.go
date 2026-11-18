@@ -31,9 +31,17 @@ import (
 
 var coreMetaKey = []byte{0xff, 'f'}
 
+// defaultPublishInterval bounds how long appended rows wait for the owner to
+// publish them. Publication is O(new batches), so it can run well below the
+// producers' one second group commit.
+const defaultPublishInterval = 250 * time.Millisecond
+
 type coreConfig struct {
 	// SealInterval is a runtime threshold, independent of the persisted format.
-	SealInterval               time.Duration `json:"-"`
+	SealInterval time.Duration `json:"-"`
+	// PublishInterval is how often an owner publishes its pending head to
+	// readers; zero means defaultPublishInterval.
+	PublishInterval            time.Duration `json:"-"`
 	SealMaxRows                int           `json:"-"`
 	Rollups                    bool
 	RollupRoutingVersion       uint8
@@ -271,7 +279,7 @@ type coreOwner struct {
 	// them, so no point is ever invisible or counted twice.
 	sealPubMu   sync.Mutex
 	sealDurable bool
-	trace                        bool
+	trace       bool
 }
 type coreFailure struct{ err error }
 type coreEngine struct {
@@ -361,7 +369,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		streamBytes = n
 	}
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 || (cfg.OmitBaseRows && !cfg.Rollups) {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.PublishInterval < 0 || cfg.SealMaxRows < 0 || (cfg.OmitBaseRows && !cfg.Rollups) {
 		return nil, os.ErrInvalid
 	}
 	if testOmitBaseRows && cfg.Rollups {
@@ -971,6 +979,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	deadline := time.Now().Add(sealInterval)
 	o.nextPoll = deadline
+	publishInterval := o.cfg.PublishInterval
+	if publishInterval == 0 {
+		publishInterval = defaultPublishInterval
+	}
 	maintenanceDeadline := time.Now().Add(time.Second)
 	var headPublication, batchPublication time.Time
 	publishedBatches := 0
@@ -1356,7 +1368,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 			headPublication = time.Now()
 		}
-		if failure == nil && !sealPending && len(batches) > publishedBatches && time.Since(batchPublication) >= time.Second {
+		if failure == nil && !sealPending && len(batches) > publishedBatches && time.Since(batchPublication) >= publishInterval {
 			failure = publishBatches()
 		}
 		if failure != nil {
@@ -1422,7 +1434,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		if len(head) > 0 {
 			if o.batchHook != nil && len(batches) > publishedBatches {
-				if next := batchPublication.Add(time.Second); next.Before(o.nextPoll) {
+				if next := batchPublication.Add(publishInterval); next.Before(o.nextPoll) {
 					o.nextPoll = next
 				}
 			}

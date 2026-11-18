@@ -31,8 +31,10 @@ import (
 type v2Config struct {
 	BaselinePath string    `toml:"baseline-path"`
 	SealInterval *Duration `toml:"seal-interval"`
-	SealMaxRows  int       `toml:"seal-max-rows"`
-	OmitBaseRows bool      `toml:"omit-base-rows"`
+	// PublishInterval is how often owners publish pending rows to readers (default 250ms).
+	PublishInterval *Duration `toml:"publish-interval"`
+	SealMaxRows     int       `toml:"seal-max-rows"`
+	OmitBaseRows    bool      `toml:"omit-base-rows"`
 
 	Enabled         bool   `toml:"enabled"`
 	Mode            string `toml:"mode"`
@@ -146,7 +148,11 @@ func (app *App) startV2() error {
 	if c.V2.SealInterval != nil {
 		sealInterval = c.V2.SealInterval.Value()
 	}
-	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, OmitBaseRows: c.V2.OmitBaseRows, Hooks: hooks}
+	var publishInterval time.Duration
+	if c.V2.PublishInterval != nil {
+		publishInterval = c.V2.PublishInterval.Value()
+	}
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, PublishInterval: publishInterval, SealMaxRows: c.V2.SealMaxRows, OmitBaseRows: c.V2.OmitBaseRows, Hooks: hooks}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err

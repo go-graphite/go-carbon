@@ -202,6 +202,13 @@ previously adopted stores, and lifecycle-reset reconciliation are outside this
 protocol. Incomplete state and links remain under `<v2.path>/moves/<ID>` for
 retry; completed moves retain only their small done receipt.
 
+### Publication cadence
+
+`[v2] publish-interval = "250ms"` is the restart-only period at which each owner
+publishes its pending head to readers (zero selects 250ms; negative values are
+rejected). A publication is O(new batches), so it is cheaper than the 1s producer
+group commit it follows; it does not change durability, which stays the 1s input-log fsync.
+
 ### Seal threshold
 
 `[v2] seal-interval = "10s"` sets the restart-only maximum time between
