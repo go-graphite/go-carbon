@@ -45,7 +45,7 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 			return err
 		}
 		if k.Archive == v2part.MetadataArchive {
-			m, err := DecodeRollupMetadata(kv.Value)
+			m, err := DecodeRollupMetadata(k.Metric, k.Group, kv.Value)
 			if err != nil {
 				return err
 			}

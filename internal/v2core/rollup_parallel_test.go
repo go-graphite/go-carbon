@@ -148,7 +148,7 @@ func TestRollupStagesPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 				legacyDigest.Write(encoded)
 				value := kv.encodedValue()
 				if key.Archive == rollupMetadataArchive {
-					meta, err := DecodeRollupMetadata(value)
+					meta, err := DecodeRollupMetadata(key.Metric, key.Group, value)
 					if err != nil {
 						t.Fatal(err)
 					}

@@ -78,7 +78,20 @@ func TestRollupHistoryDifferential(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						entries = append(entries, k+string(it.Value()))
+						// Slim envelopes are hashed as the full encoding of what
+						// they decode to, so the goldens prove decoded metadata,
+						// including definition bytes, is unchanged.
+						value := it.Value()
+						if dk, err := v2part.Decode(key); err != nil {
+							t.Fatal(err)
+						} else if dk.Archive == v2part.MetadataArchive {
+							m, err := DecodeRollupMetadata(dk.Metric, dk.Group, value)
+							if err != nil {
+								t.Fatal(err)
+							}
+							value = AppendRollupMetadata(nil, m)
+						}
+						entries = append(entries, k+string(value))
 					}
 					if err = it.Close(); err != nil {
 						t.Fatal(err)

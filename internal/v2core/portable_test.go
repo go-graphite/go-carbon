@@ -230,7 +230,7 @@ func TestPortableDenseNewestSingletonWins(t *testing.T) {
 		k.Part = v2part.PartID{8}
 		value := bytes.Clone(kv.encodedValue())
 		if k.Archive == v2part.MetadataArchive {
-			m, err := DecodeRollupMetadata(value)
+			m, err := DecodeRollupMetadata(k.Metric, k.Group, value)
 			if err != nil {
 				t.Fatal(err)
 			}

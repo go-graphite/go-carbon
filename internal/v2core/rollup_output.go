@@ -157,6 +157,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 				for archive := range schema.Archives {
 					policies = append(policies, partsformat.ArchivePolicy{Archive: uint32(archive), Digest: hash, Definition: definition})
 				}
+				partsformat.RegisterPolicies(policies)
 				r.definitions[digest] = policies
 			}
 			coverage.spec.Policies = append(coverage.spec.Policies, policies...)

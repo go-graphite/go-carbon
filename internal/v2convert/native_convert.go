@@ -88,7 +88,7 @@ func ConvertNativeCheckpoint(ctx context.Context, source NativeSnapshotReader, p
 	for _, path := range paths {
 		if err := writer.Read(ctx, filepath.Join(stage, path), func(row Record) error {
 			i, found := slices.BinarySearchFunc(rows, row, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
-			if !found || seen[i] || !bytes.Equal(rows[i].Value, row.Value) {
+			if !found || seen[i] || !sameValue(row.Key, rows[i].Value, row.Value) {
 				return errors.New("native output readback mismatch")
 			}
 			seen[i] = true

@@ -156,7 +156,7 @@ func installBaseline(root string, c Config) (uint64, error) {
 				return 0, errors.New("baseline envelope copies differ")
 			}
 		}
-		m, err := v2core.DecodeRollupMetadata(rows[indexes[0]].Value)
+		m, err := v2core.DecodeRollupMetadata(v2part.ID(name), receipt.Baseline.Group, rows[indexes[0]].Value)
 		if err != nil {
 			return 0, err
 		}

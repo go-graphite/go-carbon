@@ -519,7 +519,9 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 				continue
 			}
-			meta, e := decodeRollupMetadataView(it.Value())
+			// compactMetadata keeps no definition: decode the header only, so
+			// slim rows do not rebuild one per part.
+			meta, _, e := decodeRollupMetadataHeader(it.Value())
 			if e != nil {
 				return e
 			}
@@ -736,7 +738,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
 			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 		}
-		meta, decodeErr := decodeRollupMetadataView(it.Value())
+		meta, decodeErr := decodeRollupMetadataView(key.Metric, key.Group, it.Value())
 		if decodeErr != nil {
 			err = decodeErr
 			return nil, err
@@ -865,7 +867,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 						continue
 					}
 				}
-				meta, decodeErr := DecodeRollupMetadata(it.Value())
+				meta, decodeErr := DecodeRollupMetadata(key.Metric, key.Group, it.Value())
 				if err = decodeErr; err != nil {
 					return nil, err
 				}

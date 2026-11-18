@@ -5,8 +5,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"sync"
+	"sync/atomic"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 var rollupMetadataMagic = []byte{'R', 'U', 'M', 1}
@@ -41,22 +44,60 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	return append(dst, m.Policy...)
 }
 
-// appendMetadata emits exactly the public metadata encoding, with the policy
-// appended directly from its immutable identity rather than a temporary copy.
+// rollupWriteDefinitions makes seal and merge writers emit the full encoding
+// with the stored definition. Only the encoding differential test sets it.
+var rollupWriteDefinitions atomic.Bool
+
+// appendMetadata emits the slim seal encoding: the definition is not stored.
 func (h *PolicyIdentity) appendMetadata(dst []byte, m RollupMetadata) []byte {
-	m.Policy = nil
-	dst = AppendRollupMetadata(dst, m)
-	start := len(dst)
-	dst = h.appendDefinition(dst)
-	binary.BigEndian.PutUint32(dst[start-4:start], uint32(len(dst)-start))
-	return dst
+	if rollupWriteDefinitions.Load() {
+		m.Policy = nil
+		dst = AppendRollupMetadata(dst, m)
+		start := len(dst)
+		dst = h.appendDefinition(dst)
+		binary.BigEndian.PutUint32(dst[start-4:start], uint32(len(dst)-start))
+		return dst
+	}
+	return appendRollupMetadataSlim(dst, m)
 }
 
-// DecodeRollupMetadata accepts binary rows and legacy JSON metadata. Returned
-// policy bytes are detached from the iterator buffer and safe after Next/Close.
-func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
-	m, err := decodeRollupMetadataView(data)
-	if err == nil && len(data) >= 4 && bytes.Equal(data[:3], rollupMetadataMagic[:3]) && (data[3] >= 1 && data[3] <= 3) {
+// rollupMetadataSlim marks rows that store no definition. The header is the
+// Version 3 layout; readers rebuild the definition bit-exactly from the key's
+// name and group and the part policy table entry named by Frontier.Policy.
+// Binaries that predate it fail on such rows instead of misreading them.
+const rollupMetadataSlim = 4
+
+// appendRollupMetadataSlim writes m without its definition. Decoding returns
+// exactly what AppendRollupMetadata(m) decodes to, including the definition.
+func appendRollupMetadataSlim(dst []byte, m RollupMetadata) []byte {
+	flags := byte(0)
+	if m.Expired {
+		flags = 1
+	}
+	dst = append(dst, 'R', 'U', 'M', rollupMetadataSlim, m.Version, flags)
+	for _, n := range []uint64{m.ID, m.Frontier.Order, uint64(m.Frontier.MaxTime), uint64(m.LastUpdate), m.Revision, m.ResetOrder, m.BaselineOrder} {
+		dst = binary.BigEndian.AppendUint64(dst, n)
+	}
+	closed := int64(0)
+	if m.Version == 3 {
+		closed = m.ClosedThrough
+	}
+	dst = binary.BigEndian.AppendUint64(dst, uint64(closed))
+	dst = append(dst, m.Frontier.Policy[:]...)
+	return binary.BigEndian.AppendUint32(dst, 0)
+}
+
+// DecodeRollupMetadata accepts binary rows and legacy JSON metadata stored
+// under the metadata key of name in group. Returned policy bytes are detached
+// from the iterator buffer and safe after Next/Close.
+func DecodeRollupMetadata(name partsformat.ID, group partsformat.Group, data []byte) (RollupMetadata, error) {
+	m, slim, err := decodeRollupMetadataHeader(data)
+	if err != nil {
+		return m, err
+	}
+	if slim {
+		m.Policy, _, err = appendRollupDefinition(nil, name, group, m.Frontier.Policy)
+	} else if len(data) >= 4 && bytes.Equal(data[:3], rollupMetadataMagic[:3]) {
 		m.Policy = bytes.Clone(m.Policy)
 	}
 	return m, err
@@ -64,21 +105,31 @@ func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 
 // The policy view is valid only until the iterator moves. Intern it before
 // retaining metadata; the catalog owns the immutable definition returned.
-func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
-	var m RollupMetadata
-	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > 3) {
-		err := json.Unmarshal(data, &m)
-		return m, err
+func decodeRollupMetadataView(name partsformat.ID, group partsformat.Group, data []byte) (RollupMetadata, error) {
+	m, slim, err := decodeRollupMetadataHeader(data)
+	if err == nil && slim {
+		m.Policy, _, err = appendRollupDefinition(nil, name, group, m.Frontier.Policy)
+	}
+	return m, err
+}
+
+// decodeRollupMetadataHeader decodes every field except a slim row's
+// definition: slim rows return a nil Policy and slim true.
+func decodeRollupMetadataHeader(data []byte) (m RollupMetadata, slim bool, err error) {
+	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > rollupMetadataSlim) {
+		err = json.Unmarshal(data, &m)
+		return m, false, err
 	}
 	header := 90
 	if data[3] == 2 {
 		header = 98
 	}
-	if data[3] == 3 {
+	if data[3] >= 3 {
 		header = 106
 	}
-	if len(data) < header || data[5] > 1 || uint64(binary.BigEndian.Uint32(data[header-4:header])) != uint64(len(data)-header) {
-		return m, errors.New("invalid binary rollup metadata")
+	slim = data[3] == rollupMetadataSlim
+	if len(data) < header || data[5] > 1 || uint64(binary.BigEndian.Uint32(data[header-4:header])) != uint64(len(data)-header) || (slim && len(data) != header) {
+		return m, false, errors.New("invalid binary rollup metadata")
 	}
 	m.Version = data[4]
 	m.Expired = data[5] == 1
@@ -92,13 +143,71 @@ func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 		m.BaselineOrder = binary.BigEndian.Uint64(data[54:62])
 		offset = 62
 	}
-	if data[3] == 3 {
+	if data[3] >= 3 {
 		m.ClosedThrough = int64(binary.BigEndian.Uint64(data[62:70]))
 		offset = 70
 	}
 	copy(m.Frontier.Policy[:], data[offset:offset+32])
-	m.Policy = data[header:]
-	return m, nil
+	if !slim {
+		m.Policy = data[header:]
+	}
+	return m, slim, nil
+}
+
+type rollupDefinitionKey struct {
+	policy [32]byte
+	group  partsformat.Group
+}
+
+// rollupDefinitionSuffixes caches `,"Group":...,"Config":...}` per policy
+// and group; only the name varies between definitions.
+var rollupDefinitionSuffixes sync.Map // rollupDefinitionKey -> []byte
+
+// appendRollupDefinition appends EncodeRollupPolicy({name, group, config})
+// where config is the part policy table entry whose PolicyDigest is policy.
+// It fails closed when no registered part table carries that policy.
+func appendRollupDefinition(dst []byte, name partsformat.ID, group partsformat.Group, policy [32]byte) ([]byte, *partsformat.SealedPolicy, error) {
+	resolved, ok := partsformat.ResolvePolicy(policy)
+	if !ok {
+		return dst, nil, errors.New("rollup metadata policy missing from part policy tables")
+	}
+	key := rollupDefinitionKey{policy, group}
+	suffix, ok := rollupDefinitionSuffixes.Load(key)
+	if !ok {
+		g, err := json.Marshal(string(group))
+		if err != nil {
+			return dst, nil, err
+		}
+		s := append([]byte(`,"Group":`), g...)
+		s = append(s, `,"Config":`...)
+		s = append(s, resolved.JSON...)
+		s = append(s, '}')
+		suffix, _ = rollupDefinitionSuffixes.LoadOrStore(key, s)
+	}
+	dst = append(dst, `{"Name":`...)
+	if jsonPlainString(string(name)) {
+		dst = append(dst, '"')
+		dst = append(dst, name...)
+		dst = append(dst, '"')
+	} else {
+		n, err := json.Marshal(string(name))
+		if err != nil {
+			return dst, nil, err
+		}
+		dst = append(dst, n...)
+	}
+	return append(dst, suffix.([]byte)...), resolved, nil
+}
+
+// jsonPlainString reports whether encoding/json writes s unescaped.
+func jsonPlainString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c >= 0x7f || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+			return false
+		}
+	}
+	return true
 }
 
 // One serial owner exclusively holds these arenas until its ingest resolves.

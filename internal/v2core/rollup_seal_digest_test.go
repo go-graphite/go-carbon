@@ -17,7 +17,13 @@ import (
 )
 
 // sealPlanDigest hashes every planned key, value, record and part spec.
-func sealPlanDigest(plan coreSealPlan) string {
+func sealPlanDigest(plan coreSealPlan) string { return sealPlanDigestMode(plan, false) }
+
+// sealPlanDecodedDigest hashes metadata rows as the full encoding of what they
+// decode to, so it is independent of whether envelopes store the definition.
+func sealPlanDecodedDigest(plan coreSealPlan) string { return sealPlanDigestMode(plan, true) }
+
+func sealPlanDigestMode(plan coreSealPlan, decoded bool) string {
 	var h io.Writer = sha256.New()
 	sum := h.(hash.Hash)
 	if dump := os.Getenv("SEAL_DIGEST_DUMP"); dump != "" {
@@ -30,7 +36,19 @@ func sealPlanDigest(plan coreSealPlan) string {
 		part := plan.PartSpecs[i].Scope.Part
 		fmt.Fprintf(h, "file %d %d\n", i, len(file))
 		for _, kv := range file {
-			fmt.Fprintf(h, "%x %x", bytes.Replace(kv.Key, part[:], make([]byte, len(part)), 1), kv.Value)
+			value := kv.Value
+			if decoded && kv.Record == nil {
+				k, err := v2part.Decode(kv.Key)
+				if err != nil {
+					panic(err)
+				}
+				m, err := DecodeRollupMetadata(k.Metric, k.Group, value)
+				if err != nil {
+					panic(err)
+				}
+				value = AppendRollupMetadata(nil, m)
+			}
+			fmt.Fprintf(h, "%x %x", bytes.Replace(kv.Key, part[:], make([]byte, len(part)), 1), value)
 			if kv.Record != nil {
 				fmt.Fprintf(h, " %+v", *kv.Record)
 			}
@@ -58,7 +76,11 @@ func sealPlanDigest(plan coreSealPlan) string {
 // only closed-window coarse records, their month envelopes, the version and
 // watermark fields and the part bounds derived from them changed.
 // Planning must stay byte-identical on randomized multi-group, multi-month,
-// duplicate-batch, fresh-name and late-point seals.
+// duplicate-batch, fresh-name and late-point seals. Since envelopes stopped
+// storing the definition these goldens are checked on the decoded surface
+// (sealPlanDecodedDigest): every decoded record and envelope, including the
+// rebuilt definition bytes, is unchanged. sealPlanSlimGolden is the physical
+// surface, re-recorded once when the definition left the envelope.
 var sealPlanGolden = map[string]string{
 	"seed1/p1": "6259e16ee3a81329b0cf348163f683e4",
 	"seed1/p4": "6259e16ee3a81329b0cf348163f683e4",
@@ -113,7 +135,7 @@ func TestSealPlanDifferentialDigest(t *testing.T) {
 				}
 				specs[i] = metricSpec{policy: raw, cfg: cfg}
 			}
-			var digests []string
+			var digests, decoded []string
 			order := uint64(1)
 			base := int64(1_700_000_000) // seals cross month boundaries below
 			for seal := 0; seal < 4; seal++ {
@@ -152,12 +174,16 @@ func TestSealPlanDifferentialDigest(t *testing.T) {
 					t.Fatal(err)
 				}
 				digests = append(digests, sealPlanDigest(plan))
+				decoded = append(decoded, sealPlanDecodedDigest(plan))
 				plan.Commit()
 			}
 			key := fmt.Sprintf("seed%d/p%d", seed, parallelism)
 			got := sealPlanDigestJoin(digests)
-			if want, ok := sealPlanGolden[key]; ok && want != got {
+			if want := sealPlanSlimGolden[key]; want != got {
 				t.Errorf("%s: digest %s, want %s", key, got, want)
+			}
+			if got, want := sealPlanDigestJoin(decoded), sealPlanGolden[key]; got != want {
+				t.Errorf("%s: decoded digest %s, want %s", key, got, want)
 			}
 			t.Logf("golden %q: %q,", key, got)
 		}
@@ -170,4 +196,19 @@ func sealPlanDigestJoin(d []string) string {
 		h.Write([]byte(s))
 	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+var sealPlanSlimGolden = map[string]string{
+	"seed1/p1": "59b674e7856391cc484494820c34ad5f",
+	"seed1/p4": "59b674e7856391cc484494820c34ad5f",
+	"seed2/p1": "570c089f52c26badae3013ee693f0162",
+	"seed2/p4": "570c089f52c26badae3013ee693f0162",
+	"seed3/p1": "0bb8fea55700cc58e36df1a476f2f040",
+	"seed3/p4": "0bb8fea55700cc58e36df1a476f2f040",
+	"seed4/p1": "bb2631bde16893aa9650291907842d84",
+	"seed4/p4": "bb2631bde16893aa9650291907842d84",
+	"seed5/p1": "4f230a74481563452348f565c73f1b49",
+	"seed5/p4": "4f230a74481563452348f565c73f1b49",
+	"seed6/p1": "df4b4dff5ad8945103aff9f9668383c3",
+	"seed6/p4": "df4b4dff5ad8945103aff9f9668383c3",
 }

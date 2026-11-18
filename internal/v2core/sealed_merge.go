@@ -296,10 +296,14 @@ type mergeCursor struct {
 	part        v2part.PartID
 	metadata    RollupMetadata
 	policyBytes []byte
-	arena       []byte
-	blocks      []mergeBlock
-	records     []sealrollup.Record
-	block, next int
+	// config is the metadata's policy: from the part policy table for slim
+	// rows, or parsed from the stored definition of older rows.
+	config       *sealrollup.Config
+	legacyConfig sealrollup.Config
+	arena        []byte
+	blocks       []mergeBlock
+	records      []sealrollup.Record
+	block, next  int
 }
 
 func (c *mergeCursor) readMetric(first bool) (bool, error) {
@@ -325,12 +329,27 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 			return false, errors.New("merge metric lacks metadata")
 		}
 		if k.Archive == v2part.MetadataArchive {
-			c.metadata, err = decodeRollupMetadataView(c.cursor.Value())
+			var slim bool
+			c.metadata, slim, err = decodeRollupMetadataHeader(c.cursor.Value())
 			if err != nil {
 				return false, err
 			}
+			if slim {
+				resolved, ok := v2part.ResolvePolicy(c.metadata.Frontier.Policy)
+				if !ok {
+					return false, errors.New("rollup metadata policy missing from part policy tables")
+				}
+				c.config = &resolved.Config
+				return true, nil
+			}
 			c.policyBytes = append(c.policyBytes[:0], c.metadata.Policy...)
 			c.metadata.Policy = c.policyBytes
+			var policy RollupPolicy
+			if err = json.Unmarshal(c.policyBytes, &policy); err != nil {
+				return false, err
+			}
+			c.legacyConfig = policy.Config
+			c.config = &c.legacyConfig
 			return true, nil
 		}
 		if k.Ordinal != 0 {
@@ -421,6 +440,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		spec.MaxTime = max(spec.MaxTime, d.Coverage.MaxTime)
 		spec.Source.MinOrder = min(spec.Source.MinOrder, d.Source.MinOrder)
 		spec.Source.MaxOrder = max(spec.Source.MaxOrder, d.Source.MaxOrder)
+		v2part.RegisterPolicies(d.Coverage.Policies)
 		for _, p := range d.Coverage.Policies {
 			id := struct {
 				archive uint32
@@ -433,6 +453,9 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		}
 	}
 
+	// Output envelopes omit the definition only for policies this part's own
+	// table carries, so every merged part stays self-describing.
+	tablePolicies := v2part.TablePolicies(spec.Policies)
 	writer, err := v2part.NewDenseWriter(path, spec)
 	if err != nil {
 		return v2part.Descriptor{}, err
@@ -492,7 +515,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	var members []*mergeCursor
 	var records mergeRecordHeap
 	var key, metaBytes []byte
-	var policy RollupPolicy
+	var config sealrollup.Config
 	var expiry expiryBounds
 	for len(h) > 0 {
 		if err = ctx.Err(); err != nil {
@@ -508,19 +531,19 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		for len(h) > 0 && h[0].key.VShard == c.key.VShard && h[0].key.Metric == c.key.Metric {
 			members = append(members, heap.Pop(&h).(*mergeCursor))
 		}
-		metadata := &c.metadata
+		// The definition is a function of the key (name, group) and the policy
+		// digest, so equal IDs, groups and digests mean equal definitions.
+		metadata, chosen := &c.metadata, c
 		for _, input := range members[1:] {
 			m := &input.metadata
-			if m.ID != metadata.ID || !bytes.Equal(m.Policy, metadata.Policy) {
+			if m.ID != metadata.ID || input.key.Group != c.key.Group || m.Frontier.Policy != metadata.Frontier.Policy || (m.Policy != nil && metadata.Policy != nil && !bytes.Equal(m.Policy, metadata.Policy)) {
 				return v2part.Descriptor{}, errors.New("merge changed metric identity/policy")
 			}
 			if compactMetadata(*m).after(compactMetadata(*metadata)) {
-				metadata = m
+				metadata, chosen = m, input
 			}
 		}
-		if err = json.Unmarshal(metadata.Policy, &policy); err != nil {
-			return v2part.Descriptor{}, err
-		}
+		config = *chosen.config
 		floor := max(metadata.LastUpdate/1e9, ttl)
 		key, err = v2part.Encode(c.key)
 		if err != nil {
@@ -539,7 +562,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 			setSlot(uint32(winner.Archive), winner.Slot)
 			occupied = false
-			expiry.data(rollupRecordExpiry(policy.Config, winner))
+			expiry.data(rollupRecordExpiry(config, winner))
 			return writer.SetRecordEncoded(key, winner)
 		}
 		records = records[:0]
@@ -555,7 +578,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		for len(records) > 0 {
 			input := heap.Pop(&records).(*mergeCursor)
 			r := input.record()
-			if r.Archive >= len(policy.Config.Archives) {
+			if r.Archive >= len(config.Archives) {
 				return v2part.Descriptor{}, errors.New("merge archive outside policy")
 			}
 			// A whole non-overlapping run can keep its exact dense encoding. Durable
@@ -564,7 +587,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(policy.Config, item) < floor {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < floor {
 						untouched = false
 						break
 					}
@@ -575,7 +598,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 					return v2part.Descriptor{}, err
 				}
 				for _, item := range input.records {
-					expiry.data(rollupRecordExpiry(policy.Config, item))
+					expiry.data(rollupRecordExpiry(config, item))
 				}
 				b := input.blocks[input.block-1]
 				setSlot(b.archive, b.slot)
@@ -583,7 +606,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(policy.Config, r) >= floor {
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= floor {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -616,8 +639,18 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			return v2part.Descriptor{}, err
 		}
 		setSlot(v2part.MetadataArchive, 0)
-		expiry.envelope(rollupMetricExpiry(policy.Config, metadata.Frontier.MaxTime))
-		metaBytes = AppendRollupMetadata(metaBytes[:0], *metadata)
+		expiry.envelope(rollupMetricExpiry(config, metadata.Frontier.MaxTime))
+		if tablePolicies[metadata.Frontier.Policy] && !rollupWriteDefinitions.Load() {
+			metaBytes = appendRollupMetadataSlim(metaBytes[:0], *metadata)
+		} else {
+			full := *metadata
+			if full.Policy == nil {
+				if full.Policy, _, err = appendRollupDefinition(nil, c.key.Metric, c.key.Group, full.Frontier.Policy); err != nil {
+					return v2part.Descriptor{}, err
+				}
+			}
+			metaBytes = AppendRollupMetadata(metaBytes[:0], full)
+		}
 		if err = writer.SetEncoded(key, metaBytes); err != nil {
 			return v2part.Descriptor{}, err
 		}

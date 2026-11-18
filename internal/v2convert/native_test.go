@@ -50,7 +50,7 @@ func TestNativeRecordsPreserveArchivesAndAuthority(t *testing.T) {
 			t.Fatal("baseline identity changed")
 		}
 		if key.Archive == v2part.MetadataArchive {
-			meta, err := v2core.DecodeRollupMetadata(row.Value)
+			meta, err := v2core.DecodeRollupMetadata(key.Metric, key.Group, row.Value)
 			if err != nil {
 				t.Fatal(err)
 			}
