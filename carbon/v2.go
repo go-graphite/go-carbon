@@ -315,6 +315,8 @@ func (app *App) startV2() error {
 	app.Carbonserver.RegisterInternalInfoHandler("v2-write", func() map[string]interface{} {
 		out := telemetry.report()
 		out["part_gc"] = v.store.Core.PartGCStats()
+		s := v.store.Core.Observe()
+		out["seal_size"] = map[string]uint64{"durable_seals": s.DurableSeals, "names": s.SealNames, "points": s.SealPoints}
 		if server := intake.Load(); server != nil {
 			out["receiver"] = server.Stats()
 		}

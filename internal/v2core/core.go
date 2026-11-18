@@ -263,6 +263,12 @@ type coreOwner struct {
 	sealRows                     int
 	sealCalls, sealNS            atomic.Uint64
 	sealing                      atomic.Bool
+	// Durable seals and their point-bearing names and points (seal size).
+	durableSeals, sealNames atomic.Uint64
+	sealPoints              atomic.Uint64
+	// expiries counts Expire callbacks that returned true, on any goroutine.
+	expiries atomic.Uint64
+	index    int // owner index, staggers time-based seal deadlines
 	// syncSeal keeps threshold seals on the owner loop (CORE_SYNC_SEAL=1).
 	// Otherwise a threshold seal freezes the head and seals it in the
 	// background while intake and pending publication continue.
@@ -433,7 +439,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
 			if hooks.Visible != nil {
 				o.visible = func(b []coreBatch) { hooks.Visible(s, b) }
 			}
@@ -522,7 +528,15 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				}
 				r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
 				r.stage = hooks.Stage
-				r.expire = hooks.Expire
+				if expire := hooks.Expire; expire != nil {
+					r.expire = func(p RollupPolicy, m RollupMetadata, now time.Time) bool {
+						if !expire(p, m, now) {
+							return false
+						}
+						o.expiries.Add(1)
+						return true
+					}
+				}
 				r.now = hooks.Now
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
@@ -973,11 +987,31 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	if sealInterval == 0 {
 		sealInterval = 10 * time.Second
 	}
-	deadline := time.Now().Add(sealInterval)
+	// Stagger time-based seals by owner index across one interval, so owners
+	// that start together never seal in one wave. Later deadlines restart
+	// from each seal, which keeps the spread. Row-triggered seals are unchanged.
+	deadline := time.Now().Add(sealInterval - sealInterval*time.Duration(o.index)/time.Duration(max(1, o.cfg.Shards)))
 	o.nextPoll = deadline
 	maintenanceDeadline := time.Now().Add(time.Second)
 	var headPublication, batchPublication time.Time
 	publishedBatches := 0
+	// Publication already shows each batch to o.visible once, and observers
+	// dedupe repeats. A seal reports only batches no publication reported,
+	// unless an expiry since its head began may have dropped an already
+	// reported name: then it repeats the whole set, as before, so observers
+	// re-add it. So visibility work is O(new batches), not O(head) per seal.
+	headExpiries := o.expiries.Load()
+	sealVisible := func(sealed []coreBatch, reported int, since uint64) {
+		if o.visible == nil {
+			return
+		}
+		if o.expiries.Load() != since {
+			reported = 0
+		}
+		if reported < len(sealed) {
+			o.visible(sealed[reported:])
+		}
+	}
 	type sealResult struct {
 		n   uint64
 		err error
@@ -986,10 +1020,12 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// are the immutable prefix batches[:len(flight.batches)] of the owner's
 	// array; intake appends after them until the part is published.
 	type sealFlight struct {
-		rows    []row
-		batches []coreBatch
-		next    coreFrontier
-		done    chan sealResult
+		rows     []row
+		batches  []coreBatch
+		next     coreFrontier
+		done     chan sealResult
+		reported int    // batches[:reported] already reached o.visible
+		expiries uint64 // o.expiries when this head began
 	}
 	var flight *sealFlight
 	var spareRows []row
@@ -1059,9 +1095,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if err := publishBatches(); err != nil {
 			return err
 		}
-		if o.visible != nil {
-			o.visible(f.batches)
-		}
+		sealVisible(f.batches, f.reported, f.expiries)
 		return nil
 	}
 	awaitFlight := func() error {
@@ -1103,7 +1137,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.ArchiveClock = max(next.ArchiveClock, b.Clock)
 		}
 		next.NextPart++
-		f := &sealFlight{rows: head, batches: batches[:len(batches):len(batches)], next: next, done: make(chan sealResult, 1)}
+		f := &sealFlight{rows: head, batches: batches[:len(batches):len(batches)], next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, len(batches)), expiries: headExpiries}
+		headExpiries = o.expiries.Load()
 		o.sealPubMu.Lock()
 		o.sealDurable = false
 		o.sealPubMu.Unlock()
@@ -1164,10 +1199,12 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.ArchiveClock = max(next.ArchiveClock, b.Clock)
 		}
 		next.NextPart++
+		reported, since := min(publishedBatches, len(batches)), headExpiries
 		n, err := o.sealBatches(head, batches, next)
 		if err != nil {
 			return err
 		}
+		headExpiries = o.expiries.Load()
 		o.meta = next
 		o.readGeneration++
 		o.publishFrontier(next)
@@ -1187,9 +1224,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if err := publishBatches(); err != nil {
 			return err
 		}
-		if o.visible != nil {
-			o.visible(sealedBatches)
-		}
+		sealVisible(sealedBatches, reported, since)
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}
@@ -1616,6 +1651,11 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	defer func() {
 		if !durable && plan.Abort != nil {
 			plan.Abort()
+		}
+		if durable {
+			o.durableSeals.Add(1)
+			o.sealNames.Add(uint64(plan.Names))
+			o.sealPoints.Add(uint64(len(head)))
 		}
 	}()
 	if o.plan != nil {

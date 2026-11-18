@@ -297,6 +297,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		offset += len(b.Points)
 		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
 	}
+	named := len(stages)
 	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
 	now := time.Now()
 	if r.now != nil {
@@ -338,6 +339,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		return coreSealPlan{}, err
 	}
 	r.stages = stages
+	out.Names = named
 	out.Abort = r.release
 	out.Commit = func() {
 		defer r.release()
