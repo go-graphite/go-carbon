@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,7 +35,7 @@ const sealedMergeFanIn = 16
 // has at most one merge in flight. The output may be smaller after pruning.
 // The default matches ClickHouse max_bytes_to_merge_at_max_space_in_pool
 // (150 GiB; VictoriaMetrics allows up to 1e12 B): monthly partitions then stay
-// at O(log16 bytes) parts per owner instead of a terminal tier of capped parts.
+// at O(log16 seals) parts per owner instead of a terminal tier of capped parts.
 func mergeMaxBytes() (uint64, error) {
 	n := uint64(150 << 30)
 	if s := os.Getenv("CORE_MERGE_MAX_BYTES"); s != "" {
@@ -161,8 +160,13 @@ func (e *coreEngine) runPartMerges(workers int) {
 	wg.Wait()
 }
 
-// Each size tier spans a factor of sixteen and retains at most fifteen quiescent
-// local parts per group/partition below the cap. Terminal parts trade bounded
+// Merge tiers are generations: a seal part is generation zero and a merge
+// output is one above its inputs. A merge outputs far fewer bytes than its
+// sixteen inputs (their metric envelopes collapse to one), so a size tier
+// re-selected its own outputs and rewrote each record several times per tier.
+// By generation, a record is rewritten at most once per tier (ClickHouse levels
+// parts by merge count). Each tier retains at most fifteen quiescent local
+// parts per group/partition below the cap. Terminal parts trade bounded
 // rewrite size for a larger read inventory until their time partition expires.
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	limit, _, err := effectiveMergeLimit(o.dir)
@@ -174,9 +178,9 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 
 func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
 	type tier struct {
-		group     v2part.Group
-		partition int64
-		size      int
+		group      v2part.Group
+		partition  int64
+		generation int
 	}
 	tiers := map[tier][]v2part.Descriptor{}
 	o.gc.mu.Lock()
@@ -201,7 +205,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		if origin.Class != LivePart {
 			continue
 		}
-		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
+		t := tier{d.Scope.Group, d.Scope.Partition, mergeTier(d)}
 		tiers[t] = append(tiers[t], d)
 	}
 	var chosen []v2part.Descriptor
@@ -229,7 +233,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 			}
 			total += d.Bytes
 		}
-		if fits && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
+		if fits && (chosen == nil || t.generation < best.generation || (t.generation == best.generation && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
 			chosen, best = parts, t
 		}
 	}
@@ -239,11 +243,33 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 	return chosen, nil
 }
 
+// A merge output's generation lives in the tail of its otherwise random part
+// ID, so it survives restarts with no descriptor field: older binaries read
+// the same canonical descriptor and treat the ID as opaque. Seal parts, and
+// merge outputs written before generations, lack the tag and are generation
+// zero. Eighty-eight random bits keep IDs unique.
+var partGenerationTag = [4]byte{0x9e, 0x4d, 0x47, 0x31}
+
+func partGeneration(id v2part.PartID) int {
+	if [4]byte(id[11:15]) != partGenerationTag {
+		return 0
+	}
+	return int(id[15])
+}
+
+func setPartGeneration(id *v2part.PartID, generation int) {
+	copy(id[11:15], partGenerationTag[:])
+	id[15] = byte(min(generation, 255))
+}
+
+// mergeTier is the selector's tier key; tests swap in size tiers.
+var mergeTier = func(d v2part.Descriptor) int { return partGeneration(d.Scope.Part) }
+
 // ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per
 // four hours, so expiry work stays a small, bounded share of merge service.
 const ttlRewriteSeconds = 4 * 3600
 
-// When no size-tier merge is due, rewrite the local part whose earliest data
+// When no tier merge is due, rewrite the local part whose earliest data
 // expiry has passed (ClickHouse TTL merge). Parts whose latest expiry has
 // passed are dropped whole by GC instead and are not rewritten.
 func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, limit uint64) ([]v2part.Descriptor, error) {
@@ -431,6 +457,16 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	if _, err = rand.Read(spec.Scope.Part[:]); err != nil {
 		return v2part.Descriptor{}, err
 	}
+	// A merge output is one generation above its inputs; a TTL rewrite of one
+	// part keeps its generation.
+	generation := 0
+	for _, d := range inputs {
+		generation = max(generation, partGeneration(d.Scope.Part))
+	}
+	if ttl == 0 {
+		generation++
+	}
+	setPartGeneration(&spec.Scope.Part, generation)
 	seen := map[struct {
 		archive uint32
 		digest  v2part.Digest

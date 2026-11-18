@@ -42,8 +42,13 @@ merges prune their expired records without a wholesale conversion.
 
 `CORE_MERGE_MAX_BYTES` is a positive runtime byte count, default 1073741824
 (1GiB). Automatic merges require sixteen same-source local parts in the same
-group, partition and size tier whose total compressed bytes fit the cap. A part
-above it is never selected. The output writer enforces the same limit including
+group, partition and merge generation whose total compressed bytes fit the cap.
+A seal part is generation zero and a merge output is one above its inputs (a
+TTL rewrite keeps its generation), so a record is rewritten at most once per
+generation even though merged envelopes shrink the output. The generation is a
+tag in the tail of the merge output's random part ID, so it survives restarts
+without a descriptor field; untagged parts are generation zero. A part above
+the cap is never selected. The output writer enforces the same limit including
 SST indexes/footer and aborts an oversized proposal without publishing it.
 Thus new staged SST space is at most one cap per active merge worker; old inputs
 remain protected by existing snapshot/grace fences. This does not bound disk

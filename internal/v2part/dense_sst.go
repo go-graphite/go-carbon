@@ -66,7 +66,7 @@ type denseSSTWorkspace struct {
 
 // Zstd levels for dense blocks. Merges and imports write parts that stay at
 // rest, so they keep the stronger level. A seal part is rewritten by the next
-// size-tier merge within minutes; it pays only the fast level. Each block
+// first-generation merge within minutes; it pays only the fast level. Each block
 // records its own type byte and a Zstd frame carries no level, so readers and
 // merges decode every level alike.
 const (
