@@ -147,6 +147,11 @@ func (q *coreQueue) pop() *corePacket {
 	}
 	return p
 }
+
+// peek returns the next packet without consuming it. Only the owner calls it.
+func (q *coreQueue) peek() *corePacket {
+	return q.slots[q.read%uint64(len(q.slots))].Load()
+}
 func (q *coreQueue) tryPush(p *corePacket) bool {
 	n := p.size()
 	used := q.written - q.released.Load()
@@ -268,7 +273,7 @@ type coreOwner struct {
 	// them, so no point is ever invisible or counted twice.
 	sealPubMu   sync.Mutex
 	sealDurable bool
-	trace                        bool
+	trace       bool
 }
 type coreFailure struct{ err error }
 type coreEngine struct {
@@ -1192,7 +1197,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	// thresholdSeal applies the size and time thresholds. A due seal never blocks on
 	// the one in flight: intake continues and the next seal starts as soon as
-	// the frozen part is published. Only the hard MaxRows limit waits.
+	// the frozen part is published. A packet that would pass the hard MaxRows
+	// limit stays queued until then, while the loop keeps publishing.
 	thresholdSeal := func() error {
 		if !asyncSeal {
 			return flush()
@@ -1204,6 +1210,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return nil
 		}
 		return startSeal()
+	}
+	// fullHead reports a data packet that the head cannot admit below MaxRows.
+	fullHead := func(p *corePacket, producer int) bool {
+		return p != nil && p.operation == nil && !p.stop && p.cursor > pending[producer] && len(head)+len(p.rows) > o.cfg.MaxRows
 	}
 	return func() (bool, bool) {
 		if failure == nil && flight != nil {
@@ -1251,6 +1261,18 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if stopped[producer] {
 				continue
 			}
+			if asyncSeal && failure == nil && flight != nil && fullHead(q.peek(), producer) {
+				// Backpressure without blocking the loop: the packet stays queued
+				// and its producer waits on the full queue, as for any full queue.
+				// The loop keeps publishing the admitted head every second and
+				// polling the flight; the seal goroutine wakes it when done.
+				if failure = pollFlight(); failure != nil {
+					o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
+				} else if flight != nil {
+					q.ready.Or(q.readyMask)
+					continue
+				}
+			}
 			p := q.pop()
 			if p == nil {
 				continue
@@ -1286,7 +1308,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if failure == nil && p.cursor > pending[producer] {
 				if len(head)+len(p.rows) > o.cfg.MaxRows {
 					if asyncSeal {
-						// Backpressure: one frozen head in flight per owner.
+						// The loop above left this packet queued while a flight ran;
+						// the flight is published, so freeze the full head now.
 						failure = awaitFlight()
 						if failure == nil {
 							failure = startSeal()
