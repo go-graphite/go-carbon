@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 
 	"strings"
@@ -38,9 +39,14 @@ func (CoreRecords) Convert(e Entry) (Record, error) {
 		return Record{}, errors.New("unsupported core rollup partition")
 	}
 	if k.Archive == math.MaxUint32 {
-		if _, err := v2core.DecodeRollupMetadata(k.Metric, k.Group, e.Value); err != nil {
+		// Envelopes convert to the canonical encoding of their decoded record,
+		// so records and digests do not depend on how a source stored them
+		// (legacy JSON, full binary, or dense parts without the definition).
+		m, err := v2core.DecodeRollupMetadata(k.Metric, k.Group, e.Value)
+		if err != nil {
 			return Record{}, errors.New("invalid core metadata")
 		}
+		return Record{e.Key, v2core.AppendRollupMetadata(nil, m)}, nil
 	} else if _, err = sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, e.Value); err != nil {
 		return Record{}, err
 	}
@@ -190,3 +196,19 @@ func (p *partFile) Write(b []byte) error {
 }
 func (p *partFile) Finish() error { return errors.Join(p.f.Sync(), p.f.Close()) }
 func (p *partFile) Abort()        { p.f.Close() }
+
+// sameValue reports whether two stored values of key hold the same logical
+// record. Dense parts store envelopes without the definition, so envelopes
+// compare decoded, definition bytes included.
+func sameValue(key, a, b []byte) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+	k, err := v2part.Decode(key)
+	if err != nil || k.Archive != v2part.MetadataArchive {
+		return false
+	}
+	x, errA := v2core.DecodeRollupMetadata(k.Metric, k.Group, a)
+	y, errB := v2core.DecodeRollupMetadata(k.Metric, k.Group, b)
+	return errA == nil && errB == nil && reflect.DeepEqual(x, y)
+}

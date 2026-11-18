@@ -159,7 +159,7 @@ func ConvertSST(ctx context.Context, source string, o Options) (receipt Receipt,
 	for _, file := range receipt.Files {
 		if err = o.Writer.Read(ctx, filepath.Join(stage, file.Name), func(r Record) error {
 			i, ok := slices.BinarySearchFunc(records, r, func(a, b Record) int { return bytes.Compare(a.Key, b.Key) })
-			if !ok || seenRows[i] || !bytes.Equal(records[i].Value, r.Value) {
+			if !ok || seenRows[i] || !sameValue(r.Key, records[i].Value, r.Value) {
 				return errors.New("writer readback differs from transformed source")
 			}
 			seenRows[i] = true
