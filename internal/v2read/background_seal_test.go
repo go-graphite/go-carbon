@@ -24,14 +24,29 @@ import (
 // bit-exact against whisper: the frozen head is never invisible and never
 // counted twice. Concurrent readers keep fetching through all seals.
 func TestBackgroundSealRendersMatchClassic(t *testing.T) {
+	testBackgroundSealRendersMatchClassic(t, 1<<20, 24, time.Hour)
+}
+
+// TestBackgroundSealRendersMatchClassicLargeSeals repeats it with the largest
+// row cap and a 20 s interval, so the held seals are time-only seals of a
+// head that was published many times. Test config only; defaults unchanged.
+func TestBackgroundSealRendersMatchClassicLargeSeals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for 20 s seal intervals")
+	}
+	testBackgroundSealRendersMatchClassic(t, 2<<20, 2<<20, 20*time.Second)
+}
+
+func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, interval time.Duration) {
 	rng := rand.New(rand.NewSource(1559))
 	now := int64(1794700800)
 	clock := now
 	retentions := whisper.MustParseRetentionDefs("1s:1d,1m:30d,1h:1y")
 	const metrics = 10
 	cfg := testConfig()
-	cfg.SealMaxRows = 24
-	cfg.SealInterval = time.Hour
+	cfg.MaxRows = maxRows
+	cfg.SealMaxRows = sealRows
+	cfg.SealInterval = interval
 	var orders sync.Map
 	var sealStarts, commits atomic.Int64
 	var armed, holdSeal, holdCommit atomic.Bool
