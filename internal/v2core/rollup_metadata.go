@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 var rollupMetadataMagic = []byte{'R', 'U', 'M', 1}
@@ -44,10 +45,16 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 // appendMetadata emits exactly the public metadata encoding, with the policy
 // appended directly from its immutable identity rather than a temporary copy.
 func (h *PolicyIdentity) appendMetadata(dst []byte, m RollupMetadata) []byte {
+	return appendPolicyMetadata(dst, m, h.policy.Name, h.plain, h.policy.policyDefinition)
+}
+
+// appendPolicyMetadata is appendMetadata from a seal stage's copied identity
+// fields, so the encoder never dereferences the metric's PolicyIdentity.
+func appendPolicyMetadata(dst []byte, m RollupMetadata, name partsformat.ID, plain bool, def *policyDefinition) []byte {
 	m.Policy = nil
 	dst = AppendRollupMetadata(dst, m)
 	start := len(dst)
-	dst = h.appendDefinition(dst)
+	dst = appendPolicyDefinition(dst, name, plain, def)
 	binary.BigEndian.PutUint32(dst[start-4:start], uint32(len(dst)-start))
 	return dst
 }

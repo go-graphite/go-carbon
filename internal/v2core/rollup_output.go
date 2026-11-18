@@ -77,16 +77,16 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
 		r.coverage = map[string]*rollupCoverage{}
 	}
-	key := func(m *rollupMetric, partition int64, archive uint32, slot int64) []byte {
+	key := func(partition int64, archive uint32, slot int64) []byte {
 		physicalPart := part
 		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
 		start := len(r.arena)
-		r.arena = append(r.arena, m.policy.keyPrefix...)
-		r.arena = binary.BigEndian.AppendUint16(r.arena, m.vshard)
+		r.arena = append(r.arena, s.def.keyPrefix...)
+		r.arena = binary.BigEndian.AppendUint16(r.arena, s.vshard)
 		r.arena = binary.BigEndian.AppendUint64(r.arena, uint64(partition)^(1<<63))
 		r.arena = append(r.arena, physicalPart[:]...)
-		r.arena = binary.BigEndian.AppendUint32(r.arena, uint32(len(m.policy.Name)))
-		r.arena = append(r.arena, m.policy.Name...)
+		r.arena = binary.BigEndian.AppendUint32(r.arena, uint32(len(s.name)))
+		r.arena = append(r.arena, s.name...)
 		r.arena = append(r.arena, make([]byte, 16)...)
 		encoded := r.arena[start:len(r.arena):len(r.arena)]
 		tail := len(encoded) - 16
@@ -94,12 +94,11 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
 		return encoded
 	}
-	m := s.metric
-	group := string(m.policy.Group)
+	group := string(s.def.Group)
 	if stage != nil {
 		stage("rollup")
 	}
-	schema := m.schema()
+	schema := s.def.prepared.Config()
 	last := schema.Archives[len(schema.Archives)-1]
 	horizon := last.Step * last.Count
 	for _, b := range s.batches {
@@ -135,14 +134,14 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	}
 	r.partitions = partitions
 	start := len(r.arena)
-	r.arena = m.appendMetadata(r.arena, s.next)
+	r.arena = appendPolicyMetadata(r.arena, s.next, s.name, s.plain, s.def)
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	for _, partition := range partitions {
 		filePtr, coverage := r.file(r.fileID(group, partition))
 		physicalPart := part
 		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
 		if len(coverage.seen) == 0 {
-			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: s.def.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
 			coverage.spec.Source.MinOrder = math.MaxUint64
 		}
 		digest := s.next.Frontier.Policy
@@ -175,7 +174,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
-			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record, Name: m.policy.Name})
+			file = append(file, coreKV{Key: key(partition, uint32(record.Archive), record.Slot), Record: record, Name: s.name})
 			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
@@ -183,7 +182,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata, Name: m.policy.Name})
+		*filePtr = append(file, coreKV{Key: key(partition, rollupMetadataArchive, 0), Value: metadata, Name: s.name})
 	}
 
 	return nil
@@ -233,8 +232,8 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts)
 			for _, ref := range lane.ranked {
 				s := ref.rollupStage
-				m := s.metric
-				view, ranges := m.slots.View, m.slots.Range
+				slots := &s.slots
+				view, ranges := slots.View, slots.Range
 				var readErr error
 				if r.db != nil {
 					// Every installed sample is at/before Frontier.MaxTime; the
@@ -244,10 +243,10 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						if readErr != nil {
 							return dst
 						}
-						if result, ok := m.slots.RecentRange(a, start, end, dst); ok {
+						if result, ok := slots.RecentRange(a, start, end, dst); ok {
 							return result
 						}
-						result, err := lane.windows.rangeSamples(&history, m, a, start, end)
+						result, err := lane.windows.rangeSamples(&history, s.metric, a, start, end)
 						readErr = err
 						return append(dst, result...)
 					}
@@ -259,7 +258,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						idleThrough = r.now().Unix()
 					}
 				}
-				plan, through, err := m.policy.prepared.PlanClosedInto(lane.records[len(lane.records):], s.next.Frontier, s.next.ClosedThrough, idleThrough, view, ranges, s.batches, &lane.workspace)
+				plan, through, err := s.def.prepared.PlanClosedInto(lane.records[len(lane.records):], s.next.Frontier, s.next.ClosedThrough, idleThrough, view, ranges, s.batches, &lane.workspace)
 
 				s.next.Version, s.next.ClosedThrough = 3, through
 				if readErr != nil {
