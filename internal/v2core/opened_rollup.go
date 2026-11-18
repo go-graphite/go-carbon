@@ -38,6 +38,22 @@ type openedRollupPart struct {
 // OpenRollupParts performs no file I/O for ordinary descriptor publications.
 // Legacy and copied-part manifests retain their existing authority resolver.
 func OpenRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cacheLimit ...int64) (*OpenedRollupParts, error) {
+	limit := int64(4 << 20)
+	if len(cacheLimit) > 0 {
+		limit = max(0, min(limit, cacheLimit[0]))
+	}
+	return openRollupParts(ctx, snapshot, inventory, prior, identities, nil, limit)
+}
+
+// OpenRollupPartsWithCache opens parts on a caller-owned block cache that
+// several owners may share; each part takes a reference until Close. Pebble
+// keys cached blocks by a per-reader cache ID, so parts never alias. A prior
+// publication's cache is kept. accountBytes is the share charged to reads.
+func OpenRollupPartsWithCache(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cache *pebble.Cache, accountBytes int64) (*OpenedRollupParts, error) {
+	return openRollupParts(ctx, snapshot, inventory, prior, identities, cache, accountBytes)
+}
+
+func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cache *pebble.Cache, limit int64) (*OpenedRollupParts, error) {
 	if inventory == nil {
 		return nil, nil
 	}
@@ -68,11 +84,11 @@ func OpenRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 		out.blockCache = prior.blockCache
 		out.cacheBytes = prior.cacheBytes
 		out.blockCache.Ref()
+	} else if cache != nil {
+		out.blockCache = cache
+		out.cacheBytes = limit
+		out.blockCache.Ref()
 	} else {
-		limit := int64(4 << 20)
-		if len(cacheLimit) > 0 {
-			limit = max(0, min(limit, cacheLimit[0]))
-		}
 		out.cacheBytes = limit
 		out.blockCache = pebble.NewCacheWithShards(limit, 1)
 	}
