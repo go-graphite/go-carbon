@@ -2,6 +2,7 @@ package v2daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -238,6 +239,22 @@ func (p *Producer) skipSegments(paths []string) (int, error) {
 	for _, f := range frontiers[1:] {
 		durable = min(durable, f[p.index])
 	}
+	// Skipped segments are not decoded, so keep full replay's rejection of
+	// repeated or regressing segments: first-record cursors must increase.
+	var last uint64
+	for _, path := range paths {
+		cursor, ok, err := segmentCursor(path)
+		if err != nil {
+			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(path), err)
+		}
+		if !ok {
+			continue
+		}
+		if cursor <= last {
+			return 0, errors.New("repeated or regressing journal cursor")
+		}
+		last = cursor
+	}
 	for j := len(paths) - 1; j > 0; j-- {
 		start, order, ok, err := p.segmentStart(paths[j])
 		if err != nil {
@@ -253,6 +270,35 @@ func (p *Producer) skipSegments(paths []string) (int, error) {
 		return j, nil
 	}
 	return 0, nil
+}
+
+// segmentCursor reads the first record's cursor from its plain header without
+// decoding the record. ok is false for an empty segment or a short prefix.
+func segmentCursor(path string) (uint64, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false, err
+	}
+	defer f.Close()
+	var b [4 + 4 + binary.MaxVarintLen64]byte
+	n, err := io.ReadFull(f, b[:])
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return 0, false, err
+	}
+	if n < 9 {
+		return 0, false, nil
+	}
+	if !bytes.Equal(b[4:8], applicationMagic) {
+		return 0, false, errors.New("invalid original application envelope")
+	}
+	cursor, m := binary.Uvarint(b[8:n])
+	if m <= 0 {
+		return 0, false, nil
+	}
+	if cursor == 0 {
+		return 0, false, errors.New("invalid original application envelope")
+	}
+	return cursor, true, nil
 }
 
 // segmentStart decodes a segment's first complete record. It returns the cursor
