@@ -65,14 +65,13 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 	var shards []uint16
 	for _, segment := range part.Segments {
 		for _, kv := range segment {
-			m := kv.metric
-			if len(shards) == 0 || shards[len(shards)-1] != m.vshard {
-				shards = append(shards, m.vshard)
+			if len(shards) == 0 || shards[len(shards)-1] != kv.vshard {
+				shards = append(shards, kv.vshard)
 			}
 			if kv.record != nil {
-				err = w.SetPlannedRecord(m.vshard, m.policy.Name, kv.record)
+				err = w.SetPlannedRecord(kv.vshard, kv.name, kv.record)
 			} else {
-				err = w.SetPlannedMetadata(m.vshard, m.policy.Name, kv.value)
+				err = w.SetPlannedMetadata(kv.vshard, kv.name, kv.value)
 			}
 			if err != nil {
 				return v2part.Descriptor{}, err

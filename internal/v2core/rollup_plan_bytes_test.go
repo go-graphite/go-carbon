@@ -3,6 +3,7 @@ package v2core
 import (
 	"encoding/binary"
 
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -14,14 +15,36 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	if err != nil {
 		return out, err
 	}
-	out.Files, out.PartSpecs = expandPlannedParts(out.Parts)
+	out.Files, out.PartSpecs = expandPlannedParts(out.Parts, plannedOwners(r.stages))
 	out.Parts = nil
 	return out, nil
 }
 
+// plannedOwners maps each planned tuple back to its metric through the
+// planner's stages: records by address, envelopes by name. The reference key
+// builder takes the name and vshard from that metric, not from the tuple, so a
+// tuple carrying the wrong name or vshard changes the reference bytes.
+func plannedOwners(stages []rollupStage) func(plannedKV) *rollupMetric {
+	byRecord := map[*sealrollup.Record]*rollupMetric{}
+	byName := map[v2part.ID]*rollupMetric{}
+	for i := range stages {
+		s := &stages[i]
+		for j := range s.records {
+			byRecord[&s.records[j]] = s.metric
+		}
+		byName[s.metric.policy.Name] = s.metric
+	}
+	return func(kv plannedKV) *rollupMetric {
+		if kv.record != nil {
+			return byRecord[kv.record]
+		}
+		return byName[kv.name]
+	}
+}
+
 // expandPlannedParts is the pre-handoff key builder, kept as the reference
 // byte path: one full GCP3 key per record and per envelope.
-func expandPlannedParts(parts []plannedRollupPart) ([][]coreKV, []v2part.Spec) {
+func expandPlannedParts(parts []plannedRollupPart, owner func(plannedKV) *rollupMetric) ([][]coreKV, []v2part.Spec) {
 	var files [][]coreKV
 	var specs []v2part.Spec
 	for _, part := range parts {
@@ -33,7 +56,10 @@ func expandPlannedParts(parts []plannedRollupPart) ([][]coreKV, []v2part.Spec) {
 		var file []coreKV
 		for _, segment := range part.Segments {
 			for _, kv := range segment {
-				m := kv.metric
+				m := owner(kv)
+				if m == nil {
+					panic("planned tuple without a planner stage")
+				}
 				archive, slot := rollupMetadataArchive, int64(0)
 				if kv.record != nil {
 					archive, slot = uint32(kv.record.Archive), kv.record.Slot
