@@ -77,6 +77,9 @@ func (r *wspConfigRetriever) MetricAggrConf(metric string) (whisper.AggregationM
 type App struct {
 	v2              *v2Runtime
 	v2CollectorOnce sync.Once
+	// v2Now replaces the v2 core's rollup clock (window closure, idle
+	// maintenance) in tests; nil uses wall time.
+	v2Now func() time.Time
 	sync.RWMutex
 	ConfigFilename         string
 	Config                 *Config

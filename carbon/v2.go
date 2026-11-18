@@ -121,6 +121,9 @@ func (app *App) startV2() error {
 		telemetry.visible(owner, batches)
 		updates.visible(owner, batches)
 	}}
+	if app.v2Now != nil {
+		hooks.Now = app.v2Now
+	}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
