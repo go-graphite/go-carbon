@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
@@ -231,8 +232,8 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
 			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts)
-			for _, ref := range lane.ranked {
-				s := ref.rollupStage
+			for j := range lane.ranked {
+				s := lane.ranked[j].rollupStage
 				slots := &s.slots
 				view, ranges := slots.View, slots.Range
 				var readErr error
@@ -282,6 +283,9 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 				if lane.err = lane.output.appendStage(s, part, r.stage); lane.err != nil {
 					return
 				}
+				// The rank key is spent; commitStages installs in metric address
+				// order, so record the address while the stage is resident.
+				lane.ranked[j].key = uint64(uintptr(unsafe.Pointer(s.metric)))
 			}
 		}
 		if workers == 1 {
@@ -381,11 +385,16 @@ func compareRollupMetrics(x, y *rollupMetric) int {
 
 // State installation is independent per metric. The owner joins every lane
 // before publishing names, snapshots or the durable frontier to consumers.
+// Each lane installs in metric address order (planStages left the addresses
+// in the rank keys): rank order scatters across the heap, while address order
+// walks it in one direction, so neighbouring metrics share pages and lines.
 func (r *coreRollups) commitStages() {
 	var wg sync.WaitGroup
 	for i := range r.lanes {
 		work := func() {
-			for _, ref := range r.lanes[i].ranked {
+			lane := &r.lanes[i]
+			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts)
+			for _, ref := range lane.ranked {
 				s := ref.rollupStage
 				m := s.metric
 				if r.db != nil {

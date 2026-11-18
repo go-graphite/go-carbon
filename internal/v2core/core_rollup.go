@@ -184,7 +184,11 @@ type rollupStage struct {
 	sortKey uint64
 	vshard  uint16
 	plain   bool
+	// metric, records and next are all commitStages reads, kept adjacent so
+	// the commit pass touches as few stage lines as possible.
 	metric  *rollupMetric
+	records []sealrollup.Record
+	next    RollupMetadata
 	// Hot per-name fields, copied by newRollupStage while plan has the metric
 	// and its identity resident. planStages and appendStage read only the
 	// stage, so a seal touches the scattered metric and identity once. slots
@@ -192,9 +196,7 @@ type rollupStage struct {
 	def        *policyDefinition
 	name       partsformat.ID
 	slots      sealrollup.Slots
-	next       RollupMetadata
 	batches    []sealrollup.Batch
-	records    []sealrollup.Record
 	fresh      bool
 	batchCount int
 }
