@@ -105,8 +105,8 @@ func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 func (r *coreRollups) release() {
 	for i := range r.lanes {
 		r.lanes[i].output.release()
-		clear(r.lanes[i].ordered)
-		r.lanes[i].ordered = r.lanes[i].ordered[:0]
+		clear(r.lanes[i].ranked)
+		r.lanes[i].ranked = r.lanes[i].ranked[:0]
 	}
 	for _, coverage := range r.coverage {
 		clear(coverage.seen)
@@ -114,13 +114,10 @@ func (r *coreRollups) release() {
 	}
 	clear(r.stages)
 	r.stages = r.stages[:0]
-	clear(r.ordered)
-	r.ordered = r.ordered[:0]
 	clear(r.batches)
 	r.batches = r.batches[:0]
 	clear(r.positions)
 	clear(r.pendingNames)
-	r.order.reset()
 	for group, file := range r.files {
 		clear(file)
 		r.files[group] = file[:0]

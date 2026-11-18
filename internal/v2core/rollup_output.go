@@ -214,16 +214,14 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 		r.lanes = slices.Grow(r.lanes, workers-len(r.lanes))[:workers]
 	}
 	for i := range r.lanes {
-		r.lanes[i].ordered = r.lanes[i].ordered[:0]
+		r.lanes[i].ranked = r.lanes[i].ranked[:0]
 	}
-	// plan assigned sort keys while each metric was hot; only group ranks
-	// remain, and lanes follow the vshard already held in the route key.
-	rank := r.order.ranks()
+	// plan assigned rank keys while each metric was hot; lanes follow the
+	// vshard, and the canonical order within a lane is the key order.
 	for i := range stages {
 		s := &stages[i]
-		s.sortGroup = rank[s.sortGroup]
-		lane := int(s.sortRouteName>>32) * workers / 4096
-		r.lanes[lane].ordered = append(r.lanes[lane].ordered, rollupStageRef{group: s.sortGroup, route: s.sortRouteName, prefix: s.sortPrefix, rollupStage: s})
+		lane := int(s.vshard) * workers / 4096
+		r.lanes[lane].ranked = append(r.lanes[lane].ranked, rollupRankRef{key: s.sortKey, rollupStage: s})
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -232,8 +230,8 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			history := rollupHistoryReader{db: r.db}
 			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
-			lane.ordered, lane.scratch = sortRollupStageRefs(lane.ordered, lane.scratch, &lane.counts, len(r.order.groups))
-			for _, ref := range lane.ordered {
+			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts)
+			for _, ref := range lane.ranked {
 				s := ref.rollupStage
 				m := s.metric
 				view, ranges := m.slots.View, m.slots.Range
@@ -353,215 +351,6 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	return out, nil
 }
 
-// rollupStageOrder assigns canonical sort keys while each stage's metric and
-// name are hot, so planning never revisits catalog pointers to sort.
-// Groups get provisional first-seen ids here; ranks orders them canonically.
-type rollupStageOrder struct {
-	groups []partsformat.Group
-	index  map[partsformat.Group]uint32
-	last   uint32
-	rank   []uint32
-}
-
-func (o *rollupStageOrder) reset() {
-	clear(o.groups)
-	o.groups = o.groups[:0]
-	clear(o.index)
-	o.last = 0
-}
-
-func (o *rollupStageOrder) key(s *rollupStage) {
-	m := s.metric
-	g := m.policy.Group
-	id := o.last
-	if int(id) >= len(o.groups) || o.groups[id] != g {
-		found := false
-		if o.index != nil {
-			id, found = o.index[g]
-		} else {
-			for i := range o.groups {
-				if o.groups[i] == g {
-					id, found = uint32(i), true
-					break
-				}
-			}
-		}
-		if !found {
-			id = uint32(len(o.groups))
-			o.groups = append(o.groups, g)
-			if o.index != nil {
-				o.index[g] = id
-			} else if len(o.groups) > 8 {
-				o.index = make(map[partsformat.Group]uint32, len(o.groups))
-				for i, group := range o.groups {
-					o.index[group] = uint32(i)
-				}
-			}
-		}
-		o.last = id
-	}
-	s.sortGroup = id
-	s.sortName = string(m.policy.Name)
-	s.sortRouteName = uint64(m.vshard)<<32 | uint64(len(s.sortName))
-	var prefix [16]byte
-	copy(prefix[:], s.sortName)
-	s.sortPrefix = [2]uint64{binary.BigEndian.Uint64(prefix[:8]), binary.BigEndian.Uint64(prefix[8:])}
-}
-
-// ranks maps provisional group ids to the canonical (length, bytes) order.
-func (o *rollupStageOrder) ranks() []uint32 {
-	ids := make([]uint32, len(o.groups))
-	for i := range ids {
-		ids[i] = uint32(i)
-	}
-	slices.SortFunc(ids, func(a, b uint32) int {
-		x, y := o.groups[a], o.groups[b]
-		if len(x) != len(y) {
-			return len(x) - len(y)
-		}
-		if x < y {
-			return -1
-		}
-		if x > y {
-			return 1
-		}
-		return 0
-	})
-	o.rank = slices.Grow(o.rank[:0], len(ids))[:len(ids)]
-	for rank, id := range ids {
-		o.rank[id] = uint32(rank)
-	}
-	return o.rank
-}
-
-func prepareRollupStageOrder(stages []rollupStage) {
-	var o rollupStageOrder
-	for i := range stages {
-		o.key(&stages[i])
-	}
-	rank := o.ranks()
-	for i := range stages {
-		stages[i].sortGroup = rank[stages[i].sortGroup]
-	}
-}
-
-// rollupStageRef carries a stage's sort keys inline, so sorting compares a
-// contiguous array and touches stage memory only for long equal prefixes.
-type rollupStageRef struct {
-	group  uint32
-	route  uint64
-	prefix [2]uint64
-	*rollupStage
-}
-
-// sortRollupStageRefs buckets refs by (group rank, vshard) in one counting
-// pass, then sorts each small bucket by length, prefix and name. The result is
-// the compareRollupStageRefs order; scratch is returned for reuse.
-func sortRollupStageRefs(refs, scratch []rollupStageRef, counts *[]int, groups int) ([]rollupStageRef, []rollupStageRef) {
-	const vshards = 4096
-	if len(refs) < 256 || groups > 16 {
-		slices.SortFunc(refs, compareRollupStageRefs)
-		return refs, scratch
-	}
-	buckets := groups * vshards
-	count := slices.Grow((*counts)[:0], buckets+1)[:buckets+1]
-	clear(count)
-	*counts = count
-	for i := range refs {
-		vshard := refs[i].route >> 32
-		if vshard >= vshards || int(refs[i].group) >= groups {
-			slices.SortFunc(refs, compareRollupStageRefs)
-			return refs, scratch
-		}
-		count[int(refs[i].group)*vshards+int(vshard)+1]++
-	}
-	for i := 1; i <= buckets; i++ {
-		count[i] += count[i-1]
-	}
-	out := slices.Grow(scratch[:0], len(refs))[:len(refs)]
-	for i := range refs {
-		b := int(refs[i].group)*vshards + int(refs[i].route>>32)
-		out[count[b]] = refs[i]
-		count[b]++
-	}
-	start := 0
-	for b := 0; b < buckets; b++ {
-		end := count[b]
-		if end-start > 1 {
-			slices.SortFunc(out[start:end], compareRollupStageRefs)
-		}
-		start = end
-	}
-	clear(refs)
-	return out, refs[:0]
-}
-
-func compareRollupStageRefs(a, b rollupStageRef) int {
-	if a.group != b.group {
-		if a.group < b.group {
-			return -1
-		}
-		return 1
-	}
-	if a.route != b.route {
-		if a.route < b.route {
-			return -1
-		}
-		return 1
-	}
-	for i := range a.prefix {
-		if a.prefix[i] != b.prefix[i] {
-			if a.prefix[i] < b.prefix[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	if a.route&math.MaxUint32 <= 16 {
-		return 0
-	}
-	if a.sortName[16:] < b.sortName[16:] {
-		return -1
-	}
-	if a.sortName[16:] > b.sortName[16:] {
-		return 1
-	}
-	return 0
-}
-
-func compareRollupStages(a, b *rollupStage) int {
-	if a.sortGroup != b.sortGroup {
-		if a.sortGroup < b.sortGroup {
-			return -1
-		}
-		return 1
-	}
-	if a.sortRouteName != b.sortRouteName {
-		if a.sortRouteName < b.sortRouteName {
-			return -1
-		}
-		return 1
-	}
-	for i := range a.sortPrefix {
-		if a.sortPrefix[i] != b.sortPrefix[i] {
-			if a.sortPrefix[i] < b.sortPrefix[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	if len(a.sortName) <= 16 {
-		return 0
-	}
-	if a.sortName[16:] < b.sortName[16:] {
-		return -1
-	}
-	if a.sortName[16:] > b.sortName[16:] {
-		return 1
-	}
-	return 0
-}
-
 func compareRollupMetrics(x, y *rollupMetric) int {
 	// Most comparisons share one interned definition, including its group.
 	if x.policy.policyDefinition != y.policy.policyDefinition {
@@ -596,7 +385,7 @@ func (r *coreRollups) commitStages() {
 	var wg sync.WaitGroup
 	for i := range r.lanes {
 		work := func() {
-			for _, ref := range r.lanes[i].ordered {
+			for _, ref := range r.lanes[i].ranked {
 				s := ref.rollupStage
 				m := s.metric
 				if r.db != nil {
