@@ -16,8 +16,24 @@ import (
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
+// plannedKV is one planned archive record, or with a nil record the metric's
+// envelope, of a rollup part. The part writer formats its key from the metric
+// and the record; the planner keeps no key bytes.
+type plannedKV struct {
+	metric *rollupMetric
+	record *sealrollup.Record
+	value  []byte
+}
+
+// plannedRollupPart is one group/partition part: lane segments in lane order,
+// which is key order because lanes own ascending disjoint vshard ranges.
+type plannedRollupPart struct {
+	Spec     partsformat.Spec
+	Segments [][]plannedKV
+}
+
 type rollupOutput struct {
-	files       map[string]*[]coreKV
+	files       map[string]*[]plannedKV
 	arena       []byte
 	definitions map[[32]byte][]partsformat.ArchivePolicy
 	coverage    map[string]*rollupCoverage
@@ -31,17 +47,17 @@ type rollupOutput struct {
 	// Stages arrive sorted by group and mostly share one month: keep the
 	// current file and coverage rather than hashing the file ID per stage.
 	curFileID   string
-	curFile     *[]coreKV
+	curFile     *[]plannedKV
 	curCoverage *rollupCoverage
 }
 
-func (r *rollupOutput) file(fileID string) (*[]coreKV, *rollupCoverage) {
+func (r *rollupOutput) file(fileID string) (*[]plannedKV, *rollupCoverage) {
 	if r.curFile != nil && fileID == r.curFileID {
 		return r.curFile, r.curCoverage
 	}
 	file := r.files[fileID]
 	if file == nil {
-		file = new([]coreKV)
+		file = new([]plannedKV)
 		r.files[fileID] = file
 	}
 	coverage := r.coverage[fileID]
@@ -73,26 +89,9 @@ func (r *rollupOutput) fileID(group string, partition int64) string {
 
 func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
-		r.files = map[string]*[]coreKV{}
+		r.files = map[string]*[]plannedKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
 		r.coverage = map[string]*rollupCoverage{}
-	}
-	key := func(m *rollupMetric, partition int64, archive uint32, slot int64) []byte {
-		physicalPart := part
-		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
-		start := len(r.arena)
-		r.arena = append(r.arena, m.policy.keyPrefix...)
-		r.arena = binary.BigEndian.AppendUint16(r.arena, m.vshard)
-		r.arena = binary.BigEndian.AppendUint64(r.arena, uint64(partition)^(1<<63))
-		r.arena = append(r.arena, physicalPart[:]...)
-		r.arena = binary.BigEndian.AppendUint32(r.arena, uint32(len(m.policy.Name)))
-		r.arena = append(r.arena, m.policy.Name...)
-		r.arena = append(r.arena, make([]byte, 16)...)
-		encoded := r.arena[start:len(r.arena):len(r.arena)]
-		tail := len(encoded) - 16
-		binary.BigEndian.PutUint32(encoded[tail:], archive)
-		binary.BigEndian.PutUint64(encoded[tail+4:], uint64(slot)^(1<<63))
-		return encoded
 	}
 	m := s.metric
 	group := string(m.policy.Group)
@@ -176,7 +175,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
-			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record, Name: m.policy.Name})
+			file = append(file, plannedKV{metric: m, record: record})
 			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
@@ -184,7 +183,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata, Name: m.policy.Name})
+		*filePtr = append(file, plannedKV{metric: m, value: metadata})
 	}
 
 	return nil
@@ -298,7 +297,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 		}
 	}
 	if r.files == nil {
-		r.files = map[string][]coreKV{}
+		r.files = map[string][][]plannedKV{}
 	}
 	if r.coverage == nil {
 		r.coverage = map[string]*rollupCoverage{}
@@ -311,7 +310,8 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			if len(*file) == 0 {
 				continue
 			}
-			r.files[group] = append(r.files[group], *file...)
+			// Segments reference lane storage, valid through Commit/Abort.
+			r.files[group] = append(r.files[group], *file)
 			src := lane.output.coverage[group]
 			dst := r.coverage[group]
 			if dst == nil {
@@ -346,8 +346,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	slices.Sort(keys)
 	out := coreSealPlan{}
 	for _, group := range keys {
-		out.Files = append(out.Files, r.files[group])
-		out.PartSpecs = append(out.PartSpecs, r.coverage[group].spec)
+		out.Parts = append(out.Parts, plannedRollupPart{Spec: r.coverage[group].spec, Segments: r.files[group]})
 	}
 	return out, nil
 }

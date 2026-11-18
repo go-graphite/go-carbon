@@ -25,13 +25,12 @@ type PolicyIdentity struct {
 	nameHash uint64
 }
 
-// Definitions and key prefixes belong to the catalog epoch, rather than a name.
+// Definitions belong to the catalog epoch, rather than a name.
 // Only the name and numeric identity vary between handles.
 type policyDefinition struct {
-	suffix    []byte
-	prepared  *sealrollup.Prepared
-	keyPrefix []byte
-	Group     partsformat.Group
+	suffix   []byte
+	prepared *sealrollup.Prepared
+	Group    partsformat.Group
 }
 type policyIDPage [1024]atomic.Pointer[PolicyIdentity]
 
@@ -91,8 +90,7 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
 	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
-	prefix, _, _ := partsformat.GroupRange(p.Group)
-	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, keyPrefix: prefix, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: NameHash(string(p.Name))}
+	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: NameHash(string(p.Name))}
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {

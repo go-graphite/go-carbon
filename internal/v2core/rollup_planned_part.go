@@ -49,3 +49,40 @@ func writePlannedRollupPart(path string, file []coreKV, spec v2part.Spec) (v2par
 	d.VShards = shards
 	return d, d.Validate()
 }
+
+// writePlannedRollupTuples writes the planner's tuples straight into the shared
+// dense writer: each key is formatted once, only where a run or envelope
+// starts, and the writer still validates order, routing and scope. The part
+// bytes and descriptor equal writePlannedRollupPart over the encoded keys.
+func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descriptor, error) {
+	w, err := v2part.NewDenseWriter(path, part.Spec)
+	if err != nil {
+		return v2part.Descriptor{}, err
+	}
+	defer w.Abort()
+	// Size-tier merges rewrite fresh seal parts at the rest level.
+	w.SealCompression()
+	var shards []uint16
+	for _, segment := range part.Segments {
+		for _, kv := range segment {
+			m := kv.metric
+			if len(shards) == 0 || shards[len(shards)-1] != m.vshard {
+				shards = append(shards, m.vshard)
+			}
+			if kv.record != nil {
+				err = w.SetPlannedRecord(m.vshard, m.policy.Name, kv.record)
+			} else {
+				err = w.SetPlannedMetadata(m.vshard, m.policy.Name, kv.value)
+			}
+			if err != nil {
+				return v2part.Descriptor{}, err
+			}
+		}
+	}
+	d, err := w.Close()
+	if err != nil {
+		return v2part.Descriptor{}, err
+	}
+	d.VShards = shards
+	return d, d.Validate()
+}

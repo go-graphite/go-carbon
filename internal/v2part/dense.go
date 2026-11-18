@@ -2,11 +2,13 @@ package v2part
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -252,6 +254,10 @@ type denseWorkspace struct {
 	key     Key
 	records []sealrollup.Record
 	last    []byte
+	// Planned input: the previous tuple and the scope's group key prefix.
+	prev     Key
+	havePrev bool
+	group    []byte
 }
 
 var denseWorkspaces sync.Pool
@@ -264,6 +270,7 @@ func (w *DenseWriter) releaseWorkspace() {
 	b.decoder.key, b.decoder.name, b.key = Key{}, "", Key{}
 	b.decoder.prefix = b.decoder.prefix[:0]
 	b.first, b.encoded, b.records, b.last = b.first[:0], b.encoded[:0], b.records[:0], b.last[:0]
+	b.prev, b.havePrev, b.group = Key{}, false, b.group[:0]
 	w.denseWorkspace = nil
 	denseWorkspaces.Put(b)
 }
@@ -394,6 +401,8 @@ func (w *DenseWriter) set(key, value []byte) error {
 	}
 	return w.appendRecord(key, k, r)
 }
+
+// appendRecord starts a run at key, or at k's formatted key when key is nil.
 func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error {
 	if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
 		if e := w.flush(); e != nil {
@@ -402,10 +411,118 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 	}
 	if len(w.records) == 0 {
 		w.key = k
-		w.first = append(w.first[:0], key...)
+		if key == nil {
+			w.first = w.appendKey(w.first[:0], k)
+		} else {
+			w.first = append(w.first[:0], key...)
+		}
 	}
 	w.records = append(w.records, r)
 	return nil
+}
+
+// SetPlannedRecord packs a planner record of metric, routed to vshard, without
+// an encoded input key. Group, partition and part come from the writer scope,
+// and key bytes are formatted only where a dense run starts. Order, routing,
+// archive and scalar bounds are validated as SetRecordEncoded validates them.
+// Planned and encoded input cannot be mixed in one part.
+func (w *DenseWriter) SetPlannedRecord(vshard uint16, metric ID, r *sealrollup.Record) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	var k Key
+	err := errors.New("dense scalar record does not match valid archive key")
+	if r.Archive >= 0 && int64(r.Archive) < int64(MetadataArchive) && validSlotRecord(*r) {
+		k, err = w.plannedKey(vshard, metric, uint32(r.Archive), r.Slot)
+	}
+	if err == nil {
+		err = w.appendRecord(nil, k, *r)
+	}
+	w.err = err
+	return err
+}
+
+// SetPlannedMetadata writes metric's envelope value after its archive records.
+// The caller's value is not retained.
+func (w *DenseWriter) SetPlannedMetadata(vshard uint16, metric ID, value []byte) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	k, err := w.plannedKey(vshard, metric, MetadataArchive, 0)
+	if err == nil {
+		err = w.flush()
+	}
+	if err == nil {
+		w.first = w.appendKey(w.first[:0], k)
+		err = w.writer.setDecoded(w.first, k, value)
+	}
+	w.err = err
+	return err
+}
+
+// plannedKey checks that a tuple sorts strictly after the previous one in GCP3
+// key order (vshard, name length, name, archive, slot) and validates each new
+// name's length and route once.
+func (w *DenseWriter) plannedKey(vshard uint16, metric ID, archive uint32, slot int64) (Key, error) {
+	if len(w.last) > 0 {
+		return Key{}, errors.New("mixed encoded and planned dense input")
+	}
+	p := &w.prev
+	if w.havePrev {
+		c := cmp.Compare(vshard, p.VShard)
+		if c == 0 {
+			c = cmp.Compare(len(metric), len(p.Metric))
+		}
+		if c == 0 {
+			c = strings.Compare(string(metric), string(p.Metric))
+		}
+		if c == 0 {
+			if c = cmp.Compare(archive, p.Archive); c == 0 {
+				c = cmp.Compare(slot, p.BlockStart)
+			}
+			if c <= 0 {
+				return Key{}, errors.New("unordered planned dense input")
+			}
+			p.Archive, p.BlockStart = archive, slot
+			return *p, nil
+		}
+		if c < 0 {
+			return Key{}, errors.New("unordered planned dense input")
+		}
+	}
+	s := w.writer.spec.Scope
+	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || Route(metric) != vshard || (s.VShard != GroupVShard && s.VShard != vshard) {
+		return Key{}, errors.New("invalid or foreign planned dense metric")
+	}
+	if len(w.group) == 0 {
+		group, _, err := GroupRange(s.Group)
+		if err != nil {
+			return Key{}, err
+		}
+		w.group = append(w.group[:0], group...)
+	}
+	*p = Key{Group: s.Group, VShard: vshard, Partition: s.Partition, Part: s.Part, Metric: metric, Archive: archive, BlockStart: slot}
+	w.havePrev = true
+	return *p, nil
+}
+
+// appendKey formats k exactly as Encode does, from the cached group prefix.
+func (w *DenseWriter) appendKey(dst []byte, k Key) []byte {
+	dst = append(dst, w.group...)
+	dst = binary.BigEndian.AppendUint16(dst, k.VShard)
+	dst = binary.BigEndian.AppendUint64(dst, uint64(k.Partition)^(1<<63))
+	dst = append(dst, k.Part[:]...)
+	dst = binary.BigEndian.AppendUint32(dst, uint32(len(k.Metric)))
+	dst = append(dst, k.Metric...)
+	dst = binary.BigEndian.AppendUint32(dst, k.Archive)
+	dst = binary.BigEndian.AppendUint64(dst, uint64(k.BlockStart)^(1<<63))
+	return binary.BigEndian.AppendUint32(dst, k.Ordinal)
 }
 func (w *DenseWriter) Abort() error {
 	w.closed = true

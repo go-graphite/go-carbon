@@ -60,6 +60,9 @@ type coreSealPlan struct {
 	// PartSpecs is optional trusted coverage prepared by the rollup planner.
 	// It avoids reconstructing immutable policies from every metadata row.
 	PartSpecs []v2part.Spec
+	// Parts are rollup planner parts with trusted coverage, written from
+	// planned tuples into separate immutable files and never LSM-ingested.
+	Parts []plannedRollupPart
 	// Commit publishes staged owner-local state after durable atomic ingestion.
 	// It cannot fail and must not retain mutable input buffers.
 	Commit func()
@@ -118,6 +121,28 @@ type coreHooks struct {
 func validateCoreSealPlan(p coreSealPlan) error {
 	if len(p.PartSpecs) != 0 && len(p.PartSpecs) != len(p.Files) {
 		return errors.New("seal part specs/files mismatch")
+	}
+	// Planned parts are validated key by key by their writer; their scopes
+	// must be complete, distinct and not shared with byte-path archive files.
+	planned := map[v2part.Scope]bool{}
+	for _, part := range p.Parts {
+		empty := true
+		for _, segment := range part.Segments {
+			empty = empty && len(segment) == 0
+		}
+		if empty {
+			return errors.New("empty planned rollup part")
+		}
+		if part.Spec.Encoding != v2part.DenseEncoding || part.Spec.Scope.VShard != v2part.GroupVShard {
+			return errors.New("planned rollup part scope")
+		}
+		if planned[part.Spec.Scope] {
+			return errors.New("duplicate seal archive scope")
+		}
+		planned[part.Spec.Scope] = true
+	}
+	if len(p.Parts) > 0 && len(p.Files) > 0 {
+		return errors.New("planned rollup parts cannot share a seal with extension files")
 	}
 	// Archive originals are separate immutable files, never ingested as data
 	// into the LSM. Their vshard ranges may interleave across time partitions;

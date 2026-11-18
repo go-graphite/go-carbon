@@ -526,7 +526,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				r.now = hooks.Now
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
-				o.plan = r.plan
+				o.plan = r.planParts
 				o.rollups = r
 			}
 			// Only uncommitted staging files remain after successful atomic ingestion.
@@ -1817,26 +1817,36 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 			}
 		}
 	}()
+	retainPart := func(i int) error {
+		<-rollupWrites.done
+		result := rollupWrites.results[i]
+		xp, d, e := result.path, result.descriptor, result.err
+		if e != nil {
+			return e
+		}
+		// The shared writer closes and syncs its SST exactly once before return.
+		o.syncCalls.Add(1)
+		kv, saved, e := retainSealedPart(o.dir, xp, d)
+		retained = append(retained, saved...)
+		if e != nil {
+			return e
+		}
+		descriptors = append(descriptors, kv)
+		total += d.Bytes
+		if o.stage != nil {
+			o.stage("part-retained")
+		}
+		return nil
+	}
+	for i := range plan.Parts {
+		if e := retainPart(len(plan.Files) + i); e != nil {
+			return 0, e
+		}
+	}
 	for i, file := range plan.Files {
 		if isRollupFile(file) {
-			<-rollupWrites.done
-			result := rollupWrites.results[i]
-			xp, d, e := result.path, result.descriptor, result.err
-
-			if e != nil {
+			if e := retainPart(i); e != nil {
 				return 0, e
-			}
-			// The shared writer closes and syncs its SST exactly once before return.
-			o.syncCalls.Add(1)
-			kv, saved, e := retainSealedPart(o.dir, xp, d)
-			retained = append(retained, saved...)
-			if e != nil {
-				return 0, e
-			}
-			descriptors = append(descriptors, kv)
-			total += d.Bytes
-			if o.stage != nil {
-				o.stage("part-retained")
 			}
 			continue
 		}

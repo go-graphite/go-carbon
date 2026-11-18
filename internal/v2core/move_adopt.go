@@ -427,7 +427,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		o.stage("move-after-ingest")
 	}
 	o.rollups = next
-	o.plan = next.plan
+	o.plan = next.planParts
 	return nil
 }
 

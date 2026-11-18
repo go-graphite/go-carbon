@@ -23,7 +23,7 @@ type rollupPartWrites struct {
 // them before retaining descriptors and atomically ingesting the one frontier.
 // Raw encoding/sorting can run concurrently without changing file fanout.
 func (o *coreOwner) startRollupPartWrites(plan coreSealPlan) *rollupPartWrites {
-	p := &rollupPartWrites{done: make(chan struct{}), results: make([]rollupPartResult, len(plan.Files))}
+	p := &rollupPartWrites{done: make(chan struct{}), results: make([]rollupPartResult, len(plan.Files)+len(plan.Parts))}
 	if o.cfg.BlindBatch && !o.cfg.Rollups {
 		close(p.done)
 		return p
@@ -34,6 +34,10 @@ func (o *coreOwner) startRollupPartWrites(plan coreSealPlan) *rollupPartWrites {
 			p.results[i].path = filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, i))
 			jobs = append(jobs, i)
 		}
+	}
+	for i := range plan.Parts {
+		p.results[len(plan.Files)+i].path = filepath.Join(o.dir, fmt.Sprintf("stage-%020d-extra-%03d.sst", o.meta.NextPart, len(plan.Files)+i))
+		jobs = append(jobs, len(plan.Files)+i)
 	}
 	if len(jobs) == 0 {
 		close(p.done)
@@ -46,7 +50,12 @@ func (o *coreOwner) startRollupPartWrites(plan coreSealPlan) *rollupPartWrites {
 				for j := worker; j < len(jobs); j += min(8, len(jobs)) {
 					i := jobs[j]
 					r := &p.results[i]
-					if len(plan.PartSpecs) == len(plan.Files) {
+					if i >= len(plan.Files) {
+						part := plan.Parts[i-len(plan.Files)]
+						part.Spec.Source.Incarnation = o.partSource.Incarnation
+						part.Spec.Source.Stream = o.partSource.Stream
+						r.descriptor, r.err = writePlannedRollupTuples(r.path, part)
+					} else if len(plan.PartSpecs) == len(plan.Files) {
 						spec := plan.PartSpecs[i]
 						spec.Source.Incarnation = o.partSource.Incarnation
 						spec.Source.Stream = o.partSource.Stream
