@@ -72,8 +72,14 @@ func TestExpiryResetReopenResume(t *testing.T) {
 	}
 	snapshot := e.DBs()[0].NewSnapshot()
 	err = v2core.ScanRollups(snapshot, func(_ v2core.RollupPolicy, metadata v2core.RollupMetadata, _ []sealrollup.Record) error {
-		if metadata.Version != 2 {
+		// Version 1 readers predate expiry and ignore Expired/ResetOrder. Reset
+		// metadata must carry a version they reject (2, or 3 with closure
+		// state); only readers that honour expiry accept those versions.
+		if metadata.Version < 2 {
 			t.Error("reset metadata is readable by an older reader that ignores expiry authority")
+		}
+		if !metadata.Expired || metadata.ResetOrder != metadata.Frontier.Order {
+			t.Errorf("reset metadata lost expiry authority: %+v", metadata)
 		}
 		return nil
 	})
