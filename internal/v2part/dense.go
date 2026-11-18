@@ -257,7 +257,7 @@ func (w *DenseWriter) releaseWorkspace() {
 	if b == nil {
 		return
 	}
-	b.decoder.key, b.key = Key{}, Key{}
+	b.decoder.key, b.decoder.name, b.key = Key{}, "", Key{}
 	b.decoder.prefix = b.decoder.prefix[:0]
 	b.first, b.encoded, b.records, b.last = b.first[:0], b.encoded[:0], b.records[:0], b.last[:0]
 	w.denseWorkspace = nil
@@ -288,6 +288,12 @@ func (w *DenseWriter) flush() error {
 	w.records = w.records[:0]
 	return e
 }
+
+// NameHint names the metric of the following keys for a caller that already
+// holds that string: a matching key shares it instead of copying its name.
+// Every key is still fully validated; a stale hint only costs the copy.
+func (w *DenseWriter) NameHint(metric ID) { w.decoder.name = metric }
+
 func (w *DenseWriter) SetEncoded(key, value []byte) error {
 	if w.closed {
 		return io.ErrClosedPipe

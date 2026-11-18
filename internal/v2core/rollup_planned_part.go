@@ -30,6 +30,7 @@ func writePlannedRollupPart(path string, file []coreKV, spec v2part.Spec) (v2par
 			}
 			shards = append(shards, key.VShard)
 		}
+		w.NameHint(kv.Name)
 		if kv.Record != nil {
 			err = w.SetRecordEncoded(kv.Key, *kv.Record)
 		} else {

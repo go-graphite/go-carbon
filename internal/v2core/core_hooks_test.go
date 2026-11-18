@@ -32,7 +32,7 @@ func TestCoreOriginalBatchesAtomicExtension(t *testing.T) {
 				b.Points = slices.Clone(b.Points)
 				got = append(got, b)
 			}
-			return coreSealPlan{Files: [][]coreKV{{{[]byte{'R', byte(in.Next.NextPart)}, []byte("archive"), nil}}}, Commit: func() { committed++ }}, nil
+			return coreSealPlan{Files: [][]coreKV{{{[]byte{'R', byte(in.Next.NextPart)}, []byte("archive"), nil, ""}}}, Commit: func() { committed++ }}, nil
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -93,7 +93,7 @@ func TestCorePlanFailureDoesNotCommit(t *testing.T) {
 	}
 }
 func TestCorePlanValidation(t *testing.T) {
-	for _, files := range [][][]coreKV{{{}}, {{{[]byte{1}, nil, nil}}}, {{{[]byte{255}, nil, nil}}}, {{{[]byte{'R', 2}, nil, nil}, {[]byte{'R', 1}, nil, nil}}}, {{{[]byte{'R', 1}, nil, nil}}, {{[]byte{'R', 1}, nil, nil}}}} {
+	for _, files := range [][][]coreKV{{{}}, {{{[]byte{1}, nil, nil, ""}}}, {{{[]byte{255}, nil, nil, ""}}}, {{{[]byte{'R', 2}, nil, nil, ""}, {[]byte{'R', 1}, nil, nil, ""}}}, {{{[]byte{'R', 1}, nil, nil, ""}}, {{[]byte{'R', 1}, nil, nil, ""}}}} {
 		if validateCoreSealPlan(coreSealPlan{Files: files}) == nil {
 			t.Fatal(files)
 		}
@@ -200,7 +200,7 @@ func TestCoreSealExtensionCrash(t *testing.T) {
 			if pause == "before" {
 				stop()
 			}
-			return coreSealPlan{Files: [][]coreKV{{{[]byte{'R', 1}, []byte("same-transaction"), nil}}}, Commit: func() {
+			return coreSealPlan{Files: [][]coreKV{{{[]byte{'R', 1}, []byte("same-transaction"), nil, ""}}}, Commit: func() {
 				if pause == "after" {
 					stop()
 				}

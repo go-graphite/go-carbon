@@ -77,6 +77,9 @@ func (s Scope) ValidateRange(first, last []byte) error {
 type keyDecoder struct {
 	prefix []byte
 	key    Key
+	// name is an optional caller hint for the next identity. A full decode
+	// shares it, and the previous group, when the key bytes match.
+	name ID
 }
 
 func (d *keyDecoder) decode(encoded []byte) (Key, error) {
@@ -88,7 +91,7 @@ func (d *keyDecoder) decode(encoded []byte) (Key, error) {
 		k.Ordinal = binary.BigEndian.Uint32(tail[12:])
 		return k, nil
 	}
-	k, err := Decode(encoded)
+	k, err := partsformat.DecodeReusing(encoded, d.key.Group, d.name)
 	if err != nil {
 		return Key{}, err
 	}

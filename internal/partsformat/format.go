@@ -172,7 +172,13 @@ func Encode(k Key) ([]byte, error) {
 	binary.BigEndian.PutUint32(b[pos:], k.Ordinal)
 	return b, nil
 }
-func Decode(b []byte) (Key, error) {
+func Decode(b []byte) (Key, error) { return DecodeReusing(b, "", "") }
+
+// DecodeReusing is Decode for callers that already hold the likely group and
+// metric strings: a matching encoded group or name shares the given string
+// instead of copying the key bytes. Validation and decoded values are
+// unchanged; a non-matching hint only costs the usual copy.
+func DecodeReusing(b []byte, group Group, metric ID) (Key, error) {
 	var k Key
 	if len(b) < 54 || !bytes.Equal(b[:4], magic) {
 		return k, errors.New("invalid part key header")
@@ -185,7 +191,11 @@ func Decode(b []byte) (Key, error) {
 	if gn > len(b)-54 {
 		return k, errors.New("invalid placement group length")
 	}
-	k.Group = Group(string(b[8 : 8+gn]))
+	if string(b[8:8+gn]) == string(group) {
+		k.Group = group
+	} else {
+		k.Group = Group(string(b[8 : 8+gn]))
+	}
 	pos := 8 + gn
 	k.VShard = binary.BigEndian.Uint16(b[pos : pos+2])
 	pos += 2
@@ -202,7 +212,11 @@ func Decode(b []byte) (Key, error) {
 	if len(b) != 54+gn+n {
 		return Key{}, errors.New("invalid part key length")
 	}
-	k.Metric = ID(string(b[pos : pos+n]))
+	if string(b[pos:pos+n]) == string(metric) {
+		k.Metric = metric
+	} else {
+		k.Metric = ID(string(b[pos : pos+n]))
+	}
 	pos += n
 	k.Archive = binary.BigEndian.Uint32(b[pos:])
 	pos += 4
