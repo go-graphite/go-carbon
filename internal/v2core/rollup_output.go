@@ -17,12 +17,15 @@ import (
 )
 
 // plannedKV is one planned archive record, or with a nil record the metric's
-// envelope, of a rollup part. The part writer formats its key from the metric
-// and the record; the planner keeps no key bytes.
+// envelope, of a rollup part. The part writer formats its key from the name,
+// vshard and record; the planner keeps no key bytes. The tuple carries the
+// name and vshard so the writer never dereferences the metric's scattered
+// planner state.
 type plannedKV struct {
-	metric *rollupMetric
+	name   partsformat.ID
 	record *sealrollup.Record
 	value  []byte
+	vshard uint16
 }
 
 // plannedRollupPart is one group/partition part: lane segments in lane order,
@@ -95,6 +98,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	}
 	m := s.metric
 	group := string(m.policy.Group)
+	name, vshard := m.policy.Name, m.vshard
 	if stage != nil {
 		stage("rollup")
 	}
@@ -175,7 +179,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
-			file = append(file, plannedKV{metric: m, record: record})
+			file = append(file, plannedKV{name: name, record: record, vshard: vshard})
 			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
@@ -183,7 +187,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, plannedKV{metric: m, value: metadata})
+		*filePtr = append(file, plannedKV{name: name, value: metadata, vshard: vshard})
 	}
 
 	return nil

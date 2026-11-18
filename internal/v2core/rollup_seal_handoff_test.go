@@ -87,7 +87,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 						idle++
 					}
 				}
-				files, partSpecs := expandPlannedParts(plan.Parts)
+				files, partSpecs := expandPlannedParts(plan.Parts, plannedOwners(r.stages))
 				seen := map[int64]bool{}
 				for i, part := range plan.Parts {
 					// The owner's part workers stamp the durable source stream.
@@ -138,7 +138,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 func checkHandoffMutations(t *testing.T, dir string, part plannedRollupPart, want []byte) int {
 	t.Helper()
 	flat := slices.Concat(part.Segments...)
-	other := slices.IndexFunc(flat, func(kv plannedKV) bool { return kv.metric != flat[0].metric })
+	other := slices.IndexFunc(flat, func(kv plannedKV) bool { return kv.name != flat[0].name })
 	firstRecord := slices.IndexFunc(flat, func(kv plannedKV) bool { return kv.record != nil })
 	if other < 0 || firstRecord < 0 {
 		t.Fatal("mutation needs two metrics and a record")
@@ -148,8 +148,12 @@ func checkHandoffMutations(t *testing.T, dir string, part plannedRollupPart, wan
 		"swap last":    func(kvs []plannedKV) { n := len(kvs); kvs[n-1], kvs[n-2] = kvs[n-2], kvs[n-1] },
 		"slot":         func(kvs []plannedKV) { r := *kvs[firstRecord].record; r.Slot += 7; kvs[firstRecord].record = &r },
 		"archive":      func(kvs []plannedKV) { r := *kvs[firstRecord].record; r.Archive++; kvs[firstRecord].record = &r },
-		"metric":       func(kvs []plannedKV) { kvs[firstRecord].metric = flat[other].metric },
-		"envelope":     func(kvs []plannedKV) { kvs[len(kvs)-1].value = append([]byte{1}, kvs[len(kvs)-1].value...) },
+		"metric": func(kvs []plannedKV) {
+			kvs[firstRecord].name, kvs[firstRecord].vshard = flat[other].name, flat[other].vshard
+		},
+		"name":     func(kvs []plannedKV) { kvs[firstRecord].name = flat[other].name },
+		"vshard":   func(kvs []plannedKV) { kvs[firstRecord].vshard ^= 1 },
+		"envelope": func(kvs []plannedKV) { kvs[len(kvs)-1].value = append([]byte{1}, kvs[len(kvs)-1].value...) },
 	}
 	n := 0
 	for name, f := range mutate {
