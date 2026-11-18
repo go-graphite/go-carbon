@@ -71,6 +71,11 @@ type rollupMetric struct {
 	// planners, so a rank is valid only for its owner; 0 means unranked.
 	rank      uint32
 	rankOwner *coreRollups
+	// sealEpoch/sealStage replace the per-seal positions map entry for a
+	// metric this planner ranked: sealStage indexes r.stages while sealEpoch
+	// equals rankOwner.sealEpoch. Only the rank owner writes or reads them.
+	sealEpoch uint32
+	sealStage uint32
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -110,6 +115,8 @@ type coreRollups struct {
 	denseSpare []*rollupMetric
 	unranked   []*rollupMetric
 	replaced   bool
+	// sealEpoch numbers this planner's plans; 0 is never a live epoch.
+	sealEpoch uint32
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -176,6 +183,15 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	return newRollupMetric(h), nil
 }
 
+// staged reports whether metric id already has a stage in the plan numbered epoch.
+func (r *coreRollups) staged(id uint64, m *rollupMetric, epoch uint32) bool {
+	if m.rankOwner == r && m.rank != 0 {
+		return m.sealEpoch == epoch
+	}
+	_, ok := r.positions[id]
+	return ok
+}
+
 func newRollupMetric(h *PolicyIdentity) *rollupMetric {
 	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
 }
@@ -231,10 +247,28 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
 	r.batchPositions = slices.Grow(r.batchPositions[:0], len(in.Batches))[:len(in.Batches)]
+	r.sealEpoch++
+	if r.sealEpoch == 0 {
+		// Wrapped: no stale stamp may equal a live epoch.
+		for _, m := range r.metrics {
+			m.sealEpoch = 0
+		}
+		r.sealEpoch = 1
+	}
+	epoch := r.sealEpoch
 	for bi, b := range in.Batches {
-		i, ok := positions[b.ID]
+		// A metric this planner ranked carries its stage index in a seal
+		// stamp; fresh and unranked metrics keep the positions map. The
+		// choice depends only on the metric, so it is stable within a plan.
+		var i int
+		var ok bool
+		m := r.metrics[b.ID]
+		if m != nil && m.rankOwner == r && m.rank != 0 {
+			i, ok = int(m.sealStage), m.sealEpoch == epoch
+		} else {
+			i, ok = positions[b.ID]
+		}
 		if !ok {
-			m := r.metrics[b.ID]
 			fresh := m == nil
 			if fresh {
 				if h := b.Registered; h != nil && h.catalog == r.identities && h.id == b.ID {
@@ -262,7 +296,11 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			i = len(stages) - 1
 			stages[i].next.Expired = false
 			r.stageKey(&stages[i])
-			positions[b.ID] = i
+			if !fresh && m.rankOwner == r && m.rank != 0 {
+				m.sealEpoch, m.sealStage = epoch, uint32(i)
+			} else {
+				positions[b.ID] = i
+			}
 		}
 		r.batchPositions[bi] = i
 		s := &stages[i]
@@ -305,7 +343,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
-			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
+			if !r.staged(id, m, epoch) && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
 				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
 				r.stageKey(&stages[len(stages)-1])
 			}

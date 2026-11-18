@@ -871,7 +871,11 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			b.Points = pointArena[pointOffset : pointOffset+n : pointOffset+n]
 			pointOffset += n
 			if e.cfg.Rollups {
-				b.Registered = e.identities.lookup(b.ID)
+				// A registered handle from this catalog is the interned
+				// identity already; only foreign or unregistered batches look up.
+				if h := b.Registered; h == nil || h.catalog != e.identities || h.id != b.ID {
+					b.Registered = e.identities.lookup(b.ID)
+				}
 				b.Policy = nil
 			} else {
 				n = copy(policyArena[policyOffset:], b.Policy)
