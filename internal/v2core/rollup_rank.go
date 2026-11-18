@@ -14,8 +14,8 @@ import (
 func (r *coreRollups) stageKey(s *rollupStage) {
 	m := s.metric
 	s.vshard = m.vshard
-	if m.rankOwner == r && m.rank != 0 {
-		s.sortKey = uint64(m.rank) << 1
+	if rk := r.rankOf(m.id); rk != 0 && r.dense[rk-1] == m {
+		s.sortKey = uint64(rk) << 1
 		return
 	}
 	l, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics)
@@ -25,12 +25,28 @@ func (r *coreRollups) stageKey(s *rollupStage) {
 // renumber merges the sorted unranked metrics into dense in one sequential
 // pass and rewrites every rank. Replaced IDs (adoption) drop their stale
 // metric here; metrics are otherwise never removed from a planner.
+// rankOf returns id's rank in this planner, 0 when unranked. The owner check
+// is a range check: IDs past the array were never ranked here.
+func (r *coreRollups) rankOf(id uint64) uint32 {
+	if id < uint64(len(r.rank)) {
+		return r.rank[id]
+	}
+	return 0
+}
+
+// ranks reports whether this planner ranks m itself (not an older metric that
+// was installed under the same ID).
+func (r *coreRollups) ranks(m *rollupMetric) bool {
+	rk := r.rankOf(m.id)
+	return rk != 0 && r.dense[rk-1] == m
+}
+
 func (r *coreRollups) renumber() {
 	replaced := r.replaced
 	live := func(m *rollupMetric) bool { return r.metrics[m.id] == m }
 	// A metric this planner ranks is in dense; dead (replaced) ones drop.
 	fresh := slices.DeleteFunc(r.unranked, func(m *rollupMetric) bool {
-		return (m.rankOwner == r && m.rank != 0) || (replaced && !live(m))
+		return r.ranks(m) || (replaced && !live(m))
 	})
 	slices.SortFunc(fresh, compareRollupMetrics)
 	fresh = slices.CompactFunc(fresh, func(a, b *rollupMetric) bool { return a == b })
@@ -42,9 +58,9 @@ func (r *coreRollups) renumber() {
 	i, j := 0, 0
 	for i < len(dense) || j < len(fresh) {
 		if i < len(dense) && replaced {
-			if m := dense[i]; m.rankOwner != r || m.rank != uint32(i+1) || !live(m) {
-				if m.rankOwner == r && m.rank == uint32(i+1) {
-					m.rank, m.rankOwner = 0, nil
+			if m := dense[i]; r.rankOf(m.id) != uint32(i+1) || !live(m) {
+				if r.rankOf(m.id) == uint32(i+1) {
+					r.rank[m.id] = 0
 				}
 				i++
 				continue
@@ -58,8 +74,15 @@ func (r *coreRollups) renumber() {
 			j++
 		}
 	}
+	maxID := uint64(0)
+	for _, m := range out {
+		maxID = max(maxID, m.id)
+	}
+	if uint64(len(r.rank)) <= maxID {
+		r.rank = slices.Grow(r.rank, int(maxID+1)-len(r.rank))[:maxID+1]
+	}
 	for k, m := range out {
-		m.rank, m.rankOwner = uint32(k+1), r
+		r.rank[m.id] = uint32(k + 1)
 	}
 	clear(dense)
 	r.dense, r.denseSpare = out, dense[:0]

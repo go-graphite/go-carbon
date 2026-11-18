@@ -66,11 +66,6 @@ type rollupMetric struct {
 	meta   metricMetadata
 	slots  sealrollup.Slots
 	vshard uint16
-	// rank is 1 + this metric's index in rankOwner.dense, the canonical
-	// (group, vshard, length, name) order. Adoption shares metrics between
-	// planners, so a rank is valid only for its owner; 0 means unranked.
-	rank      uint32
-	rankOwner *coreRollups
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -114,6 +109,11 @@ type coreRollups struct {
 	denseSpare []*rollupMetric
 	unranked   []*rollupMetric
 	replaced   bool
+	// rank[id] is 1 + the index in dense of the metric installed under id, in
+	// the canonical (group, vshard, length, name) order; 0 means unranked.
+	// Owner-held and pointer-free: a metric shared with another planner
+	// (adoption) is ranked only by the planner whose array says so.
+	rank []uint32
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -138,11 +138,13 @@ func (r *coreRollups) install(id uint64, m *rollupMetric) {
 	old := r.metrics[id]
 	r.metrics[id] = m
 	if old != m {
-		if old != nil || m.rankOwner == r {
-			// The stale entry leaves dense at the next renumber; a metric
-			// this planner ranked before re-enters unranked.
+		if rk := r.rankOf(id); old != nil || rk != 0 {
+			// The stale entry leaves dense at the next renumber; an ID this
+			// planner ranked before re-enters unranked.
 			r.replaced = true
-			m.rank, m.rankOwner = 0, nil
+			if rk != 0 {
+				r.rank[id] = 0
+			}
 		}
 		r.unranked = append(r.unranked, m)
 	}
@@ -263,7 +265,14 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for j < len(keys) && in.Batches[keys[j]&sealBatchIndexMask].ID == id {
 			j++
 		}
-		m := r.metrics[id]
+		// An ID this planner ranked reaches its metric through dense; only
+		// fresh and not-yet-ranked names probe the metrics map.
+		var m *rollupMetric
+		if rk := r.rankOf(id); rk != 0 {
+			m = r.dense[rk-1]
+		} else {
+			m = r.metrics[id]
+		}
 		fresh := m == nil
 		if fresh {
 			if h := first.Registered; h != nil && h.catalog == r.identities && h.id == id {
