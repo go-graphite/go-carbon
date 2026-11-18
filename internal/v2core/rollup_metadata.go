@@ -225,7 +225,8 @@ func (r *coreRollups) release() {
 	r.stages = r.stages[:0]
 	clear(r.batches)
 	r.batches = r.batches[:0]
-	clear(r.positions)
+	clear(r.seen)
+	r.seen = r.seen[:0]
 	clear(r.pendingNames)
 	for group, file := range r.files {
 		clear(file)
