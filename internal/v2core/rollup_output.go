@@ -258,7 +258,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						if result, ok := m.slots.RecentRange(a, start, end, dst); ok {
 							return result
 						}
-						result, err := lane.windows.rangeSamples(&history, m, a, start, end)
+						result, err := lane.windows.rangeSamples(&history, m, r.committed(s), a, start, end)
 						readErr = err
 						return append(dst, result...)
 					}
@@ -417,7 +417,9 @@ func (r *coreRollups) commitStages() {
 				if s.next.Expired {
 					m.slots = *m.policy.prepared.NewSlots()
 				}
-				m.meta = compactMetadata(s.next)
+				if !s.fresh { // a fresh metric gets its slot, and these scalars, at install
+					r.meta[s.slot] = compactMetadata(s.next)
+				}
 			}
 		}
 		if len(r.lanes) == 1 {

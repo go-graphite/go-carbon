@@ -279,7 +279,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
 	for id, m := range o.rollups.metrics {
-		next.install(id, m)
+		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
 		next.names[m.policy.Name] = id
 	}
 	next.stage, next.expire, next.now = o.rollups.stage, o.rollups.expire, o.rollups.now
@@ -325,7 +325,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			if !bytes.Equal(old.definitionBytes(), local.Policy) {
 				return errors.New("receiving ID belongs to another name")
 			}
-			local = old.metadata()
+			local = o.rollups.metadataOf(id, old)
 		}
 		local.LastUpdate = max(local.LastUpdate, donor.latest.meta.LastUpdate)
 		local.Revision++
@@ -337,7 +337,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if err != nil {
 			return err
 		}
-		m.meta = compactMetadata(local)
+		meta := compactMetadata(local)
 		// Version 2 stores only repaired windows. Mature history remains in
 		// its original immutable parts; version 1 full baselines remain readable.
 		authority := moveAuthority{Version: 2, Meta: local, AtOrder: local.Frontier.Order}
@@ -349,7 +349,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		for _, record := range rebuilt {
 			m.slots.Install(record.Delta)
-			m.meta.Frontier.MaxTime = max(m.meta.Frontier.MaxTime, record.Sample.Time)
+			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
 			if record.Archive > 0 {
 				key := [2]int64{int64(record.Archive), record.Slot}
 				prior, exists := original[key]
@@ -365,11 +365,11 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 				authority.Origins = append(authority.Origins, origin)
 			}
 		}
-		authority.Meta = m.metadata()
+		authority.Meta = m.metadata(meta)
 		if next.db != nil {
-			m.slots.KeepRecent(m.meta.Frontier.MaxTime)
+			m.slots.KeepRecent(meta.Frontier.MaxTime)
 		}
-		next.install(id, m)
+		next.install(id, m, meta)
 		next.names[policy.Name] = id
 		value, err := json.Marshal(authority)
 		if err != nil {

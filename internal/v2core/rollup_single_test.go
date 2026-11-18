@@ -138,13 +138,13 @@ func BenchmarkIdleMaintenanceScan(b *testing.B) {
 		b.Fatal(err)
 	}
 	for i := 0; i < names; i++ {
-		m := newRollupMetric(h)
-		m.meta.Version, m.meta.Frontier.Order, m.meta.Frontier.MaxTime = 3, uint64(i+1), 1794700800
-		r.install(uint64(i+1), m)
+		meta := freshMetadata
+		meta.Version, meta.Frontier.Order, meta.Frontier.MaxTime = 3, uint64(i+1), 1794700800
+		r.install(uint64(i+1), newRollupMetric(h), meta)
 	}
 	scan := func(metrics map[uint64]*rollupMetric) bool {
-		for _, m := range metrics {
-			if !m.meta.Expired && rollupClosureDue(m, 1794700801) {
+		for id, m := range metrics {
+			if meta := r.metaOf(id); !meta.Expired && rollupClosureDue(m, meta, 1794700801) {
 				return true
 			}
 		}

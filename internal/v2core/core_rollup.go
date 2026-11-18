@@ -61,9 +61,11 @@ type RollupMetadata struct {
 	Revision   uint64
 }
 
+// rollupMetric holds what a name needs beyond its scalars: the shared
+// identity and, for coarse archives, KeepRecent residency. The committed
+// scalars live in coreRollups.meta, by owner slot.
 type rollupMetric struct {
 	*PolicyIdentity
-	meta   metricMetadata
 	slots  sealrollup.Slots
 	vshard uint16
 }
@@ -119,6 +121,7 @@ type coreRollups struct {
 	// dense[rank[s]-1] is the metric installed under ids[s].
 	ids             []uint64
 	rank            []uint32
+	meta            []metricMetadata // committed scalars, parallel to ids
 	denseSlots      []uint32
 	denseSlotsSpare []uint32
 	unrankedSlots   []uint32
@@ -141,15 +144,17 @@ func newCoreRollups() *coreRollups {
 }
 
 // install is the only writer of metrics/closable, so the closure index can
-// never miss a coarse-archive metric.
-func (r *coreRollups) install(id uint64, m *rollupMetric) {
+// never miss a coarse-archive metric. meta becomes id's committed scalars.
+func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	old := r.metrics[id]
 	r.metrics[id] = m
-	if old != m {
+	if old == m {
+		r.meta[r.slotOf(id, m)] = meta
+	} else {
 		s, ok := uint32(0), false
 		if old != nil {
 			// The stale entry leaves dense at the next renumber; the ID
-			// re-enters unranked in its old slot when retire finds it.
+			// re-enters unranked in its old slot.
 			r.replaced = true
 			s, ok = r.retire(id, old)
 		}
@@ -157,7 +162,9 @@ func (r *coreRollups) install(id uint64, m *rollupMetric) {
 			s = uint32(len(r.ids))
 			r.ids = append(r.ids, id)
 			r.rank = append(r.rank, 0)
+			r.meta = append(r.meta, metricMetadata{})
 		}
+		r.meta[s] = meta
 		m.ownerSlot.Store(s + 1)
 		r.unranked = append(r.unranked, m)
 		r.unrankedSlots = append(r.unrankedSlots, s)
@@ -197,12 +204,24 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 }
 
 func newRollupMetric(h *PolicyIdentity) *rollupMetric {
-	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
+	return &rollupMetric{PolicyIdentity: h, slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
+}
+
+// freshMetadata is the committed state of a name no seal has installed yet.
+var freshMetadata = compactMetadata(RollupMetadata{Version: 1})
+
+// committed returns the scalars s starts from: its slot's, or fresh ones.
+func (r *coreRollups) committed(s *rollupStage) metricMetadata {
+	if s.fresh {
+		return freshMetadata
+	}
+	return r.meta[s.slot]
 }
 
 type rollupStage struct {
 	sortKey    uint64
 	vshard     uint16
+	slot       uint32 // owner slot of an installed metric; unset when fresh
 	metric     *rollupMetric
 	next       RollupMetadata
 	batches    []sealrollup.Batch
@@ -283,13 +302,21 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		// its metric through dense. Fresh and unranked names, policy-bytes
 		// batches and hints another planner overwrote probe the metrics map.
 		var m *rollupMetric
-		rk := r.hintRank(first.Registered, id)
+		slot, hinted := r.hintSlot(first.Registered, id)
+		rk := uint32(0)
+		if hinted {
+			rk = r.rank[slot]
+		}
 		if rk != 0 {
 			m = r.dense[rk-1]
-		} else {
-			m = r.metrics[id]
+		} else if m = r.metrics[id]; m != nil && !hinted {
+			slot = r.slotOf(id, m)
 		}
 		fresh := m == nil
+		meta := freshMetadata
+		if !fresh {
+			meta = r.meta[slot]
+		}
 		if fresh {
 			if h := first.Registered; h != nil && h.catalog == r.identities && h.id == id {
 				m = newRollupMetric(h)
@@ -312,7 +339,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			names[m.policy.Name] = id
 		}
-		stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh, batchCount: j - i})
+		stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadataScalars(meta), fresh: fresh, batchCount: j - i})
 		s := &stages[len(stages)-1]
 		s.next.Expired = false
 		if rk != 0 {
@@ -346,8 +373,12 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
-			if !sealBatchSeen(in.Batches, keys, seen, maxID, id) && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
-				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
+			if sealBatchSeen(in.Batches, keys, seen, maxID, id) {
+				continue
+			}
+			slot := r.slotOf(id, m)
+			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
 				r.stageKey(&stages[len(stages)-1])
 			}
 		}
@@ -388,7 +419,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for _, s := range stages {
 			m := s.metric
 			if s.fresh {
-				r.install(m.id, m)
+				r.install(m.id, m, compactMetadata(s.next))
 				r.names[m.policy.Name] = m.id
 			}
 		}
@@ -650,14 +681,12 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		if r.metrics[meta.ID] != nil {
 			return errors.New("duplicate recovered rollup ID")
 		}
-		meta.Policy = m.definitionBytes()
-		m.meta = compactMetadata(meta)
 		m.slots.KeepRecent(meta.Frontier.MaxTime)
 		for _, record := range records {
 			m.slots.InstallRecent(record.Delta)
 		}
 		m.slots.KeepRecent(meta.Frontier.MaxTime)
-		r.install(meta.ID, m)
+		r.install(meta.ID, m, compactMetadata(meta))
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.
 		r.names[m.policy.Name] = meta.ID
