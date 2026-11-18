@@ -26,6 +26,9 @@ type plannedKV struct {
 	record *sealrollup.Record
 	value  []byte
 	vshard uint16
+	// rank is the metric's planner rank (stageKey), or 0 when unranked. The
+	// writer checks order by rank instead of comparing names.
+	rank uint32
 }
 
 // plannedRollupPart is one group/partition part: lane segments in lane order,
@@ -99,6 +102,10 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	m := s.metric
 	group := string(m.policy.Group)
 	name, vshard := m.policy.Name, m.vshard
+	var rank uint32
+	if s.sortKey&1 == 0 {
+		rank = uint32(s.sortKey >> 1)
+	}
 	if stage != nil {
 		stage("rollup")
 	}
@@ -179,7 +186,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
-			file = append(file, plannedKV{name: name, record: record, vshard: vshard})
+			file = append(file, plannedKV{name: name, record: record, vshard: vshard, rank: rank})
 			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
@@ -187,7 +194,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, plannedKV{name: name, value: metadata, vshard: vshard})
+		*filePtr = append(file, plannedKV{name: name, value: metadata, vshard: vshard, rank: rank})
 	}
 
 	return nil
