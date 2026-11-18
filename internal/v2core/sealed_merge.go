@@ -177,12 +177,7 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 }
 
 func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
-	type tier struct {
-		group      v2part.Group
-		partition  int64
-		generation int
-	}
-	tiers := map[tier][]v2part.Descriptor{}
+	var eligible []v2part.Descriptor
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -205,6 +200,22 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		if origin.Class != LivePart {
 			continue
 		}
+		eligible = append(eligible, d)
+	}
+	return pickMergeTier(eligible, limit), nil
+}
+
+// pickMergeTier returns the sixteen smallest parts of the lowest tier (per
+// group/partition) that holds sixteen parts within limit, or nil. It is the
+// selector's whole policy; the merge simulator drives it directly.
+func pickMergeTier(eligible []v2part.Descriptor, limit uint64) []v2part.Descriptor {
+	type tier struct {
+		group      v2part.Group
+		partition  int64
+		generation int
+	}
+	tiers := map[tier][]v2part.Descriptor{}
+	for _, d := range eligible {
 		t := tier{d.Scope.Group, d.Scope.Partition, mergeTier(d)}
 		tiers[t] = append(tiers[t], d)
 	}
@@ -240,7 +251,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 	if len(chosen) > sealedMergeFanIn {
 		chosen = chosen[:sealedMergeFanIn]
 	}
-	return chosen, nil
+	return chosen
 }
 
 // A merge output's generation lives in the tail of its otherwise random part
