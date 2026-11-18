@@ -20,6 +20,11 @@ type PolicyIdentity struct {
 	policy  policyName
 	vshard  uint16
 	plain   bool
+	// ownerSlot is a seal planner's hint: 1 + the owner-local slot install
+	// gave this name, 0 when none. It sits in padding (0 B per name). Planners
+	// sharing the identity (adoption) overwrite it, so it is only a hint:
+	// readers confirm ids[slot] == id and fall back to the metrics map.
+	ownerSlot atomic.Uint32
 	// nameHash is NameHash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.
 	nameHash uint64

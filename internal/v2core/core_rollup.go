@@ -109,11 +109,19 @@ type coreRollups struct {
 	denseSpare []*rollupMetric
 	unranked   []*rollupMetric
 	replaced   bool
-	// rank[id] is 1 + the index in dense of the metric installed under id, in
-	// the canonical (group, vshard, length, name) order; 0 means unranked.
-	// Owner-held and pointer-free: a metric shared with another planner
-	// (adoption) is ranked only by the planner whose array says so.
-	rank []uint32
+	// Owner-local slots. install gives each installed ID a slot, in arrival
+	// order, and leaves it as a hint on the metric's identity. ids[s] is the
+	// NumericID in slot s; rank[s] is 1 + its index in dense, in the canonical
+	// (group, vshard, length, name) order, 0 when unranked. denseSlots and
+	// unrankedSlots run parallel to dense and unranked, so renumber never
+	// looks a slot up. All four are pointer-free and sized by this owner's
+	// names, not by the engine-wide ID space. Invariant: rank[s] != 0 means
+	// dense[rank[s]-1] is the metric installed under ids[s].
+	ids             []uint64
+	rank            []uint32
+	denseSlots      []uint32
+	denseSlotsSpare []uint32
+	unrankedSlots   []uint32
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -138,15 +146,21 @@ func (r *coreRollups) install(id uint64, m *rollupMetric) {
 	old := r.metrics[id]
 	r.metrics[id] = m
 	if old != m {
-		if rk := r.rankOf(id); old != nil || rk != 0 {
-			// The stale entry leaves dense at the next renumber; an ID this
-			// planner ranked before re-enters unranked.
+		s, ok := uint32(0), false
+		if old != nil {
+			// The stale entry leaves dense at the next renumber; the ID
+			// re-enters unranked in its old slot when retire finds it.
 			r.replaced = true
-			if rk != 0 {
-				r.rank[id] = 0
-			}
+			s, ok = r.retire(id, old)
 		}
+		if !ok {
+			s = uint32(len(r.ids))
+			r.ids = append(r.ids, id)
+			r.rank = append(r.rank, 0)
+		}
+		m.ownerSlot.Store(s + 1)
 		r.unranked = append(r.unranked, m)
+		r.unrankedSlots = append(r.unrankedSlots, s)
 	}
 	if len(m.schema().Archives) > 1 {
 		r.closable[id] = m
@@ -265,10 +279,12 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for j < len(keys) && in.Batches[keys[j]&sealBatchIndexMask].ID == id {
 			j++
 		}
-		// An ID this planner ranked reaches its metric through dense; only
-		// fresh and not-yet-ranked names probe the metrics map.
+		// A ranked name whose identity carries this planner's slot reaches
+		// its metric through dense. Fresh and unranked names, policy-bytes
+		// batches and hints another planner overwrote probe the metrics map.
 		var m *rollupMetric
-		if rk := r.rankOf(id); rk != 0 {
+		rk := r.hintRank(first.Registered, id)
+		if rk != 0 {
 			m = r.dense[rk-1]
 		} else {
 			m = r.metrics[id]
@@ -299,7 +315,11 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh, batchCount: j - i})
 		s := &stages[len(stages)-1]
 		s.next.Expired = false
-		r.stageKey(s)
+		if rk != 0 {
+			s.vshard, s.sortKey = m.vshard, uint64(rk)<<1
+		} else {
+			r.stageKey(s)
+		}
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
 		}
