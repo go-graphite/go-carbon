@@ -8,9 +8,11 @@ import "time"
 type Observation struct {
 	CommittedPoints, Seals, SealNanoseconds, CompactionDebtBytes uint64
 	CompactedBytes, ObsoleteBytes, LiveBytes, DispatchBytes      uint64
-	BufferedPoints                                               int64
-	SealLagSeconds                                               float64
-	Parts                                                        [7]int64
+	// DurableSeals, SealNames and SealPoints give names and points per seal.
+	DurableSeals, SealNames, SealPoints uint64
+	BufferedPoints                      int64
+	SealLagSeconds                      float64
+	Parts                               [7]int64
 }
 
 func (e *coreEngine) Observe() Observation {
@@ -22,6 +24,9 @@ func (e *coreEngine) Observe() Observation {
 	for _, o := range e.owners {
 		s.CommittedPoints += o.committed.Load()
 		s.Seals += o.sealCalls.Load()
+		s.DurableSeals += o.durableSeals.Load()
+		s.SealNames += o.sealNames.Load()
+		s.SealPoints += o.sealPoints.Load()
 		s.SealNanoseconds += o.sealNS.Load()
 		s.BufferedPoints += o.bufferedPoints.Load()
 		if since := o.bufferedSince.Load(); since != 0 {

@@ -63,6 +63,9 @@ type coreSealPlan struct {
 	// Parts are rollup planner parts with trusted coverage, written from
 	// planned tuples into separate immutable files and never LSM-ingested.
 	Parts []plannedRollupPart
+	// Names counts the point-bearing names in this seal, excluding idle
+	// closures. It is telemetry only.
+	Names int
 	// Commit publishes staged owner-local state after durable atomic ingestion.
 	// It cannot fail and must not retain mutable input buffers.
 	Commit func()
