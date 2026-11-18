@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,7 +38,33 @@ type Reader struct {
 	work      chan *sealrollup.Workspace
 	// Now is fixed by the caller before intake; nil uses time.Now.
 	Now func() time.Time
+	// BlockCacheBytes sizes the sealed-part block cache that all owners
+	// share; fixed before the first publication, zero uses the default.
+	BlockCacheBytes int64
+	blocksOnce      sync.Once
+	blocks          *pebble.Cache
+	closedBlocks    atomic.Bool
 }
+
+// DefaultBlockCacheBytes holds the index and data blocks a cold single-name
+// read touches on every live part of its owner. A per-owner cache sized from
+// the read budget (85 KiB at 96 owners) held no 256 KiB dense block, so every
+// request decompressed one block per live part again.
+const DefaultBlockCacheBytes = 512 << 20
+
+// blockCache returns the shared cache. Shards stay at least 8 MiB so each
+// holds whole dense blocks; Pebble's default would split it 2*GOMAXPROCS ways.
+func (r *Reader) blockCache() *pebble.Cache {
+	r.blocksOnce.Do(func() {
+		n := r.BlockCacheBytes
+		if n <= 0 {
+			n = DefaultBlockCacheBytes
+		}
+		r.blocks = pebble.NewCacheWithShards(n, int(max(1, min(int64(2*runtime.GOMAXPROCS(0)), n/(8<<20)))))
+	})
+	return r.blocks
+}
+
 type generation struct {
 	refs    atomic.Int64
 	sealed  *sealedData
@@ -135,7 +162,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 			g.sealed.refs.Add(1)
 		}
 		if g.sealed == nil && inventory != nil {
-			parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, old.sealed.parts, r.Identities, r.caches[owner].limit)
+			parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, old.sealed.parts, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
 			if err != nil {
 				old.release()
 				_ = snapshot.Close()
@@ -152,7 +179,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	if g.sealed != nil && g.sealed.snapshot != snapshot {
 		_ = snapshot.Close()
 	} else if g.sealed == nil {
-		parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, nil, r.Identities, r.caches[owner].limit)
+		parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, nil, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
 		if err != nil {
 			_ = snapshot.Close()
 			return err
@@ -193,6 +220,11 @@ func (r *Reader) Close() {
 		if g := r.owners[i].Swap(nil); g != nil {
 			g.release()
 		}
+	}
+	// Open parts hold their own references; this drops only the Reader's.
+	r.blocksOnce.Do(func() {})
+	if r.blocks != nil && r.closedBlocks.CompareAndSwap(false, true) {
+		r.blocks.Unref()
 	}
 }
 func (s *sealedData) load() {
