@@ -36,8 +36,10 @@ func TestClassicCoarseOpenWindow(t *testing.T) {
 	}
 }
 
+// coarsePublication records the latest engine publication. It keeps no
+// snapshot: ownership transfers to the reader, which may close the pin at once
+// when it already holds one for the same sealed generation and inventory.
 type coarsePublication struct {
-	snapshot  *pebble.Snapshot
 	number    uint64
 	inventory *v2core.RollupInventory
 	pending   int
@@ -76,7 +78,7 @@ func testClassicCoarseOpenWindow(t *testing.T, retentions whisper.Retentions, me
 		if err := reader.PublishWithInventory(owner, snapshot, pending, number, inventory); err != nil {
 			return err
 		}
-		last = coarsePublication{snapshot, number, inventory, len(pending)}
+		last = coarsePublication{number, inventory, len(pending)}
 		return nil
 	}
 	cfg := testConfig()
@@ -155,13 +157,21 @@ func testClassicCoarseOpenWindow(t *testing.T, retentions whisper.Retentions, me
 		unsealed = append(unsealed, b)
 	}
 	// pending renders the not yet sealed applications on the latest sealed
-	// snapshot, exactly as the engine's next head publication carries them.
+	// snapshot, exactly as the engine's next head publication carries them:
+	// a fresh pin with the latest generation and inventory. The engine's own
+	// throttled pending-only publications are such pins; the reader keeps its
+	// sealed resource and closes them, so a pin handed over earlier is never
+	// published again.
 	pending := func(stage string) {
 		t.Helper()
 		mu.Lock()
 		defer mu.Unlock()
-		if err := reader.PublishWithInventory(0, last.snapshot, unsealed, last.number, last.inventory); err != nil {
+		sealed := reader.owners[0].Load().sealed
+		if err := reader.PublishWithInventory(0, engine.DBs()[0].NewSnapshot(), unsealed, last.number, last.inventory); err != nil {
 			t.Fatal(err)
+		}
+		if reader.owners[0].Load().sealed != sealed {
+			t.Fatalf("%s: pending view replaced the latest sealed resource", stage)
 		}
 		compare(stage)
 	}
