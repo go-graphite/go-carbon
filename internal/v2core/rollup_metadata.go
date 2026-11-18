@@ -216,6 +216,9 @@ func (r *coreRollups) release() {
 		r.lanes[i].output.release()
 		clear(r.lanes[i].ranked)
 		r.lanes[i].ranked = r.lanes[i].ranked[:0]
+		// The sort's spare buffer still points at stages; pooled sets must
+		// not keep another seal's stage arrays alive.
+		clear(r.lanes[i].spare)
 	}
 	for _, coverage := range r.coverage {
 		clear(coverage.seen)
@@ -233,5 +236,6 @@ func (r *coreRollups) release() {
 	}
 	r.samples = r.samples[:0]
 	r.arena = r.arena[:0]
+	r.returnScratch()
 	r.pending = false
 }

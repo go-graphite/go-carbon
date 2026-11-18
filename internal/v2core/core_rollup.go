@@ -98,6 +98,7 @@ type coreRollups struct {
 	batches        []sealrollup.Batch
 	files          map[string][][]plannedKV
 	arena          []byte
+	scratch        *rollupScratch // pooled working set held from planParts to Commit/Abort
 	pending        bool
 	definitions    map[[32]byte][]partsformat.ArchivePolicy
 	coverage       map[string]*rollupCoverage
@@ -207,6 +208,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		return coreSealPlan{}, errors.New("rollup plan still owns seal arenas")
 	}
 	r.pending = true
+	r.takeScratch()
 	returned := false
 	defer func() {
 		if !returned {
@@ -227,9 +229,9 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		names = map[partsformat.ID]uint64{}
 		r.pendingNames = names
 	}
-	// At most one stage per input application. Retain capacity between seals.
-	stages = slices.Grow(stages, len(in.Batches))
-	r.stages = stages
+	// One stage per distinct name, not per input application: a time-only
+	// seal admits several applications per name, so sizing by rows would
+	// reserve stages that are never used. Pooled capacity covers the names.
 	r.batchPositions = slices.Grow(r.batchPositions[:0], len(in.Batches))[:len(in.Batches)]
 	for bi, b := range in.Batches {
 		i, ok := positions[b.ID]
