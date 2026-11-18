@@ -22,7 +22,9 @@ import (
 )
 
 // Owner is called by exactly one goroutine. Append borrows its arguments only
-// until return. Seal+Drain must journal-sync before publishing to the core.
+// until return; plaintext names share one string per socket batch, so an owner
+// that keeps a name must clone it. Seal+Drain must journal-sync before
+// publishing to the core.
 type Owner interface {
 	Append([]string, []points.Point, []uint64, int64) error
 	Seal() error
@@ -44,7 +46,24 @@ type Config struct {
 type batch struct {
 	names []string
 	data  []points.Point
+	text  []byte // plaintext name bytes, converted once per batch by named
+	ends  []int  // end of each plaintext name in text; empty for codec batches
 }
+
+// named converts plaintext names with one allocation per batch instead of one
+// per line. The substrings share that immutable string, never the reused text.
+func (b *batch) named() {
+	if len(b.ends) == 0 {
+		return
+	}
+	text, start := string(b.text), 0
+	for i, end := range b.ends {
+		b.names[i] = text[start:end]
+		start = end
+	}
+	b.text, b.ends = b.text[:0], b.ends[:0]
+}
+
 type ownerCall struct {
 	run   func() error
 	ack   chan error
@@ -364,7 +383,10 @@ type reference struct {
 }
 
 // OwnerFor returns the stable producer used by unplaced TCP intake.
-func OwnerFor(name string, n int) int {
+func OwnerFor(name string, n int) int { return ownerFor(name, n) }
+
+// ownerFor hashes plaintext name bytes without converting them to a string.
+func ownerFor[T string | []byte](name T, n int) int {
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(name); i++ {
 		h ^= uint64(name[i])
@@ -382,6 +404,7 @@ func (s *Server) read(c net.Conn) error {
 		if b == nil || len(b.data) == 0 {
 			return nil
 		}
+		b.named()
 		select {
 		case s.queues[i] <- b:
 			buffers[i] = nil
@@ -424,25 +447,44 @@ func (s *Server) read(c net.Conn) error {
 	}
 
 	var appendErr error
-	add := func(ref *reference, value float64, ts int64) {
-		if appendErr != nil {
-			s.stats.rejected.Add(1)
-			return
-		}
-		b := buffers[ref.owner]
+	buffer := func(owner int) *batch {
+		b := buffers[owner]
 		if b == nil {
 			if pooled := s.batches.Get(); pooled != nil {
 				b = pooled.(*batch)
 			} else {
 				b = &batch{names: make([]string, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
 			}
-			buffers[ref.owner] = b
+			buffers[owner] = b
 		}
-		b.names = append(b.names, ref.name)
+		return b
+	}
+	added := func(owner int, b *batch, value float64, ts int64) {
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})
 		if len(b.data) >= s.cfg.BatchSize {
-			appendErr = flush(ref.owner)
+			appendErr = flush(owner)
 		}
+	}
+	add := func(ref *reference, value float64, ts int64) {
+		if appendErr != nil {
+			s.stats.rejected.Add(1)
+			return
+		}
+		b := buffer(ref.owner)
+		b.names = append(b.names, ref.name)
+		added(ref.owner, b, value, ts)
+	}
+	// addText copies a borrowed plaintext name into its owner's batch text.
+	addText := func(owner int, name []byte, value float64, ts int64) {
+		if appendErr != nil {
+			s.stats.rejected.Add(1)
+			return
+		}
+		b := buffer(owner)
+		b.text = append(b.text, name...)
+		b.ends = append(b.ends, len(b.text))
+		b.names = append(b.names, "")
+		added(owner, b, value, ts)
 	}
 	if head[0] == 0 {
 		pre := make([]byte, codec.PreambleSize)
@@ -497,7 +539,8 @@ func (s *Server) read(c net.Conn) error {
 		source = z
 	}
 	plain := bufio.NewReaderSize(source, 64<<10)
-	var previous reference
+	var previous []byte // last plaintext name, reused while consecutive lines repeat it
+	owner := 0
 	for {
 		line, err := plain.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
@@ -528,12 +571,12 @@ func (s *Server) read(c net.Conn) error {
 				s.cfg.Logger.Error("v2 invalid plaintext point", "error", e)
 			} else {
 				// Relay groups often contain several points for one name. Reuse
-				// its immutable name and stable owner until the name changes.
-				if !bytes.Equal(name, []byte(previous.name)) {
-					n := string(name)
-					previous = reference{name: n, owner: OwnerFor(n, len(s.queues))}
+				// its stable owner until the name changes.
+				if previous == nil || !bytes.Equal(name, previous) {
+					previous = append(previous[:0], name...)
+					owner = ownerFor(previous, len(s.queues))
 				}
-				add(&previous, value, ts)
+				addText(owner, name, value, ts)
 			}
 		}
 		if appendErr != nil {
