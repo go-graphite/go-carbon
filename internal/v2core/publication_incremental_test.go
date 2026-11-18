@@ -30,13 +30,15 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 	const perPacket, packets, epochs = 256, 256, 4
 	const head = perPacket * packets // batches per seal
 	var published []coreBatch        // the reader keeps the latest publication
-	o.batchHook = func(pin *pebble.Snapshot, b []coreBatch, _ uint64) error {
+	o.batchHook = func(pin *pebble.Snapshot, pv PendingView, _ uint64) error {
+		b := pv.Batches()
 		published = b
 		return pin.Close()
 	}
 	seen := make([]uint8, head*epochs+1) // by order
 	visibleCalls, lastCall, observed := 0, 0, 0
-	o.visible = func(b []coreBatch) {
+	o.visible = func(pv PendingView) {
+		b := pv.Batches()
 		visibleCalls++
 		lastCall = len(b)
 		observed += len(b)

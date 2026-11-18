@@ -1,6 +1,7 @@
 package v2read
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"sync"
@@ -33,71 +34,62 @@ type pendingChunk struct {
 // seal; past it the next generation indexes its whole head as one chunk.
 const maxPendingChunks = 64
 
-// samePendingBatch reports whether two published descriptors are the same
-// owner application. Point arenas are detached and immutable per packet.
-func samePendingBatch(a, b *v2core.Batch) bool {
-	if a.ID != b.ID || a.Order != b.Order || a.Clock != b.Clock || a.Registered != b.Registered || len(a.Points) != len(b.Points) || len(a.Policy) != len(b.Policy) {
-		return false
-	}
-	if len(a.Points) > 0 && &a.Points[0] != &b.Points[0] {
-		return false
-	}
-	return len(a.Policy) == 0 || &a.Policy[0] == &b.Policy[0]
-}
-
 // nextPendingIndex reuses old's chunks when pending extends oldPending.
-func nextPendingIndex(old *pendingIndex, oldPending, pending []v2core.Batch) *pendingIndex {
-	if len(pending) == 0 {
+func nextPendingIndex(old *pendingIndex, oldPending, pending v2core.PendingView) *pendingIndex {
+	if pending.Len() == 0 {
 		return &pendingIndex{}
 	}
-	n := len(oldPending)
-	if old != nil && n > 0 && n <= len(pending) && len(old.chunks) < maxPendingChunks &&
-		samePendingBatch(&oldPending[0], &pending[0]) && samePendingBatch(&oldPending[n-1], &pending[n-1]) {
-		if n == len(pending) {
+	n := oldPending.Len()
+	if old != nil && n > 0 && len(old.chunks) < maxPendingChunks && pending.Extends(oldPending) {
+		if n == pending.Len() {
 			return old
 		}
 		chunks := make([]*pendingChunk, len(old.chunks), len(old.chunks)+1)
 		copy(chunks, old.chunks)
-		return &pendingIndex{chunks: append(chunks, &pendingChunk{start: n, end: len(pending)})}
+		return &pendingIndex{chunks: append(chunks, &pendingChunk{start: n, end: pending.Len()})}
 	}
-	return &pendingIndex{chunks: []*pendingChunk{{start: 0, end: len(pending)}}}
+	return &pendingIndex{chunks: []*pendingChunk{{start: 0, end: pending.Len()}}}
 }
 
 // pendingName is the exact name predicate the linear scan used.
-func pendingName(b *v2core.Batch) (string, error) {
-	if b.Registered != nil {
-		return b.Registered.Name(), nil
+func pendingName(registered *v2core.ApplicationPolicy, policy []byte) (string, error) {
+	if registered != nil {
+		return registered.Name(), nil
 	}
 	var p v2core.RollupPolicy
-	if err := json.Unmarshal(b.Policy, &p); err != nil {
+	if err := json.Unmarshal(policy, &p); err != nil {
 		return "", err
 	}
 	return string(p.Name), nil
 }
 
 // pendingHash is the hash of pendingName without reading name bytes when the
-// batch carries a registered identity.
-func pendingHash(b *v2core.Batch) (uint64, error) {
-	if b.Registered != nil {
-		return b.Registered.NameHash(), nil
+// application carries a registered identity.
+func pendingHash(registered *v2core.ApplicationPolicy, policy []byte) (uint64, error) {
+	if registered != nil {
+		return registered.NameHash(), nil
 	}
-	name, err := pendingName(b)
+	name, err := pendingName(registered, policy)
 	return v2core.NameHash(name), err
 }
 
-// load indexes pending[start:end]. Every holder of the chunk publishes the
-// same batches at these positions, so any holder's slice may build it.
-func (c *pendingChunk) load(pending []v2core.Batch) error {
+// load indexes positions [start, end). Every holder of the chunk publishes
+// the same applications at these positions, so any holder's view may build it.
+func (c *pendingChunk) load(pending v2core.PendingView) error {
 	c.once.Do(func() {
 		n := c.end - c.start
 		hashes := make([]uint64, n)
-		for i := range hashes {
-			h, err := pendingHash(&pending[c.start+i])
+		pending.Refs(c.start, c.end, func(pos int, _ uint64, registered *v2core.ApplicationPolicy, policy []byte) bool {
+			h, err := pendingHash(registered, policy)
 			if err != nil {
 				c.err = err
-				return
+				return false
 			}
-			hashes[i] = h
+			hashes[pos-c.start] = h
+			return true
+		})
+		if c.err != nil {
+			return
 		}
 		size := 1
 		for size < 2*n {
@@ -119,9 +111,43 @@ func (c *pendingChunk) load(pending []v2core.Batch) error {
 	return c.err
 }
 
+// selectPending returns the applications whose exact name is in names, in
+// arrival order. Only matching applications are decoded.
+func selectPending(ctx context.Context, x *pendingIndex, pending v2core.PendingView, names []string) ([]v2core.Batch, error) {
+	positions, err := x.candidates(pending, names)
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, n := range names {
+		wanted[n] = true
+	}
+	var out []v2core.Batch
+	covered := -1 // positions before this belong to an application already taken
+	for _, i := range positions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if int(i) < covered {
+			continue
+		}
+		_, registered, policy := pending.Ref(int(i))
+		name, err := pendingName(registered, policy)
+		if err != nil {
+			return nil, err
+		}
+		if wanted[name] {
+			b, _, end := pending.Application(int(i))
+			out = append(out, b)
+			covered = end
+		}
+	}
+	return out, nil
+}
+
 // candidates returns ascending pending positions whose name hash matches one
 // of names. The caller still applies the exact name predicate.
-func (x *pendingIndex) candidates(pending []v2core.Batch, names []string) ([]int32, error) {
+func (x *pendingIndex) candidates(pending v2core.PendingView, names []string) ([]int32, error) {
 	if len(x.chunks) == 0 {
 		return nil, nil
 	}

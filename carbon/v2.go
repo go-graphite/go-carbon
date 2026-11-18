@@ -117,9 +117,9 @@ func (app *App) startV2() error {
 	telemetry := newV2WriteTelemetry(shards, n)
 	updates := newV2CatalogUpdates(shards)
 	catalogTelemetry := &v2CatalogTelemetry{}
-	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: func(owner int, batches []v2core.Batch) {
-		telemetry.visible(owner, batches)
-		updates.visible(owner, batches)
+	hooks := v2core.Hooks{Identities: r.Identities, PublishPending: r.PublishPending, DenseRollups: true, SealTiming: telemetry.observeStage, VisiblePending: func(owner int, pending v2core.PendingView) {
+		telemetry.visiblePending(owner, pending)
+		updates.visiblePending(owner, pending)
 	}}
 	if app.v2Now != nil {
 		hooks.Now = app.v2Now
