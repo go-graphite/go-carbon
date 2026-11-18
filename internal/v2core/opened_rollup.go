@@ -203,7 +203,7 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 				_ = it.Close()
 				return nil, err
 			}
-			meta, err := decodeRollupMetadataView(raw)
+			meta, err := decodeRollupMetadataView(key.Metric, key.Group, raw)
 			if err != nil {
 				_ = it.Close()
 				return nil, err

@@ -237,6 +237,7 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 // A valid transport checksum alone cannot certify archive/frontier semantics.
 // This bounded pass validates values without reconstructing a name digest.
 func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descriptor) error {
+	v2part.RegisterPolicies(d.Coverage.Policies)
 	type limits struct {
 		order  uint64
 		slots  map[uint32]int64
@@ -254,7 +255,7 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 			names[k.Metric] = entry
 		}
 		if k.Archive == v2part.MetadataArchive {
-			m, decodeErr := DecodeRollupMetadata(b)
+			m, decodeErr := DecodeRollupMetadata(k.Metric, k.Group, b)
 			if err := decodeErr; err != nil {
 				return err
 			}

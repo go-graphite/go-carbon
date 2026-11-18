@@ -151,6 +151,7 @@ func (d Descriptor) spec() Spec {
 }
 
 func canonicalPolicies(in []ArchivePolicy) ([]ArchivePolicy, error) {
+	RegisterPolicies(in)
 	out := slices.Clone(in)
 	slices.SortFunc(out, func(a, b ArchivePolicy) int {
 		if a.Archive < b.Archive {

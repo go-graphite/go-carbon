@@ -109,7 +109,7 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 			return v2part.Descriptor{}, errors.New("invalid metadata key")
 		}
 		var d definition
-		if d.meta, e = DecodeRollupMetadata(kv.Value); e != nil {
+		if d.meta, e = DecodeRollupMetadata(k.Metric, k.Group, kv.Value); e != nil {
 			return v2part.Descriptor{}, e
 		}
 		if d.meta.BaselineOrder > d.meta.Frontier.Order || (d.meta.Version != 1 && d.meta.Version != 2 && d.meta.Version != 3) || d.meta.Frontier.Order == 0 || (d.meta.Version == 1 && (d.meta.ResetOrder != 0 || d.meta.Expired)) || d.meta.ResetOrder > d.meta.Frontier.Order || (d.meta.Expired && d.meta.ResetOrder != d.meta.Frontier.Order) {

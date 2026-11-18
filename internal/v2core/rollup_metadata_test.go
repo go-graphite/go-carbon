@@ -2,8 +2,10 @@ package v2core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -34,22 +36,22 @@ func TestRollupMetadataBinaryLegacyAndFraming(t *testing.T) {
 		}
 		encoded := AppendRollupMetadata(nil, m)
 		for _, data := range [][]byte{legacy, encoded} {
-			got, e := DecodeRollupMetadata(data)
+			got, e := DecodeRollupMetadata("", "", data)
 			if e != nil || !reflect.DeepEqual(got, m) {
 				t.Fatalf("roundtrip %+v %v", got, e)
 			}
 		}
 		for n := 0; n < len(encoded); n++ {
-			if _, e := DecodeRollupMetadata(encoded[:n]); e == nil {
+			if _, e := DecodeRollupMetadata("", "", encoded[:n]); e == nil {
 				t.Fatalf("accepted truncated row %d", n)
 			}
 		}
 		for _, bad := range [][]byte{append(bytes.Clone(encoded), 0), append(bytes.Clone(encoded[:5]), append([]byte{2}, encoded[6:]...)...)} {
-			if _, e := DecodeRollupMetadata(bad); e == nil {
+			if _, e := DecodeRollupMetadata("", "", bad); e == nil {
 				t.Fatal("accepted corrupt row")
 			}
 		}
-		got, e := DecodeRollupMetadata(encoded)
+		got, e := DecodeRollupMetadata("", "", encoded)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -192,29 +194,66 @@ func BenchmarkRollupMetadataBinary(b *testing.B) {
 	}
 }
 
-// Registered identities must emit the identical on-disk envelope, including
-// escaped names and the optional baseline header, without a plain-name copy.
+// Registered identities emit slim envelopes that decode, through the part
+// policy table, to exactly what the full envelope decodes to, including the
+// definition bytes, for escaped names, every method, XFF and ladder shape.
 func TestRollupIdentityMetadataEncoding(t *testing.T) {
-	for _, name := range []string{"namespace.metric", "quoted.\"metric\\name", "html.<metric>&", "unicode.метрика"} {
-		_, raw := rollupTestPolicy(t, name, "1s:1h,1m:1d", sealrollup.Last, .5)
+	names := []string{"namespace.metric", "quoted.\"metric\\name", "html.<metric>&", "unicode.метрика", "ctl.\x01\x7f", "line\u2028sep", "a"}
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := 0; i < 64; i++ {
+		b := make([]byte, 1+rng.IntN(120))
+		for j := range b {
+			b[j] = byte(0x21 + rng.IntN(0x5e))
+		}
+		names = append(names, string(b))
+	}
+	ladders := []string{"1s:1h,1m:1d", "10s:3d", "10s:2d,1m:14d,30m:2y", "1m:30d,1h:1y,1d:10y", "1s:1d,1m:30d,1h:1y,1d:10y"}
+	methods := []sealrollup.Method{sealrollup.Average, sealrollup.Sum, sealrollup.Last, sealrollup.Max, sealrollup.Min}
+	xffs := []float32{0, .1, .5, 1}
+	for i, name := range names {
+		ladder, method, xff := ladders[i%len(ladders)], methods[i%len(methods)], xffs[i%len(xffs)]
+		policy, raw := rollupTestPolicy(t, name, ladder, method, xff)
 		h, err := (&PolicyCatalog{}).intern(7, name, raw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, baseline := range []uint64{0, 1} {
-			meta := RollupMetadata{Version: 2, ID: 7, Policy: raw, BaselineOrder: baseline, ResetOrder: 3, Expired: true, LastUpdate: -1, Revision: 19, Frontier: sealrollup.Frontier{Order: 5, MaxTime: -123, Policy: h.policy.prepared.Digest()}}
-			prefix := []byte("existing arena prefix")
-			want := AppendRollupMetadata(bytes.Clone(prefix), meta)
-			buf := make([]byte, len(prefix), len(want)+64)
-			copy(buf, prefix)
-			got := h.appendMetadata(buf, meta)
-			if !bytes.Equal(got, want) {
-				t.Fatalf("metadata encoding changed for %q baseline%d", name, baseline)
-			}
-			if h.plain {
+		config, _ := json.Marshal(policy.Config)
+		v2part.RegisterPolicies([]v2part.ArchivePolicy{{Digest: sha256.Sum256(config), Definition: config}})
+		for _, version := range []uint8{1, 2, 3} {
+			for _, baseline := range []uint64{0, 1} {
+				meta := RollupMetadata{Version: version, ID: 7, Policy: raw, BaselineOrder: baseline, ClosedThrough: 99, LastUpdate: -1, Revision: 19, Frontier: sealrollup.Frontier{Order: 5, MaxTime: -123, Policy: h.policy.prepared.Digest()}}
+				if version > 1 {
+					meta.ResetOrder, meta.Expired = 5, true
+				}
+				full, err := DecodeRollupMetadata(policy.Name, policy.Group, AppendRollupMetadata(nil, meta))
+				if err != nil {
+					t.Fatal(err)
+				}
+				prefix := []byte("existing arena prefix")
+				buf := append(bytes.Clone(prefix), make([]byte, 0, 256)...)
+				got := h.appendMetadata(buf, meta)
+				if !bytes.Equal(got[:len(prefix)], prefix) || bytes.Contains(got, []byte(`"Config"`)) {
+					t.Fatalf("slim envelope stored the definition for %q", name)
+				}
+				slim, err := DecodeRollupMetadata(policy.Name, policy.Group, got[len(prefix):])
+				if err != nil || !reflect.DeepEqual(slim, full) || !bytes.Equal(slim.Policy, raw) {
+					t.Fatalf("slim decode differs for %q v%d baseline%d: %v\n%+v\n%+v", name, version, baseline, err, slim, full)
+				}
+				view, err := decodeRollupMetadataView(policy.Name, policy.Group, got[len(prefix):])
+				if err != nil || !reflect.DeepEqual(view, full) {
+					t.Fatalf("slim view differs for %q", name)
+				}
+				for n := 0; n < len(got)-len(prefix); n++ {
+					if _, e := DecodeRollupMetadata(policy.Name, policy.Group, got[len(prefix):len(prefix)+n]); e == nil {
+						t.Fatalf("accepted truncated slim row %d", n)
+					}
+				}
+				if _, e := DecodeRollupMetadata(policy.Name, policy.Group, append(bytes.Clone(got[len(prefix):]), 0)); e == nil {
+					t.Fatal("accepted slim row with a stored definition")
+				}
 				allocs := testing.AllocsPerRun(100, func() { buf = h.appendMetadata(buf[:len(prefix)], meta) })
 				if allocs != 0 {
-					t.Fatalf("plain metadata allocates %.0f times", allocs)
+					t.Fatalf("slim metadata allocates %.0f times", allocs)
 				}
 			}
 		}

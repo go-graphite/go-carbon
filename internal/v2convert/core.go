@@ -38,7 +38,7 @@ func (CoreRecords) Convert(e Entry) (Record, error) {
 		return Record{}, errors.New("unsupported core rollup partition")
 	}
 	if k.Archive == math.MaxUint32 {
-		if _, err := v2core.DecodeRollupMetadata(e.Value); err != nil {
+		if _, err := v2core.DecodeRollupMetadata(k.Metric, k.Group, e.Value); err != nil {
 			return Record{}, errors.New("invalid core metadata")
 		}
 	} else if _, err = sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, e.Value); err != nil {

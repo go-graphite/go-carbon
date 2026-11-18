@@ -33,7 +33,7 @@ func ScanCatalogNames(ctx context.Context, snapshot *pebble.Snapshot, visit func
 		if key.Archive != rollupMetadataArchive {
 			continue
 		}
-		meta, err := DecodeRollupMetadata(it.Value())
+		meta, err := DecodeRollupMetadata(key.Metric, key.Group, it.Value())
 		if err != nil {
 			return err
 		}

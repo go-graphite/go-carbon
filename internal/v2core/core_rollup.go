@@ -399,7 +399,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {
-			m, decodeErr := decodeRollupMetadataView(iter.Value())
+			m, decodeErr := decodeRollupMetadataView(k.Metric, k.Group, iter.Value())
 			if identities == nil {
 				m.Policy = bytes.Clone(m.Policy)
 			}
