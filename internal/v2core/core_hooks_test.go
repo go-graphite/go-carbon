@@ -2,7 +2,9 @@ package v2core
 
 import (
 	"errors"
+	"fmt"
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +97,40 @@ func TestCorePlanValidation(t *testing.T) {
 		if validateCoreSealPlan(coreSealPlan{Files: files}) == nil {
 			t.Fatal(files)
 		}
+	}
+}
+
+// Spec-less GCP3 parts (baseline bootstrap) are retained, never LSM-ingested:
+// month partitions may interleave across vshards; scopes must stay distinct.
+func TestCorePlanValidationSpeclessRollupParts(t *testing.T) {
+	// Two metrics on distinct vshards, ordered by vshard as keys sort.
+	names := []v2part.ID{"a"}
+	for i := 0; len(names) < 2; i++ {
+		if name := v2part.ID(fmt.Sprintf("m%d", i)); v2part.Route(name) != v2part.Route(names[0]) {
+			names = append(names, name)
+		}
+	}
+	slices.SortFunc(names, func(a, b v2part.ID) int { return int(v2part.Route(a)) - int(v2part.Route(b)) })
+	key := func(name v2part.ID, partition int64, part byte) []byte {
+		t.Helper()
+		k, err := v2part.Encode(v2part.Key{Group: "g", VShard: v2part.Route(name), Partition: partition, Part: v2part.PartID{part}, Metric: name, Archive: v2part.MetadataArchive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	file := func(partition int64, part byte) []coreKV {
+		return []coreKV{{Key: key(names[0], partition, part)}, {Key: key(names[1], partition, part)}}
+	}
+	if err := validateCoreSealPlan(coreSealPlan{Files: [][]coreKV{file(1, 1), file(2, 1)}}); err != nil {
+		t.Fatalf("interleaved month parts: %v", err)
+	}
+	if err := validateCoreSealPlan(coreSealPlan{Files: [][]coreKV{file(1, 1), file(1, 1)}}); err == nil {
+		t.Fatal("accepted duplicate spec-less part scope")
+	}
+	// A generic extension file keeps the strict LSM range ordering.
+	if err := validateCoreSealPlan(coreSealPlan{Files: [][]coreKV{file(1, 1), file(2, 1), {{Key: []byte{'R', 1}}}}}); err == nil {
+		t.Fatal("accepted unordered LSM extension files")
 	}
 }
 func TestCoreConcurrentDurableFrontier(t *testing.T) {

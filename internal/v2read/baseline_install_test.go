@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -50,8 +49,10 @@ func TestInstalledBaselineClassicInventory(t *testing.T) {
 		t.Run(fmt.Sprintf("inventory=%d", first), func(t *testing.T) {
 			t.Parallel()
 			// Advance publication/seal timers when the owners are idle; keep
-			// all real file, conversion, install and replay operations.
-			synctest.Test(t, func(t *testing.T) {
+			// all real file, conversion, install and replay operations. Each
+			// bubble runs in its own process: Pebble's pooled sstable write
+			// tasks must not cross into parallel inventories or other tests.
+			pebbleSynctest(t, func(t *testing.T) {
 				checkInstalledBaselineClassicInventory(t, first, inventories)
 			})
 		})
