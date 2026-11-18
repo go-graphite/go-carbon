@@ -258,7 +258,7 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 			if err := decodeErr; err != nil {
 				return err
 			}
-			if k.BlockStart != 0 || entry.meta != nil || (m.Version != 1 && m.Version != 2) || m.ID == 0 || m.Frontier.Order == 0 || m.ResetOrder > m.Frontier.Order || (m.Version == 1 && (m.ResetOrder != 0 || m.Expired)) || (m.Expired && m.ResetOrder != m.Frontier.Order) {
+			if k.BlockStart != 0 || entry.meta != nil || (m.Version != 1 && m.Version != 2 && m.Version != 3) || m.ID == 0 || m.Frontier.Order == 0 || m.ResetOrder > m.Frontier.Order || (m.Version == 1 && (m.ResetOrder != 0 || m.Expired)) || (m.Expired && m.ResetOrder != m.Frontier.Order) {
 				return errors.New("invalid copied rollup metadata")
 			}
 			if err := json.Unmarshal(m.Policy, &entry.policy); err != nil {

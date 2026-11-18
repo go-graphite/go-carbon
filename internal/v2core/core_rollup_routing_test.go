@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cockroachdb/pebble"
@@ -145,16 +146,25 @@ func TestCoreRollupRoutingVersionRejection(t *testing.T) {
 	}
 	// Reconstruct the old marker-less owner configuration on disk. Opening it
 	// under canonical vshard routing must refuse the incompatible ownership.
+	// Rewrite it after Close: a rollup owner's closing maintenance seal
+	// persists its in-memory frontier.
 	f := e.owners[0].meta
 	f.Config.RollupRoutingVersion = 0
 	data, err := json.Marshal(f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = e.owners[0].db.Set(coreMetaKey, data, pebble.Sync); err != nil {
+	if err = e.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err = e.Close(); err != nil {
+	db, err := pebble.Open(filepath.Join(root, "owner-000"), &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Set(coreMetaKey, data, pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	e, err = Open(root, cfg, Hooks{})

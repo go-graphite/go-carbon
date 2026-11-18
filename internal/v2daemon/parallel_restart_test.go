@@ -95,6 +95,9 @@ func parallelReplayDigest(t *testing.T, s *Store) [32]byte {
 				}
 				return 0
 			})
+			// ClosedThrough records the wall-clock time at which windows were closed
+			// and legitimately differs between opens; the stored slots are compared.
+			m.ClosedThrough = 0
 			// Correction is diagnostic and may change with seal scheduling.
 			for i := range records {
 				records[i].Correction = false

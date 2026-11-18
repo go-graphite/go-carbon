@@ -274,7 +274,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 				if old.latest.PolicyIdentity != pm.PolicyIdentity {
 					return nil, errors.New("inconsistent rollup identity/policy")
 				}
-				if old.latest.meta.Frontier.Order > pm.meta.Frontier.Order || (old.latest.meta.Frontier.Order == pm.meta.Frontier.Order && old.latest.meta.Revision >= pm.meta.Revision) {
+				if !pm.meta.after(old.latest.meta) {
 					latest = old.latest
 				}
 			}
@@ -376,6 +376,12 @@ func (s *RollupSnapshot) MetricVersion(name string) any {
 // carries only immutable results and part identities across generations. New
 // snapshots decode only added parts; removed parts invalidate cached authority.
 func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
+	if m := s.metrics[name]; m != nil && !m.latest.meta.Expired && archive > 0 && archive < len(m.latest.schema().Archives) && first >= 0 && first < last && last <= m.latest.schema().Archives[archive].Count {
+		return s.scanOpenArchive(ctx, name, archive, first, last, yield)
+	}
+	return s.scanStoredArchive(ctx, name, archive, first, last, yield)
+}
+func (s *RollupSnapshot) scanStoredArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
 	m := s.metrics[name]
 	if m == nil || m.latest.meta.Expired || first >= last {
 		return ctx.Err()
@@ -740,7 +746,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			return nil, err
 		}
 		policy := h.rollupPolicy()
-		if (meta.Version != 1 && meta.Version != 2) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
+		if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 			return nil, errors.New("invalid rollup metadata")
 		}
 		if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
@@ -876,7 +882,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 					return nil, err
 				}
 				policy := h.rollupPolicy()
-				if (meta.Version != 1 && meta.Version != 2) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
+				if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 					return nil, errors.New("invalid rollup metadata")
 				}
 				if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
@@ -915,14 +921,14 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 			if seen && old.ID != p.id {
 				return nil, errors.New("source changed numeric metric identity")
 			}
-			if !seen || p.meta.Frontier.Order > old.Frontier.Order || (p.meta.Frontier.Order == old.Frontier.Order && p.meta.Revision > old.Revision) {
+			if !seen || p.meta.after(old.metricMetadata) {
 				out.moves[m].origins[p.part.origin] = sourceMetadata{ID: p.id, metricMetadata: p.meta}
 			}
 			newer, err := newerSource(p.part.origin, p.meta.Frontier.Order, out.moves[m].origin, m.latest.meta.Frontier.Order)
 			if err != nil {
 				return nil, err
 			}
-			if newer || (p.part.origin == out.moves[m].origin && p.meta.Frontier.Order == m.latest.meta.Frontier.Order && p.meta.Revision > m.latest.meta.Revision) {
+			if newer || (p.part.origin == out.moves[m].origin && p.meta.Frontier.Order == m.latest.meta.Frontier.Order && p.meta.after(m.latest.meta)) {
 				m.latest, out.moves[m].origin = p.readMetricState, p.part.origin
 			}
 		}

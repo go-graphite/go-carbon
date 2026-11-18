@@ -254,7 +254,16 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						return append(dst, result...)
 					}
 				}
-				plan, err := m.policy.prepared.PlanInto(lane.records[len(lane.records):], s.next.Frontier, view, ranges, s.batches, &lane.workspace)
+				idleThrough := int64(0)
+				if len(s.batches) == 0 && !s.next.Expired {
+					idleThrough = time.Now().Unix()
+					if r.now != nil {
+						idleThrough = r.now().Unix()
+					}
+				}
+				plan, through, err := m.policy.prepared.PlanClosedInto(lane.records[len(lane.records):], s.next.Frontier, s.next.ClosedThrough, idleThrough, view, ranges, s.batches, &lane.workspace)
+
+				s.next.Version, s.next.ClosedThrough = 3, through
 				if readErr != nil {
 					lane.err = readErr
 					return

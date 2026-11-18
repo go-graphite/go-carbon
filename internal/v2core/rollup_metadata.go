@@ -16,7 +16,9 @@ var rollupMetadataMagic = []byte{'R', 'U', 'M', 1}
 // The caller owns dst through durable publication. Old JSON rows remain readable.
 func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	dst = append(dst, rollupMetadataMagic...)
-	if m.BaselineOrder > 0 {
+	if m.Version == 3 {
+		dst[len(dst)-1] = 3
+	} else if m.BaselineOrder > 0 {
 		dst[len(dst)-1] = 2
 	}
 	dst = append(dst, m.Version)
@@ -28,8 +30,11 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	for _, n := range []uint64{m.ID, m.Frontier.Order, uint64(m.Frontier.MaxTime), uint64(m.LastUpdate), m.Revision, m.ResetOrder} {
 		dst = binary.BigEndian.AppendUint64(dst, n)
 	}
-	if m.BaselineOrder > 0 {
+	if m.BaselineOrder > 0 || m.Version == 3 {
 		dst = binary.BigEndian.AppendUint64(dst, m.BaselineOrder)
+	}
+	if m.Version == 3 {
+		dst = binary.BigEndian.AppendUint64(dst, uint64(m.ClosedThrough))
 	}
 	dst = append(dst, m.Frontier.Policy[:]...)
 	dst = binary.BigEndian.AppendUint32(dst, uint32(len(m.Policy)))
@@ -51,7 +56,7 @@ func (h *PolicyIdentity) appendMetadata(dst []byte, m RollupMetadata) []byte {
 // policy bytes are detached from the iterator buffer and safe after Next/Close.
 func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 	m, err := decodeRollupMetadataView(data)
-	if err == nil && len(data) >= 4 && bytes.Equal(data[:3], rollupMetadataMagic[:3]) && (data[3] == 1 || data[3] == 2) {
+	if err == nil && len(data) >= 4 && bytes.Equal(data[:3], rollupMetadataMagic[:3]) && (data[3] >= 1 && data[3] <= 3) {
 		m.Policy = bytes.Clone(m.Policy)
 	}
 	return m, err
@@ -61,13 +66,16 @@ func DecodeRollupMetadata(data []byte) (RollupMetadata, error) {
 // retaining metadata; the catalog owns the immutable definition returned.
 func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 	var m RollupMetadata
-	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] != 1 && data[3] != 2) {
+	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > 3) {
 		err := json.Unmarshal(data, &m)
 		return m, err
 	}
 	header := 90
 	if data[3] == 2 {
 		header = 98
+	}
+	if data[3] == 3 {
+		header = 106
 	}
 	if len(data) < header || data[5] > 1 || uint64(binary.BigEndian.Uint32(data[header-4:header])) != uint64(len(data)-header) {
 		return m, errors.New("invalid binary rollup metadata")
@@ -80,9 +88,13 @@ func decodeRollupMetadataView(data []byte) (RollupMetadata, error) {
 	m.Revision = binary.BigEndian.Uint64(data[38:46])
 	m.ResetOrder = binary.BigEndian.Uint64(data[46:54])
 	offset := 54
-	if data[3] == 2 {
+	if data[3] >= 2 {
 		m.BaselineOrder = binary.BigEndian.Uint64(data[54:62])
 		offset = 62
+	}
+	if data[3] == 3 {
+		m.ClosedThrough = int64(binary.BigEndian.Uint64(data[62:70]))
+		offset = 70
 	}
 	copy(m.Frontier.Policy[:], data[offset:offset+32])
 	m.Policy = data[header:]

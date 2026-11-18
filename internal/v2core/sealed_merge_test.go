@@ -31,6 +31,17 @@ func mergeFixture(t *testing.T, root string, stage func(string)) *coreEngine {
 	}
 	return e
 }
+
+// mergeAppend rows sit near t=1000: hold idle time below them so wall-clock
+// window closure adds no seal to fixtures that count parts.
+func mergeFixtureIdle(t *testing.T, root string, stage func(string)) *coreEngine {
+	t.Helper()
+	e, err := openCoreWithHooks(root, adoptConfig(), coreHooks{Stage: stage, Now: func() time.Time { return time.Unix(1, 0) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
 func mergeAppend(t *testing.T, e *coreEngine, order uint64) {
 	t.Helper()
 	_, policy := rollupTestPolicy(t, "merge.metric", "1s:120,10s:1h", sealrollup.Last, .5)
@@ -147,7 +158,7 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	if root := os.Getenv("V2_MERGE_CRASH_ROOT"); root != "" {
 		phase := os.Getenv("V2_MERGE_CRASH_PHASE")
-		e := mergeFixture(t, root, func(stage string) {
+		e := mergeFixtureIdle(t, root, func(stage string) {
 			if stage == phase {
 				_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 			}
@@ -158,7 +169,7 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 	for _, phase := range []string{"merge-written", "merge-retained", "merge-before-publish", "merge-published"} {
 		t.Run(phase, func(t *testing.T) {
 			root := t.TempDir()
-			e := mergeFixture(t, root, nil)
+			e := mergeFixtureIdle(t, root, nil)
 			for n := uint64(1); n <= sealedMergeFanIn; n++ {
 				mergeAppend(t, e, n)
 			}
@@ -177,7 +188,7 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 			if !ok || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
 				t.Fatalf("child not killed: %v %s", err, out)
 			}
-			e = mergeFixture(t, root, nil)
+			e = mergeFixtureIdle(t, root, nil)
 			defer e.close()
 			s = e.owners[0].db.NewSnapshot()
 			defer s.Close()
@@ -394,7 +405,7 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 
 func TestSealedMergeOverloadKeepsIntakeMoving(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
-	e := mergeFixture(t, t.TempDir(), nil)
+	e := mergeFixtureIdle(t, t.TempDir(), nil)
 	defer e.close()
 	o := e.owners[0]
 	// No merger runs: crossing the former hard limit must still seal promptly.

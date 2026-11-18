@@ -187,7 +187,12 @@ func (w *Workspace) replace(k key, d Delta) {
 	w.positions[pos] = uint32(len(w.updates))
 }
 
+type windowClosure struct{ through, advance int64 }
+
 func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Delta, error) {
+	return reduceMode(c, view, ranges, batches, w, nil)
+}
+func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Workspace, closing *windowClosure) ([]Delta, error) {
 	if w == nil {
 		// One-shot callers cannot amortize a direct retention-sized array.
 		w = &Workspace{sparseOnly: true}
@@ -208,6 +213,9 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 		}
 	}
 	w.updates = w.updates[:0]
+	if closing != nil {
+		pointCount++
+	}
 	w.preparePositions(c, pointCount)
 	get := func(a int, t int64) (Sample, bool) {
 		k := key{a, slot(t, c.Archives[a])}
@@ -248,6 +256,74 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 			k := key{a, slot(t, c.Archives[a])}
 			w.replace(k, Delta{a, k.slot, b.Order, p})
 		}
+
+		aggregateAt := func(lower int, start int64, closingWindow bool) bool {
+			higher, coarse := c.Archives[lower-1], c.Archives[lower]
+			neighbors = neighbors[:0]
+			if ranges == nil {
+				for ts := start; ts < start+coarse.Step; ts += higher.Step {
+					if p, ok := get(lower-1, ts); ok {
+						neighbors = append(neighbors, p)
+					}
+				}
+			} else {
+				neighbors = ranges(lower-1, start, start+coarse.Step, neighbors)
+				kept := neighbors[:0]
+				for _, p := range neighbors {
+					// Even a replacement with a different epoch invalidates
+					// the older occupied physical slot in the snapshot.
+					if _, replaced := w.lookup(key{lower - 1, slot(p.Time, higher)}); !replaced {
+						kept = append(kept, p)
+					}
+				}
+				neighbors = kept
+				for _, d := range w.updates {
+					if d.Archive == lower-1 && d.Sample.Time >= start && d.Sample.Time < start+coarse.Step {
+						neighbors = append(neighbors, d.Sample)
+					}
+				}
+				slices.SortFunc(neighbors, func(a, b Sample) int {
+					if a.Time < b.Time {
+						return -1
+					}
+					if a.Time > b.Time {
+						return 1
+					}
+					return 0
+				})
+			}
+			if len(neighbors) == 0 || float32(len(neighbors))/float32(coarse.Step/higher.Step) < c.XFilesFactor {
+				return false
+			}
+			set(lower, start, math.Float64bits(aggregateSamples(c.Method, neighbors)))
+			if closingWindow {
+				var order uint64
+				for _, p := range neighbors {
+					order = max(order, p.Sequence)
+				}
+				k := key{lower, slot(start, coarse)}
+				d, _ := w.lookup(k)
+				d.Order, d.Sample.Sequence = order, order
+				w.replace(k, d)
+			}
+			return true
+		}
+		if closing != nil {
+			through := max(closing.through, closing.advance)
+			for _, point := range b.Points {
+				through = max(through, point.Time)
+			}
+			// Flush source windows before any new epoch can replace their ring
+			// slots. Ascending archives make the last child available to its parent.
+			for lower := 1; lower < len(c.Archives); lower++ {
+				a := c.Archives[lower]
+				start := align(closing.through, a.Step)
+				if closing.through > 0 && start+a.Step <= through {
+					aggregateAt(lower, start, true)
+				}
+			}
+			closing.through = through
+		}
 		for archive, a := range c.Archives {
 			current := w.current[:0]
 			for _, p := range points {
@@ -276,7 +352,7 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 			// Every original interval remains eligible at each level. Do not
 			// propagate only the successful child buckets: Whisper does not do that.
 			for lower := archive + 1; lower < len(c.Archives); lower++ {
-				higher, coarse := c.Archives[lower-1], c.Archives[lower]
+				coarse := c.Archives[lower]
 				wrote := false
 				previous := int64(-1)
 				for _, t := range changed {
@@ -285,43 +361,12 @@ func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace
 						continue
 					}
 					previous = start
-					neighbors = neighbors[:0]
-					if ranges == nil {
-						for ts := start; ts < start+coarse.Step; ts += higher.Step {
-							if p, ok := get(lower-1, ts); ok {
-								neighbors = append(neighbors, p)
-							}
-						}
-					} else {
-						neighbors = ranges(lower-1, start, start+coarse.Step, neighbors)
-						kept := neighbors[:0]
-						for _, p := range neighbors {
-							// Even a replacement with a different epoch invalidates
-							// the older occupied physical slot in the snapshot.
-							if _, replaced := w.lookup(key{lower - 1, slot(p.Time, higher)}); !replaced {
-								kept = append(kept, p)
-							}
-						}
-						neighbors = kept
-						for _, d := range w.updates {
-							if d.Archive == lower-1 && d.Sample.Time >= start && d.Sample.Time < start+coarse.Step {
-								neighbors = append(neighbors, d.Sample)
-							}
-						}
-						slices.SortFunc(neighbors, func(a, b Sample) int {
-							if a.Time < b.Time {
-								return -1
-							}
-							if a.Time > b.Time {
-								return 1
-							}
-							return 0
-						})
-					}
-					if len(neighbors) == 0 || float32(len(neighbors))/float32(coarse.Step/higher.Step) < c.XFilesFactor {
+					if closing != nil && start+coarse.Step > closing.through {
 						continue
 					}
-					set(lower, start, math.Float64bits(aggregateSamples(c.Method, neighbors)))
+					if !aggregateAt(lower, start, false) {
+						continue
+					}
 					wrote = true
 				}
 				if !wrote {
