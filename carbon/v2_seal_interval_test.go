@@ -17,9 +17,18 @@ func TestV2SealIntervalPendingHTTP(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
 	}
+	// Closing a coarse window seals its rollups (window-close rollups), which
+	// would turn the pending points into sealed ones; a pending-only metric
+	// has no coarse value until then. Write the last seconds of a coarse
+	// window that stays open for the whole test and check the fine archive.
+	now := time.Now().Unix()
+	if now%60 < 12 || now%60 > 48 {
+		time.Sleep(time.Duration((72-now%60)%60) * time.Second)
+		now = time.Now().Unix()
+	}
 	app := v2TestApp(t, t.TempDir())
 	app.Config.V2.SealInterval = &Duration{10 * time.Second}
-	ret, err := persister.ParseRetentionDefs("1s:1m,10s:1h")
+	ret, err := persister.ParseRetentionDefs("1s:1m,60s:1h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,8 +42,8 @@ func TestV2SealIntervalPendingHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	now := time.Now().Unix()
-	stamp := now - now%10 - 20
+	now = time.Now().Unix()
+	stamp := now - 10
 	for round := 0; round < 2; round++ {
 		begin := time.Now()
 		for i := 0; i < 10; i++ {
@@ -57,8 +66,8 @@ func TestV2SealIntervalPendingHTTP(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			fine, coarse := false, false
-			for _, span := range []int64{10, 120} {
+			fine := false
+			for _, span := range []int64{10} {
 				b := v2HTTP(t, app, fmt.Sprintf("/render/?format=json&target=seal.pending&from=%d&until=%d", stamp+9-span, stamp+9))
 				var body struct {
 					Metrics []struct {
@@ -91,11 +100,9 @@ func TestV2SealIntervalPendingHTTP(t *testing.T) {
 				}
 				if span == 10 {
 					fine = correct && count == 10 && m.Step == 1
-				} else {
-					coarse = correct && count == 1 && m.Step == 10
 				}
 			}
-			if fine && coarse {
+			if fine {
 				if b := v2HTTP(t, app, "/metrics/find/?format=json&query=seal.*"); !strings.Contains(string(b), "seal.pending") {
 					t.Fatalf("find %s", b)
 				}
@@ -105,11 +112,14 @@ func TestV2SealIntervalPendingHTTP(t *testing.T) {
 				break
 			}
 			if time.Since(begin) > 2200*time.Millisecond {
-				t.Fatalf("round%d pending HTTP visibility >2.2s fine=%v coarse=%v", round, fine, coarse)
+				t.Fatalf("round%d pending HTTP visibility >2.2s fine=%v", round, fine)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		if obs := app.v2.store.Core.Observe(); obs.Seals != 0 {
+		// The only seal allowed is the one-second maintenance pass that
+		// establishes rollup metadata for a new name; neither the 10s time
+		// threshold nor window closure may seal in this test.
+		if obs := app.v2.store.Core.Observe(); obs.Seals > 1 {
 			t.Fatalf("pending test sealed: %+v", obs)
 		}
 		t.Logf("round%d append through HTTP visible in %s", round, time.Since(begin))
