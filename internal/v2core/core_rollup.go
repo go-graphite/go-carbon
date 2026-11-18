@@ -66,6 +66,11 @@ type rollupMetric struct {
 	meta   metricMetadata
 	slots  sealrollup.Slots
 	vshard uint16
+	// rank is 1 + this metric's index in rankOwner.dense, the canonical
+	// (group, vshard, length, name) order. Adoption shares metrics between
+	// planners, so a rank is valid only for its owner; 0 means unranked.
+	rank      uint32
+	rankOwner *coreRollups
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -86,8 +91,6 @@ type coreRollups struct {
 	closable       map[uint64]*rollupMetric
 	names          map[partsformat.ID]uint64
 	stages         []rollupStage
-	ordered        []*rollupStage
-	order          rollupStageOrder
 	positions      map[uint64]int
 	batchPositions []int
 	pendingNames   map[partsformat.ID]uint64
@@ -98,7 +101,22 @@ type coreRollups struct {
 	pending        bool
 	definitions    map[[32]byte][]partsformat.ArchivePolicy
 	coverage       map[string]*rollupCoverage
+
+	// dense holds every ranked installed metric in canonical order, so a seal
+	// sorts stages by uint32 rank instead of name bytes. unranked metrics were
+	// installed since the last renumber; replaced marks IDs whose metric
+	// changed (adoption) so the next renumber drops the stale entry.
+	dense      []*rollupMetric
+	denseSpare []*rollupMetric
+	unranked   []*rollupMetric
+	replaced   bool
 }
+
+// rankSlack bounds how many installed-but-unranked metrics a planner carries
+// relative to its dense slice before one sequential renumber. Unranked stages
+// stay exact (binary search plus name tie-break), so this only trades the
+// renumber pass (one touch per name) against per-stage search cost.
+const rankSlack = 64
 
 // Archive max-u32 is reserved within the core's GCP3 rollup experiment for the
 // per-metric policy/frontier/activity envelope. Other archives contain canonical
@@ -113,7 +131,17 @@ func newCoreRollups() *coreRollups {
 // install is the only writer of metrics/closable, so the closure index can
 // never miss a coarse-archive metric.
 func (r *coreRollups) install(id uint64, m *rollupMetric) {
+	old := r.metrics[id]
 	r.metrics[id] = m
+	if old != m {
+		if old != nil || m.rankOwner == r {
+			// The stale entry leaves dense at the next renumber; a metric
+			// this planner ranked before re-enters unranked.
+			r.replaced = true
+			m.rank, m.rankOwner = 0, nil
+		}
+		r.unranked = append(r.unranked, m)
+	}
 	if len(m.schema().Archives) > 1 {
 		r.closable[id] = m
 	} else {
@@ -153,22 +181,20 @@ func newRollupMetric(h *PolicyIdentity) *rollupMetric {
 }
 
 type rollupStage struct {
-	sortGroup     uint32
-	sortRouteName uint64
-	sortPrefix    [2]uint64
-	sortName      string
-	metric        *rollupMetric
-	next          RollupMetadata
-	batches       []sealrollup.Batch
-	records       []sealrollup.Record
-	fresh         bool
-	batchCount    int
+	sortKey    uint64
+	vshard     uint16
+	metric     *rollupMetric
+	next       RollupMetadata
+	batches    []sealrollup.Batch
+	records    []sealrollup.Record
+	fresh      bool
+	batchCount int
 }
 
 type rollupPlannerLane struct {
 	windows   rollupWindowCache
-	ordered   []rollupStageRef
-	scratch   []rollupStageRef
+	ranked    []rollupRankRef
+	spare     []rollupRankRef
 	counts    []int
 	output    rollupOutput
 	workspace sealrollup.Workspace
@@ -188,7 +214,9 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		}
 	}()
 	stages := r.stages[:0]
-	r.order.reset()
+	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
+		r.renumber()
+	}
 	positions := r.positions
 	if positions == nil {
 		positions = map[uint64]int{}
@@ -233,7 +261,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 			stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh})
 			i = len(stages) - 1
 			stages[i].next.Expired = false
-			r.order.key(&stages[i])
+			r.stageKey(&stages[i])
 			positions[b.ID] = i
 		}
 		r.batchPositions[bi] = i
@@ -278,7 +306,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		for id, m := range r.idleCandidates() {
 			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
 				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
-				r.order.key(&stages[len(stages)-1])
+				r.stageKey(&stages[len(stages)-1])
 			}
 		}
 	}
