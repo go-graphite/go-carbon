@@ -79,8 +79,11 @@ type coreRollups struct {
 	expire      func(RollupPolicy, RollupMetadata, time.Time) bool
 	now         func() time.Time
 
-	stage          func(string)
-	metrics        map[uint64]*rollupMetric
+	stage   func(string)
+	metrics map[uint64]*rollupMetric
+	// closable is the subset of metrics with a coarse archive. Only these can
+	// become closure-due; single-archive names never enter idle scans.
+	closable       map[uint64]*rollupMetric
 	names          map[partsformat.ID]uint64
 	stages         []rollupStage
 	ordered        []*rollupStage
@@ -104,7 +107,38 @@ type coreRollups struct {
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, closable: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}}
+}
+
+// install is the only writer of metrics/closable, so the closure index can
+// never miss a coarse-archive metric.
+func (r *coreRollups) install(id uint64, m *rollupMetric) {
+	r.metrics[id] = m
+	if len(m.schema().Archives) > 1 {
+		r.closable[id] = m
+	} else {
+		delete(r.closable, id)
+	}
+}
+
+// idleCandidates returns the metrics an idle pass must visit. An expiry
+// callback can fire for any metric; without one only closure can be due.
+func (r *coreRollups) idleCandidates() map[uint64]*rollupMetric {
+	if r.expire != nil {
+		return r.metrics
+	}
+	return r.closable
+}
+
+// needsMetadataSeal reports whether a not-yet-installed metric must seal before
+// the next idle deadline: expiry needs its inactivity window anchored, and a
+// coarse archive needs metadata before it can close. A single-archive name
+// without expiry has neither, so it waits for the ordinary seal.
+func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
+	if r.expire != nil || b.Registered == nil {
+		return true
+	}
+	return len(b.Registered.schema().Archives) > 1
 }
 func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	h, err := r.identities.intern(id, "", policy)
@@ -241,7 +275,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		now = r.now()
 	}
 	if r.expire != nil || r.db != nil {
-		for id, m := range r.metrics {
+		for id, m := range r.idleCandidates() {
 			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
 				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
 				r.order.key(&stages[len(stages)-1])
@@ -283,7 +317,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 		for _, s := range stages {
 			m := s.metric
 			if s.fresh {
-				r.metrics[m.id] = m
+				r.install(m.id, m)
 				r.names[m.policy.Name] = m.id
 			}
 		}
@@ -552,7 +586,7 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 			m.slots.InstallRecent(record.Delta)
 		}
 		m.slots.KeepRecent(meta.Frontier.MaxTime)
-		r.metrics[meta.ID] = m
+		r.install(meta.ID, m)
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.
 		r.names[m.policy.Name] = meta.ID
