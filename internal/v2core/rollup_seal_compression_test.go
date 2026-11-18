@@ -87,9 +87,23 @@ func TestSealCompressionDecodesAndMergesIdentically(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Live seals and dense portable parts store envelopes without the
+		// definition; give the seal writer the rows a live seal emits.
 		planned := make([]coreKV, len(rows))
 		for i, kv := range rows {
-			planned[i] = coreKV{Key: kv.Key, Value: kv.Value}
+			value := kv.Value
+			k, err := v2part.Decode(kv.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if k.Archive == v2part.MetadataArchive {
+				m, err := DecodeRollupMetadata(k.Metric, k.Group, value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				value = appendRollupMetadataSlim(nil, m)
+			}
+			planned[i] = coreKV{Key: kv.Key, Value: value}
 		}
 		spec := v2part.Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies, MinExpiry: d.Coverage.MinExpiry, MaxExpiry: d.Coverage.MaxExpiry}
 		sealPath := filepath.Join(root, fmt.Sprintf("seal-%d.sst", part))
