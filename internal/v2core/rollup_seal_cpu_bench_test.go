@@ -47,7 +47,10 @@ func sealCPUFixture(tb testing.TB, shape sealCPUShape, names int) (*coreRollups,
 		if err != nil {
 			tb.Fatal(err)
 		}
-		r.metrics[id], r.names[p.Name] = m, id
+		// Install like a commit, so the first plan ranks every metric as
+		// steady-state production planners are.
+		r.install(id, m)
+		r.names[p.Name] = id
 		rows := make([]Row, shape.points)
 		for j := range rows {
 			rows[j] = Row{Time: 100000 + int64(j)*shape.step, Bits: uint64(rng.Int63()), Seq: uint64(j + 1)}

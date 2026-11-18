@@ -195,7 +195,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 			}
 			ranked, ref := newPlanner(), newPlanner()
 			order := uint64(0)
-			lingered, renumbered := 0, 0
+			lingered, renumbered, repeated := 0, 0, 0
 			for seal := 0; seal < 100; seal++ {
 				clock += 10
 				switch seal {
@@ -221,7 +221,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						}
 					}
 				}
-				var batches []coreBatch
+				var batches, repeats []coreBatch
 				for id := 1; id <= ids; id++ {
 					if seal < births[id] || rng.IntN(3) == 0 {
 						continue
@@ -229,8 +229,17 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 					order++
 					v := float64(rng.IntN(1000)) / 4
 					batches = append(batches, coreBatch{ID: uint64(id), Policy: policies[id], Order: order, Clock: clock, Points: []row{{ID: uint64(id), Time: clock - 5, Bits: math.Float64bits(v), Seq: order}}})
+					if rng.IntN(4) == 0 {
+						// A second application of the same name in one seal must
+						// find its stage again (seal stamp or positions entry).
+						order++
+						repeats = append(repeats, coreBatch{ID: uint64(id), Policy: policies[id], Order: order, Clock: clock, Points: []row{{ID: uint64(id), Time: clock - 3, Bits: math.Float64bits(v + 1), Seq: order}}})
+						repeated++
+					}
 				}
 				rng.Shuffle(len(batches), func(i, j int) { batches[i], batches[j] = batches[j], batches[i] })
+				// Repeats follow every first application, so per-name order holds.
+				batches = append(batches, repeats...)
 				if len(ranked.dense) > 0 && len(ranked.unranked) > 0 {
 					if len(ranked.unranked)*rankSlack < len(ranked.dense) {
 						lingered++
@@ -254,8 +263,8 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 					t.Fatalf("seal %d: ranked and reference plans differ", seal)
 				}
 			}
-			if lingered == 0 || renumbered == 0 {
-				t.Fatalf("coverage: lingered=%d renumbered=%d", lingered, renumbered)
+			if lingered == 0 || renumbered == 0 || repeated == 0 {
+				t.Fatalf("coverage: lingered=%d renumbered=%d repeated=%d", lingered, renumbered, repeated)
 			}
 			ranked.renumber()
 			checkDense(t, ranked)
