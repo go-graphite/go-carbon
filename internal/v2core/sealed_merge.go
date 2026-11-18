@@ -289,10 +289,15 @@ type mergeBlock struct {
 }
 
 type mergeCursor struct {
-	reader      *sstable.Reader
-	cursor      *tableCursor
+	reader *sstable.Reader
+	cursor *tableCursor
+	// key is the current metric's identity with Metric left empty: the name
+	// stays encoded in ident, the validated key bytes before the archive, and
+	// ident[name:] is the GCP3 length-prefixed name. Merges compare and copy
+	// these bytes; they never build a name string per key.
 	key         v2part.Key
-	decoder     v2part.KeyDecoder
+	ident       []byte
+	name        int
 	part        v2part.PartID
 	metadata    RollupMetadata
 	policyBytes []byte
@@ -317,17 +322,17 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 	c.arena, c.blocks = c.arena[:0], c.blocks[:0]
 	c.records = c.records[:0]
 	c.block, c.next = 0, 0
-	k, err := c.decoder.Decode(c.cursor.Key())
+	encoded := c.cursor.Key()
+	k, name, err := v2part.DecodeName(encoded, c.key.Group)
 	if err != nil {
 		return false, err
 	}
+	c.ident = append(c.ident[:0], encoded[:len(encoded)-16]...)
+	c.name = len(c.ident) - len(name) - 4
 	c.key = k
 	c.key.Part = c.part
 	c.key.Archive, c.key.BlockStart, c.key.Ordinal = 0, 0, 0
 	for {
-		if k.Metric != c.key.Metric || k.VShard != c.key.VShard {
-			return false, errors.New("merge metric lacks metadata")
-		}
 		if k.Archive == v2part.MetadataArchive {
 			var slim bool
 			c.metadata, slim, err = decodeRollupMetadataHeader(c.cursor.Value())
@@ -364,12 +369,25 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 			}
 			return false, errors.New("merge metric lacks metadata")
 		}
-		k, err = c.decoder.Decode(c.cursor.Key())
-		if err != nil {
+		encoded = c.cursor.Key()
+		if len(encoded) == len(c.ident)+16 && bytes.Equal(encoded[:len(c.ident)], c.ident) {
+			tail := encoded[len(c.ident):]
+			k.Archive = binary.BigEndian.Uint32(tail)
+			k.BlockStart = int64(binary.BigEndian.Uint64(tail[4:]) ^ (1 << 63))
+			k.Ordinal = binary.BigEndian.Uint32(tail[12:])
+			continue
+		}
+		if k, name, err = v2part.DecodeName(encoded, c.key.Group); err != nil {
 			return false, err
+		}
+		if k.VShard != c.key.VShard || !bytes.Equal(name, c.ident[c.name+4:]) {
+			return false, errors.New("merge metric lacks metadata")
 		}
 	}
 }
+
+// metricName is the current metric's encoded length-prefixed name.
+func (c *mergeCursor) metricName() []byte { return c.ident[c.name:] }
 
 func (c *mergeCursor) advanceRecord(first bool) (bool, error) {
 	if !first {
@@ -396,15 +414,13 @@ type mergeHeap []*mergeCursor
 func (h mergeHeap) Len() int { return len(h) }
 func (h mergeHeap) Less(i, j int) bool {
 	// All inputs share group/partition and normalize to the output part. GCP3
-	// orders the remaining identity by vshard, name byte length, then name bytes.
-	a, b := h[i].key, h[j].key
-	if a.VShard != b.VShard {
-		return a.VShard < b.VShard
+	// orders the remaining identity by vshard, name byte length, then name bytes:
+	// the encoded big-endian length followed by the name compares the same way.
+	a, b := h[i], h[j]
+	if a.key.VShard != b.key.VShard {
+		return a.key.VShard < b.key.VShard
 	}
-	if len(a.Metric) != len(b.Metric) {
-		return len(a.Metric) < len(b.Metric)
-	}
-	return a.Metric < b.Metric
+	return bytes.Compare(a.metricName(), b.metricName()) < 0
 }
 func (h mergeHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h *mergeHeap) Push(v any)   { *h = append(*h, v.(*mergeCursor)) }
@@ -421,6 +437,12 @@ func mergeSlotLess(a, b sealrollup.Record) bool {
 	return a.Archive < b.Archive || a.Archive == b.Archive && a.Slot < b.Slot
 }
 
+// mergePartID draws a merge output's part ID. Byte differentials pin it.
+var mergePartID = func(id *v2part.PartID) error {
+	_, err := rand.Read(id[:])
+	return err
+}
+
 // Merge same-source local originals with the shared timestamp/class/order rule.
 // Resolved coarse records are copied, never aggregated. Publication and GC stay
 // outside this streaming rewrite and retain the ordinary snapshot fences.
@@ -428,7 +450,7 @@ func mergeSlotLess(a, b sealrollup.Record) bool {
 // whose expiry precedes it are dropped as whole-part retirement would.
 func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, ttl int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
-	if _, err = rand.Read(spec.Scope.Part[:]); err != nil {
+	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
 	}
 	seen := map[struct {
@@ -528,7 +550,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		}
 		c := heap.Pop(&h).(*mergeCursor)
 		members = append(members[:0], c)
-		for len(h) > 0 && h[0].key.VShard == c.key.VShard && h[0].key.Metric == c.key.Metric {
+		for len(h) > 0 && h[0].key.VShard == c.key.VShard && bytes.Equal(h[0].metricName(), c.metricName()) {
 			members = append(members, heap.Pop(&h).(*mergeCursor))
 		}
 		// The definition is a function of the key (name, group) and the policy
@@ -545,10 +567,10 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		}
 		config = *chosen.config
 		floor := max(metadata.LastUpdate/1e9, ttl)
-		key, err = v2part.Encode(c.key)
-		if err != nil {
-			return v2part.Descriptor{}, err
-		}
+		// The output key is the input's validated identity with the output part:
+		// Encode(c.key) byte for byte, without a name string or route re-hash.
+		key = append(append(key[:0], c.ident...), make([]byte, 16)...)
+		copy(key[c.name-16:c.name], c.part[:])
 		tail := key[len(key)-16:]
 		setSlot := func(archive uint32, slot int64) {
 			binary.BigEndian.PutUint32(tail, archive)
@@ -645,7 +667,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		} else {
 			full := *metadata
 			if full.Policy == nil {
-				if full.Policy, _, err = appendRollupDefinition(nil, c.key.Metric, c.key.Group, full.Frontier.Policy); err != nil {
+				if full.Policy, _, err = appendRollupDefinition(nil, v2part.ID(c.metricName()[4:]), c.key.Group, full.Frontier.Policy); err != nil {
 					return v2part.Descriptor{}, err
 				}
 			}

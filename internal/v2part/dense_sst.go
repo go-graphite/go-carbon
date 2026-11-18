@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"io"
+	"math/bits"
 	"sync"
 )
 
@@ -34,9 +35,7 @@ func (b *denseBlock) add(key, value []byte, interval int) {
 	if b.entries%interval == 0 {
 		b.restarts = append(b.restarts, uint32(len(b.data)))
 	} else {
-		for shared < len(key) && shared < len(b.last) && key[shared] == b.last[shared] {
-			shared++
-		}
+		shared = commonPrefix(key, b.last)
 	}
 	b.data = binary.AppendUvarint(b.data, uint64(shared))
 	b.data = binary.AppendUvarint(b.data, uint64(len(key)-shared))
@@ -45,6 +44,22 @@ func (b *denseBlock) add(key, value []byte, interval int) {
 	b.data = append(b.data, value...)
 	b.last = append(b.last[:0], key...)
 	b.entries++
+}
+
+// commonPrefix is the length of the longest common prefix of a and b. It
+// compares eight bytes at a time: keys share most of their ~200 bytes.
+func commonPrefix(a, b []byte) int {
+	n := min(len(a), len(b))
+	i := 0
+	for ; i+8 <= n; i += 8 {
+		if x := binary.LittleEndian.Uint64(a[i:]) ^ binary.LittleEndian.Uint64(b[i:]); x != 0 {
+			return i + bits.TrailingZeros64(x)>>3
+		}
+	}
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
 }
 
 func (b *denseBlock) finish() []byte {

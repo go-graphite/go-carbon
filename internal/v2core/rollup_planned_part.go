@@ -64,14 +64,20 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 	w.SealCompression()
 	var shards []uint16
 	for _, segment := range part.Segments {
-		for _, kv := range segment {
+		for i, kv := range segment {
 			if len(shards) == 0 || shards[len(shards)-1] != kv.vshard {
 				shards = append(shards, kv.vshard)
 			}
+			// Ranks order tuples within a segment; each segment's first tuple
+			// is checked against the previous segment by name.
+			rank := kv.rank
+			if i == 0 {
+				rank = 0
+			}
 			if kv.record != nil {
-				err = w.SetPlannedRecord(kv.vshard, kv.name, kv.record)
+				err = w.SetPlannedRecord(kv.vshard, rank, kv.name, kv.record)
 			} else {
-				err = w.SetPlannedMetadata(kv.vshard, kv.name, kv.value)
+				err = w.SetPlannedMetadata(kv.vshard, rank, kv.name, kv.value)
 			}
 			if err != nil {
 				return v2part.Descriptor{}, err

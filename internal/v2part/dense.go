@@ -254,8 +254,10 @@ type denseWorkspace struct {
 	key     Key
 	records []sealrollup.Record
 	last    []byte
-	// Planned input: the previous tuple and the scope's group key prefix.
+	// Planned input: the previous tuple, its planner rank and the scope's
+	// group key prefix.
 	prev     Key
+	prevRank uint32
 	havePrev bool
 	group    []byte
 }
@@ -270,7 +272,7 @@ func (w *DenseWriter) releaseWorkspace() {
 	b.decoder.key, b.decoder.name, b.key = Key{}, "", Key{}
 	b.decoder.prefix = b.decoder.prefix[:0]
 	b.first, b.encoded, b.records, b.last = b.first[:0], b.encoded[:0], b.records[:0], b.last[:0]
-	b.prev, b.havePrev, b.group = Key{}, false, b.group[:0]
+	b.prev, b.prevRank, b.havePrev, b.group = Key{}, 0, false, b.group[:0]
 	w.denseWorkspace = nil
 	denseWorkspaces.Put(b)
 }
@@ -426,7 +428,12 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 // and key bytes are formatted only where a dense run starts. Order, routing,
 // archive and scalar bounds are validated as SetRecordEncoded validates them.
 // Planned and encoded input cannot be mixed in one part.
-func (w *DenseWriter) SetPlannedRecord(vshard uint16, metric ID, r *sealrollup.Record) error {
+//
+// rank is the metric's 1-based position in the planner's canonical
+// (group, vshard, length, name) order, or 0 when unranked. Between two ranked
+// tuples the writer checks order by rank and never reads the names; the
+// caller must pass ranks of one planner epoch only.
+func (w *DenseWriter) SetPlannedRecord(vshard uint16, rank uint32, metric ID, r *sealrollup.Record) error {
 	if w.closed {
 		return io.ErrClosedPipe
 	}
@@ -436,7 +443,7 @@ func (w *DenseWriter) SetPlannedRecord(vshard uint16, metric ID, r *sealrollup.R
 	var k Key
 	var err error
 	if r.Archive >= 0 && int64(r.Archive) < int64(MetadataArchive) && validSlotRecord(*r) {
-		k, err = w.plannedKey(vshard, metric, uint32(r.Archive), r.Slot)
+		k, err = w.plannedKey(vshard, rank, metric, uint32(r.Archive), r.Slot)
 	} else {
 		err = errors.New("dense scalar record does not match valid archive key")
 	}
@@ -449,14 +456,14 @@ func (w *DenseWriter) SetPlannedRecord(vshard uint16, metric ID, r *sealrollup.R
 
 // SetPlannedMetadata writes metric's envelope value after its archive records.
 // The caller's value is not retained.
-func (w *DenseWriter) SetPlannedMetadata(vshard uint16, metric ID, value []byte) error {
+func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, value []byte) error {
 	if w.closed {
 		return io.ErrClosedPipe
 	}
 	if w.err != nil {
 		return w.err
 	}
-	k, err := w.plannedKey(vshard, metric, MetadataArchive, 0)
+	k, err := w.plannedKey(vshard, rank, metric, MetadataArchive, 0)
 	if err == nil {
 		err = w.flush()
 	}
@@ -470,19 +477,21 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, metric ID, value []byte)
 
 // plannedKey checks that a tuple sorts strictly after the previous one in GCP3
 // key order (vshard, name length, name, archive, slot) and validates each new
-// name's length and route once.
-func (w *DenseWriter) plannedKey(vshard uint16, metric ID, archive uint32, slot int64) (Key, error) {
+// name's length and route once. Two ranked tuples compare by rank, which
+// follows that name order, so the check reads no name bytes.
+func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive uint32, slot int64) (Key, error) {
 	if len(w.last) > 0 {
 		return Key{}, errors.New("mixed encoded and planned dense input")
 	}
 	p := &w.prev
 	if w.havePrev {
 		c := cmp.Compare(vshard, p.VShard)
-		if c == 0 {
-			c = cmp.Compare(len(metric), len(p.Metric))
-		}
-		if c == 0 {
-			c = strings.Compare(string(metric), string(p.Metric))
+		if c == 0 && rank != 0 && w.prevRank != 0 {
+			c = cmp.Compare(rank, w.prevRank)
+		} else if c == 0 {
+			if c = cmp.Compare(len(metric), len(p.Metric)); c == 0 {
+				c = strings.Compare(string(metric), string(p.Metric))
+			}
 		}
 		if c == 0 {
 			if c = cmp.Compare(archive, p.Archive); c == 0 {
@@ -510,7 +519,7 @@ func (w *DenseWriter) plannedKey(vshard uint16, metric ID, archive uint32, slot 
 		w.group = append(w.group[:0], group...)
 	}
 	*p = Key{Group: s.Group, VShard: vshard, Partition: s.Partition, Part: s.Part, Metric: metric, Archive: archive, BlockStart: slot}
-	w.havePrev = true
+	w.prevRank, w.havePrev = rank, true
 	return *p, nil
 }
 
