@@ -64,11 +64,22 @@ type denseSSTWorkspace struct {
 	compressed, key               []byte
 }
 
+// Zstd levels for dense blocks. Merges and imports write parts that stay at
+// rest, so they keep the stronger level. A seal part is rewritten by the next
+// size-tier merge within minutes; it pays only the fast level. Each block
+// records its own type byte and a Zstd frame carries no level, so readers and
+// merges decode every level alike.
+const (
+	denseRestLevel = 3
+	denseSealLevel = 1
+)
+
 type denseSSTWriter struct {
 	out                         *hashedOutput
 	work                        *denseSSTWorkspace
 	entries, rawKeys, rawValues uint64
 	blocks                      uint64
+	level                       int
 	err                         error
 }
 
@@ -85,7 +96,7 @@ func newDenseSSTWriter(out *hashedOutput) (*denseSSTWriter, error) {
 	work.index.reset()
 	work.properties.reset()
 	work.meta.reset()
-	return &denseSSTWriter{out: out, work: work}, nil
+	return &denseSSTWriter{out: out, work: work, level: denseRestLevel}, nil
 }
 
 func (w *denseSSTWriter) Set(key, value []byte) error {
@@ -121,7 +132,7 @@ func (w *denseSSTWriter) block(data []byte, compress bool) (offset, length uint6
 	if compress {
 		work := w.work
 		work.compressed = binary.AppendUvarint(work.compressed[:0], uint64(len(data)))
-		work.compressed, err = work.encoder.append(data, work.compressed)
+		work.compressed, err = work.encoder.append(data, work.compressed, w.level)
 		if err != nil {
 			return 0, 0, err
 		}

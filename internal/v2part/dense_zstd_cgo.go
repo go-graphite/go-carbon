@@ -37,7 +37,7 @@ func newDenseEncoder() (*denseEncoder, error) {
 	return e, nil
 }
 
-func (e *denseEncoder) append(src, dst []byte) ([]byte, error) {
+func (e *denseEncoder) append(src, dst []byte, level int) ([]byte, error) {
 	prefix := len(dst)
 	bound := int(C.ZSTD_compressBound(C.size_t(len(src))))
 	if cap(dst)-prefix < bound {
@@ -50,7 +50,7 @@ func (e *denseEncoder) append(src, dst []byte) ([]byte, error) {
 	if len(src) != 0 {
 		source = unsafe.Pointer(&src[0])
 	}
-	n := C.ZSTD_compressCCtx(e.context, unsafe.Pointer(&dst[prefix]), C.size_t(bound), source, C.size_t(len(src)), 3)
+	n := C.ZSTD_compressCCtx(e.context, unsafe.Pointer(&dst[prefix]), C.size_t(bound), source, C.size_t(len(src)), C.int(level))
 	runtime.KeepAlive(e)
 	if C.ZSTD_isError(n) != 0 {
 		return nil, errors.New(C.GoString(C.ZSTD_getErrorName(n)))

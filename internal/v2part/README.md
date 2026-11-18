@@ -118,7 +118,10 @@ bit-checked integer deltas or eight exact byte planes. Zstd/256KiB SST blocks
 compress these columns. The dense container uses a small SET-only RocksDBv2
 writer so one exclusive pooled workspace can retain its Zstd encoder, data/index
 blocks and compressed output across files. Release builds reuse a native
-`ZSTD_CCtx` at level 3; non-cgo builds reuse a Go encoder. Native contexts have a
+`ZSTD_CCtx` at level 3; non-cgo builds reuse a Go encoder. Seal parts, which
+size-tier merges rewrite within minutes, use level 1 (`SealCompression`); merges
+and imports keep level 3. Each block records its type and a Zstd frame carries no
+level, so readers and merges decode both alike. Native contexts have a
 finalizer so an idle workspace discarded by `sync.Pool` releases C memory.
 Pebble's ordinary reader still reads every file, and the original cgo/non-cgo
 stored vectors remain compatibility gates. This local writer exists because the
