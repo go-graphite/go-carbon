@@ -31,6 +31,7 @@ func TestCoreRollupPortableOwner(t *testing.T) {
 	}
 	cfg := coreTestConfig()
 	cfg.Rollups = true
+	cfg.KeepBaseRows = true
 	cfg.Shards = 3
 	cfg.Producers = 2
 	root := t.TempDir()
@@ -179,6 +180,7 @@ func TestCoreRollupReadOnlyOracle(t *testing.T) {
 	cfg.Shards = 1
 	cfg.Producers = 1
 	cfg.Rollups = true
+	cfg.KeepBaseRows = true
 	root := t.TempDir()
 	_, policy := rollupTestPolicy(t, "namespace.metric", "1s:1d", sealrollup.Average, .5)
 	e, err := Open(root, cfg, Hooks{})

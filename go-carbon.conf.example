@@ -1536,8 +1536,4 @@ shards = 0                        # 0: one immutable-part owner per producer
 # Pending reads publish every 1s; the mandatory input log still fsyncs every 1s.
 seal-interval = "10s"
 seal-max-rows = 131072
-# Stop writing raw base rows next to the archive records. Renders, recovery,
-# moves and merges read only archive records; crash replay uses the input log.
-# Runtime-only: stores keep their existing base rows readable either way.
-omit-base-rows = false
 read-budget-bytes = 268435456

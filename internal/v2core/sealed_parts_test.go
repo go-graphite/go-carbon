@@ -42,6 +42,7 @@ func TestRollupBlindBatchRetainsRawAndSharedPart(t *testing.T) {
 		t.Run(fmt.Sprint(blind), func(t *testing.T) {
 			cfg := coreTestConfig()
 			cfg.Shards, cfg.Producers, cfg.Rollups, cfg.BlindBatch = 1, 1, true, blind
+			cfg.KeepBaseRows = true
 			_, policy := rollupTestPolicy(t, "blind.original", "1s:1d", sealrollup.Last, .5)
 			root := t.TempDir()
 			e, err := openCore(root, cfg)

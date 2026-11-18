@@ -46,16 +46,13 @@ type coreConfig struct {
 	// DeferMerges holds background part merges until ResumeMerges or Close, so
 	// crash replay does not rewrite parts it is still sealing. Runtime only.
 	DeferMerges bool `json:"-"`
-	// OmitBaseRows stops writing numeric raw base rows in rollups mode. Archive
-	// records stay the only render, recovery, move and merge source; crash
-	// replay uses the input journal. Runtime-only: existing base rows remain
-	// readable and either setting reopens the same store.
-	OmitBaseRows bool `json:"-"`
+	// KeepBaseRows is for tests only: it writes numeric raw base rows in rollups
+	// mode, which otherwise never writes them. Archive records are the only
+	// render, recovery, move and merge source and crash replay uses the input
+	// journal, so tests use this to build stores in the older format and to
+	// assert that they stay readable. Runtime-only.
+	KeepBaseRows bool `json:"-"`
 }
-
-// testOmitBaseRows reruns existing rollup tests without base rows; only
-// TestMain sets it.
-var testOmitBaseRows bool
 
 type coreFrontier struct {
 	ArchiveClock  int64 `json:",omitempty"`
@@ -350,11 +347,8 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		streamBytes = n
 	}
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 || (cfg.OmitBaseRows && !cfg.Rollups) {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 {
 		return nil, os.ErrInvalid
-	}
-	if testOmitBaseRows && cfg.Rollups {
-		cfg.OmitBaseRows = true
 	}
 	sealPhase := 0
 	if value := os.Getenv("CORE_SEAL_PHASE"); value != "" {
@@ -373,7 +367,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	diskConfig.SealInterval = 0
 	diskConfig.SealMaxRows = 0
 	diskConfig.DeferMerges = false
-	diskConfig.OmitBaseRows = false
+	diskConfig.KeepBaseRows = false
 	identities := hooks.Identities
 	if identities == nil {
 		identities = &PolicyCatalog{}
@@ -1410,8 +1404,8 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	rollupWrites := o.startRollupPartWrites(plan)
 	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
-	omitRaw := plan.ReplaceRaw || o.cfg.OmitBaseRows
-	if o.cfg.OmitBaseRows && !plan.ReplaceRaw && len(head) > 0 {
+	omitRaw := plan.ReplaceRaw || (o.cfg.Rollups && !o.cfg.KeepBaseRows)
+	if omitRaw && !plan.ReplaceRaw && len(head) > 0 {
 		// Keep the base-row admission rule without sorting or encoding rows.
 		// Partitions are monotonic in time, so the oldest row decides.
 		low := head[0].Time

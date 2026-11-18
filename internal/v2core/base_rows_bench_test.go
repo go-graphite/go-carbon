@@ -24,7 +24,7 @@ func BenchmarkOmitBaseRowsSeal(b *testing.B) {
 				cfg := adoptConfig()
 				cfg.MaxRows = 1 << 20
 				cfg.SealInterval = time.Hour
-				cfg.OmitBaseRows = omit
+				cfg.KeepBaseRows = !omit
 				e, err := openCore(b.TempDir(), cfg)
 				if err != nil {
 					b.Fatal(err)

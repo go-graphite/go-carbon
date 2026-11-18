@@ -130,7 +130,7 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	// The finite historical stream supplies closure through its data frontier.
 	// Wall time must not close windows ahead of fixture points still to arrive.
 	// Live stores retain the default wall clock; only this benchmark pins idle time.
-	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards, MaxCoreRows: f.coreMaxRows,
+	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards, MaxCoreRows: f.coreMaxRows, KeepBaseRows: layer == 3,
 		Hooks: v2core.Hooks{Now: func() time.Time { return time.Unix(fixturePoint(0, 0).Timestamp, 0) }}}
 	var block *os.File
 	stopBlock := func() error {

@@ -24,7 +24,7 @@ import (
 )
 
 func restartConfig(layer int) Config {
-	return Config{Layer: layer, Producers: 1, Shards: 2, GroupInterval: time.Hour}
+	return Config{Layer: layer, Producers: 1, Shards: 2, GroupInterval: time.Hour, KeepBaseRows: layer == 3}
 }
 func restartApps(t *testing.T, from, to int) []Application {
 	t.Helper()
