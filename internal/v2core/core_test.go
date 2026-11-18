@@ -212,6 +212,8 @@ func TestCoreSubmitDetachesCallerRows(t *testing.T) {
 func TestCoreIdleOneSecondSeal(t *testing.T) {
 	t.Parallel()
 	cfg := coreTestConfig()
+	// The default time threshold is longer; this test owns a one-second one.
+	cfg.SealInterval = time.Second
 	e, err := openCore(t.TempDir(), cfg)
 	if err != nil {
 		t.Fatal(err)

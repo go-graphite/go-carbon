@@ -66,7 +66,7 @@ func NativeRecords(snapshot chunkstore.Snapshot, baseline NativeBaseline) ([]Rec
 	if err != nil {
 		return nil, err
 	}
-	meta := v2core.RollupMetadata{Version: 1, ID: m.ID, Policy: encoded, Revision: m.Revision, LastUpdate: m.LastUpdate.UnixNano(), Frontier: sealrollup.Frontier{Order: baseline.Order, Policy: digest}}
+	meta := v2core.RollupMetadata{Version: 3, ID: m.ID, Policy: encoded, Revision: m.Revision, LastUpdate: m.LastUpdate.UnixNano(), Frontier: sealrollup.Frontier{Order: baseline.Order, Policy: digest}}
 	key := v2part.Key{Group: baseline.Group, VShard: v2part.Route(policy.Name), Part: baseline.Part, Metric: policy.Name}
 	var records []Record
 	var partitions []int64
@@ -110,6 +110,9 @@ func NativeRecords(snapshot chunkstore.Snapshot, baseline NativeBaseline) ([]Rec
 	if home := v2core.RollupMonthPartition(meta.Frontier.MaxTime); !slices.Contains(partitions, home) {
 		partitions = append(partitions, home)
 	}
+	// As in a first live seal, windows close through the newest sample: later
+	// seals plan from the same watermark and reads project the open windows.
+	meta.ClosedThrough = meta.Frontier.MaxTime
 	encoded = v2core.AppendRollupMetadata(nil, meta)
 	for _, partition := range partitions {
 		if err := put(partition, v2part.MetadataArchive, 0, encoded); err != nil {
