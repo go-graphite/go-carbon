@@ -58,24 +58,39 @@ func (r *coreRollups) metricRank(m *rollupMetric) uint32 {
 }
 
 // retire clears the rank of old, the metric being replaced under id, and
-// returns id's slot for reuse. Its identity hint finds a ranked old in O(1).
-// When another planner overwrote the hint, a binary search of dense finds a
-// ranked old, so no stale rank survives a replacement whatever the hint says.
-// An unranked old has no rank to clear; with a lost hint the ID takes a new
-// slot and the old one keeps rank 0, which routes lookups to the map.
+// returns id's slot for reuse, so every installed ID owns exactly one slot
+// and a hint that passes ids[s] == id always names it.
 func (r *coreRollups) retire(id uint64, old *rollupMetric) (uint32, bool) {
-	s, ok := r.hintSlot(old.PolicyIdentity, id)
-	if ok && r.rank[s] != 0 && r.dense[r.rank[s]-1] == old {
-		r.rank[s] = 0
-		return s, true
+	s := r.slotOf(id, old)
+	r.rank[s] = 0
+	return s, true
+}
+
+// slotOf returns the slot of m, installed under id. Its identity hint answers
+// in O(1). When another planner overwrote the hint, a binary search of dense
+// finds a ranked m and a scan of unranked (at most 1/rankSlack of dense) an
+// unranked one; the hint is then restored, so each lost hint costs one search.
+func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
+	if s, ok := r.hintSlot(m.PolicyIdentity, id); ok {
+		return s
 	}
-	for p, _ := slices.BinarySearchFunc(r.dense, old, compareRollupMetrics); p < len(r.dense) && compareRollupMetrics(r.dense[p], old) == 0; p++ {
-		if d := r.denseSlots[p]; r.dense[p] == old && r.rank[d] == uint32(p+1) {
-			r.rank[d] = 0
-			return d, true
+	s, found := uint32(0), false
+	for p, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics); p < len(r.dense) && compareRollupMetrics(r.dense[p], m) == 0; p++ {
+		if d := r.denseSlots[p]; r.dense[p] == m && r.rank[d] == uint32(p+1) {
+			s, found = d, true
+			break
 		}
 	}
-	return s, ok
+	for k := len(r.unranked) - 1; !found && k >= 0; k-- {
+		if r.unranked[k] == m && r.ids[r.unrankedSlots[k]] == id {
+			s, found = r.unrankedSlots[k], true
+		}
+	}
+	if !found {
+		panic("v2core: installed rollup metric has no owner slot")
+	}
+	m.ownerSlot.Store(s + 1)
+	return s
 }
 
 // rollupSlotSorter sorts unranked metrics with their slots alongside.

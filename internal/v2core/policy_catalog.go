@@ -263,8 +263,12 @@ func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
 func (h *PolicyIdentity) metadataScalars(m metricMetadata) RollupMetadata {
 	return RollupMetadata{ClosedThrough: m.ClosedThrough, BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
-func (m *rollupMetric) metadata() RollupMetadata    { return m.PolicyIdentity.metadata(m.meta) }
 func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
+
+// metadataOf returns the committed metadata of m, installed under id.
+func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {
+	return m.metadata(r.meta[r.slotOf(id, m)])
+}
 
 type policyName struct {
 	Name partsformat.ID
