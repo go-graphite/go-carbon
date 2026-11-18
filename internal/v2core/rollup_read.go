@@ -519,7 +519,9 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
 				continue
 			}
-			meta, e := decodeRollupMetadataView(key.Metric, key.Group, it.Value())
+			// compactMetadata keeps no definition: decode the header only, so
+			// slim rows do not rebuild one per part.
+			meta, _, e := decodeRollupMetadataHeader(it.Value())
 			if e != nil {
 				return e
 			}
