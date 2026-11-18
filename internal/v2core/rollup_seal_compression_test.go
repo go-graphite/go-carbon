@@ -153,6 +153,34 @@ func TestSealCompressionDecodesAndMergesIdentically(t *testing.T) {
 	if restMerged.Coverage.Records == 0 {
 		t.Fatal("empty merge")
 	}
+	// A merge writes at the rest level whatever its inputs used: rewriting the
+	// merged records at the seal level must cost more bytes.
+	rows := readSealCompressionPart(t, filepath.Join(sealDir, "merged.sst"), sealMerged)
+	planned := make([]coreKV, len(rows))
+	for i, kv := range rows {
+		value := kv.Value
+		k, err := v2part.Decode(kv.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k.Archive == v2part.MetadataArchive {
+			m, err := DecodeRollupMetadata(k.Metric, k.Group, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value = appendRollupMetadataSlim(nil, m)
+		}
+		planned[i] = coreKV{Key: kv.Key, Value: value}
+	}
+	spec := v2part.Spec{Scope: sealMerged.Scope, Encoding: sealMerged.Encoding, Source: sealMerged.Source, MinTime: sealMerged.Coverage.MinTime, MaxTime: sealMerged.Coverage.MaxTime, Policies: sealMerged.Coverage.Policies, MinExpiry: sealMerged.Coverage.MinExpiry, MaxExpiry: sealMerged.Coverage.MaxExpiry}
+	again, err := writePlannedRollupPart(filepath.Join(root, "again.sst"), planned, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Bytes <= sealMerged.Bytes {
+		t.Fatalf("merged part (%d bytes) is not smaller than its seal-level rewrite (%d bytes): merge ignored the rest level", sealMerged.Bytes, again.Bytes)
+	}
+	t.Logf("merged %d bytes at rest level, %d at seal level", sealMerged.Bytes, again.Bytes)
 }
 
 func readSealCompressionPart(t *testing.T, path string, d v2part.Descriptor) []KV {
