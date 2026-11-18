@@ -40,7 +40,7 @@ func BenchmarkSealSweep(b *testing.B) {
 	planners := []struct {
 		name string
 		plan sealPlanner
-	}{{"planParts", todaySealPlanner}}
+	}{{"legacy", legacySealPlanner}, {"planParts", todaySealPlanner}}
 	for _, names := range sizes {
 		var r *coreRollups // the production planner fixture, shared by both k
 		for _, k := range []float64{1.1, 5.7} {

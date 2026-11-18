@@ -1,0 +1,170 @@
+package v2core
+
+import (
+	"crypto/rand"
+	"errors"
+	"math"
+	"slices"
+	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
+)
+
+// legacySealPlanner is the planner before the seal sweep, kept test-only as
+// the differential oracle: a per-seal positions map from batch ID to stage
+// and a second pass placing each batch by position. The sweep must match it
+// exactly on every seal.
+func legacySealPlanner(r *coreRollups, in coreSealInput) (coreSealPlan, error) {
+	return r.planPartsLegacy(in)
+}
+
+func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
+	if r.pending {
+		return coreSealPlan{}, errors.New("rollup plan still owns seal arenas")
+	}
+	r.pending = true
+	returned := false
+	defer func() {
+		if !returned {
+			r.release()
+		}
+	}()
+	stages := r.stages[:0]
+	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
+		r.renumber()
+	}
+	positions := map[uint64]int{}
+	names := r.pendingNames
+	if names == nil {
+		names = map[partsformat.ID]uint64{}
+		r.pendingNames = names
+	}
+	// At most one stage per input application. Retain capacity between seals.
+	stages = slices.Grow(stages, len(in.Batches))
+	r.stages = stages
+	batchPositions := make([]int, len(in.Batches))
+	for bi, b := range in.Batches {
+		i, ok := positions[b.ID]
+		if !ok {
+			m := r.metrics[b.ID]
+			fresh := m == nil
+			if fresh {
+				if h := b.Registered; h != nil && h.catalog == r.identities && h.id == b.ID {
+					m = newRollupMetric(h)
+				} else {
+					policy := b.Policy
+					if h != nil {
+						policy = h.definitionBytes()
+					}
+					var err error
+					m, err = r.metric(b.ID, policy)
+					if err != nil {
+						return coreSealPlan{}, err
+					}
+				}
+				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
+					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
+				}
+				if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
+					return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
+				}
+				names[m.policy.Name] = b.ID
+			}
+			stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh})
+			i = len(stages) - 1
+			stages[i].next.Expired = false
+			r.stageKey(&stages[i])
+			positions[b.ID] = i
+		}
+		batchPositions[bi] = i
+		s := &stages[i]
+		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !s.metric.definitionEqual(b.Policy) {
+			return coreSealPlan{}, errors.New("stored rollup policy changed")
+		}
+		stages[i].batchCount++
+	}
+	// One allocation per sealed part for samples and application descriptors.
+	// Every original boundary/order/clock remains distinct.
+	sampleCount := 0
+	for _, b := range in.Batches {
+		sampleCount += len(b.Points)
+	}
+	r.samples = slices.Grow(r.samples[:0], sampleCount)[:sampleCount]
+	samples := r.samples
+	r.batches = slices.Grow(r.batches[:0], len(in.Batches))[:len(in.Batches)]
+	batchStorage := r.batches
+	offset := 0
+	for i := range stages {
+		n := stages[i].batchCount
+		stages[i].batches = batchStorage[offset : offset : offset+n]
+		offset += n
+	}
+	offset = 0
+	for bi, b := range in.Batches {
+		s := &stages[batchPositions[bi]]
+		ps := samples[offset : offset+len(b.Points) : offset+len(b.Points)]
+		for j, p := range b.Points {
+			ps[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
+		}
+		offset += len(b.Points)
+		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
+	}
+	named := len(stages)
+	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	if r.expire != nil || r.db != nil {
+		for id, m := range r.idleCandidates() {
+			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
+				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
+				r.stageKey(&stages[len(stages)-1])
+			}
+		}
+	}
+	// Expiry callbacks retain their serial owner contract. Idle plans do not
+	// advance order, so the persisted reset frontier is already known here.
+	for i := range stages {
+		s := &stages[i]
+		m := s.metric
+		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
+			// Older readers must reject reset authority rather than ignore its
+			// fields and resurrect the covered slot history.
+			s.next.Version = max(2, s.next.Version)
+			s.next.Expired = true
+			s.next.ResetOrder = s.next.Frontier.Order
+			if s.next.Revision == math.MaxUint64 {
+				return coreSealPlan{}, errors.New("metric revision exhausted")
+			}
+			s.next.Revision++
+		}
+	}
+	var part partsformat.PartID
+	if len(stages) > 0 {
+		if _, err := rand.Read(part[:]); err != nil {
+			return coreSealPlan{}, err
+		}
+	}
+	out, err := r.planStages(stages, part)
+	if err != nil {
+		return coreSealPlan{}, err
+	}
+	r.stages = stages
+	out.Names = named
+	out.Abort = r.release
+	out.Commit = func() {
+		defer r.release()
+		r.commitStages()
+		for _, s := range stages {
+			m := s.metric
+			if s.fresh {
+				r.install(m.id, m)
+				r.names[m.policy.Name] = m.id
+			}
+		}
+	}
+	returned = true
+	return out, nil
+}

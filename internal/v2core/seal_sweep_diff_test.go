@@ -615,16 +615,16 @@ const sealSweepNames = 1000
 // TestSealSweepPlanDifferential runs two seal planner implementations behind
 // the sealPlanner seam on the same randomized seals and requires identical
 // errors, part specs, rank (key) order, records, envelopes, part bytes and
-// descriptors, and post-commit metadata and rank state. Both sides are the
-// production planner today; the seal sweep replaces one side. Part bytes must
-// also be independent of planner parallelism (1 and 3 lanes).
+// descriptors, and post-commit metadata and rank state. Side a is the legacy
+// positions-map planner (test-only oracle), side b the production seal sweep.
+// Part bytes must also be independent of planner parallelism (1 and 3 lanes).
 func TestSealSweepPlanDifferential(t *testing.T) {
 	var total sealSweepCoverage
 	for _, seed := range sealSweepSeeds(t) {
 		s := newSealSweepScript(seed)
 		var digests []string
 		for _, lanes := range []int{1, 3} {
-			diff, cov, digest := runSealSweepDifferential(t, s, lanes, todaySealPlanner, todaySealPlanner)
+			diff, cov, digest := runSealSweepDifferential(t, s, lanes, legacySealPlanner, todaySealPlanner)
 			if diff != nil {
 				t.Fatalf("seed %d lanes %d: planners differ at %s", seed, lanes, diff)
 			}
