@@ -152,6 +152,12 @@ func TestPendingConcurrentRetirement(t *testing.T) {
 		}
 	}
 	wg.Wait()
+	// Wait closes the listener; a dialed but unaccepted connection would be dropped.
+	for deadline := time.Now().Add(10 * time.Second); s.Stats().Connections < 8; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("accepted connections", s.Stats().Connections)
+		}
+	}
 	if err = s.Wait(t.Context()); err != nil {
 		t.Fatal(err)
 	}

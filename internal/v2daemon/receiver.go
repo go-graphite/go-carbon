@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"slices"
+	"strings"
 
 	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"github.com/go-graphite/go-carbon/points"
@@ -37,6 +38,7 @@ func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint6
 			registered = o.policies[name]
 		}
 		if registered == nil {
+			name = strings.Clone(name) // retained; the receiver's batch text is borrowed
 			policy, err := o.resolve(name)
 			if err != nil {
 				return err
