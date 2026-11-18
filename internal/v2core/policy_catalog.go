@@ -71,14 +71,19 @@ func (h *PolicyIdentity) definitionBytes() []byte {
 
 // appendDefinition writes the canonical definition directly into an owner arena.
 func (h *PolicyIdentity) appendDefinition(out []byte) []byte {
+	return appendPolicyDefinition(out, h.policy.Name, h.plain, h.policy.policyDefinition)
+}
+
+// appendPolicyDefinition is appendDefinition from copied identity fields.
+func appendPolicyDefinition(out []byte, name partsformat.ID, plain bool, def *policyDefinition) []byte {
 	out = append(out, `{"Name":"`...)
-	if h.plain {
-		out = append(out, h.policy.Name...)
+	if plain {
+		out = append(out, name...)
 	} else {
-		name, _ := json.Marshal(string(h.policy.Name))
-		out = append(out, name[1:len(name)-1]...)
+		encoded, _ := json.Marshal(string(name))
+		out = append(out, encoded[1:len(encoded)-1]...)
 	}
-	return append(out, h.policy.suffix...)
+	return append(out, def.suffix...)
 }
 func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 	if !h.plain {

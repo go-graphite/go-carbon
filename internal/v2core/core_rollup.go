@@ -181,14 +181,27 @@ func newRollupMetric(h *PolicyIdentity) *rollupMetric {
 }
 
 type rollupStage struct {
-	sortKey    uint64
-	vshard     uint16
-	metric     *rollupMetric
+	sortKey uint64
+	vshard  uint16
+	plain   bool
+	metric  *rollupMetric
+	// Hot per-name fields, copied by newRollupStage while plan has the metric
+	// and its identity resident. planStages and appendStage read only the
+	// stage, so a seal touches the scattered metric and identity once. slots
+	// is a read-only header copy; its backing arrays change only at Commit.
+	def        *policyDefinition
+	name       partsformat.ID
+	slots      sealrollup.Slots
 	next       RollupMetadata
 	batches    []sealrollup.Batch
 	records    []sealrollup.Record
 	fresh      bool
 	batchCount int
+}
+
+func newRollupStage(m *rollupMetric, next RollupMetadata, fresh bool) rollupStage {
+	h := m.PolicyIdentity
+	return rollupStage{metric: m, next: next, fresh: fresh, plain: h.plain, def: h.policy.policyDefinition, name: h.policy.Name, slots: m.slots}
 }
 
 type rollupPlannerLane struct {
@@ -258,7 +271,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 				}
 				names[m.policy.Name] = b.ID
 			}
-			stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh})
+			stages = append(stages, newRollupStage(m, m.metadataScalars(m.meta), fresh))
 			i = len(stages) - 1
 			stages[i].next.Expired = false
 			r.stageKey(&stages[i])
@@ -305,7 +318,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
 			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
-				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
+				stages = append(stages, newRollupStage(m, m.metadata(), false))
 				r.stageKey(&stages[len(stages)-1])
 			}
 		}

@@ -60,6 +60,20 @@ func checkDense(t *testing.T, r *coreRollups) {
 // TestRollupRankSortMatchesMetricOrder checks rank keys plus the radix sort
 // against compareRollupMetrics with ranked, unranked, replaced (copied) and
 // reinstalled metrics, on both the small (comparison) and radix paths.
+// checkStageHotFields asserts that every planned stage's copied identity and
+// slots equal its metric's live fields: planStages and appendStage read only
+// the copy, so a stale or wrong copy would change sealed bytes.
+func checkStageHotFields(t *testing.T, r *coreRollups) {
+	t.Helper()
+	for i := range r.stages {
+		s := &r.stages[i]
+		m := s.metric
+		if s.def != m.policy.policyDefinition || s.name != m.policy.Name || s.plain != m.plain || s.vshard != m.vshard || !reflect.DeepEqual(s.slots, m.slots) {
+			t.Fatalf("stage %d: hot fields differ from metric %d", i, m.id)
+		}
+	}
+}
+
 func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 	for _, n := range []int{100, 3000} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
@@ -247,6 +261,8 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				checkStageHotFields(t, ranked)
+				checkStageHotFields(t, ref)
 				gotA, gotB := decode(planA), decode(planB)
 				planA.Commit()
 				planB.Commit()

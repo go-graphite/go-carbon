@@ -50,11 +50,17 @@ var rollupWriteDefinitions atomic.Bool
 
 // appendMetadata emits the slim seal encoding: the definition is not stored.
 func (h *PolicyIdentity) appendMetadata(dst []byte, m RollupMetadata) []byte {
+	return appendPolicyMetadata(dst, m, h.policy.Name, h.plain, h.policy.policyDefinition)
+}
+
+// appendPolicyMetadata is appendMetadata from a seal stage's copied identity
+// fields, so the encoder never dereferences the metric's PolicyIdentity.
+func appendPolicyMetadata(dst []byte, m RollupMetadata, name partsformat.ID, plain bool, def *policyDefinition) []byte {
 	if rollupWriteDefinitions.Load() {
 		m.Policy = nil
 		dst = AppendRollupMetadata(dst, m)
 		start := len(dst)
-		dst = h.appendDefinition(dst)
+		dst = appendPolicyDefinition(dst, name, plain, def)
 		binary.BigEndian.PutUint32(dst[start-4:start], uint32(len(dst)-start))
 		return dst
 	}
