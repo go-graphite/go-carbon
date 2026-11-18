@@ -331,8 +331,9 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 	}
 	visible := func(b v2core.Batch) bool { _, ok := orders.Load(b.Order); return ok }
 	// appendOne returns once the batch is queued. Each poll admits at most one
-	// packet per producer and checks the seal threshold after it. Publication is
-	// a prefix of admission order: a visible batch implies all earlier ones.
+	// packet per producer and checks the seal threshold after it, so producers
+	// are admitted in their own FIFO order but not in call order across them.
+	var outstanding []v2core.Batch
 	appendOne := func(producer, n int) v2core.Batch {
 		b, i, pts := batch(producer, n)
 		classic(i, pts)
@@ -340,6 +341,7 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 		if err := engine.AppendBatches(producer, []v2core.Batch{b}, cursors[producer], false); err != nil {
 			t.Fatal(err)
 		}
+		outstanding = append(outstanding, b)
 		return b
 	}
 	appendVisible := func(producer, n int) {
@@ -348,6 +350,10 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 	}
 	compare := func(label string) {
 		t.Helper()
+		for _, b := range outstanding {
+			await(t, func() bool { return visible(b) })
+		}
+		outstanding = outstanding[:0]
 		for i := range ms {
 			if !written[i] {
 				continue
