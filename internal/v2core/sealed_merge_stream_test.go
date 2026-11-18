@@ -75,7 +75,15 @@ func TestSealedMergeMetricOrder(t *testing.T) {
 	var cursors mergeHeap
 	for i := 0; i < 1024; i++ {
 		name := v2part.ID(fmt.Sprintf("namespace.%s.%d", strings.Repeat("a", i%47), i))
-		cursors = append(cursors, &mergeCursor{key: v2part.Key{Group: "namespace", VShard: v2part.Route(name), Metric: name, Part: v2part.PartID{77}}})
+		// The merge decodes the key once and keeps the name in its bytes.
+		key := v2part.Key{Group: "namespace", VShard: v2part.Route(name), Metric: name, Part: v2part.PartID{77}}
+		enc, err := v2part.Encode(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &mergeCursor{key: key, ident: enc[:len(enc)-16]}
+		c.name = len(c.ident) - len(name) - 4
+		cursors = append(cursors, c)
 	}
 	slices.SortFunc(cursors, func(a, b *mergeCursor) int {
 		x, err := v2part.Encode(a.key)
