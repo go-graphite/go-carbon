@@ -434,9 +434,11 @@ func (w *DenseWriter) SetPlannedRecord(vshard uint16, metric ID, r *sealrollup.R
 		return w.err
 	}
 	var k Key
-	err := errors.New("dense scalar record does not match valid archive key")
+	var err error
 	if r.Archive >= 0 && int64(r.Archive) < int64(MetadataArchive) && validSlotRecord(*r) {
 		k, err = w.plannedKey(vshard, metric, uint32(r.Archive), r.Slot)
+	} else {
+		err = errors.New("dense scalar record does not match valid archive key")
 	}
 	if err == nil {
 		err = w.appendRecord(nil, k, *r)
