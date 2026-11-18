@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -107,19 +108,7 @@ func TestFormat3LiveSealConverterIdentity(t *testing.T) {
 	if err != nil || len(nativePaths) != 2 {
 		t.Fatalf("native convert: paths=%v error=%v", nativePaths, err)
 	}
-	for _, path := range nativePaths {
-		got, err := os.ReadFile(filepath.Join(nativeRoot, path))
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := liveBytes
-		if strings.HasSuffix(path, ".descriptor") {
-			want = descriptorBytes
-		}
-		if !bytes.Equal(got, want) {
-			t.Fatalf("native conversion changed live seal %s", path)
-		}
-	}
+	sameAsLiveSeal(t, "native conversion", nativeRoot, nativePaths, livePath, d)
 	copyRoot := filepath.Join(t.TempDir(), "copied")
 	sealedSnapshot := engine.DBs()[0].NewSnapshot()
 	copied, err := v2core.LinkPartSnapshot(ctx, copyRoot, v2core.SealedSnapshotReader{Snapshot: sealedSnapshot, Directory: filepath.Join(root, "owner-000")})
@@ -150,19 +139,7 @@ func TestFormat3LiveSealConverterIdentity(t *testing.T) {
 	if err != nil || len(paths) != 2 {
 		t.Fatalf("convert: paths=%v error=%v", paths, err)
 	}
-	for _, path := range paths {
-		got, err := os.ReadFile(filepath.Join(convertedRoot, path))
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := liveBytes
-		if strings.HasSuffix(path, ".descriptor") {
-			want = descriptorBytes
-		}
-		if !bytes.Equal(got, want) {
-			t.Fatalf("converter changed live seal %s", path)
-		}
-	}
+	sameAsLiveSeal(t, "converter", convertedRoot, paths, livePath, d)
 	var converted []v2convert.Record
 	for _, path := range paths {
 		if err := writer.Read(ctx, filepath.Join(convertedRoot, path), func(record v2convert.Record) error {
@@ -207,5 +184,45 @@ func TestFormat3LiveSealConverterIdentity(t *testing.T) {
 		return nil
 	}); err != nil || names != 1 {
 		t.Fatalf("recovered %d names: %v", names, err)
+	}
+}
+
+// sameAsLiveSeal checks a converted part against a live seal. Live seals use
+// the fast Zstd level and conversions the rest level, so their physical bytes
+// differ; descriptors match apart from size and hash, and records are equal.
+func sameAsLiveSeal(t *testing.T, what, root string, paths []string, livePath string, live v2part.Descriptor) {
+	t.Helper()
+	var partPath string
+	var d v2part.Descriptor
+	for _, path := range paths {
+		if !strings.HasSuffix(path, ".descriptor") {
+			partPath = filepath.Join(root, path)
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d, err = v2part.ParseDescriptor(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	normalized := d
+	normalized.SHA256, normalized.Bytes = live.SHA256, live.Bytes
+	if partPath == "" || !reflect.DeepEqual(normalized, live) {
+		t.Fatalf("%s changed the live seal descriptor", what)
+	}
+	read := func(path string, d v2part.Descriptor) (out []v2convert.Record) {
+		if err := v2part.ReadExpanded(context.Background(), path, &d, func(key v2part.Key, value []byte) error {
+			encoded, err := v2part.Encode(key)
+			out = append(out, v2convert.Record{Key: encoded, Value: bytes.Clone(value)})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got, want := read(partPath, d), read(livePath, live); len(want) == 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s changed live seal records", what)
 	}
 }

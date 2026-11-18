@@ -14,6 +14,8 @@ func writePlannedRollupPart(path string, file []coreKV, spec v2part.Spec) (v2par
 		return v2part.Descriptor{}, err
 	}
 	defer w.Abort()
+	// Size-tier merges rewrite fresh seal parts at the rest level.
+	w.SealCompression()
 	var shards []uint16
 	var prefix []byte
 	for _, kv := range file {

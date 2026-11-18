@@ -131,7 +131,7 @@ func BenchmarkDenseReusableZstdBlock(b *testing.B) {
 	}
 	input := bytes.Repeat([]byte("archive-metric-slot-value-order-frontier-"), 6500)
 	var output []byte
-	output, err = encoder.append(input, output)
+	output, err = encoder.append(input, output, denseRestLevel)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func BenchmarkDenseReusableZstdBlock(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		output, err = encoder.append(input, output[:0])
+		output, err = encoder.append(input, output[:0], denseRestLevel)
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -4,16 +4,25 @@ package v2part
 
 import "github.com/klauspost/compress/zstd"
 
-type denseEncoder struct{ encoder *zstd.Encoder }
+// The pure-Go encoder fixes its level per instance; seal parts use a second
+// one. Its physical bytes differ from the C encoder's, as before.
+type denseEncoder struct{ rest, seal *zstd.Encoder }
 
 func newDenseEncoder() (*denseEncoder, error) {
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20), zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	rest, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20), zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
 	if err != nil {
 		return nil, err
 	}
-	return &denseEncoder{encoder: encoder}, nil
+	seal, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20), zstd.WithEncoderLevel(zstd.SpeedFastest))
+	if err != nil {
+		return nil, err
+	}
+	return &denseEncoder{rest: rest, seal: seal}, nil
 }
 
-func (e *denseEncoder) append(src, dst []byte) ([]byte, error) {
-	return e.encoder.EncodeAll(src, dst), nil
+func (e *denseEncoder) append(src, dst []byte, level int) ([]byte, error) {
+	if level < denseRestLevel {
+		return e.seal.EncodeAll(src, dst), nil
+	}
+	return e.rest.EncodeAll(src, dst), nil
 }

@@ -236,6 +236,10 @@ type DenseWriter struct {
 // Call before the first Set. Exceeding it aborts this proposal, never inputs.
 func (w *DenseWriter) LimitBytes(n uint64) { w.writer.out.limit = n }
 
+// SealCompression writes this part's blocks at the fast seal level. Use it
+// only for parts a background merge rewrites; call before the first Set.
+func (w *DenseWriter) SealCompression() { w.writer.sst.(*denseSSTWriter).level = denseSealLevel }
+
 // SetExpiry records expiry bounds measured while streaming. Call before Close.
 func (w *DenseWriter) SetExpiry(minExpiry, maxExpiry int64) {
 	w.writer.spec.MinExpiry, w.writer.spec.MaxExpiry = minExpiry, maxExpiry
