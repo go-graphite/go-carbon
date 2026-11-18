@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -73,30 +74,31 @@ func BenchmarkSealCPU(b *testing.B) {
 		for _, names := range sizes {
 			r, batches, points := sealCPUFixture(b, shape, names)
 			b.Run(fmt.Sprintf("plan/%s/%d", shape.name, names), func(b *testing.B) {
+				heap := sealPlanRetainedHeap(b, r, batches)
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					plan, err := r.plan(SealInput{Batches: batches})
+					plan, err := r.planParts(SealInput{Batches: batches})
 					if err != nil {
 						b.Fatal(err)
 					}
 					plan.Abort()
 				}
 				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*points), "ns/point")
+				b.ReportMetric(float64(heap)/float64(points), "heap-B/point")
 			})
 			b.Run(fmt.Sprintf("part/%s/%d", shape.name, names), func(b *testing.B) {
 				dir := b.TempDir()
-				plan, err := r.plan(SealInput{Batches: batches})
+				plan, err := r.planParts(SealInput{Batches: batches})
 				if err != nil {
 					b.Fatal(err)
 				}
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					for f := range plan.Files {
-						spec := plan.PartSpecs[f]
-						spec.Source.Incarnation, spec.Source.Stream = v2part.PartID{1}, "bench"
-						if _, err := writePlannedRollupPart(filepath.Join(dir, fmt.Sprintf("p%d-%d.sst", i, f)), plan.Files[f], spec); err != nil {
+					for f, part := range plan.Parts {
+						part.Spec.Source.Incarnation, part.Spec.Source.Stream = v2part.PartID{1}, "bench"
+						if _, err := writePlannedRollupTuples(filepath.Join(dir, fmt.Sprintf("p%d-%d.sst", i, f)), part); err != nil {
 							b.Fatal(err)
 						}
 					}
@@ -107,4 +109,21 @@ func BenchmarkSealCPU(b *testing.B) {
 			})
 		}
 	}
+}
+
+// sealPlanRetainedHeap is the live heap a fresh planner keeps after one seal
+// plan of batches: its reusable stage, record, tuple/key and arena capacity.
+func sealPlanRetainedHeap(b *testing.B, r *coreRollups, batches []Batch) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	plan, err := r.planParts(SealInput{Batches: batches})
+	if err != nil {
+		b.Fatal(err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	plan.Abort()
+	runtime.KeepAlive(plan)
+	return after.HeapAlloc - min(after.HeapAlloc, before.HeapAlloc)
 }

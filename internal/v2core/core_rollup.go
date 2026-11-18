@@ -96,7 +96,7 @@ type coreRollups struct {
 	pendingNames   map[partsformat.ID]uint64
 	samples        []sealrollup.Sample
 	batches        []sealrollup.Batch
-	files          map[string][]coreKV
+	files          map[string][][]plannedKV
 	arena          []byte
 	pending        bool
 	definitions    map[[32]byte][]partsformat.ArchivePolicy
@@ -202,7 +202,7 @@ type rollupPlannerLane struct {
 	err       error
 }
 
-func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
+func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	if r.pending {
 		return coreSealPlan{}, errors.New("rollup plan still owns seal arenas")
 	}
