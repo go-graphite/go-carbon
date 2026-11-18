@@ -175,7 +175,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
-			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record})
+			file = append(file, coreKV{Key: key(m, partition, uint32(record.Archive), record.Slot), Record: record, Name: m.policy.Name})
 			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
@@ -183,7 +183,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata})
+		*filePtr = append(file, coreKV{Key: key(m, partition, rollupMetadataArchive, 0), Value: metadata, Name: m.policy.Name})
 	}
 
 	return nil

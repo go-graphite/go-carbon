@@ -6,7 +6,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
@@ -205,5 +207,63 @@ func TestDenseTypedWriterRejectsMismatch(t *testing.T) {
 				t.Fatal("invalid typed writer published")
 			}
 		})
+	}
+}
+
+// A planner that already holds the metric name shares it (and the previous
+// group) instead of copying both out of each new identity. Hints never change
+// validation or decoded values: stale or forged hints decode as the reference.
+func TestKeyDecoderSharesHintedStrings(t *testing.T) {
+	spec := fixtureSpec()
+	keys := make([][]byte, 2)
+	names := []ID{"example.metric", "example.metric.other"}
+	for i, name := range names {
+		k := fixtureKey(spec, 0)
+		k.Metric, k.VShard = name, Route(name)
+		var err error
+		if keys[i], err = Encode(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var decoder keyDecoder
+	first, err := decoder.decode(keys[0])
+	if want, _ := Decode(keys[0]); err != nil || first != want {
+		t.Fatalf("unhinted decode: %+v %v", first, err)
+	}
+	hint := ID(strings.Clone(string(names[1])))
+	decoder.name = hint
+	got, err := decoder.decode(keys[1])
+	if want, _ := Decode(keys[1]); err != nil || got != want {
+		t.Fatalf("hinted decode: got=%+v want=%+v err=%v", got, want, err)
+	}
+	if unsafe.StringData(string(got.Metric)) != unsafe.StringData(string(hint)) || unsafe.StringData(string(got.Group)) != unsafe.StringData(string(first.Group)) {
+		t.Fatal("matching hint or group was copied")
+	}
+	// A stale hint costs only the copy.
+	got, err = decoder.decode(keys[0])
+	if want, _ := Decode(keys[0]); err != nil || got != want {
+		t.Fatalf("stale hint: got=%+v want=%+v err=%v", got, want, err)
+	}
+	// Forged prefixes are rejected or decoded exactly as without hints.
+	for i := 0; i < len(keys[1])-16; i++ {
+		candidate := bytes.Clone(keys[1])
+		candidate[i] ^= 1
+		decoder.name = hint
+		got, err := decoder.decode(candidate)
+		want, referenceErr := Decode(candidate)
+		if (err == nil) != (referenceErr == nil) || (err == nil && got != want) {
+			t.Fatalf("prefix byte %d: hinted decode differs from reference", i)
+		}
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		for i := range keys {
+			decoder.name = names[i]
+			if _, err := decoder.decode(keys[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("hinted identity changes allocate %.1f times", allocs)
 	}
 }

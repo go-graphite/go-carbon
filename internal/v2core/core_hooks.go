@@ -35,6 +35,9 @@ type coreKV struct {
 	// Record is immutable planner-owned storage valid through Commit/Abort.
 	// The shared writer packs it directly; metadata continues to use Value.
 	Record *sealrollup.Record
+	// Name optionally carries the planner's metric name, so writing a planned
+	// part shares it rather than copying it out of Key. Empty means unknown.
+	Name v2part.ID
 }
 
 func (kv coreKV) encodedValue() []byte {
