@@ -53,21 +53,25 @@ func sealPlanDigest(plan coreSealPlan) string {
 }
 
 // Golden digests were recorded on the parent revision before the seal CPU
-// changes; planning must stay byte-identical on randomized multi-group,
-// multi-month, duplicate-batch, fresh-name and late-point seals.
+// changes and re-recorded once when coarse rollups moved to window closure
+// (metadata Version 3): raw records and metadata identity stayed identical;
+// only closed-window coarse records, their month envelopes, the version and
+// watermark fields and the part bounds derived from them changed.
+// Planning must stay byte-identical on randomized multi-group, multi-month,
+// duplicate-batch, fresh-name and late-point seals.
 var sealPlanGolden = map[string]string{
-	"seed1/p1": "b12a7fef081ebf4c28c346b4ba3ba873",
-	"seed1/p4": "b12a7fef081ebf4c28c346b4ba3ba873",
-	"seed2/p1": "0aa229cf46bbf09fec6c2d189e240efc",
-	"seed2/p4": "0aa229cf46bbf09fec6c2d189e240efc",
-	"seed3/p1": "070d3c76cb204d8370f95371cda22565",
-	"seed3/p4": "070d3c76cb204d8370f95371cda22565",
-	"seed4/p1": "fdbd7daa7caf2c0dbebb1577ce7b4524",
-	"seed4/p4": "fdbd7daa7caf2c0dbebb1577ce7b4524",
-	"seed5/p1": "a6634ae34131279aafb9fd09a2fe6db7",
-	"seed5/p4": "a6634ae34131279aafb9fd09a2fe6db7",
-	"seed6/p1": "32c46946773d28878e52e88dce41f9b5",
-	"seed6/p4": "32c46946773d28878e52e88dce41f9b5",
+	"seed1/p1": "6259e16ee3a81329b0cf348163f683e4",
+	"seed1/p4": "6259e16ee3a81329b0cf348163f683e4",
+	"seed2/p1": "8676afd189175e46a9837c31f9943c26",
+	"seed2/p4": "8676afd189175e46a9837c31f9943c26",
+	"seed3/p1": "4695d0035bfbacc766af8fbd5a8b2026",
+	"seed3/p4": "4695d0035bfbacc766af8fbd5a8b2026",
+	"seed4/p1": "7c16dbb9edd19da727bc51a571c2a18b",
+	"seed4/p4": "7c16dbb9edd19da727bc51a571c2a18b",
+	"seed5/p1": "69f01d70ff5050a12994be9b02a8673c",
+	"seed5/p4": "69f01d70ff5050a12994be9b02a8673c",
+	"seed6/p1": "b8040620ea2052c14aafee2838936bed",
+	"seed6/p4": "b8040620ea2052c14aafee2838936bed",
 }
 
 func TestSealPlanDifferentialDigest(t *testing.T) {
