@@ -87,12 +87,6 @@ type sealedCache struct {
 	pendingMu      sync.Mutex
 	reductions     []pendingReduction
 	reductionBytes int64
-	orderMu        sync.Mutex
-	ordered        []orderedSamples
-	orderedBytes   int64
-	renderMu       sync.Mutex
-	rendered       []renderedEntry
-	renderedBytes  int64
 }
 type sealedData struct {
 	parts     *v2core.OpenedRollupParts
@@ -382,7 +376,7 @@ func (m *metricState) resolveContext(ctx context.Context) {
 	ordered := make([]sealrollup.Batch, len(batches))
 	copy(ordered, batches)
 	for i := range ordered {
-		ordered[i].Points = m.resource.cache.orderSamples(ordered[i].Points)
+		ordered[i].Points = orderSamples(ordered[i].Points)
 	}
 	plan, err := prepared.PlanWithWorkspace(frontier, base.view, ranges, ordered, workspace)
 	if err != nil {
@@ -481,35 +475,6 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		} else {
 			source = &sealedSource{metric: metric}
 		}
-		// Exact repeated requests can serialize the same immutable resolved
-		// values. The bounded cache owns no generation or snapshot reference.
-		if metric.frozen != nil {
-			if cached := metric.resource.cache.renderedSeries(metric.frozen, from, until, now); cached != nil {
-				retained := metric.frozen.RetainedBytes() + 4*metric.resource.cache.limit + r.WorkBytes
-				if metric.sealed != nil {
-					retained += metric.sealed.RetainedBytes()
-				}
-				if int64(len(cached.Values)) > r.WorkBytes/32 {
-					return ErrAdmission
-				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if !r.Budget.take(retained) {
-					return ErrAdmission
-				}
-				err := func() error {
-					defer r.Budget.used.Add(-retained)
-					stage := time.Now()
-					defer func() { r.stages.observe(StageConsume, stage) }()
-					return consume(name, cached)
-				}()
-				if err != nil {
-					return err
-				}
-				continue
-			}
-		}
 		archives := make([]Archive, len(metric.policy.Config.Archives))
 		for i, a := range metric.policy.Config.Archives {
 			archives[i] = Archive{Step: a.Step, Points: a.Count}
@@ -537,9 +502,6 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			r.stages.observe(StageRender, stage)
 			if e != nil {
 				return e
-			}
-			if metric.frozen != nil && s != nil {
-				metric.resource.cache.rememberRendered(metric.frozen, from, until, now, s)
 			}
 			stage = time.Now()
 			defer func() { r.stages.observe(StageConsume, stage) }()

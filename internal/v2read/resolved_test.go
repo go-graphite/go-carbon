@@ -167,27 +167,15 @@ func TestPendingPrefixExactAndCanonical(t *testing.T) {
 	}
 }
 
-func TestPendingOrderingStableAndBounded(t *testing.T) {
-	c := &sealedCache{limit: 1024}
+func TestPendingOrderingStable(t *testing.T) {
 	input := []sealrollup.Sample{{Time: 2, Bits: 1, Sequence: 2}, {Time: 1, Bits: 2, Sequence: 1}, {Time: 1, Bits: 3, Sequence: 1}}
-	got := c.orderSamples(slices.Clone(input))
+	original := slices.Clone(input)
+	got := orderSamples(input)
 	if got[0].Bits != 2 || got[1].Bits != 3 || got[2].Bits != 1 {
 		t.Fatal("stable tie ordering changed")
 	}
-	again := c.orderSamples(slices.Clone(input))
-	if &again[0] != &got[0] {
-		t.Fatal("same immutable points not reused")
-	}
-	for i := 0; i < 100; i++ {
-		next := slices.Clone(input)
-		next[0].Bits = uint64(i)
-		c.orderSamples(next)
-	}
-	if len(c.ordered) > 64 || c.orderedBytes > c.limit {
-		t.Fatal("unbounded sorted sample cache")
-	}
-	if got[0].Bits != 2 || got[1].Bits != 3 {
-		t.Fatal("eviction changed a pinned sample arena")
+	if !slices.Equal(input, original) {
+		t.Fatal("ordering mutated the published pending arena")
 	}
 }
 
