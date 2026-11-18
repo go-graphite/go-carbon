@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -107,18 +106,20 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fb, _ := os.ReadFile(fast)
-		sb, _ := os.ReadFile(slow)
 		// Planned sealing adds the exact inventory and expiry bounds to the
 		// descriptor; the generic portable writer (no expiry: never retired by
-		// age) and the SST bytes stay backward compatible.
+		// age) stays backward compatible. Seals use the fast Zstd level and
+		// portable parts the rest level, so only size and hash differ, and
+		// both decode to the same records.
 		if fd.Coverage.MaxExpiry == 0 {
 			t.Fatal("planned seal omitted expiry bounds")
 		}
+		same := reflect.DeepEqual(readSealCompressionPart(t, fast, fd), readSealCompressionPart(t, slow, sd))
 		sd.VShards = fd.VShards
 		sd.Coverage.MinExpiry, sd.Coverage.MaxExpiry = fd.Coverage.MinExpiry, fd.Coverage.MaxExpiry
-		if !reflect.DeepEqual(fd, sd) || !bytes.Equal(fb, sb) {
-			t.Fatal("planned spec changed portable part bytes/descriptor")
+		sd.SHA256, sd.Bytes = fd.SHA256, fd.Bytes
+		if !same || !reflect.DeepEqual(fd, sd) {
+			t.Fatal("planned spec changed portable part records/descriptor")
 		}
 		first, _ := v2part.Decode(file[0].Key)
 		shards := map[uint16]bool{}
