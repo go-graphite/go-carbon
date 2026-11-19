@@ -95,6 +95,7 @@ func TestDerivedStateOracle(t *testing.T) {
 				hooks.Expire = func(p RollupPolicy, m RollupMetadata, at time.Time) bool {
 					return string(p.Name) == "oracle.two" && at.Unix() >= expireAt && !m.Expired
 				}
+				hooks.ExpiryTTL = expiryWindow(time.Nanosecond) // every idle name is asked; Expire picks oracle.two
 			}
 			e, err := Open(root, cfg, hooks)
 			if err != nil {

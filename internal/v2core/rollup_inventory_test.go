@@ -33,7 +33,7 @@ func TestRollupInventoryAddsOnlyChangedNamesAndRewinds(t *testing.T) {
 		}
 		p := e.owners[0].db.NewSnapshot()
 		pins = append(pins, p)
-		s, err := NewRollupSnapshot(ctx, p, prior)
+		s, err := NewRollupSnapshot(ctx, p, prior, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -57,7 +57,7 @@ func TestRollupInventoryAddsOnlyChangedNamesAndRewinds(t *testing.T) {
 	if len(third.metricParts(third.metrics["inventory.a"])) != 2 {
 		t.Fatal("added part missing")
 	}
-	rewind, err := NewRollupSnapshot(ctx, pins[0], third)
+	rewind, err := NewRollupSnapshot(ctx, pins[0], third, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,11 +138,11 @@ func TestPublishedInventoryMatchesPinnedBindings(t *testing.T) {
 			}
 			continue
 		}
-		got, err := NewRollupSnapshotWithInventory(context.Background(), p.pin, prior, p.inventory)
+		got, err := NewRollupSnapshot(context.Background(), p.pin, prior, nil, p.inventory)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, err := NewRollupSnapshot(context.Background(), p.pin, nil)
+		want, err := NewRollupSnapshot(context.Background(), p.pin, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

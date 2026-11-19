@@ -91,7 +91,7 @@ func compareL3(job compareJob, base string, sums *totals) bool {
 	}
 	var failures []string
 	for _, s := range job.Snapshots {
-		snap, e := v2core.NewRollupSnapshot(ctx, s, nil, 0)
+		snap, e := v2core.NewRollupSnapshot(ctx, s, nil, nil, nil, 0)
 		if e != nil {
 			failures = append(failures, e.Error())
 			continue

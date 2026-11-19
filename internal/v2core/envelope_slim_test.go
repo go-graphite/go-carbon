@@ -71,7 +71,13 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 		}
 		// A fixed hook clock keeps background idle closure from running at
 		// timing-dependent points, as in TestRollupHistoryDifferential.
-		e, err := Open(root, cfg, Hooks{Expire: expire, Now: func() time.Time { return time.Unix(1, 0) }})
+		h := Hooks{Now: func() time.Time { return time.Unix(1, 0) }}
+		if expire != nil {
+			// Every name is asked at the batch clock, after its last write.
+			at := time.Unix(now.Load(), 0)
+			h.Expire, h.ExpiryTTL, h.Now = expire, expiryWindow(time.Nanosecond), func() time.Time { return at }
+		}
+		e, err := Open(root, cfg, h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +126,7 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 			t.Fatal(err)
 		}
 		slices.Sort(out.Scanned)
-		index, err := NewRollupSnapshot(ctx, pin, nil, 0)
+		index, err := NewRollupSnapshot(ctx, pin, nil, nil, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

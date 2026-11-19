@@ -222,16 +222,22 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
-	ready          []atomic.Uint64
-	work           chan struct{}
-	nextPoll       time.Time // execution-owner local seal deadline
-	bufferedPoints atomic.Int64
-	bufferedSince  atomic.Int64
-	rollups        *coreRollups
-	gc             *sealedPartGC
-	gcDirty        atomic.Bool
-	mergeStop      <-chan struct{}
-	readGeneration uint64 // owner-local; includes manifest-only retirement publications
+	// ckptAt and ckptWriting belong to the owner goroutine (then to close):
+	// the last at-seal checkpoint encode and its in-flight file write.
+	ckptAt      time.Time
+	ckptWriting chan struct{}
+	// Checkpoint bytes written and failed writes, on any goroutine.
+	ckptBytes, ckptFailures atomic.Uint64
+	ready                   []atomic.Uint64
+	work                    chan struct{}
+	nextPoll                time.Time // execution-owner local seal deadline
+	bufferedPoints          atomic.Int64
+	bufferedSince           atomic.Int64
+	rollups                 *coreRollups
+	gc                      *sealedPartGC
+	gcDirty                 atomic.Bool
+	mergeStop               <-chan struct{}
+	readGeneration          uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
 	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
@@ -333,6 +339,9 @@ func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngin
 func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (*coreEngine, error) {
 	if cfg.Rollups && hooks.PlanSeal != nil {
 		return nil, errors.New("core rollups already own the seal planner")
+	}
+	if (hooks.Expire == nil) != (hooks.ExpiryTTL == nil) {
+		return nil, errors.New("expiry needs both Expire and ExpiryTTL")
 	}
 	if cfg.Rollups {
 		if cfg.RollupRoutingVersion == 0 {
@@ -549,7 +558,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
 					return err
 				}
-				r, err := recoverCoreRollups(db, identities)
+				r, err := recoverCoreRollups(db, dir, identities)
 				if err != nil {
 					return err
 				}
@@ -565,6 +574,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					}
 				}
 				r.now = hooks.Now
+				if r.expire != nil {
+					r.setExpiryTTL(hooks.ExpiryTTL)
+				}
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
 				o.plan = r.planParts
@@ -1157,6 +1169,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		sealVisible(f.pending, f.reported, f.expiries)
+		o.checkpointAfterSeal()
 		return nil
 	}
 	awaitFlight := func() error {
@@ -1287,6 +1300,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		sealVisible(sealedPending, reported, since)
+		o.checkpointAfterSeal()
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}
@@ -1518,14 +1532,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if r.now != nil {
 				now = r.now()
 			}
-			due := false
-			for id, m := range r.idleCandidates() {
-				if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
-					due = true
-					break
-				}
-			}
-			// Establish new names' metadata before their inactivity window can end.
+			due := r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now))
+			// Establish new names metadata before their inactivity window can end.
 			due = due || r.pendingMetadataDue(&pend, o.lookup)
 			if due {
 				failure = flush()
@@ -2046,8 +2054,32 @@ func (e *coreEngine) close() error {
 			err = errors.Join(err, q.push(&corePacket{stop: true}, o.dead))
 		}
 	}
-	for _, o := range e.owners {
-		err = errors.Join(err, <-o.done)
+	// Owners write a final checkpoint in parallel, so a clean restart folds
+	// no parts. A failed write is loud and keeps the previous file.
+	errs := make([]error, len(e.owners))
+	var writing errgroup.Group
+	writing.SetLimit(min(16, runtime.GOMAXPROCS(0)))
+	for i, o := range e.owners {
+		errs[i] = <-o.done
+		if o.ckptWriting != nil {
+			<-o.ckptWriting // never leave an at-seal write behind a closed owner
+		}
+		if errs[i] == nil && o.rollups != nil && o.rollups.db != nil {
+			writing.Go(func() error {
+				buf, err := o.rollups.encodeOwnerCheckpoint()
+				if err == nil {
+					err = o.saveCheckpoint(buf)
+				} else {
+					o.checkpointFailed(err)
+				}
+				errs[i] = err
+				return nil
+			})
+		}
+	}
+	_ = writing.Wait()
+	for i, o := range e.owners {
+		err = errors.Join(err, errs[i])
 		o.pub.clear()
 		err = errors.Join(err, o.db.Close())
 	}

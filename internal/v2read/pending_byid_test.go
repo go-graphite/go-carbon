@@ -89,7 +89,7 @@ func TestPendingRowsSelectByID(t *testing.T) {
 			for k := 1 + rng.Intn(3); k > 0; k-- {
 				want = append(want, fmt.Sprintf("byid.n%d", rng.Intn(total+10)))
 			}
-			index, err := g.sealed.parts.SnapshotForNames(context.Background(), g.sealed.snapshot, want, g.sealed.cache.ranges)
+			index, err := g.parts.SnapshotForNames(context.Background(), g.snapshot, want, g.cache.ranges)
 			if err != nil {
 				t.Fatal(err)
 			}

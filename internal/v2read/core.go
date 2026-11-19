@@ -69,16 +69,25 @@ func (r *Reader) blockCache() *pebble.Cache {
 	return r.blocks
 }
 
+// generation is one owner publication: its own registry references on the
+// sealed parts plus the pending tail. Request views copy the sealed fields
+// with a request-local directory and own no references.
 type generation struct {
-	refs   atomic.Int64
-	sealed *sealedData
-	// view is an owner publication's pointer-free pending set; pending holds
-	// decoded applications only in per-request generations.
-	view    v2core.PendingView
-	pending []v2core.Batch
-	once    sync.Once
-	metrics map[string]*metricState
-	err     error
+	refs  atomic.Int64
+	parts *v2core.OpenedRollupParts
+	// snapshot stays open only while parts.NeedsSnapshot(). A head-only
+	// publication shares it through base, the publication that owns it.
+	snapshot  *pebble.Snapshot
+	base      *generation
+	inventory *v2core.RollupInventory
+	number    uint64
+	cache     *sealedCache
+	reader    *Reader
+	sealed    *v2core.RollupSnapshot // request views only
+	pending   []v2core.Batch
+	view      v2core.PendingView
+	metrics   map[string]*metricState
+	err       error
 }
 type sealedCache struct {
 	ranges   *v2core.RollupReadCache
@@ -88,19 +97,6 @@ type sealedCache struct {
 	number   uint64
 	limit    int64
 }
-type sealedData struct {
-	parts     *v2core.OpenedRollupParts
-	cache     *sealedCache
-	index     *v2core.RollupSnapshot
-	refs      atomic.Int64
-	number    uint64
-	reader    *Reader
-	snapshot  *pebble.Snapshot
-	inventory *v2core.RollupInventory
-	once      sync.Once
-	err       error
-}
-
 type metricState struct {
 	sealed   *v2core.RollupSnapshot
 	name     string
@@ -109,11 +105,10 @@ type metricState struct {
 	meta     v2core.RollupMetadata
 	records  []sealrollup.Record
 	pending  []sealrollup.Batch
-	once     sync.Once
 	frozen   *resolvedSource
 	reader   *Reader
 	err      error
-	resource *sealedData
+	resource *generation
 }
 
 func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
@@ -139,14 +134,13 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 
 // PublishWithInventory transfers the core's coherent immutable binding set.
 // A nil snapshot is a head-only publication: number and inventory equal the
-// current generation's, whose sealed view and Pebble snapshot it shares.
+// current generation's, whose parts it takes its own references on.
 func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pending []v2core.Batch, number uint64, inventory *v2core.RollupInventory) error {
 	return r.PublishPending(owner, snapshot, v2core.PendingBatches(pending), number, inventory)
 }
 
-// PublishPending is PublishWithInventory over the owner's pointer-free pending
-// view. The reader keeps the view; it never materializes the whole head. A nil
-// snapshot is a head-only publication, as for PublishWithInventory.
+// PublishPending transfers an immutable owner publication and its sealed parts.
+// Head-only publications retain their own references on the sealed parts.
 func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2core.PendingView, number uint64, inventory *v2core.RollupInventory) error {
 	closeSnapshot := func() error {
 		if snapshot == nil {
@@ -161,43 +155,47 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 		_ = closeSnapshot()
 		return errors.New("invalid publication owner")
 	}
-	g := &generation{view: pending}
-	// Retain the previous publication while borrowing its sealed index. Close
-	// may race publication; a failed retain means a fresh sealed resource is needed.
+	g := &generation{view: pending, number: number, inventory: inventory, cache: &r.caches[owner], reader: r}
+	// Retain the previous publication while sharing its sealed parts. Close
+	// may race publication; a failed retain means fresh parts are needed.
+	// The owner's part registry, carried by the inventory, shares opened parts
+	// with the previous publication, which stays installed until the swap.
+	shared := false
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
-		if old.sealed.number == number && old.sealed.inventory == inventory {
-			g.sealed = old.sealed
-			g.sealed.refs.Add(1)
-		}
-		if g.sealed == nil && inventory != nil && snapshot != nil {
-			parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, old.sealed.parts, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
-			if err != nil {
-				old.release()
-				_ = snapshot.Close()
-				return err
+		if shared = old.number == number && old.inventory == inventory; shared {
+			g.parts = old.parts.Retain()
+			if g.snapshot = old.snapshot; g.snapshot != nil {
+				g.base = old.base
+				if g.base == nil {
+					g.base = old
+				}
+				g.base.refs.Add(1)
 			}
-			g.sealed = &sealedData{parts: parts, snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
-			g.sealed.refs.Store(1)
 		}
 		old.release()
 	}
-	if g.sealed == nil && snapshot == nil {
+	if !shared && snapshot == nil {
 		if r.closed.Load() {
 			return nil
 		}
 		return errors.New("head-only publication without a pinned sealed generation")
 	}
-	if g.sealed != nil && g.sealed.snapshot != snapshot {
+	if shared && g.snapshot != snapshot {
 		_ = closeSnapshot()
-	} else if g.sealed == nil {
-		parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, nil, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
+	} else if !shared {
+		parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
 		if err != nil {
 			_ = snapshot.Close()
 			return err
 		}
-		g.sealed = &sealedData{parts: parts, snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
-		g.sealed.refs.Store(1)
+		g.parts, g.snapshot = parts, snapshot
+		if !parts.NeedsSnapshot() {
+			// Registry references keep the part files; the GC fence no
+			// longer waits for this snapshot.
+			_ = snapshot.Close()
+			g.snapshot = nil
+		}
 	}
 	g.refs.Store(1)
 	if old := r.owners[owner].Swap(g); old != nil {
@@ -211,11 +209,14 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 	return nil
 }
 func (g *generation) release() {
-	if g.refs.Add(-1) == 0 {
-		if g.sealed.refs.Add(-1) == 0 {
-			g.sealed.parts.Close()
-			_ = g.sealed.snapshot.Close()
-		}
+	if g.refs.Add(-1) != 0 {
+		return
+	}
+	g.parts.Close()
+	if g.base != nil {
+		g.base.release()
+	} else if g.snapshot != nil {
+		_ = g.snapshot.Close()
 	}
 }
 func (g *generation) retain() bool {
@@ -239,43 +240,19 @@ func (r *Reader) Close() {
 		r.blocks.Unref()
 	}
 }
-func (s *sealedData) load() {
-	// The prior directory is immutable. Keep it usable while this generation
-	// loads; sealedData.once coordinates only readers of this same generation.
-	s.cache.mu.Lock()
-	prior := s.cache.index
-	s.cache.mu.Unlock()
-	s.index, s.err = v2core.NewRollupSnapshotWithCatalogAndInventory(context.Background(), s.snapshot, prior, s.reader.Identities, s.inventory, s.cache.limit)
-	if s.err != nil {
-		return
-	}
-	s.cache.mu.Lock()
-	// An older pinned generation may finish after a newer publication.
-	if s.cache.index == nil || s.number >= s.cache.number {
-		s.cache.index, s.cache.number = s.index, s.number
-	}
-	s.cache.mu.Unlock()
-}
-func (s *sealedData) lookup(name string) *metricState {
-	p, meta, ok := s.index.LookupMetadata(name)
+
+// lookup reads a request view's sealed directory.
+func (g *generation) lookup(name string) *metricState {
+	p, meta, ok := g.sealed.LookupMetadata(name)
 	if !ok {
 		return nil
 	}
 	// Keep request state local; decoded sources and reductions already use
 	// the bounded sealedCache. A name sweep must not grow another permanent map.
-	return &metricState{policy: p, meta: meta, sealed: s.index, name: name, reader: s.reader, resource: s}
+	return &metricState{policy: p, meta: meta, sealed: g.sealed, name: name, reader: g.reader, resource: g}
 }
 
-func (g *generation) load() {
-	g.sealed.once.Do(g.sealed.load)
-	g.loadPending()
-}
-func (g *generation) loadPending() { g.loadPendingContext(context.Background()) }
 func (g *generation) loadPendingContext(ctx context.Context) {
-	if g.sealed.err != nil {
-		g.err = g.sealed.err
-		return
-	}
 	g.metrics = make(map[string]*metricState)
 	pending := g.pending
 	if pending == nil && g.view.Len() > 0 {
@@ -295,8 +272,8 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		name := h.Name()
 		m := g.metrics[name]
 		if m == nil {
-			m = &metricState{name: name, reader: g.sealed.reader, resource: g.sealed}
-			if base := g.sealed.lookup(name); base != nil {
+			m = &metricState{name: name, reader: g.reader, resource: g}
+			if base := g.lookup(name); base != nil {
 				m.policy, m.meta, m.sealed = base.policy, base.meta, base.sealed
 			} else {
 				m.policy, m.meta, m.identity = h.RollupPolicy(), v2core.RollupMetadata{ID: b.ID, Policy: h.Definition()}, h
@@ -338,7 +315,7 @@ func (m *metricState) resolveContext(ctx context.Context, from, until, now int64
 	switch {
 	case m.sealed != nil && m.reader.fullHistory:
 		var records []sealrollup.Record
-		if records, m.err = m.resource.index.Records(ctx, m.name); m.err != nil {
+		if records, m.err = m.resource.sealed.Records(ctx, m.name); m.err != nil {
 			return
 		}
 		base = newResolvedSource(m.meta.ID, m.policy.Config.Archives, records)
@@ -459,7 +436,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			}
 			m := g.metrics[name]
 			if m == nil {
-				m = g.sealed.lookup(name)
+				m = g.lookup(name)
 			}
 			if m != nil {
 				if metric != nil {
@@ -559,7 +536,7 @@ func (r *Reader) viewsForNames(ctx context.Context, pinned []*generation, names 
 			continue
 		}
 		own := routed[i]
-		if g.sealed.parts == nil {
+		if g.parts == nil {
 			own = names
 		}
 		if len(own) == 0 {
@@ -577,11 +554,11 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if g.sealed.parts == nil {
+	if g.parts == nil {
 		return g.discover(ctx)
 	}
 	stage := time.Now()
-	index, err := g.sealed.parts.SnapshotForNames(ctx, g.sealed.snapshot, names, g.sealed.cache.ranges)
+	index, err := g.parts.SnapshotForNames(ctx, g.snapshot, names, g.cache.ranges)
 	st.observe(StageSnapshot, stage)
 	if err != nil {
 		return nil, err
@@ -592,7 +569,7 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 		return nil, err
 	}
 	st.observe(StagePending, stage)
-	q := &generation{pending: pending, sealed: &sealedData{index: index, reader: g.sealed.reader, cache: g.sealed.cache, number: g.sealed.number}}
+	q := &generation{pending: pending, sealed: index, reader: g.reader, cache: g.cache, number: g.number}
 	stage = time.Now()
 	q.loadPendingContext(ctx)
 	st.observe(StageLoadPending, stage)
@@ -601,30 +578,32 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 
 // Discovery alone enumerates names. Serialize its incremental refresh per owner
 // so overlapping generations never independently reload the same new parts.
+// Without legacy rows it reads registry-held parts only, never a snapshot.
 func (g *generation) discover(ctx context.Context) (*generation, error) {
-	s := g.sealed
+	c := g.cache
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-s.cache.loadGate:
+	case <-c.loadGate:
 	}
-	defer func() { s.cache.loadGate <- struct{}{} }()
-	s.cache.mu.Lock()
-	prior := s.cache.index
-	s.cache.mu.Unlock()
-	if s.parts != nil {
-		ctx = v2core.WithOpenedRollupParts(ctx, s.parts)
+	defer func() { c.loadGate <- struct{}{} }()
+	c.mu.Lock()
+	prior := c.index
+	c.mu.Unlock()
+	if g.parts != nil {
+		ctx = v2core.WithOpenedRollupParts(ctx, g.parts)
 	}
-	index, err := v2core.NewRollupSnapshotWithCatalogAndInventory(ctx, s.snapshot, prior, s.reader.Identities, s.inventory, s.cache.limit)
+	index, err := v2core.NewRollupSnapshot(ctx, g.snapshot, prior, g.reader.Identities, g.inventory, c.limit)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.mu.Lock()
-	if s.cache.index == nil || s.number >= s.cache.number {
-		s.cache.index, s.cache.number = index, s.number
+	c.mu.Lock()
+	// An older pinned generation may finish after a newer publication.
+	if c.index == nil || g.number >= c.number {
+		c.index, c.number = index, g.number
 	}
-	s.cache.mu.Unlock()
-	q := &generation{pending: g.view.Batches(), sealed: &sealedData{index: index, reader: s.reader, cache: s.cache, number: s.number}}
+	c.mu.Unlock()
+	q := &generation{pending: g.view.Batches(), sealed: index, reader: g.reader, cache: c, number: g.number}
 	q.loadPendingContext(ctx)
 	return q, q.err
 }
