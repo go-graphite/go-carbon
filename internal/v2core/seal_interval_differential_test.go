@@ -59,7 +59,7 @@ func TestSealIntervalStoredWinnersDifferential(t *testing.T) {
 			get := func(e *coreEngine) []sealrollup.Record {
 				pin := e.owners[0].db.NewSnapshot()
 				defer pin.Close()
-				index, err := NewRollupSnapshot(context.Background(), pin, nil, 0)
+				index, err := NewRollupSnapshot(context.Background(), pin, nil, nil, nil, 0)
 				if err != nil {
 					t.Fatal(err)
 				}

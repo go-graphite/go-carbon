@@ -159,7 +159,7 @@ func (r *rollupHistoryReader) open() error {
 		return err
 	}
 	if found {
-		r.copied, err = NewRollupSnapshot(ctx, r.snapshot, nil, 0)
+		r.copied, err = NewRollupSnapshot(ctx, r.snapshot, nil, nil, nil, 0)
 		return err
 	}
 	selected := map[string]v2part.Descriptor{}
@@ -168,7 +168,7 @@ func (r *rollupHistoryReader) open() error {
 		return err
 	}
 	if inventory == nil {
-		r.copied, err = NewRollupSnapshot(ctx, r.snapshot, nil, 0)
+		r.copied, err = NewRollupSnapshot(ctx, r.snapshot, nil, nil, nil, 0)
 		return err
 	}
 	r.parts = map[string][]*rollupHistoryPart{}
