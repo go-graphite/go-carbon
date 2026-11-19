@@ -54,12 +54,13 @@ func sealTimeOnlyFixture(tb testing.TB, names, perName int, seed int64) (*coreRo
 // after Commit or Abort. The working set goes back to the shared pool, so
 // retained planner heap follows the seals in flight, not the owner count.
 func TestSealPlanScratchBound(t *testing.T) {
+	defer drainRollupScratchPool()
 	const names, perName = 3000, 6
 	r, batches := sealTimeOnlyFixture(t, names, perName, 1)
 	for seal := range 3 {
-		// Empty the shared pool so the capacities below are this seal's own.
-		runtime.GC()
-		runtime.GC()
+		// The cache survives GC; explicitly discard earlier working sets so
+		// the capacities below are this seal's own.
+		drainRollupScratchPool()
 		plan, err := r.planParts(coreSealInput{Batches: batches})
 		if err != nil {
 			t.Fatal(err)
@@ -84,6 +85,49 @@ func TestSealPlanScratchBound(t *testing.T) {
 	}
 }
 
+func drainRollupScratchPool() {
+	for {
+		select {
+		case <-rollupScratchPool:
+		default:
+			return
+		}
+	}
+}
+
+func TestSealScratchReuseAcrossGC(t *testing.T) {
+	drainRollupScratchPool()
+	defer drainRollupScratchPool()
+	r := newCoreRollups()
+	r.takeScratch()
+	s := r.scratch
+	r.stages = make([]rollupStage, 0, 1024)
+	r.release()
+	runtime.GC()
+	runtime.GC()
+	r.takeScratch()
+	defer r.release()
+	if r.scratch != s || cap(r.stages) != 1024 {
+		t.Fatal("GC discarded reusable seal buffers")
+	}
+}
+
+func TestSealScratchIdleBound(t *testing.T) {
+	drainRollupScratchPool()
+	defer drainRollupScratchPool()
+	planners := make([]*coreRollups, cap(rollupScratchPool)+1)
+	for i := range planners {
+		planners[i] = newCoreRollups()
+		planners[i].takeScratch()
+	}
+	for _, r := range planners {
+		r.release()
+	}
+	if len(rollupScratchPool) != cap(rollupScratchPool) {
+		t.Fatalf("idle working sets = %d, want %d", len(rollupScratchPool), cap(rollupScratchPool))
+	}
+}
+
 // BenchmarkSealPlanRetained reports planner heap per frozen row for time-only
 // seals (6 applications per name): inflight-B/row is one plan's working set,
 // retained-B/row is what `owners` planners (and the shared pool) keep between
@@ -91,6 +135,8 @@ func TestSealPlanScratchBound(t *testing.T) {
 // retained figure is the heap freed by dropping every planner's seal buffers
 // and emptying the pool.
 func BenchmarkSealPlanRetained(b *testing.B) {
+	drainRollupScratchPool()
+	defer drainRollupScratchPool()
 	const owners, names, perName = 8, 20000, 6
 	planners := make([]*coreRollups, owners)
 	inputs := make([][]Batch, owners)
@@ -118,6 +164,7 @@ func BenchmarkSealPlanRetained(b *testing.B) {
 		r.stages, r.stageMetrics, r.samples, r.batches, r.arena = nil, nil, nil, nil, nil
 		r.files, r.coverage, r.lanes = nil, nil, nil
 	}
+	drainRollupScratchPool()
 	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&dropped)

@@ -2,14 +2,13 @@ package v2core
 
 import (
 	"slices"
-	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
 // rollupScratch is one seal's planner working set: stages, per-row sample and
 // batch storage, lane records and lane part outputs. A planner holds one only
-// between planParts and Commit/Abort and returns it to a process-wide pool, so
+// between planParts and Commit/Abort and returns it to a bounded shared cache, so
 // retained capacity follows the seals in flight instead of the high-water
 // capacity of every owner. Owner seal deadlines are staggered, so few owners
 // plan at once. VictoriaMetrics pools its in-memory part buffers the same way.
@@ -34,11 +33,19 @@ type rollupLaneScratch struct {
 	output  rollupOutput
 }
 
-var rollupScratchPool sync.Pool
+// Keep a small idle working set across GC cycles. sync.Pool can discard these
+// large buffers while owners still need them every seal, forcing allocation
+// and another GC cycle. Retain at most eight idle sets; extra concurrent
+// seals allocate normally and never wait for a buffer.
+var rollupScratchPool = make(chan *rollupScratch, 8)
 
 // takeScratch adopts a pooled working set for the seal that is starting.
 func (r *coreRollups) takeScratch() {
-	s, _ := rollupScratchPool.Get().(*rollupScratch)
+	var s *rollupScratch
+	select {
+	case s = <-rollupScratchPool:
+	default:
+	}
 	if s == nil {
 		s = &rollupScratch{}
 	}
@@ -86,5 +93,8 @@ func (r *coreRollups) returnScratch() {
 		*pooled = rollupLaneScratch{ranked: lane.ranked, spare: lane.spare, counts: lane.counts, records: lane.records, output: lane.output}
 		lane.ranked, lane.spare, lane.counts, lane.records, lane.output = nil, nil, nil, nil, rollupOutput{}
 	}
-	rollupScratchPool.Put(s)
+	select {
+	case rollupScratchPool <- s:
+	default:
+	}
 }
