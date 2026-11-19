@@ -1239,6 +1239,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		deadline = time.Now().Add(sealInterval)
 		work := o.work
 		go func() {
+			if o.stage != nil {
+				o.stage("background-seal")
+			}
 			// The planner reads the frozen rows in place and copies samples
 			// into its own pointer-free scratch.
 			n, err := o.sealBatches(f.rows, f.points, f.oldest, f.pending, f.next)

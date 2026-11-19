@@ -161,6 +161,8 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 		e := mergeFixtureIdle(t, root, func(stage string) {
 			if stage == phase {
 				_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+				// SIGKILL may land after Kill returns: never pass the boundary.
+				time.Sleep(time.Hour)
 			}
 		})
 		_, err := e.owners[0].mergeSealedParts(nil, false)
@@ -195,9 +197,10 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 			if !reflect.DeepEqual(mergeRead(t, s), want) {
 				t.Fatal("crash lost or changed slots")
 			}
+			// The child runs one merge of the first smallMergeRatio parts.
 			expected := sealedMergeFanIn
 			if phase == "merge-published" {
-				expected = 1
+				expected = sealedMergeFanIn - smallMergeRatio + 1
 			}
 			if got := mergeCount(e.owners[0]); got != expected {
 				t.Fatalf("live=%d want %d", got, expected)
@@ -339,7 +342,7 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 			for i, name := range []string{"merge.reset", "merge.other"} {
 				policies[i], encoded[i] = rollupTestPolicy(t, name, "1s:120,10s:1h", sealrollup.Last, .5)
 			}
-			for n := byte(1); n <= sealedMergeFanIn; n++ {
+			for n := byte(1); n <= smallMergeRatio; n++ {
 				metas := make([]RollupMetadata, 2)
 				rs := make([][]sealrollup.Record, 2)
 				for i := range metas {
@@ -351,9 +354,9 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 					if n >= 2 {
 						reset = 2
 					}
-					isExpired := n == 2 || (expired && n == sealedMergeFanIn)
-					if expired && n == sealedMergeFanIn {
-						reset = sealedMergeFanIn
+					isExpired := n == 2 || (expired && n == smallMergeRatio)
+					if expired && n == smallMergeRatio {
+						reset = smallMergeRatio
 					}
 					metas[i] = RollupMetadata{Version: 2, ID: uint64(i + 1), Policy: encoded[i], Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 1120, Policy: digest}, LastUpdate: 1130e9, Revision: uint64(n), ResetOrder: reset, Expired: isExpired}
 					if !isExpired {
@@ -381,7 +384,7 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 			if expired && len(got) != 0 {
 				t.Fatal("expired records retained")
 			}
-			if !expired && (len(got) != 2 || got[0].Order != sealedMergeFanIn || got[1].Order != sealedMergeFanIn) {
+			if !expired && (len(got) != 2 || got[0].Order != smallMergeRatio || got[1].Order != smallMergeRatio) {
 				t.Fatalf("reset lost revived winners: %v", got)
 			}
 			o.gc.mu.Lock()
