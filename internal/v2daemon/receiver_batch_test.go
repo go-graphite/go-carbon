@@ -110,6 +110,11 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 					}
 					return a.Slot < b.Slot
 				})
+				// Merged runs carry their metric's frontier as order, and the
+				// two arms merge at different times: compare time and bits.
+				for i := range records {
+					records[i].Order, records[i].Sample.Sequence = 0, 0
+				}
 			}
 			for i := range owners {
 				var values []uint64
