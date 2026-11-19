@@ -88,11 +88,15 @@ func TestClassicPendingAndSealed(t *testing.T) {
 							t.Fatal(err)
 						}
 						b := v2core.Batch{ID: 7, Policy: encoded, Order: uint64(i + 1), Clock: clock, Points: rows}
-						previous := reader.owners[0].Load()
 						if err = engine.AppendBatches(0, []v2core.Batch{b}, uint64(i+1), false); err != nil {
 							t.Fatal(err)
 						}
-						await(t, func() bool { return reader.owners[0].Load() != previous })
+						// Wait for the publication that carries this batch: a background
+						// merge publishes too, possibly before the batch reaches the head.
+						await(t, func() bool {
+							g := reader.owners[0].Load()
+							return g != nil && len(g.pending) > 0 && g.pending[len(g.pending)-1].Order == b.Order
+						})
 						// Overwrite borrowed input after acknowledgment: the published head owns it.
 						for j := range rows {
 							rows[j].Bits = 0xdeadbeef
