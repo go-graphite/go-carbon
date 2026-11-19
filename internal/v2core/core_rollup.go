@@ -229,7 +229,7 @@ func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
 // clear pass, and resolves catalog handles only for names not installed.
 func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *ApplicationPolicy) bool {
 	due := false
-	h.view(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
+	h.rawView(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
 		if r.metrics[id] != nil {
 			return true
 		}
@@ -247,6 +247,7 @@ func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *Ap
 	}
 	return due
 }
+
 // noteNewNames extends the head's new-name list over positions appended since
 // its last pass: each row ID that is not installed, once, with its name hash.
 // Installed names have sealed metadata in every snapshot published after their
@@ -254,7 +255,7 @@ func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *Ap
 // The caller excludes a concurrent Commit (the owner loop, or sealPubMu). A
 // nil r (no rollups) has nothing installed.
 func (r *coreRollups) noteNewNames(h *pendingHead, lookup func(uint64) *ApplicationPolicy) {
-	h.view(lookup).IDs(h.freshScanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
+	h.rawView(lookup).IDs(h.freshScanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
 		if cold != nil || (r != nil && r.metrics[id] != nil) {
 			return true
 		}

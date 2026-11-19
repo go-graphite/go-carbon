@@ -3,6 +3,7 @@ package v2read
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -33,46 +34,39 @@ func pendingHash(registered *v2core.ApplicationPolicy, policy []byte) (uint64, e
 // selectPending returns the applications whose exact name is in names, in
 // arrival order. The request resolves only its own names to owner IDs: sealed
 // names through their metadata in sealed, the others through the owner's
-// published new-name list. It then scans the published rows by ID, and cold
-// applications by their inline name hash, with no catalog lookup per position.
+// published new-name list. It then binary-searches the owner's ID-sorted runs
+// for those IDs, and matches cold applications by their inline name hash, with
+// no catalog lookup and no scan per pending row.
 // Candidates are re-checked by exact name, so hash collisions cannot change
 // results. Only matching applications are decoded.
 func selectPending(ctx context.Context, sealed *v2core.RollupSnapshot, pending v2core.PendingView, names []string) ([]v2core.Batch, error) {
 	if pending.Len() == 0 {
 		return nil, nil
 	}
-	var hashes, ids namefp.Table // sets: keys in Hash, no local number
+	var hashes namefp.Table // set: keys in Hash, no local number
+	var ids []uint64
 	for _, n := range names {
 		hashes.Put(namefp.Fingerprint{Hash: namefp.Hash(n)}, 0)
 		if sealed == nil {
 			continue
 		}
 		if _, meta, ok := sealed.LookupMetadata(n); ok {
-			ids.Put(namefp.Fingerprint{Hash: meta.ID}, 0)
+			ids = append(ids, meta.ID)
 		}
 	}
 	pending.NewNames(func(hash, id uint64) {
 		if _, ok := hashes.Get(namefp.Fingerprint{Hash: hash}); ok {
-			ids.Put(namefp.Fingerprint{Hash: id}, 0)
+			ids = append(ids, id)
 		}
 	})
-	var positions []int
-	var err error
-	pending.IDs(0, pending.Len(), func(pos int, id uint64, cold *v2core.Batch) bool {
-		if cold == nil {
-			if _, ok := ids.Get(namefp.Fingerprint{Hash: id}); ok {
-				positions = append(positions, pos)
-			}
-			return true
+	slices.Sort(ids)
+	positions, err := pending.Find(slices.Compact(ids), func(cold *v2core.Batch) (bool, error) {
+		h, err := pendingHash(cold.Registered, cold.Policy)
+		if err != nil {
+			return false, err
 		}
-		var h uint64
-		if h, err = pendingHash(cold.Registered, cold.Policy); err != nil {
-			return false
-		}
-		if _, ok := hashes.Get(namefp.Fingerprint{Hash: h}); ok {
-			positions = append(positions, pos)
-		}
-		return true
+		_, ok := hashes.Get(namefp.Fingerprint{Hash: h})
+		return ok, nil
 	})
 	if err != nil || len(positions) == 0 {
 		return nil, err

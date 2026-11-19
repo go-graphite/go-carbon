@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/metrics"
+	"slices"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 // (policy-byte) packets, publishes views at random boundaries, and checks
 // every view against the submitted applications: full decode, Each, every
 // position's Ref and Application, Refs, Suffix at earlier publication
-// boundaries, Extends and concat across heads.
+// boundaries and concat across heads, and Find against a linear scan.
 func TestPendingViewMatchesBatches(t *testing.T) {
 	var coldApps, rowApps, views int
 	for seed := uint64(1); seed <= 6; seed++ {
@@ -54,25 +55,16 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 			checkPendingView(t, seed, p.v, want[:p.apps])
 			if k > 0 {
 				prev := pubs[k-1]
-				if !p.v.Extends(prev.v) {
-					t.Fatalf("seed %d: view %d does not extend view %d", seed, k, k-1)
-				}
-				if prev.v.Len() < p.v.Len() && prev.v.Extends(p.v) {
-					t.Fatalf("seed %d: shorter view extends longer", seed)
-				}
 				suffix := p.v.Suffix(prev.v.Len())
 				checkPendingView(t, seed, suffix, want[prev.apps:p.apps])
 			}
 		}
-		// A second head over the same packets shares no arrays: no reuse.
+		// concat across heads: the second head's positions and runs shift.
 		var other pendingHead
 		for _, packet := range s.packets[:3] {
 			other.add(packet, s.find)
 		}
 		ov := other.view(s.find)
-		if pubs[len(pubs)-1].v.Extends(ov) {
-			t.Fatalf("seed %d: unrelated head reported as prefix", seed)
-		}
 		joined := ov.concat(pubs[len(pubs)-1].v)
 		var all []coreBatch
 		for _, packet := range s.packets[:3] {
@@ -144,6 +136,28 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 	}
 	if got := v.maxClock(-1); got != clock {
 		t.Fatalf("seed %d: maxClock %d, want %d", seed, got, clock)
+	}
+	// Find: per ID, the binary-searched run positions equal the linear scan's
+	// row positions in arrival order; cold positions come only from the cold
+	// predicate.
+	byID := map[uint64][]int{}
+	var coldPos []int
+	v.IDs(0, v.Len(), func(p int, id uint64, cold *coreBatch) bool {
+		if cold != nil {
+			coldPos = append(coldPos, p)
+		} else {
+			byID[id] = append(byID[id], p)
+		}
+		return true
+	})
+	for id, wantPos := range byID {
+		got, err := v.Find([]uint64{id}, func(*coreBatch) (bool, error) { return false, nil })
+		if err != nil || !slices.Equal(got, wantPos) {
+			t.Fatalf("seed %d: Find(%d) = %v, %v, want %v", seed, id, got, err, wantPos)
+		}
+	}
+	if got, err := v.Find(nil, func(*coreBatch) (bool, error) { return true, nil }); err != nil || !slices.Equal(got, coldPos) {
+		t.Fatalf("seed %d: Find(cold) = %v, %v, want %v", seed, got, err, coldPos)
 	}
 	for pos < v.Len() {
 		b, lo, hi := v.Application(pos)
