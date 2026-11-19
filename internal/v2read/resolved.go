@@ -262,24 +262,10 @@ func (s *sealedData) rememberReduction(m *metricState, next sealrollup.Frontier)
 	c.reductionBytes += e.bytes
 }
 
-// Stable ordering is reusable independently of batch order/clock. The canonical
-// reducer still owns admission and aggregation, and rechecks its input order.
-// Exact scalar comparison makes this useful for overlapping pending arenas and
-// repeated corrections without hash collision or pointer-lifetime assumptions.
-type orderedSamples struct {
-	original, sorted []sealrollup.Sample
-	bytes            int64
-}
-
-func (c *sealedCache) orderSamples(input []sealrollup.Sample) []sealrollup.Sample {
-	c.orderMu.Lock()
-	for _, e := range c.ordered {
-		if slices.Equal(e.original, input) {
-			c.orderMu.Unlock()
-			return e.sorted
-		}
-	}
-	c.orderMu.Unlock()
+// orderSamples returns a stably time/sequence-ordered copy of one immutable
+// pending batch. The canonical reducer still owns admission and aggregation,
+// and rechecks its input order. Every request sorts only its own name's batches.
+func orderSamples(input []sealrollup.Sample) []sealrollup.Sample {
 	sorted := slices.Clone(input)
 	slices.SortStableFunc(sorted, func(a, b sealrollup.Sample) int {
 		if a.Time < b.Time {
@@ -296,24 +282,5 @@ func (c *sealedCache) orderSamples(input []sealrollup.Sample) []sealrollup.Sampl
 		}
 		return 0
 	})
-	size := int64(cap(input)+cap(sorted))*24 + 64
-	if size > c.limit {
-		return sorted
-	}
-	c.orderMu.Lock()
-	defer c.orderMu.Unlock()
-	for _, e := range c.ordered {
-		if slices.Equal(e.original, input) {
-			return e.sorted
-		}
-	}
-	for len(c.ordered) > 0 && (len(c.ordered) >= 64 || c.orderedBytes+size > c.limit) {
-		c.orderedBytes -= c.ordered[0].bytes
-		copy(c.ordered, c.ordered[1:])
-		c.ordered[len(c.ordered)-1] = orderedSamples{}
-		c.ordered = c.ordered[:len(c.ordered)-1]
-	}
-	c.ordered = append(c.ordered, orderedSamples{input, sorted, size})
-	c.orderedBytes += size
 	return sorted
 }
