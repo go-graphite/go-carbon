@@ -51,7 +51,7 @@ func TestDenseBitExact(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			b, e := appendSlotsOrder(nil, rs, true)
+			b, e := appendSlotsOrder(nil, rs, nil, true)
 			if e != nil {
 				t.Fatal(e)
 			}
