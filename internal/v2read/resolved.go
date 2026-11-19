@@ -15,6 +15,9 @@ type resolvedSource struct {
 	id       uint64
 	archives []sealrollup.Archive
 	records  []sealrollup.Record
+	// stored answers HasArchive for a range-limited base: whether the sealed
+	// archive holds any slot outside the loaded ranges.
+	stored func(context.Context, int) (bool, error)
 }
 
 func recordCompare(a, b sealrollup.Record) int {
@@ -35,7 +38,7 @@ func recordCompare(a, b sealrollup.Record) int {
 func newResolvedSource(id uint64, archives []sealrollup.Archive, records []sealrollup.Record) *resolvedSource {
 	records = slices.Clone(records)
 	slices.SortFunc(records, recordCompare)
-	return &resolvedSource{id, archives, records}
+	return &resolvedSource{id: id, archives: archives, records: records}
 }
 func (s *resolvedSource) replace(updates []sealrollup.Record) *resolvedSource {
 	out := make([]sealrollup.Record, 0, len(s.records)+len(updates))
@@ -55,7 +58,7 @@ func (s *resolvedSource) replace(updates []sealrollup.Record) *resolvedSource {
 	}
 	out = append(out, s.records[i:]...)
 	out = append(out, updates[j:]...)
-	return &resolvedSource{s.id, s.archives, out}
+	return &resolvedSource{id: s.id, archives: s.archives, records: out, stored: s.stored}
 }
 func (s *resolvedSource) lower(a int, slot int64) int {
 	i, _ := slices.BinarySearchFunc(s.records, sealrollup.Record{Delta: sealrollup.Delta{Archive: a, Slot: slot}}, recordCompare)
@@ -95,7 +98,13 @@ func (s *resolvedSource) HasArchive(ctx context.Context, id uint64, step int64) 
 		return false, ctx.Err()
 	}
 	i := s.lower(a, 0)
-	return i < len(s.records) && s.records[i].Archive == a, ctx.Err()
+	if i < len(s.records) && s.records[i].Archive == a {
+		return true, ctx.Err()
+	}
+	if s.stored != nil {
+		return s.stored(ctx, a)
+	}
+	return false, ctx.Err()
 }
 func (s *resolvedSource) Scan(ctx context.Context, id uint64, a Archive, from, until int64, yield func(Sample) error) error {
 	archive := s.archive(a.Step)
