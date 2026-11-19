@@ -334,7 +334,7 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 	if err != nil {
 		return nil, err
 	}
-	out.iterators = append(out.iterators, legacy)
+	out.iterators = append(out.iterators, newHeaderCursor(legacy, nil))
 	// Routes already pruned the store. Do not enumerate descriptor bindings here.
 	seen := map[*openedRollupPart]bool{}
 	for _, p := range s.routesForSelection(selected) {

@@ -19,10 +19,16 @@ import (
 )
 
 // mergeByteDifferentialDigest is the SHA-256 of every merged part file and
-// descriptor that TestMergeByteDifferential writes, recorded on github
-// atimofieiev/v2 9f959a15aa7a (string merge keys). A merge must stay byte
-// identical: do not re-record it for a performance change.
-const mergeByteDifferentialDigest = "fb27b251cf5420cf2e301852a7d96db2e946d3b7482acabdebdc855cfd8a9d3e"
+// descriptor that TestMergeByteDifferential writes, with each name's envelope
+// folded into its last run. mergeByteDifferentialLegacyDigest is the same
+// merges written with v2part.LegacyEnvelopeKV, recorded on github
+// atimofieiev/v2 9f959a15aa7a (string merge keys): it pins every other byte,
+// so the folded digest differs only by the envelope's placement. A merge must
+// stay byte identical: do not re-record either for a performance change.
+const (
+	mergeByteDifferentialDigest       = "f5b46c94d9759955d25573c581c8d172746964094528b7af0a84de1808d72612"
+	mergeByteDifferentialLegacyDigest = "fb27b251cf5420cf2e301852a7d96db2e946d3b7482acabdebdc855cfd8a9d3e"
+)
 
 // TestMergeByteDifferential runs multi-tier merges (seal parts, merges of
 // merges plus a late part) over length-tied, prefix-sharing and non-ASCII
@@ -31,21 +37,28 @@ const mergeByteDifferentialDigest = "fb27b251cf5420cf2e301852a7d96db2e946d3b7482
 func TestMergeByteDifferential(t *testing.T) {
 	saved := mergePartID
 	defer func() { mergePartID = saved }()
-	var serial byte
-	mergePartID = func(id *v2part.PartID) error {
-		serial++
-		*id = v2part.PartID{0xA5, serial}
-		return nil
-	}
-	sum := sha256.New()
-	for seed := uint64(1); seed <= 3; seed++ {
-		for _, group := range []v2part.Group{"live", "g.long-group"} {
-			mergeByteDifferentialCase(t, seed, group, sum)
+	defer v2part.LegacyEnvelopeKV.Store(false)
+	for _, legacy := range []bool{true, false} {
+		v2part.LegacyEnvelopeKV.Store(legacy)
+		var serial byte
+		mergePartID = func(id *v2part.PartID) error {
+			serial++
+			*id = v2part.PartID{0xA5, serial}
+			return nil
 		}
-	}
-	got := hex.EncodeToString(sum.Sum(nil))
-	if got != mergeByteDifferentialDigest {
-		t.Fatalf("merged part bytes changed: digest %s, want %s", got, mergeByteDifferentialDigest)
+		sum := sha256.New()
+		for seed := uint64(1); seed <= 3; seed++ {
+			for _, group := range []v2part.Group{"live", "g.long-group"} {
+				mergeByteDifferentialCase(t, seed, group, sum)
+			}
+		}
+		want := mergeByteDifferentialDigest
+		if legacy {
+			want = mergeByteDifferentialLegacyDigest
+		}
+		if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+			t.Fatalf("legacy=%v: merged part bytes changed: digest %s, want %s", legacy, got, want)
+		}
 	}
 }
 

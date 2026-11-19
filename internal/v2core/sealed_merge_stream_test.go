@@ -58,7 +58,8 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if d.Coverage.Records != uint64(sealedMergeFanIn)-reset+1 {
+				// One run per surviving input; the envelope rides in the last.
+				if d.Coverage.Records != uint64(sealedMergeFanIn)-reset {
 					t.Fatalf("runs were repacked or masked incorrectly: %d", d.Coverage.Records)
 				}
 				if err = v2part.ReadExpanded(context.Background(), gcPath(e.owners[0].gc, d), &d, nil); err != nil {

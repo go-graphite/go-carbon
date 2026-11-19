@@ -101,7 +101,11 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 	if err != nil {
 		return nil, err
 	}
-	out.iterators = append(out.iterators, legacy)
+	var upper []byte
+	if opts != nil {
+		upper = opts.UpperBound
+	}
+	out.iterators = append(out.iterators, newHeaderCursor(legacy, upper))
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
 	if directory == "" {
 		value, closer, e := snapshot.Get(rollupDirectoryKey)
@@ -215,10 +219,6 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 			return nil, e
 		}
 		files = nil
-		var upper []byte
-		if opts != nil {
-			upper = opts.UpperBound
-		}
 		out.iterators = append(out.iterators, newHeaderCursor(external, upper))
 	}
 	return out, nil

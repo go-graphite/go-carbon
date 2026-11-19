@@ -8,6 +8,11 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
+// partKeyMagic prefixes every part record key. headerCursor passes other keys
+// (raw rows, catalogs) through, so it can wrap the store's own Pebble keyspace,
+// where installed copied and portable parts keep their records.
+var partKeyMagic = []byte{'G', 'C', 'P', 3}
+
 // headerCursor presents a part's records as the logical stream every reader
 // expects. A dense run with a folded envelope (v2part.SplitHeader) is
 // followed by that envelope at its metric's envelope key, exactly where parts
@@ -34,7 +39,7 @@ func (c *headerCursor) load(valid bool) bool {
 	}
 	k, v := c.archiveCursor.Key(), c.archiveCursor.Value()
 	c.run = v
-	if len(k) < 16 || binary.BigEndian.Uint32(k[len(k)-16:]) == v2part.MetadataArchive {
+	if len(k) < 16 || !bytes.HasPrefix(k, partKeyMagic) || binary.BigEndian.Uint32(k[len(k)-16:]) == v2part.MetadataArchive {
 		return true
 	}
 	c.env, c.run, c.err = v2part.SplitHeader(v)
