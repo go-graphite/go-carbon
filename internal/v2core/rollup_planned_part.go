@@ -52,7 +52,7 @@ func writePlannedRollupPart(path string, file []coreKV, spec v2part.Spec) (v2par
 
 // writePlannedRollupTuples writes the planner's tuples straight into the shared
 // dense writer: each key is formatted once, only where a run or envelope
-// starts, and the writer still validates order, routing and scope. The part
+// starts, and the writer validates order and scope using the planner's route. The part
 // bytes and descriptor equal writePlannedRollupPart over the encoded keys.
 func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descriptor, error) {
 	w, err := v2part.NewDenseWriter(path, part.Spec)
