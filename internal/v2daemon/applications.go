@@ -52,6 +52,9 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	if p.layer < 2 {
 		return nil, errors.New("application registration requires a journal")
 	}
+	if err := p.openCatalog(); err != nil {
+		return nil, err
+	}
 	id, err := p.catalog.Intern(name, policy)
 	if err != nil {
 		return nil, err
