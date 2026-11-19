@@ -87,7 +87,29 @@ type readPart struct {
 	metrics     map[string]*readPartMetric
 	bytes       int64
 	origin      partOrigin
+	// Event-time coverage from the descriptor; timed is false when unknown.
+	minTime, maxTime int64
+	timed            bool
 }
+
+// mayHoldSlots reports whether the part can hold a record in physical slots
+// [first, last) of an archive. Its event-time coverage is mapped onto the
+// ring, so newer epochs sharing a slot stay eligible.
+func (p *readPart) mayHoldSlots(a sealrollup.Archive, first, last int64) bool {
+	if !p.timed || p.minTime <= 0 {
+		return true
+	}
+	lo, hi := p.minTime/a.Step, p.maxTime/a.Step
+	if hi-lo+1 >= a.Count {
+		return true
+	}
+	lo, hi = lo%a.Count, hi%a.Count
+	if lo <= hi {
+		return lo < last && hi >= first
+	}
+	return lo < last || hi >= first
+}
+
 type readMetricState struct {
 	*PolicyIdentity
 	meta metricMetadata
@@ -426,7 +448,15 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	count := copy(candidates[:], s.cache.entries[cacheKey])
 	s.cache.mu.Unlock()
 	var cached *archiveResult
-	partList := s.metricParts(m)
+	// Parts whose time coverage cannot reach these slots hold nothing for
+	// this range; the same range always skips the same parts.
+	var partList []*readPartMetric
+	ar := m.latest.schema().Archives[archive]
+	for _, part := range s.metricParts(m) {
+		if part.part.mayHoldSlots(ar, first, last) {
+			partList = append(partList, part)
+		}
+	}
 	parts := make(map[string]struct{}, len(partList))
 	for _, part := range partList {
 		parts[part.part.id] = struct{}{}

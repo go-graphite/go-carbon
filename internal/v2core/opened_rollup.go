@@ -241,7 +241,7 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			id := string(scope)
 			if out.parts[id] == nil {
 				key.Metric = ""
-				rp := &readPart{id: id, key: key, first: name, last: name, origin: partOrigin{Class: LivePart}}
+				rp := &readPart{id: id, key: key, first: name, last: name, origin: partOrigin{Class: LivePart}, minTime: p.descriptor.Coverage.MinTime, maxTime: p.descriptor.Coverage.MaxTime, timed: true}
 				out.parts[id] = rp
 				route := partRoute{key.Group, shard}
 				out.routes[route] = append(out.routes[route], rp)

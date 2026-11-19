@@ -29,6 +29,9 @@ func fetchBoth(t *testing.T, reader *Reader, names []string, from, until, now in
 	t.Helper()
 	collect := func(rangeBase bool) map[string]renderedSlots {
 		reader.fullHistory = !rangeBase
+		// Fresh range caches: a cached full archive would serve the range
+		// pass and hide its part skip.
+		resetRangeCaches(reader)
 		out := map[string]renderedSlots{}
 		err := reader.FetchMany(context.Background(), names, from, until, now, func(name string, s *Series) error {
 			if s == nil {
@@ -55,6 +58,12 @@ func fetchBoth(t *testing.T, reader *Reader, names []string, from, until, now in
 		}
 	}
 	return len(names)
+}
+
+func resetRangeCaches(reader *Reader) {
+	for i := range reader.caches {
+		reader.caches[i].ranges = v2core.NewRollupReadCache(reader.caches[i].limit)
+	}
 }
 
 func TestResolveRangeDifferential(t *testing.T) {
