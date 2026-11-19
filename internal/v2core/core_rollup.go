@@ -970,8 +970,8 @@ func (e *rollupScanEntry) addRecord(record sealrollup.Record) error {
 
 // foldRollupKeys folds every rollup row of iter into series.
 func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, reducerOnly bool) error {
-	// Iterator keys and slim envelopes borrow one decode workspace. Catalog
-	// identities own their name and suffix before the iterator advances.
+	// Reuse key decoding and temporary slim definitions while folding rows.
+	// Catalog identities own their name and suffix before the next row.
 	var keys partsformat.KeyDecoder
 	var definition []byte
 	// A writable reducer never uses terminal-archive samples. Resolve the
