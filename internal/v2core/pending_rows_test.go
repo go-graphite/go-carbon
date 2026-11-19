@@ -144,6 +144,50 @@ func TestPendingRowsRoundTrip(t *testing.T) {
 	t.Logf("coverage: headers %d multi %d explicit-seq %d escapes %d", headers, multi, seq, escapes)
 }
 
+// TestPendingRowsRoutedCopy: the router encodes each owner's share of a
+// packet and the owner copies it (appendRows); the owner's rows, headers and
+// side arrays must equal encoding the owner's batches directly (append).
+func TestPendingRowsRoutedCopy(t *testing.T) {
+	const owners = 4
+	for seed := uint64(1); seed <= 8; seed++ {
+		s := newPendingRowsScript(seed)
+		var direct, copied [owners]pendingRows
+		var routed [owners]pendingRows // reused per packet, as the lease is
+		for _, packet := range s.packets {
+			if !pendingBatchesFit(packet) {
+				t.Fatalf("seed %d: representable packet rejected", seed)
+			}
+			var byOwner [owners][]coreBatch
+			for i := range routed {
+				routed[i].reset()
+			}
+			for _, b := range packet {
+				o := int(b.ID % owners)
+				byOwner[o] = append(byOwner[o], b)
+				routed[o].startApplication(b.Order, b.Clock, b.Points[0].Time, len(b.Points))
+				for _, r := range b.Points {
+					routed[o].addRow(b.ID, r.Time, r.Bits, r.Seq)
+				}
+			}
+			for o := range routed {
+				routed[o].closePacket()
+				if len(byOwner[o]) > 0 {
+					direct[o].append(byOwner[o])
+					copied[o].appendRows(&routed[o])
+				}
+			}
+		}
+		for o := range direct {
+			d, c := &direct[o], &copied[o]
+			if !reflect.DeepEqual(d.rows, c.rows) || !reflect.DeepEqual(d.packets, c.packets) || !reflect.DeepEqual(d.deltas, c.deltas) ||
+				!reflect.DeepEqual(d.seqs, c.seqs) || !reflect.DeepEqual(d.escapes, c.escapes) || d.lastOrder != c.lastOrder || d.open != c.open {
+				t.Fatalf("seed %d owner %d: copied rows differ: %d/%d rows, %d/%d headers, %d/%d deltas, %d/%d seqs, %d/%d escapes",
+					seed, o, len(c.rows), len(d.rows), len(c.packets), len(d.packets), len(c.deltas), len(d.deltas), len(c.seqs), len(d.seqs), len(c.escapes), len(d.escapes))
+			}
+		}
+	}
+}
+
 func TestPendingRowsFitRejects(t *testing.T) {
 	pol, other := &ApplicationPolicy{}, &ApplicationPolicy{}
 	lookup := func(uint64) *ApplicationPolicy { return pol }

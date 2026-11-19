@@ -303,6 +303,21 @@ func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationP
 	h.n += len(batches)
 }
 
+// addRows is add for applications the router already encoded as rows.
+func (h *pendingHead) addRows(src *pendingRows) {
+	if len(src.rows) == 0 {
+		return
+	}
+	if h.coldOpen {
+		h.closeOpen()
+	}
+	h.rows.appendRows(src)
+	h.n += len(src.rows)
+	if h.openID == 0 {
+		h.openID = pendingSegmentIDs.Add(1)
+	}
+}
+
 func (h *pendingHead) openSegment(start int) (pendingSegment, bool) {
 	if h.coldOpen {
 		if len(h.cold) == 0 {

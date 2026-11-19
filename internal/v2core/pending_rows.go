@@ -3,6 +3,7 @@ package v2core
 import (
 	"math"
 	"sort"
+	"unsafe"
 )
 
 // pendingRows is the pointer-free resident form of pending original
@@ -77,6 +78,49 @@ func pendingRowsFit(batches []coreBatch, lookup func(uint64) *ApplicationPolicy)
 		}
 	}
 	return true
+}
+
+// pendingBatchesFit reports whether rollup batches, whose IDs core has
+// interned, fit pendingRows: every application has 1..pendingPacketRows points.
+func pendingBatchesFit(batches []coreBatch) bool {
+	for i := range batches {
+		if n := len(batches[i].Points); n == 0 || n > pendingPacketRows {
+			return false
+		}
+	}
+	return len(batches) > 0
+}
+
+// appendRows copies closed rows encoded by append, startApplication and
+// addRow, rebasing their row and side-array offsets. The result equals
+// append over the same applications.
+func (p *pendingRows) appendRows(src *pendingRows) {
+	p.closePacket()
+	row, delta, seq := uint32(len(p.rows)), uint32(len(p.deltas)), uint32(len(p.seqs))
+	for _, pk := range src.packets {
+		pk.FirstRow += row
+		if pk.Flags&pendingMulti != 0 {
+			pk.Deltas += delta
+		}
+		if pk.Flags&pendingSeq != 0 {
+			pk.Seqs += seq
+		}
+		p.packets = append(p.packets, pk)
+	}
+	for _, e := range src.escapes {
+		e.Row += row
+		p.escapes = append(p.escapes, e)
+	}
+	p.rows = append(p.rows, src.rows...)
+	p.deltas = append(p.deltas, src.deltas...)
+	p.seqs = append(p.seqs, src.seqs...)
+	p.lastOrder = src.lastOrder
+}
+
+// size is the packet's queue charge: its rows, headers and side arrays.
+func (p *pendingRows) size() uint64 {
+	return uint64(len(p.rows))*uint64(unsafe.Sizeof(pendingRow{})) + uint64(len(p.packets))*uint64(unsafe.Sizeof(pendingPacket{})) +
+		uint64(len(p.deltas))*4 + uint64(len(p.seqs))*8 + uint64(len(p.escapes))*uint64(unsafe.Sizeof(pendingEscape{}))
 }
 
 // append encodes one submitted packet's applications. It starts a new packet
