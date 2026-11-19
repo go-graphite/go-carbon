@@ -216,6 +216,10 @@ func (app *App) startV2() error {
 	// never call discovery, take a refresh mutex, or wait for this work.
 	// Without quotas (whose projection needs every name at once) a backlog is
 	// published in bounded chunks, back to back, so no publication is long.
+	// The base level of the discovery index lives in files (page cache).
+	if err := v.catalog.SetDir(filepath.Join(c.V2.Path, "index")); err != nil {
+		return err
+	}
 	chunk := v2CatalogChunk
 	if v.quotas != nil {
 		chunk = 0
@@ -476,6 +480,7 @@ func (v *v2Runtime) close() {
 	}
 	close(v.stop)
 	v.wg.Wait()
+	v.catalog.Close()
 	v.reader.Close()
 	if v.store != nil {
 		if err := v.store.Close(); err != nil {

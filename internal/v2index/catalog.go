@@ -8,6 +8,7 @@ import (
 	"errors"
 	"iter"
 	"math/bits"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -71,35 +72,55 @@ func (s *Snapshot) EqualNames(names []string) bool {
 // blockNames is the number of names per front-coded block.
 const blockNames = 32
 
-// level is an immutable sorted run of unique names, front-coded like LevelDB
+// run is an immutable sorted run of unique names, front-coded like LevelDB
 // data blocks or VictoriaMetrics mergeset items: each entry stores the length
 // of the prefix it shares with the previous name, then the rest. The first
 // name of every block is stored whole, so a seek binary-searches block starts
-// and decodes at most one block of blockNames names.
-type level struct {
+// and decodes at most one block of blockNames names. The base run is a
+// read-only file mapping (page cache); only its block offsets are on the heap.
+type run struct {
 	data   []byte // entries: uvarint shared, uvarint suffix length, suffix
 	blocks []int  // offset of each block's first (whole) name in data
 	n      int
+	path   string // base file; empty on the heap
 }
 
-// levelWriter appends names in strictly increasing order.
+// level is a run minus its removed names: sorted positions in the run. A
+// removal never rewrites a run; the next merge of that run drops the names.
+type level struct {
+	*run
+	dead []uint32
+}
+
+func (l *level) live() int { return l.n - len(l.dead) }
+
+// levelWriter appends names in strictly increasing order. With out set it
+// streams the entries to a file in chunks and keeps only block offsets.
 type levelWriter struct {
-	l    level
+	r    run
 	prev []byte
+	out  *os.File
+	size int
+	err  error
 }
 
 func (w *levelWriter) add(name []byte) {
 	shared := 0
-	if w.l.n%blockNames == 0 {
-		w.l.blocks = append(w.l.blocks, len(w.l.data))
+	if w.r.n%blockNames == 0 {
+		w.r.blocks = append(w.r.blocks, w.size)
+		if w.out != nil && len(w.r.data) >= 64<<10 {
+			w.flush()
+		}
 	} else {
 		shared = sharedPrefix(w.prev, name)
 	}
-	w.l.data = binary.AppendUvarint(w.l.data, uint64(shared))
-	w.l.data = binary.AppendUvarint(w.l.data, uint64(len(name)-shared))
-	w.l.data = append(w.l.data, name[shared:]...)
+	before := len(w.r.data)
+	w.r.data = binary.AppendUvarint(w.r.data, uint64(shared))
+	w.r.data = binary.AppendUvarint(w.r.data, uint64(len(name)-shared))
+	w.r.data = append(w.r.data, name[shared:]...)
+	w.size += len(w.r.data) - before
 	w.prev = append(w.prev[:0], name...)
-	w.l.n++
+	w.r.n++
 }
 
 // sharedPrefix compares eight bytes at a time: names share long prefixes.
@@ -117,57 +138,68 @@ func sharedPrefix(a, b []byte) int {
 	return i
 }
 
-func (w *levelWriter) finish() *level {
-	w.l.data = slices.Clip(w.l.data)
-	w.l.blocks = slices.Clip(w.l.blocks)
-	return &w.l
+func (w *levelWriter) finish() *run {
+	w.r.data = slices.Clip(w.r.data)
+	w.r.blocks = slices.Clip(w.r.blocks)
+	return &w.r
 }
 
-func newLevel(names []string) *level {
+func newRun(names []string) *run {
 	var w levelWriter
-	w.l.data = make([]byte, 0, len(names)*16)
+	w.r.data = make([]byte, 0, len(names)*16)
 	for _, name := range names {
 		w.add([]byte(name))
 	}
 	return w.finish()
 }
 
-// levelIter decodes one level forward; key is valid after a true step.
+func newLevel(names []string) *level { return &level{run: newRun(names)} }
+
+// levelIter decodes one level forward, skipping removed names; key is valid
+// after a true step.
 type levelIter struct {
 	l     *level
 	off   int // offset of entry i
 	i     int // entries consumed
+	d     int // first dead position >= i
 	key   []byte
 	valid bool
 }
 
 func (it *levelIter) next() bool {
-	if it.i >= it.l.n {
-		it.valid = false
-		return false
+	for it.i < it.l.n {
+		shared, k := binary.Uvarint(it.l.data[it.off:])
+		it.off += k
+		size, k := binary.Uvarint(it.l.data[it.off:])
+		it.off += k
+		it.key = append(it.key[:shared], it.l.data[it.off:it.off+int(size)]...)
+		it.off += int(size)
+		p := uint32(it.i)
+		it.i++
+		for it.d < len(it.l.dead) && it.l.dead[it.d] < p {
+			it.d++
+		}
+		if it.d < len(it.l.dead) && it.l.dead[it.d] == p {
+			continue
+		}
+		it.valid = true
+		return true
 	}
-	shared, k := binary.Uvarint(it.l.data[it.off:])
-	it.off += k
-	size, k := binary.Uvarint(it.l.data[it.off:])
-	it.off += k
-	it.key = append(it.key[:shared], it.l.data[it.off:it.off+int(size)]...)
-	it.off += int(size)
-	it.i++
-	it.valid = true
-	return true
+	it.valid = false
+	return false
 }
 
 // first returns block b's first name without copying it.
-func (l *level) first(b int) []byte {
-	off := l.blocks[b] + 1 // shared length is always 0
-	size, k := binary.Uvarint(l.data[off:])
-	return l.data[off+k : off+k+int(size)]
+func (r *run) first(b int) []byte {
+	off := r.blocks[b] + 1 // shared length is always 0
+	size, k := binary.Uvarint(r.data[off:])
+	return r.data[off+k : off+k+int(size)]
 }
 
 // at appends name i to dst[:0]. Blocks hold a fixed number of names, so a
 // position decodes at most one block (no scan), like a mergeset item lookup.
-func (l *level) at(i int, dst []byte) []byte {
-	it := levelIter{l: l, off: l.blocks[i/blockNames], i: i / blockNames * blockNames, key: dst[:0]}
+func (r *run) at(i int, dst []byte) []byte {
+	it := levelIter{l: &level{run: r}, off: r.blocks[i/blockNames], i: i / blockNames * blockNames, key: dst[:0]}
 	for it.i <= i {
 		it.next()
 	}
@@ -183,6 +215,9 @@ func (it *levelIter) skipTo(key string) bool {
 	// usually near (sorted batches, directory skips), so gallop first.
 	start := (it.i + blockNames - 1) / blockNames
 	lo, hi := start, start
+	if start == 0 {
+		hi = len(it.l.blocks) // a fresh seek binary-searches every block
+	}
 	for step := 1; hi < len(it.l.blocks) && string(it.l.first(hi)) <= key; step <<= 1 {
 		lo, hi = hi+1, hi+step
 	}
@@ -190,6 +225,8 @@ func (it *levelIter) skipTo(key string) bool {
 	b := lo + sort.Search(hi-lo, func(j int) bool { return string(it.l.first(lo+j)) > key }) - 1
 	if b >= start && b*blockNames > it.i {
 		it.off, it.i = it.l.blocks[b], b*blockNames
+		p := uint32(it.i)
+		it.d = sort.Search(len(it.l.dead), func(j int) bool { return it.l.dead[j] >= p })
 	}
 	for it.next() {
 		if string(it.key) >= key {
@@ -197,6 +234,20 @@ func (it *levelIter) skipTo(key string) bool {
 		}
 	}
 	return false
+}
+
+// find reports, for each sorted key the run holds (removed or not), the key
+// index and the name position. Each search starts at the previous match.
+func (r *run) find(keys []string, found func(i, pos int)) {
+	it := levelIter{l: &level{run: r}}
+	for i, key := range keys {
+		if !it.skipTo(key) {
+			return
+		}
+		if string(it.key) == key {
+			found(i, it.i-1)
+		}
+	}
 }
 
 // cursor walks the disjoint levels in global sorted order.
@@ -238,13 +289,42 @@ func (c *cursor) skipTo(key string) {
 // Catalog is a single-control-owner projection; Snapshot is safe concurrently.
 // Publish/Apply belong at the catalog publication boundary, never per point.
 // Recovery may publish its first view after discovery is attached.
-type Catalog struct{ current atomic.Pointer[Snapshot] }
+//
+// The largest (base) level is rewritten only by one background merge, never
+// inside Publish's successor Apply calls, so publication latency does not
+// grow with the host's name count. Apply installs a finished merge.
+type Catalog struct {
+	current atomic.Pointer[Snapshot]
+	dir     string // base files; empty keeps the base on the heap
+	seq     int
+	job     *baseMerge
+	err     atomic.Pointer[error]
+}
+
+// baseMerge rewrites inputs (the base, then level 1 if any) into one run.
+// Inputs are captured with their removed names at start.
+type baseMerge struct {
+	inputs []*level
+	done   chan struct{}
+	cancel context.CancelFunc
+	out    *run
+	err    error // the file write failed; out is on the heap
+}
 
 func (c *Catalog) Snapshot() *Snapshot {
 	if s := c.current.Load(); s != nil {
 		return s
 	}
 	return &Snapshot{}
+}
+
+// Err returns the last base file failure. The index stays correct: the
+// merged base is then kept on the heap until the next file write succeeds.
+func (c *Catalog) Err() error {
+	if p := c.err.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 func namesCopy(names []string) ([]string, error) {
@@ -272,9 +352,21 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 	}
 	snapshot := &Snapshot{revision: revision, n: len(next)}
 	if len(next) > 0 {
-		snapshot.levels = []*level{newLevel(next)}
+		r, err := c.writeBase(context.Background(), func(w *levelWriter) error {
+			for _, name := range next {
+				w.add([]byte(name))
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		snapshot.levels = []*level{{run: r}}
 	}
 	c.current.Store(snapshot)
+	for _, l := range old.levels {
+		retire(l.run)
+	}
 	return nil
 }
 
@@ -291,28 +383,15 @@ func (c *Catalog) ApplyBeforePublish(revision uint64, add, remove []string, befo
 	return c.ApplyBeforePublishContext(context.Background(), revision, add, remove, before)
 }
 
-// contains reports, for each sorted key, whether the level holds it.
-// Keys are searched in order, so each search starts at the previous match.
-func (l *level) contains(keys []string, found func(int)) {
-	it := levelIter{l: l}
-	for i, key := range keys {
-		if !it.skipTo(key) {
-			return
-		}
-		if string(it.key) == key {
-			found(i)
-		}
-	}
-}
-
 // ApplyBeforePublishContext also cancels a large merge during daemon shutdown.
-// Its cost is O(changed names * levels * log N) plus the occasional level
-// merge; unchanged levels are shared with the preceding view, never copied.
+// Its cost is O(changed names * levels * log N) plus merges of the small
+// heap levels; the base is merged in the background. Removed names become
+// positions in their level, so no run is rewritten for a removal.
 func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64, add, remove []string, before func(*Snapshot) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	old := c.Snapshot()
+	old := c.install(c.Snapshot(), false)
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
 	}
@@ -324,39 +403,34 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	slices.Sort(deletions)
 	deletions = slices.Compact(deletions)
 	// Removal wins within a batch; names already present are not new.
-	drop := make([]bool, len(additions))
+	removed := make([]bool, len(additions))
 	k := 0
 	for i, name := range additions {
 		k += sort.SearchStrings(deletions[k:], name)
-		drop[i] = k < len(deletions) && deletions[k] == name
+		removed[i] = k < len(deletions) && deletions[k] == name
 	}
+	drop := slices.Clone(removed)
 	levels := make([]*level, 0, len(old.levels)+1)
 	n, changed := old.n, false
 	for _, l := range old.levels {
-		l.contains(additions, func(i int) { drop[i] = true })
-		removed := 0
-		l.contains(deletions, func(int) { removed++ })
-		if removed > 0 {
-			var w levelWriter
-			it, k := levelIter{l: l}, 0
-			for it.next() {
-				if it.i&1023 == 0 {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-				}
-				for k < len(deletions) && deletions[k] < string(it.key) {
-					k++
-				}
-				if k == len(deletions) || deletions[k] != string(it.key) {
-					w.add(it.key)
-				}
+		// A name is in at most one run, live or removed.
+		var revive, kill []uint32
+		l.find(additions, func(i, pos int) {
+			drop[i] = true
+			if !removed[i] && isDead(l.dead, pos) {
+				revive = append(revive, uint32(pos))
 			}
-			l, n, changed = w.finish(), n-removed, true
+		})
+		l.find(deletions, func(_, pos int) {
+			if !isDead(l.dead, pos) {
+				kill = append(kill, uint32(pos))
+			}
+		})
+		if len(revive)+len(kill) > 0 {
+			l = &level{run: l.run, dead: mergeDead(l.dead, kill, revive)}
+			n, changed = n+len(revive)-len(kill), true
 		}
-		if l.n > 0 {
-			levels = append(levels, l)
-		}
+		levels = append(levels, l)
 	}
 	fresh := additions[:0]
 	for i, name := range additions {
@@ -370,7 +444,11 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	if len(fresh) > 0 {
 		levels, n = append(levels, newLevel(fresh)), n+len(fresh)
 	}
-	if levels, err = compact(ctx, levels); err != nil {
+	floor := 1
+	if c.job != nil {
+		floor = len(c.job.inputs)
+	}
+	if levels, err = compact(ctx, levels, floor); err != nil {
 		return err
 	}
 	snapshot := &Snapshot{revision: revision, levels: levels, n: n}
@@ -380,39 +458,68 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		}
 	}
 	c.current.Store(snapshot)
+	c.startBaseMerge(levels)
 	return nil
 }
 
-// compact merges a level into its predecessor until every level is more than
-// levelFanout times smaller than the one before it. The input slice is private.
-func compact(ctx context.Context, levels []*level) ([]*level, error) {
-	for i := len(levels) - 1; i > 0; {
+func isDead(dead []uint32, pos int) bool {
+	_, ok := slices.BinarySearch(dead, uint32(pos))
+	return ok
+}
+
+// mergeDead returns dead plus kill minus revive (all sorted) as a new slice:
+// published levels are immutable.
+func mergeDead(dead, kill, revive []uint32) []uint32 {
+	out := make([]uint32, 0, len(dead)+len(kill))
+	for _, p := range dead {
+		if !slices.Contains(revive, p) {
+			out = append(out, p)
+		}
+	}
+	out = append(out, kill...)
+	slices.Sort(out)
+	return out
+}
+
+// compact merges a level into its predecessor until every level from floor
+// on is more than levelFanout times smaller than the one before it. Levels
+// below floor (the base, and level 1 while the background merge reads it)
+// are never merged here. The input slice is private.
+func compact(ctx context.Context, levels []*level, floor int) ([]*level, error) {
+	for i := len(levels) - 1; i > floor; {
+		if levels[i].live() == 0 {
+			levels = slices.Delete(levels, i, i+1)
+			i = len(levels) - 1
+			continue
+		}
 		if levels[i].n*levelFanout < levels[i-1].n {
 			i--
 			continue
 		}
-		merged, err := merge(ctx, levels[i-1], levels[i])
-		if err != nil {
+		var w levelWriter
+		w.r.data = make([]byte, 0, len(levels[i-1].data)+len(levels[i].data))
+		if err := mergeInto(ctx, &w, levels[i-1], levels[i]); err != nil {
 			return nil, err
 		}
-		levels[i-1] = merged
+		levels[i-1] = &level{run: w.finish()}
 		levels = slices.Delete(levels, i, i+1)
 		i = len(levels) - 1
 	}
 	return levels, nil
 }
 
-func merge(ctx context.Context, a, b *level) (*level, error) {
-	var w levelWriter
-	w.l.data = make([]byte, 0, len(a.data)+len(b.data))
-	w.l.blocks = make([]int, 0, (a.n+b.n)/blockNames+1)
+// mergeInto writes the live names of a and b (b may be nil) in order.
+func mergeInto(ctx context.Context, w *levelWriter, a, b *level) error {
+	if b == nil {
+		b = &level{run: &run{}}
+	}
 	x, y := levelIter{l: a}, levelIter{l: b}
 	x.next()
 	y.next()
 	for x.valid || y.valid {
 		if (x.i+y.i)&1023 == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		if !y.valid || (x.valid && string(x.key) < string(y.key)) {
@@ -423,5 +530,110 @@ func merge(ctx context.Context, a, b *level) (*level, error) {
 			y.next()
 		}
 	}
-	return w.finish(), nil
+	return nil
+}
+
+// startBaseMerge rewrites the base with level 1 once level 1 reaches
+// 1/levelFanout of it, once that many of its names were removed, or when a
+// heap base (the first names of an Apply-built view) should be a file.
+func (c *Catalog) startBaseMerge(levels []*level) {
+	if c.job != nil || len(levels) == 0 {
+		return
+	}
+	base, k := levels[0], min(len(levels), 2)
+	spill := c.dir != "" && base.path == "" // a heap base moves to a file
+	grown := k == 2 && levels[1].n*levelFanout >= base.n
+	if !spill && !grown && len(base.dead)*levelFanout < base.n {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	j := &baseMerge{inputs: slices.Clone(levels[:k]), done: make(chan struct{}), cancel: cancel}
+	c.job = j
+	path := c.nextPath()
+	go func() {
+		defer close(j.done)
+		var b *level
+		if k == 2 {
+			b = j.inputs[1]
+		}
+		j.out, j.err = writeRun(ctx, path, func(w *levelWriter) error { return mergeInto(ctx, w, j.inputs[0], b) })
+	}()
+}
+
+// install publishes a finished background merge with the same membership.
+// Names removed or revived in the inputs while the merge ran are carried
+// over: removals as positions in the new base, revivals as a fresh level.
+func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
+	j := c.job
+	if j == nil {
+		return old
+	}
+	if wait {
+		<-j.done
+	} else {
+		select {
+		case <-j.done:
+		default:
+			return old
+		}
+	}
+	c.job = nil
+	if j.err != nil {
+		c.err.Store(&j.err)
+	}
+	stale := j.out == nil || len(old.levels) < len(j.inputs) // canceled or replaced
+	for i := 0; !stale && i < len(j.inputs); i++ {
+		stale = old.levels[i].run != j.inputs[i].run // a Publish replaced the inputs
+	}
+	if stale {
+		retire(j.out)
+		c.startBaseMerge(old.levels)
+		return old
+	}
+	k := len(j.inputs)
+	base := &level{run: j.out}
+	var revived []string
+	var buf []byte
+	for i, in := range j.inputs {
+		was, now := in.dead, old.levels[i].dead
+		for _, p := range now {
+			if !isDead(was, int(p)) {
+				buf = in.at(int(p), buf)
+				base.run.find([]string{string(buf)}, func(_, pos int) { base.dead = append(base.dead, uint32(pos)) })
+			}
+		}
+		for _, p := range was {
+			if !isDead(now, int(p)) {
+				buf = in.at(int(p), buf)
+				revived = append(revived, string(buf))
+			}
+		}
+	}
+	slices.Sort(base.dead)
+	levels := []*level{base}
+	if len(revived) > 0 {
+		slices.Sort(revived)
+		levels = append(levels, newLevel(revived))
+	}
+	levels = append(levels, old.levels[k:]...)
+	levels, _ = compact(context.Background(), levels, 1) // cannot be canceled
+	s := &Snapshot{revision: old.revision, levels: levels, n: old.n}
+	c.current.Store(s)
+	for _, in := range j.inputs {
+		retire(in.run)
+	}
+	c.startBaseMerge(levels) // names that arrived meanwhile may be due
+	return s
+}
+
+// Close stops a running background merge. The catalog stays readable.
+func (c *Catalog) Close() {
+	if j := c.job; j != nil {
+		j.cancel()
+		<-j.done
+		c.job = nil
+		if j.out != nil {
+			retire(j.out)
+		}
+	}
 }
