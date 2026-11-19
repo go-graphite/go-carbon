@@ -303,6 +303,8 @@ type Catalog struct {
 	writer   atomic.Bool // a Publish, Apply or Close is running
 	dir      string      // base files; empty keeps the base on the heap
 	seq      int
+	log      *os.File // name log of base-seq; nil when not persisted
+	logged   int      // bytes of changes in log
 	job      *baseMerge
 	err      atomic.Pointer[error] // the failure of the heap base's file write
 	failures atomic.Uint64
@@ -326,6 +328,7 @@ type baseMerge struct {
 	path   string
 	out    *run
 	err    error // the file write failed; out is on the heap
+	seq    int   // the base file's sequence number
 }
 
 func (c *Catalog) Snapshot() *Snapshot {
@@ -393,6 +396,7 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 	for _, l := range old.levels {
 		retire(l.run)
 	}
+	c.dropLogs(c.seq)
 	return nil
 }
 
@@ -422,9 +426,27 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
 	}
+	snapshot, added, removed, err := c.apply(ctx, old, revision, add, remove)
+	if err != nil || snapshot == nil {
+		return err
+	}
+	if before != nil {
+		if err := before(snapshot); err != nil {
+			return err
+		}
+	}
+	c.appendLog(added, removed)
+	c.current.Store(snapshot)
+	c.startBaseMerge(snapshot.levels)
+	return nil
+}
+
+// apply returns old plus add minus remove (nil without a membership change)
+// and the names it added and removed, sorted.
+func (c *Catalog) apply(ctx context.Context, old *Snapshot, revision uint64, add, remove []string) (*Snapshot, []string, []string, error) {
 	additions, err := sortedNames(add)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	deletions := slices.Clone(remove)
 	slices.Sort(deletions)
@@ -439,6 +461,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	drop := slices.Clone(removed)
 	levels := make([]*level, 0, len(old.levels)+1)
 	n, changed := old.n, false
+	var added, gone []string
 	for _, l := range old.levels {
 		// A name is in at most one run, live or removed.
 		var revive, kill []uint32
@@ -446,11 +469,13 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 			drop[i] = true
 			if !removed[i] && isDead(l.dead, pos) {
 				revive = append(revive, uint32(pos))
+				added = append(added, additions[i])
 			}
 		})
-		l.find(deletions, func(_, pos int) {
+		l.find(deletions, func(i, pos int) {
 			if !isDead(l.dead, pos) {
 				kill = append(kill, uint32(pos))
+				gone = append(gone, deletions[i])
 			}
 		})
 		if len(revive)+len(kill) > 0 {
@@ -466,7 +491,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		}
 	}
 	if len(fresh) == 0 && !changed {
-		return nil
+		return nil, nil, nil, nil
 	}
 	if len(fresh) > 0 {
 		levels, n = append(levels, newLevel(fresh)), n+len(fresh)
@@ -476,17 +501,12 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		floor = len(c.job.inputs)
 	}
 	if levels, err = compact(ctx, levels, floor); err != nil {
-		return err
+		return nil, nil, nil, err
 	}
-	snapshot := &Snapshot{revision: revision, levels: levels, n: n}
-	if before != nil {
-		if err := before(snapshot); err != nil {
-			return err
-		}
-	}
-	c.current.Store(snapshot)
-	c.startBaseMerge(levels)
-	return nil
+	added = append(added, fresh...)
+	slices.Sort(added)
+	slices.Sort(gone)
+	return &Snapshot{revision: revision, levels: levels, n: n}, added, gone, nil
 }
 
 func isDead(dead []uint32, pos int) bool {
@@ -564,8 +584,9 @@ func mergeInto(ctx context.Context, w *levelWriter, a, b *level) error {
 }
 
 // startBaseMerge rewrites the base with level 1 once level 1 reaches
-// 1/levelFanout of it, once that many of its names were removed, or when a
-// heap base (the first names of an Apply-built view) should be a file.
+// 1/levelFanout of it, once that many of its names were removed, once its
+// log is as large as it (names flapping), or when a heap base (the first
+// names of an Apply-built view) should be a file.
 func (c *Catalog) startBaseMerge(levels []*level) {
 	if c.job != nil || len(levels) == 0 {
 		return
@@ -573,12 +594,13 @@ func (c *Catalog) startBaseMerge(levels []*level) {
 	base, k := levels[0], min(len(levels), 2)
 	spill := c.dir != "" && base.path == "" && time.Now().After(c.retryAt) // a heap base moves to a file
 	grown := k == 2 && levels[1].n*levelFanout >= base.n
-	if !spill && !grown && len(base.dead)*levelFanout < base.n {
+	if !spill && !grown && len(base.dead)*levelFanout < base.n && (c.logged == 0 || c.logged < len(base.data)) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	j := &baseMerge{inputs: slices.Clone(levels[:k]), done: make(chan struct{}), cancel: cancel, path: c.nextPath()}
+	j := &baseMerge{inputs: slices.Clone(levels[:k]), done: make(chan struct{}), cancel: cancel, path: c.nextPath(levels[k:])}
 	c.job = j
+	j.seq = c.seq
 	go func() {
 		defer close(j.done)
 		var b *level
@@ -649,6 +671,9 @@ func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
 	for _, in := range j.inputs {
 		retire(in.run)
 	}
+	if j.out.path != "" {
+		c.dropLogs(j.seq)
+	}
 	c.startBaseMerge(levels) // names that arrived meanwhile may be due
 	return s
 }
@@ -663,5 +688,9 @@ func (c *Catalog) Close() {
 		if j.out != nil {
 			retire(j.out)
 		}
+	}
+	if c.log != nil {
+		c.log.Close()
+		c.log = nil
 	}
 }
