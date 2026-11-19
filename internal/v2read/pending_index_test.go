@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -84,7 +85,7 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if h.NameHash() != v2core.NameHash(n) {
+		if h.NameHash() != namefp.Hash(n) {
 			t.Fatalf("cached name hash differs for %s", n)
 		}
 		registered[i] = h

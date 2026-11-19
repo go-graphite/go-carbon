@@ -35,11 +35,6 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		r.renumber()
 	}
 	positions := map[uint64]int{}
-	names := r.pendingNames
-	if names == nil {
-		names = map[partsformat.ID]uint64{}
-		r.pendingNames = names
-	}
 	// At most one stage per input application. Retain capacity between seals.
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
@@ -63,13 +58,14 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 						return coreSealPlan{}, err
 					}
 				}
-				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
+				fp := m.fingerprint()
+				if _, ok := r.names.Get(fp); ok {
 					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
 				}
-				if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
+				if _, ok := r.pendingNames.Get(fp); ok {
 					return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
 				}
-				names[m.policy.Name] = b.ID
+				r.pendingNames.Put(fp, uint32(len(stages)))
 			}
 			slot, meta := uint32(0), freshMetadata
 			if !fresh {
@@ -170,7 +166,6 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			m := s.metric
 			if s.fresh {
 				r.install(m.id, m, compactMetadata(s.next))
-				r.names[m.policy.Name] = m.id
 			}
 		}
 	}
