@@ -36,7 +36,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 			r := newCoreRollups()
 			r.parallelism = lanes
 			expired := map[v2part.ID]bool{}
-			r.expire = func(p RollupPolicy, _ RollupMetadata, _ time.Time) bool { return expired[p.Name] }
+			r.expire = func(_ uint16, p RollupPolicy, _ RollupMetadata, _ time.Time) bool { return expired[p.Name] }
 			names := 500 + rng.Intn(400)
 			type metricSpec struct {
 				name   v2part.ID

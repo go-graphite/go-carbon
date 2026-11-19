@@ -182,7 +182,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				r.parallelism = workers
 				r.now = func() time.Time { return time.Unix(clock, 0) }
 				// Expire names idle for more than 5 seals: idle stages join plans.
-				r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
+				r.expire = func(_ uint16, _ RollupPolicy, m RollupMetadata, now time.Time) bool {
 					return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > 50
 				}
 				return r

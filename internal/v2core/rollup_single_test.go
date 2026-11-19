@@ -18,7 +18,7 @@ type singleArchiveImage map[string]struct {
 
 // runMixedIdleStore seals single- and multi-archive names, reopens, then runs
 // one idle closure seal. A non-nil expire forces the full-metric idle scan.
-func runMixedIdleStore(t *testing.T, expire func(RollupPolicy, RollupMetadata, time.Time) bool) (singleArchiveImage, []int) {
+func runMixedIdleStore(t *testing.T, expire func(uint16, RollupPolicy, RollupMetadata, time.Time) bool) (singleArchiveImage, []int) {
 	t.Helper()
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	cfg := coreTestConfig()
@@ -91,7 +91,7 @@ func runMixedIdleStore(t *testing.T, expire func(RollupPolicy, RollupMetadata, t
 // store yields the same records and metadata as the full-metric scan.
 func TestSingleArchiveIdleIndexDifferential(t *testing.T) {
 	indexed, closable := runMixedIdleStore(t, nil)
-	full, _ := runMixedIdleStore(t, func(RollupPolicy, RollupMetadata, time.Time) bool { return false })
+	full, _ := runMixedIdleStore(t, func(uint16, RollupPolicy, RollupMetadata, time.Time) bool { return false })
 	if len(indexed) != 5 || !reflect.DeepEqual(indexed, full) {
 		t.Fatalf("indexed %+v\nfull %+v", indexed, full)
 	}
@@ -118,7 +118,7 @@ func TestSingleArchiveNeedsNoMetadataSeal(t *testing.T) {
 	if r.needsMetadataSeal(&coreBatch{Registered: single}) || !r.needsMetadataSeal(&coreBatch{Registered: multi}) || !r.needsMetadataSeal(&coreBatch{Policy: []byte("x")}) {
 		t.Fatal("metadata seal rule")
 	}
-	r.expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return false }
+	r.expire = func(uint16, RollupPolicy, RollupMetadata, time.Time) bool { return false }
 	if !r.needsMetadataSeal(&coreBatch{Registered: single}) {
 		t.Fatal("expiry needs every new metric anchored")
 	}

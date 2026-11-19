@@ -127,7 +127,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 				continue
 			}
 			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expires(m, m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
 				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
 				r.stageKey(&stages[len(stages)-1])
 			}
@@ -138,7 +138,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	for i := range stages {
 		s := &stages[i]
 		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
+		if r.expire != nil && len(s.batches) == 0 && r.expires(m, s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = max(2, s.next.Version)

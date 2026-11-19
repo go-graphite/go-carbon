@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/go-graphite/go-carbon/internal/v2read"
 	"github.com/go-graphite/go-carbon/internal/v2recv"
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
@@ -125,13 +127,16 @@ func (app *App) startV2() error {
 		hooks.Now = app.v2Now
 	}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
-		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
+		// v2 configuration is restart-only, so each name's rule resolves once.
+		rules := c.Whisper.ExpirationRules
+		hooks.ExpiryRule = func(p v2core.RollupPolicy) uint16 { return v2ExpiryRule(rules, string(p.Name)) }
+		hooks.Expire = func(rule uint16, p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
 			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
 				return false
 			}
 			ttl := c.Whisper.StoreExpiration.Value()
-			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
-				ttl = c.Whisper.ExpirationRules[i].TTL()
+			if i := v2ExpiryRuleAt(rules, rule, string(p.Name), now); i >= 0 {
+				ttl = rules[i].TTL()
 			}
 			if ttl <= 0 || now.Sub(time.Unix(0, m.LastUpdate)) < ttl {
 				return false
@@ -487,3 +492,30 @@ func (v *v2Runtime) close() {
 // v2PublishedCatalog exposes only the latest immutable publication to HTTP.
 // Its single background owner performs refresh and quota fencing.
 type v2PublishedCatalog struct{ v2index.Catalog }
+
+// v2ExpiryRule is 1 + the first rule whose patterns match name at any time,
+// 0 when none does, or MaxUint16 when the index cannot hold the rule.
+func v2ExpiryRule(rules persister.WhisperExpirationRules, name string) uint16 {
+	for i, rule := range rules {
+		if i+1 >= math.MaxUint16 {
+			return math.MaxUint16
+		}
+		if rule.Pattern.MatchString(name) && (rule.Exclude == nil || !rule.Exclude.MatchString(name)) {
+			return uint16(i + 1)
+		}
+	}
+	return 0
+}
+
+// v2ExpiryRuleAt equals rules.MatchIndex(name, now) for a name whose
+// v2ExpiryRule is rule. No earlier rule matches the name, so an active rule
+// answers without matching; only a lapsed (Until) rule matches the name again.
+func v2ExpiryRuleAt(rules persister.WhisperExpirationRules, rule uint16, name string, now time.Time) int {
+	if rule == 0 {
+		return -1
+	}
+	if i := int(rule) - 1; rule != math.MaxUint16 && (rules[i].Until.IsZero() || now.Before(rules[i].Until)) {
+		return i
+	}
+	return rules.MatchIndex(name, now)
+}

@@ -216,7 +216,7 @@ func (w *sealSweepWorld) planner() *coreRollups {
 	r := newCoreRollups()
 	r.parallelism = w.lanes
 	r.now = func() time.Time { return time.Unix(w.clock, 0) }
-	r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
+	r.expire = func(_ uint16, _ RollupPolicy, m RollupMetadata, now time.Time) bool {
 		return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > sealSweepExpiry
 	}
 	return r
@@ -706,7 +706,7 @@ func sealSweepSkipIdleClosure(r *coreRollups, in coreSealInput) (coreSealPlan, e
 			continue
 		}
 		meta := r.metaOf(id)
-		if meta.Expired || meta.Version != 3 || meta.Frontier.Order == 0 || r.expire(m.rollupPolicy(), m.metadata(meta), now) {
+		if meta.Expired || meta.Version != 3 || meta.Frontier.Order == 0 || r.expires(m, m.metadata(meta), now) {
 			continue
 		}
 		coarse := archives[len(archives)-1]

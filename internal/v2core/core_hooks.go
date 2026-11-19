@@ -88,7 +88,11 @@ type coreHooks struct {
 
 	// Expire runs on the serial seal owner, after admitted batches are applied.
 	// It must be immutable and must remain false until journal replay finishes.
-	Expire func(RollupPolicy, RollupMetadata, time.Time) bool
+	// rule is the name's ExpiryRule result, or 0 without ExpiryRule.
+	Expire func(rule uint16, p RollupPolicy, m RollupMetadata, now time.Time) bool
+	// ExpiryRule optionally resolves a name to an application rule index once,
+	// on the seal owner, before the name's first Expire call. It must be pure.
+	ExpiryRule func(RollupPolicy) uint16
 	Now    func() time.Time
 
 	// Stage is an optional fault-injection observer for offline recovery tests.

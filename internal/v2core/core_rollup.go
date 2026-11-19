@@ -70,6 +70,9 @@ type rollupMetric struct {
 	*PolicyIdentity
 	slots  *sealrollup.Slots
 	vshard uint16
+	// expiry is 1 + the name's Hooks.ExpiryRule, resolved on first use;
+	// 0 means not resolved yet. It fits in the struct's padding.
+	expiry uint32
 }
 
 // residency returns m's slots, allocating them on the first install.
@@ -107,7 +110,8 @@ type coreRollups struct {
 	identities  *PolicyCatalog
 	lanes       []rollupPlannerLane
 	parallelism int
-	expire      func(RollupPolicy, RollupMetadata, time.Time) bool
+	expire      func(uint16, RollupPolicy, RollupMetadata, time.Time) bool
+	expiryRule  func(RollupPolicy) uint16
 	now         func() time.Time
 
 	stage   func(string)
@@ -207,6 +211,19 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 
 // idleCandidates returns the metrics an idle pass must visit. An expiry
 // callback can fire for any metric; without one only closure can be due.
+// expires asks the Expire hook about m with the name's expiry rule, which
+// ExpiryRule resolves once per name, so idle scans repeat no name matching.
+func (r *coreRollups) expires(m *rollupMetric, md RollupMetadata, now time.Time) bool {
+	p := m.rollupPolicy()
+	if m.expiry == 0 {
+		m.expiry = 1
+		if r.expiryRule != nil {
+			m.expiry += uint32(r.expiryRule(p))
+		}
+	}
+	return r.expire(uint16(m.expiry-1), p, md, now)
+}
+
 func (r *coreRollups) idleCandidates() map[uint64]*rollupMetric {
 	if r.expire != nil {
 		return r.metrics
@@ -406,7 +423,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 				continue
 			}
 			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expires(m, m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
 				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
 				r.stageKey(&stages[len(stages)-1])
 			}
@@ -417,7 +434,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	for i := range stages {
 		s := &stages[i]
 		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
+		if r.expire != nil && len(s.batches) == 0 && r.expires(m, s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = max(2, s.next.Version)

@@ -177,7 +177,7 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = nil
-	cfg.Hooks.Expire = func(v2core.RollupPolicy, v2core.RollupMetadata, time.Time) bool { return true }
+	cfg.Hooks.Expire = func(uint16, v2core.RollupPolicy, v2core.RollupMetadata, time.Time) bool { return true }
 	open()
 	deadline := time.Now().Add(5 * time.Second)
 	for {

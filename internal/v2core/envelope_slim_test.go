@@ -63,7 +63,7 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 	var now atomic.Int64 // batch clock
 	var engine *Engine
 	var root string
-	open := func(expire func(RollupPolicy, RollupMetadata, time.Time) bool) {
+	open := func(expire func(uint16, RollupPolicy, RollupMetadata, time.Time) bool) {
 		if engine != nil {
 			if err := engine.Close(); err != nil {
 				t.Fatal(err)
@@ -193,7 +193,7 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 			t.Fatal("no parts merged")
 		}
 		now.Add(600)
-		open(func(_ RollupPolicy, m RollupMetadata, _ time.Time) bool { return m.ID%5 == 0 })
+		open(func(_ uint16, _ RollupPolicy, m RollupMetadata, _ time.Time) bool { return m.ID%5 == 0 })
 		if err := engine.AppendBatches(0, nil, order, true); err != nil {
 			t.Fatal(err)
 		}

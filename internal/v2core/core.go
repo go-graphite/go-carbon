@@ -529,8 +529,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
 				r.stage = hooks.Stage
 				if expire := hooks.Expire; expire != nil {
-					r.expire = func(p RollupPolicy, m RollupMetadata, now time.Time) bool {
-						if !expire(p, m, now) {
+					r.expiryRule = hooks.ExpiryRule
+					r.expire = func(rule uint16, p RollupPolicy, m RollupMetadata, now time.Time) bool {
+						if !expire(rule, p, m, now) {
 							return false
 						}
 						o.expiries.Add(1)
@@ -1454,7 +1455,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			}
 			due := false
 			for id, m := range r.idleCandidates() {
-				if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+				if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && ((r.expire != nil && r.expires(m, m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
 					due = true
 					break
 				}

@@ -144,7 +144,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				r := newCoreRollups()
 				r.parallelism = workers
 				r.now = func() time.Time { return time.Unix(clock, 0) }
-				r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
+				r.expire = func(_ uint16, _ RollupPolicy, m RollupMetadata, now time.Time) bool {
 					return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > 25
 				}
 				return r
