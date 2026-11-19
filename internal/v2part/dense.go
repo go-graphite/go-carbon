@@ -31,10 +31,11 @@ func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
 	return appendSlots(nil, records)
 }
 
-// Mode bit 1 codes the order column as zigzag delta-of-delta (first order,
+// Mode bit 0x04 codes the order column as zigzag delta-of-delta (first order,
 // first delta, then delta changes) in place of the XOR chain: regular arrival
-// orders cost one byte per slot. Decoding is exact.
-const denseModeOrderDoD = 2
+// orders cost one byte per slot. Decoding is exact. Unknown mode bits are
+// rejected; 0x02 is reserved for the slot-time code.
+const denseModeOrderDoD = 4
 
 func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
 
@@ -155,7 +156,7 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		return append(dst[:0], r), nil
 	}
 	bad := errors.New("invalid dense archive run")
-	if len(data) < 6 || data[4] > 1|denseModeOrderDoD || archive == MetadataArchive || firstSlot < 0 {
+	if len(data) < 6 || data[4]&^(1|denseModeOrderDoD) != 0 || archive == MetadataArchive || firstSlot < 0 {
 		return nil, bad
 	}
 	integer := data[4]&1 == 1

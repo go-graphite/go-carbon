@@ -94,7 +94,7 @@ func TestMergeOrderCodeExact(t *testing.T) {
 				if k.Archive == v2part.MetadataArchive {
 					return nil
 				}
-				if b[4]&2 != 0 {
+				if b[4]&4 != 0 {
 					one++
 				}
 				rs, e := v2part.DecodeSlots(k.Archive, k.BlockStart, b)
