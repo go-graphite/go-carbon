@@ -43,7 +43,8 @@ type RegisteredApplication struct {
 }
 
 // RegisterApplication validates canonical identity and collision/definition
-// equality at admission. It retains no caller-owned policy bytes.
+// equality at admission. It retains no caller-owned bytes: the handle's name is
+// the catalog's own string (the shared identity name on layer 3).
 func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredApplication, error) {
 	if p.failed != nil {
 		return nil, p.failed
@@ -55,9 +56,10 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	if err != nil {
 		return nil, err
 	}
-	if r := p.applicationPolicies[id]; r != nil {
-		return r, nil
+	if id < uint64(len(p.applications)) && p.applications[id] != nil {
+		return p.applications[id], nil
 	}
+	name, _ = p.catalog.Key(id)
 	var registered *v2core.ApplicationPolicy
 	// Classic mirroring consumes canonical bytes before core submission.
 	if p.layer == 3 && p.durableApplications == nil {
@@ -66,11 +68,11 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 			return nil, err
 		}
 	}
-	if p.applicationPolicies == nil {
-		p.applicationPolicies = make(map[uint64]*RegisteredApplication)
+	for uint64(len(p.applications)) <= id {
+		p.applications = append(p.applications, nil) // catalog IDs are dense
 	}
 	r := &RegisteredApplication{producer: p, id: id, name: name, policy: registered}
-	p.applicationPolicies[id] = r
+	p.applications[id] = r
 	return r, nil
 }
 

@@ -88,7 +88,7 @@ type Producer struct {
 	spareBatches                                                 [][]v2core.Batch
 	applicationFrames                                            []partlog.CatalogFrame
 	applicationIDs                                               []uint64
-	applicationPolicies                                          map[uint64]*RegisteredApplication
+	applications                                                 []*RegisteredApplication // by catalog ID
 	cursor                                                       uint64
 	applyOrder                                                   uint64
 	pendingRows                                                  int
