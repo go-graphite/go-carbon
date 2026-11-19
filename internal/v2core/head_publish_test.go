@@ -65,11 +65,11 @@ func TestCorePendingPublicationSharesImmutablePrefix(t *testing.T) {
 	var pubs []publication
 	feed := make(chan publication, 1024)
 	visible := map[uint64]int{}
-	o.batchHook = func(pin *pebble.Snapshot, pv PendingView, _ uint64) error {
+	o.batchHook = func(pv PendingView, _ uint64) error {
 		p := publication{view: pv, want: describeBatches(pv.Batches()), seals: o.parts.Load()}
 		pubs = append(pubs, p)
 		feed <- p
-		return pin.Close()
+		return nil
 	}
 	o.visible = func(pv PendingView) {
 		pv.Each(func(a *PendingApplication) bool {
@@ -217,10 +217,10 @@ func BenchmarkCorePendingPublication(b *testing.B) {
 			o.publishFrontier(o.meta)
 			defer func() { o.pub.clear(); db.Close() }()
 			var retained []coreBatch
-			o.batchHook = func(pin *pebble.Snapshot, pv PendingView, _ uint64) error {
+			o.batchHook = func(pv PendingView, _ uint64) error {
 				batches := pv.Batches()
 				retained = batches
-				return pin.Close()
+				return nil
 			}
 			q := newCoreQueue(coreQueueBytes)
 			o.queues = []*coreQueue{q}

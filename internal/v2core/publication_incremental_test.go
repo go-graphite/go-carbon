@@ -33,9 +33,9 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 	// decode it, so the measured bytes are the owner's alone. Every
 	// application here holds one point: positions count batches.
 	var published PendingView
-	o.batchHook = func(pin *pebble.Snapshot, pv PendingView, _ uint64) error {
+	o.batchHook = func(pv PendingView, _ uint64) error {
 		published = pv
-		return pin.Close()
+		return nil
 	}
 	seen := make([]uint8, head*epochs+1) // by order
 	visibleCalls, lastCall, observed := 0, 0, 0
