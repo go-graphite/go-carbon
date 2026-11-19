@@ -10,9 +10,10 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
+// publishedBatch is a batch's content. Row segments decode fresh arenas on
+// every read, so point addresses are not part of it.
 type publishedBatch struct {
 	id, order uint64
-	points    *row
 	n         int
 	first     row
 }
@@ -20,12 +21,14 @@ type publishedBatch struct {
 func describeBatches(b []coreBatch) []publishedBatch {
 	out := make([]publishedBatch, len(b))
 	for i := range b {
-		out[i] = publishedBatch{id: b[i].ID, order: b[i].Order, points: &b[i].Points[0], n: len(b[i].Points), first: b[i].Points[0]}
+		out[i] = publishedBatch{id: b[i].ID, order: b[i].Order, n: len(b[i].Points), first: b[i].Points[0]}
 	}
 	return out
 }
 
-func checkPublished(got []coreBatch, want []publishedBatch) error {
+// checkPublished re-decodes a publication from the owner's shared arrays.
+func checkPublished(v PendingView, want []publishedBatch) error {
+	got := v.Batches()
 	if len(got) != len(want) || cap(got) != len(got) {
 		return fmt.Errorf("publication len/cap %d/%d, want %d", len(got), cap(got), len(want))
 	}
@@ -55,25 +58,24 @@ func TestCorePendingPublicationSharesImmutablePrefix(t *testing.T) {
 	defer func() { o.pub.clear(); db.Close() }()
 
 	type publication struct {
-		batches []coreBatch
-		want    []publishedBatch
-		seals   uint64
+		view  PendingView
+		want  []publishedBatch
+		seals uint64
 	}
 	var pubs []publication
 	feed := make(chan publication, 1024)
 	visible := map[uint64]int{}
 	o.batchHook = func(pin *pebble.Snapshot, pv PendingView, _ uint64) error {
-		b := pv.Batches()
-		p := publication{batches: b, want: describeBatches(b), seals: o.parts.Load()}
+		p := publication{view: pv, want: describeBatches(pv.Batches()), seals: o.parts.Load()}
 		pubs = append(pubs, p)
 		feed <- p
 		return pin.Close()
 	}
 	o.visible = func(pv PendingView) {
-		b := pv.Batches()
-		for i := range b {
-			visible[b[i].Order]++
-		}
+		pv.Each(func(a *PendingApplication) bool {
+			visible[a.Order]++
+			return true
+		})
 	}
 	stop := make(chan struct{})
 	errs := make(chan error, 8)
@@ -96,7 +98,7 @@ func TestCorePendingPublicationSharesImmutablePrefix(t *testing.T) {
 				snapshot := slices.Clone(live)
 				mu.Unlock()
 				for _, p := range snapshot {
-					if err := checkPublished(p.batches, p.want); err != nil {
+					if err := checkPublished(p.view, p.want); err != nil {
 						errs <- err
 						return
 					}
@@ -173,12 +175,13 @@ func TestCorePendingPublicationSharesImmutablePrefix(t *testing.T) {
 	// extends its predecessor within one seal epoch.
 	lastBySeal := map[uint64][]publishedBatch{}
 	for i, p := range pubs {
-		if err := checkPublished(p.batches, p.want); err != nil {
+		if err := checkPublished(p.view, p.want); err != nil {
 			t.Fatal(i, err)
 		}
 		if i > 0 && pubs[i-1].seals == p.seals {
 			prev := pubs[i-1].want
-			if len(prev) > len(p.want) || !slices.Equal(prev, p.want[:len(prev)]) {
+			if len(prev) > len(p.want) || !slices.Equal(prev, p.want[:len(prev)]) ||
+				(len(prev) > 0 && !p.view.Extends(pubs[i-1].view)) {
 				t.Fatalf("publication %d does not extend its predecessor", i)
 			}
 		}

@@ -984,6 +984,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	if o.ready == nil {
 		o.initQueueSignals(nil)
 	}
+	if o.lookup == nil {
+		// Without a catalog no ID has a handle, as with the engine's empty
+		// PolicyCatalog; pending rows and views resolve through lookup.
+		o.lookup = func(uint64) *ApplicationPolicy { return nil }
+	}
 	headCapacity := o.cfg.MaxRows
 	if o.cfg.Rollups {
 		// Rollups normally seal on a time or size threshold, below the
