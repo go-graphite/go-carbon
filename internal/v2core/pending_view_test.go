@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -504,4 +506,63 @@ func BenchmarkPendingScan(b *testing.B) {
 	b.Run("before", func(b *testing.B) { run(b, false, false) })
 	b.Run("routed", func(b *testing.B) { run(b, true, false) })
 	b.Run("after", func(b *testing.B) { run(b, true, true) })
+}
+
+// Compare the scan projection to the existing full-identity oracle through
+// frozen heads, concatenation and suffixes. Scans must not fetch row handles.
+func TestPendingNameHashesMatchRefs(t *testing.T) {
+	for seed := uint64(1); seed <= 3; seed++ {
+		script := newPendingRowsScript(seed)
+		hashes := map[uint64]uint64{}
+		for id, h := range script.lookup {
+			h.nameHash = id * 0x9e3779b97f4a7c15
+			hashes[id] = h.nameHash
+		}
+		var left, right pendingHead
+		for i, packet := range script.packets {
+			if i < len(script.packets)/2 {
+				left.add(packet, script.find)
+			} else {
+				right.add(packet, script.find)
+			}
+		}
+		// Include a JSON cold segment and a registered cold segment (no points).
+		_, raw := rollupTestPolicy(t, "projection.cold", "1s:1d", sealrollup.Last, .5)
+		right.add([]Batch{{ID: 999, Policy: raw}, {ID: 1, Registered: script.find(1)}}, script.find)
+		fast := func(id uint64) uint64 { return hashes[id] }
+		l, r := left.view(script.find, fast), right.view(script.find, fast)
+		joined := l.concat(r)
+		for _, v := range []PendingView{l, r, joined, joined.Suffix(l.Len()), joined.Suffix(joined.Len())} {
+			want := map[int]uint64{}
+			v.Refs(0, v.Len(), func(pos int, _ uint64, h *ApplicationPolicy, raw []byte) bool {
+				if h != nil {
+					want[pos] = h.NameHash()
+				} else {
+					var p RollupPolicy
+					if err := json.Unmarshal(raw, &p); err != nil {
+						t.Fatal(err)
+					}
+					want[pos] = namefp.Hash(string(p.Name))
+				}
+				return true
+			})
+			v.lookup = func(uint64) *ApplicationPolicy { t.Fatal("hash projection fetched row identity"); return nil }
+			for _, bounds := range [][2]int{{0, v.Len()}, {v.Len() / 3, v.Len() * 2 / 3}} {
+				seen := 0
+				err := v.NameHashes(bounds[0], bounds[1], func(pos int, h uint64) {
+					if h != want[pos] {
+						t.Fatalf("seed %d pos %d: hash %x want %x", seed, pos, h, want[pos])
+					}
+					seen++
+				})
+				if err != nil || seen != bounds[1]-bounds[0] {
+					t.Fatalf("scan %v: %d positions, error %v", bounds, seen, err)
+				}
+			}
+		}
+	}
+	v := PendingBatches([]Batch{{Policy: []byte("{")}})
+	if err := v.NameHashes(0, v.Len(), func(int, uint64) {}); err == nil {
+		t.Fatal("malformed cold policy accepted")
+	}
 }
