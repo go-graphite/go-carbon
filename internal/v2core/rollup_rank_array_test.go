@@ -147,6 +147,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
 					return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > 25
 				}
+				r.setExpiryTTL(expiryWindow(26 * time.Second))
 				return r
 			}
 			ranked, ref := newPlanner(), newPlanner()

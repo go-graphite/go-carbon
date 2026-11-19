@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// expiryWindow is an ExpiryTTL giving every name window d, forever.
+func expiryWindow(d time.Duration) func(RollupPolicy, time.Time) (time.Duration, time.Time) {
+	return func(RollupPolicy, time.Time) (time.Duration, time.Time) { return d, time.Time{} }
+}
+
 // expiryTestRules is a carbon-like rule table: a time-limited rule, a short
 // rule, an exclusion that never expires, and a store default.
 func expiryTestRules(t0 int64) func(string, time.Time) (time.Duration, time.Time) {
@@ -40,13 +45,17 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 	r := closureTestStore(t, n, t0)
 	rules := expiryTestRules(t0)
 	allowed := true
-	r.expire = func(p RollupPolicy, m RollupMetadata, now time.Time) bool {
+	// The walk's own question, which carbon's Expire asked before ExpiryTTL.
+	walkExpire := func(p RollupPolicy, m RollupMetadata, now time.Time) bool {
 		if !allowed || m.LastUpdate == 0 {
 			return false
 		}
 		ttl, _ := rules(string(p.Name), now)
 		return ttl > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= ttl
 	}
+	// As carbon's Expire: a gate only, so a name asked before its window
+	// ends would expire early.
+	r.expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return allowed }
 	for id, m := range r.metrics {
 		slot := r.slotOf(id, m)
 		r.meta[slot].LastUpdate = (t0-int64(id%700))*int64(time.Second) + int64(id)*7919%int64(time.Second)
@@ -68,7 +77,7 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 		want, walkDue := map[uint32]bool{}, false
 		for id, m := range r.metrics {
 			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
+			if meta := r.meta[slot]; !meta.Expired && (walkExpire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
 				walkDue = true
 				if !written[id] {
 					want[slot] = true
@@ -114,7 +123,7 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 		for _, slot := range got {
 			m := r.slotMetric(slot)
 			next := r.meta[slot]
-			if r.expire(m.rollupPolicy(), m.metadata(next), now) {
+			if walkExpire(m.rollupPolicy(), m.metadata(next), now) {
 				next.Expired = true
 			} else {
 				next.ClosedThrough = now.Unix()

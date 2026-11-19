@@ -328,6 +328,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	if cfg.Rollups && hooks.PlanSeal != nil {
 		return nil, errors.New("core rollups already own the seal planner")
 	}
+	if (hooks.Expire == nil) != (hooks.ExpiryTTL == nil) {
+		return nil, errors.New("expiry needs both Expire and ExpiryTTL")
+	}
 	if cfg.Rollups {
 		if cfg.RollupRoutingVersion == 0 {
 			cfg.RollupRoutingVersion = 1
@@ -538,7 +541,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					}
 				}
 				r.now = hooks.Now
-				if r.expire != nil && hooks.ExpiryTTL != nil {
+				if r.expire != nil {
 					r.setExpiryTTL(hooks.ExpiryTTL)
 				}
 				o.retireNow = hooks.Now
@@ -1455,20 +1458,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if r.now != nil {
 				now = r.now()
 			}
-			due := false
-			if r.expire == nil {
-				due = r.closureDue(now.Unix())
-			} else if r.expiryTTL != nil {
-				due = r.closureDue(now.Unix()) || r.expiryDue(now)
-			} else {
-				// An opaque expiry callback can fire for any metric.
-				for id, m := range r.metrics {
-					if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
-						due = true
-						break
-					}
-				}
-			}
+			due := r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now))
 			for i := range batches {
 				if b := &batches[i]; r.metrics[b.ID] == nil && r.needsMetadataSeal(b) {
 					due = true // establish metadata before its inactivity window can end

@@ -219,6 +219,7 @@ func (w *sealSweepWorld) planner() *coreRollups {
 	r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
 		return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > sealSweepExpiry
 	}
+	r.setExpiryTTL(expiryWindow((sealSweepExpiry + 1) * time.Second))
 	return r
 }
 

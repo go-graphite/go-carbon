@@ -19,9 +19,13 @@ type singleArchiveImage map[string]struct {
 }
 
 // runMixedIdleStore seals single- and multi-archive names, reopens, then runs
-// one idle closure seal. A non-nil expire forces the full-metric idle scan.
+// one idle closure seal. A non-nil expire is asked about every name there.
 func runMixedIdleStore(t *testing.T, expire func(RollupPolicy, RollupMetadata, time.Time) bool) (singleArchiveImage, []int) {
-	return runMixedIdleStoreHooks(t, Hooks{Expire: expire}, nil)
+	h := Hooks{}
+	if expire != nil {
+		h.Expire, h.ExpiryTTL = expire, expiryWindow(time.Nanosecond)
+	}
+	return runMixedIdleStoreHooks(t, h, nil)
 }
 
 // runMixedIdleStoreHooks is runMixedIdleStore with the expiry hooks given;
@@ -111,7 +115,8 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 }
 
 // The closure calendar changes only which metrics an idle pass visits: a
-// mixed store yields the same records and metadata as the full-metric scan.
+// mixed store yields the same records and metadata as one where expiry asks
+// about every name and refuses.
 func TestSingleArchiveIdleIndexDifferential(t *testing.T) {
 	indexed, closable := runMixedIdleStore(t, nil)
 	full, _ := runMixedIdleStore(t, func(RollupPolicy, RollupMetadata, time.Time) bool { return false })
@@ -128,8 +133,9 @@ func TestSingleArchiveIdleIndexDifferential(t *testing.T) {
 	}
 }
 
-// Through real seals, a reopen and a refused (fenced) expiry, the expiry
-// calendar yields the same records and metadata as the full expiry walk.
+// Through real seals, a reopen and a refused (fenced) expiry, per-name
+// windows yield the same records and metadata as a 1 ns window for every
+// name, which asks Expire about every name at every pass.
 func TestExpiryCalendarEngineDifferential(t *testing.T) {
 	ttl := func(p RollupPolicy, _ time.Time) (time.Duration, time.Time) {
 		if n := string(p.Name); n == "mixed.1" || n == "mixed.3" {
@@ -139,24 +145,35 @@ func TestExpiryCalendarEngineDifferential(t *testing.T) {
 	}
 	run := func(withTTL bool) singleArchiveImage {
 		var armed atomic.Bool
+		// Every name: Expire applies the window itself, as the walk did.
 		h := Hooks{Expire: func(p RollupPolicy, m RollupMetadata, now time.Time) bool {
 			d, _ := ttl(p, now)
 			return armed.Load() && m.LastUpdate != 0 && d > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= d
-		}}
+		}, ExpiryTTL: expiryWindow(time.Nanosecond)}
 		if withTTL {
+			// Per-name windows: Expire is a gate only, as carbon's.
+			h.Expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return armed.Load() }
 			h.ExpiryTTL = ttl
 		}
 		image, _ := runMixedIdleStoreHooks(t, h, func() { armed.Store(true) })
 		return image
 	}
-	walk, calendar := run(false), run(true)
-	if !reflect.DeepEqual(walk, calendar) {
-		t.Fatalf("walk %+v\ncalendar %+v", walk, calendar)
+	every, calendar := run(false), run(true)
+	if !reflect.DeepEqual(every, calendar) {
+		t.Fatalf("every name %+v\ncalendar %+v", every, calendar)
 	}
 	for name, m := range calendar {
 		if want := name == "mixed.1" || name == "mixed.3"; m.Meta.Expired != want {
 			t.Fatalf("%s expired %v, want %v", name, m.Meta.Expired, want)
 		}
+	}
+}
+
+func TestExpireNeedsExpiryTTL(t *testing.T) {
+	cfg := coreTestConfig()
+	cfg.Rollups = true
+	if _, err := Open(t.TempDir(), cfg, Hooks{Expire: func(RollupPolicy, RollupMetadata, time.Time) bool { return true }}); err == nil {
+		t.Fatal("Open accepted Expire without ExpiryTTL")
 	}
 }
 

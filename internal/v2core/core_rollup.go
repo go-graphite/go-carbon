@@ -80,13 +80,13 @@ type coreRollups struct {
 	parallelism int
 	expire      func(RollupPolicy, RollupMetadata, time.Time) bool
 	now         func() time.Time
-	// expiryTTL, when set with expire, resolves a name's expiry window once
+	// expiryTTL, set with expire, resolves a name's expiry window once
 	// (at install, and again for all names when a returned until passes)
 	// into ttl[slot], in ns (<= 0: never). expiries files each slot once under
 	// expAt[slot], the second floor((LastUpdate+ttl)/1s): no later than expire
 	// can first fire, since LastUpdate only moves forward. Entries under any
 	// other second are stale. A pass drains only seconds at or before now and
-	// asks expire only for names overdue by ttl, so it reads no other name.
+	// asks expire only about names overdue by ttl, so it reads no other name.
 	expiryTTL  func(RollupPolicy, time.Time) (time.Duration, time.Time)
 	ttl        []int64
 	expAt      []int64
@@ -197,7 +197,7 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	}
 	slot := r.slotOf(id, m)
 	r.file(slot, m, meta, math.MaxUint16)
-	if r.expiryTTL != nil {
+	if r.expire != nil {
 		r.resolveTTL(slot, m, r.clock())
 		r.fileExpiry(slot)
 	}
@@ -234,7 +234,7 @@ func (r *coreRollups) resolveTTL(slot uint32, m *rollupMetric, now time.Time) {
 // reresolve re-resolves every name's window once now reaches the earliest
 // until a resolution returned (a rule stopped applying).
 func (r *coreRollups) reresolve(now time.Time) {
-	if r.expiryTTL == nil || r.ttlUntil == 0 || now.UnixNano() < r.ttlUntil {
+	if r.ttlUntil == 0 || now.UnixNano() < r.ttlUntil {
 		return
 	}
 	r.ttlUntil = 0
@@ -246,8 +246,8 @@ func (r *coreRollups) reresolve(now time.Time) {
 	}
 }
 
-// expiryOverdue reports whether expire may fire for slot at ns: the walk's
-// own condition, now - LastUpdate >= ttl, on the cached window.
+// expiryOverdue reports whether slot is idle for its cached window at ns
+// (now - LastUpdate >= ttl): the only names expire is asked about.
 func (r *coreRollups) expiryOverdue(slot uint32, ns int64) bool {
 	meta := r.meta[slot]
 	return r.ttl[slot] > 0 && meta.LastUpdate != 0 && !meta.Expired && ns-meta.LastUpdate >= r.ttl[slot]
@@ -588,7 +588,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	r.planClock = now
 	r.expDrained = r.expDrained[:0]
-	if r.expire != nil && r.expiryTTL != nil {
+	if r.expire != nil {
 		r.reresolve(now)
 		for key := range r.expiries {
 			if key <= r.planNow {
@@ -596,19 +596,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 		}
 	}
-	if r.expire != nil && r.expiryTTL == nil {
-		// An opaque expiry callback can fire for any metric, so it visits all.
-		for id, m := range r.metrics {
-			if sealBatchSeen(in.Batches, keys, seen, maxID, id) {
-				continue
-			}
-			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, r.planNow)) {
-				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
-				r.stageKey(&stages[len(stages)-1])
-			}
-		}
-	} else if r.db != nil || r.expire != nil {
+	if r.db != nil || r.expire != nil {
 		r.due = r.dueSlots(func(id uint64) bool { return sealBatchSeen(in.Batches, keys, seen, maxID, id) }, r.due[:0])
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
@@ -621,7 +609,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	for i := range stages {
 		s := &stages[i]
 		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
+		if r.expire != nil && len(s.batches) == 0 && r.expiryOverdue(s.slot, now.UnixNano()) && r.expire(m.rollupPolicy(), s.next, now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = max(2, s.next.Version)
@@ -652,7 +640,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for _, end := range r.drained {
 			delete(r.calendar, end)
 		}
-		expiry := r.expiryTTL != nil
+		expiry := r.expire != nil
 		if expiry {
 			r.commitExpiries()
 		}
