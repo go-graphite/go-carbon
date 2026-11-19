@@ -140,7 +140,7 @@ func mergeByteDifferentialCase(t *testing.T, seed uint64, group v2part.Group, su
 	}
 	merge := func(name string, inputs []v2part.Descriptor, ttl int64) v2part.Descriptor {
 		path := filepath.Join(dir, name+".sst")
-		d, e := mergePartFiles(context.Background(), dir, path, inputs, ttl, nil)
+		d, e := mergePartFiles(context.Background(), dir, path, inputs, ttl, false, nil)
 		if e != nil {
 			t.Fatalf("seed%d %s %s: %v", seed, group, name, e)
 		}

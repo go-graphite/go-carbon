@@ -448,7 +448,10 @@ var mergePartID = func(id *v2part.PartID) error {
 // outside this streaming rewrite and retain the ordinary snapshot fences.
 // A nonzero ttl is the durable owner ArchiveClock of a TTL rewrite: records
 // whose expiry precedes it are dropped as whole-part retirement would.
-func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, ttl int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+//
+// elide writes runs without a per-slot order column: each metric's envelope
+// frontier stands for its slots. Pass it only when orderRangeAlone holds.
+func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, ttl int64, elide bool, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
@@ -566,6 +569,13 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 		}
 		config = *chosen.config
+		if elide {
+			// The frontier bounds every record of the metric and lies inside
+			// this part's order range.
+			if err = writer.ElideOrder(metadata.Frontier.Order); err != nil {
+				return v2part.Descriptor{}, err
+			}
+		}
 		floor := max(metadata.LastUpdate/1e9, ttl)
 		// The output key is the input's validated identity with the output part:
 		// Encode(c.key) byte for byte, without a name string or route re-hash.
@@ -698,6 +708,31 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	return d, d.Validate()
 }
 
+// orderRangeAlone reports whether no live part of the inputs' source outside
+// the inputs overlaps their joint order range. Then any order inside that
+// range at or above a record's own order compares with every other order of
+// the source as the record's own order does, and later parts carry higher
+// orders. Slots compare only within
+// a partition, but a reset masks records in every partition, so every
+// partition of the group counts.
+func orderRangeAlone(live, inputs []v2part.Descriptor) bool {
+	src := inputs[0].Source
+	in := map[v2part.Digest]bool{}
+	for _, d := range inputs {
+		if d.Source.Incarnation != src.Incarnation || d.Source.Stream != src.Stream || d.Scope.Group != inputs[0].Scope.Group {
+			return false
+		}
+		src.MinOrder, src.MaxOrder = min(src.MinOrder, d.Source.MinOrder), max(src.MaxOrder, d.Source.MaxOrder)
+		in[d.SHA256] = true
+	}
+	for _, d := range live {
+		if !in[d.SHA256] && d.Scope.Group == inputs[0].Scope.Group && d.Source.Incarnation == src.Incarnation && d.Source.Stream == src.Stream && d.Source.MinOrder <= src.MaxOrder && d.Source.MaxOrder >= src.MinOrder {
+			return false
+		}
+	}
+	return true
+}
+
 func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	// Capture the pin and inventory under the same GC fence as publications.
 	o.gc.mu.Lock()
@@ -746,7 +781,19 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, ttl, stop)
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	live := make([]v2part.Descriptor, 0, len(inventory.bindings))
+	for _, value := range inventory.bindings {
+		d, e := v2part.ParseDescriptor(value)
+		if e != nil {
+			return false, e
+		}
+		live = append(live, d)
+	}
+	elide := orderRangeAlone(live, inputs)
+	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, ttl, elide, stop)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}

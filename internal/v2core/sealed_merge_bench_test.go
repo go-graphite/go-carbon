@@ -94,7 +94,7 @@ func BenchmarkSealedMergeSparseNames(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		path := filepath.Join(dir, "output.sst")
-		if _, err := mergePartFiles(context.Background(), dir, path, inputs, 0, nil); err != nil {
+		if _, err := mergePartFiles(context.Background(), dir, path, inputs, 0, false, nil); err != nil {
 			b.Fatal(err)
 		}
 		if err := os.Remove(path); err != nil {
