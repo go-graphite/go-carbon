@@ -3,9 +3,11 @@ package v2read
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -84,6 +86,38 @@ func TestDiscoveryParallelOwners(t *testing.T) {
 			t.Fatalf("name %s lost its exact sealed value after enumeration", name)
 		}
 	}
+	t.Run("pending-does-not-wait-for-discovery", func(t *testing.T) {
+		// A released directory must not put fresh-name publication or reads
+		// behind another whole-store sweep. Hold every sweep gate throughout.
+		for i := range r.caches {
+			<-r.caches[i].loadGate
+			defer func() { r.caches[i].loadGate <- struct{}{} }()
+		}
+		const name = "discovery.fresh"
+		policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 100}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := v2core.Batch{ID: 65, Order: 65, Clock: 1000, Policy: policy, Points: []v2core.Row{{ID: 65, Time: 990, Bits: 65, Seq: 65}}}
+		if err := e.AppendBatches(0, []v2core.Batch{b}, 2, false); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		await(t, func() bool {
+			_, err := r.Metadata(ctx, name)
+			return err == nil || ctx.Err() != nil
+		})
+		err = r.FetchMany(ctx, []string{name}, 989, 992, 1000, func(_ string, s *Series) error {
+			if got := math.Float64bits(s.Values[(990-s.From)/s.Step]); got != 65 {
+				t.Fatalf("fresh pending bits=%x want=41", got)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := r.NamesWithMasks(ctx); err != context.Canceled {
