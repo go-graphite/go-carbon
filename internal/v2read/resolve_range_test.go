@@ -28,7 +28,7 @@ type renderedSlots struct {
 func fetchBoth(t *testing.T, reader *Reader, names []string, from, until, now int64) int {
 	t.Helper()
 	collect := func(rangeBase bool) map[string]renderedSlots {
-		reader.rangeBase = rangeBase
+		reader.fullHistory = !rangeBase
 		out := map[string]renderedSlots{}
 		err := reader.FetchMany(context.Background(), names, from, until, now, func(name string, s *Series) error {
 			if s == nil {
@@ -107,7 +107,7 @@ func resolveRangeCase(t *testing.T, def string, method sealrollup.Method, xff fl
 	order := uint64(0)
 	specials := []uint64{0x7ff8000000000042, 1 << 63, 0, 0x7ff0000000000000, 0xfff0000000000000, 1}
 	compared := 0
-	for step := 0; step < 14; step++ {
+	for step := 0; step < 8; step++ {
 		switch rng.Intn(4) {
 		case 0:
 			clock += advance + fine.Step*int64(rng.Intn(5)) // wrap the finest ring

@@ -29,9 +29,9 @@ type Reader struct {
 	stages stageCounters
 	// scanAllOwners is the test oracle: every owner sees every name.
 	scanAllOwners bool
-	// rangeBase resolves pending names over the request's touched slots
-	// instead of the full sealed history.
-	rangeBase bool
+	// fullHistory is the range-resolve oracle: pending names resolve over the
+	// whole sealed history instead of the request's touched slots.
+	fullHistory bool
 
 	closed    atomic.Bool
 	owners    []atomic.Pointer[generation]
@@ -78,18 +78,12 @@ type generation struct {
 	err     error
 }
 type sealedCache struct {
-	ranges         *v2core.RollupReadCache
-	loadGate       chan struct{}
-	mu             sync.Mutex // read-side only; Publish never acquires this lock
-	index          *v2core.RollupSnapshot
-	number         uint64
-	limit          int64
-	fullMu         sync.Mutex
-	full           []resolvedEntry
-	fullBytes      int64
-	pendingMu      sync.Mutex
-	reductions     []pendingReduction
-	reductionBytes int64
+	ranges   *v2core.RollupReadCache
+	loadGate chan struct{}
+	mu       sync.Mutex // read-side only; Publish never acquires this lock
+	index    *v2core.RollupSnapshot
+	number   uint64
+	limit    int64
 }
 type sealedData struct {
 	parts     *v2core.OpenedRollupParts
@@ -315,27 +309,26 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		m.meta.Expired = false
 	}
 }
-func (m *metricState) resolve() { m.resolveContext(context.Background(), 0, 0, 0) }
 
-// resolveContext reduces pending batches over the sealed base. With rangeBase
-// the base holds only the slots the render window [from, until) at now and the
-// reducer can observe; otherwise it is the full history.
+// resolveContext reduces pending batches over the sealed slots the render
+// window [from, until) at now and the reducer can observe.
 func (m *metricState) resolveContext(ctx context.Context, from, until, now int64) {
 	if m.err = ctx.Err(); m.err != nil {
 		return
 	}
 	var base *resolvedSource
-	if m.sealed != nil && m.reader.rangeBase {
-		base, m.err = m.resource.rangeBase(ctx, m, touchedRanges(m.policy.Config.Archives, m.pending, from, until, now))
-		if m.err != nil {
+	switch {
+	case m.sealed != nil && m.reader.fullHistory:
+		var records []sealrollup.Record
+		if records, m.err = m.resource.index.Records(ctx, m.name); m.err != nil {
 			return
 		}
-	} else if m.sealed != nil {
-		base, m.err = m.resource.resolvedContext(ctx, m.name, m.policy, m.meta)
-		if m.err != nil {
+		base = newResolvedSource(m.meta.ID, m.policy.Config.Archives, records)
+	case m.sealed != nil:
+		if base, m.err = m.resource.rangeBase(ctx, m, touchedRanges(m.policy.Config.Archives, m.pending, from, until, now)); m.err != nil {
 			return
 		}
-	} else {
+	default:
 		base = newResolvedSource(m.meta.ID, m.policy.Config.Archives, m.records)
 	}
 	if len(m.pending) == 0 {
@@ -343,16 +336,6 @@ func (m *metricState) resolveContext(ctx context.Context, from, until, now int64
 		return
 	}
 	batches, frontier := m.pending, m.meta.Frontier
-	if m.reader.rangeBase {
-		// A range base differs per request; prefixes reduced over it never carry over.
-	} else if cached := m.resource.cachedReduction(m); cached != nil {
-		base, frontier = cached.source, cached.frontier
-		batches = batches[len(cached.batches):]
-		if len(batches) == 0 {
-			m.frozen = base
-			return
-		}
-	}
 	prepared, err := sealrollup.Prepare(m.policy.Config)
 	if err != nil {
 		m.err = err
@@ -398,9 +381,6 @@ func (m *metricState) resolveContext(ctx context.Context, from, until, now int64
 		return
 	}
 	m.frozen = base.replace(plan.Records)
-	if !m.reader.rangeBase {
-		m.resource.rememberReduction(m, plan.Next)
-	}
 }
 
 // FetchMany adapts the carbonserver fetch boundary for an already expanded set
