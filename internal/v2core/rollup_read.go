@@ -203,32 +203,12 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 	}
 
-	// A part's own directory is read through only that file. Merging every
-	// live file for each metadata seek makes sparse catch-up quadratic.
-	loaded := map[string]*readPart{}
-	byPart := map[v2part.Digest][]string{}
-	for scope, descriptor := range selected {
-		byPart[descriptor.SHA256] = append(byPart[descriptor.SHA256], scope)
-	}
-	for _, ids := range byPart {
-		partIt, err := newArchiveIterSelected(ctx, snapshot, nil, nil, selected[ids[0]])
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			loaded[id], err = readRollupPart(ctx, partIt, []byte(id), identities)
-			if err != nil {
-				_ = partIt.Close()
-				return nil, err
-			}
-		}
-		if err := partIt.Close(); err != nil {
-			return nil, err
-		}
-	}
-
 	// Latest metadata is the only name-sized read structure. Each newly loaded
 	// part uses a transient sorted SST walk; its membership remains in the SST.
+	// A part is merged and dropped before the next is read, so one decoded part
+	// is live at a time. A part's own directory is read through only that file
+	// (merging every live file per metadata seek makes catch-up quadratic); a
+	// descriptor's scopes are adjacent in scopes, so one file is open at a time.
 	if prior != nil {
 		out.metrics = make(map[string]*snapshotMetric, len(prior.metrics))
 		for name, m := range prior.metrics {
@@ -240,13 +220,34 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 	}
 	out.routes = map[partRoute][]*readPart{}
 	changed := false
+	var partIt *archiveIter
+	var partDigest v2part.Digest
+	defer func() {
+		if partIt != nil {
+			_ = partIt.Close()
+		}
+	}()
 	for _, id := range scopes {
 		var part *readPart
 		if prior != nil {
 			part = prior.parts[id]
 		}
-		if part == nil {
-			part = loaded[id]
+		if descriptor, ok := selected[id]; part == nil && ok {
+			if partIt == nil || partDigest != descriptor.SHA256 {
+				if partIt != nil {
+					err, partIt = partIt.Close(), nil
+					if err != nil {
+						return nil, err
+					}
+				}
+				if partIt, err = newArchiveIterSelected(ctx, snapshot, nil, nil, descriptor); err != nil {
+					return nil, err
+				}
+				partDigest = descriptor.SHA256
+			}
+			if part, err = readRollupPart(ctx, partIt, []byte(id), identities); err != nil {
+				return nil, err
+			}
 		}
 		if part == nil {
 			if it == nil {
