@@ -354,3 +354,27 @@ func BenchmarkPendingSelection(b *testing.B) {
 		}
 	})
 }
+
+// Bucket collisions now deliberately reach selectPending's exact-name check;
+// they must neither add another metric nor duplicate matching applications.
+func TestPendingIndexBucketCollision(t *testing.T) {
+	const first = "bucket.metric.0"
+	var second string
+	for i := 1; ; i++ {
+		second = fmt.Sprintf("bucket.metric.%d", i)
+		if namefp.Hash(first)&7 == namefp.Hash(second)&7 {
+			break
+		}
+	}
+	pending := []v2core.Batch{
+		{ID: 1, Order: 1, Policy: testPolicy(t, first)},
+		{ID: 2, Order: 2, Policy: testPolicy(t, second)},
+		{ID: 1, Order: 3, Policy: testPolicy(t, first)},
+	}
+	view := v2core.PendingBatches(pending)
+	index := nextPendingIndex(nil, v2core.PendingView{}, view)
+	got, err := selectPending(context.Background(), index, view, []string{first, first})
+	if err != nil || len(got) != 2 || got[0].Order != 1 || got[1].Order != 3 {
+		t.Fatalf("bucket collision changed selection: %+v, %v", got, err)
+	}
+}

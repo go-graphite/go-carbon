@@ -249,6 +249,7 @@ type coreOwner struct {
 	stage      func(string)
 	visible    func(PendingView)
 	lookup     func(uint64) *ApplicationPolicy
+	nameHash   func(uint64) uint64
 	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
@@ -453,7 +454,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace, lookup: identities.lookup}
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace, lookup: identities.lookup, nameHash: identities.nameHash}
 			if hooks.VisiblePending != nil {
 				o.visible = func(v PendingView) { hooks.VisiblePending(s, v) }
 			} else if hooks.Visible != nil {
@@ -1133,7 +1134,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		batchPublication = time.Now()
 		prev := publishedBatches
 		publishedBatches = pend.n
-		published := pend.view(o.lookup)
+		published := pend.view(o.lookup, o.nameHash)
 		generation := o.readGeneration
 		if flight != nil {
 			// Pin under the seal's publication lock. Once the frozen part is
@@ -1218,7 +1219,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		frozen := pend.view(o.lookup)
+		frozen := pend.view(o.lookup, o.nameHash)
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
 		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
@@ -1287,7 +1288,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		sealedPending := pend.view(o.lookup)
+		sealedPending := pend.view(o.lookup, o.nameHash)
 		next.ArchiveClock = sealedPending.maxClock(next.ArchiveClock)
 		next.NextPart++
 		reported, since := min(publishedBatches, pend.n), headExpiries

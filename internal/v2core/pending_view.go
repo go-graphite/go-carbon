@@ -1,8 +1,11 @@
 package v2core
 
 import (
+	"encoding/json"
 	"sort"
 	"sync/atomic"
+
+	"github.com/go-graphite/go-carbon/internal/namefp"
 )
 
 // PendingView is an owner's published pending set (name-once S5a-2): an
@@ -13,9 +16,10 @@ import (
 // one application can own several consecutive positions. Owners only append
 // between seals, so a later publication extends an earlier one's positions.
 type PendingView struct {
-	segs   []pendingSegment
-	n      int
-	lookup func(uint64) *ApplicationPolicy
+	segs     []pendingSegment
+	n        int
+	lookup   func(uint64) *ApplicationPolicy
+	nameHash func(uint64) uint64
 }
 
 // pendingSegment is immutable once published. A row segment covers packets
@@ -237,7 +241,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 		return v
 	}
 	if pos >= v.n {
-		return PendingView{lookup: v.lookup}
+		return PendingView{lookup: v.lookup, nameHash: v.nameHash}
 	}
 	i := sort.Search(len(v.segs), func(i int) bool { return v.segs[i].start+v.segs[i].count > pos })
 	segs := make([]pendingSegment, 0, len(v.segs)-i)
@@ -258,7 +262,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 		s.start -= pos
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup}
+	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup, nameHash: v.nameHash}
 }
 
 // Extends reports whether v starts with all of old: same immutable segments
@@ -372,7 +376,7 @@ func (h *pendingHead) closeOpen() {
 }
 
 // view publishes the current immutable prefix.
-func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy) PendingView {
+func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy, hashes ...func(uint64) uint64) PendingView {
 	start := 0
 	if k := len(h.segs); k > 0 {
 		start = h.segs[k-1].start + h.segs[k-1].count
@@ -382,7 +386,11 @@ func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy) PendingView {
 	if ok {
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: h.n, lookup: lookup}
+	v := PendingView{segs: segs, n: h.n, lookup: lookup}
+	if len(hashes) > 0 {
+		v.nameHash = hashes[0]
+	}
+	return v
 }
 
 // concat joins a frozen head's view and the next head's view.
@@ -399,7 +407,7 @@ func (v PendingView) concat(w PendingView) PendingView {
 		s.start += v.n
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup}
+	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, nameHash: v.nameHash}
 }
 
 func sameColdBatch(a, b *coreBatch) bool {
@@ -422,6 +430,38 @@ func (v PendingView) Refs(lo, hi int, fn func(pos int, id uint64, registered *Ap
 		}
 		return fn(pos, id, v.lookup(id), nil)
 	})
+}
+
+// NameHashes visits the same positions as Refs without fetching row identities.
+// Cold JSON policies retain the name predicate and decoding errors of Refs.
+func (v PendingView) NameHashes(lo, hi int, visit func(pos int, hash uint64)) error {
+	var err error
+	v.ids(lo, hi, func(pos int, id uint64, cold *coreBatch) bool {
+		if cold == nil && v.nameHash != nil {
+			if h := v.nameHash(id); h != 0 {
+				visit(pos, h)
+				return true
+			}
+		}
+		var h *ApplicationPolicy
+		var policy []byte
+		if cold != nil {
+			h, policy = cold.Registered, cold.Policy
+		} else {
+			h = v.lookup(id)
+		}
+		if h != nil {
+			visit(pos, h.NameHash())
+			return true
+		}
+		var p RollupPolicy
+		if err = json.Unmarshal(policy, &p); err != nil {
+			return false
+		}
+		visit(pos, namefp.Hash(string(p.Name)))
+		return true
+	})
+	return err
 }
 
 // ids visits positions [lo, hi) in order with each position's ID and, for
