@@ -15,7 +15,7 @@ import (
 
 // TestDensePlannedRankOrder checks the planned writer's rank order check: ranked
 // tuples write the same bytes as unranked (name-compared) tuples, and a rank
-// out of order, a wrong vshard or a duplicate slot under ranks still fails.
+// out of order, a wrong vshard or a duplicate slot under ranks is detected.
 func TestDensePlannedRankOrder(t *testing.T) {
 	spec := fixtureSpec()
 	spec.Scope.VShard = GroupVShard

@@ -540,8 +540,9 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 
 // SetPlannedRecord packs a planner record of metric, routed to vshard, without
 // an encoded input key. Group, partition and part come from the writer scope,
-// and key bytes are formatted only where a dense run starts. Order, routing,
-// archive and scalar bounds are validated as SetRecordEncoded validates them.
+// and key bytes are formatted only where a dense run starts. The caller must
+// supply the route already derived by the planner. Order, scope, archive and
+// scalar bounds are validated as SetRecordEncoded validates them.
 // Planned and encoded input cannot be mixed in one part.
 //
 // rank is the metric's 1-based position in the planner's canonical
@@ -570,6 +571,7 @@ func (w *DenseWriter) SetPlannedRecord(vshard uint16, rank uint32, metric ID, r 
 }
 
 // SetPlannedMetadata writes metric's envelope value after its archive records.
+// The caller supplies a planner-validated route, as for SetPlannedRecord.
 // The caller's value is not retained.
 func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, value []byte) error {
 	if w.closed {
@@ -592,7 +594,8 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 
 // plannedKey checks that a tuple sorts strictly after the previous one in GCP3
 // key order (vshard, name length, name, archive, slot) and validates each new
-// name's length and route once. Two ranked tuples compare by rank, which
+// name's length and scope once. Routing comes from the planner, without hashing
+// the name again. Two ranked tuples compare by rank, which
 // follows that name order, so the check reads no name bytes.
 func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive uint32, slot int64) (Key, error) {
 	if len(w.last) > 0 {
@@ -623,7 +626,7 @@ func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive 
 		}
 	}
 	s := w.writer.spec.Scope
-	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || Route(metric) != vshard || (s.VShard != GroupVShard && s.VShard != vshard) {
+	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || (s.VShard != GroupVShard && s.VShard != vshard) {
 		return Key{}, errors.New("invalid or foreign planned dense metric")
 	}
 	if len(w.group) == 0 {
