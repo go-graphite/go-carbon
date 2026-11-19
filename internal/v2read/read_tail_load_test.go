@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -68,7 +69,33 @@ func TestReadTailLoad(t *testing.T) {
 		cfg.SealMaxRows = 2 << 20
 	}
 	cfg.SealInterval = seal
-	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishPending: r.PublishPending})
+	// Publication cost on the owner, split by whether the sealed generation
+	// moved; a pin is a Pebble snapshot handed to the reader.
+	type publishStat struct{ n, ns, pins atomic.Int64 }
+	var heads, seals publishStat
+	var measuring atomic.Bool
+	type sealedKey struct {
+		number    uint64
+		inventory *v2core.RollupInventory
+	}
+	last := make([]sealedKey, owners)
+	publish := func(owner int, snap *pebble.Snapshot, pending v2core.PendingView, number uint64, inventory *v2core.RollupInventory) error {
+		st := &heads
+		if k := (sealedKey{number, inventory}); last[owner] != k {
+			st, last[owner] = &seals, k
+		}
+		started := time.Now()
+		err := r.PublishPending(owner, snap, pending, number, inventory)
+		if measuring.Load() {
+			st.n.Add(1)
+			st.ns.Add(int64(time.Since(started)))
+			if snap != nil {
+				st.pins.Add(1)
+			}
+		}
+		return err
+	}
+	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishPending: publish})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)
@@ -173,6 +200,7 @@ func TestReadTailLoad(t *testing.T) {
 		}
 		return float64(live) / float64(owners)
 	}
+	measuring.Store(true)
 	before := r.StageObservations()
 	rtBefore := readRuntimeHists()
 	stop := make(chan struct{})
@@ -227,6 +255,14 @@ func TestReadTailLoad(t *testing.T) {
 	slices.Sort(all)
 	q := func(p float64) time.Duration { return all[min(len(all)-1, int(p*float64(len(all))))] }
 	t.Logf("live parts per owner at end %.1f", livePerOwner())
+	for _, p := range []struct {
+		kind string
+		st   *publishStat
+	}{{"head-only", &heads}, {"sealed", &seals}} {
+		if n := p.st.n.Load(); n > 0 {
+			t.Logf("publish %-9s count %6d (%.1f/s) mean %7.1f us, reader pins %.1f/s", p.kind, n, float64(n)/float64(secs), float64(p.st.ns.Load())/float64(n)/1000, float64(p.st.pins.Load())/float64(secs))
+		}
+	}
 	t.Logf("writes %.0f points/s (target %d), renders %d, p50 %v p90 %v p99 %v max %v", float64(written)/float64(secs), rate, len(all), q(.5), q(.9), q(.99), all[len(all)-1])
 	for i := range after {
 		dc := after[i].Count - before[i].Count

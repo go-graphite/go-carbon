@@ -25,6 +25,10 @@ type OpenedRollupParts struct {
 	byIdentity map[archivePartIdentity]*openedRollupPart
 	directory  string
 	identities *PolicyCatalog
+	// legacyRows records whether the opening snapshot holds GCP3 rows in the
+	// LSM itself. Core never ingests rollup rows there, so reads skip the
+	// Pebble iterator unless an older store or fixture put rows in it.
+	legacyRows bool
 }
 type openedRollupPart struct {
 	descriptor v2part.Descriptor
@@ -79,7 +83,11 @@ func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 			identities = &PolicyCatalog{}
 		}
 	}
-	out := &OpenedRollupParts{parts: make(map[string]*openedRollupPart, len(inventory.bindings)), routes: map[uint16][]*openedRollupPart{}, byIdentity: map[archivePartIdentity]*openedRollupPart{}, directory: directory, identities: identities}
+	legacyRows, err := snapshotHasLegacyRows(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	out := &OpenedRollupParts{parts: make(map[string]*openedRollupPart, len(inventory.bindings)), routes: map[uint16][]*openedRollupPart{}, byIdentity: map[archivePartIdentity]*openedRollupPart{}, directory: directory, identities: identities, legacyRows: legacyRows}
 	if prior != nil {
 		out.blockCache = prior.blockCache
 		out.cacheBytes = prior.cacheBytes
@@ -334,11 +342,13 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 			_ = out.Close()
 		}
 	}()
-	legacy, err := snapshot.NewIter(nil)
-	if err != nil {
-		return nil, err
+	if s.legacyRows {
+		legacy, err := snapshot.NewIter(nil)
+		if err != nil {
+			return nil, err
+		}
+		out.iterators = append(out.iterators, legacy)
 	}
-	out.iterators = append(out.iterators, legacy)
 	// Routes already pruned the store. Do not enumerate descriptor bindings here.
 	seen := map[*openedRollupPart]bool{}
 	for _, p := range s.routesForSelection(selected) {
@@ -346,17 +356,64 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 			continue
 		}
 		seen[p] = true
-		r, e := p.open(ctx, s.directory, s.blockCache)
+		c, e := p.cursor(ctx, s.directory, s.blockCache)
 		if e != nil {
 			return nil, e
 		}
-		it, e := r.NewIterWithBlockPropertyFiltersAndContextEtc(ctx, nil, nil, nil, false, true, nil, sstable.TrivialReaderProvider{Reader: r})
-		if e != nil {
-			return nil, e
-		}
-		out.iterators = append(out.iterators, &tableCursor{it: it})
+		out.iterators = append(out.iterators, c)
 	}
 	return out, nil
+}
+
+// partCursor reads one part on its own, as VM searches each part
+// independently. Legacy LSM rows, when present, merge in with the
+// conflicting-duplicate check. A nil cursor means the part has no rows.
+func (s *OpenedRollupParts) partCursor(ctx context.Context, snapshot *pebble.Snapshot, id archivePartIdentity) (archiveCursor, error) {
+	var out archiveIter
+	out.selected = -1
+	if s.legacyRows {
+		legacy, err := snapshot.NewIter(nil)
+		if err != nil {
+			return nil, err
+		}
+		out.iterators = append(out.iterators, legacy)
+	}
+	if p := s.byIdentity[id]; p != nil {
+		c, err := p.cursor(ctx, s.directory, s.blockCache)
+		if err != nil {
+			return nil, errors.Join(err, out.Close())
+		}
+		if !s.legacyRows {
+			return c, nil
+		}
+		out.iterators = append(out.iterators, c)
+	}
+	if len(out.iterators) == 0 {
+		return nil, nil
+	}
+	return &out, nil
+}
+func (p *openedRollupPart) cursor(ctx context.Context, directory string, cache *pebble.Cache) (*tableCursor, error) {
+	r, err := p.open(ctx, directory, cache)
+	if err != nil {
+		return nil, err
+	}
+	it, err := r.NewIterWithBlockPropertyFiltersAndContextEtc(ctx, nil, nil, nil, false, true, nil, sstable.TrivialReaderProvider{Reader: r})
+	if err != nil {
+		return nil, err
+	}
+	return &tableCursor{it: it}, nil
+}
+
+// snapshotHasLegacyRows probes the LSM's own GCP3 namespace once per opening.
+func snapshotHasLegacyRows(snapshot *pebble.Snapshot) (bool, error) {
+	prefix := []byte{'G', 'C', 'P', 3}
+	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+	if err != nil {
+		return false, err
+	}
+	found := it.First()
+	return found, errors.Join(it.Error(), it.Close())
 }
 func (s *OpenedRollupParts) routesForSelection(selected map[archivePartIdentity]bool) []*openedRollupPart {
 	var out []*openedRollupPart
