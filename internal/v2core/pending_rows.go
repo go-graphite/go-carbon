@@ -85,35 +85,45 @@ func (p *pendingRows) append(batches []coreBatch) {
 	p.closePacket()
 	for i := range batches {
 		b := &batches[i]
-		if p.open {
-			pk := &p.packets[len(p.packets)-1]
-			if b.Clock != pk.Clock || b.Order <= p.lastOrder || b.Order-pk.FirstOrder > math.MaxUint32 ||
-				int(pk.Rows)+len(b.Points) > pendingPacketRows {
-				p.closePacket()
-			}
-		}
-		if !p.open {
-			p.packets = append(p.packets, pendingPacket{FirstOrder: b.Order, Clock: b.Clock, Base: b.Points[0].Time, FirstRow: uint32(len(p.rows))})
-			p.open = true
-		}
-		pk := &p.packets[len(p.packets)-1]
-		delta := uint32(b.Order - pk.FirstOrder)
+		p.startApplication(b.Order, b.Clock, b.Points[0].Time, len(b.Points))
 		for j := range b.Points {
-			r := &b.Points[j]
-			dt := r.Time - pk.Base
-			if b.ID > math.MaxUint32 || dt < math.MinInt32 || dt > math.MaxInt32 {
-				p.escapes = append(p.escapes, pendingEscape{Row: uint32(len(p.rows)), ID: b.ID, Time: r.Time})
-				p.rows = append(p.rows, pendingRow{Bits: r.Bits})
-			} else {
-				p.rows = append(p.rows, pendingRow{ID: uint32(b.ID), DT: int32(dt), Bits: r.Bits})
-			}
-			p.openDeltas = append(p.openDeltas, delta)
-			p.openSeqs = append(p.openSeqs, r.Seq)
+			p.addRow(b.ID, b.Points[j].Time, b.Points[j].Bits, b.Points[j].Seq)
 		}
-		pk.Rows += uint32(len(b.Points))
-		p.lastOrder = b.Order
 	}
 	p.closePacket()
+}
+
+// startApplication opens the header for one application of n points, closing
+// the open header on a clock change, a non-increasing order, an order delta
+// above 2^32 or a full packet. Producers call it and addRow per point instead
+// of building a coreBatch.
+func (p *pendingRows) startApplication(order uint64, clock, base int64, n int) {
+	if p.open {
+		pk := &p.packets[len(p.packets)-1]
+		if clock != pk.Clock || order <= p.lastOrder || order-pk.FirstOrder > math.MaxUint32 || int(pk.Rows)+n > pendingPacketRows {
+			p.closePacket()
+		}
+	}
+	if !p.open {
+		p.packets = append(p.packets, pendingPacket{FirstOrder: order, Clock: clock, Base: base, FirstRow: uint32(len(p.rows))})
+		p.open = true
+	}
+	p.lastOrder = order
+}
+
+// addRow appends one point of the application startApplication opened.
+func (p *pendingRows) addRow(id uint64, t int64, bits, seq uint64) {
+	pk := &p.packets[len(p.packets)-1]
+	dt := t - pk.Base
+	if id > math.MaxUint32 || dt < math.MinInt32 || dt > math.MaxInt32 {
+		p.escapes = append(p.escapes, pendingEscape{Row: uint32(len(p.rows)), ID: id, Time: t})
+		p.rows = append(p.rows, pendingRow{Bits: bits})
+	} else {
+		p.rows = append(p.rows, pendingRow{ID: uint32(id), DT: int32(dt), Bits: bits})
+	}
+	p.openDeltas = append(p.openDeltas, uint32(p.lastOrder-pk.FirstOrder))
+	p.openSeqs = append(p.openSeqs, seq)
+	pk.Rows++
 }
 
 // closePacket keeps side arrays only for packets that need them.
