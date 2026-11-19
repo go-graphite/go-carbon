@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -20,6 +21,9 @@ import (
 // rollupStateDigest lists every installed name's identity, committed scalars,
 // residency and closure calendar ends, in ID order.
 func rollupStateDigest(r *coreRollups) string {
+	if err := r.loadAllCheckpoint(); err != nil {
+		panic(err)
+	}
 	ids := make([]uint64, 0, len(r.metrics))
 	for id := range r.metrics {
 		ids = append(ids, id)
@@ -128,10 +132,11 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 		if o.rollups.fromCheckpoint != wantCheckpoint {
 			t.Fatalf("%s: fromCheckpoint=%v want %v", dir, o.rollups.fromCheckpoint, wantCheckpoint)
 		}
+		state := rollupStateDigest(o.rollups)
 		if len(o.rollups.calendar.slots) == 0 {
 			t.Fatalf("%s: no open coarse window on the closure calendar", dir)
 		}
-		return e, rollupStateDigest(o.rollups)
+		return e, state
 	}
 	damage := map[string]func(string){
 		"missing":     func(dir string) { _ = os.Remove(filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
@@ -207,7 +212,7 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 	delta, _ := strconv.Atoi(os.Getenv("CKPT_MEASURE_DELTA")) // seals newer than the kill arm's checkpoint
 	delta = max(delta, 1)
 	cfg := coreTestConfig()
-	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 4, 1, true, 1<<20
+	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 4, 1, true, max(1<<20, n)
 	policies := make([][]byte, n)
 	for i := range policies {
 		def := "10s:6h,5m:7d,1h:1y"
@@ -288,10 +293,14 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 		if want := arm.name != "scan"; e.owners[0].rollups.fromCheckpoint != want {
 			t.Fatalf("%s: fromCheckpoint=%v", arm.name, !want)
 		}
+		materialized := 0
+		for _, owner := range e.owners {
+			materialized += len(owner.rollups.metrics)
+		}
 		if err = e.Close(); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("MEASURE names=%d arm=%s open=%v", n, arm.name, open)
+		t.Logf("MEASURE names=%d arm=%s open=%v materialized=%d", n, arm.name, open, materialized)
 	}
 	t.Logf("MEASURE names=%d close(with checkpoint write)=%v checkpoint bytes=%d (%.1f B/name)", n, closeTime, size, float64(size)/float64(n))
 }
@@ -417,11 +426,13 @@ func TestRollupCheckpointWriteFailureIsLoud(t *testing.T) {
 	if e, err = Open(root, cfg, Hooks{}); err != nil {
 		t.Fatal(err)
 	}
+	// Exercise the at-seal failure even though a loaded checkpoint is recent.
+	e.owners[0].ckptAt = time.Time{}
 	checkpointFixture(t, e, policies, 11, 13)
 	if err = e.Close(); err == nil {
 		t.Fatal("Close hid a failed checkpoint write")
 	}
-	if got := e.owners[0].ckptFailures.Load(); got != 2 { // first seal after open, and close
+	if got := e.owners[0].ckptFailures.Load(); got != 2 { // forced at-seal write, and close
 		t.Fatalf("checkpoint failures=%d want 2", got)
 	}
 	if err = os.RemoveAll(blocker); err != nil {
@@ -503,5 +514,309 @@ func TestRollupCheckpointKillChild(t *testing.T) {
 		// Continue above every child order but inside the shortest archive's
 		// retention, so no history becomes droppable between the two arms.
 		checkpointVsScan(t, cfg, policies, root, 1000, statErr == nil)
+	}
+}
+
+// Loading a single ID must preserve its resident tie-breaks and frontier when
+// it next seals, without materializing unrelated names. The scan is the eager
+// oracle, with the same fixed clock and canonical part encoding.
+func TestLazyCheckpointFirstSealMatchesEager(t *testing.T) {
+	cfg, policies := checkpointTestSetup(t)
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 23)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lazyDir, eagerDir := copyTree(t, root), copyTree(t, root)
+	if err = os.Remove(filepath.Join(eagerDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(lazyDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(eagerDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r := a.owners[0].rollups
+	if !r.fromCheckpoint || r.checkpoint == nil || len(r.metrics) != 0 {
+		t.Fatalf("open materialized %d names", len(r.metrics))
+	}
+	// One ordinary write/seal, before the first multi-archive closure is due.
+	batch := Batch{ID: 2, Order: 24, Clock: 1794701400, Policy: policies[1], Points: []Row{{ID: 2, Time: 1794700950, Bits: math.Float64bits(123), Seq: 2402}}}
+	for _, engine := range []*Engine{a, b} {
+		if err = engine.AppendBatches(0, []Batch{batch}, 24, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(r.metrics) != 1 {
+		t.Fatalf("first seal materialized %d names, want 1", len(r.metrics))
+	}
+	if a.owners[0].rollups.metrics[2] == nil {
+		t.Fatal("first seal did not materialize its ID")
+	}
+	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
+		t.Fatal("lazy first seal differs from eager parts")
+	}
+	// The at-seal checkpoint may serialize remaining names. Verify all state too.
+	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatalf("lazy first seal differs from eager state:\n%s\n---\n%s", x, y)
+	}
+}
+
+func TestLazyCheckpointIdleClosureMatchesEager(t *testing.T) {
+	cfg, policies := checkpointTestSetup(t)
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 23)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lazyDir, eagerDir := copyTree(t, root), copyTree(t, root)
+	if err = os.Remove(filepath.Join(eagerDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(lazyDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(eagerDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if len(a.owners[0].rollups.metrics) != 0 {
+		t.Fatal("idle names loaded at open")
+	}
+	for _, engine := range []*Engine{a, b} {
+		engine.owners[0].rollups.now = func() time.Time { return time.Unix(1794787200, 0) }
+		if err = engine.AppendBatches(0, nil, 23, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
+		t.Fatal("lazy idle closure differs from eager parts")
+	}
+	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("lazy idle closure differs from eager state")
+	}
+}
+
+func TestLazyCheckpointRejectsColdDuplicateName(t *testing.T) {
+	cfg, policies := checkpointTestSetup(t)
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 3)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e, err = Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if len(e.owners[0].rollups.metrics) != 0 {
+		t.Fatal("names loaded at open")
+	}
+	err = e.AppendBatches(0, []Batch{{ID: 1000, Order: 4, Clock: 1794700800, Policy: policies[0], Points: []Row{{ID: 1000, Time: 1794700800, Bits: math.Float64bits(42), Seq: 4}}}}, 4, true)
+	if err == nil || !strings.Contains(err.Error(), "multiple producer IDs") {
+		t.Fatalf("cold duplicate accepted: %v", err)
+	}
+}
+
+// More than two blocks, with name order deliberately unrelated to ID order.
+// Alternating distant names exercises scratch reuse in both lookup indexes.
+func TestLazyCheckpointCompressedBlocks(t *testing.T) {
+	cfg, _ := checkpointTestSetup(t)
+	var policies [][]byte
+	for i := range 521 {
+		_, encoded := rollupTestPolicy(t, fmt.Sprintf("block.n%03d", (i*137)%521), "10s:6h,5m:7d,1h:1y", sealrollup.Average, 0)
+		policies = append(policies, encoded)
+	}
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 3)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	eagerDir := copyTree(t, root)
+	if err = os.Remove(filepath.Join(eagerDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(eagerDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r := a.owners[0].rollups
+	if len(r.metrics) != 0 {
+		t.Fatal("compressed checkpoint eagerly decoded records")
+	}
+	for step := range 521 {
+		i := (step * 263) % 521
+		name := []byte(fmt.Sprintf("block.n%03d", (i*137)%521))
+		if err = r.loadCheckpointName(name); err != nil {
+			t.Fatal(err)
+		}
+		if m := r.metrics[uint64(i+1)]; m == nil || !m.definitionEqual(policies[i]) {
+			t.Fatalf("wrong name after block reuse: ID %d", i+1)
+		}
+	}
+	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("compressed blocks differ from eager recovery")
+	}
+}
+
+// The callback has no persisted configuration identity. A restart with a new
+// TTL must re-resolve cold names before an idle seal can expire them.
+func TestLazyCheckpointChangedExpiryMatchesScan(t *testing.T) {
+	cfg, policies := checkpointTestSetup(t)
+	clock := time.Unix(1794700800+600, 0)
+	hooks := Hooks{Now: func() time.Time { return clock },
+		Expire:    func(RollupPolicy, RollupMetadata, time.Time) bool { return true },
+		ExpiryTTL: expiryWindow(365 * 24 * time.Hour),
+	}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 3)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scanDir := copyTree(t, root)
+	if err = os.Remove(filepath.Join(scanDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	hooks.ExpiryTTL = expiryWindow(time.Nanosecond)
+	a, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(scanDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if len(a.owners[0].rollups.metrics) != len(policies) {
+		t.Fatal("changed expiry did not resolve every cold name")
+	}
+	for _, engine := range []*Engine{a, b} {
+		if err = engine.AppendBatches(0, nil, 3, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("changed expiry differs from scan")
+	}
+	for _, meta := range a.owners[0].rollups.meta {
+		if !meta.Expired {
+			t.Fatal("new TTL did not expire idle name")
+		}
+	}
+}
+
+// Checkpoint indexes contain record ordinals, not producer IDs. Sparse wide
+// IDs and escaped names must retain their name/ID binding after a rewrite.
+func TestLazyCheckpointSparseIDs(t *testing.T) {
+	cfg, _ := checkpointTestSetup(t)
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	ids := []uint64{1007, 1<<40 + 13, 42, 99, 1<<32 + 7}
+	names := []string{"sparse.z", "sparse.\"quoted", "sparse.\nline", "sparse.\\slash", "sparse.a"}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := make([][]byte, len(ids))
+	var batches []Batch
+	for i, id := range ids {
+		_, policies[i] = rollupTestPolicy(t, names[i], "10s:6h,5m:7d,1h:1y", sealrollup.Average, 0)
+		batches = append(batches, Batch{ID: id, Order: 1, Clock: 1794700800, Policy: policies[i], Points: []Row{{ID: id, Time: 1794700800, Bits: math.Float64bits(float64(i) + .25), Seq: 1}}})
+	}
+	if err = e.AppendBatches(0, batches, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scanDir := copyTree(t, root)
+	if err = os.Remove(filepath.Join(scanDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(scanDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r := a.owners[0].rollups
+	if !r.fromCheckpoint || len(r.metrics) != 0 {
+		t.Fatal("checkpoint did not stay lazy")
+	}
+	// A seal with repeated, sparse/wide IDs restores each required run before
+	// planning, while leaving unrelated checkpoint names cold.
+	seal := []Batch{batches[1], batches[3], batches[1]}
+	for i := range seal {
+		seal[i].Order = uint64(i + 2)
+	}
+	for _, engine := range []*Engine{a, b} {
+		if err = engine.AppendBatches(0, seal, 4, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(r.metrics) != 2 || r.metrics[ids[1]] == nil || r.metrics[ids[3]] == nil {
+		t.Fatalf("required-ID seal materialized %d names, want exactly its two IDs", len(r.metrics))
+	}
+	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
+		t.Fatal("sparse-ID first seal differs from eager parts")
+	}
+	for i, id := range ids {
+		encodedName, err := json.Marshal(names[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := encodedName[1 : len(encodedName)-1]
+		if err = r.loadCheckpointName(name); err != nil {
+			t.Fatal(err)
+		}
+		if m := r.metrics[id]; m == nil || !m.definitionEqual(policies[i]) {
+			t.Fatalf("wrong name/ID binding for %d", id)
+		}
+	}
+	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("sparse-ID checkpoint differs from scan")
 	}
 }

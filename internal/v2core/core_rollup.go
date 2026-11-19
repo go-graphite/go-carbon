@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -184,6 +183,7 @@ type coreRollups struct {
 	// fromCheckpoint reports that open loaded this state from the owner's
 	// checkpoint instead of scanning parts.
 	fromCheckpoint bool
+	checkpoint     *mappedRollupCheckpoint
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -617,6 +617,11 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
+	if r.checkpoint != nil {
+		if err := r.loadCheckpointDue(r.clock().Unix()); err != nil {
+			return coreSealPlan{}, err
+		}
+	}
 	view := in.Pending
 	if view.Len() == 0 {
 		view = PendingBatches(in.Batches)
@@ -625,6 +630,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		return coreSealPlan{}, errors.New("too many seal batches")
 	}
 	stages, metrics := r.stages[:0], r.stageMetrics[:0]
+
 	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
 	}
@@ -639,6 +645,18 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			return view.idAt(int(k & sealKeyPosMask))
 		}
 		return k >> 32
+	}
+	// Restore the required mapped IDs before the ordinary planner. Fresh
+	// stores and fully materialized checkpoints skip this extra sweep.
+	if r.checkpoint != nil {
+		for i, k := range keys {
+			id := keyID(k)
+			if i == 0 || id != keyID(keys[i-1]) {
+				if err := r.loadCheckpointID(id, nil); err != nil {
+					return coreSealPlan{}, err
+				}
+			}
+		}
 	}
 	runs := 0
 	for i := range keys {
@@ -710,6 +728,13 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			// A fresh ID is not installed, and the sweep stages each ID once,
 			// so any holder of this fingerprint is another ID for the name.
+			if r.checkpoint != nil {
+				encodedName := m.definitionBytes()
+				encodedName = encodedName[len(`{"Name":"`) : len(encodedName)-len(m.policy.suffix)]
+				if err := r.loadCheckpointName(encodedName); err != nil {
+					return coreSealPlan{}, err
+				}
+			}
 			fp := m.fingerprint()
 			if _, ok := r.names.Get(fp); ok {
 				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
@@ -1121,13 +1146,12 @@ func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (
 			}
 		}
 	} else if dir != "" {
-		if buf, err := os.ReadFile(filepath.Join(dir, rollupCheckpointFile)); err == nil {
-			loaded, err := loadCheckpoint(db, snapshot, buf, r.identities)
-			if err == nil {
-				return loaded, nil
-			} else if !errors.Is(err, errCheckpoint) {
-				return nil, err
-			}
+		loaded, err := openMappedCheckpoint(db, snapshot, filepath.Join(dir, rollupCheckpointFile), r.identities)
+		if err == nil {
+			return loaded, nil
+		}
+		if !errors.Is(err, errCheckpoint) {
+			return nil, err
 		}
 	}
 	err := scanRollups(snapshot, r.identities, r.installRecovered)

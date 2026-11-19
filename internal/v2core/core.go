@@ -580,12 +580,21 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				}
 				r.now = hooks.Now
 				if r.expire != nil {
+					// ExpiryTTL can change by name across restart; the checkpoint
+					// cannot reuse its old deadlines without a configuration identity.
+					// Resolve every name under the current callback before intake.
 					r.setExpiryTTL(hooks.ExpiryTTL)
+					if err := r.loadAllCheckpoint(); err != nil {
+						return err
+					}
 				}
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
 				o.plan = r.planParts
 				o.rollups = r
+				if r.fromCheckpoint {
+					o.ckptAt = time.Now()
+				}
 			}
 			// Only uncommitted staging files remain after successful atomic ingestion.
 			files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
@@ -1564,9 +1573,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if r.now != nil {
 				now = r.now()
 			}
-			due := r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now))
-			// Establish new names metadata before their inactivity window can end.
-			due = due || r.pendingMetadataDue(&pend, o.lookup)
+			if err := r.loadCheckpointDue(now.Unix()); err != nil {
+				failure = err
+				o.failure.CompareAndSwap(nil, &coreFailure{err: err})
+			}
+			due := failure == nil && (r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now)) || r.pendingMetadataDue(&pend, o.lookup))
 			if due {
 				failure = flush()
 				if failure != nil {

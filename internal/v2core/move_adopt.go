@@ -274,6 +274,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 		}
 	}
+	if err := o.rollups.loadAllCheckpoint(); err != nil {
+		return err
+	}
 	next := newCoreRollups()
 	next.db = o.rollups.db
 	next.identities = o.rollups.identities
