@@ -245,12 +245,12 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 			for _, ref := range lane.ranked {
 				s, m := &stages[ref.stage], metrics[ref.stage]
 				batches := r.batches[s.batch : s.batch+s.batches : s.batch+s.batches]
-				view, ranges := m.slots.View, m.slots.Range
+				var view sealrollup.View
+				var ranges sealrollup.RangeView
 				var readErr error
 				if r.db != nil {
 					// Every installed sample is at/before Frontier.MaxTime; the
 					// correction bit already covers equal-time replacements.
-					view = nil
 					ranges = func(a int, start, end int64, dst []sealrollup.Sample) []sealrollup.Sample {
 						if readErr != nil {
 							return dst
@@ -262,6 +262,8 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 						readErr = err
 						return append(dst, result...)
 					}
+				} else {
+					view, ranges = m.slots.View, m.slots.Range
 				}
 				idleThrough := int64(0)
 				if s.batches == 0 && !s.next.Expired {

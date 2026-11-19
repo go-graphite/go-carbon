@@ -192,7 +192,7 @@ func (e *referenceCatalogEncoder) Close() {
 	}
 }
 
-// referenceCatalogEncoder freezes the pre-optimization PDC4 wire format.
+// The frozen compressed encoder remains the predictor-payload oracle.
 func TestCatalogEncoderByteOracle(t *testing.T) {
 	t.Parallel()
 	for _, independent := range []bool{false, true} {
@@ -231,7 +231,7 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 						if e != nil {
 							t.Fatal(e)
 						}
-						if !bytes.Equal(want, got) {
+						if !catalogPayloadEqual(t, want, got) {
 							t.Fatalf("record %d changed bytes", record)
 						}
 						ids := make([]uint64, len(fs))
@@ -244,7 +244,7 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 							}
 						}
 						gotIDs, e := bIDs.EncodeIDs(fs, ids)
-						if e != nil || !bytes.Equal(want, gotIDs) {
+						if e != nil || !catalogPayloadEqual(t, want, gotIDs) {
 							t.Fatalf("record %d IDs changed bytes: %v", record, e)
 						}
 						resolved := make([]CatalogFrame, len(fs))
@@ -256,7 +256,7 @@ func TestCatalogEncoderByteOracle(t *testing.T) {
 							resolved[i] = CatalogFrame{ID: id, Clock: f.Clock, Points: f.Points}
 						}
 						gotFrames, err := bFrames.EncodeFrames(resolved)
-						if err != nil || !bytes.Equal(want, gotFrames) {
+						if err != nil || !catalogPayloadEqual(t, want, gotFrames) {
 							t.Fatalf("record%d resolved changed bytes: %v", record, err)
 						}
 						kept = append(kept, gotFrames)
@@ -382,7 +382,8 @@ func TestCatalogEncodePointsByteOracle(t *testing.T) {
 							t.Fatal(err)
 						}
 						g, err := got.EncodePoints(ids, data, clock)
-						if err != nil || !bytes.Equal(w, g) || wa != ga {
+						wa.Encoded = ga.Encoded // framing/predictor accounting stays exact; compression changes length.
+						if err != nil || !catalogPayloadEqual(t, w, g) || wa != ga {
 							t.Fatalf("record %d: bytes/accounting differ: %v", record, err)
 						}
 						retained = append(retained, g)
@@ -445,5 +446,63 @@ func TestCatalogFramesRejectInvalid(t *testing.T) {
 	c.failed = errCatalog
 	if _, err := e.EncodeFrames([]CatalogFrame{{ID: id, Points: []points.Point{{}}}}); err != errCatalog {
 		t.Fatal("lost sticky catalog error", err)
+	}
+}
+
+// Only the compression flag, predecessor CRC, payload representation and final
+// CRC change. Predictor metadata, value bits, epoch and sequence stay exact.
+func catalogPayloadEqual(t *testing.T, compressed, plain []byte) bool {
+	t.Helper()
+	if len(compressed) < 41 || len(plain) < 41 || plain[4] != compressed[4]|catalogPlain {
+		return false
+	}
+	if !bytes.Equal(compressed[:4], plain[:4]) || !bytes.Equal(compressed[5:13], plain[5:13]) || !bytes.Equal(compressed[17:37], plain[17:37]) {
+		return false
+	}
+	z, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer z.Close()
+	raw, err := z.DecodeAll(compressed[37:len(compressed)-4], nil)
+	return err == nil && bytes.Equal(raw, plain[37:len(plain)-4])
+}
+
+func TestCatalogPlainAndLegacyExact(t *testing.T) {
+	c := newTestCatalog(t)
+	plain := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
+	legacy := referenceCatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
+	defer legacy.Close()
+	pd, ld := CatalogDecoder{Catalog: c}, CatalogDecoder{Catalog: c}
+	defer pd.Close()
+	defer ld.Close()
+	for _, fs := range [][]DictionaryFrame{v3Fixture()[:700], v3Fixture()[700:1400], v3Fixture()[1400:]} {
+		pb, err := plain.Encode(fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lb, err := legacy.Encode(fs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, x := range []struct {
+			d *CatalogDecoder
+			b []byte
+		}{{&pd, pb}, {&ld, lb}} {
+			got, err := x.d.Decode(x.b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exactV3(t, fs, got)
+		}
+		// A valid outer CRC cannot excuse a wrong declared raw length.
+		bad := bytes.Clone(pb)
+		binary.LittleEndian.PutUint32(bad[17:], binary.LittleEndian.Uint32(bad[17:])+1)
+		binary.LittleEndian.PutUint32(bad[len(bad)-4:], crc32.Checksum(bad[:len(bad)-4], predictorV3CRC))
+		d := CatalogDecoder{Catalog: c}
+		if _, err := d.Decode(bad); err == nil {
+			t.Fatal("accepted a false raw length")
+		}
+		d.Close()
 	}
 }

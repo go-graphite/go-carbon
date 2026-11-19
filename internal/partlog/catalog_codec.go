@@ -14,12 +14,16 @@ import (
 // Catalog records carry stable, delta-coded catalog IDs and independent predictor
 // epochs. A new encoder per segment permits trimming preceding segments.
 
+// catalogPlain flags predictor bytes stored directly, without a zstd pass.
+// The decoder retains support for compressed PDC4 records.
+const catalogPlain byte = 16
+
 var catalogCodecMagic = []byte{'P', 'D', 'C', 4}
 
 // CatalogEncoder belongs to one stream owner. Encode preserves arbitrary
-// int64 timestamps/clocks, exact IEEE bits, metadata and apply order. Close
-// releases compressor memory. Point slices are not retained; dictionary metadata
-// is persisted in the catalog; predictors are retained for the segment epoch. The input is never modified.
+// int64 timestamps/clocks, exact IEEE bits, metadata and apply order. Point slices
+// are not retained; dictionary metadata is persisted in the catalog; predictors
+// are retained for the segment epoch. The input is never modified.
 type CatalogEncoder struct {
 	Catalog      *NameCatalog
 	Independent  bool
@@ -28,7 +32,6 @@ type CatalogEncoder struct {
 	SparseClocks bool
 	// Accounting optionally collects exact pre-zstd field bytes.
 	Accounting                *PredictorV3Accounting
-	encoder                   *zstd.Encoder
 	pages                     []*[1024]predictorV3State
 	meta, raw, values, clocks []byte
 	clock                     int64
@@ -237,13 +240,6 @@ func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []point
 	e.meta, e.raw, e.values, e.clocks = meta, raw, values.b, clocks.b
 	account.Values = int64(len(values.b))
 	account.Framing += int64(len(raw) - len(meta) - len(values.b) - len(clocks.b))
-	var err error
-	if e.encoder == nil {
-		e.encoder, err = zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithWindowSize(1<<20), zstd.WithEncoderCRC(true))
-		if err != nil {
-			return nil, err
-		}
-	}
 	b := append([]byte(nil), catalogCodecMagic...)
 	if reset {
 		b = append(b, 1)
@@ -260,7 +256,8 @@ func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []point
 	b = binary.LittleEndian.AppendUint32(b, e.previousCRC)
 	b = binary.LittleEndian.AppendUint32(b, uint32(len(raw)))
 	b = append(b, e.Catalog.epoch[:]...)
-	b = e.encoder.EncodeAll(raw, b)
+	b[4] |= catalogPlain
+	b = append(b, raw...)
 	e.previousCRC = crc32.Checksum(b, predictorV3CRC)
 	e.sequence++
 	account.Headers = 41 + 32 // catalog-backed PDC4 header/checksum plus outer journal header.
@@ -271,12 +268,8 @@ func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []point
 	return binary.LittleEndian.AppendUint32(b, e.previousCRC), nil
 }
 
-func (e *CatalogEncoder) Close() {
-	if e.encoder != nil {
-		_ = e.encoder.Close()
-		e.encoder = nil
-	}
-}
+// Close is retained for codec callers; the plain encoder owns no compressor.
+func (e *CatalogEncoder) Close() {}
 
 // CatalogDecoder accepts only catalog-backed PDC4; dispatch by discriminator at the journal
 // boundary. Replay must begin with an epoch record. A failed Encode or Decode
@@ -293,7 +286,7 @@ type CatalogDecoder struct {
 }
 
 func (d *CatalogDecoder) Decode(b []byte) ([]DictionaryFrame, error) {
-	if d.Catalog == nil || len(b) < 41 || len(b) > predictorV3MaxRaw+1<<20 || !IsCatalogRecord(b) || b[4]&^byte(1|2|8) != 0 {
+	if d.Catalog == nil || len(b) < 41 || len(b) > predictorV3MaxRaw+1<<20 || !IsCatalogRecord(b) || b[4]&^byte(1|2|8|catalogPlain) != 0 {
 		return nil, errPredictorV3
 	}
 	if !bytes.Equal(b[21:37], d.Catalog.epoch[:]) {
@@ -311,19 +304,22 @@ func (d *CatalogDecoder) Decode(b []byte) ([]DictionaryFrame, error) {
 	} else if d.entries == nil || sequence != d.sequence || previousCRC != d.previousCRC {
 		return nil, errPredictorV3
 	}
-	var err error
-	if d.decoder == nil {
-		d.decoder, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(predictorV3MaxRaw), zstd.WithDecoderMaxWindow(1<<20), zstd.WithDecodeAllCapLimit(true))
+	raw := b[37 : len(b)-4]
+	if b[4]&catalogPlain == 0 {
+		var err error
+		if d.decoder == nil {
+			d.decoder, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(predictorV3MaxRaw), zstd.WithDecoderMaxWindow(1<<20), zstd.WithDecodeAllCapLimit(true))
+			if err != nil {
+				return nil, err
+			}
+		}
+		if cap(d.raw) < n {
+			d.raw = make([]byte, 0, n)
+		}
+		raw, err = d.decoder.DecodeAll(raw, d.raw[:0])
 		if err != nil {
 			return nil, err
 		}
-	}
-	if cap(d.raw) < n {
-		d.raw = make([]byte, 0, n)
-	}
-	raw, err := d.decoder.DecodeAll(b[37:len(b)-4], d.raw[:0])
-	if err != nil {
-		return nil, err
 	}
 	if len(raw) != n {
 		return nil, errPredictorV3

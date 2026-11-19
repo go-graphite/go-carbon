@@ -72,8 +72,9 @@ type RollupMetadata struct {
 // so such a name costs one 24-B object.
 type rollupMetric struct {
 	*PolicyIdentity
-	slots  *sealrollup.Slots
-	vshard uint16
+	slots    *sealrollup.Slots
+	vshard   uint16
+	terminal uint32 // immutable archive index, in the existing 24-byte object padding
 }
 
 // residency returns m's slots, allocating them on the first install.
@@ -87,7 +88,7 @@ func (m *rollupMetric) residency() *sealrollup.Slots {
 // keepRecent is Slots.KeepRecent. A single archive keeps nothing, so its
 // slots drop to nil.
 func (m *rollupMetric) keepRecent(maxTime int64) {
-	if len(m.schema().Archives) == 1 {
+	if m.terminal == 0 {
 		m.slots = nil
 		return
 	}
@@ -97,7 +98,7 @@ func (m *rollupMetric) keepRecent(maxTime int64) {
 // installRecent is Slots.InstallRecent, which never keeps the terminal
 // archive (a single-archive name's only one).
 func (m *rollupMetric) installRecent(d sealrollup.Delta) {
-	if d.Archive == len(m.schema().Archives)-1 {
+	if d.Archive == int(m.terminal) {
 		return
 	}
 	m.residency().InstallRecent(d)
@@ -543,7 +544,7 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 }
 
 func newRollupMetric(h *PolicyIdentity) *rollupMetric {
-	return &rollupMetric{PolicyIdentity: h, vshard: h.vshard}
+	return &rollupMetric{PolicyIdentity: h, vshard: h.vshard, terminal: uint32(len(h.schema().Archives) - 1)}
 }
 
 // freshMetadata is the committed state of a name no seal has installed yet.
