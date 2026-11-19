@@ -141,7 +141,7 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 	}
 	snap := db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
-	parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, nil)
+	parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, testBlockCache(t), 4<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +158,9 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			inv.registry = inventory.registry
 			nextSnap := db.NewSnapshot()
-			next, err := OpenRollupParts(context.Background(), nextSnap, inv, parts, nil)
+			next, err := OpenRollupParts(context.Background(), nextSnap, inv, nil, testBlockCache(t), 4<<20)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -213,7 +214,17 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 	if err != context.Canceled {
 		t.Fatalf("cancellation: %v", err)
 	}
-	if p.refs.Load() != 1 {
-		t.Fatalf("references leaked: %d", p.refs.Load())
+	parts.registry.mu.Lock()
+	refs := p.refs
+	parts.registry.mu.Unlock()
+	if refs != 1 {
+		t.Fatalf("references leaked: %d", refs)
 	}
+}
+
+// testBlockCache is a per-test block cache; opened parts take their own references.
+func testBlockCache(t testing.TB) *pebble.Cache {
+	c := pebble.NewCacheWithShards(4<<20, 1)
+	t.Cleanup(c.Unref)
+	return c
 }
