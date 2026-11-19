@@ -292,8 +292,9 @@ func checkpointVsScan(t *testing.T, cfg Config, policies [][]byte, root string, 
 	t.Helper()
 	ckptDir, scanDir := copyTree(t, root), copyTree(t, root)
 	_ = os.Remove(filepath.Join(scanDir, "owner-000", rollupCheckpointFile))
+	// One fixed clock for both arms: idle closure and expiry read it.
 	open := func(dir string) *Engine {
-		e, err := Open(dir, cfg, Hooks{})
+		e, err := Open(dir, cfg, Hooks{Now: func() time.Time { return time.Unix(1794800000, 0) }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -422,6 +423,8 @@ func TestRollupCheckpointKillChild(t *testing.T) {
 		}
 		_, statErr := os.Stat(filepath.Join(root, "owner-000", rollupCheckpointFile))
 		t.Logf("kill %d after %v: last printed seal %d, checkpoint present=%v", kill, after, last, statErr == nil)
-		checkpointVsScan(t, cfg, policies, root, 100000, statErr == nil)
+		// Continue above every child order but inside the shortest archive's
+		// retention, so no history becomes droppable between the two arms.
+		checkpointVsScan(t, cfg, policies, root, 1000, statErr == nil)
 	}
 }
