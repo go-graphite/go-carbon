@@ -34,7 +34,7 @@ func BenchmarkReceiverToOwner(b *testing.B) {
 				batchNames[j] = names[k%nameCount]
 				batchData[j] = points.Point{Timestamp: int64(1_700_000_000 + k/nameCount), Value: float64(k)}
 			}
-			if err := o.Append(batchNames, batchData, nil, int64(1_700_000_000+(first+off)/nameCount)); err != nil {
+			if err := o.Append(batchNames, nil, batchData, nil, int64(1_700_000_000+(first+off)/nameCount)); err != nil {
 				return err
 			}
 		}

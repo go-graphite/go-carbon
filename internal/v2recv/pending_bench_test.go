@@ -15,9 +15,11 @@ import (
 
 type pendingBenchOwner struct{}
 
-func (pendingBenchOwner) Append([]string, []points.Point, []uint64, int64) error { return nil }
-func (pendingBenchOwner) Seal() error                                            { return nil }
-func (pendingBenchOwner) Drain() error                                           { return nil }
+func (pendingBenchOwner) Append([]string, []uint64, []points.Point, []uint64, int64) error {
+	return nil
+}
+func (pendingBenchOwner) Seal() error  { return nil }
+func (pendingBenchOwner) Drain() error { return nil }
 func BenchmarkReceiverPendingBatches(b *testing.B) {
 	for _, names := range []int{16, 1024} {
 		b.Run(fmt.Sprintf("names%d", names), func(b *testing.B) {
