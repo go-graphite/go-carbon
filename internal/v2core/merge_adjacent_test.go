@@ -2,41 +2,55 @@ package v2core
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// Merges take a window of sequence-adjacent parts that meets the size ratio,
-// and folding small parts to quiescence keeps every record.
+// Merges take a window of sequence-adjacent parts that meets the span ratio. A
+// young merged part does not re-absorb the next few seals, although its bytes
+// shrank to one seal's: it waits until those seals fold among themselves.
 func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	e := mergeFixtureIdle(t, t.TempDir(), nil)
 	defer e.close()
 	o := e.owners[0]
-	for n := uint64(1); n <= 9; n++ {
+	drain := func(from, to uint64, merges, live int) {
+		t.Helper()
+		for n := from; n <= to; n++ {
+			mergeAppend(t, e, n)
+		}
+		s := o.db.NewSnapshot()
+		want := mergeRead(t, s)
+		s.Close()
+		if got := mergeDrain(t, o); got != merges || mergeCount(o) != live {
+			t.Fatalf("after seals %d..%d: %d merges and %d live parts, want %d and %d", from, to, got, mergeCount(o), merges, live)
+		}
+		s = o.db.NewSnapshot()
+		defer s.Close()
+		if got := mergeRead(t, s); !reflect.DeepEqual(got, want) {
+			t.Fatalf("records changed by adjacent merges:\n got %v\nwant %v", got, want)
+		}
+	}
+	for n := uint64(1); n <= smallMergeRatio; n++ {
 		mergeAppend(t, e, n)
 	}
 	s := o.db.NewSnapshot()
 	inputs, err := o.selectMerge(s)
 	s.Close()
-	if err != nil || len(inputs) < 2 {
+	if err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("inputs=%d %v", len(inputs), err)
 	}
-	var total, largest uint64
-	selected := map[v2part.Digest]bool{}
 	for i, d := range inputs {
-		total += d.Bytes
-		largest = max(largest, d.Bytes)
-		selected[d.SHA256] = true
 		if i > 0 && d.Source.MinOrder <= inputs[i-1].Source.MaxOrder {
 			t.Fatalf("inputs out of sequence order at %d", i)
 		}
 	}
-	if len(inputs) != smallMergeRatio || 2*total < smallMergeRatio*largest {
-		t.Fatalf("window of %d parts, total %d, largest %d", len(inputs), total, largest)
-	}
-	lo, hi := inputs[0].Source.MinOrder, inputs[len(inputs)-1].Source.MaxOrder
+	drain(1, 0, 1, 1)
+	drain(smallMergeRatio+1, 2*smallMergeRatio-1, 0, smallMergeRatio)
+	drain(2*smallMergeRatio, 2*smallMergeRatio, 1, 2)
+	var ranges [][2]uint64
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -45,34 +59,10 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !selected[d.SHA256] && d.Source.MaxOrder >= lo && d.Source.MinOrder <= hi {
-			t.Fatalf("live part [%d,%d] interleaves the merge window [%d,%d]", d.Source.MinOrder, d.Source.MaxOrder, lo, hi)
-		}
+		ranges = append(ranges, [2]uint64{d.Source.MinOrder, d.Source.MaxOrder})
 	}
-
-	for n := uint64(10); n <= 16; n++ {
-		mergeAppend(t, e, n)
-	}
-	s = o.db.NewSnapshot()
-	want := mergeRead(t, s)
-	s.Close()
-	merges := 0
-	for {
-		changed, err := o.mergeSealedParts(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !changed {
-			break
-		}
-		merges++
-	}
-	if live := e.PartGCStats()[0].LiveParts; live != 1 || merges != 5 {
-		t.Fatalf("16 parts folded into %d live parts with %d merges, want 1 and 5", live, merges)
-	}
-	s = o.db.NewSnapshot()
-	defer s.Close()
-	if got := mergeRead(t, s); !reflect.DeepEqual(got, want) {
-		t.Fatalf("records changed by adjacent merges:\n got %v\nwant %v", got, want)
+	slices.SortFunc(ranges, func(a, b [2]uint64) int { return int(a[0]) - int(b[0]) })
+	if want := [][2]uint64{{1, smallMergeRatio}, {smallMergeRatio + 1, 2 * smallMergeRatio}}; !reflect.DeepEqual(ranges, want) {
+		t.Fatalf("live order ranges %v, want %v", ranges, want)
 	}
 }

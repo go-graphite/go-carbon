@@ -62,7 +62,7 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	o := e.owners[0]
 	p, enc := rollupTestPolicy(t, "merge.prune", "1s:120,10s:1h", sealrollup.Last, .5)
 	digest, _ := sealrollup.PolicyDigest(p.Config)
-	for n := byte(1); n <= 16; n++ {
+	for n := byte(1); n <= smallMergeRatio; n++ {
 		m := RollupMetadata{Version: 1, ID: 1, Policy: enc, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 2000, Policy: digest}, LastUpdate: 2000e9, Revision: uint64(n)}
 		rs := []sealrollup.Record{{Delta: sealrollup.Delta{Archive: 0, Slot: 40, Order: uint64(n), Sample: sealrollup.Sample{Time: 1000, Bits: math.Float64bits(1)}}}, {Delta: sealrollup.Delta{Archive: 0, Slot: 41, Order: uint64(n), Sample: sealrollup.Sample{Time: 1961, Bits: math.Float64bits(2)}}}}
 		installMergeRecords(t, o, n, []RollupMetadata{m}, [][]sealrollup.Record{rs})
@@ -77,8 +77,8 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	f := *o.frontier.Load()
 	f.ArchiveClock = 2000
 	o.frontier.Store(&f)
-	// Sixteen equal parts fold in four 4-way merges and one final merge.
-	if mergeDrain(t, o) != 5 || mergeCount(o) != 1 {
+	// Four equal parts fold in one merge.
+	if mergeDrain(t, o) != 1 || mergeCount(o) != 1 {
 		t.Fatal("did not merge")
 	}
 	s := o.db.NewSnapshot()
