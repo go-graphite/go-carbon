@@ -965,7 +965,36 @@ func (e *rollupScanEntry) addRecord(record sealrollup.Record) error {
 }
 
 // foldRollupKeys folds every rollup row of iter into series.
-func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry) error {
+func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, reducerOnly bool) error {
+	// A writable reducer never uses terminal-archive samples. Resolve the
+	// envelopes first so recovery can validate those runs without retaining
+	// and sorting their entire history in per-name slot maps.
+	if reducerOnly {
+		for iter.First(); iter.Valid(); iter.Next() {
+			k, err := partsformat.Decode(iter.Key())
+			if err != nil {
+				return err
+			}
+			if k.Archive != rollupMetadataArchive {
+				continue
+			}
+			e := series[k.Metric]
+			if e == nil {
+				e = &rollupScanEntry{group: k.Group}
+				series[k.Metric] = e
+			}
+			if k.Ordinal != 0 || e.group != k.Group {
+				return errors.New("unexpected rollup partition")
+			}
+			if err := e.addMetadata(identities, k, iter.Value()); err != nil {
+				return err
+			}
+		}
+		if err := iter.Error(); err != nil {
+			return err
+		}
+	}
+	var scratch []sealrollup.Record
 	for iter.First(); iter.Valid(); iter.Next() {
 		k, err := partsformat.Decode(iter.Key())
 		if err != nil {
@@ -980,27 +1009,28 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {
-			if err = e.addMetadata(identities, k, iter.Value()); err != nil {
-				return err
+			if !reducerOnly {
+				err = e.addMetadata(identities, k, iter.Value())
 			}
-			continue
-		}
-		value := iter.Value()
-		if len(value) == 26 && value[0] == 1 {
-			record, err := sealrollup.DecodeRecord(int(k.Archive), k.BlockStart, value)
 			if err != nil {
 				return err
 			}
-			if err = e.addRecord(record); err != nil {
-				return err
-			}
 			continue
 		}
-		decoded, err := partsformat.DecodeSlots(k.Archive, k.BlockStart, value)
+		terminal := reducerOnly && e.identity != nil && int(k.Archive) == len(e.identity.schema().Archives)-1
+		value := iter.Value()
+		decoded, err := partsformat.DecodeSlotsInto(scratch, k.Archive, k.BlockStart, value)
 		if err != nil {
 			return err
 		}
+		scratch = decoded[:0]
 		for _, record := range decoded {
+			if terminal {
+				if record.Slot >= e.identity.schema().Archives[k.Archive].Count || record.Order > e.meta.Frontier.Order {
+					return errors.New("invalid rollup slot/frontier")
+				}
+				continue
+			}
 			if err = e.addRecord(record); err != nil {
 				return err
 			}
@@ -1075,7 +1105,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 		return err
 	}
 	defer iter.Close()
-	if err = foldRollupKeys(iter, identities, series); err != nil {
+	if err = foldRollupKeys(iter, identities, series, false); err != nil {
 		return err
 	}
 	for name, e := range series {
