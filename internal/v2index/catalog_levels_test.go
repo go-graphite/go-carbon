@@ -68,10 +68,11 @@ func checkLevels(t *testing.T, s *Snapshot) {
 	total := 0
 	for i, l := range s.levels {
 		level := levelNames(l)
-		if len(level) == 0 || len(level) != l.n || len(l.blocks) != (l.n+blockNames-1)/blockNames || !slices.IsSorted(level) || len(slices.Compact(slices.Clone(level))) != len(level) {
+		// The base and level 1 (inputs of the background merge) may be empty.
+		if (len(level) == 0 && i > 1) || len(level) != l.live() || len(l.blocks) != (l.n+blockNames-1)/blockNames || !slices.IsSorted(level) || len(slices.Compact(slices.Clone(level))) != len(level) {
 			t.Fatalf("level %d is empty, unsorted or duplicated", i)
 		}
-		if i > 0 && len(level)*levelFanout >= s.levels[i-1].n {
+		if i > 2 && l.n*levelFanout >= s.levels[i-1].n {
 			t.Fatalf("level %d (%d names) not compacted into %d", i, len(level), s.levels[i-1].n)
 		}
 		total += len(level)
