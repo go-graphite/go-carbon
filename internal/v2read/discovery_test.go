@@ -65,6 +65,25 @@ func TestDiscoveryParallelOwners(t *testing.T) {
 		})
 	}
 	wg.Wait()
+	for i := range r.caches {
+		r.caches[i].mu.Lock()
+		retained := r.caches[i].index != nil
+		r.caches[i].mu.Unlock()
+		if retained {
+			t.Fatalf("owner %d retains an all-name directory after enumeration", i)
+		}
+	}
+	// Releasing the discovery directory preserves the registered names and
+	// the sealed values consumed by subsequent request-local readers.
+	values, err := fetchAll(r, want, 989, 992, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range want {
+		if !slices.Contains(values[name].bits, uint64(i+1)) {
+			t.Fatalf("name %s lost its exact sealed value after enumeration", name)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := r.NamesWithMasks(ctx); err != context.Canceled {
