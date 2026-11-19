@@ -137,12 +137,20 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 }
 
 // PublishWithInventory transfers the core's coherent immutable binding set.
+// A nil snapshot is a head-only publication: number and inventory equal the
+// current generation's, whose sealed view and Pebble snapshot it shares.
 func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pending []v2core.Batch, number uint64, inventory *v2core.RollupInventory) error {
-	if r.closed.Load() {
+	closeSnapshot := func() error {
+		if snapshot == nil {
+			return nil
+		}
 		return snapshot.Close()
 	}
+	if r.closed.Load() {
+		return closeSnapshot()
+	}
 	if owner < 0 || owner >= len(r.owners) {
-		_ = snapshot.Close()
+		_ = closeSnapshot()
 		return errors.New("invalid publication owner")
 	}
 	g := &generation{pending: pending}
@@ -155,7 +163,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 			g.sealed = old.sealed
 			g.sealed.refs.Add(1)
 		}
-		if g.sealed == nil && inventory != nil {
+		if g.sealed == nil && inventory != nil && snapshot != nil {
 			parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, old.sealed.parts, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
 			if err != nil {
 				old.release()
@@ -170,8 +178,14 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	if g.index == nil {
 		g.index = nextPendingIndex(nil, nil, pending)
 	}
+	if g.sealed == nil && snapshot == nil {
+		if r.closed.Load() {
+			return nil
+		}
+		return errors.New("head-only publication without a pinned sealed generation")
+	}
 	if g.sealed != nil && g.sealed.snapshot != snapshot {
-		_ = snapshot.Close()
+		_ = closeSnapshot()
 	} else if g.sealed == nil {
 		parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, nil, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
 		if err != nil {
