@@ -144,18 +144,18 @@ func TestRollupHistoryDifferential(t *testing.T) {
 				// time. TestClosedHistoryLogicalDifferential proves the resolved values
 				// equal the original eager golden at every epoch and restart cut.
 				want := map[string]string{
-					"1|1s:1h,1m:1d,1h:1y":         "27eff56f749b398edee4a0c95010870c10f2343a2f41c9ecf78e612a8854342e",
-					"1|10s:6h,5m:7d,1h:1y,1d:10y": "456a99886c398e2609c32d9b069790e778e19e4dd10bb6eed2ca4e51dfbc176d",
-					"2|1s:1h,1m:1d,1h:1y":         "9791e5be5c30b9533dfd4781cb425d414aac2e02e7bbb139ee12613e03150f1d",
-					"2|10s:6h,5m:7d,1h:1y,1d:10y": "88cf4d606d332e820afc8f9c1acea432b3233514ebbc86a26fc6306dd3b30b0b",
-					"3|1s:1h,1m:1d,1h:1y":         "846fffd8bbd5b082f9fbb91891f46288afa9d50e1da3c4b53f463448eaf12b27",
-					"3|10s:6h,5m:7d,1h:1y,1d:10y": "a92bd0f9b43bb33ad1ab128c792466f722189c745c0406d30998d1770ba550b2",
-					"4|1s:1h,1m:1d,1h:1y":         "50088ea3d8cde560c2debd1f73394988224236ab887b5a6f8eeb59ec1d5395ad",
-					"4|10s:6h,5m:7d,1h:1y,1d:10y": "9ae1834a7c455cbd4a174509f78c59f5b1b3581f5b4eae600247c014f788e219",
-					"5|1s:1h,1m:1d,1h:1y":         "c7418f9fb9c73b374c6c1966e5145f27a6b225ffcd04d4ad20b3dafeabd316ad",
-					"5|10s:6h,5m:7d,1h:1y,1d:10y": "64a804304717a1d682e5fc072f21a36ffa7b415406e5dc4765b53f471226018e",
-					"6|1s:1h,1m:1d,1h:1y":         "bfd00d5e469f75f00719857c7bc06dc0d0fef1a01a4dc8a3dcfba7f28ee1358c",
-					"6|10s:6h,5m:7d,1h:1y,1d:10y": "1fa7741bce3b1a640c99ccb8e60f7efaf4c6b0f5e8f4da7befd20f27d47896ac"}[fmt.Sprintf("%d|%s", method, schema)]
+					"1|1s:1h,1m:1d,1h:1y":         "01accbf6a1d9cb2abc53794bc83d80b060831ca12836bc08f57800213fe65275",
+					"1|10s:6h,5m:7d,1h:1y,1d:10y": "6bbac1a8f952b51b7f6851c492139967d9c60e3544a6393f3735d5ae31f33bb5",
+					"2|1s:1h,1m:1d,1h:1y":         "e486b8fec32a0168f4a2ec10e425246d4b672120f53d5e183d567bc171475e06",
+					"2|10s:6h,5m:7d,1h:1y,1d:10y": "3b890b4fc755759d2b64fb7b4685911f079c0cfeaa97377079359701e8a8d710",
+					"3|1s:1h,1m:1d,1h:1y":         "622017fa321e4aa780af44af056e02e75c07a20aab46740398c3d7f447aa0bf4",
+					"3|10s:6h,5m:7d,1h:1y,1d:10y": "44d287d32cc86f12a47ce7b31c3b0845d00b8a1efdb603d1eb7c8eb242710753",
+					"4|1s:1h,1m:1d,1h:1y":         "05ce7a5925cba87b97235b710ba6aa584a524f9800dedf22fc4aa9e248758642",
+					"4|10s:6h,5m:7d,1h:1y,1d:10y": "380215e96af296cdd1fea6ebdb052757440a38ac3ab9cc45bcd756d4b44506c8",
+					"5|1s:1h,1m:1d,1h:1y":         "18085a1390c0735facf28f6699da1fe6616ade5c00a723feb2c55914b19dc9a9",
+					"5|10s:6h,5m:7d,1h:1y,1d:10y": "3a44390467c449d3e959f8aaef15b8c86840adf9dd91ee09cf5aa2c93b409b3c",
+					"6|1s:1h,1m:1d,1h:1y":         "d6f8e3de2df05f04243069956dec0fe5ef37b5134bae46516a9cacf18d8308aa",
+					"6|10s:6h,5m:7d,1h:1y,1d:10y": "f43b0781e16de59ec1d8e5c894b21306268eae84857ef7e63e90d9847b32af52"}[fmt.Sprintf("%d|%s", method, schema)]
 				if digest != want {
 					t.Fatalf("stored/read bit differential got %s want %s", digest, want)
 				}

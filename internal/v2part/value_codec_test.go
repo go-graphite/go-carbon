@@ -61,7 +61,7 @@ func TestDenseValueCodecFloatEdges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if v[4] != denseTagged {
+		if v[4]&^denseAligned != denseTagged {
 			t.Fatalf("%s: mode %#x", tc.name, v[4])
 		}
 		got, err := DecodeSlots(0, 1, v)
@@ -91,6 +91,8 @@ func TestDenseValueCodecLegacyRuns(t *testing.T) {
 		{0, []uint64{0x7ff8000000000001, math.Float64bits(math.Copysign(0, -1)), math.Float64bits(0.1)}},
 	} {
 		rs := valueRun(tc.bits...)
+		// Retain the original timestamp column in these pre-alignment fixtures.
+		rs[1].Sample.Time++
 		v, err := EncodeSlots(rs)
 		if err != nil {
 			t.Fatal(err)

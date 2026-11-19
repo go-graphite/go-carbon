@@ -23,6 +23,40 @@ const MaxDenseSlots = 4096
 
 var denseMagic = []byte{'G', 'C', 'D', 1}
 
+// Run mode bits, independent flags; a reader rejects any other bit. An aligned
+// run stores slots only: every timestamp is ts0 + (slot - slot0) * step, so the
+// header carries ts0 and step instead of a timestamp column. Ring wrap,
+// unaligned and single-slot runs keep the delta-of-delta timestamp column.
+// denseModeOrderDoD codes the order column as delta-of-delta (see dodSmaller).
+const (
+	denseInteger      = 1 << 0
+	denseAligned      = 1 << 1
+	denseModeOrderDoD = 1 << 2
+	denseModes        = denseInteger | denseAligned | denseModeOrderDoD | denseTagged
+)
+
+// alignedStep returns the run's slot step in seconds, or 0 if any timestamp
+// is not ts0 + (slot - slot0) * step. Callers have validated strictly
+// increasing slots and timestamps in (0, MaxUint32].
+func alignedStep(records []sealrollup.Record) int64 {
+	if len(records) < 2 {
+		return 0
+	}
+	t0, s0 := records[0].Sample.Time, records[0].Slot
+	dt, ds := records[1].Sample.Time-t0, records[1].Slot-s0
+	if dt <= 0 || dt%ds != 0 {
+		return 0
+	}
+	step := dt / ds
+	for _, r := range records[2:] {
+		ds := r.Slot - s0
+		if ds > (math.MaxUint32-t0)/step || r.Sample.Time != t0+ds*step {
+			return 0
+		}
+	}
+	return step
+}
+
 // headerMagic marks a dense run that carries its metric's envelope, like one
 // block header per series per part: magic | uvarint(len) | envelope | run. The
 // envelope sorts after every run of its metric, so a name's last run holds it
@@ -64,11 +98,9 @@ func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
 	return appendSlots(nil, records)
 }
 
-// Mode bit 0x04 codes the order column as zigzag delta-of-delta (first order,
-// first delta, then delta changes) in place of the XOR chain: regular arrival
-// orders cost one byte per slot. Decoding is exact. Unknown mode bits are
-// rejected; 0x02 is reserved for the slot-time code.
-const denseModeOrderDoD = 4
+// Mode bit denseModeOrderDoD codes the order column as zigzag delta-of-delta
+// (first order, first delta, then delta changes) in place of the XOR chain:
+// regular arrival orders cost one byte per slot. Decoding is exact.
 
 func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
 
@@ -109,6 +141,10 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]b
 	}
 	out = append(out, denseMagic...)
 	mode := byte(denseTagged)
+	step := alignedStep(records)
+	if step != 0 {
+		mode |= denseAligned
+	}
 	dod := deltas && dodSmaller(records)
 	if dod {
 		mode |= denseModeOrderDoD
@@ -120,11 +156,16 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]b
 		out = binary.AppendUvarint(out, uint64(r.Slot-slot))
 		slot = r.Slot
 	}
-	for _, r := range records {
-		delta := r.Sample.Time - ts
-		out = binary.AppendVarint(out, delta-dt)
-		ts = r.Sample.Time
-		dt = delta
+	if step != 0 {
+		out = binary.AppendUvarint(out, uint64(records[0].Sample.Time))
+		out = binary.AppendUvarint(out, uint64(step))
+	} else {
+		for _, r := range records {
+			delta := r.Sample.Time - ts
+			out = binary.AppendVarint(out, delta-dt)
+			ts = r.Sample.Time
+			dt = delta
+		}
 	}
 	var prev uint64
 	var pd int64
@@ -158,7 +199,6 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]b
 // float64 bits are checked at encode, so NaN payloads, -0 and infinities always
 // take the byte planes.
 const (
-	denseInteger  = 0x01 // untagged legacy integer runs
 	denseTagged   = 0x80
 	valuePlanes   = 0 << 5
 	valueDelta1   = 1 << 5
@@ -261,9 +301,10 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	// Mode bits are independent flags; the value column takes one of
 	// untagged planes, untagged integers or a tag.
 	mode := data[4]
-	if mode&^(denseInteger|denseModeOrderDoD|denseTagged) != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged {
+	if mode&^denseModes != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged {
 		return nil, bad
 	}
+	aligned := mode&denseAligned != 0
 	p := data[5:]
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(p)
@@ -298,25 +339,40 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	if rs[0].Slot != firstSlot {
 		return nil, bad
 	}
-	var ts, dt int64
-	for i := range rs {
-		v, n := binary.Varint(p)
-		if n <= 0 {
+	if aligned {
+		t0, ok0 := take()
+		step, ok1 := take()
+		if !ok0 || !ok1 || len(rs) < 2 || t0 == 0 || t0 > math.MaxUint32 || step == 0 || step > math.MaxUint32 {
 			return nil, bad
 		}
-		p = p[n:]
-		if (v > 0 && dt > math.MaxInt64-v) || (v < 0 && dt < math.MinInt64-v) {
+		// The last slot bounds every offset; slots strictly increase.
+		if uint64(rs[len(rs)-1].Slot-firstSlot) > (math.MaxUint32-t0)/step {
 			return nil, bad
 		}
-		dt += v
-		if dt < -math.MaxUint32 || dt > math.MaxUint32 {
-			return nil, bad
+		for i := range rs {
+			rs[i].Sample.Time = int64(t0) + (rs[i].Slot-firstSlot)*int64(step)
 		}
-		ts += dt
-		if ts <= 0 || ts > math.MaxUint32 {
-			return nil, bad
+	} else {
+		var ts, dt int64
+		for i := range rs {
+			v, n := binary.Varint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			p = p[n:]
+			if (v > 0 && dt > math.MaxInt64-v) || (v < 0 && dt < math.MinInt64-v) {
+				return nil, bad
+			}
+			dt += v
+			if dt < -math.MaxUint32 || dt > math.MaxUint32 {
+				return nil, bad
+			}
+			ts += dt
+			if ts <= 0 || ts > math.MaxUint32 {
+				return nil, bad
+			}
+			rs[i].Sample.Time = ts
 		}
-		rs[i].Sample.Time = ts
 	}
 	var order uint64
 	var pd int64
@@ -677,8 +733,9 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 
 // SetPlannedRecord packs a planner record of metric, routed to vshard, without
 // an encoded input key. Group, partition and part come from the writer scope,
-// and key bytes are formatted only where a dense run starts. Order, routing,
-// archive and scalar bounds are validated as SetRecordEncoded validates them.
+// and key bytes are formatted only where a dense run starts. The caller must
+// supply the route already derived by the planner. Order, scope, archive and
+// scalar bounds are validated as SetRecordEncoded validates them.
 // Planned and encoded input cannot be mixed in one part.
 //
 // rank is the metric's 1-based position in the planner's canonical
@@ -707,6 +764,7 @@ func (w *DenseWriter) SetPlannedRecord(vshard uint16, rank uint32, metric ID, r 
 }
 
 // SetPlannedMetadata writes metric's envelope value after its archive records.
+// The caller supplies a planner-validated route, as for SetPlannedRecord.
 // The caller's value is not retained.
 func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, value []byte) error {
 	if w.closed {
@@ -731,7 +789,8 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 
 // plannedKey checks that a tuple sorts strictly after the previous one in GCP3
 // key order (vshard, name length, name, archive, slot) and validates each new
-// name's length and route once. Two ranked tuples compare by rank, which
+// name's length and scope once. Routing comes from the planner, without hashing
+// the name again. Two ranked tuples compare by rank, which
 // follows that name order, so the check reads no name bytes.
 func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive uint32, slot int64) (Key, error) {
 	if len(w.last) > 0 {
@@ -762,7 +821,7 @@ func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive 
 		}
 	}
 	s := w.writer.spec.Scope
-	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || Route(metric) != vshard || (s.VShard != GroupVShard && s.VShard != vshard) {
+	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || (s.VShard != GroupVShard && s.VShard != vshard) {
 		return Key{}, errors.New("invalid or foreign planned dense metric")
 	}
 	if len(w.group) == 0 {

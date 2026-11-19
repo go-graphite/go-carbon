@@ -206,9 +206,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			dir := filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
 			var err error
 			if c.Layer == 3 {
-				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"), func(id uint64, name string, definition []byte) (string, []byte, error) {
-					return e.BindDefinition(NumericID(id, i, c.Producers), name, definition)
-				})
+				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"), catalogPolicies{engine: e, producer: i, producers: c.Producers})
 			} else {
 				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
 			}

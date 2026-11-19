@@ -4,6 +4,7 @@ package v2core
 // retain their move-catalog authority and are never reclassified by compaction.
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"crypto/rand"
@@ -13,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -200,9 +200,27 @@ func (e *coreEngine) ForceMerge() (int, error) {
 	return int(merged.Load()), nil
 }
 
-// Each size tier spans a factor of sixteen and retains at most fifteen quiescent
-// local parts per group/partition below the cap. Terminal parts trade bounded
-// rewrite size for a larger read inventory until their time partition expires.
+// Merges combine only sequence-adjacent local parts of one group/partition
+// (ClickHouse's rule), so their order ranges never interleave. A window of
+// adjacent parts qualifies once it holds at least ratio parts and its total is
+// at least ratio/2 times its largest part, so a large input is not repeatedly
+// combined with only a few much smaller inputs. Small outputs use ratio 4,
+// so new seals fold into a small
+// part every few seal intervals and few small parts stay live for renders.
+// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
+// parts quiescent below the cap. The cheapest qualifying window merges first.
+const (
+	smallMergeBytes = 64 << 20
+	smallMergeRatio = 4
+)
+
+func mergeRatio(total uint64) uint64 {
+	if total <= smallMergeBytes {
+		return smallMergeRatio
+	}
+	return sealedMergeFanIn
+}
+
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	limit, _, err := effectiveMergeLimit(o.dir)
 	if err != nil {
@@ -211,15 +229,13 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 	return o.selectMergeLimit(snapshot, limit, false)
 }
 
-// full ignores size tiers: every live local part of a group/partition is one
-// candidate set, merged once at least two of them fit under the limit.
+// full keeps adjacency and the byte cap, but ignores background ratios and fan-in.
 func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, full bool) ([]v2part.Descriptor, error) {
-	type tier struct {
+	type scope struct {
 		group     v2part.Group
 		partition int64
-		size      int
 	}
-	tiers := map[tier][]v2part.Descriptor{}
+	scopes := map[scope][]v2part.Descriptor{}
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -228,7 +244,8 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 		if err != nil {
 			return nil, err
 		}
-		if d.Bytes > limit || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+		// Oversized parts stay in the sequence: a window stops at them.
+		if d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
 		k, err := v2part.Decode(d.FirstKey)
@@ -242,45 +259,42 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 		if origin.Class != LivePart {
 			continue
 		}
-		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
-		if full {
-			t.size = 0
-		}
-		tiers[t] = append(tiers[t], d)
+		s := scope{d.Scope.Group, d.Scope.Partition}
+		scopes[s] = append(scopes[s], d)
 	}
 	var chosen []v2part.Descriptor
-	var best tier
-	for t, parts := range tiers {
+	var best uint64
+	var bestScope scope
+	for s, parts := range scopes {
 		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
-			if a.Bytes < b.Bytes {
-				return -1
-			}
-			if a.Bytes > b.Bytes {
-				return 1
+			if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
+				return c
 			}
 			return bytes.Compare(a.SHA256[:], b.SHA256[:])
 		})
-		fanIn := sealedMergeFanIn
-		if full {
-			fanIn = 2
-		}
-		if len(parts) < fanIn {
-			continue
-		}
-		var total uint64
-		n := 0
-		for _, d := range parts {
-			if d.Bytes > limit-total || n == sealedMergeFanIn && !full {
+		for i := range parts {
+			var total, largest uint64
+			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total; j++ {
+				total += parts[j].Bytes
+				largest = max(largest, parts[j].Bytes)
+				if full {
+					// Force the first maximal adjacent window that fits the cap.
+					if j > i && (j+1 == len(parts) || parts[j+1].Bytes > limit-total) {
+						return slices.Clone(parts[i : j+1]), nil
+					}
+					continue
+				}
+				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
+					continue
+				}
+				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
+					chosen, best, bestScope = parts[i:j+1], total, s
+				}
 				break
 			}
-			total += d.Bytes
-			n++
-		}
-		if n >= fanIn && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
-			chosen, best = parts[:n], t
 		}
 	}
-	return chosen, nil
+	return slices.Clone(chosen), nil
 }
 
 // ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per
@@ -822,12 +836,24 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 // Before it commits, the output is an orphan; after it commits, only output is
 // live. Reader snapshots continue naming the inputs until ordinary GC permits
 // their unlink. Concurrent retire/move activity invalidates the whole proposal.
+// The output is linked and synced before the binding fence (g.mu): the caller's
+// fileMu already excludes unlink, so publications wait only for the commit.
 func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d v2part.Descriptor) (bool, error) {
+	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
+	if err != nil {
+		return false, err
+	}
+	if g.stage != nil {
+		g.stage("merge-retained")
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, old := range inputs {
 		value, closer, err := g.db.Get(partBinding(sealedPartPrefix, old.SHA256))
 		if errors.Is(err, pebble.ErrNotFound) {
+			// The unpublished output is an orphan, as after a crash here.
+			g.pending[d.SHA256] = retiredPart{at: g.now()}
+			g.pendingCount.Store(uint64(len(g.pending)))
 			return false, nil
 		}
 		if err != nil {
@@ -842,13 +868,6 @@ func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d 
 		if !same {
 			return false, errors.New("merge input binding changed")
 		}
-	}
-	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
-	if err != nil {
-		return false, err
-	}
-	if g.stage != nil {
-		g.stage("merge-retained")
 	}
 	batch := g.db.NewBatch()
 	defer batch.Close()

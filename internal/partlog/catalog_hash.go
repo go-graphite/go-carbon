@@ -39,13 +39,13 @@ type catalogSlot struct {
 }
 
 // catalogIndex is the catalog's sole name index. Slots refer to the canonical
-// immutable names in entries; growth reuses stored hashes, never hashes names.
+// immutable names through IDs; growth reuses stored hashes, never hashes names.
 type catalogIndex struct {
 	slots []catalogSlot
 	count int
 }
 
-func (m *catalogIndex) lookup(key string, hash uint64, entries []catalogEntry) uint64 {
+func (m *catalogIndex) lookup(key string, hash uint64, catalog *NameCatalog) uint64 {
 	if len(m.slots) == 0 {
 		return 0
 	}
@@ -55,7 +55,7 @@ func (m *catalogIndex) lookup(key string, hash uint64, entries []catalogEntry) u
 		if s.id == 0 {
 			return 0
 		}
-		if s.hash == hash && entries[s.id].key == key {
+		if s.hash == hash && catalog.key(s.id) == key {
 			return s.id
 		}
 	}

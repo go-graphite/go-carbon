@@ -26,11 +26,11 @@ import (
 // atimofieiev/v2 9f959a15aa7a (string merge keys) and re-recorded once when
 // merges began repacking short runs up to MaxDenseSlots. It pins every other
 // byte, so the folded digest differs only by the envelope's placement. Both
-// physical pins include tagged value encoding; the decoded pin is unchanged.
+// physical pins include aligned timestamps and tagged value encoding; the decoded pin is unchanged.
 // Do not re-record either for a performance change.
 const (
-	mergeByteDifferentialDigest       = "5da0cd1810ebea15a0723153c7981fe608c2f6b69a15a8625e149b078f1cc398"
-	mergeByteDifferentialLegacyDigest = "b588eaac80d7714bb49f51a9dfbe86746f8886e53b97157f02875493240a1807"
+	mergeByteDifferentialDigest       = "7b63a505d5883efe1c513cbb8172218d9a740d577e35df52548c13d9a599c13c"
+	mergeByteDifferentialLegacyDigest = "0491b83dcceaa95f461ec5e31ed8d42bfe8cc75a1c5cecc82be6b5775abf7c17"
 )
 
 // mergeDecodedDifferentialDigest is the SHA-256 of the same merged parts'
