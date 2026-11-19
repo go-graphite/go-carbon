@@ -83,6 +83,50 @@ func checkLevels(t *testing.T, s *Snapshot) {
 	}
 }
 
+// Keep the merge pending explicitly: scheduling must not decide whether the
+// first unprotected level is pruned when its last name expires.
+func TestCatalogLevelsRemoveEmptyAfterMergeInputs(t *testing.T) {
+	base := newLevel([]string{"base.a", "base.b", "base.c"})
+	head := newLevel([]string{"head.a", "head.b"})
+	tail := newLevel([]string{"tail.a"})
+	var c Catalog
+	before := &Snapshot{revision: 1, levels: []*level{base, head, tail}, n: 6}
+	c.current.Store(before)
+	j := &baseMerge{inputs: []*level{base, head}, done: make(chan struct{})}
+	c.job = j // An open done channel holds the same state as a running merge.
+	want := []string{"base.a", "base.b", "base.c", "head.a", "head.b"}
+	if err := c.ApplyBeforePublish(2, nil, []string{"tail.a"}, func(s *Snapshot) error {
+		if !s.EqualNames(want) {
+			t.Fatal("removing an empty tail changed live names")
+		}
+		checkLevels(t, s)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := c.Snapshot()
+	checkLevels(t, s)
+	if len(s.levels) != 2 || s.levels[0] != base || s.levels[1] != head || c.job != j {
+		t.Fatal("removing an empty tail changed the protected merge inputs")
+	}
+	if !s.EqualNames(want) || !before.EqualNames(append(slices.Clone(want), "tail.a")) {
+		t.Fatal("removing an empty tail changed live names or the pinned snapshot")
+	}
+	// Complete the captured merge and verify installation preserves membership.
+	var w levelWriter
+	if err := mergeInto(context.Background(), &w, base, head); err != nil {
+		t.Fatal(err)
+	}
+	j.out = w.finish()
+	close(j.done)
+	c.settle()
+	defer c.Close()
+	checkLevels(t, c.Snapshot())
+	if !c.Snapshot().EqualNames(want) {
+		t.Fatal("installing the merge changed live names")
+	}
+}
+
 // Incremental publications, including expiry and recreation, must yield the
 // same names and the same find candidates as a full rebuild of the same set.
 func TestCatalogLevelsMatchFullRebuild(t *testing.T) {

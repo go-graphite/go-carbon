@@ -503,15 +503,16 @@ func mergeDead(dead, kill, revive []uint32) []uint32 {
 // compact merges a level into its predecessor until every level from floor
 // on is more than levelFanout times smaller than the one before it. Levels
 // below floor (the base, and level 1 while the background merge reads it)
-// are never merged here. The input slice is private.
+// are never changed here. Empty levels at floor and above are removed, but
+// floor is never merged into its protected predecessor. The input slice is private.
 func compact(ctx context.Context, levels []*level, floor int) ([]*level, error) {
-	for i := len(levels) - 1; i > floor; {
+	for i := len(levels) - 1; i >= floor; {
 		if levels[i].live() == 0 {
 			levels = slices.Delete(levels, i, i+1)
 			i = len(levels) - 1
 			continue
 		}
-		if levels[i].n*levelFanout < levels[i-1].n {
+		if i == floor || levels[i].n*levelFanout < levels[i-1].n {
 			i--
 			continue
 		}
