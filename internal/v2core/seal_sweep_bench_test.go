@@ -26,6 +26,9 @@ import (
 // The models are skeletons, not planners: they omit envelopes, closure and
 // tuples. A new planner plugs in as another sealPlanner arm.
 // SEAL_SWEEP_NAMES overrides N (comma-separated; default 1000000).
+//
+// planParts plans from a frozen pendingHead, as the seal does; allocB/point
+// is what each seal allocates and drops, beside the retained transientB.
 func BenchmarkSealSweep(b *testing.B) {
 	sizes := []int{1_000_000}
 	if v := os.Getenv("SEAL_SWEEP_NAMES"); v != "" {
@@ -66,11 +69,31 @@ func BenchmarkSealSweep(b *testing.B) {
 					}
 					arena := make([]row, len(ids))
 					in := make([]Batch, len(ids))
+					handles := make([]*ApplicationPolicy, names+2)
+					// One arrival clock per 512-application receiver packet:
+					// the latest point time in it.
+					clocks := make([]int64, (len(ids)+511)/512)
+					for i := range ids {
+						clocks[i/512] = max(clocks[i/512], times[i])
+					}
 					for i, id := range ids {
 						arena[i] = row{ID: uint64(id) + 1, Time: times[i], Bits: uint64(i) * 0x9e3779b97f4a7c15, Seq: uint64(i + 1)}
-						in[i] = Batch{ID: uint64(id) + 1, Order: uint64(i + 1), Clock: times[i], Registered: r.metrics[uint64(id)+1].PolicyIdentity, Points: arena[i : i+1]}
+						in[i] = Batch{ID: uint64(id) + 1, Order: uint64(i + 1), Clock: clocks[i/512], Registered: r.metrics[uint64(id)+1].PolicyIdentity, Points: arena[i : i+1]}
+						handles[id+1] = in[i].Registered
 					}
-					plan, err := p.plan(r, SealInput{Batches: in})
+					// The seal's real input: the owner's frozen pending head,
+					// built from receiver-shape packets of 512 applications.
+					input := func() SealInput { return SealInput{Batches: in} }
+					if p.name == "planParts" {
+						var head pendingHead
+						lookup := func(id uint64) *ApplicationPolicy { return handles[id] }
+						for lo := 0; lo < len(in); lo += 512 {
+							head.add(in[lo:min(lo+512, len(in))], lookup)
+						}
+						view := head.view(lookup)
+						input = func() SealInput { return sealViewInput(view) }
+					}
+					plan, err := p.plan(r, input())
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -91,7 +114,7 @@ func BenchmarkSealSweep(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						plan, err := p.plan(r, SealInput{Batches: in})
+						plan, err := p.plan(r, input())
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -103,6 +126,7 @@ func BenchmarkSealSweep(b *testing.B) {
 					b.ReportMetric(float64(scratch)/float64(points), "transientB/point")
 					b.ReportMetric(float64(pointerful)/float64(points), "ptrTransientB/point")
 					b.ReportMetric(float64(m1.NumGC-m0.NumGC)/float64(b.N), "gc/op")
+					b.ReportMetric(float64(m1.TotalAlloc-m0.TotalAlloc)/float64(b.N*points), "allocB/point")
 				})
 			}
 			b.Run(fmt.Sprintf("model-A/names=%d/k=%.1f", names, k), func(b *testing.B) {
@@ -479,3 +503,6 @@ func sweepModelRows(w sweepModelWorkload, rng *rand.Rand) (ids []uint32, times [
 	rng.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i]; times[i], times[j] = times[j], times[i] })
 	return ids, times
 }
+
+// sealViewInput is the seal's planner input for a frozen pending view.
+func sealViewInput(v PendingView) SealInput { return SealInput{Pending: v} }

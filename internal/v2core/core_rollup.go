@@ -285,7 +285,11 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
-	if uint64(len(in.Batches)) > math.MaxUint32 {
+	view := in.Pending
+	if view.Len() == 0 {
+		view = PendingBatches(in.Batches)
+	}
+	if uint64(view.Len()) > math.MaxUint32 {
 		return coreSealPlan{}, errors.New("too many seal batches")
 	}
 	stages, metrics := r.stages[:0], r.stageMetrics[:0]
@@ -297,14 +301,21 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		names = map[partsformat.ID]uint64{}
 		r.pendingNames = names
 	}
-	// One stable sort of batch indices by ID makes each name's batches one run
-	// in arrival order; the sweep stages a name once per run. The keys and the
-	// idle bitset are pointer-free scratch retained between seals.
-	keys, spare, maxID := sortSealBatches(in.Batches, r.sweepKeys, r.sweepSpare)
+	// One stable sort of the frozen view's applications by ID makes each
+	// name's applications one run in arrival order; the sweep stages a name
+	// once per run and reads its points in place. The keys and the idle
+	// bitset are pointer-free scratch retained between seals.
+	keys, spare, maxID, wide, sampleCount := view.sealKeys(r.sweepKeys, r.sweepSpare)
 	r.sweepKeys, r.sweepSpare = keys, spare
+	keyID := func(k uint64) uint64 {
+		if wide {
+			return view.idAt(int(k & sealKeyPosMask))
+		}
+		return k >> 32
+	}
 	runs := 0
 	for i := range keys {
-		if i == 0 || in.Batches[keys[i]&sealBatchIndexMask].ID != in.Batches[keys[i-1]&sealBatchIndexMask].ID {
+		if i == 0 || keyID(keys[i]) != keyID(keys[i-1]) {
 			runs++
 		}
 	}
@@ -316,29 +327,35 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		seen = slices.Grow(seen, words)[:words]
 	}
 	r.seen = seen
-	// One allocation per sealed part for samples and application descriptors.
+	// Samples and application descriptors live in retained planner storage.
 	// Every original boundary/order/clock remains distinct.
-	sampleCount := 0
-	for i := range in.Batches {
-		sampleCount += len(in.Batches[i].Points)
-	}
 	r.samples = slices.Grow(r.samples[:0], sampleCount)[:sampleCount]
 	samples := r.samples
-	r.batches = slices.Grow(r.batches[:0], len(in.Batches))[:len(in.Batches)]
+	r.batches = slices.Grow(r.batches[:0], len(keys))[:len(keys)]
 	batchStorage := r.batches
 	offset, batch := 0, 0
 	for i := 0; i < len(keys); {
-		first := &in.Batches[keys[i]&sealBatchIndexMask]
-		id := first.ID
+		id := keyID(keys[i])
 		j := i + 1
-		for j < len(keys) && in.Batches[keys[j]&sealBatchIndexMask].ID == id {
+		for j < len(keys) && keyID(keys[j]) == id {
 			j++
+		}
+		first := view.app(int(keys[i] & sealKeyPosMask))
+		// Row applications carry no handle: the catalog resolves it once per
+		// name. Cold applications keep their own.
+		var registered *ApplicationPolicy
+		if view.lookup != nil {
+			registered = view.lookup(id)
+		}
+		firstRegistered, firstPolicy := registered, []byte(nil)
+		if first.cold != nil {
+			firstRegistered, firstPolicy = first.cold.Registered, first.cold.Policy
 		}
 		// A ranked name whose identity carries this planner's slot reaches
 		// its metric through dense. Fresh and unranked names, policy-bytes
 		// batches and hints another planner overwrote probe the metrics map.
 		var m *rollupMetric
-		rk := r.hintRank(first.Registered, id)
+		rk := r.hintRank(firstRegistered, id)
 		if rk != 0 {
 			m = r.dense[rk-1]
 		} else {
@@ -346,10 +363,10 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		}
 		fresh := m == nil
 		if fresh {
-			if h := first.Registered; h != nil && h.catalog == r.identities && h.id == id {
+			if h := firstRegistered; h != nil && h.catalog == r.identities && h.id == id {
 				m = newRollupMetric(h)
 			} else {
-				policy := first.Policy
+				policy := firstPolicy
 				if h != nil {
 					policy = h.definitionBytes()
 				}
@@ -379,19 +396,26 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
 		}
-		for ; i < j; i++ {
-			b := &in.Batches[keys[i]&sealBatchIndexMask]
-			if (b.Registered == nil || b.Registered != m.PolicyIdentity) && !m.definitionEqual(b.Policy) {
+		for k := i; k < j; k++ {
+			a := first
+			if k > i {
+				a = view.app(int(keys[k] & sealKeyPosMask))
+			}
+			reg, policy := registered, []byte(nil)
+			if a.cold != nil {
+				reg, policy = a.cold.Registered, a.cold.Policy
+			}
+			if (reg == nil || reg != m.PolicyIdentity) && !m.definitionEqual(policy) {
 				return coreSealPlan{}, errors.New("stored rollup policy changed")
 			}
-			ps := samples[offset : offset+len(b.Points) : offset+len(b.Points)]
-			for k, p := range b.Points {
-				ps[k] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
-			}
-			offset += len(b.Points)
-			batchStorage[batch] = sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps}
+			n := a.points()
+			ps := samples[offset : offset+n : offset+n]
+			a.samples(ps)
+			offset += n
+			batchStorage[batch] = sealrollup.Batch{Order: a.Order, Now: a.Clock, Points: ps}
 			batch++
 		}
+		i = j
 	}
 	named := len(stages)
 	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
@@ -401,7 +425,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
-			if !sealBatchSeen(in.Batches, keys, seen, maxID, id) && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
+			if !sealKeySeen(keys, seen, maxID, id, keyID) && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
 				stages, metrics = append(stages, rollupStage{next: m.meta}), append(metrics, m)
 				r.stageKey(&stages[len(stages)-1], m)
 			}
