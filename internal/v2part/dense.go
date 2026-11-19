@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"math/bits"
 	"strings"
 	"sync"
 
@@ -34,7 +35,6 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
-	integer := true
 	for i, r := range records {
 		if !validSlotRecord(r) {
 			return nil, errors.New("invalid sealed archive record clock/order/slot")
@@ -42,17 +42,9 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 		if i > 0 && (r.Archive != records[0].Archive || r.Slot <= records[i-1].Slot) {
 			return nil, errors.New("unordered dense slots")
 		}
-		f := math.Float64frombits(r.Sample.Bits)
-		if !(f >= -(1<<53) && f <= 1<<53) || math.Float64bits(float64(int64(f))) != r.Sample.Bits {
-			integer = false
-		}
 	}
 	out = append(out, denseMagic...)
-	mode := byte(0)
-	if integer {
-		mode = 1
-	}
-	out = append(out, mode)
+	out = append(out, denseTagged)
 	out = binary.AppendUvarint(out, uint64(len(records)))
 	var slot, ts, dt int64
 	var order uint64
@@ -77,21 +69,98 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 			out[flags+i/8] |= 1 << uint(i%8)
 		}
 	}
-	if integer {
-		var prev int64
-		for _, r := range records {
-			v := int64(math.Float64frombits(r.Sample.Bits))
-			out = binary.AppendVarint(out, v-prev)
-			prev = v
-		}
-	} else {
-		for plane := uint(0); plane < 8; plane++ {
-			for _, r := range records {
-				out = append(out, byte(r.Sample.Bits>>(plane*8)))
+	return appendValues(out, records), nil
+}
+
+// Value column codecs. A run's tag byte (mode bit denseTagged) names one codec
+// for all its values: decimal runs store v = m / 10^e with one exponent e per
+// run and integer mantissas m as zigzag first or second differences, whichever
+// packs smaller; other runs, and decimal runs whose mantissa differences average
+// more than decimalMaxCost bytes, store eight raw byte planes. Every decimal value's
+// float64 bits are checked at encode, so NaN payloads, -0 and infinities always
+// take the byte planes.
+const (
+	denseTagged   = 0x80
+	valuePlanes   = 0 << 5
+	valueDelta1   = 1 << 5
+	valueDelta2   = 2 << 5
+	maxDecimalExp = 18
+	// Above this mean varint size per value, mantissas are wide and noisy:
+	// the byte planes' constant exponent and zero low bytes compress better.
+	decimalMaxCost = 4
+)
+
+var pow10 = [maxDecimalExp + 1]float64{1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+	1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18}
+
+// decimalMantissa returns m with float64(m)/10^e bit-identical to bits.
+func decimalMantissa(bits uint64, e int) (int64, bool) {
+	s := math.Float64frombits(bits) * pow10[e]
+	if !(s >= -(1<<53) && s <= 1<<53) {
+		return 0, false
+	}
+	m := int64(math.Round(s))
+	return m, math.Float64bits(float64(m)/pow10[e]) == bits
+}
+
+func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
+
+func varintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
+
+func appendValues(out []byte, records []sealrollup.Record) []byte {
+	e := 0
+	for _, r := range records {
+		for ; e <= maxDecimalExp; e++ {
+			if _, ok := decimalMantissa(r.Sample.Bits, e); ok {
+				break
 			}
 		}
+		if e > maxDecimalExp {
+			break
+		}
 	}
-	return out, nil
+	if e <= maxDecimalExp {
+		var prev, prevDelta int64
+		cost1, cost2 := 0, 0
+		ok := true
+		for _, r := range records {
+			m, exact := decimalMantissa(r.Sample.Bits, e)
+			if !exact {
+				ok = false
+				break
+			}
+			d := m - prev
+			cost1 += varintLen(zigzag(d))
+			cost2 += varintLen(zigzag(d - prevDelta))
+			prev, prevDelta = m, d
+		}
+		if ok && min(cost1, cost2) <= decimalMaxCost*len(records) {
+			tag := byte(valueDelta1)
+			if cost2 < cost1 {
+				tag = valueDelta2
+			}
+			out = append(out, tag|byte(e))
+			prev, prevDelta = 0, 0
+			for _, r := range records {
+				m, _ := decimalMantissa(r.Sample.Bits, e)
+				d := m - prev
+				if tag == valueDelta2 {
+					out = binary.AppendUvarint(out, zigzag(d-prevDelta))
+				} else {
+					out = binary.AppendUvarint(out, zigzag(d))
+				}
+				prev, prevDelta = m, d
+			}
+			return out
+		}
+	}
+	out = append(out, valuePlanes)
+	for plane := uint(0); plane < 8; plane++ {
+		for _, r := range records {
+			out = append(out, byte(r.Sample.Bits>>(plane*8)))
+		}
+	}
+	return out
 }
 
 // DecodeSlots also accepts the published singleton codec. It bounds allocations
@@ -111,10 +180,13 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		return append(dst[:0], r), nil
 	}
 	bad := errors.New("invalid dense archive run")
-	if len(data) < 6 || data[4] > 1 || archive == MetadataArchive || firstSlot < 0 {
+	if len(data) < 6 || archive == MetadataArchive || firstSlot < 0 {
 		return nil, bad
 	}
-	integer := data[4] == 1
+	mode := data[4]
+	if mode != 0 && mode != 1 && mode != denseTagged {
+		return nil, bad
+	}
 	p := data[5:]
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(p)
@@ -193,30 +265,19 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	for i := range rs {
 		rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
 	}
-	if integer {
-		var prev int64
-		for i := range rs {
-			v, n := binary.Varint(p)
-			if n <= 0 || (v > 0 && prev > math.MaxInt64-v) || (v < 0 && prev < math.MinInt64-v) {
-				return nil, bad
-			}
-			p = p[n:]
-			prev += v
-			if prev < -(1<<53) || prev > 1<<53 {
-				return nil, bad
-			}
-			rs[i].Sample.Bits = math.Float64bits(float64(prev))
-		}
-	} else {
-		if len(p) != 8*len(rs) {
+	tag := byte(valuePlanes)
+	switch mode {
+	case 1: // legacy integer run: first differences, plain varints, e = 0
+		tag = valueDelta1
+	case denseTagged:
+		if len(p) == 0 {
 			return nil, bad
 		}
-		for plane := uint(0); plane < 8; plane++ {
-			for i := range rs {
-				rs[i].Sample.Bits |= uint64(p[int(plane)*len(rs)+i]) << (plane * 8)
-			}
-		}
-		p = p[8*len(rs):]
+		tag, p = p[0], p[1:]
+	}
+	var err error
+	if p, err = decodeValues(rs, tag, mode == 1, p); err != nil {
+		return nil, bad
 	}
 	if len(p) != 0 {
 		return nil, bad
@@ -592,4 +653,58 @@ func ReadExpanded(ctx context.Context, path string, d *Descriptor, visit func(Ke
 		}
 		return nil
 	})
+}
+
+// decodeValues fills rs' value bits from a value column coded as tag. legacy
+// selects the untagged integer run's signed varints.
+func decodeValues(rs []sealrollup.Record, tag byte, legacy bool, p []byte) ([]byte, error) {
+	bad := errors.New("invalid dense value column")
+	kind, e := tag&^31, int(tag&31)
+	if kind == valuePlanes {
+		if e != 0 || len(p) < 8*len(rs) {
+			return nil, bad
+		}
+		for plane := uint(0); plane < 8; plane++ {
+			for i := range rs {
+				rs[i].Sample.Bits |= uint64(p[int(plane)*len(rs)+i]) << (plane * 8)
+			}
+		}
+		return p[8*len(rs):], nil
+	}
+	if (kind != valueDelta1 && kind != valueDelta2) || e > maxDecimalExp {
+		return nil, bad
+	}
+	var prev, delta int64
+	for i := range rs {
+		var v int64
+		if legacy {
+			x, n := binary.Varint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			v, p = x, p[n:]
+		} else {
+			u, n := binary.Uvarint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			v, p = int64(u>>1)^-int64(u&1), p[n:]
+		}
+		if kind == valueDelta2 {
+			if (v > 0 && delta > math.MaxInt64-v) || (v < 0 && delta < math.MinInt64-v) {
+				return nil, bad
+			}
+			v += delta
+		}
+		if (v > 0 && prev > math.MaxInt64-v) || (v < 0 && prev < math.MinInt64-v) {
+			return nil, bad
+		}
+		delta = v
+		prev += v
+		if prev < -(1<<53) || prev > 1<<53 {
+			return nil, bad
+		}
+		rs[i].Sample.Bits = math.Float64bits(float64(prev) / pow10[e])
+	}
+	return p, nil
 }

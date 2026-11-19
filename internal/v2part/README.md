@@ -113,8 +113,12 @@ remain separate qualification gates.
 produces `core-rollup-dense-v1` values. A value holds at most 4,096 occupied
 physical slots of one metric/archive. Slot deltas encode sparse archives without
 padding; timestamp delta-of-deltas retain physical ring wrap; XOR varints retain
-original replacement orders; a bitmap retains correction flags. Values use
-bit-checked integer deltas or eight exact byte planes. Zstd/256KiB SST blocks
+original replacement orders; a bitmap retains correction flags. A one-byte
+tag names each run's value codec: decimal mantissas m with v = m / 10^e (one
+exponent per run, every value's float64 bits checked at encode) as zigzag first
+or second differences, or eight exact byte planes for NaN payloads, -0,
+infinities, true floats and wide mantissas. Untagged runs (mode 0 planes, mode 1
+integer differences) still decode. Zstd/256KiB SST blocks
 compress these columns. The dense container uses a small SET-only RocksDBv2
 writer so one exclusive pooled workspace can retain its Zstd encoder, data/index
 blocks and compressed output across files. Release builds reuse a native
