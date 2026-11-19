@@ -80,6 +80,20 @@ type coreRollups struct {
 	parallelism int
 	expire      func(RollupPolicy, RollupMetadata, time.Time) bool
 	now         func() time.Time
+	// expiryTTL, when set with expire, resolves a name's expiry window once
+	// (at install, and again for all names when a returned until passes)
+	// into ttl[slot], in ns (<= 0: never). expiries files each slot once under
+	// expAt[slot], the second floor((LastUpdate+ttl)/1s): no later than expire
+	// can first fire, since LastUpdate only moves forward. Entries under any
+	// other second are stale. A pass drains only seconds at or before now and
+	// asks expire only for names overdue by ttl, so it reads no other name.
+	expiryTTL  func(RollupPolicy, time.Time) (time.Duration, time.Time)
+	ttl        []int64
+	expAt      []int64
+	ttlUntil   int64
+	expiries   map[int64][]uint32
+	expDrained []int64
+	expRefile  []uint32
 
 	stage   func(string)
 	metrics map[uint64]*rollupMetric
@@ -95,6 +109,7 @@ type coreRollups struct {
 	taken        []uint64
 	due          []uint32
 	planNow      int64
+	planClock    time.Time
 	names        map[partsformat.ID]uint64
 	stages       []rollupStage
 	pendingNames map[partsformat.ID]uint64
@@ -149,7 +164,7 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, calendar: map[int64][]uint32{}, names: map[partsformat.ID]uint64{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, calendar: map[int64][]uint32{}, expiries: map[int64][]uint32{}, names: map[partsformat.ID]uint64{}}
 }
 
 // install is the only writer of metrics and files every open coarse window,
@@ -172,13 +187,124 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 			r.ids = append(r.ids, id)
 			r.rank = append(r.rank, 0)
 			r.meta = append(r.meta, metricMetadata{})
+			r.ttl = append(r.ttl, 0)
+			r.expAt = append(r.expAt, 0)
 		}
 		r.meta[s] = meta
 		m.ownerSlot.Store(s + 1)
 		r.unranked = append(r.unranked, m)
 		r.unrankedSlots = append(r.unrankedSlots, s)
 	}
-	r.file(r.slotOf(id, m), m, meta, math.MaxUint16)
+	slot := r.slotOf(id, m)
+	r.file(slot, m, meta, math.MaxUint16)
+	if r.expiryTTL != nil {
+		r.resolveTTL(slot, m, r.clock())
+		r.fileExpiry(slot)
+	}
+}
+
+// setExpiryTTL turns on the expiry calendar, filing every installed name.
+func (r *coreRollups) setExpiryTTL(f func(RollupPolicy, time.Time) (time.Duration, time.Time)) {
+	r.expiryTTL = f
+	now := r.clock()
+	for slot := range r.ids {
+		if m := r.slotMetric(uint32(slot)); m != nil {
+			r.resolveTTL(uint32(slot), m, now)
+			r.fileExpiry(uint32(slot))
+		}
+	}
+}
+
+func (r *coreRollups) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// resolveTTL caches slot's expiry window and tracks when any answer expires.
+func (r *coreRollups) resolveTTL(slot uint32, m *rollupMetric, now time.Time) {
+	ttl, until := r.expiryTTL(m.rollupPolicy(), now)
+	r.ttl[slot] = int64(ttl)
+	if !until.IsZero() && (r.ttlUntil == 0 || until.UnixNano() < r.ttlUntil) {
+		r.ttlUntil = until.UnixNano()
+	}
+}
+
+// reresolve re-resolves every name's window once now reaches the earliest
+// until a resolution returned (a rule stopped applying).
+func (r *coreRollups) reresolve(now time.Time) {
+	if r.expiryTTL == nil || r.ttlUntil == 0 || now.UnixNano() < r.ttlUntil {
+		return
+	}
+	r.ttlUntil = 0
+	for slot := range r.ids {
+		if m := r.slotMetric(uint32(slot)); m != nil {
+			r.resolveTTL(uint32(slot), m, now)
+			r.fileExpiry(uint32(slot))
+		}
+	}
+}
+
+// expiryOverdue reports whether expire may fire for slot at ns: the walk's
+// own condition, now - LastUpdate >= ttl, on the cached window.
+func (r *coreRollups) expiryOverdue(slot uint32, ns int64) bool {
+	meta := r.meta[slot]
+	return r.ttl[slot] > 0 && meta.LastUpdate != 0 && !meta.Expired && ns-meta.LastUpdate >= r.ttl[slot]
+}
+
+// fileExpiry files slot under its deadline second unless a live entry at or
+// before it exists already.
+func (r *coreRollups) fileExpiry(slot uint32) {
+	meta, ttl := r.meta[slot], r.ttl[slot]
+	if ttl <= 0 || meta.LastUpdate == 0 || meta.Expired {
+		return
+	}
+	key := (meta.LastUpdate + ttl) / int64(time.Second)
+	if at := r.expAt[slot]; at != 0 && at <= key {
+		return
+	}
+	r.expAt[slot] = key
+	r.expiries[key] = append(r.expiries[key], slot)
+}
+
+// expiryDue reports whether expire fires for a live entry due by now.
+func (r *coreRollups) expiryDue(now time.Time) bool {
+	r.reresolve(now)
+	ns, sec := now.UnixNano(), now.Unix()
+	for key, slots := range r.expiries {
+		if key > sec {
+			continue
+		}
+		for _, slot := range slots {
+			if r.expAt[slot] == key && r.expiryOverdue(slot, ns) {
+				if m := r.slotMetric(slot); r.expire(m.rollupPolicy(), m.metadata(r.meta[slot]), now) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// commitExpiries drops the drained seconds and refiles their live slots at
+// their current deadlines: later for written names, the same overdue second
+// for names expire refused, none for expired names.
+func (r *coreRollups) commitExpiries() {
+	refile := r.expRefile[:0]
+	for _, key := range r.expDrained {
+		for _, slot := range r.expiries[key] {
+			if r.expAt[slot] == key {
+				r.expAt[slot] = 0
+				refile = append(refile, slot)
+			}
+		}
+		delete(r.expiries, key)
+	}
+	for _, slot := range refile {
+		r.fileExpiry(slot)
+	}
+	r.expRefile = refile
 }
 
 // file enters slot under the open window end of each coarse archive whose
@@ -219,11 +345,26 @@ func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
 	words := (len(r.ids) + 63) / 64
 	taken := slices.Grow(r.taken[:0], words)[:words]
 	first := len(dst)
+	expiry := r.expire != nil
 	for _, end := range r.drained {
 		for _, slot := range r.calendar[end] {
-			if taken[slot>>6]&(1<<(slot&63)) == 0 && !skip(r.ids[slot]) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], r.planNow) {
+			if taken[slot>>6]&(1<<(slot&63)) == 0 && !skip(r.ids[slot]) && (!expiry || !r.meta[slot].Expired) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], r.planNow) {
 				taken[slot>>6] |= 1 << (slot & 63)
 				dst = append(dst, slot)
+			}
+		}
+	}
+	if expiry {
+		ns := r.planClock.UnixNano()
+		for _, key := range r.expDrained {
+			for _, slot := range r.expiries[key] {
+				if r.expAt[slot] != key || taken[slot>>6]&(1<<(slot&63)) != 0 || skip(r.ids[slot]) || !r.expiryOverdue(slot, ns) {
+					continue
+				}
+				if m := r.slotMetric(slot); r.expire(m.rollupPolicy(), m.metadata(r.meta[slot]), r.planClock) {
+					taken[slot>>6] |= 1 << (slot & 63)
+					dst = append(dst, slot)
+				}
 			}
 		}
 	}
@@ -242,7 +383,7 @@ func (r *coreRollups) closureDue(now int64) bool {
 			continue
 		}
 		for _, slot := range slots {
-			if rollupClosureDue(r.slotMetric(slot), r.meta[slot], now) {
+			if (r.expire == nil || !r.meta[slot].Expired) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], now) {
 				return true
 			}
 		}
@@ -445,8 +586,18 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.drained = append(r.drained, end)
 		}
 	}
-	if r.expire != nil {
-		// An expiry callback can fire for any metric, so expiry visits all.
+	r.planClock = now
+	r.expDrained = r.expDrained[:0]
+	if r.expire != nil && r.expiryTTL != nil {
+		r.reresolve(now)
+		for key := range r.expiries {
+			if key <= r.planNow {
+				r.expDrained = append(r.expDrained, key)
+			}
+		}
+	}
+	if r.expire != nil && r.expiryTTL == nil {
+		// An opaque expiry callback can fire for any metric, so it visits all.
 		for id, m := range r.metrics {
 			if sealBatchSeen(in.Batches, keys, seen, maxID, id) {
 				continue
@@ -457,7 +608,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 				r.stageKey(&stages[len(stages)-1])
 			}
 		}
-	} else if r.db != nil {
+	} else if r.db != nil || r.expire != nil {
 		r.due = r.dueSlots(func(id uint64) bool { return sealBatchSeen(in.Batches, keys, seen, maxID, id) }, r.due[:0])
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
@@ -501,14 +652,23 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for _, end := range r.drained {
 			delete(r.calendar, end)
 		}
+		expiry := r.expiryTTL != nil
+		if expiry {
+			r.commitExpiries()
+		}
 		for i := range stages {
 			s := &stages[i]
 			m := s.metric
 			if s.fresh {
 				r.install(m.id, m, compactMetadata(s.next))
 				r.names[m.policy.Name] = m.id
-			} else if s.refile != 0 {
+				continue
+			}
+			if s.refile != 0 {
 				r.file(s.slot, m, r.meta[s.slot], s.refile)
+			}
+			if expiry {
+				r.fileExpiry(s.slot) // a revived name, or one drained this plan
 			}
 		}
 	}

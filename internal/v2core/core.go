@@ -538,6 +538,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					}
 				}
 				r.now = hooks.Now
+				if r.expire != nil && hooks.ExpiryTTL != nil {
+					r.setExpiryTTL(hooks.ExpiryTTL)
+				}
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
 				o.plan = r.planParts
@@ -1455,8 +1458,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			due := false
 			if r.expire == nil {
 				due = r.closureDue(now.Unix())
+			} else if r.expiryTTL != nil {
+				due = r.closureDue(now.Unix()) || r.expiryDue(now)
 			} else {
-				// An expiry callback can fire for any metric.
+				// An opaque expiry callback can fire for any metric.
 				for id, m := range r.metrics {
 					if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
 						due = true

@@ -143,6 +143,21 @@ func (app *App) startV2() error {
 			expiryNeeded.Store(true)
 			return false
 		}
+		// The window Expire applies, resolved once per name; it may change
+		// only when a rule's Until passes.
+		hooks.ExpiryTTL = func(p v2core.RollupPolicy, now time.Time) (time.Duration, time.Time) {
+			ttl := c.Whisper.StoreExpiration.Value()
+			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
+				ttl = c.Whisper.ExpirationRules[i].TTL()
+			}
+			var until time.Time
+			for _, rule := range c.Whisper.ExpirationRules {
+				if !rule.Until.IsZero() && now.Before(rule.Until) && (until.IsZero() || rule.Until.Before(until)) {
+					until = rule.Until
+				}
+			}
+			return ttl, until
+		}
 	}
 	var sealInterval time.Duration
 	if c.V2.SealInterval != nil {

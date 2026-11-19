@@ -278,11 +278,11 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.db = o.rollups.db
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
+	next.stage, next.expire, next.now, next.expiryTTL = o.rollups.stage, o.rollups.expire, o.rollups.now, o.rollups.expiryTTL
 	for id, m := range o.rollups.metrics {
 		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
 		next.names[m.policy.Name] = id
 	}
-	next.stage, next.expire, next.now = o.rollups.stage, o.rollups.expire, o.rollups.now
 	for name, donor := range prepared.index.metrics {
 		id := ids[name]
 		if id == 0 {

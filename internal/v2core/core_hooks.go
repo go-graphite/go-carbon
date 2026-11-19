@@ -89,6 +89,12 @@ type coreHooks struct {
 	// Expire runs on the serial seal owner, after admitted batches are applied.
 	// It must be immutable and must remain false until journal replay finishes.
 	Expire func(RollupPolicy, RollupMetadata, time.Time) bool
+	// ExpiryTTL, optional with Expire, is a name's expiry window at now and
+	// when that answer may next change (zero: never). Expire must return
+	// false while now - LastUpdate < ttl (ttl <= 0: always false). With it,
+	// seals and the maintenance pass ask Expire only for names overdue by
+	// their window instead of visiting every name.
+	ExpiryTTL func(RollupPolicy, time.Time) (time.Duration, time.Time)
 	Now    func() time.Time
 
 	// Stage is an optional fault-injection observer for offline recovery tests.
