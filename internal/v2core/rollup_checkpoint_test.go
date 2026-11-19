@@ -10,10 +10,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
@@ -86,15 +86,7 @@ func copyTree(t *testing.T, src string) string {
 // the same per-name state as one rebuilt by scanRollups, keeps producing the
 // same parts, and every damaged or stale checkpoint falls back to the scan.
 func TestRollupCheckpointMatchesScan(t *testing.T) {
-	cfg := coreTestConfig()
-	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 1, 1, true, 1024
-	var policies [][]byte
-	for i, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:30d,1h:1y,1d:10y", "10s:6h,5m:7d,1h:1y", "1m:14d,30m:2y"} {
-		for j := range 4 {
-			_, encoded := rollupTestPolicy(t, fmt.Sprintf("ckpt.m%d.n%d", i, j), def, sealrollup.Method(1+(i+j)%5), float32(j%2)/2)
-			policies = append(policies, encoded)
-		}
-	}
+	cfg, policies := checkpointTestSetup(t)
 	root := t.TempDir()
 	e, err := Open(root, cfg, Hooks{})
 	if err != nil {
@@ -119,21 +111,13 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 		if o.rollups.fromCheckpoint != wantCheckpoint {
 			t.Fatalf("%s: fromCheckpoint=%v want %v", dir, o.rollups.fromCheckpoint, wantCheckpoint)
 		}
-		// Open consumed the checkpoint: a kill from here on must scan.
-		if _, closer, err := o.db.Get(rollupCheckpointKey); err == nil {
-			_ = closer.Close()
-			t.Fatal("checkpoint token survived open")
-		} else if !errors.Is(err, pebble.ErrNotFound) {
-			t.Fatal(err)
-		}
 		return e, rollupStateDigest(o.rollups)
 	}
 	damage := map[string]func(string){
 		"missing":   func(dir string) { _ = os.Remove(filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
 		"flipped":   func(dir string) { flipByte(t, filepath.Join(dir, "owner-000", rollupCheckpointFile), 0.6) },
 		"truncated": func(dir string) { truncateHalf(t, filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
-		// A kill between rename and token: the file is complete, the token absent.
-		"no-token": func(dir string) { dropToken(t, filepath.Join(dir, "owner-000")) },
+		"wrong-magic": func(dir string) { flipByte(t, filepath.Join(dir, "owner-000", rollupCheckpointFile), 0) },
 	}
 	scanDir := copyTree(t, root)
 	damage["missing"](scanDir)
@@ -189,17 +173,6 @@ func truncateHalf(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	if err = os.Truncate(path, st.Size()/2); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func dropToken(t *testing.T, owner string) {
-	t.Helper()
-	db, err := pebble.Open(owner, &pebble.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = errors.Join(db.Delete(rollupCheckpointKey, pebble.Sync), db.Close()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -271,4 +244,158 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 		t.Logf("MEASURE names=%d arm=%s open=%v", n, arm.name, open)
 	}
 	t.Logf("MEASURE names=%d close(with checkpoint write)=%v checkpoint bytes=%d (%.1f B/name)", n, closeTime, size, float64(size)/float64(n))
+}
+
+func checkpointTestSetup(t *testing.T) (Config, [][]byte) {
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 1, 1, true, 1024
+	var policies [][]byte
+	for i, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:30d,1h:1y,1d:10y", "10s:6h,5m:7d,1h:1y", "1m:14d,30m:2y"} {
+		for j := range 4 {
+			_, encoded := rollupTestPolicy(t, fmt.Sprintf("ckpt.m%d.n%d", i, j), def, sealrollup.Method(1+(i+j)%5), float32(j%2)/2)
+			policies = append(policies, encoded)
+		}
+	}
+	return cfg, policies
+}
+
+// checkpointVsScan opens a copy of root with its checkpoint and a copy
+// without, requires identical state, seals more rounds on both and requires
+// identical state and parts again.
+func checkpointVsScan(t *testing.T, cfg Config, policies [][]byte, root string, base int, wantCheckpoint bool) {
+	t.Helper()
+	ckptDir, scanDir := copyTree(t, root), copyTree(t, root)
+	_ = os.Remove(filepath.Join(scanDir, "owner-000", rollupCheckpointFile))
+	open := func(dir string) *Engine {
+		e, err := Open(dir, cfg, Hooks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	a, b := open(ckptDir), open(scanDir)
+	if got := a.owners[0].rollups.fromCheckpoint; got != wantCheckpoint {
+		t.Fatalf("fromCheckpoint=%v want %v", got, wantCheckpoint)
+	}
+	if b.owners[0].rollups.fromCheckpoint {
+		t.Fatal("scan copy loaded a checkpoint")
+	}
+	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatalf("checkpoint+delta state differs from scan:\n--- checkpoint\n%s\n--- scan\n%s", x, y)
+	}
+	checkpointFixture(t, a, policies, base, 7)
+	checkpointFixture(t, b, policies, base, 7)
+	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatalf("state after further seals differs:\n%s\n---\n%s", x, y)
+	}
+	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
+		t.Fatalf("parts after further seals differ:\n%s\n---\n%s", x, y)
+	}
+	if err := errors.Join(a.Close(), b.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRollupCheckpointStalePlusParts: a checkpoint written many seals ago,
+// plus the parts published after it, equals a full scan.
+func TestRollupCheckpointStalePlusParts(t *testing.T) {
+	cfg, policies := checkpointTestSetup(t)
+	root := t.TempDir()
+	e, err := Open(root, cfg, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 11)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "owner-000", rollupCheckpointFile)
+	stale, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, err = Open(root, cfg, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 11, 13)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(file, stale, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checkpointVsScan(t, cfg, policies, root, 24, true)
+}
+
+// TestRollupCheckpointKillChild SIGKILLs a child that seals continuously and
+// writes a checkpoint after every seal, at random points (mid-seal,
+// mid-checkpoint write), then requires checkpoint+parts == scan.
+func TestRollupCheckpointKillChild(t *testing.T) {
+	if dir := os.Getenv("CKPT_KILL_CHILD_DIR"); dir != "" {
+		cfg, policies := checkpointTestSetup(t)
+		rollupCheckpointEvery = 0
+		e, err := Open(dir, cfg, Hooks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for base := 0; ; base++ {
+			checkpointFixture(t, e, policies, base, 1)
+			fmt.Printf("sealed %d\n", base)
+		}
+	}
+	cfg, policies := checkpointTestSetup(t)
+	for kill, after := range []time.Duration{90 * time.Millisecond, 230 * time.Millisecond, 410 * time.Millisecond, 700 * time.Millisecond, 1100 * time.Millisecond} {
+		root := t.TempDir()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRollupCheckpointKillChild$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "CKPT_KILL_CHILD_DIR="+root)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		lines := make(chan string, 1024)
+		go func() {
+			b := make([]byte, 4096)
+			var acc []byte
+			for {
+				n, err := out.Read(b)
+				acc = append(acc, b[:n]...)
+				for {
+					i := slices.Index(acc, '\n')
+					if i < 0 {
+						break
+					}
+					lines <- string(acc[:i])
+					acc = acc[i+1:]
+				}
+				if err != nil {
+					close(lines)
+					return
+				}
+			}
+		}()
+		// Wait for two seals, so a checkpoint exists, then kill after a delay.
+		seals := 0
+		for line := range lines {
+			if strings.HasPrefix(line, "sealed ") {
+				if seals++; seals == 2 {
+					break
+				}
+			}
+		}
+		time.Sleep(after)
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_ = cmd.Wait()
+		last := 0
+		for line := range lines {
+			if strings.HasPrefix(line, "sealed ") {
+				last, _ = strconv.Atoi(strings.TrimPrefix(line, "sealed "))
+			}
+		}
+		_, statErr := os.Stat(filepath.Join(root, "owner-000", rollupCheckpointFile))
+		t.Logf("kill %d after %v: last printed seal %d, checkpoint present=%v", kill, after, last, statErr == nil)
+		checkpointVsScan(t, cfg, policies, root, 100000, statErr == nil)
+	}
 }

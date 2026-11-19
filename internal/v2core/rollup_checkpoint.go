@@ -2,47 +2,92 @@ package v2core
 
 import (
 	"bytes"
-	"crypto/rand"
+	"context"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // An owner's rollup checkpoint is derived state: one sequential file holding,
 // per installed name, its identity, committed scalars and KeepRecent
-// residency, written at clean close. Open loads it instead of scanRollups only
-// while rollupCheckpointKey still holds the file's token and coreMetaKey still
-// holds the bytes the file was stamped with. Open deletes the token (synced)
-// before the owner can change anything, so after any later seal, a kill, a
-// partial write or a corrupt file, the next open rebuilds from parts.
+// residency, stamped with the live part bindings the state reflects. Owners
+// write it after seals and at close. Open loads it, folds in only the parts
+// published since (absent from the stamp) with the same rules scanRollups
+// uses, and rebuilds from parts when the file is missing, corrupt or torn.
 const (
 	rollupCheckpointFile  = "rollup-state.ckpt"
-	rollupCheckpointMagic = "GCRSCKP1"
+	rollupCheckpointMagic = "GCRSCKP2"
 )
-
-var rollupCheckpointKey = []byte{0xff, 'k'}
 
 var rollupCheckpointCRC = crc32.MakeTable(crc32.Castagnoli)
 
-// writeCheckpoint runs after the owner stopped and before its DB closes. The
-// file is durable before the token is, so a kill at any point leaves either no
-// token or a complete file.
-func (r *coreRollups) writeCheckpoint(dir string) error {
-	stamp, closer, err := r.db.Get(coreMetaKey)
-	if errors.Is(err, pebble.ErrNotFound) {
-		return nil
-	} else if err != nil {
-		return err
+// rollupCheckpointEvery spaces at-seal checkpoints; close always writes one.
+var rollupCheckpointEvery = time.Minute
+
+// livePartBindings lists the sealed part bindings visible now. Seals publish
+// bindings with their parts; a merge replaces inputs by an output holding the
+// same rows, so the in-memory state reflects every listed part.
+func livePartBindings(db *pebble.DB) ([][]byte, error) {
+	it, err := db.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
+	if err != nil {
+		return nil, err
 	}
-	buf, token, err := r.encodeCheckpoint(stamp)
-	if err = errors.Join(err, closer.Close()); err != nil {
-		return err
+	var out [][]byte
+	for valid := it.First(); valid; valid = it.Next() {
+		out = append(out, bytes.Clone(it.Key()))
 	}
+	return out, errors.Join(it.Error(), it.Close())
+}
+
+// encodeOwnerCheckpoint runs on the owner goroutine with no seal in flight.
+func (r *coreRollups) encodeOwnerCheckpoint() ([]byte, error) {
+	parts, err := livePartBindings(r.db)
+	if err != nil {
+		return nil, err
+	}
+	return r.encodeCheckpoint(parts), nil
+}
+
+// checkpointAfterSeal runs on the owner goroutine right after a seal commits,
+// with no seal in flight. It encodes the per-name state (about 0.3 µs/name)
+// and hands the file write to one goroutine; a write still running skips this
+// round. A failed write keeps the previous file, so the next open folds more.
+func (o *coreOwner) checkpointAfterSeal() {
+	if o.rollups == nil || o.rollups.db == nil || time.Since(o.ckptAt) < rollupCheckpointEvery {
+		return
+	}
+	if o.ckptWriting != nil {
+		select {
+		case <-o.ckptWriting:
+			o.ckptWriting = nil
+		default:
+			return
+		}
+	}
+	buf, err := o.rollups.encodeOwnerCheckpoint()
+	if err != nil {
+		return
+	}
+	o.ckptAt = time.Now()
+	done := make(chan struct{})
+	o.ckptWriting = done
+	dir := o.dir
+	go func() {
+		_ = writeCheckpointFile(dir, buf)
+		close(done)
+	}()
+}
+
+// writeCheckpointFile makes buf the owner's checkpoint: tmp, fsync, rename,
+// dir fsync. A kill at any point leaves the previous file or the new one.
+func writeCheckpointFile(dir string, buf []byte) error {
 	path := filepath.Join(dir, rollupCheckpointFile)
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
@@ -60,7 +105,7 @@ func (r *coreRollups) writeCheckpoint(dir string) error {
 	if err != nil {
 		return errors.Join(err, os.Remove(tmp))
 	}
-	return r.db.Set(rollupCheckpointKey, token[:], pebble.Sync)
+	return nil
 }
 
 func syncDir(dir string) error {
@@ -71,14 +116,10 @@ func syncDir(dir string) error {
 	return errors.Join(d.Sync(), d.Close())
 }
 
-// Layout: magic, token[16], stamp, suffix table, names in owner-slot order,
-// CRC32-C of everything before it. Each name: id, suffix index, the name part
-// of its canonical definition, scalars, resident samples.
-func (r *coreRollups) encodeCheckpoint(stamp []byte) ([]byte, [16]byte, error) {
-	var token [16]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return nil, token, err
-	}
+// Layout: magic, stamp (part binding keys), suffix table, names in owner-slot
+// order, CRC32-C of everything before it. Each name: id, suffix index, the
+// name part of its canonical definition, scalars, resident samples.
+func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	suffixes := map[string]uint64{}
 	var table [][]byte
 	var body []byte
@@ -126,11 +167,17 @@ func (r *coreRollups) encodeCheckpoint(stamp []byte) ([]byte, [16]byte, error) {
 		}
 		names++
 	}
-	out := make([]byte, 0, len(body)+len(stamp)+64)
+	size := len(body) + 64
+	for _, p := range parts {
+		size += len(p) + 2
+	}
+	out := make([]byte, 0, size)
 	out = append(out, rollupCheckpointMagic...)
-	out = append(out, token[:]...)
-	out = binary.AppendUvarint(out, uint64(len(stamp)))
-	out = append(out, stamp...)
+	out = binary.AppendUvarint(out, uint64(len(parts)))
+	for _, p := range parts {
+		out = binary.AppendUvarint(out, uint64(len(p)))
+		out = append(out, p...)
+	}
 	out = binary.AppendUvarint(out, uint64(len(table)))
 	for _, s := range table {
 		out = binary.AppendUvarint(out, uint64(len(s)))
@@ -138,64 +185,68 @@ func (r *coreRollups) encodeCheckpoint(stamp []byte) ([]byte, [16]byte, error) {
 	}
 	out = binary.AppendUvarint(out, names)
 	out = append(out, body...)
-	return binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, rollupCheckpointCRC)), token, nil
-}
-
-// takeCheckpoint consumes the owner's checkpoint: it returns the file bytes
-// when the token in Pebble matches, and always deletes token and file first,
-// so a checkpoint is loaded at most once and never after a later mutation.
-// An empty dir (validation-only recoveries) leaves the checkpoint alone.
-func takeCheckpoint(db *pebble.DB, dir string) ([]byte, error) {
-	if dir == "" {
-		return nil, nil
-	}
-	token, closer, err := db.Get(rollupCheckpointKey)
-	if errors.Is(err, pebble.ErrNotFound) {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
-	}
-	want := bytes.Clone(token)
-	if err = closer.Close(); err != nil {
-		return nil, err
-	}
-	if err = db.Delete(rollupCheckpointKey, pebble.Sync); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(dir, rollupCheckpointFile)
-	buf, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil
-	}
-	if len(buf) < len(rollupCheckpointMagic)+16 || !bytes.Equal(buf[len(rollupCheckpointMagic):len(rollupCheckpointMagic)+16], want) {
-		return nil, nil
-	}
-	return buf, nil
+	return binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, rollupCheckpointCRC))
 }
 
 var errCheckpoint = errors.New("invalid rollup checkpoint")
 
-// loadCheckpoint rebuilds the owner's rollups from a taken checkpoint, exactly
-// as recoverCoreRollups would install them from a scan. Any mismatch returns
-// errCheckpoint; the caller then scans parts.
-func loadCheckpoint(db *pebble.DB, buf, stamp []byte, identities *PolicyCatalog) (*coreRollups, error) {
+// loadCheckpoint rebuilds the owner's rollups from its checkpoint plus the
+// parts published after it, exactly as recoverCoreRollups would install them
+// from a scan. Any mismatch returns errCheckpoint; the caller then scans.
+func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, buf []byte, identities *PolicyCatalog) (*coreRollups, error) {
 	n := len(buf) - 4
-	if n < len(rollupCheckpointMagic)+16 || string(buf[:len(rollupCheckpointMagic)]) != rollupCheckpointMagic || binary.LittleEndian.Uint32(buf[n:]) != crc32.Checksum(buf[:n], rollupCheckpointCRC) {
+	if n < len(rollupCheckpointMagic) || string(buf[:len(rollupCheckpointMagic)]) != rollupCheckpointMagic || binary.LittleEndian.Uint32(buf[n:]) != crc32.Checksum(buf[:n], rollupCheckpointCRC) {
 		return nil, errCheckpoint
 	}
-	d := checkpointDecoder{buf: buf[len(rollupCheckpointMagic)+16 : n]}
-	if !bytes.Equal(d.bytes(), stamp) {
-		return nil, errCheckpoint
+	d := checkpointDecoder{buf: buf[len(rollupCheckpointMagic):n]}
+	stamp := make(map[string]bool, 64)
+	for range d.uvarint() {
+		stamp[string(d.bytes())] = true
 	}
 	table := make([][]byte, d.uvarint())
 	for i := range table {
 		table[i] = d.bytes()
+	}
+	if d.err != nil {
+		return nil, errCheckpoint
+	}
+	// Fold the parts published after the stamp. Re-folding rows the state
+	// already reflects (a merge output) is idempotent under after/newerOrigin.
+	series := map[v2part.ID]*rollupScanEntry{}
+	selected := map[archivePartIdentity]bool{}
+	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
+	if err != nil {
+		return nil, err
+	}
+	for valid := it.First(); valid; valid = it.Next() {
+		if stamp[string(it.Key())] {
+			continue
+		}
+		desc, e := v2part.ParseDescriptor(it.Value())
+		if e != nil {
+			return nil, errors.Join(e, it.Close())
+		}
+		selected[archivePartIdentity{desc.Scope.Group, desc.Scope.Part}] = true
+	}
+	if err = errors.Join(it.Error(), it.Close()); err != nil {
+		return nil, err
+	}
+	if len(selected) > 0 {
+		iter, err := newArchiveIterSelected(context.Background(), snapshot, rollupScanBounds(), selected)
+		if err != nil {
+			return nil, err
+		}
+		err = foldRollupKeys(iter, identities, series)
+		if err = errors.Join(err, iter.Close()); err != nil {
+			return nil, errCheckpoint
+		}
 	}
 	r := newCoreRollups()
 	r.db = db
 	if identities != nil {
 		r.identities = identities
 	}
+	var resident []sealrollup.Delta
 	count := d.uvarint()
 	for i := uint64(0); i < count && d.err == nil; i++ {
 		id := d.uvarint()
@@ -211,17 +262,7 @@ func loadCheckpoint(db *pebble.DB, buf, stamp []byte, identities *PolicyCatalog)
 		meta.Frontier.MaxTime = d.varint()
 		meta.Version = d.byte()
 		meta.Expired = d.byte() == 1
-		if d.err != nil || index >= uint64(len(table)) {
-			return nil, errCheckpoint
-		}
-		def := make([]byte, 0, len(`{"Name":"`)+len(name)+len(table[index]))
-		def = append(append(append(def, `{"Name":"`...), name...), table[index]...)
-		m, err := r.metric(id, def)
-		if err != nil || r.metrics[id] != nil {
-			return nil, errCheckpoint
-		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
-		archives := len(m.schema().Archives)
+		resident = resident[:0]
 		for range d.uvarint() {
 			var x sealrollup.Delta
 			x.Archive = int(d.uvarint())
@@ -229,7 +270,46 @@ func loadCheckpoint(db *pebble.DB, buf, stamp []byte, identities *PolicyCatalog)
 			x.Sample.Time = d.varint()
 			x.Sample.Bits = d.uint64()
 			x.Sample.Sequence = d.uvarint()
-			if d.err != nil || x.Archive >= archives {
+			resident = append(resident, x)
+		}
+		if d.err != nil || index >= uint64(len(table)) {
+			return nil, errCheckpoint
+		}
+		def := make([]byte, 0, len(`{"Name":"`)+len(name)+len(table[index]))
+		def = append(append(append(def, `{"Name":"`...), name...), table[index]...)
+		if e := series[v2part.ID(name)]; e != nil {
+			// Touched since the stamp: merge the reflected state into the fold.
+			delete(series, v2part.ID(name))
+			if meta.after(e.meta) {
+				h, err := scanIdentity(r.identities, id, string(name), def)
+				if err != nil {
+					return nil, errCheckpoint
+				}
+				e.identity, e.meta = h, meta
+			}
+			for _, x := range resident {
+				// A record's Sequence is its Order.
+				if err := e.addRecord(sealrollup.Record{Delta: sealrollup.Delta{Archive: x.Archive, Slot: x.Slot, Order: x.Sample.Sequence, Sample: x.Sample}}); err != nil {
+					return nil, errCheckpoint
+				}
+			}
+			policy, m, records, err := e.finish(v2part.ID(name))
+			if err != nil || m.ID != id {
+				return nil, errCheckpoint
+			}
+			if err = r.installRecovered(policy, m, records); err != nil {
+				return nil, errCheckpoint
+			}
+			continue
+		}
+		m, err := r.metric(id, def)
+		if err != nil || r.metrics[id] != nil {
+			return nil, errCheckpoint
+		}
+		archives := len(m.schema().Archives)
+		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		for _, x := range resident {
+			if x.Archive >= archives {
 				return nil, errCheckpoint
 			}
 			m.slots.InstallRecent(x)
@@ -240,6 +320,16 @@ func loadCheckpoint(db *pebble.DB, buf, stamp []byte, identities *PolicyCatalog)
 	}
 	if d.err != nil || len(d.buf) != 0 {
 		return nil, errCheckpoint
+	}
+	// Names first published after the stamp.
+	for name, e := range series {
+		policy, m, records, err := e.finish(name)
+		if err != nil {
+			return nil, errCheckpoint
+		}
+		if err = r.installRecovered(policy, m, records); err != nil {
+			return nil, errCheckpoint
+		}
 	}
 	r.fromCheckpoint = true
 	return r, nil

@@ -217,6 +217,10 @@ func coreWait(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	// ckptAt and ckptWriting belong to the owner goroutine (then to close):
+	// the last at-seal checkpoint encode and its in-flight file write.
+	ckptAt      time.Time
+	ckptWriting chan struct{}
 	ready          []atomic.Uint64
 	work           chan struct{}
 	nextPoll       time.Time // execution-owner local seal deadline
@@ -1096,6 +1100,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		sealVisible(f.batches, f.reported, f.expiries)
+		o.checkpointAfterSeal()
 		return nil
 	}
 	awaitFlight := func() error {
@@ -1225,6 +1230,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		sealVisible(sealedBatches, reported, since)
+		o.checkpointAfterSeal()
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}
@@ -1984,14 +1990,24 @@ func (e *coreEngine) close() error {
 			err = errors.Join(err, q.push(&corePacket{stop: true}, o.dead))
 		}
 	}
-	// Owners write their checkpoints in parallel, as they open. Derived
-	// state: a failed write only costs the next open a scan.
+	// Owners write a final checkpoint in parallel, so a clean restart folds
+	// no parts. Derived state: a failed write only costs the next open a scan.
 	errs := make([]error, len(e.owners))
 	var writing errgroup.Group
 	writing.SetLimit(min(16, runtime.GOMAXPROCS(0)))
 	for i, o := range e.owners {
 		if errs[i] = <-o.done; errs[i] == nil && o.rollups != nil && o.rollups.db != nil {
-			writing.Go(func() error { errs[i] = o.rollups.writeCheckpoint(o.dir); return nil })
+			writing.Go(func() error {
+				if o.ckptWriting != nil {
+					<-o.ckptWriting
+				}
+				buf, err := o.rollups.encodeOwnerCheckpoint()
+				if err == nil {
+					err = writeCheckpointFile(o.dir, buf)
+				}
+				errs[i] = err
+				return nil
+			})
 		}
 	}
 	_ = writing.Wait()
