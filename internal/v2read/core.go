@@ -30,10 +30,12 @@ type Reader struct {
 	// scanAllOwners is the test oracle: every owner sees every name.
 	scanAllOwners bool
 
-	closed    atomic.Bool
-	owners    []atomic.Pointer[generation]
-	caches    []sealedCache
-	Budget    *Budget
+	closed atomic.Bool
+	owners []atomic.Pointer[generation]
+	caches []sealedCache
+	// renders admits budgetBytes/WorkBytes concurrent renders; each holds at
+	// most WorkBytes (32B per slot) until its consumer returns.
+	renders   chan struct{}
 	WorkBytes int64
 	work      chan *sealrollup.Workspace
 	// Now is fixed by the caller before intake; nil uses time.Now.
@@ -119,7 +121,7 @@ func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
 	if owners < 1 || budgetBytes < 1 || workBytes < 0 {
 		return nil, errors.New("invalid read geometry/budget")
 	}
-	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes, work: make(chan *sealrollup.Workspace, owners)}
+	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), renders: make(chan struct{}, budgetBytes/max(workBytes, 1)), WorkBytes: workBytes, work: make(chan *sealrollup.Workspace, owners)}
 	for i := range r.caches {
 		r.caches[i].loadGate = make(chan struct{}, 1)
 		r.caches[i].loadGate <- struct{}{}
@@ -480,26 +482,19 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			archives[i] = Archive{Step: a.Step, Points: a.Count}
 		}
 		m := Metric{ID: metric.meta.ID, Archives: archives, XFilesFactor: metric.policy.Config.XFilesFactor, AggregationMethod: aggregationName(metric.policy.Config.Method)}
-		catalog := CatalogFuncs{LookupFunc: func(n string) (Metric, bool) { return m, n == name }}
-		var p Publication
-		retained := 4 * metric.resource.cache.limit
-		if metric.sealed != nil {
-			retained += metric.sealed.RetainedBytes()
+		select {
+		case r.renders <- struct{}{}:
+		default:
+			return ErrAdmission
 		}
-		if metric.frozen != nil {
-			retained += metric.frozen.RetainedBytes()
-		}
-		p.Publish(View{Catalog: catalog, Blocks: []Source{source}, RetainedBytes: retained})
-		h, err := p.Pin(r.Budget, r.WorkBytes)
-		p.Close()
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			defer h.Close()
+		err := func() error {
+			defer func() { <-r.renders }()
 			stage := time.Now()
-			s, e := h.Render(ctx, name, from, until, now)
+			s, workspace, e := render(ctx, m, source, from, until, now, r.WorkBytes)
 			r.stages.observe(StageRender, stage)
+			if workspace != nil {
+				defer releaseRenderWorkspace(workspace)
+			}
 			if e != nil {
 				return e
 			}
