@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
+	"github.com/klauspost/compress/zstd"
 )
 
 // An owner's rollup checkpoint is derived state: one sequential file holding,
@@ -28,10 +29,14 @@ import (
 // validates the checksum and part bindings without decoding unchanged names.
 const (
 	rollupCheckpointFile  = "rollup-state.ckpt"
-	rollupCheckpointMagic = "GCRSCKP4"
+	rollupCheckpointMagic = "GCRSCKP5"
 )
 
-var rollupCheckpointCRC = crc32.MakeTable(crc32.Castagnoli)
+var (
+	rollupCheckpointCRC       = crc32.MakeTable(crc32.Castagnoli)
+	rollupCheckpointZstd, _   = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
+	rollupCheckpointUnzstd, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(1<<32))
+)
 
 // rollupCheckpointEvery spaces at-seal checkpoints; close always writes one.
 // A kill restart folds at most this much of newer parts; the rewrite costs
@@ -154,7 +159,9 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	var resident []sealrollup.Delta
 	names := uint64(0)
 	entries := make([]checkpointIndexEntry, 0, len(r.ids))
-	for _, id := range r.ids {
+	ids := slices.Clone(r.ids)
+	slices.Sort(ids)
+	for _, id := range ids {
 		m := r.metrics[id]
 		if m == nil {
 			continue
@@ -203,7 +210,23 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 		entries = append(entries, checkpointIndexEntry{id: id, offset: uint64(start), size: uint64(len(body) - start), due: end, nameOffset: nameOffset, nameSize: uint64(len(name))})
 		names++
 	}
-	size := len(body) + len(entries)*48 + 80
+	// Compress independently addressable groups. A single owner-local scratch
+	// block is enough to decode a first touch; there is no decoded state cache.
+	var compressed []byte
+	for first := 0; first < len(entries); first += 128 {
+		last := min(first+128, len(entries))
+		start := entries[first].offset
+		end := entries[last-1].offset + entries[last-1].size
+		block := rollupCheckpointZstd.EncodeAll(body[start:end], nil)
+		offset := uint64(len(compressed))
+		compressed = binary.LittleEndian.AppendUint64(compressed, uint64(len(block)))
+		compressed = append(compressed, block...)
+		for i := first; i < last; i++ {
+			entries[i].size |= (entries[i].offset - start) << 32
+			entries[i].offset = offset
+		}
+	}
+	size := len(compressed) + len(entries)*48 + 80
 	for _, p := range parts {
 		size += len(p) + 2
 	}
@@ -221,7 +244,8 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	}
 	out = binary.AppendUvarint(out, names)
 	bodyOffset := uint64(len(out))
-	out = append(out, body...)
+	out = append(out, compressed...)
+	var indexes []byte
 	indexOffset := uint64(len(out))
 	slices.SortFunc(entries, func(a, b checkpointIndexEntry) int {
 		if a.id < b.id {
@@ -232,16 +256,18 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 		}
 		return 0
 	})
-	for _, e := range entries {
-		out = binary.LittleEndian.AppendUint64(out, e.id)
-		out = binary.LittleEndian.AppendUint64(out, e.offset+bodyOffset)
-		out = binary.LittleEndian.AppendUint64(out, e.size)
+	for i := range entries {
+		e := &entries[i]
+		e.ordinal = uint64(i)
+		indexes = binary.LittleEndian.AppendUint64(indexes, e.id)
+		indexes = binary.LittleEndian.AppendUint64(indexes, e.offset+bodyOffset)
+		indexes = binary.LittleEndian.AppendUint64(indexes, e.size)
 	}
 	slices.SortFunc(entries, func(a, b checkpointIndexEntry) int {
 		return bytes.Compare(body[a.nameOffset:a.nameOffset+a.nameSize], body[b.nameOffset:b.nameOffset+b.nameSize])
 	})
 	for _, e := range entries {
-		out = binary.LittleEndian.AppendUint64(out, e.offset+bodyOffset)
+		indexes = binary.LittleEndian.AppendUint64(indexes, e.ordinal)
 	}
 	slices.SortFunc(entries, func(a, b checkpointIndexEntry) int {
 		if a.due < b.due {
@@ -253,9 +279,10 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 		return 0
 	})
 	for _, e := range entries {
-		out = binary.LittleEndian.AppendUint64(out, uint64(e.due))
-		out = binary.LittleEndian.AppendUint64(out, e.id)
+		indexes = binary.LittleEndian.AppendUint64(indexes, uint64(e.due))
+		indexes = binary.LittleEndian.AppendUint64(indexes, e.id)
 	}
+	out = rollupCheckpointZstd.EncodeAll(indexes, out)
 	out = binary.LittleEndian.AppendUint64(out, indexOffset)
 	out = binary.LittleEndian.AppendUint64(out, names)
 	return binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, rollupCheckpointCRC))
@@ -293,7 +320,11 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 	}
 	indexOffset := binary.LittleEndian.Uint64(buf[n-16 : n-8])
 	countIndex := binary.LittleEndian.Uint64(buf[n-8 : n])
-	if indexOffset > uint64(n-16) || countIndex > uint64(n)/48 || indexOffset+countIndex*48 != uint64(n-16) {
+	if indexOffset > uint64(n-16) || countIndex > uint64(math.MaxInt)/48 {
+		return nil, errCheckpoint
+	}
+	indexes, err := rollupCheckpointUnzstd.DecodeAll(buf[indexOffset:n-16], nil)
+	if err != nil || uint64(len(indexes)) != countIndex*48 {
 		return nil, errCheckpoint
 	}
 	// Fold the parts published after the stamp. Re-folding rows the state
@@ -350,18 +381,22 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 	if d.err != nil || count != countIndex || uint64(len(buf)-4-len(d.buf)) > indexOffset {
 		return nil, errCheckpoint
 	}
-	r.checkpoint = &mappedRollupCheckpoint{buf: buf, table: table, index: buf[indexOffset : indexOffset+count*24], names: buf[indexOffset+count*24 : indexOffset+count*32], due: buf[indexOffset+count*32 : uint64(n-16)]}
+	r.checkpoint = &mappedRollupCheckpoint{buf: buf, table: table, index: indexes[:count*24], names: indexes[count*24 : count*32], due: indexes[count*32:]}
 	// A large delta already needs most names. Decode in file order instead
 	// of turning recovery into millions of random ID-index probes.
 	if count > 0 && uint64(len(series)) >= (count+1)/2 {
-		d.buf = d.buf[:indexOffset-uint64(len(buf)-4-len(d.buf))]
-		for i := uint64(0); i < count; i++ {
-			if err := r.decodeCheckpointRecord(&d, table, series); err != nil {
+		for i := 0; i < int(count); i++ {
+			_, record, err := r.checkpoint.record(i)
+			if err != nil {
 				return nil, err
 			}
-		}
-		if d.err != nil || len(d.buf) != 0 {
-			return nil, errCheckpoint
+			rd := checkpointDecoder{buf: record}
+			if err := r.decodeCheckpointRecord(&rd, table, series); err != nil {
+				return nil, err
+			}
+			if rd.err != nil || len(rd.buf) != 0 {
+				return nil, errCheckpoint
+			}
 		}
 		r.checkpoint = nil
 	} else {

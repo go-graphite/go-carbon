@@ -21,9 +21,12 @@ type mappedRollupCheckpoint struct {
 	buf, index, names, due []byte
 	table                  [][]byte
 	nextDue                int
+	blockOffset            uint64
+	block                  []byte
 }
 type checkpointIndexEntry struct {
 	id, offset, size     uint64
+	ordinal              uint64
 	due                  int64
 	nameOffset, nameSize uint64
 }
@@ -62,10 +65,25 @@ func openMappedCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, path string,
 func (c *mappedRollupCheckpoint) record(i int) (uint64, []byte, error) {
 	e := c.index[i*24 : (i+1)*24]
 	id, off, n := binary.LittleEndian.Uint64(e), binary.LittleEndian.Uint64(e[8:]), binary.LittleEndian.Uint64(e[16:])
-	if off > uint64(len(c.buf)) || n > uint64(len(c.buf))-off {
+	if off > uint64(len(c.buf))-8 {
 		return 0, nil, errCheckpoint
 	}
-	return id, c.buf[off : off+n], nil
+	if c.block == nil || c.blockOffset != off {
+		length := binary.LittleEndian.Uint64(c.buf[off:])
+		if length > uint64(len(c.buf))-off-8 {
+			return 0, nil, errCheckpoint
+		}
+		block, err := rollupCheckpointUnzstd.DecodeAll(c.buf[off+8:off+8+length], c.block[:0])
+		if err != nil {
+			return 0, nil, errCheckpoint
+		}
+		c.block, c.blockOffset = block, off
+	}
+	start, length := n>>32, uint64(uint32(n))
+	if start > uint64(len(c.block)) || length > uint64(len(c.block))-start {
+		return 0, nil, errCheckpoint
+	}
+	return id, c.block[start : start+length], nil
 }
 
 func (r *coreRollups) loadCheckpointID(id uint64, series map[v2part.ID]*rollupScanEntry) error {
@@ -120,12 +138,17 @@ func (r *coreRollups) loadCheckpointName(name []byte) error {
 	}
 	var decodeErr error
 	entry := func(i int) (uint64, []byte) {
-		off := binary.LittleEndian.Uint64(c.names[i*8:])
-		if off >= uint64(len(c.buf)) {
+		ordinal := binary.LittleEndian.Uint64(c.names[i*8:])
+		if ordinal >= uint64(len(c.index)/24) {
 			decodeErr = errCheckpoint
 			return 0, nil
 		}
-		d := checkpointDecoder{buf: c.buf[off:]}
+		_, record, err := c.record(int(ordinal))
+		if err != nil {
+			decodeErr = err
+			return 0, nil
+		}
+		d := checkpointDecoder{buf: record}
 		id := d.uvarint()
 		d.uvarint()
 		n := d.bytes()
