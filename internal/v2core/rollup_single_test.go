@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 type singleArchiveImage map[string]struct {
@@ -127,20 +128,20 @@ func mustRollupPolicy(t *testing.T, name, retention string) []byte {
 func BenchmarkIdleMaintenanceScan(b *testing.B) {
 	const names = 200000
 	r := newCoreRollups()
-	h, err := NewApplicationPolicy("s", func() []byte {
-		p, err := EncodeRollupPolicy(RollupPolicy{Name: "s", Group: "test", Config: sealrollup.Config{Method: sealrollup.Average, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 86400}}}})
+	for i := 0; i < names; i++ {
+		// One identity per ID, as the catalog interns them: the slot hint
+		// lives on the identity.
+		p, err := EncodeRollupPolicy(RollupPolicy{Name: partsformat.ID(fmt.Sprintf("s.%d", i)), Group: "test", Config: sealrollup.Config{Method: sealrollup.Average, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 86400}}}})
 		if err != nil {
 			b.Fatal(err)
 		}
-		return p
-	}())
-	if err != nil {
-		b.Fatal(err)
-	}
-	for i := 0; i < names; i++ {
+		m, err := r.metric(uint64(i+1), p)
+		if err != nil {
+			b.Fatal(err)
+		}
 		meta := freshMetadata
 		meta.Version, meta.Frontier.Order, meta.Frontier.MaxTime = 3, uint64(i+1), 1794700800
-		r.install(uint64(i+1), newRollupMetric(h), meta)
+		r.install(uint64(i+1), m, meta)
 	}
 	scan := func(metrics map[uint64]*rollupMetric) bool {
 		for id, m := range metrics {
