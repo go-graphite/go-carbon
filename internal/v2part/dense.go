@@ -27,13 +27,14 @@ var denseMagic = []byte{'G', 'C', 'D', 1}
 // run stores slots only: every timestamp is ts0 + (slot - slot0) * step, so the
 // header carries ts0 and step instead of a timestamp column. Ring wrap,
 // unaligned and single-slot runs keep the delta-of-delta timestamp column.
-// Older merged runs use denseModeOrderDoD; new merges use denseModeOrderLinear.
+// Older merges use DoD or predicted byte planes; new merges add OrderBits.
 const (
 	denseInteger         = 1 << 0
 	denseAligned         = 1 << 1
 	denseModeOrderDoD    = 1 << 2
 	denseModeOrderLinear = 1 << 4
-	denseModes           = denseInteger | denseAligned | denseModeOrderDoD | denseModeOrderLinear | denseTagged
+	denseModeOrderBits   = 1 << 3
+	denseModes           = denseInteger | denseAligned | denseModeOrderDoD | denseModeOrderLinear | denseModeOrderBits | denseTagged
 )
 
 // alignedStep returns the run's slot step in seconds, or 0 if any timestamp
@@ -110,7 +111,7 @@ func appendSlots(out []byte, records []sealrollup.Record, table *[]uint64) ([]by
 }
 
 // appendSlotsOrder predicts merged orders from the two endpoints and stores
-// exact zigzag residuals in byte planes. Unsigned arithmetic preserves wraps.
+// exact zigzag residuals in bit planes. Unsigned arithmetic preserves wraps.
 func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, predictOrders bool) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
@@ -131,7 +132,7 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	}
 	predict := predictOrders && len(records) > 1
 	if predict {
-		mode |= denseModeOrderLinear
+		mode |= denseModeOrderLinear | denseModeOrderBits
 	}
 	out = append(out, mode)
 	out = binary.AppendUvarint(out, uint64(len(records)))
@@ -179,15 +180,36 @@ func appendPredictedOrders(out []byte, records []sealrollup.Record) []byte {
 	for i, r := range records[1:] {
 		union |= zigzag(int64(r.Order - first - uint64(step)*uint64(i+1)))
 	}
-	width := (bits.Len64(union) + 7) / 8
+	width := bits.Len64(union)
 	out = append(out, byte(width))
-	for plane := 0; plane < width; plane++ {
-		for i, r := range records[1:] {
-			v := zigzag(int64(r.Order - first - uint64(step)*uint64(i+1)))
-			out = append(out, byte(v>>uint(plane*8)))
+	stride := (len(records) - 1 + 7) / 8
+	start := len(out)
+	out = append(out, make([]byte, width*stride)...)
+	for plane := 0; plane*8 < width; plane++ {
+		for i := 1; i < len(records); i += 8 {
+			var word uint64
+			for j := 0; j < 8 && i+j < len(records); j++ {
+				v := zigzag(int64(records[i+j].Order - first - uint64(step)*uint64(i+j)))
+				word |= uint64(byte(v>>uint(plane*8))) << uint(j*8)
+			}
+			word = transposeOrderBits(word)
+			for bit := 0; bit < 8 && plane*8+bit < width; bit++ {
+				out[start+(plane*8+bit)*stride+(i-1)/8] = byte(word >> uint(bit*8))
+			}
 		}
 	}
 	return out
+}
+
+// transposeOrderBits exchanges the rows and columns of an 8x8 bit matrix.
+// It is its own inverse; byte planes and bit planes use the same operation.
+func transposeOrderBits(x uint64) uint64 {
+	t := (x ^ (x >> 7)) & 0x00AA00AA00AA00AA
+	x ^= t ^ (t << 7)
+	t = (x ^ (x >> 14)) & 0x0000CCCC0000CCCC
+	x ^= t ^ (t << 14)
+	t = (x ^ (x >> 28)) & 0x00000000F0F0F0F0
+	return x ^ t ^ (t << 28)
 }
 
 // Value column codecs. A run's tag byte (mode bit denseTagged) names one codec
@@ -357,7 +379,7 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	// Mode bits are independent flags; the value column takes one of
 	// untagged planes, untagged integers or a tag.
 	mode := data[4]
-	if mode&^denseModes != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged || mode&(denseModeOrderDoD|denseModeOrderLinear) == denseModeOrderDoD|denseModeOrderLinear {
+	if mode&denseModeOrderBits != 0 && mode&denseModeOrderLinear == 0 || mode&^denseModes != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged || mode&(denseModeOrderDoD|denseModeOrderLinear) == denseModeOrderDoD|denseModeOrderLinear {
 		return nil, bad
 	}
 	aligned := mode&denseAligned != 0
@@ -441,15 +463,42 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		step := int64(u>>1) ^ -int64(u&1)
 		width := int(p[0])
 		p = p[1:]
-		if width > 8 || len(p) < width*(len(rs)-1) {
-			return nil, bad
-		}
-		for plane := 0; plane < width; plane++ {
-			for i := 1; i < len(rs); i++ {
-				rs[i].Order |= uint64(p[plane*(len(rs)-1)+i-1]) << uint(plane*8)
+		if mode&denseModeOrderBits != 0 {
+			stride := (len(rs) - 1 + 7) / 8
+			if width > 64 || len(p) < width*stride {
+				return nil, bad
 			}
+			if tail := uint((len(rs) - 1) % 8); tail != 0 {
+				for bit := 0; bit < width; bit++ {
+					if p[(bit+1)*stride-1]>>tail != 0 {
+						return nil, bad
+					}
+				}
+			}
+			for plane := 0; plane*8 < width; plane++ {
+				for i := 1; i < len(rs); i += 8 {
+					var word uint64
+					for bit := 0; bit < 8 && plane*8+bit < width; bit++ {
+						word |= uint64(p[(plane*8+bit)*stride+(i-1)/8]) << uint(bit*8)
+					}
+					word = transposeOrderBits(word)
+					for j := 0; j < 8 && i+j < len(rs); j++ {
+						rs[i+j].Order |= uint64(byte(word>>uint(j*8))) << uint(plane*8)
+					}
+				}
+			}
+			p = p[width*stride:]
+		} else {
+			if width > 8 || len(p) < width*(len(rs)-1) {
+				return nil, bad
+			}
+			for plane := 0; plane < width; plane++ {
+				for i := 1; i < len(rs); i++ {
+					rs[i].Order |= uint64(p[plane*(len(rs)-1)+i-1]) << uint(plane*8)
+				}
+			}
+			p = p[width*(len(rs)-1):]
 		}
-		p = p[width*(len(rs)-1):]
 		for i := range rs {
 			u := rs[i].Order
 			rs[i].Order = first + uint64(step)*uint64(i) + uint64(int64(u>>1)^-int64(u&1))
@@ -524,7 +573,7 @@ type DenseWriter struct {
 	predictOrders bool
 }
 
-// PredictOrders replaces the seal order codec with endpoint-predicted byte planes,
+// PredictOrders replaces the seal order codec with endpoint-predicted bit planes,
 // including copied runs. Decoding is exact. Call before
 // the first Set.
 func (w *DenseWriter) PredictOrders() { w.predictOrders = true }
@@ -691,7 +740,7 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
 		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
-		if w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
+		if w.predictOrders && value[4]&denseModeOrderBits == 0 && len(w.records) > 1 {
 			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, true)
 			w.encoded = value
 		}

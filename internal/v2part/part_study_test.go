@@ -128,7 +128,11 @@ func TestPartStudy(t *testing.T) {
 				take()
 				take()
 				width := int(b[pos])
-				pos += 1 + width*(n-1)
+				if mode&denseModeOrderBits != 0 {
+					pos += 1 + width*((n-1+7)/8)
+				} else {
+					pos += 1 + width*(n-1)
+				}
 			} else {
 				for i := 0; i < n; i++ {
 					take()

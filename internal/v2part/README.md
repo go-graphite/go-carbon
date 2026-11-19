@@ -163,12 +163,15 @@ materialized source/compaction contract and is not inferred from filenames.
 The synthetic byte gate covers encoded SST bytes against native exact point
 blocks; it does not certify captured-data or whole-engine at-rest density.
 
-Merged runs encode arrival orders with mode bit `0x10`: first order (uvarint),
-endpoint-derived signed step (varint), residual byte width (0–8), then that many
-little-endian byte planes for the remaining orders' zigzag residuals. The
-predictor is `first + step*i` modulo 2^64; adding the decoded signed residual
-preserves every order bit, including wrap and descending orders. This replaces
-the merge writer's XOR/delta-of-delta selection. Seals retain the inexpensive XOR
-codec. Readers accept the existing XOR and `0x04` delta-of-delta forms; merges
-rewrite copied older runs to `0x10`. Each run stores one order representation.
-Readers without `0x10` support cannot read newly merged parts.
+Merged runs encode arrival orders with mode bits `0x10 | 0x08`: first order
+(uvarint), endpoint-derived signed step (varint), residual bit width (0–64),
+then that many bit planes for the remaining orders' zigzag residuals. Each
+plane contains ceil((count-1)/8) bytes, least significant sample bit first;
+padding bits are zero. An 8x8 transpose converts eight residual bytes at once.
+The predictor is `first + step*i` modulo 2^64, preserving every order bit,
+including wraps and descending orders. Seals retain the inexpensive XOR codec.
+Readers accept legacy XOR, `0x04` delta-of-delta and `0x10` byte-plane prediction;
+merges rewrite copied older runs to bit planes. Every run stores one order
+representation. Older readers cannot read newly merged parts; downgrade needs
+an old store or explicit conversion. The compatibility decoders remain until
+old parts and supported backups have been rewritten or aged out.

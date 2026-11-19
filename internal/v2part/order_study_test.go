@@ -3,10 +3,13 @@
 package v2part
 
 import (
+	"bufio"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"math/bits"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -17,6 +20,9 @@ import (
 func studyOrderColumn(rs []sealrollup.Record, scheme string) []byte {
 	if scheme == "original" {
 		return nil
+	}
+	if scheme != "dod_planes" && scheme != "delta_planes" && scheme != "linear" && scheme != "linear_planes" {
+		return studyExtraOrders(rs, scheme)
 	}
 	out := binary.AppendUvarint(nil, rs[0].Order)
 	n := len(rs)
@@ -69,7 +75,7 @@ func TestPartOrderStudy(t *testing.T) {
 	if path == "" {
 		t.Skip("PART_STUDY")
 	}
-	schemes := []string{"original", "dod_planes", "delta_planes", "linear", "linear_planes"}
+	schemes := []string{"original", "dod_planes", "delta_planes", "linear", "linear_planes", "raw_planes", "raw_bits", "linear_bits", "linear_unsigned", "delta_bits", "xor_planes", "linear_shift8", "linear_shift10", "linear_shift16", "linear_nibbles", "linear_base", "xor_predict", "round8", "round12", "round16", "round17"}
 	blocks := make([]denseBlock, len(schemes))
 	totals := make([]int, len(schemes))
 	spent := make([]time.Duration, len(schemes))
@@ -77,6 +83,18 @@ func TestPartOrderStudy(t *testing.T) {
 	enc, e := newDenseEncoder()
 	if e != nil {
 		t.Fatal(e)
+	}
+	var rewrite *denseSSTWriter
+	if target := os.Getenv("PART_REWRITE"); target != "" {
+		f, e := os.Create(target)
+		if e != nil {
+			t.Fatal(e)
+		}
+		out := &hashedOutput{f: f, buf: bufio.NewWriterSize(f, 256<<10), h: sha256.New()}
+		rewrite, e = newDenseSSTWriter(out)
+		if e != nil {
+			t.Fatal(e)
+		}
 	}
 	var compressed []byte
 	flush := func(i int) {
@@ -134,13 +152,34 @@ func TestPartOrderStudy(t *testing.T) {
 				take()
 				take()
 				width := int(run[p])
-				p += 1 + width*(len(rs)-1)
+				if run[4]&denseModeOrderBits != 0 {
+					p += 1 + width*((len(rs)-1+7)/8)
+				} else {
+					p += 1 + width*(len(rs)-1)
+				}
 			} else {
 				for range rs {
 					take()
 				}
 			}
 			end = p
+		}
+		if rewrite != nil {
+			b := v
+			if len(rs) > 0 {
+				encoded, e := appendSlotsOrder(nil, rs, nil, true)
+				if e != nil {
+					return e
+				}
+				got, e := DecodeSlots(k.Archive, k.BlockStart, encoded)
+				if e != nil || !reflect.DeepEqual(got, rs) {
+					t.Fatalf("rewrite changed records: %v", e)
+				}
+				b = append(append([]byte(nil), v[:off]...), encoded...)
+			}
+			if e := rewrite.Set(key[:len(key)-8], b); e != nil {
+				return e
+			}
 		}
 		for i, s := range schemes {
 			b := v
@@ -191,9 +230,110 @@ func TestPartOrderStudy(t *testing.T) {
 	if e = it.Error(); e != nil {
 		t.Fatal(e)
 	}
+	if rewrite != nil {
+		if e := rewrite.Close(); e != nil {
+			t.Fatal(e)
+		}
+	}
 	for i, s := range schemes {
 		flush(i)
 		j, _ := json.Marshal(map[string]any{"scheme": s, "data_bytes": totals[i], "points": points, "bpp": float64(totals[i]) / float64(points), "encode_ns_per_point": float64(spent[i].Nanoseconds()) / float64(points)})
 		t.Log(string(j))
 	}
+}
+
+func studyExtraOrders(rs []sealrollup.Record, scheme string) []byte {
+	n := len(rs)
+	first := rs[0].Order
+	step := uint64(int64(rs[n-1].Order-first) / int64(n-1))
+	if scheme == "round8" {
+		step = (step + 128) &^ 255
+	}
+	if scheme == "round12" {
+		step = (step + 2048) &^ 4095
+	}
+	if scheme == "round16" {
+		step = (step + 32768) &^ 65535
+	}
+	if scheme == "round17" {
+		step = (step + 65536) &^ 131071
+	}
+	vals := make([]uint64, n-1)
+	var union uint64
+	shift := uint(0)
+	if scheme == "linear_shift8" {
+		shift = 8
+	}
+	if scheme == "linear_shift10" {
+		shift = 10
+	}
+	if scheme == "linear_shift16" {
+		shift = 16
+	}
+	for i := 1; i < n; i++ {
+		v := rs[i].Order - first - step*uint64(i)
+		switch scheme {
+		case "raw_planes", "raw_bits":
+			v = rs[i].Order
+		case "xor_predict":
+			v = rs[i].Order ^ (first + step*uint64(i))
+		case "xor_planes":
+			v = rs[i].Order ^ rs[i-1].Order
+		case "delta_bits":
+			v = zigzag(int64(rs[i].Order - rs[i-1].Order))
+		case "linear_unsigned", "linear_base":
+		default:
+			v = zigzag(int64(v))
+		}
+		if shift > 0 {
+			v = (v >> shift) | (v << (64 - shift))
+		}
+		vals[i-1] = v
+		union |= v
+	}
+	if scheme == "linear_base" {
+		lo := int64(vals[0])
+		for _, v := range vals {
+			if int64(v) < lo {
+				lo = int64(v)
+			}
+		}
+		union = 0
+		for i, v := range vals {
+			vals[i] = v - uint64(lo)
+			union |= vals[i]
+		}
+	}
+	out := binary.AppendUvarint(nil, first)
+	out = binary.AppendUvarint(out, step)
+	width := (bits.Len64(union) + 7) / 8
+	out = append(out, byte(width))
+	if scheme == "raw_bits" || scheme == "linear_bits" || scheme == "delta_bits" {
+		for p := 0; p < bits.Len64(union); p++ {
+			for i := 0; i < len(vals); i += 8 {
+				var b byte
+				for j := 0; j < 8 && i+j < len(vals); j++ {
+					b |= byte((vals[i+j]>>uint(p))&1) << uint(j)
+				}
+				out = append(out, b)
+			}
+		}
+	} else if scheme == "linear_nibbles" {
+		for p := 0; p < (bits.Len64(union)+3)/4; p++ {
+			for i := 0; i < len(vals); i += 2 {
+				b := byte(vals[i]>>uint(p*4)) & 15
+				if i+1 < len(vals) {
+					b |= (byte(vals[i+1]>>uint(p*4)) & 15) << 4
+				}
+				out = append(out, b)
+			}
+		}
+	} else {
+		for p := 0; p < width; p++ {
+			for _, v := range vals {
+				out = append(out, byte(v>>uint(p*8)))
+			}
+		}
+	}
+	return out
 }
