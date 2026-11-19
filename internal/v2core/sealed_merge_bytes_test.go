@@ -22,7 +22,7 @@ import (
 // descriptor that TestMergeByteDifferential writes, recorded on github
 // atimofieiev/v2 9f959a15aa7a (string merge keys). A merge must stay byte
 // identical: do not re-record it for a performance change.
-const mergeByteDifferentialDigest = "fb27b251cf5420cf2e301852a7d96db2e946d3b7482acabdebdc855cfd8a9d3e"
+const mergeByteDifferentialDigest = "23b371ca09de479942eae3ab30f282325c6f2baa9b634311b12211a4992f8cc2"
 
 // TestMergeByteDifferential runs multi-tier merges (seal parts, merges of
 // merges plus a late part) over length-tied, prefix-sharing and non-ASCII
@@ -178,6 +178,15 @@ func mergeByteDifferentialCase(t *testing.T, seed uint64, group v2part.Group, su
 	})
 	m3 := merge("m3", []v2part.Descriptor{m1, m2, late}, 0)
 	// Tier 3: TTL rewrite of the merged part with one more late seal.
-	s6 := writeInput(6, 5, 20, func(n int) bool { return n%4 == 3 }, nil)
+	// Its envelopes carry the late seal's resets forward, as every seal writer
+	// does; expired names re-incarnate with the reset at the expiry order.
+	s6 := writeInput(6, 5, 20, func(n int) bool { return n%4 == 3 }, func(n int, md *RollupMetadata) {
+		if n%13 == 0 {
+			md.ResetOrder = 2
+		}
+		if n%11 == 0 {
+			md.ResetOrder = 6
+		}
+	})
 	merge("m4", []v2part.Descriptor{m3, s6}, 100000+50)
 }
