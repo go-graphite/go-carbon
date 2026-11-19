@@ -211,11 +211,11 @@ func TestPendingRowsFitRejects(t *testing.T) {
 	}
 }
 
-// pendingRowsSealPlanner seals what the planner would see if pending held
-// 16-byte rows: runs of representable batches (up to 37 per packet) are
-// encoded into one pendingRows; policy-byte batches stay a cold coreBatch
-// segment in arrival order. Decoded and cold segments are interleaved back
-// and planned. Plans and part bytes must match the production planner.
+// pendingRowsSealPlanner seals what the owner hands the planner: runs of
+// representable batches (up to 37 per packet) become pending rows, and
+// policy-byte batches cold coreBatch segments in arrival order, all in one
+// frozen pendingHead view that the planner reads in place. Plans and part
+// bytes must match the legacy oracle on the decoded batches.
 func pendingRowsSealPlanner(r *coreRollups, in coreSealInput) (coreSealPlan, error) {
 	lookup := map[uint64]*ApplicationPolicy{}
 	for i := range in.Batches {
@@ -224,24 +224,18 @@ func pendingRowsSealPlanner(r *coreRollups, in coreSealInput) (coreSealPlan, err
 		}
 	}
 	find := func(id uint64) *ApplicationPolicy { return lookup[id] }
-	type segment struct {
-		encoded int
-		cold    []coreBatch
-	}
-	var p pendingRows
-	var segments []segment
+	var head pendingHead
 	var packet []coreBatch
 	flush := func() {
 		if len(packet) > 0 {
-			p.append(packet)
-			segments = append(segments, segment{encoded: len(packet)})
+			head.add(packet, find)
 			packet = nil
 		}
 	}
 	for _, b := range in.Batches {
 		if !pendingRowsFit([]coreBatch{b}, find) {
 			flush()
-			segments = append(segments, segment{cold: []coreBatch{b}})
+			head.add([]coreBatch{b}, find)
 			continue
 		}
 		if packet = append(packet, b); len(packet) == 37 {
@@ -249,18 +243,18 @@ func pendingRowsSealPlanner(r *coreRollups, in coreSealInput) (coreSealPlan, err
 		}
 	}
 	flush()
-	decoded := p.batches(find)
-	out := make([]coreBatch, 0, len(in.Batches))
-	for _, s := range segments {
-		out = append(out, decoded[:s.encoded]...)
-		decoded = decoded[s.encoded:]
-		out = append(out, s.cold...)
+	view := head.view(find)
+	rows := 0
+	for _, s := range view.segs {
+		if s.cold == nil {
+			rows += s.count
+		}
 	}
-	if len(decoded) != 0 || len(out) != len(in.Batches) {
+	if len(view.Batches()) != len(in.Batches) {
 		return coreSealPlan{}, errors.New("pending rows lost or added applications")
 	}
-	pendingRowsEncoded.Add(int64(p.len()))
-	in.Batches = out
+	pendingRowsEncoded.Add(int64(rows))
+	in.Batches, in.Pending = nil, view
 	return r.planParts(in)
 }
 
@@ -270,7 +264,7 @@ func TestPendingRowsSealDifferential(t *testing.T) {
 	for _, seed := range []uint64{1, 2, 3} {
 		s := newSealSweepScript(seed)
 		for _, lanes := range []int{1, 3} {
-			diff, cov, digest := runSealSweepDifferential(t, s, lanes, todaySealPlanner, pendingRowsSealPlanner)
+			diff, cov, digest := runSealSweepDifferential(t, s, lanes, legacySealPlanner, pendingRowsSealPlanner)
 			if diff != nil {
 				t.Fatalf("seed %d lanes %d: pending rows change the seal at %s", seed, lanes, diff)
 			}
