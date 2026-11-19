@@ -139,29 +139,52 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 func checkHandoffMutations(t *testing.T, dir string, part plannedRollupPart, want []byte) int {
 	t.Helper()
 	flat := slices.Concat(part.Segments...)
-	other := slices.IndexFunc(flat, func(kv plannedKV) bool { return kv.name != flat[0].name })
+	other := slices.IndexFunc(flat, func(kv plannedKV) bool { return kv.stage != flat[0].stage })
 	firstRecord := slices.IndexFunc(flat, func(kv plannedKV) bool { return kv.record != nil })
 	if other < 0 || firstRecord < 0 {
 		t.Fatal("mutation needs two metrics and a record")
 	}
-	mutate := map[string]func([]plannedKV){
-		"swap metrics": func(kvs []plannedKV) { kvs[0], kvs[other] = kvs[other], kvs[0] },
-		"swap last":    func(kvs []plannedKV) { n := len(kvs); kvs[n-1], kvs[n-2] = kvs[n-2], kvs[n-1] },
-		"slot":         func(kvs []plannedKV) { r := *kvs[firstRecord].record; r.Slot += 7; kvs[firstRecord].record = &r },
-		"archive":      func(kvs []plannedKV) { r := *kvs[firstRecord].record; r.Archive++; kvs[firstRecord].record = &r },
-		"metric": func(kvs []plannedKV) {
-			kvs[firstRecord].name, kvs[firstRecord].vshard = flat[other].name, flat[other].vshard
+	mutate := map[string]func([]plannedKV, *plannedRollupPart){
+		"swap metrics": func(kvs []plannedKV, _ *plannedRollupPart) { kvs[0], kvs[other] = kvs[other], kvs[0] },
+		"swap last":    func(kvs []plannedKV, _ *plannedRollupPart) { n := len(kvs); kvs[n-1], kvs[n-2] = kvs[n-2], kvs[n-1] },
+		"slot": func(kvs []plannedKV, _ *plannedRollupPart) {
+			r := *kvs[firstRecord].record
+			r.Slot += 7
+			kvs[firstRecord].record = &r
 		},
-		"name":     func(kvs []plannedKV) { kvs[firstRecord].name = flat[other].name },
-		"vshard":   func(kvs []plannedKV) { kvs[firstRecord].vshard ^= 1 },
-		"envelope": func(kvs []plannedKV) { kvs[len(kvs)-1].value = append([]byte{1}, kvs[len(kvs)-1].value...) },
+		"archive": func(kvs []plannedKV, _ *plannedRollupPart) {
+			r := *kvs[firstRecord].record
+			r.Archive++
+			kvs[firstRecord].record = &r
+		},
+		"stage": func(kvs []plannedKV, _ *plannedRollupPart) { kvs[firstRecord].stage = flat[other].stage },
+		"name": func(kvs []plannedKV, p *plannedRollupPart) {
+			id := kvs[firstRecord].stage
+			m := *p.metrics[id]
+			m.PolicyIdentity = &PolicyIdentity{id: m.id, policy: m.policy, plain: m.plain}
+			policy := m.policy
+			policy.Name = p.metrics[flat[other].stage].policy.Name
+			m.policy = policy
+			p.metrics[id] = &m
+		},
+		"vshard": func(kvs []plannedKV, p *plannedRollupPart) {
+			id := kvs[firstRecord].stage
+			m := *p.metrics[id]
+			m.vshard ^= 1
+			p.metrics[id] = &m
+		},
+		"envelope": func(kvs []plannedKV, p *plannedRollupPart) { p.stages[kvs[len(kvs)-1].stage].next.Revision++ },
 	}
 	n := 0
 	for name, f := range mutate {
 		kvs := slices.Clone(flat)
-		f(kvs)
+		mutated := part
+		mutated.metrics = slices.Clone(part.metrics)
+		mutated.stages = slices.Clone(part.stages)
+		mutated.Segments = [][]plannedKV{kvs}
+		f(kvs, &mutated)
 		path := filepath.Join(dir, "mutated.sst")
-		_, err := writePlannedRollupTuples(path, plannedRollupPart{Spec: part.Spec, Segments: [][]plannedKV{kvs}})
+		_, err := writePlannedRollupTuples(path, mutated)
 		if err == nil {
 			got, _ := os.ReadFile(path)
 			if bytes.Equal(got, want) {

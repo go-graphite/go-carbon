@@ -21,12 +21,12 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 }
 
 // plannedOwners maps each planned tuple back to its metric through the
-// planner's stages: records by address, envelopes by name. The reference key
-// builder takes the name and vshard from that metric, not from the tuple, so a
-// tuple carrying the wrong name or vshard changes the reference bytes.
+// planner's stages: records by address, envelopes by stage. The reference key
+// builder takes the name and vshard from that metric. For records this is
+// independent of the compact tuple's stage ID, so a wrong binding changes bytes.
 func plannedOwners(r *coreRollups) func(plannedKV) *rollupMetric {
 	byRecord := map[*sealrollup.Record]*rollupMetric{}
-	byName := map[v2part.ID]*rollupMetric{}
+	byStage := map[uint32]*rollupMetric{}
 	for i := range r.lanes {
 		lane := &r.lanes[i]
 		for _, ref := range lane.ranked {
@@ -34,14 +34,14 @@ func plannedOwners(r *coreRollups) func(plannedKV) *rollupMetric {
 			for j := range records {
 				byRecord[&records[j]] = m
 			}
-			byName[m.policy.Name] = m
+			byStage[ref.stage] = m
 		}
 	}
 	return func(kv plannedKV) *rollupMetric {
 		if kv.record != nil {
 			return byRecord[kv.record]
 		}
-		return byName[kv.name]
+		return byStage[kv.stage]
 	}
 }
 
@@ -76,7 +76,11 @@ func expandPlannedParts(parts []plannedRollupPart, owner func(plannedKV) *rollup
 				key = binary.BigEndian.AppendUint32(key, archive)
 				key = binary.BigEndian.AppendUint64(key, uint64(slot)^(1<<63))
 				key = binary.BigEndian.AppendUint32(key, 0)
-				file = append(file, coreKV{Key: key, Value: kv.value, Record: kv.record, Name: m.policy.Name})
+				var value []byte
+				if kv.record == nil {
+					value = m.appendMetadata(nil, m.metadataScalars(part.stages[kv.stage].next))
+				}
+				file = append(file, coreKV{Key: key, Value: value, Record: kv.record, Name: m.policy.Name})
 			}
 		}
 		files = append(files, file)

@@ -338,16 +338,17 @@ func sealSweepCapture(plan coreSealPlan, err error, dir, side string, seal int) 
 		var names []string
 		var recs, envs []sealSweepTuple
 		for _, kv := range slices.Concat(part.Segments...) {
-			if len(names) == 0 || names[len(names)-1] != string(kv.name) {
-				names = append(names, string(kv.name))
+			m := part.metrics[kv.stage]
+			if len(names) == 0 || names[len(names)-1] != string(m.policy.Name) {
+				names = append(names, string(m.policy.Name))
 			}
-			t := sealSweepTuple{Name: kv.name, VShard: kv.vshard}
+			t := sealSweepTuple{Name: m.policy.Name, VShard: m.vshard}
 			if kv.record != nil {
 				r := *kv.record
 				t.Record = &r
 				recs = append(recs, t)
 			} else {
-				t.Value = string(kv.value)
+				t.Value = string(m.appendMetadata(nil, m.metadataScalars(part.stages[kv.stage].next)))
 				envs = append(envs, t)
 			}
 		}

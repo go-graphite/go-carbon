@@ -16,31 +16,25 @@ import (
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// plannedKV is one planned archive record, or with a nil record the metric's
-// envelope, of a rollup part. The part writer formats its key from the name,
-// vshard and record; the planner keeps no key bytes. The tuple carries the
-// name and vshard so the writer never dereferences the metric's scattered
-// planner state.
+// plannedKV references the seal's existing stage and record arenas. A nil
+// record marks the envelope, serialized only as the writer consumes it.
 type plannedKV struct {
-	name   partsformat.ID
 	record *sealrollup.Record
-	value  []byte
-	vshard uint16
-	// rank is the metric's planner rank (stageKey), or 0 when unranked. The
-	// writer checks order by rank instead of comparing names.
-	rank uint32
+	stage  uint32
 }
 
 // plannedRollupPart is one group/partition part: lane segments in lane order,
 // which is key order because lanes own ascending disjoint vshard ranges.
+// Stages and metrics borrow the immutable seal arenas through Commit/Abort.
 type plannedRollupPart struct {
 	Spec     partsformat.Spec
 	Segments [][]plannedKV
+	stages   []rollupStage
+	metrics  []*rollupMetric
 }
 
 type rollupOutput struct {
 	files       map[string]*[]plannedKV
-	arena       []byte
 	definitions map[[32]byte][]partsformat.ArchivePolicy
 	coverage    map[string]*rollupCoverage
 	partitions  []int64
@@ -93,18 +87,13 @@ func (r *rollupOutput) fileID(group string, partition int64) string {
 	return r.lastFileID
 }
 
-func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []sealrollup.Batch, records []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
+func (r *rollupOutput) appendStage(stageID uint32, s *rollupStage, m *rollupMetric, batches []sealrollup.Batch, records []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
 		r.files = map[string]*[]plannedKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
 		r.coverage = map[string]*rollupCoverage{}
 	}
 	group := string(m.policy.Group)
-	name, vshard := m.policy.Name, m.vshard
-	var rank uint32
-	if s.sortKey&1 == 0 {
-		rank = uint32(s.sortKey >> 1)
-	}
 	if stage != nil {
 		stage("rollup")
 	}
@@ -143,9 +132,6 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 		}
 	}
 	r.partitions = partitions
-	start := len(r.arena)
-	r.arena = m.appendMetadata(r.arena, m.metadataScalars(s.next))
-	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	for _, partition := range partitions {
 		filePtr, coverage := r.file(r.fileID(group, partition))
 		physicalPart := part
@@ -185,7 +171,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
-			file = append(file, plannedKV{name: name, record: record, vshard: vshard, rank: rank})
+			file = append(file, plannedKV{record: record, stage: stageID})
 			expiry.data(rollupRecordExpiry(schema, *record))
 			coverage.spec.MinTime = min(coverage.spec.MinTime, record.Sample.Time)
 			coverage.spec.MaxTime = max(coverage.spec.MaxTime, record.Sample.Time)
@@ -193,7 +179,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, plannedKV{name: name, value: metadata, vshard: vshard, rank: rank})
+		*filePtr = append(file, plannedKV{stage: stageID})
 	}
 
 	return nil
@@ -209,7 +195,6 @@ func (r *rollupOutput) release() {
 		clear(c.seen)
 		c.spec.Policies = nil
 	}
-	r.arena = r.arena[:0]
 }
 
 // Each lane owns a disjoint routed key range, planner workspace and output
@@ -303,7 +288,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 				s.record, s.records = lane.base+uint32(start), uint32(n)
 				// Build while this metric's policy, metadata and batches are hot.
 				// The lane still retains all arenas until the owner joins ingest.
-				if lane.err = lane.output.appendStage(s, m, batches, lane.records[start:start+n:start+n], part, r.stage); lane.err != nil {
+				if lane.err = lane.output.appendStage(ref.stage, s, m, batches, lane.records[start:start+n:start+n], part, r.stage); lane.err != nil {
 					return
 				}
 			}
@@ -370,7 +355,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	slices.Sort(keys)
 	out := coreSealPlan{}
 	for _, group := range keys {
-		out.Parts = append(out.Parts, plannedRollupPart{Spec: r.coverage[group].spec, Segments: r.files[group]})
+		out.Parts = append(out.Parts, plannedRollupPart{Spec: r.coverage[group].spec, Segments: r.files[group], stages: stages, metrics: metrics})
 	}
 	return out, nil
 }

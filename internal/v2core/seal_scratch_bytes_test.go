@@ -32,7 +32,6 @@ func sealScratchBytes(r *coreRollups) (total, pointerful int) {
 		for _, f := range l.output.files {
 			add(len(*f), unsafe.Sizeof(plannedKV{}), true)
 		}
-		add(len(l.output.arena), 1, false)
 	}
 	return total, pointerful
 }

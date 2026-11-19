@@ -63,21 +63,34 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 	// Size-tier merges rewrite fresh seal parts at the rest level.
 	w.SealCompression()
 	var shards []uint16
+	var metadata []byte
 	for _, segment := range part.Segments {
+		var previous uint32
+		var m *rollupMetric
+		var rank uint32
 		for i, kv := range segment {
-			if len(shards) == 0 || shards[len(shards)-1] != kv.vshard {
-				shards = append(shards, kv.vshard)
+			if i == 0 || kv.stage != previous {
+				previous, m = kv.stage, part.metrics[kv.stage]
+				rank = 0
+				if key := part.stages[kv.stage].sortKey; key&1 == 0 {
+					rank = uint32(key >> 1)
+				}
+			}
+			if len(shards) == 0 || shards[len(shards)-1] != m.vshard {
+				shards = append(shards, m.vshard)
 			}
 			// Ranks order tuples within a segment; each segment's first tuple
 			// is checked against the previous segment by name.
-			rank := kv.rank
+			checkedRank := rank
 			if i == 0 {
-				rank = 0
+				checkedRank = 0
 			}
 			if kv.record != nil {
-				err = w.SetPlannedRecord(kv.vshard, rank, kv.name, kv.record)
+				err = w.SetPlannedRecord(m.vshard, checkedRank, m.policy.Name, kv.record)
 			} else {
-				err = w.SetPlannedMetadata(kv.vshard, rank, kv.name, kv.value)
+				// SetPlannedMetadata consumes the envelope before this buffer is reused.
+				metadata = m.appendMetadata(metadata[:0], m.metadataScalars(part.stages[kv.stage].next))
+				err = w.SetPlannedMetadata(m.vshard, checkedRank, m.policy.Name, metadata)
 			}
 			if err != nil {
 				return v2part.Descriptor{}, err
