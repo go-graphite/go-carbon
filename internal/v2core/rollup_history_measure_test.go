@@ -26,13 +26,13 @@ func TestRollupHistoryMillionNameHolder(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	states := make([]rollupMetric, names)
 	for i := range states {
-		states[i].slots = *prepared.NewSlots()
+		states[i].slots = prepared.NewSlots()
 	}
 	type recent interface {
 		KeepRecent(int64)
 		InstallRecent(sealrollup.Delta)
 	}
-	_, bounded := any(&states[0].slots).(recent)
+	_, bounded := any(states[0].slots).(recent)
 	now := int64(1794700800)
 	var points uint64
 	start := time.Now()
@@ -55,7 +55,7 @@ func TestRollupHistoryMillionNameHolder(t *testing.T) {
 			updates = append(updates, sealrollup.Delta{Archive: a + 1, Slot: (stamp / step) % count, Order: uint64(epoch), Sample: sealrollup.Sample{Time: stamp, Bits: uint64(epoch), Sequence: uint64(epoch)}})
 		}
 		for i := range states {
-			s := &states[i].slots
+			s := states[i].slots
 			if bounded {
 				any(s).(recent).KeepRecent(now - 10)
 			}
