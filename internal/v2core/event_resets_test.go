@@ -2,8 +2,12 @@ package v2core
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -129,14 +133,11 @@ func eventResetsState(t *testing.T, e *Engine, run *eventResetsRun) string {
 	snap := e.DBs()[0].NewSnapshot()
 	defer snap.Close()
 	var out []string
-	if err := scanRollups(snap, nil, func(p RollupPolicy, m RollupMetadata, records []sealrollup.Record) error {
-		visible := 0
-		var sum float64
-		for _, r := range records {
-			visible++
-			sum += math.Float64frombits(r.Sample.Bits) * float64(r.Archive+1)
-		}
-		out = append(out, fmt.Sprintf("%s order=%d reset=%d expired=%v baseline=%d records=%d sum=%g", p.Name, m.Frontier.Order, m.ResetOrder, m.Expired, m.BaselineOrder, visible, sum))
+	// Recovered records still hold points past retention until a merge drops
+	// them, which background timing decides; compare the recovered metadata and
+	// the snapshot's retention-filtered records.
+	if err := scanRollups(snap, nil, func(p RollupPolicy, m RollupMetadata, _ []sealrollup.Record) error {
+		out = append(out, fmt.Sprintf("%s order=%d reset=%d expired=%v baseline=%d", p.Name, m.Frontier.Order, m.ResetOrder, m.Expired, m.BaselineOrder))
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -195,4 +196,81 @@ func eventResetsState(t *testing.T, e *Engine, run *eventResetsRun) string {
 	run.maxParts = max(run.maxParts, len(parts))
 	sort.Strings(out)
 	return strings.Join(out, "; ")
+}
+
+// TestEventResetMergeKeepsTombstone merges a tombstone with a newer event-form
+// part whose envelope stores no reset, while an older part outside the merge
+// still holds the record the reset masks. The output must keep the reset.
+func TestEventResetMergeKeepsTombstone(t *testing.T) {
+	policy, encoded := rollupTestPolicy(t, "tomb.metric", "1s:120,10s:1h", sealrollup.Last, 0)
+	digest, err := sealrollup.PolicyDigest(policy.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err = os.Mkdir(filepath.Join(dir, "parts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(order uint64, slot int64, md RollupMetadata) v2part.Descriptor {
+		k := v2part.Key{Group: policy.Group, VShard: v2part.Route(policy.Name), Part: v2part.PartID{byte(order)}, Metric: policy.Name}
+		var rows []KV
+		if slot != 0 {
+			k.Archive, k.BlockStart = 0, slot
+			enc, err := v2part.Encode(k)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows = append(rows, KV{Key: enc, Value: sealrollup.EncodeRecord(sealrollup.Record{Delta: sealrollup.Delta{Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 960 + slot, Bits: math.Float64bits(float64(order))}}})})
+		}
+		md.Version, md.ID, md.Policy, md.Frontier.Order, md.Frontier.Policy, md.LastUpdate, md.Revision = 2, 1, encoded, order, digest, 1001e9, order
+		md.Frontier.MaxTime = 1001
+		k.Archive, k.BlockStart = v2part.MetadataArchive, 0
+		enc, err := v2part.Encode(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, KV{Key: enc, Value: AppendRollupMetadata(nil, md)})
+		path := filepath.Join(dir, fmt.Sprintf("in-%d.sst", order))
+		d, err := WriteDenseRollupPart(path, rows, v2part.Provenance{Stream: "event-reset", Incarnation: v2part.PartID{7}, MinOrder: order, MaxOrder: order})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Rename(path, filepath.Join(dir, "parts", hex.EncodeToString(d.SHA256[:])+".sst")); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	older := write(1, 40, RollupMetadata{})
+	tombstone := write(2, 0, RollupMetadata{Expired: true, ResetOrder: 2})
+	newer := write(3, 41, RollupMetadata{})
+	merge := func(name string, inputs ...v2part.Descriptor) (RollupMetadata, []int64) {
+		path := filepath.Join(dir, name+".sst")
+		d, err := mergePartFiles(context.Background(), dir, path, inputs, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var meta RollupMetadata
+		var slots []int64
+		if err = v2part.Read(context.Background(), path, &d, func(k v2part.Key, v []byte) error {
+			if k.Archive == v2part.MetadataArchive {
+				meta, err = DecodeRollupMetadata(k.Metric, k.Group, v)
+				return err
+			}
+			slots = append(slots, k.BlockStart)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return meta, slots
+	}
+	// The older part stays outside: its slot-40 record (order 1) must stay masked.
+	meta, slots := merge("tombstone-newer", tombstone, newer)
+	if meta.ResetOrder != 2 || meta.Expired || meta.Frontier.Order != 3 || !slices.Equal(slots, []int64{41}) {
+		t.Fatalf("merge lost the tombstone: reset %d expired %v order %d slots %v", meta.ResetOrder, meta.Expired, meta.Frontier.Order, slots)
+	}
+	// With every part inside, the masked record goes and the reset stays.
+	meta, slots = merge("all", older, tombstone, newer)
+	if meta.ResetOrder != 2 || meta.Expired || !slices.Equal(slots, []int64{41}) {
+		t.Fatalf("full merge: reset %d expired %v slots %v", meta.ResetOrder, meta.Expired, slots)
+	}
 }
