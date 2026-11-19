@@ -748,6 +748,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, error) {
 	o.mergeMu.Lock()
 	defer o.mergeMu.Unlock()
+	select {
+	case <-stop:
+		return false, nil
+	default:
+	}
 	// Capture the pin and inventory under the same GC fence as publications.
 	o.gc.mu.Lock()
 	snapshot := o.db.NewSnapshot()

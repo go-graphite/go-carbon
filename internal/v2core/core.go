@@ -1995,6 +1995,12 @@ func (e *coreEngine) close() error {
 	close(e.gcStop)
 	<-e.gcDone
 	<-e.mergeDone
+	// Forced merges can outlive HTTP shutdown. Drain each owner's merge before
+	// closing its database; queued merges observe gcStop under the same lock.
+	for _, o := range e.owners {
+		o.mergeMu.Lock()
+		o.mergeMu.Unlock()
+	}
 	var err error
 	if f := e.gcFailure.Load(); f != nil {
 		err = f.err

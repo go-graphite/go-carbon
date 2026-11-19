@@ -522,3 +522,50 @@ func TestForceMergeDifferential(t *testing.T) {
 		t.Fatalf("second pass: %d merges, %v", n, err)
 	}
 }
+
+// HTTP shutdown has a deadline. A forced merge still publishing afterward must
+// finish before close releases the database, and queued calls must stop safely.
+func TestForceMergeClose(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	written, release := make(chan struct{}), make(chan struct{})
+	e := mergeFixture(t, t.TempDir(), func(phase string) {
+		if phase == "merge-written" {
+			close(written)
+			<-release
+		}
+	})
+	for order := uint64(1); order <= 2; order++ {
+		mergeAppend(t, e, order)
+	}
+	merged := make(chan error, 1)
+	go func() { _, err := e.ForceMerge(); merged <- err }()
+	select {
+	case <-written:
+	case <-time.After(10 * time.Second):
+		close(release)
+		_ = e.close()
+		t.Fatal("forced merge did not reach publication")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- e.close() }()
+	<-e.gcStop
+	var early bool
+	select {
+	case err := <-closed:
+		early = true
+		t.Errorf("close passed an active merge: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-merged; err != nil {
+		t.Errorf("forced merge: %v", err)
+	}
+	if !early {
+		if err := <-closed; err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}
+	if n, err := e.ForceMerge(); err != nil || n != 0 {
+		t.Fatalf("force merge after close: %d, %v", n, err)
+	}
+}

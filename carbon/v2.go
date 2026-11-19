@@ -542,6 +542,7 @@ type v2PublishedCatalog struct{ v2index.Catalog }
 // group and time partition and replies {"merges": n}. Repeat until n is 0.
 func (v *v2Runtime) forceMerge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "merge requires POST", http.StatusMethodNotAllowed)
 		return
 	}
@@ -550,5 +551,6 @@ func (v *v2Runtime) forceMerge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, "{\"merges\":%d}\n", n)
 }
