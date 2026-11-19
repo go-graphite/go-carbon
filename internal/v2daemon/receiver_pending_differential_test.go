@@ -25,8 +25,8 @@ import (
 // across the direct and socket batching schedules.
 type fixedReceiverClock struct{ *applicationOwner }
 
-func (o fixedReceiverClock) Append(n []string, p []points.Point, seq []uint64, _ int64) error {
-	if err := o.applicationOwner.Append(n, p, seq, 1010); err != nil {
+func (o fixedReceiverClock) Append(n []string, h []uint64, p []points.Point, seq []uint64, _ int64) error {
+	if err := o.applicationOwner.Append(n, h, p, seq, 1010); err != nil {
 		return err
 	}
 	if err := o.p.Drain(); err != nil {
@@ -98,7 +98,7 @@ func TestReceiverStoredRecordsAndReadsDifferential(t *testing.T) {
 						}
 					}
 				} else {
-					if err = owners[v2recv.OwnerFor(name, 2)].Append([]string{name}, []points.Point{p}, nil, 1010); err != nil {
+					if err = owners[v2recv.OwnerFor(name, 2)].Append([]string{name}, nil, []points.Point{p}, nil, 1010); err != nil {
 						t.Fatal(err)
 					}
 				}
