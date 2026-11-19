@@ -51,6 +51,14 @@ type Config struct {
 	// MaxCoreRows bounds each core owner's staging buffer. Zero retains the
 	// experiment default; small correctness fixtures can bound their memory.
 	MaxCoreRows int
+	// JournalSegmentBytes rotates a producer's journal to a new segment after a
+	// group fsync once the current segment holds at least this many bytes. Each
+	// segment starts with fresh predictor state, so restart can skip every
+	// segment that ends at or below all owners' durable frontiers. Zero keeps one
+	// segment per process run. Rotation never deletes a segment.
+	JournalSegmentBytes int64
+	// fullReplay disables segment skipping; tests use it as the oracle.
+	fullReplay bool
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -71,26 +79,33 @@ type packet struct {
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
 type Producer struct {
-	relayPositions                                               map[v2placement.Stamp]relayPosition
-	admission                                                    v2placement.Sink
-	placement                                                    Placement
-	engine                                                       *v2core.Engine
-	durableApplications                                          func(int, []v2core.Batch) error
-	index, count, layer, maxPending                              int
-	catalog                                                      *partlog.NameCatalog
-	encoder                                                      partlog.CatalogEncoder
-	journal                                                      *os.File
-	writer                                                       *bufio.Writer
-	packets                                                      []packet
-	records                                                      [][]byte
-	spareRecords                                                 [][]byte
-	spareRows                                                    [][]v2core.Row
-	spareBatches                                                 [][]v2core.Batch
-	applicationFrames                                            []partlog.CatalogFrame
-	applicationIDs                                               []uint64
-	applicationPolicies                                          map[uint64]*RegisteredApplication
-	cursor                                                       uint64
-	applyOrder                                                   uint64
+	relayPositions                  map[v2placement.Stamp]relayPosition
+	admission                       v2placement.Sink
+	placement                       Placement
+	engine                          *v2core.Engine
+	durableApplications             func(int, []v2core.Batch) error
+	index, count, layer, maxPending int
+	catalog                         *partlog.NameCatalog
+	encoder                         partlog.CatalogEncoder
+	journal                         *os.File
+	writer                          *bufio.Writer
+	packets                         []packet
+	records                         [][]byte
+	spareRecords                    [][]byte
+	spareRows                       [][]v2core.Row
+	spareBatches                    [][]v2core.Batch
+	applicationFrames               []partlog.CatalogFrame
+	applicationIDs                  []uint64
+	applications                    []*RegisteredApplication // by catalog ID
+	cursor                          uint64
+	applyOrder                      uint64
+	journalDir                      string
+	segment                         int
+	segmentBytes, segmentLimit      int64
+	fullReplay                      bool
+	// Recovery counts journal segments skipped below the durable frontier and
+	// segments decoded; set once by Open.
+	RecoverySkippedSegments, RecoveryReplayedSegments            int
 	pendingRows                                                  int
 	nextSync                                                     time.Time
 	interval                                                     time.Duration
@@ -170,7 +185,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	s := &Store{Core: e, cfg: c, lock: lock}
 	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
-		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
+		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes, fullReplay: c.fullReplay}
 		if c.Placement != nil {
 			p.placement = c.Placement
 			p.admission = c.Placement.Register()
@@ -360,6 +375,7 @@ func (p *Producer) Drain() error {
 				return p.fail(err)
 			}
 			p.JournalBytes += uint64(4 + len(record))
+			p.segmentBytes += int64(4 + len(record))
 		}
 		start = time.Now()
 		if err := p.writer.Flush(); err != nil {
@@ -381,6 +397,12 @@ func (p *Producer) Drain() error {
 		}
 		clear(p.records)
 		p.records = p.records[:0]
+		// Every record of this segment is synced and none is encoded ahead.
+		if p.segmentLimit > 0 && p.segmentBytes >= p.segmentLimit {
+			if err := p.rotateJournal(); err != nil {
+				return p.fail(err)
+			}
+		}
 	}
 	start = time.Now()
 	for _, packet := range p.packets {

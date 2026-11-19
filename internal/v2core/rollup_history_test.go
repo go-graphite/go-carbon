@@ -17,23 +17,23 @@ func TestRollupWindowCacheCommitAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Seed entries through a reader whose committed empty history needs no I/O.
-	m.meta.Expired = true
+	meta := metricMetadata{Expired: true}
 	var cache rollupWindowCache
 	for _, start := range []int64{120, 180} {
-		if _, err = cache.rangeSamples(&rollupHistoryReader{}, m, 0, start, start+60); err != nil {
+		if _, err = cache.rangeSamples(&rollupHistoryReader{}, m, meta, 0, start, start+60); err != nil {
 			t.Fatal(err)
 		}
 	}
-	m.meta.Expired = false
+	meta.Expired = false
 	record := sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: 121, Order: 1, Sample: sealrollup.Sample{Time: 121, Bits: 1 << 63, Sequence: 1}}}
 	cache.commit(m, []sealrollup.Record{record}, false)
-	samples, err := cache.rangeSamples(nil, m, 0, 120, 180)
+	samples, err := cache.rangeSamples(nil, m, meta, 0, 120, 180)
 	if err != nil || len(samples) != 1 || samples[0].Bits != 1<<63 {
 		t.Fatalf("cached replacement: %v %v", samples, err)
 	}
 	record.Sample = sealrollup.Sample{Time: 3721, Bits: math.Float64bits(math.Inf(1)), Sequence: 2}
 	cache.commit(m, []sealrollup.Record{record}, false)
-	samples, err = cache.rangeSamples(nil, m, 0, 120, 180)
+	samples, err = cache.rangeSamples(nil, m, meta, 0, 120, 180)
 	if err != nil || len(samples) != 0 {
 		t.Fatalf("physical epoch did not mask old time: %v %v", samples, err)
 	}
@@ -49,10 +49,10 @@ func TestRollupWindowCacheBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.meta.Expired = true
+	meta := metricMetadata{Expired: true}
 	var cache rollupWindowCache
 	for i := int64(0); i < 2000; i++ {
-		if _, err = cache.rangeSamples(&rollupHistoryReader{}, m, 0, i*60, i*60+60); err != nil {
+		if _, err = cache.rangeSamples(&rollupHistoryReader{}, m, meta, 0, i*60, i*60+60); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -108,7 +108,7 @@ func TestRollupColdReadFailureDoesNotPublish(t *testing.T) {
 	if err == nil {
 		t.Fatal("missing durable source was accepted")
 	}
-	if e.owners[0].rollups.metrics[1].meta.Frontier.Order != 1 {
+	if e.owners[0].rollups.metaOf(1).Frontier.Order != 1 {
 		t.Fatal("failed source read advanced reducer frontier")
 	}
 }

@@ -177,7 +177,8 @@ func TestDenseValueCodecRejectsCorruptTags(t *testing.T) {
 
 // TestDenseRunModeBits checks the mode byte as independent flags: unknown
 // bits and a tag combined with the legacy integer bit are rejected, so a
-// writer's new flag fails old readers loudly instead of misreading them.
+// writer's new flag fails old readers loudly instead of misreading them. The
+// order delta-of-delta bit is independent of the value codec.
 func TestDenseRunModeBits(t *testing.T) {
 	v, err := EncodeSlots(valueRun(floats(1, 2, 3)...))
 	if err != nil {
@@ -187,7 +188,7 @@ func TestDenseRunModeBits(t *testing.T) {
 		bad := append([]byte(nil), v...)
 		bad[4] = byte(mode)
 		_, err := DecodeSlots(0, 1, bad)
-		if want := mode == denseTagged; (err == nil) != want {
+		if want := mode&^denseModeOrderDoD == denseTagged; (err == nil) != want {
 			t.Fatalf("mode %#x: err %v", mode, err)
 		}
 	}

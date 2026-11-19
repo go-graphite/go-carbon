@@ -85,7 +85,7 @@ func TestRollupDirectoryPopulatedScale(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				writers.metrics[uint64(i+1)] = m
+				writers.install(uint64(i+1), m, freshMetadata)
 			}
 			key := v2part.Key{Group: "fixture", VShard: v2part.Route(metric), Metric: metric}
 			binary.BigEndian.PutUint64(key.Part[:8], uint64(epoch))
@@ -129,7 +129,7 @@ func TestRollupDirectoryPopulatedScale(t *testing.T) {
 		}
 		nextPin := db.NewSnapshot()
 		started := time.Now()
-		next, err := NewRollupSnapshotWithCatalog(ctx, nextPin, prior, identities, 0)
+		next, err := NewRollupSnapshot(ctx, nextPin, prior, identities, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

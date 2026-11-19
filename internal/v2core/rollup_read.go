@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -111,35 +112,32 @@ type snapshotMove struct {
 	authority *moveAuthority
 }
 
-func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, nil, cacheLimit...)
-}
-func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, identities, nil, cacheLimit...)
-}
-func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, bindings, cacheLimit...)
-}
-
-// NewRollupSnapshotWithCatalogAndInventory reuses immutable identities and the owner binding set.
-func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
+// NewRollupSnapshot reuses immutable identities and the owner binding set;
+// nil identities come from prior, nil bindings scan the snapshot.
+func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
 	if identities == nil && prior != nil {
 		identities = prior.identities
 	}
 	if identities == nil {
 		identities = &PolicyCatalog{}
 	}
-	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
-		return nil, err
-	} else if found {
-		return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
+	// Opened parts exist only for stores without copied parts. With them and
+	// no legacy rows, the directory and its record reads use only registry-held
+	// parts and the inventory, so snapshot may be nil.
+	opened, _ := ctx.Value(openedPartsContext{}).(*OpenedRollupParts)
+	if opened == nil {
+		if found, err := snapshotHasCopiedParts(snapshot); err != nil {
+			return nil, err
+		} else if found {
+			return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
+		}
 	}
 	limit := int64(rollupReadCacheBytes)
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
-	out := &RollupSnapshot{identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	out := &RollupSnapshot{opened: opened, identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -162,8 +160,6 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 			return nil, err
 		}
 		defer it.Close()
-	}
-	if inventory == nil {
 		// Bare GCP3 fixtures have no core frontier or atomic inventory bindings.
 		for valid := it.First(); valid; {
 			if err := ctx.Err(); err != nil {
@@ -193,7 +189,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 		for id := range prior.parts {
 			if !live[id] {
-				fresh, err := NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, nil, identities, bindings, cacheLimit...)
+				fresh, err := NewRollupSnapshot(ctx, snapshot, nil, identities, bindings, cacheLimit...)
 				if err == nil && prior.cache != nil && prior.cache.limit == limit {
 					fresh.cache = prior.cache
 				}
@@ -310,13 +306,6 @@ func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
 		out = append(out, &readPartMetric{part: p, readMetricState: readMetricState{PolicyIdentity: m.latest.PolicyIdentity}})
 	}
 	return out
-}
-func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
-	ids := map[string]struct{}{}
-	for _, p := range s.metricParts(m) {
-		ids[p.part.id] = struct{}{}
-	}
-	return ids
 }
 
 // RetainedBytes conservatively charges directory storage plus the maximum
@@ -464,48 +453,42 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		}
 		return ctx.Err()
 	}
-	winners := map[int64]sealrollup.Record{}
-	var origins map[int64]partOrigin
-	if s.moves[m] != nil && s.moves[m].copied {
-		origins = map[int64]partOrigin{}
+	// Each part is searched on its own and its visible records are kept in
+	// part order. A stable sort by slot then reduces every slot in the same
+	// order a merged scan would, with no per-slot map.
+	copied := s.moves[m] != nil && s.moves[m].copied
+	stored := func(origin partOrigin) partOrigin {
+		if !copied {
+			return partOrigin{Class: LivePart}
+		}
+		return origin
 	}
+	var found []slotCandidate
 	if cached != nil {
 		for _, record := range cached.records {
-			if s.recordVisible(m, cachedOrigin(cached.origins, record.Slot), record.Order) {
-				winners[record.Slot] = record
-				if origins != nil {
-					origins[record.Slot] = cachedOrigin(cached.origins, record.Slot)
-				}
+			if origin := cachedOrigin(cached.origins, record.Slot); s.recordVisible(m, origin, record.Order) {
+				found = append(found, slotCandidate{record, origin})
 			}
 		}
 	}
 	if s.directory != "" {
 		ctx = WithRollupDirectory(ctx, s.directory)
 	}
-	selected := make(map[archivePartIdentity]bool, len(partList))
-	for _, part := range partList {
-		selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
-	}
-	var it *archiveIter
-	var err error
-	if s.opened != nil {
-		it, err = s.opened.archiveIter(ctx, s.snapshot, selected)
-	} else {
-		it, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected)
-	}
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-	for _, part := range partList {
-		if cached != nil {
-			if _, ok := cached.parts[part.part.id]; ok {
-				continue
-			}
+	var shared *archiveIter
+	if s.opened == nil {
+		// Copied and bare-fixture stores keep one merged iterator over the
+		// legacy namespace and every selected file.
+		selected := make(map[archivePartIdentity]bool, len(partList))
+		for _, part := range partList {
+			selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
 		}
-		if err = ctx.Err(); err != nil {
+		var err error
+		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected); err != nil {
 			return err
 		}
+		defer shared.Close()
+	}
+	scan := func(it archiveCursor, part *readPartMetric) error {
 		if part.meta.Frontier.Order == 0 {
 			key := part.part.key
 			key.Metric = m.latest.policy.Name
@@ -517,7 +500,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 				return e
 			}
 			if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
-				continue
+				return nil
 			}
 			// compactMetadata keeps no definition: decode the header only, so
 			// slim rows do not rebuild one per part.
@@ -528,7 +511,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			part.meta = compactMetadata(meta)
 		}
 		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
-			continue
+			return nil
 		}
 		key := part.part.key
 		key.Metric = part.policy.Name
@@ -539,6 +522,18 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			return err
 		}
 		prefix := lower[:len(lower)-12]
+		emit := func(record sealrollup.Record) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if record.Slot >= archiveCount || record.Order > part.meta.Frontier.Order {
+				return errors.New("invalid rollup slot/frontier")
+			}
+			if record.Slot >= first && record.Slot < last && s.recordVisible(m, part.part.origin, record.Order) {
+				found = append(found, slotCandidate{record, part.part.origin})
+			}
+			return nil
+		}
 		// A run may straddle the lower bound. Never cross metric/archive/part.
 		valid := it.SeekLT(lower)
 		if !valid || !bytes.HasPrefix(it.Key(), prefix) {
@@ -557,35 +552,6 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			}
 			if key.Ordinal != 0 {
 				return errors.New("unexpected rollup ordinal")
-			}
-			emit := func(record sealrollup.Record) error {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if record.Slot >= m.latest.schema().Archives[archive].Count || record.Order > part.meta.Frontier.Order {
-					return errors.New("invalid rollup slot/frontier")
-				}
-				if record.Slot >= first && record.Slot < last && s.recordVisible(m, part.part.origin, record.Order) {
-					old, ok := winners[record.Slot]
-					newer := !ok
-					if ok {
-						var e error
-						newer, e = newerOrigin(part.part.origin, record, cachedOrigin(origins, record.Slot), old)
-						if e != nil {
-							return e
-						}
-					}
-					if newer {
-						winners[record.Slot] = record
-						if origins != nil {
-							origins[record.Slot] = part.part.origin
-						}
-					} else if part.part.origin == cachedOrigin(origins, record.Slot) && record.Sample.Time == old.Sample.Time && record.Order == old.Order && record.Delta != old.Delta {
-						return errors.New("conflicting rollup replacement order")
-					}
-					return nil
-				}
-				return nil
 			}
 			value := it.Value()
 			if len(value) >= 4 && bytes.Equal(value[:4], []byte{'G', 'C', 'D', 1}) {
@@ -609,13 +575,65 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			}
 			valid = it.Next()
 		}
+		return nil
 	}
-	if err = it.Error(); err != nil {
-		return err
+	for _, part := range partList {
+		if cached != nil {
+			if _, ok := cached.parts[part.part.id]; ok {
+				continue
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if shared != nil {
+			if err := scan(shared, part); err != nil {
+				return err
+			}
+			continue
+		}
+		it, err := s.opened.partCursor(ctx, s.snapshot, archivePartIdentity{part.part.key.Group, part.part.key.Part})
+		if err != nil {
+			return err
+		}
+		if it == nil {
+			continue
+		}
+		if err = errors.Join(scan(it, part), it.Error(), it.Close()); err != nil {
+			return err
+		}
 	}
-	result := &archiveResult{origin: s.metricOrigin(m), frontier: m.latest.meta.Frontier.Order, revision: m.latest.meta.Revision, parts: parts, origins: origins, records: make([]sealrollup.Record, 0, len(winners))}
-	for _, record := range winners {
-		result.records = append(result.records, record)
+	if shared != nil {
+		if err := shared.Error(); err != nil {
+			return err
+		}
+	}
+	if !slices.IsSortedFunc(found, compareCandidateSlot) {
+		slices.SortStableFunc(found, compareCandidateSlot)
+	}
+	var origins map[int64]partOrigin
+	if copied {
+		origins = map[int64]partOrigin{}
+	}
+	result := &archiveResult{origin: s.metricOrigin(m), frontier: m.latest.meta.Frontier.Order, revision: m.latest.meta.Revision, parts: parts, origins: origins, records: make([]sealrollup.Record, 0, len(found))}
+	for i := 0; i < len(found); {
+		winner := found[i]
+		for i++; i < len(found) && found[i].record.Slot == winner.record.Slot; i++ {
+			c := found[i]
+			newer, err := newerOrigin(c.origin, c.record, stored(winner.origin), winner.record)
+			if err != nil {
+				return err
+			}
+			if newer {
+				winner = c
+			} else if c.origin == stored(winner.origin) && c.record.Sample.Time == winner.record.Sample.Time && c.record.Order == winner.record.Order && c.record.Delta != winner.record.Delta {
+				return errors.New("conflicting rollup replacement order")
+			}
+		}
+		result.records = append(result.records, winner.record)
+		if origins != nil {
+			origins[winner.record.Slot] = winner.origin
+		}
 	}
 	result.bytes = int64(256+len(name)) + int64(len(result.records))*int64(unsafe.Sizeof(sealrollup.Record{}))
 	for _, origin := range origins {
@@ -683,7 +701,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	}
 	s.cache.mu.Unlock()
 	for _, record := range result.records {
-		if err = yield(record, cachedOrigin(result.origins, record.Slot)); err != nil {
+		if err := yield(record, cachedOrigin(result.origins, record.Slot)); err != nil {
 			return err
 		}
 	}
@@ -960,6 +978,14 @@ func (s *RollupSnapshot) recordVisible(m *snapshotMetric, origin partOrigin, ord
 	meta := s.moves[m].origins[origin]
 	return !meta.Expired && order > meta.ResetOrder
 }
+
+// slotCandidate is one visible stored record with the origin it came from.
+type slotCandidate struct {
+	record sealrollup.Record
+	origin partOrigin
+}
+
+func compareCandidateSlot(a, b slotCandidate) int { return cmp.Compare(a.record.Slot, b.record.Slot) }
 
 func cachedOrigin(origins map[int64]partOrigin, slot int64) partOrigin {
 	if origins == nil {

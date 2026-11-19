@@ -101,7 +101,7 @@ func TestRollupHistoryDifferential(t *testing.T) {
 						put(uint64(len(entry)))
 						h.Write([]byte(entry))
 					}
-					index, err := NewRollupSnapshot(context.Background(), snap, nil, 0)
+					index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -138,10 +138,10 @@ func TestRollupHistoryDifferential(t *testing.T) {
 				// time. TestClosedHistoryLogicalDifferential proves the resolved values
 				// equal the original eager golden at every epoch and restart cut.
 				want := map[string]string{
-					"1|1s:1h,1m:1d,1h:1y":         "68debcdf6f60ce0e4675b9c6df7a5794cf90ea52f645bd3ba9b711058892d3a9",
-					"1|10s:6h,5m:7d,1h:1y,1d:10y": "25362563a7380fd0bef6ec1ba9aa112601bfc23ab61b41c84144c229135813c6",
-					"2|1s:1h,1m:1d,1h:1y":         "504a8de60700202d6ea28cfa9c470a4308ff0a9107c849301c50639eafca6224",
-					"2|10s:6h,5m:7d,1h:1y,1d:10y": "2979806086b90f8b4376a18a11c45bcfb874cb8127bed8f660eab13cbbed4831",
+					"1|1s:1h,1m:1d,1h:1y":         "27eff56f749b398edee4a0c95010870c10f2343a2f41c9ecf78e612a8854342e",
+					"1|10s:6h,5m:7d,1h:1y,1d:10y": "b412fd98e3293a4c76c18239ff6fa5fe0eb2e10e4b0e0f3b36fad134f9fb2335",
+					"2|1s:1h,1m:1d,1h:1y":         "9791e5be5c30b9533dfd4781cb425d414aac2e02e7bbb139ee12613e03150f1d",
+					"2|10s:6h,5m:7d,1h:1y,1d:10y": "38d8aa99f820bdaedbab936be20b31e7ef9a4198e1ec4d361565ff3098a2870c",
 					"3|1s:1h,1m:1d,1h:1y":         "846fffd8bbd5b082f9fbb91891f46288afa9d50e1da3c4b53f463448eaf12b27",
 					"3|10s:6h,5m:7d,1h:1y,1d:10y": "3e9f85f6e7804607ebe27316bed6bbc8131f9fa20128fecba93d603eca34406b",
 					"4|1s:1h,1m:1d,1h:1y":         "50088ea3d8cde560c2debd1f73394988224236ab887b5a6f8eeb59ec1d5395ad",

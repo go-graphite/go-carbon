@@ -26,7 +26,9 @@ import (
 func TestDenseBitExact(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 7))
 	for _, n := range []int{1, 2, 127, 128, 4096} {
-		for _, integers := range []bool{false, true} {
+		for mode := 0; mode < 4; mode++ {
+			// Bit 0: integer values; bit 1: every record shares one order.
+			integers, shared := mode&1 != 0, mode&2 != 0
 			rs := make([]sealrollup.Record, n)
 			var slot int64
 			for i := range rs {
@@ -39,11 +41,23 @@ func TestDenseBitExact(t *testing.T) {
 				if !integers && i < len(edges) {
 					b = edges[i]
 				}
-				rs[i] = sealrollup.Record{Delta: sealrollup.Delta{Archive: 2, Slot: slot, Order: rng.Uint64() | 1, Sample: sealrollup.Sample{Time: 1700000000 + int64((i+400)%4096)*86400, Bits: b}}, Correction: i%3 == 0}
+				order := rng.Uint64() | 1
+				if shared {
+					order = 1<<40 + uint64(i)*977 + rng.Uint64N(3)
+				}
+				rs[i] = sealrollup.Record{Delta: sealrollup.Delta{Archive: 2, Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 1700000000 + int64((i+400)%4096)*86400, Bits: b}}, Correction: i%3 == 0}
 			}
-			b, e := EncodeSlots(rs)
+			column, e := EncodeSlots(rs)
 			if e != nil {
 				t.Fatal(e)
+			}
+			b, e := appendSlotsOrder(nil, rs, nil, true)
+			if e != nil {
+				t.Fatal(e)
+			}
+			// Regular orders take delta-of-delta; it is used only when smaller.
+			if dod := b[4]&denseModeOrderDoD != 0; (shared && n >= 127 && !dod) || dod == bytes.Equal(b, column) || (dod && len(b) >= len(column)) {
+				t.Fatalf("n=%d shared=%v: one-order %d B, column %d B", n, shared, len(b), len(column))
 			}
 			got, e := DecodeSlots(2, rs[0].Slot, b)
 			if e != nil {
