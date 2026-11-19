@@ -186,14 +186,10 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 var applicationMagic = []byte{'V', '2', 'A', 1}
 var applicationCRC = crc32.MakeTable(crc32.Castagnoli)
 
-// The existing PDC4 point codec is nested unchanged. The outer checksum binds
-// source IDs, application orders and sequences to those original PDC4 frames.
-func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
-	return appendApplicationRecord(nil, cursor, ids, batches, pdc4)
-}
-
 func applicationVarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
 
+// The existing PDC4 point codec is nested unchanged. The outer checksum binds
+// source IDs, application orders and sequences to those original PDC4 frames.
 // Append into producer-owned storage retained until the journal fsync succeeds.
 // Reserve the complete envelope once, including all original sequence varints.
 func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
