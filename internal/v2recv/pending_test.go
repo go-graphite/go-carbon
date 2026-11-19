@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -35,7 +36,7 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 	o := &coalescingOwner{}
 	for i := range 17 {
 		name := fmt.Sprintf("fragment.%d", i/3)
-		q <- &batch{names: []string{name}, hashes: []uint64{NameHash(name)}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
+		q <- &batch{names: []string{name}, hashes: []uint64{namefp.Route(name)}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
 	}
 	close(q)
 	s.workers.Add(1)
@@ -53,7 +54,7 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 		if o.names[i] != fmt.Sprintf("fragment.%d", i/3) || o.data[i].Timestamp != int64(i) || o.data[i].Value != float64(i)+.125 {
 			t.Fatal("changed point order/bits", i)
 		}
-		if o.hashes[i] != NameHash(o.names[i]) {
+		if o.hashes[i] != namefp.Route(o.names[i]) {
 			t.Fatal("hash lane misaligned with names", i)
 		}
 	}

@@ -2,7 +2,6 @@ package v2daemon
 
 import (
 	"errors"
-	"math"
 	"net"
 	"slices"
 
@@ -16,67 +15,34 @@ import (
 // point is an explicit application; batching socket reads must not change it.
 type PolicyResolver func(string) ([]byte, error)
 
-// applicationOwner maps a name to its producer-local catalog ID with one probe
-// of a pointer-free open-addressing table keyed by the name's 96-bit
-// fingerprint. No name bytes are read or kept: a miss proves the name is new,
-// and it resolves the policy and registers once per lifetime.
+// applicationOwner maps a name to its producer-local catalog ID with one
+// namefp.Table probe keyed by the name's 96-bit fingerprint. No name bytes are
+// read or kept: a miss proves the name is new, and it resolves the policy and
+// registers once per lifetime.
 type applicationOwner struct {
 	p        *Producer
 	resolve  PolicyResolver
 	throttle func(*points.Points, bool) bool
-	slots    []nameSlot // power-of-two length, at most 3/4 used
-	used     int
+	names    namefp.Table // fingerprint → producer-local catalog ID
 	apps     []Application
 	sequence []uint64
 }
 
-// nameSlot is 16 bytes with no pointers, so the GC never scans the table.
-// local 0 marks an empty slot: catalog IDs start at 1.
-type nameSlot struct {
-	fp    namefp.Fingerprint
-	local uint32 // producer-local catalog ID
-}
-
-// find returns fp's slot, or the empty slot where it belongs.
-func (o *applicationOwner) find(fp namefp.Fingerprint) *nameSlot {
-	mask := uint64(len(o.slots) - 1)
-	for i := fp.Hash & mask; ; i = (i + 1) & mask {
-		if s := &o.slots[i]; s.local == 0 || s.fp == fp {
-			return s
-		}
-	}
-}
-
-func (o *applicationOwner) grow() {
-	old := o.slots
-	o.slots = make([]nameSlot, max(1024, 2*len(old)))
-	for _, s := range old {
-		if s.local != 0 {
-			*o.find(s.fp) = s
-		}
-	}
-}
-
 // register admits a new name; the borrowed batch name is not retained.
-func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (nameSlot, error) {
+func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32, error) {
 	policy, err := o.resolve(name)
 	if err != nil {
-		return nameSlot{}, err
+		return 0, err
 	}
 	registered, err := o.p.RegisterApplication(name, policy)
 	if err != nil {
-		return nameSlot{}, err
+		return 0, err
 	}
-	if registered.id > math.MaxUint32 {
-		return nameSlot{}, errors.New("receiver name table: producer catalog ID exceeds 32 bits")
+	if registered.id > namefp.MaxLocal {
+		return 0, errors.New("receiver name table: producer catalog ID exceeds 32 bits")
 	}
-	if (o.used+1)*4 > len(o.slots)*3 {
-		o.grow()
-	}
-	s := o.find(fp)
-	*s = nameSlot{fp: fp, local: uint32(registered.id)}
-	o.used++
-	return *s, nil
+	o.names.Put(fp, uint32(registered.id))
+	return uint32(registered.id), nil
 }
 
 func (o *applicationOwner) Append(names []string, hashes []uint64, data []points.Point, _ []uint64, clock int64) error {
@@ -84,24 +50,24 @@ func (o *applicationOwner) Append(names []string, hashes []uint64, data []points
 	o.sequence = slices.Grow(o.sequence[:0], len(names))[:len(names)]
 	apps := o.apps[:0]
 	defer func() { clear(apps); o.apps = apps[:0] }()
-	if len(o.slots) == 0 {
-		o.grow()
-	}
-	var previous nameSlot
+	var previous namefp.Fingerprint
+	var local uint32 // 0 until the first name: catalog IDs start at 1
 	for i, name := range names {
 		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
 			continue
 		}
-		var fnv uint64
+		var route uint64
 		if hashes != nil {
-			fnv = hashes[i]
+			route = hashes[i]
 		} else {
-			fnv = v2recv.NameHash(name)
+			route = namefp.Route(name)
 		}
-		if fp := namefp.Of(name, fnv); previous.local == 0 || previous.fp != fp {
-			if previous = *o.find(fp); previous.local == 0 {
+		if fp := namefp.Of(namefp.Hash(name), route); local == 0 || previous != fp {
+			previous = fp
+			var ok bool
+			if local, ok = o.names.Get(fp); !ok {
 				var err error
-				if previous, err = o.register(name, fp); err != nil {
+				if local, err = o.register(name, fp); err != nil {
 					return err
 				}
 			}
@@ -109,7 +75,7 @@ func (o *applicationOwner) Append(names []string, hashes []uint64, data []points
 		index := len(apps)
 		order := o.p.applyOrder + uint64(index) + 1
 		o.sequence[index] = order
-		apps = append(apps, Application{Registered: o.p.applications[previous.local], Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
+		apps = append(apps, Application{Registered: o.p.applications[local], Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
 	}
 	if len(apps) == 0 {
 		return nil

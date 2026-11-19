@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -83,10 +84,13 @@ type coreRollups struct {
 	metrics map[uint64]*rollupMetric
 	// closable is the subset of metrics with a coarse archive. Only these can
 	// become closure-due; single-archive names never enter idle scans.
-	closable     map[uint64]*rollupMetric
-	names        map[partsformat.ID]uint64
+	closable map[uint64]*rollupMetric
+	// names maps each installed name's fingerprint to its owner slot (ID =
+	// ids[slot]); pendingNames maps this plan's fresh names to their stage.
+	// Both are pointer-free and read no name bytes.
+	names        namefp.Table
 	stages       []rollupStage
-	pendingNames map[partsformat.ID]uint64
+	pendingNames namefp.Table
 	// sweepKeys/sweepSpare are the seal's sorted batch keys and radix spare,
 	// seen the idle pass's bitset of staged IDs: pointer-free, so retaining
 	// them between seals adds nothing for the GC to scan.
@@ -137,11 +141,11 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, closable: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, closable: map[uint64]*rollupMetric{}}
 }
 
-// install is the only writer of metrics/closable, so the closure index can
-// never miss a coarse-archive metric.
+// install is the only writer of metrics/closable/names, so the closure index
+// can never miss a coarse-archive metric and every installed name is indexed.
 func (r *coreRollups) install(id uint64, m *rollupMetric) {
 	old := r.metrics[id]
 	r.metrics[id] = m
@@ -159,6 +163,7 @@ func (r *coreRollups) install(id uint64, m *rollupMetric) {
 			r.rank = append(r.rank, 0)
 		}
 		m.ownerSlot.Store(s + 1)
+		r.names.Put(m.fingerprint(), s)
 		r.unranked = append(r.unranked, m)
 		r.unrankedSlots = append(r.unrankedSlots, s)
 	}
@@ -237,11 +242,6 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
 	}
-	names := r.pendingNames
-	if names == nil {
-		names = map[partsformat.ID]uint64{}
-		r.pendingNames = names
-	}
 	// One stable sort of batch indices by ID makes each name's batches one run
 	// in arrival order; the sweep stages a name once per run. The keys and the
 	// idle bitset are pointer-free scratch retained between seals.
@@ -304,13 +304,16 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 					return coreSealPlan{}, err
 				}
 			}
-			if prior, ok := r.names[m.policy.Name]; ok && prior != id {
+			// A fresh ID is not installed, and the sweep stages each ID once,
+			// so any holder of this fingerprint is another ID for the name.
+			fp := m.fingerprint()
+			if _, ok := r.names.Get(fp); ok {
 				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
 			}
-			if prior, ok := names[m.policy.Name]; ok && prior != id {
+			if _, ok := r.pendingNames.Get(fp); ok {
 				return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
 			}
-			names[m.policy.Name] = id
+			r.pendingNames.Put(fp, uint32(len(stages)))
 		}
 		stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh, batchCount: j - i})
 		s := &stages[len(stages)-1]
@@ -389,7 +392,6 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			m := s.metric
 			if s.fresh {
 				r.install(m.id, m)
-				r.names[m.policy.Name] = m.id
 			}
 		}
 	}
@@ -658,9 +660,6 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		}
 		m.slots.KeepRecent(meta.Frontier.MaxTime)
 		r.install(meta.ID, m)
-		// Keep the recovered reverse index on the same immutable name as the
-		// metric. ScanRollups' decoded policy is temporary construction state.
-		r.names[m.policy.Name] = meta.ID
 		return nil
 	})
 	return r, err
