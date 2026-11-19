@@ -27,7 +27,7 @@ func TestRollupSnapshotDescriptorSelectionMatchesScan(t *testing.T) {
 	ctx := context.Background()
 	var policies [][]byte
 	for i := range 2 {
-		_, p := rollupTestPolicy(t, fmt.Sprintf("descriptors.%d", i), "1s:1h,1m:1d", sealrollup.Last, 0)
+		_, p := rollupTestPolicy(t, fmt.Sprintf("descriptors.%d", i), "1s:1h,1m:100d", sealrollup.Last, 0)
 		policies = append(policies, p)
 	}
 	less := func(a, b sealrollup.Record) int {
@@ -41,7 +41,7 @@ func TestRollupSnapshotDescriptorSelectionMatchesScan(t *testing.T) {
 		now := int64(1794700800) + int64(order)*60
 		var batches []Batch
 		for i, p := range policies {
-			batches = append(batches, Batch{ID: uint64(i + 1), Policy: p, Order: order, Clock: now, Points: []Row{{ID: uint64(i + 1), Time: now - 120, Bits: order + uint64(i), Seq: order}}})
+			batches = append(batches, Batch{ID: uint64(i + 1), Policy: p, Order: order, Clock: now, Points: []Row{{ID: uint64(i + 1), Time: now - 120, Bits: order + uint64(i), Seq: order}, {ID: uint64(i + 1), Time: now - 40*86400, Bits: order + uint64(i) + 10, Seq: order + 10}}})
 		}
 		if err := engine.AppendBatches(0, batches, order, true); err != nil {
 			t.Fatal(err)
@@ -58,6 +58,15 @@ func TestRollupSnapshotDescriptorSelectionMatchesScan(t *testing.T) {
 		}
 		if len(view.parts) < int(order) {
 			t.Fatal("fixture did not retain multiple originals")
+		}
+		if order == 1 {
+			identities := map[archivePartIdentity]bool{}
+			for _, part := range view.parts {
+				identities[archivePartIdentity{part.key.Group, part.key.Part}] = true
+			}
+			if len(view.parts) <= len(identities) {
+				t.Fatal("fixture did not split one part across monthly files")
+			}
 		}
 		views = append(views, view)
 		for _, v := range views {

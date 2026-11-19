@@ -487,15 +487,16 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		// legacy namespace and every selected file.
 		selected := make(map[archivePartIdentity]bool, len(partList))
 		var exact []v2part.Descriptor
+		seen := make(map[v2part.Digest]bool, len(partList))
 		complete := true
 		for _, part := range partList {
 			id := archivePartIdentity{part.part.key.Group, part.part.key.Part}
-			if selected[id] {
-				continue
-			}
 			selected[id] = true
 			if d := part.part.descriptor; d != nil {
-				exact = append(exact, *d)
+				if !seen[d.SHA256] {
+					seen[d.SHA256] = true
+					exact = append(exact, *d)
+				}
 			} else {
 				complete = false
 			}
