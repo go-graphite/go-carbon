@@ -617,6 +617,18 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		}
 		return k >> 32
 	}
+	// Restore the required mapped IDs before the ordinary planner. Fresh
+	// stores and fully materialized checkpoints skip this extra sweep.
+	if r.checkpoint != nil {
+		for i, k := range keys {
+			id := keyID(k)
+			if i == 0 || id != keyID(keys[i-1]) {
+				if err := r.loadCheckpointID(id, nil); err != nil {
+					return coreSealPlan{}, err
+				}
+			}
+		}
+	}
 	runs := 0
 	for i := range keys {
 		if i == 0 || keyID(keys[i]) != keyID(keys[i-1]) {
@@ -640,11 +652,6 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	offset, batch := 0, 0
 	for i := 0; i < len(keys); {
 		id := keyID(keys[i])
-		if r.checkpoint != nil {
-			if err := r.loadCheckpointID(id, nil); err != nil {
-				return coreSealPlan{}, err
-			}
-		}
 		j := i + 1
 		for j < len(keys) && keyID(keys[j]) == id {
 			j++

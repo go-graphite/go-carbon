@@ -786,6 +786,23 @@ func TestLazyCheckpointSparseIDs(t *testing.T) {
 	if !r.fromCheckpoint || len(r.metrics) != 0 {
 		t.Fatal("checkpoint did not stay lazy")
 	}
+	// A seal with repeated, sparse/wide IDs restores each required run before
+	// planning, while leaving unrelated checkpoint names cold.
+	seal := []Batch{batches[1], batches[3], batches[1]}
+	for i := range seal {
+		seal[i].Order = uint64(i + 2)
+	}
+	for _, engine := range []*Engine{a, b} {
+		if err = engine.AppendBatches(0, seal, 4, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(r.metrics) != 2 || r.metrics[ids[1]] == nil || r.metrics[ids[3]] == nil {
+		t.Fatalf("required-ID seal materialized %d names, want exactly its two IDs", len(r.metrics))
+	}
+	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
+		t.Fatal("sparse-ID first seal differs from eager parts")
+	}
 	for i, id := range ids {
 		encodedName, err := json.Marshal(names[i])
 		if err != nil {
