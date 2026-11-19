@@ -19,7 +19,7 @@ type coalescingOwner struct {
 	data  []points.Point
 }
 
-func (o *coalescingOwner) Append(names []string, data []points.Point, _ []uint64, _ int64) error {
+func (o *coalescingOwner) Append(names []string, _ []uint64, data []points.Point, _ []uint64, _ int64) error {
 	o.calls = append(o.calls, len(data))
 	o.names = append(o.names, names...)
 	o.data = append(o.data, data...)
@@ -57,7 +57,7 @@ type fenceOwner struct {
 	once              sync.Once
 }
 
-func (o *fenceOwner) Append(names []string, _ []points.Point, _ []uint64, _ int64) error {
+func (o *fenceOwner) Append(names []string, _ []uint64, _ []points.Point, _ []uint64, _ int64) error {
 	if o.block != nil {
 		o.once.Do(func() { close(o.entered); <-o.block })
 	}

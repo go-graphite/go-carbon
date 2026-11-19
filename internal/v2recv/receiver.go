@@ -23,10 +23,11 @@ import (
 
 // Owner is called by exactly one goroutine. Append borrows its arguments only
 // until return; plaintext names share one string per socket batch, so an owner
-// that keeps a name must clone it. Seal+Drain must journal-sync before
+// that keeps a name must clone it. hashes[i] is NameHash(names[i]), the hash
+// that routed the name to this owner. Seal+Drain must journal-sync before
 // publishing to the core.
 type Owner interface {
-	Append([]string, []points.Point, []uint64, int64) error
+	Append(names []string, hashes []uint64, data []points.Point, sequence []uint64, clock int64) error
 	Seal() error
 	Drain() error
 }
@@ -44,10 +45,11 @@ type Config struct {
 	Logger                                              *slog.Logger
 }
 type batch struct {
-	names []string
-	data  []points.Point
-	text  []byte // plaintext name bytes, converted once per batch by named
-	ends  []int  // end of each plaintext name in text; empty for codec batches
+	names  []string
+	hashes []uint64 // NameHash of each name, computed once for routing
+	data   []points.Point
+	text   []byte // plaintext name bytes, converted once per batch by named
+	ends   []int  // end of each plaintext name in text; empty for codec batches
 }
 
 // named converts plaintext names with one allocation per batch instead of one
@@ -200,13 +202,13 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 	// Per-name order survives this coalescing.
 	var pending batch
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
-	appendBatch := func(names []string, data []points.Point) {
+	appendBatch := func(names []string, hashes []uint64, data []points.Point) {
 		sequence = sequence[:0]
 		for range data {
 			seq++
 			sequence = append(sequence, seq)
 		}
-		if err := o.Append(names, data, sequence, time.Now().Unix()); err != nil {
+		if err := o.Append(names, hashes, data, sequence, time.Now().Unix()); err != nil {
 			failed = true
 			s.stats.rejected.Add(uint64(len(data)))
 			s.stats.sink.Add(1)
@@ -219,10 +221,9 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 		if failed || len(pending.data) == 0 {
 			return
 		}
-		appendBatch(pending.names, pending.data)
+		appendBatch(pending.names, pending.hashes, pending.data)
 		clear(pending.names)
-		pending.names = pending.names[:0]
-		pending.data = pending.data[:0]
+		pending.names, pending.hashes, pending.data = pending.names[:0], pending.hashes[:0], pending.data[:0]
 	}
 	syncOwner := func() {
 		appendPending()
@@ -235,10 +236,10 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 		}
 	}
 	consume := func(b *batch) {
-		originalNames, originalData := b.names, b.data
+		originalNames, originalHashes, originalData := b.names, b.hashes, b.data
 		recycle := func() {
 			clear(originalNames)
-			b.names, b.data = originalNames[:0], originalData[:0]
+			b.names, b.hashes, b.data = originalNames[:0], originalHashes[:0], originalData[:0]
 			s.batches.Put(b)
 		}
 		if failed {
@@ -247,14 +248,15 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 			return
 		}
 		if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
-			appendBatch(b.names, b.data)
-			b.names, b.data = b.names[:0], b.data[:0]
+			appendBatch(b.names, b.hashes, b.data)
+			b.names, b.hashes, b.data = b.names[:0], b.hashes[:0], b.data[:0]
 		}
 		for len(b.data) > 0 {
 			n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
 			pending.names = append(pending.names, b.names[:n]...)
+			pending.hashes = append(pending.hashes, b.hashes[:n]...)
 			pending.data = append(pending.data, b.data[:n]...)
-			b.names, b.data = b.names[n:], b.data[n:]
+			b.names, b.hashes, b.data = b.names[n:], b.hashes[n:], b.data[n:]
 			if len(pending.data) == s.cfg.BatchSize {
 				appendPending()
 			}
@@ -379,20 +381,22 @@ func (r countedReader) Read(b []byte) (int, error) {
 
 type reference struct {
 	name  string
+	hash  uint64
 	owner int
 }
 
 // OwnerFor returns the stable producer used by unplaced TCP intake.
-func OwnerFor(name string, n int) int { return ownerFor(name, n) }
+func OwnerFor(name string, n int) int { return int(NameHash(name) % uint64(n)) }
 
-// ownerFor hashes plaintext name bytes without converting them to a string.
-func ownerFor[T string | []byte](name T, n int) int {
+// NameHash is the FNV-1a hash that routes a name; owners receive it beside the
+// name. It hashes plaintext name bytes without converting them to a string.
+func NameHash[T string | []byte](name T) uint64 {
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(name); i++ {
 		h ^= uint64(name[i])
 		h *= 1099511628211
 	}
-	return int(h % uint64(n))
+	return h
 }
 func (s *Server) read(c net.Conn) error {
 	if s.cfg.Placement != nil {
@@ -453,7 +457,7 @@ func (s *Server) read(c net.Conn) error {
 			if pooled := s.batches.Get(); pooled != nil {
 				b = pooled.(*batch)
 			} else {
-				b = &batch{names: make([]string, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
+				b = &batch{names: make([]string, 0, s.cfg.BatchSize), hashes: make([]uint64, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
 			}
 			buffers[owner] = b
 		}
@@ -472,10 +476,11 @@ func (s *Server) read(c net.Conn) error {
 		}
 		b := buffer(ref.owner)
 		b.names = append(b.names, ref.name)
+		b.hashes = append(b.hashes, ref.hash)
 		added(ref.owner, b, value, ts)
 	}
 	// addText copies a borrowed plaintext name into its owner's batch text.
-	addText := func(owner int, name []byte, value float64, ts int64) {
+	addText := func(owner int, hash uint64, name []byte, value float64, ts int64) {
 		if appendErr != nil {
 			s.stats.rejected.Add(1)
 			return
@@ -484,6 +489,7 @@ func (s *Server) read(c net.Conn) error {
 		b.text = append(b.text, name...)
 		b.ends = append(b.ends, len(b.text))
 		b.names = append(b.names, "")
+		b.hashes = append(b.hashes, hash)
 		added(owner, b, value, ts)
 	}
 	if head[0] == 0 {
@@ -506,7 +512,8 @@ func (s *Server) read(c net.Conn) error {
 			_, err = d.ReadFrame(r, func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 				if *slot == nil {
 					n := string(name)
-					*slot = &reference{name: n, owner: OwnerFor(n, len(s.queues))}
+					h := NameHash(n)
+					*slot = &reference{name: n, hash: h, owner: int(h % uint64(len(s.queues)))}
 				}
 				add((*slot).(*reference), value, ts)
 			})
@@ -540,7 +547,7 @@ func (s *Server) read(c net.Conn) error {
 	}
 	plain := bufio.NewReaderSize(source, 64<<10)
 	var previous []byte // last plaintext name, reused while consecutive lines repeat it
-	owner := 0
+	owner, hash := 0, uint64(0)
 	for {
 		line, err := plain.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
@@ -574,9 +581,10 @@ func (s *Server) read(c net.Conn) error {
 				// its stable owner until the name changes.
 				if previous == nil || !bytes.Equal(name, previous) {
 					previous = append(previous[:0], name...)
-					owner = ownerFor(previous, len(s.queues))
+					hash = NameHash(previous)
+					owner = int(hash % uint64(len(s.queues)))
 				}
-				addText(owner, name, value, ts)
+				addText(owner, hash, name, value, ts)
 			}
 		}
 		if appendErr != nil {
