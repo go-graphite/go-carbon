@@ -63,7 +63,7 @@ func TestOwnerIndexHeap(t *testing.T) {
 			sink += Route(names[(i*7919)%n])
 		}
 		routeNS := float64(time.Since(start).Nanoseconds()) / float64(n)
-		t.Logf("names=%d map[name]id %.1f B/name %.1f ns/lookup | namefp.Table %.1f B/name %.1f ns/lookup | Route (FNV-1a64, once per name at intern) %.1f ns | sink %d",
+		t.Logf("names=%d map[name]id %.1f B/name %.1f ns/lookup | namefp.Table %.1f B/name %.1f ns/lookup | Route (XXH3-64, once per name at intern) %.1f ns | sink %d",
 			n, float64(mapBytes)/float64(n), mapNS, float64(tabBytes)/float64(n), tabNS, routeNS, sink&1)
 		runtime.KeepAlive(m)
 		runtime.KeepAlive(&tab)
