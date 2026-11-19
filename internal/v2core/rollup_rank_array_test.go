@@ -14,45 +14,72 @@ import (
 	"github.com/go-graphite/go-whisper"
 )
 
-// checkRankArray asserts the owner slot arrays and dense agree both ways:
-// every dense metric's slot holds its ID and ranks to its position, and every
-// non-zero rank names the metric installed under that slot's ID. A stale
-// entry would route the seal sweep to the wrong metric.
+// checkRankArray asserts the rank-ordered slot arrays: slot s < len(dense) is
+// dense[s] and holds its ID (or deadSlot once replaced), slot len(dense)+k is
+// unranked[k], every installed ID owns exactly one slot, and a passing hint
+// names that slot. A stale entry would route the seal sweep to the wrong
+// metric or scalars.
 func checkRankArray(t *testing.T, r *coreRollups, seal int) {
 	t.Helper()
-	if len(r.ids) != len(r.rank) || len(r.denseSlots) != len(r.dense) || len(r.unrankedSlots) != len(r.unranked) {
-		t.Fatalf("seal %d: slot arrays out of step: ids %d rank %d dense %d/%d unranked %d/%d", seal, len(r.ids), len(r.rank), len(r.dense), len(r.denseSlots), len(r.unranked), len(r.unrankedSlots))
+	if len(r.ids) != len(r.dense)+len(r.unranked) || len(r.meta) != len(r.ids) {
+		t.Fatalf("seal %d: slot arrays out of step: ids %d meta %d dense %d unranked %d", seal, len(r.ids), len(r.meta), len(r.dense), len(r.unranked))
 	}
-	for i, m := range r.dense {
-		s := r.denseSlots[i]
-		if r.ids[s] != m.id {
-			t.Fatalf("seal %d: dense[%d] id %d in slot %d of id %d", seal, i, m.id, s, r.ids[s])
+	slotMetric := func(s int) *rollupMetric {
+		if s < len(r.dense) {
+			return r.dense[s]
 		}
-		if r.metrics[m.id] != m {
-			// A replaced metric lingers in dense until the next renumber,
-			// but its slot must no longer rank to it.
-			if !r.replaced || r.rank[s] == uint32(i+1) {
-				t.Fatalf("seal %d: replaced dense[%d] id %d still ranked", seal, i, m.id)
+		return r.unranked[s-len(r.dense)]
+	}
+	owner := make(map[uint64]int, len(r.ids))
+	for s, id := range r.ids {
+		m := slotMetric(s)
+		if id == deadSlot {
+			if s >= len(r.dense) || r.metrics[m.id] == m {
+				t.Fatalf("seal %d: dead slot %d holds a live or unranked metric", seal, s)
 			}
 			continue
 		}
-		if r.rank[s] != uint32(i+1) {
-			t.Fatalf("seal %d: dense[%d] id %d stale rank %d", seal, i, m.id, r.rank[s])
+		if m.id != id || r.metrics[id] != m {
+			t.Fatalf("seal %d: slot %d id %d holds metric %d (installed %v)", seal, s, id, m.id, r.metrics[id] == m)
+		}
+		if prior, dup := owner[id]; dup {
+			t.Fatalf("seal %d: id %d owns slots %d and %d", seal, id, prior, s)
+		}
+		owner[id] = s
+	}
+	for id, m := range r.metrics {
+		s, ok := owner[id]
+		if h, hinted := r.hintSlot(m.PolicyIdentity, id); !ok || hinted && h != uint32(s) {
+			t.Fatalf("seal %d: id %d has no slot or a hint to another slot", seal, id)
 		}
 	}
-	for k, m := range r.unranked {
-		if r.ids[r.unrankedSlots[k]] != m.id {
-			t.Fatalf("seal %d: unranked[%d] id %d in slot of id %d", seal, k, m.id, r.ids[r.unrankedSlots[k]])
-		}
-	}
-	for s, rk := range r.rank {
-		if rk == 0 {
+}
+
+// hasDeadSlot reports whether a replaced metric still lingers in dense.
+func hasDeadSlot(r *coreRollups) bool {
+	return slices.Contains(r.ids[:len(r.dense)], deadSlot)
+}
+
+// unrankAll moves every live slot to the unranked tail in slot order, so the
+// next plan re-sorts the whole planner from scratch: a reference that shares
+// no incremental merge state with a long-lived planner.
+func unrankAll(r *coreRollups) {
+	var ms []*rollupMetric
+	var ids []uint64
+	var meta []metricMetadata
+	for s, id := range r.ids {
+		if id == deadSlot {
 			continue
 		}
-		if int(rk) > len(r.dense) || r.dense[rk-1].id != r.ids[s] || r.metrics[r.ids[s]] != r.dense[rk-1] {
-			t.Fatalf("seal %d: rank[%d]=%d names another metric", seal, s, rk)
+		m := r.unranked
+		if s < len(r.dense) {
+			ms = append(ms, r.dense[s])
+		} else {
+			ms = append(ms, m[s-len(r.dense)])
 		}
+		ids, meta = append(ids, id), append(meta, r.meta[s])
 	}
+	r.dense, r.unranked, r.ids, r.meta = r.dense[:0], ms, ids, meta
 }
 
 // TestRollupRankRenumberBoundary drives names added, expired, revived and
@@ -137,15 +164,6 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 			var lostRanked, restoredRenumbers, hintHits int
 			for seal := 0; seal < 14; seal++ {
 				clock += 10
-				if adopt && (seal == 3 || seal == 7) {
-					// The previous seal aborted an adoption; count ranked
-					// names whose hint no longer leads to their slot.
-					for i, m := range ranked.dense {
-						if s, ok := ranked.hintSlot(m.PolicyIdentity, m.id); !ok || s != ranked.denseSlots[i] {
-							lostRanked++
-						}
-					}
-				}
 				switch seal {
 				case 4, 7:
 					// A move replaces metrics in place with fresh state. At
@@ -159,7 +177,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					for _, p := range []*coreRollups{ranked, ref} {
 						for id, m := range p.metrics {
 							if id%mod == 1 {
-								p.install(id, newRollupMetric(m.PolicyIdentity))
+								p.install(id, newRollupMetric(m.PolicyIdentity), freshMetadata)
 							}
 						}
 					}
@@ -186,20 +204,25 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				}
 				rng.Shuffle(len(batches), func(i, j int) { batches[i], batches[j] = batches[j], batches[i] })
 				if adopt && (seal == 2 || seal == 6) {
-					// A failed move: an adopter shares every metric and
+					// A failed move: an adopter shares metrics and every
 					// identity, installs them in map-like order, plans this
 					// seal (its renumber re-stores the hints) and is dropped.
 					next := newPlanner()
 					next.identities = ranked.identities
 					adopted := make([]uint64, 0, len(ranked.metrics))
 					for id := range ranked.metrics {
-						adopted = append(adopted, id)
+						// Rank-ordered slots coincide when both planners
+						// hold the same names; a two-thirds subset shifts
+						// the adopter's slots, so it overwrites hints.
+						if id%3 != 0 {
+							adopted = append(adopted, id)
+						}
 					}
 					slices.Sort(adopted)
 					rng.Shuffle(len(adopted), func(i, j int) { adopted[i], adopted[j] = adopted[j], adopted[i] })
 					for _, id := range adopted {
 						m := ranked.metrics[id]
-						next.install(id, m)
+						next.install(id, m, ranked.metaOf(id))
 						next.names[m.policy.Name] = id
 					}
 					plan, err := next.plan(coreSealInput{Batches: batches})
@@ -207,6 +230,14 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 						t.Fatal(err)
 					}
 					plan.Abort()
+					// Count ranked names whose hint no longer leads to their
+					// slot. This seal's plan reaches them through slotOf's
+					// search, which restores each hint.
+					for i, m := range ranked.dense {
+						if s, ok := ranked.hintSlot(m.PolicyIdentity, m.id); !ok || s != uint32(i) {
+							lostRanked++
+						}
+					}
 				}
 				renumbering := len(ranked.unranked) > 0 && len(ranked.unranked)*rankSlack >= len(ranked.dense)
 				if !renumbering {
@@ -218,15 +249,13 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				}
 				if renumbering {
 					renumberSeals++
-					if ranked.replaced {
+					if hasDeadSlot(ranked) {
 						replacedRenumbers++
 					}
-				} else if ranked.replaced {
+				} else if hasDeadSlot(ranked) {
 					lingeringReplaced++
 				}
-				clear(ref.rank)
-				ref.dense, ref.unranked, ref.replaced = ref.dense[:0], ref.unranked[:0], false
-				ref.denseSlots, ref.unrankedSlots = ref.denseSlots[:0], ref.unrankedSlots[:0]
+				unrankAll(ref)
 				planA, err := ranked.plan(coreSealInput{Batches: batches})
 				if err != nil {
 					t.Fatal(err)
@@ -249,7 +278,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				checkRankArray(t, ranked, seal)
 				if renumbering {
 					for i, m := range ranked.dense {
-						if s, ok := ranked.hintSlot(m.PolicyIdentity, m.id); !ok || s != ranked.denseSlots[i] {
+						if s, ok := ranked.hintSlot(m.PolicyIdentity, m.id); !ok || s != uint32(i) {
 							t.Fatalf("seal %d: renumber left dense[%d] id %d without its hint", seal, i, m.id)
 						}
 					}
@@ -274,8 +303,10 @@ func TestPolicyIdentitySlotFitsPadding(t *testing.T) {
 	if got := reflect.TypeFor[PolicyIdentity]().Size(); got != 56 {
 		t.Fatalf("PolicyIdentity is %d B, want 56", got)
 	}
-	if got := reflect.TypeFor[rollupMetric]().Size(); got != 160 {
-		t.Fatalf("rollupMetric is %d B, want 160", got)
+	// The committed scalars live in the owner's pointer-free meta array and
+	// KeepRecent residency behind a pointer that only coarse archives fill.
+	if got := reflect.TypeFor[rollupMetric]().Size(); got != 24 {
+		t.Fatalf("rollupMetric is %d B, want 24", got)
 	}
 }
 
@@ -291,22 +322,22 @@ func TestRollupSlotArraysScaleWithNames(t *testing.T) {
 		m := rankTestMetric(i)
 		m.id = uint64(i)*producers + 37
 		maxID = max(maxID, m.id)
-		r.install(m.id, m)
+		r.install(m.id, m, metricMetadata{})
 	}
 	r.renumber()
 	for id, m := range r.metrics {
 		if id%5 == 0 {
 			c := *m
-			r.install(id, &c)
+			r.install(id, &c, r.metaOf(id))
 		}
 	}
 	r.renumber()
 	checkDense(t, r)
 	checkRankArray(t, r, 0)
-	if len(r.ids) != names || len(r.rank) != names || len(r.denseSlots) != names {
-		t.Fatalf("slots: ids %d rank %d denseSlots %d, want %d each", len(r.ids), len(r.rank), len(r.denseSlots), names)
+	if len(r.ids) != names || len(r.dense) != names {
+		t.Fatalf("slots: ids %d dense %d, want %d each", len(r.ids), len(r.dense), names)
 	}
-	bytes := 8*cap(r.ids) + 4*(cap(r.rank)+cap(r.denseSlots)+cap(r.denseSlotsSpare)+cap(r.unrankedSlots))
+	bytes := 8 * cap(r.ids)
 	if limit := 2 * 24 * names; bytes > limit || uint64(bytes) >= maxID {
 		t.Fatalf("owner slot arrays hold %d B for %d names (max ID %d), limit %d", bytes, names, maxID, limit)
 	}

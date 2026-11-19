@@ -71,7 +71,12 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 				}
 				names[m.policy.Name] = b.ID
 			}
-			stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh})
+			slot, meta := uint32(0), freshMetadata
+			if !fresh {
+				slot = r.slotOf(b.ID, m)
+				meta = r.meta[slot]
+			}
+			stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadataScalars(meta), fresh: fresh})
 			i = len(stages) - 1
 			stages[i].next.Expired = false
 			r.stageKey(&stages[i])
@@ -118,8 +123,12 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
-			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
-				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
+			if _, seen := positions[id]; seen {
+				continue
+			}
+			slot := r.slotOf(id, m)
+			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
 				r.stageKey(&stages[len(stages)-1])
 			}
 		}
@@ -160,7 +169,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		for _, s := range stages {
 			m := s.metric
 			if s.fresh {
-				r.install(m.id, m)
+				r.install(m.id, m, compactMetadata(s.next))
 				r.names[m.policy.Name] = m.id
 			}
 		}
