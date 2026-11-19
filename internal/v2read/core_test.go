@@ -97,7 +97,15 @@ func TestClassicPendingAndSealed(t *testing.T) {
 						// merge publishes too, possibly before the batch reaches the head.
 						await(t, func() bool {
 							g := reader.owners[0].Load()
-							return g != nil && len(g.pending) > 0 && g.pending[len(g.pending)-1].Order == b.Order
+							if g == nil {
+								return false
+							}
+							found := false
+							g.view.Each(func(a *v2core.PendingApplication) bool {
+								found = a.Order == b.Order
+								return !found
+							})
+							return found
 						})
 						// Overwrite borrowed input after acknowledgment: the published head owns it.
 						for j := range rows {
