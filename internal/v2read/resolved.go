@@ -141,9 +141,6 @@ func (s *generation) metricVersion(name string) any {
 	return s.number
 }
 
-func (s *generation) resolved(name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
-	return s.resolvedContext(context.Background(), name, policy, meta)
-}
 func (s *generation) resolvedContext(ctx context.Context, name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
 	c := s.cache
 	version := s.metricVersion(name)

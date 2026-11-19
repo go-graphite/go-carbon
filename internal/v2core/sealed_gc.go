@@ -41,7 +41,6 @@ type sealedPartGC struct {
 	fileMu               sync.Mutex // serializes seal file publication with unlink; readers never acquire it
 	mu                   sync.Mutex
 	inventory            *RollupInventory // immutable; captured/updated under mu
-	parts                partRegistry
 	db                   *pebble.DB
 	dir                  string
 	pending              map[v2part.Digest]retiredPart
@@ -66,7 +65,6 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 	if g.inventory, err = loadRollupInventory(db); err != nil {
 		return nil, err
 	}
-	g.inventory.registry = &g.parts
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: retiredPartPrefix, UpperBound: v2part.PrefixEnd(retiredPartPrefix)})
 	if err != nil {
 		return nil, err
@@ -200,7 +198,7 @@ func (g *sealedPartGC) sweep() (uint64, error) {
 		if completed >= 64 {
 			break
 		}
-		if g.now().Sub(p.at) < g.grace || g.parts.held(id) || (snapshots.Count > 0 && p.sequence > 0 && snapshots.EarliestSeqNum <= p.sequence) {
+		if g.now().Sub(p.at) < g.grace || g.inventory.registry.held(id) || (snapshots.Count > 0 && p.sequence > 0 && snapshots.EarliestSeqNum <= p.sequence) {
 			continue
 		}
 		_, closer, err := g.db.Get(partBinding(sealedPartPrefix, id))

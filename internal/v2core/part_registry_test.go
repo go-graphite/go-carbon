@@ -44,9 +44,9 @@ func TestHeldPartOutlivesRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inventory.registry = &g.parts
+	inventory.registry = g.inventory.registry
 	snap := db.NewSnapshot()
-	parts, err := OpenRollupParts(ctx, snap, inventory, nil, nil)
+	parts, err := OpenRollupParts(ctx, snap, inventory, nil, testBlockCache(t), 4<<20)
 	if err != nil || parts == nil {
 		t.Fatalf("open: %v %v", parts, err)
 	}
@@ -72,7 +72,7 @@ func TestHeldPartOutlivesRetirement(t *testing.T) {
 		t.Fatalf("held part read: %v %v", records, err)
 	}
 	parts.Close()
-	if g.parts.held(d.SHA256) {
+	if g.inventory.registry.held(d.SHA256) {
 		t.Fatal("released part still registered")
 	}
 	if n, err := g.sweep(); err != nil || n == 0 {

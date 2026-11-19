@@ -3,11 +3,12 @@ package v2read
 import (
 	"context"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/partsformat"
-	"github.com/go-graphite/go-carbon/internal/v2core"
 	"math"
 	"slices"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/v2core"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
@@ -87,23 +88,23 @@ func TestResolvedCacheIsBoundedAndGenerationScoped(t *testing.T) {
 	policy := v2core.RollupPolicy{Config: sealrollup.Config{Archives: []sealrollup.Archive{{Step: 1, Count: 10}}}}
 	for i := 0; i < 100; i++ {
 		sealed.number = uint64(i)
-		if _, err := sealed.resolved(fmt.Sprint(i), policy, v2core.RollupMetadata{ID: 1}); err != nil {
+		if _, err := sealed.resolvedContext(context.Background(), fmt.Sprint(i), policy, v2core.RollupMetadata{ID: 1}); err != nil {
 			t.Fatal(err)
 		}
 		if c.fullBytes > c.limit || len(c.full) > 64 {
 			t.Fatal("unbounded scalar cache")
 		}
 	}
-	old, err := sealed.resolved("repeat", policy, v2core.RollupMetadata{ID: 1})
+	old, err := sealed.resolvedContext(context.Background(), "repeat", policy, v2core.RollupMetadata{ID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := sealed.resolved("repeat", policy, v2core.RollupMetadata{ID: 1})
+	again, err := sealed.resolvedContext(context.Background(), "repeat", policy, v2core.RollupMetadata{ID: 1})
 	if err != nil || again != old {
 		t.Fatal("same generation not reused")
 	}
 	sealed.number++
-	newer, err := sealed.resolved("repeat", policy, v2core.RollupMetadata{ID: 1})
+	newer, err := sealed.resolvedContext(context.Background(), "repeat", policy, v2core.RollupMetadata{ID: 1})
 	if err != nil || newer == old {
 		t.Fatal("cross-generation source reused")
 	}
@@ -125,7 +126,7 @@ func TestPendingPrefixExactAndCanonical(t *testing.T) {
 	}
 	cache := &sealedCache{limit: 1 << 20}
 	prefix := makeMetric(batches[:1], cache)
-	prefix.resolve()
+	prefix.resolveContext(context.Background())
 	if prefix.err != nil {
 		t.Fatal(prefix.err)
 	}
@@ -133,12 +134,12 @@ func TestPendingPrefixExactAndCanonical(t *testing.T) {
 	if incremental.resource.cachedReduction(incremental) == nil {
 		t.Fatal("exact prefix missed")
 	}
-	incremental.resolve()
+	incremental.resolveContext(context.Background())
 	if incremental.err != nil {
 		t.Fatal(incremental.err)
 	}
 	whole := makeMetric(batches, &sealedCache{limit: 1 << 20})
-	whole.resolve()
+	whole.resolveContext(context.Background())
 	if whole.err != nil {
 		t.Fatal(whole.err)
 	}
@@ -214,13 +215,13 @@ func TestResolvedCacheSharesOnlyUnchangedPartSets(t *testing.T) {
 	}
 	first := seal("stable.a", 1, 1)
 	a := first.lookup("stable.a")
-	a.once.Do(a.resolve)
+	a.resolveContext(context.Background())
 	if a.err != nil {
 		t.Fatal(a.err)
 	}
 	second := seal("stable.b", 2, 2)
 	b := second.lookup("stable.a")
-	b.once.Do(b.resolve)
+	b.resolveContext(context.Background())
 	if b.err != nil {
 		t.Fatal(b.err)
 	}
@@ -229,7 +230,7 @@ func TestResolvedCacheSharesOnlyUnchangedPartSets(t *testing.T) {
 	}
 	third := seal("stable.a", 1, 3)
 	c := third.lookup("stable.a")
-	c.once.Do(c.resolve)
+	c.resolveContext(context.Background())
 	if c.err != nil {
 		t.Fatal(c.err)
 	}

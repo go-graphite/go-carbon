@@ -129,7 +129,7 @@ func TestRollupDirectoryPopulatedScale(t *testing.T) {
 		}
 		nextPin := db.NewSnapshot()
 		started := time.Now()
-		next, err := NewRollupSnapshotWithCatalog(ctx, nextPin, prior, identities, 0)
+		next, err := NewRollupSnapshot(ctx, nextPin, prior, identities, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

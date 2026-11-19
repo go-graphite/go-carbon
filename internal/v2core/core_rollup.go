@@ -564,7 +564,7 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 	return nil
 }
 func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
-	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, 0)
+	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, nil, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -603,7 +603,7 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
 		return nil, err
 	} else if found {
-		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, 0)
+		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, nil, nil, 0)
 		if err != nil {
 			return nil, err
 		}

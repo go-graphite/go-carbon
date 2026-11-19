@@ -106,7 +106,6 @@ type metricState struct {
 	meta     v2core.RollupMetadata
 	records  []sealrollup.Record
 	pending  []sealrollup.Batch
-	once     sync.Once
 	frozen   *resolvedSource
 	reader   *Reader
 	err      error
@@ -184,7 +183,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	if shared && g.snapshot != snapshot {
 		_ = closeSnapshot()
 	} else if !shared {
-		parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
+		parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
 		if err != nil {
 			_ = snapshot.Close()
 			return err
@@ -307,7 +306,6 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		m.meta.Expired = false
 	}
 }
-func (m *metricState) resolve() { m.resolveContext(context.Background()) }
 func (m *metricState) resolveContext(ctx context.Context) {
 	if m.err = ctx.Err(); m.err != nil {
 		return
@@ -625,7 +623,7 @@ func (g *generation) discover(ctx context.Context) (*generation, error) {
 	if g.parts != nil {
 		ctx = v2core.WithOpenedRollupParts(ctx, g.parts)
 	}
-	index, err := v2core.NewRollupSnapshotWithCatalogAndInventory(ctx, g.snapshot, prior, g.reader.Identities, g.inventory, c.limit)
+	index, err := v2core.NewRollupSnapshot(ctx, g.snapshot, prior, g.reader.Identities, g.inventory, c.limit)
 	if err != nil {
 		return nil, err
 	}

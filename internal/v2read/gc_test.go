@@ -32,7 +32,7 @@ func TestRetirementPublishesNewSealedGenerationWithoutInput(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-			fresh, err := v2core.NewRollupSnapshot(context.Background(), snap, nil)
+			fresh, err := v2core.NewRollupSnapshot(context.Background(), snap, nil, nil, nil)
 			if err != nil {
 				t.Error(err)
 			}

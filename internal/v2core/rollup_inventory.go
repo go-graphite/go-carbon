@@ -20,11 +20,11 @@ import (
 type RollupInventory struct {
 	bindings map[string][]byte
 	bytes    int64
-	registry *partRegistry // the owner's opened parts; nil outside a core owner
+	registry *partRegistry // opened parts, shared by every inventory derived from one load
 }
 
 func loadRollupInventory(db *pebble.DB) (*RollupInventory, error) {
-	out := &RollupInventory{bindings: map[string][]byte{}}
+	out := &RollupInventory{bindings: map[string][]byte{}, registry: &partRegistry{}}
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
 	if err != nil {
 		return nil, err

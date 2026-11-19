@@ -112,18 +112,9 @@ type snapshotMove struct {
 	authority *moveAuthority
 }
 
-func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, nil, cacheLimit...)
-}
-func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, identities, nil, cacheLimit...)
-}
-func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, bindings, cacheLimit...)
-}
-
-// NewRollupSnapshotWithCatalogAndInventory reuses immutable identities and the owner binding set.
-func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
+// NewRollupSnapshot reuses immutable identities and the owner binding set;
+// nil identities come from prior, nil bindings scan the snapshot.
+func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
 	if identities == nil && prior != nil {
 		identities = prior.identities
 	}
@@ -169,8 +160,6 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 			return nil, err
 		}
 		defer it.Close()
-	}
-	if inventory == nil {
 		// Bare GCP3 fixtures have no core frontier or atomic inventory bindings.
 		for valid := it.First(); valid; {
 			if err := ctx.Err(); err != nil {
@@ -200,7 +189,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 		for id := range prior.parts {
 			if !live[id] {
-				fresh, err := NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, nil, identities, bindings, cacheLimit...)
+				fresh, err := NewRollupSnapshot(ctx, snapshot, nil, identities, bindings, cacheLimit...)
 				if err == nil && prior.cache != nil && prior.cache.limit == limit {
 					fresh.cache = prior.cache
 				}
@@ -317,13 +306,6 @@ func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
 		out = append(out, &readPartMetric{part: p, readMetricState: readMetricState{PolicyIdentity: m.latest.PolicyIdentity}})
 	}
 	return out
-}
-func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
-	ids := map[string]struct{}{}
-	for _, p := range s.metricParts(m) {
-		ids[p.part.id] = struct{}{}
-	}
-	return ids
 }
 
 // RetainedBytes conservatively charges directory storage plus the maximum

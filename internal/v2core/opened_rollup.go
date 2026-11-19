@@ -100,48 +100,12 @@ func (r *partRegistry) held(id v2part.Digest) bool {
 	return r.parts[id] != nil
 }
 
-// OpenRollupParts performs no file I/O for ordinary descriptor publications.
-// Legacy and copied-part manifests retain their existing authority resolver.
-func OpenRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cacheLimit ...int64) (*OpenedRollupParts, error) {
-	limit := int64(4 << 20)
-	if len(cacheLimit) > 0 {
-		limit = max(0, min(limit, cacheLimit[0]))
-	}
-	return openRollupParts(ctx, snapshot, inventory, prior, identities, nil, limit)
-}
-
-// OpenRollupPartsWithCache opens parts on a caller-owned block cache that
-// several owners may share; each part takes a reference until Close. Pebble
-// keys cached blocks by a per-reader cache ID, so parts never alias.
-// accountBytes is the share charged to reads.
-func OpenRollupPartsWithCache(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, identities *PolicyCatalog, cache *pebble.Cache, accountBytes int64) (*OpenedRollupParts, error) {
-	return openRollupParts(ctx, snapshot, inventory, nil, identities, cache, accountBytes)
-}
-
-// NeedsSnapshot reports whether reads still go through the opening snapshot:
-// stores with legacy LSM rows, copied parts or no inventory (nil parts). Other
-// readers close the snapshot once parts are open; registry references keep
-// the files.
-func (s *OpenedRollupParts) NeedsSnapshot() bool { return s == nil || s.legacyRows }
-
-// Retain takes the caller's own registry reference on every part, for a
-// publication that binds the same parts. The caller holds s; the immutable
-// routing maps are shared.
-func (s *OpenedRollupParts) Retain() *OpenedRollupParts {
-	if s == nil {
-		return nil
-	}
-	out := *s
-	s.registry.mu.Lock()
-	for _, p := range s.parts {
-		p.refs++
-	}
-	s.registry.mu.Unlock()
-	s.blockCache.Ref()
-	return &out
-}
-
-func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cache *pebble.Cache, limit int64) (*OpenedRollupParts, error) {
+// OpenRollupParts opens parts on a caller-owned block cache that several
+// owners may share; each part takes a reference until Close. Pebble keys
+// cached blocks by a per-reader cache ID, so parts never alias. accountBytes
+// is the share charged to reads. It performs no file I/O. A nil result (no
+// inventory, copied parts, or a part without vshards) reads the snapshot.
+func OpenRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, identities *PolicyCatalog, cache *pebble.Cache, accountBytes int64) (*OpenedRollupParts, error) {
 	if inventory == nil {
 		return nil, nil
 	}
@@ -161,34 +125,14 @@ func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 		}
 	}
 	if identities == nil {
-		if prior != nil {
-			identities = prior.identities
-		} else {
-			identities = &PolicyCatalog{}
-		}
+		identities = &PolicyCatalog{}
 	}
 	legacyRows, err := snapshotHasLegacyRows(snapshot)
 	if err != nil {
 		return nil, err
 	}
-	out := &OpenedRollupParts{registry: inventory.registry, parts: make(map[string]*openedRollupPart, len(inventory.bindings)), routes: map[uint16][]*openedRollupPart{}, byIdentity: map[archivePartIdentity]*openedRollupPart{}, directory: directory, identities: identities, legacyRows: legacyRows}
-	if out.registry == nil && prior != nil {
-		out.registry = prior.registry
-	} else if out.registry == nil {
-		out.registry = &partRegistry{}
-	}
-	if prior != nil {
-		out.blockCache = prior.blockCache
-		out.cacheBytes = prior.cacheBytes
-		out.blockCache.Ref()
-	} else if cache != nil {
-		out.blockCache = cache
-		out.cacheBytes = limit
-		out.blockCache.Ref()
-	} else {
-		out.cacheBytes = limit
-		out.blockCache = pebble.NewCacheWithShards(limit, 1)
-	}
+	out := &OpenedRollupParts{registry: inventory.registry, blockCache: cache, cacheBytes: accountBytes, parts: make(map[string]*openedRollupPart, len(inventory.bindings)), routes: map[uint16][]*openedRollupPart{}, byIdentity: map[archivePartIdentity]*openedRollupPart{}, directory: directory, identities: identities, legacyRows: legacyRows}
+	cache.Ref()
 	ok := false
 	defer func() {
 		if !ok {
@@ -216,6 +160,30 @@ func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 	ok = true
 	return out, nil
 }
+
+// NeedsSnapshot reports whether reads still go through the opening snapshot:
+// stores with legacy LSM rows, copied parts or no inventory (nil parts). Other
+// readers close the snapshot once parts are open; registry references keep
+// the files.
+func (s *OpenedRollupParts) NeedsSnapshot() bool { return s == nil || s.legacyRows }
+
+// Retain takes the caller's own registry reference on every part, for a
+// publication that binds the same parts. The caller holds s; the immutable
+// routing maps are shared.
+func (s *OpenedRollupParts) Retain() *OpenedRollupParts {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	s.registry.mu.Lock()
+	for _, p := range s.parts {
+		p.refs++
+	}
+	s.registry.mu.Unlock()
+	s.blockCache.Ref()
+	return &out
+}
+
 func (s *OpenedRollupParts) Close() {
 	if s == nil {
 		return
