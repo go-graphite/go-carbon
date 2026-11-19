@@ -37,7 +37,10 @@ var rankTestPrepared = func() *sealrollup.Prepared {
 
 func rankTestMetric(i int) *rollupMetric {
 	def := &policyDefinition{prepared: rankTestPrepared, Group: partsformat.Group([]string{"z", "ab", "aa", "a"}[i%4])}
-	return &rollupMetric{PolicyIdentity: &PolicyIdentity{id: uint64(i + 1), policy: policyName{Name: partsformat.ID(rankTestName(i)), policyDefinition: def}}, vshard: uint16((i * 2654435761) % 4096)}
+	name := rankTestName(i)
+	h := &PolicyIdentity{id: uint64(i + 1), policy: policyName{policyDefinition: def}}
+	h.heapName.Store(&name)
+	return &rollupMetric{PolicyIdentity: h, vshard: uint16((i * 2654435761) % 4096)}
 }
 
 // checkDense asserts every live metric is ranked exactly once, in canonical

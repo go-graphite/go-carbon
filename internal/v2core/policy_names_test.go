@@ -31,13 +31,13 @@ func TestMappedPolicyNamesTailAndGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.policy.Name != "" {
-		t.Fatal("identity retained heap name")
+	if h.heapName.Load() == nil {
+		t.Fatal("unmapped identity lost its owned name")
 	}
 	if err := c.BindMappedNames(testPolicyNames{"service.old"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := c.nameTail.Load(uint64(7)); ok {
+	if h.heapName.Load() != nil {
 		t.Fatal("mapped name remains in heap tail")
 	}
 	old := func() *policyNamePage { p, _ := c.ids.Load(uint64(0)); return p.(*policyIDPage).names.Load() }()

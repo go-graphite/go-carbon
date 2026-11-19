@@ -10,7 +10,7 @@ type PolicyNameSource interface {
 	NameAt(uint32) string
 }
 
-// A page owns positions in exactly one immutable base. Zero uses nameTail.
+// A page owns positions in exactly one immutable base. Zero uses the identity's owned heap name.
 // Rebinding copies absent names to the tail, so a retired base is never pinned
 // by an expired identity for the remainder of the journal epoch.
 type policyNamePage struct {
@@ -19,22 +19,23 @@ type policyNamePage struct {
 }
 
 func (h *PolicyIdentity) metricName() v2part.ID {
-	if h.policy.Name != "" || h.catalog == nil {
-		return h.policy.Name
-	}
-	page, _ := h.catalog.ids.Load(h.id >> 10)
-	p := page.(*policyIDPage)
 	for {
+		if name := h.heapName.Load(); name != nil {
+			return v2part.ID(*name)
+		}
+		if h.catalog == nil {
+			return ""
+		}
+		page, _ := h.catalog.ids.Load(h.id >> 10)
+		p := page.(*policyIDPage)
 		if names := p.names.Load(); names != nil {
 			if ref := names.refs[h.id&1023]; ref != 0 {
 				return v2part.ID(names.source.NameAt(ref - 1))
 			}
 		}
-		if tail, ok := h.catalog.nameTail.Load(h.id); ok {
-			return v2part.ID(tail.(string))
-		}
-		// A publication may have installed the first mapping and removed the tail
-		// after this reader sampled the old page. Retry against its new owner.
+		// Binding publishes a mapped page before dropping its owned name, and
+		// installs an owned fallback before retiring a mapped page. Retry if a
+		// reader straddles either publication.
 	}
 }
 
@@ -67,7 +68,8 @@ func (c *PolicyCatalog) BindMappedNames(source PolicyNameSource) error {
 			} else if old != nil && old.refs[slot] != 0 {
 				// Install the owned fallback before publishing a page without this name.
 				// Readers holding old keep that source alive through NameAt's owned copy.
-				c.nameTail.Store(h.id, old.source.NameAt(old.refs[slot]-1))
+				ownedName := old.source.NameAt(old.refs[slot] - 1)
+				h.heapName.Store(&ownedName)
 			}
 		}
 		if len(published) == 0 {
@@ -75,7 +77,7 @@ func (c *PolicyCatalog) BindMappedNames(source PolicyNameSource) error {
 		}
 		page.names.Store(next)
 		for _, id := range published {
-			c.nameTail.Delete(id)
+			page.handles[id&1023].Load().heapName.Store(nil)
 		}
 		return true
 	})

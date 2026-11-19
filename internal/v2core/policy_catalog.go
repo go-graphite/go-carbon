@@ -16,11 +16,12 @@ import (
 // borrows one shared schema/key prefix. Detached handles retain a local name.
 // Journal and part boundaries reconstruct the original canonical definition.
 type PolicyIdentity struct {
-	catalog *PolicyCatalog
-	id      uint64
-	policy  policyName
-	vshard  uint16
-	plain   bool
+	catalog  *PolicyCatalog
+	id       uint64
+	policy   policyName
+	heapName atomic.Pointer[string]
+	vshard   uint16
+	plain    bool
 	// ownerSlot is a seal planner's hint: 1 + the owner-local slot install
 	// gave this name, 0 when none. It sits in padding (0 B per name). Planners
 	// sharing the identity (adoption) overwrite it, so it is only a hint:
@@ -51,7 +52,6 @@ type policyIDPage struct {
 // immutable; page pointers publish new bindings atomically. Reads take no
 // construction mutex, including during page growth.
 type PolicyCatalog struct {
-	nameTail    sync.Map   // uint64 -> string; names not yet in a mapped base
 	namesMu     sync.Mutex // serializes base rebinding
 	ids         sync.Map   // page number -> *policyIDPage, not one map node per name
 	definitions sync.Map   // canonical suffix -> *policyDefinition
@@ -108,7 +108,10 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
 	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
-	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: namefp.Hash(string(p.Name)), route: uint32(namefp.Route(p.Name) >> 32)}
+	h := &PolicyIdentity{id: id, policy: policyName{policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: namefp.Hash(string(p.Name)), route: uint32(namefp.Route(p.Name) >> 32)}
+	ownedName := string(p.Name)
+	h.heapName.Store(&ownedName)
+	return h
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
@@ -125,11 +128,7 @@ func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
 		page, _ = c.ids.LoadOrStore(pageID, &policyIDPage{})
 	}
 	slot := &page.(*policyIDPage).handles[h.id&1023]
-	name := string(h.policy.Name)
-	if prior, loaded := c.nameTail.LoadOrStore(h.id, name); loaded && prior.(string) != name {
-		return nil, errors.New("stored rollup policy changed")
-	}
-	h.policy.Name = ""
+	name := h.Name()
 	if slot.CompareAndSwap(nil, h) {
 		return h, nil
 	}
@@ -180,7 +179,8 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 				return nil, errors.New("noncanonical rollup policy")
 			}
 			ownedName := string(definition[start:nameEnd])
-			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: namefp.Hash(ownedName), route: uint32(namefp.Route(ownedName) >> 32)}
+			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: namefp.Hash(ownedName), route: uint32(namefp.Route(ownedName) >> 32)}
+			h.heapName.Store(&ownedName)
 			return c.publish(h)
 		}
 	}
@@ -291,7 +291,6 @@ func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {
 }
 
 type policyName struct {
-	Name partsformat.ID
 	*policyDefinition
 }
 
