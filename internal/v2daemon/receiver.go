@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -44,69 +45,79 @@ func checkNameLimits(name string) error {
 
 const maxFileNameBytes = 255 // NAME_MAX on Linux filesystems
 
+// applicationOwner maps a name to its producer-local catalog ID with one
+// namefp.Table probe keyed by the name's 96-bit fingerprint. No name bytes are
+// read or kept: a miss proves the name is new, and it resolves the policy and
+// registers once per lifetime.
 type applicationOwner struct {
 	p        *Producer
 	resolve  PolicyResolver
-	policies map[string]*RegisteredApplication
 	throttle func(*points.Points, bool) bool
 	reject   func(name string, err error) // one refused point; nil ignores
+	names    namefp.Table                 // fingerprint → producer-local catalog ID
 	apps     []Application
 	sequence []uint64
 }
 
-// register admits a new name. Its errors refuse only this name unless the
-// producer itself failed; a catalog I/O failure surfaces at the next Drain.
-func (o *applicationOwner) register(name string) (*RegisteredApplication, error) {
+// register admits a new name; the borrowed batch name is not retained. Its
+// errors refuse only this name unless the producer itself failed; a catalog
+// I/O failure surfaces at the next Drain.
+func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32, error) {
 	if err := checkNameLimits(name); err != nil {
-		return nil, err
+		return 0, err
 	}
-	name = strings.Clone(name) // retained; the receiver's batch text is borrowed
 	policy, err := o.resolve(name)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	registered, err := o.p.RegisterApplication(name, policy)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if o.policies == nil {
-		o.policies = map[string]*RegisteredApplication{}
+	if registered.id > namefp.MaxLocal {
+		return 0, errors.New("receiver name table: producer catalog ID exceeds 32 bits")
 	}
-	o.policies[name] = registered
-	return registered, nil
+	o.names.Put(fp, uint32(registered.id))
+	return uint32(registered.id), nil
 }
 
-func (o *applicationOwner) Append(names []string, data []points.Point, _ []uint64, clock int64) error {
+func (o *applicationOwner) Append(names []string, hashes []uint64, data []points.Point, _ []uint64, clock int64) error {
 	o.apps = slices.Grow(o.apps[:0], len(names))
 	o.sequence = slices.Grow(o.sequence[:0], len(names))[:len(names)]
 	apps := o.apps[:0]
 	defer func() { clear(apps); o.apps = apps[:0] }()
-	var previous *RegisteredApplication
+	var previous namefp.Fingerprint
+	var local uint32 // 0 until the first admitted name: catalog IDs start at 1
 	for i, name := range names {
 		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
 			continue
 		}
-		registered := previous
-		if registered == nil || registered.name != name {
-			registered = o.policies[name]
+		var route uint64
+		if hashes != nil {
+			route = hashes[i]
+		} else {
+			route = namefp.Route(name)
 		}
-		if registered == nil {
-			var err error
-			if registered, err = o.register(name); err != nil {
-				if o.p.failed != nil {
-					return err
+		if fp := namefp.Of(namefp.Hash(name), route); local == 0 || previous != fp {
+			var ok bool
+			if local, ok = o.names.Get(fp); !ok {
+				var err error
+				if local, err = o.register(name, fp); err != nil {
+					if o.p.failed != nil {
+						return err
+					}
+					if o.reject != nil {
+						o.reject(name, err)
+					}
+					continue // local is 0, so the next point probes again
 				}
-				if o.reject != nil {
-					o.reject(name, err)
-				}
-				continue
 			}
+			previous = fp
 		}
-		previous = registered
 		index := len(apps)
 		order := o.p.applyOrder + uint64(index) + 1
 		o.sequence[index] = order
-		apps = append(apps, Application{Registered: registered, Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
+		apps = append(apps, Application{Registered: o.p.applications[local], Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
 	}
 	if len(apps) == 0 {
 		return nil

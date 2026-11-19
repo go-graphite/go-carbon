@@ -115,7 +115,7 @@ func TestReceiverRejectsBadNamesLocally(t *testing.T) {
 			sent += uint64(len(part))
 			if !tcp {
 				for _, x := range part {
-					if err = owners[v2recv.OwnerFor(x.name, 2)].Append([]string{x.name}, []points.Point{x.p}, nil, 1010); err != nil {
+					if err = owners[v2recv.OwnerFor(x.name, 2)].Append([]string{x.name}, nil, []points.Point{x.p}, nil, 1010); err != nil {
 						t.Fatal(err)
 					}
 				}

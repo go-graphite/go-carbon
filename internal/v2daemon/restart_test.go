@@ -388,7 +388,7 @@ func TestRestartNamedAppendPreservesBitsAndSequence(t *testing.T) {
 			n := epoch*2 + i
 			seq := uint64(n*13 + 7)
 			point := points.Point{Timestamp: int64(100 + n), Value: math.Float64frombits(bits[n])}
-			if err = s.Producers[0].Append([]string{"special"}, []points.Point{point}, []uint64{seq}, 123); err != nil {
+			if err = s.Producers[0].Append([]string{"special"}, nil, []points.Point{point}, []uint64{seq}, 123); err != nil {
 				t.Fatal(err)
 			}
 			want = append(want, v2core.Row{ID: 1, Time: point.Timestamp, Bits: bits[n], Seq: seq})
