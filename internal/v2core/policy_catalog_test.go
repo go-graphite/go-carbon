@@ -144,32 +144,6 @@ func TestPolicyCatalogSharedSchemasAndPagedIDs(t *testing.T) {
 	}
 }
 
-// Hash scans must match identities across page boundaries and concurrent
-// publication, including the handle-before-hash interval and a real zero hash.
-func TestPolicyCatalogNameHashProjection(t *testing.T) {
-	var c PolicyCatalog
-	for _, id := range []uint64{1, 1023, 1024, 1025, 1<<30 - 1, 1 << 30, ^uint64(0)} {
-		name := fmt.Sprintf("hash.metric.%d", id)
-		_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
-		h, err := c.intern(id, name, raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := c.nameHash(id); got != h.NameHash() {
-			t.Fatalf("id %d: hash %x want %x", id, got, h.NameHash())
-		}
-		c.idPage(id>>10, false).hashes[id&1023].Store(0)
-		if got := c.nameHash(id); got != h.NameHash() {
-			t.Fatalf("publication fallback id %d: hash %x want %x", id, got, h.NameHash())
-		}
-	}
-	p := c.idPage(20, true)
-	p.handles[17].Store(&PolicyIdentity{})
-	if c.nameHash(20<<10|17) != 0 || c.nameHash(20<<10|18) != 0 || c.nameHash(19<<10) != 0 {
-		t.Fatal("zero or missing identity changed")
-	}
-}
-
 func TestPolicyCatalogConcurrentPageGrowth(t *testing.T) {
 	var c PolicyCatalog
 	var wg sync.WaitGroup
@@ -184,7 +158,7 @@ func TestPolicyCatalogConcurrentPageGrowth(t *testing.T) {
 					t.Errorf("publish id %d: %v", id, err)
 					return
 				}
-				if c.lookup(id) != h || c.nameHash(id) != h.nameHash {
+				if c.lookup(id) != h {
 					t.Errorf("lost id %d during growth", id)
 					return
 				}
@@ -196,7 +170,7 @@ func TestPolicyCatalogConcurrentPageGrowth(t *testing.T) {
 	for g := range 4 {
 		for i := range 256 {
 			id := uint64((i*4+g)<<10) + uint64(g+1)
-			if c.lookup(id) == nil || c.nameHash(id) != id*0x9e3779b97f4a7c15 {
+			if c.lookup(id) == nil || c.lookup(id).NameHash() != id*0x9e3779b97f4a7c15 {
 				t.Fatalf("lost id %d after growth", id)
 			}
 		}

@@ -1,11 +1,8 @@
 package v2core
 
 import (
-	"encoding/json"
+	"slices"
 	"sort"
-	"sync/atomic"
-
-	"github.com/go-graphite/go-carbon/internal/namefp"
 )
 
 // PendingView is an owner's published pending set (name-once S5a-2): an
@@ -16,11 +13,30 @@ import (
 // one application can own several consecutive positions. Owners only append
 // between seals, so a later publication extends an earlier one's positions.
 type PendingView struct {
-	segs     []pendingSegment
-	n        int
-	lookup   func(uint64) *ApplicationPolicy
-	nameHash func(uint64) uint64
+	segs   []pendingSegment
+	n      int
+	lookup func(uint64) *ApplicationPolicy
+	// fresh lists, once per head, each row application's ID whose name had no
+	// sealed metadata when the owner published it, with the name's hash.
+	fresh []pendingFresh
+	// runs index every row position by ID: immutable in-memory parts, one per
+	// publication, merged as they accumulate. Cold positions are not in runs.
+	runs []pendingRun
 }
+
+// pendingRun is an immutable ID-sorted part over head row positions:
+// keys are ID<<32|position, ascending, so positions ascend within an ID
+// (arrival order). A view position is a head position plus shift. Rows with
+// IDs at or above 2^32 are row escapes, which Find reads from the segments.
+type pendingRun struct {
+	keys  []uint64
+	lo    int // retained head positions start at lo (Suffix preserves backing keys)
+	hi    int // head positions below hi
+	shift int
+}
+
+// pendingFresh is a name with no sealed metadata: namefp.Hash and its ID.
+type pendingFresh struct{ hash, id uint64 }
 
 // pendingSegment is immutable once published. A row segment covers packets
 // packets[0..] whose rows are rows[packets[0].FirstRow:]; side arrays keep the
@@ -32,15 +48,9 @@ type pendingSegment struct {
 	seqs    []uint64
 	escapes []pendingEscape
 	cold    []coreBatch
-	start   int    // first position
-	count   int    // positions
-	id      uint64 // owner segment identity; 0 for PendingBatches wrappers
+	start   int // first position
+	count   int // positions
 }
-
-// pendingSegmentIDs names owner segments. A segment never rewrites a
-// published position, even when its slices grow into new arrays, so equal
-// IDs mean equal content at every position both views hold.
-var pendingSegmentIDs atomic.Uint64
 
 // PendingApplication describes one application without materializing points.
 type PendingApplication struct {
@@ -241,7 +251,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 		return v
 	}
 	if pos >= v.n {
-		return PendingView{lookup: v.lookup, nameHash: v.nameHash}
+		return PendingView{lookup: v.lookup}
 	}
 	i := sort.Search(len(v.segs), func(i int) bool { return v.segs[i].start+v.segs[i].count > pos })
 	segs := make([]pendingSegment, 0, len(v.segs)-i)
@@ -262,32 +272,15 @@ func (v PendingView) Suffix(pos int) PendingView {
 		s.start -= pos
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup, nameHash: v.nameHash}
-}
-
-// Extends reports whether v starts with all of old: same immutable segments
-// and backing arrays. Readers use it to keep indexes of old's positions.
-func (v PendingView) Extends(old PendingView) bool {
-	if old.n == 0 || old.n > v.n || len(old.segs) > len(v.segs) {
-		return false
-	}
-	for i := range old.segs {
-		a, b := &old.segs[i], &v.segs[i]
-		if a.start != b.start || a.count > b.count || (a.count != b.count && i != len(old.segs)-1) || (a.cold == nil) != (b.cold == nil) {
-			return false
-		}
-		if a.id != b.id {
-			return false
-		}
-		if a.id == 0 {
-			// PendingBatches wrappers may be re-sliced copies; compare the
-			// first and last descriptors by their immutable arenas.
-			if a.cold == nil || !sameColdBatch(&a.cold[0], &b.cold[0]) || !sameColdBatch(&a.cold[a.count-1], &b.cold[a.count-1]) {
-				return false
-			}
+	runs := make([]pendingRun, 0, len(v.runs))
+	for _, r := range v.runs {
+		if r.hi+r.shift > pos {
+			r.lo = max(r.lo, pos-r.shift)
+			r.shift -= pos
+			runs = append(runs, r)
 		}
 	}
-	return true
+	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup, fresh: v.fresh, runs: runs}
 }
 
 // pendingHead is the owner's append-only pending set for one head. Closed
@@ -297,23 +290,28 @@ type pendingHead struct {
 	rows     pendingRows
 	cold     []coreBatch
 	coldOpen bool
-	openID   uint64
 	n        int
 	// scanned is how many positions the owner's metadata scan has cleared.
 	// Installed metrics, the catalog and the expiry policy only ever add, so
 	// a cleared position stays clear until the head resets.
 	scanned int
+	// fresh is the head's published new-name list (PendingView.NewNames);
+	// freshScanned the positions it covers, freshIDs its members.
+	fresh        []pendingFresh
+	freshScanned int
+	freshIDs     map[uint64]struct{}
+	// runs cover positions [0, runEnd); view adds one for the rest.
+	runs   []pendingRun
+	runEnd int
+	// Identifies this head's outstanding merge. Resetting the head drops it;
+	// an owner may still finish that old merge, but cannot install its result.
+	merging <-chan []pendingRun
 }
 
 func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationPolicy) {
 	if len(batches) == 0 {
 		return
 	}
-	defer func() {
-		if h.openID == 0 {
-			h.openID = pendingSegmentIDs.Add(1)
-		}
-	}()
 	if pendingRowsFit(batches, lookup) {
 		if h.coldOpen {
 			h.closeOpen()
@@ -341,9 +339,6 @@ func (h *pendingHead) addRows(src *pendingRows) {
 	}
 	h.rows.appendRows(src)
 	h.n += len(src.rows)
-	if h.openID == 0 {
-		h.openID = pendingSegmentIDs.Add(1)
-	}
 }
 
 func (h *pendingHead) openSegment(start int) (pendingSegment, bool) {
@@ -351,7 +346,7 @@ func (h *pendingHead) openSegment(start int) (pendingSegment, bool) {
 		if len(h.cold) == 0 {
 			return pendingSegment{}, false
 		}
-		return pendingSegment{cold: h.cold[:len(h.cold):len(h.cold)], start: start, count: len(h.cold), id: h.openID}, true
+		return pendingSegment{cold: h.cold[:len(h.cold):len(h.cold)], start: start, count: len(h.cold)}, true
 	}
 	r := &h.rows
 	if len(r.rows) == 0 {
@@ -359,7 +354,7 @@ func (h *pendingHead) openSegment(start int) (pendingSegment, bool) {
 	}
 	return pendingSegment{rows: r.rows[:len(r.rows):len(r.rows)], packets: r.packets[:len(r.packets):len(r.packets)],
 		deltas: r.deltas[:len(r.deltas):len(r.deltas)], seqs: r.seqs[:len(r.seqs):len(r.seqs)],
-		escapes: r.escapes[:len(r.escapes):len(r.escapes)], start: start, count: len(r.rows), id: h.openID}, true
+		escapes: r.escapes[:len(r.escapes):len(r.escapes)], start: start, count: len(r.rows)}, true
 }
 
 // closeOpen freezes the open segment; the next one starts fresh slices so it
@@ -372,11 +367,188 @@ func (h *pendingHead) closeOpen() {
 	if s, ok := h.openSegment(start); ok {
 		h.segs = append(h.segs, s)
 	}
-	h.rows, h.cold, h.coldOpen, h.openID = pendingRows{}, nil, false, 0
+	h.rows, h.cold, h.coldOpen = pendingRows{}, nil, false
 }
 
-// view publishes the current immutable prefix.
-func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy, hashes ...func(uint64) uint64) PendingView {
+// view publishes the current immutable prefix with every row position in an
+// ID-sorted run.
+func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy) PendingView {
+	v := h.rawView(lookup)
+	if h.runEnd < h.n {
+		h.addRun(v)
+	}
+	v.runs = h.runs[:len(h.runs):len(h.runs)]
+	return v
+}
+
+// addRun sorts only the row positions appended since the last publication.
+// Merging older runs belongs to pendingCompaction, outside publication.
+func (h *pendingHead) addRun(v PendingView) {
+	if h.n >= 1<<32 {
+		panic("pending head beyond 2^32 positions")
+	}
+	r := pendingRun{hi: h.n}
+	v.IDs(h.runEnd, h.n, func(pos int, id uint64, cold *coreBatch) bool {
+		if cold == nil && id < 1<<32 {
+			r.keys = append(r.keys, id<<32|uint64(pos))
+		}
+		return true
+	})
+	h.runEnd = h.n
+	if len(r.keys) == 0 {
+		return // cold applications and escapes only: Find reads them directly
+	}
+	r.keys = sortByID(r.keys)
+	h.runs = append(h.runs, r)
+}
+
+// pendingCompaction permits one merge flight per owner, including across
+// seals. Inputs and outputs are immutable; only the owner installs a result.
+// A slow flight leaves new publications searchable as separate runs.
+type pendingCompaction struct {
+	done chan []pendingRun
+	n    int // input prefix length; later publications form an untouched tail
+}
+
+func (c *pendingCompaction) install(h *pendingHead, runs []pendingRun) {
+	if h.merging == c.done {
+		h.runs = append(runs[:len(runs):len(runs)], h.runs[c.n:]...)
+		h.merging = nil
+	}
+	c.done = nil
+}
+
+func (c *pendingCompaction) poll(h *pendingHead) {
+	if c.done != nil {
+		select {
+		case runs := <-c.done:
+			c.install(h, runs)
+		default:
+		}
+	}
+}
+
+func (c *pendingCompaction) wait(h *pendingHead) {
+	if c.done != nil {
+		c.install(h, <-c.done)
+	}
+}
+
+func (c *pendingCompaction) start(h *pendingHead) {
+	if c.done != nil {
+		return
+	}
+	for i := 1; i < len(h.runs); i++ {
+		if len(h.runs[i-1].keys) > len(h.runs[i].keys) {
+			continue
+		}
+		inputs := h.runs[:len(h.runs):len(h.runs)]
+		done := make(chan []pendingRun, 1)
+		c.done, c.n, h.merging = done, len(inputs), done
+		go func() {
+			runs := make([]pendingRun, 0, len(inputs))
+			for _, r := range inputs {
+				for k := len(runs); k > 0 && len(runs[k-1].keys) <= len(r.keys); k-- {
+					r = mergeRuns(&runs[k-1], &r)
+					runs = runs[:k-1]
+				}
+				runs = append(runs, r)
+			}
+			done <- runs
+		}()
+		return
+	}
+}
+
+// sortByID orders keys that arrive in position order by their ID half with a
+// stable LSD radix (bytes that never vary are skipped), which leaves them in
+// full key order. It returns the slice holding the result.
+func sortByID(keys []uint64) []uint64 {
+	if len(keys) < 256 {
+		slices.Sort(keys)
+		return keys
+	}
+	src, dst := keys, make([]uint64, len(keys))
+	for shift := 32; shift < 64; shift += 8 {
+		var count [256]int
+		for _, k := range src {
+			count[byte(k>>shift)]++
+		}
+		if count[byte(src[0]>>shift)] == len(src) {
+			continue
+		}
+		sum := 0
+		for i, c := range count {
+			count[i], sum = sum, sum+c
+		}
+		for _, k := range src {
+			b := byte(k >> shift)
+			dst[count[b]] = k
+			count[b]++
+		}
+		src, dst = dst, src
+	}
+	return src
+}
+
+// mergeRuns joins an earlier run a and a later run b into new arrays.
+func mergeRuns(a, b *pendingRun) pendingRun {
+	m := pendingRun{hi: b.hi, keys: make([]uint64, 0, len(a.keys)+len(b.keys))}
+	i, j := 0, 0
+	for i < len(a.keys) && j < len(b.keys) {
+		if a.keys[i] < b.keys[j] {
+			m.keys = append(m.keys, a.keys[i])
+			i++
+		} else {
+			m.keys = append(m.keys, b.keys[j])
+			j++
+		}
+	}
+	m.keys = append(append(m.keys, a.keys[i:]...), b.keys[j:]...)
+	return m
+}
+
+// Find returns, ascending, the positions of row applications whose ID is in
+// ids and of the cold applications cold accepts. Row positions come from a
+// binary search of each run, so the cost grows with the requested IDs and the
+// number of runs, not with the pending rows. Rows with wider IDs, which are
+// rare, come from the segments' escape lists.
+func (v PendingView) Find(ids []uint64, cold func(*Batch) (bool, error)) ([]int, error) {
+	var out []int
+	for _, id := range ids {
+		for ri := range v.runs {
+			r := &v.runs[ri]
+			k, _ := slices.BinarySearch(r.keys, id<<32)
+			for ; id < 1<<32 && k < len(r.keys) && r.keys[k]>>32 == id; k++ {
+				if pos := int(uint32(r.keys[k])); pos >= r.lo && pos+r.shift >= 0 && pos+r.shift < v.n {
+					out = append(out, pos+r.shift)
+				}
+			}
+		}
+	}
+	for si := range v.segs {
+		s := &v.segs[si]
+		for _, e := range s.escapes {
+			if e.ID >= 1<<32 && slices.Contains(ids, e.ID) && e.Row >= s.firstRow() && int(e.Row-s.firstRow()) < s.count {
+				out = append(out, s.start+int(e.Row-s.firstRow()))
+			}
+		}
+		for i := range s.cold {
+			ok, err := cold(&s.cold[i])
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				out = append(out, s.start+i)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// rawView is the current immutable prefix without runs, for owner scans.
+func (h *pendingHead) rawView(lookup func(uint64) *ApplicationPolicy) PendingView {
 	start := 0
 	if k := len(h.segs); k > 0 {
 		start = h.segs[k-1].start + h.segs[k-1].count
@@ -386,11 +558,7 @@ func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy, hashes ...fun
 	if ok {
 		segs = append(segs, s)
 	}
-	v := PendingView{segs: segs, n: h.n, lookup: lookup}
-	if len(hashes) > 0 {
-		v.nameHash = hashes[0]
-	}
-	return v
+	return PendingView{segs: segs, n: h.n, lookup: lookup, fresh: h.fresh[:len(h.fresh):len(h.fresh)]}
 }
 
 // concat joins a frozen head's view and the next head's view.
@@ -407,66 +575,28 @@ func (v PendingView) concat(w PendingView) PendingView {
 		s.start += v.n
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, nameHash: v.nameHash}
-}
-
-func sameColdBatch(a, b *coreBatch) bool {
-	if a.ID != b.ID || a.Order != b.Order || a.Clock != b.Clock || a.Registered != b.Registered || len(a.Points) != len(b.Points) || len(a.Policy) != len(b.Policy) {
-		return false
+	runs := append(v.runs[:len(v.runs):len(v.runs)], w.runs...)
+	for i := len(v.runs); i < len(runs); i++ {
+		runs[i].shift += v.n
 	}
-	if len(a.Points) > 0 && &a.Points[0] != &b.Points[0] {
-		return false
+	fresh := append(v.fresh[:len(v.fresh):len(v.fresh)], w.fresh...)
+	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, fresh: fresh, runs: runs}
+}
+
+// NewNames visits the name hash and ID of each row application whose name had
+// no sealed metadata when the owner published it. A reader resolves its
+// requested names to IDs through it and the sealed metadata, so it never looks
+// a pending position up in the catalog. Cold applications are not listed:
+// they carry their identity inline.
+func (v PendingView) NewNames(fn func(hash, id uint64)) {
+	for _, f := range v.fresh {
+		fn(f.hash, f.id)
 	}
-	return len(a.Policy) == 0 || &a.Policy[0] == &b.Policy[0]
 }
 
-// Refs visits positions [lo, hi) in order with each position's application
-// ID and name source; fn returns false to stop. Rows resolve their identity
-// through the owner's catalog.
-func (v PendingView) Refs(lo, hi int, fn func(pos int, id uint64, registered *ApplicationPolicy, policy []byte) bool) {
-	v.ids(lo, hi, func(pos int, id uint64, cold *coreBatch) bool {
-		if cold != nil {
-			return fn(pos, id, cold.Registered, cold.Policy)
-		}
-		return fn(pos, id, v.lookup(id), nil)
-	})
-}
-
-// NameHashes visits the same positions as Refs without fetching row identities.
-// Cold JSON policies retain the name predicate and decoding errors of Refs.
-func (v PendingView) NameHashes(lo, hi int, visit func(pos int, hash uint64)) error {
-	var err error
-	v.ids(lo, hi, func(pos int, id uint64, cold *coreBatch) bool {
-		if cold == nil && v.nameHash != nil {
-			if h := v.nameHash(id); h != 0 {
-				visit(pos, h)
-				return true
-			}
-		}
-		var h *ApplicationPolicy
-		var policy []byte
-		if cold != nil {
-			h, policy = cold.Registered, cold.Policy
-		} else {
-			h = v.lookup(id)
-		}
-		if h != nil {
-			visit(pos, h.NameHash())
-			return true
-		}
-		var p RollupPolicy
-		if err = json.Unmarshal(policy, &p); err != nil {
-			return false
-		}
-		visit(pos, namefp.Hash(string(p.Name)))
-		return true
-	})
-	return err
-}
-
-// ids visits positions [lo, hi) in order with each position's ID and, for
+// IDs visits positions [lo, hi) in order with each position's ID and, for
 // cold applications, their descriptor. It never touches the catalog.
-func (v PendingView) ids(lo, hi int, fn func(pos int, id uint64, cold *coreBatch) bool) {
+func (v PendingView) IDs(lo, hi int, fn func(pos int, id uint64, cold *Batch) bool) {
 	for si := range v.segs {
 		s := &v.segs[si]
 		from, to := max(lo, s.start), min(hi, s.start+s.count)

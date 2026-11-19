@@ -249,7 +249,6 @@ type coreOwner struct {
 	stage      func(string)
 	visible    func(PendingView)
 	lookup     func(uint64) *ApplicationPolicy
-	nameHash   func(uint64) uint64
 	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
@@ -454,7 +453,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace, lookup: identities.lookup, nameHash: identities.nameHash}
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace, lookup: identities.lookup}
 			if hooks.VisiblePending != nil {
 				o.visible = func(v PendingView) { hooks.VisiblePending(s, v) }
 			} else if hooks.Visible != nil {
@@ -1080,6 +1079,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// Pending applications live as pointer-free rows (name-once S5a-2). Each
 	// head is a fresh pendingHead; published views share its immutable prefix.
 	var pend pendingHead
+	var pendingMerge pendingCompaction
 	sealInterval := o.cfg.SealInterval
 	if sealInterval == 0 {
 		sealInterval = 10 * time.Second
@@ -1143,14 +1143,19 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		batchPublication = time.Now()
 		prev := publishedBatches
 		publishedBatches = pend.n
-		published := pend.view(o.lookup, o.nameHash)
-		generation := o.readGeneration
 		if flight != nil {
 			// Pin under the seal's publication lock. Once the frozen part is
 			// durable the pin includes it, so its batches leave pending and the
 			// sealed view moves to the next generation in the same publication.
+			// The lock also orders the new-name pass against the seal's Commit.
 			o.sealPubMu.Lock()
 			defer o.sealPubMu.Unlock()
+		}
+		o.rollups.noteNewNames(&pend, o.lookup)
+		pendingMerge.poll(&pend)
+		published := pend.view(o.lookup)
+		generation := o.readGeneration
+		if flight != nil {
 			if o.sealDurable {
 				generation++
 			} else {
@@ -1159,6 +1164,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			}
 		}
 		err := o.batchHook(published, generation)
+		if err == nil {
+			pendingMerge.start(&pend)
+		}
 		if err == nil && o.visible != nil && prev < published.Len() {
 			o.visible(published.Suffix(prev))
 		}
@@ -1228,7 +1236,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		frozen := pend.view(o.lookup, o.nameHash)
+		frozen := pend.view(o.lookup)
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
 		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
@@ -1297,7 +1305,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		sealedPending := pend.view(o.lookup, o.nameHash)
+		sealedPending := pend.view(o.lookup)
 		next.ArchiveClock = sealedPending.maxClock(next.ArchiveClock)
 		next.NextPart++
 		reported, since := min(publishedBatches, pend.n), headExpiries
@@ -1379,6 +1387,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				<-flight.done
 				flight = nil
 			}
+			pendingMerge.wait(&pend)
 			if failure != nil {
 				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 			}
@@ -1933,14 +1942,14 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 		o.sealPubMu.Lock()
 		err = batch.Commit(pebble.Sync)
 		o.sealDurable = err == nil
+		if err == nil && plan.Commit != nil {
+			plan.Commit() // installs under the lock the new-name pass holds
+		}
 		o.sealPubMu.Unlock()
 		if err != nil {
 			return 0, err
 		}
 		durable = true
-		if plan.Commit != nil {
-			plan.Commit()
-		}
 		return n, nil
 	}
 	var descriptors []coreKV
@@ -2052,6 +2061,9 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 		o.gc.mu.Unlock()
 	}
 	o.sealDurable = err == nil
+	if err == nil && plan.Commit != nil {
+		plan.Commit() // installs under the lock the new-name pass holds
+	}
 	o.sealPubMu.Unlock()
 	if err != nil {
 		return 0, err
@@ -2059,9 +2071,6 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 	durable = true
 	if o.stage != nil {
 		o.stage("commit")
-	}
-	if plan.Commit != nil {
-		plan.Commit()
 	}
 	return total, nil
 }

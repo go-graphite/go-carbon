@@ -16,6 +16,50 @@ import (
 // publications, synchronous seals and background seals. A seal repeats its
 // whole set only after an expiry, so observers can re-add an expired name.
 func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
+	t.Run("allocation", testPendingPublicationAllocation)
+	t.Run("visibility", testCorePublicationVisibility)
+}
+
+// Background merges allocate independently of publication. Measure the same
+// immutable-view publisher in isolation, joining the worker outside each
+// TotalAlloc interval. The owner/observer/seal integration is checked below.
+func testPendingPublicationAllocation(t *testing.T) {
+	const perPacket, packets = 256, 256
+	const head = perPacket * packets
+	lookup := func(uint64) *ApplicationPolicy { return nil }
+	packet := make([]coreBatch, perPacket)
+	for i := range packet {
+		packet[i] = coreBatch{ID: uint64(i%17 + 1), Order: uint64(i + 1), Clock: 1,
+			Points: []row{{ID: uint64(i%17 + 1), Time: 1000, Seq: uint64(i + 1)}}}
+	}
+	maxBytes, maxAt := uint64(0), 0
+	for _, compact := range []bool{false, true} {
+		var h pendingHead
+		var c pendingCompaction
+		for range packets {
+			h.add(packet, lookup)
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			before := stats.TotalAlloc
+			v := h.view(lookup)
+			runtime.ReadMemStats(&stats)
+			if n := stats.TotalAlloc - before; n > maxBytes {
+				maxBytes, maxAt = n, v.Len()
+			}
+			if compact {
+				c.start(&h)
+				c.wait(&h)
+			}
+		}
+	}
+	clone := uint64(head) * uint64(unsafe.Sizeof(coreBatch{}))
+	if limit := clone / 32; maxBytes > limit {
+		t.Fatalf("a publication allocated %d bytes at %d published batches; limit %d (a full clone is %d)", maxBytes, maxAt, limit, clone)
+	}
+	t.Logf("max bytes per publication %d at %d batches (full clone %d)", maxBytes, maxAt, clone)
+}
+
+func testCorePublicationVisibility(t *testing.T) {
 	dir := t.TempDir()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
@@ -29,9 +73,8 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 
 	const perPacket, packets, epochs = 256, 256, 4
 	const head = perPacket * packets // batches per seal
-	// The reader keeps the latest publication. Hooks walk the view and never
-	// decode it, so the measured bytes are the owner's alone. Every
-	// application here holds one point: positions count batches.
+	// The reader keeps the latest publication. Every application here holds
+	// one point: positions count batches.
 	var published PendingView
 	o.batchHook = func(pv PendingView, _ uint64) error {
 		published = pv
@@ -79,8 +122,6 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 			poll()
 		}
 	}
-	var stats runtime.MemStats
-	maxBytes, maxAt := uint64(0), 0
 	for epoch := range epochs {
 		async := epoch%2 == 1
 		if async {
@@ -95,15 +136,8 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 				awaitSeals(uint64(epoch + 1))
 				break
 			}
-			// A pure publication of the grown head: its cost must not grow with it.
-			runtime.ReadMemStats(&stats)
-			before := stats.TotalAlloc
 			o.gcDirty.Store(true)
 			poll()
-			runtime.ReadMemStats(&stats)
-			if b := stats.TotalAlloc - before; b > maxBytes {
-				maxBytes, maxAt = b, published.Len()
-			}
 			if published.Len() != (i+1)*perPacket {
 				t.Fatalf("epoch %d packet %d: published %d batches, want %d", epoch, i, published.Len(), (i+1)*perPacket)
 			}
@@ -142,12 +176,7 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 			t.Fatalf("order %d reached the observer %d times, want %d", ord, seen[ord], want)
 		}
 	}
-	// A full-head clone costs head x sizeof(coreBatch), 5.8 MB here.
-	clone := uint64(head) * uint64(unsafe.Sizeof(coreBatch{}))
-	if limit := clone / 32; maxBytes > limit {
-		t.Fatalf("a publication allocated %d bytes at %d published batches; limit %d (a full clone is %d)", maxBytes, maxAt, limit, clone)
-	}
-	t.Logf("max bytes per publication %d at %d batches (full clone %d)", maxBytes, maxAt, clone)
+
 }
 
 // TestCoreSealDeadlinesStaggerByOwner checks that owners which start together

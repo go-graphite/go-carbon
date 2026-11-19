@@ -1,16 +1,15 @@
 package v2core
 
 import (
-	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"reflect"
 	"runtime"
 	"runtime/metrics"
+	"slices"
 	"testing"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -19,13 +18,14 @@ import (
 // (policy-byte) packets, publishes views at random boundaries, and checks
 // every view against the submitted applications: full decode, Each, every
 // position's Ref and Application, Refs, Suffix at earlier publication
-// boundaries, Extends and concat across heads.
+// boundaries and concat across heads, and Find against a linear scan.
 func TestPendingViewMatchesBatches(t *testing.T) {
 	var coldApps, rowApps, views int
 	for seed := uint64(1); seed <= 6; seed++ {
 		s := newPendingRowsScript(seed)
 		rng := rand.New(rand.NewPCG(seed, 0x5b))
 		var h pendingHead
+		var c pendingCompaction
 		var want []coreBatch
 		type published struct {
 			v    PendingView
@@ -47,34 +47,29 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 			h.add(packet, s.find)
 			want = append(want, packet...)
 			if rng.IntN(3) == 0 {
+				c.poll(&h)
 				pubs = append(pubs, published{h.view(s.find), len(want)})
+				c.start(&h)
 			}
 		}
+		c.wait(&h)
 		pubs = append(pubs, published{h.view(s.find), len(want)})
 		for k, p := range pubs {
 			views++
 			checkPendingView(t, seed, p.v, want[:p.apps])
 			if k > 0 {
 				prev := pubs[k-1]
-				if !p.v.Extends(prev.v) {
-					t.Fatalf("seed %d: view %d does not extend view %d", seed, k, k-1)
-				}
-				if prev.v.Len() < p.v.Len() && prev.v.Extends(p.v) {
-					t.Fatalf("seed %d: shorter view extends longer", seed)
-				}
 				suffix := p.v.Suffix(prev.v.Len())
 				checkPendingView(t, seed, suffix, want[prev.apps:p.apps])
+				checkPendingView(t, seed, prev.v.concat(suffix), want[:p.apps])
 			}
 		}
-		// A second head over the same packets shares no arrays: no reuse.
+		// concat across heads: the second head's positions and runs shift.
 		var other pendingHead
 		for _, packet := range s.packets[:3] {
 			other.add(packet, s.find)
 		}
 		ov := other.view(s.find)
-		if pubs[len(pubs)-1].v.Extends(ov) {
-			t.Fatalf("seed %d: unrelated head reported as prefix", seed)
-		}
 		joined := ov.concat(pubs[len(pubs)-1].v)
 		var all []coreBatch
 		for _, packet := range s.packets[:3] {
@@ -86,6 +81,57 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 		t.Fatalf("coverage: cold %d rows %d", coldApps, rowApps)
 	}
 	t.Logf("coverage: %d views, %d row applications, %d cold applications", views, rowApps, coldApps)
+}
+
+// A merge may finish after more publications or a seal. It must preserve
+// pinned views and new tails, and never install an old head into its successor.
+func TestPendingCompactionLifetime(t *testing.T) {
+	s := newPendingRowsScript(19)
+	var h pendingHead
+	var c pendingCompaction
+	var want []coreBatch
+	var pinned []PendingView
+	var counts []int
+	for _, packet := range s.packets[:12] {
+		h.add(packet, s.find)
+		want = append(want, packet...)
+		pinned = append(pinned, h.view(s.find))
+		counts = append(counts, len(want))
+	}
+	c.start(&h)
+	if c.done == nil {
+		t.Fatal("no compaction started")
+	}
+	flight := c.done
+	for _, packet := range s.packets[12:15] {
+		h.add(packet, s.find)
+		want = append(want, packet...)
+		h.view(s.find)
+		c.start(&h)
+		if c.done != flight {
+			t.Fatal("started another merge before consuming the first")
+		}
+	}
+	c.wait(&h)
+	checkPendingView(t, 19, h.view(s.find), want)
+	for i, v := range pinned {
+		checkPendingView(t, 19, v, want[:counts[i]])
+	}
+	// Force another eligible pair, then reset while its result is outstanding.
+	for range 2 {
+		h.add(s.packets[0], s.find)
+		h.view(s.find)
+	}
+	c.start(&h)
+	if c.done == nil {
+		t.Fatal("no compaction across reset")
+	}
+	h = pendingHead{}
+	h.add(s.packets[1], s.find)
+	v := h.view(s.find)
+	c.wait(&h)
+	checkPendingView(t, 19, h.view(s.find), s.packets[1])
+	checkPendingView(t, 19, v, s.packets[1])
 }
 
 func samePendingApp(got, want *coreBatch) bool {
@@ -118,15 +164,9 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 	// Positions: every position maps to its application; ranges tile [0, n).
 	app, pos := 0, 0
 	refs := make([]uint64, 0, v.Len())
-	v.Refs(0, v.Len(), func(p int, id uint64, registered *ApplicationPolicy, policy []byte) bool {
-		if p != len(refs) {
-			t.Fatalf("seed %d: Refs position %d, want %d", seed, p, len(refs))
-		}
+	for p := range v.Len() {
+		id, _, _ := v.Ref(p)
 		refs = append(refs, id)
-		return true
-	})
-	if len(refs) != v.Len() {
-		t.Fatalf("seed %d: Refs visited %d, want %d", seed, len(refs), v.Len())
 	}
 	// ids: the same positions and IDs without the catalog; cold positions
 	// carry their own descriptor. maxClock: the latest application clock.
@@ -137,7 +177,7 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 			wantColds++
 		}
 	}
-	v.ids(0, v.Len(), func(p int, id uint64, cold *coreBatch) bool {
+	v.IDs(0, v.Len(), func(p int, id uint64, cold *coreBatch) bool {
 		if p != n || id != refs[p] || (cold != nil && (cold.ID != id || cold.Policy == nil)) {
 			t.Fatalf("seed %d: ids position %d id %d cold %v", seed, p, id, cold != nil)
 		}
@@ -152,6 +192,28 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 	}
 	if got := v.maxClock(-1); got != clock {
 		t.Fatalf("seed %d: maxClock %d, want %d", seed, got, clock)
+	}
+	// Find: per ID, the binary-searched run positions equal the linear scan's
+	// row positions in arrival order; cold positions come only from the cold
+	// predicate.
+	byID := map[uint64][]int{}
+	var coldPos []int
+	v.IDs(0, v.Len(), func(p int, id uint64, cold *coreBatch) bool {
+		if cold != nil {
+			coldPos = append(coldPos, p)
+		} else {
+			byID[id] = append(byID[id], p)
+		}
+		return true
+	})
+	for id, wantPos := range byID {
+		got, err := v.Find([]uint64{id}, func(*coreBatch) (bool, error) { return false, nil })
+		if err != nil || !slices.Equal(got, wantPos) {
+			t.Fatalf("seed %d: Find(%d) = %v, %v, want %v", seed, id, got, err, wantPos)
+		}
+	}
+	if got, err := v.Find(nil, func(*coreBatch) (bool, error) { return true, nil }); err != nil || !slices.Equal(got, coldPos) {
+		t.Fatalf("seed %d: Find(cold) = %v, %v, want %v", seed, got, err, coldPos)
 	}
 	for pos < v.Len() {
 		b, lo, hi := v.Application(pos)
@@ -362,7 +424,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 				dues++
 				// A due pass seals: install every pending name, as the seal
 				// would, and start a fresh head.
-				h.view(find).ids(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
+				h.view(find).IDs(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
 					r.metrics[id] = &rollupMetric{}
 					return true
 				})
@@ -508,61 +570,34 @@ func BenchmarkPendingScan(b *testing.B) {
 	b.Run("after", func(b *testing.B) { run(b, true, true) })
 }
 
-// Compare the scan projection to the existing full-identity oracle through
-// frozen heads, concatenation and suffixes. Scans must not fetch row handles.
-func TestPendingNameHashesMatchRefs(t *testing.T) {
-	for seed := uint64(1); seed <= 3; seed++ {
-		script := newPendingRowsScript(seed)
-		hashes := map[uint64]uint64{}
-		for id, h := range script.lookup {
-			h.nameHash = id * 0x9e3779b97f4a7c15
-			hashes[id] = h.nameHash
-		}
-		var left, right pendingHead
-		for i, packet := range script.packets {
-			if i < len(script.packets)/2 {
-				left.add(packet, script.find)
-			} else {
-				right.add(packet, script.find)
-			}
-		}
-		// Include a JSON cold segment and a registered cold segment (no points).
-		_, raw := rollupTestPolicy(t, "projection.cold", "1s:1d", sealrollup.Last, .5)
-		right.add([]Batch{{ID: 999, Policy: raw}, {ID: 1, Registered: script.find(1)}}, script.find)
-		fast := func(id uint64) uint64 { return hashes[id] }
-		l, r := left.view(script.find, fast), right.view(script.find, fast)
-		joined := l.concat(r)
-		for _, v := range []PendingView{l, r, joined, joined.Suffix(l.Len()), joined.Suffix(joined.Len())} {
-			want := map[int]uint64{}
-			v.Refs(0, v.Len(), func(pos int, _ uint64, h *ApplicationPolicy, raw []byte) bool {
-				if h != nil {
-					want[pos] = h.NameHash()
-				} else {
-					var p RollupPolicy
-					if err := json.Unmarshal(raw, &p); err != nil {
-						t.Fatal(err)
-					}
-					want[pos] = namefp.Hash(string(p.Name))
-				}
-				return true
-			})
-			v.lookup = func(uint64) *ApplicationPolicy { t.Fatal("hash projection fetched row identity"); return nil }
-			for _, bounds := range [][2]int{{0, v.Len()}, {v.Len() / 3, v.Len() * 2 / 3}} {
-				seen := 0
-				err := v.NameHashes(bounds[0], bounds[1], func(pos int, h uint64) {
-					if h != want[pos] {
-						t.Fatalf("seed %d pos %d: hash %x want %x", seed, pos, h, want[pos])
-					}
-					seen++
-				})
-				if err != nil || seen != bounds[1]-bounds[0] {
-					t.Fatalf("scan %v: %d positions, error %v", bounds, seen, err)
-				}
-			}
-		}
+// Find must remain independent of the catalog across a frozen head and its
+// successor, including suffixes and IDs wider than the run key's ID half.
+func TestPendingRunsAcrossSealAvoidCatalog(t *testing.T) {
+	s := newPendingRowsScript(31)
+	var frozen, next pendingHead
+	for _, p := range s.packets[:8] {
+		frozen.add(p, s.find)
 	}
-	v := PendingBatches([]Batch{{Policy: []byte("{")}})
-	if err := v.NameHashes(0, v.Len(), func(int, uint64) {}); err == nil {
-		t.Fatal("malformed cold policy accepted")
+	for _, p := range s.packets[8:] {
+		next.add(p, s.find)
+	}
+	a, b := frozen.view(s.find), next.view(s.find)
+	joined := a.concat(b)
+	for _, v := range []PendingView{a, b, joined, joined.Suffix(a.Len())} {
+		want := map[uint64][]int{}
+		v.IDs(0, v.Len(), func(pos int, id uint64, cold *coreBatch) bool {
+			if cold != nil {
+				t.Fatal("expected row applications")
+			}
+			want[id] = append(want[id], pos)
+			return true
+		})
+		v.lookup = func(uint64) *ApplicationPolicy { t.Fatal("Find fetched catalog identity"); return nil }
+		for id, positions := range want {
+			got, err := v.Find([]uint64{id}, func(*Batch) (bool, error) { t.Fatal("unexpected cold application"); return false, nil })
+			if err != nil || !slices.Equal(got, positions) {
+				t.Fatalf("Find(%d): positions differ (got %d, want %d), error %v", id, len(got), len(positions), err)
+			}
+		}
 	}
 }

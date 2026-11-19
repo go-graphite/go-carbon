@@ -180,8 +180,7 @@ func TestCorePendingPublicationSharesImmutablePrefix(t *testing.T) {
 		}
 		if i > 0 && pubs[i-1].seals == p.seals {
 			prev := pubs[i-1].want
-			if len(prev) > len(p.want) || !slices.Equal(prev, p.want[:len(prev)]) ||
-				(len(prev) > 0 && !p.view.Extends(pubs[i-1].view)) {
+			if len(prev) > len(p.want) || !slices.Equal(prev, p.want[:len(prev)]) {
 				t.Fatalf("publication %d does not extend its predecessor", i)
 			}
 		}
