@@ -57,6 +57,7 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 				prev := pubs[k-1]
 				suffix := p.v.Suffix(prev.v.Len())
 				checkPendingView(t, seed, suffix, want[prev.apps:p.apps])
+				checkPendingView(t, seed, prev.v.concat(suffix), want[:p.apps])
 			}
 		}
 		// concat across heads: the second head's positions and runs shift.

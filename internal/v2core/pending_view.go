@@ -30,6 +30,7 @@ type PendingView struct {
 // IDs at or above 2^32 are row escapes, which Find reads from the segments.
 type pendingRun struct {
 	keys  []uint64
+	lo    int // retained head positions start at lo (Suffix preserves backing keys)
 	hi    int // head positions below hi
 	shift int
 }
@@ -255,6 +256,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 	runs := make([]pendingRun, 0, len(v.runs))
 	for _, r := range v.runs {
 		if r.hi+r.shift > pos {
+			r.lo = max(r.lo, pos-r.shift)
 			r.shift -= pos
 			runs = append(runs, r)
 		}
@@ -444,8 +446,8 @@ func (v PendingView) Find(ids []uint64, cold func(*Batch) (bool, error)) ([]int,
 			r := &v.runs[ri]
 			k, _ := slices.BinarySearch(r.keys, id<<32)
 			for ; id < 1<<32 && k < len(r.keys) && r.keys[k]>>32 == id; k++ {
-				if pos := int(uint32(r.keys[k])) + r.shift; pos >= 0 && pos < v.n {
-					out = append(out, pos)
+				if pos := int(uint32(r.keys[k])); pos >= r.lo && pos+r.shift >= 0 && pos+r.shift < v.n {
+					out = append(out, pos+r.shift)
 				}
 			}
 		}
