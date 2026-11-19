@@ -146,3 +146,26 @@ func TestWorkspacePositionReuse(t *testing.T) {
 		}
 	}
 }
+
+// A nil *Slots is a caller's "no residency": every read must answer exactly
+// as an empty Slots does, or a name without residency would plan differently.
+func TestNilSlotsReadAsEmpty(t *testing.T) {
+	archives := []Archive{{Step: 1, Count: 60}, {Step: 60, Count: 60}}
+	empty := NewSlots(archives)
+	var none *Slots
+	for a := range archives {
+		for _, w := range [][2]int64{{0, 60}, {120, 180}, {3600, 7200}} {
+			got, gotOK := none.RecentRange(a, w[0], w[1], nil)
+			want, wantOK := empty.RecentRange(a, w[0], w[1], nil)
+			if !reflect.DeepEqual(got, want) || gotOK != wantOK {
+				t.Fatalf("RecentRange(%d, %v) = %v %v, empty Slots %v %v", a, w, got, gotOK, want, wantOK)
+			}
+			if got, want := none.Range(a, w[0], w[1], nil), empty.Range(a, w[0], w[1], nil); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Range(%d, %v) = %v, empty Slots %v", a, w, got, want)
+			}
+		}
+		if s, ok := none.View(a, 0); ok || s != (Sample{}) {
+			t.Fatalf("View(%d) = %v %v on nil Slots", a, s, ok)
+		}
+	}
+}
