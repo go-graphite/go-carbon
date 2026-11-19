@@ -62,7 +62,8 @@ func pct(d []time.Duration, p float64) time.Duration {
 }
 
 // TestCatalogLayoutScale is an opt-in laptop measurement of one layout per
-// process: V2_INDEX_LAYOUT_SCALE=1000000 V2_INDEX_LAYOUT=old|f4|f8|f16.
+// process: V2_INDEX_LAYOUT_SCALE=1000000 V2_INDEX_LAYOUT=old|f4|f8|f16|mmap.
+// mmap is f8 with the base level in a file (SetDir).
 // Half the names are published at once, the rest arrive in 10k batches.
 func TestCatalogLayoutScale(t *testing.T) {
 	n, _ := strconv.Atoi(os.Getenv("V2_INDEX_LAYOUT_SCALE"))
@@ -73,12 +74,12 @@ func TestCatalogLayoutScale(t *testing.T) {
 	switch layout {
 	case "f4":
 		levelFanout = 4
-	case "f8", "old": // old is the plain-string index, fanout 4
+	case "f8", "old", "mmap": // old is the plain-string index, fanout 4
 		levelFanout = 8
 	case "f16":
 		levelFanout = 16
 	default:
-		t.Fatal("V2_INDEX_LAYOUT=old|f4|f8|f16")
+		t.Fatal("V2_INDEX_LAYOUT=old|f4|f8|f16|mmap")
 	}
 	defer func() { levelFanout = 8 }()
 	ctx := context.Background()
@@ -132,6 +133,12 @@ func TestCatalogLayoutScale(t *testing.T) {
 			return out
 		}
 	}
+	if layout == "mmap" {
+		if err := nc.SetDir(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		defer nc.Close()
+	}
 	start := time.Now()
 	if err := publish(1, names[:half]); err != nil {
 		t.Fatal(err)
@@ -172,6 +179,28 @@ func TestCatalogLayoutScale(t *testing.T) {
 	}
 	names = nil
 	retained := heapInUse() - baseline
+	if layout == "mmap" {
+		// Heap before the last background base merge is installed, then
+		// after: page-cache bytes are the base file.
+		probesHeap := uint64(0)
+		for _, p := range probes {
+			probesHeap += uint64(len(p)) + 16
+		}
+		before := retained - probesHeap
+		for nc.settle(); nc.job != nil; nc.settle() {
+		}
+		retained = heapInUse() - baseline
+		file := 0
+		if b := nc.Snapshot().levels[0]; b.path != "" {
+			st, err := os.Stat(b.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file = int(st.Size())
+		}
+		t.Logf("mmap index_heap_before_install=%.1fB/name index_heap_after_install=%.1fB/name page_cache=%.1fB/name levels_after_install=%d",
+			float64(before)/float64(n), float64(retained-probesHeap)/float64(n), float64(file)/float64(n), levels())
+	}
 	s := snap()
 	if s.Len() != n {
 		t.Fatalf("len %d, want %d", s.Len(), n)

@@ -69,7 +69,8 @@ func TestFrontCodedMatchesOldIndex(t *testing.T) {
 			}
 			settled := rng.Intn(3) == 0
 			if settled {
-				nc.settle()
+				for nc.settle(); nc.job != nil; nc.settle() {
+				}
 			}
 			ns, os := nc.Snapshot(), oc.Snapshot()
 			if file && len(ns.levels) > 0 && ns.levels[0].path != "" {

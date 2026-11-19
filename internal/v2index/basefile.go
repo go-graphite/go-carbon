@@ -14,8 +14,9 @@ import (
 
 // A base file is the base run's entries, then its block offsets (u64 each),
 // then a footer: entry bytes, blocks, names (u64 each) and fileMagic. It is
-// written to a temporary name, synced and renamed, so a crash at any point
-// leaves the preceding base file whole.
+// written to a temporary name and renamed, so a kill at any point leaves the
+// preceding base file whole. There is no fsync: the files are a projection
+// that SetDir discards at startup, so they need no power-loss durability.
 const (
 	fileMagic  = "v2idxfc1"
 	footerSize = 32
@@ -119,35 +120,17 @@ func writeFile(path string, fill func(*levelWriter) error) (*run, error) {
 		tail = append(tail, fileMagic...)
 		_, err = f.Write(tail)
 	}
-	if err == nil {
-		err = f.Sync()
-	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
 		err = os.Rename(tmp, path)
 	}
-	if err == nil {
-		err = syncDir(filepath.Dir(path))
-	}
 	if err != nil {
 		os.Remove(tmp)
 		return nil, err
 	}
 	return openRun(path)
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
 }
 
 // openRun maps a base file read-only. Only the block offsets are copied to
@@ -186,6 +169,13 @@ func openRun(path string) (*run, error) {
 			return nil, errors.New("v2 index: corrupt base file block offsets")
 		}
 	}
+	// Map every page now (the file was just written, so it is in the page
+	// cache): finds then take no first-touch faults on a new base.
+	var sum byte
+	for i := 0; i < len(m); i += os.Getpagesize() {
+		sum += m[i]
+	}
+	runtime.KeepAlive(sum)
 	r := &run{data: m[:dataLen:dataLen], blocks: blocks, n: int(n), path: path}
 	runtime.AddCleanup(r, func(m []byte) { syscall.Munmap(m) }, m)
 	return r, nil

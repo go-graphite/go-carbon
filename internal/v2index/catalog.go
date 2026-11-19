@@ -215,6 +215,9 @@ func (it *levelIter) skipTo(key string) bool {
 	// usually near (sorted batches, directory skips), so gallop first.
 	start := (it.i + blockNames - 1) / blockNames
 	lo, hi := start, start
+	if start == 0 {
+		hi = len(it.l.blocks) // a fresh seek binary-searches every block
+	}
 	for step := 1; hi < len(it.l.blocks) && string(it.l.first(hi)) <= key; step <<= 1 {
 		lo, hi = hi+1, hi+step
 	}
@@ -578,20 +581,16 @@ func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
 	if j.err != nil {
 		c.err.Store(&j.err)
 	}
-	if j.out == nil {
-		return old // canceled
+	stale := j.out == nil || len(old.levels) < len(j.inputs) // canceled or replaced
+	for i := 0; !stale && i < len(j.inputs); i++ {
+		stale = old.levels[i].run != j.inputs[i].run // a Publish replaced the inputs
 	}
-	k := len(j.inputs)
-	if len(old.levels) < k {
+	if stale {
 		retire(j.out)
+		c.startBaseMerge(old.levels)
 		return old
 	}
-	for i, in := range j.inputs {
-		if old.levels[i].run != in.run {
-			retire(j.out) // a Publish replaced the inputs
-			return old
-		}
-	}
+	k := len(j.inputs)
 	base := &level{run: j.out}
 	var revived []string
 	var buf []byte
@@ -623,6 +622,7 @@ func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
 	for _, in := range j.inputs {
 		retire(in.run)
 	}
+	c.startBaseMerge(levels) // names that arrived meanwhile may be due
 	return s
 }
 
