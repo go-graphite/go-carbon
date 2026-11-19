@@ -102,6 +102,27 @@ func (s *Slots) InstallRecent(d Delta) {
 	s.Install(d)
 }
 
+// AppendResident appends every resident sample as a Delta, in archive and slot
+// order. Reinstalling them with InstallRecent between two KeepRecent calls
+// rebuilds the same residency, which is what a state checkpoint stores.
+func (s *Slots) AppendResident(dst []Delta) []Delta {
+	if s == nil {
+		return dst
+	}
+	if s.data == nil {
+		if s.hasSingle {
+			dst = append(dst, Delta{Archive: s.singleArchive, Slot: s.single.slot, Sample: s.single.sample})
+		}
+		return dst
+	}
+	for a := range s.data {
+		for _, p := range s.data[a].data {
+			dst = append(dst, Delta{Archive: a, Slot: p.slot, Sample: p.sample})
+		}
+	}
+	return dst
+}
+
 // View, Range and RecentRange read a nil *Slots as empty: a caller that keeps
 // no residency needs no Slots value.
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
