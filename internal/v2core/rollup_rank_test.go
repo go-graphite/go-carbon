@@ -48,7 +48,7 @@ func checkDense(t *testing.T, r *coreRollups) {
 		t.Fatalf("dense %d != metrics %d", len(r.dense), len(r.metrics))
 	}
 	for i, m := range r.dense {
-		if sl := r.denseSlots[i]; r.ids[sl] != m.id || r.rank[sl] != uint32(i+1) || r.metrics[m.id] != m {
+		if r.ids[i] != m.id || r.metrics[m.id] != m {
 			t.Fatalf("dense[%d] stale", i)
 		}
 		if i > 0 && compareRollupMetrics(r.dense[i-1], m) >= 0 {
@@ -188,11 +188,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				r.setExpiryTTL(expiryWindow(51 * time.Second))
 				return r
 			}
-			unrank := func(r *coreRollups) {
-				clear(r.rank)
-				r.dense, r.unranked, r.replaced = r.dense[:0], r.unranked[:0], false
-				r.denseSlots, r.unrankedSlots = r.denseSlots[:0], r.unrankedSlots[:0]
-			}
+			unrank := unrankAll
 			ranked, ref := newPlanner(), newPlanner()
 			order := uint64(0)
 			lingered, renumbered := 0, 0

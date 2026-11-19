@@ -80,6 +80,13 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 		if len(e.owners[0].rollups.metrics) != len(batches) {
 			t.Fatalf("metrics %d", len(e.owners[0].rollups.metrics))
 		}
+		// A durable single-archive name keeps no residency, after a seal
+		// and after recovery alike.
+		for id, m := range e.owners[0].rollups.metrics {
+			if len(m.schema().Archives) == 1 && m.slots != nil {
+				t.Fatalf("single-archive metric %d holds slots %+v", id, *m.slots)
+			}
+		}
 		return ids
 	}
 	before := closable()
