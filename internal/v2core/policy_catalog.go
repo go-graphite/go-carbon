@@ -20,6 +20,11 @@ type PolicyIdentity struct {
 	policy  policyName
 	vshard  uint16
 	plain   bool
+	// ownerSlot is a seal planner's hint: 1 + the owner-local slot install
+	// gave this name, 0 when none. It sits in padding (0 B per name). Planners
+	// sharing the identity (adoption) overwrite it, so it is only a hint:
+	// readers confirm ids[slot] == id and fall back to the metrics map.
+	ownerSlot atomic.Uint32
 	// nameHash is NameHash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.
 	nameHash uint64
@@ -258,8 +263,12 @@ func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
 func (h *PolicyIdentity) metadataScalars(m metricMetadata) RollupMetadata {
 	return RollupMetadata{ClosedThrough: m.ClosedThrough, BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
-func (m *rollupMetric) metadata() RollupMetadata    { return m.PolicyIdentity.metadata(m.meta) }
 func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
+
+// metadataOf returns the committed metadata of m, installed under id.
+func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {
+	return m.metadata(r.meta[r.slotOf(id, m)])
+}
 
 type policyName struct {
 	Name partsformat.ID

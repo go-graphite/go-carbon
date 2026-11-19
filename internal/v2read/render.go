@@ -7,8 +7,8 @@ import (
 	"math/bits"
 )
 
-// Series returned by Render borrows read-only Values and Occupied until Handle.Close.
-// RenderInto uses caller-owned writable Values; its Occupied is still read-only.
+// Series borrows read-only Values and Occupied from the render workspace until
+// the caller releases it.
 type Series struct {
 	Metric            Metric
 	From, Until, Step int64
@@ -27,53 +27,67 @@ func alignNext(t, step int64) int64 {
 	return t - r + step
 }
 
-// Render follows Whisper archive selection, clamping and next-slot alignment.
-// Each archive is already resolved by the write/rollup engine; reads only choose
-// the latest authoritative version of each slot, preserving IEEE value bits.
-func (h *Handle) Render(ctx context.Context, name string, from, until, now int64) (*Series, error) {
-	return h.render(ctx, name, from, until, now, nil)
+// SlotRange is a half-open interval of physical archive slots. A source keyed
+// by (series, archive, physical slot, version) needs at most two bounded seeks.
+type SlotRange struct{ From, Until int64 }
+
+// SlotRanges translates an aligned render interval to physical ring slots.
+// Sources must return all versions in these ranges, even timestamps outside
+// the render interval, so wrapped replacements still invalidate old values.
+// Archive dimensions and alignment are validated by render before Scan.
+func SlotRanges(a Archive, from, until int64) ([2]SlotRange, int) {
+	var ranges [2]SlotRange
+	n := (until - from) / a.Step
+	if n <= 0 {
+		return ranges, 0
+	}
+	if n >= a.Points {
+		ranges[0] = SlotRange{0, a.Points}
+		return ranges, 1
+	}
+	first := (from / a.Step) % a.Points
+	if first < 0 {
+		first += a.Points
+	}
+	end := first + n
+	ranges[0] = SlotRange{first, min(end, a.Points)}
+	if end > a.Points {
+		ranges[1] = SlotRange{0, end - a.Points}
+		return ranges, 2
+	}
+	return ranges, 1
 }
 
-// RenderInto overlays occupied v2 slots onto an already aligned base result.
-// Untouched slots retain the caller's values. Occupied NaNs and wrapped winners
-// invalidate the base just as they do in Render. The caller owns base.Values;
-// it must not alias any live handle's workspace. Occupied remains handle-owned.
-func (h *Handle) RenderInto(ctx context.Context, name string, from, until, now int64, base *Series) (*Series, error) {
-	if base == nil {
-		return nil, errors.New("nil render base")
-	}
-	return h.render(ctx, name, from, until, now, base)
-}
-func (h *Handle) render(ctx context.Context, name string, from, until, now int64, base *Series) (*Series, error) {
-	if h.closed.Load() {
-		return nil, ErrClosed
-	}
+// render follows Whisper archive selection, clamping and next-slot alignment.
+// Each archive is already resolved by the write/rollup engine; reads only choose
+// the latest authoritative version of each slot, preserving IEEE value bits.
+// Values, winner sequence, timestamp, presence and touched index take at most
+// 32B per slot, so a render holds at most work/32 slots. The returned workspace
+// backs the series; it is non-nil whenever buffers were taken, even with an
+// error, and the caller releases it once the series is consumed.
+func render(ctx context.Context, m Metric, source Source, from, until, now, work int64) (*Series, *renderWorkspace, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if now < 0 || now > math.MaxUint32 {
-		return nil, errors.New("clock outside storage timestamp range")
+		return nil, nil, errors.New("clock outside storage timestamp range")
 	}
 	if from > until {
-		return nil, errors.New("invalid time interval")
-	}
-	m, ok := h.v.view.Catalog.Lookup(name)
-	if !ok {
-		return nil, ErrNotFound
+		return nil, nil, errors.New("invalid time interval")
 	}
 	if len(m.Archives) == 0 {
-		return nil, errors.New("metric has no archives")
+		return nil, nil, errors.New("metric has no archives")
 	}
 	var retention int64
 	for _, a := range m.Archives {
 		if a.Step <= 0 || a.Points <= 0 || a.Points > math.MaxUint32/a.Step {
-			return nil, errors.New("invalid archive")
+			return nil, nil, errors.New("invalid archive")
 		}
 		retention = max(retention, a.Step*a.Points)
 	}
 	oldest := now - retention
 	if from > now || until < oldest {
-		return nil, nil
+		return nil, nil, nil
 	}
 	from = max(from, oldest)
 	until = min(until, now)
@@ -85,81 +99,59 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 		}
 	}
 	if from > math.MaxInt64-a.Step || until > math.MaxInt64-a.Step {
-		return nil, errors.New("interval overflows")
+		return nil, nil, errors.New("interval overflows")
 	}
 	start, end := alignNext(from, a.Step), alignNext(until, a.Step)
-	groups := [][]Source{h.v.view.Blocks, h.v.view.Parts, h.v.view.Head}
 	if start == end {
-		populated := false
-		for _, sources := range groups {
-			for _, s := range sources {
-				exists, err := s.HasArchive(ctx, m.ID, a.Step)
-				if err != nil {
-					return nil, err
-				}
-				populated = populated || exists
-			}
+		populated, err := source.HasArchive(ctx, m.ID, a.Step)
+		if err != nil {
+			return nil, nil, err
 		}
 		if populated {
 			if end > math.MaxInt64-a.Step {
-				return nil, errors.New("interval overflows")
+				return nil, nil, errors.New("interval overflows")
 			}
 			end += a.Step
 		}
 	}
 	n := (end - start) / a.Step
-	// Values, winner sequence, timestamp, presence and touched indices use at most 32B/slot;
-	// no allocation grows with duplicate/input count.
-	if n < 0 || n > math.MaxUint32 || n > h.work/32 {
-		return nil, ErrAdmission
+	// No allocation grows with duplicate/input count.
+	if n < 0 || n > math.MaxUint32 || n > work/32 {
+		return nil, nil, ErrAdmission
 	}
-	if base != nil && (base.From != start || base.Until != end || base.Step != a.Step || int64(len(base.Values)) != n) {
-		return nil, ErrShape
-	}
-	// Budget stays charged until the handle is closed, including prior results.
-	h.work -= n * 32
-	out := &Series{Metric: m, From: start, Until: end, Step: a.Step, Values: nil}
 	workspace := takeRenderWorkspace(int(n))
-	workspace.next = h.workspaces
-	h.workspaces = workspace
-	out.Values = workspace.values
+	out := &Series{Metric: m, From: start, Until: end, Step: a.Step, Values: workspace.values, Occupied: workspace.seen}
 	seq, times, seen := workspace.sequences, workspace.times, workspace.seen
-	out.Occupied = seen
 	workspace.touched = workspace.touched[:0]
-	if base != nil {
-		out.Values = base.Values
-	}
 	firstSlot := (start / a.Step) % a.Points
 	if firstSlot < 0 {
 		firstSlot += a.Points
 	}
 	// A resolved source already owns one authoritative winner per physical
 	// slot. Use that slot directly instead of arbitrating every sample again.
-	if len(h.v.view.Blocks) == 1 && len(h.v.view.Parts) == 0 && len(h.v.view.Head) == 0 {
-		if source, ok := h.v.view.Blocks[0].(*resolvedSource); ok && source.id == m.ID {
-			archive := source.archive(a.Step)
-			ranges, count := SlotRanges(a, start, end)
-			for _, interval := range ranges[:count] {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				for i := source.lower(archive, interval.From); i < len(source.records) && source.records[i].Archive == archive && source.records[i].Slot < interval.Until; i++ {
-					record := source.records[i]
-					j := record.Slot - firstSlot
-					if j < 0 {
-						j += a.Points
-					}
-					seen[j] = true
-					workspace.touched = append(workspace.touched, uint32(j))
-					value := math.NaN()
-					if record.Sample.Time == start+j*a.Step {
-						value = math.Float64frombits(record.Sample.Bits)
-					}
-					out.Values[j] = value
-				}
+	if source, ok := source.(*resolvedSource); ok && source.id == m.ID {
+		archive := source.archive(a.Step)
+		ranges, count := SlotRanges(a, start, end)
+		for _, interval := range ranges[:count] {
+			if err := ctx.Err(); err != nil {
+				return nil, workspace, err
 			}
-			return out, ctx.Err()
+			for i := source.lower(archive, interval.From); i < len(source.records) && source.records[i].Archive == archive && source.records[i].Slot < interval.Until; i++ {
+				record := source.records[i]
+				j := record.Slot - firstSlot
+				if j < 0 {
+					j += a.Points
+				}
+				seen[j] = true
+				workspace.touched = append(workspace.touched, uint32(j))
+				value := math.NaN()
+				if record.Sample.Time == start+j*a.Step {
+					value = math.Float64frombits(record.Sample.Bits)
+				}
+				out.Values[j] = value
+			}
 		}
+		return out, workspace, ctx.Err()
 	}
 	// Sources check cancellation at block boundaries. Per-sample polling takes
 	// a cancel-context mutex for every version, even for fully cached blocks.
@@ -193,26 +185,18 @@ func (h *Handle) render(ctx context.Context, name string, from, until, now int64
 		}
 		return nil
 	}
-	readCtx := ctx
-	for _, sources := range groups {
-		for _, s := range sources {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			if err := s.Scan(readCtx, m.ID, a, start, end, emit); err != nil {
-				return nil, err
-			}
-		}
+	if err := source.Scan(ctx, m.ID, a, start, end, emit); err != nil {
+		return nil, workspace, err
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, workspace, err
 	}
 	for _, i := range workspace.touched {
 		if times[i] != start+int64(i)*a.Step {
 			out.Values[i] = math.NaN()
 		}
 	}
-	return out, nil
+	return out, workspace, nil
 }
 
 // Idle caches are bounded by size class, independently of active admission.
@@ -225,7 +209,6 @@ type renderWorkspace struct {
 	times     []int64
 	seen      []bool
 	touched   []uint32
-	next      *renderWorkspace
 }
 
 var renderWorkspaces = func() [12]chan *renderWorkspace {
@@ -281,15 +264,13 @@ func takeRenderWorkspace(n int) *renderWorkspace {
 	return w
 }
 func releaseRenderWorkspace(w *renderWorkspace) {
-	// Values are valid until Close. Reset only the slots that this handle wrote;
-	// all untouched slots are already canonical NaNs from allocation/last close.
-	// Overlay values belong to the caller and are never retained in w.values.
+	// Values are valid until release. Reset only the slots this render wrote;
+	// all untouched slots are already canonical NaNs from allocation/last release.
 	for _, i := range w.touched {
 		w.values[i] = math.NaN()
 		w.seen[i] = false
 	}
 	w.touched = w.touched[:0]
-	w.next = nil
 	if pool := renderWorkspacePool(len(w.values)); pool != nil {
 		select {
 		case pool <- w:

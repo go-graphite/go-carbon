@@ -359,3 +359,36 @@ func TestOriginalBatchBoundariesMatter(t *testing.T) {
 		t.Fatal("fixture failed to distinguish flattened history")
 	}
 }
+
+// TestSumNaNHasAmd64Bits pins Average and Sum NaN bits, on every architecture,
+// to what classic whisper's sum stores on amd64 (checked under linux/amd64).
+func TestSumNaNHasAmd64Bits(t *testing.T) {
+	const amd64Default = 0xfff8000000000000
+	a, b, s := uint64(0x7ff8000000000042), uint64(0xfff8000000000099), uint64(0x7ff0000000000007)
+	inf, ninf, one := math.Float64bits(math.Inf(1)), math.Float64bits(math.Inf(-1)), math.Float64bits(1)
+	for i, c := range []struct {
+		in   []uint64
+		want uint64
+	}{
+		{[]uint64{inf, ninf}, amd64Default},
+		{[]uint64{one, one, ninf, inf, one}, amd64Default},
+		{[]uint64{inf, ninf, a}, amd64Default},
+		{[]uint64{inf, ninf, s}, amd64Default},
+		{[]uint64{a, inf, ninf}, a},
+		{[]uint64{a, b}, a},
+		{[]uint64{b, a}, b},
+		{[]uint64{one, s}, s | 1<<51},
+		{[]uint64{s, a}, s | 1<<51},
+		{[]uint64{a, s}, a},
+	} {
+		samples := make([]Sample, len(c.in))
+		for j, bits := range c.in {
+			samples[j] = Sample{Time: int64(j), Bits: bits}
+		}
+		for _, m := range []Method{Sum, Average} {
+			if got := math.Float64bits(aggregateSamples(m, samples)); got != c.want {
+				t.Errorf("case %d method %d: got %#016x want %#016x", i, m, got, c.want)
+			}
+		}
+	}
+}
