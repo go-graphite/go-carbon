@@ -165,7 +165,7 @@ func (app *App) startV2() error {
 	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks,
 		// Smaller segments bound the durable boundary/active tail retained by
 		// standalone stores without changing journal or core durability.
-		JournalSegmentBytes: 4 << 20}
+		JournalSegmentBytes: 8 << 20}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
