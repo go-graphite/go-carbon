@@ -196,6 +196,12 @@ func (s *Slots) KeepRecent(maxTime int64) {
 		s.data, s.hasSingle = nil, false
 		return
 	}
+	// Every coarser step is a multiple of the first coarse step, so no
+	// resident floor can advance before its next boundary. The existing fine
+	// floor encodes that deadline; no per-name timer is needed.
+	if s.data != nil && s.data[len(ars)-1].floor == math.MaxInt64 && align(maxTime, ars[1].Step)-2*ars[0].Step <= s.data[0].floor {
+		return
+	}
 	if s.data == nil {
 		s.data = make([]slotSpan, len(ars))
 		if s.hasSingle {
