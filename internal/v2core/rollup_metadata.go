@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -213,16 +214,27 @@ func jsonPlainString(s string) bool {
 // One serial owner exclusively holds these arenas until its ingest resolves.
 func (r *coreRollups) release() {
 	for i := range r.lanes {
-		r.lanes[i].output.release()
-		clear(r.lanes[i].ranked)
-		r.lanes[i].ranked = r.lanes[i].ranked[:0]
+		lane := &r.lanes[i]
+		lane.output.release()
+		lane.ranked = lane.ranked[:0]
+		// Size records for this seal's overflow, so the next one plans in place.
+		grow := 0
+		for _, o := range lane.overflow {
+			grow += len(o)
+		}
+		if grow != 0 {
+			lane.records = slices.Grow(lane.records, grow)
+		}
+		clear(lane.overflow)
+		lane.overflow = lane.overflow[:0]
 	}
 	for _, coverage := range r.coverage {
 		clear(coverage.seen)
 		coverage.spec.Policies = nil
 	}
-	clear(r.stages)
 	r.stages = r.stages[:0]
+	clear(r.stageMetrics)
+	r.stageMetrics = r.stageMetrics[:0]
 	clear(r.batches)
 	r.batches = r.batches[:0]
 	clear(r.seen)

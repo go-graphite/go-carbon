@@ -14,8 +14,7 @@ import (
 // sharing a key tie-break by compareRollupMetrics, so the order is exact. A
 // ranked metric whose hint another planner overwrote takes the search key,
 // which sorts identically.
-func (r *coreRollups) stageKey(s *rollupStage) {
-	m := s.metric
+func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric) {
 	s.vshard = m.vshard
 	if rk := r.metricRank(m); rk != 0 {
 		s.sortKey = uint64(rk) << 1
@@ -161,32 +160,26 @@ func (r *coreRollups) renumber() {
 	r.replaced = false
 }
 
-// rollupRankRef is the 16-byte sort record of one stage.
+// rollupRankRef is the 16-byte, pointer-free sort record of one stage: its
+// key and its index in the planner's stages.
 type rollupRankRef struct {
-	key uint64
-	*rollupStage
-}
-
-func compareRollupRankRefs(a, b rollupRankRef) int {
-	if a.key != b.key {
-		if a.key < b.key {
-			return -1
-		}
-		return 1
-	}
-	if a.key&1 == 0 {
-		return 0
-	}
-	return compareRollupMetrics(a.metric, b.metric)
+	key   uint64
+	stage uint32
 }
 
 // sortRollupRanks orders refs by key with an LSD radix sort (11-bit digits,
 // only as many passes as the largest key needs), then sorts each run of equal
 // odd keys (unranked neighbours) by name. It returns the sorted slice and the
-// spare buffer for reuse.
-func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRankRef, []rollupRankRef) {
+// spare buffer for reuse. metrics[ref.stage] names each ref's metric.
+func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int, metrics []*rollupMetric) ([]rollupRankRef, []rollupRankRef) {
+	byName := func(a, b rollupRankRef) int { return compareRollupMetrics(metrics[a.stage], metrics[b.stage]) }
 	if len(refs) < 256 {
-		slices.SortFunc(refs, compareRollupRankRefs)
+		slices.SortFunc(refs, func(a, b rollupRankRef) int {
+			if c := cmp.Compare(a.key, b.key); c != 0 || a.key&1 == 0 {
+				return c
+			}
+			return byName(a, b)
+		})
 		return refs, scratch
 	}
 	const bits = 11
@@ -222,16 +215,12 @@ func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRank
 			j++
 		}
 		if j-i > 1 {
-			slices.SortFunc(src[i:j], compareRollupMetricsRef)
+			slices.SortFunc(src[i:j], byName)
 		}
 		i = j
 	}
 	clear(tmp)
 	return src, tmp[:0]
-}
-
-func compareRollupMetricsRef(a, b rollupRankRef) int {
-	return compareRollupMetrics(a.metric, b.metric)
 }
 
 // sealBatchIndexMask selects the batch index from a sorted seal batch key.
