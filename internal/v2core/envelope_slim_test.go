@@ -3,10 +3,12 @@ package v2core
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,20 +135,32 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 		index.Metadata(func(name string, p RollupPolicy, m RollupMetadata) {
 			out.Snapshot = append(out.Snapshot, fmt.Sprintf("meta %q %+v %+v %q", name, p, m, m.Policy))
 		})
-		for _, m := range metrics {
-			p, meta, ok := index.LookupMetadata(m.name)
-			rs, err := index.Records(ctx, m.name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			slices.SortFunc(rs, func(a, b sealrollup.Record) int {
-				if a.Archive != b.Archive {
-					return a.Archive - b.Archive
+		// Readers share one snapshot concurrently, as fetches do. Each name's
+		// read is independent; the image is sorted below.
+		lookups, errs := make([]string, len(metrics)), make([]error, len(metrics))
+		var wg sync.WaitGroup
+		for i, m := range metrics {
+			wg.Go(func() {
+				p, meta, ok := index.LookupMetadata(m.name)
+				rs, err := index.Records(ctx, m.name)
+				if err != nil {
+					errs[i] = err
+					return
 				}
-				return int(a.Slot - b.Slot)
+				slices.SortFunc(rs, func(a, b sealrollup.Record) int {
+					if a.Archive != b.Archive {
+						return a.Archive - b.Archive
+					}
+					return int(a.Slot - b.Slot)
+				})
+				lookups[i] = fmt.Sprintf("lookup %q %v %+v %+v %q %+v", m.name, ok, p, meta, meta.Policy, rs)
 			})
-			out.Snapshot = append(out.Snapshot, fmt.Sprintf("lookup %q %v %+v %+v %q %+v", m.name, ok, p, meta, meta.Policy, rs))
 		}
+		wg.Wait()
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+		out.Snapshot = append(out.Snapshot, lookups...)
 		slices.Sort(out.Snapshot)
 		if err = ScanCatalogNames(ctx, pin, func(name string) error {
 			out.Names = append(out.Names, name)
