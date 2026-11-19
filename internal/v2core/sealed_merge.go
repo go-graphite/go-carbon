@@ -781,12 +781,24 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 // Before it commits, the output is an orphan; after it commits, only output is
 // live. Reader snapshots continue naming the inputs until ordinary GC permits
 // their unlink. Concurrent retire/move activity invalidates the whole proposal.
+// The output is linked and synced before the binding fence (g.mu): the caller's
+// fileMu already excludes unlink, so publications wait only for the commit.
 func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d v2part.Descriptor) (bool, error) {
+	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
+	if err != nil {
+		return false, err
+	}
+	if g.stage != nil {
+		g.stage("merge-retained")
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, old := range inputs {
 		value, closer, err := g.db.Get(partBinding(sealedPartPrefix, old.SHA256))
 		if errors.Is(err, pebble.ErrNotFound) {
+			// The unpublished output is an orphan, as after a crash here.
+			g.pending[d.SHA256] = retiredPart{at: g.now()}
+			g.pendingCount.Store(uint64(len(g.pending)))
 			return false, nil
 		}
 		if err != nil {
@@ -801,13 +813,6 @@ func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d 
 		if !same {
 			return false, errors.New("merge input binding changed")
 		}
-	}
-	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
-	if err != nil {
-		return false, err
-	}
-	if g.stage != nil {
-		g.stage("merge-retained")
 	}
 	batch := g.db.NewBatch()
 	defer batch.Close()
