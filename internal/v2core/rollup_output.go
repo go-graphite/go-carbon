@@ -400,13 +400,13 @@ func (r *coreRollups) commitStages() {
 				s := ref.rollupStage
 				m := s.metric
 				if r.db != nil {
-					m.slots.KeepRecent(s.next.Frontier.MaxTime)
+					m.keepRecent(s.next.Frontier.MaxTime)
 				}
 				for _, record := range s.records {
 					if r.db != nil {
-						m.slots.InstallRecent(record.Delta)
+						m.installRecent(record.Delta)
 					} else {
-						m.slots.Install(record.Delta)
+						m.residency().Install(record.Delta)
 					}
 				}
 				if r.db != nil {
@@ -415,7 +415,7 @@ func (r *coreRollups) commitStages() {
 					}
 				}
 				if s.next.Expired {
-					m.slots = *m.policy.prepared.NewSlots()
+					m.slots = nil
 				}
 				if !s.fresh { // a fresh metric gets its slot, and these scalars, at install
 					next := compactMetadata(s.next)

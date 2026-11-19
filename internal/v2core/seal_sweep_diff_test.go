@@ -703,7 +703,7 @@ func sealSweepSkipIdleClosure(r *coreRollups, in coreSealInput) (coreSealPlan, e
 	hidden := map[uint64]*rollupMetric{}
 	for id, m := range r.metrics {
 		archives := m.schema().Archives
-		if r.replaced || busy[id] || len(archives) < 2 {
+		if hasDeadSlot(r) || busy[id] || len(archives) < 2 {
 			continue
 		}
 		meta := r.metaOf(id)

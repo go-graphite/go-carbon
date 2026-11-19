@@ -348,7 +348,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 		}
 		for _, record := range rebuilt {
-			m.slots.Install(record.Delta)
+			m.residency().Install(record.Delta)
 			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
 			if record.Archive > 0 {
 				key := [2]int64{int64(record.Archive), record.Slot}
@@ -367,7 +367,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		authority.Meta = m.metadata(meta)
 		if next.db != nil {
-			m.slots.KeepRecent(meta.Frontier.MaxTime)
+			m.keepRecent(meta.Frontier.MaxTime)
 		}
 		next.install(id, m, meta)
 		next.names[policy.Name] = id

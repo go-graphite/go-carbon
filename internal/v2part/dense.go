@@ -369,6 +369,54 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	return err
 }
 
+// AppendSlots appends a decoded non-overlapping dense run (records, encoded as
+// value) after the pending output. A run that cannot grow, MaxDenseSlots long
+// with no pending run of its metric and archive, keeps its exact encoding as in
+// SetSlotsEncoded. Any shorter run joins the pending run, which re-encodes in
+// runs of up to MaxDenseSlots, so merges repack short runs instead of freezing
+// them. key is the first record's key. Every record is validated as
+// SetRecordEncoded validates it; caller buffers are not retained.
+func (w *DenseWriter) AppendSlots(key, value []byte, records []sealrollup.Record) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	if len(records) == MaxDenseSlots && (len(w.records) == 0 || len(w.records) == MaxDenseSlots || w.records[0].Archive != records[0].Archive || !bytes.Equal(w.first[:len(w.first)-16], key[:max(len(key)-16, 0)])) {
+		return w.SetSlotsEncoded(key, value)
+	}
+	k, err := w.decodeInput(key)
+	if err == nil && (len(records) == 0 || k.Archive == MetadataArchive || k.Ordinal != 0 || records[0].Archive < 0 || uint64(records[0].Archive) != uint64(k.Archive) || records[0].Slot != k.BlockStart) {
+		err = errors.New("dense run does not match valid archive key")
+	}
+	for i := 0; err == nil && i < len(records); i++ {
+		r := records[i]
+		if r.Archive != records[0].Archive || !validSlotRecord(r) || (i > 0 && r.Slot <= records[i-1].Slot) {
+			err = errors.New("invalid dense run record")
+			break
+		}
+		if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
+			if err = w.flush(); err != nil {
+				break
+			}
+		}
+		if len(w.records) == 0 {
+			k.BlockStart = r.Slot
+			w.key = k
+			w.first = append(w.first[:0], key...)
+			binary.BigEndian.PutUint64(w.first[len(w.first)-12:], uint64(r.Slot)^(1<<63))
+		}
+		w.records = append(w.records, r)
+	}
+	if err == nil {
+		// Future inputs must start after this run's last physical slot.
+		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(records[len(records)-1].Slot)^(1<<63))
+	}
+	w.err = err
+	return err
+}
+
 func validSlotRecord(r sealrollup.Record) bool {
 	return r.Archive >= 0 && r.Slot >= 0 && r.Order != 0 && r.Sample.Time > 0 && r.Sample.Time <= math.MaxUint32
 }

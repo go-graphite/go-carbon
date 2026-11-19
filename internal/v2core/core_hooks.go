@@ -119,6 +119,8 @@ type coreHooks struct {
 	PublishBatches func(int, *pebble.Snapshot, []coreBatch, uint64) error
 	// PublishBatchesWithInventory is the same transfer with the immutable binding
 	// set captured atomically with snapshot. When set, it replaces PublishBatches.
+	// snapshot is nil when the generation and inventory equal the previous
+	// successful publication's: the consumer keeps the snapshot it holds.
 	PublishBatchesWithInventory func(int, *pebble.Snapshot, []coreBatch, uint64, *RollupInventory) error
 	// PlanSeal is pure: no publication/mutation until Commit. Input buffers are
 	// owner-local and valid only for this call. The planner must detach retained
