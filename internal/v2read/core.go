@@ -84,13 +84,10 @@ type generation struct {
 	cache     *sealedCache
 	reader    *Reader
 	sealed    *v2core.RollupSnapshot // request views only
-	// view is an owner publication's pointer-free pending set; pending holds
-	// decoded applications only in per-request generations.
-	view    v2core.PendingView
-	pending []v2core.Batch
-	index   *pendingIndex
-	metrics map[string]*metricState
-	err     error
+	pending   []v2core.Batch
+	view      v2core.PendingView
+	metrics   map[string]*metricState
+	err       error
 }
 type sealedCache struct {
 	ranges   *v2core.RollupReadCache
@@ -142,9 +139,8 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	return r.PublishPending(owner, snapshot, v2core.PendingBatches(pending), number, inventory)
 }
 
-// PublishPending is PublishWithInventory over the owner's pointer-free pending
-// view. The reader keeps the view; it never materializes the whole head. A nil
-// snapshot is a head-only publication, as for PublishWithInventory.
+// PublishPending transfers an immutable owner publication and its sealed parts.
+// Head-only publications retain their own references on the sealed parts.
 func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2core.PendingView, number uint64, inventory *v2core.RollupInventory) error {
 	closeSnapshot := func() error {
 		if snapshot == nil {
@@ -167,7 +163,6 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 	shared := false
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
-		g.index = nextPendingIndex(old.index, old.view, pending)
 		if shared = old.number == number && old.inventory == inventory; shared {
 			g.parts = old.parts.Retain()
 			if g.snapshot = old.snapshot; g.snapshot != nil {
@@ -179,9 +174,6 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 			}
 		}
 		old.release()
-	}
-	if g.index == nil {
-		g.index = nextPendingIndex(nil, v2core.PendingView{}, pending)
 	}
 	if !shared && snapshot == nil {
 		if r.closed.Load() {
@@ -572,11 +564,7 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 		return nil, err
 	}
 	stage = time.Now()
-	pendingIdx := g.index
-	if pendingIdx == nil {
-		pendingIdx = nextPendingIndex(nil, v2core.PendingView{}, g.view)
-	}
-	pending, err := selectPending(ctx, pendingIdx, g.view, names)
+	pending, err := selectPending(ctx, index, g.view, names)
 	if err != nil {
 		return nil, err
 	}

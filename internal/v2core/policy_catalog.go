@@ -42,12 +42,7 @@ type policyDefinition struct {
 	Group    partsformat.Group
 }
 
-// Keep scan keys contiguous: pending readers need hashes without fetching
-// every scattered identity. Zero hashes fall back to the published handle.
-type policyIDPage struct {
-	handles [1024]atomic.Pointer[PolicyIdentity]
-	hashes  [1024]atomic.Uint64
-}
+type policyIDPage [1024]atomic.Pointer[PolicyIdentity]
 
 // The normal numeric-ID space uses a small, geometrically grown directory.
 // Only creation takes the mutex; published directory entries are atomic and
@@ -128,9 +123,8 @@ func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) 
 
 func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
 	p := c.idPage(h.id>>10, true)
-	slot := &p.handles[h.id&1023]
+	slot := &p[h.id&1023]
 	if slot.CompareAndSwap(nil, h) {
-		p.hashes[h.id&1023].Store(h.nameHash)
 		return h, nil
 	}
 	return policyIdentityMatches(slot.Load(), string(h.policy.Name), h.definitionBytes())
@@ -274,26 +268,9 @@ func (c *PolicyCatalog) idPage(id uint64, create bool) *policyIDPage {
 
 func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
 	if p := c.idPage(id>>10, false); p != nil {
-		return p.handles[id&1023].Load()
+		return p[id&1023].Load()
 	}
 	return nil
-}
-
-// nameHash is lookup's scan-only projection. A concurrent intern may observe
-// the handle before its hash store; the zero fallback preserves that boundary
-// and also handles the legitimate (rare) zero name hash.
-func (c *PolicyCatalog) nameHash(id uint64) uint64 {
-	p := c.idPage(id>>10, false)
-	if p == nil {
-		return 0
-	}
-	if h := p.hashes[id&1023].Load(); h != 0 {
-		return h
-	}
-	if h := p.handles[id&1023].Load(); h != nil {
-		return h.nameHash
-	}
-	return 0
 }
 
 // ApplicationPolicy resolves an ID in this engine's immutable catalog epoch.

@@ -45,8 +45,8 @@ func linearPending(pending []v2core.Batch, names []string) ([]v2core.Batch, erro
 	return out, nil
 }
 
-func indexedPending(x *pendingIndex, pending []v2core.Batch, names []string) ([]v2core.Batch, error) {
-	return selectPending(context.Background(), x, v2core.PendingBatches(pending), names)
+func indexedPending(pending []v2core.Batch, names []string) ([]v2core.Batch, error) {
+	return selectPending(context.Background(), nil, v2core.PendingBatches(pending), names)
 }
 
 // samePendingBatch reports whether two descriptors are the same application.
@@ -71,8 +71,8 @@ func testPolicy(t testing.TB, name string) []byte {
 }
 
 // TestPendingIndexMatchesLinearScan publishes randomized registered and JSON
-// policy heads through prefix extensions, unchanged republications, seals and
-// chunk-cap rebuilds, and compares every selection with the linear oracle.
+// policy cold heads through prefix extensions, unchanged republications and
+// seals, and compares every selection with the linear oracle.
 func TestPendingIndexMatchesLinearScan(t *testing.T) {
 	t.Parallel()
 	rng := rand.New(rand.NewSource(18))
@@ -92,7 +92,6 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 		registered[i] = h
 	}
 	var head []v2core.Batch
-	var index *pendingIndex
 	var published []v2core.Batch
 	order := uint64(0)
 	for step := 0; step < 400; step++ {
@@ -113,14 +112,13 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 			}
 		}
 		pending := slices.Clone(head)
-		index = nextPendingIndex(index, v2core.PendingBatches(published), v2core.PendingBatches(pending))
 		published = pending
 		for q := 0; q < 8; q++ {
 			var want []string
 			for k := 1 + rng.Intn(4); k > 0; k-- {
 				want = append(want, fmt.Sprintf("a.b%d.c%d", rng.Intn(7), rng.Intn(names+20)))
 			}
-			got, err := indexedPending(index, pending, want)
+			got, err := indexedPending(pending, want)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -137,14 +135,11 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 				}
 			}
 		}
-		if len(index.chunks) > maxPendingChunks {
-			t.Fatalf("chunks %d", len(index.chunks))
-		}
 	}
 	// A malformed JSON policy fails selection exactly like the linear scan.
 	bad := append(slices.Clone(published), v2core.Batch{ID: 1, Order: order + 1, Policy: []byte("{")})
 	_, refErr := linearPending(bad, []string{"x"})
-	_, gotErr := indexedPending(nextPendingIndex(index, v2core.PendingBatches(published), v2core.PendingBatches(bad)), bad, []string{"x"})
+	_, gotErr := indexedPending(bad, []string{"x"})
 	if refErr == nil || gotErr == nil || refErr.Error() != gotErr.Error() {
 		t.Fatalf("errors got %v want %v", gotErr, refErr)
 	}
@@ -302,9 +297,9 @@ func TestPendingIndexRendersMatchClassic(t *testing.T) {
 }
 
 // BenchmarkPendingSelection compares one-name pending selection over a large
-// unsealed head: the linear scan versus the reused chunk index.
+// unsealed cold head: the linear scan versus the by-hash scan.
 func BenchmarkPendingSelection(b *testing.B) {
-	const names, batches, chunks = 200000, 1000000, 10
+	const names, batches = 200000, 1000000
 	registered := make([]*v2core.ApplicationPolicy, names)
 	for i := range registered {
 		n := fmt.Sprintf("bench.metric.name.%d", i)
@@ -319,13 +314,6 @@ func BenchmarkPendingSelection(b *testing.B) {
 	for i := range pending {
 		pending[i] = v2core.Batch{ID: uint64(i), Order: uint64(i), Registered: registered[rng.Intn(names)], Points: make([]v2core.Row, 1)}
 	}
-	var index *pendingIndex
-	var prev []v2core.Batch
-	for c := 1; c <= chunks; c++ {
-		next := pending[:batches*c/chunks]
-		index = nextPendingIndex(index, v2core.PendingBatches(prev), v2core.PendingBatches(next))
-		prev = next
-	}
 	want := []string{registered[17].Name()}
 	b.Run("linear", func(b *testing.B) {
 		for b.Loop() {
@@ -334,30 +322,18 @@ func BenchmarkPendingSelection(b *testing.B) {
 			}
 		}
 	})
-	b.Run("index", func(b *testing.B) {
-		if _, err := indexedPending(index, pending, want); err != nil { // build once
-			b.Fatal(err)
-		}
-		b.ResetTimer()
+	b.Run("select", func(b *testing.B) {
 		for b.Loop() {
-			if _, err := indexedPending(index, pending, want); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("index-build-newest-chunk", func(b *testing.B) {
-		for b.Loop() {
-			c := &pendingChunk{start: batches * (chunks - 1) / chunks, end: batches}
-			if err := c.load(v2core.PendingBatches(pending)); err != nil {
+			if _, err := indexedPending(pending, want); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 }
 
-// Bucket collisions now deliberately reach selectPending's exact-name check;
-// they must neither add another metric nor duplicate matching applications.
-func TestPendingIndexBucketCollision(t *testing.T) {
+// Duplicate request names must select each cold application once, in arrival
+// order, even when another metric shares the old hash bucket.
+func TestPendingSelectionDeduplicatesNames(t *testing.T) {
 	const first = "bucket.metric.0"
 	var second string
 	for i := 1; ; i++ {
@@ -371,10 +347,8 @@ func TestPendingIndexBucketCollision(t *testing.T) {
 		{ID: 2, Order: 2, Policy: testPolicy(t, second)},
 		{ID: 1, Order: 3, Policy: testPolicy(t, first)},
 	}
-	view := v2core.PendingBatches(pending)
-	index := nextPendingIndex(nil, v2core.PendingView{}, view)
-	got, err := selectPending(context.Background(), index, view, []string{first, first})
+	got, err := selectPending(context.Background(), nil, v2core.PendingBatches(pending), []string{first, first})
 	if err != nil || len(got) != 2 || got[0].Order != 1 || got[1].Order != 3 {
-		t.Fatalf("bucket collision changed selection: %+v, %v", got, err)
+		t.Fatalf("duplicate names changed selection: %+v, %v", got, err)
 	}
 }
