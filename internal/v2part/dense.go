@@ -21,6 +21,37 @@ const MaxDenseSlots = 4096
 
 var denseMagic = []byte{'G', 'C', 'D', 1}
 
+// Run mode bits. An aligned run stores slots only: every timestamp is
+// ts0 + (slot - slot0) * step, so the header carries ts0 and step instead of a
+// timestamp column. Ring wrap, unaligned and single-slot runs keep the
+// delta-of-delta timestamp column.
+const (
+	denseInteger = 1 << 0
+	denseAligned = 1 << 1
+)
+
+// alignedStep returns the run's slot step in seconds, or 0 if any timestamp
+// is not ts0 + (slot - slot0) * step. Callers have validated strictly
+// increasing slots and timestamps in (0, MaxUint32].
+func alignedStep(records []sealrollup.Record) int64 {
+	if len(records) < 2 {
+		return 0
+	}
+	t0, s0 := records[0].Sample.Time, records[0].Slot
+	dt, ds := records[1].Sample.Time-t0, records[1].Slot-s0
+	if dt <= 0 || dt%ds != 0 {
+		return 0
+	}
+	step := dt / ds
+	for _, r := range records[2:] {
+		ds := r.Slot - s0
+		if ds > (math.MaxUint32-t0)/step || r.Sample.Time != t0+ds*step {
+			return 0
+		}
+	}
+	return step
+}
+
 // EncodeSlots preserves every occupied slot, timestamp, value bit, replacement
 // order and correction flag. Missing slots cost only a delta, never padding.
 // Runs are bounded and strictly increasing in physical slot, including across
@@ -50,7 +81,11 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 	out = append(out, denseMagic...)
 	mode := byte(0)
 	if integer {
-		mode = 1
+		mode = denseInteger
+	}
+	step := alignedStep(records)
+	if step != 0 {
+		mode |= denseAligned
 	}
 	out = append(out, mode)
 	out = binary.AppendUvarint(out, uint64(len(records)))
@@ -60,11 +95,16 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 		out = binary.AppendUvarint(out, uint64(r.Slot-slot))
 		slot = r.Slot
 	}
-	for _, r := range records {
-		delta := r.Sample.Time - ts
-		out = binary.AppendVarint(out, delta-dt)
-		ts = r.Sample.Time
-		dt = delta
+	if step != 0 {
+		out = binary.AppendUvarint(out, uint64(records[0].Sample.Time))
+		out = binary.AppendUvarint(out, uint64(step))
+	} else {
+		for _, r := range records {
+			delta := r.Sample.Time - ts
+			out = binary.AppendVarint(out, delta-dt)
+			ts = r.Sample.Time
+			dt = delta
+		}
 	}
 	for _, r := range records {
 		out = binary.AppendUvarint(out, r.Order^order)
@@ -111,10 +151,11 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		return append(dst[:0], r), nil
 	}
 	bad := errors.New("invalid dense archive run")
-	if len(data) < 6 || data[4] > 1 || archive == MetadataArchive || firstSlot < 0 {
+	if len(data) < 6 || data[4] > denseInteger|denseAligned || archive == MetadataArchive || firstSlot < 0 {
 		return nil, bad
 	}
-	integer := data[4] == 1
+	integer := data[4]&denseInteger != 0
+	aligned := data[4]&denseAligned != 0
 	p := data[5:]
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(p)
@@ -148,25 +189,40 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	if rs[0].Slot != firstSlot {
 		return nil, bad
 	}
-	var ts, dt int64
-	for i := range rs {
-		v, n := binary.Varint(p)
-		if n <= 0 {
+	if aligned {
+		t0, ok0 := take()
+		step, ok1 := take()
+		if !ok0 || !ok1 || len(rs) < 2 || t0 == 0 || t0 > math.MaxUint32 || step == 0 || step > math.MaxUint32 {
 			return nil, bad
 		}
-		p = p[n:]
-		if (v > 0 && dt > math.MaxInt64-v) || (v < 0 && dt < math.MinInt64-v) {
+		// The last slot bounds every offset; slots strictly increase.
+		if uint64(rs[len(rs)-1].Slot-firstSlot) > (math.MaxUint32-t0)/step {
 			return nil, bad
 		}
-		dt += v
-		if dt < -math.MaxUint32 || dt > math.MaxUint32 {
-			return nil, bad
+		for i := range rs {
+			rs[i].Sample.Time = int64(t0) + (rs[i].Slot-firstSlot)*int64(step)
 		}
-		ts += dt
-		if ts <= 0 || ts > math.MaxUint32 {
-			return nil, bad
+	} else {
+		var ts, dt int64
+		for i := range rs {
+			v, n := binary.Varint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			p = p[n:]
+			if (v > 0 && dt > math.MaxInt64-v) || (v < 0 && dt < math.MinInt64-v) {
+				return nil, bad
+			}
+			dt += v
+			if dt < -math.MaxUint32 || dt > math.MaxUint32 {
+				return nil, bad
+			}
+			ts += dt
+			if ts <= 0 || ts > math.MaxUint32 {
+				return nil, bad
+			}
+			rs[i].Sample.Time = ts
 		}
-		rs[i].Sample.Time = ts
 	}
 	var order uint64
 	for i := range rs {
