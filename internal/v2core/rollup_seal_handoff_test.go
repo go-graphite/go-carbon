@@ -37,6 +37,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 			r.parallelism = lanes
 			expired := map[v2part.ID]bool{}
 			r.expire = func(p RollupPolicy, _ RollupMetadata, _ time.Time) bool { return expired[p.Name] }
+			r.setExpiryTTL(expiryWindow(time.Second)) // plans run an hour after writes
 			names := 500 + rng.Intn(400)
 			type metricSpec struct {
 				name   v2part.ID

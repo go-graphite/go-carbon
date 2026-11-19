@@ -66,11 +66,11 @@ func touchedRanges(archives []sealrollup.Archive, batches []sealrollup.Batch, fr
 // rangeBase reads only the touched slots of one name. Physical winners resolve
 // per slot, so each slot equals the full-history read. HasArchive falls back to
 // the stored archive for its whole-archive question.
-func (s *sealedData) rangeBase(ctx context.Context, m *metricState, ranges [][]SlotRange) (*resolvedSource, error) {
+func (s *generation) rangeBase(ctx context.Context, m *metricState, ranges [][]SlotRange) (*resolvedSource, error) {
 	var records []sealrollup.Record
 	for archive, rs := range ranges {
 		for _, r := range rs {
-			err := s.index.ScanArchive(ctx, m.name, archive, r.From, r.Until, func(record sealrollup.Record) error {
+			err := s.sealed.ScanArchive(ctx, m.name, archive, r.From, r.Until, func(record sealrollup.Record) error {
 				records = append(records, record)
 				return nil
 			})
@@ -82,7 +82,7 @@ func (s *sealedData) rangeBase(ctx context.Context, m *metricState, ranges [][]S
 	source := newResolvedSource(m.meta.ID, m.policy.Config.Archives, records)
 	source.stored = func(ctx context.Context, archive int) (bool, error) {
 		found := errors.New("archive found")
-		err := s.index.ScanArchive(ctx, m.name, archive, 0, m.policy.Config.Archives[archive].Count, func(sealrollup.Record) error { return found })
+		err := s.sealed.ScanArchive(ctx, m.name, archive, 0, m.policy.Config.Archives[archive].Count, func(sealrollup.Record) error { return found })
 		if err == found {
 			return true, nil
 		}

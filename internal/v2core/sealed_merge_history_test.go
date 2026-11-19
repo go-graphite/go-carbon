@@ -50,7 +50,7 @@ func TestSealedMergeHistoryDifferential(t *testing.T) {
 					for _, e := range engines {
 						s := e.owners[0].db.NewSnapshot()
 						defer s.Close()
-						index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+						index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -152,7 +152,7 @@ func TestSealedMergeSparseMetadata(t *testing.T) {
 	read := func() map[string][]sealrollup.Record {
 		s := e.owners[0].db.NewSnapshot()
 		defer s.Close()
-		index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+		index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
