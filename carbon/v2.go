@@ -241,6 +241,18 @@ func (app *App) startV2() error {
 	if v.quotas != nil {
 		chunk = 0
 	}
+	var nameBase v2core.PolicyNameSource
+	bindNames := func() error {
+		base := v.catalog.Snapshot().MappedNames()
+		if base == nil || base == nameBase {
+			return nil
+		}
+		if err := r.Identities.BindMappedNames(base); err != nil {
+			return err
+		}
+		nameBase = base
+		return nil
+	}
 	var moreQueued bool
 	refreshOnce := func() (refreshErr error) {
 		var quotaFence uint64
@@ -269,7 +281,7 @@ func (app *App) startV2() error {
 				return err
 			}
 			initialized = true
-			return nil
+			return bindNames()
 		}
 		var add []string
 		var stamps []v2NameStamp
@@ -307,7 +319,7 @@ func (app *App) startV2() error {
 		}
 		next := v.catalog.Snapshot()
 		catalogTelemetry.published(start, add, stamps, next.Levels(), next.Len())
-		return nil
+		return bindNames()
 	}
 	refresh := func() error {
 		for {

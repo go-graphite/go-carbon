@@ -1131,14 +1131,15 @@ func compareRollupIdentity(a, b *rollupMetric) int {
 	if c := bytes.Compare([]byte(a.policy.Group), []byte(b.policy.Group)); c != 0 {
 		return c
 	}
-	if c := int(partsformat.Route(a.policy.Name)) - int(partsformat.Route(b.policy.Name)); c != 0 {
+	an, bn := a.metricName(), b.metricName()
+	if c := int(partsformat.Route(an)) - int(partsformat.Route(bn)); c != 0 {
 		return c
 	}
-	if len(a.policy.Name) < len(b.policy.Name) {
+	if len(an) < len(bn) {
 		return -1
 	}
-	if len(a.policy.Name) > len(b.policy.Name) {
+	if len(an) > len(bn) {
 		return 1
 	}
-	return bytes.Compare([]byte(a.policy.Name), []byte(b.policy.Name))
+	return bytes.Compare([]byte(an), []byte(bn))
 }

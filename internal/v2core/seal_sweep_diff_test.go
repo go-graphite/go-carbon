@@ -395,7 +395,7 @@ func sealSweepState(r *coreRollups) sealSweepPlannerState {
 		st.Meta = append(st.Meta, r.metadataOf(id, r.metrics[id]))
 	}
 	for _, m := range r.dense {
-		st.Dense = append(st.Dense, m.policy.Name)
+		st.Dense = append(st.Dense, m.metricName())
 	}
 	st.Unranked = len(r.unranked)
 	return st

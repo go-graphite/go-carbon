@@ -123,6 +123,11 @@ func TestStoreNameScale(t *testing.T) {
 	if err := catalog.Publish(1, names); err != nil {
 		t.Fatal(err)
 	}
+	if source := catalog.Snapshot().MappedNames(); source != nil {
+		if err := r.Identities.BindMappedNames(source); err != nil {
+			t.Fatal(err)
+		}
+	}
 	names = nil
 	elapsed := time.Since(start)
 	// Persist readiness in the test log even if the profiling GC times out.

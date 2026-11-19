@@ -734,7 +734,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		if h == nil {
 			return 0, errors.New("rollup row requires original application policy")
 		}
-		return int(partsformat.Route(h.policy.Name)) % e.cfg.Shards, nil
+		return int(partsformat.Route(h.metricName())) % e.cfg.Shards, nil
 	}
 	// A registered batch borrows the shared catalog identity. Do not repeat
 	// contended catalog lookups or name hashing for every admitted point.

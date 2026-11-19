@@ -222,7 +222,7 @@ func (r *rollupHistoryReader) load(m *rollupMetric, meta metricMetadata, a int, 
 	}
 	scan := func(first, last int64) error {
 		if r.copied != nil {
-			return r.copied.ScanArchive(context.Background(), string(m.policy.Name), a, first, last, emit)
+			return r.copied.ScanArchive(context.Background(), string(m.metricName()), a, first, last, emit)
 		}
 		scope, err := v2part.PartitionPrefixForGroup(m.policy.Group, m.vshard, 0)
 		if err != nil {
@@ -253,7 +253,7 @@ func (r *rollupHistoryReader) load(m *rollupMetric, meta metricMetadata, a int, 
 				r.opened.MoveToFront(part.age)
 			}
 			it := part.iterator
-			key := v2part.Key{Group: m.policy.Group, VShard: m.vshard, Partition: part.descriptor.Scope.Partition, Part: part.descriptor.Scope.Part, Metric: m.policy.Name, Archive: uint32(a), BlockStart: first}
+			key := v2part.Key{Group: m.policy.Group, VShard: m.vshard, Partition: part.descriptor.Scope.Partition, Part: part.descriptor.Scope.Part, Metric: m.metricName(), Archive: uint32(a), BlockStart: first}
 			lower, err := v2part.Encode(key)
 			if err != nil {
 				return err

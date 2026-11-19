@@ -12,7 +12,8 @@ import (
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// PolicyIdentity owns an immutable name and borrows one shared schema/key prefix.
+// PolicyIdentity resolves its immutable name through its catalog epoch and
+// borrows one shared schema/key prefix. Detached handles retain a local name.
 // Journal and part boundaries reconstruct the original canonical definition.
 type PolicyIdentity struct {
 	catalog *PolicyCatalog
@@ -41,13 +42,19 @@ type policyDefinition struct {
 	prepared *sealrollup.Prepared
 	Group    partsformat.Group
 }
-type policyIDPage [1024]atomic.Pointer[PolicyIdentity]
+type policyIDPage struct {
+	handles [1024]atomic.Pointer[PolicyIdentity]
+	names   atomic.Pointer[policyNamePage]
+}
 
-// PolicyCatalog is scoped to one journal epoch. Published pages and handles are
-// immutable; reads take no construction mutex, including during page growth.
+// PolicyCatalog is scoped to one journal epoch. Handles and name bindings are
+// immutable; page pointers publish new bindings atomically. Reads take no
+// construction mutex, including during page growth.
 type PolicyCatalog struct {
-	ids         sync.Map // page number -> *policyIDPage, not one map node per name
-	definitions sync.Map // canonical suffix -> *policyDefinition
+	nameTail    sync.Map   // uint64 -> string; names not yet in a mapped base
+	namesMu     sync.Mutex // serializes base rebinding
+	ids         sync.Map   // page number -> *policyIDPage, not one map node per name
+	definitions sync.Map   // canonical suffix -> *policyDefinition
 	shards      [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
 }
 type policyCatalogShard struct {
@@ -69,21 +76,22 @@ func (h *PolicyIdentity) fingerprint() namefp.Fingerprint {
 }
 
 // Name returns the immutable registered metric name without encoding its policy.
-func (h *PolicyIdentity) Name() string { return string(h.policy.Name) }
+func (h *PolicyIdentity) Name() string { return string(h.metricName()) }
 
 // definitionBytes reconstructs the unchanged canonical journal/part encoding.
 // Ordinary routing and registered application lookup need only the handle.
 func (h *PolicyIdentity) definitionBytes() []byte {
-	return h.appendDefinition(make([]byte, 0, len(h.policy.Name)+len(h.policy.suffix)+16))
+	return h.appendDefinition(make([]byte, 0, len(h.metricName())+len(h.policy.suffix)+16))
 }
 
 // appendDefinition writes the canonical definition directly into an owner arena.
 func (h *PolicyIdentity) appendDefinition(out []byte) []byte {
+	nameBytes := h.metricName()
 	out = append(out, `{"Name":"`...)
 	if h.plain {
-		out = append(out, h.policy.Name...)
+		out = append(out, nameBytes...)
 	} else {
-		name, _ := json.Marshal(string(h.policy.Name))
+		name, _ := json.Marshal(string(nameBytes))
 		out = append(out, name[1:len(name)-1]...)
 	}
 	return append(out, h.policy.suffix...)
@@ -93,8 +101,9 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 		return bytes.Equal(h.definitionBytes(), raw)
 	}
 	const prefix = `{"Name":"`
-	n := len(prefix) + len(h.policy.Name)
-	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && string(raw[len(prefix):n]) == string(h.policy.Name) && bytes.Equal(raw[n:], h.policy.suffix)
+	name := h.metricName()
+	n := len(prefix) + len(name)
+	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && string(raw[len(prefix):n]) == string(name) && bytes.Equal(raw[n:], h.policy.suffix)
 }
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
@@ -103,7 +112,7 @@ func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
-	if (name != "" && string(old.policy.Name) != name) || !old.definitionEqual(definition) {
+	if (name != "" && string(old.metricName()) != name) || !old.definitionEqual(definition) {
 		return nil, errors.New("stored rollup policy changed")
 	}
 	return old, nil
@@ -115,11 +124,16 @@ func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
 	if page == nil {
 		page, _ = c.ids.LoadOrStore(pageID, &policyIDPage{})
 	}
-	slot := &page.(*policyIDPage)[h.id&1023]
+	slot := &page.(*policyIDPage).handles[h.id&1023]
+	name := string(h.policy.Name)
+	if prior, loaded := c.nameTail.LoadOrStore(h.id, name); loaded && prior.(string) != name {
+		return nil, errors.New("stored rollup policy changed")
+	}
+	h.policy.Name = ""
 	if slot.CompareAndSwap(nil, h) {
 		return h, nil
 	}
-	return policyIdentityMatches(slot.Load(), string(h.policy.Name), h.definitionBytes())
+	return policyIdentityMatches(slot.Load(), name, h.definitionBytes())
 }
 
 func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -215,7 +229,7 @@ func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
 	if page == nil {
 		return nil
 	}
-	return page.(*policyIDPage)[id&1023].Load()
+	return page.(*policyIDPage).handles[id&1023].Load()
 }
 
 // ApplicationPolicy resolves an ID in this engine's immutable catalog epoch.
@@ -283,7 +297,7 @@ type policyName struct {
 
 func (h *PolicyIdentity) schema() sealrollup.Config { return h.policy.prepared.Config() }
 func (h *PolicyIdentity) rollupPolicy() RollupPolicy {
-	return RollupPolicy{Name: h.policy.Name, Group: h.policy.Group, Config: h.schema()}
+	return RollupPolicy{Name: h.metricName(), Group: h.policy.Group, Config: h.schema()}
 }
 
 // Only plain ASCII names take the suffix fast path. JSON escaping, UTF-8

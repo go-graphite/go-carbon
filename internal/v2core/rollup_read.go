@@ -304,7 +304,7 @@ func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
 	if parts, ok := s.partOverrides[m]; ok {
 		return parts
 	}
-	name := string(m.latest.policy.Name)
+	name := string(m.latest.metricName())
 	scoped := s.routes[partRoute{m.latest.policy.Group, m.latest.vshard}]
 	out := make([]*readPartMetric, 0, len(scoped))
 	for _, p := range scoped {
@@ -516,7 +516,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	scan := func(it archiveCursor, part *readPartMetric) error {
 		if part.meta.Frontier.Order == 0 {
 			key := part.part.key
-			key.Metric = m.latest.policy.Name
+			key.Metric = m.latest.metricName()
 			key.Archive = v2part.MetadataArchive
 			key.BlockStart = 0
 			key.Ordinal = 0
@@ -539,7 +539,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			return nil
 		}
 		key := part.part.key
-		key.Metric = part.policy.Name
+		key.Metric = part.metricName()
 		key.Archive = uint32(archive)
 		key.BlockStart = first
 		lower, err := v2part.Encode(key)
