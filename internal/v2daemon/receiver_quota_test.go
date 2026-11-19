@@ -25,10 +25,10 @@ func TestApplicationReceiverQuotaAndPolicyCache(t *testing.T) {
 		resolves[name]++
 		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "local", Config: sealrollup.Config{Method: sealrollup.Average, Archives: []sealrollup.Archive{{Step: 1, Count: 60}}}})
 	}, throttle: func(p *points.Points, _ bool) bool { return p.Metric == "blocked" }}
-	if err = owner.Append([]string{"accepted", "blocked", "accepted"}, []points.Point{{Timestamp: 100, Value: 1}, {Timestamp: 100, Value: 9}, {Timestamp: 101, Value: 2}}, nil, 102); err != nil {
+	if err = owner.Append([]string{"accepted", "blocked", "accepted"}, nil, []points.Point{{Timestamp: 100, Value: 1}, {Timestamp: 100, Value: 9}, {Timestamp: 101, Value: 2}}, nil, 102); err != nil {
 		t.Fatal(err)
 	}
-	if err = owner.Append([]string{"accepted"}, []points.Point{{Timestamp: 102, Value: 3}}, nil, 103); err != nil {
+	if err = owner.Append([]string{"accepted"}, nil, []points.Point{{Timestamp: 102, Value: 3}}, nil, 103); err != nil {
 		t.Fatal(err)
 	}
 	if s.Producers[0].applyOrder != 3 {

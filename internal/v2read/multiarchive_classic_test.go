@@ -1,7 +1,6 @@
 package v2read
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -309,48 +308,35 @@ func TestClassicArchiveBoundaries(t *testing.T) {
 						for k, p := range state {
 							records = append(records, Record{ID: 7, Step: c.Archives[k.archive].Step, Sample: Sample{Time: p.Time, Bits: p.Bits, Sequence: uint64(bi + 2)}})
 						}
-						var pub Publication
-						pub.Publish(View{Catalog: testCatalog(archives), Parts: []Source{Freeze(records)}})
-						func() {
-							defer pub.Close()
-							for _, a := range archives {
-								edge := now - a.Step*a.Points
-								for _, delta := range []int64{-1, 0, 1} {
-									from := edge + delta
-									until := from + 2*a.Step + 1
-									want, err := w.Fetch(int(from), int(until))
-									if err != nil {
-										t.Fatal(err)
+						source := Freeze(records)
+						for _, a := range archives {
+							edge := now - a.Step*a.Points
+							for _, delta := range []int64{-1, 0, 1} {
+								from := edge + delta
+								until := from + 2*a.Step + 1
+								want, err := w.Fetch(int(from), int(until))
+								if err != nil {
+									t.Fatal(err)
+								}
+								got, err := testRender(t, source, archives, from, until, now, 1<<20)
+								if err != nil {
+									t.Fatal(err)
+								}
+								if (got == nil) != (want == nil) {
+									t.Fatalf("range [%d,%d] nil mismatch", from, until)
+								}
+								if got != nil {
+									if got.From != int64(want.FromTime()) || got.Until != int64(want.UntilTime()) || got.Step != int64(want.Step()) || len(got.Values) != len(want.Values()) {
+										t.Fatalf("range [%d,%d] shape got(%d,%d,%d,%d) want(%d,%d,%d,%d)", from, until, got.From, got.Until, got.Step, len(got.Values), want.FromTime(), want.UntilTime(), want.Step(), len(want.Values()))
 									}
-									h, err := pub.Pin(NewBudget(1<<20), 1<<20)
-									if err != nil {
-										t.Fatal(err)
-									}
-									got, err := h.Render(context.Background(), "sample", from, until, now)
-									if err != nil {
-										h.Close()
-										t.Fatal(err)
-									}
-									if (got == nil) != (want == nil) {
-										h.Close()
-										t.Fatalf("range [%d,%d] nil mismatch", from, until)
-									}
-									if got != nil {
-										if got.From != int64(want.FromTime()) || got.Until != int64(want.UntilTime()) || got.Step != int64(want.Step()) || len(got.Values) != len(want.Values()) {
-											h.Close()
-											t.Fatalf("range [%d,%d] shape got(%d,%d,%d,%d) want(%d,%d,%d,%d)", from, until, got.From, got.Until, got.Step, len(got.Values), want.FromTime(), want.UntilTime(), want.Step(), len(want.Values()))
-										}
-										for i, v := range want.Values() {
-											if math.Float64bits(got.Values[i]) != math.Float64bits(v) {
-												h.Close()
-												t.Fatalf("range [%d,%d] slot%d got%016x want%016x", from, until, i, math.Float64bits(got.Values[i]), math.Float64bits(v))
-											}
+									for i, v := range want.Values() {
+										if math.Float64bits(got.Values[i]) != math.Float64bits(v) {
+											t.Fatalf("range [%d,%d] slot%d got%016x want%016x", from, until, i, math.Float64bits(got.Values[i]), math.Float64bits(v))
 										}
 									}
-									h.Close()
 								}
 							}
-						}()
+						}
 					}
 				})
 			}
