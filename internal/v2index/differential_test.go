@@ -21,8 +21,10 @@ func TestFrontCodedMatchesOldIndex(t *testing.T) {
 		}
 		return out
 	}
-	for seed := int64(1); seed <= 12; seed++ {
+	for seed := int64(1); seed <= 24; seed++ {
 		rng := rand.New(rand.NewSource(seed))
+		// Even seeds keep the base in a file and reopen it after each install.
+		file := seed%2 == 0
 		name := func() string {
 			// Long shared prefixes and short tails exercise front coding.
 			parts := make([]string, 1+rng.Intn(5))
@@ -33,6 +35,12 @@ func TestFrontCodedMatchesOldIndex(t *testing.T) {
 		}
 		var nc Catalog
 		var oc oldCatalog
+		if file {
+			if err := nc.SetDir(t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Cleanup(nc.Close)
 		for revision := uint64(1); revision <= 120; revision++ {
 			var add, remove []string
 			for range rng.Intn(1 + rng.Intn(200)) {
@@ -59,14 +67,30 @@ func TestFrontCodedMatchesOldIndex(t *testing.T) {
 			if (nerr == nil) != (oerr == nil) {
 				t.Fatalf("seed %d rev %d: errors differ: %v vs %v", seed, revision, nerr, oerr)
 			}
+			settled := rng.Intn(3) == 0
+			if settled {
+				nc.settle()
+			}
 			ns, os := nc.Snapshot(), oc.Snapshot()
+			if file && len(ns.levels) > 0 && ns.levels[0].path != "" {
+				reopened, err := openRun(ns.levels[0].path)
+				if err != nil {
+					t.Fatalf("seed %d rev %d: reopen: %v", seed, revision, err)
+				}
+				base := &level{run: reopened, dead: ns.levels[0].dead}
+				if !slices.Equal(levelNames(base), levelNames(ns.levels[0])) {
+					t.Fatalf("seed %d rev %d: reopened base differs", seed, revision)
+				}
+			} else if file && settled && len(ns.levels) > 0 && nc.Err() == nil {
+				t.Fatalf("seed %d rev %d: base is not file-backed", seed, revision)
+			}
 			want := slices.Collect(os.Names())
 			if ns.Len() != os.Len() || ns.Revision() != os.Revision() || !slices.Equal(slices.Collect(ns.Names()), want) || !ns.EqualNames(want) {
 				t.Fatalf("seed %d rev %d: names differ", seed, revision)
 			}
 			for li, l := range ns.levels {
-				names := levelNames(l)
-				for range 4 {
+				names := levelNames(&level{run: l.run}) // positions include removed names
+				for range min(4, len(names)) {
 					if i := rng.Intn(len(names)); string(l.at(i, nil)) != names[i] {
 						t.Fatalf("seed %d rev %d: level %d at(%d) differs", seed, revision, li, i)
 					}
