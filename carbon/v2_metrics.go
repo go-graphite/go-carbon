@@ -28,7 +28,6 @@ var v2Descs = struct {
 	ingest, committed, buffered, dispatch, seals, sealTime, sealLag                   *prometheus.Desc
 	durableSeals, sealNames, sealPoints                                               *prometheus.Desc
 	parts, debt, compacted, obsolete, live, dual, reads, names, rollupLag, readStages *prometheus.Desc
-	baseErrors, baseHeap                                                              *prometheus.Desc
 }{
 	ingest:       prometheus.NewDesc("v2_ingest_points_total", "Points accepted by the v2 TCP receiver; use rate() for points per second.", nil, nil),
 	committed:    prometheus.NewDesc("v2_committed_points_total", "Points durably sealed by this v2 process, including journal replay.", nil, nil),
@@ -50,8 +49,11 @@ var v2Descs = struct {
 	readStages:   prometheus.NewDesc("v2_read_stage_duration_seconds", "Render request stage wall time; per-owner stages are observed once per owner call.", []string{"stage"}, nil),
 	reads:        prometheus.NewDesc("v2_read_duration_seconds", "FetchMany wall time including errors, cancellation and consumer callbacks.", nil, nil),
 	names:        prometheus.NewDesc("v2_catalog_names", "Names in the latest immutable discovery view, including classic union names.", nil, nil),
-	baseErrors:   prometheus.NewDesc("v2_catalog_base_file_errors_total", "Failed writes of the discovery index base file; the base stays on the heap until a write succeeds.", nil, nil),
-	baseHeap:     prometheus.NewDesc("v2_catalog_base_heap_bytes", "Bytes of the discovery index base held on the heap because its file write failed.", nil, nil),
+}
+
+var v2CatalogDescs = struct{ baseErrors, baseHeap *prometheus.Desc }{
+	prometheus.NewDesc("v2_catalog_base_file_errors_total", "Failed writes of the discovery index base file; the base stays on the heap until a write succeeds.", nil, nil),
+	prometheus.NewDesc("v2_catalog_base_heap_bytes", "Bytes of the discovery index base held on the heap because its file write failed.", nil, nil),
 }
 
 // Stat reports base file failures to the stats collector.
@@ -65,10 +67,10 @@ func (*v2Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- v2MoveDesc
 	ch <- v2MoveOwnerDesc
 	ch <- v2MoveRegressionDesc
-	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked, v2MergeDescs.live, v2MergeDescs.pressure, v2MergeDescs.runs} {
+	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked, v2MergeDescs.live, v2MergeDescs.pressure, v2MergeDescs.runs, v2CatalogDescs.baseErrors, v2CatalogDescs.baseHeap} {
 		ch <- d
 	}
-	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.durableSeals, v2Descs.sealNames, v2Descs.sealPoints, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.readStages, v2Descs.names, v2Descs.rollupLag, v2Descs.baseErrors, v2Descs.baseHeap} {
+	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.durableSeals, v2Descs.sealNames, v2Descs.sealPoints, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.readStages, v2Descs.names, v2Descs.rollupLag} {
 		ch <- d
 	}
 }
@@ -118,8 +120,8 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	emit(v2Descs.dual, prometheus.GaugeValue, 0)
 	emit(v2Descs.names, prometheus.GaugeValue, float64(v.catalog.Catalog.Snapshot().Len()))
 	failures, heap := v.catalog.BaseFileStats()
-	emit(v2Descs.baseErrors, prometheus.CounterValue, float64(failures))
-	emit(v2Descs.baseHeap, prometheus.GaugeValue, float64(heap))
+	emit(v2CatalogDescs.baseErrors, prometheus.CounterValue, float64(failures))
+	emit(v2CatalogDescs.baseHeap, prometheus.GaugeValue, float64(heap))
 	for level, count := range s.Parts {
 		ch <- prometheus.MustNewConstMetric(v2Descs.parts, prometheus.GaugeValue, float64(count), strconv.Itoa(level))
 	}
