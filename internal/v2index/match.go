@@ -31,19 +31,20 @@ func (s *Snapshot) VisitPaths(ctx context.Context, glob string, yield func(strin
 	prefix := strings.ReplaceAll(literal, "/", ".")
 	depth := strings.Count(glob, "/") + 1
 	c := s.seek(prefix)
+	var path strings.Builder
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		name, level := c.peek()
-		if level < 0 || !strings.HasPrefix(name, prefix) {
+		if level < 0 || len(name) < len(prefix) || string(name[:len(prefix)]) != prefix {
 			break
 		}
-		c.pos[level]++
-		path := strings.ReplaceAll(name, ".", "/") + ".wsp"
+		// Path separators are exactly the name's dots, so the directory at
+		// this depth ends at the depth-th dot.
 		cut, seen := -1, 0
-		for j := range path {
-			if path[j] == '/' {
+		for j, b := range name {
+			if b == '.' {
 				seen++
 				if seen == depth {
 					cut = j
@@ -51,13 +52,29 @@ func (s *Snapshot) VisitPaths(ctx context.Context, glob string, yield func(strin
 				}
 			}
 		}
+		end := name
 		if cut >= 0 {
-			path = path[:cut]
-			// Every descendant of this directory produces the same candidate path.
-			directory := strings.ReplaceAll(path, "/", ".") + "."
-			c.skipTo(directory[:len(directory)-1] + "/") // '.' + 1, exclusive prefix end
+			end = name[:cut]
 		}
-		if err := yield("/" + path); err != nil {
+		path.Reset()
+		path.Grow(len(end) + 5)
+		path.WriteByte('/')
+		for _, b := range end {
+			if b == '.' {
+				b = '/'
+			}
+			path.WriteByte(b)
+		}
+		if cut < 0 {
+			path.WriteString(".wsp")
+			c.advance(level)
+		} else {
+			// Every descendant of this directory produces the same candidate path.
+			directory := string(end) + "/" // '.' + 1, exclusive prefix end
+			c.advance(level)
+			c.skipTo(directory)
+		}
+		if err := yield(path.String()); err != nil {
 			return err
 		}
 	}
