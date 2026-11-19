@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"runtime/metrics"
 	"strconv"
 	"testing"
 	"time"
@@ -88,9 +89,15 @@ func TestDiscoverRestartTiming(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	// Allocation and GC CPU of discovery alone, the costs that scale with names.
+	sample := []metrics.Sample{{Name: "/gc/heap/allocs:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}}
+	metrics.Read(sample)
+	alloc0, gc0 := sample[0].Value.Uint64(), sample[1].Value.Float64()
 	start = time.Now()
 	names, masks, err := r.NamesWithMasks(context.Background())
 	took := time.Since(start)
+	metrics.Read(sample)
+	allocPerName, gcCPU := (sample[0].Value.Uint64()-alloc0)/uint64(max(n, 1)), sample[1].Value.Float64()-gc0
 	if err != nil || len(names) != n {
 		t.Fatalf("names=%d err=%v", len(names), err)
 	}
@@ -98,7 +105,7 @@ func TestDiscoverRestartTiming(t *testing.T) {
 	for _, name := range names {
 		fmt.Fprintf(h, "%s %v\n", name, masks[name])
 	}
-	t.Logf("DISCOVER names=%d seals=%d owners=%d open=%s discover=%s digest=%x", n, seals, owners, opened.Round(time.Millisecond), took.Round(time.Millisecond), h.Sum(nil)[:6])
+	t.Logf("DISCOVER names=%d seals=%d owners=%d open=%s discover=%s alloc=%dB/name gc_cpu=%.2fs digest=%x", n, seals, owners, opened.Round(time.Millisecond), took.Round(time.Millisecond), allocPerName, gcCPU, h.Sum(nil)[:6])
 }
 
 func btoi(b bool) int {

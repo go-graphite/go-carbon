@@ -344,14 +344,22 @@ func (c *Catalog) Err() error {
 	return nil
 }
 
-func namesCopy(names []string) ([]string, error) {
-	out := slices.Clone(names)
-	for _, name := range out {
+// sortedNames validates names once and returns them sorted and unique.
+// Sorted, unique input (the startup publication) is returned as is: no copy,
+// no sort. Callers must not modify the result.
+func sortedNames(names []string) ([]string, error) {
+	sorted := true
+	for i, name := range names {
 		// Slash/NUL and empty components do not have an unambiguous classic path.
 		if name == "" || strings.ContainsAny(name, "/\x00") || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
 			return nil, errors.New("v2 index: name has no classic metric path")
 		}
+		sorted = sorted && (i == 0 || names[i-1] < name)
 	}
+	if sorted {
+		return names, nil
+	}
+	out := slices.Clone(names)
 	slices.Sort(out)
 	return slices.Compact(out), nil
 }
@@ -364,7 +372,7 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
 	}
-	next, err := namesCopy(names)
+	next, err := sortedNames(names)
 	if err != nil {
 		return err
 	}
@@ -414,7 +422,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
 	}
-	additions, err := namesCopy(add)
+	additions, err := sortedNames(add)
 	if err != nil {
 		return err
 	}
@@ -451,7 +459,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		}
 		levels = append(levels, l)
 	}
-	fresh := additions[:0]
+	var fresh []string
 	for i, name := range additions {
 		if !drop[i] {
 			fresh = append(fresh, name)
@@ -505,11 +513,14 @@ func mergeDead(dead, kill, revive []uint32) []uint32 {
 // below floor (the base, and level 1 while the background merge reads it)
 // are never merged here. The input slice is private.
 func compact(ctx context.Context, levels []*level, floor int) ([]*level, error) {
-	for i := len(levels) - 1; i > floor; {
+	for i := len(levels) - 1; i >= floor; {
 		if levels[i].live() == 0 {
 			levels = slices.Delete(levels, i, i+1)
 			i = len(levels) - 1
 			continue
+		}
+		if i == floor {
+			break // keep the protected predecessor unchanged
 		}
 		if levels[i].n*levelFanout < levels[i-1].n {
 			i--

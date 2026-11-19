@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -734,6 +735,12 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 	id := string(scope)
 	part := &readPart{origin: partOrigin{Class: LivePart}, id: id, metrics: map[string]*readPartMetric{}}
 	end := v2part.PrefixEnd(scope)
+	// Per-row scratch, reused across the part: the metadata key and a slim
+	// row's definition only feed the seek and intern below.
+	var encoded, definition []byte
+	var metadataSuffix [16]byte // MetadataArchive, BlockStart 0, Ordinal 0
+	binary.BigEndian.PutUint32(metadataSuffix[:], v2part.MetadataArchive)
+	binary.BigEndian.PutUint64(metadataSuffix[4:], 1<<63)
 	for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -745,10 +752,10 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		key.Archive = v2part.MetadataArchive
 		key.BlockStart = 0
 		key.Ordinal = 0
-		encoded, err := v2part.Encode(key)
-		if err != nil {
-			return nil, err
-		}
+		// A decoded key re-encodes to itself; only the last 16 bytes (archive,
+		// physical slot, ordinal) differ in the metadata key.
+		raw := it.Key()
+		encoded = append(append(encoded[:0], raw[:len(raw)-len(metadataSuffix)]...), metadataSuffix[:]...)
 		// Most new metrics have one archive row immediately before metadata.
 		// One Next avoids rebuilding the merging iterator for that common case.
 		if !bytes.Equal(it.Key(), encoded) {
@@ -757,9 +764,12 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
 			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 		}
-		meta, decodeErr := decodeRollupMetadataView(key.Metric, key.Group, it.Value())
-		if decodeErr != nil {
-			err = decodeErr
+		meta, slim, err := decodeRollupMetadataHeader(it.Value())
+		if err == nil && slim {
+			definition, _, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
+			meta.Policy = definition
+		}
+		if err != nil {
 			return nil, err
 		}
 		h, err := identities.intern(meta.ID, string(key.Metric), meta.Policy)
