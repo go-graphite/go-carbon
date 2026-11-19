@@ -393,47 +393,15 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 	})
 	return out, nil
 }
-func aggregate(method Method, values []float64) float64 {
-	switch method {
-	case Average, Sum:
-		result := 0.0
-		for _, v := range values {
-			result += v
-		}
-		if method == Average {
-			result /= float64(len(values))
-		}
-		return result
-	case First:
-		return values[0]
-	case Last:
-		return values[len(values)-1]
-	case Min:
-		result := values[0]
-		for _, v := range values {
-			if v < result {
-				result = v
-			}
-		}
-		return result
-	case Max:
-		result := values[0]
-		for _, v := range values {
-			if v > result {
-				result = v
-			}
-		}
-		return result
-	}
-	panic("validated method")
-}
-
 func aggregateSamples(method Method, values []Sample) float64 {
 	switch method {
 	case Average, Sum:
 		result := 0.0
 		for _, v := range values {
 			result += math.Float64frombits(v.Bits)
+		}
+		if math.IsNaN(result) {
+			result = amd64SumNaN(values)
 		}
 		if method == Average {
 			result /= float64(len(values))
@@ -461,4 +429,24 @@ func aggregateSamples(method Method, values []Sample) float64 {
 		return result
 	}
 	panic("validated method")
+}
+
+// amd64SumNaN returns the NaN that classic whisper's sum stores on amd64, the
+// production architecture, so a NaN sum has the same bits on every
+// architecture. amd64 keeps the first NaN the accumulator holds: either the
+// first NaN input, made quiet, or the amd64 default NaN 0xfff8000000000000 from
+// an invalid +Inf + -Inf. arm64 differs in that default (0x7ff8000000000000)
+// and lets a later signaling NaN replace a quiet one.
+func amd64SumNaN(values []Sample) float64 {
+	acc := 0.0
+	for _, v := range values {
+		x := math.Float64frombits(v.Bits)
+		if math.IsNaN(x) {
+			return math.Float64frombits(v.Bits | 1<<51)
+		}
+		if acc += x; math.IsNaN(acc) {
+			break
+		}
+	}
+	return math.Float64frombits(0xfff8000000000000)
 }
