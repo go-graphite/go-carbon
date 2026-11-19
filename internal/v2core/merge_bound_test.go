@@ -77,7 +77,8 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	f := *o.frontier.Load()
 	f.ArchiveClock = 2000
 	o.frontier.Store(&f)
-	if mergeDrain(t, o) != 1 {
+	// Sixteen equal parts fold in four 4-way merges and one final merge.
+	if mergeDrain(t, o) != 5 || mergeCount(o) != 1 {
 		t.Fatal("did not merge")
 	}
 	s := o.db.NewSnapshot()

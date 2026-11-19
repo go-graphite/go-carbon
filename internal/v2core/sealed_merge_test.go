@@ -161,6 +161,8 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 		e := mergeFixtureIdle(t, root, func(stage string) {
 			if stage == phase {
 				_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+				// SIGKILL may land after Kill returns: never pass the boundary.
+				time.Sleep(time.Hour)
 			}
 		})
 		_, err := e.owners[0].mergeSealedParts(nil)
@@ -195,9 +197,10 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 			if !reflect.DeepEqual(mergeRead(t, s), want) {
 				t.Fatal("crash lost or changed slots")
 			}
+			// The child runs one merge of the first smallMergeRatio parts.
 			expected := sealedMergeFanIn
 			if phase == "merge-published" {
-				expected = 1
+				expected = sealedMergeFanIn - smallMergeRatio + 1
 			}
 			if got := mergeCount(e.owners[0]); got != expected {
 				t.Fatalf("live=%d want %d", got, expected)
