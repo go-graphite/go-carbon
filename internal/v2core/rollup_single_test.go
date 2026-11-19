@@ -59,7 +59,7 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 	closable := func() []int {
 		r := e.owners[0].rollups
 		filed := map[int]bool{}
-		for _, slots := range r.calendar {
+		for _, slots := range r.calendar.slots {
 			for _, slot := range slots {
 				filed[int(r.ids[slot])] = true
 			}
@@ -264,12 +264,7 @@ func TestClosureCalendarMatchesWalk(t *testing.T) {
 			now += int64(rng.Intn(25))
 		}
 		r.planNow = now
-		r.drained = r.drained[:0]
-		for end := range r.calendar {
-			if end <= now {
-				r.drained = append(r.drained, end)
-			}
-		}
+		r.drained = r.calendar.due(now, 0, r.drained[:0])
 		written := map[uint64]bool{}
 		for k := rng.Intn(40); k > 0; k-- {
 			written[uint64(1+rng.Intn(n))] = true
@@ -334,9 +329,7 @@ func TestClosureCalendarMatchesWalk(t *testing.T) {
 			}
 			commit(slot, next)
 		}
-		for _, end := range r.drained {
-			delete(r.calendar, end)
-		}
+		r.calendar.drop(now)
 		for _, c := range changes {
 			if c.mask != 0 {
 				r.file(c.slot, c.m, r.meta[c.slot], c.mask)

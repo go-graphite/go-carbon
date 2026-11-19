@@ -89,17 +89,8 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 		}
 		r.planNow, r.planClock = now.Unix(), now
 		r.reresolve(now)
-		r.drained, r.expDrained = r.drained[:0], r.expDrained[:0]
-		for end := range r.calendar {
-			if end <= r.planNow {
-				r.drained = append(r.drained, end)
-			}
-		}
-		for key := range r.expiries {
-			if key <= r.planNow {
-				r.expDrained = append(r.expDrained, key)
-			}
-		}
+		r.drained = r.calendar.due(r.planNow, 0, r.drained[:0])
+		r.expDrained = r.expiries.due(r.planNow, 0, r.expDrained[:0])
 		got := r.dueSlots(func(id uint64) bool { return written[id] }, nil)
 		if len(got) != len(want) {
 			t.Fatalf("round %d: calendar staged %d slots, walk %d", round, len(got), len(want))
@@ -138,9 +129,7 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 			next.Frontier.MaxTime = max(next.Frontier.MaxTime, now.Unix()-int64(rng.Intn(120)))
 			commit(slot, next)
 		}
-		for _, end := range r.drained {
-			delete(r.calendar, end)
-		}
+		r.calendar.drop(r.planNow)
 		r.commitExpiries()
 		for _, c := range changes {
 			if c.mask != 0 {
@@ -204,6 +193,42 @@ func BenchmarkExpirySelect(b *testing.B) {
 			for i := range b.N {
 				slot := uint32(i % names)
 				r.meta[slot].LastUpdate += int64(time.Second)
+				r.fileExpiry(slot)
+			}
+		})
+	}
+}
+
+// BenchmarkExpirySelectSpread is an idle pass with idle names' last writes
+// spread over 30 d (a 30 d window: distinct deadline seconds ≈ names), and
+// filing a name under a second nothing else holds.
+func BenchmarkExpirySelectSpread(b *testing.B) {
+	for _, names := range []int{200000, 1000000} {
+		t0 := int64(1794700800)
+		r := closureTestStore(b, names, t0+600)
+		rng := rand.New(rand.NewSource(1))
+		r.expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return true }
+		for i := range r.meta {
+			r.meta[i].LastUpdate = (t0 - rng.Int63n(30*86400-1000)) * int64(time.Second)
+		}
+		clk := time.Unix(t0, 0)
+		r.now = func() time.Time { return clk }
+		r.setExpiryTTL(expiryWindow(30 * 24 * time.Hour))
+		now := time.Unix(t0+300, 0)
+		b.Run("calendar/"+strconv.Itoa(names), func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				if r.closureDue(now.Unix()) || r.expiryDue(now) {
+					b.Fatal("due")
+				}
+			}
+			b.ReportMetric(float64(len(r.expiries.slots)), "keys")
+		})
+		b.Run("file-new/"+strconv.Itoa(names), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := range b.N {
+				slot := uint32(i % names)
+				r.expAt[slot], r.meta[slot].LastUpdate = 0, (t0+int64(i))*int64(time.Second)
 				r.fileExpiry(slot)
 			}
 		})

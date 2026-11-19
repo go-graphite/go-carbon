@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -91,7 +92,7 @@ type coreRollups struct {
 	ttl        []int64
 	expAt      []int64
 	ttlUntil   int64
-	expiries   map[int64][]uint32
+	expiries   calendar
 	expDrained []int64
 	expRefile  []uint32
 
@@ -104,7 +105,7 @@ type coreRollups struct {
 	// lists the ends this plan drained (deleted at commit); taken is the
 	// plan's bitset of slots staged from them, due those slots; planNow is the
 	// plan's clock.
-	calendar     map[int64][]uint32
+	calendar     calendar
 	drained      []int64
 	taken        []uint64
 	due          []uint32
@@ -164,7 +165,7 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, calendar: map[int64][]uint32{}, expiries: map[int64][]uint32{}, names: map[partsformat.ID]uint64{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, calendar: calendar{slots: map[int64][]uint32{}}, expiries: calendar{slots: map[int64][]uint32{}}, names: map[partsformat.ID]uint64{}}
 }
 
 // install is the only writer of metrics and files every open coarse window,
@@ -265,18 +266,15 @@ func (r *coreRollups) fileExpiry(slot uint32) {
 		return
 	}
 	r.expAt[slot] = key
-	r.expiries[key] = append(r.expiries[key], slot)
+	r.expiries.file(key, slot)
 }
 
 // expiryDue reports whether expire fires for a live entry due by now.
 func (r *coreRollups) expiryDue(now time.Time) bool {
 	r.reresolve(now)
-	ns, sec := now.UnixNano(), now.Unix()
-	for key, slots := range r.expiries {
-		if key > sec {
-			continue
-		}
-		for _, slot := range slots {
+	ns := now.UnixNano()
+	for _, key := range r.expiries.due(now.Unix(), 0, nil) {
+		for _, slot := range r.expiries.slots[key] {
 			if r.expAt[slot] == key && r.expiryOverdue(slot, ns) {
 				if m := r.slotMetric(slot); r.expire(m.rollupPolicy(), m.metadata(r.meta[slot]), now) {
 					return true
@@ -293,14 +291,14 @@ func (r *coreRollups) expiryDue(now time.Time) bool {
 func (r *coreRollups) commitExpiries() {
 	refile := r.expRefile[:0]
 	for _, key := range r.expDrained {
-		for _, slot := range r.expiries[key] {
+		for _, slot := range r.expiries.slots[key] {
 			if r.expAt[slot] == key {
 				r.expAt[slot] = 0
 				refile = append(refile, slot)
 			}
 		}
-		delete(r.expiries, key)
 	}
+	r.expiries.drop(r.planNow)
 	for _, slot := range refile {
 		r.fileExpiry(slot)
 	}
@@ -312,7 +310,7 @@ func (r *coreRollups) commitExpiries() {
 func (r *coreRollups) file(slot uint32, m *rollupMetric, meta metricMetadata, mask uint16) {
 	for i, a := range m.schema().Archives[1:] {
 		if end := rollupOpenEnd(meta, a); mask&(1<<min(i, 15)) != 0 && end != math.MaxInt64 {
-			r.calendar[end] = append(r.calendar[end], slot)
+			r.calendar.file(end, slot)
 		}
 	}
 }
@@ -347,7 +345,7 @@ func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
 	first := len(dst)
 	expiry := r.expire != nil
 	for _, end := range r.drained {
-		for _, slot := range r.calendar[end] {
+		for _, slot := range r.calendar.slots[end] {
 			if taken[slot>>6]&(1<<(slot&63)) == 0 && !skip(r.ids[slot]) && (!expiry || !r.meta[slot].Expired) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], r.planNow) {
 				taken[slot>>6] |= 1 << (slot & 63)
 				dst = append(dst, slot)
@@ -357,7 +355,7 @@ func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
 	if expiry {
 		ns := r.planClock.UnixNano()
 		for _, key := range r.expDrained {
-			for _, slot := range r.expiries[key] {
+			for _, slot := range r.expiries.slots[key] {
 				if r.expAt[slot] != key || taken[slot>>6]&(1<<(slot&63)) != 0 || skip(r.ids[slot]) || !r.expiryOverdue(slot, ns) {
 					continue
 				}
@@ -378,18 +376,53 @@ func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
 // closureDue reports whether any calendar end at or before now holds a
 // closure-due slot. Ends holding none are stale and dropped here.
 func (r *coreRollups) closureDue(now int64) bool {
-	for end, slots := range r.calendar {
-		if end > now {
-			continue
-		}
-		for _, slot := range slots {
+	for c := &r.calendar; len(c.heap) > 0 && c.heap[0] <= now; c.drop(c.heap[0]) {
+		for _, slot := range c.slots[c.heap[0]] {
 			if (r.expire == nil || !r.meta[slot].Expired) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], now) {
 				return true
 			}
 		}
-		delete(r.calendar, end)
 	}
 	return false
+}
+
+// calendar files slots under a second. heap holds each filed second once,
+// earliest first, so a pass visits only the seconds at or before now.
+type calendar struct {
+	slots map[int64][]uint32
+	heap  seconds
+}
+
+type seconds []int64
+
+func (h seconds) Len() int           { return len(h) }
+func (h seconds) Less(i, j int) bool { return h[i] < h[j] }
+func (h seconds) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *seconds) Push(x any)        { *h = append(*h, x.(int64)) }
+func (h *seconds) Pop() any          { x := (*h)[len(*h)-1]; *h = (*h)[:len(*h)-1]; return x }
+
+func (c *calendar) file(sec int64, slot uint32) {
+	filed, ok := c.slots[sec]
+	if !ok {
+		heap.Push(&c.heap, sec)
+	}
+	c.slots[sec] = append(filed, slot)
+}
+
+// due appends the filed seconds at or before now from the heap subtree at i.
+// Below a later second the heap holds only later ones, so none is visited.
+func (c *calendar) due(now int64, i int, dst []int64) []int64 {
+	if i < len(c.heap) && c.heap[i] <= now {
+		dst = c.due(now, 2*i+2, c.due(now, 2*i+1, append(dst, c.heap[i])))
+	}
+	return dst
+}
+
+// drop deletes every filed second at or before now.
+func (c *calendar) drop(now int64) {
+	for len(c.heap) > 0 && c.heap[0] <= now {
+		delete(c.slots, heap.Pop(&c.heap).(int64))
+	}
 }
 
 // needsMetadataSeal reports whether a not-yet-installed metric must seal before
@@ -580,22 +613,10 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		now = r.now()
 	}
 	r.planNow = now.Unix()
-	r.drained = r.drained[:0]
-	for end := range r.calendar {
-		if end <= r.planNow {
-			r.drained = append(r.drained, end)
-		}
-	}
+	r.drained = r.calendar.due(r.planNow, 0, r.drained[:0])
 	r.planClock = now
-	r.expDrained = r.expDrained[:0]
-	if r.expire != nil {
-		r.reresolve(now)
-		for key := range r.expiries {
-			if key <= r.planNow {
-				r.expDrained = append(r.expDrained, key)
-			}
-		}
-	}
+	r.reresolve(now) // returns at once without expiry
+	r.expDrained = r.expiries.due(r.planNow, 0, r.expDrained[:0])
 	if r.db != nil || r.expire != nil {
 		r.due = r.dueSlots(func(id uint64) bool { return sealBatchSeen(in.Batches, keys, seen, maxID, id) }, r.due[:0])
 		for _, slot := range r.due {
@@ -637,9 +658,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	out.Commit = func() {
 		defer r.release()
 		r.commitStages()
-		for _, end := range r.drained {
-			delete(r.calendar, end)
-		}
+		r.calendar.drop(r.planNow)
 		expiry := r.expire != nil
 		if expiry {
 			r.commitExpiries()
