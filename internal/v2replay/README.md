@@ -16,14 +16,20 @@ synchronous: successful Open exposes the complete recovered state to readers
 and returns any replay ingest failure before admitting live input. There is no separate replay writer,
 point lookup, sender queue or change to the core transaction layout.
 
-Every reopened writer starts a new predictor segment. Recovery always decodes
-complete prefixes to rebuild predictor state, even when core skips their packets.
+Every reopened writer starts a new predictor segment. Rotation deletes only the
+leading segments that every owner's durable frontier covers, then syncs the
+journal directory. The same first-record boundary selects the restart skip
+prefix. The first retained segment seeds the original cursor and application
+order; its generation determines the next filename. Recovery decodes complete
+records within each retained segment to rebuild predictor state, even when core
+skips their packets. Placement/relay and classic-mirror stores keep the entire
+journal because their consumers have independent replay requirements.
 Only an incomplete EOF in the newest segment is truncated and synced. Complete
 checksum failures, invalid lengths, cursor gaps/regressions, original-order
 regressions and a core frontier beyond retained input fail startup. Duplicate
 packets submitted to core are suppressed by its cursor; duplicated journal
 records violate the journal's strictly increasing cursor contract and fail closed.
-No journal retirement or asynchronous backlog follower is implemented here.
+No asynchronous backlog follower is implemented here.
 Startup scans retained segments before opening intake, so the 100ms target for
 large journals is not qualified. This is an offline daemon API, without a listener.
 

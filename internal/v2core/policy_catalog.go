@@ -41,12 +41,24 @@ type policyDefinition struct {
 	prepared *sealrollup.Prepared
 	Group    partsformat.Group
 }
+
 type policyIDPage [1024]atomic.Pointer[PolicyIdentity]
+
+// The normal numeric-ID space uses a small, geometrically grown directory.
+// Only creation takes the mutex; published directory entries are atomic and
+// never removed. Overflow IDs keep the sparse map rather than reserving holes.
+type policyIDPages struct {
+	pages []atomic.Pointer[policyIDPage]
+}
+
+const denseIDPages = 1 << 20 // one billion IDs; at most 8 MiB of directory
 
 // PolicyCatalog is scoped to one journal epoch. Published pages and handles are
 // immutable; reads take no construction mutex, including during page growth.
 type PolicyCatalog struct {
-	ids         sync.Map // page number -> *policyIDPage, not one map node per name
+	pages       atomic.Pointer[policyIDPages]
+	pagesMu     sync.Mutex
+	ids         sync.Map // sparse overflow pages for IDs at or above 2^30
 	definitions sync.Map // canonical suffix -> *policyDefinition
 	shards      [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
 }
@@ -110,12 +122,8 @@ func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) 
 }
 
 func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
-	pageID := h.id >> 10
-	page, _ := c.ids.Load(pageID)
-	if page == nil {
-		page, _ = c.ids.LoadOrStore(pageID, &policyIDPage{})
-	}
-	slot := &page.(*policyIDPage)[h.id&1023]
+	p := c.idPage(h.id>>10, true)
+	slot := &p[h.id&1023]
 	if slot.CompareAndSwap(nil, h) {
 		return h, nil
 	}
@@ -210,22 +218,71 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 	}
 	return c.publish(h)
 }
-func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
-	page, _ := c.ids.Load(id >> 10)
-	if page == nil {
+
+// idPage returns an epoch-owned page. Directory growth copies pointers only;
+// holding pagesMu prevents a concurrent creator from publishing into an old copy.
+func (c *PolicyCatalog) idPage(id uint64, create bool) *policyIDPage {
+	if id >= denseIDPages {
+		p, _ := c.ids.Load(id)
+		if p == nil && create {
+			p, _ = c.ids.LoadOrStore(id, &policyIDPage{})
+		}
+		if p != nil {
+			return p.(*policyIDPage)
+		}
 		return nil
 	}
-	return page.(*policyIDPage)[id&1023].Load()
+	d := c.pages.Load()
+	if d != nil && id < uint64(len(d.pages)) {
+		if p := d.pages[id].Load(); p != nil {
+			return p
+		}
+	}
+	if !create {
+		return nil
+	}
+	c.pagesMu.Lock()
+	defer c.pagesMu.Unlock()
+	d = c.pages.Load()
+	if d == nil || id >= uint64(len(d.pages)) {
+		n := 1
+		for uint64(n) <= id {
+			n *= 2
+		}
+		next := &policyIDPages{pages: make([]atomic.Pointer[policyIDPage], n)}
+		if d != nil {
+			for i := range d.pages {
+				next.pages[i].Store(d.pages[i].Load())
+			}
+		}
+		c.pages.Store(next)
+		d = next
+	}
+	p := d.pages[id].Load()
+	if p == nil {
+		p = &policyIDPage{}
+		d.pages[id].Store(p)
+	}
+	return p
 }
 
-// BindDefinition shares the canonical name and validates the journal definition.
-// The journal stores its own shared suffix, rather than a full encoding per name.
-func (e *coreEngine) BindDefinition(id uint64, name string, definition []byte) (string, []byte, error) {
-	h, err := e.identities.intern(id, name, definition)
-	if err != nil {
-		return "", nil, err
+func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
+	if p := c.idPage(id>>10, false); p != nil {
+		return p[id&1023].Load()
 	}
-	return string(h.policy.Name), h.definitionBytes(), nil
+	return nil
+}
+
+// ApplicationPolicy resolves an ID in this engine's immutable catalog epoch.
+// The returned identity keeps the catalog alive for its consumers.
+func (e *coreEngine) ApplicationPolicy(id uint64) *ApplicationPolicy {
+	return e.identities.lookup(id)
+}
+
+// MatchesDefinition compares the canonical journal bytes without rebuilding
+// ordinary unescaped definitions.
+func (h *PolicyIdentity) MatchesDefinition(definition []byte) bool {
+	return h.definitionEqual(definition)
 }
 
 // Only mutable lifecycle/frontier scalars belong in each owner/part directory.

@@ -569,3 +569,35 @@ func BenchmarkPendingScan(b *testing.B) {
 	b.Run("routed", func(b *testing.B) { run(b, true, false) })
 	b.Run("after", func(b *testing.B) { run(b, true, true) })
 }
+
+// Find must remain independent of the catalog across a frozen head and its
+// successor, including suffixes and IDs wider than the run key's ID half.
+func TestPendingRunsAcrossSealAvoidCatalog(t *testing.T) {
+	s := newPendingRowsScript(31)
+	var frozen, next pendingHead
+	for _, p := range s.packets[:8] {
+		frozen.add(p, s.find)
+	}
+	for _, p := range s.packets[8:] {
+		next.add(p, s.find)
+	}
+	a, b := frozen.view(s.find), next.view(s.find)
+	joined := a.concat(b)
+	for _, v := range []PendingView{a, b, joined, joined.Suffix(a.Len())} {
+		want := map[uint64][]int{}
+		v.IDs(0, v.Len(), func(pos int, id uint64, cold *coreBatch) bool {
+			if cold != nil {
+				t.Fatal("expected row applications")
+			}
+			want[id] = append(want[id], pos)
+			return true
+		})
+		v.lookup = func(uint64) *ApplicationPolicy { t.Fatal("Find fetched catalog identity"); return nil }
+		for id, positions := range want {
+			got, err := v.Find([]uint64{id}, func(*Batch) (bool, error) { t.Fatal("unexpected cold application"); return false, nil })
+			if err != nil || !slices.Equal(got, positions) {
+				t.Fatalf("Find(%d): positions differ (got %d, want %d), error %v", id, len(got), len(positions), err)
+			}
+		}
+	}
+}

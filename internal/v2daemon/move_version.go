@@ -17,18 +17,10 @@ func (a *MoveAdmin) requireMoveVersion() error {
 	if e = json.Unmarshal(b, &geometry); e != nil {
 		return e
 	}
-	if geometry.Version == 2 {
-		return nil
-	}
-	if geometry.Version != 1 {
+	if geometry.Version != restartVersion {
 		return errors.New("unsupported restart format version")
 	}
-	geometry.Version = 2
-	b, e = json.Marshal(geometry)
-	if e != nil {
-		return e
-	}
-	return writeMoveFile(root, "restart.json", b)
+	return nil
 }
 func validateMoveRecords(root string) error {
 	entries, e := os.ReadDir(filepath.Join(root, "moves"))

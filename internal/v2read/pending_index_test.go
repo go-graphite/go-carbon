@@ -74,6 +74,7 @@ func testPolicy(t testing.TB, name string) []byte {
 // policy cold heads through prefix extensions, unchanged republications and
 // seals, and compares every selection with the linear oracle.
 func TestPendingIndexMatchesLinearScan(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(18))
 	const names = 300
 	policies := make([][]byte, names)
@@ -148,6 +149,7 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 // through several owners, unsealed publications and seals, then compares every
 // rendered slot bit-for-bit with whisper.
 func TestPendingIndexRendersMatchClassic(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(1818))
 	now := int64(1794700800)
 	clock := now
@@ -327,4 +329,26 @@ func BenchmarkPendingSelection(b *testing.B) {
 			}
 		}
 	})
+}
+
+// Duplicate request names must select each cold application once, in arrival
+// order, even when another metric shares the old hash bucket.
+func TestPendingSelectionDeduplicatesNames(t *testing.T) {
+	const first = "bucket.metric.0"
+	var second string
+	for i := 1; ; i++ {
+		second = fmt.Sprintf("bucket.metric.%d", i)
+		if namefp.Hash(first)&7 == namefp.Hash(second)&7 {
+			break
+		}
+	}
+	pending := []v2core.Batch{
+		{ID: 1, Order: 1, Policy: testPolicy(t, first)},
+		{ID: 2, Order: 2, Policy: testPolicy(t, second)},
+		{ID: 1, Order: 3, Policy: testPolicy(t, first)},
+	}
+	got, err := selectPending(context.Background(), nil, v2core.PendingBatches(pending), []string{first, first})
+	if err != nil || len(got) != 2 || got[0].Order != 1 || got[1].Order != 3 {
+		t.Fatalf("duplicate names changed selection: %+v, %v", got, err)
+	}
 }

@@ -99,9 +99,6 @@ func TestFingerprintHalvesIndependent(t *testing.T) {
 	if len(seen) != 200_000 {
 		t.Fatalf("fingerprints collided: %d distinct", len(seen))
 	}
-	if Route("") != 14695981039346656037 || Route([]byte("a")) != Route("a") {
-		t.Fatal("Route is not FNV-1a64 over the bytes")
-	}
 }
 
 func BenchmarkTableGet(b *testing.B) {
@@ -121,5 +118,13 @@ func BenchmarkTableGet(b *testing.B) {
 			}
 			b.ReportMetric(float64(len(tab.slots)*16)/float64(n), "B/name")
 		})
+	}
+}
+
+func TestHashBytesMatchesString(t *testing.T) {
+	for _, name := range []string{"", "a", "metric.\x00.bytes", "metric.日本語", string(make([]byte, 4096))} {
+		if HashBytes([]byte(name)) != Hash(name) {
+			t.Fatalf("hash differs for %q", name)
+		}
 	}
 }

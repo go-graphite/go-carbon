@@ -23,6 +23,40 @@ const MaxDenseSlots = 4096
 
 var denseMagic = []byte{'G', 'C', 'D', 1}
 
+// Run mode bits, independent flags; a reader rejects any other bit. An aligned
+// run stores slots only: every timestamp is ts0 + (slot - slot0) * step, so the
+// header carries ts0 and step instead of a timestamp column. Ring wrap,
+// unaligned and single-slot runs keep the delta-of-delta timestamp column.
+// denseModeOrderDoD codes the order column as delta-of-delta (see dodSmaller).
+const (
+	denseInteger      = 1 << 0
+	denseAligned      = 1 << 1
+	denseModeOrderDoD = 1 << 2
+	denseModes        = denseInteger | denseAligned | denseModeOrderDoD | denseTagged
+)
+
+// alignedStep returns the run's slot step in seconds, or 0 if any timestamp
+// is not ts0 + (slot - slot0) * step. Callers have validated strictly
+// increasing slots and timestamps in (0, MaxUint32].
+func alignedStep(records []sealrollup.Record) int64 {
+	if len(records) < 2 {
+		return 0
+	}
+	t0, s0 := records[0].Sample.Time, records[0].Slot
+	dt, ds := records[1].Sample.Time-t0, records[1].Slot-s0
+	if dt <= 0 || dt%ds != 0 {
+		return 0
+	}
+	step := dt / ds
+	for _, r := range records[2:] {
+		ds := r.Slot - s0
+		if ds > (math.MaxUint32-t0)/step || r.Sample.Time != t0+ds*step {
+			return 0
+		}
+	}
+	return step
+}
+
 // headerMagic marks a dense run that carries its metric's envelope, like one
 // block header per series per part: magic | uvarint(len) | envelope | run. The
 // envelope sorts after every run of its metric, so a name's last run holds it
@@ -61,14 +95,12 @@ func EnvelopeKey(k Key) Key {
 // an event-time ring wrap. No arithmetic on float values is used unless exact
 // integer reconstruction has been checked bit for bit.
 func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
-	return appendSlots(nil, records)
+	return appendSlots(nil, records, nil)
 }
 
-// Mode bit 0x04 codes the order column as zigzag delta-of-delta (first order,
-// first delta, then delta changes) in place of the XOR chain: regular arrival
-// orders cost one byte per slot. Decoding is exact. Unknown mode bits are
-// rejected; 0x02 is reserved for the slot-time code.
-const denseModeOrderDoD = 4
+// Mode bit denseModeOrderDoD codes the order column as zigzag delta-of-delta
+// (first order, first delta, then delta changes) in place of the XOR chain:
+// regular arrival orders cost one byte per slot. Decoding is exact.
 
 func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
 
@@ -90,16 +122,17 @@ func dodSmaller(records []sealrollup.Record) bool {
 	return d < x
 }
 
-func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
-	return appendSlotsOrder(out, records, false)
+// appendSlots reuses *table, when given, as the value codec's distinct-value
+// table.
+func appendSlots(out []byte, records []sealrollup.Record, table *[]uint64) ([]byte, error) {
+	return appendSlotsOrder(out, records, table, false)
 }
 
 // appendSlotsOrder with deltas codes orders as delta-of-delta when smaller.
-func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]byte, error) {
+func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, deltas bool) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
-	integer := true
 	for i, r := range records {
 		if !validSlotRecord(r) {
 			return nil, errors.New("invalid sealed archive record clock/order/slot")
@@ -107,15 +140,12 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]b
 		if i > 0 && (r.Archive != records[0].Archive || r.Slot <= records[i-1].Slot) {
 			return nil, errors.New("unordered dense slots")
 		}
-		f := math.Float64frombits(r.Sample.Bits)
-		if !(f >= -(1<<53) && f <= 1<<53) || math.Float64bits(float64(int64(f))) != r.Sample.Bits {
-			integer = false
-		}
 	}
 	out = append(out, denseMagic...)
-	mode := byte(0)
-	if integer {
-		mode = 1
+	mode := byte(denseTagged)
+	step := alignedStep(records)
+	if step != 0 {
+		mode |= denseAligned
 	}
 	dod := deltas && dodSmaller(records)
 	if dod {
@@ -128,11 +158,16 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]b
 		out = binary.AppendUvarint(out, uint64(r.Slot-slot))
 		slot = r.Slot
 	}
-	for _, r := range records {
-		delta := r.Sample.Time - ts
-		out = binary.AppendVarint(out, delta-dt)
-		ts = r.Sample.Time
-		dt = delta
+	if step != 0 {
+		out = binary.AppendUvarint(out, uint64(records[0].Sample.Time))
+		out = binary.AppendUvarint(out, uint64(step))
+	} else {
+		for _, r := range records {
+			delta := r.Sample.Time - ts
+			out = binary.AppendVarint(out, delta-dt)
+			ts = r.Sample.Time
+			dt = delta
+		}
 	}
 	var prev uint64
 	var pd int64
@@ -155,21 +190,151 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]b
 			out[flags+i/8] |= 1 << uint(i%8)
 		}
 	}
-	if integer {
-		var prev int64
-		for _, r := range records {
-			v := int64(math.Float64frombits(r.Sample.Bits))
-			out = binary.AppendVarint(out, v-prev)
-			prev = v
-		}
+	return appendValues(out, records, table), nil
+}
+
+// Value column codecs. A run's tag byte (mode bit denseTagged) names one codec
+// for all its values: decimal runs store v = m / 10^e with one exponent e per
+// run and integer mantissas m as zigzag first or second differences, whichever
+// packs smaller. Other runs, and decimal runs whose mantissa differences average
+// more than decimalMaxCost bytes, store their float64 bits verbatim: as raw
+// little-endian words when the run has at least wordsMinRun values and at least
+// one in twenty repeats an earlier one (zstd then matches whole 8-byte values),
+// else as eight byte planes (zstd then packs the near-constant sign and
+// exponent bytes). Every decimal
+// value's float64 bits are checked at encode, so NaN payloads, -0 and
+// infinities always keep their exact bits.
+const (
+	denseTagged   = 0x80
+	valuePlanes   = 0 << 5
+	valueDelta1   = 1 << 5
+	valueDelta2   = 2 << 5
+	valueWords    = 3 << 5
+	maxDecimalExp = 18
+	wordsMinRun   = 64
+	// A run repeats values when fewer than wordsDistinctNum/wordsDistinctDen
+	// of them are distinct.
+	wordsDistinctNum = 19
+	wordsDistinctDen = 20
+	// Above this mean varint size per value, mantissas are wide and noisy:
+	// the byte planes' constant exponent and zero low bytes compress better.
+	decimalMaxCost = 4
+)
+
+var pow10 = [maxDecimalExp + 1]float64{1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+	1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18}
+
+// decimalMantissa returns m with float64(m)/10^e bit-identical to bits.
+func decimalMantissa(bits uint64, e int) (int64, bool) {
+	s := math.Float64frombits(bits) * pow10[e]
+	if !(s >= -(1<<53) && s <= 1<<53) {
+		return 0, false
+	}
+	m := int64(math.Round(s))
+	return m, math.Float64bits(float64(m)/pow10[e]) == bits
+}
+
+// repeatsValues reports whether fewer than wordsDistinctNum/wordsDistinctDen of
+// the run's values are distinct, counting them in an open-addressing table
+// (reused from *table when given) and stopping at the limit.
+func repeatsValues(records []sealrollup.Record, table *[]uint64) bool {
+	shift := 64 - bits.Len(uint(2*len(records)-1))
+	size := 1 << (64 - shift)
+	var t []uint64
+	if table != nil && cap(*table) >= size {
+		t = (*table)[:size]
+		clear(t)
 	} else {
-		for plane := uint(0); plane < 8; plane++ {
-			for _, r := range records {
-				out = append(out, byte(r.Sample.Bits>>(plane*8)))
-			}
+		t = make([]uint64, size)
+		if table != nil {
+			*table = t
 		}
 	}
-	return out, nil
+	limit := len(records) * wordsDistinctNum / wordsDistinctDen
+	distinct, zero := 0, false
+	for _, r := range records {
+		v := r.Sample.Bits
+		if v == 0 { // 0 marks a free slot, so +0.0 is counted aside
+			if !zero {
+				zero, distinct = true, distinct+1
+			}
+		} else {
+			i := (v * 0x9e3779b97f4a7c15) >> shift
+			for t[i] != 0 && t[i] != v {
+				i = (i + 1) & uint64(size-1)
+			}
+			if t[i] == 0 {
+				t[i], distinct = v, distinct+1
+			}
+		}
+		if distinct >= limit {
+			return false
+		}
+	}
+	return true
+}
+
+func appendValues(out []byte, records []sealrollup.Record, table *[]uint64) []byte {
+	e := 0
+	for _, r := range records {
+		for ; e <= maxDecimalExp; e++ {
+			if _, ok := decimalMantissa(r.Sample.Bits, e); ok {
+				break
+			}
+		}
+		if e > maxDecimalExp {
+			break
+		}
+	}
+	if e <= maxDecimalExp {
+		var prev, prevDelta int64
+		cost1, cost2 := 0, 0
+		ok := true
+		for _, r := range records {
+			m, exact := decimalMantissa(r.Sample.Bits, e)
+			if !exact {
+				ok = false
+				break
+			}
+			d := m - prev
+			cost1 += uvarintLen(zigzag(d))
+			cost2 += uvarintLen(zigzag(d - prevDelta))
+			prev, prevDelta = m, d
+		}
+		if ok && min(cost1, cost2) <= decimalMaxCost*len(records) {
+			tag := byte(valueDelta1)
+			if cost2 < cost1 {
+				tag = valueDelta2
+			}
+			out = append(out, tag|byte(e))
+			prev, prevDelta = 0, 0
+			for _, r := range records {
+				m, _ := decimalMantissa(r.Sample.Bits, e)
+				d := m - prev
+				if tag == valueDelta2 {
+					out = binary.AppendUvarint(out, zigzag(d-prevDelta))
+				} else {
+					out = binary.AppendUvarint(out, zigzag(d))
+				}
+				prev, prevDelta = m, d
+			}
+			return out
+		}
+	}
+	if len(records) >= wordsMinRun && repeatsValues(records, table) {
+		out = append(out, valueWords)
+		for _, r := range records {
+			out = binary.LittleEndian.AppendUint64(out, r.Sample.Bits)
+		}
+		return out
+	}
+	out = append(out, valuePlanes)
+	for plane := uint(0); plane < 8; plane++ {
+		for _, r := range records {
+			out = append(out, byte(r.Sample.Bits>>(plane*8)))
+		}
+	}
+	return out
 }
 
 // DecodeSlots also accepts the published singleton codec. It bounds allocations
@@ -189,10 +354,16 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		return append(dst[:0], r), nil
 	}
 	bad := errors.New("invalid dense archive run")
-	if len(data) < 6 || data[4]&^(1|denseModeOrderDoD) != 0 || archive == MetadataArchive || firstSlot < 0 {
+	if len(data) < 6 || archive == MetadataArchive || firstSlot < 0 {
 		return nil, bad
 	}
-	integer := data[4]&1 == 1
+	// Mode bits are independent flags; the value column takes one of
+	// untagged planes, untagged integers or a tag.
+	mode := data[4]
+	if mode&^denseModes != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged {
+		return nil, bad
+	}
+	aligned := mode&denseAligned != 0
 	p := data[5:]
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(p)
@@ -227,25 +398,40 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	if rs[0].Slot != firstSlot {
 		return nil, bad
 	}
-	var ts, dt int64
-	for i := range rs {
-		v, n := binary.Varint(p)
-		if n <= 0 {
+	if aligned {
+		t0, ok0 := take()
+		step, ok1 := take()
+		if !ok0 || !ok1 || len(rs) < 2 || t0 == 0 || t0 > math.MaxUint32 || step == 0 || step > math.MaxUint32 {
 			return nil, bad
 		}
-		p = p[n:]
-		if (v > 0 && dt > math.MaxInt64-v) || (v < 0 && dt < math.MinInt64-v) {
+		// The last slot bounds every offset; slots strictly increase.
+		if uint64(rs[len(rs)-1].Slot-firstSlot) > (math.MaxUint32-t0)/step {
 			return nil, bad
 		}
-		dt += v
-		if dt < -math.MaxUint32 || dt > math.MaxUint32 {
-			return nil, bad
+		for i := range rs {
+			rs[i].Sample.Time = int64(t0) + (rs[i].Slot-firstSlot)*int64(step)
 		}
-		ts += dt
-		if ts <= 0 || ts > math.MaxUint32 {
-			return nil, bad
+	} else {
+		var ts, dt int64
+		for i := range rs {
+			v, n := binary.Varint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			p = p[n:]
+			if (v > 0 && dt > math.MaxInt64-v) || (v < 0 && dt < math.MinInt64-v) {
+				return nil, bad
+			}
+			dt += v
+			if dt < -math.MaxUint32 || dt > math.MaxUint32 {
+				return nil, bad
+			}
+			ts += dt
+			if ts <= 0 || ts > math.MaxUint32 {
+				return nil, bad
+			}
+			rs[i].Sample.Time = ts
 		}
-		rs[i].Sample.Time = ts
 	}
 	var order uint64
 	var pd int64
@@ -280,30 +466,20 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	for i := range rs {
 		rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
 	}
-	if integer {
-		var prev int64
-		for i := range rs {
-			v, n := binary.Varint(p)
-			if n <= 0 || (v > 0 && prev > math.MaxInt64-v) || (v < 0 && prev < math.MinInt64-v) {
-				return nil, bad
-			}
-			p = p[n:]
-			prev += v
-			if prev < -(1<<53) || prev > 1<<53 {
-				return nil, bad
-			}
-			rs[i].Sample.Bits = math.Float64bits(float64(prev))
-		}
-	} else {
-		if len(p) != 8*len(rs) {
+	tag := byte(valuePlanes)
+	legacyInteger := mode&denseInteger != 0
+	switch {
+	case legacyInteger: // first differences, plain varints, e = 0
+		tag = valueDelta1
+	case mode&denseTagged != 0:
+		if len(p) == 0 {
 			return nil, bad
 		}
-		for plane := uint(0); plane < 8; plane++ {
-			for i := range rs {
-				rs[i].Sample.Bits |= uint64(p[int(plane)*len(rs)+i]) << (plane * 8)
-			}
-		}
-		p = p[8*len(rs):]
+		tag, p = p[0], p[1:]
+	}
+	var err error
+	if p, err = decodeValues(rs, tag, legacyInteger, p); err != nil {
+		return nil, bad
 	}
 	if len(p) != 0 {
 		return nil, bad
@@ -358,6 +534,8 @@ type denseWorkspace struct {
 	prevRank uint32
 	havePrev bool
 	group    []byte
+	// distinct is the value codec's reusable distinct-value table.
+	distinct []uint64
 }
 
 var denseWorkspaces sync.Pool
@@ -406,7 +584,7 @@ func (w *DenseWriter) flushWith(envelope []byte) error {
 	if w.rawPending {
 		b = append(b, w.raw...)
 	} else {
-		b, e = appendSlotsOrder(b, w.records, w.dod)
+		b, e = appendSlotsOrder(b, w.records, &w.distinct, w.dod)
 	}
 	w.encoded = b
 	if e == nil {
@@ -489,7 +667,7 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 		// Future inputs must start after this run's last physical slot.
 		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
 		if w.dod && value[4]&denseModeOrderDoD == 0 && dodSmaller(w.records) {
-			value, err = appendSlotsOrder(w.encoded[:0], w.records, true)
+			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, true)
 			w.encoded = value
 		}
 	}
@@ -616,8 +794,9 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 
 // SetPlannedRecord packs a planner record of metric, routed to vshard, without
 // an encoded input key. Group, partition and part come from the writer scope,
-// and key bytes are formatted only where a dense run starts. Order, routing,
-// archive and scalar bounds are validated as SetRecordEncoded validates them.
+// and key bytes are formatted only where a dense run starts. The caller must
+// supply the route already derived by the planner. Order, scope, archive and
+// scalar bounds are validated as SetRecordEncoded validates them.
 // Planned and encoded input cannot be mixed in one part.
 //
 // rank is the metric's 1-based position in the planner's canonical
@@ -646,6 +825,7 @@ func (w *DenseWriter) SetPlannedRecord(vshard uint16, rank uint32, metric ID, r 
 }
 
 // SetPlannedMetadata writes metric's envelope value after its archive records.
+// The caller supplies a planner-validated route, as for SetPlannedRecord.
 // The caller's value is not retained.
 func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, value []byte) error {
 	if w.closed {
@@ -670,7 +850,8 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 
 // plannedKey checks that a tuple sorts strictly after the previous one in GCP3
 // key order (vshard, name length, name, archive, slot) and validates each new
-// name's length and route once. Two ranked tuples compare by rank, which
+// name's length and scope once. Routing comes from the planner, without hashing
+// the name again. Two ranked tuples compare by rank, which
 // follows that name order, so the check reads no name bytes.
 func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive uint32, slot int64) (Key, error) {
 	if len(w.last) > 0 {
@@ -701,7 +882,7 @@ func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive 
 		}
 	}
 	s := w.writer.spec.Scope
-	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || Route(metric) != vshard || (s.VShard != GroupVShard && s.VShard != vshard) {
+	if len(metric) == 0 || len(metric) > MaxNameBytes || vshard >= VirtualShards || (s.VShard != GroupVShard && s.VShard != vshard) {
 		return Key{}, errors.New("invalid or foreign planned dense metric")
 	}
 	if len(w.group) == 0 {
@@ -785,4 +966,67 @@ func ReadExpanded(ctx context.Context, path string, d *Descriptor, visit func(Ke
 		}
 		return nil
 	})
+}
+
+// decodeValues fills rs' value bits from a value column coded as tag. legacy
+// selects the untagged integer run's signed varints.
+func decodeValues(rs []sealrollup.Record, tag byte, legacy bool, p []byte) ([]byte, error) {
+	bad := errors.New("invalid dense value column")
+	kind, e := tag&^31, int(tag&31)
+	if kind == valueWords {
+		if e != 0 || len(p) < 8*len(rs) {
+			return nil, bad
+		}
+		for i := range rs {
+			rs[i].Sample.Bits = binary.LittleEndian.Uint64(p[8*i:])
+		}
+		return p[8*len(rs):], nil
+	}
+	if kind == valuePlanes {
+		if e != 0 || len(p) < 8*len(rs) {
+			return nil, bad
+		}
+		for plane := uint(0); plane < 8; plane++ {
+			for i := range rs {
+				rs[i].Sample.Bits |= uint64(p[int(plane)*len(rs)+i]) << (plane * 8)
+			}
+		}
+		return p[8*len(rs):], nil
+	}
+	if (kind != valueDelta1 && kind != valueDelta2) || e > maxDecimalExp {
+		return nil, bad
+	}
+	var prev, delta int64
+	for i := range rs {
+		var v int64
+		if legacy {
+			x, n := binary.Varint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			v, p = x, p[n:]
+		} else {
+			u, n := binary.Uvarint(p)
+			if n <= 0 {
+				return nil, bad
+			}
+			v, p = int64(u>>1)^-int64(u&1), p[n:]
+		}
+		if kind == valueDelta2 {
+			if (v > 0 && delta > math.MaxInt64-v) || (v < 0 && delta < math.MinInt64-v) {
+				return nil, bad
+			}
+			v += delta
+		}
+		if (v > 0 && prev > math.MaxInt64-v) || (v < 0 && prev < math.MinInt64-v) {
+			return nil, bad
+		}
+		delta = v
+		prev += v
+		if prev < -(1<<53) || prev > 1<<53 {
+			return nil, bad
+		}
+		rs[i].Sample.Bits = math.Float64bits(float64(prev) / pow10[e])
+	}
+	return p, nil
 }

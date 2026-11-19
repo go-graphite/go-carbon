@@ -619,6 +619,7 @@ const sealSweepNames = 1000
 // positions-map planner (test-only oracle), side b the production seal sweep.
 // Part bytes must also be independent of planner parallelism (1 and 3 lanes).
 func TestSealSweepPlanDifferential(t *testing.T) {
+	t.Parallel()
 	var total sealSweepCoverage
 	for _, seed := range sealSweepSeeds(t) {
 		s := newSealSweepScript(seed)

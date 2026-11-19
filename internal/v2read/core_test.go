@@ -29,10 +29,12 @@ func await(t *testing.T, f func() bool) {
 	}
 }
 func TestClassicPendingAndSealed(t *testing.T) {
+	t.Parallel()
 	for _, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y"} {
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			for _, xff := range []float32{0, .5, 1} {
 				t.Run(fmt.Sprintf("%s/%d/%g", def, method, xff), func(t *testing.T) {
+					t.Parallel() // each case owns its reader, engine and whisper oracle
 					now := int64(1794700800)
 					clock := now
 					retentions := whisper.MustParseRetentionDefs(def)
@@ -88,11 +90,23 @@ func TestClassicPendingAndSealed(t *testing.T) {
 							t.Fatal(err)
 						}
 						b := v2core.Batch{ID: 7, Policy: encoded, Order: uint64(i + 1), Clock: clock, Points: rows}
-						previous := reader.owners[0].Load()
 						if err = engine.AppendBatches(0, []v2core.Batch{b}, uint64(i+1), false); err != nil {
 							t.Fatal(err)
 						}
-						await(t, func() bool { return reader.owners[0].Load() != previous })
+						// Wait for the publication that carries this batch: a background
+						// merge publishes too, possibly before the batch reaches the head.
+						await(t, func() bool {
+							g := reader.owners[0].Load()
+							if g == nil {
+								return false
+							}
+							found := false
+							g.view.Each(func(a *v2core.PendingApplication) bool {
+								found = a.Order == b.Order
+								return !found
+							})
+							return found
+						})
 						// Overwrite borrowed input after acknowledgment: the published head owns it.
 						for j := range rows {
 							rows[j].Bits = 0xdeadbeef
