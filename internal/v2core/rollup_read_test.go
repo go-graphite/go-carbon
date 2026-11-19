@@ -258,3 +258,68 @@ func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
 	}
 	return ids
 }
+
+// TestNamesMmapMixedLengthBounds exercises names whose encoded-key order differs
+// from lexical range order in one virtual shard and one physical part.
+func TestNamesMmapMixedLengthBounds(t *testing.T) {
+	db, err := pebble.Open(t.TempDir(), &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	names := []string{"z", ""}
+	for i := 0; ; i++ {
+		candidate := fmt.Sprintf("a.long.metric.%d", i)
+		if v2part.Route(v2part.ID(candidate)) == v2part.Route(v2part.ID(names[0])) {
+			names[1] = candidate
+			break
+		}
+	}
+	var part v2part.PartID
+	part[0] = 1
+	for i, name := range names {
+		policy := RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 100}}}}
+		raw, err := EncodeRollupPolicy(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest, err := sealrollup.PolicyDigest(policy.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta, err := json.Marshal(RollupMetadata{Version: 1, ID: uint64(i + 1), Policy: raw, Frontier: sealrollup.Frontier{Order: 1, Policy: digest}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := v2part.Key{Group: policy.Group, VShard: v2part.Route(policy.Name), Part: part, Metric: policy.Name, Archive: v2part.MetadataArchive}
+		encoded, err := v2part.Encode(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Set(encoded, meta, pebble.NoSync); err != nil {
+			t.Fatal(err)
+		}
+		key.Archive = 0
+		key.BlockStart = 10
+		encoded, err = v2part.Encode(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := sealrollup.Record{Delta: sealrollup.Delta{Order: 1, Archive: 0, Slot: 10, Sample: sealrollup.Sample{Time: 110, Bits: math.Float64bits(float64(i + 42)), Sequence: 1}}}
+		if err := db.Set(encoded, sealrollup.EncodeRecord(record), pebble.NoSync); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := db.NewSnapshot()
+	defer snapshot.Close()
+	view, err := NewRollupSnapshot(context.Background(), snapshot, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		records, err := view.Records(context.Background(), name)
+		if err != nil || len(records) != 1 {
+			t.Fatalf("name=%q records=%d want=1 err=%v; encoded order cannot supply lexical bounds", name, len(records), err)
+		}
+	}
+}
