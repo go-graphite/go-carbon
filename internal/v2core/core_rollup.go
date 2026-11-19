@@ -470,7 +470,9 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 				if h.policy.prepared.Digest() != m.Frontier.Policy {
 					return errors.New("rollup policy/frontier mismatch")
 				}
-				e.identity, e.meta = h, compactMetadata(m)
+				e.identity, e.meta = h, compactMetadata(m).withEvents(e.meta)
+			} else {
+				e.meta = e.meta.withEvents(compactMetadata(m))
 			}
 		} else {
 			// Legacy singleton rows need no temporary decoded slice. Dense runs

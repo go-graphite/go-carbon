@@ -565,6 +565,16 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 				metadata, chosen = m, input
 			}
 		}
+		// The output keeps every input's lifecycle events: an older tombstone
+		// still masks records in parts outside this merge.
+		var folded RollupMetadata
+		for _, input := range members {
+			if m := &input.metadata; m.ResetOrder > metadata.ResetOrder || m.BaselineOrder > metadata.BaselineOrder {
+				folded = *metadata
+				folded.ResetOrder, folded.BaselineOrder = max(folded.ResetOrder, m.ResetOrder), max(folded.BaselineOrder, m.BaselineOrder)
+				metadata = &folded
+			}
+		}
 		config = *chosen.config
 		floor := max(metadata.LastUpdate/1e9, ttl)
 		// The output key is the input's validated identity with the output part:

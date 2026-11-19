@@ -145,7 +145,11 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	}
 	r.partitions = partitions
 	start := len(r.arena)
-	r.arena = m.appendMetadata(r.arena, s.next)
+	next := s.next
+	if !next.Expired && rollupEventResets.Load() {
+		next.ResetOrder, next.BaselineOrder = 0, 0
+	}
+	r.arena = m.appendMetadata(r.arena, next)
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	for _, partition := range partitions {
 		filePtr, coverage := r.file(r.fileID(group, partition))

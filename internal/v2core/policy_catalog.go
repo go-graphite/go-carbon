@@ -298,6 +298,14 @@ func canonicalNameEnd(definition []byte) int {
 	return 0
 }
 
+// withEvents keeps the lifecycle events o recorded. ResetOrder and BaselineOrder
+// are written only in the envelope of the seal where the event happens, so a
+// name's value is the maximum over all its envelopes; Expired stays m's.
+func (m metricMetadata) withEvents(o metricMetadata) metricMetadata {
+	m.ResetOrder, m.BaselineOrder = max(m.ResetOrder, o.ResetOrder), max(m.BaselineOrder, o.BaselineOrder)
+	return m
+}
+
 // Idle closure changes no input activity revision or source order. Its committed
 // watermark breaks otherwise equal metadata ties, including after merge/reopen.
 func (m metricMetadata) after(other metricMetadata) bool {

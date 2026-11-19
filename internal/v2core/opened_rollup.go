@@ -261,6 +261,10 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			if old == nil || state.meta.after(old.latest.meta) {
 				out.metrics[name] = &snapshotMetric{latest: state}
 			}
+			if old != nil {
+				m := out.metrics[name]
+				m.latest.meta = m.latest.meta.withEvents(old.latest.meta).withEvents(state.meta)
+			}
 		}
 	}
 	return out, ctx.Err()

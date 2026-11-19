@@ -277,6 +277,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 				if !pm.meta.after(old.latest.meta) {
 					latest = old.latest
 				}
+				latest.meta = latest.meta.withEvents(old.latest.meta).withEvents(pm.meta)
 			}
 			out.metrics[name] = &snapshotMetric{latest: latest}
 		}
@@ -923,15 +924,22 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 			if seen && old.ID != p.id {
 				return nil, errors.New("source changed numeric metric identity")
 			}
+			// Resets are source-local: fold events only within one origin.
+			source := old
 			if !seen || p.meta.after(old.metricMetadata) {
-				out.moves[m].origins[p.part.origin] = sourceMetadata{ID: p.id, metricMetadata: p.meta}
+				source = sourceMetadata{ID: p.id, metricMetadata: p.meta}
 			}
+			source.metricMetadata = source.metricMetadata.withEvents(old.metricMetadata).withEvents(p.meta)
+			out.moves[m].origins[p.part.origin] = source
 			newer, err := newerSource(p.part.origin, p.meta.Frontier.Order, out.moves[m].origin, m.latest.meta.Frontier.Order)
 			if err != nil {
 				return nil, err
 			}
 			if newer || (p.part.origin == out.moves[m].origin && p.meta.Frontier.Order == m.latest.meta.Frontier.Order && p.meta.after(m.latest.meta)) {
 				m.latest, out.moves[m].origin = p.readMetricState, p.part.origin
+			}
+			if out.moves[m].origin == p.part.origin {
+				m.latest.meta = m.latest.meta.withEvents(source.metricMetadata)
 			}
 		}
 		part.metrics = nil

@@ -44,6 +44,12 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	return append(dst, m.Policy...)
 }
 
+// rollupEventResets makes seal writers store ResetOrder and BaselineOrder only in
+// the envelope of the seal where the event happens: the expiry tombstone, or the
+// baseline row. Later seal envelopes store 0. Readers take both as a maximum over
+// a name's envelopes, so parts of either form read the same.
+var rollupEventResets atomic.Bool
+
 // rollupWriteDefinitions makes seal and merge writers emit the full encoding
 // with the stored definition. Only the encoding differential test sets it.
 var rollupWriteDefinitions atomic.Bool
