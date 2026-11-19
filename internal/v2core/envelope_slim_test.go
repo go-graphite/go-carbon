@@ -3,9 +3,13 @@ package v2core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
@@ -25,6 +29,11 @@ type envelopeImage struct {
 	Slim     int      // physical rows without a stored definition
 }
 
+type envelopeRun struct {
+	Stages []string
+	Images []envelopeImage
+}
+
 // Engines that store the definition and engines that do not, fed the same
 // input, decode identical metadata (definition bytes included), records,
 // lookups and name listings after seals, merges, restarts and expiry. Every
@@ -32,6 +41,72 @@ type envelopeImage struct {
 // Physical placement of idle-closure envelopes depends on publication timing,
 // so the logical surfaces are compared rather than the physical row sets.
 func TestSlimEnvelopeEngineDifferential(t *testing.T) {
+	if os.Getenv("GO_CARBON_SLIM_IMAGE") != "" {
+		writeSlimEnvelopeImages(t, os.Getenv("GO_CARBON_SLIM_ENCODING") == "full")
+		return
+	}
+	t.Parallel()
+	// The writer switch is process-global. Isolate encodings, keeping every
+	// fixture and image check while allowing the two independent engines to run
+	// together and alongside the rest of the package.
+	var runs [2]envelopeRun
+	t.Run("encodings", func(t *testing.T) {
+		for i, encoding := range []string{"full", "slim"} {
+			t.Run(encoding, func(t *testing.T) {
+				t.Parallel()
+				output := filepath.Join(t.TempDir(), "images.json")
+				cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestSlimEnvelopeEngineDifferential$", "-test.count=1", "-test.timeout=10m")
+				cmd.Env = append(os.Environ(), "GO_CARBON_SLIM_IMAGE="+output, "GO_CARBON_SLIM_ENCODING="+encoding)
+				if log, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("%s encoding: %v\n%s", encoding, err, log)
+				}
+				data, err := os.ReadFile(output)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &runs[i]); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
+	stages, fullImages, slimImages := runs[0].Stages, runs[0].Images, runs[1].Images
+	if !reflect.DeepEqual(stages, runs[1].Stages) || len(fullImages) != len(stages) || len(slimImages) != len(stages) {
+		t.Fatal("encoding stages differ")
+	}
+	for i, stage := range stages {
+		full, slim := fullImages[i], slimImages[i]
+		if full.Slim != 0 || slim.Slim == 0 {
+			t.Fatalf("%s: slim rows full=%d slim=%d of %d", stage, full.Slim, slim.Slim, slim.Rows)
+		}
+		full.Slim, slim.Slim, full.Rows, slim.Rows = 0, 0, 0, 0
+		if !reflect.DeepEqual(full, slim) {
+			for j := range min(len(full.Scanned), len(slim.Scanned)) {
+				if full.Scanned[j] != slim.Scanned[j] {
+					t.Logf("scanned %d\nfull=%.700s\nslim=%.700s", j, full.Scanned[j], slim.Scanned[j])
+					break
+				}
+			}
+			t.Fatalf("%s: scanned equal=%v snapshot equal=%v names equal=%v", stage, reflect.DeepEqual(full.Scanned, slim.Scanned), reflect.DeepEqual(full.Snapshot, slim.Snapshot), reflect.DeepEqual(full.Names, slim.Names))
+		}
+		if len(full.Scanned) == 0 || len(full.Names) == 0 {
+			t.Fatalf("%s: empty image", stage)
+		}
+	}
+	expired := 0
+	for _, row := range slimImages[len(slimImages)-1].Scanned {
+		if bytes.Contains([]byte(row), []byte("Expired:true")) {
+			expired++
+		}
+	}
+	if expired == 0 {
+		t.Fatal("expiry did not run")
+	}
+	last := slimImages[len(slimImages)-1]
+	t.Logf("%d stages identical; final: %d metrics scanned, %d expired, %d names", len(stages), len(last.Scanned), expired, len(last.Names))
+}
+
+func writeSlimEnvelopeImages(t *testing.T, full bool) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	t.Cleanup(func() { rollupWriteDefinitions.Store(false) })
 	cfg := coreTestConfig()
@@ -226,37 +301,12 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 		t.Logf("full=%v: %d merges", full, merges)
 		return stages, images
 	}
-	stages, fullImages := run(true)
-	_, slimImages := run(false)
-	for i, stage := range stages {
-		full, slim := fullImages[i], slimImages[i]
-		if full.Slim != 0 || slim.Slim == 0 {
-			t.Fatalf("%s: slim rows full=%d slim=%d of %d", stage, full.Slim, slim.Slim, slim.Rows)
-		}
-		full.Slim, slim.Slim, full.Rows, slim.Rows = 0, 0, 0, 0
-		if !reflect.DeepEqual(full, slim) {
-			for j := range min(len(full.Scanned), len(slim.Scanned)) {
-				if full.Scanned[j] != slim.Scanned[j] {
-					t.Logf("scanned %d\nfull=%.700s\nslim=%.700s", j, full.Scanned[j], slim.Scanned[j])
-					break
-				}
-			}
-			t.Fatalf("%s: scanned equal=%v snapshot equal=%v names equal=%v", stage, reflect.DeepEqual(full.Scanned, slim.Scanned), reflect.DeepEqual(full.Snapshot, slim.Snapshot), reflect.DeepEqual(full.Names, slim.Names))
-			t.Fatalf("%s: images differ\nfull=%+v\nslim=%+v", stage, full, slim)
-		}
-		if len(full.Scanned) == 0 || len(full.Names) == 0 {
-			t.Fatalf("%s: empty image", stage)
-		}
+	stages, images := run(full)
+	data, err := json.Marshal(envelopeRun{Stages: stages, Images: images})
+	if err != nil {
+		t.Fatal(err)
 	}
-	expired := 0
-	for _, row := range slimImages[len(slimImages)-1].Scanned {
-		if bytes.Contains([]byte(row), []byte("Expired:true")) {
-			expired++
-		}
+	if err := os.WriteFile(os.Getenv("GO_CARBON_SLIM_IMAGE"), data, 0600); err != nil {
+		t.Fatal(err)
 	}
-	if expired == 0 {
-		t.Fatal("expiry did not run")
-	}
-	last := slimImages[len(slimImages)-1]
-	t.Logf("%d stages identical; final: %d metrics scanned, %d expired, %d names", len(stages), len(last.Scanned), expired, len(last.Names))
 }

@@ -18,6 +18,9 @@ import (
 // This fixture deliberately uses only pre-history-cache APIs so it can also run
 // against an overlay of the unchanged reducer runtime.
 func TestClosedHistoryLogicalDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	// This same fixture passed on the unchanged eager runtime. Its fixed
 	// resolved-value hashes prove that regenerating the physical golden does
 	// not alter timestamps or floating-point bits, including restart cuts.

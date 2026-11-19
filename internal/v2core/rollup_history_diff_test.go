@@ -17,6 +17,9 @@ import (
 // This fixture deliberately uses only pre-history-cache APIs so it can also run
 // against an overlay of the unchanged reducer runtime.
 func TestRollupHistoryDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	// This golden guards the no-merge physical layout, including superseded
 	// replacements. Compaction legitimately changes that layout. Logical exactness
 	// with merges, retirement and reopen is TestSealedMergeHistoryDifferential.

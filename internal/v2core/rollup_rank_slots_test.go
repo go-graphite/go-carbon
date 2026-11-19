@@ -15,6 +15,7 @@ import (
 // ID's committed scalars, read through slotOf, must equal a map model, and
 // after every renumber each slot must be its metric's rank minus one.
 func TestRollupRenumberMovesSlotColumns(t *testing.T) {
+	t.Parallel()
 	for seed := uint64(1); seed <= 40; seed++ {
 		rng := rand.New(rand.NewPCG(seed, 7))
 		r := newCoreRollups()
@@ -85,6 +86,7 @@ func TestRollupRenumberMovesSlotColumns(t *testing.T) {
 // an ID filed under that end, every ID's latest open window ends are filed
 // under its current slot, and dead (adopted) slots leave at renumber.
 func TestClosureCalendarFollowsRenumber(t *testing.T) {
+	t.Parallel()
 	coarse, err := sealrollup.Prepare(sealrollup.Config{Method: sealrollup.Average, Archives: []sealrollup.Archive{{Step: 10, Count: 100}, {Step: 60, Count: 100}, {Step: 600, Count: 100}}})
 	if err != nil {
 		t.Fatal(err)

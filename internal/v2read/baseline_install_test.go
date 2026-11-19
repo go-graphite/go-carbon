@@ -40,6 +40,7 @@ type baselineClassic struct {
 // NativeRecords/CoreWriter conversion -> atomic daemon install -> original
 // journal applications -> pending/sealed reader -> retained-journal replay.
 func TestInstalledBaselineClassicInventory(t *testing.T) {
+	t.Parallel()
 	// Keep the complete schema × method × xFilesFactor matrix, but install
 	// bounded inventories. Each fetch opens and validates the installed part;
 	// one descriptor containing the whole matrix makes this oracle quadratic.

@@ -14,6 +14,9 @@ import (
 // Compare exact persisted winners with an unmerged store after original parts
 // are retired, unlinked and reopened. Late writes force cold older-window loads.
 func TestSealedMergeHistoryDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
