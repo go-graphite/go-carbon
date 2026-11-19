@@ -4,8 +4,10 @@ package v2index
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"iter"
+	"math/bits"
 	"slices"
 	"sort"
 	"strings"
@@ -18,9 +20,10 @@ import (
 type Source interface{ Snapshot() *Snapshot }
 
 // levelFanout bounds the number of sorted levels: every level is more than
-// levelFanout times larger than the next one, so a 17M-name view has at most
-// about a dozen levels and each name is rewritten O(levelFanout*log N) times.
-const levelFanout = 4
+// levelFanout times larger than the next one, so a 17M-name view keeps about
+// log_8(17M/10k) = 4 levels and each name is rewritten O(levelFanout*log N)
+// times. It is a variable only so the layout scale test can compare fanouts.
+var levelFanout = 8
 
 // Snapshot may be held by readers after the source publishes a replacement.
 // Names live in a few immutable, sorted, pairwise disjoint levels (largest
@@ -28,7 +31,7 @@ const levelFanout = 4
 // small LSM parts that merge later, instead of copying every name.
 type Snapshot struct {
 	revision uint64
-	levels   [][]string
+	levels   []*level
 	n        int
 }
 
@@ -39,10 +42,11 @@ func (s *Snapshot) Names() iter.Seq[string] {
 	return func(yield func(string) bool) {
 		c := s.seek("")
 		for {
-			name, ok := c.next()
-			if !ok || !yield(name) {
+			name, level := c.peek()
+			if level < 0 || !yield(string(name)) {
 				return
 			}
+			c.advance(level)
 		}
 	}
 }
@@ -53,57 +57,181 @@ func (s *Snapshot) EqualNames(names []string) bool {
 	if len(names) != s.n {
 		return false
 	}
-	i := 0
-	for name := range s.Names() {
-		if names[i] != name {
+	c := s.seek("")
+	for _, want := range names {
+		name, level := c.peek()
+		if level < 0 || string(name) != want {
 			return false
 		}
-		i++
+		c.advance(level)
 	}
 	return true
 }
 
-// cursor walks the disjoint levels in global sorted order.
-type cursor struct {
-	levels [][]string
-	pos    []int
+// blockNames is the number of names per front-coded block.
+const blockNames = 32
+
+// level is an immutable sorted run of unique names, front-coded like LevelDB
+// data blocks or VictoriaMetrics mergeset items: each entry stores the length
+// of the prefix it shares with the previous name, then the rest. The first
+// name of every block is stored whole, so a seek binary-searches block starts
+// and decodes at most one block of blockNames names.
+type level struct {
+	data   []byte // entries: uvarint shared, uvarint suffix length, suffix
+	blocks []int  // offset of each block's first (whole) name in data
+	n      int
 }
 
+// levelWriter appends names in strictly increasing order.
+type levelWriter struct {
+	l    level
+	prev []byte
+}
+
+func (w *levelWriter) add(name []byte) {
+	shared := 0
+	if w.l.n%blockNames == 0 {
+		w.l.blocks = append(w.l.blocks, len(w.l.data))
+	} else {
+		shared = sharedPrefix(w.prev, name)
+	}
+	w.l.data = binary.AppendUvarint(w.l.data, uint64(shared))
+	w.l.data = binary.AppendUvarint(w.l.data, uint64(len(name)-shared))
+	w.l.data = append(w.l.data, name[shared:]...)
+	w.prev = append(w.prev[:0], name...)
+	w.l.n++
+}
+
+// sharedPrefix compares eight bytes at a time: names share long prefixes.
+func sharedPrefix(a, b []byte) int {
+	n := min(len(a), len(b))
+	i := 0
+	for ; i+8 <= n; i += 8 {
+		if x := binary.LittleEndian.Uint64(a[i:]) ^ binary.LittleEndian.Uint64(b[i:]); x != 0 {
+			return i + bits.TrailingZeros64(x)/8
+		}
+	}
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+func (w *levelWriter) finish() *level {
+	w.l.data = slices.Clip(w.l.data)
+	w.l.blocks = slices.Clip(w.l.blocks)
+	return &w.l
+}
+
+func newLevel(names []string) *level {
+	var w levelWriter
+	w.l.data = make([]byte, 0, len(names)*16)
+	for _, name := range names {
+		w.add([]byte(name))
+	}
+	return w.finish()
+}
+
+// levelIter decodes one level forward; key is valid after a true step.
+type levelIter struct {
+	l     *level
+	off   int // offset of entry i
+	i     int // entries consumed
+	key   []byte
+	valid bool
+}
+
+func (it *levelIter) next() bool {
+	if it.i >= it.l.n {
+		it.valid = false
+		return false
+	}
+	shared, k := binary.Uvarint(it.l.data[it.off:])
+	it.off += k
+	size, k := binary.Uvarint(it.l.data[it.off:])
+	it.off += k
+	it.key = append(it.key[:shared], it.l.data[it.off:it.off+int(size)]...)
+	it.off += int(size)
+	it.i++
+	it.valid = true
+	return true
+}
+
+// first returns block b's first name without copying it.
+func (l *level) first(b int) []byte {
+	off := l.blocks[b] + 1 // shared length is always 0
+	size, k := binary.Uvarint(l.data[off:])
+	return l.data[off+k : off+k+int(size)]
+}
+
+// at appends name i to dst[:0]. Blocks hold a fixed number of names, so a
+// position decodes at most one block (no scan), like a mergeset item lookup.
+func (l *level) at(i int, dst []byte) []byte {
+	it := levelIter{l: l, off: l.blocks[i/blockNames], i: i / blockNames * blockNames, key: dst[:0]}
+	for it.i <= i {
+		it.next()
+	}
+	return it.key
+}
+
+// skipTo moves forward to the first name >= key; false at the end.
+func (it *levelIter) skipTo(key string) bool {
+	if it.valid && string(it.key) >= key {
+		return true
+	}
+	// Jump to the last unstarted block whose first name is <= key. Keys are
+	// usually near (sorted batches, directory skips), so gallop first.
+	start := (it.i + blockNames - 1) / blockNames
+	lo, hi := start, start
+	for step := 1; hi < len(it.l.blocks) && string(it.l.first(hi)) <= key; step <<= 1 {
+		lo, hi = hi+1, hi+step
+	}
+	hi = min(hi, len(it.l.blocks))
+	b := lo + sort.Search(hi-lo, func(j int) bool { return string(it.l.first(lo+j)) > key }) - 1
+	if b >= start && b*blockNames > it.i {
+		it.off, it.i = it.l.blocks[b], b*blockNames
+	}
+	for it.next() {
+		if string(it.key) >= key {
+			return true
+		}
+	}
+	return false
+}
+
+// cursor walks the disjoint levels in global sorted order.
+type cursor struct{ its []levelIter }
+
 func (s *Snapshot) seek(key string) cursor {
-	c := cursor{levels: s.levels, pos: make([]int, len(s.levels))}
-	for i, level := range s.levels {
-		c.pos[i] = sort.SearchStrings(level, key)
+	c := cursor{its: make([]levelIter, len(s.levels))}
+	for i, l := range s.levels {
+		c.its[i].l = l
+		c.its[i].skipTo(key)
 	}
 	return c
 }
 
-// peek returns the smallest remaining name and its level.
-func (c *cursor) peek() (string, int) {
+// peek returns the smallest remaining name and its level. The name is valid
+// until that level advances.
+func (c *cursor) peek() ([]byte, int) {
 	best := -1
-	for i, level := range c.levels {
-		if c.pos[i] < len(level) && (best < 0 || level[c.pos[i]] < c.levels[best][c.pos[best]]) {
+	for i := range c.its {
+		if c.its[i].valid && (best < 0 || string(c.its[i].key) < string(c.its[best].key)) {
 			best = i
 		}
 	}
 	if best < 0 {
-		return "", -1
+		return nil, -1
 	}
-	return c.levels[best][c.pos[best]], best
+	return c.its[best].key, best
 }
-func (c *cursor) next() (string, bool) {
-	name, level := c.peek()
-	if level < 0 {
-		return "", false
-	}
-	c.pos[level]++
-	return name, true
-}
+
+func (c *cursor) advance(level int) { c.its[level].next() }
 
 // skipTo advances every level to its first name >= key.
 func (c *cursor) skipTo(key string) {
-	for i, level := range c.levels {
-		rest := level[c.pos[i]:]
-		c.pos[i] += sort.SearchStrings(rest, key)
+	for i := range c.its {
+		c.its[i].skipTo(key)
 	}
 }
 
@@ -144,7 +272,7 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 	}
 	snapshot := &Snapshot{revision: revision, n: len(next)}
 	if len(next) > 0 {
-		snapshot.levels = [][]string{next}
+		snapshot.levels = []*level{newLevel(next)}
 	}
 	c.current.Store(snapshot)
 	return nil
@@ -163,26 +291,15 @@ func (c *Catalog) ApplyBeforePublish(revision uint64, add, remove []string, befo
 	return c.ApplyBeforePublishContext(context.Background(), revision, add, remove, before)
 }
 
-// contains reports, for each sorted key, whether the sorted level holds it.
+// contains reports, for each sorted key, whether the level holds it.
 // Keys are searched in order, so each search starts at the previous match.
-func contains(level, keys []string, found func(int)) {
-	lo := 0
+func (l *level) contains(keys []string, found func(int)) {
+	it := levelIter{l: l}
 	for i, key := range keys {
-		// Gallop from the previous match: sorted keys in a large level
-		// are usually close together, so this beats a full binary search.
-		step := 1
-		hi := lo
-		for hi < len(level) && level[hi] < key {
-			lo = hi + 1
-			hi += step
-			step <<= 1
-		}
-		hi = min(hi+1, len(level))
-		lo += sort.SearchStrings(level[lo:hi], key)
-		if lo == len(level) {
+		if !it.skipTo(key) {
 			return
 		}
-		if level[lo] == key {
+		if string(it.key) == key {
 			found(i)
 		}
 	}
@@ -208,33 +325,37 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	deletions = slices.Compact(deletions)
 	// Removal wins within a batch; names already present are not new.
 	drop := make([]bool, len(additions))
-	contains(deletions, additions, func(i int) { drop[i] = true })
-	levels := make([][]string, 0, len(old.levels)+1)
+	k := 0
+	for i, name := range additions {
+		k += sort.SearchStrings(deletions[k:], name)
+		drop[i] = k < len(deletions) && deletions[k] == name
+	}
+	levels := make([]*level, 0, len(old.levels)+1)
 	n, changed := old.n, false
-	for _, level := range old.levels {
-		contains(level, additions, func(i int) { drop[i] = true })
+	for _, l := range old.levels {
+		l.contains(additions, func(i int) { drop[i] = true })
 		removed := 0
-		contains(level, deletions, func(int) { removed++ })
+		l.contains(deletions, func(int) { removed++ })
 		if removed > 0 {
-			kept := make([]string, 0, len(level)-removed)
-			k := 0
-			for i, name := range level {
-				if i&1023 == 0 {
+			var w levelWriter
+			it, k := levelIter{l: l}, 0
+			for it.next() {
+				if it.i&1023 == 0 {
 					if err := ctx.Err(); err != nil {
 						return err
 					}
 				}
-				for k < len(deletions) && deletions[k] < name {
+				for k < len(deletions) && deletions[k] < string(it.key) {
 					k++
 				}
-				if k == len(deletions) || deletions[k] != name {
-					kept = append(kept, name)
+				if k == len(deletions) || deletions[k] != string(it.key) {
+					w.add(it.key)
 				}
 			}
-			level, n, changed = kept, n-removed, true
+			l, n, changed = w.finish(), n-removed, true
 		}
-		if len(level) > 0 {
-			levels = append(levels, level)
+		if l.n > 0 {
+			levels = append(levels, l)
 		}
 	}
 	fresh := additions[:0]
@@ -247,7 +368,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		return nil
 	}
 	if len(fresh) > 0 {
-		levels, n = append(levels, fresh), n+len(fresh)
+		levels, n = append(levels, newLevel(fresh)), n+len(fresh)
 	}
 	if levels, err = compact(ctx, levels); err != nil {
 		return err
@@ -264,9 +385,9 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 
 // compact merges a level into its predecessor until every level is more than
 // levelFanout times smaller than the one before it. The input slice is private.
-func compact(ctx context.Context, levels [][]string) ([][]string, error) {
+func compact(ctx context.Context, levels []*level) ([]*level, error) {
 	for i := len(levels) - 1; i > 0; {
-		if len(levels[i])*levelFanout < len(levels[i-1]) {
+		if levels[i].n*levelFanout < levels[i-1].n {
 			i--
 			continue
 		}
@@ -281,23 +402,26 @@ func compact(ctx context.Context, levels [][]string) ([][]string, error) {
 	return levels, nil
 }
 
-func merge(ctx context.Context, a, b []string) ([]string, error) {
-	out := make([]string, 0, len(a)+len(b))
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		if (i+j)&1023 == 0 {
+func merge(ctx context.Context, a, b *level) (*level, error) {
+	var w levelWriter
+	w.l.data = make([]byte, 0, len(a.data)+len(b.data))
+	w.l.blocks = make([]int, 0, (a.n+b.n)/blockNames+1)
+	x, y := levelIter{l: a}, levelIter{l: b}
+	x.next()
+	y.next()
+	for x.valid || y.valid {
+		if (x.i+y.i)&1023 == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 		}
-		if a[i] < b[j] {
-			out = append(out, a[i])
-			i++
+		if !y.valid || (x.valid && string(x.key) < string(y.key)) {
+			w.add(x.key)
+			x.next()
 		} else {
-			out = append(out, b[j])
-			j++
+			w.add(y.key)
+			y.next()
 		}
 	}
-	out = append(out, a[i:]...)
-	return append(out, b[j:]...), nil
+	return w.finish(), nil
 }

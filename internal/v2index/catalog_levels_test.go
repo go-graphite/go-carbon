@@ -54,15 +54,25 @@ func matches(t *testing.T, s *Snapshot, glob string) (match, visit []string) {
 	return match, visit
 }
 
+func levelNames(l *level) []string {
+	var out []string
+	it := levelIter{l: l}
+	for it.next() {
+		out = append(out, string(it.key))
+	}
+	return out
+}
+
 func checkLevels(t *testing.T, s *Snapshot) {
 	t.Helper()
 	total := 0
-	for i, level := range s.levels {
-		if len(level) == 0 || !slices.IsSorted(level) || len(slices.Compact(slices.Clone(level))) != len(level) {
+	for i, l := range s.levels {
+		level := levelNames(l)
+		if len(level) == 0 || len(level) != l.n || len(l.blocks) != (l.n+blockNames-1)/blockNames || !slices.IsSorted(level) || len(slices.Compact(slices.Clone(level))) != len(level) {
 			t.Fatalf("level %d is empty, unsorted or duplicated", i)
 		}
-		if i > 0 && len(level)*levelFanout >= len(s.levels[i-1]) {
-			t.Fatalf("level %d (%d names) not compacted into %d", i, len(level), len(s.levels[i-1]))
+		if i > 0 && len(level)*levelFanout >= s.levels[i-1].n {
+			t.Fatalf("level %d (%d names) not compacted into %d", i, len(level), s.levels[i-1].n)
 		}
 		total += len(level)
 	}
