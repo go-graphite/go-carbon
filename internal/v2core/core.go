@@ -1180,10 +1180,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		next.Cursors = slices.Clone(pending)
 		frozen := pend.view(o.lookup)
-		frozen.Each(func(a *PendingApplication) bool {
-			next.ArchiveClock = max(next.ArchiveClock, a.Clock)
-			return true
-		})
+		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
 		f := &sealFlight{rows: head, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
 		pend = pendingHead{}
@@ -1248,10 +1245,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		next.Cursors = slices.Clone(pending)
 		sealedPending := pend.view(o.lookup)
-		sealedPending.Each(func(a *PendingApplication) bool {
-			next.ArchiveClock = max(next.ArchiveClock, a.Clock)
-			return true
-		})
+		next.ArchiveClock = sealedPending.maxClock(next.ArchiveClock)
 		next.NextPart++
 		reported, since := min(publishedBatches, pend.n), headExpiries
 		n, err := o.sealBatches(head, sealedPending.Batches(), next)
@@ -1516,19 +1510,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					break
 				}
 			}
-			if !due {
-				pend.view(o.lookup).Each(func(a *PendingApplication) bool {
-					if r.metrics[a.ID] != nil {
-						return true
-					}
-					b := coreBatch{ID: a.ID, Registered: a.Registered(), Policy: a.Policy}
-					if r.needsMetadataSeal(&b) {
-						due = true // establish metadata before its inactivity window can end
-						return false
-					}
-					return true
-				})
-			}
+			// Establish new names' metadata before their inactivity window can end.
+			due = due || r.pendingMetadataDue(&pend, o.lookup)
 			if due {
 				failure = flush()
 				if failure != nil {
