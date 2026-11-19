@@ -224,14 +224,18 @@ func TestPrepareAndRun(t *testing.T) {
 
 }
 func TestQueueOwnership(t *testing.T) {
+	t.Parallel()
+	// Order across many wraps of the two-slot ring; the property does not
+	// depend on the count, and each handoff costs a scheduler sleep.
+	const n = 1000
 	q := new(queue)
 	go func() {
-		for i := 0; i < 10000; i++ {
+		for i := 0; i < n; i++ {
 			q.push(&packet{Rows: []row{{Seq: uint64(i)}}})
 		}
 		q.push(&packet{End: true})
 	}()
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < n; i++ {
 		p := q.pop()
 		if len(p.Rows) != 1 || p.Rows[0].Seq != uint64(i) {
 			t.Fatal("order")

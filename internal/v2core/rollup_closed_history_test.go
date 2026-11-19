@@ -25,6 +25,9 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {
+				// Subtests own their engines; the parent's environment stays set
+				// until all of them finish.
+				t.Parallel()
 				_, policy := rollupTestPolicy(t, "history.metric", schema, method, .1)
 				cfg := coreTestConfig()
 				cfg.Shards = 1
