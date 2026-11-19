@@ -47,7 +47,7 @@ func (c *rollupWindowCache) remove(e *list.Element) {
 	}
 	c.lru.Remove(e)
 }
-func (c *rollupWindowCache) rangeSamples(r *rollupHistoryReader, m *rollupMetric, a int, start, end int64) ([]sealrollup.Sample, error) {
+func (c *rollupWindowCache) rangeSamples(r *rollupHistoryReader, m *rollupMetric, meta metricMetadata, a int, start, end int64) ([]sealrollup.Sample, error) {
 	key := rollupWindowKey{m.id, a, start, end}
 	if e := c.entries[key]; e != nil {
 		c.hits++
@@ -55,7 +55,7 @@ func (c *rollupWindowCache) rangeSamples(r *rollupHistoryReader, m *rollupMetric
 		return e.Value.(*rollupWindow).samples, nil
 	}
 	c.loads++
-	samples, err := r.load(m, a, start, end)
+	samples, err := r.load(m, meta, a, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -188,8 +188,8 @@ func (r *rollupHistoryReader) open() error {
 	}
 	return nil
 }
-func (r *rollupHistoryReader) load(m *rollupMetric, a int, start, end int64) ([]sealrollup.Sample, error) {
-	if m.meta.Expired {
+func (r *rollupHistoryReader) load(m *rollupMetric, meta metricMetadata, a int, start, end int64) ([]sealrollup.Sample, error) {
+	if meta.Expired {
 		return nil, nil
 	}
 	if err := r.open(); err != nil {
@@ -200,10 +200,10 @@ func (r *rollupHistoryReader) load(m *rollupMetric, a int, start, end int64) ([]
 	hi := lo + (end-start)/ar.Step
 	winners := map[int64]sealrollup.Record{}
 	emit := func(record sealrollup.Record) error {
-		if r.copied == nil && record.Order > m.meta.Frontier.Order {
+		if r.copied == nil && record.Order > meta.Frontier.Order {
 			return errors.New("history exceeds committed frontier")
 		}
-		if r.copied == nil && record.Order <= m.meta.ResetOrder {
+		if r.copied == nil && record.Order <= meta.ResetOrder {
 			return nil
 		}
 		old, ok := winners[record.Slot]
