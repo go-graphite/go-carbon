@@ -2,6 +2,7 @@ package v2part
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 
@@ -139,5 +140,33 @@ func TestDenseValueCodecRejectsCorruptTags(t *testing.T) {
 	}
 	if _, err := DecodeSlots(0, 1, v[:tagAt]); err == nil {
 		t.Fatal("missing tag accepted")
+	}
+}
+
+// BenchmarkDenseValues reports encode cost per point for seal-sized (one
+// point) and at-rest (4,096-point) runs of integer, decimal and true floats.
+func BenchmarkDenseValues(b *testing.B) {
+	for _, n := range []int{1, MaxDenseSlots} {
+		for _, kind := range []string{"integer", "decimal", "float"} {
+			bits := make([]uint64, n)
+			for i := range bits {
+				switch kind {
+				case "integer":
+					bits[i] = math.Float64bits(float64(1_000_000 + 1000*i))
+				case "decimal":
+					bits[i] = math.Float64bits(float64(i%97) * 0.01)
+				default:
+					bits[i] = math.Float64bits(math.Sqrt(float64(i + 2)))
+				}
+			}
+			rs := valueRun(bits...)
+			b.Run(fmt.Sprintf("%s/%d", kind, n), func(b *testing.B) {
+				var out []byte
+				for b.Loop() {
+					out = appendValues(out[:0], rs)
+				}
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*n), "ns/pt")
+			})
+		}
 	}
 }
