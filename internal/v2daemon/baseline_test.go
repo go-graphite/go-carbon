@@ -178,6 +178,7 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 	}
 	store = nil
 	cfg.Hooks.Expire = func(v2core.RollupPolicy, v2core.RollupMetadata, time.Time) bool { return true }
+	cfg.Hooks.ExpiryTTL = func(v2core.RollupPolicy, time.Time) (time.Duration, time.Time) { return time.Nanosecond, time.Time{} }
 	open()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -213,7 +214,7 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = nil
-	cfg.Hooks.Expire = nil
+	cfg.Hooks.Expire, cfg.Hooks.ExpiryTTL = nil, nil
 	open()
 	series, masked, err = reader.FetchWithMask(context.Background(), "baseline.metric", 1794700739, 1794700860)
 	if err != nil || !masked || series.Values()[1] != 18 {
