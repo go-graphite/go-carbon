@@ -4,6 +4,8 @@ import (
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/go-graphite/go-carbon/helper"
 )
 
 // App's lifecycle lock keeps the engine open during collection. No producer
@@ -51,11 +53,23 @@ var v2Descs = struct {
 	names:        prometheus.NewDesc("v2_catalog_names", "Names in the latest immutable discovery view, including classic union names.", nil, nil),
 }
 
+var v2CatalogDescs = struct{ baseErrors, baseHeap *prometheus.Desc }{
+	prometheus.NewDesc("v2_catalog_base_file_errors_total", "Failed writes of the discovery index base file; the base stays on the heap until a write succeeds.", nil, nil),
+	prometheus.NewDesc("v2_catalog_base_heap_bytes", "Bytes of the discovery index base held on the heap because its file write failed.", nil, nil),
+}
+
+// Stat reports base file failures to the stats collector.
+func (c *v2PublishedCatalog) Stat(send helper.StatCallback) {
+	failures, heap := c.BaseFileStats()
+	send("baseFileErrors", float64(failures))
+	send("baseHeapBytes", float64(heap))
+}
+
 func (*v2Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- v2MoveDesc
 	ch <- v2MoveOwnerDesc
 	ch <- v2MoveRegressionDesc
-	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked, v2MergeDescs.live, v2MergeDescs.pressure, v2MergeDescs.runs} {
+	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked, v2MergeDescs.live, v2MergeDescs.pressure, v2MergeDescs.runs, v2CatalogDescs.baseErrors, v2CatalogDescs.baseHeap} {
 		ch <- d
 	}
 	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.durableSeals, v2Descs.sealNames, v2Descs.sealPoints, v2Descs.ckptBytes, v2Descs.ckptFailures, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.readStages, v2Descs.names, v2Descs.rollupLag} {
@@ -109,6 +123,9 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	emit(v2Descs.live, prometheus.GaugeValue, float64(s.LiveBytes))
 	emit(v2Descs.dual, prometheus.GaugeValue, 0)
 	emit(v2Descs.names, prometheus.GaugeValue, float64(v.catalog.Catalog.Snapshot().Len()))
+	failures, heap := v.catalog.BaseFileStats()
+	emit(v2CatalogDescs.baseErrors, prometheus.CounterValue, float64(failures))
+	emit(v2CatalogDescs.baseHeap, prometheus.GaugeValue, float64(heap))
 	for level, count := range s.Parts {
 		ch <- prometheus.MustNewConstMetric(v2Descs.parts, prometheus.GaugeValue, float64(count), strconv.Itoa(level))
 	}
