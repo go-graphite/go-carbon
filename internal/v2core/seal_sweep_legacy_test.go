@@ -35,11 +35,6 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		r.renumber()
 	}
 	positions := map[uint64]int{}
-	names := r.pendingNames
-	if names == nil {
-		names = map[partsformat.ID]uint64{}
-		r.pendingNames = names
-	}
 	// At most one stage per input application. Retain capacity between seals.
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
@@ -64,15 +59,21 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 						return coreSealPlan{}, err
 					}
 				}
-				if prior, ok := r.names[m.policy.Name]; ok && prior != b.ID {
+				fp := m.fingerprint()
+				if _, ok := r.names.Get(fp); ok {
 					return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
 				}
-				if prior, ok := names[m.policy.Name]; ok && prior != b.ID {
+				if _, ok := r.pendingNames.Get(fp); ok {
 					return coreSealPlan{}, errors.New("canonical name has multiple pending IDs")
 				}
-				names[m.policy.Name] = b.ID
+				r.pendingNames.Put(fp, uint32(len(stages)))
 			}
-			stages, metrics = append(stages, rollupStage{next: m.meta, fresh: fresh}), append(metrics, m)
+			slot, meta := uint32(0), freshMetadata
+			if !fresh {
+				slot = r.slotOf(b.ID, m)
+				meta = r.meta[slot]
+			}
+			stages, metrics = append(stages, rollupStage{next: meta, slot: slot, fresh: fresh}), append(metrics, m)
 			batchCounts = append(batchCounts, 0)
 			i = len(stages) - 1
 			stages[i].next.Expired = false
@@ -120,8 +121,12 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
-			if _, seen := positions[id]; !seen && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
-				stages, metrics = append(stages, rollupStage{next: m.meta}), append(metrics, m)
+			if _, seen := positions[id]; seen {
+				continue
+			}
+			slot := r.slotOf(id, m)
+			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+				stages, metrics = append(stages, rollupStage{next: meta, slot: slot}), append(metrics, m)
 				r.stageKey(&stages[len(stages)-1], m)
 			}
 		}

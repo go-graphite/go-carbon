@@ -240,7 +240,7 @@ type coreOwner struct {
 
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
-	batchHook                    func(*pebble.Snapshot, PendingView, uint64) error
+	batchHook                    func(PendingView, uint64) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
 	frontier                     atomic.Pointer[coreFrontier]
 	db                           *pebble.DB
@@ -475,21 +475,32 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				}
 			}
 			if publishInventory != nil {
-				o.batchHook = func(snap *pebble.Snapshot, pending PendingView, generation uint64) error {
-					// Replace the provisional pin with one captured under the GC binding
-					// fence. No reader acquires this owner/GC mutex.
-					_ = snap.Close()
-					if o.gc == nil {
-						return publishInventory(s, o.db.NewSnapshot(), pending, generation, nil)
+				// The pin is captured with the binding set under the GC fence. A
+				// head-only publication (same sealed generation and binding set)
+				// pins nothing: the reader keeps the snapshot it holds for them.
+				var pinned bool
+				var pinnedGeneration uint64
+				var pinnedInventory *RollupInventory
+				o.batchHook = func(pending PendingView, generation uint64) error {
+					var pin *pebble.Snapshot
+					var inventory *RollupInventory
+					if o.gc != nil {
+						o.gc.mu.Lock()
+						inventory = o.gc.inventory
 					}
-					o.gc.mu.Lock()
-					pin, inventory := o.db.NewSnapshot(), o.gc.inventory
-					o.gc.mu.Unlock()
-					return publishInventory(s, pin, pending, generation, inventory)
+					if !pinned || generation != pinnedGeneration || inventory != pinnedInventory {
+						pin = o.db.NewSnapshot()
+					}
+					if o.gc != nil {
+						o.gc.mu.Unlock()
+					}
+					err := publishInventory(s, pin, pending, generation, inventory)
+					pinned, pinnedGeneration, pinnedInventory = err == nil, generation, inventory
+					return err
 				}
 			} else if hooks.PublishBatches != nil {
-				o.batchHook = func(snap *pebble.Snapshot, pending PendingView, generation uint64) error {
-					return hooks.PublishBatches(s, snap, pending.Batches(), generation)
+				o.batchHook = func(pending PendingView, generation uint64) error {
+					return hooks.PublishBatches(s, o.db.NewSnapshot(), pending.Batches(), generation)
 				}
 			}
 			if hooks.PlanSeal != nil {
@@ -589,7 +600,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			o.readGeneration = o.meta.NextPart
 			o.pub.publish(o.db.NewSnapshot())
 			if o.batchHook != nil {
-				if err := o.batchHook(o.db.NewSnapshot(), PendingView{}, o.readGeneration); err != nil {
+				if err := o.batchHook(PendingView{}, o.readGeneration); err != nil {
 					return err
 				}
 			}
@@ -990,6 +1001,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	if o.ready == nil {
 		o.initQueueSignals(nil)
 	}
+	if o.lookup == nil {
+		// Without a catalog no ID has a handle, as with the engine's empty
+		// PolicyCatalog; pending rows and views resolve through lookup.
+		o.lookup = func(uint64) *ApplicationPolicy { return nil }
+	}
 	headCapacity := o.cfg.MaxRows
 	if o.cfg.Rollups {
 		// Rollups normally seal on a time or size threshold, below the
@@ -1078,7 +1094,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				published = flight.pending.concat(published)
 			}
 		}
-		err := o.batchHook(o.db.NewSnapshot(), published, generation)
+		err := o.batchHook(published, generation)
 		if err == nil && o.visible != nil && prev < published.Len() {
 			o.visible(published.Suffix(prev))
 		}
@@ -1474,8 +1490,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				now = r.now()
 			}
 			due := false
-			for _, m := range r.idleCandidates() {
-				if !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
+			for id, m := range r.idleCandidates() {
+				if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
 					due = true
 					break
 				}

@@ -48,7 +48,7 @@ func checkDense(t *testing.T, r *coreRollups) {
 		t.Fatalf("dense %d != metrics %d", len(r.dense), len(r.metrics))
 	}
 	for i, m := range r.dense {
-		if sl := r.denseSlots[i]; r.ids[sl] != m.id || r.rank[sl] != uint32(i+1) || r.metrics[m.id] != m {
+		if r.ids[i] != m.id || r.metrics[m.id] != m {
 			t.Fatalf("dense[%d] stale", i)
 		}
 		if i > 0 && compareRollupMetrics(r.dense[i-1], m) >= 0 {
@@ -70,7 +70,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				all[i] = rankTestMetric(i)
 			}
 			for _, i := range rng.Perm(n)[:n/2] {
-				r.install(all[i].id, all[i])
+				r.install(all[i].id, all[i], metricMetadata{})
 			}
 			r.renumber()
 			checkDense(t, r)
@@ -81,20 +81,20 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				if id%7 == 0 {
 					c := *m
 					origs[id] = m
-					r.install(id, &c)
+					r.install(id, &c, r.metaOf(id))
 					all[id-1] = &c
 				}
 			}
 			for id, m := range origs {
 				if id%2 == 0 {
-					r.install(id, m)
+					r.install(id, m, r.metaOf(id))
 					all[id-1] = m
 				}
 			}
 			// Unranked installs stay below the renumber threshold.
 			for i := range all {
 				if r.metrics[all[i].id] == nil && i%13 == 0 {
-					r.install(all[i].id, all[i])
+					r.install(all[i].id, all[i], metricMetadata{})
 				}
 			}
 			for round := 0; round < 2; round++ {
@@ -188,11 +188,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				}
 				return r
 			}
-			unrank := func(r *coreRollups) {
-				clear(r.rank)
-				r.dense, r.unranked, r.replaced = r.dense[:0], r.unranked[:0], false
-				r.denseSlots, r.unrankedSlots = r.denseSlots[:0], r.unrankedSlots[:0]
-			}
+			unrank := unrankAll
 			ranked, ref := newPlanner(), newPlanner()
 			order := uint64(0)
 			lingered, renumbered := 0, 0
@@ -205,8 +201,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						next := newPlanner()
 						next.identities = (*p).identities
 						for id, m := range (*p).metrics {
-							next.install(id, m)
-							next.names[m.policy.Name] = id
+							next.install(id, m, (*p).metaOf(id))
 						}
 						*p = next
 					}
@@ -216,7 +211,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						for id, m := range p.metrics {
 							if id%7 == uint64(seal%7) {
 								c := *m
-								p.install(id, &c)
+								p.install(id, &c, p.metaOf(id))
 							}
 						}
 					}

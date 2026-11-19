@@ -252,7 +252,7 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Commit()
-	before := r.metrics[7].meta
+	before := r.metaOf(7)
 	changed := policy
 	changed.Config.Method = sealrollup.Max
 	wrong, err := EncodeRollupPolicy(changed)
@@ -263,7 +263,7 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 		if _, err = r.plan(SealInput{Batches: []Batch{bad}}); err == nil {
 			t.Fatal("invalid application accepted")
 		}
-		if r.metrics[7].meta.Frontier != before.Frontier || r.metrics[7].meta.Revision != before.Revision || len(r.metrics) != 1 {
+		if r.metaOf(7).Frontier != before.Frontier || r.metaOf(7).Revision != before.Revision || len(r.metrics) != 1 {
 			t.Fatal("failed planner changed durable view")
 		}
 	}

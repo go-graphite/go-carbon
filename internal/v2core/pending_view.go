@@ -226,7 +226,8 @@ func (v PendingView) Batches() []Batch {
 		rs := pendingRows{rows: s.rows, packets: s.packets, deltas: s.deltas, seqs: s.seqs, escapes: s.escapes}
 		dst = append(dst, rs.decodeFrom(v.lookup)...)
 	}
-	return dst
+	// Like the cold form, the result has cap == len: appends never share it.
+	return dst[:len(dst):len(dst)]
 }
 
 // Suffix returns the positions at and after pos, which must be an
