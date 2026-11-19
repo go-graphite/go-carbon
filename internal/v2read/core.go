@@ -3,7 +3,6 @@ package v2read
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -104,6 +103,7 @@ type sealedData struct {
 type metricState struct {
 	sealed   *v2core.RollupSnapshot
 	name     string
+	identity *v2core.ApplicationPolicy // last pending handle checked against meta
 	policy   v2core.RollupPolicy
 	meta     v2core.RollupMetadata
 	records  []sealrollup.Record
@@ -263,38 +263,31 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		if g.err = ctx.Err(); g.err != nil {
 			return
 		}
-		if b.Registered != nil && len(b.Policy) == 0 {
-			b.Policy = b.Registered.Definition()
-		}
-		var p v2core.RollupPolicy
-		if g.err = json.Unmarshal(b.Policy, &p); g.err != nil {
+		// Admission interned every rollup batch through the catalog's canonical
+		// JSON oracle and published only that identity, never raw policy bytes.
+		h := b.Registered
+		if h == nil {
+			g.err = errors.New("pending batch without registered policy")
 			return
 		}
-		canonical, err := v2core.EncodeRollupPolicy(p)
-		if err != nil {
-			g.err = err
-			return
-		}
-		if !bytes.Equal(canonical, b.Policy) {
-			g.err = errors.New("noncanonical pending policy")
-			return
-		}
-		name := string(p.Name)
+		name := h.Name()
 		m := g.metrics[name]
 		if m == nil {
+			m = &metricState{name: name, reader: g.sealed.reader, resource: g.sealed}
 			if base := g.sealed.lookup(name); base != nil {
-				m = &metricState{policy: base.policy, meta: base.meta, sealed: base.sealed, name: name, reader: g.sealed.reader, resource: g.sealed}
-				g.metrics[name] = m
+				m.policy, m.meta, m.sealed = base.policy, base.meta, base.sealed
+			} else {
+				m.policy, m.meta, m.identity = h.RollupPolicy(), v2core.RollupMetadata{ID: b.ID, Policy: h.Definition()}, h
 			}
-		}
-		if m == nil {
-			m = &metricState{name: name, policy: p, meta: v2core.RollupMetadata{ID: b.ID, Policy: canonical}, reader: g.sealed.reader, resource: g.sealed}
 			g.metrics[name] = m
 		}
-		if m.meta.ID != b.ID || !bytes.Equal(m.meta.Policy, b.Policy) {
+		// One catalog hands every batch of an ID the same handle: compare the
+		// definition bytes once per name, then only the handle.
+		if m.meta.ID != b.ID || (h != m.identity && !bytes.Equal(m.meta.Policy, h.Definition())) {
 			g.err = errors.New("pending identity/policy mismatch")
 			return
 		}
+		m.identity = h
 		if b.Order <= m.meta.Frontier.Order {
 			g.err = errors.New("pending batch overlaps sealed frontier")
 			return
