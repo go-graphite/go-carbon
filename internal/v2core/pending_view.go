@@ -72,8 +72,19 @@ func (v PendingView) Len() int { return v.n }
 
 func (s *pendingSegment) firstRow() uint32 { return s.packets[0].FirstRow }
 
+// packetAt finds the packet holding row. The seal calls it once per
+// application in ID order, so it is a plain loop rather than sort.Search.
 func (s *pendingSegment) packetAt(row uint32) int {
-	return sort.Search(len(s.packets), func(i int) bool { return s.packets[i].FirstRow+s.packets[i].Rows > row })
+	lo, hi := 0, len(s.packets)
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if pk := &s.packets[m]; pk.FirstRow+pk.Rows > row {
+			hi = m
+		} else {
+			lo = m + 1
+		}
+	}
+	return lo
 }
 
 func (s *pendingSegment) delta(pk *pendingPacket, row uint32) uint32 {
@@ -101,8 +112,16 @@ func (s *pendingSegment) idTime(pk *pendingPacket, row uint32) (uint64, int64) {
 
 // seg finds the segment holding position pos.
 func (v PendingView) seg(pos int) *pendingSegment {
-	i := sort.Search(len(v.segs), func(i int) bool { return v.segs[i].start+v.segs[i].count > pos })
-	return &v.segs[i]
+	lo, hi := 0, len(v.segs)
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if s := &v.segs[m]; s.start+s.count > pos {
+			hi = m
+		} else {
+			lo = m + 1
+		}
+	}
+	return &v.segs[lo]
 }
 
 // Ref returns the application at pos: its ID and its name source.

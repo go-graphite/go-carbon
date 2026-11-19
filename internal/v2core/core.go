@@ -493,7 +493,13 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				}
 			}
 			if hooks.PlanSeal != nil {
-				o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
+				o.plan = func(in coreSealInput) (coreSealPlan, error) {
+					// PlanSeal hooks take decoded batches; they serve tests only.
+					if in.Pending.Len() != 0 {
+						in.Batches, in.Pending = in.Pending.Batches(), PendingView{}
+					}
+					return hooks.PlanSeal(s, in)
+				}
 			}
 			o.meta = coreFrontier{Version: 1, Config: diskConfig, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
 			b, c, err := db.Get(coreMetaKey)
@@ -1164,9 +1170,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		deadline = time.Now().Add(sealInterval)
 		work := o.work
 		go func() {
-			// Decode the frozen rows only for planning; the planner copies
-			// samples into its own pointer-free scratch and drops this.
-			n, err := o.sealBatches(f.rows, f.pending.Batches(), f.next)
+			// The planner reads the frozen rows in place and copies samples
+			// into its own pointer-free scratch.
+			n, err := o.sealBatches(f.rows, f.pending, f.next)
 			f.done <- sealResult{n: n, err: err}
 			if work != nil {
 				select {
@@ -1216,7 +1222,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		})
 		next.NextPart++
 		reported, since := min(publishedBatches, pend.n), headExpiries
-		n, err := o.sealBatches(head, sealedPending.Batches(), next)
+		n, err := o.sealBatches(head, sealedPending, next)
 		if err != nil {
 			return err
 		}
@@ -1633,9 +1639,9 @@ func sortCoreRows(head []row, seconds int64) {
 	})
 }
 func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
-	return o.sealBatches(head, nil, next)
+	return o.sealBatches(head, PendingView{}, next)
 }
-func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
+func (o *coreOwner) sealBatches(head []row, pending PendingView, next coreFrontier) (uint64, error) {
 	if err := o.observeSealedMergeBudget(); err != nil {
 		return 0, err
 	}
@@ -1681,7 +1687,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	if o.plan != nil {
-		plan, err = o.plan(coreSealInput{Rows: head, Batches: batches, Next: next})
+		plan, err = o.plan(coreSealInput{Rows: head, Pending: pending, Next: next})
 		if err != nil {
 			return 0, err
 		}
