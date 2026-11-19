@@ -89,11 +89,15 @@ func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
 }
 
 // rollupTail is the unranked tail of the slot arrays: unranked[k] owns slot
-// len(dense)+k. It sorts the three columns together.
+// len(dense)+k. It sorts the columns together; from keeps each entry's old
+// slot, so renumber can move the closure calendar.
 type rollupTail struct {
 	metrics []*rollupMetric
 	ids     []uint64
 	meta    []metricMetadata
+	ttl     []int64
+	expAt   []int64
+	from    []uint32
 }
 
 func (x rollupTail) Len() int { return len(x.metrics) }
@@ -104,6 +108,9 @@ func (x rollupTail) Swap(i, j int) {
 	x.metrics[i], x.metrics[j] = x.metrics[j], x.metrics[i]
 	x.ids[i], x.ids[j] = x.ids[j], x.ids[i]
 	x.meta[i], x.meta[j] = x.meta[j], x.meta[i]
+	x.ttl[i], x.ttl[j] = x.ttl[j], x.ttl[i]
+	x.expAt[i], x.expAt[j] = x.expAt[j], x.expAt[i]
+	x.from[i], x.from[j] = x.from[j], x.from[i]
 }
 
 // renumber merges the unranked tail into dense so every slot is again its
@@ -118,14 +125,28 @@ func (r *coreRollups) renumber() {
 	if d+f >= math.MaxUint32 {
 		return // every new name stays unranked; plans stay exact on the search path
 	}
-	tail := rollupTail{r.unranked, r.ids[d:], r.meta[d:]}
+	tail := rollupTail{r.unranked, r.ids[d:], r.meta[d:], r.ttl[d:], r.expAt[d:], make([]uint32, f)}
+	for k := range tail.from {
+		tail.from[k] = uint32(d + k)
+	}
 	sort.Sort(tail)
-	fresh := rollupTail{slices.Clone(tail.metrics), slices.Clone(tail.ids), slices.Clone(tail.meta)}
+	fresh := rollupTail{slices.Clone(tail.metrics), slices.Clone(tail.ids), slices.Clone(tail.meta), slices.Clone(tail.ttl), slices.Clone(tail.expAt), tail.from}
+	// moved maps each old slot to its new one (gone for a dead slot); only
+	// the closure and expiry calendars hold slots across a renumber.
+	var moved []uint32
+	if len(r.calendar.slots) > 0 || len(r.expiries.slots) > 0 {
+		moved = make([]uint32, d+f)
+	}
 	n := 0
 	for i, id := range r.ids[:d] {
 		if id != deadSlot {
-			r.dense[n], r.ids[n], r.meta[n] = r.dense[i], id, r.meta[i]
+			r.dense[n], r.ids[n], r.meta[n], r.ttl[n], r.expAt[n] = r.dense[i], id, r.meta[i], r.ttl[i], r.expAt[i]
+			if moved != nil {
+				moved[i] = uint32(n)
+			}
 			n++
+		} else if moved != nil {
+			moved[i] = gone
 		}
 	}
 	size := n + f
@@ -133,16 +154,28 @@ func (r *coreRollups) renumber() {
 		clear(r.dense[size:])
 	}
 	r.dense = slices.Grow(r.dense, size-len(r.dense))[:size]
-	r.ids, r.meta = r.ids[:size], r.meta[:size]
-	for i, j, w := n-1, f-1, size-1; j >= 0; w-- {
+	r.ids, r.meta, r.ttl, r.expAt = r.ids[:size], r.meta[:size], r.ttl[:size], r.expAt[:size]
+	for i, j, w, o := n-1, f-1, size-1, d-1; j >= 0; w-- {
 		if i >= 0 && compareRollupMetrics(r.dense[i], fresh.metrics[j]) > 0 {
-			r.dense[w], r.ids[w], r.meta[w] = r.dense[i], r.ids[i], r.meta[i]
+			r.dense[w], r.ids[w], r.meta[w], r.ttl[w], r.expAt[w] = r.dense[i], r.ids[i], r.meta[i], r.ttl[i], r.expAt[i]
+			if moved != nil {
+				for moved[o] != uint32(i) { // compacted slot i came from old slot o
+					o--
+				}
+				moved[o] = uint32(w)
+				o--
+			}
 			i--
 		} else {
-			r.dense[w], r.ids[w], r.meta[w] = fresh.metrics[j], fresh.ids[j], fresh.meta[j]
+			r.dense[w], r.ids[w], r.meta[w], r.ttl[w], r.expAt[w] = fresh.metrics[j], fresh.ids[j], fresh.meta[j], fresh.ttl[j], fresh.expAt[j]
+			if moved != nil {
+				moved[fresh.from[j]] = uint32(w)
+			}
 			j--
 		}
 	}
+	r.calendar.move(moved)
+	r.expiries.move(moved)
 	for s, m := range r.dense {
 		if m.ownerSlot.Load() != uint32(s)+1 {
 			m.ownerSlot.Store(uint32(s) + 1)
@@ -301,4 +334,26 @@ func sealBatchSeen(batches []coreBatch, keys, seen []uint64, maxID, id uint64) b
 	}
 	_, ok := slices.BinarySearchFunc(keys, id, func(k, id uint64) int { return cmp.Compare(batches[k&sealBatchIndexMask].ID, id) })
 	return ok
+}
+
+// gone marks a dead slot in renumber's old-to-new slot map.
+const gone = math.MaxUint32
+
+// move rewrites every calendar entry to its slot's new number and drops
+// dead slots; moved is renumber's old-to-new map (nil: nothing filed). An
+// emptied second stays filed (heap and slots keep one entry per second)
+// until a pass drops it.
+func (c *calendar) move(moved []uint32) {
+	if moved == nil {
+		return
+	}
+	for end, slots := range c.slots {
+		kept := slots[:0]
+		for _, s := range slots {
+			if ns := moved[s]; ns != gone {
+				kept = append(kept, ns)
+			}
+		}
+		c.slots[end] = kept
+	}
 }
