@@ -1996,11 +1996,12 @@ func (e *coreEngine) close() error {
 	var writing errgroup.Group
 	writing.SetLimit(min(16, runtime.GOMAXPROCS(0)))
 	for i, o := range e.owners {
-		if errs[i] = <-o.done; errs[i] == nil && o.rollups != nil && o.rollups.db != nil {
+		errs[i] = <-o.done
+		if o.ckptWriting != nil {
+			<-o.ckptWriting // never leave an at-seal write behind a closed owner
+		}
+		if errs[i] == nil && o.rollups != nil && o.rollups.db != nil {
 			writing.Go(func() error {
-				if o.ckptWriting != nil {
-					<-o.ckptWriting
-				}
 				buf, err := o.rollups.encodeOwnerCheckpoint()
 				if err == nil {
 					err = writeCheckpointFile(o.dir, buf)
