@@ -1106,14 +1106,18 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		batchPublication = time.Now()
 		prev := publishedBatches
 		publishedBatches = pend.n
-		published := pend.view(o.lookup)
-		generation := o.readGeneration
 		if flight != nil {
 			// Pin under the seal's publication lock. Once the frozen part is
 			// durable the pin includes it, so its batches leave pending and the
 			// sealed view moves to the next generation in the same publication.
+			// The lock also orders the new-name pass against the seal's Commit.
 			o.sealPubMu.Lock()
 			defer o.sealPubMu.Unlock()
+		}
+		o.rollups.noteNewNames(&pend, o.lookup)
+		published := pend.view(o.lookup)
+		generation := o.readGeneration
+		if flight != nil {
 			if o.sealDurable {
 				generation++
 			} else {
@@ -1896,14 +1900,14 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		o.sealPubMu.Lock()
 		err = batch.Commit(pebble.Sync)
 		o.sealDurable = err == nil
+		if err == nil && plan.Commit != nil {
+			plan.Commit() // installs under the lock the new-name pass holds
+		}
 		o.sealPubMu.Unlock()
 		if err != nil {
 			return 0, err
 		}
 		durable = true
-		if plan.Commit != nil {
-			plan.Commit()
-		}
 		return n, nil
 	}
 	var descriptors []coreKV
@@ -2015,6 +2019,9 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		o.gc.mu.Unlock()
 	}
 	o.sealDurable = err == nil
+	if err == nil && plan.Commit != nil {
+		plan.Commit() // installs under the lock the new-name pass holds
+	}
 	o.sealPubMu.Unlock()
 	if err != nil {
 		return 0, err
@@ -2022,9 +2029,6 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	durable = true
 	if o.stage != nil {
 		o.stage("commit")
-	}
-	if plan.Commit != nil {
-		plan.Commit()
 	}
 	return total, nil
 }

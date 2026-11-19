@@ -116,15 +116,9 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 	// Positions: every position maps to its application; ranges tile [0, n).
 	app, pos := 0, 0
 	refs := make([]uint64, 0, v.Len())
-	v.Refs(0, v.Len(), func(p int, id uint64, registered *ApplicationPolicy, policy []byte) bool {
-		if p != len(refs) {
-			t.Fatalf("seed %d: Refs position %d, want %d", seed, p, len(refs))
-		}
+	for p := range v.Len() {
+		id, _, _ := v.Ref(p)
 		refs = append(refs, id)
-		return true
-	})
-	if len(refs) != v.Len() {
-		t.Fatalf("seed %d: Refs visited %d, want %d", seed, len(refs), v.Len())
 	}
 	// ids: the same positions and IDs without the catalog; cold positions
 	// carry their own descriptor. maxClock: the latest application clock.
@@ -135,7 +129,7 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 			wantColds++
 		}
 	}
-	v.ids(0, v.Len(), func(p int, id uint64, cold *coreBatch) bool {
+	v.IDs(0, v.Len(), func(p int, id uint64, cold *coreBatch) bool {
 		if p != n || id != refs[p] || (cold != nil && (cold.ID != id || cold.Policy == nil)) {
 			t.Fatalf("seed %d: ids position %d id %d cold %v", seed, p, id, cold != nil)
 		}
@@ -360,7 +354,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 				dues++
 				// A due pass seals: install every pending name, as the seal
 				// would, and start a fresh head.
-				h.view(find).ids(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
+				h.view(find).IDs(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
 					r.metrics[id] = &rollupMetric{}
 					return true
 				})

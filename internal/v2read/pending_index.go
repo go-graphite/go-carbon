@@ -3,54 +3,10 @@ package v2read
 import (
 	"context"
 	"encoding/json"
-	"slices"
-	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
-
-// pendingIndex finds a request's pending batches without scanning every
-// owner's whole pending head. Owners only append to the published head between
-// seals, so a generation reuses its predecessor's immutable chunks and adds one
-// chunk for the new suffix. Chunks hold positions and name hashes only, never
-// batches, and are built once by the first reader that needs them. Candidates
-// are re-checked by exact name, so hash collisions cannot change results.
-type pendingIndex struct {
-	chunks []*pendingChunk
-}
-
-type pendingChunk struct {
-	start, end int
-	once       sync.Once
-	// hashes[i] is the name hash of pending[start+i]; heads/next chain equal
-	// buckets so lookups need no sort and no name bytes.
-	hashes []uint64
-	heads  []int32
-	next   []int32
-	err    error
-}
-
-// maxPendingChunks bounds lookup work for owners that publish often but rarely
-// seal; past it the next generation indexes its whole head as one chunk.
-const maxPendingChunks = 64
-
-// nextPendingIndex reuses old's chunks when pending extends oldPending.
-func nextPendingIndex(old *pendingIndex, oldPending, pending v2core.PendingView) *pendingIndex {
-	if pending.Len() == 0 {
-		return &pendingIndex{}
-	}
-	n := oldPending.Len()
-	if old != nil && n > 0 && len(old.chunks) < maxPendingChunks && pending.Extends(oldPending) {
-		if n == pending.Len() {
-			return old
-		}
-		chunks := make([]*pendingChunk, len(old.chunks), len(old.chunks)+1)
-		copy(chunks, old.chunks)
-		return &pendingIndex{chunks: append(chunks, &pendingChunk{start: n, end: pending.Len()})}
-	}
-	return &pendingIndex{chunks: []*pendingChunk{{start: 0, end: pending.Len()}}}
-}
 
 // pendingName is the exact name predicate the linear scan used.
 func pendingName(registered *v2core.ApplicationPolicy, policy []byte) (string, error) {
@@ -74,49 +30,51 @@ func pendingHash(registered *v2core.ApplicationPolicy, policy []byte) (uint64, e
 	return namefp.Hash(name), err
 }
 
-// load indexes positions [start, end). Every holder of the chunk publishes
-// the same applications at these positions, so any holder's view may build it.
-func (c *pendingChunk) load(pending v2core.PendingView) error {
-	c.once.Do(func() {
-		n := c.end - c.start
-		hashes := make([]uint64, n)
-		pending.Refs(c.start, c.end, func(pos int, _ uint64, registered *v2core.ApplicationPolicy, policy []byte) bool {
-			h, err := pendingHash(registered, policy)
-			if err != nil {
-				c.err = err
-				return false
-			}
-			hashes[pos-c.start] = h
-			return true
-		})
-		if c.err != nil {
-			return
-		}
-		size := 1
-		for size < 2*n {
-			size <<= 1
-		}
-		heads := make([]int32, size)
-		for i := range heads {
-			heads[i] = -1
-		}
-		next := make([]int32, n)
-		mask := uint64(size - 1)
-		for i := n - 1; i >= 0; i-- { // descending inserts leave each chain ascending
-			b := hashes[i] & mask
-			next[i] = heads[b]
-			heads[b] = int32(i)
-		}
-		c.hashes, c.heads, c.next = hashes, heads, next
-	})
-	return c.err
-}
-
 // selectPending returns the applications whose exact name is in names, in
-// arrival order. Only matching applications are decoded.
-func selectPending(ctx context.Context, x *pendingIndex, pending v2core.PendingView, names []string) ([]v2core.Batch, error) {
-	positions, err := x.candidates(pending, names)
-	if err != nil {
+// arrival order. The request resolves only its own names to owner IDs: sealed
+// names through their metadata in sealed, the others through the owner's
+// published new-name list. It then scans the published rows by ID, and cold
+// applications by their inline name hash, with no catalog lookup per position.
+// Candidates are re-checked by exact name, so hash collisions cannot change
+// results. Only matching applications are decoded.
+func selectPending(ctx context.Context, sealed *v2core.RollupSnapshot, pending v2core.PendingView, names []string) ([]v2core.Batch, error) {
+	if pending.Len() == 0 {
+		return nil, nil
+	}
+	var hashes, ids namefp.Table // sets: keys in Hash, no local number
+	for _, n := range names {
+		hashes.Put(namefp.Fingerprint{Hash: namefp.Hash(n)}, 0)
+		if sealed == nil {
+			continue
+		}
+		if _, meta, ok := sealed.LookupMetadata(n); ok {
+			ids.Put(namefp.Fingerprint{Hash: meta.ID}, 0)
+		}
+	}
+	pending.NewNames(func(hash, id uint64) {
+		if _, ok := hashes.Get(namefp.Fingerprint{Hash: hash}); ok {
+			ids.Put(namefp.Fingerprint{Hash: id}, 0)
+		}
+	})
+	var positions []int
+	var err error
+	pending.IDs(0, pending.Len(), func(pos int, id uint64, cold *v2core.Batch) bool {
+		if cold == nil {
+			if _, ok := ids.Get(namefp.Fingerprint{Hash: id}); ok {
+				positions = append(positions, pos)
+			}
+			return true
+		}
+		var h uint64
+		if h, err = pendingHash(cold.Registered, cold.Policy); err != nil {
+			return false
+		}
+		if _, ok := hashes.Get(namefp.Fingerprint{Hash: h}); ok {
+			positions = append(positions, pos)
+		}
+		return true
+	})
+	if err != nil || len(positions) == 0 {
 		return nil, err
 	}
 	wanted := make(map[string]bool, len(names))
@@ -129,47 +87,19 @@ func selectPending(ctx context.Context, x *pendingIndex, pending v2core.PendingV
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if int(i) < covered {
+		if i < covered {
 			continue
 		}
-		_, registered, policy := pending.Ref(int(i))
+		_, registered, policy := pending.Ref(i)
 		name, err := pendingName(registered, policy)
 		if err != nil {
 			return nil, err
 		}
 		if wanted[name] {
-			b, _, end := pending.Application(int(i))
+			b, _, end := pending.Application(i)
 			out = append(out, b)
 			covered = end
 		}
 	}
 	return out, nil
-}
-
-// candidates returns ascending pending positions whose name hash matches one
-// of names. The caller still applies the exact name predicate.
-func (x *pendingIndex) candidates(pending v2core.PendingView, names []string) ([]int32, error) {
-	if len(x.chunks) == 0 {
-		return nil, nil
-	}
-	hashes := make([]uint64, len(names))
-	for i, n := range names {
-		hashes[i] = namefp.Hash(n)
-	}
-	var out []int32
-	for _, c := range x.chunks {
-		if err := c.load(pending); err != nil {
-			return nil, err
-		}
-		mask := uint64(len(c.heads) - 1)
-		for _, h := range hashes {
-			for j := c.heads[h&mask]; j >= 0; j = c.next[j] {
-				if c.hashes[j] == h {
-					out = append(out, int32(c.start)+j)
-				}
-			}
-		}
-	}
-	slices.Sort(out)
-	return slices.Compact(out), nil
 }

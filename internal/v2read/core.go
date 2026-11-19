@@ -76,7 +76,6 @@ type generation struct {
 	// decoded applications only in per-request generations.
 	view    v2core.PendingView
 	pending []v2core.Batch
-	index   *pendingIndex
 	once    sync.Once
 	metrics map[string]*metricState
 	err     error
@@ -167,7 +166,6 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 	// may race publication; a failed retain means a fresh sealed resource is needed.
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
-		g.index = nextPendingIndex(old.index, old.view, pending)
 		if old.sealed.number == number && old.sealed.inventory == inventory {
 			g.sealed = old.sealed
 			g.sealed.refs.Add(1)
@@ -183,9 +181,6 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 			g.sealed.refs.Store(1)
 		}
 		old.release()
-	}
-	if g.index == nil {
-		g.index = nextPendingIndex(nil, v2core.PendingView{}, pending)
 	}
 	if g.sealed == nil && snapshot == nil {
 		if r.closed.Load() {
@@ -592,11 +587,7 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 		return nil, err
 	}
 	stage = time.Now()
-	pendingIdx := g.index
-	if pendingIdx == nil {
-		pendingIdx = nextPendingIndex(nil, v2core.PendingView{}, g.view)
-	}
-	pending, err := selectPending(ctx, pendingIdx, g.view, names)
+	pending, err := selectPending(ctx, index, g.view, names)
 	if err != nil {
 		return nil, err
 	}

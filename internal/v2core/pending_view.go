@@ -16,7 +16,13 @@ type PendingView struct {
 	segs   []pendingSegment
 	n      int
 	lookup func(uint64) *ApplicationPolicy
+	// fresh lists, once per head, each row application's ID whose name had no
+	// sealed metadata when the owner published it, with the name's hash.
+	fresh []pendingFresh
 }
+
+// pendingFresh is a name with no sealed metadata: namefp.Hash and its ID.
+type pendingFresh struct{ hash, id uint64 }
 
 // pendingSegment is immutable once published. A row segment covers packets
 // packets[0..] whose rows are rows[packets[0].FirstRow:]; side arrays keep the
@@ -239,7 +245,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 		s.start -= pos
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup}
+	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup, fresh: v.fresh}
 }
 
 // Extends reports whether v starts with all of old: same immutable segments
@@ -280,6 +286,11 @@ type pendingHead struct {
 	// Installed metrics, the catalog and the expiry policy only ever add, so
 	// a cleared position stays clear until the head resets.
 	scanned int
+	// fresh is the head's published new-name list (PendingView.NewNames);
+	// freshScanned the positions it covers, freshIDs its members.
+	fresh        []pendingFresh
+	freshScanned int
+	freshIDs     map[uint64]struct{}
 }
 
 func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationPolicy) {
@@ -363,7 +374,7 @@ func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy) PendingView {
 	if ok {
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: h.n, lookup: lookup}
+	return PendingView{segs: segs, n: h.n, lookup: lookup, fresh: h.fresh[:len(h.fresh):len(h.fresh)]}
 }
 
 // concat joins a frozen head's view and the next head's view.
@@ -380,7 +391,8 @@ func (v PendingView) concat(w PendingView) PendingView {
 		s.start += v.n
 		segs = append(segs, s)
 	}
-	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup}
+	fresh := append(v.fresh[:len(v.fresh):len(v.fresh)], w.fresh...)
+	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, fresh: fresh}
 }
 
 func sameColdBatch(a, b *coreBatch) bool {
@@ -393,21 +405,20 @@ func sameColdBatch(a, b *coreBatch) bool {
 	return len(a.Policy) == 0 || &a.Policy[0] == &b.Policy[0]
 }
 
-// Refs visits positions [lo, hi) in order with each position's application
-// ID and name source; fn returns false to stop. Rows resolve their identity
-// through the owner's catalog.
-func (v PendingView) Refs(lo, hi int, fn func(pos int, id uint64, registered *ApplicationPolicy, policy []byte) bool) {
-	v.ids(lo, hi, func(pos int, id uint64, cold *coreBatch) bool {
-		if cold != nil {
-			return fn(pos, id, cold.Registered, cold.Policy)
-		}
-		return fn(pos, id, v.lookup(id), nil)
-	})
+// NewNames visits the name hash and ID of each row application whose name had
+// no sealed metadata when the owner published it. A reader resolves its
+// requested names to IDs through it and the sealed metadata, so it never looks
+// a pending position up in the catalog. Cold applications are not listed:
+// they carry their identity inline.
+func (v PendingView) NewNames(fn func(hash, id uint64)) {
+	for _, f := range v.fresh {
+		fn(f.hash, f.id)
+	}
 }
 
-// ids visits positions [lo, hi) in order with each position's ID and, for
+// IDs visits positions [lo, hi) in order with each position's ID and, for
 // cold applications, their descriptor. It never touches the catalog.
-func (v PendingView) ids(lo, hi int, fn func(pos int, id uint64, cold *coreBatch) bool) {
+func (v PendingView) IDs(lo, hi int, fn func(pos int, id uint64, cold *Batch) bool) {
 	for si := range v.segs {
 		s := &v.segs[si]
 		from, to := max(lo, s.start), min(hi, s.start+s.count)
