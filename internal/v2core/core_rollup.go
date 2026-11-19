@@ -1044,7 +1044,8 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 	if err != nil {
 		return err
 	}
-	for name, metric := range index.metrics {
+	for _, metric := range index.metrics {
+		name := metric.latest.Name()
 		records, err := index.Records(context.Background(), name)
 		if err != nil {
 			return err

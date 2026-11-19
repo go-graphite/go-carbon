@@ -70,7 +70,7 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := c.lookup(1)
-	if index.metrics["shared.metric"].latest.PolicyIdentity != h {
+	if index.metric("shared.metric").latest.PolicyIdentity != h {
 		t.Fatal("reader copied immutable identity")
 	}
 	bound, err := e.RegisterApplicationPolicy(1, "shared.metric", raw)

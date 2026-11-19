@@ -89,7 +89,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(prior.metricPartIDs(prior.metrics[string(policy.Name)])) != 1 || len(index.metricPartIDs(index.metrics[string(policy.Name)])) != 2 {
+			if len(prior.metricPartIDs(prior.metric(string(policy.Name)))) != 1 || len(index.metricPartIDs(index.metric(string(policy.Name)))) != 2 {
 				t.Fatal("extending a directory changed an older pin's part authority")
 			}
 			for _, view := range []struct {
@@ -114,10 +114,10 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if same.metrics[string(policy.Name)] != index.metrics[string(policy.Name)] {
+			if same.metric(string(policy.Name)) != index.metric(string(policy.Name)) {
 				t.Fatal("unchanged inventory rebuilt metric directory")
 			}
-			if len(same.metricPartIDs(same.metrics[string(policy.Name)])) != len(same.metricParts(same.metrics[string(policy.Name)])) {
+			if len(same.metricPartIDs(same.metric(string(policy.Name)))) != len(same.metricParts(same.metric(string(policy.Name)))) {
 				t.Fatal("snapshot part membership is incomplete")
 			}
 			all, err := index.Records(ctx, string(policy.Name))

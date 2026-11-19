@@ -1,10 +1,6 @@
 package v2core
 
-import (
-	"errors"
-
-	"github.com/go-graphite/go-carbon/internal/v2part"
-)
+import "github.com/go-graphite/go-carbon/internal/v2part"
 
 // PolicyNameSource is one immutable mapped discovery run. NameAt returns owned
 // bytes; holding the source pins its mapping through readers and seal output.
@@ -14,13 +10,12 @@ type PolicyNameSource interface {
 	NameAt(uint32) string
 }
 
-// A page binds positions to their exact mapping owners. The low word is 1+the
-// position; the high word is 1+the source index. Unpublished names use nameTail.
-// Keeping older sources only for names missing from the new base also preserves
-// identities of expired names, which can still be referenced by the journal.
+// A page owns positions in exactly one immutable base. Zero uses nameTail.
+// Rebinding copies absent names to the tail, so a retired base is never pinned
+// by an expired identity for the remainder of the journal epoch.
 type policyNamePage struct {
-	sources []PolicyNameSource
-	refs    [1024]uint64
+	source PolicyNameSource
+	refs   [1024]uint32
 }
 
 func (h *PolicyIdentity) metricName() v2part.ID {
@@ -32,7 +27,7 @@ func (h *PolicyIdentity) metricName() v2part.ID {
 	for {
 		if names := p.names.Load(); names != nil {
 			if ref := names.refs[h.id&1023]; ref != 0 {
-				return v2part.ID(names.sources[(ref>>32)-1].NameAt(uint32(ref) - 1))
+				return v2part.ID(names.source.NameAt(ref - 1))
 			}
 		}
 		if tail, ok := h.catalog.nameTail.Load(h.id); ok {
@@ -46,41 +41,37 @@ func (h *PolicyIdentity) metricName() v2part.ID {
 // BindMappedNames moves matching identities out of the heap tail. The source
 // must be immutable and must own its mapping; a catalog-wide mutable resolver
 // would silently reinterpret positions after a discovery base replacement.
+// A nil source detaches the base, preserving all names in the owned tail.
 // Call only on a new base publication, never on per-point or small-tail updates.
 func (c *PolicyCatalog) BindMappedNames(source PolicyNameSource) error {
-	if source == nil {
-		return errors.New("nil mapped policy name source")
-	}
 	c.namesMu.Lock()
 	defer c.namesMu.Unlock()
 	c.ids.Range(func(_, value any) bool {
 		page := value.(*policyIDPage)
 		old := page.names.Load()
-		next := &policyNamePage{sources: []PolicyNameSource{source}}
-		carried := make(map[uint32]uint32)
+		next := &policyNamePage{source: source}
 		var published []uint64
 		for slot := range page.handles {
 			h := page.handles[slot].Load()
 			if h == nil {
 				continue
 			}
-			if pos, ok := source.FindName(h.Name()); ok {
-				next.refs[slot] = uint64(1)<<32 | uint64(pos) + 1
+			var pos uint32
+			var ok bool
+			if source != nil {
+				pos, ok = source.FindName(h.Name())
+			}
+			if ok {
+				next.refs[slot] = pos + 1
 				published = append(published, h.id)
 			} else if old != nil && old.refs[slot] != 0 {
-				ref := old.refs[slot]
-				src := uint32(ref >> 32)
-				target, ok := carried[src]
-				if !ok {
-					next.sources = append(next.sources, old.sources[src-1])
-					target = uint32(len(next.sources))
-					carried[src] = target
-				}
-				next.refs[slot] = uint64(target)<<32 | uint64(uint32(ref))
+				// Install the owned fallback before publishing a page without this name.
+				// Readers holding old keep that source alive through NameAt's owned copy.
+				c.nameTail.Store(h.id, old.source.NameAt(old.refs[slot]-1))
 			}
 		}
 		if len(published) == 0 {
-			return true
+			next = nil
 		}
 		page.names.Store(next)
 		for _, id := range published {

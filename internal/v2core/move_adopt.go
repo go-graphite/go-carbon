@@ -14,6 +14,7 @@ import (
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -95,7 +96,8 @@ func (p *PreparedMove) Close() error {
 // Policies contains canonical names, never donor numeric identities.
 func (p *PreparedMove) Policies() map[string][]byte {
 	out := map[string][]byte{}
-	for name, m := range p.index.metrics {
+	for _, m := range p.index.metrics {
+		name := m.latest.Name()
 		out[name] = bytes.Clone(m.latest.definitionBytes())
 	}
 	return out
@@ -177,7 +179,7 @@ type moveWinner struct {
 // collectMoveArchive shares the ordinary physical-slot resolver with reads.
 // Separate source producers have disjoint names; their counters never compete.
 func collectMoveArchive(ctx context.Context, index *RollupSnapshot, name string, archive int, winners map[int64]moveWinner) error {
-	m := index.metrics[name]
+	m := index.metric(name)
 	if m == nil {
 		return nil
 	}
@@ -207,7 +209,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	}
 	wanted := map[archivePartIdentity]bool{}
 	for name := range ids {
-		if metric := prepared.index.metrics[name]; metric != nil {
+		if metric := prepared.index.metric(name); metric != nil {
 			for _, part := range prepared.index.metricParts(metric) {
 				wanted[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
 			}
@@ -282,13 +284,14 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	for id, m := range o.rollups.metrics {
 		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
 	}
-	for name, donor := range prepared.index.metrics {
+	for _, donor := range prepared.index.metrics {
+		name := donor.latest.Name()
 		id := ids[name]
 		if id == 0 {
 			continue
 		}
 		policy := donor.latest.rollupPolicy()
-		if existing := current.metrics[name]; existing != nil && !bytes.Equal(existing.latest.definitionBytes(), donor.latest.definitionBytes()) {
+		if existing := current.metric(name); existing != nil && !bytes.Equal(existing.latest.definitionBytes(), donor.latest.definitionBytes()) {
 			return errors.New("move policy mismatch")
 		}
 		winning := []sealrollup.Record{}
@@ -341,7 +344,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		// its original immutable parts; version 1 full baselines remain readable.
 		authority := moveAuthority{Version: 2, Meta: local, AtOrder: local.Frontier.Order}
 		priorRepairs := map[[2]int64]sealrollup.Record{}
-		if existing := current.metrics[name]; existing != nil && current.moves[existing] != nil && current.moves[existing].authority != nil {
+		if existing := current.metric(name); existing != nil && current.moves[existing] != nil && current.moves[existing].authority != nil {
 			for _, r := range current.moves[existing].authority.Coarse {
 				priorRepairs[[2]int64{int64(r.Archive), r.Slot}] = r
 			}
@@ -430,7 +433,8 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 }
 
 func (s *RollupSnapshot) loadMoveAuthorities() error {
-	for name, m := range s.metrics {
+	for _, m := range s.metrics {
+		name := m.latest.Name()
 		if s.moves[m] == nil || !s.moves[m].copied {
 			continue
 		}
@@ -459,7 +463,7 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 				latest.meta = compactMetadata(a.Meta)
 				policy := latest.policy
 				policy.Name = latest.metricName()
-				latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: policy, plain: latest.plain, vshard: latest.vshard}
+				latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: policy, plain: latest.plain, vshard: latest.vshard, nameHash: latest.nameHash, route: latest.route}
 				m.latest = latest
 			}
 		} else {
@@ -467,7 +471,7 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 			latest.meta = compactMetadata(a.Meta)
 			policy := latest.policy
 			policy.Name = latest.metricName()
-			latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: policy, plain: latest.plain, vshard: latest.vshard}
+			latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: policy, plain: latest.plain, vshard: latest.vshard, nameHash: latest.nameHash, route: latest.route}
 			m.latest = latest
 		}
 		s.moves[m].authority = &a
@@ -480,7 +484,7 @@ func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, arc
 }
 
 func (s *RollupSnapshot) scanMoveArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
-	m := s.metrics[name]
+	m := s.metric(name)
 	a := s.moves[m].authority
 	winners := map[int64]moveWinner{}
 	base := s
@@ -494,7 +498,7 @@ func (s *RollupSnapshot) scanMoveArchive(ctx context.Context, name string, archi
 				liveParts = append(liveParts, part)
 			}
 		}
-		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, partOverrides: map[*snapshotMetric][]*readPartMetric{&live: liveParts}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
+		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[namefp.Fingerprint]*snapshotMetric{m.latest.fingerprint(): &live}, partOverrides: map[*snapshotMetric][]*readPartMetric{&live: liveParts}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
 	}
 	if err := base.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, origin partOrigin) error {
 		if a.Version != 1 || record.Order > a.AtOrder {

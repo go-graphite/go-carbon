@@ -11,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -232,7 +233,7 @@ func (p *openedRollupPart) open(ctx context.Context, directory string, cache *pe
 // SnapshotForNames decodes only requested metadata entries in the name's exact
 // vshard. It owns no shared maps and borrows the caller's generation pin.
 func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebble.Snapshot, names []string, cache *RollupReadCache) (*RollupSnapshot, error) {
-	out := &RollupSnapshot{identities: s.identities, snapshot: snapshot, directory: s.directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}, routes: map[partRoute][]*readPart{}, opened: s, cache: cache}
+	out := &RollupSnapshot{identities: s.identities, snapshot: snapshot, directory: s.directory, parts: map[string]*readPart{}, metrics: map[namefp.Fingerprint]*snapshotMetric{}, routes: map[partRoute][]*readPart{}, opened: s, cache: cache}
 	out.directoryBytes = s.cacheBytes + int64(len(s.parts))*256
 	for _, name := range names {
 		shard := v2part.Route(v2part.ID(name))
@@ -280,25 +281,25 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			id := string(scope)
 			if out.parts[id] == nil {
 				key.Metric = ""
-				rp := &readPart{id: id, key: key, first: name, last: name, origin: partOrigin{Class: LivePart}}
+				rp := &readPart{id: id, key: key, first: h, last: h, origin: partOrigin{Class: LivePart}}
 				out.parts[id] = rp
 				route := partRoute{key.Group, shard}
 				out.routes[route] = append(out.routes[route], rp)
 			} else {
 				rp := out.parts[id]
-				if name < rp.first {
-					rp.first = name
+				if name < rp.first.Name() {
+					rp.first = h
 				}
-				if name > rp.last {
-					rp.last = name
+				if name > rp.last.Name() {
+					rp.last = h
 				}
 			}
-			old := out.metrics[name]
+			old := out.metrics[h.fingerprint()]
 			if old != nil && old.latest.PolicyIdentity != h {
 				return nil, errors.New("inconsistent rollup identity/policy")
 			}
 			if old == nil || state.meta.after(old.latest.meta) {
-				out.metrics[name] = &snapshotMetric{latest: state}
+				out.metrics[h.fingerprint()] = &snapshotMetric{latest: state}
 			}
 		}
 	}

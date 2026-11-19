@@ -244,7 +244,7 @@ func (app *App) startV2() error {
 	var nameBase v2core.PolicyNameSource
 	bindNames := func() error {
 		base := v.catalog.Snapshot().MappedNames()
-		if base == nil || base == nameBase {
+		if base == nameBase {
 			return nil
 		}
 		if err := r.Identities.BindMappedNames(base); err != nil {

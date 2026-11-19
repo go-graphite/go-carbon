@@ -34,7 +34,7 @@ func rollupOpenEnd(meta metricMetadata, a sealrollup.Archive) int64 {
 // pinned generation, physical winner resolver and ring ranges as stored reads.
 // Recursion only follows the one open child, so work is the sum of step ratios.
 func (s *RollupSnapshot) scanOpenArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
-	m := s.metrics[name]
+	m := s.metric(name)
 	c := m.latest.schema()
 	a := c.Archives[archive]
 	start := m.latest.meta.Frontier.MaxTime

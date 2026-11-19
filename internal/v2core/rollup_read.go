@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -34,7 +35,7 @@ type RollupSnapshot struct {
 	directory      string
 	routes         map[partRoute][]*readPart
 	parts          map[string]*readPart
-	metrics        map[string]*snapshotMetric
+	metrics        map[namefp.Fingerprint]*snapshotMetric
 	cache          *RollupReadCache
 	directoryBytes int64
 	bindingSet     *RollupInventory
@@ -86,10 +87,10 @@ type readPart struct {
 	// Bare-snapshot reads reuse the descriptor validated while loading this
 	// immutable scope. Registry-backed reads already retain their opened parts.
 	descriptor  *v2part.Descriptor
-	first, last string
+	first, last *PolicyIdentity
 	id          string
 	key         v2part.Key // immutable part scope; names come from the metric policy
-	metrics     map[string]*readPartMetric
+	metrics     map[namefp.Fingerprint]*readPartMetric
 	bytes       int64
 	origin      partOrigin
 }
@@ -141,7 +142,7 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
-	out := &RollupSnapshot{opened: opened, identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	out := &RollupSnapshot{opened: opened, identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[namefp.Fingerprint]*snapshotMetric{}}
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -209,7 +210,7 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 	// (merging every live file per metadata seek makes catch-up quadratic); a
 	// descriptor's scopes are adjacent in scopes, so one file is open at a time.
 	if prior != nil {
-		out.metrics = make(map[string]*snapshotMetric, len(prior.metrics))
+		out.metrics = make(map[namefp.Fingerprint]*snapshotMetric, len(prior.metrics))
 		for name, m := range prior.metrics {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -308,7 +309,7 @@ func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
 	scoped := s.routes[partRoute{m.latest.policy.Group, m.latest.vshard}]
 	out := make([]*readPartMetric, 0, len(scoped))
 	for _, p := range scoped {
-		if name < p.first || name > p.last {
+		if name < p.first.Name() || name > p.last.Name() {
 			continue
 		}
 		out = append(out, &readPartMetric{part: p, readMetricState: readMetricState{PolicyIdentity: m.latest.PolicyIdentity}})
@@ -334,7 +335,8 @@ func (s *RollupSnapshot) Metadata(visit func(string, RollupPolicy, RollupMetadat
 
 // MetadataContext permits discovery to leave its publication promptly on cancel.
 func (s *RollupSnapshot) MetadataContext(ctx context.Context, visit func(string, RollupPolicy, RollupMetadata)) error {
-	for name, m := range s.metrics {
+	for _, m := range s.metrics {
+		name := m.latest.Name()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -346,18 +348,28 @@ func (s *RollupSnapshot) MetadataContext(ctx context.Context, visit func(string,
 // LookupMetadata reads the immutable directory without constructing a second
 // all-name map in each consumer generation.
 func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetadata, bool) {
-	m := s.metrics[name]
+	m := s.metric(name)
 	if m == nil {
 		return RollupPolicy{}, RollupMetadata{}, false
 	}
 	return m.latest.rollupPolicy(), m.latest.metadata(), true
 }
 
+// metric uses the same process-local numeric identity as intake and owners.
+// A request's name is borrowed; the directory retains only the shared handle.
+func (s *RollupSnapshot) metric(name string) *snapshotMetric {
+	m := s.metrics[namefp.Name(name)]
+	if m != nil && m.latest.Name() != name {
+		return nil
+	}
+	return m
+}
+
 // MetricVersion identifies an immutable name's complete part set and metadata.
 // It owns no snapshot; equality proves archive records are unchanged, including
 // reset, retirement and rewind. Consumers may retain it in bounded caches.
 func (s *RollupSnapshot) MetricVersion(name string) any {
-	if m := s.metrics[name]; m != nil {
+	if m := s.metric(name); m != nil {
 		if s.opened != nil {
 			return openedMetricVersion{state: m.latest, parts: s.metricPartIdentity(m)}
 		}
@@ -373,13 +385,13 @@ func (s *RollupSnapshot) MetricVersion(name string) any {
 // carries only immutable results and part identities across generations. New
 // snapshots decode only added parts; removed parts invalidate cached authority.
 func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
-	if m := s.metrics[name]; m != nil && !m.latest.meta.Expired && archive > 0 && archive < len(m.latest.schema().Archives) && first >= 0 && first < last && last <= m.latest.schema().Archives[archive].Count {
+	if m := s.metric(name); m != nil && !m.latest.meta.Expired && archive > 0 && archive < len(m.latest.schema().Archives) && first >= 0 && first < last && last <= m.latest.schema().Archives[archive].Count {
 		return s.scanOpenArchive(ctx, name, archive, first, last, yield)
 	}
 	return s.scanStoredArchive(ctx, name, archive, first, last, yield)
 }
 func (s *RollupSnapshot) scanStoredArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
-	m := s.metrics[name]
+	m := s.metric(name)
 	if m == nil || m.latest.meta.Expired || first >= last {
 		return ctx.Err()
 	}
@@ -398,7 +410,7 @@ func (s *RollupSnapshot) scanStoredArchive(ctx context.Context, name string, arc
 // scanArchiveParts resolves immutable parts without applying move repairs. The
 // move reader overlays its small repair set on this same cached range resolver.
 func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
-	m := s.metrics[name]
+	m := s.metric(name)
 	// Reuse a cached full archive for covered ranges, preserving origins for
 	// the move repair resolver as well as ordinary reads.
 	archiveCount := m.latest.schema().Archives[archive].Count
@@ -736,7 +748,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 // Records resolves the canonical full state needed by pending rollup planning.
 // Render without pending data uses ScanArchive directly and avoids this work.
 func (s *RollupSnapshot) Records(ctx context.Context, name string) ([]sealrollup.Record, error) {
-	m := s.metrics[name]
+	m := s.metric(name)
 	if m == nil {
 		return nil, nil
 	}
@@ -756,7 +768,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		return nil, fmt.Errorf("missing rollup part %x", scope)
 	}
 	id := string(scope)
-	part := &readPart{origin: partOrigin{Class: LivePart}, id: id, metrics: map[string]*readPartMetric{}}
+	part := &readPart{origin: partOrigin{Class: LivePart}, id: id, metrics: map[namefp.Fingerprint]*readPartMetric{}}
 	end := v2part.PrefixEnd(scope)
 	// Per-row scratch, reused across the part: the metadata key and a slim
 	// row's definition only feed the seek and intern below.
@@ -813,14 +825,11 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			part.key = key
 			part.key.Metric = ""
 		}
-		name := string(policy.Name)
-		if part.first == "" || name < part.first {
-			part.first = name
+		if part.first == nil {
+			part.first = h
 		}
-		if name > part.last {
-			part.last = name
-		}
-		part.metrics[name] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
+		part.last = h // metadata is visited in canonical name order
+		part.metrics[h.fingerprint()] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
 		// The last 16 bytes are archive, physical slot and ordinal.
 		it.Next()
 		if it.Valid() && bytes.HasPrefix(it.Key(), encoded[:len(encoded)-16]) {
@@ -837,7 +846,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
-	out := &RollupSnapshot{snapshot: snapshot, directory: directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}, moves: map[*snapshotMetric]*snapshotMove{}, routes: map[partRoute][]*readPart{}, sourceIdentities: map[partOrigin]*PolicyCatalog{}}
+	out := &RollupSnapshot{snapshot: snapshot, directory: directory, parts: map[string]*readPart{}, metrics: map[namefp.Fingerprint]*snapshotMetric{}, moves: map[*snapshotMetric]*snapshotMove{}, routes: map[partRoute][]*readPart{}, sourceIdentities: map[partOrigin]*PolicyCatalog{}}
 	var err error
 	out.hasCopied, err = snapshotHasCopiedParts(snapshot)
 	if err != nil {
@@ -876,7 +885,7 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 			part = nil
 		}
 		if part == nil {
-			part = &readPart{id: scopeID, key: key, metrics: map[string]*readPartMetric{}}
+			part = &readPart{id: scopeID, key: key, metrics: map[namefp.Fingerprint]*readPartMetric{}}
 			part.key.Metric = ""
 			origin := partOrigin{Class: LivePart}
 			if out.hasCopied {
@@ -945,14 +954,11 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 				if h.policy.prepared.Digest() != meta.Frontier.Policy {
 					return nil, errors.New("rollup policy/frontier mismatch")
 				}
-				name := string(policy.Name)
-				if part.first == "" || name < part.first {
-					part.first = name
+				if part.first == nil {
+					part.first = h
 				}
-				if name > part.last {
-					part.last = name
-				}
-				part.metrics[name] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
+				part.last = h // metadata is visited in canonical name order
+				part.metrics[h.fingerprint()] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
 				// The last 16 bytes are archive, physical slot and ordinal.
 				it.SeekGE(v2part.PrefixEnd(encoded[:len(encoded)-16]))
 			}

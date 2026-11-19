@@ -108,7 +108,8 @@ func TestSparseRollupInventoryWorkBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name := range prior.metrics {
+	for _, m := range prior.metrics {
+		name := m.latest.Name()
 		want, err := prior.Records(context.Background(), name)
 		if err != nil {
 			t.Fatal(err)

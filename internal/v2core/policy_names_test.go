@@ -46,7 +46,7 @@ func TestMappedPolicyNamesTailAndGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime.GC()
-	if h.Name() != "service.old" || old.sources[0].NameAt(0) != "service.old" || !bytes.Equal(h.Definition(), raw) {
+	if h.Name() != "service.old" || old.source.NameAt(0) != "service.old" || !bytes.Equal(h.Definition(), raw) {
 		t.Fatal("resolved an identity through the wrong generation")
 	}
 	_, raw2 := rollupTestPolicy(t, "service.new", "1s:1d", sealrollup.Last, .5)
@@ -75,6 +75,14 @@ func TestMappedPolicyNamesTailAndGeneration(t *testing.T) {
 	wg.Wait()
 	if !bytes.Equal(fresh.Definition(), raw2) {
 		t.Fatal("canonical bytes changed")
+	}
+	// An empty successor must release the last mapped source as well.
+	if err := c.BindMappedNames(nil); err != nil {
+		t.Fatal(err)
+	}
+	page, _ := c.ids.Load(uint64(0))
+	if page.(*policyIDPage).names.Load() != nil || h.Name() != "service.old" || fresh.Name() != "service.new" {
+		t.Fatal("empty base retained a mapping or lost an identity")
 	}
 }
 

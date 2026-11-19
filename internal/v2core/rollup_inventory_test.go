@@ -45,23 +45,23 @@ func TestRollupInventoryAddsOnlyChangedNamesAndRewinds(t *testing.T) {
 	if len(third.inventory) != 3 {
 		t.Fatalf("descriptor inventory: %d", len(third.inventory))
 	}
-	if first.metrics["inventory.a"] != second.metrics["inventory.a"] {
+	if first.metric("inventory.a") != second.metric("inventory.a") {
 		t.Fatal("unaffected name rebuilt")
 	}
-	if second.metrics["inventory.b"] != third.metrics["inventory.b"] {
+	if second.metric("inventory.b") != third.metric("inventory.b") {
 		t.Fatal("unaffected name rebuilt on correction")
 	}
-	if first.metrics["inventory.a"].latest.meta.Frontier.Order != 1 || len(first.metricParts(first.metrics["inventory.a"])) != 1 {
+	if first.metric("inventory.a").latest.meta.Frontier.Order != 1 || len(first.metricParts(first.metric("inventory.a"))) != 1 {
 		t.Fatal("old pinned directory mutated")
 	}
-	if len(third.metricParts(third.metrics["inventory.a"])) != 2 {
+	if len(third.metricParts(third.metric("inventory.a"))) != 2 {
 		t.Fatal("added part missing")
 	}
 	rewind, err := NewRollupSnapshot(ctx, pins[0], third, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rewind.metrics["inventory.b"] != nil || rewind.metrics["inventory.a"].latest.meta.Frontier.Order != 1 {
+	if rewind.metric("inventory.b") != nil || rewind.metric("inventory.a").latest.meta.Frontier.Order != 1 {
 		t.Fatal("removed parts survived rewind")
 	}
 	for _, s := range []*RollupSnapshot{first, second, third, rewind} {
