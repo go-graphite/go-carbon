@@ -11,18 +11,19 @@ import (
 )
 
 func TestParallelOwnerOpen(t *testing.T) {
-	prior := runtime.GOMAXPROCS(4)
+	const owners = 24 // above the former fixed ceiling of 16 concurrent opens
+	prior := runtime.GOMAXPROCS(owners)
 	defer runtime.GOMAXPROCS(prior)
 	root := t.TempDir()
 	cfg := coreTestConfig()
-	cfg.Shards = 4
+	cfg.Shards = owners
 	var opened atomic.Int32
 	ready := make(chan struct{})
 	e, err := openCoreWithHooks(root, cfg, coreHooks{PublishBatches: func(_ int, s *pebble.Snapshot, _ []coreBatch, _ uint64) error {
 		if err := s.Close(); err != nil {
 			return err
 		}
-		if opened.Add(1) == 4 {
+		if opened.Add(1) == owners {
 			close(ready)
 		}
 		select {
