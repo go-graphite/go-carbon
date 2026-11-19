@@ -153,16 +153,15 @@ type coreRollups struct {
 	// sweepKeys/sweepSpare are the seal's sorted batch keys and radix spare,
 	// seen the idle pass's bitset of staged IDs: pointer-free, so retaining
 	// them between seals adds nothing for the GC to scan.
-	sweepKeys   []uint64
-	sweepSpare  []uint64
-	seen        []uint64
-	samples     []sealrollup.Sample
-	batches     []sealrollup.Batch
-	files       map[string][][]plannedKV
-	arena       []byte
-	pending     bool
-	definitions map[[32]byte][]partsformat.ArchivePolicy
-	coverage    map[string]*rollupCoverage
+	sweepKeys  []uint64
+	sweepSpare []uint64
+	seen       []uint64
+	samples    []sealrollup.Sample
+	batches    []sealrollup.Batch
+	files      map[string][][]plannedKV
+	arena      []byte
+	pending    bool
+	coverage   map[string]*rollupCoverage
 
 	// Owner-local slots, in rank order. dense holds every ranked installed
 	// metric in canonical (group, vshard, length, name) order, so a seal
