@@ -200,7 +200,7 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := int64(1794700800)
-	for round := range 3 {
+	seal := func(round int) {
 		order := uint64(round + 1)
 		batches := make([]Batch, n)
 		for i := range batches {
@@ -211,6 +211,23 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	seal(0)
+	seal(1)
+	// The kill arm keeps the checkpoint of the first two seals: one seal
+	// touching every name is newer than it, as after a SIGKILL.
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stale := make([][]byte, cfg.Shards)
+	for s := range cfg.Shards {
+		if stale[s], err = os.ReadFile(filepath.Join(root, fmt.Sprintf("owner-%03d", s), rollupCheckpointFile)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e, err = Open(root, cfg, Hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	seal(2)
 	start := time.Now()
 	if err = e.Close(); err != nil {
 		t.Fatal(err)
@@ -229,15 +246,24 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 		_ = os.Remove(filepath.Join(scanDir, fmt.Sprintf("owner-%03d", s), rollupCheckpointFile))
 	}
 	ckptDir := copyTree(t, root)
+	killDir := copyTree(t, root)
+	for s := range cfg.Shards {
+		if err = os.WriteFile(filepath.Join(killDir, fmt.Sprintf("owner-%03d", s), rollupCheckpointFile), stale[s], 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, arm := range []struct {
 		name, dir string
-	}{{"scan", scanDir}, {"checkpoint", ckptDir}} {
+	}{{"scan", scanDir}, {"kill(checkpoint+1 seal)", killDir}, {"checkpoint", ckptDir}} {
 		start := time.Now()
 		e, err := Open(arm.dir, cfg, Hooks{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		open := time.Since(start)
+		if want := arm.name != "scan"; e.owners[0].rollups.fromCheckpoint != want {
+			t.Fatalf("%s: fromCheckpoint=%v", arm.name, !want)
+		}
 		if err = e.Close(); err != nil {
 			t.Fatal(err)
 		}
