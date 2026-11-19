@@ -245,22 +245,36 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 	// already reflects (a merge output) is idempotent under after/newerOrigin.
 	series := map[v2part.ID]*rollupScanEntry{}
 	selected := map[archivePartIdentity]bool{}
+	reflected := map[archivePartIdentity]bool{}
 	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: sealedPartPrefix, UpperBound: v2part.PrefixEnd(sealedPartPrefix)})
 	if err != nil {
 		return nil, err
 	}
 	for valid := it.First(); valid; valid = it.Next() {
-		if stamp[string(it.Key())] {
-			continue
-		}
 		desc, e := v2part.ParseDescriptor(it.Value())
 		if e != nil {
 			return nil, errors.Join(e, it.Close())
 		}
-		selected[archivePartIdentity{desc.Scope.Group, desc.Scope.Part}] = true
+		if stamp[string(it.Key())] {
+			reflected[archivePartIdentity{desc.Scope.Group, desc.Scope.Part}] = true
+		} else {
+			selected[archivePartIdentity{desc.Scope.Group, desc.Scope.Part}] = true
+		}
 	}
 	if err = errors.Join(it.Error(), it.Close()); err != nil {
 		return nil, err
+	}
+	// Open the reflected parts too, without reading their rows: a missing,
+	// resized or unreadable original (footer, index, properties) fails open
+	// exactly as a rebuild from parts would.
+	if len(reflected) > 0 {
+		iter, err := newArchiveIterSelected(context.Background(), snapshot, rollupScanBounds(), reflected)
+		if err != nil {
+			return nil, err
+		}
+		if err = iter.Close(); err != nil {
+			return nil, err
+		}
 	}
 	if len(selected) > 0 {
 		iter, err := newArchiveIterSelected(context.Background(), snapshot, rollupScanBounds(), selected)
