@@ -547,7 +547,7 @@ func (s *Server) read(c net.Conn) error {
 				}
 				add((*slot).(*reference), value, ts)
 			})
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return flushAll()
 			}
 			if err != nil {
@@ -580,9 +580,9 @@ func (s *Server) read(c net.Conn) error {
 	owner, hash := 0, uint64(0)
 	for {
 		line, err := plain.ReadSlice('\n')
-		if err == bufio.ErrBufferFull {
+		if errors.Is(err, bufio.ErrBufferFull) {
 			joined := append([]byte(nil), line...)
-			for err == bufio.ErrBufferFull {
+			for errors.Is(err, bufio.ErrBufferFull) {
 				if len(joined) > s.cfg.MaxLineBytes {
 					return fmt.Errorf("plaintext line limit: %d", s.cfg.MaxLineBytes)
 				}
@@ -591,7 +591,7 @@ func (s *Server) read(c net.Conn) error {
 			}
 			line = joined
 		}
-		if err == io.EOF && len(line) == 0 {
+		if errors.Is(err, io.EOF) && len(line) == 0 {
 			return flushAll()
 		}
 		if err != nil {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"net"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"

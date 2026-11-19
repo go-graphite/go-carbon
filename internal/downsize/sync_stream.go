@@ -56,15 +56,14 @@ func (s *syncer) startList(ctx context.Context, store, after string) *syncLister
 		// one name in memory, even for multi-million-name copy inventories.
 		var scope *bufio.Scanner
 		var wanted string
-		advanceScope := func() bool {
+		advanceScope := func() {
 			for scope.Scan() {
 				wanted = strings.TrimSpace(scope.Text())
 				if wanted != "" {
-					return true
+					return
 				}
 			}
 			wanted = ""
-			return false
 		}
 		if s.o.namesFile != "" {
 			file, err := os.Open(s.o.namesFile)

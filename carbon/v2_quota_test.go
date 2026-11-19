@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -74,12 +75,22 @@ func TestV2TCPUnionQuotaRestartExpiry(t *testing.T) {
 		}
 	}
 	// Leave the sender open across shutdown, as a relay is during a rolling restart.
-	sender := send(fmt.Sprintf("live 11 %d\nblocked 99 %d\n", stamp, stamp), true)
+	sender := send(fmt.Sprintf("live 11 %d\n", stamp), true)
+	// Owners admit independently. Establish the last reservation before sending
+	// a name routed to another owner; socket order is not cross-owner order.
 	await(func() bool {
-		names, _ := app.v2.reader.Names(t.Context())
-		return len(names) == 1 && app.v2.quotas.Rejected() > 0
+		_, err := app.v2.reader.Metadata(t.Context(), "live")
+		return err == nil
 	})
-	if _, err := app.v2.reader.Metadata(t.Context(), "blocked"); err != v2read.ErrNotFound {
+	if _, err := fmt.Fprintf(sender, "blocked 99 %d\n", stamp); err != nil {
+		t.Fatal(err)
+	}
+	await(func() bool { return app.v2.quotas.Rejected() > 0 })
+	// Complete queued intake before checking that refusal left no journal state.
+	if err := app.v2.server.Fence(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.v2.reader.Metadata(t.Context(), "blocked"); !errors.Is(err, v2read.ErrNotFound) {
 		t.Fatalf("rejected name journaled: %v", err)
 	}
 	before := v2HTTP(t, app, fmt.Sprintf("/render/?format=json&target=historic&from=%d&until=%d", stamp-1, stamp))
@@ -92,6 +103,10 @@ func TestV2TCPUnionQuotaRestartExpiry(t *testing.T) {
 	app = setup()
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
+	}
+	// Rejected input must also stay absent from the recovered journal.
+	if _, err := app.v2.reader.Metadata(t.Context(), "blocked"); !errors.Is(err, v2read.ErrNotFound) {
+		t.Fatalf("rejected name recovered: %v", err)
 	}
 	// The received live point survives the restart, then inactivity expires it.
 	// A full host quota initially prevented 'blocked'; retirement releases its slot.

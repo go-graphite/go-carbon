@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -36,7 +37,7 @@ func TestCaptureCancellationDifferential(t *testing.T) {
 			for c := range 3 {
 				s := &startupInput{stop: channel(a), replayStop: channel(b)}
 				cancel := channel(c)
-				if got, want := s.waitCaptureUntil(cancel), referenceCaptureCancellation(s, cancel); got != want {
+				if got, want := s.waitCaptureUntil(cancel), referenceCaptureCancellation(s, cancel); !errors.Is(got, want) {
 					t.Fatalf("states %d/%d/%d: got %v want %v", a, b, c, got, want)
 				}
 			}

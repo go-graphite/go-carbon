@@ -17,8 +17,8 @@ func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	batches := []v2core.Batch{{ID: 7, Policy: raw, Clock: 1700000000}}
-	u.visible(0, batches)
-	u.visible(0, batches)
+	u.visible(batches)
+	u.visible(batches)
 	add, stamps, remove, _ := u.drain(0)
 	if !slices.Equal(add, []string{"name.metric"}) || len(remove) != 0 {
 		t.Fatal(add, remove)
@@ -27,8 +27,8 @@ func TestV2CatalogUpdatesDeduplicateAndRecreate(t *testing.T) {
 		t.Fatal(stamps)
 	}
 	u.expire(7, "name.metric")
-	u.visible(0, batches)
-	u.visible(0, batches)
+	u.visible(batches)
+	u.visible(batches)
 	add, _, remove, _ = u.drain(0)
 	if !slices.Equal(add, []string{"name.metric"}) || !slices.Equal(remove, add) {
 		t.Fatal(add, remove)

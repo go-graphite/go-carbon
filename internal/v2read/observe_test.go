@@ -2,6 +2,7 @@ package v2read
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -13,7 +14,7 @@ func TestReadObservationIncludesFailedFetch(t *testing.T) {
 	defer r.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := r.FetchMany(ctx, []string{"missing"}, 0, 60, 60, nil); err != context.Canceled {
+	if err := r.FetchMany(ctx, []string{"missing"}, 0, 60, 60, nil); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	count, sum, buckets := r.ReadObservation()

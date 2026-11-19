@@ -615,9 +615,9 @@ func run() (retErr error) {
 			if *layer == 3 && *policyFile != "" && policies[name] == nil {
 				continue
 			}
-			id, ok := names[name]
+			_, ok := names[name]
 			if !ok {
-				id = uint64(len(names) + 1)
+				id := uint64(len(names) + 1)
 				names[name] = id
 				if (*layer == 3 || *sampleEvery > 1 || id%8192 == 1) && len(candidates) < 4096 {
 					candidates = append(candidates, candidate{id, name})

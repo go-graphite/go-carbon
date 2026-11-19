@@ -113,20 +113,21 @@ func (e *CatalogEncoder) encode(fs []DictionaryFrame, ids []uint64, data []point
 	for frame := 0; frame < count; frame++ {
 		var f DictionaryFrame
 		var id uint64
-		if resolved != nil {
+		switch {
+		case resolved != nil:
 			r := resolved[frame]
 			id = r.ID
 			if id == 0 || id > e.Catalog.Count() || len(r.Points) == 0 || len(r.Points) > predictorV3MaxRaw {
 				return nil, errCatalog
 			}
 			f.Clock, f.Points = r.Clock, r.Points
-		} else if data != nil {
+		case data != nil:
 			id = ids[frame]
 			if _, _, ok := e.Catalog.Lookup(id); !ok {
 				return nil, errCatalog
 			}
 			f.Clock, f.Points = arrivalClock, data[frame:frame+1]
-		} else {
+		default:
 			f = fs[frame]
 			if f.Key == "" || len(f.Key) > predictorV3MaxRaw || len(f.Definition) > predictorV3MaxRaw || len(f.Points) == 0 || len(f.Points) > predictorV3MaxRaw {
 				return nil, errPredictorV3

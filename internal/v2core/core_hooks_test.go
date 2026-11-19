@@ -3,8 +3,6 @@ package v2core
 import (
 	"errors"
 	"fmt"
-	"github.com/cockroachdb/pebble"
-	"github.com/go-graphite/go-carbon/internal/v2part"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +10,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 func TestCoreOriginalBatchesAtomicExtension(t *testing.T) {

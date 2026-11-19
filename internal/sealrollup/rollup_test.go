@@ -117,9 +117,8 @@ func testDifferential(t *testing.T, continuation bool) {
 					state := map[key]Sample{}
 					candidates := map[key]bool{}
 					step := c.Archives[0].Step
-					start := align(clock-240*step, 86400)
 					// Keep fine samples inside the first retention for every schema.
-					start = align(clock-240*step, step)
+					start := align(clock-240*step, step)
 					var dense, sparse, late, boundary []Sample
 					for i := int64(0); i < 180; i++ {
 						dense = append(dense, sample(start+i*step, float64(i%17)-8, uint64(i+1)))

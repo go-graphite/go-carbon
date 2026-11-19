@@ -1,10 +1,11 @@
 package carbonserver
 
 import (
-	"github.com/go-graphite/go-carbon/points"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestV2QuotaStoragePendingExpiryAndThroughput(t *testing.T) {

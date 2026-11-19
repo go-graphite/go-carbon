@@ -722,13 +722,14 @@ func Run() {
 		must(coreReplay(*journal, *out, cfg))
 		return
 	}
-	if *mode == "prepare" {
+	switch *mode {
+	case "prepare":
 		must(prepare(*journal, *fixture, *schemas, *aggregation, *limit))
-	} else if *mode == "check" {
+	case "check":
 		must(checkFixture(*fixture, *out))
-	} else if *mode == "run" {
+	case "run":
 		must(runLayout(*fixture, *out, *shards, *passes, *maxRows, *readers, *steps, *dbPerOwner))
-	} else {
+	default:
 		panic("unknown mode")
 	}
 }

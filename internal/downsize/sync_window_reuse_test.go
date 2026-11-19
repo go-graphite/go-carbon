@@ -2,6 +2,7 @@ package downsize
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -57,7 +58,7 @@ func TestSyncIdenticalWindowsReusePhysicalComparison(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			if err := s.verifyWindows(ctx, &next, names, schemas, syncTestNow); err != context.Canceled {
+			if err := s.verifyWindows(ctx, &next, names, schemas, syncTestNow); !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancellation: %v", err)
 			}
 		})

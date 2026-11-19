@@ -64,11 +64,11 @@ func TestImportPublicationRequeuesLiveWithoutHoldingStripe(t *testing.T) {
 				check := make(chan error, 1)
 				go func() {
 					if e := target.TryUpdateMany(ctx, name, live); !errors.Is(e, store.ErrImportPending) {
-						check <- fmt.Errorf("single pending: %v", e)
+						check <- fmt.Errorf("single pending: %w", e)
 						return
 					}
 					if e := target.UpdateBatch(ctx, []store.MetricUpdate{{Name: name, Points: live}}, nil); !errors.Is(e, store.ErrImportPending) {
-						check <- fmt.Errorf("batch pending: %v", e)
+						check <- fmt.Errorf("batch pending: %w", e)
 						return
 					}
 					check <- target.UpdateMany(ctx, collision, live)

@@ -198,9 +198,10 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 					return nil
 				}
 				var x error
-				if layer == 0 {
+				switch layer {
+				case 0:
 					x = producer.AppendNumeric(in.rows)
-				} else if layer == 3 {
+				case 3:
 					in.apps = in.apps[:0]
 					for i, row := range in.rows {
 						in.order++
@@ -216,7 +217,7 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 					}
 					x = producer.AppendApplications(in.apps)
 					clear(in.apps)
-				} else {
+				default:
 					x = producer.Append(in.names, nil, in.data, in.seq, 1794700800+int64((seal+1)*4))
 				}
 				clear(in.names)

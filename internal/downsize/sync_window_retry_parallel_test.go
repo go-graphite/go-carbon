@@ -162,10 +162,7 @@ func TestWindowRetryLegacyProgressIsObservationOnly(t *testing.T) {
 	if len(b.copies) != 24 || s.prog.done.Load() != 48 || s.prog.durableFloor != 37 {
 		t.Fatal("legacy adoption skipped work/lost floor", len(b.copies), s.prog.done.Load(), s.prog.durableFloor)
 	}
-	kept, err := verificationCheckpointRows(s.j.rows)
-	if err != nil {
-		t.Fatal(err)
-	}
+	kept := verificationCheckpointRows(s.j.rows)
 	floor, visits := 0, 0
 	for _, r := range kept {
 		if r.Kind == "window-retry-floor" {

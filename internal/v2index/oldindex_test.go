@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 )
+
 // oldLevelFanout bounds the number of sorted levels: every level is more than
 // oldLevelFanout times larger than the next one, so a 17M-name view has at most
 // about a dozen levels and each name is rewritten O(oldLevelFanout*log N) times.
@@ -296,6 +297,7 @@ func oldMerge(ctx context.Context, a, b []string) ([]string, error) {
 	out = append(out, a[i:]...)
 	return append(out, b[j:]...), nil
 }
+
 // MatchPaths uses the sorted name projection itself as the discovery index.
 // Literal prefixes seek directly into the snapshot. Directory matches skip
 // their entire descendant range, so a broad find visits namespaces, not every

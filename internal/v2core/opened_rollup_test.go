@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -212,7 +213,7 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 	cancel()
 	_, err = parts.SnapshotForNames(ctx, snap, []string{name}, cache)
 	p.gate <- struct{}{}
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
 	parts.registry.mu.Lock()

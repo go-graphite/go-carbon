@@ -3,6 +3,7 @@ package partlog
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"math"
@@ -443,7 +444,7 @@ func TestCatalogFramesRejectInvalid(t *testing.T) {
 	e := CatalogEncoder{Catalog: c}
 	defer e.Close()
 	c.failed = errCatalog
-	if _, err := e.EncodeFrames([]CatalogFrame{{ID: id, Points: []points.Point{{}}}}); err != errCatalog {
+	if _, err := e.EncodeFrames([]CatalogFrame{{ID: id, Points: []points.Point{{}}}}); !errors.Is(err, errCatalog) {
 		t.Fatal("lost sticky catalog error", err)
 	}
 }

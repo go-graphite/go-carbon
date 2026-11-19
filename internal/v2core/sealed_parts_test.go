@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -95,7 +96,8 @@ func TestSealedPartCrashPublicationAndReplay(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestSealedPartCrashPublicationAndReplay$")
 			cmd.Env = append(os.Environ(), "V2_PART_CRASH_ROOT="+root, "V2_PART_CRASH_PHASE="+phase)
 			out, err := cmd.CombinedOutput()
-			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 61 {
+			exit := &exec.ExitError{}
+			if !errors.As(err, &exit) || exit.ExitCode() != 61 {
 				t.Fatalf("child did not reach boundary: %v\n%s", err, out)
 			}
 			paths, err := filepath.Glob(filepath.Join(root, "owner-000", "parts", "*"))

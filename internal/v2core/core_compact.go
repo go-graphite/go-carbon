@@ -22,7 +22,8 @@ func (w *coreCompactWorkspace) encode(rows []row) ([]byte, error) {
 	if len(rows) == 0 || len(rows) > coreCompactRows {
 		return nil, errors.New("invalid core compact row count")
 	}
-	b := append(w.encoded[:0], 'G', 'C', 'R', 1, 0, 0, 0, 0)
+	b := w.encoded[:0]
+	b = append(b, 'G', 'C', 'R', 1, 0, 0, 0, 0)
 	var previous uint64
 	for _, r := range rows {
 		b = binary.AppendUvarint(b, r.ID-previous)

@@ -197,10 +197,10 @@ func OpenNameCatalog(dir string, bind ...CatalogBinding) (*NameCatalog, error) {
 		good := int64(28)
 		for {
 			n, e := c.readRecord(c.wal)
-			if e == io.EOF {
+			if errors.Is(e, io.EOF) {
 				break
 			}
-			if e == io.ErrUnexpectedEOF {
+			if errors.Is(e, io.ErrUnexpectedEOF) {
 				if e = c.wal.Truncate(good); e != nil {
 					return fail(e)
 				}
@@ -264,7 +264,7 @@ func (c *NameCatalog) recoverCheckpoint(f *os.File) error {
 		}
 	}
 	var extra [1]byte
-	if n, err := decoder.Read(extra[:]); n != 0 || err != io.EOF {
+	if n, err := decoder.Read(extra[:]); n != 0 || !errors.Is(err, io.EOF) {
 		if err != nil {
 			return err
 		}

@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/go-graphite/go-carbon/internal/v2placement"
-	"github.com/go-graphite/go-carbon/internal/v2recv"
-	"github.com/go-graphite/go-carbon/internal/v2wire"
 	"math"
 	"net"
 	"path/filepath"
@@ -14,6 +11,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2placement"
+	"github.com/go-graphite/go-carbon/internal/v2recv"
+	"github.com/go-graphite/go-carbon/internal/v2wire"
 )
 
 func TestRelayDurableACKDisconnectRestartDedup(t *testing.T) {

@@ -2,6 +2,7 @@ package v2daemon
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -119,7 +120,7 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 				for {
 					var h [4]byte
 					_, err = io.ReadFull(file, h[:])
-					if err == io.EOF {
+					if errors.Is(err, io.EOF) {
 						break
 					}
 					if err != nil {

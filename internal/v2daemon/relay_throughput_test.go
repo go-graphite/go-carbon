@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2recv"
 )
 
 // TestLegacyThroughputEndpoint is an opt-in loopback-only measurement fixture.

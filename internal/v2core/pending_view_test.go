@@ -244,7 +244,7 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 // pointerful garbage while it stays resident.
 func BenchmarkPendingHead(b *testing.B) {
 	const points, perPacket = 8 << 20, 512
-	packets, pols := receiverPackets(points, perPacket)
+	packets, pols := receiverPackets(points)
 	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
 	submit := func(packet []coreBatch) []coreBatch {
 		// submitPacketMode: one descriptor and one point arena per packet.
@@ -452,7 +452,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 // []coreBatch list. Router-side encoding is outside the timer.
 func BenchmarkPendingScan(b *testing.B) {
 	const points, perPacket, ticks = 4 << 20, 512, 10
-	packets, pols := receiverPackets(points, perPacket)
+	packets, pols := receiverPackets(points)
 	var lookups int
 	lookup := func(id uint64) *ApplicationPolicy { lookups++; return pols[id-1] }
 	r := newCoreRollups()

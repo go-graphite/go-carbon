@@ -135,7 +135,7 @@ func (q *V2Quotas) Publish(metrics []V2QuotaMetric, fence uint64) error {
 	if old := q.index.Load(); old != nil {
 		t.throughputs = old.throughputs
 	}
-	if _, err := q.apply(t); err != nil {
+	if err := q.apply(t); err != nil {
 		return err
 	}
 	q.updateUsage(t)
@@ -196,7 +196,7 @@ func (q *V2Quotas) ShouldThrottleMetric(ps *points.Points, inCache bool) (thrott
 	}
 	// Newly materialized namespaces must receive matching rules before another
 	// new name can reserve their capacity. Existing throughput recorders survive.
-	if _, err := q.apply(t); err != nil {
+	if err := q.apply(t); err != nil {
 		return true
 	}
 	q.updateUsage(t)
@@ -220,13 +220,13 @@ func (q *V2Quotas) updateUsage(t *trieIndex) {
 
 // An expired namespace can be recreated within the same throughput interval.
 // Keep its recorder even when no storage node currently materializes its rule.
-func (q *V2Quotas) apply(t *trieIndex) (*throughputQuotaManager, error) {
+func (q *V2Quotas) apply(t *trieIndex) error {
 	saved := map[string]*throughputUsagePerNamespace{}
 	depth := t.throughputs.getDepth()
 	t.throughputs.entries.Range(func(k, v any) bool { saved[k.(string)] = v.(*throughputUsagePerNamespace); return true })
 	manager, err := t.applyQuotas(q.frequency, q.rules...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for path, old := range saved {
 		if manager.load(path) == nil {
@@ -236,5 +236,5 @@ func (q *V2Quotas) apply(t *trieIndex) (*throughputQuotaManager, error) {
 	depth = max(depth, manager.getDepth())
 	atomic.StoreInt64(&manager.depth, int64(depth))
 	manager.publishRoutes(depth)
-	return manager, nil
+	return nil
 }
