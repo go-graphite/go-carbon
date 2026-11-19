@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -73,6 +74,7 @@ func BenchmarkSealSweep(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
+					scratch, pointerful := sealScratchBytes(r)
 					records := 0
 					for _, part := range plan.Parts {
 						for _, segment := range part.Segments {
@@ -84,6 +86,9 @@ func BenchmarkSealSweep(b *testing.B) {
 						}
 					}
 					plan.Abort()
+					var m0, m1 runtime.MemStats
+					runtime.ReadMemStats(&m0)
+					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						plan, err := p.plan(r, SealInput{Batches: in})
@@ -92,7 +97,12 @@ func BenchmarkSealSweep(b *testing.B) {
 						}
 						plan.Abort()
 					}
+					b.StopTimer()
+					runtime.ReadMemStats(&m1)
 					report(b, records)
+					b.ReportMetric(float64(scratch)/float64(points), "transientB/point")
+					b.ReportMetric(float64(pointerful)/float64(points), "ptrTransientB/point")
+					b.ReportMetric(float64(m1.NumGC-m0.NumGC)/float64(b.N), "gc/op")
 				})
 			}
 			b.Run(fmt.Sprintf("model-A/names=%d/k=%.1f", names, k), func(b *testing.B) {

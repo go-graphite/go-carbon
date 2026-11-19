@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -66,11 +67,6 @@ type rollupMetric struct {
 	meta   metricMetadata
 	slots  sealrollup.Slots
 	vshard uint16
-	// rank is 1 + this metric's index in rankOwner.dense, the canonical
-	// (group, vshard, length, name) order. Adoption shares metrics between
-	// planners, so a rank is valid only for its owner; 0 means unranked.
-	rank      uint32
-	rankOwner *coreRollups
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -88,9 +84,12 @@ type coreRollups struct {
 	metrics map[uint64]*rollupMetric
 	// closable is the subset of metrics with a coarse archive. Only these can
 	// become closure-due; single-archive names never enter idle scans.
-	closable     map[uint64]*rollupMetric
-	names        map[partsformat.ID]uint64
+	closable map[uint64]*rollupMetric
+	names    map[partsformat.ID]uint64
+	// stages is the seal's pointer-free work list; stageMetrics[i] is the
+	// metric of stages[i], the only pointer per stage.
 	stages       []rollupStage
+	stageMetrics []*rollupMetric
 	pendingNames map[partsformat.ID]uint64
 	// sweepKeys/sweepSpare are the seal's sorted batch keys and radix spare,
 	// seen the idle pass's bitset of staged IDs: pointer-free, so retaining
@@ -114,6 +113,19 @@ type coreRollups struct {
 	denseSpare []*rollupMetric
 	unranked   []*rollupMetric
 	replaced   bool
+	// Owner-local slots. install gives each installed ID a slot, in arrival
+	// order, and leaves it as a hint on the metric's identity. ids[s] is the
+	// NumericID in slot s; rank[s] is 1 + its index in dense, in the canonical
+	// (group, vshard, length, name) order, 0 when unranked. denseSlots and
+	// unrankedSlots run parallel to dense and unranked, so renumber never
+	// looks a slot up. All four are pointer-free and sized by this owner's
+	// names, not by the engine-wide ID space. Invariant: rank[s] != 0 means
+	// dense[rank[s]-1] is the metric installed under ids[s].
+	ids             []uint64
+	rank            []uint32
+	denseSlots      []uint32
+	denseSlotsSpare []uint32
+	unrankedSlots   []uint32
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -138,13 +150,21 @@ func (r *coreRollups) install(id uint64, m *rollupMetric) {
 	old := r.metrics[id]
 	r.metrics[id] = m
 	if old != m {
-		if old != nil || m.rankOwner == r {
-			// The stale entry leaves dense at the next renumber; a metric
-			// this planner ranked before re-enters unranked.
+		s, ok := uint32(0), false
+		if old != nil {
+			// The stale entry leaves dense at the next renumber; the ID
+			// re-enters unranked in its old slot when retire finds it.
 			r.replaced = true
-			m.rank, m.rankOwner = 0, nil
+			s, ok = r.retire(id, old)
 		}
+		if !ok {
+			s = uint32(len(r.ids))
+			r.ids = append(r.ids, id)
+			r.rank = append(r.rank, 0)
+		}
+		m.ownerSlot.Store(s + 1)
 		r.unranked = append(r.unranked, m)
+		r.unrankedSlots = append(r.unrankedSlots, s)
 	}
 	if len(m.schema().Archives) > 1 {
 		r.closable[id] = m
@@ -184,15 +204,20 @@ func newRollupMetric(h *PolicyIdentity) *rollupMetric {
 	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
 }
 
+// rollupStage is one name's seal work. It is pointer-free, so the retained
+// stage buffer adds nothing for the GC to scan: the metric is
+// stageMetrics[i], the batches are batches[batch:batch+batches] of the
+// planner's batch storage, and the records are records[record:] of the
+// planning lane's record arena (see rollupPlannerLane.stageRecords). next
+// holds the compact scalars; the identity supplies ID, policy digest and
+// definition when encoding.
 type rollupStage struct {
-	sortKey    uint64
-	vshard     uint16
-	metric     *rollupMetric
-	next       RollupMetadata
-	batches    []sealrollup.Batch
-	records    []sealrollup.Record
-	fresh      bool
-	batchCount int
+	sortKey         uint64
+	next            metricMetadata
+	batch, batches  uint32
+	record, records uint32
+	vshard          uint16
+	fresh           bool
 }
 
 type rollupPlannerLane struct {
@@ -202,8 +227,27 @@ type rollupPlannerLane struct {
 	counts    []int
 	output    rollupOutput
 	workspace sealrollup.Workspace
-	records   []sealrollup.Record
-	err       error
+	// records is the current chunk of the lane's record arena; tuples point
+	// into it, so a chunk never moves during a plan. A plan that does not fit
+	// starts a chunk twice as large; full chunks wait in chunks, base is the
+	// arena index of records[0], and release sizes one chunk for the total.
+	records []sealrollup.Record
+	chunks  [][]sealrollup.Record
+	bases   []uint32
+	base    uint32
+	err     error
+}
+
+// stageRecords returns the records this lane planned for s.
+func (l *rollupPlannerLane) stageRecords(s *rollupStage) []sealrollup.Record {
+	i, c := s.record, l.records
+	if i < l.base {
+		k := sort.Search(len(l.bases), func(k int) bool { return l.bases[k] > i }) - 1
+		i, c = i-l.bases[k], l.chunks[k]
+	} else {
+		i -= l.base
+	}
+	return c[i : i+s.records : i+s.records]
 }
 
 func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
@@ -217,7 +261,10 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
-	stages := r.stages[:0]
+	if uint64(len(in.Batches)) > math.MaxUint32 {
+		return coreSealPlan{}, errors.New("too many seal batches")
+	}
+	stages, metrics := r.stages[:0], r.stageMetrics[:0]
 	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
 	}
@@ -237,8 +284,8 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			runs++
 		}
 	}
-	stages = slices.Grow(stages, runs)
-	r.stages = stages
+	stages, metrics = slices.Grow(stages, runs), slices.Grow(metrics, runs)
+	r.stages, r.stageMetrics = stages, metrics
 	idle := r.expire != nil || r.db != nil
 	seen := r.seen[:0]
 	if words := sealSeenWords(maxID, len(keys)); idle && words != 0 {
@@ -255,7 +302,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	samples := r.samples
 	r.batches = slices.Grow(r.batches[:0], len(in.Batches))[:len(in.Batches)]
 	batchStorage := r.batches
-	offset := 0
+	offset, batch := 0, 0
 	for i := 0; i < len(keys); {
 		first := &in.Batches[keys[i]&sealBatchIndexMask]
 		id := first.ID
@@ -263,7 +310,16 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for j < len(keys) && in.Batches[keys[j]&sealBatchIndexMask].ID == id {
 			j++
 		}
-		m := r.metrics[id]
+		// A ranked name whose identity carries this planner's slot reaches
+		// its metric through dense. Fresh and unranked names, policy-bytes
+		// batches and hints another planner overwrote probe the metrics map.
+		var m *rollupMetric
+		rk := r.hintRank(first.Registered, id)
+		if rk != 0 {
+			m = r.dense[rk-1]
+		} else {
+			m = r.metrics[id]
+		}
 		fresh := m == nil
 		if fresh {
 			if h := first.Registered; h != nil && h.catalog == r.identities && h.id == id {
@@ -287,15 +343,18 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			names[m.policy.Name] = id
 		}
-		stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh, batchCount: j - i})
+		stages = append(stages, rollupStage{next: m.meta, fresh: fresh, batch: uint32(batch), batches: uint32(j - i)})
+		metrics = append(metrics, m)
 		s := &stages[len(stages)-1]
 		s.next.Expired = false
-		r.stageKey(s)
+		if rk != 0 {
+			s.vshard, s.sortKey = m.vshard, uint64(rk)<<1
+		} else {
+			r.stageKey(s, m)
+		}
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
 		}
-		s.batches = batchStorage[: 0 : j-i]
-		batchStorage = batchStorage[j-i:]
 		for ; i < j; i++ {
 			b := &in.Batches[keys[i]&sealBatchIndexMask]
 			if (b.Registered == nil || b.Registered != m.PolicyIdentity) && !m.definitionEqual(b.Policy) {
@@ -306,7 +365,8 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 				ps[k] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 			}
 			offset += len(b.Points)
-			s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
+			batchStorage[batch] = sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps}
+			batch++
 		}
 	}
 	named := len(stages)
@@ -318,27 +378,14 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
 			if !sealBatchSeen(in.Batches, keys, seen, maxID, id) && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
-				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
-				r.stageKey(&stages[len(stages)-1])
+				stages, metrics = append(stages, rollupStage{next: m.meta}), append(metrics, m)
+				r.stageKey(&stages[len(stages)-1], m)
 			}
 		}
 	}
-	// Expiry callbacks retain their serial owner contract. Idle plans do not
-	// advance order, so the persisted reset frontier is already known here.
-	for i := range stages {
-		s := &stages[i]
-		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
-			// Older readers must reject reset authority rather than ignore its
-			// fields and resurrect the covered slot history.
-			s.next.Version = max(2, s.next.Version)
-			s.next.Expired = true
-			s.next.ResetOrder = s.next.Frontier.Order
-			if s.next.Revision == math.MaxUint64 {
-				return coreSealPlan{}, errors.New("metric revision exhausted")
-			}
-			s.next.Revision++
-		}
+	r.stages, r.stageMetrics = stages, metrics
+	if err := r.expireIdleStages(now); err != nil {
+		return coreSealPlan{}, err
 	}
 	var part partsformat.PartID
 	if len(stages) > 0 {
@@ -346,26 +393,52 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			return coreSealPlan{}, err
 		}
 	}
-	out, err := r.planStages(stages, part)
+	out, err := r.planStages(part)
 	if err != nil {
 		return coreSealPlan{}, err
 	}
-	r.stages = stages
 	out.Names = named
 	out.Abort = r.release
-	out.Commit = func() {
-		defer r.release()
-		r.commitStages()
-		for _, s := range stages {
-			m := s.metric
-			if s.fresh {
-				r.install(m.id, m)
-				r.names[m.policy.Name] = m.id
-			}
-		}
-	}
+	out.Commit = r.commitPlan
 	returned = true
 	return out, nil
+}
+
+// expireIdleStages applies the expiry callback to the idle stages, in stage
+// order: callbacks retain their serial owner contract. Idle plans do not
+// advance order, so the persisted reset frontier is already known here.
+func (r *coreRollups) expireIdleStages(now time.Time) error {
+	if r.expire == nil {
+		return nil
+	}
+	for i := range r.stages {
+		s, m := &r.stages[i], r.stageMetrics[i]
+		if s.batches == 0 && r.expire(m.rollupPolicy(), m.PolicyIdentity.metadata(s.next), now) {
+			// Older readers must reject reset authority rather than ignore its
+			// fields and resurrect the covered slot history.
+			s.next.Version = max(2, s.next.Version)
+			s.next.Expired = true
+			s.next.ResetOrder = s.next.Frontier.Order
+			if s.next.Revision == math.MaxUint64 {
+				return errors.New("metric revision exhausted")
+			}
+			s.next.Revision++
+		}
+	}
+	return nil
+}
+
+// commitPlan publishes the staged plan's owner-local state, then installs the
+// fresh names.
+func (r *coreRollups) commitPlan() {
+	defer r.release()
+	r.commitStages()
+	for i := range r.stages {
+		if m := r.stageMetrics[i]; r.stages[i].fresh {
+			r.install(m.id, m)
+			r.names[m.policy.Name] = m.id
+		}
+	}
 }
 
 // ScanRollups reads one immutable core snapshot. It resolves each physical slot

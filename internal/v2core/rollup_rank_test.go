@@ -48,7 +48,7 @@ func checkDense(t *testing.T, r *coreRollups) {
 		t.Fatalf("dense %d != metrics %d", len(r.dense), len(r.metrics))
 	}
 	for i, m := range r.dense {
-		if m.rankOwner != r || m.rank != uint32(i+1) || r.metrics[m.id] != m {
+		if sl := r.denseSlots[i]; r.ids[sl] != m.id || r.rank[sl] != uint32(i+1) || r.metrics[m.id] != m {
 			t.Fatalf("dense[%d] stale", i)
 		}
 		if i > 0 && compareRollupMetrics(r.dense[i-1], m) >= 0 {
@@ -100,23 +100,24 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 			for round := 0; round < 2; round++ {
 				var refs []rollupRankRef
 				stages := make([]rollupStage, 0, n)
+				var metrics []*rollupMetric
 				for _, m := range all {
 					if r.metrics[m.id] == m || rng.IntN(4) == 0 {
-						stages = append(stages, rollupStage{metric: m})
-						r.stageKey(&stages[len(stages)-1])
+						stages, metrics = append(stages, rollupStage{}), append(metrics, m)
+						r.stageKey(&stages[len(stages)-1], m)
 					}
 				}
 				for i := range stages {
-					refs = append(refs, rollupRankRef{key: stages[i].sortKey, rollupStage: &stages[i]})
+					refs = append(refs, rollupRankRef{key: stages[i].sortKey, stage: uint32(i)})
 				}
-				got, _ := sortRollupRanks(refs, nil, new([]int))
-				want := make([]*rollupStage, len(stages))
+				got, _ := sortRollupRanks(refs, nil, new([]int), metrics)
+				want := make([]uint32, len(stages))
 				for i := range stages {
-					want[i] = &stages[i]
+					want[i] = uint32(i)
 				}
-				slices.SortFunc(want, func(a, b *rollupStage) int { return compareRollupMetrics(a.metric, b.metric) })
+				slices.SortFunc(want, func(a, b uint32) int { return compareRollupMetrics(metrics[a], metrics[b]) })
 				for i := range got {
-					if got[i].rollupStage != want[i] {
+					if got[i].stage != want[i] {
 						t.Fatalf("round %d: canonical order differs at %d of %d", round, i, len(got))
 					}
 				}
@@ -188,10 +189,9 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				return r
 			}
 			unrank := func(r *coreRollups) {
-				for _, m := range r.metrics {
-					m.rank, m.rankOwner = 0, nil
-				}
+				clear(r.rank)
 				r.dense, r.unranked, r.replaced = r.dense[:0], r.unranked[:0], false
+				r.denseSlots, r.unrankedSlots = r.denseSlots[:0], r.unrankedSlots[:0]
 			}
 			ranked, ref := newPlanner(), newPlanner()
 			order := uint64(0)
