@@ -101,7 +101,7 @@ func TestMoveProgressFailureAndVersion(t *testing.T) {
 	if e = json.Unmarshal(b, &geometry); e != nil {
 		t.Fatal(e)
 	}
-	if geometry.Version != 2 {
+	if geometry.Version != restartVersion {
 		t.Fatal("old binary would accept move root")
 	}
 	m.Version = 99

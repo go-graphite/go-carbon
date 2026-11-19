@@ -14,8 +14,7 @@ import (
 // sharing a key tie-break by compareRollupMetrics, so the order is exact. A
 // ranked metric whose hint another planner overwrote takes the search key,
 // which sorts identically.
-func (r *coreRollups) stageKey(s *rollupStage) {
-	m := s.metric
+func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric) {
 	s.vshard = m.vshard
 	if rk := r.metricRank(m); rk != 0 {
 		s.sortKey = uint64(rk) << 1
@@ -185,32 +184,26 @@ func (r *coreRollups) renumber() {
 	r.unranked = r.unranked[:0]
 }
 
-// rollupRankRef is the 16-byte sort record of one stage.
+// rollupRankRef is the 16-byte, pointer-free sort record of one stage: its
+// key and its index in the planner's stages.
 type rollupRankRef struct {
-	key uint64
-	*rollupStage
-}
-
-func compareRollupRankRefs(a, b rollupRankRef) int {
-	if a.key != b.key {
-		if a.key < b.key {
-			return -1
-		}
-		return 1
-	}
-	if a.key&1 == 0 {
-		return 0
-	}
-	return compareRollupMetrics(a.metric, b.metric)
+	key   uint64
+	stage uint32
 }
 
 // sortRollupRanks orders refs by key with an LSD radix sort (11-bit digits,
 // only as many passes as the largest key needs), then sorts each run of equal
 // odd keys (unranked neighbours) by name. It returns the sorted slice and the
-// spare buffer for reuse.
-func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRankRef, []rollupRankRef) {
+// spare buffer for reuse. metrics[ref.stage] names each ref's metric.
+func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int, metrics []*rollupMetric) ([]rollupRankRef, []rollupRankRef) {
+	byName := func(a, b rollupRankRef) int { return compareRollupMetrics(metrics[a.stage], metrics[b.stage]) }
 	if len(refs) < 256 {
-		slices.SortFunc(refs, compareRollupRankRefs)
+		slices.SortFunc(refs, func(a, b rollupRankRef) int {
+			if c := cmp.Compare(a.key, b.key); c != 0 || a.key&1 == 0 {
+				return c
+			}
+			return byName(a, b)
+		})
 		return refs, scratch
 	}
 	const bits = 11
@@ -246,7 +239,7 @@ func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRank
 			j++
 		}
 		if j-i > 1 {
-			slices.SortFunc(src[i:j], compareRollupMetricsRef)
+			slices.SortFunc(src[i:j], byName)
 		}
 		i = j
 	}
@@ -254,86 +247,14 @@ func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRank
 	return src, tmp[:0]
 }
 
-func compareRollupMetricsRef(a, b rollupRankRef) int {
-	return compareRollupMetrics(a.metric, b.metric)
-}
-
-// sealBatchIndexMask selects the batch index from a sorted seal batch key.
-const sealBatchIndexMask = 1<<32 - 1
-
-// sortSealBatches returns the batch indices sorted by ID, stable, so each
-// name's batches form one run in arrival order and last-write-wins per slot
-// is preserved by construction. A key is ID<<32 | index; LSD radix passes run
-// over the ID bits only, as many as the largest ID needs, and the ascending
-// index bits keep equal IDs in arrival order. IDs of 32 bits or more take a
-// cold comparison-sort path on index-only keys. It also returns the spare
-// buffer for reuse and the largest ID.
-func sortSealBatches(batches []coreBatch, keys, spare []uint64) (sorted, tmp []uint64, maxID uint64) {
-	n := len(batches)
-	keys = slices.Grow(keys[:0], n)[:n]
-	for i := range batches {
-		maxID = max(maxID, batches[i].ID)
-	}
-	if maxID > sealBatchIndexMask || uint64(n) > sealBatchIndexMask {
-		for i := range keys {
-			keys[i] = uint64(i)
-		}
-		slices.SortStableFunc(keys, func(a, b uint64) int { return cmp.Compare(batches[a].ID, batches[b].ID) })
-		return keys, spare, maxID
-	}
-	for i := range batches {
-		keys[i] = batches[i].ID<<32 | uint64(i)
-	}
-	if n < 256 {
-		slices.Sort(keys)
-		return keys, spare, maxID
-	}
-	const bits = 11
-	const mask = 1<<bits - 1
-	var count [1 << bits]int
-	tmp = slices.Grow(spare[:0], n)[:n]
-	src := keys
-	for shift := uint(32); shift < 64 && maxID>>(shift-32) != 0; shift += bits {
-		clear(count[:])
-		for _, k := range src {
-			count[(k>>shift)&mask]++
-		}
-		sum := 0
-		for d, c := range count {
-			count[d] = sum
-			sum += c
-		}
-		for _, k := range src {
-			d := (k >> shift) & mask
-			tmp[count[d]] = k
-			count[d]++
-		}
-		src, tmp = tmp, src
-	}
-	return src, tmp[:0], maxID
-}
-
 // sealSeenWords sizes the idle pass's staged-ID bitset: one bit per ID up to
-// maxID, or 0 (binary search instead) when that exceeds two words per batch,
+// maxID, or 0 (binary search instead) when that exceeds two words per application,
 // so the bitset never outgrows the sort keys and their spare.
 func sealSeenWords(maxID uint64, batches int) int {
 	if maxID>>6 >= uint64(2*batches+1024) {
 		return 0
 	}
 	return int(maxID>>6) + 1
-}
-
-// sealBatchSeen reports whether this seal staged id: a bitset probe when the
-// IDs were dense enough for one, otherwise a binary search of the sorted keys.
-func sealBatchSeen(batches []coreBatch, keys, seen []uint64, maxID, id uint64) bool {
-	if id > maxID {
-		return false
-	}
-	if len(seen) != 0 {
-		return seen[id>>6]&(1<<(id&63)) != 0
-	}
-	_, ok := slices.BinarySearchFunc(keys, id, func(k, id uint64) int { return cmp.Compare(batches[k&sealBatchIndexMask].ID, id) })
-	return ok
 }
 
 // gone marks a dead slot in renumber's old-to-new slot map.

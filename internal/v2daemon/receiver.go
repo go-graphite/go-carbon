@@ -129,7 +129,7 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 			if local == 0 {
 				name = string(raw)
 			} else if o.throttle != nil {
-				name = o.p.applications[local].name // quota checks reuse the catalog string
+				name = o.p.applications[local].name() // quota checks reuse the catalog string
 			}
 		}
 		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {

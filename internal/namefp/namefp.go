@@ -4,7 +4,7 @@
 // retains no name.
 //
 // Identity is the fingerprint: a process-seeded maphash64 plus the high 32 bits
-// of the FNV-1a64 routing hash. At 263M names the chance of any two names
+// of the XXH3-64 routing hash. At 263M names the chance of any two names
 // sharing a fingerprint is about n²/2^97 ≈ 4e-13 per process lifetime; 64 bits
 // alone would be 2e-3, which is why both halves are kept. The fingerprint is
 // never persisted: the seed changes on every start.
@@ -14,6 +14,8 @@ import (
 	"hash/maphash"
 	"math"
 	"math/bits"
+
+	"github.com/zeebo/xxh3"
 )
 
 var seed = maphash.MakeSeed()
@@ -24,15 +26,13 @@ func Hash(name string) uint64 { return maphash.String(seed, name) }
 // HashBytes is Hash for borrowed name bytes, with no string allocation.
 func HashBytes(name []byte) uint64 { return maphash.Bytes(seed, name) }
 
-// Route is FNV-1a64 over the name bytes, the hash TCP intake routes by. Its high
+// Route is XXH3-64 over the name bytes, the hash TCP intake routes by. Its high
 // 32 bits are the second half of a fingerprint.
 func Route[T ~string | ~[]byte](name T) uint64 {
-	h := uint64(14695981039346656037)
-	for i := 0; i < len(name); i++ {
-		h ^= uint64(name[i])
-		h *= 1099511628211
+	if raw, ok := any(name).([]byte); ok {
+		return xxh3.Hash(raw)
 	}
-	return h
+	return xxh3.HashString(string(name))
 }
 
 // Fingerprint identifies a name within one process.

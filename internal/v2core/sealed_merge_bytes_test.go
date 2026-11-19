@@ -20,18 +20,23 @@ import (
 )
 
 // mergeByteDifferentialDigest is the SHA-256 of every merged part file and
-// descriptor that TestMergeByteDifferential writes, recorded on github
+// descriptor that TestMergeByteDifferential writes, with each name's envelope
+// folded into its last run. mergeByteDifferentialLegacyDigest is the same
+// merges written with v2part.LegacyEnvelopeKV, recorded on github
 // atimofieiev/v2 9f959a15aa7a (string merge keys) and re-recorded once when
-// merges began repacking short runs up to MaxDenseSlots; the decoded digest
-// below did not change. A merge must stay byte identical: do not re-record it
-// for a performance change.
-const mergeByteDifferentialDigest = "c8067a3d9c42ffe48aa7ec84db2eb9be9ffe5bb52113cf95f64b91a304c9a8d3"
+// merges began repacking short runs up to MaxDenseSlots. It pins every other
+// byte, so the folded digest differs only by the envelope's placement. A merge
+// must stay byte identical: do not re-record either for a performance change.
+const (
+	mergeByteDifferentialDigest       = "8d17173363d77469eca0b4e8bddea9f296575e92e5f3656981aaf099e40be7b0"
+	mergeByteDifferentialLegacyDigest = "c8067a3d9c42ffe48aa7ec84db2eb9be9ffe5bb52113cf95f64b91a304c9a8d3"
+)
 
 // mergeDecodedDifferentialDigest is the SHA-256 of the same merged parts'
-// content independent of run layout (every slot as a singleton record, every
-// envelope, the descriptor without file bytes, digest or KV count), recorded
-// on github atimofieiev/v2 e9795c4c62e3 before merges repacked runs. Run
-// layout may change; this content must not.
+// content independent of run layout and envelope placement (every slot as a
+// singleton record, every envelope at its own key, the descriptor without file
+// bytes, digest or KV count), recorded on github atimofieiev/v2 e9795c4c62e3
+// before merges repacked runs. Both envelope forms must reproduce it.
 const mergeDecodedDifferentialDigest = "266d1b35f1f24860c11a88321445ea9debcfb4591932bab481fcdb14cef56f42"
 
 // TestMergeByteDifferential runs multi-tier merges (seal parts, merges of
@@ -39,26 +44,36 @@ const mergeDecodedDifferentialDigest = "266d1b35f1f24860c11a88321445ea9debcfb459
 // names with late points, expired names, reset orders and a TTL floor, and
 // pins every merged part's bytes and descriptor to the recorded digest.
 func TestMergeByteDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	saved := mergePartID
 	defer func() { mergePartID = saved }()
-	var serial byte
-	mergePartID = func(id *v2part.PartID) error {
-		serial++
-		*id = v2part.PartID{0xA5, serial}
-		return nil
-	}
-	sum, decoded := sha256.New(), sha256.New()
-	for seed := uint64(1); seed <= 3; seed++ {
-		for _, group := range []v2part.Group{"live", "g.long-group"} {
-			mergeByteDifferentialCase(t, seed, group, sum, decoded)
+	defer v2part.LegacyEnvelopeKV.Store(false)
+	for _, legacy := range []bool{true, false} {
+		v2part.LegacyEnvelopeKV.Store(legacy)
+		var serial byte
+		mergePartID = func(id *v2part.PartID) error {
+			serial++
+			*id = v2part.PartID{0xA5, serial}
+			return nil
 		}
-	}
-	if got := hex.EncodeToString(decoded.Sum(nil)); got != mergeDecodedDifferentialDigest {
-		t.Fatalf("merged part content changed: decoded digest %s, want %s", got, mergeDecodedDifferentialDigest)
-	}
-	got := hex.EncodeToString(sum.Sum(nil))
-	if got != mergeByteDifferentialDigest {
-		t.Fatalf("merged part bytes changed: digest %s, want %s", got, mergeByteDifferentialDigest)
+		sum, decoded := sha256.New(), sha256.New()
+		for seed := uint64(1); seed <= 3; seed++ {
+			for _, group := range []v2part.Group{"live", "g.long-group"} {
+				mergeByteDifferentialCase(t, seed, group, sum, decoded)
+			}
+		}
+		if got := hex.EncodeToString(decoded.Sum(nil)); got != mergeDecodedDifferentialDigest {
+			t.Errorf("legacy=%v: merged part content changed: decoded digest %s, want %s", legacy, got, mergeDecodedDifferentialDigest)
+		}
+		want := mergeByteDifferentialDigest
+		if legacy {
+			want = mergeByteDifferentialLegacyDigest
+		}
+		if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+			t.Errorf("legacy=%v: merged part bytes changed: digest %s, want %s", legacy, got, want)
+		}
 	}
 }
 

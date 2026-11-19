@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -141,6 +142,8 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 			for n, m := range d.metrics {
 				visit(n, m.meta)
 			}
+			slices.Sort(o.names)
+			o.names = slices.Compact(o.names)
 		})
 	}
 	wg.Wait()
@@ -155,15 +158,52 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 		return nil, nil, failed
 	}
 	masks := make(map[string]bool)
-	var names []string
-	for _, o := range out {
-		names = append(names, o.names...)
+	lists := make([][]string, len(out))
+	for i, o := range out {
+		lists[i] = o.names
 		for _, n := range o.masked {
 			masks[n] = true
 		}
 	}
-	slices.Sort(names)
-	return slices.Compact(names), masks, nil
+	return MergeNames(lists...), masks, nil
+}
+
+// MergeNames merges sorted, duplicate-free lists into one sorted list, keeping
+// a name present in several lists once. Pairs of lists merge in parallel
+// rounds, so 10M names from 96 owners take 7 linear rounds, not a sort.
+func MergeNames(lists ...[]string) []string {
+	for len(lists) > 1 {
+		next := make([][]string, (len(lists)+1)/2)
+		var wg sync.WaitGroup
+		for i := range next {
+			if 2*i+1 == len(lists) {
+				next[i] = lists[2*i]
+				continue
+			}
+			wg.Go(func() { next[i] = mergeTwo(lists[2*i], lists[2*i+1]) })
+		}
+		wg.Wait()
+		lists = next
+	}
+	if len(lists) == 0 {
+		return nil
+	}
+	return lists[0]
+}
+
+func mergeTwo(a, b []string) []string {
+	out := make([]string, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		switch c := strings.Compare(a[0], b[0]); {
+		case c < 0:
+			out, a = append(out, a[0]), a[1:]
+		case c > 0:
+			out, b = append(out, b[0]), b[1:]
+		default:
+			out, a, b = append(out, a[0]), a[1:], b[1:]
+		}
+	}
+	return append(append(out, a...), b...)
 }
 
 // loadOwners pins publications without starting any directory work.

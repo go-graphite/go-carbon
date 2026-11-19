@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -147,22 +148,24 @@ type coreRollups struct {
 	// names holds each installed name's fingerprint; pendingNames those of
 	// this plan's fresh names. Both are pointer-free sets that read no name
 	// bytes and hold no slot, so renumber moves no entry.
-	names        namefp.Table
+	names namefp.Table
+	// stages is the seal's pointer-free work list; stageMetrics[i] is the
+	// metric of stages[i], the only pointer per stage.
 	stages       []rollupStage
+	stageMetrics []*rollupMetric
 	pendingNames namefp.Table
 	// sweepKeys/sweepSpare are the seal's sorted batch keys and radix spare,
 	// seen the idle pass's bitset of staged IDs: pointer-free, so retaining
 	// them between seals adds nothing for the GC to scan.
-	sweepKeys   []uint64
-	sweepSpare  []uint64
-	seen        []uint64
-	samples     []sealrollup.Sample
-	batches     []sealrollup.Batch
-	files       map[string][][]plannedKV
-	arena       []byte
-	pending     bool
-	definitions map[[32]byte][]partsformat.ArchivePolicy
-	coverage    map[string]*rollupCoverage
+	sweepKeys  []uint64
+	sweepSpare []uint64
+	seen       []uint64
+	samples    []sealrollup.Sample
+	batches    []sealrollup.Batch
+	files      map[string][][]plannedKV
+	arena      []byte
+	pending    bool
+	coverage   map[string]*rollupCoverage
 
 	// Owner-local slots, in rank order. dense holds every ranked installed
 	// metric in canonical (group, vshard, length, name) order, so a seal
@@ -468,6 +471,30 @@ func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
 	}
 	return len(b.Registered.schema().Archives) > 1
 }
+
+// pendingMetadataDue reports whether a pending name that is not installed yet
+// needs a metadata seal. It visits only positions appended since its last
+// clear pass, and resolves catalog handles only for names not installed.
+func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *ApplicationPolicy) bool {
+	due := false
+	h.view(lookup).ids(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
+		if r.metrics[id] != nil {
+			return true
+		}
+		b := coreBatch{ID: id}
+		if cold != nil {
+			b.Registered, b.Policy = cold.Registered, cold.Policy
+		} else {
+			b.Registered = lookup(id)
+		}
+		due = r.needsMetadataSeal(&b)
+		return !due
+	})
+	if !due {
+		h.scanned = h.n
+	}
+	return due
+}
 func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	h, err := r.identities.intern(id, "", policy)
 	if err != nil {
@@ -491,17 +518,23 @@ func (r *coreRollups) committed(s *rollupStage) metricMetadata {
 	return r.meta[s.slot]
 }
 
+// rollupStage is one name's seal work. It is pointer-free, so the retained
+// stage buffer adds nothing for the GC to scan: the metric is
+// stageMetrics[i], the batches are batches[batch:batch+batches] of the
+// planner's batch storage, and the records are records[record:] of the
+// planning lane's record arena (see rollupPlannerLane.stageRecords). next
+// holds the compact scalars; the identity supplies ID, policy digest and
+// definition when encoding. slot is the owner slot of an installed metric,
+// unset when fresh.
 type rollupStage struct {
-	sortKey    uint64
-	vshard     uint16
-	slot       uint32 // owner slot of an installed metric; unset when fresh
-	metric     *rollupMetric
-	next       RollupMetadata
-	batches    []sealrollup.Batch
-	records    []sealrollup.Record
-	fresh      bool
-	refile     uint16 // coarse archives to file at commit (coreRollups.refile)
-	batchCount int
+	sortKey         uint64
+	next            metricMetadata
+	batch, batches  uint32
+	record, records uint32
+	slot            uint32
+	vshard          uint16
+	refile          uint16 // coarse archives to file at commit (coreRollups.refile)
+	fresh           bool
 }
 
 type rollupPlannerLane struct {
@@ -511,8 +544,27 @@ type rollupPlannerLane struct {
 	counts    []int
 	output    rollupOutput
 	workspace sealrollup.Workspace
-	records   []sealrollup.Record
-	err       error
+	// records is the current chunk of the lane's record arena; tuples point
+	// into it, so a chunk never moves during a plan. A plan that does not fit
+	// starts a chunk twice as large; full chunks wait in chunks, base is the
+	// arena index of records[0], and release sizes one chunk for the total.
+	records []sealrollup.Record
+	chunks  [][]sealrollup.Record
+	bases   []uint32
+	base    uint32
+	err     error
+}
+
+// stageRecords returns the records this lane planned for s.
+func (l *rollupPlannerLane) stageRecords(s *rollupStage) []sealrollup.Record {
+	i, c := s.record, l.records
+	if i < l.base {
+		k := sort.Search(len(l.bases), func(k int) bool { return l.bases[k] > i }) - 1
+		i, c = i-l.bases[k], l.chunks[k]
+	} else {
+		i -= l.base
+	}
+	return c[i : i+s.records : i+s.records]
 }
 
 func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
@@ -526,52 +578,72 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
-	stages := r.stages[:0]
+	view := in.Pending
+	if view.Len() == 0 {
+		view = PendingBatches(in.Batches)
+	}
+	if uint64(view.Len()) > math.MaxUint32 {
+		return coreSealPlan{}, errors.New("too many seal batches")
+	}
+	stages, metrics := r.stages[:0], r.stageMetrics[:0]
 	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
 	}
-	// One stable sort of batch indices by ID makes each name's batches one run
-	// in arrival order; the sweep stages a name once per run. The keys and the
-	// idle bitset are pointer-free scratch retained between seals.
-	keys, spare, maxID := sortSealBatches(in.Batches, r.sweepKeys, r.sweepSpare)
+	// One stable sort of the frozen view's applications by ID makes each
+	// name's applications one run in arrival order; the sweep stages a name
+	// once per run and reads its points in place. The keys and the idle
+	// bitset are pointer-free scratch retained between seals.
+	keys, spare, maxID, wide, sampleCount := view.sealKeys(r.sweepKeys, r.sweepSpare)
 	r.sweepKeys, r.sweepSpare = keys, spare
+	keyID := func(k uint64) uint64 {
+		if wide {
+			return view.idAt(int(k & sealKeyPosMask))
+		}
+		return k >> 32
+	}
 	runs := 0
 	for i := range keys {
-		if i == 0 || in.Batches[keys[i]&sealBatchIndexMask].ID != in.Batches[keys[i-1]&sealBatchIndexMask].ID {
+		if i == 0 || keyID(keys[i]) != keyID(keys[i-1]) {
 			runs++
 		}
 	}
-	stages = slices.Grow(stages, runs)
-	r.stages = stages
+	stages, metrics = slices.Grow(stages, runs), slices.Grow(metrics, runs)
+	r.stages, r.stageMetrics = stages, metrics
 	idle := r.expire != nil || r.db != nil
 	seen := r.seen[:0]
 	if words := sealSeenWords(maxID, len(keys)); idle && words != 0 {
 		seen = slices.Grow(seen, words)[:words]
 	}
 	r.seen = seen
-	// One allocation per sealed part for samples and application descriptors.
+	// Samples and application descriptors live in retained planner storage.
 	// Every original boundary/order/clock remains distinct.
-	sampleCount := 0
-	for i := range in.Batches {
-		sampleCount += len(in.Batches[i].Points)
-	}
 	r.samples = slices.Grow(r.samples[:0], sampleCount)[:sampleCount]
 	samples := r.samples
-	r.batches = slices.Grow(r.batches[:0], len(in.Batches))[:len(in.Batches)]
+	r.batches = slices.Grow(r.batches[:0], len(keys))[:len(keys)]
 	batchStorage := r.batches
-	offset := 0
+	offset, batch := 0, 0
 	for i := 0; i < len(keys); {
-		first := &in.Batches[keys[i]&sealBatchIndexMask]
-		id := first.ID
+		id := keyID(keys[i])
 		j := i + 1
-		for j < len(keys) && in.Batches[keys[j]&sealBatchIndexMask].ID == id {
+		for j < len(keys) && keyID(keys[j]) == id {
 			j++
+		}
+		first := view.app(int(keys[i] & sealKeyPosMask))
+		// Row applications carry no handle: the catalog resolves it once per
+		// name. Cold applications keep their own.
+		var registered *ApplicationPolicy
+		if view.lookup != nil {
+			registered = view.lookup(id)
+		}
+		firstRegistered, firstPolicy := registered, []byte(nil)
+		if first.cold != nil {
+			firstRegistered, firstPolicy = first.cold.Registered, first.cold.Policy
 		}
 		// A ranked name whose identity carries this planner's slot reaches
 		// its metric through dense. Fresh and unranked names, policy-bytes
 		// batches and hints another planner overwrote probe the metrics map.
 		var m *rollupMetric
-		slot, hinted := r.hintSlot(first.Registered, id)
+		slot, hinted := r.hintSlot(firstRegistered, id)
 		rk := uint32(0)
 		if hinted && int(slot) < len(r.dense) {
 			m, rk = r.dense[slot], slot+1
@@ -584,10 +656,10 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			meta = r.meta[slot]
 		}
 		if fresh {
-			if h := first.Registered; h != nil && h.catalog == r.identities && h.id == id {
+			if h := firstRegistered; h != nil && h.catalog == r.identities && h.id == id {
 				m = newRollupMetric(h)
 			} else {
-				policy := first.Policy
+				policy := firstPolicy
 				if h != nil {
 					policy = h.definitionBytes()
 				}
@@ -608,31 +680,38 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			r.pendingNames.Put(fp, uint32(len(stages)))
 		}
-		stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadataScalars(meta), fresh: fresh, batchCount: j - i})
+		stages = append(stages, rollupStage{next: meta, slot: slot, fresh: fresh, batch: uint32(batch), batches: uint32(j - i)})
+		metrics = append(metrics, m)
 		s := &stages[len(stages)-1]
 		s.next.Expired = false
 		if rk != 0 {
 			s.vshard, s.sortKey = m.vshard, uint64(rk)<<1
 		} else {
-			r.stageKey(s)
+			r.stageKey(s, m)
 		}
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
 		}
-		s.batches = batchStorage[: 0 : j-i]
-		batchStorage = batchStorage[j-i:]
-		for ; i < j; i++ {
-			b := &in.Batches[keys[i]&sealBatchIndexMask]
-			if (b.Registered == nil || b.Registered != m.PolicyIdentity) && !m.definitionEqual(b.Policy) {
+		for k := i; k < j; k++ {
+			a := first
+			if k > i {
+				a = view.app(int(keys[k] & sealKeyPosMask))
+			}
+			reg, policy := registered, []byte(nil)
+			if a.cold != nil {
+				reg, policy = a.cold.Registered, a.cold.Policy
+			}
+			if (reg == nil || reg != m.PolicyIdentity) && !m.definitionEqual(policy) {
 				return coreSealPlan{}, errors.New("stored rollup policy changed")
 			}
-			ps := samples[offset : offset+len(b.Points) : offset+len(b.Points)]
-			for k, p := range b.Points {
-				ps[k] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
-			}
-			offset += len(b.Points)
-			s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
+			n := a.points()
+			ps := samples[offset : offset+n : offset+n]
+			a.samples(ps)
+			offset += n
+			batchStorage[batch] = sealrollup.Batch{Order: a.Order, Now: a.Clock, Points: ps}
+			batch++
 		}
+		i = j
 	}
 	named := len(stages)
 	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
@@ -646,29 +725,16 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	r.reresolve(now) // returns at once without expiry
 	r.expDrained = r.expiries.due(r.planNow, 0, r.expDrained[:0])
 	if r.db != nil || r.expire != nil {
-		r.due = r.dueSlots(func(id uint64) bool { return sealBatchSeen(in.Batches, keys, seen, maxID, id) }, r.due[:0])
+		r.due = r.dueSlots(func(id uint64) bool { return sealKeySeen(keys, seen, maxID, id, keyID) }, r.due[:0])
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
-			stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(r.meta[slot])})
-			r.stageKey(&stages[len(stages)-1])
+			stages, metrics = append(stages, rollupStage{next: r.meta[slot], slot: slot}), append(metrics, m)
+			r.stageKey(&stages[len(stages)-1], m)
 		}
 	}
-	// Expiry callbacks retain their serial owner contract. Idle plans do not
-	// advance order, so the persisted reset frontier is already known here.
-	for i := range stages {
-		s := &stages[i]
-		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expiryOverdue(s.slot, now.UnixNano()) && r.expire(m.rollupPolicy(), s.next, now) {
-			// Older readers must reject reset authority rather than ignore its
-			// fields and resurrect the covered slot history.
-			s.next.Version = max(2, s.next.Version)
-			s.next.Expired = true
-			s.next.ResetOrder = s.next.Frontier.Order
-			if s.next.Revision == math.MaxUint64 {
-				return coreSealPlan{}, errors.New("metric revision exhausted")
-			}
-			s.next.Revision++
-		}
+	r.stages, r.stageMetrics = stages, metrics
+	if err := r.expireIdleStages(now); err != nil {
+		return coreSealPlan{}, err
 	}
 	var part partsformat.PartID
 	if len(stages) > 0 {
@@ -676,38 +742,65 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			return coreSealPlan{}, err
 		}
 	}
-	out, err := r.planStages(stages, part)
+	out, err := r.planStages(part)
 	if err != nil {
 		return coreSealPlan{}, err
 	}
-	r.stages = stages
 	out.Names = named
 	out.Abort = r.release
-	out.Commit = func() {
-		defer r.release()
-		r.commitStages()
-		r.calendar.drop(r.planNow)
-		expiry := r.expire != nil
-		if expiry {
-			r.commitExpiries()
-		}
-		for i := range stages {
-			s := &stages[i]
-			m := s.metric
-			if s.fresh {
-				r.install(m.id, m, compactMetadata(s.next))
-				continue
-			}
-			if s.refile != 0 {
-				r.file(s.slot, m, r.meta[s.slot], s.refile)
-			}
-			if expiry {
-				r.fileExpiry(s.slot) // a revived name, or one drained this plan
-			}
-		}
-	}
+	out.Commit = r.commitPlan
 	returned = true
 	return out, nil
+}
+
+// expireIdleStages applies the expiry callback to the overdue idle stages, in
+// stage order: callbacks retain their serial owner contract. Idle plans do not
+// advance order, so the persisted reset frontier is already known here.
+func (r *coreRollups) expireIdleStages(now time.Time) error {
+	if r.expire == nil {
+		return nil
+	}
+	ns := now.UnixNano()
+	for i := range r.stages {
+		s, m := &r.stages[i], r.stageMetrics[i]
+		if s.batches == 0 && r.expiryOverdue(s.slot, ns) && r.expire(m.rollupPolicy(), m.PolicyIdentity.metadata(s.next), now) {
+			// Older readers must reject reset authority rather than ignore its
+			// fields and resurrect the covered slot history.
+			s.next.Version = max(2, s.next.Version)
+			s.next.Expired = true
+			s.next.ResetOrder = s.next.Frontier.Order
+			if s.next.Revision == math.MaxUint64 {
+				return errors.New("metric revision exhausted")
+			}
+			s.next.Revision++
+		}
+	}
+	return nil
+}
+
+// commitPlan publishes the staged plan's owner-local state, drops the drained
+// calendar seconds, then installs the fresh names and refiles the staged ones.
+func (r *coreRollups) commitPlan() {
+	defer r.release()
+	r.commitStages()
+	r.calendar.drop(r.planNow)
+	expiry := r.expire != nil
+	if expiry {
+		r.commitExpiries()
+	}
+	for i := range r.stages {
+		s, m := &r.stages[i], r.stageMetrics[i]
+		if s.fresh {
+			r.install(m.id, m, s.next)
+			continue
+		}
+		if s.refile != 0 {
+			r.file(s.slot, m, r.meta[s.slot], s.refile)
+		}
+		if expiry {
+			r.fileExpiry(s.slot) // a revived name, or one drained this plan
+		}
+	}
 }
 
 // ScanRollups reads one immutable core snapshot. It resolves each physical slot

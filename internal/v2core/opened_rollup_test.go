@@ -29,6 +29,7 @@ func (b *partTableBuffer) Abort()               {}
 // The fixture writes real SST originals and descriptors, without the writer's
 // durability fsyncs. It exercises read cost independently of laptop fsync speed.
 func TestOpenedRollupTwentyThousandParts(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dir := filepath.Join(root, "parts")
 	if err := os.Mkdir(dir, 0700); err != nil {

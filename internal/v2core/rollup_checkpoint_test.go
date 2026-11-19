@@ -352,6 +352,9 @@ func checkpointVsScan(t *testing.T, cfg Config, policies [][]byte, root string, 
 // a merge output that re-carries rows the checkpoint already reflects, so a
 // resident must re-enter with its record Order to keep winning the tie.
 func TestRollupCheckpointStalePlusParts(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for _, merge := range []bool{false, true} {
 		t.Run(fmt.Sprintf("merge=%v", merge), func(t *testing.T) {
@@ -392,6 +395,9 @@ func TestRollupCheckpointStalePlusParts(t *testing.T) {
 // and returned by Close, keep the previous file, and the next open folds the
 // parts published since that file.
 func TestRollupCheckpointWriteFailureIsLoud(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	cfg, policies := checkpointTestSetup(t)
 	root := t.TempDir()
@@ -440,6 +446,7 @@ func TestRollupCheckpointKillChild(t *testing.T) {
 			fmt.Printf("sealed %d\n", base)
 		}
 	}
+	t.Parallel()
 	cfg, policies := checkpointTestSetup(t)
 	for kill, after := range []time.Duration{90 * time.Millisecond, 230 * time.Millisecond, 410 * time.Millisecond, 700 * time.Millisecond, 1100 * time.Millisecond} {
 		root := t.TempDir()

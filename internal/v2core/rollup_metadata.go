@@ -117,8 +117,10 @@ func decodeRollupMetadataView(name partsformat.ID, group partsformat.Group, data
 // definition: slim rows return a nil Policy and slim true.
 func decodeRollupMetadataHeader(data []byte) (m RollupMetadata, slim bool, err error) {
 	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > rollupMetadataSlim) {
-		err = json.Unmarshal(data, &m)
-		return m, false, err
+		// A separate variable keeps m off the heap on the binary path.
+		var j RollupMetadata
+		err = json.Unmarshal(data, &j)
+		return j, false, err
 	}
 	header := 90
 	if data[3] == 2 {
@@ -213,16 +215,23 @@ func jsonPlainString(s string) bool {
 // One serial owner exclusively holds these arenas until its ingest resolves.
 func (r *coreRollups) release() {
 	for i := range r.lanes {
-		r.lanes[i].output.release()
-		clear(r.lanes[i].ranked)
-		r.lanes[i].ranked = r.lanes[i].ranked[:0]
+		lane := &r.lanes[i]
+		lane.output.release()
+		lane.ranked = lane.ranked[:0]
+		// One chunk for this seal's records, so the next one plans in place.
+		if len(lane.chunks) != 0 {
+			lane.records = make([]sealrollup.Record, 0, int(lane.base)+cap(lane.records))
+		}
+		clear(lane.chunks)
+		lane.chunks, lane.bases, lane.base = lane.chunks[:0], lane.bases[:0], 0
 	}
 	for _, coverage := range r.coverage {
 		clear(coverage.seen)
 		coverage.spec.Policies = nil
 	}
-	clear(r.stages)
 	r.stages = r.stages[:0]
+	clear(r.stageMetrics)
+	r.stageMetrics = r.stageMetrics[:0]
 	clear(r.batches)
 	r.batches = r.batches[:0]
 	clear(r.seen)

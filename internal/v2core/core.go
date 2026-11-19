@@ -67,6 +67,7 @@ type corePacket struct {
 	operation  func(*coreOwner) error
 	rows       []row
 	batches    []coreBatch
+	pending    *pendingRows // rollup applications, encoded by the router
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
@@ -81,6 +82,7 @@ type coreDispatch struct {
 	parts     [][]row
 	counts    []int
 	routes    []int
+	pending   []pendingRows
 	waitSince []time.Time
 	packets   []corePacket
 	router    *coreRouter
@@ -124,6 +126,9 @@ func (p *corePacket) size() uint64 {
 	n := corePacketBytes + uint64(len(p.rows))*uint64(unsafe.Sizeof(row{}))
 	for _, b := range p.batches {
 		n += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
+	}
+	if p.pending != nil {
+		n += p.pending.size()
 	}
 	return n
 }
@@ -232,7 +237,8 @@ type coreOwner struct {
 	gc                      *sealedPartGC
 	gcDirty                 atomic.Bool
 	mergeStop               <-chan struct{}
-	readGeneration          uint64 // owner-local; includes manifest-only retirement publications
+	mergeMu                 sync.Mutex // one merge in flight per owner (background or ForceMerge)
+	readGeneration          uint64     // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
 	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
@@ -240,12 +246,13 @@ type coreOwner struct {
 	maintenance bool
 
 	stage      func(string)
-	visible    func([]coreBatch)
+	visible    func(PendingView)
+	lookup     func(uint64) *ApplicationPolicy
 	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
-	batchHook                    func([]coreBatch, uint64) error
+	batchHook                    func(PendingView, uint64) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
 	frontier                     atomic.Pointer[coreFrontier]
 	db                           *pebble.DB
@@ -321,9 +328,6 @@ func coreShard(id uint64, n int) int {
 
 // The optional hook owns its snapshot and receives a detached immutable head.
 // It runs on the owner; callers must bound retained bytes and release snapshots.
-func openCore(root string, cfg coreConfig) (*coreEngine, error) {
-	return openCoreWithHooks(root, cfg, coreHooks{})
-}
 func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapshot, []row) error) (*coreEngine, error) {
 	return openCoreWithHooks(root, cfg, coreHooks{Publish: hook})
 }
@@ -448,9 +452,11 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace}
-			if hooks.Visible != nil {
-				o.visible = func(b []coreBatch) { hooks.Visible(s, b) }
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace, lookup: identities.lookup}
+			if hooks.VisiblePending != nil {
+				o.visible = func(v PendingView) { hooks.VisiblePending(s, v) }
+			} else if hooks.Visible != nil {
+				o.visible = func(v PendingView) { hooks.Visible(s, v.Batches()) }
 			}
 			sealMaxRows := cfg.SealMaxRows
 			if sealMaxRows == 0 {
@@ -472,14 +478,22 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if hook != nil {
 				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 			}
-			if hooks.PublishBatchesWithInventory != nil {
+			// PublishPending hands readers the pointer-free view. The older
+			// []Batch hooks decode it per publication; they serve tests only.
+			publishInventory := hooks.PublishPending
+			if publishInventory == nil && hooks.PublishBatchesWithInventory != nil {
+				publishInventory = func(s int, pin *pebble.Snapshot, v PendingView, generation uint64, inventory *RollupInventory) error {
+					return hooks.PublishBatchesWithInventory(s, pin, v.Batches(), generation, inventory)
+				}
+			}
+			if publishInventory != nil {
 				// The pin is captured with the binding set under the GC fence. A
 				// head-only publication (same sealed generation and binding set)
 				// pins nothing: the reader keeps the snapshot it holds for them.
 				var pinned bool
 				var pinnedGeneration uint64
 				var pinnedInventory *RollupInventory
-				o.batchHook = func(batches []coreBatch, generation uint64) error {
+				o.batchHook = func(pending PendingView, generation uint64) error {
 					var pin *pebble.Snapshot
 					var inventory *RollupInventory
 					if o.gc != nil {
@@ -492,17 +506,23 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					if o.gc != nil {
 						o.gc.mu.Unlock()
 					}
-					err := hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+					err := publishInventory(s, pin, pending, generation, inventory)
 					pinned, pinnedGeneration, pinnedInventory = err == nil, generation, inventory
 					return err
 				}
 			} else if hooks.PublishBatches != nil {
-				o.batchHook = func(batches []coreBatch, generation uint64) error {
-					return hooks.PublishBatches(s, o.db.NewSnapshot(), batches, generation)
+				o.batchHook = func(pending PendingView, generation uint64) error {
+					return hooks.PublishBatches(s, o.db.NewSnapshot(), pending.Batches(), generation)
 				}
 			}
 			if hooks.PlanSeal != nil {
-				o.plan = func(in coreSealInput) (coreSealPlan, error) { return hooks.PlanSeal(s, in) }
+				o.plan = func(in coreSealInput) (coreSealPlan, error) {
+					// PlanSeal hooks take decoded batches; they serve tests only.
+					if in.Pending.Len() != 0 {
+						in.Batches, in.Pending = in.Pending.Batches(), PendingView{}
+					}
+					return hooks.PlanSeal(s, in)
+				}
 			}
 			o.meta = coreFrontier{Version: 1, Config: diskConfig, Cursors: make([]uint64, cfg.Producers), ExpiredBefore: -1 << 63}
 			b, c, err := db.Get(coreMetaKey)
@@ -595,7 +615,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			o.readGeneration = o.meta.NextPart
 			o.pub.publish(o.db.NewSnapshot())
 			if o.batchHook != nil {
-				if err := o.batchHook(nil, o.readGeneration); err != nil {
+				if err := o.batchHook(PendingView{}, o.readGeneration); err != nil {
 					return err
 				}
 			}
@@ -858,7 +878,33 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		}
 	}
 	var byOwner [][]coreBatch
-	if len(batches) > 0 {
+	var pending []pendingRows
+	if e.cfg.Rollups && pendingBatchesFit(batches) {
+		// Every ID is interned above, so the owners' pendingRowsFit holds:
+		// encode each owner's 16-byte rows here, in the lease, and let the
+		// owner copy them. No per-point descriptor outlives the submission.
+		if len(d.pending) == 0 {
+			d.pending = make([]pendingRows, e.cfg.Shards)
+		}
+		pending = d.pending
+		for s := range pending {
+			pending[s].reset()
+		}
+		for _, b := range batches {
+			owner, err := routeBatch(b)
+			if err != nil {
+				return err
+			}
+			pk := &pending[owner]
+			pk.startApplication(b.Order, b.Clock, b.Points[0].Time, len(b.Points))
+			for _, r := range b.Points {
+				pk.addRow(b.ID, r.Time, r.Bits, r.Seq)
+			}
+		}
+		for s := range pending {
+			pending[s].closePacket()
+		}
+	} else if len(batches) > 0 {
 		// One immutable application and point arena per submitted packet. Owners
 		// retain these after releasing the dispatch lease; no caller slices or
 		// reusable routing storage escape into a seal or read snapshot.
@@ -914,7 +960,9 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	for s := range e.owners {
 		p := &d.packets[s]
 		*p = corePacket{rows: parts[s], cursor: cursor, seal: seal, lease: d}
-		if byOwner != nil {
+		if pending != nil {
+			p.pending = &pending[s]
+		} else if byOwner != nil {
 			p.batches = byOwner[s]
 		}
 		if seal && waitSeal {
@@ -996,6 +1044,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	if o.ready == nil {
 		o.initQueueSignals(nil)
 	}
+	if o.lookup == nil {
+		// Without a catalog no ID has a handle, as with the engine's empty
+		// PolicyCatalog; pending rows and views resolve through lookup.
+		o.lookup = func(uint64) *ApplicationPolicy { return nil }
+	}
 	headCapacity := o.cfg.MaxRows
 	if o.cfg.Rollups {
 		// Rollups normally seal on a time or size threshold, below the
@@ -1005,7 +1058,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	head := make([]row, 0, headCapacity)
 	pending := slices.Clone(o.meta.Cursors)
-	var batches []coreBatch
+	// Pending applications live as pointer-free rows (name-once S5a-2). Each
+	// head is a fresh pendingHead; published views share its immutable prefix.
+	var pend pendingHead
 	sealInterval := o.cfg.SealInterval
 	if sealInterval == 0 {
 		sealInterval = 10 * time.Second
@@ -1024,30 +1079,30 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// reported name: then it repeats the whole set, as before, so observers
 	// re-add it. So visibility work is O(new batches), not O(head) per seal.
 	headExpiries := o.expiries.Load()
-	sealVisible := func(sealed []coreBatch, reported int, since uint64) {
+	sealVisible := func(sealed PendingView, reported int, since uint64) {
 		if o.visible == nil {
 			return
 		}
 		if o.expiries.Load() != since {
 			reported = 0
 		}
-		if reported < len(sealed) {
-			o.visible(sealed[reported:])
+		if reported < sealed.Len() {
+			o.visible(sealed.Suffix(reported))
 		}
 	}
 	type sealResult struct {
 		n   uint64
 		err error
 	}
-	// At most one frozen head per owner seals in the background. Its batches
-	// are the immutable prefix batches[:len(flight.batches)] of the owner's
-	// array; intake appends after them until the part is published.
+	// At most one frozen head per owner seals in the background. Its pending
+	// view is immutable; intake appends to a fresh pendingHead, and
+	// publications show both until the part is published.
 	type sealFlight struct {
 		rows     []row
-		batches  []coreBatch
+		pending  PendingView
 		next     coreFrontier
 		done     chan sealResult
-		reported int    // batches[:reported] already reached o.visible
+		reported int    // pending positions [0, reported) already reached o.visible
 		expiries uint64 // o.expiries when this head began
 	}
 	var flight *sealFlight
@@ -1066,8 +1121,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// share with the owner: publication costs O(new batches), not O(head).
 		batchPublication = time.Now()
 		prev := publishedBatches
-		publishedBatches = len(batches)
-		published := batches[:len(batches):len(batches)]
+		publishedBatches = pend.n
+		published := pend.view(o.lookup)
 		generation := o.readGeneration
 		if flight != nil {
 			// Pin under the seal's publication lock. Once the frozen part is
@@ -1076,15 +1131,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			o.sealPubMu.Lock()
 			defer o.sealPubMu.Unlock()
 			if o.sealDurable {
-				frozen := len(flight.batches)
-				published = published[frozen:]
-				prev = max(0, prev-frozen)
 				generation++
+			} else {
+				prev += flight.pending.Len()
+				published = flight.pending.concat(published)
 			}
 		}
 		err := o.batchHook(published, generation)
-		if err == nil && o.visible != nil {
-			o.visible(published[prev:])
+		if err == nil && o.visible != nil && prev < published.Len() {
+			o.visible(published.Suffix(prev))
 		}
 		return err
 	}
@@ -1105,20 +1160,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.bytes.Add(r.n)
 		o.bufferedPoints.Store(int64(len(head)))
 		o.bufferedSince.Store(headSince)
-		// Move the intake tail to a fresh array. Readers that still pin the old
-		// one keep it; the retired prefix and its arenas go with them.
-		frozen := len(f.batches)
-		tail := batches[frozen:]
-		batches = make([]coreBatch, len(tail), max(frozen, 2*len(tail)))
-		copy(batches, tail)
-		publishedBatches = max(0, publishedBatches-frozen)
+		// The intake head is already separate; readers that still pin the
+		// frozen view keep it.
 		// The seal never retains its input rows; reuse them for the next head.
 		spareRows = f.rows[:0]
 		o.pub.publish(o.db.NewSnapshot())
 		if err := publishBatches(); err != nil {
 			return err
 		}
-		sealVisible(f.batches, f.reported, f.expiries)
+		sealVisible(f.pending, f.reported, f.expiries)
 		o.checkpointAfterSeal()
 		return nil
 	}
@@ -1147,7 +1197,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			deadline = time.Now().Add(sealInterval)
 			return nil
 		}
-		if len(batches) > publishedBatches {
+		if pend.n > publishedBatches {
 			if err := publishBatches(); err != nil {
 				return err
 			}
@@ -1157,11 +1207,12 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		for _, b := range batches {
-			next.ArchiveClock = max(next.ArchiveClock, b.Clock)
-		}
+		frozen := pend.view(o.lookup)
+		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
-		f := &sealFlight{rows: head, batches: batches[:len(batches):len(batches)], next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, len(batches)), expiries: headExpiries}
+		f := &sealFlight{rows: head, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
+		pend = pendingHead{}
+		publishedBatches = 0
 		headExpiries = o.expiries.Load()
 		o.sealPubMu.Lock()
 		o.sealDurable = false
@@ -1176,7 +1227,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		deadline = time.Now().Add(sealInterval)
 		work := o.work
 		go func() {
-			n, err := o.sealBatches(f.rows, f.batches, f.next)
+			// The planner reads the frozen rows in place and copies samples
+			// into its own pointer-free scratch.
+			n, err := o.sealBatches(f.rows, f.pending, f.next)
 			f.done <- sealResult{n: n, err: err}
 			if work != nil {
 				select {
@@ -1207,7 +1260,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		// Publish the last intake tail before synchronous rollup/disk work. A
 		// larger seal must not postpone visibility until that work completes.
-		if len(batches) > publishedBatches {
+		if pend.n > publishedBatches {
 			if err := publishBatches(); err != nil {
 				return err
 			}
@@ -1219,12 +1272,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		for _, b := range batches {
-			next.ArchiveClock = max(next.ArchiveClock, b.Clock)
-		}
+		sealedPending := pend.view(o.lookup)
+		next.ArchiveClock = sealedPending.maxClock(next.ArchiveClock)
 		next.NextPart++
-		reported, since := min(publishedBatches, len(batches)), headExpiries
-		n, err := o.sealBatches(head, batches, next)
+		reported, since := min(publishedBatches, pend.n), headExpiries
+		n, err := o.sealBatches(head, sealedPending, next)
 		if err != nil {
 			return err
 		}
@@ -1232,10 +1284,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.meta = next
 		o.readGeneration++
 		o.publishFrontier(next)
-		// Readers may still hold the published prefix of sealedBatches. Never
-		// overwrite or clear it; the next head appends to a fresh array.
-		sealedBatches := batches
-		batches = make([]coreBatch, 0, len(sealedBatches))
+		// Readers may still hold the published prefix of sealedPending. Never
+		// overwrite or clear it; the next head appends to fresh slices.
+		pend = pendingHead{}
 		publishedBatches = 0
 		o.committed.Add(uint64(len(head)))
 		o.parts.Add(1)
@@ -1248,7 +1299,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if err := publishBatches(); err != nil {
 			return err
 		}
-		sealVisible(sealedBatches, reported, since)
+		sealVisible(sealedPending, reported, since)
 		o.checkpointAfterSeal()
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
@@ -1362,7 +1413,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				left--
 				continue
 			}
-			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 {
+			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 && p.pending == nil {
 				failure = errors.New("seal planner requires original apply batches")
 			}
 			if failure == nil && p.cursor > pending[producer] {
@@ -1391,7 +1442,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 						buffered += len(flight.rows)
 					}
 					o.bufferedPoints.Store(int64(buffered))
-					batches = append(batches, p.batches...)
+					if p.pending != nil {
+						pend.addRows(p.pending)
+					} else {
+						pend.add(p.batches, o.lookup)
+					}
 					pending[producer] = p.cursor
 				}
 			}
@@ -1438,7 +1493,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 			headPublication = time.Now()
 		}
-		if failure == nil && !sealPending && len(batches) > publishedBatches && time.Since(batchPublication) >= time.Second {
+		if failure == nil && !sealPending && pend.n > publishedBatches && time.Since(batchPublication) >= time.Second {
 			failure = publishBatches()
 		}
 		if failure != nil {
@@ -1477,13 +1532,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if r.now != nil {
 				now = r.now()
 			}
-			due := r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now))
-			for i := range batches {
-				if b := &batches[i]; r.metrics[b.ID] == nil && r.needsMetadataSeal(b) {
-					due = true // establish metadata before its inactivity window can end
-					break
-				}
-			}
+			// Establish new names' metadata before their inactivity window can end.
+			due := r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now)) || r.pendingMetadataDue(&pend, o.lookup)
 			if due {
 				failure = flush()
 				if failure != nil {
@@ -1497,7 +1547,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			o.nextPoll = maintenanceDeadline
 		}
 		if len(head) > 0 {
-			if o.batchHook != nil && len(batches) > publishedBatches {
+			if o.batchHook != nil && pend.n > publishedBatches {
 				if next := batchPublication.Add(time.Second); next.Before(o.nextPoll) {
 					o.nextPoll = next
 				}
@@ -1580,11 +1630,6 @@ func runCoreOwnerGroup(owners []*coreOwner, cpus []int, index int) {
 // key = data-prefix / time-partition / metric-ID / archive / block-start /
 // immutable-part / block-ordinal. Partition prefix permits one range deletion;
 // the tuple inside a partition has the requested metric/archive/block layout.
-func coreKey(r row, partition int64, part uint64, ordinal uint32) []byte {
-	b := make([]byte, 41)
-	coreKeyInto(b, r, partition, part, ordinal)
-	return b
-}
 func coreKeyInto(b []byte, r row, partition int64, part uint64, ordinal uint32) {
 	b[0] = 1
 	binary.BigEndian.PutUint64(b[1:9], uint64(partition)^(1<<63))
@@ -1630,9 +1675,9 @@ func sortCoreRows(head []row, seconds int64) {
 	})
 }
 func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
-	return o.sealBatches(head, nil, next)
+	return o.sealBatches(head, PendingView{}, next)
 }
-func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFrontier) (uint64, error) {
+func (o *coreOwner) sealBatches(head []row, pending PendingView, next coreFrontier) (uint64, error) {
 	if err := o.observeSealedMergeBudget(); err != nil {
 		return 0, err
 	}
@@ -1678,7 +1723,7 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 	}()
 	if o.plan != nil {
-		plan, err = o.plan(coreSealInput{Rows: head, Batches: batches, Next: next})
+		plan, err = o.plan(coreSealInput{Rows: head, Pending: pending, Next: next})
 		if err != nil {
 			return 0, err
 		}
@@ -1994,6 +2039,12 @@ func (e *coreEngine) close() error {
 	close(e.gcStop)
 	<-e.gcDone
 	<-e.mergeDone
+	// Forced merges can outlive HTTP shutdown. Drain each owner's merge before
+	// closing its database; queued merges observe gcStop under the same lock.
+	for _, o := range e.owners {
+		o.mergeMu.Lock()
+		o.mergeMu.Unlock()
+	}
 	var err error
 	if f := e.gcFailure.Load(); f != nil {
 		err = f.err
@@ -2096,42 +2147,4 @@ func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 	}
 	slices.SortFunc(out, less)
 	return out, it.Error()
-}
-
-// Expiry is a stopped-owner operation until authoritative rollups exist. It
-// atomically drops a complete logical partition range and persists its floor.
-// Physical bytes are reclaimed by Pebble compaction, not immediately unlinked.
-func coreExpire(db *pebble.DB, before int64) error {
-	b, c, err := db.Get(coreMetaKey)
-	if err != nil {
-		return err
-	}
-	var meta coreFrontier
-	err = json.Unmarshal(b, &meta)
-	_ = c.Close()
-	if err != nil {
-		return err
-	}
-	if before < meta.ExpiredBefore {
-		return errors.New("retention floor cannot move backwards")
-	}
-	meta.ExpiredBefore = before
-	batch := db.NewBatch()
-	defer batch.Close()
-	for _, prefix := range []byte{1, 2} {
-		upper := make([]byte, 9)
-		upper[0] = prefix
-		binary.BigEndian.PutUint64(upper[1:], uint64(before)^(1<<63))
-		if err = batch.DeleteRange([]byte{prefix}, upper, nil); err != nil {
-			return err
-		}
-	}
-	b, err = json.Marshal(meta)
-	if err != nil {
-		return err
-	}
-	if err = batch.Set(coreMetaKey, b, nil); err != nil {
-		return err
-	}
-	return batch.Commit(pebble.Sync)
 }
