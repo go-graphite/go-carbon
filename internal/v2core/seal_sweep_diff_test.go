@@ -235,8 +235,7 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 	slices.Sort(ids)
 	for _, id := range ids {
 		m := w.r.metrics[id]
-		next.install(id, m)
-		next.names[m.policy.Name] = id
+		next.install(id, m, w.r.metaOf(id))
 	}
 	return next
 }
@@ -247,7 +246,7 @@ func (w *sealSweepWorld) move(seal int) {
 	for id, m := range w.r.metrics {
 		if id%7 == uint64(seal%7) {
 			c := *m
-			w.r.install(id, &c)
+			w.r.install(id, &c, w.r.metaOf(id))
 		}
 	}
 }
@@ -392,7 +391,7 @@ func sealSweepState(r *coreRollups) sealSweepPlannerState {
 	}
 	slices.Sort(st.IDs)
 	for _, id := range st.IDs {
-		st.Meta = append(st.Meta, r.metrics[id].metadata())
+		st.Meta = append(st.Meta, r.metadataOf(id, r.metrics[id]))
 	}
 	for _, m := range r.dense {
 		st.Dense = append(st.Dense, m.policy.Name)
@@ -702,13 +701,16 @@ func sealSweepSkipIdleClosure(r *coreRollups, in coreSealInput) (coreSealPlan, e
 	hidden := map[uint64]*rollupMetric{}
 	for id, m := range r.metrics {
 		archives := m.schema().Archives
-		if r.replaced || busy[id] || len(archives) < 2 || m.meta.Expired || m.meta.Version != 3 || m.meta.Frontier.Order == 0 ||
-			r.expire(m.rollupPolicy(), m.metadata(), now) {
+		if hasDeadSlot(r) || busy[id] || len(archives) < 2 {
+			continue
+		}
+		meta := r.metaOf(id)
+		if meta.Expired || meta.Version != 3 || meta.Frontier.Order == 0 || r.expire(m.rollupPolicy(), m.metadata(meta), now) {
 			continue
 		}
 		coarse := archives[len(archives)-1]
-		end := m.meta.Frontier.MaxTime - m.meta.Frontier.MaxTime%coarse.Step + coarse.Step
-		if m.meta.ClosedThrough < end && now.Unix() >= end {
+		end := meta.Frontier.MaxTime - meta.Frontier.MaxTime%coarse.Step + coarse.Step
+		if meta.ClosedThrough < end && now.Unix() >= end {
 			hidden[id] = m
 		}
 	}
