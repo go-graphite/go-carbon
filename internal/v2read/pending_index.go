@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
 
@@ -82,7 +83,7 @@ func pendingHash(b *v2core.Batch) (uint64, error) {
 		return b.Registered.NameHash(), nil
 	}
 	name, err := pendingName(b)
-	return v2core.NameHash(name), err
+	return namefp.Hash(name), err
 }
 
 // load indexes pending[start:end]. Every holder of the chunk publishes the
@@ -127,7 +128,7 @@ func (x *pendingIndex) candidates(pending []v2core.Batch, names []string) ([]int
 	}
 	hashes := make([]uint64, len(names))
 	for i, n := range names {
-		hashes[i] = v2core.NameHash(n)
+		hashes[i] = namefp.Hash(n)
 	}
 	var out []int32
 	for _, c := range x.chunks {

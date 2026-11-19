@@ -29,7 +29,7 @@ type retainingOwner struct {
 	got []parsedPoint
 }
 
-func (o *retainingOwner) Append(names []string, data []points.Point, _ []uint64, _ int64) error {
+func (o *retainingOwner) Append(names []string, _ []uint64, data []points.Point, _ []uint64, _ int64) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for i := range names {
