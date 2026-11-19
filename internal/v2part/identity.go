@@ -29,11 +29,12 @@ const GroupFileVersion = 2
 const GroupVShard uint16 = 65535
 const MetadataArchive = ^uint32(0)
 
-func Encode(k Key) ([]byte, error)               { return partsformat.Encode(k) }
-func Decode(b []byte) (Key, error)               { return partsformat.Decode(b) }
-func Route(id ID) uint16                         { return partsformat.Route(id) }
-func GroupRange(g Group) ([]byte, []byte, error) { return partsformat.GroupRange(g) }
-func PrefixEnd(b []byte) []byte                  { return partsformat.PrefixEnd(b) }
+func Encode(k Key) ([]byte, error)                      { return partsformat.Encode(k) }
+func Decode(b []byte) (Key, error)                      { return partsformat.Decode(b) }
+func Route(id ID) uint16                                { return partsformat.Route(id) }
+func DecodeName(b []byte, g Group) (Key, []byte, error) { return partsformat.DecodeName(b, g) }
+func GroupRange(g Group) ([]byte, []byte, error)        { return partsformat.GroupRange(g) }
+func PrefixEnd(b []byte) []byte                         { return partsformat.PrefixEnd(b) }
 func PartitionPrefixForGroup(g Group, v uint16, p int64) ([]byte, error) {
 	return partsformat.PartitionPrefixForGroup(g, v, p)
 }

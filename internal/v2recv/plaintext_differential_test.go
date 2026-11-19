@@ -29,7 +29,7 @@ type retainingOwner struct {
 	got []parsedPoint
 }
 
-func (o *retainingOwner) Append(names []string, data []points.Point, _ []uint64, _ int64) error {
+func (o *retainingOwner) Append(names []string, _ []uint64, data []points.Point, _ []uint64, _ int64) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for i := range names {
@@ -37,6 +37,19 @@ func (o *retainingOwner) Append(names []string, data []points.Point, _ []uint64,
 	}
 	return nil
 }
+
+type retainingByteOwner struct{ *retainingOwner }
+
+func (o retainingByteOwner) AppendBytes(text []byte, ends []int, hashes []uint64, data []points.Point, sequence []uint64, clock int64) error {
+	names := make([]string, len(ends))
+	start := 0
+	for i, end := range ends {
+		names[i] = string(text[start:end])
+		start = end
+	}
+	return o.Append(names, hashes, data, sequence, clock)
+}
+
 func (o *retainingOwner) Seal() error  { return nil }
 func (o *retainingOwner) Drain() error { return nil }
 
@@ -89,16 +102,19 @@ func referencePlaintext(t *testing.T, input []byte, owners int) [][]parsedPoint 
 
 func TestPlaintextBatchTextDifferential(t *testing.T) {
 	for _, tc := range []struct {
-		batch, owners int
-		zstd          bool
-	}{{7, 5, false}, {1024, 3, false}, {64, 4, true}, {1, 1, false}} {
-		t.Run(fmt.Sprintf("batch%d-owners%d-zstd%v", tc.batch, tc.owners, tc.zstd), func(t *testing.T) {
+		batch, owners   int
+		zstd, byteNames bool
+	}{{7, 5, false, false}, {1024, 3, false, false}, {64, 4, true, false}, {1, 1, false, false}, {7, 5, false, true}, {1024, 3, false, true}, {64, 4, true, true}, {1, 1, false, true}} {
+		t.Run(fmt.Sprintf("batch%d-owners%d-zstd%v-bytes%v", tc.batch, tc.owners, tc.zstd, tc.byteNames), func(t *testing.T) {
 			conns := [][]byte{mixedPlaintext(1, 5000), mixedPlaintext(2, 3000), mixedPlaintext(3, 1)}
 			owners := make([]v2recv.Owner, tc.owners)
 			recorded := make([]*retainingOwner, tc.owners)
 			for i := range owners {
 				recorded[i] = &retainingOwner{}
 				owners[i] = recorded[i]
+				if tc.byteNames {
+					owners[i] = retainingByteOwner{recorded[i]}
+				}
 			}
 			l, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {

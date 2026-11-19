@@ -20,6 +20,7 @@ import (
 // writes, late corrections across a month boundary, restarts that toggle the
 // setting on an old store, and merges.
 func TestOmitBaseRowsRenderDifferential(t *testing.T) {
+	t.Parallel()
 	type metric struct {
 		id     uint64
 		name   string
@@ -102,7 +103,7 @@ func TestOmitBaseRowsRenderDifferential(t *testing.T) {
 		var metas [2]map[string]RollupMetadata
 		for i, e := range es {
 			pin := e.owners[0].db.NewSnapshot()
-			index, err := NewRollupSnapshot(context.Background(), pin, nil, 0)
+			index, err := NewRollupSnapshot(context.Background(), pin, nil, nil, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

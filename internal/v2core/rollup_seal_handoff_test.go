@@ -37,6 +37,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 			r.parallelism = lanes
 			expired := map[v2part.ID]bool{}
 			r.expire = func(p RollupPolicy, _ RollupMetadata, _ time.Time) bool { return expired[p.Name] }
+			r.setExpiryTTL(expiryWindow(time.Second)) // plans run an hour after writes
 			names := 500 + rng.Intn(400)
 			type metricSpec struct {
 				name   v2part.ID
@@ -83,11 +84,11 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, s := range r.stages {
-					if len(s.batches) == 0 {
+					if s.batches == 0 {
 						idle++
 					}
 				}
-				files, partSpecs := expandPlannedParts(plan.Parts, plannedOwners(r.stages))
+				files, partSpecs := expandPlannedParts(plan.Parts, plannedOwners(r))
 				seen := map[int64]bool{}
 				for i, part := range plan.Parts {
 					// The owner's part workers stamp the durable source stream.

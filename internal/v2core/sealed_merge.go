@@ -4,6 +4,7 @@ package v2core
 // retain their move-catalog authority and are never reclassified by compaction.
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"crypto/rand"
@@ -13,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -140,7 +140,7 @@ func (e *coreEngine) runPartMerges(workers int) {
 					if unchanged[o] == inventory {
 						continue
 					}
-					changed, err := o.mergeSealedParts(e.gcStop)
+					changed, err := o.mergeSealedParts(e.gcStop, false)
 					if err != nil {
 						o.gc.mergeFailure.CompareAndSwap(nil, &coreFailure{err: err})
 						e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
@@ -161,24 +161,81 @@ func (e *coreEngine) runPartMerges(workers int) {
 	wg.Wait()
 }
 
-// Each size tier spans a factor of sixteen and retains at most fifteen quiescent
-// local parts per group/partition below the cap. Terminal parts trade bounded
-// rewrite size for a larger read inventory until their time partition expires.
+// ForceMerge merges each owner's live local parts down to one part per group
+// and time partition, like VictoriaMetrics /internal/force_merge or ClickHouse
+// OPTIMIZE FINAL. Background merges keep running beside it. It returns the
+// number of merges done; a caller repeats it until that number is zero.
+func (e *coreEngine) ForceMerge() (int, error) {
+	workers, err := mergeWorkerCount(len(e.owners))
+	if err != nil {
+		return 0, err
+	}
+	var merged atomic.Int64
+	var failure atomic.Pointer[error]
+	var wg sync.WaitGroup
+	for worker := 0; worker < max(1, workers); worker++ {
+		wg.Go(func() {
+			for i := worker; i < len(e.owners); i += max(1, workers) {
+				o := e.owners[i]
+				if o.gc == nil || !o.cfg.Rollups {
+					continue
+				}
+				for failure.Load() == nil {
+					changed, err := o.mergeSealedParts(e.gcStop, true)
+					if err != nil {
+						failure.CompareAndSwap(nil, &err)
+					}
+					if !changed {
+						break
+					}
+					merged.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if p := failure.Load(); p != nil {
+		return int(merged.Load()), *p
+	}
+	return int(merged.Load()), nil
+}
+
+// Merges combine only sequence-adjacent local parts of one group/partition
+// (ClickHouse's rule), so their order ranges never interleave. A window of
+// adjacent parts qualifies once it holds at least ratio parts and its total is
+// at least ratio/2 times its largest part, so a large input is not repeatedly
+// combined with only a few much smaller inputs. Small outputs use ratio 4,
+// so new seals fold into a small
+// part every few seal intervals and few small parts stay live for renders.
+// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
+// parts quiescent below the cap. The cheapest qualifying window merges first.
+const (
+	smallMergeBytes = 64 << 20
+	smallMergeRatio = 4
+)
+
+func mergeRatio(total uint64) uint64 {
+	if total <= smallMergeBytes {
+		return smallMergeRatio
+	}
+	return sealedMergeFanIn
+}
+
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	limit, _, err := effectiveMergeLimit(o.dir)
 	if err != nil {
 		return nil, err
 	}
-	return o.selectMergeLimit(snapshot, limit)
+	return o.selectMergeLimit(snapshot, limit, false)
 }
 
-func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
-	type tier struct {
+// full keeps adjacency and the byte cap, but ignores background ratios and fan-in.
+func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, full bool) ([]v2part.Descriptor, error) {
+	type scope struct {
 		group     v2part.Group
 		partition int64
-		size      int
 	}
-	tiers := map[tier][]v2part.Descriptor{}
+	scopes := map[scope][]v2part.Descriptor{}
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -187,7 +244,8 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		if err != nil {
 			return nil, err
 		}
-		if d.Bytes > limit || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+		// Oversized parts stay in the sequence: a window stops at them.
+		if d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
 		k, err := v2part.Decode(d.FirstKey)
@@ -201,42 +259,42 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		if origin.Class != LivePart {
 			continue
 		}
-		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
-		tiers[t] = append(tiers[t], d)
+		s := scope{d.Scope.Group, d.Scope.Partition}
+		scopes[s] = append(scopes[s], d)
 	}
 	var chosen []v2part.Descriptor
-	var best tier
-	for t, parts := range tiers {
+	var best uint64
+	var bestScope scope
+	for s, parts := range scopes {
 		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
-			if a.Bytes < b.Bytes {
-				return -1
-			}
-			if a.Bytes > b.Bytes {
-				return 1
+			if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
+				return c
 			}
 			return bytes.Compare(a.SHA256[:], b.SHA256[:])
 		})
-		var total uint64
-		if len(parts) < sealedMergeFanIn {
-			continue
-		}
-		fits := true
-		total = 0
-		for _, d := range parts[:sealedMergeFanIn] {
-			if d.Bytes > limit-total {
-				fits = false
+		for i := range parts {
+			var total, largest uint64
+			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total; j++ {
+				total += parts[j].Bytes
+				largest = max(largest, parts[j].Bytes)
+				if full {
+					// Force the first maximal adjacent window that fits the cap.
+					if j > i && (j+1 == len(parts) || parts[j+1].Bytes > limit-total) {
+						return slices.Clone(parts[i : j+1]), nil
+					}
+					continue
+				}
+				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
+					continue
+				}
+				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
+					chosen, best, bestScope = parts[i:j+1], total, s
+				}
 				break
 			}
-			total += d.Bytes
-		}
-		if fits && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
-			chosen, best = parts, t
 		}
 	}
-	if len(chosen) > sealedMergeFanIn {
-		chosen = chosen[:sealedMergeFanIn]
-	}
-	return chosen, nil
+	return slices.Clone(chosen), nil
 }
 
 // ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per
@@ -289,10 +347,15 @@ type mergeBlock struct {
 }
 
 type mergeCursor struct {
-	reader      *sstable.Reader
-	cursor      *tableCursor
+	reader *sstable.Reader
+	cursor *headerCursor
+	// key is the current metric's identity with Metric left empty: the name
+	// stays encoded in ident, the validated key bytes before the archive, and
+	// ident[name:] is the GCP3 length-prefixed name. Merges compare and copy
+	// these bytes; they never build a name string per key.
 	key         v2part.Key
-	decoder     v2part.KeyDecoder
+	ident       []byte
+	name        int
 	part        v2part.PartID
 	metadata    RollupMetadata
 	policyBytes []byte
@@ -317,17 +380,17 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 	c.arena, c.blocks = c.arena[:0], c.blocks[:0]
 	c.records = c.records[:0]
 	c.block, c.next = 0, 0
-	k, err := c.decoder.Decode(c.cursor.Key())
+	encoded := c.cursor.Key()
+	k, name, err := v2part.DecodeName(encoded, c.key.Group)
 	if err != nil {
 		return false, err
 	}
+	c.ident = append(c.ident[:0], encoded[:len(encoded)-16]...)
+	c.name = len(c.ident) - len(name) - 4
 	c.key = k
 	c.key.Part = c.part
 	c.key.Archive, c.key.BlockStart, c.key.Ordinal = 0, 0, 0
 	for {
-		if k.Metric != c.key.Metric || k.VShard != c.key.VShard {
-			return false, errors.New("merge metric lacks metadata")
-		}
 		if k.Archive == v2part.MetadataArchive {
 			var slim bool
 			c.metadata, slim, err = decodeRollupMetadataHeader(c.cursor.Value())
@@ -364,12 +427,25 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 			}
 			return false, errors.New("merge metric lacks metadata")
 		}
-		k, err = c.decoder.Decode(c.cursor.Key())
-		if err != nil {
+		encoded = c.cursor.Key()
+		if len(encoded) == len(c.ident)+16 && bytes.Equal(encoded[:len(c.ident)], c.ident) {
+			tail := encoded[len(c.ident):]
+			k.Archive = binary.BigEndian.Uint32(tail)
+			k.BlockStart = int64(binary.BigEndian.Uint64(tail[4:]) ^ (1 << 63))
+			k.Ordinal = binary.BigEndian.Uint32(tail[12:])
+			continue
+		}
+		if k, name, err = v2part.DecodeName(encoded, c.key.Group); err != nil {
 			return false, err
+		}
+		if k.VShard != c.key.VShard || !bytes.Equal(name, c.ident[c.name+4:]) {
+			return false, errors.New("merge metric lacks metadata")
 		}
 	}
 }
+
+// metricName is the current metric's encoded length-prefixed name.
+func (c *mergeCursor) metricName() []byte { return c.ident[c.name:] }
 
 func (c *mergeCursor) advanceRecord(first bool) (bool, error) {
 	if !first {
@@ -396,15 +472,13 @@ type mergeHeap []*mergeCursor
 func (h mergeHeap) Len() int { return len(h) }
 func (h mergeHeap) Less(i, j int) bool {
 	// All inputs share group/partition and normalize to the output part. GCP3
-	// orders the remaining identity by vshard, name byte length, then name bytes.
-	a, b := h[i].key, h[j].key
-	if a.VShard != b.VShard {
-		return a.VShard < b.VShard
+	// orders the remaining identity by vshard, name byte length, then name bytes:
+	// the encoded big-endian length followed by the name compares the same way.
+	a, b := h[i], h[j]
+	if a.key.VShard != b.key.VShard {
+		return a.key.VShard < b.key.VShard
 	}
-	if len(a.Metric) != len(b.Metric) {
-		return len(a.Metric) < len(b.Metric)
-	}
-	return a.Metric < b.Metric
+	return bytes.Compare(a.metricName(), b.metricName()) < 0
 }
 func (h mergeHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h *mergeHeap) Push(v any)   { *h = append(*h, v.(*mergeCursor)) }
@@ -421,14 +495,21 @@ func mergeSlotLess(a, b sealrollup.Record) bool {
 	return a.Archive < b.Archive || a.Archive == b.Archive && a.Slot < b.Slot
 }
 
+// mergePartID draws a merge output's part ID. Byte differentials pin it.
+var mergePartID = func(id *v2part.PartID) error {
+	_, err := rand.Read(id[:])
+	return err
+}
+
 // Merge same-source local originals with the shared timestamp/class/order rule.
 // Resolved coarse records are copied, never aggregated. Publication and GC stay
 // outside this streaming rewrite and retain the ordinary snapshot fences.
-// A nonzero ttl is the durable owner ArchiveClock of a TTL rewrite: records
-// whose expiry precedes it are dropped as whole-part retirement would.
-func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, ttl int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+// retire is the owner's age-retirement clock (retireClock): a record is dropped
+// only when its expiry precedes it, as whole-part retirement would, so a merge
+// never removes a record the reader still returns.
+func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
-	if _, err = rand.Read(spec.Scope.Part[:]); err != nil {
+	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
 	}
 	seen := map[struct {
@@ -461,6 +542,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		return v2part.Descriptor{}, err
 	}
 	defer writer.Abort()
+	writer.OrderDeltas()
 	limit, err := mergeMaxBytes()
 	if err != nil {
 		return v2part.Descriptor{}, err
@@ -500,7 +582,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			return v2part.Descriptor{}, e
 		}
 
-		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, part: spec.Scope.Part}
+		c := &mergeCursor{reader: reader, cursor: newHeaderCursor(&tableCursor{it: it}, nil), part: spec.Scope.Part}
 		cursors = append(cursors, c)
 		valid, e := c.readMetric(true)
 		if e != nil {
@@ -528,7 +610,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		}
 		c := heap.Pop(&h).(*mergeCursor)
 		members = append(members[:0], c)
-		for len(h) > 0 && h[0].key.VShard == c.key.VShard && h[0].key.Metric == c.key.Metric {
+		for len(h) > 0 && h[0].key.VShard == c.key.VShard && bytes.Equal(h[0].metricName(), c.metricName()) {
 			members = append(members, heap.Pop(&h).(*mergeCursor))
 		}
 		// The definition is a function of the key (name, group) and the policy
@@ -544,11 +626,10 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 		}
 		config = *chosen.config
-		floor := max(metadata.LastUpdate/1e9, ttl)
-		key, err = v2part.Encode(c.key)
-		if err != nil {
-			return v2part.Descriptor{}, err
-		}
+		// The output key is the input's validated identity with the output part:
+		// Encode(c.key) byte for byte, without a name string or route re-hash.
+		key = append(append(key[:0], c.ident...), make([]byte, 16)...)
+		copy(key[c.name-16:c.name], c.part[:])
 		tail := key[len(key)-16:]
 		setSlot := func(archive uint32, slot int64) {
 			binary.BigEndian.PutUint32(tail, archive)
@@ -581,13 +662,15 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			if r.Archive >= len(config.Archives) {
 				return v2part.Descriptor{}, errors.New("merge archive outside policy")
 			}
-			// A whole non-overlapping run can keep its exact dense encoding. Durable
+			// A whole non-overlapping run skips per-record winner selection. Durable
 			// reset/expiry masks must permit every slot; ties always use the slow path.
+			// The writer coalesces it with adjacent runs of the same name and archive
+			// up to MaxDenseSlots; only a full run keeps its exact dense encoding.
 			last := input.records[len(input.records)-1]
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < floor {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < retire {
 						untouched = false
 						break
 					}
@@ -602,11 +685,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 				}
 				b := input.blocks[input.block-1]
 				setSlot(b.archive, b.slot)
-				if err = writer.SetSlotsEncoded(key, input.arena[b.start:b.end]); err != nil {
+				if err = writer.AppendSlots(key, input.arena[b.start:b.end], input.records); err != nil {
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= floor {
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= retire {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -645,7 +728,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		} else {
 			full := *metadata
 			if full.Policy == nil {
-				if full.Policy, _, err = appendRollupDefinition(nil, c.key.Metric, c.key.Group, full.Frontier.Policy); err != nil {
+				if full.Policy, _, err = appendRollupDefinition(nil, v2part.ID(c.metricName()[4:]), c.key.Group, full.Frontier.Policy); err != nil {
 					return v2part.Descriptor{}, err
 				}
 			}
@@ -676,7 +759,14 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	return d, d.Validate()
 }
 
-func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
+func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, error) {
+	o.mergeMu.Lock()
+	defer o.mergeMu.Unlock()
+	select {
+	case <-stop:
+		return false, nil
+	default:
+	}
 	// Capture the pin and inventory under the same GC fence as publications.
 	o.gc.mu.Lock()
 	snapshot := o.db.NewSnapshot()
@@ -686,14 +776,14 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	inputs, err := o.selectMergeLimit(snapshot, limit)
+	inputs, err := o.selectMergeLimit(snapshot, limit, full)
 	if err != nil {
 		return false, err
 	}
-	var ttl int64
+	retire := o.retireClock()
 	if len(inputs) == 0 && limit < configured {
 		// Disk-bound: tell "nothing due" from "due but no room".
-		if due, e := o.selectMergeLimit(snapshot, configured); e == nil && len(due) > 0 {
+		if due, e := o.selectMergeLimit(snapshot, configured, full); e == nil && len(due) > 0 {
 			mergeDiskSkip.Add(1)
 			slog.Warn("v2 merge skipped: not enough free disk", "dir", o.dir, "merge_limit_bytes", limit, "configured_cap_bytes", configured)
 			return false, nil
@@ -704,12 +794,10 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 		if now < o.ttlNext.Load() {
 			return false, nil
 		}
-		clock := o.retireClock()
-		inputs, err = o.selectTTLRewrite(snapshot, clock, limit)
+		inputs, err = o.selectTTLRewrite(snapshot, retire, limit)
 		if err != nil || len(inputs) == 0 {
 			return false, err
 		}
-		ttl = clock
 		o.ttlNext.Store(now + ttlRewriteSeconds)
 	}
 	var staged uint64
@@ -724,7 +812,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, ttl, stop)
+	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, retire, stop)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
@@ -748,12 +836,24 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 // Before it commits, the output is an orphan; after it commits, only output is
 // live. Reader snapshots continue naming the inputs until ordinary GC permits
 // their unlink. Concurrent retire/move activity invalidates the whole proposal.
+// The output is linked and synced before the binding fence (g.mu): the caller's
+// fileMu already excludes unlink, so publications wait only for the commit.
 func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d v2part.Descriptor) (bool, error) {
+	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
+	if err != nil {
+		return false, err
+	}
+	if g.stage != nil {
+		g.stage("merge-retained")
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, old := range inputs {
 		value, closer, err := g.db.Get(partBinding(sealedPartPrefix, old.SHA256))
 		if errors.Is(err, pebble.ErrNotFound) {
+			// The unpublished output is an orphan, as after a crash here.
+			g.pending[d.SHA256] = retiredPart{at: g.now()}
+			g.pendingCount.Store(uint64(len(g.pending)))
 			return false, nil
 		}
 		if err != nil {
@@ -768,13 +868,6 @@ func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d 
 		if !same {
 			return false, errors.New("merge input binding changed")
 		}
-	}
-	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
-	if err != nil {
-		return false, err
-	}
-	if g.stage != nil {
-		g.stage("merge-retained")
 	}
 	batch := g.db.NewBatch()
 	defer batch.Close()

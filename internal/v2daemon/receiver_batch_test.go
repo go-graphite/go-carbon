@@ -54,7 +54,7 @@ func TestApplicationOwnerThresholdDifferential(t *testing.T) {
 				for i, o := range owners {
 					name := fmt.Sprintf("threshold.%d", i)
 					data := []points.Point{{Timestamp: 1000 + int64(round%3), Value: math.Float64frombits(bits[round])}, {Timestamp: 999, Value: float64(round) + .25}}
-					if err = o.Append([]string{name, name}, data, nil, 1010); err != nil {
+					if err = o.Append([]string{name, name}, nil, data, nil, 1010); err != nil {
 						t.Fatal(err)
 					}
 					if eager {
@@ -167,7 +167,7 @@ func TestApplicationOwnerExpiryDrainFences(t *testing.T) {
 	o := &applicationOwner{p: s.Producers[0], resolve: func(name string) ([]byte, error) {
 		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: partsformat.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, Archives: []sealrollup.Archive{{Step: 1, Count: 120}}}})
 	}}
-	if err = o.Append([]string{"expiry.fenced"}, []points.Point{{Timestamp: 1000, Value: 1}}, nil, 1001); err != nil {
+	if err = o.Append([]string{"expiry.fenced"}, nil, []points.Point{{Timestamp: 1000, Value: 1}}, nil, 1001); err != nil {
 		t.Fatal(err)
 	}
 	if err = o.Flush(); err != nil {

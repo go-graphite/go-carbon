@@ -16,6 +16,18 @@ func (p *Prepared) PlanClosedInto(records []Record, prior Frontier, through, clo
 	}
 	next := prior
 	next.Policy = p.policy
+	// Within the smallest coarse window there is nothing to aggregate. Keep
+	// using the same reducer for fine slots, including its ordering and input
+	// validation; old retention targets and closed-window corrections use the
+	// full ladder. Larger steps are multiples of this one.
+	c := p.config
+	watermark := max(through, prior.MaxTime)
+	start, end := int64(0), int64(0)
+	fineOnly := len(c.Archives) > 1 && len(batches) > 0
+	if fineOnly {
+		start = align(watermark, c.Archives[1].Step)
+		end = start + c.Archives[1].Step
+	}
 	for _, b := range batches {
 		if b.Order <= next.Order {
 			return SealPlan{}, through, fmt.Errorf("rollup batch is not after frontier")
@@ -23,14 +35,21 @@ func (p *Prepared) PlanClosedInto(records []Record, prior Frontier, through, clo
 		next.Order = b.Order
 		for _, sample := range b.Points {
 			next.MaxTime = max(next.MaxTime, sample.Time)
+			fineOnly = fineOnly && sample.Time >= start && sample.Time < end && sample.Time >= b.Now-c.Archives[0].Step*c.Archives[0].Count
 		}
 	}
-	closing := windowClosure{through: max(through, prior.MaxTime)}
+	closing := windowClosure{through: watermark}
 	if len(batches) == 0 && prior.Order != 0 && closeThrough > closing.through {
 		closing.advance = closeThrough
 		batches = []Batch{{Order: prior.Order, Now: closeThrough}}
 	}
-	deltas, err := reduceMode(p.config, view, ranges, batches, w, &closing)
+	closure := &closing
+	if fineOnly {
+		c.Archives = c.Archives[:1]
+		closing.through = max(watermark, next.MaxTime)
+		closure = nil
+	}
+	deltas, err := reduceMode(c, view, ranges, batches, w, closure)
 	if err != nil {
 		return SealPlan{}, through, err
 	}

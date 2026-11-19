@@ -65,7 +65,7 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 	}
 	snap := e.owners[0].db.NewSnapshot()
 	defer snap.Close()
-	index, err := NewRollupSnapshotWithCatalog(context.Background(), snap, nil, c)
+	index, err := NewRollupSnapshot(context.Background(), snap, nil, c, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,11 +73,11 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 	if index.metrics["shared.metric"].latest.PolicyIdentity != h {
 		t.Fatal("reader copied immutable identity")
 	}
-	name, definition, err := e.BindDefinition(1, "shared.metric", raw)
+	bound, err := e.RegisterApplicationPolicy(1, "shared.metric", raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "shared.metric" || !bytes.Equal(definition, h.definitionBytes()) {
+	if bound != h || e.ApplicationPolicy(1) != h || !h.MatchesDefinition(raw) {
 		t.Fatal("journal binding changed policy")
 	}
 	if err := ScanRollups(snap, func(p RollupPolicy, m RollupMetadata, want []sealrollup.Record) error {
@@ -140,6 +140,39 @@ func TestPolicyCatalogSharedSchemasAndPagedIDs(t *testing.T) {
 		}
 		if c.lookup(id) != h || c.lookup(id-1) == h {
 			t.Fatal("atomic page boundary aliased identity")
+		}
+	}
+}
+
+func TestPolicyCatalogConcurrentPageGrowth(t *testing.T) {
+	var c PolicyCatalog
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for g := range 4 {
+		wg.Go(func() {
+			<-start
+			for i := range 256 {
+				id := uint64((i*4+g)<<10) + uint64(g+1)
+				h := &PolicyIdentity{id: id, nameHash: id * 0x9e3779b97f4a7c15}
+				if got, err := c.publish(h); err != nil || got != h {
+					t.Errorf("publish id %d: %v", id, err)
+					return
+				}
+				if c.lookup(id) != h {
+					t.Errorf("lost id %d during growth", id)
+					return
+				}
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	for g := range 4 {
+		for i := range 256 {
+			id := uint64((i*4+g)<<10) + uint64(g+1)
+			if c.lookup(id) == nil || c.lookup(id).NameHash() != id*0x9e3779b97f4a7c15 {
+				t.Fatalf("lost id %d after growth", id)
+			}
 		}
 	}
 }

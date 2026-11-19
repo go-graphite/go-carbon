@@ -197,10 +197,11 @@ func TestCoreSealPollCoalescesDurably(t *testing.T) {
 			calls := 0
 			o.plan = func(in coreSealInput) (coreSealPlan, error) {
 				calls++
-				if len(in.Rows) != 3 || len(in.Batches) != 3 {
+				batches := in.Pending.Batches()
+				if len(in.Rows) != 3 || len(batches) != 3 {
 					return coreSealPlan{}, errors.New("poll did not preserve all original groups")
 				}
-				for i, b := range in.Batches {
+				for i, b := range batches {
 					if b.ID != uint64(i+1) || b.Clock != int64(i-7) || b.Order != 9 || string(b.Policy) != "exact" {
 						return coreSealPlan{}, errors.New("original apply metadata changed")
 					}

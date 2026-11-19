@@ -82,6 +82,11 @@ func Route(id ID) uint16 {
 	return uint16(crc32.Checksum(unsafe.Slice(unsafe.StringData(string(id)), len(id)), routingTable) & (VirtualShards - 1))
 }
 
+// RouteBytes is Route over encoded name bytes.
+func RouteBytes(name []byte) uint16 {
+	return uint16(crc32.Checksum(name, routingTable) & (VirtualShards - 1))
+}
+
 // PartID must be globally unique across all writers, restarts and shard moves.
 // A UUID generated once per immutable part is suitable. Local counters alone
 // are unsafe: newly assigned owners would overwrite keys copied from peers.
@@ -179,17 +184,33 @@ func Decode(b []byte) (Key, error) { return DecodeReusing(b, "", "") }
 // instead of copying the key bytes. Validation and decoded values are
 // unchanged; a non-matching hint only costs the usual copy.
 func DecodeReusing(b []byte, group Group, metric ID) (Key, error) {
+	k, name, err := DecodeName(b, group)
+	if err != nil {
+		return k, err
+	}
+	if string(name) == string(metric) {
+		k.Metric = metric
+	} else {
+		k.Metric = ID(string(name))
+	}
+	return k, nil
+}
+
+// DecodeName validates b exactly as Decode does but leaves Key.Metric empty and
+// returns the name bytes as a sub-slice of b, so a caller that compares or
+// copies names allocates no string per key.
+func DecodeName(b []byte, group Group) (Key, []byte, error) {
 	var k Key
 	if len(b) < 54 || !bytes.Equal(b[:4], magic) {
-		return k, errors.New("invalid part key header")
+		return k, nil, errors.New("invalid part key header")
 	}
 	gn32 := binary.BigEndian.Uint32(b[4:8])
 	if gn32 > MaxNameBytes {
-		return k, errors.New("invalid placement group length")
+		return k, nil, errors.New("invalid placement group length")
 	}
 	gn := int(gn32)
 	if gn > len(b)-54 {
-		return k, errors.New("invalid placement group length")
+		return k, nil, errors.New("invalid placement group length")
 	}
 	if string(b[8:8+gn]) == string(group) {
 		k.Group = group
@@ -206,27 +227,23 @@ func DecodeReusing(b []byte, group Group, metric ID) (Key, error) {
 	n32 := binary.BigEndian.Uint32(b[pos : pos+4])
 	pos += 4
 	if n32 == 0 || n32 > MaxNameBytes {
-		return Key{}, errors.New("invalid part key length")
+		return Key{}, nil, errors.New("invalid part key length")
 	}
 	n := int(n32)
 	if len(b) != 54+gn+n {
-		return Key{}, errors.New("invalid part key length")
+		return Key{}, nil, errors.New("invalid part key length")
 	}
-	if string(b[pos:pos+n]) == string(metric) {
-		k.Metric = metric
-	} else {
-		k.Metric = ID(string(b[pos : pos+n]))
-	}
+	name := b[pos : pos+n : pos+n]
 	pos += n
 	k.Archive = binary.BigEndian.Uint32(b[pos:])
 	pos += 4
 	k.BlockStart = int64(binary.BigEndian.Uint64(b[pos:]) ^ (1 << 63))
 	pos += 8
 	k.Ordinal = binary.BigEndian.Uint32(b[pos:])
-	if k.VShard >= VirtualShards || Route(k.Metric) != k.VShard {
-		return Key{}, errors.New("invalid part key routing")
+	if k.VShard >= VirtualShards || RouteBytes(name) != k.VShard {
+		return Key{}, nil, errors.New("invalid part key routing")
 	}
-	return k, nil
+	return k, name, nil
 }
 
 type Part struct {

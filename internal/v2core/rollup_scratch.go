@@ -17,14 +17,14 @@ import (
 //
 // Per-owner state (metrics, ranks, history window caches) never moves here.
 type rollupScratch struct {
-	stages         []rollupStage
-	batchPositions []int
-	samples        []sealrollup.Sample
-	batches        []sealrollup.Batch
-	files          map[string][][]plannedKV
-	coverage       map[string]*rollupCoverage
-	arena          []byte
-	lanes          []rollupLaneScratch
+	stages       []rollupStage
+	stageMetrics []*rollupMetric
+	samples      []sealrollup.Sample
+	batches      []sealrollup.Batch
+	files        map[string][][]plannedKV
+	coverage     map[string]*rollupCoverage
+	arena        []byte
+	lanes        []rollupLaneScratch
 }
 
 type rollupLaneScratch struct {
@@ -44,9 +44,9 @@ func (r *coreRollups) takeScratch() {
 		s = &rollupScratch{}
 	}
 	r.scratch = s
-	r.stages, r.batchPositions, r.samples, r.batches = s.stages, s.batchPositions, s.samples, s.batches
+	r.stages, r.stageMetrics, r.samples, r.batches = s.stages, s.stageMetrics, s.samples, s.batches
 	r.files, r.coverage, r.arena = s.files, s.coverage, s.arena
-	s.stages, s.batchPositions, s.samples, s.batches = nil, nil, nil, nil
+	s.stages, s.stageMetrics, s.samples, s.batches = nil, nil, nil, nil
 	s.files, s.coverage, s.arena = nil, nil, nil
 }
 
@@ -72,9 +72,9 @@ func (r *coreRollups) returnScratch() {
 		s = &rollupScratch{}
 	}
 	r.scratch = nil
-	s.stages, s.batchPositions, s.samples, s.batches = r.stages, r.batchPositions, r.samples, r.batches
+	s.stages, s.stageMetrics, s.samples, s.batches = r.stages, r.stageMetrics, r.samples, r.batches
 	s.files, s.coverage, s.arena = r.files, r.coverage, r.arena
-	r.stages, r.batchPositions, r.samples, r.batches = nil, nil, nil, nil
+	r.stages, r.stageMetrics, r.samples, r.batches = nil, nil, nil, nil
 	r.files, r.coverage, r.arena = nil, nil, nil
 	if len(s.lanes) < len(r.lanes) {
 		s.lanes = slices.Grow(s.lanes, len(r.lanes)-len(s.lanes))[:len(r.lanes)]
@@ -93,7 +93,7 @@ func (r *coreRollups) returnScratch() {
 // retainedScratchBytes is the planner working-set capacity this planner keeps
 // between seals; with pooling it is zero once a seal has committed or aborted.
 func (r *coreRollups) retainedScratchBytes() int {
-	n := cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.batchPositions)*8 + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
+	n := cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*rollupMetric)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
 	for i := range r.lanes {
 		lane := &r.lanes[i]
 		n += (cap(lane.ranked)+cap(lane.spare))*int(unsafe.Sizeof(rollupRankRef{})) + cap(lane.counts)*8 + cap(lane.records)*int(unsafe.Sizeof(sealrollup.Record{})) + cap(lane.output.arena)

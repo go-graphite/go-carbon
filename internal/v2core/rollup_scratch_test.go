@@ -30,7 +30,7 @@ func sealTimeOnlyFixture(tb testing.TB, names, perName int, seed int64) (*coreRo
 		if err != nil {
 			tb.Fatal(err)
 		}
-		r.metrics[id], r.names[p.Name] = m, id
+		r.install(id, m)
 		metrics[i] = m
 	}
 	batches := make([]Batch, 0, names*perName)
@@ -59,7 +59,7 @@ func TestSealPlanScratchBound(t *testing.T) {
 		// Empty the shared pool so the capacities below are this seal's own.
 		runtime.GC()
 		runtime.GC()
-		plan, err := r.planParts(SealInput{Batches: batches})
+		plan, err := r.planParts(coreSealInput{Batches: batches})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,7 +101,7 @@ func BenchmarkSealPlanRetained(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for i, r := range planners {
-			plan, err := r.planParts(SealInput{Batches: inputs[i]})
+			plan, err := r.planParts(coreSealInput{Batches: inputs[i]})
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -114,8 +114,8 @@ func BenchmarkSealPlanRetained(b *testing.B) {
 	runtime.GC()
 	runtime.ReadMemStats(&held)
 	for _, r := range planners {
-		r.stages, r.batchPositions, r.samples, r.batches, r.arena = nil, nil, nil, nil, nil
-		r.files, r.coverage, r.positions, r.pendingNames, r.lanes = nil, nil, nil, nil, nil
+		r.stages, r.stageMetrics, r.samples, r.batches, r.arena = nil, nil, nil, nil, nil
+		r.files, r.coverage, r.lanes = nil, nil, nil
 	}
 	runtime.GC()
 	runtime.GC()

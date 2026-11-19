@@ -24,17 +24,19 @@ import (
 // bit-exact against whisper: the frozen head is never invisible and never
 // counted twice. Concurrent readers keep fetching through all seals.
 func TestBackgroundSealRendersMatchClassic(t *testing.T) {
+	t.Parallel()
 	testBackgroundSealRendersMatchClassic(t, 1<<20, 24, time.Hour)
 }
 
 // TestBackgroundSealRendersMatchClassicLargeSeals repeats it with the largest
-// row cap and a 20 s interval, so the held seals are time-only seals of a
+// row cap and a 2 s interval, so the held seals are time-only seals of a
 // head that was published many times. Test config only; defaults unchanged.
 func TestBackgroundSealRendersMatchClassicLargeSeals(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
-		t.Skip("waits for 20 s seal intervals")
+		t.Skip("waits for time-only seals")
 	}
-	testBackgroundSealRendersMatchClassic(t, 2<<20, 2<<20, 20*time.Second)
+	testBackgroundSealRendersMatchClassic(t, 2<<20, 2<<20, 2*time.Second)
 }
 
 func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, interval time.Duration) {
@@ -61,21 +63,26 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 	}
 	reader, _ := New(1, 1<<30, 64<<20)
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{
-		PublishBatchesWithInventory: reader.PublishWithInventory,
+		PublishPending: reader.PublishPending,
 		Visible: func(_ int, batches []v2core.Batch) {
 			for _, b := range batches {
 				orders.Store(b.Order, true)
 			}
 		},
 		Stage: func(s string) {
+			// Hold only a background (threshold) seal and its commit. A
+			// maintenance flush is a synchronous seal on the owner loop; holding
+			// it would stop publication by construction.
 			switch s {
 			case "seal":
-				if sealStarts.Add(1) > 0 && armed.Load() && holdSeal.CompareAndSwap(false, true) {
+				sealStarts.Add(1)
+			case "background-seal":
+				if armed.Load() && holdSeal.CompareAndSwap(false, true) {
 					hold(atSeal, releaseSeal)
 				}
 			case "commit":
 				commits.Add(1)
-				if armed.Load() && holdCommit.CompareAndSwap(false, true) {
+				if holdSeal.Load() && holdCommit.CompareAndSwap(false, true) {
 					hold(atCommit, releaseCommit)
 				}
 			}
@@ -258,6 +265,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 // still fit become visible during the seal. Once the seal is published, the
 // queued packet is admitted in order. Every render is bit-exact against whisper.
 func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(1561))
 	clock := int64(1794700800)
 	retentions := whisper.MustParseRetentionDefs("1s:1d,1m:30d,1h:1y")
@@ -272,7 +280,7 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 	atSeal, releaseSeal := make(chan struct{}), make(chan struct{})
 	reader, _ := New(1, 1<<30, 64<<20)
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{
-		PublishBatchesWithInventory: reader.PublishWithInventory,
+		PublishPending: reader.PublishPending,
 		Visible: func(_ int, batches []v2core.Batch) {
 			for _, b := range batches {
 				orders.Store(b.Order, true)

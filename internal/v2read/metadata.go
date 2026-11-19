@@ -2,7 +2,11 @@ package v2read
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"slices"
+	"strings"
+	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
@@ -51,7 +55,7 @@ func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpir
 		}
 		m := g.metrics[name]
 		if m == nil {
-			m = g.sealed.lookup(name)
+			m = g.lookup(name)
 		}
 		if m != nil {
 			masked = masked || m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0
@@ -83,50 +87,123 @@ func (r *Reader) Names(ctx context.Context) ([]string, error) {
 
 // NamesWithMasks projects visible names and classic reset barriers together.
 // Each owner is pinned once; masks never sample a later publication than names.
+// Owners are independent, so up to GOMAXPROCS of them discover at once; each
+// holds one decoded part at a time. Errors surface in owner order.
 func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool, error) {
 	pins, err := r.loadOwners(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer releaseOwners(pins)
-	masks := make(map[string]bool)
-	var names []string
-	for _, g := range pins {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type owned struct {
+		names, masked []string
+		err           error
+	}
+	out := make([]owned, len(pins))
+	slots := make(chan struct{}, runtime.GOMAXPROCS(0))
+	var wg sync.WaitGroup
+	for i, g := range pins {
 		if g == nil {
 			continue
 		}
-		g, err = g.discover(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		err = g.sealed.index.MetadataContext(ctx, func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
-			if pending := g.metrics[n]; pending != nil {
-				meta = pending.meta
+		wg.Go(func() {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				out[i].err = ctx.Err()
+				return
 			}
-			if meta.BaselineOrder > 0 || meta.Expired || meta.ResetOrder > 0 {
-				masks[n] = true
+			o := &out[i]
+			visit := func(n string, meta v2core.RollupMetadata) {
+				if meta.BaselineOrder > 0 || meta.Expired || meta.ResetOrder > 0 {
+					o.masked = append(o.masked, n)
+				}
+				if !meta.Expired {
+					o.names = append(o.names, n)
+				}
 			}
-			if !meta.Expired {
-				names = append(names, n)
+			d, err := g.discover(ctx)
+			if err == nil {
+				err = d.sealed.MetadataContext(ctx, func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
+					if pending := d.metrics[n]; pending != nil {
+						meta = pending.meta
+					}
+					visit(n, meta)
+				})
 			}
+			if err != nil {
+				o.err = err
+				cancel()
+				return
+			}
+			for n, m := range d.metrics {
+				visit(n, m.meta)
+			}
+			slices.Sort(o.names)
+			o.names = slices.Compact(o.names)
 		})
-		if err != nil {
-			return nil, nil, err
-		}
-		for n, m := range g.metrics {
-			if m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0 {
-				masks[n] = true
-			}
-			if !m.meta.Expired {
-				names = append(names, n)
-			}
+	}
+	wg.Wait()
+	// The first failing owner cancels the rest; report its error, not theirs.
+	var failed error
+	for _, o := range out {
+		if o.err != nil && (failed == nil || errors.Is(failed, context.Canceled) && !errors.Is(o.err, context.Canceled)) {
+			failed = o.err
 		}
 	}
-	slices.Sort(names)
-	return slices.Compact(names), masks, nil
+	if failed != nil {
+		return nil, nil, failed
+	}
+	masks := make(map[string]bool)
+	lists := make([][]string, len(out))
+	for i, o := range out {
+		lists[i] = o.names
+		for _, n := range o.masked {
+			masks[n] = true
+		}
+	}
+	return MergeNames(lists...), masks, nil
+}
+
+// MergeNames merges sorted, duplicate-free lists into one sorted list, keeping
+// a name present in several lists once. Pairs of lists merge in parallel
+// rounds, so 10M names from 96 owners take 7 linear rounds, not a sort.
+func MergeNames(lists ...[]string) []string {
+	for len(lists) > 1 {
+		next := make([][]string, (len(lists)+1)/2)
+		var wg sync.WaitGroup
+		for i := range next {
+			if 2*i+1 == len(lists) {
+				next[i] = lists[2*i]
+				continue
+			}
+			wg.Go(func() { next[i] = mergeTwo(lists[2*i], lists[2*i+1]) })
+		}
+		wg.Wait()
+		lists = next
+	}
+	if len(lists) == 0 {
+		return nil
+	}
+	return lists[0]
+}
+
+func mergeTwo(a, b []string) []string {
+	out := make([]string, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		switch c := strings.Compare(a[0], b[0]); {
+		case c < 0:
+			out, a = append(out, a[0]), a[1:]
+		case c > 0:
+			out, b = append(out, b[0]), b[1:]
+		default:
+			out, a, b = append(out, a[0]), a[1:], b[1:]
+		}
+	}
+	return append(append(out, a...), b...)
 }
 
 // loadOwners pins publications without starting any directory work.

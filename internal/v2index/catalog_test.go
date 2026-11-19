@@ -89,3 +89,73 @@ func TestCatalogConcurrentReaders(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// The writer state has no lock: ordered writers on different goroutines are
+// fine, overlapping ones panic instead of racing on the background merge job.
+func TestCatalogSingleWriter(t *testing.T) {
+	c := &Catalog{}
+	if err := c.SetDir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Publish(1, []string{"a.base"}); err != nil {
+		t.Fatal(err)
+	}
+	handoff := make(chan error)
+	go func() { handoff <- c.Apply(2, []string{"b.other"}, nil) }() // starts a base merge
+	if err := <-handoff; err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		handoff <- c.ApplyBeforePublish(3, []string{"c.blocked"}, nil, func(*Snapshot) error { close(entered); <-release; return nil })
+	}()
+	<-entered
+	for name, write := range map[string]func(){
+		"publish": func() { _ = c.Publish(4, nil) },
+		"apply":   func() { _ = c.Apply(4, []string{"d.late"}, nil) },
+		"close":   c.Close,
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != "v2 index: concurrent catalog writers" {
+					t.Errorf("%s during a blocked Apply: recovered %v", name, r)
+				}
+			}()
+			write()
+		}()
+	}
+	close(release)
+	if err := <-handoff; err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if got := slices.Collect(c.Snapshot().Names()); !reflect.DeepEqual(got, []string{"a.base", "b.other", "c.blocked"}) {
+		t.Fatal(got)
+	}
+}
+
+// TestPublishSortedNames checks the single validation pass: sorted unique
+// input is used as is, a sorted duplicate or unsorted input is still
+// deduplicated, and the caller's slice is never modified.
+func TestPublishSortedNames(t *testing.T) {
+	var c Catalog
+	for i, tc := range []struct{ in, want []string }{
+		{[]string{"a.b", "a.c", "b"}, []string{"a.b", "a.c", "b"}},
+		{[]string{"a.b", "a.c", "a.c", "b"}, []string{"a.b", "a.c", "b"}},
+		{[]string{"b", "a.c", "a.b", "b"}, []string{"a.b", "a.c", "b"}},
+	} {
+		in := slices.Clone(tc.in)
+		if err := c.Publish(uint64(i+1), in); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(in, tc.in) {
+			t.Fatalf("case %d: input modified: %q", i, in)
+		}
+		if s := c.Snapshot(); s.Len() != len(tc.want) || !s.EqualNames(tc.want) {
+			t.Fatalf("case %d: got %q", i, slices.Collect(s.Names()))
+		}
+	}
+	if err := c.Publish(9, []string{"a.b", "a..c"}); err == nil {
+		t.Fatal("invalid name published")
+	}
+}
