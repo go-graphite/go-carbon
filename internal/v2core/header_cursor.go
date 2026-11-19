@@ -53,8 +53,19 @@ func (c *headerCursor) load(valid bool) bool {
 func (c *headerCursor) First() bool { return c.load(c.archiveCursor.First()) }
 
 // SeekGE lands on a folded envelope when the run before key carries one at or
-// after key; the envelope sorts after all of its metric's runs.
+// after key; the envelope sorts after all of its metric's runs. A run key
+// answered by a run of the same metric needs one seek: that metric's envelope
+// sorts after it. An envelope key looks back first, where a folded part has it.
 func (c *headerCursor) SeekGE(key []byte) bool {
+	if n := len(key) - 16; n >= 0 && binary.BigEndian.Uint32(key[n:]) != v2part.MetadataArchive {
+		valid := c.load(c.archiveCursor.SeekGE(key))
+		if k := c.archiveCursor.Key(); c.err != nil || valid && len(k) == len(key) && bytes.Equal(k[:n], key[:n]) {
+			return valid
+		}
+		if c.archiveCursor.Error() != nil {
+			return false
+		}
+	}
 	if c.load(c.archiveCursor.SeekLT(key)) && c.env != nil && bytes.Compare(c.key, key) >= 0 {
 		c.onEnv = true
 		return true
