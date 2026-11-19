@@ -13,7 +13,7 @@ import (
 // pendingIndex finds a request's pending batches without scanning every
 // owner's whole pending head. Owners only append to the published head between
 // seals, so a generation reuses its predecessor's immutable chunks and adds one
-// chunk for the new suffix. Chunks hold positions and name hashes only, never
+// chunk for the new suffix. Chunks hold positions only, never
 // batches, and are built once by the first reader that needs them. Candidates
 // are re-checked by exact name, so hash collisions cannot change results.
 type pendingIndex struct {
@@ -23,12 +23,11 @@ type pendingIndex struct {
 type pendingChunk struct {
 	start, end int
 	once       sync.Once
-	// hashes[i] is the name hash of pending[start+i]; heads/next chain equal
-	// buckets so lookups need no sort and no name bytes.
-	hashes []uint64
-	heads  []int32
-	next   []int32
-	err    error
+	// heads/next chain hash buckets. Exact-name filtering rejects bucket
+	// collisions, so chunks need no retained per-position hash array.
+	heads []int32
+	next  []int32
+	err   error
 }
 
 // maxPendingChunks bounds lookup work for owners that publish often but rarely
@@ -64,34 +63,11 @@ func pendingName(registered *v2core.ApplicationPolicy, policy []byte) (string, e
 	return string(p.Name), nil
 }
 
-// pendingHash is the hash of pendingName without reading name bytes when the
-// application carries a registered identity.
-func pendingHash(registered *v2core.ApplicationPolicy, policy []byte) (uint64, error) {
-	if registered != nil {
-		return registered.NameHash(), nil
-	}
-	name, err := pendingName(registered, policy)
-	return namefp.Hash(name), err
-}
-
 // load indexes positions [start, end). Every holder of the chunk publishes
 // the same applications at these positions, so any holder's view may build it.
 func (c *pendingChunk) load(pending v2core.PendingView) error {
 	c.once.Do(func() {
 		n := c.end - c.start
-		hashes := make([]uint64, n)
-		pending.Refs(c.start, c.end, func(pos int, _ uint64, registered *v2core.ApplicationPolicy, policy []byte) bool {
-			h, err := pendingHash(registered, policy)
-			if err != nil {
-				c.err = err
-				return false
-			}
-			hashes[pos-c.start] = h
-			return true
-		})
-		if c.err != nil {
-			return
-		}
 		size := 1
 		for size < 2*n {
 			size <<= 1
@@ -102,12 +78,13 @@ func (c *pendingChunk) load(pending v2core.PendingView) error {
 		}
 		next := make([]int32, n)
 		mask := uint64(size - 1)
-		for i := n - 1; i >= 0; i-- { // descending inserts leave each chain ascending
-			b := hashes[i] & mask
+		c.err = pending.NameHashes(c.start, c.end, func(pos int, h uint64) {
+			i := pos - c.start
+			b := h & mask
 			next[i] = heads[b]
 			heads[b] = int32(i)
-		}
-		c.hashes, c.heads, c.next = hashes, heads, next
+		})
+		c.heads, c.next = heads, next
 	})
 	return c.err
 }
@@ -146,8 +123,8 @@ func selectPending(ctx context.Context, x *pendingIndex, pending v2core.PendingV
 	return out, nil
 }
 
-// candidates returns ascending pending positions whose name hash matches one
-// of names. The caller still applies the exact name predicate.
+// candidates returns ascending pending positions in a name's hash bucket.
+// The caller still applies the exact name predicate.
 func (x *pendingIndex) candidates(pending v2core.PendingView, names []string) ([]int32, error) {
 	if len(x.chunks) == 0 {
 		return nil, nil
@@ -164,9 +141,7 @@ func (x *pendingIndex) candidates(pending v2core.PendingView, names []string) ([
 		mask := uint64(len(c.heads) - 1)
 		for _, h := range hashes {
 			for j := c.heads[h&mask]; j >= 0; j = c.next[j] {
-				if c.hashes[j] == h {
-					out = append(out, int32(c.start)+j)
-				}
+				out = append(out, int32(c.start)+j)
 			}
 		}
 	}

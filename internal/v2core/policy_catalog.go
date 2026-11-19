@@ -41,12 +41,29 @@ type policyDefinition struct {
 	prepared *sealrollup.Prepared
 	Group    partsformat.Group
 }
-type policyIDPage [1024]atomic.Pointer[PolicyIdentity]
+
+// Keep scan keys contiguous: pending readers need hashes without fetching
+// every scattered identity. Zero hashes fall back to the published handle.
+type policyIDPage struct {
+	handles [1024]atomic.Pointer[PolicyIdentity]
+	hashes  [1024]atomic.Uint64
+}
+
+// The normal numeric-ID space uses a small, geometrically grown directory.
+// Only creation takes the mutex; published directory entries are atomic and
+// never removed. Overflow IDs keep the sparse map rather than reserving holes.
+type policyIDPages struct {
+	pages []atomic.Pointer[policyIDPage]
+}
+
+const denseIDPages = 1 << 20 // one billion IDs; at most 8 MiB of directory
 
 // PolicyCatalog is scoped to one journal epoch. Published pages and handles are
 // immutable; reads take no construction mutex, including during page growth.
 type PolicyCatalog struct {
-	ids         sync.Map // page number -> *policyIDPage, not one map node per name
+	pages       atomic.Pointer[policyIDPages]
+	pagesMu     sync.Mutex
+	ids         sync.Map // sparse overflow pages for IDs at or above 2^30
 	definitions sync.Map // canonical suffix -> *policyDefinition
 	shards      [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
 }
@@ -110,13 +127,10 @@ func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) 
 }
 
 func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
-	pageID := h.id >> 10
-	page, _ := c.ids.Load(pageID)
-	if page == nil {
-		page, _ = c.ids.LoadOrStore(pageID, &policyIDPage{})
-	}
-	slot := &page.(*policyIDPage)[h.id&1023]
+	p := c.idPage(h.id>>10, true)
+	slot := &p.handles[h.id&1023]
 	if slot.CompareAndSwap(nil, h) {
+		p.hashes[h.id&1023].Store(h.nameHash)
 		return h, nil
 	}
 	return policyIdentityMatches(slot.Load(), string(h.policy.Name), h.definitionBytes())
@@ -210,12 +224,76 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 	}
 	return c.publish(h)
 }
-func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
-	page, _ := c.ids.Load(id >> 10)
-	if page == nil {
+
+// idPage returns an epoch-owned page. Directory growth copies pointers only;
+// holding pagesMu prevents a concurrent creator from publishing into an old copy.
+func (c *PolicyCatalog) idPage(id uint64, create bool) *policyIDPage {
+	if id >= denseIDPages {
+		p, _ := c.ids.Load(id)
+		if p == nil && create {
+			p, _ = c.ids.LoadOrStore(id, &policyIDPage{})
+		}
+		if p != nil {
+			return p.(*policyIDPage)
+		}
 		return nil
 	}
-	return page.(*policyIDPage)[id&1023].Load()
+	d := c.pages.Load()
+	if d != nil && id < uint64(len(d.pages)) {
+		if p := d.pages[id].Load(); p != nil {
+			return p
+		}
+	}
+	if !create {
+		return nil
+	}
+	c.pagesMu.Lock()
+	defer c.pagesMu.Unlock()
+	d = c.pages.Load()
+	if d == nil || id >= uint64(len(d.pages)) {
+		n := 1
+		for uint64(n) <= id {
+			n *= 2
+		}
+		next := &policyIDPages{pages: make([]atomic.Pointer[policyIDPage], n)}
+		if d != nil {
+			for i := range d.pages {
+				next.pages[i].Store(d.pages[i].Load())
+			}
+		}
+		c.pages.Store(next)
+		d = next
+	}
+	p := d.pages[id].Load()
+	if p == nil {
+		p = &policyIDPage{}
+		d.pages[id].Store(p)
+	}
+	return p
+}
+
+func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
+	if p := c.idPage(id>>10, false); p != nil {
+		return p.handles[id&1023].Load()
+	}
+	return nil
+}
+
+// nameHash is lookup's scan-only projection. A concurrent intern may observe
+// the handle before its hash store; the zero fallback preserves that boundary
+// and also handles the legitimate (rare) zero name hash.
+func (c *PolicyCatalog) nameHash(id uint64) uint64 {
+	p := c.idPage(id>>10, false)
+	if p == nil {
+		return 0
+	}
+	if h := p.hashes[id&1023].Load(); h != 0 {
+		return h
+	}
+	if h := p.handles[id&1023].Load(); h != nil {
+		return h.nameHash
+	}
+	return 0
 }
 
 // ApplicationPolicy resolves an ID in this engine's immutable catalog epoch.
