@@ -301,9 +301,10 @@ func checkInstalledBaselineClassicInventory(t *testing.T, first, stride int) {
 						return false
 					}
 					g.sealed.index.Metadata(func(_ string, _ v2core.RollupPolicy, m v2core.RollupMetadata) { add(m.Frontier.Order) })
-					for _, b := range g.pending {
-						add(b.Order)
-					}
+					g.view.Each(func(a *v2core.PendingApplication) bool {
+						add(a.Order)
+						return true
+					})
 					g.release()
 				}
 			}

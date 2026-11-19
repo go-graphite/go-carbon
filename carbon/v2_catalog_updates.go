@@ -31,10 +31,15 @@ func newV2CatalogUpdates(owners int) *v2CatalogUpdates {
 	return u
 }
 func (u *v2CatalogUpdates) visible(owner int, batches []v2core.Batch) {
+	u.visiblePending(owner, v2core.PendingBatches(batches))
+}
+
+// visiblePending registers names newly visible in an owner's pending view.
+func (u *v2CatalogUpdates) visiblePending(owner int, pending v2core.PendingView) {
 	var added []string
 	var stamps []v2NameStamp
 	now := time.Now().UnixNano()
-	for _, b := range batches {
+	pending.Each(func(b *v2core.PendingApplication) bool {
 		page := u.owners[owner][b.ID>>10]
 		if page == nil {
 			page = new([16]uint64)
@@ -43,16 +48,16 @@ func (u *v2CatalogUpdates) visible(owner int, batches []v2core.Batch) {
 		word, bit := (b.ID&1023)>>6, uint64(1)<<(b.ID&63)
 		if page[word]&bit != 0 {
 			if !u.hasExpiry.Load() {
-				continue
+				return true
 			}
 			if _, ok := u.expiredIDs.LoadAndDelete(b.ID); !ok {
-				continue
+				return true
 			}
 		}
 		page[word] |= bit
 		var name string
-		if b.Registered != nil {
-			name = b.Registered.Name()
+		if h := b.Registered(); h != nil {
+			name = h.Name()
 		} else {
 			var policy v2core.RollupPolicy
 			// The core validated this canonical policy before publishing it.
@@ -63,7 +68,8 @@ func (u *v2CatalogUpdates) visible(owner int, batches []v2core.Batch) {
 		}
 		added = append(added, name)
 		stamps = append(stamps, v2NameStamp{registered: b.Clock, visible: now})
-	}
+		return true
+	})
 	if len(added) > 0 {
 		u.mu.Lock()
 		u.added = append(u.added, added...)

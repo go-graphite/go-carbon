@@ -103,6 +103,9 @@ type coreHooks struct {
 	// Visible observes original batches after successful reader publication.
 	// Owners may call concurrently; batches are borrowed and can repeat.
 	Visible func(owner int, batches []coreBatch)
+	// VisiblePending is Visible over the pending view, without decoding
+	// points. When set it replaces Visible.
+	VisiblePending func(owner int, pending PendingView)
 
 	OwnerCPUs []int
 	Publish   func(int, *pebble.Snapshot, []row) error
@@ -115,6 +118,10 @@ type coreHooks struct {
 	// PublishBatchesWithInventory is the same transfer with the immutable binding
 	// set captured atomically with snapshot. When set, it replaces PublishBatches.
 	PublishBatchesWithInventory func(int, *pebble.Snapshot, []coreBatch, uint64, *RollupInventory) error
+	// PublishPending is PublishBatchesWithInventory over the owner's
+	// pointer-free pending view (name-once S5a-2). When set it replaces both
+	// []Batch hooks, which otherwise receive a per-publication decode.
+	PublishPending func(int, *pebble.Snapshot, PendingView, uint64, *RollupInventory) error
 	// PlanSeal is pure: no publication/mutation until Commit. Input buffers are
 	// owner-local and valid only for this call. The planner must detach retained
 	// output. An error prevents raw data, archives and frontier from committing.

@@ -45,25 +45,18 @@ func linearPending(pending []v2core.Batch, names []string) ([]v2core.Batch, erro
 }
 
 func indexedPending(x *pendingIndex, pending []v2core.Batch, names []string) ([]v2core.Batch, error) {
-	wanted := make(map[string]bool, len(names))
-	for _, n := range names {
-		wanted[n] = true
+	return selectPending(context.Background(), x, v2core.PendingBatches(pending), names)
+}
+
+// samePendingBatch reports whether two descriptors are the same application.
+func samePendingBatch(a, b *v2core.Batch) bool {
+	if a.ID != b.ID || a.Order != b.Order || a.Clock != b.Clock || a.Registered != b.Registered || len(a.Points) != len(b.Points) || len(a.Policy) != len(b.Policy) {
+		return false
 	}
-	positions, err := x.candidates(pending, names)
-	if err != nil {
-		return nil, err
+	if len(a.Points) > 0 && &a.Points[0] != &b.Points[0] {
+		return false
 	}
-	var out []v2core.Batch
-	for _, i := range positions {
-		name, err := pendingName(&pending[i])
-		if err != nil {
-			return nil, err
-		}
-		if wanted[name] {
-			out = append(out, pending[i])
-		}
-	}
-	return out, nil
+	return len(a.Policy) == 0 || &a.Policy[0] == &b.Policy[0]
 }
 
 func testPolicy(t testing.TB, name string) []byte {
@@ -118,7 +111,7 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 			}
 		}
 		pending := slices.Clone(head)
-		index = nextPendingIndex(index, published, pending)
+		index = nextPendingIndex(index, v2core.PendingBatches(published), v2core.PendingBatches(pending))
 		published = pending
 		for q := 0; q < 8; q++ {
 			var want []string
@@ -149,7 +142,7 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 	// A malformed JSON policy fails selection exactly like the linear scan.
 	bad := append(slices.Clone(published), v2core.Batch{ID: 1, Order: order + 1, Policy: []byte("{")})
 	_, refErr := linearPending(bad, []string{"x"})
-	_, gotErr := indexedPending(nextPendingIndex(index, published, bad), bad, []string{"x"})
+	_, gotErr := indexedPending(nextPendingIndex(index, v2core.PendingBatches(published), v2core.PendingBatches(bad)), bad, []string{"x"})
 	if refErr == nil || gotErr == nil || refErr.Error() != gotErr.Error() {
 		t.Fatalf("errors got %v want %v", gotErr, refErr)
 	}
@@ -167,7 +160,7 @@ func TestPendingIndexRendersMatchClassic(t *testing.T) {
 	cfg := testConfig()
 	cfg.Shards, cfg.Owners = owners, owners
 	reader, _ := New(owners, 1<<30, 64<<20)
-	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
+	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{PublishPending: reader.PublishPending})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,8 +226,8 @@ func TestPendingIndexRendersMatchClassic(t *testing.T) {
 	seq := uint64(0)
 	published := func(id, order uint64) bool {
 		for o := range reader.owners {
-			if g := reader.owners[o].Load(); g != nil && len(g.pending) > 0 {
-				if b := g.pending[len(g.pending)-1]; b.ID == id && b.Order == order {
+			if g := reader.owners[o].Load(); g != nil && g.view.Len() > 0 {
+				if b, _, _ := g.view.Application(g.view.Len() - 1); b.ID == id && b.Order == order {
 					return true
 				}
 			}
@@ -327,7 +320,7 @@ func BenchmarkPendingSelection(b *testing.B) {
 	var prev []v2core.Batch
 	for c := 1; c <= chunks; c++ {
 		next := pending[:batches*c/chunks]
-		index = nextPendingIndex(index, prev, next)
+		index = nextPendingIndex(index, v2core.PendingBatches(prev), v2core.PendingBatches(next))
 		prev = next
 	}
 	want := []string{registered[17].Name()}
@@ -352,7 +345,7 @@ func BenchmarkPendingSelection(b *testing.B) {
 	b.Run("index-build-newest-chunk", func(b *testing.B) {
 		for b.Loop() {
 			c := &pendingChunk{start: batches * (chunks - 1) / chunks, end: batches}
-			if err := c.load(pending); err != nil {
+			if err := c.load(v2core.PendingBatches(pending)); err != nil {
 				b.Fatal(err)
 			}
 		}

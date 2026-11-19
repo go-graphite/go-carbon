@@ -55,7 +55,7 @@ func TestClassicPendingAndSealed(t *testing.T) {
 					// below the oracle's history to compare every slot it renders.
 					// It also holds idle closure below the data watermark: after each seal,
 					// all current coarse windows must still be projected from source slots.
-					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory, Now: func() time.Time { return time.Unix(1, 0) }})
+					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: reader.PublishPending, Now: func() time.Time { return time.Unix(1, 0) }})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -141,7 +141,7 @@ func TestClassicPendingAndSealed(t *testing.T) {
 
 func TestConcurrentPublicationAndClose(t *testing.T) {
 	reader, _ := New(1, 1<<28, 1<<20)
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: reader.PublishPending})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestConcurrentPublicationAndClose(t *testing.T) {
 func TestPinnedCallbackDoesNotBlockWriter(t *testing.T) {
 	reader, _ := New(1, 1<<28, 1<<20)
 	reader.Now = func() time.Time { return time.Unix(1000, 0) }
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: reader.PublishPending})
 	if err != nil {
 		t.Fatal(err)
 	}

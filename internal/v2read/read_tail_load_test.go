@@ -68,7 +68,7 @@ func TestReadTailLoad(t *testing.T) {
 		cfg.SealMaxRows = 2 << 20
 	}
 	cfg.SealInterval = seal
-	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory})
+	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishPending: r.PublishPending})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)

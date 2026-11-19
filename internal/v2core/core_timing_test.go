@@ -95,7 +95,7 @@ func TestCorePendingPublicationCoalesces(t *testing.T) {
 	o.publishFrontier(o.meta)
 	defer func() { o.pub.clear(); db.Close() }()
 	calls := 0
-	o.batchHook = func(pin *pebble.Snapshot, _ []coreBatch, _ uint64) error { calls++; return pin.Close() }
+	o.batchHook = func(pin *pebble.Snapshot, _ PendingView, _ uint64) error { calls++; return pin.Close() }
 	q := newCoreQueue(coreQueueBytes)
 	o.queues = []*coreQueue{q}
 	poll := o.poller()

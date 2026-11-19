@@ -1,6 +1,9 @@
 package v2core
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // pendingRows is the pointer-free resident form of pending original
 // applications (name-once S5a). One point costs one 16-byte pendingRow; one
@@ -151,9 +154,20 @@ func (p *pendingRows) reset() {
 // points in one arena so each batch's Points has cap == len, as submission
 // produces them.
 func (p *pendingRows) batches(lookup func(uint64) *ApplicationPolicy) []coreBatch {
+	return p.decodeFrom(lookup)
+}
+
+// decodeFrom decodes p.packets, which may start after row 0 (a published
+// suffix); rows and side arrays keep their absolute indices.
+func (p *pendingRows) decodeFrom(lookup func(uint64) *ApplicationPolicy) []coreBatch {
+	if len(p.packets) == 0 {
+		return nil
+	}
+	first := p.packets[0].FirstRow
+	last := &p.packets[len(p.packets)-1]
 	var dst []coreBatch
-	arena := make([]row, len(p.rows))
-	escape := 0
+	arena := make([]row, last.FirstRow+last.Rows-first)
+	escape := sort.Search(len(p.escapes), func(i int) bool { return p.escapes[i].Row >= first })
 	for pi := range p.packets {
 		pk := &p.packets[pi]
 		start := -1
@@ -175,19 +189,19 @@ func (p *pendingRows) batches(lookup func(uint64) *ApplicationPolicy) []coreBatc
 				id, t = p.escapes[escape].ID, p.escapes[escape].Time
 				escape++
 			}
-			arena[ri] = row{ID: id, Time: t, Bits: src.Bits, Seq: seq}
+			arena[ri-first] = row{ID: id, Time: t, Bits: src.Bits, Seq: seq}
 			if start >= 0 && delta == prev {
 				continue
 			}
 			if start >= 0 {
-				dst[len(dst)-1].Points = arena[start:ri:ri]
+				dst[len(dst)-1].Points = arena[start-int(first) : ri-first : ri-first]
 			}
 			dst = append(dst, coreBatch{ID: id, Order: order, Clock: pk.Clock, Registered: lookup(id)})
 			start, prev = int(ri), delta
 		}
 		if start >= 0 {
-			end := int(pk.FirstRow + pk.Rows)
-			dst[len(dst)-1].Points = arena[start:end:end]
+			end := int(pk.FirstRow + pk.Rows - first)
+			dst[len(dst)-1].Points = arena[start-int(first) : end : end]
 		}
 	}
 	return dst
