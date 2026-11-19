@@ -275,6 +275,10 @@ type pendingHead struct {
 	coldOpen bool
 	openID   uint64
 	n        int
+	// scanned is how many positions the owner's metadata scan has cleared.
+	// Installed metrics, the catalog and the expiry policy only ever add, so
+	// a cleared position stays clear until the head resets.
+	scanned int
 }
 
 func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationPolicy) {
@@ -392,6 +396,17 @@ func sameColdBatch(a, b *coreBatch) bool {
 // ID and name source; fn returns false to stop. Rows resolve their identity
 // through the owner's catalog.
 func (v PendingView) Refs(lo, hi int, fn func(pos int, id uint64, registered *ApplicationPolicy, policy []byte) bool) {
+	v.ids(lo, hi, func(pos int, id uint64, cold *coreBatch) bool {
+		if cold != nil {
+			return fn(pos, id, cold.Registered, cold.Policy)
+		}
+		return fn(pos, id, v.lookup(id), nil)
+	})
+}
+
+// ids visits positions [lo, hi) in order with each position's ID and, for
+// cold applications, their descriptor. It never touches the catalog.
+func (v PendingView) ids(lo, hi int, fn func(pos int, id uint64, cold *coreBatch) bool) {
 	for si := range v.segs {
 		s := &v.segs[si]
 		from, to := max(lo, s.start), min(hi, s.start+s.count)
@@ -401,7 +416,7 @@ func (v PendingView) Refs(lo, hi int, fn func(pos int, id uint64, registered *Ap
 		if s.cold != nil {
 			for pos := from; pos < to; pos++ {
 				b := &s.cold[pos-s.start]
-				if !fn(pos, b.ID, b.Registered, b.Policy) {
+				if !fn(pos, b.ID, b) {
 					return
 				}
 			}
@@ -416,9 +431,24 @@ func (v PendingView) Refs(lo, hi int, fn func(pos int, id uint64, registered *Ap
 				id = s.escapes[esc].ID
 				esc++
 			}
-			if !fn(pos, id, v.lookup(id), nil) {
+			if !fn(pos, id, nil) {
 				return
 			}
 		}
 	}
+}
+
+// maxClock is the latest arrival clock among the view's applications, or c.
+// Every application in a packet shares its header's clock.
+func (v PendingView) maxClock(c int64) int64 {
+	for si := range v.segs {
+		s := &v.segs[si]
+		for i := range s.cold {
+			c = max(c, s.cold[i].Clock)
+		}
+		for i := range s.packets {
+			c = max(c, s.packets[i].Clock)
+		}
+	}
+	return c
 }

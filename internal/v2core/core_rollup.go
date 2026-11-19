@@ -172,6 +172,30 @@ func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
 	}
 	return len(b.Registered.schema().Archives) > 1
 }
+
+// pendingMetadataDue reports whether a pending name that is not installed yet
+// needs a metadata seal. It visits only positions appended since its last
+// clear pass, and resolves catalog handles only for names not installed.
+func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *ApplicationPolicy) bool {
+	due := false
+	h.view(lookup).ids(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
+		if r.metrics[id] != nil {
+			return true
+		}
+		b := coreBatch{ID: id}
+		if cold != nil {
+			b.Registered, b.Policy = cold.Registered, cold.Policy
+		} else {
+			b.Registered = lookup(id)
+		}
+		due = r.needsMetadataSeal(&b)
+		return !due
+	})
+	if !due {
+		h.scanned = h.n
+	}
+	return due
+}
 func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 	h, err := r.identities.intern(id, "", policy)
 	if err != nil {
