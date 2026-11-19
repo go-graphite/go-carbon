@@ -82,6 +82,9 @@ type partRoute struct {
 }
 
 type readPart struct {
+	// Bare-snapshot reads reuse the descriptor validated while loading this
+	// immutable scope. Registry-backed reads already retain their opened parts.
+	descriptor  *v2part.Descriptor
 	first, last string
 	id          string
 	key         v2part.Key // immutable part scope; names come from the metric policy
@@ -242,6 +245,9 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 			}
 			if part, err = readRollupPart(ctx, partIt, []byte(id), identities); err != nil {
 				return nil, err
+			}
+			if opened == nil {
+				part.descriptor = &descriptor
 			}
 		}
 		if part == nil {
@@ -480,11 +486,27 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		// Copied and bare-fixture stores keep one merged iterator over the
 		// legacy namespace and every selected file.
 		selected := make(map[archivePartIdentity]bool, len(partList))
+		var exact []v2part.Descriptor
+		complete := true
 		for _, part := range partList {
-			selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
+			id := archivePartIdentity{part.part.key.Group, part.part.key.Part}
+			if selected[id] {
+				continue
+			}
+			selected[id] = true
+			if d := part.part.descriptor; d != nil {
+				exact = append(exact, *d)
+			} else {
+				complete = false
+			}
+		}
+		// Legacy/copied scopes without retained descriptors keep the manifest
+		// scan. Exact descriptors belong to this pinned immutable inventory.
+		if !complete {
+			exact = nil
 		}
 		var err error
-		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected); err != nil {
+		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected, exact...); err != nil {
 			return err
 		}
 		defer shared.Close()
