@@ -639,3 +639,106 @@ func TestLazyCheckpointRejectsColdDuplicateName(t *testing.T) {
 		t.Fatalf("cold duplicate accepted: %v", err)
 	}
 }
+
+// More than two blocks, with name order deliberately unrelated to ID order.
+// Alternating distant names exercises scratch reuse in both lookup indexes.
+func TestLazyCheckpointCompressedBlocks(t *testing.T) {
+	cfg, _ := checkpointTestSetup(t)
+	var policies [][]byte
+	for i := range 521 {
+		_, encoded := rollupTestPolicy(t, fmt.Sprintf("block.n%03d", (i*137)%521), "10s:6h,5m:7d,1h:1y", sealrollup.Average, 0)
+		policies = append(policies, encoded)
+	}
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 3)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	eagerDir := copyTree(t, root)
+	if err = os.Remove(filepath.Join(eagerDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(eagerDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r := a.owners[0].rollups
+	if len(r.metrics) != 0 {
+		t.Fatal("compressed checkpoint eagerly decoded records")
+	}
+	for step := range 521 {
+		i := (step * 263) % 521
+		name := []byte(fmt.Sprintf("block.n%03d", (i*137)%521))
+		if err = r.loadCheckpointName(name); err != nil {
+			t.Fatal(err)
+		}
+		if m := r.metrics[uint64(i+1)]; m == nil || !m.definitionEqual(policies[i]) {
+			t.Fatalf("wrong name after block reuse: ID %d", i+1)
+		}
+	}
+	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("compressed blocks differ from eager recovery")
+	}
+}
+
+// The callback has no persisted configuration identity. A restart with a new
+// TTL must re-resolve cold names before an idle seal can expire them.
+func TestLazyCheckpointChangedExpiryMatchesScan(t *testing.T) {
+	cfg, policies := checkpointTestSetup(t)
+	clock := time.Unix(1794700800+600, 0)
+	hooks := Hooks{Now: func() time.Time { return clock },
+		Expire:    func(RollupPolicy, RollupMetadata, time.Time) bool { return true },
+		ExpiryTTL: expiryWindow(365 * 24 * time.Hour),
+	}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 3)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scanDir := copyTree(t, root)
+	if err = os.Remove(filepath.Join(scanDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	hooks.ExpiryTTL = expiryWindow(time.Nanosecond)
+	a, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(scanDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if len(a.owners[0].rollups.metrics) != len(policies) {
+		t.Fatal("changed expiry did not resolve every cold name")
+	}
+	for _, engine := range []*Engine{a, b} {
+		if err = engine.AppendBatches(0, nil, 3, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("changed expiry differs from scan")
+	}
+	for _, meta := range a.owners[0].rollups.meta {
+		if !meta.Expired {
+			t.Fatal("new TTL did not expire idle name")
+		}
+	}
+}

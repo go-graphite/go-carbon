@@ -14,9 +14,10 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// The checkpoint indexes are file-backed. The existing metrics map contains
-// only materialized, mutable state; it is also the test for an already loaded ID.
-// Entries in the file never change, including while a replacement is renamed.
+// The pointer-free indexes are decoded once; record blocks remain mapped and
+// compressed. One owner-local scratch block serves consecutive first touches.
+// The existing metrics map is the only materialized mutable name state.
+// File bytes never change, including while a replacement is renamed.
 type mappedRollupCheckpoint struct {
 	buf, index, names, due []byte
 	table                  [][]byte

@@ -25,8 +25,9 @@ import (
 // write it after seals and at close. Open loads it, folds in only the parts
 // published since (absent from the stamp) with the same rules scanRollups
 // uses, and rebuilds from parts when the file is missing, corrupt or torn.
-// Records and their ID, name and closure indexes are mapped read-only. Open
-// validates the checksum and part bindings without decoding unchanged names.
+// Record blocks stay compressed in a read-only mapping. Open decodes only
+// the pointer-free lookup indexes and validates the checksum and part bindings;
+// unchanged names are not materialized.
 const (
 	rollupCheckpointFile  = "rollup-state.ckpt"
 	rollupCheckpointMagic = "GCRSCKP5"
@@ -148,8 +149,10 @@ func syncDir(dir string) error {
 	return errors.Join(d.Sync(), d.Close())
 }
 
-// Layout: magic, part stamp, suffix table, count, records, ID index (24 B),
-// name offsets (8 B), closure index (16 B), index offset/count, CRC32-C.
+// Layout: magic, part stamp, suffix table, count, compressed record blocks,
+// compressed indexes, index offset/count, CRC32-C. Decoded indexes hold ID,
+// block offset and packed record range (24 B), name-order ordinals (8 B),
+// and closure deadlines/IDs (16 B). Each block contains up to 128 records.
 // Each name: id, suffix index, the
 // name part of its canonical definition, scalars, resident samples.
 func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
@@ -226,7 +229,7 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 			entries[i].offset = offset
 		}
 	}
-	size := len(compressed) + len(entries)*48 + 80
+	size := len(compressed) + len(entries)*12 + 80
 	for _, p := range parts {
 		size += len(p) + 2
 	}
@@ -245,17 +248,9 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	out = binary.AppendUvarint(out, names)
 	bodyOffset := uint64(len(out))
 	out = append(out, compressed...)
-	var indexes []byte
+	indexes := make([]byte, 0, len(entries)*48)
 	indexOffset := uint64(len(out))
-	slices.SortFunc(entries, func(a, b checkpointIndexEntry) int {
-		if a.id < b.id {
-			return -1
-		}
-		if a.id > b.id {
-			return 1
-		}
-		return 0
-	})
+
 	for i := range entries {
 		e := &entries[i]
 		e.ordinal = uint64(i)
@@ -362,6 +357,11 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 			return nil, err
 		}
 	}
+	// New parts may introduce IDs, reset barriers and activity/closure changes.
+	// Their part inventory does not expose the latest per-name metadata. Fold
+	// those rows before publishing the owner so idle maintenance and duplicate
+	// checks cannot consult a stale checkpoint. Deferring this needs a separate
+	// per-name reconciliation/scheduling mechanism, not just deferred decoding.
 	if len(selected) > 0 {
 		iter, err := newArchiveIterSelected(context.Background(), snapshot, rollupScanBounds(), selected)
 		if err != nil {
