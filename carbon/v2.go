@@ -252,13 +252,15 @@ func (app *App) startV2() error {
 			if err != nil {
 				return err
 			}
+			// Owner names arrive sorted and unique; only classic names are sorted.
+			var classic []string
 			for _, name := range classicNames {
 				if !masks[name] {
-					names = append(names, name)
+					classic = append(classic, name)
 				}
 			}
-			slices.Sort(names)
-			names = slices.Compact(names)
+			slices.Sort(classic)
+			names = v2read.MergeNames(names, slices.Compact(classic))
 			if err := publishV2QuotasContext(ctx, v.quotas, quotaFence, r, names, historicalQuota); err != nil {
 				return err
 			}
