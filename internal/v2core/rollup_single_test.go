@@ -58,6 +58,9 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 	}
 	closable := func() []int {
 		r := e.owners[0].rollups
+		if err := r.loadAllCheckpoint(); err != nil {
+			t.Fatal(err)
+		}
 		filed := map[int]bool{}
 		for _, slots := range r.calendar.slots {
 			for _, slot := range slots {
