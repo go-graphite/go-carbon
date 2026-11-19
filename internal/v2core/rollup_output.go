@@ -271,10 +271,6 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 					}
 				}
 				start := len(lane.records)
-				if start >= rollupOverflowRecords {
-					lane.err = errors.New("too many planned rollup records")
-					return
-				}
 				frontier := sealrollup.Frontier{Order: s.next.Frontier.Order, MaxTime: s.next.Frontier.MaxTime, Policy: m.policy.prepared.Digest()}
 				plan, through, err := m.policy.prepared.PlanClosedInto(lane.records[start:], frontier, s.next.ClosedThrough, idleThrough, view, ranges, batches, &lane.workspace)
 
@@ -288,19 +284,26 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 					return
 				}
 				s.next.Frontier.Order, s.next.Frontier.MaxTime = plan.Next.Order, plan.Next.MaxTime
-				// Records planned in place keep the lane's records still, so
-				// tuples may point into them; a larger plan keeps its own array.
-				s.records = uint32(len(plan.Records))
-				if len(plan.Records) <= cap(lane.records)-start {
-					s.record = uint32(start)
-					lane.records = lane.records[:start+len(plan.Records)]
+				// A plan that fit was written in place. Otherwise the full
+				// chunk stays put (tuples point into it) and a chunk twice as
+				// large takes this plan.
+				n := len(plan.Records)
+				if n > cap(lane.records)-start {
+					lane.chunks, lane.bases = append(lane.chunks, lane.records), append(lane.bases, lane.base)
+					lane.base += uint32(start)
+					lane.records = append(make([]sealrollup.Record, 0, max(2*cap(lane.records), n, 1024)), plan.Records...)
+					start = 0
 				} else {
-					s.record = rollupOverflowRecords | uint32(len(lane.overflow))
-					lane.overflow = append(lane.overflow, plan.Records)
+					lane.records = lane.records[:start+n]
 				}
+				if uint64(lane.base)+uint64(start+n) > math.MaxUint32 {
+					lane.err = errors.New("too many planned rollup records")
+					return
+				}
+				s.record, s.records = lane.base+uint32(start), uint32(n)
 				// Build while this metric's policy, metadata and batches are hot.
 				// The lane still retains all arenas until the owner joins ingest.
-				if lane.err = lane.output.appendStage(s, m, batches, plan.Records, part, r.stage); lane.err != nil {
+				if lane.err = lane.output.appendStage(s, m, batches, lane.records[start:start+n:start+n], part, r.stage); lane.err != nil {
 					return
 				}
 			}

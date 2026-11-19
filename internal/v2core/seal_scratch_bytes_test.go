@@ -26,8 +26,8 @@ func sealScratchBytes(r *coreRollups) (total, pointerful int) {
 		l := &r.lanes[i]
 		add(len(l.ranked), unsafe.Sizeof(rollupRankRef{}), false)
 		add(len(l.records), unsafe.Sizeof(sealrollup.Record{}), false)
-		for _, o := range l.overflow {
-			add(len(o), unsafe.Sizeof(sealrollup.Record{}), false)
+		for _, c := range l.chunks {
+			add(len(c), unsafe.Sizeof(sealrollup.Record{}), false)
 		}
 		for _, f := range l.output.files {
 			add(len(*f), unsafe.Sizeof(plannedKV{}), true)

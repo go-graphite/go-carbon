@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -206,9 +207,10 @@ func newRollupMetric(h *PolicyIdentity) *rollupMetric {
 // rollupStage is one name's seal work. It is pointer-free, so the retained
 // stage buffer adds nothing for the GC to scan: the metric is
 // stageMetrics[i], the batches are batches[batch:batch+batches] of the
-// planner's batch storage, and the records are the planning lane's (see
-// rollupPlannerLane.stageRecords). next holds the compact scalars; the
-// identity supplies ID, policy digest and definition when encoding.
+// planner's batch storage, and the records are records[record:] of the
+// planning lane's record arena (see rollupPlannerLane.stageRecords). next
+// holds the compact scalars; the identity supplies ID, policy digest and
+// definition when encoding.
 type rollupStage struct {
 	sortKey         uint64
 	next            metricMetadata
@@ -218,10 +220,6 @@ type rollupStage struct {
 	fresh           bool
 }
 
-// rollupOverflowRecords marks a stage record index into the lane's overflow
-// list instead of an offset into its records.
-const rollupOverflowRecords = 1 << 31
-
 type rollupPlannerLane struct {
 	windows   rollupWindowCache
 	ranked    []rollupRankRef
@@ -229,20 +227,27 @@ type rollupPlannerLane struct {
 	counts    []int
 	output    rollupOutput
 	workspace sealrollup.Workspace
-	// records holds the lane's planned records; tuples point into it, so it
-	// never moves during a plan. A plan that does not fit lands in overflow,
-	// and release grows records so the next seal fits.
-	records  []sealrollup.Record
-	overflow [][]sealrollup.Record
-	err      error
+	// records is the current chunk of the lane's record arena; tuples point
+	// into it, so a chunk never moves during a plan. A plan that does not fit
+	// starts a chunk twice as large; full chunks wait in chunks, base is the
+	// arena index of records[0], and release sizes one chunk for the total.
+	records []sealrollup.Record
+	chunks  [][]sealrollup.Record
+	bases   []uint32
+	base    uint32
+	err     error
 }
 
 // stageRecords returns the records this lane planned for s.
 func (l *rollupPlannerLane) stageRecords(s *rollupStage) []sealrollup.Record {
-	if s.record&rollupOverflowRecords != 0 {
-		return l.overflow[s.record&^rollupOverflowRecords]
+	i, c := s.record, l.records
+	if i < l.base {
+		k := sort.Search(len(l.bases), func(k int) bool { return l.bases[k] > i }) - 1
+		i, c = i-l.bases[k], l.chunks[k]
+	} else {
+		i -= l.base
 	}
-	return l.records[s.record : s.record+s.records : s.record+s.records]
+	return c[i : i+s.records : i+s.records]
 }
 
 func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {

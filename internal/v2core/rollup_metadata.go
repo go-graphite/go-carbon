@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -217,16 +216,12 @@ func (r *coreRollups) release() {
 		lane := &r.lanes[i]
 		lane.output.release()
 		lane.ranked = lane.ranked[:0]
-		// Size records for this seal's overflow, so the next one plans in place.
-		grow := 0
-		for _, o := range lane.overflow {
-			grow += len(o)
+		// One chunk for this seal's records, so the next one plans in place.
+		if len(lane.chunks) != 0 {
+			lane.records = make([]sealrollup.Record, 0, int(lane.base)+cap(lane.records))
 		}
-		if grow != 0 {
-			lane.records = slices.Grow(lane.records, grow)
-		}
-		clear(lane.overflow)
-		lane.overflow = lane.overflow[:0]
+		clear(lane.chunks)
+		lane.chunks, lane.bases, lane.base = lane.chunks[:0], lane.bases[:0], 0
 	}
 	for _, coverage := range r.coverage {
 		clear(coverage.seen)
