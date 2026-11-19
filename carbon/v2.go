@@ -126,15 +126,9 @@ func (app *App) startV2() error {
 		hooks.Now = app.v2Now
 	}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
-		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
-			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
-				return false
-			}
-			ttl := c.Whisper.StoreExpiration.Value()
-			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
-				ttl = c.Whisper.ExpirationRules[i].TTL()
-			}
-			if ttl <= 0 || now.Sub(time.Unix(0, m.LastUpdate)) < ttl {
+		// v2core asks Expire only about names idle for their ExpiryTTL window.
+		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, _ time.Time) bool {
+			if !recovered.Load() {
 				return false
 			}
 			if expiryAllowed.Load() {
@@ -144,12 +138,33 @@ func (app *App) startV2() error {
 			expiryNeeded.Store(true)
 			return false
 		}
+		// A name's window, resolved once per name; it may change only when a
+		// rule's Until passes. A dry run expires nothing.
+		hooks.ExpiryTTL = func(p v2core.RollupPolicy, now time.Time) (time.Duration, time.Time) {
+			if c.Whisper.StoreExpirationDryRun {
+				return 0, time.Time{}
+			}
+			ttl := c.Whisper.StoreExpiration.Value()
+			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
+				ttl = c.Whisper.ExpirationRules[i].TTL()
+			}
+			var until time.Time
+			for _, rule := range c.Whisper.ExpirationRules {
+				if !rule.Until.IsZero() && now.Before(rule.Until) && (until.IsZero() || rule.Until.Before(until)) {
+					until = rule.Until
+				}
+			}
+			return ttl, until
+		}
 	}
 	var sealInterval time.Duration
 	if c.V2.SealInterval != nil {
 		sealInterval = c.V2.SealInterval.Value()
 	}
-	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks}
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks,
+		// 16 MiB is ~20 s of one producer's input at 7M points/s over 96 producers:
+		// restart decodes at most that plus the unsealed tail per producer.
+		JournalSegmentBytes: 16 << 20}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
