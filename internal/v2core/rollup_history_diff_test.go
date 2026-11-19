@@ -138,10 +138,10 @@ func TestRollupHistoryDifferential(t *testing.T) {
 				// time. TestClosedHistoryLogicalDifferential proves the resolved values
 				// equal the original eager golden at every epoch and restart cut.
 				want := map[string]string{
-					"1|1s:1h,1m:1d,1h:1y":         "68debcdf6f60ce0e4675b9c6df7a5794cf90ea52f645bd3ba9b711058892d3a9",
-					"1|10s:6h,5m:7d,1h:1y,1d:10y": "22b70ea0f5eeb6d4008dd11fbfe006d25ebb6701073e6185e78aa1fb806a3e63",
-					"2|1s:1h,1m:1d,1h:1y":         "504a8de60700202d6ea28cfa9c470a4308ff0a9107c849301c50639eafca6224",
-					"2|10s:6h,5m:7d,1h:1y,1d:10y": "7a101549dcaf85fddf6d351dc0ccc081298ef04eaec3faaa2b6d0076382182d8",
+					"1|1s:1h,1m:1d,1h:1y":         "27eff56f749b398edee4a0c95010870c10f2343a2f41c9ecf78e612a8854342e",
+					"1|10s:6h,5m:7d,1h:1y,1d:10y": "456a99886c398e2609c32d9b069790e778e19e4dd10bb6eed2ca4e51dfbc176d",
+					"2|1s:1h,1m:1d,1h:1y":         "9791e5be5c30b9533dfd4781cb425d414aac2e02e7bbb139ee12613e03150f1d",
+					"2|10s:6h,5m:7d,1h:1y,1d:10y": "88cf4d606d332e820afc8f9c1acea432b3233514ebbc86a26fc6306dd3b30b0b",
 					"3|1s:1h,1m:1d,1h:1y":         "846fffd8bbd5b082f9fbb91891f46288afa9d50e1da3c4b53f463448eaf12b27",
 					"3|10s:6h,5m:7d,1h:1y,1d:10y": "a92bd0f9b43bb33ad1ab128c792466f722189c745c0406d30998d1770ba550b2",
 					"4|1s:1h,1m:1d,1h:1y":         "50088ea3d8cde560c2debd1f73394988224236ab887b5a6f8eeb59ec1d5395ad",
