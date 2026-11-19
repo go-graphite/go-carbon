@@ -281,7 +281,6 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.stage, next.expire, next.now, next.expiryTTL = o.rollups.stage, o.rollups.expire, o.rollups.now, o.rollups.expiryTTL
 	for id, m := range o.rollups.metrics {
 		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
-		next.names[m.policy.Name] = id
 	}
 	for name, donor := range prepared.index.metrics {
 		id := ids[name]
@@ -370,7 +369,6 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			m.keepRecent(meta.Frontier.MaxTime)
 		}
 		next.install(id, m, meta)
-		next.names[policy.Name] = id
 		value, err := json.Marshal(authority)
 		if err != nil {
 			return err
