@@ -38,6 +38,7 @@ type Application struct {
 type RegisteredApplication struct {
 	producer *Producer
 	id       uint64
+	nameHash uint64 // policy.NameHash(), 0 without policy; fits the 48 B size class
 	name     string
 	policy   *v2core.ApplicationPolicy
 }
@@ -70,6 +71,9 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 		p.applicationPolicies = make(map[uint64]*RegisteredApplication)
 	}
 	r := &RegisteredApplication{producer: p, id: id, name: name, policy: registered}
+	if registered != nil {
+		r.nameHash = registered.NameHash()
+	}
 	p.applicationPolicies[id] = r
 	return r, nil
 }
@@ -138,7 +142,7 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		for j, point := range a.Points {
 			rows = append(rows, v2core.Row{ID: NumericID(id, p.index, p.count), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
 		}
-		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)], Registered: registered.policy}
+		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, NameHash: registered.nameHash, Points: rows[start:len(rows):len(rows)], Registered: registered.policy}
 		if registered.policy == nil {
 			// Classic mirroring and the non-rollup compatibility path consume
 			// immutable catalog bytes; direct L3 carries its validated handle.

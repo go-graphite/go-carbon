@@ -75,9 +75,12 @@ func pendingName(b *v2core.Batch) (string, error) {
 	return string(p.Name), nil
 }
 
-// pendingHash is the hash of pendingName without reading name bytes when the
-// batch carries a registered identity.
+// pendingHash is the hash of pendingName. It reads the batch's own NameHash
+// when set, then the registered identity, and only then the name bytes.
 func pendingHash(b *v2core.Batch) (uint64, error) {
+	if b.NameHash != 0 {
+		return b.NameHash, nil
+	}
 	if b.Registered != nil {
 		return b.Registered.NameHash(), nil
 	}

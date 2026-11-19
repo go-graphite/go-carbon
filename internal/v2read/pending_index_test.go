@@ -109,8 +109,11 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 				i := rng.Intn(names)
 				order++
 				b := v2core.Batch{ID: uint64(i + 1), Order: order, Clock: int64(order), Points: make([]v2core.Row, 1+rng.Intn(3))}
-				if rng.Intn(2) == 0 {
+				if r := rng.Intn(3); r < 2 {
 					b.Registered = registered[i]
+					if r == 0 { // producers copy the identity's hash inline
+						b.NameHash = registered[i].NameHash()
+					}
 				} else {
 					b.Policy = policies[i]
 				}
@@ -357,4 +360,47 @@ func BenchmarkPendingSelection(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkPendingChunkBuild measures what the first read after a publication
+// pays: indexing the newest chunk of one owner's head. Batches carry one point
+// and reference identities scattered over a large catalog, as on a store, so
+// reading Registered.NameHash costs one cache miss per batch while the inline
+// NameHash streams with the batch array. Sub-runs interleave A1 B1 A2 B2.
+func BenchmarkPendingChunkBuild(b *testing.B) {
+	const names, batches = 1 << 20, 240000
+	registered := make([]*v2core.ApplicationPolicy, names)
+	for i := range registered {
+		n := fmt.Sprintf("bench.host%04d.metric.name.%d", i%4096, i)
+		h, err := v2core.NewApplicationPolicy(n, testPolicy(b, n))
+		if err != nil {
+			b.Fatal(err)
+		}
+		registered[i] = h
+	}
+	rng := rand.New(rand.NewSource(1))
+	identity := make([]v2core.Batch, batches)
+	for i := range identity {
+		identity[i] = v2core.Batch{ID: uint64(i), Order: uint64(i), Registered: registered[rng.Intn(names)], Points: make([]v2core.Row, 1)}
+	}
+	inline := slices.Clone(identity)
+	for i := range inline {
+		inline[i].NameHash = inline[i].Registered.NameHash()
+	}
+	want := []string{identity[batches/2].Registered.Name()}
+	run := func(pending []v2core.Batch) func(*testing.B) {
+		return func(b *testing.B) {
+			for b.Loop() {
+				x := &pendingIndex{chunks: []*pendingChunk{{start: 0, end: batches}}}
+				got, err := indexedPending(x, pending, want)
+				if err != nil || len(got) == 0 {
+					b.Fatal(len(got), err)
+				}
+			}
+		}
+	}
+	for _, round := range []string{"1", "2"} {
+		b.Run("A"+round+"-identity", run(identity))
+		b.Run("B"+round+"-inline", run(inline))
+	}
 }

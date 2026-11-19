@@ -16,10 +16,14 @@ import (
 // Order and Clock are the original apply order and ingest clock. Every point
 // belongs to ID. The numeric ID remains an offline experiment.
 type coreBatch struct {
-	ID     uint64
-	Order  uint64
-	Clock  int64
-	Policy []byte
+	ID    uint64
+	Order uint64
+	Clock int64
+	// NameHash is NameHash of the batch's metric name, or 0 when unknown.
+	// Producers copy it from the registration they already hold, so readers
+	// index pending heads sequentially instead of dereferencing Registered.
+	NameHash uint64
+	Policy   []byte
 	// Registered carries an immutable definition across the application boundary.
 	// Policy must be nil when Registered is supplied.
 	Registered *ApplicationPolicy

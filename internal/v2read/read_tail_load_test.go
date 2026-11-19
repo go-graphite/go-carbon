@@ -115,6 +115,18 @@ func TestReadTailLoad(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// LT_HASH picks the batch shape: "" sends JSON policies; "identity" sends
+	// registered identities as a producer did before batches carried their
+	// name hash; "inline" also sets Batch.NameHash, as producers do now.
+	hashMode := os.Getenv("LT_HASH")
+	registered := make([]*v2core.ApplicationPolicy, nNames)
+	if hashMode != "" {
+		for i := range registered {
+			if registered[i], err = e.RegisterApplicationPolicy(uint64(i+1), names[i], policies[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	base := time.Now().Unix()
 	var clock atomic.Int64
 	clock.Store(base)
@@ -127,7 +139,17 @@ func TestReadTailLoad(t *testing.T) {
 			for i := from; i < to; i++ {
 				id := uint64(i + 1)
 				order++
-				batches = append(batches, v2core.Batch{ID: id, Order: order, Clock: ts, Policy: policies[i], Points: []v2core.Row{{ID: id, Time: ts, Bits: math.Float64bits(float64(i%977) + float64(ts%61)), Seq: order}}})
+				b := v2core.Batch{ID: id, Order: order, Clock: ts, Points: []v2core.Row{{ID: id, Time: ts, Bits: math.Float64bits(float64(i%977) + float64(ts%61)), Seq: order}}}
+				switch hashMode {
+				case "":
+					b.Policy = policies[i]
+				case "inline":
+					b.NameHash = registered[i].NameHash()
+					fallthrough
+				default:
+					b.Registered = registered[i]
+				}
+				batches = append(batches, b)
 			}
 			cursor++
 			if err := e.AppendBatches(0, batches, cursor, false); err != nil {
@@ -278,7 +300,14 @@ func TestReadTailLoad(t *testing.T) {
 			prev = c
 		}
 		hist = append(hist, fmt.Sprintf(">1s:%d", dc-prev))
-		t.Logf("stage %-12s count %7d mean %8.3f ms total %8.3f s  %v", after[i].Name, dc, ds/float64(dc)*1000, ds, hist)
+		p99 := "<=" + "inf"
+		for _, b := range stageBounds { // upper bound of the bucket holding p99
+			if c := after[i].Buckets[b] - before[i].Buckets[b]; float64(c) >= .99*float64(dc) {
+				p99 = fmt.Sprintf("<=%gms", b*1000)
+				break
+			}
+		}
+		t.Logf("stage %-12s count %7d mean %8.3f ms p99 %s total %8.3f s  %v", after[i].Name, dc, ds/float64(dc)*1000, p99, ds, hist)
 	}
 	for name, a := range rtAfter {
 		t.Logf("runtime %s: %s", name, histDelta(rtBefore[name], a))
