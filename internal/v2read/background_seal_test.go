@@ -63,7 +63,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 	}
 	reader, _ := New(1, 1<<30, 64<<20)
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{
-		PublishBatchesWithInventory: reader.PublishWithInventory,
+		PublishPending: reader.PublishPending,
 		Visible: func(_ int, batches []v2core.Batch) {
 			for _, b := range batches {
 				orders.Store(b.Order, true)
@@ -275,7 +275,7 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 	atSeal, releaseSeal := make(chan struct{}), make(chan struct{})
 	reader, _ := New(1, 1<<30, 64<<20)
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{
-		PublishBatchesWithInventory: reader.PublishWithInventory,
+		PublishPending: reader.PublishPending,
 		Visible: func(_ int, batches []v2core.Batch) {
 			for _, b := range batches {
 				orders.Store(b.Order, true)

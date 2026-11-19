@@ -36,7 +36,7 @@ func TestSealedMergeDaemonMeasure(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: 1, Shards: owners, MaxCoreRows: 256, GroupInterval: time.Hour, Hooks: v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory}})
+	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 3, Producers: 1, Shards: owners, MaxCoreRows: 256, GroupInterval: time.Hour, Hooks: v2core.Hooks{PublishPending: r.PublishPending}})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)

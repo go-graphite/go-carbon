@@ -79,13 +79,13 @@ func TestReadTailLoad(t *testing.T) {
 		inventory *v2core.RollupInventory
 	}
 	last := make([]sealedKey, owners)
-	publish := func(owner int, snap *pebble.Snapshot, pending []v2core.Batch, number uint64, inventory *v2core.RollupInventory) error {
+	publish := func(owner int, snap *pebble.Snapshot, pending v2core.PendingView, number uint64, inventory *v2core.RollupInventory) error {
 		st := &heads
 		if k := (sealedKey{number, inventory}); last[owner] != k {
 			st, last[owner] = &seals, k
 		}
 		started := time.Now()
-		err := r.PublishWithInventory(owner, snap, pending, number, inventory)
+		err := r.PublishPending(owner, snap, pending, number, inventory)
 		if measuring.Load() {
 			st.n.Add(1)
 			st.ns.Add(int64(time.Since(started)))
@@ -95,7 +95,7 @@ func TestReadTailLoad(t *testing.T) {
 		}
 		return err
 	}
-	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: publish})
+	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishPending: publish})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)
