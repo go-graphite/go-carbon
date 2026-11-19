@@ -240,6 +240,11 @@ func (p *Producer) rotateJournal() error {
 	p.writer.Reset(p.journal)
 	p.encoder.Close()
 	p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
+	// Independent replay consumers retain the whole log. Avoid scanning their
+	// ever-growing file list when retirement is disabled.
+	if p.fullReplay || p.placement != nil || p.durableApplications != nil {
+		return nil
+	}
 	paths, err := journalSegments(p.journalDir)
 	if err != nil {
 		return err
