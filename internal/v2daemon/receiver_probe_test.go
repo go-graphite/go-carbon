@@ -98,9 +98,9 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 		}
 	}
 	// Forced equal maphash: only the FNV half tells these apart.
-	a := namefp.Fingerprint{Hash: 7, FNV: 1}
+	a := namefp.Fingerprint{Hash: 7, Route: 1}
 	*o.find(a) = nameSlot{fp: a, local: 1}
-	if got := o.find(namefp.Fingerprint{Hash: 7, FNV: 2}); got.local != 0 {
+	if got := o.find(namefp.Fingerprint{Hash: 7, Route: 2}); got.local != 0 {
 		t.Fatalf("equal maphash merged into local %d", got.local)
 	}
 	if got := o.find(a); got.local != 1 {
@@ -141,7 +141,7 @@ func TestApplicationOwnerProbeGrowthAndSharing(t *testing.T) {
 		t.Fatalf("used=%d catalog=%d slots=%d", o.used, p.catalog.Count(), len(o.slots))
 	}
 	for _, name := range raw {
-		slot := o.find(namefp.Of(name, v2recv.NameHash(name)))
+		slot := o.find(namefp.Of(namefp.Hash(name), v2recv.NameHash(name)))
 		if slot.local == 0 {
 			t.Fatalf("%q lost from the table", name)
 		}

@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"hash/maphash"
 	"sync"
 	"sync/atomic"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -25,6 +25,9 @@ type PolicyIdentity struct {
 	// sharing the identity (adoption) overwrite it, so it is only a hint:
 	// readers confirm ids[slot] == id and fall back to the metrics map.
 	ownerSlot atomic.Uint32
+	// route is namefp.Route(name)>>32, the second fingerprint half, beside
+	// ownerSlot in padding (0 B per name).
+	route uint32
 	// nameHash is NameHash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.
 	nameHash uint64
@@ -59,10 +62,13 @@ func (h *PolicyIdentity) Definition() []byte { return h.definitionBytes() }
 // NameHash returns the cached process-local 64-bit hash of Name.
 func (h *PolicyIdentity) NameHash() uint64 { return h.nameHash }
 
-var nameHashSeed = maphash.MakeSeed()
-
 // NameHash hashes a metric name with the seed PolicyIdentity.NameHash uses.
-func NameHash(name string) uint64 { return maphash.String(nameHashSeed, name) }
+func NameHash(name string) uint64 { return namefp.Hash(name) }
+
+// fingerprint identifies the name without reading its bytes.
+func (h *PolicyIdentity) fingerprint() namefp.Fingerprint {
+	return namefp.Fingerprint{Hash: h.nameHash, Route: h.route}
+}
 
 // Name returns the immutable registered metric name without encoding its policy.
 func (h *PolicyIdentity) Name() string { return string(h.policy.Name) }
@@ -95,7 +101,7 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
 	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
-	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: NameHash(string(p.Name))}
+	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: NameHash(string(p.Name)), route: uint32(namefp.Route(p.Name) >> 32)}
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
@@ -162,7 +168,7 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 				return nil, errors.New("noncanonical rollup policy")
 			}
 			ownedName := string(definition[start:nameEnd])
-			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: NameHash(ownedName)}
+			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: NameHash(ownedName), route: uint32(namefp.Route(ownedName) >> 32)}
 			return c.publish(h)
 		}
 	}

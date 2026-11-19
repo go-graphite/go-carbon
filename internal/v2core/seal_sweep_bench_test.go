@@ -168,7 +168,6 @@ func sweepPlannerFixture(tb testing.TB, names int) *coreRollups {
 			tb.Fatal(err)
 		}
 		r.install(uint64(i+1), m)
-		r.names[name] = uint64(i + 1)
 	}
 	r.renumber()
 	return r

@@ -98,7 +98,7 @@ func (o *applicationOwner) Append(names []string, hashes []uint64, data []points
 		} else {
 			fnv = v2recv.NameHash(name)
 		}
-		if fp := namefp.Of(name, fnv); previous.local == 0 || previous.fp != fp {
+		if fp := namefp.Of(namefp.Hash(name), fnv); previous.local == 0 || previous.fp != fp {
 			if previous = *o.find(fp); previous.local == 0 {
 				var err error
 				if previous, err = o.register(name, fp); err != nil {

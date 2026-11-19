@@ -205,7 +205,6 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						next.identities = (*p).identities
 						for id, m := range (*p).metrics {
 							next.install(id, m)
-							next.names[m.policy.Name] = id
 						}
 						*p = next
 					}

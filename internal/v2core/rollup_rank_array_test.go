@@ -200,7 +200,6 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					for _, id := range adopted {
 						m := ranked.metrics[id]
 						next.install(id, m)
-						next.names[m.policy.Name] = id
 					}
 					plan, err := next.plan(coreSealInput{Batches: batches})
 					if err != nil {
