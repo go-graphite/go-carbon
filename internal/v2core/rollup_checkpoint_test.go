@@ -101,8 +101,11 @@ func copyTree(t *testing.T, src string) string {
 // same parts, and every damaged or stale checkpoint falls back to the scan.
 func TestRollupCheckpointMatchesScan(t *testing.T) {
 	cfg, policies := checkpointTestSetup(t)
+	// Ten minutes after the fixture clock every name's hourly and daily
+	// windows are still open, so the digest compares closure calendar entries.
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800+600, 0) }}
 	root := t.TempDir()
-	e, err := Open(root, cfg, Hooks{})
+	e, err := Open(root, cfg, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,13 +120,16 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 	}
 	reopen := func(dir string, wantCheckpoint bool) (*Engine, string) {
 		t.Helper()
-		e, err := Open(dir, cfg, Hooks{})
+		e, err := Open(dir, cfg, hooks)
 		if err != nil {
 			t.Fatal(err)
 		}
 		o := e.owners[0]
 		if o.rollups.fromCheckpoint != wantCheckpoint {
 			t.Fatalf("%s: fromCheckpoint=%v want %v", dir, o.rollups.fromCheckpoint, wantCheckpoint)
+		}
+		if len(o.rollups.calendar.slots) == 0 {
+			t.Fatalf("%s: no open coarse window on the closure calendar", dir)
 		}
 		return e, rollupStateDigest(o.rollups)
 	}
