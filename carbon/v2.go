@@ -430,7 +430,9 @@ func (app *App) startV2() error {
 	v.wg.Add(1)
 	go func() {
 		defer v.wg.Done()
-		ticker := time.NewTicker(500 * time.Millisecond)
+		// Pending data already publishes on the owner's one-second frontier;
+		// catalog refresh must not add another half-second to fresh names.
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
