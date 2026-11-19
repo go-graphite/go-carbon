@@ -284,6 +284,9 @@ type pendingHead struct {
 	// runs cover positions [0, runEnd); view adds one for the rest.
 	runs   []pendingRun
 	runEnd int
+	// Identifies this head's outstanding merge. Resetting the head drops it;
+	// an owner may still finish that old merge, but cannot install its result.
+	merging <-chan []pendingRun
 }
 
 func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationPolicy) {
@@ -359,10 +362,8 @@ func (h *pendingHead) view(lookup func(uint64) *ApplicationPolicy) PendingView {
 	return v
 }
 
-// addRun sorts the row positions appended since the last run by ID and
-// appends them as a run. While the newest run is at least as large as the one
-// before it, the two merge into a new array (published runs stay immutable),
-// so a head of P publications holds about log2(P) runs.
+// addRun sorts only the row positions appended since the last publication.
+// Merging older runs belongs to pendingCompaction, outside publication.
 func (h *pendingHead) addRun(v PendingView) {
 	if h.n >= 1<<32 {
 		panic("pending head beyond 2^32 positions")
@@ -379,11 +380,65 @@ func (h *pendingHead) addRun(v PendingView) {
 		return // cold applications and escapes only: Find reads them directly
 	}
 	r.keys = sortByID(r.keys)
-	for k := len(h.runs); k > 0 && len(h.runs[k-1].keys) <= len(r.keys); k-- {
-		r = mergeRuns(&h.runs[k-1], &r)
-		h.runs = h.runs[: k-1 : k-1] // published views keep their runs array
-	}
 	h.runs = append(h.runs, r)
+}
+
+// pendingCompaction permits one merge flight per owner, including across
+// seals. Inputs and outputs are immutable; only the owner installs a result.
+// A slow flight leaves new publications searchable as separate runs.
+type pendingCompaction struct {
+	done chan []pendingRun
+	n    int // input prefix length; later publications form an untouched tail
+}
+
+func (c *pendingCompaction) install(h *pendingHead, runs []pendingRun) {
+	if h.merging == c.done {
+		h.runs = append(runs[:len(runs):len(runs)], h.runs[c.n:]...)
+		h.merging = nil
+	}
+	c.done = nil
+}
+
+func (c *pendingCompaction) poll(h *pendingHead) {
+	if c.done != nil {
+		select {
+		case runs := <-c.done:
+			c.install(h, runs)
+		default:
+		}
+	}
+}
+
+func (c *pendingCompaction) wait(h *pendingHead) {
+	if c.done != nil {
+		c.install(h, <-c.done)
+	}
+}
+
+func (c *pendingCompaction) start(h *pendingHead) {
+	if c.done != nil {
+		return
+	}
+	for i := 1; i < len(h.runs); i++ {
+		if len(h.runs[i-1].keys) > len(h.runs[i].keys) {
+			continue
+		}
+		inputs := h.runs[:len(h.runs):len(h.runs)]
+		done := make(chan []pendingRun, 1)
+		c.done, c.n, h.merging = done, len(inputs), done
+		go func() {
+			runs := make([]pendingRun, 0, len(inputs))
+			for _, r := range inputs {
+				for k := len(runs); k > 0 && len(runs[k-1].keys) <= len(r.keys); k-- {
+					r = mergeRuns(&runs[k-1], &r)
+					runs = runs[:k-1]
+				}
+				runs = append(runs, r)
+			}
+			done <- runs
+		}()
+		return
+	}
 }
 
 // sortByID orders keys that arrive in position order by their ID half with a

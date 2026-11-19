@@ -1057,6 +1057,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// Pending applications live as pointer-free rows (name-once S5a-2). Each
 	// head is a fresh pendingHead; published views share its immutable prefix.
 	var pend pendingHead
+	var pendingMerge pendingCompaction
 	sealInterval := o.cfg.SealInterval
 	if sealInterval == 0 {
 		sealInterval = 10 * time.Second
@@ -1127,6 +1128,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			defer o.sealPubMu.Unlock()
 		}
 		o.rollups.noteNewNames(&pend, o.lookup)
+		pendingMerge.poll(&pend)
 		published := pend.view(o.lookup)
 		generation := o.readGeneration
 		if flight != nil {
@@ -1138,6 +1140,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			}
 		}
 		err := o.batchHook(published, generation)
+		if err == nil {
+			pendingMerge.start(&pend)
+		}
 		if err == nil && o.visible != nil && prev < published.Len() {
 			o.visible(published.Suffix(prev))
 		}
@@ -1353,6 +1358,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				<-flight.done
 				flight = nil
 			}
+			pendingMerge.wait(&pend)
 			if failure != nil {
 				o.failure.CompareAndSwap(nil, &coreFailure{err: failure})
 			}

@@ -13,6 +13,7 @@ func pendingRunBenchHead(rows, ids, pub int, raw bool) (*pendingHead, PendingVie
 	rng := rand.New(rand.NewPCG(1, 2))
 	find := func(uint64) *ApplicationPolicy { return nil }
 	h := &pendingHead{}
+	var c pendingCompaction
 	var v PendingView
 	batch := make([]coreBatch, 0, 256)
 	order := uint64(1)
@@ -29,6 +30,9 @@ func pendingRunBenchHead(rows, ids, pub int, raw bool) (*pendingHead, PendingVie
 				v = h.rawView(find)
 			} else {
 				v = h.view(find)
+				c.start(h)
+				c.wait(h)
+				v = h.view(find)
 			}
 		}
 	}
@@ -37,8 +41,9 @@ func pendingRunBenchHead(rows, ids, pub int, raw bool) (*pendingHead, PendingVie
 
 // BenchmarkPendingRunPublish is the owner's append-and-publish cost per
 // pending row (262,144 rows in 64 publications over 1,048,576 IDs) with one
-// ID-sorted run per publication including merges (runs), and without (raw).
-// The difference is the runs' cost per row.
+// ID-sorted run per publication including joined background merges (runs),
+// and without (raw). Joining includes the complete work rather than leaving
+// outstanding merges outside the timer. The difference is the runs' cost.
 func BenchmarkPendingRunPublish(b *testing.B) {
 	const rows, ids, pub = 1 << 18, 1 << 20, 1 << 12
 	for _, raw := range []bool{false, true} {

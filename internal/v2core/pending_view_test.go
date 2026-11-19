@@ -25,6 +25,7 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 		s := newPendingRowsScript(seed)
 		rng := rand.New(rand.NewPCG(seed, 0x5b))
 		var h pendingHead
+		var c pendingCompaction
 		var want []coreBatch
 		type published struct {
 			v    PendingView
@@ -46,9 +47,12 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 			h.add(packet, s.find)
 			want = append(want, packet...)
 			if rng.IntN(3) == 0 {
+				c.poll(&h)
 				pubs = append(pubs, published{h.view(s.find), len(want)})
+				c.start(&h)
 			}
 		}
+		c.wait(&h)
 		pubs = append(pubs, published{h.view(s.find), len(want)})
 		for k, p := range pubs {
 			views++
@@ -77,6 +81,57 @@ func TestPendingViewMatchesBatches(t *testing.T) {
 		t.Fatalf("coverage: cold %d rows %d", coldApps, rowApps)
 	}
 	t.Logf("coverage: %d views, %d row applications, %d cold applications", views, rowApps, coldApps)
+}
+
+// A merge may finish after more publications or a seal. It must preserve
+// pinned views and new tails, and never install an old head into its successor.
+func TestPendingCompactionLifetime(t *testing.T) {
+	s := newPendingRowsScript(19)
+	var h pendingHead
+	var c pendingCompaction
+	var want []coreBatch
+	var pinned []PendingView
+	var counts []int
+	for _, packet := range s.packets[:12] {
+		h.add(packet, s.find)
+		want = append(want, packet...)
+		pinned = append(pinned, h.view(s.find))
+		counts = append(counts, len(want))
+	}
+	c.start(&h)
+	if c.done == nil {
+		t.Fatal("no compaction started")
+	}
+	flight := c.done
+	for _, packet := range s.packets[12:15] {
+		h.add(packet, s.find)
+		want = append(want, packet...)
+		h.view(s.find)
+		c.start(&h)
+		if c.done != flight {
+			t.Fatal("started another merge before consuming the first")
+		}
+	}
+	c.wait(&h)
+	checkPendingView(t, 19, h.view(s.find), want)
+	for i, v := range pinned {
+		checkPendingView(t, 19, v, want[:counts[i]])
+	}
+	// Force another eligible pair, then reset while its result is outstanding.
+	for range 2 {
+		h.add(s.packets[0], s.find)
+		h.view(s.find)
+	}
+	c.start(&h)
+	if c.done == nil {
+		t.Fatal("no compaction across reset")
+	}
+	h = pendingHead{}
+	h.add(s.packets[1], s.find)
+	v := h.view(s.find)
+	c.wait(&h)
+	checkPendingView(t, 19, h.view(s.find), s.packets[1])
+	checkPendingView(t, 19, v, s.packets[1])
 }
 
 func samePendingApp(got, want *coreBatch) bool {
