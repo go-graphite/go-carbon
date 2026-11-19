@@ -26,7 +26,11 @@ type coreBatch struct {
 	Points     []row
 }
 type coreSealInput struct {
-	Rows    []row
+	Rows []row
+	// Pending is the frozen pending view; the rollup planner reads its rows
+	// in place. Batches carries the same applications decoded, for PlanSeal
+	// hooks and callers without a view; the planner reads Pending when set.
+	Pending PendingView
 	Batches []coreBatch
 	Next    coreFrontier
 }
