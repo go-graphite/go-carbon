@@ -13,7 +13,6 @@ import (
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/internal/v2read"
-	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -88,8 +87,8 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 	if err := o.Append(names, hashes, probePoints(len(names)), nil, 1010); err != nil {
 		t.Fatal(err)
 	}
-	if got := p.catalog.Count(); got != 3 || o.used != 3 {
-		t.Fatalf("catalog names=%d table=%d, want 3", got, o.used)
+	if got := p.catalog.Count(); got != 3 || o.names.Len() != 3 {
+		t.Fatalf("catalog names=%d table=%d, want 3", got, o.names.Len())
 	}
 	ids := p.applicationIDs[:len(names)]
 	for i, name := range names {
@@ -97,14 +96,14 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 			t.Fatalf("point %d (%q) journaled as %q", i, name, got)
 		}
 	}
-	// Forced equal maphash: only the FNV half tells these apart.
+	// Forced equal maphash: only the Route half tells these apart.
 	a := namefp.Fingerprint{Hash: 7, Route: 1}
-	*o.find(a) = nameSlot{fp: a, local: 1}
-	if got := o.find(namefp.Fingerprint{Hash: 7, Route: 2}); got.local != 0 {
-		t.Fatalf("equal maphash merged into local %d", got.local)
+	o.names.Put(a, 1)
+	if got, ok := o.names.Get(namefp.Fingerprint{Hash: 7, Route: 2}); ok {
+		t.Fatalf("equal maphash merged into local %d", got)
 	}
-	if got := o.find(a); got.local != 1 {
-		t.Fatalf("lost local 1: %d", got.local)
+	if got, ok := o.names.Get(a); !ok || got != 1 {
+		t.Fatalf("lost local 1: %d, %v", got, ok)
 	}
 }
 
@@ -115,7 +114,7 @@ func TestApplicationOwnerProbeGrowthAndSharing(t *testing.T) {
 	s, resolve := openProbeStore(t)
 	p := s.Producers[0]
 	o := &applicationOwner{p: p, resolve: resolve}
-	const n = 3000 // 1024 slots grow at 769 and 1537 entries, then 3073
+	const n = 3000 // the table grows through 64..4096 slots
 	raw := make([]string, n)
 	for i := range raw {
 		raw[i] = fmt.Sprintf("grow.host%04d.", i) + strings.Repeat("m", i%37)
@@ -132,21 +131,21 @@ func TestApplicationOwnerProbeGrowthAndSharing(t *testing.T) {
 	_, again := probeBatch(raw)
 	hashes := make([]uint64, n)
 	for i, name := range again {
-		hashes[i] = v2recv.NameHash(name)
+		hashes[i] = namefp.Route(name)
 	}
 	if err := o.Append(again[:2048], hashes[:2048], probePoints(2048), nil, 1020); err != nil {
 		t.Fatal(err)
 	}
-	if o.used != n || p.catalog.Count() != n || len(o.slots) != 4096 {
-		t.Fatalf("used=%d catalog=%d slots=%d", o.used, p.catalog.Count(), len(o.slots))
+	if o.names.Len() != n || p.catalog.Count() != n {
+		t.Fatalf("table=%d catalog=%d", o.names.Len(), p.catalog.Count())
 	}
 	for _, name := range raw {
-		slot := o.find(namefp.Of(namefp.Hash(name), v2recv.NameHash(name)))
-		if slot.local == 0 {
+		local, ok := o.names.Get(namefp.Name(name))
+		if !ok {
 			t.Fatalf("%q lost from the table", name)
 		}
-		registered := p.applications[slot.local]
-		owned, _ := p.catalog.Key(uint64(slot.local))
+		registered := p.applications[local]
+		owned, _ := p.catalog.Key(uint64(local))
 		if registered == nil || registered.name != name {
 			t.Fatalf("%q resolves to %v", name, registered)
 		}
@@ -209,7 +208,7 @@ func BenchmarkApplicationOwnerProbe(b *testing.B) {
 				_, inputs[i] = probeBatch(probeNames(batch, i*batch))
 				hashes[i] = make([]uint64, batch)
 				for j, name := range inputs[i] {
-					hashes[i][j] = v2recv.NameHash(name)
+					hashes[i][j] = namefp.Route(name)
 				}
 				if err := o.Append(inputs[i], hashes[i], data, nil, 1010); err != nil {
 					b.Fatal(err)

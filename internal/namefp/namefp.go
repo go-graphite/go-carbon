@@ -6,11 +6,13 @@
 // Identity is the fingerprint: a process-seeded maphash64 plus the high 32 bits
 // of the FNV-1a64 routing hash. At 263M names the chance of any two names
 // sharing a fingerprint is about n²/2^97 ≈ 4e-13 per process lifetime; 64 bits
-// alone would be 2e-3, which is why both halves are kept.
+// alone would be 2e-3, which is why both halves are kept. The fingerprint is
+// never persisted: the seed changes on every start.
 package namefp
 
 import (
 	"hash/maphash"
+	"math"
 	"math/bits"
 )
 
@@ -42,11 +44,15 @@ func Of(hash, route uint64) Fingerprint { return Fingerprint{Hash: hash, Route: 
 // Name fingerprints name bytes directly.
 func Name(name string) Fingerprint { return Of(Hash(name), Route(name)) }
 
-// slot is 16 B with no pointers. key is Hash|1, so 0 marks an empty slot; val
-// is Route<<32 | local. The bit forced into key leaves 95 independent bits.
+// slot is 16 B with no pointers: key is Hash and val is Route<<32 | local+1.
+// An occupied slot's val is never 0, so val 0 marks an empty slot and all 96
+// fingerprint bits take part in identity.
 type slot struct {
 	key, val uint64
 }
+
+// MaxLocal is the largest local number a Table holds.
+const MaxLocal = math.MaxUint32 - 1
 
 // Table is an open-addressing map from fingerprint to a 32-bit local number,
 // linear probing at load at most 3/4. It is not safe for concurrent use.
@@ -66,34 +72,36 @@ func (t *Table) Get(fp Fingerprint) (uint32, bool) {
 	if t.used == 0 {
 		return 0, false
 	}
-	key, route := fp.Hash|1, uint64(fp.Route)<<32
 	mask := uint64(len(t.slots) - 1)
-	for i := t.home(key); ; i = (i + 1) & mask {
+	for i := t.home(fp.Hash); ; i = (i + 1) & mask {
 		s := t.slots[i]
-		if s.key == 0 {
+		if s.val == 0 {
 			return 0, false
 		}
-		if s.key == key && s.val&^0xffffffff == route {
-			return uint32(s.val), true
+		if s.key == fp.Hash && uint32(s.val>>32) == fp.Route {
+			return uint32(s.val) - 1, true
 		}
 	}
 }
 
-// Put sets fp's local number, replacing any previous one.
+// Put sets fp's local number, at most MaxLocal, replacing any previous one.
 func (t *Table) Put(fp Fingerprint, local uint32) {
+	if local > MaxLocal {
+		panic("namefp: local number above MaxLocal")
+	}
 	if (t.used+1)*4 > len(t.slots)*3 {
 		t.grow()
 	}
-	key, val := fp.Hash|1, uint64(fp.Route)<<32|uint64(local)
+	val := uint64(fp.Route)<<32 | uint64(local+1)
 	mask := uint64(len(t.slots) - 1)
-	for i := t.home(key); ; i = (i + 1) & mask {
+	for i := t.home(fp.Hash); ; i = (i + 1) & mask {
 		s := &t.slots[i]
-		if s.key == 0 {
-			*s = slot{key, val}
+		if s.val == 0 {
+			*s = slot{fp.Hash, val}
 			t.used++
 			return
 		}
-		if s.key == key && s.val>>32 == val>>32 {
+		if s.key == fp.Hash && s.val>>32 == val>>32 {
 			s.val = val
 			return
 		}
@@ -105,11 +113,11 @@ func (t *Table) grow() {
 	t.slots = make([]slot, max(64, 2*len(old)))
 	mask := uint64(len(t.slots) - 1)
 	for _, s := range old {
-		if s.key == 0 {
+		if s.val == 0 {
 			continue
 		}
 		i := t.home(s.key)
-		for t.slots[i].key != 0 {
+		for t.slots[i].val != 0 {
 			i = (i + 1) & mask
 		}
 		t.slots[i] = s

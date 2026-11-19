@@ -32,22 +32,20 @@ func TestTableRoundTripThroughGrowth(t *testing.T) {
 	}
 }
 
-// TestTableSeparatesEqualHashes forces names whose 64-bit halves collide (and
-// collide after the |1 empty marker): only the Route half keeps them apart.
-// Dropping the Route comparison from Get or Put fails it.
+// TestTableSeparatesEqualHashes forces names whose 64-bit halves are equal:
+// only the Route half keeps them apart. Dropping the Route comparison from Get
+// or Put fails it.
 func TestTableSeparatesEqualHashes(t *testing.T) {
 	var tab Table
 	const n = 300 // enough to cross several growth steps with one probe run
 	for i := 0; i < n; i++ {
-		h := uint64(0xdeadbeef00) | uint64(i&1) // h and h|1 share a key
-		tab.Put(Fingerprint{Hash: h, Route: uint32(i)}, uint32(1000+i))
+		tab.Put(Fingerprint{Hash: 0xdeadbeef00, Route: uint32(i)}, uint32(1000+i))
 	}
 	if tab.Len() != n {
 		t.Fatalf("Len = %d, want %d: equal hashes merged", tab.Len(), n)
 	}
 	for i := 0; i < n; i++ {
-		h := uint64(0xdeadbeef00) | uint64(i&1)
-		if got, ok := tab.Get(Fingerprint{Hash: h, Route: uint32(i)}); !ok || got != uint32(1000+i) {
+		if got, ok := tab.Get(Fingerprint{Hash: 0xdeadbeef00, Route: uint32(i)}); !ok || got != uint32(1000+i) {
 			t.Fatalf("Get(route %d) = %d, %v", i, got, ok)
 		}
 	}
@@ -62,6 +60,29 @@ func TestTableSeparatesEqualHashes(t *testing.T) {
 	}
 }
 
+// TestTableKeepsAll96Bits checks that no fingerprint bit is spent on the empty
+// marker: hashes that differ only in bit 0 stay apart, and the all-zero
+// fingerprint holding local 0 is found. Forcing Hash|1 into the key, or
+// storing local without the +1 offset, fails it.
+func TestTableKeepsAll96Bits(t *testing.T) {
+	var tab Table
+	tab.Put(Fingerprint{Hash: 6, Route: 9}, 1)
+	tab.Put(Fingerprint{Hash: 7, Route: 9}, 2)
+	tab.Put(Fingerprint{}, 0)
+	tab.Put(Fingerprint{Hash: 1}, MaxLocal)
+	if tab.Len() != 4 {
+		t.Fatalf("Len = %d, want 4", tab.Len())
+	}
+	for _, c := range []struct {
+		fp    Fingerprint
+		local uint32
+	}{{Fingerprint{Hash: 6, Route: 9}, 1}, {Fingerprint{Hash: 7, Route: 9}, 2}, {Fingerprint{}, 0}, {Fingerprint{Hash: 1}, MaxLocal}} {
+		if got, ok := tab.Get(c.fp); !ok || got != c.local {
+			t.Fatalf("Get(%+v) = %d, %v, want %d", c.fp, got, ok, c.local)
+		}
+	}
+}
+
 // TestFingerprintHalvesIndependent checks that real names spread both halves:
 // no two of 200k structured names share a 64-bit Hash or a full fingerprint.
 func TestFingerprintHalvesIndependent(t *testing.T) {
@@ -69,10 +90,10 @@ func TestFingerprintHalvesIndependent(t *testing.T) {
 	hashes := make(map[uint64]struct{}, 200_000)
 	for i := 0; i < 200_000; i++ {
 		fp := Name(fmt.Sprintf("containers.k8s.cluster-%02d.ns-%03d.pod-%06x.cpu", i%7, i%311, i))
-		if _, dup := hashes[fp.Hash|1]; dup {
+		if _, dup := hashes[fp.Hash]; dup {
 			t.Fatalf("64-bit hash collision at %d", i)
 		}
-		hashes[fp.Hash|1] = struct{}{}
+		hashes[fp.Hash] = struct{}{}
 		seen[fp] = struct{}{}
 	}
 	if len(seen) != 200_000 {

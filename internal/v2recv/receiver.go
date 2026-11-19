@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/parse"
 	"github.com/go-graphite/go-carbon/receiver/stream/codec"
@@ -23,7 +24,7 @@ import (
 
 // Owner is called by exactly one goroutine. Append borrows its arguments only
 // until return; plaintext names share one string per socket batch, so an owner
-// that keeps a name must clone it. hashes[i] is NameHash(names[i]), the hash
+// that keeps a name must clone it. hashes[i] is namefp.Route(names[i]), the hash
 // that routed the name to this owner. Seal+Drain must journal-sync before
 // publishing to the core.
 type Owner interface {
@@ -46,7 +47,7 @@ type Config struct {
 }
 type batch struct {
 	names  []string
-	hashes []uint64 // NameHash of each name, computed once for routing
+	hashes []uint64 // namefp.Route of each name, computed once for routing
 	data   []points.Point
 	text   []byte // plaintext name bytes, converted once per batch by named
 	ends   []int  // end of each plaintext name in text; empty for codec batches
@@ -386,18 +387,7 @@ type reference struct {
 }
 
 // OwnerFor returns the stable producer used by unplaced TCP intake.
-func OwnerFor(name string, n int) int { return int(NameHash(name) % uint64(n)) }
-
-// NameHash is the FNV-1a hash that routes a name; owners receive it beside the
-// name. It hashes plaintext name bytes without converting them to a string.
-func NameHash[T string | []byte](name T) uint64 {
-	h := uint64(14695981039346656037)
-	for i := 0; i < len(name); i++ {
-		h ^= uint64(name[i])
-		h *= 1099511628211
-	}
-	return h
-}
+func OwnerFor(name string, n int) int { return int(namefp.Route(name) % uint64(n)) }
 func (s *Server) read(c net.Conn) error {
 	if s.cfg.Placement != nil {
 		return s.readPlaced(c)
@@ -512,7 +502,7 @@ func (s *Server) read(c net.Conn) error {
 			_, err = d.ReadFrame(r, func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 				if *slot == nil {
 					n := string(name)
-					h := NameHash(n)
+					h := namefp.Route(n)
 					*slot = &reference{name: n, hash: h, owner: int(h % uint64(len(s.queues)))}
 				}
 				add((*slot).(*reference), value, ts)
@@ -581,7 +571,7 @@ func (s *Server) read(c net.Conn) error {
 				// its stable owner until the name changes.
 				if previous == nil || !bytes.Equal(name, previous) {
 					previous = append(previous[:0], name...)
-					hash = NameHash(previous)
+					hash = namefp.Route(previous)
 					owner = int(hash % uint64(len(s.queues)))
 				}
 				addText(owner, hash, name, value, ts)
