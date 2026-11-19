@@ -311,15 +311,6 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 	return nil
 }
 
-func hasCopiedParts(db *pebble.DB) (bool, error) {
-	it, err := db.NewIter(&pebble.IterOptions{LowerBound: movePartPrefix, UpperBound: v2part.PrefixEnd(movePartPrefix)})
-	if err != nil {
-		return false, err
-	}
-	found := it.First()
-	return found, errors.Join(it.Error(), it.Close())
-}
-
 func snapshotHasCopiedParts(snapshot *pebble.Snapshot) (bool, error) {
 	it, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: movePartPrefix, UpperBound: v2part.PrefixEnd(movePartPrefix)})
 	if err != nil {

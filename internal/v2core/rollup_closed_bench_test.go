@@ -78,7 +78,7 @@ func BenchmarkClosedWindowReadCost(b *testing.B) {
 				}
 				pin := e.DBs()[0].NewSnapshot()
 				defer pin.Close()
-				index, err := NewRollupSnapshot(context.Background(), pin, nil, 16<<20)
+				index, err := NewRollupSnapshot(context.Background(), pin, nil, nil, nil, 16<<20)
 				if err != nil {
 					b.Fatal(err)
 				}

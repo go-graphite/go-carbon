@@ -31,7 +31,8 @@ func TestExpiryResetReopenResume(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.Now = func() time.Time { return time.Unix(clock, 0) }
-		e, err = v2core.Open(root, cfg, v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, Expire: func(_ v2core.RollupPolicy, _ v2core.RollupMetadata, _ time.Time) bool { return expire.Load() }})
+		e, err = v2core.Open(root, cfg, v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, Expire: func(_ v2core.RollupPolicy, _ v2core.RollupMetadata, _ time.Time) bool { return expire.Load() },
+			ExpiryTTL: func(v2core.RollupPolicy, time.Time) (time.Duration, time.Time) { return time.Nanosecond, time.Time{} }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,8 +87,8 @@ func TestExpiryResetReopenResume(t *testing.T) {
 	if closeErr := snapshot.Close(); err != nil || closeErr != nil {
 		t.Fatalf("reset metadata %v %v", err, closeErr)
 	}
-	old.once.Do(old.load)
-	m := old.sealed.lookup("expiry.metric")
+	old.load()
+	m := old.lookup("expiry.metric")
 	if old.err != nil || m == nil || m.meta.Expired {
 		t.Fatal("old snapshot changed")
 	}

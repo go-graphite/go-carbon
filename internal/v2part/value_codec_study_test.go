@@ -228,8 +228,8 @@ func studyValues(out []byte, records []sealrollup.Record, maxCost int, xor bool)
 		for _, r := range records {
 			m, _ := decimalMantissa(r.Sample.Bits, e)
 			d := m - prev
-			cost1 += varintLen(zigzag(d))
-			cost2 += varintLen(zigzag(d - prevDelta))
+			cost1 += uvarintLen(zigzag(d))
+			cost2 += uvarintLen(zigzag(d - prevDelta))
 			prev, prevDelta = m, d
 		}
 		if min(cost1, cost2) <= maxCost*len(records) {

@@ -51,7 +51,7 @@ func (r *Reader) metadataWithMask(ctx context.Context, name string, includeExpir
 		}
 		m := g.metrics[name]
 		if m == nil {
-			m = g.sealed.lookup(name)
+			m = g.lookup(name)
 		}
 		if m != nil {
 			masked = masked || m.meta.BaselineOrder > 0 || m.meta.Expired || m.meta.ResetOrder > 0
@@ -102,7 +102,7 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 		if err != nil {
 			return nil, nil, err
 		}
-		err = g.sealed.index.MetadataContext(ctx, func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
+		err = g.sealed.MetadataContext(ctx, func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
 			if pending := g.metrics[n]; pending != nil {
 				meta = pending.meta
 			}
