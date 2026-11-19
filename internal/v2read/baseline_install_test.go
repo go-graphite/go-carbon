@@ -295,12 +295,12 @@ func checkInstalledBaselineClassicInventory(t *testing.T, first, stride int) {
 			for i := range reader.owners {
 				g := reader.owners[i].Load()
 				if g != nil && g.retain() {
-					g.once.Do(g.load)
+					g.load()
 					if g.err != nil {
 						g.release()
 						return false
 					}
-					g.sealed.index.Metadata(func(_ string, _ v2core.RollupPolicy, m v2core.RollupMetadata) { add(m.Frontier.Order) })
+					g.sealed.Metadata(func(_ string, _ v2core.RollupPolicy, m v2core.RollupMetadata) { add(m.Frontier.Order) })
 					g.view.Each(func(a *v2core.PendingApplication) bool {
 						add(a.Order)
 						return true

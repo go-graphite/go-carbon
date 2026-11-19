@@ -286,7 +286,11 @@ func (c *cursor) skipTo(key string) {
 	}
 }
 
-// Catalog is a single-control-owner projection; Snapshot is safe concurrently.
+// Catalog is a single-writer projection; Snapshot is safe concurrently.
+// Publish, PublishCore, Apply* and Close must not overlap: the writer state
+// (the background merge job and file sequence) has no lock, and an
+// overlapping writer panics like a concurrent Go map write. Calls from
+// different goroutines are fine when they are ordered (one owner at a time).
 // Publish/Apply belong at the catalog publication boundary, never per point.
 // Recovery may publish its first view after discovery is attached.
 //
@@ -295,10 +299,19 @@ func (c *cursor) skipTo(key string) {
 // grow with the host's name count. Apply installs a finished merge.
 type Catalog struct {
 	current atomic.Pointer[Snapshot]
-	dir     string // base files; empty keeps the base on the heap
+	writer  atomic.Bool // a Publish, Apply or Close is running
+	dir     string      // base files; empty keeps the base on the heap
 	seq     int
 	job     *baseMerge
 	err     atomic.Pointer[error]
+}
+
+// own asserts the single-writer contract and returns its release.
+func (c *Catalog) own() func() {
+	if !c.writer.CompareAndSwap(false, true) {
+		panic("v2 index: concurrent catalog writers")
+	}
+	return func() { c.writer.Store(false) }
 }
 
 // baseMerge rewrites inputs (the base, then level 1 if any) into one run.
@@ -342,6 +355,7 @@ func namesCopy(names []string) ([]string, error) {
 // Publish replaces all names atomically. Stale publications fail closed.
 // Names and the input slice may be reused after return.
 func (c *Catalog) Publish(revision uint64, names []string) error {
+	defer c.own()()
 	old := c.Snapshot()
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
@@ -391,6 +405,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	defer c.own()()
 	old := c.install(c.Snapshot(), false)
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
@@ -628,6 +643,7 @@ func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
 
 // Close stops a running background merge. The catalog stays readable.
 func (c *Catalog) Close() {
+	defer c.own()()
 	if j := c.job; j != nil {
 		j.cancel()
 		<-j.done
