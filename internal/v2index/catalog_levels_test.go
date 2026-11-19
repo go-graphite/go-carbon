@@ -83,6 +83,22 @@ func checkLevels(t *testing.T, s *Snapshot) {
 	}
 }
 
+func TestCatalogExpiryDropsEmptyLevelBehindMerge(t *testing.T) {
+	base, held := newLevel([]string{"a"}), newLevel([]string{"b"})
+	var c Catalog
+	c.current.Store(&Snapshot{revision: 1, levels: []*level{base, held, newLevel([]string{"c"})}, n: 3})
+	// Keep the first two levels pinned by an unfinished base merge. The
+	// third level is unpinned and must disappear when its last name expires.
+	c.job = &baseMerge{inputs: []*level{base, held}, done: make(chan struct{})}
+	if err := c.Apply(2, nil, []string{"c"}); err != nil {
+		t.Fatal(err)
+	}
+	checkLevels(t, c.Snapshot())
+	if !c.Snapshot().EqualNames([]string{"a", "b"}) {
+		t.Fatal("expiry changed surviving names")
+	}
+}
+
 // Incremental publications, including expiry and recreation, must yield the
 // same names and the same find candidates as a full rebuild of the same set.
 func TestCatalogLevelsMatchFullRebuild(t *testing.T) {

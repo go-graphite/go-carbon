@@ -65,7 +65,30 @@ func denseGoldenInput(t *testing.T) (Spec, [][2][]byte) {
 	return spec, input
 }
 
+// TestDenseGoldenBitExact pins both writer forms: dense-pooled keeps the
+// separate envelope KV (LegacyEnvelopeKV), dense-header folds each envelope
+// into its name's last run. Both read back to the same singleton stream.
+// DENSE_GOLDEN_RECORD=1 rewrites the vectors of the running build.
 func TestDenseGoldenBitExact(t *testing.T) {
+	defer LegacyEnvelopeKV.Store(false)
+	for _, form := range []struct {
+		name    string
+		legacy  bool
+		records uint64
+	}{{"dense-pooled", true, 6}, {"dense-header", false, 4}} {
+		LegacyEnvelopeKV.Store(form.legacy)
+		denseGoldenWrite(t, form.name, form.records)
+	}
+	_, input := denseGoldenInput(t)
+	// Verify and decode both compressor variants independently of the writer.
+	for _, suffix := range []string{"", "-nocgo"} {
+		checkDenseGolden(t, "dense"+suffix, input)
+		checkDenseGolden(t, "dense-pooled"+suffix, input)
+		checkDenseGolden(t, "dense-header"+suffix, input)
+	}
+}
+
+func denseGoldenWrite(t *testing.T, name string, records uint64) {
 	spec, input := denseGoldenInput(t)
 	path := filepath.Join(t.TempDir(), "dense.sst")
 	w, err := NewDenseWriter(path, spec)
@@ -90,8 +113,13 @@ func TestDenseGoldenBitExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vectors := map[string][]byte{"dense-pooled" + denseGoldenSuffix + ".sst": data, "dense-pooled" + denseGoldenSuffix + "-descriptor.json": descriptor}
+	vectors := map[string][]byte{name + denseGoldenSuffix + ".sst": data, name + denseGoldenSuffix + "-descriptor.json": descriptor}
 	for name, got := range vectors {
+		if os.Getenv("DENSE_GOLDEN_RECORD") != "" {
+			if err = os.WriteFile(filepath.Join("testdata", name), got, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
 		want, err := os.ReadFile(filepath.Join("testdata", name))
 		if err != nil {
 			t.Fatal(err)
@@ -100,13 +128,8 @@ func TestDenseGoldenBitExact(t *testing.T) {
 			t.Fatalf("dense golden %s changed: sha256=%x", name, sha256.Sum256(got))
 		}
 	}
-	if d.Version != 2 || d.Coverage.Names != 2 || d.Coverage.Records != 6 {
+	if d.Version != 2 || d.Coverage.Names != 2 || d.Coverage.Records != records {
 		t.Fatalf("dense coverage: %+v", d)
-	}
-	// Verify and decode both compressor variants independently of the writer.
-	for _, suffix := range []string{"", "-nocgo"} {
-		checkDenseGolden(t, "dense"+suffix, input)
-		checkDenseGolden(t, "dense-pooled"+suffix, input)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -82,6 +83,9 @@ type partRoute struct {
 }
 
 type readPart struct {
+	// Bare-snapshot reads reuse the descriptor validated while loading this
+	// immutable scope. Registry-backed reads already retain their opened parts.
+	descriptor  *v2part.Descriptor
 	first, last string
 	id          string
 	key         v2part.Key // immutable part scope; names come from the metric policy
@@ -198,32 +202,12 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 		}
 	}
 
-	// A part's own directory is read through only that file. Merging every
-	// live file for each metadata seek makes sparse catch-up quadratic.
-	loaded := map[string]*readPart{}
-	byPart := map[v2part.Digest][]string{}
-	for scope, descriptor := range selected {
-		byPart[descriptor.SHA256] = append(byPart[descriptor.SHA256], scope)
-	}
-	for _, ids := range byPart {
-		partIt, err := newArchiveIterSelected(ctx, snapshot, nil, nil, selected[ids[0]])
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			loaded[id], err = readRollupPart(ctx, partIt, []byte(id), identities)
-			if err != nil {
-				_ = partIt.Close()
-				return nil, err
-			}
-		}
-		if err := partIt.Close(); err != nil {
-			return nil, err
-		}
-	}
-
 	// Latest metadata is the only name-sized read structure. Each newly loaded
 	// part uses a transient sorted SST walk; its membership remains in the SST.
+	// A part is merged and dropped before the next is read, so one decoded part
+	// is live at a time. A part's own directory is read through only that file
+	// (merging every live file per metadata seek makes catch-up quadratic); a
+	// descriptor's scopes are adjacent in scopes, so one file is open at a time.
 	if prior != nil {
 		out.metrics = make(map[string]*snapshotMetric, len(prior.metrics))
 		for name, m := range prior.metrics {
@@ -235,13 +219,37 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 	}
 	out.routes = map[partRoute][]*readPart{}
 	changed := false
+	var partIt *archiveIter
+	var partDigest v2part.Digest
+	defer func() {
+		if partIt != nil {
+			_ = partIt.Close()
+		}
+	}()
 	for _, id := range scopes {
 		var part *readPart
 		if prior != nil {
 			part = prior.parts[id]
 		}
-		if part == nil {
-			part = loaded[id]
+		if descriptor, ok := selected[id]; part == nil && ok {
+			if partIt == nil || partDigest != descriptor.SHA256 {
+				if partIt != nil {
+					err, partIt = partIt.Close(), nil
+					if err != nil {
+						return nil, err
+					}
+				}
+				if partIt, err = newArchiveIterSelected(ctx, snapshot, nil, nil, descriptor); err != nil {
+					return nil, err
+				}
+				partDigest = descriptor.SHA256
+			}
+			if part, err = readRollupPart(ctx, partIt, []byte(id), identities); err != nil {
+				return nil, err
+			}
+			if opened == nil {
+				part.descriptor = &descriptor
+			}
 		}
 		if part == nil {
 			if it == nil {
@@ -479,11 +487,28 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		// Copied and bare-fixture stores keep one merged iterator over the
 		// legacy namespace and every selected file.
 		selected := make(map[archivePartIdentity]bool, len(partList))
+		var exact []v2part.Descriptor
+		seen := make(map[v2part.Digest]bool, len(partList))
+		complete := true
 		for _, part := range partList {
-			selected[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
+			id := archivePartIdentity{part.part.key.Group, part.part.key.Part}
+			selected[id] = true
+			if d := part.part.descriptor; d != nil {
+				if !seen[d.SHA256] {
+					seen[d.SHA256] = true
+					exact = append(exact, *d)
+				}
+			} else {
+				complete = false
+			}
+		}
+		// Legacy/copied scopes without retained descriptors keep the manifest
+		// scan. Exact descriptors belong to this pinned immutable inventory.
+		if !complete {
+			exact = nil
 		}
 		var err error
-		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected); err != nil {
+		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected, exact...); err != nil {
 			return err
 		}
 		defer shared.Close()
@@ -733,6 +758,12 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 	id := string(scope)
 	part := &readPart{origin: partOrigin{Class: LivePart}, id: id, metrics: map[string]*readPartMetric{}}
 	end := v2part.PrefixEnd(scope)
+	// Per-row scratch, reused across the part: the metadata key and a slim
+	// row's definition only feed the seek and intern below.
+	var encoded, definition []byte
+	var metadataSuffix [16]byte // MetadataArchive, BlockStart 0, Ordinal 0
+	binary.BigEndian.PutUint32(metadataSuffix[:], v2part.MetadataArchive)
+	binary.BigEndian.PutUint64(metadataSuffix[4:], 1<<63)
 	for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -744,10 +775,10 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		key.Archive = v2part.MetadataArchive
 		key.BlockStart = 0
 		key.Ordinal = 0
-		encoded, err := v2part.Encode(key)
-		if err != nil {
-			return nil, err
-		}
+		// A decoded key re-encodes to itself; only the last 16 bytes (archive,
+		// physical slot, ordinal) differ in the metadata key.
+		raw := it.Key()
+		encoded = append(append(encoded[:0], raw[:len(raw)-len(metadataSuffix)]...), metadataSuffix[:]...)
 		// Most new metrics have one archive row immediately before metadata.
 		// One Next avoids rebuilding the merging iterator for that common case.
 		if !bytes.Equal(it.Key(), encoded) {
@@ -756,9 +787,12 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
 			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
 		}
-		meta, decodeErr := decodeRollupMetadataView(key.Metric, key.Group, it.Value())
-		if decodeErr != nil {
-			err = decodeErr
+		meta, slim, err := decodeRollupMetadataHeader(it.Value())
+		if err == nil && slim {
+			definition, _, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
+			meta.Policy = definition
+		}
+		if err != nil {
 			return nil, err
 		}
 		h, err := identities.intern(meta.ID, string(key.Metric), meta.Policy)

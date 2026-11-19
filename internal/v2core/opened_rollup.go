@@ -245,31 +245,22 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			if err != nil {
 				return nil, err
 			}
-			r, err := p.open(ctx, s.directory, s.blockCache)
+			c, err := p.cursor(ctx, s.directory, s.blockCache)
 			if err != nil {
 				return nil, err
 			}
-			it, err := r.NewIterWithBlockPropertyFiltersAndContextEtc(ctx, nil, nil, nil, false, true, nil, sstable.TrivialReaderProvider{Reader: r})
-			if err != nil {
-				return nil, err
-			}
-			k, v := it.SeekGE(encoded, 0)
-			if k == nil || !bytes.Equal(k.UserKey, encoded) {
-				err = it.Error()
-				_ = it.Close()
+			if !c.SeekGE(encoded) || !bytes.Equal(c.Key(), encoded) {
+				err = c.Error()
+				_ = c.Close()
 				if err != nil {
 					return nil, err
 				}
 				continue
 			}
-			raw, _, err := v.Value(nil)
-			if err != nil {
-				_ = it.Close()
-				return nil, err
-			}
+			raw := c.Value()
 			meta, err := decodeRollupMetadataView(key.Metric, key.Group, raw)
 			if err != nil {
-				_ = it.Close()
+				_ = c.Close()
 				return nil, err
 			}
 			h, err := s.identities.intern(meta.ID, name, meta.Policy)
@@ -277,11 +268,11 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 				err = validateReadMetadata(h, meta, key)
 			}
 			if err != nil {
-				_ = it.Close()
+				_ = c.Close()
 				return nil, err
 			}
 			state := readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}
-			if err = it.Close(); err != nil {
+			if err = c.Close(); err != nil {
 				return nil, err
 			}
 			scope, _ := v2part.PartitionPrefixForGroup(key.Group, shard, key.Partition)
@@ -387,7 +378,7 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 		if err != nil {
 			return nil, err
 		}
-		out.iterators = append(out.iterators, legacy)
+		out.iterators = append(out.iterators, newHeaderCursor(legacy, nil))
 	}
 	// Routes already pruned the store. Do not enumerate descriptor bindings here.
 	seen := map[*openedRollupPart]bool{}
@@ -416,7 +407,7 @@ func (s *OpenedRollupParts) partCursor(ctx context.Context, snapshot *pebble.Sna
 		if err != nil {
 			return nil, err
 		}
-		out.iterators = append(out.iterators, legacy)
+		out.iterators = append(out.iterators, newHeaderCursor(legacy, nil))
 	}
 	if p := s.byIdentity[id]; p != nil {
 		c, err := p.cursor(ctx, s.directory, s.blockCache)
@@ -433,7 +424,10 @@ func (s *OpenedRollupParts) partCursor(ctx context.Context, snapshot *pebble.Sna
 	}
 	return &out, nil
 }
-func (p *openedRollupPart) cursor(ctx context.Context, directory string, cache *pebble.Cache) (*tableCursor, error) {
+
+// cursor reads one part through headerCursor, so a folded envelope reads at
+// its own key as in parts that store it separately.
+func (p *openedRollupPart) cursor(ctx context.Context, directory string, cache *pebble.Cache) (*headerCursor, error) {
 	r, err := p.open(ctx, directory, cache)
 	if err != nil {
 		return nil, err
@@ -442,7 +436,7 @@ func (p *openedRollupPart) cursor(ctx context.Context, directory string, cache *
 	if err != nil {
 		return nil, err
 	}
-	return &tableCursor{it: it}, nil
+	return newHeaderCursor(&tableCursor{it: it}, nil), nil
 }
 
 // snapshotHasLegacyRows probes the LSM's own GCP3 namespace once per opening.

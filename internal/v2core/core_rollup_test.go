@@ -293,7 +293,7 @@ func TestCoreRollupIngestFailureDoesNotPublish(t *testing.T) {
 	owner := &coreOwner{db: db, dir: root, cfg: cfg, plan: r.plan}
 	rows := []Row{{ID: 7, Time: 9990, Bits: math.Float64bits(3), Seq: 1}}
 	batches := []Batch{{ID: 7, Order: 1, Clock: 10000, Policy: policy, Points: rows}}
-	if _, err = owner.sealBatches(rows, len(rows), rows[0].Time, batches, Frontier{Version: 1, Config: cfg, Cursors: []uint64{1}, NextPart: 1}); err == nil {
+	if _, err = owner.sealBatches(rows, len(rows), rows[0].Time, PendingBatches(batches), Frontier{Version: 1, Config: cfg, Cursors: []uint64{1}, NextPart: 1}); err == nil {
 		t.Fatal("read-only ingest succeeded")
 	}
 	if len(r.metrics) != 0 {

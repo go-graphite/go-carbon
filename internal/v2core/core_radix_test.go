@@ -44,7 +44,7 @@ func testCoreRadixSSTBytes(t *testing.T, ambiguous bool) {
 		next := o.meta
 		next.Cursors = []uint64{8192}
 		next.NextPart = 1
-		if _, err = o.sealBatches(slices.Clone(input), len(input), 0, nil, next); err != nil {
+		if _, err = o.sealBatches(slices.Clone(input), len(input), 0, PendingView{}, next); err != nil {
 			t.Fatal(err)
 		}
 		if err = db.Close(); err != nil {
