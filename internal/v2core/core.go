@@ -1984,13 +1984,19 @@ func (e *coreEngine) close() error {
 			err = errors.Join(err, q.push(&corePacket{stop: true}, o.dead))
 		}
 	}
-	for _, o := range e.owners {
-		ownerErr := <-o.done
-		if ownerErr == nil && o.rollups != nil && o.rollups.db != nil {
-			// Derived state: a failed write only costs the next open a scan.
-			ownerErr = o.rollups.writeCheckpoint(o.dir)
+	// Owners write their checkpoints in parallel, as they open. Derived
+	// state: a failed write only costs the next open a scan.
+	errs := make([]error, len(e.owners))
+	var writing errgroup.Group
+	writing.SetLimit(min(16, runtime.GOMAXPROCS(0)))
+	for i, o := range e.owners {
+		if errs[i] = <-o.done; errs[i] == nil && o.rollups != nil && o.rollups.db != nil {
+			writing.Go(func() error { errs[i] = o.rollups.writeCheckpoint(o.dir); return nil })
 		}
-		err = errors.Join(err, ownerErr)
+	}
+	_ = writing.Wait()
+	for i, o := range e.owners {
+		err = errors.Join(err, errs[i])
 		o.pub.clear()
 		err = errors.Join(err, o.db.Close())
 	}
