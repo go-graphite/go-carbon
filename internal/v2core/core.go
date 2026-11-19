@@ -221,16 +221,18 @@ type coreOwner struct {
 	// the last at-seal checkpoint encode and its in-flight file write.
 	ckptAt      time.Time
 	ckptWriting chan struct{}
-	ready          []atomic.Uint64
-	work           chan struct{}
-	nextPoll       time.Time // execution-owner local seal deadline
-	bufferedPoints atomic.Int64
-	bufferedSince  atomic.Int64
-	rollups        *coreRollups
-	gc             *sealedPartGC
-	gcDirty        atomic.Bool
-	mergeStop      <-chan struct{}
-	readGeneration uint64 // owner-local; includes manifest-only retirement publications
+	// Checkpoint bytes written and failed writes, on any goroutine.
+	ckptBytes, ckptFailures atomic.Uint64
+	ready                   []atomic.Uint64
+	work                    chan struct{}
+	nextPoll                time.Time // execution-owner local seal deadline
+	bufferedPoints          atomic.Int64
+	bufferedSince           atomic.Int64
+	rollups                 *coreRollups
+	gc                      *sealedPartGC
+	gcDirty                 atomic.Bool
+	mergeStop               <-chan struct{}
+	readGeneration          uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
 	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
@@ -1991,7 +1993,7 @@ func (e *coreEngine) close() error {
 		}
 	}
 	// Owners write a final checkpoint in parallel, so a clean restart folds
-	// no parts. Derived state: a failed write only costs the next open a scan.
+	// no parts. A failed write is loud and keeps the previous file.
 	errs := make([]error, len(e.owners))
 	var writing errgroup.Group
 	writing.SetLimit(min(16, runtime.GOMAXPROCS(0)))
@@ -2004,7 +2006,9 @@ func (e *coreEngine) close() error {
 			writing.Go(func() error {
 				buf, err := o.rollups.encodeOwnerCheckpoint()
 				if err == nil {
-					err = writeCheckpointFile(o.dir, buf)
+					err = o.saveCheckpoint(buf)
+				} else {
+					o.checkpointFailed(err)
 				}
 				errs[i] = err
 				return nil

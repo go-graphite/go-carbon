@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -58,7 +59,7 @@ func (r *coreRollups) encodeOwnerCheckpoint() ([]byte, error) {
 // checkpointAfterSeal runs on the owner goroutine right after a seal commits,
 // with no seal in flight. It encodes the per-name state (about 0.3 µs/name)
 // and hands the file write to one goroutine; a write still running skips this
-// round. A failed write keeps the previous file, so the next open folds more.
+// round.
 func (o *coreOwner) checkpointAfterSeal() {
 	if o.rollups == nil || o.rollups.db == nil || time.Since(o.ckptAt) < rollupCheckpointEvery {
 		return
@@ -71,18 +72,35 @@ func (o *coreOwner) checkpointAfterSeal() {
 			return
 		}
 	}
+	o.ckptAt = time.Now()
 	buf, err := o.rollups.encodeOwnerCheckpoint()
 	if err != nil {
+		o.checkpointFailed(err)
 		return
 	}
-	o.ckptAt = time.Now()
 	done := make(chan struct{})
 	o.ckptWriting = done
-	dir := o.dir
 	go func() {
-		_ = writeCheckpointFile(dir, buf)
+		_ = o.saveCheckpoint(buf)
 		close(done)
 	}()
+}
+
+// saveCheckpoint writes buf as the owner's checkpoint. A failure is loud
+// (ERROR log, v2_rollup_checkpoint_failures_total) and keeps the previous
+// file, so the next open folds more parts, or rebuilds when there is none.
+func (o *coreOwner) saveCheckpoint(buf []byte) error {
+	if err := writeCheckpointFile(o.dir, buf); err != nil {
+		o.checkpointFailed(err)
+		return err
+	}
+	o.ckptBytes.Add(uint64(len(buf)))
+	return nil
+}
+
+func (o *coreOwner) checkpointFailed(err error) {
+	o.ckptFailures.Add(1)
+	slog.Error("v2 rollup checkpoint failed; next open folds more parts", "dir", o.dir, "error", err)
 }
 
 // writeCheckpointFile makes buf the owner's checkpoint: tmp, fsync, rename,
