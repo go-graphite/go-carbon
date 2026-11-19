@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -200,4 +202,73 @@ func dropToken(t *testing.T, owner string) {
 	if err = errors.Join(db.Delete(rollupCheckpointKey, pebble.Sync), db.Close()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestRollupCheckpointOpenMeasure times core open of one store loaded from its
+// checkpoint and rebuilt by scanRollups. CKPT_MEASURE_NAMES sets the names.
+func TestRollupCheckpointOpenMeasure(t *testing.T) {
+	n, _ := strconv.Atoi(os.Getenv("CKPT_MEASURE_NAMES"))
+	if n == 0 {
+		t.Skip("set CKPT_MEASURE_NAMES")
+	}
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 4, 1, true, 1<<20
+	policies := make([][]byte, n)
+	for i := range policies {
+		def := "10s:6h,5m:7d,1h:1y"
+		if i%3 == 0 {
+			def = "1m:30d"
+		}
+		_, policies[i] = rollupTestPolicy(t, fmt.Sprintf("measure.host%04d.cpu.core%03d.user", i/1000, i%1000), def, sealrollup.Average, 0)
+	}
+	root := t.TempDir()
+	e, err := Open(root, cfg, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := int64(1794700800)
+	for round := range 3 {
+		order := uint64(round + 1)
+		batches := make([]Batch, n)
+		for i := range batches {
+			id := uint64(i + 1)
+			batches[i] = Batch{ID: id, Order: order, Clock: clock + int64(round)*10, Policy: policies[i], Points: []Row{{ID: id, Time: clock + int64(round)*10, Bits: math.Float64bits(float64(i)), Seq: order}}}
+		}
+		if err = e.AppendBatches(0, batches, order, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closeTime := time.Since(start)
+	var size int64
+	for s := range cfg.Shards {
+		st, err := os.Stat(filepath.Join(root, fmt.Sprintf("owner-%03d", s), rollupCheckpointFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		size += st.Size()
+	}
+	scanDir := copyTree(t, root)
+	for s := range cfg.Shards {
+		_ = os.Remove(filepath.Join(scanDir, fmt.Sprintf("owner-%03d", s), rollupCheckpointFile))
+	}
+	ckptDir := copyTree(t, root)
+	for _, arm := range []struct {
+		name, dir string
+	}{{"scan", scanDir}, {"checkpoint", ckptDir}} {
+		start := time.Now()
+		e, err := Open(arm.dir, cfg, Hooks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		open := time.Since(start)
+		if err = e.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("MEASURE names=%d arm=%s open=%v", n, arm.name, open)
+	}
+	t.Logf("MEASURE names=%d close(with checkpoint write)=%v checkpoint bytes=%d (%.1f B/name)", n, closeTime, size, float64(size)/float64(n))
 }
