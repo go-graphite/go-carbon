@@ -3,7 +3,6 @@ package v2core
 import (
 	"slices"
 	"sync"
-	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
@@ -88,18 +87,4 @@ func (r *coreRollups) returnScratch() {
 		lane.ranked, lane.spare, lane.counts, lane.records, lane.output = nil, nil, nil, nil, rollupOutput{}
 	}
 	rollupScratchPool.Put(s)
-}
-
-// retainedScratchBytes is the planner working-set capacity this planner keeps
-// between seals; with pooling it is zero once a seal has committed or aborted.
-func (r *coreRollups) retainedScratchBytes() int {
-	n := cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*rollupMetric)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
-	for i := range r.lanes {
-		lane := &r.lanes[i]
-		n += (cap(lane.ranked)+cap(lane.spare))*int(unsafe.Sizeof(rollupRankRef{})) + cap(lane.counts)*8 + cap(lane.records)*int(unsafe.Sizeof(sealrollup.Record{})) + cap(lane.output.arena)
-		for _, file := range lane.output.files {
-			n += cap(*file) * int(unsafe.Sizeof(plannedKV{}))
-		}
-	}
-	return n
 }

@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"runtime"
 	"testing"
+	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -30,7 +31,7 @@ func sealTimeOnlyFixture(tb testing.TB, names, perName int, seed int64) (*coreRo
 		if err != nil {
 			tb.Fatal(err)
 		}
-		r.install(id, m)
+		r.install(id, m, metricMetadata{})
 		metrics[i] = m
 	}
 	batches := make([]Batch, 0, names*perName)
@@ -125,4 +126,18 @@ func BenchmarkSealPlanRetained(b *testing.B) {
 	b.ReportMetric(float64(elapsed.Nanoseconds())/float64(b.N*owners*rows), "ns/row")
 	b.ReportMetric(float64(inflight)/float64(rows), "inflight-B/row")
 	b.ReportMetric(float64(held.HeapAlloc-min(held.HeapAlloc, dropped.HeapAlloc))/float64(owners*rows), "retained-B/row")
+}
+
+// retainedScratchBytes is the planner working-set capacity this planner keeps
+// between seals; with pooling it is zero once a seal has committed or aborted.
+func (r *coreRollups) retainedScratchBytes() int {
+	n := cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*rollupMetric)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
+	for i := range r.lanes {
+		lane := &r.lanes[i]
+		n += (cap(lane.ranked)+cap(lane.spare))*int(unsafe.Sizeof(rollupRankRef{})) + cap(lane.counts)*8 + cap(lane.records)*int(unsafe.Sizeof(sealrollup.Record{})) + cap(lane.output.arena)
+		for _, file := range lane.output.files {
+			n += cap(*file) * int(unsafe.Sizeof(plannedKV{}))
+		}
+	}
+	return n
 }
