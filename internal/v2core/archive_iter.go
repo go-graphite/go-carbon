@@ -215,7 +215,11 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 			return nil, e
 		}
 		files = nil
-		out.iterators = append(out.iterators, external)
+		var upper []byte
+		if opts != nil {
+			upper = opts.UpperBound
+		}
+		out.iterators = append(out.iterators, newHeaderCursor(external, upper))
 	}
 	return out, nil
 }

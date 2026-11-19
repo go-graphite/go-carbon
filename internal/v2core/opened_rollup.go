@@ -205,20 +205,16 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			if err != nil {
 				return nil, err
 			}
-			k, v := it.SeekGE(encoded, 0)
-			if k == nil || !bytes.Equal(k.UserKey, encoded) {
-				err = it.Error()
+			c := newHeaderCursor(&tableCursor{it: it}, nil)
+			if !c.SeekGE(encoded) || !bytes.Equal(c.Key(), encoded) {
+				err = c.Error()
 				_ = it.Close()
 				if err != nil {
 					return nil, err
 				}
 				continue
 			}
-			raw, _, err := v.Value(nil)
-			if err != nil {
-				_ = it.Close()
-				return nil, err
-			}
+			raw := c.Value()
 			meta, err := decodeRollupMetadataView(key.Metric, key.Group, raw)
 			if err != nil {
 				_ = it.Close()
@@ -354,7 +350,7 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 		if e != nil {
 			return nil, e
 		}
-		out.iterators = append(out.iterators, &tableCursor{it: it})
+		out.iterators = append(out.iterators, newHeaderCursor(&tableCursor{it: it}, nil))
 	}
 	return out, nil
 }
