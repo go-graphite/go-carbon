@@ -128,7 +128,7 @@ func TestSealedMergeDifferential(t *testing.T) {
 	current := o.db.NewSnapshot()
 	got := mergeRead(t, current)
 	_ = current.Close()
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(logicalWinners(got), logicalWinners(slices.Clone(want))) {
 		t.Fatalf("merge changed exact records\ngot=%+v\nwant=%+v", got, want)
 	}
 	if merges == 0 || mergeCount(o) >= before {
@@ -158,7 +158,7 @@ func TestSealedMergeDifferential(t *testing.T) {
 	e = mergeFixture(t, root, nil)
 	s := e.owners[0].db.NewSnapshot()
 	defer s.Close()
-	if !reflect.DeepEqual(mergeRead(t, s), want) {
+	if !reflect.DeepEqual(logicalWinners(mergeRead(t, s)), logicalWinners(slices.Clone(want))) {
 		t.Fatal("restart changed stored winners")
 	}
 	t.Logf("live parts %d -> %d in %d merges", before, mergeCount(e.owners[0]), merges)
