@@ -290,7 +290,7 @@ type mergeBlock struct {
 
 type mergeCursor struct {
 	reader *sstable.Reader
-	cursor *tableCursor
+	cursor *headerCursor
 	// key is the current metric's identity with Metric left empty: the name
 	// stays encoded in ident, the validated key bytes before the archive, and
 	// ident[name:] is the GCP3 length-prefixed name. Merges compare and copy
@@ -524,7 +524,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			return v2part.Descriptor{}, e
 		}
 
-		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, part: spec.Scope.Part}
+		c := &mergeCursor{reader: reader, cursor: newHeaderCursor(&tableCursor{it: it}, nil), part: spec.Scope.Part}
 		cursors = append(cursors, c)
 		valid, e := c.readMetric(true)
 		if e != nil {
