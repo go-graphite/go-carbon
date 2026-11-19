@@ -79,9 +79,10 @@ func appendSlots(out []byte, records []sealrollup.Record, table *[]uint64) ([]by
 // run and integer mantissas m as zigzag first or second differences, whichever
 // packs smaller. Other runs, and decimal runs whose mantissa differences average
 // more than decimalMaxCost bytes, store their float64 bits verbatim: as raw
-// little-endian words when the run has at least wordsMinRun values and repeats
-// values (zstd then matches whole 8-byte values), else as eight byte planes
-// (zstd then packs the near-constant sign and exponent bytes). Every decimal
+// little-endian words when the run has at least wordsMinRun values and at least
+// one in twenty repeats an earlier one (zstd then matches whole 8-byte values),
+// else as eight byte planes (zstd then packs the near-constant sign and
+// exponent bytes). Every decimal
 // value's float64 bits are checked at encode, so NaN payloads, -0 and
 // infinities always keep their exact bits.
 const (
@@ -95,8 +96,8 @@ const (
 	wordsMinRun   = 64
 	// A run repeats values when fewer than wordsDistinctNum/wordsDistinctDen
 	// of them are distinct.
-	wordsDistinctNum = 3
-	wordsDistinctDen = 4
+	wordsDistinctNum = 19
+	wordsDistinctDen = 20
 	// Above this mean varint size per value, mantissas are wide and noisy:
 	// the byte planes' constant exponent and zero low bytes compress better.
 	decimalMaxCost = 4
