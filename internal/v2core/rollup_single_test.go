@@ -169,6 +169,25 @@ func TestExpiryCalendarEngineDifferential(t *testing.T) {
 	}
 }
 
+// Expire is asked only about names idle for their window: with no window,
+// an Expire that always agrees expires nothing, though idle closure stages
+// the coarse-archive names.
+func TestExpireAskedOnlyWhenOverdue(t *testing.T) {
+	h := Hooks{Expire: func(p RollupPolicy, _ RollupMetadata, _ time.Time) bool {
+		t.Errorf("Expire asked about %s", p.Name)
+		return true
+	}, ExpiryTTL: expiryWindow(0)}
+	image, closable := runMixedIdleStoreHooks(t, h, nil)
+	if len(closable) != 2 {
+		t.Fatalf("filed %v, want the two coarse-archive names", closable)
+	}
+	for name, m := range image {
+		if m.Meta.Expired {
+			t.Fatalf("%s expired", name)
+		}
+	}
+}
+
 func TestExpireNeedsExpiryTTL(t *testing.T) {
 	cfg := coreTestConfig()
 	cfg.Rollups = true

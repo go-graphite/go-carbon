@@ -716,12 +716,25 @@ func sealSweepSkipIdleClosure(r *coreRollups, in coreSealInput) (coreSealPlan, e
 			hidden[id] = m
 		}
 	}
-	for id := range hidden {
-		delete(r.metrics, id)
+	slots := map[uint32]bool{}
+	for id, m := range hidden {
+		slots[r.slotOf(id, m)] = true
+	}
+	saved := map[int64][]uint32{}
+	for end, filed := range r.calendar {
+		var kept []uint32
+		for _, slot := range filed {
+			if !slots[slot] {
+				kept = append(kept, slot)
+			}
+		}
+		if len(kept) != len(filed) {
+			saved[end], r.calendar[end] = filed, kept
+		}
 	}
 	defer func() {
-		for id, m := range hidden {
-			r.metrics[id] = m
+		for end, filed := range saved {
+			r.calendar[end] = filed
 		}
 	}()
 	return r.planParts(in)
