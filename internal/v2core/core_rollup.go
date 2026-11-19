@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -181,6 +180,7 @@ type coreRollups struct {
 	// fromCheckpoint reports that open loaded this state from the owner's
 	// checkpoint instead of scanning parts.
 	fromCheckpoint bool
+	checkpoint     *mappedRollupCheckpoint
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -526,6 +526,16 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
+	if r.checkpoint != nil {
+		if err := r.loadCheckpointDue(r.clock().Unix()); err != nil {
+			return coreSealPlan{}, err
+		}
+		for i := range in.Batches {
+			if err := r.loadCheckpointID(in.Batches[i].ID, nil); err != nil {
+				return coreSealPlan{}, err
+			}
+		}
+	}
 	stages := r.stages[:0]
 	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
@@ -599,6 +609,13 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			// A fresh ID is not installed, and the sweep stages each ID once,
 			// so any holder of this fingerprint is another ID for the name.
+			if r.checkpoint != nil {
+				encodedName := m.definitionBytes()
+				encodedName = encodedName[len(`{"Name":"`) : len(encodedName)-len(m.policy.suffix)]
+				if err := r.loadCheckpointName(encodedName); err != nil {
+					return coreSealPlan{}, err
+				}
+			}
 			fp := m.fingerprint()
 			if _, ok := r.names.Get(fp); ok {
 				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
@@ -989,13 +1006,12 @@ func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (
 			}
 		}
 	} else if dir != "" {
-		if buf, err := os.ReadFile(filepath.Join(dir, rollupCheckpointFile)); err == nil {
-			loaded, err := loadCheckpoint(db, snapshot, buf, r.identities)
-			if err == nil {
-				return loaded, nil
-			} else if !errors.Is(err, errCheckpoint) {
-				return nil, err
-			}
+		loaded, err := openMappedCheckpoint(db, snapshot, filepath.Join(dir, rollupCheckpointFile), r.identities)
+		if err == nil {
+			return loaded, nil
+		}
+		if !errors.Is(err, errCheckpoint) {
+			return nil, err
 		}
 	}
 	err := scanRollups(snapshot, r.identities, r.installRecovered)
