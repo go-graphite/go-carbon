@@ -71,7 +71,7 @@ func TestFrozenComparisonFreshSnapshotConvergence(t *testing.T) {
 	job := compareJob{Names: []candidate{{ID: 1, Name: "a"}}, From: 60, Until: 120, FirstSnapshot: time.Now()}
 	for seq := uint64(1); seq <= 2; seq++ {
 		p := store.Producers[0]
-		if err = p.Append([]string{"a"}, []points.Point{{Timestamp: 60, Value: float64(seq)}}, []uint64{seq}, 120); err != nil {
+		if err = p.Append([]string{"a"}, nil, []points.Point{{Timestamp: 60, Value: float64(seq)}}, []uint64{seq}, 120); err != nil {
 			t.Fatal(err)
 		}
 		if err = p.Seal(); err != nil {
@@ -104,7 +104,7 @@ func TestSerialCatalogIdentityAndSnapshot(t *testing.T) {
 	}
 	defer store.Close()
 	p := store.Producers[0]
-	if err = p.Append([]string{"a", "b", "a"}, []points.Point{{Timestamp: 60, Value: 1}, {Timestamp: 60, Value: 2}, {Timestamp: 120, Value: 3}}, []uint64{1, 2, 3}, 120); err != nil {
+	if err = p.Append([]string{"a", "b", "a"}, nil, []points.Point{{Timestamp: 60, Value: 1}, {Timestamp: 60, Value: 2}, {Timestamp: 120, Value: 3}}, []uint64{1, 2, 3}, 120); err != nil {
 		t.Fatal(err)
 	}
 	if err = p.Seal(); err != nil {

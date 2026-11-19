@@ -106,6 +106,9 @@ func (s *Slots) InstallRecent(d Delta) {
 // order. Reinstalling them with InstallRecent between two KeepRecent calls
 // rebuilds the same residency, which is what a state checkpoint stores.
 func (s *Slots) AppendResident(dst []Delta) []Delta {
+	if s == nil {
+		return dst
+	}
 	if s.data == nil {
 		if s.hasSingle {
 			dst = append(dst, Delta{Archive: s.singleArchive, Slot: s.single.slot, Sample: s.single.sample})
@@ -120,7 +123,12 @@ func (s *Slots) AppendResident(dst []Delta) []Delta {
 	return dst
 }
 
+// View, Range and RecentRange read a nil *Slots as empty: a caller that keeps
+// no residency needs no Slots value.
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
+	if s == nil {
+		return Sample{}, false
+	}
 	if s.data == nil {
 		if s.hasSingle && s.singleArchive == a && s.single.slot == physical {
 			return s.single.sample, true
@@ -138,6 +146,9 @@ func (s *Slots) View(a int, physical int64) (Sample, bool) {
 
 // Range requires aligned bounds spanning at most one archive retention.
 func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
+	if s == nil {
+		return dst
+	}
 	if s.data == nil {
 		if s.hasSingle && s.singleArchive == a && s.single.sample.Time >= start && s.single.sample.Time < end {
 			return append(dst, s.single.sample)
@@ -169,7 +180,7 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 // RecentRange reports whether the complete window is still resident. A miss
 // must be resolved from durable physical-slot winners, never partial aggregates.
 func (s *Slots) RecentRange(a int, start, end int64, dst []Sample) ([]Sample, bool) {
-	if s.data != nil && start < s.data[a].floor {
+	if s != nil && s.data != nil && start < s.data[a].floor {
 		return dst, false
 	}
 	return s.Range(a, start, end, dst), true

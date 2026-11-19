@@ -220,7 +220,7 @@ func loadCheckpoint(db *pebble.DB, buf, stamp []byte, identities *PolicyCatalog)
 		if err != nil || r.metrics[id] != nil {
 			return nil, errCheckpoint
 		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		archives := len(m.schema().Archives)
 		for range d.uvarint() {
 			var x sealrollup.Delta
@@ -232,11 +232,10 @@ func loadCheckpoint(db *pebble.DB, buf, stamp []byte, identities *PolicyCatalog)
 			if d.err != nil || x.Archive >= archives {
 				return nil, errCheckpoint
 			}
-			m.slots.InstallRecent(x)
+			m.installRecent(x)
 		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		r.install(id, m, meta)
-		r.names[m.policy.Name] = id
 	}
 	if d.err != nil || len(d.buf) != 0 {
 		return nil, errCheckpoint
