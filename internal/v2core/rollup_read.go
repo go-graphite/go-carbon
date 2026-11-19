@@ -130,17 +130,23 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 	if identities == nil {
 		identities = &PolicyCatalog{}
 	}
-	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
-		return nil, err
-	} else if found {
-		return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
+	// Opened parts exist only for stores without copied parts. With them and
+	// no legacy rows, the directory and its record reads use only registry-held
+	// parts and the inventory, so snapshot may be nil.
+	opened, _ := ctx.Value(openedPartsContext{}).(*OpenedRollupParts)
+	if opened == nil {
+		if found, err := snapshotHasCopiedParts(snapshot); err != nil {
+			return nil, err
+		} else if found {
+			return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
+		}
 	}
 	limit := int64(rollupReadCacheBytes)
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
-	out := &RollupSnapshot{identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	out := &RollupSnapshot{opened: opened, identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {

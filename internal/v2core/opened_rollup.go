@@ -112,10 +112,33 @@ func OpenRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 
 // OpenRollupPartsWithCache opens parts on a caller-owned block cache that
 // several owners may share; each part takes a reference until Close. Pebble
-// keys cached blocks by a per-reader cache ID, so parts never alias. A prior
-// publication's cache is kept. accountBytes is the share charged to reads.
-func OpenRollupPartsWithCache(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cache *pebble.Cache, accountBytes int64) (*OpenedRollupParts, error) {
-	return openRollupParts(ctx, snapshot, inventory, prior, identities, cache, accountBytes)
+// keys cached blocks by a per-reader cache ID, so parts never alias.
+// accountBytes is the share charged to reads.
+func OpenRollupPartsWithCache(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, identities *PolicyCatalog, cache *pebble.Cache, accountBytes int64) (*OpenedRollupParts, error) {
+	return openRollupParts(ctx, snapshot, inventory, nil, identities, cache, accountBytes)
+}
+
+// NeedsSnapshot reports whether reads still go through the opening snapshot:
+// stores with legacy LSM rows, copied parts or no inventory (nil parts). Other
+// readers close the snapshot once parts are open; registry references keep
+// the files.
+func (s *OpenedRollupParts) NeedsSnapshot() bool { return s == nil || s.legacyRows }
+
+// Retain takes the caller's own registry reference on every part, for a
+// publication that binds the same parts. The caller holds s; the immutable
+// routing maps are shared.
+func (s *OpenedRollupParts) Retain() *OpenedRollupParts {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	s.registry.mu.Lock()
+	for _, p := range s.parts {
+		p.refs++
+	}
+	s.registry.mu.Unlock()
+	s.blockCache.Ref()
+	return &out
 }
 
 func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *RollupInventory, prior *OpenedRollupParts, identities *PolicyCatalog, cache *pebble.Cache, limit int64) (*OpenedRollupParts, error) {

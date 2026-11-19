@@ -78,12 +78,12 @@ func TestResolvedCacheIsBoundedAndGenerationScoped(t *testing.T) {
 		t.Fatal("retain")
 	}
 	defer g.release()
-	g.sealed.once.Do(g.sealed.load)
-	if g.sealed.err != nil {
-		t.Fatal(g.sealed.err)
+	g.load()
+	if g.err != nil {
+		t.Fatal(g.err)
 	}
 	c := &sealedCache{limit: 1024}
-	sealed := &sealedData{index: g.sealed.index, cache: c}
+	sealed := &generation{sealed: g.sealed, cache: c}
 	policy := v2core.RollupPolicy{Config: sealrollup.Config{Archives: []sealrollup.Archive{{Step: 1, Count: 10}}}}
 	for i := 0; i < 100; i++ {
 		sealed.number = uint64(i)
@@ -121,7 +121,7 @@ func TestPendingPrefixExactAndCanonical(t *testing.T) {
 	}
 	r, _ := New(1, 1<<24, 1<<20)
 	makeMetric := func(b []sealrollup.Batch, cache *sealedCache) *metricState {
-		return &metricState{name: "prefix", policy: policy, meta: v2core.RollupMetadata{ID: 1, Policy: encoded}, pending: b, reader: r, resource: &sealedData{cache: cache}}
+		return &metricState{name: "prefix", policy: policy, meta: v2core.RollupMetadata{ID: 1, Policy: encoded}, pending: b, reader: r, resource: &generation{cache: cache}}
 	}
 	cache := &sealedCache{limit: 1 << 20}
 	prefix := makeMetric(batches[:1], cache)
@@ -206,20 +206,20 @@ func TestResolvedCacheSharesOnlyUnchangedPartSets(t *testing.T) {
 			t.Fatal("pin")
 		}
 		pins = append(pins, g)
-		g.once.Do(g.load)
+		g.load()
 		if g.err != nil {
 			t.Fatal(g.err)
 		}
 		return g
 	}
 	first := seal("stable.a", 1, 1)
-	a := first.sealed.lookup("stable.a")
+	a := first.lookup("stable.a")
 	a.once.Do(a.resolve)
 	if a.err != nil {
 		t.Fatal(a.err)
 	}
 	second := seal("stable.b", 2, 2)
-	b := second.sealed.lookup("stable.a")
+	b := second.lookup("stable.a")
 	b.once.Do(b.resolve)
 	if b.err != nil {
 		t.Fatal(b.err)
@@ -228,7 +228,7 @@ func TestResolvedCacheSharesOnlyUnchangedPartSets(t *testing.T) {
 		t.Fatal("unchanged name rescanned after unrelated seal")
 	}
 	third := seal("stable.a", 1, 3)
-	c := third.sealed.lookup("stable.a")
+	c := third.lookup("stable.a")
 	c.once.Do(c.resolve)
 	if c.err != nil {
 		t.Fatal(c.err)

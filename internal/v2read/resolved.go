@@ -132,19 +132,19 @@ type resolvedEntry struct {
 
 // Missing names keep the sealed generation fence; existing names share their
 // exact immutable part-set identity across unrelated owner seals.
-func (s *sealedData) metricVersion(name string) any {
-	if s.index != nil {
-		if v := s.index.MetricVersion(name); v != nil {
+func (s *generation) metricVersion(name string) any {
+	if s.sealed != nil {
+		if v := s.sealed.MetricVersion(name); v != nil {
 			return v
 		}
 	}
 	return s.number
 }
 
-func (s *sealedData) resolved(name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
+func (s *generation) resolved(name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
 	return s.resolvedContext(context.Background(), name, policy, meta)
 }
-func (s *sealedData) resolvedContext(ctx context.Context, name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
+func (s *generation) resolvedContext(ctx context.Context, name string, policy v2core.RollupPolicy, meta v2core.RollupMetadata) (*resolvedSource, error) {
 	c := s.cache
 	version := s.metricVersion(name)
 	c.fullMu.Lock()
@@ -155,7 +155,7 @@ func (s *sealedData) resolvedContext(ctx context.Context, name string, policy v2
 		}
 	}
 	c.fullMu.Unlock()
-	records, err := s.index.Records(ctx, name)
+	records, err := s.sealed.Records(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func samePrefix(prefix, batches []sealrollup.Batch) bool {
 	}
 	return true
 }
-func (s *sealedData) cachedReduction(m *metricState) *pendingReduction {
+func (s *generation) cachedReduction(m *metricState) *pendingReduction {
 	c := s.cache
 	c.pendingMu.Lock()
 	candidates := append([]pendingReduction(nil), c.reductions...)
@@ -226,7 +226,7 @@ func (s *sealedData) cachedReduction(m *metricState) *pendingReduction {
 	}
 	return best
 }
-func (s *sealedData) rememberReduction(m *metricState, next sealrollup.Frontier) {
+func (s *generation) rememberReduction(m *metricState, next sealrollup.Frontier) {
 	c := s.cache
 	e := pendingReduction{version: s.metricVersion(m.name), generation: s.number, name: m.name, id: m.meta.ID, policy: m.meta.Policy, batches: m.pending, frontier: next, source: m.frozen}
 	e.bytes = m.frozen.RetainedBytes() + int64(len(e.name)+len(e.policy)) + int64(cap(e.batches))*64 + 128
