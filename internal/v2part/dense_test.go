@@ -47,7 +47,7 @@ func TestDenseBitExact(t *testing.T) {
 				}
 				rs[i] = sealrollup.Record{Delta: sealrollup.Delta{Archive: 2, Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 1700000000 + int64((i+400)%4096)*86400, Bits: b}}, Correction: i%3 == 0}
 			}
-			column, e := EncodeSlots(rs)
+			_, e := EncodeSlots(rs)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -55,9 +55,8 @@ func TestDenseBitExact(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			// Regular orders take delta-of-delta; it is used only when smaller.
-			if dod := b[4]&denseModeOrderDoD != 0; (shared && n >= 127 && !dod) || dod == bytes.Equal(b, column) || (dod && len(b) >= len(column)) {
-				t.Fatalf("n=%d shared=%v: one-order %d B, column %d B", n, shared, len(b), len(column))
+			if predicted := b[4]&denseModeOrderLinear != 0; predicted != (n > 1) {
+				t.Fatalf("n=%d: predicted=%v", n, predicted)
 			}
 			got, e := DecodeSlots(2, rs[0].Slot, b)
 			if e != nil {

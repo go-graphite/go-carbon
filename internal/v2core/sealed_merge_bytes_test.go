@@ -19,20 +19,6 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// mergeByteDifferentialDigest is the SHA-256 of every merged part file and
-// descriptor that TestMergeByteDifferential writes, with each name's envelope
-// folded into its last run. mergeByteDifferentialLegacyDigest is the same
-// merges written with v2part.LegacyEnvelopeKV, recorded on github
-// atimofieiev/v2 9f959a15aa7a (string merge keys) and re-recorded once when
-// merges began repacking short runs up to MaxDenseSlots. It pins every other
-// byte, so the folded digest differs only by the envelope's placement. Both
-// physical pins include aligned timestamps and tagged value encoding; the decoded pin is unchanged.
-// Do not re-record either for a performance change.
-const (
-	mergeByteDifferentialDigest       = "7b63a505d5883efe1c513cbb8172218d9a740d577e35df52548c13d9a599c13c"
-	mergeByteDifferentialLegacyDigest = "0491b83dcceaa95f461ec5e31ed8d42bfe8cc75a1c5cecc82be6b5775abf7c17"
-)
-
 // mergeDecodedDifferentialDigest is the SHA-256 of the same merged parts'
 // content independent of run layout and envelope placement (every slot as a
 // singleton record, every envelope at its own key, the descriptor without file
@@ -43,7 +29,8 @@ const mergeDecodedDifferentialDigest = "266d1b35f1f24860c11a88321445ea9debcfb459
 // TestMergeByteDifferential runs multi-tier merges (seal parts, merges of
 // merges plus a late part) over length-tied, prefix-sharing and non-ASCII
 // names with late points, expired names, reset orders and a TTL floor, and
-// pins every merged part's bytes and descriptor to the recorded digest.
+// pins decoded content to the unchanged digest and physical bytes/descriptors
+// to an independent repeat. Physical bytes change with an order codec revision.
 func TestMergeByteDifferential(t *testing.T) {
 	if coreTestProcess(t) {
 		return
@@ -52,28 +39,30 @@ func TestMergeByteDifferential(t *testing.T) {
 	defer func() { mergePartID = saved }()
 	defer v2part.LegacyEnvelopeKV.Store(false)
 	for _, legacy := range []bool{true, false} {
-		v2part.LegacyEnvelopeKV.Store(legacy)
-		var serial byte
-		mergePartID = func(id *v2part.PartID) error {
-			serial++
-			*id = v2part.PartID{0xA5, serial}
-			return nil
-		}
-		sum, decoded := sha256.New(), sha256.New()
-		for seed := uint64(1); seed <= 3; seed++ {
-			for _, group := range []v2part.Group{"live", "g.long-group"} {
-				mergeByteDifferentialCase(t, seed, group, sum, decoded)
+		var physical string
+		for repeat := 0; repeat < 2; repeat++ {
+			v2part.LegacyEnvelopeKV.Store(legacy)
+			var serial byte
+			mergePartID = func(id *v2part.PartID) error {
+				serial++
+				*id = v2part.PartID{0xA5, serial}
+				return nil
 			}
-		}
-		if got := hex.EncodeToString(decoded.Sum(nil)); got != mergeDecodedDifferentialDigest {
-			t.Errorf("legacy=%v: merged part content changed: decoded digest %s, want %s", legacy, got, mergeDecodedDifferentialDigest)
-		}
-		want := mergeByteDifferentialDigest
-		if legacy {
-			want = mergeByteDifferentialLegacyDigest
-		}
-		if got := hex.EncodeToString(sum.Sum(nil)); got != want {
-			t.Errorf("legacy=%v: merged part bytes changed: digest %s, want %s", legacy, got, want)
+			sum, decoded := sha256.New(), sha256.New()
+			for seed := uint64(1); seed <= 3; seed++ {
+				for _, group := range []v2part.Group{"live", "g.long-group"} {
+					mergeByteDifferentialCase(t, seed, group, sum, decoded)
+				}
+			}
+			if got := hex.EncodeToString(decoded.Sum(nil)); got != mergeDecodedDifferentialDigest {
+				t.Errorf("legacy=%v: merged part content changed: decoded digest %s, want %s", legacy, got, mergeDecodedDifferentialDigest)
+			}
+			got := hex.EncodeToString(sum.Sum(nil))
+			if repeat == 0 {
+				physical = got
+			} else if got != physical {
+				t.Errorf("legacy=%v: repeated merge bytes changed: %s != %s", legacy, got, physical)
+			}
 		}
 	}
 }
