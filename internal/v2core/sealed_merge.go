@@ -162,18 +162,14 @@ func (e *coreEngine) runPartMerges(workers int) {
 }
 
 // Merges combine only sequence-adjacent local parts of one group/partition
-// (ClickHouse's rule), so their order ranges never interleave. A part's span is
-// the write order it adds past the parts before it. The spans of adjacent parts
-// add up exactly to their merged part's span and, unlike bytes, do not shrink
-// when a merge collapses envelopes. A window of adjacent parts qualifies once
-// it holds at least ratio parts and its span is at least ratio/2 times its
-// largest part's: every rewrite grows a point's part by at least ratio/2, so a
-// young merged part never re-absorbs the next few seals, and a big part never
-// absorbs a few small ones. Outputs up to 64 MiB use ratio 4, so new seals fold
-// into a small part every few seal intervals and few small parts stay live for
-// renders. Larger outputs keep ratio sixteen, which leaves at most fifteen
-// similar parts quiescent below the cap. The qualifying window with the fewest
-// bytes merges first.
+// (ClickHouse's rule), so their order ranges never interleave. A window of
+// adjacent parts qualifies once it holds at least ratio parts and its total is
+// at least ratio/2 times its largest part: a rewrite grows every point's part
+// by at least ratio/2 (ratio for equal parts), and a big part never absorbs a
+// few small ones. Small outputs use ratio 4, so new seals fold into a small
+// part every few seal intervals and few small parts stay live for renders.
+// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
+// parts quiescent below the cap. The cheapest qualifying window merges first.
 const (
 	smallMergeBytes = 64 << 20
 	smallMergeRatio = 4
@@ -236,20 +232,12 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 			}
 			return bytes.Compare(a.SHA256[:], b.SHA256[:])
 		})
-		spans := make([]uint64, len(parts))
-		next := parts[0].Source.MinOrder
-		for i, p := range parts {
-			end := p.Source.MaxOrder + 1
-			spans[i] = max(end, next) - next
-			next = max(next, end)
-		}
 		for i := range parts {
-			var total, span, largest uint64
+			var total, largest uint64
 			for j := i; j < len(parts) && j-i < sealedMergeFanIn && parts[j].Bytes <= limit-total; j++ {
 				total += parts[j].Bytes
-				span += spans[j]
-				largest = max(largest, spans[j])
-				if r := mergeRatio(total); uint64(j-i+1) < r || 2*span < r*largest {
+				largest = max(largest, parts[j].Bytes)
+				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
 					continue
 				}
 				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
