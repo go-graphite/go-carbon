@@ -140,7 +140,7 @@ func (e *coreEngine) runPartMerges(workers int) {
 					if unchanged[o] == inventory {
 						continue
 					}
-					changed, err := o.mergeSealedParts(e.gcStop)
+					changed, err := o.mergeSealedParts(e.gcStop, false)
 					if err != nil {
 						o.gc.mergeFailure.CompareAndSwap(nil, &coreFailure{err: err})
 						e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
@@ -161,12 +161,51 @@ func (e *coreEngine) runPartMerges(workers int) {
 	wg.Wait()
 }
 
+// ForceMerge merges each owner's live local parts down to one part per group
+// and time partition, like VictoriaMetrics /internal/force_merge or ClickHouse
+// OPTIMIZE FINAL. Background merges keep running beside it. It returns the
+// number of merges done; a caller repeats it until that number is zero.
+func (e *coreEngine) ForceMerge() (int, error) {
+	workers, err := mergeWorkerCount(len(e.owners))
+	if err != nil {
+		return 0, err
+	}
+	var merged atomic.Int64
+	var failure atomic.Pointer[error]
+	var wg sync.WaitGroup
+	for worker := 0; worker < max(1, workers); worker++ {
+		wg.Go(func() {
+			for i := worker; i < len(e.owners); i += max(1, workers) {
+				o := e.owners[i]
+				if o.gc == nil || !o.cfg.Rollups {
+					continue
+				}
+				for failure.Load() == nil {
+					changed, err := o.mergeSealedParts(e.gcStop, true)
+					if err != nil {
+						failure.CompareAndSwap(nil, &err)
+					}
+					if !changed {
+						break
+					}
+					merged.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if p := failure.Load(); p != nil {
+		return int(merged.Load()), *p
+	}
+	return int(merged.Load()), nil
+}
+
 // Merges combine only sequence-adjacent local parts of one group/partition
 // (ClickHouse's rule), so their order ranges never interleave. A window of
 // adjacent parts qualifies once it holds at least ratio parts and its total is
-// at least ratio/2 times its largest part: a rewrite grows every point's part
-// by at least ratio/2 (ratio for equal parts), and a big part never absorbs a
-// few small ones. Small outputs use ratio 4, so new seals fold into a small
+// at least ratio/2 times its largest part, so a large input is not repeatedly
+// combined with only a few much smaller inputs. Small outputs use ratio 4,
+// so new seals fold into a small
 // part every few seal intervals and few small parts stay live for renders.
 // Larger outputs keep ratio sixteen, which leaves at most fifteen similar
 // parts quiescent below the cap. The cheapest qualifying window merges first.
@@ -187,10 +226,11 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 	if err != nil {
 		return nil, err
 	}
-	return o.selectMergeLimit(snapshot, limit)
+	return o.selectMergeLimit(snapshot, limit, false)
 }
 
-func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
+// full keeps adjacency and the byte cap, but ignores background ratios and fan-in.
+func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, full bool) ([]v2part.Descriptor, error) {
 	type scope struct {
 		group     v2part.Group
 		partition int64
@@ -234,9 +274,16 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		})
 		for i := range parts {
 			var total, largest uint64
-			for j := i; j < len(parts) && j-i < sealedMergeFanIn && parts[j].Bytes <= limit-total; j++ {
+			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total; j++ {
 				total += parts[j].Bytes
 				largest = max(largest, parts[j].Bytes)
+				if full {
+					// Force the first maximal adjacent window that fits the cap.
+					if j > i && (j+1 == len(parts) || parts[j+1].Bytes > limit-total) {
+						return slices.Clone(parts[i : j+1]), nil
+					}
+					continue
+				}
 				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
 					continue
 				}
@@ -301,7 +348,7 @@ type mergeBlock struct {
 
 type mergeCursor struct {
 	reader *sstable.Reader
-	cursor *tableCursor
+	cursor *headerCursor
 	// key is the current metric's identity with Metric left empty: the name
 	// stays encoded in ident, the validated key bytes before the archive, and
 	// ident[name:] is the GCP3 length-prefixed name. Merges compare and copy
@@ -535,7 +582,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			return v2part.Descriptor{}, e
 		}
 
-		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, part: spec.Scope.Part}
+		c := &mergeCursor{reader: reader, cursor: newHeaderCursor(&tableCursor{it: it}, nil), part: spec.Scope.Part}
 		cursors = append(cursors, c)
 		valid, e := c.readMetric(true)
 		if e != nil {
@@ -712,7 +759,14 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	return d, d.Validate()
 }
 
-func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
+func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, error) {
+	o.mergeMu.Lock()
+	defer o.mergeMu.Unlock()
+	select {
+	case <-stop:
+		return false, nil
+	default:
+	}
 	// Capture the pin and inventory under the same GC fence as publications.
 	o.gc.mu.Lock()
 	snapshot := o.db.NewSnapshot()
@@ -722,14 +776,14 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	inputs, err := o.selectMergeLimit(snapshot, limit)
+	inputs, err := o.selectMergeLimit(snapshot, limit, full)
 	if err != nil {
 		return false, err
 	}
 	retire := o.retireClock()
 	if len(inputs) == 0 && limit < configured {
 		// Disk-bound: tell "nothing due" from "due but no room".
-		if due, e := o.selectMergeLimit(snapshot, configured); e == nil && len(due) > 0 {
+		if due, e := o.selectMergeLimit(snapshot, configured, full); e == nil && len(due) > 0 {
 			mergeDiskSkip.Add(1)
 			slog.Warn("v2 merge skipped: not enough free disk", "dir", o.dir, "merge_limit_bytes", limit, "configured_cap_bytes", configured)
 			return false, nil

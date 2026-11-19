@@ -58,7 +58,7 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 	s.Close()
 	merges := 0
 	for {
-		changed, err := o.mergeSealedParts(nil)
+		changed, err := o.mergeSealedParts(nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}

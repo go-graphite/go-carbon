@@ -73,7 +73,11 @@ func (c CoreRecords) Expand(e Entry, emit func(Record) error) error {
 	if k.Ordinal != 0 || !validPartition(k.Partition) || e.Trailer>>8 != 0 {
 		return errors.New("unsupported materialized source key/sequence")
 	}
-	records, err := v2part.DecodeSlots(k.Archive, k.BlockStart, e.Value)
+	envelope, run, err := v2part.SplitHeader(e.Value)
+	if err != nil {
+		return err
+	}
+	records, err := v2part.DecodeSlots(k.Archive, k.BlockStart, run)
 	if err != nil {
 		return err
 	}
@@ -87,7 +91,15 @@ func (c CoreRecords) Expand(e Entry, emit func(Record) error) error {
 			return err
 		}
 	}
-	return nil
+	if envelope == nil {
+		return nil
+	}
+	// A folded envelope follows its metric's last run in the logical stream.
+	key, err := v2part.Encode(v2part.EnvelopeKey(k))
+	if err != nil {
+		return err
+	}
+	return c.Expand(Entry{Key: key, Value: envelope, Trailer: e.Trailer}, emit)
 }
 
 // CoreWriter uses the common dense part writer and verifies through its reader.
