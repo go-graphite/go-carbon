@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -88,6 +89,14 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 	skip, err := p.skipSegments(paths)
 	if err != nil {
 		return err
+	}
+	// A sealed journal needs no names to recover. Open its catalog on the first
+	// new application instead; a retained tail still needs it before decoding.
+	p.journalDir = dir
+	if skip < len(paths) || len(paths) == 0 {
+		if err := p.openCatalog(); err != nil {
+			return err
+		}
 	}
 	p.RecoverySkippedSegments, p.RecoveryReplayedSegments = skip, len(paths)-skip
 	for i, path := range paths {
@@ -176,7 +185,9 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 			return errors.New("core frontier exceeds retained journal")
 		}
 	}
-	if p.cursor > 0 {
+	// No replay means the frontiers already cover every record. An empty seal
+	// here would rewrite owner checkpoints without making any input durable.
+	if p.cursor > 0 && skip < len(paths) {
 		if err = p.engine.AppendBatches(p.index, nil, p.cursor, true); err != nil {
 			return err
 		}
@@ -276,14 +287,44 @@ func (p *Producer) rotateJournal() error {
 // skipSegments uses the same durability boundary as retirement. A retired
 // prefix needs its cursor/order seed even when no further segment can be skipped.
 func (p *Producer) skipSegments(paths []string) (int, error) {
+	if p.fullReplay || p.placement != nil || p.durableApplications != nil || len(paths) == 0 {
+		return 0, nil
+	}
 	j, err := p.durablePrefix(paths)
 	if err != nil || len(paths) == 0 {
 		return j, err
 	}
+	// Retirement keeps a nonempty anchor segment. Fully sealed recovery can
+	// skip that anchor too, restoring the end cursor/order from retained input.
+	for k := len(paths) - 1; k >= 0; k-- {
+		end, order, ok, err := segmentEnd(paths[k], k == len(paths)-1)
+		if err != nil {
+			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(paths[k]), err)
+		}
+		if !ok {
+			continue
+		}
+		frontiers := p.engine.DurableFrontiers()
+		covered := len(frontiers) > 0
+		for _, frontier := range frontiers {
+			if end > frontier[p.index] {
+				covered = false
+				break
+			}
+		}
+		if !covered {
+			break
+		}
+		if order <= p.applyOrder {
+			return 0, errors.New("journal application order regressed")
+		}
+		p.cursor, p.applyOrder = end, order
+		return len(paths), nil
+	}
 	if j == 0 && filepath.Base(paths[0]) == "segment.pdc4" {
 		return 0, nil
 	}
-	start, order, ok, err := p.segmentStart(paths[j])
+	start, order, ok, err := segmentStart(paths[j])
 	if err != nil {
 		return 0, err
 	}
@@ -337,7 +378,7 @@ func (p *Producer) durablePrefix(paths []string) (int, error) {
 		last = cursor
 	}
 	for j := len(paths) - 1; j >= 0; j-- {
-		start, _, ok, err := p.segmentStart(paths[j])
+		start, _, ok, err := segmentStart(paths[j])
 		if err != nil {
 			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(paths[j]), err)
 		}
@@ -378,10 +419,10 @@ func segmentCursor(path string) (uint64, bool, error) {
 	return cursor, true, nil
 }
 
-// segmentStart decodes a segment's first complete record. It returns the cursor
+// segmentStart reads a segment's first complete record. It returns the cursor
 // before that record and the record's first application order; ok is false for
 // an empty or torn segment, which can only be the newest.
-func (p *Producer) segmentStart(path string) (start, order uint64, ok bool, err error) {
+func segmentStart(path string) (start, order uint64, ok bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0, false, err
@@ -399,18 +440,101 @@ func (p *Producer) segmentStart(path string) (start, order uint64, ok bool, err 
 	if _, err = io.ReadFull(f, record); err != nil {
 		return 0, 0, false, nil
 	}
-	decoder := partlog.CatalogDecoder{Catalog: p.catalog}
-	defer decoder.Close()
-	batches, cursor, err := DecodeApplications(record, &decoder, p.catalog, p.index, p.count)
+	cursor, n, first, _, err := applicationHeader(record)
+	return cursor - n, first, err == nil, err
+}
+
+// segmentEnd returns the cursor and last application order of a segment's last
+// complete record, reading only record lengths and that record. Like Scan, it
+// truncates a torn tail of the newest segment and rejects one anywhere else.
+// ok is false for a segment without a complete record.
+func segmentEnd(path string, newest bool) (end, order uint64, ok bool, err error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return 0, 0, false, err
 	}
-	var n uint64
-	for _, b := range batches {
-		n += uint64(len(b.Points))
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, 0, false, err
 	}
-	if len(batches) == 0 || cursor < n {
-		return 0, 0, false, errors.New("journal cursor gap")
+	var offset, last int64 = 0, -1
+	for offset < st.Size() {
+		var h [4]byte
+		if _, err = f.ReadAt(h[:], offset); err == nil {
+			size := binary.LittleEndian.Uint32(h[:])
+			if size == 0 || size > v2replay.MaxRecord {
+				return 0, 0, false, errors.New("invalid journal length")
+			}
+			if offset+4+int64(size) <= st.Size() {
+				last, offset = offset, offset+4+int64(size)
+				continue
+			}
+		} else if err != io.EOF {
+			return 0, 0, false, err
+		}
+		if !newest {
+			return 0, 0, false, fmt.Errorf("torn journal record at %d", offset)
+		}
+		if err = errors.Join(f.Truncate(offset), f.Sync()); err != nil {
+			return 0, 0, false, err
+		}
+		break
 	}
-	return cursor - n, batches[0].Order, true, nil
+	if last < 0 {
+		return 0, 0, false, nil
+	}
+	record := make([]byte, offset-last-4)
+	if _, err = f.ReadAt(record, last+4); err != nil {
+		return 0, 0, false, err
+	}
+	end, _, _, order, err = applicationHeader(record)
+	return end, order, err == nil, err
+}
+
+// applicationHeader verifies an original application record's checksum and
+// reads its plain header: the cursor after the record, its point count and its
+// first and last application orders. The coded payload is not decoded.
+func applicationHeader(record []byte) (cursor, n, first, last uint64, err error) {
+	invalid := errors.New("invalid original application envelope")
+	if len(record) < 8 || !bytes.Equal(record[:4], applicationMagic) || crc32.Checksum(record[:len(record)-4], applicationCRC) != binary.LittleEndian.Uint32(record[len(record)-4:]) {
+		return 0, 0, 0, 0, invalid
+	}
+	b := record[4 : len(record)-4]
+	read := func() uint64 {
+		v, m := binary.Uvarint(b)
+		if m <= 0 {
+			err = invalid
+			return 0
+		}
+		b = b[m:]
+		return v
+	}
+	cursor = read()
+	count := read()
+	if count == 0 || count > 32768 {
+		return 0, 0, 0, 0, invalid
+	}
+	for i := uint64(0); i < count && err == nil; i++ {
+		if read() == 0 {
+			err = invalid
+		}
+		previous := last
+		if last = read(); i == 0 {
+			first = last
+		}
+		points := read()
+		if last <= previous || points == 0 || points > 32768-n {
+			return 0, 0, 0, 0, invalid
+		}
+		n += points
+		for j := uint64(0); j < points && err == nil; j++ {
+			read() // sequence
+		}
+	}
+	size := read()
+	if err == nil && (size != uint64(len(b)) || n > cursor) {
+		err = invalid
+	}
+	return cursor, n, first, last, err
 }

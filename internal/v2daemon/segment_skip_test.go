@@ -3,7 +3,9 @@ package v2daemon
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"math"
 	"os"
 	"os/exec"
@@ -37,18 +39,20 @@ func segmentSkipWriteFrom(t *testing.T, s *Store, first, rounds int, after func(
 	t.Helper()
 	for round := first; round < first+rounds; round++ {
 		for i, p := range s.Producers {
-			apps := restartApps(t, round*2, round*2+2)
+			writeRound := int(p.applyOrder / 2)
+			apps := restartApps(t, writeRound*2, writeRound*2+2)
 			bits := []uint64{0, 1 << 63, 1, 0x7ff8000000000042, 0x7ff0000000000000, 0xfff0000000000000}
 			var err error
 			for j := range apps {
 				a := &apps[j]
+				a.Order = p.applyOrder + uint64(j) + 1
 				a.Name = fmt.Sprintf("parallel.%d.%d", i, j)
 				a.Policy, err = v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: partsformat.ID(a.Name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 120}, {Step: 10, Count: 120}}}})
 				if err != nil {
 					t.Fatal(err)
 				}
-				a.Clock = 10040 - int64(round%3)
-				a.Points = []points.Point{{Timestamp: 10000 + int64(round%7), Value: float64(round+i) / 4}, {Timestamp: 10000 + int64(round%11), Value: math.Float64frombits(bits[round%len(bits)])}}
+				a.Clock = 10040 - int64(writeRound%3)
+				a.Points = []points.Point{{Timestamp: 10000 + int64(writeRound%7), Value: float64(writeRound+i) / 4}, {Timestamp: 10000 + int64(writeRound%11), Value: math.Float64frombits(bits[writeRound%len(bits)])}}
 			}
 			if err = p.AppendApplications(apps); err != nil {
 				t.Fatal(err)
@@ -218,5 +222,185 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 			}
 			t.Logf("skipped=%d replayed=%d sha256=%x", skipped, replayed, got)
 		})
+	}
+}
+
+// TestJournalSegmentSkipQuiesced kills a store after every owner sealed the
+// whole journal, with and without segment rotation: restart replays no segment. A tail written after that seal is only
+// in the journal, so restart must replay it.
+func TestJournalSegmentSkipQuiesced(t *testing.T) {
+	if root := os.Getenv("V2_QUIESCED_CHILD"); root != "" {
+		c := segmentSkipConfig()
+		c.fullReplay = true // Preserve retired input for the independent rebuild oracle.
+		c.JournalSegmentBytes, _ = strconv.ParseInt(os.Getenv("V2_QUIESCED_SEGMENT"), 10, 64)
+		s, err := Open(root, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		segmentSkipWrite(t, s, 7, nil)
+		for i, p := range s.Producers {
+			if err = s.Core.AppendBatches(i, nil, p.cursor, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if os.Getenv("V2_QUIESCED_TAIL") == "true" {
+			segmentSkipWrite(t, s, 1, nil)
+		}
+		fmt.Println("CUT")
+		select {}
+	}
+	for _, k := range []struct {
+		name         string
+		segmentBytes int64
+		tail         bool
+	}{{"rotate", 1, false}, {"one-segment", 0, false}, {"rotate-tail", 1, true}, {"one-segment-tail", 0, true}} {
+		t.Run(k.name, func(t *testing.T) {
+			root := t.TempDir()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestJournalSegmentSkipQuiesced$", "-test.timeout=55s")
+			cmd.Env = append(os.Environ(), "V2_QUIESCED_CHILD="+root, fmt.Sprintf("V2_QUIESCED_SEGMENT=%d", k.segmentBytes), fmt.Sprintf("V2_QUIESCED_TAIL=%v", k.tail))
+			out, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr synchronizedBuffer
+			cmd.Stderr = &stderr
+			if err = cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer cmd.Process.Kill()
+			scan := bufio.NewScanner(out)
+			cut := false
+			for scan.Scan() {
+				if scan.Text() == "CUT" {
+					cut = true
+					break
+				}
+			}
+			if !cut {
+				_ = cmd.Wait()
+				t.Fatalf("no crash barrier: %s", stderr.String())
+			}
+			if err = cmd.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			_ = cmd.Wait()
+			want, _, _ := segmentSkipOpen(t, root, true, true)
+			got, skipped, replayed := segmentSkipOpen(t, root, false, false)
+			if got != want {
+				t.Fatalf("segment skip %x != journal rebuild %x (skipped %d, replayed %d)", got, want, skipped, replayed)
+			}
+			if k.tail != (replayed > 0) {
+				t.Fatalf("tail=%v but replayed %d segments (skipped %d)", k.tail, replayed, skipped)
+			}
+			t.Logf("skipped=%d replayed=%d", skipped, replayed)
+		})
+	}
+}
+
+// A sealed producer opens no catalog at restart, but its first new write must
+// recover the persisted IDs and reject changes to their immutable definitions.
+func TestJournalSegmentSkipLazyCatalog(t *testing.T) {
+	root := t.TempDir()
+	c := segmentSkipConfig()
+	c.fullReplay = true // Keep complete input for the rebuild oracle below.
+	s, err := Open(root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segmentSkipWrite(t, s, 3, nil)
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c.fullReplay = false
+	s, err = Open(root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := s.Core.Observe().CheckpointBytes; got != 0 {
+		t.Fatalf("sealed recovery rewrote %d checkpoint bytes", got)
+	}
+	for i, p := range s.Producers {
+		if p.catalog != nil {
+			t.Fatal("sealed producer opened its catalog")
+		}
+		// Preserve the resumed journal too: the final oracle rebuilds without core.
+		p.fullReplay = true
+		apps := restartApps(t, 8, 10)
+		for j := range apps {
+			a := &apps[j]
+			a.Name = fmt.Sprintf("parallel.%d.%d", i, j)
+			a.Policy, err = v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: partsformat.ID(a.Name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 120}, {Step: 10, Count: 120}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.Order = p.applyOrder + uint64(j) + 1
+		}
+		if err = p.AppendApplications(apps); err != nil {
+			t.Fatal(err)
+		}
+		if err = p.Drain(); err != nil {
+			t.Fatal(err)
+		}
+		if p.catalog == nil || p.catalog.Count() != 2 {
+			t.Fatal("first write changed catalog identities")
+		}
+		if _, err = p.RegisterApplication(apps[0].Name, []byte("changed")); err == nil {
+			t.Fatal("changed definition accepted after lazy open")
+		}
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	image := t.TempDir()
+	copyTree(t, root, image)
+	want, _, _ := segmentSkipOpen(t, image, true, true)
+	got, _, _ := segmentSkipOpen(t, image, false, false)
+	if got != want {
+		t.Fatalf("resumed write digest %x != journal rebuild %x", got, want)
+	}
+}
+
+func TestJournalSegmentEndTornTail(t *testing.T) {
+	// Header-only records deliberately omit a PDC4 payload: this path must not
+	// decode points that the core already owns.
+	record := append([]byte{}, applicationMagic...)
+	for _, n := range []uint64{3, 1, 1, 7, 3, 1, 2, 3, 0} {
+		record = binary.AppendUvarint(record, n)
+	}
+	record = binary.LittleEndian.AppendUint32(record, crc32.Checksum(record, applicationCRC))
+	framed := binary.LittleEndian.AppendUint32(nil, uint32(len(record)))
+	framed = append(framed, record...)
+	for _, tail := range [][]byte{nil, {1}, {10, 0, 0, 0, 1, 2}} {
+		for _, newest := range []bool{false, true} {
+			path := filepath.Join(t.TempDir(), "segment.pdc4")
+			if err := os.WriteFile(path, append(append([]byte{}, framed...), tail...), 0600); err != nil {
+				t.Fatal(err)
+			}
+			end, order, ok, err := segmentEnd(path, newest)
+			if len(tail) > 0 && !newest {
+				if err == nil {
+					t.Fatal("accepted torn older segment")
+				}
+				continue
+			}
+			if err != nil || !ok || end != 3 || order != 7 {
+				t.Fatalf("end=%d order=%d ok=%v err=%v", end, order, ok, err)
+			}
+			st, err := os.Stat(path)
+			if err != nil || st.Size() != int64(len(framed)) {
+				t.Fatal("newest torn tail not truncated")
+			}
+		}
+	}
+	path := filepath.Join(t.TempDir(), "bad.pdc4")
+	framed[len(framed)-1] ^= 1
+	if err := os.WriteFile(path, framed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := segmentEnd(path, true); err == nil {
+		t.Fatal("accepted corrupt final record")
 	}
 }

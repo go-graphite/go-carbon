@@ -289,6 +289,17 @@ func TestJournalRetireSingleSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, p := range s.Producers {
+		if p.RecoveryReplayedSegments != 0 || p.RecoverySkippedSegments != 1 {
+			t.Fatalf("sealed retained anchor: skipped=%d replayed=%d", p.RecoverySkippedSegments, p.RecoveryReplayedSegments)
+		}
+		if p.catalog != nil {
+			t.Fatal("sealed retained anchor opened its catalog")
+		}
+	}
+	if got := s.Core.Observe().CheckpointBytes; got != 0 {
+		t.Fatalf("sealed retained anchor rewrote %d checkpoint bytes", got)
+	}
 	if got := parallelReplayDigest(t, s); got != want {
 		t.Fatalf("single segment: %x != %x", got, want)
 	}
