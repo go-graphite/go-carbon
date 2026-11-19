@@ -13,7 +13,7 @@ import (
 
 func TestOpenedRequestsCancelAndReleasePins(t *testing.T) {
 	r, _ := New(1, 1<<28, 1<<20)
-	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory})
+	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: r.PublishPending})
 	if err != nil {
 		t.Fatal(err)
 	}

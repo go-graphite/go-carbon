@@ -100,23 +100,24 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 			for round := 0; round < 2; round++ {
 				var refs []rollupRankRef
 				stages := make([]rollupStage, 0, n)
+				var metrics []*rollupMetric
 				for _, m := range all {
 					if r.metrics[m.id] == m || rng.IntN(4) == 0 {
-						stages = append(stages, rollupStage{metric: m})
-						r.stageKey(&stages[len(stages)-1])
+						stages, metrics = append(stages, rollupStage{}), append(metrics, m)
+						r.stageKey(&stages[len(stages)-1], m)
 					}
 				}
 				for i := range stages {
-					refs = append(refs, rollupRankRef{key: stages[i].sortKey, rollupStage: &stages[i]})
+					refs = append(refs, rollupRankRef{key: stages[i].sortKey, stage: uint32(i)})
 				}
-				got, _ := sortRollupRanks(refs, nil, new([]int))
-				want := make([]*rollupStage, len(stages))
+				got, _ := sortRollupRanks(refs, nil, new([]int), metrics)
+				want := make([]uint32, len(stages))
 				for i := range stages {
-					want[i] = &stages[i]
+					want[i] = uint32(i)
 				}
-				slices.SortFunc(want, func(a, b *rollupStage) int { return compareRollupMetrics(a.metric, b.metric) })
+				slices.SortFunc(want, func(a, b uint32) int { return compareRollupMetrics(metrics[a], metrics[b]) })
 				for i := range got {
-					if got[i].rollupStage != want[i] {
+					if got[i].stage != want[i] {
 						t.Fatalf("round %d: canonical order differs at %d of %d", round, i, len(got))
 					}
 				}
@@ -134,6 +135,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 // Names are born staggered, so unranked installed names linger below the
 // renumber threshold across seals.
 func TestRollupPlanRankDifferential(t *testing.T) {
+	t.Parallel()
 	for _, workers := range []int{1, 3} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(workers), 7))

@@ -20,7 +20,7 @@ func TestDiscoveryParallelOwners(t *testing.T) {
 	r.Identities = &v2core.PolicyCatalog{}
 	cfg := testConfig()
 	cfg.Shards, cfg.Owners = 4, 4
-	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory})
+	e, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: r.Identities, PublishPending: r.PublishPending})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)

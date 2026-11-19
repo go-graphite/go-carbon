@@ -496,15 +496,6 @@ func consume(q *queue, db *pebble.DB, dir string, s int, cat catalogue, maxRows 
 	flush()
 	return o
 }
-func run(root, out string, shards, passes, maxRows int) error {
-	return runReaders(root, out, shards, passes, maxRows, 0)
-}
-func runReaders(root, out string, shards, passes, maxRows, readers int) error {
-	return runConfigured(root, out, shards, passes, maxRows, readers, "")
-}
-func runConfigured(root, out string, shards, passes, maxRows, readers int, stepsOverride string) error {
-	return runLayout(root, out, shards, passes, maxRows, readers, stepsOverride, false)
-}
 func runLayout(root, out string, shards, passes, maxRows, readers int, stepsOverride string, dbPerOwner bool) error {
 	if maxRows < 1 || passes < 1 || readers < 0 {
 		return fmt.Errorf("positive max-rows/passes and nonnegative readers required")

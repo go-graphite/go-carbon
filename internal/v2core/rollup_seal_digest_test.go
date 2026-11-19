@@ -97,6 +97,7 @@ var sealPlanGolden = map[string]string{
 }
 
 func TestSealPlanDifferentialDigest(t *testing.T) {
+	t.Parallel()
 	configs := []sealrollup.Config{
 		{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 86400}}},
 		{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 10, Count: 8640}}},

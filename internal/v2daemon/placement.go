@@ -67,7 +67,7 @@ func (p *Producer) AppendApplicationsPlaced(stamp v2placement.Stamp, apps []Appl
 			if app.Registered.producer != p || app.Name != "" || len(app.Policy) != 0 {
 				return fmt.Errorf("invalid registered application")
 			}
-			name = app.Registered.name
+			name = app.Registered.name()
 		}
 		if e = p.placement.CheckNames([]string{name}); e != nil {
 			return e
