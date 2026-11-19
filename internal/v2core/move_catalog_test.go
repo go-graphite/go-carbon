@@ -196,7 +196,7 @@ func TestMoveCatalogCopiedPrecedenceAndRepair(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("metrics %d", count)
 	}
-	if _, e := recoverCoreRollups(db); e == nil || !strings.Contains(e.Error(), "adoption") {
+	if _, e := recoverCoreRollups(db, ""); e == nil || !strings.Contains(e.Error(), "adoption") {
 		t.Fatalf("unadopted writable recovery allowed: %v", e)
 	}
 }

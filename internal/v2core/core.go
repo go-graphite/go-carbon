@@ -522,7 +522,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
 					return err
 				}
-				r, err := recoverCoreRollups(db, identities)
+				r, err := recoverCoreRollups(db, dir, identities)
 				if err != nil {
 					return err
 				}
@@ -1985,7 +1985,12 @@ func (e *coreEngine) close() error {
 		}
 	}
 	for _, o := range e.owners {
-		err = errors.Join(err, <-o.done)
+		ownerErr := <-o.done
+		if ownerErr == nil && o.rollups != nil && o.rollups.db != nil {
+			// Derived state: a failed write only costs the next open a scan.
+			ownerErr = o.rollups.writeCheckpoint(o.dir)
+		}
+		err = errors.Join(err, ownerErr)
 		o.pub.clear()
 		err = errors.Join(err, o.db.Close())
 	}

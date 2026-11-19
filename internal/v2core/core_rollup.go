@@ -125,6 +125,9 @@ type coreRollups struct {
 	denseSlots      []uint32
 	denseSlotsSpare []uint32
 	unrankedSlots   []uint32
+	// fromCheckpoint reports that open loaded this state from the owner's
+	// checkpoint instead of scanning parts.
+	fromCheckpoint bool
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -652,11 +655,17 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 	return nil
 }
 
-func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups, error) {
+// recoverCoreRollups loads the owner's checkpoint from dir when it is still
+// valid, and otherwise rebuilds every name from the rollup keys in parts.
+func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (*coreRollups, error) {
 	r := newCoreRollups()
 	r.db = db
 	if len(catalogs) > 0 {
 		r.identities = catalogs[0]
+	}
+	checkpoint, err := takeCheckpoint(db, dir)
+	if err != nil {
+		return nil, err
 	}
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
@@ -672,8 +681,21 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 				return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
 			}
 		}
+	} else if checkpoint != nil {
+		stamp, closer, err := snapshot.Get(coreMetaKey)
+		if err == nil {
+			loaded, loadErr := loadCheckpoint(db, checkpoint, stamp, r.identities)
+			if err = closer.Close(); err != nil {
+				return nil, err
+			}
+			if loadErr == nil {
+				return loaded, nil
+			}
+		} else if !errors.Is(err, pebble.ErrNotFound) {
+			return nil, err
+		}
 	}
-	err := scanRollups(snapshot, r.identities, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
+	err = scanRollups(snapshot, r.identities, func(policy RollupPolicy, meta RollupMetadata, records []sealrollup.Record) error {
 		m, err := r.metric(meta.ID, meta.Policy)
 		if err != nil {
 			return err

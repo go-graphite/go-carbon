@@ -1,0 +1,203 @@
+package v2core
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+)
+
+// rollupStateDigest lists every installed name's identity, committed scalars,
+// residency and closure membership, in ID order.
+func rollupStateDigest(r *coreRollups) string {
+	ids := make([]uint64, 0, len(r.metrics))
+	for id := range r.metrics {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	var b strings.Builder
+	for _, id := range ids {
+		m := r.metrics[id]
+		fmt.Fprintf(&b, "%d %s %+v %v closable=%v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], m.slots.AppendResident(nil), r.closable[id] != nil, r.names[m.policy.Name] == id)
+	}
+	fmt.Fprintf(&b, "names=%d metrics=%d\n", len(r.names), len(r.metrics))
+	return b.String()
+}
+
+func rollupScanDigest(t *testing.T, e *Engine) string {
+	t.Helper()
+	snap := e.DBs()[0].NewSnapshot()
+	defer snap.Close()
+	var lines []string
+	if err := ScanRollups(snap, func(p RollupPolicy, m RollupMetadata, records []sealrollup.Record) error {
+		lines = append(lines, fmt.Sprintf("%s %+v %+v", p.Name, m, records))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "\n")
+}
+
+// checkpointFixture writes rounds of points for single- and multi-archive
+// names, sealing after each round, from order base+1.
+func checkpointFixture(t *testing.T, e *Engine, policies [][]byte, base, rounds int) {
+	t.Helper()
+	clock := int64(1794700800)
+	for round := range rounds {
+		order := uint64(base + round + 1)
+		now := clock + int64(base+round)*7
+		var batches []Batch
+		for i, encoded := range policies {
+			id := uint64(i + 1)
+			if (base+round+i)%5 == 4 {
+				continue // idle rounds, so names diverge in frontier and residency
+			}
+			batches = append(batches, Batch{ID: id, Order: order, Clock: now, Policy: encoded, Points: []Row{
+				{ID: id, Time: now - int64(i%3)*61, Bits: math.Float64bits(float64(round*31 + i)), Seq: order*100 + id},
+			}})
+		}
+		if err := e.AppendBatches(0, batches, order, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func copyTree(t *testing.T, src string) string {
+	t.Helper()
+	dst := filepath.Join(t.TempDir(), "copy")
+	if out, err := exec.Command("cp", "-R", src, dst).CombinedOutput(); err != nil {
+		t.Fatalf("cp: %v %s", err, out)
+	}
+	return dst
+}
+
+// TestRollupCheckpointMatchesScan: a store reopened from its checkpoint holds
+// the same per-name state as one rebuilt by scanRollups, keeps producing the
+// same parts, and every damaged or stale checkpoint falls back to the scan.
+func TestRollupCheckpointMatchesScan(t *testing.T) {
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 1, 1, true, 1024
+	var policies [][]byte
+	for i, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:30d,1h:1y,1d:10y", "10s:6h,5m:7d,1h:1y", "1m:14d,30m:2y"} {
+		for j := range 4 {
+			_, encoded := rollupTestPolicy(t, fmt.Sprintf("ckpt.m%d.n%d", i, j), def, sealrollup.Method(1+(i+j)%5), float32(j%2)/2)
+			policies = append(policies, encoded)
+		}
+	}
+	root := t.TempDir()
+	e, err := Open(root, cfg, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointFixture(t, e, policies, 0, 23)
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	owner := filepath.Join(root, "owner-000")
+	file := filepath.Join(owner, rollupCheckpointFile)
+	if _, err = os.Stat(file); err != nil {
+		t.Fatalf("no checkpoint after close: %v", err)
+	}
+	reopen := func(dir string, wantCheckpoint bool) (*Engine, string) {
+		t.Helper()
+		e, err := Open(dir, cfg, Hooks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := e.owners[0]
+		if o.rollups.fromCheckpoint != wantCheckpoint {
+			t.Fatalf("%s: fromCheckpoint=%v want %v", dir, o.rollups.fromCheckpoint, wantCheckpoint)
+		}
+		// Open consumed the checkpoint: a kill from here on must scan.
+		if _, closer, err := o.db.Get(rollupCheckpointKey); err == nil {
+			_ = closer.Close()
+			t.Fatal("checkpoint token survived open")
+		} else if !errors.Is(err, pebble.ErrNotFound) {
+			t.Fatal(err)
+		}
+		return e, rollupStateDigest(o.rollups)
+	}
+	damage := map[string]func(string){
+		"missing":   func(dir string) { _ = os.Remove(filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
+		"flipped":   func(dir string) { flipByte(t, filepath.Join(dir, "owner-000", rollupCheckpointFile), 0.6) },
+		"truncated": func(dir string) { truncateHalf(t, filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
+		// A kill between rename and token: the file is complete, the token absent.
+		"no-token": func(dir string) { dropToken(t, filepath.Join(dir, "owner-000")) },
+	}
+	scanDir := copyTree(t, root)
+	damage["missing"](scanDir)
+	ckptEngine, ckptState := reopen(copyTree(t, root), true)
+	scanEngine, scanState := reopen(scanDir, false)
+	if ckptState != scanState {
+		t.Fatalf("checkpoint state differs from scan:\n--- checkpoint\n%s\n--- scan\n%s", ckptState, scanState)
+	}
+	for name, hurt := range damage {
+		if name == "missing" {
+			continue
+		}
+		dir := copyTree(t, root)
+		hurt(dir)
+		e, state := reopen(dir, false)
+		if state != scanState {
+			t.Fatalf("%s: fallback state differs from scan", name)
+		}
+		if err = e.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The loaded state keeps sealing exactly like the scanned one.
+	checkpointFixture(t, ckptEngine, policies, 23, 9)
+	checkpointFixture(t, scanEngine, policies, 23, 9)
+	if a, b := rollupStateDigest(ckptEngine.owners[0].rollups), rollupStateDigest(scanEngine.owners[0].rollups); a != b {
+		t.Fatalf("state after further seals differs:\n%s\n---\n%s", a, b)
+	}
+	if a, b := rollupScanDigest(t, ckptEngine), rollupScanDigest(t, scanEngine); a != b {
+		t.Fatalf("parts after further seals differ:\n%s\n---\n%s", a, b)
+	}
+	if err = errors.Join(ckptEngine.Close(), scanEngine.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func flipByte(t *testing.T, path string, at float64) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[int(float64(len(b))*at)] ^= 0x20
+	if err = os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func truncateHalf(t *testing.T, path string) {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Truncate(path, st.Size()/2); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func dropToken(t *testing.T, owner string) {
+	t.Helper()
+	db, err := pebble.Open(owner, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = errors.Join(db.Delete(rollupCheckpointKey, pebble.Sync), db.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
