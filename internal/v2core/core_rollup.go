@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
-	"math"
 	"slices"
 	"time"
 
@@ -444,6 +444,7 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 		return visit(p, m, records)
 	})
 }
+
 // rollupScanEntry folds one name's rollup rows as recovery does: the newest
 // metadata by after(), and per physical slot the newest record by newerOrigin.
 type rollupScanEntry struct {
