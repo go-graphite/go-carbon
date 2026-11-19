@@ -432,6 +432,7 @@ func (r *coreRollups) commitStages() {
 					m.slots = nil
 				}
 				if !s.fresh { // a fresh metric gets its slot, and these scalars, at install
+					s.refile = r.refile(m, r.meta[s.slot], s.next)
 					r.meta[s.slot] = s.next
 				}
 			}

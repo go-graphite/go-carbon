@@ -67,19 +67,21 @@ func unrankAll(r *coreRollups) {
 	var ms []*rollupMetric
 	var ids []uint64
 	var meta []metricMetadata
+	var ttl, expAt []int64
+	moved := make([]uint32, len(r.ids)) // dead slots drop, so the calendar moves
 	for s, id := range r.ids {
+		moved[s] = gone
 		if id == deadSlot {
 			continue
 		}
-		m := r.unranked
-		if s < len(r.dense) {
-			ms = append(ms, r.dense[s])
-		} else {
-			ms = append(ms, m[s-len(r.dense)])
-		}
+		moved[s] = uint32(len(ids))
+		ms = append(ms, r.slotMetric(uint32(s)))
 		ids, meta = append(ids, id), append(meta, r.meta[s])
+		ttl, expAt = append(ttl, r.ttl[s]), append(expAt, r.expAt[s])
 	}
-	r.dense, r.unranked, r.ids, r.meta = r.dense[:0], ms, ids, meta
+	r.calendar.move(moved)
+	r.expiries.move(moved)
+	r.dense, r.unranked, r.ids, r.meta, r.ttl, r.expAt = r.dense[:0], ms, ids, meta, ttl, expAt
 }
 
 // TestRollupRankRenumberBoundary drives names added, expired, revived and
@@ -156,6 +158,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
 					return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > 25
 				}
+				r.setExpiryTTL(expiryWindow(26 * time.Second))
 				return r
 			}
 			ranked, ref := newPlanner(), newPlanner()
