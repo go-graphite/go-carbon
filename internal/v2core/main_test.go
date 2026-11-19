@@ -192,7 +192,7 @@ func TestPrepareAndRun(t *testing.T) {
 	if e != nil || c.Points != 10 {
 		t.Fatalf("%+v %v", c, e)
 	}
-	if e = runReaders(fixture, filepath.Join(dir, "out"), 16, 1, 64, 4); e != nil {
+	if e = runLayout(fixture, filepath.Join(dir, "out"), 16, 1, 64, 4, "", false); e != nil {
 		t.Fatal(e)
 	}
 	if e = runLayout(fixture, filepath.Join(dir, "out-private"), 16, 1, 64, 4, "1", true); e != nil {
@@ -224,14 +224,18 @@ func TestPrepareAndRun(t *testing.T) {
 
 }
 func TestQueueOwnership(t *testing.T) {
+	t.Parallel()
+	// Order across many wraps of the two-slot ring; the property does not
+	// depend on the count, and each handoff costs a scheduler sleep.
+	const n = 1000
 	q := new(queue)
 	go func() {
-		for i := 0; i < 10000; i++ {
+		for i := 0; i < n; i++ {
 			q.push(&packet{Rows: []row{{Seq: uint64(i)}}})
 		}
 		q.push(&packet{End: true})
 	}()
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < n; i++ {
 		p := q.pop()
 		if len(p.Rows) != 1 || p.Rows[0].Seq != uint64(i) {
 			t.Fatal("order")

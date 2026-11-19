@@ -30,7 +30,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
-	stages := r.stages[:0]
+	stages, metrics := r.stages[:0], r.stageMetrics[:0]
 	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
 	}
@@ -39,6 +39,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	stages = slices.Grow(stages, len(in.Batches))
 	r.stages = stages
 	batchPositions := make([]int, len(in.Batches))
+	batchCounts := make([]int, 0, len(in.Batches))
 	for bi, b := range in.Batches {
 		i, ok := positions[b.ID]
 		if !ok {
@@ -72,18 +73,19 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 				slot = r.slotOf(b.ID, m)
 				meta = r.meta[slot]
 			}
-			stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadataScalars(meta), fresh: fresh})
+			stages, metrics = append(stages, rollupStage{next: meta, slot: slot, fresh: fresh}), append(metrics, m)
+			batchCounts = append(batchCounts, 0)
 			i = len(stages) - 1
 			stages[i].next.Expired = false
-			r.stageKey(&stages[i])
+			r.stageKey(&stages[i], m)
 			positions[b.ID] = i
 		}
 		batchPositions[bi] = i
-		s := &stages[i]
-		if (b.Registered == nil || b.Registered != s.metric.PolicyIdentity) && !s.metric.definitionEqual(b.Policy) {
+		m := metrics[i]
+		if (b.Registered == nil || b.Registered != m.PolicyIdentity) && !m.definitionEqual(b.Policy) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
-		stages[i].batchCount++
+		batchCounts[i]++
 	}
 	// One allocation per sealed part for samples and application descriptors.
 	// Every original boundary/order/clock remains distinct.
@@ -97,9 +99,8 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	batchStorage := r.batches
 	offset := 0
 	for i := range stages {
-		n := stages[i].batchCount
-		stages[i].batches = batchStorage[offset : offset : offset+n]
-		offset += n
+		stages[i].batch = uint32(offset)
+		offset += batchCounts[i]
 	}
 	offset = 0
 	for bi, b := range in.Batches {
@@ -109,7 +110,8 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			ps[j] = sealrollup.Sample{Time: p.Time, Bits: p.Bits, Sequence: p.Seq}
 		}
 		offset += len(b.Points)
-		s.batches = append(s.batches, sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps})
+		batchStorage[s.batch+s.batches] = sealrollup.Batch{Order: b.Order, Now: b.Clock, Points: ps}
+		s.batches++
 	}
 	named := len(stages)
 	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
@@ -124,17 +126,16 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			}
 			slot := r.slotOf(id, m)
 			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
-				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
-				r.stageKey(&stages[len(stages)-1])
+				stages, metrics = append(stages, rollupStage{next: meta, slot: slot}), append(metrics, m)
+				r.stageKey(&stages[len(stages)-1], m)
 			}
 		}
 	}
 	// Expiry callbacks retain their serial owner contract. Idle plans do not
 	// advance order, so the persisted reset frontier is already known here.
 	for i := range stages {
-		s := &stages[i]
-		m := s.metric
-		if r.expire != nil && len(s.batches) == 0 && r.expire(m.rollupPolicy(), s.next, now) {
+		s, m := &stages[i], metrics[i]
+		if r.expire != nil && s.batches == 0 && r.expire(m.rollupPolicy(), m.PolicyIdentity.metadata(s.next), now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = max(2, s.next.Version)
@@ -152,23 +153,14 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			return coreSealPlan{}, err
 		}
 	}
-	out, err := r.planStages(stages, part)
+	r.stages, r.stageMetrics = stages, metrics
+	out, err := r.planStages(part)
 	if err != nil {
 		return coreSealPlan{}, err
 	}
-	r.stages = stages
 	out.Names = named
 	out.Abort = r.release
-	out.Commit = func() {
-		defer r.release()
-		r.commitStages()
-		for _, s := range stages {
-			m := s.metric
-			if s.fresh {
-				r.install(m.id, m, compactMetadata(s.next))
-			}
-		}
-	}
+	out.Commit = r.commitPlan
 	returned = true
 	return out, nil
 }

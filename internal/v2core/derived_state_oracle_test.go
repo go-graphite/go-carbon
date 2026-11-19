@@ -23,6 +23,9 @@ import (
 // rules only, then compares that with the envelope the planner wrote. Fields
 // that must stay carried are reported with their first counterexample.
 func TestDerivedStateOracle(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	type tally struct {
 		Checked, ExtraParts                                 int

@@ -29,7 +29,7 @@ func TestV2SparseSealsLiveDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := v2core.Open(t.TempDir(), v2core.Config{Rollups: true, AppendParts: true, JournalIdentity: "live-discovery", Shards: owners, Owners: owners, Producers: 1, MaxRows: 256, PartitionSeconds: 86400, RawCodec: "run1"}, v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory})
+	e, err := v2core.Open(t.TempDir(), v2core.Config{Rollups: true, AppendParts: true, JournalIdentity: "live-discovery", Shards: owners, Owners: owners, Producers: 1, MaxRows: 256, PartitionSeconds: 86400, RawCodec: "run1"}, v2core.Hooks{PublishPending: r.PublishPending})
 	if err != nil {
 		r.Close()
 		t.Fatal(err)

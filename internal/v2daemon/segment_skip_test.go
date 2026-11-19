@@ -189,6 +189,12 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = cmd.Wait()
+			// Each owner's first seal writes its rollup checkpoint, and later
+			// seals fall inside the checkpoint spacing: the skip open loads a
+			// checkpoint written before the cut and folds the newer parts.
+			if ckpts, _ := filepath.Glob(filepath.Join(root, "placement-group-*", "core", "owner-*", "rollup-state.ckpt")); len(ckpts) == 0 {
+				t.Fatal("no rollup checkpoint written before the cut")
+			}
 			want, _, _ := segmentSkipOpen(t, root, true, true)
 			full, fullSkipped, _ := segmentSkipOpen(t, root, true, false)
 			got, skipped, replayed := segmentSkipOpen(t, root, false, false)

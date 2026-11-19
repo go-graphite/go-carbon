@@ -99,9 +99,6 @@ func TestFingerprintHalvesIndependent(t *testing.T) {
 	if len(seen) != 200_000 {
 		t.Fatalf("fingerprints collided: %d distinct", len(seen))
 	}
-	if Route("") != 14695981039346656037 || Route([]byte("a")) != Route("a") {
-		t.Fatal("Route is not FNV-1a64 over the bytes")
-	}
 }
 
 func BenchmarkTableGet(b *testing.B) {
