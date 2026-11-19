@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -377,7 +378,10 @@ func (app *App) startV2() error {
 		return receiver.OnOwner(index, run)
 	})
 	v.moves.SetNamesVisible(updates.changed)
-	app.Carbonserver.SetV2MoveAdmin(v.moves)
+	admin := http.NewServeMux()
+	admin.Handle("/admin/v2/move/", v.moves)
+	admin.HandleFunc("/admin/v2/merge", v.forceMerge)
+	app.Carbonserver.SetV2Admin(admin)
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
 	}
@@ -533,3 +537,18 @@ func (v *v2Runtime) close() {
 // v2PublishedCatalog exposes only the latest immutable publication to HTTP.
 // Its single background owner performs refresh and quota fencing.
 type v2PublishedCatalog struct{ v2index.Catalog }
+
+// forceMerge (POST /admin/v2/merge) merges every owner's parts down to one per
+// group and time partition and replies {"merges": n}. Repeat until n is 0.
+func (v *v2Runtime) forceMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "merge requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+	n, err := v.store.Core.ForceMerge()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintf(w, "{\"merges\":%d}\n", n)
+}

@@ -88,7 +88,7 @@ func mergeDrain(t *testing.T, o *coreOwner) int {
 	t.Helper()
 	count := 0
 	for {
-		changed, err := o.mergeSealedParts(nil)
+		changed, err := o.mergeSealedParts(nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +163,7 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 				_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 			}
 		})
-		_, err := e.owners[0].mergeSealedParts(nil)
+		_, err := e.owners[0].mergeSealedParts(nil, false)
 		t.Fatalf("crash boundary missed: %v", err)
 	}
 	for _, phase := range []string{"merge-written", "merge-retained", "merge-before-publish", "merge-published"} {
@@ -229,7 +229,7 @@ func TestSealedMergeMoveDuringWrite(t *testing.T) {
 	}
 	o := e.owners[0]
 	done := make(chan error, 1)
-	go func() { _, err := o.mergeSealedParts(nil); done <- err }()
+	go func() { _, err := o.mergeSealedParts(nil, false); done <- err }()
 	select {
 	case <-written:
 	case <-time.After(5 * time.Second):
@@ -488,5 +488,37 @@ func TestSealedMergeDeferredUntilResume(t *testing.T) {
 	}
 	if err := held2.close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ForceMerge takes every live part of the scope to one, below the size-tier
+// fan-in, and keeps the exact records.
+func TestForceMergeDifferential(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e := mergeFixture(t, t.TempDir(), nil)
+	defer e.close()
+	for order := uint64(1); order <= 21; order++ {
+		mergeAppend(t, e, order)
+	}
+	o := e.owners[0]
+	pin := o.db.NewSnapshot()
+	want := mergeRead(t, pin)
+	_ = pin.Close()
+	tiered := mergeDrain(t, o)
+	before := mergeCount(o)
+	if before < 2 {
+		t.Fatalf("fixture leaves %d parts after %d tier merges", before, tiered)
+	}
+	n, err := e.ForceMerge()
+	if err != nil || n == 0 || mergeCount(o) != 1 {
+		t.Fatalf("force merge: %d merges, %d -> %d parts, %v", n, before, mergeCount(o), err)
+	}
+	s := o.db.NewSnapshot()
+	defer s.Close()
+	if got := mergeRead(t, s); !reflect.DeepEqual(got, want) {
+		t.Fatalf("force merge changed exact records\ngot=%+v\nwant=%+v", got, want)
+	}
+	if n, err = e.ForceMerge(); err != nil || n != 0 {
+		t.Fatalf("second pass: %d merges, %v", n, err)
 	}
 }

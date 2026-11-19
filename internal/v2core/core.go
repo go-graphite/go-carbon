@@ -226,6 +226,7 @@ type coreOwner struct {
 	gc             *sealedPartGC
 	gcDirty        atomic.Bool
 	mergeStop      <-chan struct{}
+	mergeMu        sync.Mutex // one merge in flight per owner (background or ForceMerge)
 	readGeneration uint64 // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
