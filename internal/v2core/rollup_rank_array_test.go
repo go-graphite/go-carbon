@@ -67,18 +67,17 @@ func unrankAll(r *coreRollups) {
 	var ms []*rollupMetric
 	var ids []uint64
 	var meta []metricMetadata
+	moved := make([]uint32, len(r.ids)) // dead slots drop, so the calendar moves
 	for s, id := range r.ids {
+		moved[s] = gone
 		if id == deadSlot {
 			continue
 		}
-		m := r.unranked
-		if s < len(r.dense) {
-			ms = append(ms, r.dense[s])
-		} else {
-			ms = append(ms, m[s-len(r.dense)])
-		}
+		moved[s] = uint32(len(ids))
+		ms = append(ms, r.slotMetric(uint32(s)))
 		ids, meta = append(ids, id), append(meta, r.meta[s])
 	}
+	r.moveCalendar(moved)
 	r.dense, r.unranked, r.ids, r.meta = r.dense[:0], ms, ids, meta
 }
 
