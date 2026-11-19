@@ -14,7 +14,8 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// forEachPartKV calls fn with every key and value of a part file in key order.
+// forEachPartKV calls fn with every logical key and value of a part file in
+// key order: a folded envelope follows its run at its own key.
 func forEachPartKV(t *testing.T, path string, fn func(key, value []byte)) {
 	t.Helper()
 	f, err := os.Open(path)
@@ -39,7 +40,7 @@ func forEachPartKV(t *testing.T, path string, fn func(key, value []byte)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &tableCursor{it: it}
+	c := newHeaderCursor(&tableCursor{it: it}, nil)
 	defer c.Close()
 	for ok := c.First(); ok; ok = c.Next() {
 		fn(c.Key(), c.Value())
@@ -50,11 +51,15 @@ func forEachPartKV(t *testing.T, path string, fn func(key, value []byte)) {
 }
 
 // writeDecodedPart writes a merged part's content independent of its run
-// layout: every slot as its singleton key and record, every envelope as
-// stored, and the descriptor without file bytes, digest or KV count.
+// layout and envelope placement: every slot as its singleton key and record,
+// every envelope at its own key, and the descriptor without file bytes, digest
+// or KV count, with its logical last key (a folded part's physical last key is
+// its last run, before that run's envelope).
 func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descriptor) {
 	t.Helper()
+	var last []byte
 	forEachPartKV(t, path, func(key, value []byte) {
+		last = append(last[:0], key...)
 		k, err := v2part.Decode(key)
 		if err != nil {
 			t.Fatal(err)
@@ -76,7 +81,7 @@ func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descripto
 			_, _ = fmt.Fprintf(w, "%x=%x\n", enc, sealrollup.EncodeRecord(r))
 		}
 	})
-	d.Bytes, d.SHA256, d.Coverage.Records = 0, v2part.Digest{}, 0
+	d.Bytes, d.SHA256, d.Coverage.Records, d.LastKey = 0, v2part.Digest{}, 0, last
 	_, _ = fmt.Fprintf(w, "%+v\n", d)
 }
 

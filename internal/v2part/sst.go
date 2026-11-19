@@ -332,7 +332,7 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 			return e
 		}
 		if visit != nil {
-			if e = visit(k, data); e != nil {
+			if e = visitLogical(k, data, visit); e != nil {
 				return e
 			}
 		}
@@ -350,4 +350,21 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 		return errors.New("part vshard inventory mismatch")
 	}
 	return nil
+}
+
+// visitLogical visits a record as the logical stream: a run with a folded
+// envelope is its run, then the envelope at the metric's envelope key.
+// Descriptor coverage still counts physical records.
+func visitLogical(k Key, data []byte, visit func(Key, []byte) error) error {
+	if k.Archive == MetadataArchive {
+		return visit(k, data)
+	}
+	envelope, run, err := SplitHeader(data)
+	if err == nil {
+		err = visit(k, run)
+	}
+	if err == nil && envelope != nil {
+		err = visit(EnvelopeKey(k), envelope)
+	}
+	return err
 }
