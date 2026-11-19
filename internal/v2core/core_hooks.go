@@ -95,7 +95,7 @@ type coreHooks struct {
 	// seals and the maintenance pass ask Expire only for names overdue by
 	// their window instead of visiting every name.
 	ExpiryTTL func(RollupPolicy, time.Time) (time.Duration, time.Time)
-	Now    func() time.Time
+	Now       func() time.Time
 
 	// Stage is an optional fault-injection observer for offline recovery tests.
 	// It runs on owner goroutines; callers must serialize their own observer.

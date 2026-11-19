@@ -178,7 +178,9 @@ func BenchmarkExpirySelect(b *testing.B) {
 			}
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(names), "ns/name")
 		})
-		r.setExpiryTTL(func(p RollupPolicy, now time.Time) (time.Duration, time.Time) { return ttl(string(p.Name), now), time.Time{} })
+		r.setExpiryTTL(func(p RollupPolicy, now time.Time) (time.Duration, time.Time) {
+			return ttl(string(p.Name), now), time.Time{}
+		})
 		b.Run("calendar/"+strconv.Itoa(names), func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {

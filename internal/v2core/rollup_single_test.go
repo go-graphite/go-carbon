@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,12 @@ type singleArchiveImage map[string]struct {
 // runMixedIdleStore seals single- and multi-archive names, reopens, then runs
 // one idle closure seal. A non-nil expire forces the full-metric idle scan.
 func runMixedIdleStore(t *testing.T, expire func(RollupPolicy, RollupMetadata, time.Time) bool) (singleArchiveImage, []int) {
+	return runMixedIdleStoreHooks(t, Hooks{Expire: expire}, nil)
+}
+
+// runMixedIdleStoreHooks is runMixedIdleStore with the expiry hooks given;
+// arm runs just before the idle seal.
+func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiveImage, []int) {
 	t.Helper()
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	cfg := coreTestConfig()
@@ -27,7 +34,9 @@ func runMixedIdleStore(t *testing.T, expire func(RollupPolicy, RollupMetadata, t
 	root := t.TempDir()
 	now := int64(1794700800)
 	open := func() *Engine {
-		e, err := Open(root, cfg, Hooks{Expire: expire, Now: func() time.Time { return time.Unix(now, 0) }})
+		h := hooks
+		h.Now = func() time.Time { return time.Unix(now, 0) }
+		e, err := Open(root, cfg, h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -76,6 +85,9 @@ func runMixedIdleStore(t *testing.T, expire func(RollupPolicy, RollupMetadata, t
 	e = open()
 	defer func() { _ = e.Close() }()
 	closable() // recovery files every open coarse window
+	if arm != nil {
+		arm()
+	}
 	now += 3600
 	if err := e.AppendBatches(0, nil, uint64(len(batches)), true); err != nil {
 		t.Fatal(err)
@@ -112,6 +124,38 @@ func TestSingleArchiveIdleIndexDifferential(t *testing.T) {
 	for name, m := range indexed {
 		if m.Meta.ClosedThrough == 0 && len(m.Records) == 0 {
 			t.Fatalf("%s lost data", name)
+		}
+	}
+}
+
+// Through real seals, a reopen and a refused (fenced) expiry, the expiry
+// calendar yields the same records and metadata as the full expiry walk.
+func TestExpiryCalendarEngineDifferential(t *testing.T) {
+	ttl := func(p RollupPolicy, _ time.Time) (time.Duration, time.Time) {
+		if n := string(p.Name); n == "mixed.1" || n == "mixed.3" {
+			return time.Hour, time.Time{}
+		}
+		return 0, time.Time{}
+	}
+	run := func(withTTL bool) singleArchiveImage {
+		var armed atomic.Bool
+		h := Hooks{Expire: func(p RollupPolicy, m RollupMetadata, now time.Time) bool {
+			d, _ := ttl(p, now)
+			return armed.Load() && m.LastUpdate != 0 && d > 0 && now.Sub(time.Unix(0, m.LastUpdate)) >= d
+		}}
+		if withTTL {
+			h.ExpiryTTL = ttl
+		}
+		image, _ := runMixedIdleStoreHooks(t, h, func() { armed.Store(true) })
+		return image
+	}
+	walk, calendar := run(false), run(true)
+	if !reflect.DeepEqual(walk, calendar) {
+		t.Fatalf("walk %+v\ncalendar %+v", walk, calendar)
+	}
+	for name, m := range calendar {
+		if want := name == "mixed.1" || name == "mixed.3"; m.Meta.Expired != want {
+			t.Fatalf("%s expired %v, want %v", name, m.Meta.Expired, want)
 		}
 	}
 }
