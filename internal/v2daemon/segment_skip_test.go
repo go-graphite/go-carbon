@@ -151,7 +151,10 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 		})
 		t.Fatal("missed cut")
 	}
-	cases := []struct{ cut, commits int }{{11, 0}, {23, 0}, {99, 23}}
+	// cut10 dies two rounds after the round-8 seal, so every owner's frontier
+	// sits two data segments below the journal end: skipping one segment too
+	// many drops round 9's points, which only the journal still holds.
+	cases := []struct{ cut, commits int }{{10, 0}, {11, 0}, {23, 0}, {99, 23}}
 	for _, k := range cases {
 		t.Run(fmt.Sprintf("cut%d-commit%d", k.cut, k.commits), func(t *testing.T) {
 			t.Parallel()
@@ -198,7 +201,7 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 			if got != want {
 				t.Fatalf("segment skip %x != journal rebuild %x (skipped %d)", got, want, skipped)
 			}
-			if k.cut >= 11 && skipped == 0 {
+			if k.cut >= 10 && skipped == 0 {
 				t.Fatalf("no segment skipped (replayed %d)", replayed)
 			}
 			t.Logf("skipped=%d replayed=%d sha256=%x", skipped, replayed, got)
