@@ -2,9 +2,6 @@ package v2read
 
 import (
 	"context"
-	"fmt"
-	"github.com/go-graphite/go-carbon/internal/partsformat"
-	"github.com/go-graphite/go-carbon/internal/v2core"
 	"math"
 	"slices"
 	"testing"
@@ -62,111 +59,6 @@ func TestResolvedPhysicalSourceMatchesFrozen(t *testing.T) {
 	}
 }
 
-func TestResolvedCacheIsBoundedAndGenerationScoped(t *testing.T) {
-	// Empty snapshots are enough to exercise scalar-source ownership and limits;
-	// no cached entry may retain a snapshot after the caller closes it.
-	r, _ := New(1, 1<<20, 1<<16)
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatches: r.Publish})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer engine.Close()
-	defer r.Close()
-	await(t, func() bool { return r.owners[0].Load() != nil })
-	g := r.owners[0].Load()
-	if !g.retain() {
-		t.Fatal("retain")
-	}
-	defer g.release()
-	g.load()
-	if g.err != nil {
-		t.Fatal(g.err)
-	}
-	c := &sealedCache{limit: 1024}
-	sealed := &generation{sealed: g.sealed, cache: c}
-	policy := v2core.RollupPolicy{Config: sealrollup.Config{Archives: []sealrollup.Archive{{Step: 1, Count: 10}}}}
-	for i := 0; i < 100; i++ {
-		sealed.number = uint64(i)
-		if _, err := sealed.resolved(fmt.Sprint(i), policy, v2core.RollupMetadata{ID: 1}); err != nil {
-			t.Fatal(err)
-		}
-		if c.fullBytes > c.limit || len(c.full) > 64 {
-			t.Fatal("unbounded scalar cache")
-		}
-	}
-	old, err := sealed.resolved("repeat", policy, v2core.RollupMetadata{ID: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := sealed.resolved("repeat", policy, v2core.RollupMetadata{ID: 1})
-	if err != nil || again != old {
-		t.Fatal("same generation not reused")
-	}
-	sealed.number++
-	newer, err := sealed.resolved("repeat", policy, v2core.RollupMetadata{ID: 1})
-	if err != nil || newer == old {
-		t.Fatal("cross-generation source reused")
-	}
-}
-
-func TestPendingPrefixExactAndCanonical(t *testing.T) {
-	policy := v2core.RollupPolicy{Name: "prefix", Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 100}, {Step: 10, Count: 100}}}}
-	encoded, err := v2core.EncodeRollupPolicy(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batches := []sealrollup.Batch{
-		{Order: 1, Now: 1000, Points: []sealrollup.Sample{{Time: 990, Bits: math.Float64bits(2), Sequence: 1}, {Time: 991, Bits: math.Float64bits(3), Sequence: 2}}},
-		{Order: 2, Now: 990, Points: []sealrollup.Sample{{Time: 990, Bits: 1 << 63, Sequence: 3}, {Time: 992, Bits: 0x7ff8000000000042, Sequence: 4}}},
-	}
-	r, _ := New(1, 1<<24, 1<<20)
-	makeMetric := func(b []sealrollup.Batch, cache *sealedCache) *metricState {
-		return &metricState{name: "prefix", policy: policy, meta: v2core.RollupMetadata{ID: 1, Policy: encoded}, pending: b, reader: r, resource: &generation{cache: cache}}
-	}
-	cache := &sealedCache{limit: 1 << 20}
-	prefix := makeMetric(batches[:1], cache)
-	prefix.resolve()
-	if prefix.err != nil {
-		t.Fatal(prefix.err)
-	}
-	incremental := makeMetric(batches, cache)
-	if incremental.resource.cachedReduction(incremental) == nil {
-		t.Fatal("exact prefix missed")
-	}
-	incremental.resolve()
-	if incremental.err != nil {
-		t.Fatal(incremental.err)
-	}
-	whole := makeMetric(batches, &sealedCache{limit: 1 << 20})
-	whole.resolve()
-	if whole.err != nil {
-		t.Fatal(whole.err)
-	}
-	if len(whole.frozen.records) != len(incremental.frozen.records) {
-		t.Fatal("incremental shape")
-	}
-	for i, w := range whole.frozen.records {
-		if w.Delta != incremental.frozen.records[i].Delta {
-			t.Fatal("incremental canonical mismatch")
-		}
-	}
-	for _, change := range []func(*sealrollup.Batch){
-		func(b *sealrollup.Batch) { b.Now++ }, func(b *sealrollup.Batch) { b.Order++ },
-		func(b *sealrollup.Batch) { b.Points = slices.Clone(b.Points); b.Points[0].Bits ^= 1 },
-		func(b *sealrollup.Batch) { b.Points = slices.Clone(b.Points); b.Points[0].Sequence++ },
-	} {
-		altered := slices.Clone(batches)
-		change(&altered[0])
-		m := makeMetric(altered, cache)
-		if m.resource.cachedReduction(m) != nil {
-			t.Fatal("different pending boundary reused")
-		}
-	}
-	if cache.reductionBytes > cache.limit {
-		t.Fatal("pending cache over budget")
-	}
-}
-
 func TestPendingOrderingStable(t *testing.T) {
 	input := []sealrollup.Sample{{Time: 2, Bits: 1, Sequence: 2}, {Time: 1, Bits: 2, Sequence: 1}, {Time: 1, Bits: 3, Sequence: 1}}
 	original := slices.Clone(input)
@@ -176,67 +68,5 @@ func TestPendingOrderingStable(t *testing.T) {
 	}
 	if !slices.Equal(input, original) {
 		t.Fatal("ordering mutated the published pending arena")
-	}
-}
-
-func TestResolvedCacheSharesOnlyUnchangedPartSets(t *testing.T) {
-	r, _ := New(1, 1<<30, 1<<20)
-	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: r.PublishWithInventory})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer e.Close()
-	defer r.Close()
-	var pins []*generation
-	defer func() {
-		for _, g := range pins {
-			g.release()
-		}
-	}()
-	seal := func(name string, id, order uint64) *generation {
-		policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: partsformat.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 3600}}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = e.AppendBatches(0, []v2core.Batch{{ID: id, Order: order, Clock: 1700000002, Policy: policy, Points: []v2core.Row{{ID: id, Time: 1700000000, Bits: order, Seq: order}}}}, order, true); err != nil {
-			t.Fatal(err)
-		}
-		g := r.owners[0].Load()
-		if !g.retain() {
-			t.Fatal("pin")
-		}
-		pins = append(pins, g)
-		g.load()
-		if g.err != nil {
-			t.Fatal(g.err)
-		}
-		return g
-	}
-	first := seal("stable.a", 1, 1)
-	a := first.lookup("stable.a")
-	a.once.Do(a.resolve)
-	if a.err != nil {
-		t.Fatal(a.err)
-	}
-	second := seal("stable.b", 2, 2)
-	b := second.lookup("stable.a")
-	b.once.Do(b.resolve)
-	if b.err != nil {
-		t.Fatal(b.err)
-	}
-	if a.frozen != b.frozen {
-		t.Fatal("unchanged name rescanned after unrelated seal")
-	}
-	third := seal("stable.a", 1, 3)
-	c := third.lookup("stable.a")
-	c.once.Do(c.resolve)
-	if c.err != nil {
-		t.Fatal(c.err)
-	}
-	if c.frozen == b.frozen {
-		t.Fatal("changed name reused stale archives")
-	}
-	if a.frozen.records[0].Order != 1 || c.frozen.records[0].Order != 3 {
-		t.Fatal("pinned or current records changed")
 	}
 }

@@ -26,7 +26,7 @@ func BenchmarkRollupRegisteredPlanning(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		r.metrics[id], r.names[p.Name] = m, id
+		r.install(id, m, freshMetadata)
 		batches[i] = Batch{ID: id, Registered: m.PolicyIdentity, Order: 1, Clock: 1000, Points: []Row{{Time: 999, Seq: 1}}}
 	}
 	b.ReportAllocs()
