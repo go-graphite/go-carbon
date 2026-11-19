@@ -81,6 +81,7 @@ func testPolicy(t testing.TB, name string) []byte {
 // policy heads through prefix extensions, unchanged republications, seals and
 // chunk-cap rebuilds, and compares every selection with the linear oracle.
 func TestPendingIndexMatchesLinearScan(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(18))
 	const names = 300
 	policies := make([][]byte, names)
@@ -160,6 +161,7 @@ func TestPendingIndexMatchesLinearScan(t *testing.T) {
 // through several owners, unsealed publications and seals, then compares every
 // rendered slot bit-for-bit with whisper.
 func TestPendingIndexRendersMatchClassic(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(1818))
 	now := int64(1794700800)
 	clock := now

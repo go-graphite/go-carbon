@@ -20,6 +20,10 @@ import (
 
 type restartGeometry struct{ Version, Layer, Producers, Shards int }
 
+// Version 3 binds producer ownership and fingerprints to XXH3-64. Older
+// journals and catalogues must be rebuilt, never replayed under another hash.
+const restartVersion = 3
+
 // lockRoot prevents two writable opens, including before core has opened its DBs.
 // Geometry is independent of tuning knobs and survives a process crash.
 func lockRoot(root string, c Config) (*os.File, bool, error) {
@@ -32,14 +36,13 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 		return fail(err)
 	}
 	path := filepath.Join(root, "restart.json")
-	want := restartGeometry{1, c.Layer, c.Producers, c.Shards}
+	want := restartGeometry{restartVersion, c.Layer, c.Producers, c.Shards}
 	b, err := os.ReadFile(path)
 	if err == nil {
 		var got restartGeometry
-		if json.Unmarshal(b, &got) != nil || (got.Version != 1 && got.Version != 2) {
+		if json.Unmarshal(b, &got) != nil || got.Version != restartVersion {
 			return fail(errors.New("unsupported restart format version"))
 		}
-		want.Version = got.Version
 		if got != want {
 			return fail(errors.New("restart geometry mismatch"))
 		}

@@ -29,10 +29,12 @@ func await(t *testing.T, f func() bool) {
 	}
 }
 func TestClassicPendingAndSealed(t *testing.T) {
+	t.Parallel()
 	for _, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y"} {
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			for _, xff := range []float32{0, .5, 1} {
 				t.Run(fmt.Sprintf("%s/%d/%g", def, method, xff), func(t *testing.T) {
+					t.Parallel() // each case owns its reader, engine and whisper oracle
 					now := int64(1794700800)
 					clock := now
 					retentions := whisper.MustParseRetentionDefs(def)

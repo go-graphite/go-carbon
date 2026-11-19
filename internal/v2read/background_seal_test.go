@@ -24,17 +24,19 @@ import (
 // bit-exact against whisper: the frozen head is never invisible and never
 // counted twice. Concurrent readers keep fetching through all seals.
 func TestBackgroundSealRendersMatchClassic(t *testing.T) {
+	t.Parallel()
 	testBackgroundSealRendersMatchClassic(t, 1<<20, 24, time.Hour)
 }
 
 // TestBackgroundSealRendersMatchClassicLargeSeals repeats it with the largest
-// row cap and a 20 s interval, so the held seals are time-only seals of a
+// row cap and a 2 s interval, so the held seals are time-only seals of a
 // head that was published many times. Test config only; defaults unchanged.
 func TestBackgroundSealRendersMatchClassicLargeSeals(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
-		t.Skip("waits for 20 s seal intervals")
+		t.Skip("waits for time-only seals")
 	}
-	testBackgroundSealRendersMatchClassic(t, 2<<20, 2<<20, 20*time.Second)
+	testBackgroundSealRendersMatchClassic(t, 2<<20, 2<<20, 2*time.Second)
 }
 
 func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, interval time.Duration) {
@@ -258,6 +260,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 // still fit become visible during the seal. Once the seal is published, the
 // queued packet is admitted in order. Every render is bit-exact against whisper.
 func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(1561))
 	clock := int64(1794700800)
 	retentions := whisper.MustParseRetentionDefs("1s:1d,1m:30d,1h:1y")

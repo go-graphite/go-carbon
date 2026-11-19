@@ -133,3 +133,29 @@ func TestCatalogSingleWriter(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// TestPublishSortedNames checks the single validation pass: sorted unique
+// input is used as is, a sorted duplicate or unsorted input is still
+// deduplicated, and the caller's slice is never modified.
+func TestPublishSortedNames(t *testing.T) {
+	var c Catalog
+	for i, tc := range []struct{ in, want []string }{
+		{[]string{"a.b", "a.c", "b"}, []string{"a.b", "a.c", "b"}},
+		{[]string{"a.b", "a.c", "a.c", "b"}, []string{"a.b", "a.c", "b"}},
+		{[]string{"b", "a.c", "a.b", "b"}, []string{"a.b", "a.c", "b"}},
+	} {
+		in := slices.Clone(tc.in)
+		if err := c.Publish(uint64(i+1), in); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(in, tc.in) {
+			t.Fatalf("case %d: input modified: %q", i, in)
+		}
+		if s := c.Snapshot(); s.Len() != len(tc.want) || !s.EqualNames(tc.want) {
+			t.Fatalf("case %d: got %q", i, slices.Collect(s.Names()))
+		}
+	}
+	if err := c.Publish(9, []string{"a.b", "a..c"}); err == nil {
+		t.Fatal("invalid name published")
+	}
+}

@@ -117,8 +117,10 @@ func decodeRollupMetadataView(name partsformat.ID, group partsformat.Group, data
 // definition: slim rows return a nil Policy and slim true.
 func decodeRollupMetadataHeader(data []byte) (m RollupMetadata, slim bool, err error) {
 	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > rollupMetadataSlim) {
-		err = json.Unmarshal(data, &m)
-		return m, false, err
+		// A separate variable keeps m off the heap on the binary path.
+		var j RollupMetadata
+		err = json.Unmarshal(data, &j)
+		return j, false, err
 	}
 	header := 90
 	if data[3] == 2 {
