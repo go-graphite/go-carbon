@@ -72,7 +72,8 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	if len(mergeRead(t, pin)) != 2 {
 		t.Fatal("fixture")
 	}
-	if mergeDrain(t, o) != 1 {
+	// Sixteen equal parts fold in four 4-way merges and one final merge.
+	if mergeDrain(t, o) != 5 || mergeCount(o) != 1 {
 		t.Fatal("did not merge")
 	}
 	s := o.db.NewSnapshot()
