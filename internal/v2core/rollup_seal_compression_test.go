@@ -135,7 +135,7 @@ func TestSealCompressionDecodesAndMergesIdentically(t *testing.T) {
 		// The merged part draws a random part identity; pin it per merge.
 		cryptotest.SetGlobalRandom(t, 7)
 		path := filepath.Join(dir, "merged.sst")
-		d, err := mergePartFiles(context.Background(), dir, path, inputs, 0, false, nil)
+		d, err := mergePartFiles(context.Background(), dir, path, inputs, 0, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

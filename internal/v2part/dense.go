@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"math/bits"
 	"strings"
 	"sync"
 
@@ -30,24 +31,43 @@ func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
 	return appendSlots(nil, records)
 }
 
-// Mode bit 1 marks a run that stores no per-slot order column: one header
-// order, the metric's envelope frontier, stands for every slot. Merges write
-// it only when no other live part of the source can hold an order inside the
-// part's range, so every order comparison and reset mask is unchanged.
-const denseModeOneOrder = 2
+// Mode bit 1 codes the order column as zigzag delta-of-delta (first order,
+// first delta, then delta changes) in place of the XOR chain: regular arrival
+// orders cost one byte per slot. Decoding is exact.
+const denseModeOrderDoD = 2
 
-func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
-	return appendSlotsOrder(out, records, 0)
+func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
+
+func uvarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
+
+// dodSmaller reports whether delta-of-delta codes the orders in fewer bytes.
+func dodSmaller(records []sealrollup.Record) bool {
+	var x, d int
+	var prev uint64
+	var pd int64
+	for i, r := range records {
+		delta := int64(r.Order - prev)
+		x += uvarintLen(r.Order ^ prev)
+		d += uvarintLen(zigzag(delta - pd))
+		if prev = r.Order; i > 0 {
+			pd = delta
+		}
+	}
+	return d < x
 }
 
-// appendSlotsOrder writes one order for every record when order is nonzero.
-func appendSlotsOrder(out []byte, records []sealrollup.Record, order uint64) ([]byte, error) {
+func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
+	return appendSlotsOrder(out, records, false)
+}
+
+// appendSlotsOrder with deltas codes orders as delta-of-delta when smaller.
+func appendSlotsOrder(out []byte, records []sealrollup.Record, deltas bool) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
 	integer := true
 	for i, r := range records {
-		if !validSlotRecord(r) || (order != 0 && r.Order > order) {
+		if !validSlotRecord(r) {
 			return nil, errors.New("invalid sealed archive record clock/order/slot")
 		}
 		if i > 0 && (r.Archive != records[0].Archive || r.Slot <= records[i-1].Slot) {
@@ -63,14 +83,12 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, order uint64) ([]
 	if integer {
 		mode = 1
 	}
-	if order != 0 {
-		mode |= denseModeOneOrder
+	dod := deltas && dodSmaller(records)
+	if dod {
+		mode |= denseModeOrderDoD
 	}
 	out = append(out, mode)
 	out = binary.AppendUvarint(out, uint64(len(records)))
-	if order != 0 {
-		out = binary.AppendUvarint(out, order)
-	}
 	var slot, ts, dt int64
 	for _, r := range records {
 		out = binary.AppendUvarint(out, uint64(r.Slot-slot))
@@ -82,12 +100,19 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, order uint64) ([]
 		ts = r.Sample.Time
 		dt = delta
 	}
-	if order == 0 {
-		var prev uint64
-		for _, r := range records {
+	var prev uint64
+	var pd int64
+	for i, r := range records {
+		if dod {
+			delta := int64(r.Order - prev)
+			out = binary.AppendUvarint(out, zigzag(delta-pd))
+			if i > 0 {
+				pd = delta
+			}
+		} else {
 			out = binary.AppendUvarint(out, r.Order^prev)
-			prev = r.Order
 		}
+		prev = r.Order
 	}
 	flags := len(out)
 	out = append(out, make([]byte, (len(records)+7)/8)...)
@@ -130,7 +155,7 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		return append(dst[:0], r), nil
 	}
 	bad := errors.New("invalid dense archive run")
-	if len(data) < 6 || data[4] > 1|denseModeOneOrder || archive == MetadataArchive || firstSlot < 0 {
+	if len(data) < 6 || data[4] > 1|denseModeOrderDoD || archive == MetadataArchive || firstSlot < 0 {
 		return nil, bad
 	}
 	integer := data[4]&1 == 1
@@ -147,12 +172,7 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	if !ok || count == 0 || count > MaxDenseSlots || count > uint64(len(p)) {
 		return nil, bad
 	}
-	var one uint64
-	if data[4]&denseModeOneOrder != 0 {
-		if one, ok = take(); !ok || one == 0 {
-			return nil, bad
-		}
-	}
+	dod := data[4]&denseModeOrderDoD != 0
 	var rs []sealrollup.Record
 	if cap(dst) >= int(count) {
 		rs = dst[:int(count)]
@@ -193,17 +213,23 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		}
 		rs[i].Sample.Time = ts
 	}
-	order := one
+	var order uint64
+	var pd int64
 	for i := range rs {
-		if one == 0 {
-			v, ok := take()
-			if !ok {
-				return nil, bad
+		v, ok := take()
+		if !ok {
+			return nil, bad
+		}
+		if dod {
+			delta := pd + (int64(v>>1) ^ -int64(v&1))
+			if order += uint64(delta); i > 0 {
+				pd = delta
 			}
+		} else {
 			order ^= v
-			if order == 0 {
-				return nil, bad
-			}
+		}
+		if order == 0 {
+			return nil, bad
 		}
 		rs[i].Order = order
 		rs[i].Sample.Sequence = order
@@ -259,20 +285,14 @@ type DenseWriter struct {
 	*denseWorkspace
 	err    error
 	closed bool
-	order  uint64 // nonzero: runs store this one order (ElideOrder)
+	// dod: runs code orders as delta-of-delta when smaller (OrderDeltas).
+	dod bool
 }
 
-// ElideOrder makes the following runs, including copied runs, store order in
-// place of their per-slot orders; zero restores the column. Pass a metric's
-// envelope frontier before its records, and only when no other live part of
-// the source overlaps this part's order range.
-func (w *DenseWriter) ElideOrder(order uint64) error {
-	if order != w.order && w.err == nil {
-		w.err = w.flush()
-	}
-	w.order = order
-	return w.err
-}
+// OrderDeltas codes each run's orders as delta-of-delta when that is smaller
+// than the XOR chain, including copied runs. Decoding is exact. Call before
+// the first Set.
+func (w *DenseWriter) OrderDeltas() { w.dod = true }
 
 // LimitBytes bounds compressed staging output, including SST indexes/footer.
 // Call before the first Set. Exceeding it aborts this proposal, never inputs.
@@ -333,7 +353,7 @@ func (w *DenseWriter) flush() error {
 	if len(w.records) == 0 {
 		return nil
 	}
-	b, e := appendSlotsOrder(w.encoded[:0], w.records, w.order)
+	b, e := appendSlotsOrder(w.encoded[:0], w.records, w.dod)
 	w.encoded = b
 	if e == nil {
 		e = w.writer.setDecoded(w.first, w.key, b)
@@ -402,8 +422,8 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
 		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
-		if w.order != 0 {
-			value, err = appendSlotsOrder(w.encoded[:0], w.records, w.order)
+		if w.dod && value[4]&denseModeOrderDoD == 0 && dodSmaller(w.records) {
+			value, err = appendSlotsOrder(w.encoded[:0], w.records, true)
 			w.encoded = value
 		}
 	}
