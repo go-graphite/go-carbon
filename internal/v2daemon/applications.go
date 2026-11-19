@@ -35,16 +35,27 @@ type Application struct {
 // RegisteredApplication is an immutable producer-local catalog identity. It
 // cannot cross a producer, restart, or catalog epoch. Callers retain the handle
 // instead of resubmitting names and definitions for each original application.
+// It holds no name: the catalog (the shared identity on layer 3) owns the one
+// copy, and the cold paths that need the string resolve it by ID (24 B/name).
 type RegisteredApplication struct {
 	producer *Producer
 	id       uint64
-	name     string
 	policy   *v2core.ApplicationPolicy
 }
 
+// name resolves the registered name from its single owner. Callers are in the
+// producer's serialized append domain, like the catalog reads in
+// appendApplicationsStamped.
+func (r *RegisteredApplication) name() string {
+	if r.policy != nil {
+		return r.policy.Name()
+	}
+	name, _ := r.producer.catalog.Key(r.id)
+	return name
+}
+
 // RegisterApplication validates canonical identity and collision/definition
-// equality at admission. It retains no caller-owned bytes: the handle's name is
-// the catalog's own string (the shared identity name on layer 3).
+// equality at admission. It retains no caller-owned bytes.
 func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredApplication, error) {
 	if p.failed != nil {
 		return nil, p.failed
@@ -59,7 +70,7 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	if id < uint64(len(p.applications)) && p.applications[id] != nil {
 		return p.applications[id], nil
 	}
-	name, _ = p.catalog.Key(id)
+	name, _ = p.catalog.Key(id) // the catalog's own string, not the caller's
 	var registered *v2core.ApplicationPolicy
 	// Classic mirroring consumes canonical bytes before core submission.
 	if p.layer == 3 && p.durableApplications == nil {
@@ -71,7 +82,7 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	for uint64(len(p.applications)) <= id {
 		p.applications = append(p.applications, nil) // catalog IDs are dense
 	}
-	r := &RegisteredApplication{producer: p, id: id, name: name, policy: registered}
+	r := &RegisteredApplication{producer: p, id: id, policy: registered}
 	p.applications[id] = r
 	return r, nil
 }

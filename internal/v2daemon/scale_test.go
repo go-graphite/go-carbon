@@ -115,6 +115,11 @@ func TestStoreNameScale(t *testing.T) {
 		t.Fatalf("discovery names=%d want=%d err=%v", len(names), n, err)
 	}
 	var catalog v2index.Catalog
+	// The daemon maps its index base from <v2.path>/index; measure that shape.
+	if err := catalog.SetDir(filepath.Join(dir, "index")); err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
 	if err := catalog.Publish(1, names); err != nil {
 		t.Fatal(err)
 	}
