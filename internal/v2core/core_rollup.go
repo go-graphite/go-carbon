@@ -61,17 +61,44 @@ type RollupMetadata struct {
 	Revision   uint64
 }
 
+// rollupMetric holds what a name needs beyond its scalars: the shared
+// identity and, for coarse archives, KeepRecent residency. The committed
+// scalars live in coreRollups.meta, by owner slot. slots is nil while the
+// name keeps no residency, which is always for a durable single-archive name,
+// so such a name costs one 24-B object.
 type rollupMetric struct {
 	*PolicyIdentity
-	meta   metricMetadata
-	slots  sealrollup.Slots
+	slots  *sealrollup.Slots
 	vshard uint16
-	// rank is 1 + this metric's index in rankOwner.dense, the canonical
-	// (group, vshard, length, name) order. Adoption shares metrics between
-	// planners, so a rank is valid only for its owner; 0 means unranked.
-	rank      uint32
-	rankOwner *coreRollups
 }
+
+// residency returns m's slots, allocating them on the first install.
+func (m *rollupMetric) residency() *sealrollup.Slots {
+	if m.slots == nil {
+		m.slots = m.policy.prepared.NewSlots()
+	}
+	return m.slots
+}
+
+// keepRecent is Slots.KeepRecent. A single archive keeps nothing, so its
+// slots drop to nil.
+func (m *rollupMetric) keepRecent(maxTime int64) {
+	if len(m.schema().Archives) == 1 {
+		m.slots = nil
+		return
+	}
+	m.residency().KeepRecent(maxTime)
+}
+
+// installRecent is Slots.InstallRecent, which never keeps the terminal
+// archive (a single-archive name's only one).
+func (m *rollupMetric) installRecent(d sealrollup.Delta) {
+	if d.Archive == len(m.schema().Archives)-1 {
+		return
+	}
+	m.residency().InstallRecent(d)
+}
+
 type rollupCoverage struct {
 	spec partsformat.Spec
 	seen map[[32]byte]bool
@@ -106,14 +133,20 @@ type coreRollups struct {
 	definitions map[[32]byte][]partsformat.ArchivePolicy
 	coverage    map[string]*rollupCoverage
 
-	// dense holds every ranked installed metric in canonical order, so a seal
-	// sorts stages by uint32 rank instead of name bytes. unranked metrics were
-	// installed since the last renumber; replaced marks IDs whose metric
-	// changed (adoption) so the next renumber drops the stale entry.
-	dense      []*rollupMetric
-	denseSpare []*rollupMetric
-	unranked   []*rollupMetric
-	replaced   bool
+	// Owner-local slots, in rank order. dense holds every ranked installed
+	// metric in canonical (group, vshard, length, name) order, so a seal
+	// sorts stages by uint32 rank instead of name bytes; unranked holds those
+	// installed since the last renumber, in arrival order. Slot s < len(dense)
+	// is dense[s], rank s+1; slot len(dense)+k is unranked[k]. ids[s] is the
+	// slot's NumericID (deadSlot once adoption replaced its metric) and
+	// meta[s] its committed scalars. install leaves the slot as a hint on the
+	// metric's identity; renumber moves ids and meta with their metric and
+	// re-stores the hints. ids and meta are pointer-free and sized by this
+	// owner's names, not by the engine-wide ID space.
+	dense    []*rollupMetric
+	unranked []*rollupMetric
+	ids      []uint64
+	meta     []metricMetadata
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -133,19 +166,29 @@ func newCoreRollups() *coreRollups {
 }
 
 // install is the only writer of metrics/closable, so the closure index can
-// never miss a coarse-archive metric.
-func (r *coreRollups) install(id uint64, m *rollupMetric) {
+// never miss a coarse-archive metric. meta becomes id's committed scalars.
+func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	old := r.metrics[id]
 	r.metrics[id] = m
-	if old != m {
-		if old != nil || m.rankOwner == r {
-			// The stale entry leaves dense at the next renumber; a metric
-			// this planner ranked before re-enters unranked.
-			r.replaced = true
-			m.rank, m.rankOwner = 0, nil
-		}
-		r.unranked = append(r.unranked, m)
+	s := uint32(len(r.ids))
+	if old != nil {
+		s = r.slotOf(id, old)
 	}
+	switch {
+	case old != nil && int(s) >= len(r.dense):
+		r.unranked[int(s)-len(r.dense)] = m // an unranked old hands m its slot
+	case old == m:
+	default:
+		if old != nil {
+			r.ids[s], s = deadSlot, uint32(len(r.ids)) // the next renumber drops it
+		}
+		if id == deadSlot {
+			panic("v2core: rollup NumericID collides with deadSlot")
+		}
+		r.ids, r.meta, r.unranked = append(r.ids, id), append(r.meta, metricMetadata{}), append(r.unranked, m)
+	}
+	r.meta[s] = meta
+	m.ownerSlot.Store(s + 1)
 	if len(m.schema().Archives) > 1 {
 		r.closable[id] = m
 	} else {
@@ -181,12 +224,24 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 }
 
 func newRollupMetric(h *PolicyIdentity) *rollupMetric {
-	return &rollupMetric{PolicyIdentity: h, meta: compactMetadata(RollupMetadata{Version: 1}), slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
+	return &rollupMetric{PolicyIdentity: h, vshard: h.vshard}
+}
+
+// freshMetadata is the committed state of a name no seal has installed yet.
+var freshMetadata = compactMetadata(RollupMetadata{Version: 1})
+
+// committed returns the scalars s starts from: its slot's, or fresh ones.
+func (r *coreRollups) committed(s *rollupStage) metricMetadata {
+	if s.fresh {
+		return freshMetadata
+	}
+	return r.meta[s.slot]
 }
 
 type rollupStage struct {
 	sortKey    uint64
 	vshard     uint16
+	slot       uint32 // owner slot of an installed metric; unset when fresh
 	metric     *rollupMetric
 	next       RollupMetadata
 	batches    []sealrollup.Batch
@@ -263,8 +318,22 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for j < len(keys) && in.Batches[keys[j]&sealBatchIndexMask].ID == id {
 			j++
 		}
-		m := r.metrics[id]
+		// A ranked name whose identity carries this planner's slot reaches
+		// its metric through dense. Fresh and unranked names, policy-bytes
+		// batches and hints another planner overwrote probe the metrics map.
+		var m *rollupMetric
+		slot, hinted := r.hintSlot(first.Registered, id)
+		rk := uint32(0)
+		if hinted && int(slot) < len(r.dense) {
+			m, rk = r.dense[slot], slot+1
+		} else if m = r.metrics[id]; m != nil && !hinted {
+			slot = r.slotOf(id, m)
+		}
 		fresh := m == nil
+		meta := freshMetadata
+		if !fresh {
+			meta = r.meta[slot]
+		}
 		if fresh {
 			if h := first.Registered; h != nil && h.catalog == r.identities && h.id == id {
 				m = newRollupMetric(h)
@@ -287,10 +356,14 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			names[m.policy.Name] = id
 		}
-		stages = append(stages, rollupStage{metric: m, next: m.metadataScalars(m.meta), fresh: fresh, batchCount: j - i})
+		stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadataScalars(meta), fresh: fresh, batchCount: j - i})
 		s := &stages[len(stages)-1]
 		s.next.Expired = false
-		r.stageKey(s)
+		if rk != 0 {
+			s.vshard, s.sortKey = m.vshard, uint64(rk)<<1
+		} else {
+			r.stageKey(s)
+		}
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
 		}
@@ -317,8 +390,12 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	if r.expire != nil || r.db != nil {
 		for id, m := range r.idleCandidates() {
-			if !sealBatchSeen(in.Batches, keys, seen, maxID, id) && !m.meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(), now)) || rollupClosureDue(m, now.Unix())) {
-				stages = append(stages, rollupStage{metric: m, next: m.metadata()})
+			if sealBatchSeen(in.Batches, keys, seen, maxID, id) {
+				continue
+			}
+			slot := r.slotOf(id, m)
+			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
 				r.stageKey(&stages[len(stages)-1])
 			}
 		}
@@ -359,7 +436,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for _, s := range stages {
 			m := s.metric
 			if s.fresh {
-				r.install(m.id, m)
+				r.install(m.id, m, compactMetadata(s.next))
 				r.names[m.policy.Name] = m.id
 			}
 		}
@@ -621,14 +698,12 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		if r.metrics[meta.ID] != nil {
 			return errors.New("duplicate recovered rollup ID")
 		}
-		meta.Policy = m.definitionBytes()
-		m.meta = compactMetadata(meta)
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		for _, record := range records {
-			m.slots.InstallRecent(record.Delta)
+			m.installRecent(record.Delta)
 		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
-		r.install(meta.ID, m)
+		m.keepRecent(meta.Frontier.MaxTime)
+		r.install(meta.ID, m, compactMetadata(meta))
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.
 		r.names[m.policy.Name] = meta.ID

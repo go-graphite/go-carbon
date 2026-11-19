@@ -167,7 +167,7 @@ func sweepPlannerFixture(tb testing.TB, names int) *coreRollups {
 		if err != nil {
 			tb.Fatal(err)
 		}
-		r.install(uint64(i+1), m)
+		r.install(uint64(i+1), m, freshMetadata)
 		r.names[name] = uint64(i + 1)
 	}
 	r.renumber()
