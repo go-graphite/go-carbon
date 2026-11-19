@@ -6,6 +6,14 @@ same binary preamble, optional per-frame zstd compression, plaintext, and zstd
 plaintext on one endpoint. This is an offline L5 experiment; the ordinary daemon
 startup and production receiver configuration are unchanged.
 
+Plaintext names travel in reusable byte batches through the L3 application's
+`ByteOwner.AppendBytes` handoff. The owner hashes these bytes directly and creates
+a string on a fingerprint-table miss. Quota checks for known names reuse the
+catalog string. Partial socket batches copy name bytes into the serial worker's
+pending batch before recycling the source; offsets are rebased with the copy.
+Raw L1/L2 owners retain the string interface, and codec names retain their existing
+dictionary strings. Both interfaces borrow their arguments only until return.
+
 Each connection owns its decoder/dictionary and caches canonical name strings in
 the decoder's opaque slots. Stable name hashing routes every occurrence of a name,
 including on different connections, to the same producer. Each producer has one

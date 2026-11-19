@@ -218,14 +218,16 @@ func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
 	return page.(*policyIDPage)[id&1023].Load()
 }
 
-// BindDefinition shares the canonical name and validates the journal definition.
-// The journal stores its own shared suffix, rather than a full encoding per name.
-func (e *coreEngine) BindDefinition(id uint64, name string, definition []byte) (string, []byte, error) {
-	h, err := e.identities.intern(id, name, definition)
-	if err != nil {
-		return "", nil, err
-	}
-	return string(h.policy.Name), h.definitionBytes(), nil
+// ApplicationPolicy resolves an ID in this engine's immutable catalog epoch.
+// The returned identity keeps the catalog alive for its consumers.
+func (e *coreEngine) ApplicationPolicy(id uint64) *ApplicationPolicy {
+	return e.identities.lookup(id)
+}
+
+// MatchesDefinition compares the canonical journal bytes without rebuilding
+// ordinary unescaped definitions.
+func (h *PolicyIdentity) MatchesDefinition(definition []byte) bool {
+	return h.definitionEqual(definition)
 }
 
 // Only mutable lifecycle/frontier scalars belong in each owner/part directory.

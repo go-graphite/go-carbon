@@ -354,8 +354,18 @@ func (r *coreRollups) file(slot uint32, m *rollupMetric, meta metricMetadata, ma
 // window end, a reopened window, or an end this plan drained. A window end
 // only moves forward per archive, so one entry per open window suffices.
 func (r *coreRollups) refile(m *rollupMetric, old, next metricMetadata) uint16 {
+	archives := m.schema().Archives
+	if len(archives) > 1 && old.Version == 3 && next.Version == 3 && old.Frontier.Order != 0 && !old.Expired && !next.Expired {
+		// No archive's window changes inside the smallest coarse window.
+		// Before its close, none of this name's entries can have drained.
+		step := archives[1].Step
+		start := old.Frontier.MaxTime - old.Frontier.MaxTime%step
+		if next.Frontier.MaxTime >= start && next.Frontier.MaxTime < start+step && r.planNow < start+step {
+			return 0
+		}
+	}
 	mask := uint16(0)
-	for i, a := range m.schema().Archives[1:] {
+	for i, a := range archives[1:] {
 		end, prior := rollupOpenEnd(next, a), rollupOpenEnd(old, a)
 		if end != math.MaxInt64 && (end != prior || prior <= r.planNow) {
 			mask |= 1 << min(i, 15)

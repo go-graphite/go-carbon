@@ -120,3 +120,11 @@ func BenchmarkTableGet(b *testing.B) {
 		})
 	}
 }
+
+func TestHashBytesMatchesString(t *testing.T) {
+	for _, name := range []string{"", "a", "metric.\x00.bytes", "metric.日本語", string(make([]byte, 4096))} {
+		if HashBytes([]byte(name)) != Hash(name) {
+			t.Fatalf("hash differs for %q", name)
+		}
+	}
+}

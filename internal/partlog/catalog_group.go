@@ -18,23 +18,23 @@ func (c *NameCatalog) flushGroup() error {
 	if len(c.pending) == 0 {
 		return nil
 	}
-	sort.Slice(c.pending, func(i, j int) bool { return c.entries[c.pending[i]].key < c.entries[c.pending[j]].key })
+	sort.Slice(c.pending, func(i, j int) bool { return c.key(c.pending[i]) < c.key(c.pending[j]) })
 	raw := binary.AppendUvarint(make([]byte, 0, c.pendingBytes), uint64(len(c.pending)))
 	previous := ""
 	for _, id := range c.pending {
-		e := c.entries[id]
+		key := c.key(id)
 		prefix := 0
-		for prefix < len(previous) && prefix < len(e.key) && previous[prefix] == e.key[prefix] {
+		for prefix < len(previous) && prefix < len(key) && previous[prefix] == key[prefix] {
 			prefix++
 		}
 		raw = binary.AppendUvarint(raw, id)
 		raw = binary.AppendUvarint(raw, uint64(prefix))
-		raw = binary.AppendUvarint(raw, uint64(len(e.key)-prefix))
-		raw = append(raw, e.key[prefix:]...)
-		definition := e.definitionBytes()
+		raw = binary.AppendUvarint(raw, uint64(len(key)-prefix))
+		raw = append(raw, key[prefix:]...)
+		definition := c.definition(id)
 		raw = binary.AppendUvarint(raw, uint64(len(definition)))
 		raw = append(raw, definition...)
-		previous = e.key
+		previous = key
 	}
 	if c.groupEncoder == nil {
 		var err error
@@ -121,25 +121,22 @@ func (c *NameCatalog) readGroup(body []byte) error {
 	}
 	sort.Slice(bindings, func(i, j int) bool { return bindings[i].id < bindings[j].id })
 	for i, b := range bindings {
-		if b.id == 0 || b.id > uint64(len(c.entries)) || (i > 0 && b.id == bindings[i-1].id) {
+		if b.id == 0 || b.id > c.Count()+1 || (i > 0 && b.id == bindings[i-1].id) {
 			return errCatalog
 		}
-		if b.id < uint64(len(c.entries)) {
-			old := c.entries[b.id]
-			if old.key != b.key || !old.definitionEqual(b.def) {
+		if b.id <= c.Count() {
+			if !c.Matches(b.id, b.key, b.def) {
 				return errCatalog
 			}
 		} else {
 			hash := NameHash(b.key)
-			if c.ids.lookup(b.key, hash, c.entries) != 0 {
+			if c.ids.lookup(b.key, hash, c) != 0 {
 				return errCatalog
 			}
 			c.ids.insert(hash, b.id)
-			entry, err := c.bindEntry(b.id, b.key, b.def)
-			if err != nil {
+			if err := c.bindEntry(b.id, b.key, b.def); err != nil {
 				return err
 			}
-			c.entries = append(c.entries, entry)
 		}
 	}
 	return nil
