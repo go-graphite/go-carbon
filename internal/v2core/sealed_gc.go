@@ -3,6 +3,7 @@ package v2core
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +41,7 @@ type sealedPartGC struct {
 	unlinkedBytes        atomic.Uint64
 	removedParts         atomic.Uint64
 	fileMu               sync.Mutex // serializes seal file publication with unlink; readers never acquire it
+	seq                  uint64     // last descriptor Seq; guarded by fileMu
 	mu                   sync.Mutex
 	inventory            *RollupInventory // immutable; captured/updated under mu
 	db                   *pebble.DB
@@ -48,6 +50,16 @@ type sealedPartGC struct {
 	grace                time.Duration
 	now                  func() time.Time
 	stage                func(string)
+}
+
+// publication stamps d with the next Seq and the admission clock range.
+// Callers hold fileMu, which every seal and merge publication holds.
+func (g *sealedPartGC) publication(d *v2part.Descriptor, minClock, maxClock int64) {
+	g.seq++
+	d.Seq = g.seq
+	if minClock > 0 && minClock <= maxClock {
+		d.MinClock, d.MaxClock = minClock, maxClock
+	}
 }
 
 func partBinding(prefix []byte, id v2part.Digest) []byte {
@@ -65,6 +77,13 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 	var err error
 	if g.inventory, err = loadRollupInventory(db); err != nil {
 		return nil, err
+	}
+	for _, b := range g.inventory.bindings {
+		var d struct{ Seq uint64 }
+		if err = json.Unmarshal(b, &d); err != nil {
+			return nil, err
+		}
+		g.seq = max(g.seq, d.Seq)
 	}
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: retiredPartPrefix, UpperBound: v2part.PrefixEnd(retiredPartPrefix)})
 	if err != nil {

@@ -117,7 +117,17 @@ func retainSealedPart(dir, path string, d v2part.Descriptor) (coreKV, []string, 
 			return coreKV{}, saved, e
 		}
 		if !bytes.Equal(old, b) {
-			return coreKV{}, saved, errors.New("existing descriptor mismatch")
+			// A replayed original keeps its first publication's Seq and clocks:
+			// the sidecar must stay byte-equal to the binding it backs.
+			prev, e := v2part.ParseDescriptor(old)
+			if e != nil {
+				return coreKV{}, saved, e
+			}
+			prev.Seq, prev.MinClock, prev.MaxClock = d.Seq, d.MinClock, d.MaxClock
+			if same, e := prev.MarshalBinary(); e != nil || !bytes.Equal(same, b) {
+				return coreKV{}, saved, errors.Join(e, errors.New("existing descriptor mismatch"))
+			}
+			b = old
 		}
 		// The sidecar can outlive an interrupted data-link deletion. A
 		// newly recreated link still needs directory durability before binding.

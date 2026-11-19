@@ -72,6 +72,14 @@ type Descriptor struct {
 	// VShards is the sorted, exact routed inventory recorded by the seal
 	// writer. Omitted by older producers; readers retain their scan fallback.
 	VShards []uint16 `json:",omitempty"`
+	// Seq is the owner's publication sequence: unique among its live sealed and
+	// merged parts and increasing in publication order, so a merged part is
+	// above all its inputs. A replayed byte-identical part keeps its first Seq. MinClock/MaxClock bound the admission clock (unix seconds)
+	// of the batches whose rows the part holds. Zero means unknown (older
+	// producers, moved parts, seals without batches). Readers ignore all three.
+	Seq      uint64 `json:",omitempty"`
+	MinClock int64  `json:",omitempty"`
+	MaxClock int64  `json:",omitempty"`
 }
 
 func validateSpec(s Spec) error {
@@ -132,6 +140,9 @@ func (d Descriptor) Validate() error {
 	}
 	if !d.Scope.contains(first) || !d.Scope.contains(last) || bytes.Compare(d.FirstKey, d.LastKey) > 0 {
 		return errors.New("part key range outside scope")
+	}
+	if d.MinClock < 0 || d.MinClock > d.MaxClock || (d.MaxClock != 0 && d.MinClock == 0) {
+		return errors.New("invalid part admission clock range")
 	}
 	if len(d.VShards) > 0 {
 		if len(d.VShards) > VirtualShards || d.VShards[0] != first.VShard || d.VShards[len(d.VShards)-1] != last.VShard {

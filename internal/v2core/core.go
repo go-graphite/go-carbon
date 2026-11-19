@@ -1850,6 +1850,13 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 	}
 	var descriptors []coreKV
 	var retained []string
+	var minClock, maxClock int64
+	for i, b := range batches {
+		if i == 0 || b.Clock < minClock {
+			minClock = b.Clock
+		}
+		maxClock = max(maxClock, b.Clock)
+	}
 	defer func() {
 		if !durable {
 			for _, p := range retained {
@@ -1866,6 +1873,9 @@ func (o *coreOwner) sealBatches(head []row, batches []coreBatch, next coreFronti
 		}
 		// The shared writer closes and syncs its SST exactly once before return.
 		o.syncCalls.Add(1)
+		if o.gc != nil {
+			o.gc.publication(&d, minClock, maxClock)
+		}
 		kv, saved, e := retainSealedPart(o.dir, xp, d)
 		retained = append(retained, saved...)
 		if e != nil {

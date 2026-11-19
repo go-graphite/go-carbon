@@ -758,6 +758,15 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	}
 	o.gc.fileMu.Lock()
 	defer o.gc.fileMu.Unlock()
+	minClock, maxClock := inputs[0].MinClock, inputs[0].MaxClock
+	for _, in := range inputs[1:] {
+		if in.MinClock == 0 || minClock == 0 {
+			minClock, maxClock = 0, 0
+			break
+		}
+		minClock, maxClock = min(minClock, in.MinClock), max(maxClock, in.MaxClock)
+	}
+	o.gc.publication(&d, minClock, maxClock)
 	changed, err := o.gc.replaceMerged(inputs, path, d)
 	if changed {
 		o.gcDirty.Store(true)
