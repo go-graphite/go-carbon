@@ -404,3 +404,79 @@ func BenchmarkPendingRows(b *testing.B) {
 		runtime.KeepAlive(&keep)
 	})
 }
+
+// BenchmarkPendingRowsRouted isolates the submit → owner step for receiver
+// packets over four owners: per-packet descriptors and point arena plus the
+// owner's encode (descriptors) against the router's encode into reused
+// per-owner rows plus the owner's copy (routed).
+func BenchmarkPendingRowsRouted(b *testing.B) {
+	const points, perPacket, owners = 1 << 20, 512, 4
+	packets, pols := receiverPackets(points, perPacket)
+	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
+	b.Run("descriptors", func(b *testing.B) {
+		var heads [owners]pendingHead
+		var counts [owners]int
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			heads = [owners]pendingHead{}
+			for _, packet := range packets {
+				clear(counts[:])
+				for _, bt := range packet {
+					counts[bt.ID%owners]++
+				}
+				descriptors := make([]coreBatch, len(packet))
+				arena := make([]row, len(packet))
+				var byOwner [owners][]coreBatch
+				off := 0
+				for o, n := range counts {
+					byOwner[o] = descriptors[off : off : off+n]
+					off += n
+				}
+				off = 0
+				for _, bt := range packet {
+					n := copy(arena[off:], bt.Points)
+					bt.Points = arena[off : off+n : off+n]
+					bt.Registered = lookup(bt.ID)
+					off += n
+					byOwner[bt.ID%owners] = append(byOwner[bt.ID%owners], bt)
+				}
+				for o := range heads {
+					heads[o].add(byOwner[o], lookup)
+				}
+			}
+		}
+		b.StopTimer()
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/points, "ns/point")
+	})
+	b.Run("routed", func(b *testing.B) {
+		var heads [owners]pendingHead
+		var routed [owners]pendingRows
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			heads = [owners]pendingHead{}
+			for _, packet := range packets {
+				if !pendingBatchesFit(packet) {
+					b.Fatal("receiver packet rejected")
+				}
+				for o := range routed {
+					routed[o].reset()
+				}
+				for _, bt := range packet {
+					pk := &routed[bt.ID%owners]
+					pk.startApplication(bt.Order, bt.Clock, bt.Points[0].Time, len(bt.Points))
+					for _, r := range bt.Points {
+						pk.addRow(bt.ID, r.Time, r.Bits, r.Seq)
+					}
+				}
+				for o := range heads {
+					routed[o].closePacket()
+					heads[o].addRows(&routed[o])
+				}
+			}
+		}
+		b.StopTimer()
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/points, "ns/point")
+	})
+}
