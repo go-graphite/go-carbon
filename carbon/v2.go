@@ -149,7 +149,10 @@ func (app *App) startV2() error {
 	if c.V2.SealInterval != nil {
 		sealInterval = c.V2.SealInterval.Value()
 	}
-	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks}
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks,
+		// 16 MiB is ~20 s of one producer's input at 7M points/s over 96 producers:
+		// restart decodes at most that plus the unsealed tail per producer.
+		JournalSegmentBytes: 16 << 20}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
