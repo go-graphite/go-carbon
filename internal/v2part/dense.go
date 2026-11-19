@@ -11,6 +11,7 @@ import (
 	"math/bits"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
@@ -21,6 +22,38 @@ const DenseEncoding = "core-rollup-dense-v1"
 const MaxDenseSlots = 4096
 
 var denseMagic = []byte{'G', 'C', 'D', 1}
+
+// headerMagic marks a dense run that carries its metric's envelope, like one
+// block header per series per part: magic | uvarint(len) | envelope | run. The
+// envelope sorts after every run of its metric, so a name's last run holds it
+// and the name pays no separate envelope KV. Parts written before this form
+// keep the envelope as its own KV at MetadataArchive; both read the same.
+var headerMagic = []byte{'G', 'C', 'P', 1}
+
+// LegacyEnvelopeKV makes new dense writers keep the separate envelope KV, the
+// form older readers understand. It exists for compatibility tests and for a
+// rollback to a reader without header-in-run support.
+var LegacyEnvelopeKV atomic.Bool
+
+// SplitHeader returns a dense value's folded envelope and its run. A value
+// without a header returns a nil envelope and the value itself.
+func SplitHeader(v []byte) (envelope, run []byte, err error) {
+	if !bytes.HasPrefix(v, headerMagic) {
+		return nil, v, nil
+	}
+	n, k := binary.Uvarint(v[len(headerMagic):])
+	if k <= 0 || n == 0 || n >= uint64(len(v)-len(headerMagic)-k) {
+		return nil, nil, errors.New("invalid dense run header")
+	}
+	p := v[len(headerMagic)+k:]
+	return p[:n], p[n:], nil
+}
+
+// EnvelopeKey is the key a metric's envelope has in the logical record stream.
+func EnvelopeKey(k Key) Key {
+	k.Archive, k.BlockStart, k.Ordinal = MetadataArchive, 0, 0
+	return k
+}
 
 // EncodeSlots preserves every occupied slot, timestamp, value bit, replacement
 // order and correction flag. Missing slots cost only a delta, never padding.
@@ -434,7 +467,11 @@ type denseWorkspace struct {
 	encoded []byte
 	key     Key
 	records []sealrollup.Record
-	last    []byte
+	// raw is a copied run awaiting its metric's envelope (rawPending).
+	raw        []byte
+	rawPending bool
+	fold       bool
+	last       []byte
 	// Planned input: the previous tuple, its planner rank and the scope's
 	// group key prefix.
 	prev     Key
@@ -455,6 +492,7 @@ func (w *DenseWriter) releaseWorkspace() {
 	b.decoder.key, b.decoder.name, b.key = Key{}, "", Key{}
 	b.decoder.prefix = b.decoder.prefix[:0]
 	b.first, b.encoded, b.records, b.last = b.first[:0], b.encoded[:0], b.records[:0], b.last[:0]
+	b.raw, b.rawPending = b.raw[:0], false
 	b.prev, b.prevRank, b.havePrev, b.group = Key{}, 0, false, b.group[:0]
 	w.denseWorkspace = nil
 	denseWorkspaces.Put(b)
@@ -470,19 +508,46 @@ func NewDenseWriter(path string, spec Spec) (*DenseWriter, error) {
 	if b == nil {
 		b = &denseWorkspace{}
 	}
+	b.fold = !LegacyEnvelopeKV.Load()
 	return &DenseWriter{writer: w, denseWorkspace: b}, nil
 }
-func (w *DenseWriter) flush() error {
-	if len(w.records) == 0 {
+func (w *DenseWriter) flush() error { return w.flushWith(nil) }
+
+// flushWith writes the pending run, prefixed by envelope when it is non-nil.
+func (w *DenseWriter) flushWith(envelope []byte) error {
+	if len(w.records) == 0 && !w.rawPending {
 		return nil
 	}
-	b, e := appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.dod)
+	b := w.encoded[:0]
+	if envelope != nil {
+		b = append(b, headerMagic...)
+		b = binary.AppendUvarint(b, uint64(len(envelope)))
+		b = append(b, envelope...)
+	}
+	var e error
+	if w.rawPending {
+		b = append(b, w.raw...)
+	} else {
+		b, e = appendSlotsOrder(b, w.records, &w.distinct, w.dod)
+	}
 	w.encoded = b
 	if e == nil {
 		e = w.writer.setDecoded(w.first, w.key, b)
 	}
-	w.records = w.records[:0]
+	w.records, w.rawPending = w.records[:0], false
 	return e
+}
+
+// setEnvelope writes metric's envelope k: folded into the pending run when
+// that run is the metric's last, else as its own KV at key.
+func (w *DenseWriter) setEnvelope(key []byte, k Key, value []byte) error {
+	if w.fold && len(value) > 0 && (len(w.records) > 0 || w.rawPending) && w.key.Metric == k.Metric {
+		return w.flushWith(value)
+	}
+	if e := w.flush(); e != nil {
+		return e
+	}
+	return w.writer.setDecoded(key, k, value)
 }
 
 // NameHint names the metric of the following keys for a caller that already
@@ -551,7 +616,12 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 		}
 	}
 	if err == nil {
-		err = w.writer.setDecoded(key, k, value)
+		if w.fold {
+			// Hold the copy: if it is the metric's last run, it carries the envelope.
+			w.first, w.key, w.raw, w.rawPending = append(w.first[:0], key...), k, append(w.raw[:0], value...), true
+		} else {
+			err = w.writer.setDecoded(key, k, value)
+		}
 	}
 	w.records = w.records[:0]
 	w.err = err
@@ -578,6 +648,10 @@ func (w *DenseWriter) AppendSlots(key, value []byte, records []sealrollup.Record
 	k, err := w.decodeInput(key)
 	if err == nil && (len(records) == 0 || k.Archive == MetadataArchive || k.Ordinal != 0 || records[0].Archive < 0 || uint64(records[0].Archive) != uint64(k.Archive) || records[0].Slot != k.BlockStart) {
 		err = errors.New("dense run does not match valid archive key")
+	}
+	if err == nil && w.rawPending {
+		// A held copy is complete: write it before this run joins w.records.
+		err = w.flush()
 	}
 	for i := 0; err == nil && i < len(records); i++ {
 		r := records[i]
@@ -626,10 +700,7 @@ func (w *DenseWriter) set(key, value []byte) error {
 		return e
 	}
 	if k.Archive == MetadataArchive {
-		if e = w.flush(); e != nil {
-			return e
-		}
-		return w.writer.setDecoded(key, k, value)
+		return w.setEnvelope(key, k, value)
 	}
 	if k.Ordinal != 0 {
 		return errors.New("dense input requires ordinal zero")
@@ -643,6 +714,11 @@ func (w *DenseWriter) set(key, value []byte) error {
 
 // appendRecord starts a run at key, or at k's formatted key when key is nil.
 func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error {
+	if w.rawPending {
+		if e := w.flush(); e != nil {
+			return e
+		}
+	}
 	if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
 		if e := w.flush(); e != nil {
 			return e
@@ -701,12 +777,14 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 		return w.err
 	}
 	k, err := w.plannedKey(vshard, rank, metric, MetadataArchive, 0)
-	if err == nil {
+	if err == nil && w.fold && len(value) > 0 && len(w.records) > 0 && w.key.Metric == metric {
+		err = w.flushWith(value)
+	} else if err == nil {
 		err = w.flush()
-	}
-	if err == nil {
-		w.first = w.appendKey(w.first[:0], k)
-		err = w.writer.setDecoded(w.first, k, value)
+		if err == nil {
+			w.first = w.appendKey(w.first[:0], k)
+			err = w.writer.setDecoded(w.first, k, value)
+		}
 	}
 	w.err = err
 	return err

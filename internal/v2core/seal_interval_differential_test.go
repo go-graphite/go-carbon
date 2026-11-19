@@ -15,6 +15,7 @@ import (
 // Ten original apply batches in one seal must have exactly the same stored
 // winners as ten independent seals, including corrections and nonfinite bits.
 func TestSealIntervalStoredWinnersDifferential(t *testing.T) {
+	t.Parallel()
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		t.Run(fmt.Sprint(method), func(t *testing.T) {
 			_, policy := rollupTestPolicy(t, "cadence.metric", "1s:1h,1m:1d,1h:1y", method, .1)

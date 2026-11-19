@@ -62,6 +62,10 @@ func newV2WriteTelemetry(shards, producers int) *v2WriteTelemetry {
 	return t
 }
 func (t *v2WriteTelemetry) visible(owner int, batches []v2core.Batch) {
+	t.visiblePending(owner, v2core.PendingBatches(batches))
+}
+
+func (t *v2WriteTelemetry) visiblePending(owner int, pending v2core.PendingView) {
 	o := &t.owners[owner]
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -70,14 +74,14 @@ func (t *v2WriteTelemetry) visible(owner int, batches []v2core.Batch) {
 	// order is monotonic on each owner; advance only after scanning the whole head.
 	next := append([]uint64(nil), o.orders...)
 	counts := map[int64]uint64{}
-	for _, b := range batches {
+	pending.Each(func(b *v2core.PendingApplication) bool {
 		p := int((b.ID - 1) % uint64(t.producers))
-		if b.Order <= o.orders[p] {
-			continue
+		if b.Order > o.orders[p] {
+			next[p] = max(next[p], b.Order)
+			counts[b.Clock] += uint64(b.Points)
 		}
-		next[p] = max(next[p], b.Order)
-		counts[b.Clock] += uint64(len(b.Points))
-	}
+		return true
+	})
 	copy(o.orders, next)
 	for clock, n := range counts {
 		t.visibleLatency.add(now.Sub(time.Unix(clock, 0)), n)

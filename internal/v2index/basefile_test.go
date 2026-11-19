@@ -1,14 +1,20 @@
 package v2index
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/lomik/zapwriter"
 )
 
 // settle waits for the background base merge and installs it.
@@ -154,4 +160,78 @@ func TestBaseMergeOffPublishPath(t *testing.T) {
 		t.Fatalf("merge not installed: levels=%d len=%d", s.Levels(), s.Len())
 	}
 	checkLevels(t, s)
+}
+
+// A failed base write logs one ERROR per failure streak, counts every failure
+// and the heap bytes, keeps finds unchanged, and is retried at most once per
+// baseRetry: the next success puts the base back on file with one INFO.
+func TestBaseFileFailureLoudAndRetried(t *testing.T) {
+	defer zapwriter.Test()()
+	var c Catalog
+	if err := c.SetDir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	var failing atomic.Bool
+	fileHook = func(int) error {
+		if failing.Load() {
+			return errors.New("injected write failure")
+		}
+		return nil
+	}
+	defer func() { c.Close(); fileHook = nil }() // after merges stop reading it
+	var ref Catalog                              // heap only, never fails
+	rev := uint64(0)
+	apply := func(names []string) {
+		t.Helper()
+		rev++
+		for _, cat := range []*Catalog{&c, &ref} {
+			if err := cat.Apply(rev, names, nil); err != nil {
+				t.Fatal(err)
+			}
+			cat.settle()
+		}
+	}
+	finds := func(cat *Catalog) []string {
+		var out []string
+		for _, glob := range []string{"app1.*.metric2.*", "app3.host00[1-3]*.*.{1,5}", "*.host0042.*.*"} {
+			if err := cat.Snapshot().MatchPaths(context.Background(), glob, func(p string) error { out = append(out, p); return nil }); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out
+	}
+	check := func(failures uint64, onHeap bool) {
+		t.Helper()
+		n, heap := c.BaseFileStats()
+		s := c.Snapshot()
+		if n != failures || (heap > 0) != onHeap || (s.levels[0].path == "") != onHeap || (c.Err() != nil) != onHeap {
+			t.Fatalf("failures=%d heap=%d path=%q err=%v, want failures=%d onHeap=%v", n, heap, s.levels[0].path, c.Err(), failures, onHeap)
+		}
+		if !s.EqualNames(slices.Collect(ref.Snapshot().Names())) || !slices.Equal(finds(&c), finds(&ref)) {
+			t.Fatal("names or finds differ from the reference")
+		}
+	}
+	apply(baseNames(20000, 1)) // a heap base spills to a file
+	check(0, false)
+	failing.Store(true)
+	apply(baseNames(5000, 2)) // the grown base merge fails
+	check(1, true)
+	apply(baseNames(10, 3)) // within baseRetry: no rewrite
+	if c.job != nil {
+		t.Fatal("heap base rewritten before baseRetry")
+	}
+	check(1, true)
+	c.retryAt = time.Time{} // baseRetry has passed
+	apply(baseNames(10, 4))
+	check(2, true)
+	if logs := zapwriter.TestString(); strings.Count(logs, "base file write failed") != 1 || !strings.Contains(logs, "injected write failure") || !strings.Contains(logs, "base-") {
+		t.Fatalf("want one ERROR with path and error per streak, logs:\n%s", logs)
+	}
+	failing.Store(false)
+	c.retryAt = time.Time{}
+	apply(baseNames(10, 5))
+	check(2, false)
+	if _, err := os.Stat(c.Snapshot().levels[0].path); err != nil || !strings.Contains(zapwriter.TestString(), "base back on file") {
+		t.Fatalf("base not back on file: %v\n%s", err, zapwriter.TestString())
+	}
 }
