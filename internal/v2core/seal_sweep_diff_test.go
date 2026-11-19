@@ -236,7 +236,6 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 	for _, id := range ids {
 		m := w.r.metrics[id]
 		next.install(id, m)
-		next.names[m.policy.Name] = id
 	}
 	return next
 }
