@@ -457,9 +457,10 @@ var mergePartID = func(id *v2part.PartID) error {
 // Merge same-source local originals with the shared timestamp/class/order rule.
 // Resolved coarse records are copied, never aggregated. Publication and GC stay
 // outside this streaming rewrite and retain the ordinary snapshot fences.
-// A nonzero ttl is the durable owner ArchiveClock of a TTL rewrite: records
-// whose expiry precedes it are dropped as whole-part retirement would.
-func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, ttl int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+// retire is the owner's age-retirement clock (retireClock): a record is dropped
+// only when its expiry precedes it, as whole-part retirement would, so a merge
+// never removes a record the reader still returns.
+func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
@@ -577,7 +578,6 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 		}
 		config = *chosen.config
-		floor := max(metadata.LastUpdate/1e9, ttl)
 		// The output key is the input's validated identity with the output part:
 		// Encode(c.key) byte for byte, without a name string or route re-hash.
 		key = append(append(key[:0], c.ident...), make([]byte, 16)...)
@@ -620,7 +620,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < floor {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < retire {
 						untouched = false
 						break
 					}
@@ -639,7 +639,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= floor {
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= retire {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -723,7 +723,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var ttl int64
+	retire := o.retireClock()
 	if len(inputs) == 0 && limit < configured {
 		// Disk-bound: tell "nothing due" from "due but no room".
 		if due, e := o.selectMergeLimit(snapshot, configured); e == nil && len(due) > 0 {
@@ -737,12 +737,10 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 		if now < o.ttlNext.Load() {
 			return false, nil
 		}
-		clock := o.retireClock()
-		inputs, err = o.selectTTLRewrite(snapshot, clock, limit)
+		inputs, err = o.selectTTLRewrite(snapshot, retire, limit)
 		if err != nil || len(inputs) == 0 {
 			return false, err
 		}
-		ttl = clock
 		o.ttlNext.Store(now + ttlRewriteSeconds)
 	}
 	var staged uint64
@@ -757,7 +755,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, ttl, stop)
+	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, retire, stop)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
