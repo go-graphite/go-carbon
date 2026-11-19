@@ -60,6 +60,7 @@ func TestBaseFileWriteFailureKeepsOldBase(t *testing.T) {
 	if s.levels[0].path != "" {
 		t.Fatalf("base should be on the heap after a failed write, path %q", s.levels[0].path)
 	}
+	c.Close() // the next spill attempt may be writing its temporary file
 	if m, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(m) != 0 {
 		t.Fatalf("temporary file left: %v", m)
 	}
