@@ -41,8 +41,9 @@ func TestCheckNameLimits(t *testing.T) {
 
 // One over-long name, one over-long path component and one name without a
 // policy, among normal names, refuse only their own points. The good names'
-// stored records and read bits match a stream without them, over TCP (the bad
-// points arrive on the first of two connections) and through direct Append.
+// stored records and read bits match the same stream without them, over TCP
+// (the bad points arrive on the first of two connections) and through direct
+// Append.
 func TestReceiverRejectsBadNamesLocally(t *testing.T) {
 	type image struct {
 		Records map[string][]sealrollup.Record
@@ -83,7 +84,7 @@ func TestReceiverRejectsBadNamesLocally(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if srv, e = v2recv.Start(l, owners, v2recv.Config{BatchSize: 7, QueueDepth: 1, SyncInterval: time.Hour}); e != nil {
+			if srv, e = v2recv.Start(l, owners, v2recv.Config{BatchSize: 7, QueueDepth: 1, SyncInterval: 5 * time.Millisecond}); e != nil {
 				t.Fatal(e)
 			}
 		}
@@ -103,10 +104,12 @@ func TestReceiverRejectsBadNamesLocally(t *testing.T) {
 		want := uint64(len(stream))
 		sent := uint64(0)
 		for _, part := range [][]sample{stream[:split], stream[split:]} {
-			// Per-name order needs the first connection consumed before the second.
-			for deadline := time.Now().Add(5 * time.Second); tcp && srv.Stats().Accepted < sent && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
-				if err = srv.Fence(func() error { return nil }); err != nil {
-					t.Fatal("receiver stopped:", err)
+			// Per-name order needs the first connection consumed before the
+			// second. The short sync tick appends pending points without the
+			// extra core seal a Fence (Flush) would add.
+			for deadline := time.Now().Add(30 * time.Second); tcp && srv.Stats().Accepted < sent; time.Sleep(time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatalf("first connection not consumed: %+v", srv.Stats())
 				}
 			}
 			sent += uint64(len(part))
@@ -218,11 +221,11 @@ func TestReceiverRejectsBadNamesLocally(t *testing.T) {
 		t.Logf("tcp=%t bad=%t names=%d too-long=%d invalid=%d stored-records-reads-sha256=%x", tcp, withBad, len(im.Records), long, invalid, sha256.Sum256(b))
 		return im, long, invalid
 	}
-	clean, _, _ := run(false, false)
-	if len(clean.Records) != 2 {
-		t.Fatal("missing names", len(clean.Records))
-	}
 	for _, tcp := range []bool{false, true} {
+		clean, _, _ := run(tcp, false)
+		if len(clean.Records) != 2 {
+			t.Fatal("missing names", len(clean.Records))
+		}
 		got, long, invalid := run(tcp, true)
 		if long != 2 || invalid != 1 {
 			t.Fatalf("tcp=%t: too-long=%d invalid=%d, want 2 and 1", tcp, long, invalid)
