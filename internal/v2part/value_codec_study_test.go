@@ -122,6 +122,46 @@ func TestValueCodecStudy(t *testing.T) {
 		}
 		before, beforeNs := compressed(legacyAppendSlots)
 		after, afterNs := compressed(appendValues)
+		rawIf := func(short bool) func([]byte, []sealrollup.Record) []byte {
+			return func(out []byte, r []sealrollup.Record) []byte {
+				v := appendValues(nil, r)
+				if v[0] != valuePlanes || (len(r) < 64) != short {
+					return append(out, v...)
+				}
+				out = append(out, valuePlanes)
+				for _, x := range r {
+					out = binary.LittleEndian.AppendUint64(out, x.Sample.Bits)
+				}
+				return out
+			}
+		}
+		rawDistinct := func(ratio float64) func([]byte, []sealrollup.Record) []byte {
+			return func(out []byte, r []sealrollup.Record) []byte {
+				v := appendValues(nil, r)
+				if v[0] != valuePlanes || len(r) < 64 {
+					return append(out, v...)
+				}
+				seen := make(map[uint64]struct{}, len(r))
+				for _, x := range r {
+					seen[x.Sample.Bits] = struct{}{}
+				}
+				if float64(len(seen)) > ratio*float64(len(r)) {
+					return append(out, v...)
+				}
+				out = append(out, valuePlanes)
+				for _, x := range r {
+					out = binary.LittleEndian.AppendUint64(out, x.Sample.Bits)
+				}
+				return out
+			}
+		}
+		d25, _ := compressed(rawDistinct(0.25))
+		d50, _ := compressed(rawDistinct(0.5))
+		d75, _ := compressed(rawDistinct(0.75))
+		t.Logf("%s distinct selector B/pt: d25=%.4f d50=%.4f d75=%.4f", filepath.Base(path), float64(d25)/float64(points), float64(d50)/float64(points), float64(d75)/float64(points))
+		rawShort, _ := compressed(rawIf(true))
+		rawLong, _ := compressed(rawIf(false))
+		t.Logf("%s selector B/pt: raw<64=%.4f raw>=64=%.4f", filepath.Base(path), float64(rawShort)/float64(points), float64(rawLong)/float64(points))
 		nocap, _ := compressed(func(out []byte, r []sealrollup.Record) []byte { return studyValues(out, r, 64, false) })
 		xorPlanes, _ := compressed(func(out []byte, r []sealrollup.Record) []byte { return studyValues(out, r, 64, true) })
 		cap2, _ := compressed(func(out []byte, r []sealrollup.Record) []byte {
