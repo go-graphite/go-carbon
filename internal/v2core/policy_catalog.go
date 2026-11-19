@@ -25,8 +25,9 @@ type PolicyIdentity struct {
 	// sharing the identity (adoption) overwrite it, so it is only a hint:
 	// readers confirm ids[slot] == id and fall back to the metrics map.
 	ownerSlot atomic.Uint32
-	// route is namefp.Route(name)>>32, the second fingerprint half, beside
-	// ownerSlot in padding (0 B per name).
+	// route is namefp.Route(name)>>32, the second fingerprint half. It takes
+	// the struct from 56 B to 64 B, and both round up to Go's 64 B size class,
+	// so it costs 0 B of heap per name.
 	route uint32
 	// nameHash is NameHash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.
