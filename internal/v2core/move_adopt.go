@@ -280,7 +280,6 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.parallelism = o.rollups.parallelism
 	for id, m := range o.rollups.metrics {
 		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
-		next.names[m.policy.Name] = id
 	}
 	next.stage, next.expire, next.now = o.rollups.stage, o.rollups.expire, o.rollups.now
 	for name, donor := range prepared.index.metrics {
@@ -348,7 +347,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 		}
 		for _, record := range rebuilt {
-			m.slots.Install(record.Delta)
+			m.residency().Install(record.Delta)
 			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
 			if record.Archive > 0 {
 				key := [2]int64{int64(record.Archive), record.Slot}
@@ -367,10 +366,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		authority.Meta = m.metadata(meta)
 		if next.db != nil {
-			m.slots.KeepRecent(meta.Frontier.MaxTime)
+			m.keepRecent(meta.Frontier.MaxTime)
 		}
 		next.install(id, m, meta)
-		next.names[policy.Name] = id
 		value, err := json.Marshal(authority)
 		if err != nil {
 			return err

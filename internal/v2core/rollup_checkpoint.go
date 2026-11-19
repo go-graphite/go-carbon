@@ -338,16 +338,15 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 			return nil, errCheckpoint
 		}
 		archives := len(m.schema().Archives)
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		for _, x := range resident {
 			if x.Archive >= archives {
 				return nil, errCheckpoint
 			}
-			m.slots.InstallRecent(x)
+			m.installRecent(x)
 		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		r.install(id, m, meta)
-		r.names[m.policy.Name] = id
 	}
 	if d.err != nil || len(d.buf) != 0 {
 		return nil, errCheckpoint

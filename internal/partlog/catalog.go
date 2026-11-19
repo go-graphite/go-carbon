@@ -367,6 +367,17 @@ func (c *NameCatalog) Lookup(id uint64) (string, []byte, bool) {
 	e := c.entries[id]
 	return e.key, e.definitionBytes(), true
 }
+
+// Key returns the catalog-owned name for id without rebuilding its definition.
+// With a bind hook it is the shared identity name, so callers can retain or key
+// maps by it instead of keeping another copy of the name.
+func (c *NameCatalog) Key(id uint64) (string, bool) {
+	if id == 0 || id >= uint64(len(c.entries)) {
+		return "", false
+	}
+	return c.entries[id].key, true
+}
+
 // Matches reports whether id is bound to exactly name and definition, without
 // reconstructing the definition bytes.
 func (c *NameCatalog) Matches(id uint64, name string, definition []byte) bool {

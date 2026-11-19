@@ -28,10 +28,15 @@ func rollupStateDigest(r *coreRollups) string {
 	var b strings.Builder
 	for _, id := range ids {
 		m := r.metrics[id]
-		fmt.Fprintf(&b, "%d %s %+v %v closable=%v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], m.slots.AppendResident(nil), r.closable[id] != nil, r.names[m.policy.Name] == id)
+		fmt.Fprintf(&b, "%d %s %+v %v closable=%v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], m.slots.AppendResident(nil), r.closable[id] != nil, nameIndexed(r, m))
 	}
-	fmt.Fprintf(&b, "names=%d metrics=%d\n", len(r.names), len(r.metrics))
+	fmt.Fprintf(&b, "names=%d metrics=%d\n", r.names.Len(), len(r.metrics))
 	return b.String()
+}
+
+func nameIndexed(r *coreRollups, m *rollupMetric) bool {
+	_, ok := r.names.Get(m.fingerprint())
+	return ok
 }
 
 func rollupScanDigest(t *testing.T, e *Engine) string {
