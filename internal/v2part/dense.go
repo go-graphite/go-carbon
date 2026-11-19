@@ -28,10 +28,12 @@ var denseMagic = []byte{'G', 'C', 'D', 1}
 // an event-time ring wrap. No arithmetic on float values is used unless exact
 // integer reconstruction has been checked bit for bit.
 func EncodeSlots(records []sealrollup.Record) ([]byte, error) {
-	return appendSlots(nil, records)
+	return appendSlots(nil, records, nil)
 }
 
-func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
+// appendSlots reuses *table, when given, as the value codec's distinct-value
+// table.
+func appendSlots(out []byte, records []sealrollup.Record, table *[]uint64) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
@@ -69,22 +71,32 @@ func appendSlots(out []byte, records []sealrollup.Record) ([]byte, error) {
 			out[flags+i/8] |= 1 << uint(i%8)
 		}
 	}
-	return appendValues(out, records), nil
+	return appendValues(out, records, table), nil
 }
 
 // Value column codecs. A run's tag byte (mode bit denseTagged) names one codec
 // for all its values: decimal runs store v = m / 10^e with one exponent e per
 // run and integer mantissas m as zigzag first or second differences, whichever
-// packs smaller; other runs, and decimal runs whose mantissa differences average
-// more than decimalMaxCost bytes, store eight raw byte planes. Every decimal value's
-// float64 bits are checked at encode, so NaN payloads, -0 and infinities always
-// take the byte planes.
+// packs smaller. Other runs, and decimal runs whose mantissa differences average
+// more than decimalMaxCost bytes, store their float64 bits verbatim: as raw
+// little-endian words when the run has at least wordsMinRun values and repeats
+// values (zstd then matches whole 8-byte values), else as eight byte planes
+// (zstd then packs the near-constant sign and exponent bytes). Every decimal
+// value's float64 bits are checked at encode, so NaN payloads, -0 and
+// infinities always keep their exact bits.
 const (
+	denseInteger  = 0x01 // untagged legacy integer runs
 	denseTagged   = 0x80
 	valuePlanes   = 0 << 5
 	valueDelta1   = 1 << 5
 	valueDelta2   = 2 << 5
+	valueWords    = 3 << 5
 	maxDecimalExp = 18
+	wordsMinRun   = 64
+	// A run repeats values when fewer than wordsDistinctNum/wordsDistinctDen
+	// of them are distinct.
+	wordsDistinctNum = 3
+	wordsDistinctDen = 4
 	// Above this mean varint size per value, mantissas are wide and noisy:
 	// the byte planes' constant exponent and zero low bytes compress better.
 	decimalMaxCost = 4
@@ -107,7 +119,47 @@ func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
 
 func varintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
 
-func appendValues(out []byte, records []sealrollup.Record) []byte {
+// repeatsValues reports whether fewer than wordsDistinctNum/wordsDistinctDen of
+// the run's values are distinct, counting them in an open-addressing table
+// (reused from *table when given) and stopping at the limit.
+func repeatsValues(records []sealrollup.Record, table *[]uint64) bool {
+	shift := 64 - bits.Len(uint(2*len(records)-1))
+	size := 1 << (64 - shift)
+	var t []uint64
+	if table != nil && cap(*table) >= size {
+		t = (*table)[:size]
+		clear(t)
+	} else {
+		t = make([]uint64, size)
+		if table != nil {
+			*table = t
+		}
+	}
+	limit := len(records) * wordsDistinctNum / wordsDistinctDen
+	distinct, zero := 0, false
+	for _, r := range records {
+		v := r.Sample.Bits
+		if v == 0 { // 0 marks a free slot, so +0.0 is counted aside
+			if !zero {
+				zero, distinct = true, distinct+1
+			}
+		} else {
+			i := (v * 0x9e3779b97f4a7c15) >> shift
+			for t[i] != 0 && t[i] != v {
+				i = (i + 1) & uint64(size-1)
+			}
+			if t[i] == 0 {
+				t[i], distinct = v, distinct+1
+			}
+		}
+		if distinct >= limit {
+			return false
+		}
+	}
+	return true
+}
+
+func appendValues(out []byte, records []sealrollup.Record, table *[]uint64) []byte {
 	e := 0
 	for _, r := range records {
 		for ; e <= maxDecimalExp; e++ {
@@ -154,6 +206,13 @@ func appendValues(out []byte, records []sealrollup.Record) []byte {
 			return out
 		}
 	}
+	if len(records) >= wordsMinRun && repeatsValues(records, table) {
+		out = append(out, valueWords)
+		for _, r := range records {
+			out = binary.LittleEndian.AppendUint64(out, r.Sample.Bits)
+		}
+		return out
+	}
 	out = append(out, valuePlanes)
 	for plane := uint(0); plane < 8; plane++ {
 		for _, r := range records {
@@ -183,8 +242,10 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	if len(data) < 6 || archive == MetadataArchive || firstSlot < 0 {
 		return nil, bad
 	}
+	// Mode bits are independent flags; the value column takes one of
+	// untagged planes, untagged integers or a tag.
 	mode := data[4]
-	if mode != 0 && mode != 1 && mode != denseTagged {
+	if mode&^(denseInteger|denseTagged) != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged {
 		return nil, bad
 	}
 	p := data[5:]
@@ -266,17 +327,18 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
 	}
 	tag := byte(valuePlanes)
-	switch mode {
-	case 1: // legacy integer run: first differences, plain varints, e = 0
+	legacyInteger := mode&denseInteger != 0
+	switch {
+	case legacyInteger: // first differences, plain varints, e = 0
 		tag = valueDelta1
-	case denseTagged:
+	case mode&denseTagged != 0:
 		if len(p) == 0 {
 			return nil, bad
 		}
 		tag, p = p[0], p[1:]
 	}
 	var err error
-	if p, err = decodeValues(rs, tag, mode == 1, p); err != nil {
+	if p, err = decodeValues(rs, tag, legacyInteger, p); err != nil {
 		return nil, bad
 	}
 	if len(p) != 0 {
@@ -321,6 +383,8 @@ type denseWorkspace struct {
 	prevRank uint32
 	havePrev bool
 	group    []byte
+	// distinct is the value codec's reusable distinct-value table.
+	distinct []uint64
 }
 
 var denseWorkspaces sync.Pool
@@ -354,7 +418,7 @@ func (w *DenseWriter) flush() error {
 	if len(w.records) == 0 {
 		return nil
 	}
-	b, e := appendSlots(w.encoded[:0], w.records)
+	b, e := appendSlots(w.encoded[:0], w.records, &w.distinct)
 	w.encoded = b
 	if e == nil {
 		e = w.writer.setDecoded(w.first, w.key, b)
@@ -660,6 +724,15 @@ func ReadExpanded(ctx context.Context, path string, d *Descriptor, visit func(Ke
 func decodeValues(rs []sealrollup.Record, tag byte, legacy bool, p []byte) ([]byte, error) {
 	bad := errors.New("invalid dense value column")
 	kind, e := tag&^31, int(tag&31)
+	if kind == valueWords {
+		if e != 0 || len(p) < 8*len(rs) {
+			return nil, bad
+		}
+		for i := range rs {
+			rs[i].Sample.Bits = binary.LittleEndian.Uint64(p[8*i:])
+		}
+		return p[8*len(rs):], nil
+	}
 	if kind == valuePlanes {
 		if e != 0 || len(p) < 8*len(rs) {
 			return nil, bad
