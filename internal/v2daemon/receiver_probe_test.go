@@ -1,6 +1,7 @@
 package v2daemon
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -234,5 +235,32 @@ func BenchmarkApplicationOwnerProbe(b *testing.B) {
 			b.StopTimer()
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*batch), "ns/point")
 		})
+	}
+}
+
+// A refused name stays out of the fingerprint table: each of its points is
+// refused on its own, and the points around it keep their own names' IDs.
+func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
+	s, resolve := openProbeStore(t)
+	p := s.Producers[0]
+	var refused []string
+	o := &applicationOwner{p: p, resolve: resolve, reject: func(name string, err error) {
+		if !errors.Is(err, ErrNameTooLong) {
+			t.Errorf("refused %d-byte name: %v", len(name), err)
+		}
+		refused = append(refused, name)
+	}}
+	bad := "bad." + strings.Repeat("x", points.MaxMetricNameBytes)
+	_, names := probeBatch([]string{"ok.a", bad, bad, "ok.a", "ok.b", bad})
+	if err := o.Append(names, nil, probePoints(len(names)), nil, 1010); err != nil {
+		t.Fatal(err)
+	}
+	if len(refused) != 3 || p.catalog.Count() != 2 || o.names.Len() != 2 {
+		t.Fatalf("refused=%d catalog=%d table=%d, want 3, 2, 2", len(refused), p.catalog.Count(), o.names.Len())
+	}
+	for i, want := range []string{"ok.a", "ok.a", "ok.b"} {
+		if got, _ := p.catalog.Key(p.applicationIDs[i]); got != want {
+			t.Fatalf("appended point %d journaled as %q, want %q", i, got, want)
+		}
 	}
 }
