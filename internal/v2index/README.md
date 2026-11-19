@@ -33,8 +33,17 @@ Never concurrently inspect a producer's mutable `partlog.NameCatalog`.
 Each query pins an immutable image. The first query after membership changes
 builds a replacement off the writer path; other builders serialize, existing
 readers keep their old image. Failed builds return an error without replacing
-the preceding image. Publication copies/sorts names; delta publication merges
-the complete name slice. Both backends rebuild completely on membership changes.
+the preceding image. Both backends rebuild completely on membership changes.
+
+The snapshot keeps names in a few immutable, sorted, disjoint levels, each a
+front-coded byte slice (LevelDB/Pebble data blocks, VictoriaMetrics mergeset
+items): 32 names per block, every entry stores the prefix length it shares with
+the previous name plus the rest, and each block starts with a whole name. A
+seek binary-searches block starts and decodes at most one block; position `i`
+decodes block `i/32` only. A publication encodes its new names as a small level
+and shares untouched levels; a level merges into its predecessor once it is
+more than 1/8 of it (fanout 8), so 10M names keep about 3-4 levels. Name bytes
+are copied out of the caller's strings, so the index holds no string headers.
 This deliberately reuses the earlier operational-parity prototype rather than
 introducing another glob engine. It is **not** an incremental 10M-name design:
 latency, old/new overlapping images and rebuild cost must be budgeted before

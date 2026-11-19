@@ -27,8 +27,7 @@ func BenchmarkRollupSparseCatalog(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					r.metrics[id] = m
-					r.names.Put(m.fingerprint(), 0)
+					r.install(id, m, freshMetadata)
 				}
 				if i < 31 || i == size {
 					batches = append(batches, Batch{ID: id, Policy: encoded, Order: 1, Clock: 1000, Points: []Row{{Time: 999, Seq: 1}}})
