@@ -33,6 +33,13 @@ type Owner interface {
 	Drain() error
 }
 
+// ByteOwner accepts plaintext names without making a batch string. Each name
+// spans text[ends[i-1]:ends[i]] (the first starts at zero). Like Append, it
+// borrows all arguments until return; retained names must be copied.
+type ByteOwner interface {
+	AppendBytes(text []byte, ends []int, hashes []uint64, data []points.Point, sequence []uint64, clock int64) error
+}
+
 type Config struct {
 	OnStopped func() // called once after Wait drains handlers and owners
 
@@ -49,7 +56,7 @@ type batch struct {
 	names  []string
 	hashes []uint64 // namefp.Route of each name, computed once for routing
 	data   []points.Point
-	text   []byte // plaintext name bytes, converted once per batch by named
+	text   []byte // plaintext name bytes, borrowed by ByteOwner until return
 	ends   []int  // end of each plaintext name in text; empty for codec batches
 }
 
@@ -202,29 +209,38 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 	// existing serial worker, bounded by BatchSize and the existing sync tick.
 	// Per-name order survives this coalescing.
 	var pending batch
+	byteOwner, _ := o.(ByteOwner)
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
-	appendBatch := func(names []string, hashes []uint64, data []points.Point) {
+	appendBatch := func(b *batch) {
 		sequence = sequence[:0]
-		for range data {
+		for range b.data {
 			seq++
 			sequence = append(sequence, seq)
 		}
-		if err := o.Append(names, hashes, data, sequence, time.Now().Unix()); err != nil {
+		var err error
+		if byteOwner != nil && len(b.ends) != 0 {
+			err = byteOwner.AppendBytes(b.text, b.ends, b.hashes, b.data, sequence, time.Now().Unix())
+		} else {
+			b.named()
+			err = o.Append(b.names, b.hashes, b.data, sequence, time.Now().Unix())
+		}
+		if err != nil {
 			failed = true
-			s.stats.rejected.Add(uint64(len(data)))
+			s.stats.rejected.Add(uint64(len(b.data)))
 			s.stats.sink.Add(1)
 			s.fail(err)
 		} else {
-			s.stats.accepted.Add(uint64(len(data)))
+			s.stats.accepted.Add(uint64(len(b.data)))
 		}
 	}
 	appendPending := func() {
 		if failed || len(pending.data) == 0 {
 			return
 		}
-		appendBatch(pending.names, pending.hashes, pending.data)
+		appendBatch(&pending)
 		clear(pending.names)
 		pending.names, pending.hashes, pending.data = pending.names[:0], pending.hashes[:0], pending.data[:0]
+		pending.text, pending.ends = pending.text[:0], pending.ends[:0]
 	}
 	syncOwner := func() {
 		appendPending()
@@ -241,6 +257,7 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 		recycle := func() {
 			clear(originalNames)
 			b.names, b.hashes, b.data = originalNames[:0], originalHashes[:0], originalData[:0]
+			b.text, b.ends = b.text[:0], b.ends[:0]
 			s.batches.Put(b)
 		}
 		if failed {
@@ -248,12 +265,33 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 			recycle()
 			return
 		}
+		// Codec names already own immutable strings. Keep their batching path
+		// separate when connections with different protocols share an owner.
+		if len(pending.data) != 0 && (len(pending.ends) == 0) != (len(b.ends) == 0) {
+			appendPending()
+			if failed {
+				s.stats.rejected.Add(uint64(len(b.data)))
+				recycle()
+				return
+			}
+		}
 		if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
-			appendBatch(b.names, b.hashes, b.data)
+			appendBatch(b)
 			b.names, b.hashes, b.data = b.names[:0], b.hashes[:0], b.data[:0]
 		}
+		textStart, nameIndex := 0, 0
 		for len(b.data) > 0 {
 			n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
+			if len(b.ends) != 0 {
+				ends := b.ends[nameIndex : nameIndex+n]
+				offset := len(pending.text) - textStart
+				pending.text = append(pending.text, b.text[textStart:ends[n-1]]...)
+				for _, end := range ends {
+					pending.ends = append(pending.ends, offset+end)
+				}
+				textStart = ends[n-1]
+				nameIndex += n
+			}
 			pending.names = append(pending.names, b.names[:n]...)
 			pending.hashes = append(pending.hashes, b.hashes[:n]...)
 			pending.data = append(pending.data, b.data[:n]...)
@@ -398,7 +436,9 @@ func (s *Server) read(c net.Conn) error {
 		if b == nil || len(b.data) == 0 {
 			return nil
 		}
-		b.named()
+		if _, ok := s.owners[i].(ByteOwner); !ok {
+			b.named()
+		}
 		select {
 		case s.queues[i] <- b:
 			buffers[i] = nil

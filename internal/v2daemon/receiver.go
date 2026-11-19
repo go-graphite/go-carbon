@@ -82,37 +82,70 @@ func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32,
 }
 
 func (o *applicationOwner) Append(names []string, hashes []uint64, data []points.Point, _ []uint64, clock int64) error {
-	o.apps = slices.Grow(o.apps[:0], len(names))
-	o.sequence = slices.Grow(o.sequence[:0], len(names))[:len(names)]
+	return o.appendNames(names, nil, nil, hashes, data, clock)
+}
+
+func (o *applicationOwner) AppendBytes(text []byte, ends []int, hashes []uint64, data []points.Point, _ []uint64, clock int64) error {
+	return o.appendNames(nil, text, ends, hashes, data, clock)
+}
+
+func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, hashes []uint64, data []points.Point, clock int64) error {
+	o.apps = slices.Grow(o.apps[:0], len(data))
+	o.sequence = slices.Grow(o.sequence[:0], len(data))[:len(data)]
 	apps := o.apps[:0]
 	defer func() { clear(apps); o.apps = apps[:0] }()
 	var previous namefp.Fingerprint
 	var local uint32 // 0 until the first admitted name: catalog IDs start at 1
-	for i, name := range names {
-		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
-			continue
+	start := 0
+	for i := range data {
+		var name string
+		var raw []byte
+		if ends != nil {
+			raw = text[start:ends[i]]
+			start = ends[i]
+		} else {
+			name = names[i]
 		}
 		var route uint64
 		if hashes != nil {
 			route = hashes[i]
+		} else if ends != nil {
+			route = namefp.Route(raw)
 		} else {
 			route = namefp.Route(name)
 		}
-		if fp := namefp.Of(namefp.Hash(name), route); local == 0 || previous != fp {
-			var ok bool
-			if local, ok = o.names.Get(fp); !ok {
-				var err error
-				if local, err = o.register(name, fp); err != nil {
-					if o.p.failed != nil {
-						return err
-					}
-					if o.reject != nil {
-						o.reject(name, err)
-					}
-					continue // local is 0, so the next point probes again
-				}
-			}
+		var hash uint64
+		if ends != nil {
+			hash = namefp.HashBytes(raw)
+		} else {
+			hash = namefp.Hash(name)
+		}
+		fp := namefp.Of(hash, route)
+		if local == 0 || previous != fp {
+			local, _ = o.names.Get(fp)
 			previous = fp
+		}
+		if ends != nil {
+			if local == 0 {
+				name = string(raw)
+			} else if o.throttle != nil {
+				name = o.p.applications[local].name // quota checks reuse the catalog string
+			}
+		}
+		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
+			continue
+		}
+		if local == 0 {
+			var err error
+			if local, err = o.register(name, fp); err != nil {
+				if o.p.failed != nil {
+					return err
+				}
+				if o.reject != nil {
+					o.reject(name, err)
+				}
+				continue // local is 0, so the next point probes again
+			}
 		}
 		index := len(apps)
 		order := o.p.applyOrder + uint64(index) + 1
