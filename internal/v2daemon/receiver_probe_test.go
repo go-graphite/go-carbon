@@ -74,8 +74,8 @@ func probePoints(n int) []points.Point {
 	return data
 }
 
-// Either fingerprint half separates names. Equal routing hashes (the FNV half)
-// are split by maphash end to end; equal maphash is split by the FNV half.
+// Either fingerprint half separates names. Equal routing hashes (the route half)
+// are split by maphash end to end; equal maphash is split by the route half.
 func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 	s, resolve := openProbeStore(t)
 	p := s.Producers[0]
@@ -83,7 +83,7 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 	names := []string{"collide.a", "collide.b", "collide.b", "collide.a", "collide.c", "collide.a"}
 	hashes := make([]uint64, len(names))
 	for i := range hashes {
-		hashes[i] = 42 << 32 // forced equal FNV half
+		hashes[i] = 42 << 32 // forced equal route half
 	}
 	if err := o.Append(names, hashes, probePoints(len(names)), nil, 1010); err != nil {
 		t.Fatal(err)
