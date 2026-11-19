@@ -17,6 +17,7 @@ import (
 // pins no Pebble snapshot for it; readers still see every new pending point.
 // A seal moves the generation and takes exactly one new pin.
 func TestHeadOnlyPublishPinsNothing(t *testing.T) {
+	t.Parallel()
 	clock := int64(1794700800)
 	cfg := testConfig()
 	cfg.SealInterval = time.Hour

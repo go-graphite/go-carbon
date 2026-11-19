@@ -134,6 +134,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 // Names are born staggered, so unranked installed names linger below the
 // renumber threshold across seals.
 func TestRollupPlanRankDifferential(t *testing.T) {
+	t.Parallel()
 	for _, workers := range []int{1, 3} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(workers), 7))
