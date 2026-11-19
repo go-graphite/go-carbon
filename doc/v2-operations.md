@@ -38,6 +38,14 @@ and [storage caches](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/mas
 The go-carbon metrics retain the existing component prefix and Prometheus
 `_total`, `_bytes` and `_seconds` conventions.
 
+## Go memory policy
+
+With v2 enabled, startup defaults to `GOGC=75` to reduce garbage retained
+between collections. An explicit `GOGC` value (including `off`) wins. The
+Go runtime still honors an explicit `GOMEMLIMIT`; this growth target does not
+bound RSS. File mappings, native allocations and filesystem page cache need separate
+accounting. Classic startup retains the runtime's GC growth setting.
+
 ## Repeatable producer catalog measurements
 
 `TestNameCatalogScale` is opt-in. Compile once, then run create and recover in

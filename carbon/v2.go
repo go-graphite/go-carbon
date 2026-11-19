@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -91,6 +93,10 @@ func (app *App) startV2() error {
 
 	if c.Whisper.Aggregation == nil || len(c.Whisper.Schemas) == 0 {
 		return errors.New("v2 requires loaded schema and aggregation policies")
+	}
+	// Bound the garbage allowance on large heaps while preserving operator tuning.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(75)
 	}
 	var core *cache.Cache
 	n := c.V2.Producers
