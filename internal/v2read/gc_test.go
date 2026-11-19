@@ -26,7 +26,7 @@ func TestRetirementPublishesNewSealedGenerationWithoutInput(t *testing.T) {
 	var mu sync.Mutex
 	files := map[uint64][]v2core.SnapshotPart{}
 	freshFound := map[uint64]bool{}
-	publish := func(owner int, snap *pebble.Snapshot, pending []v2core.Batch, number uint64, inventory *v2core.RollupInventory) error {
+	publish := func(owner int, snap *pebble.Snapshot, pending v2core.PendingView, number uint64, inventory *v2core.RollupInventory) error {
 		if snap != nil {
 			parts, err := (v2core.SealedSnapshotReader{Snapshot: snap, Directory: filepath.Join(root, "owner-000")}).ReadPartFiles(context.Background())
 			if err != nil {
@@ -43,9 +43,9 @@ func TestRetirementPublishesNewSealedGenerationWithoutInput(t *testing.T) {
 			}
 			mu.Unlock()
 		}
-		return r.PublishWithInventory(owner, snap, pending, number, inventory)
+		return r.PublishPending(owner, snap, pending, number, inventory)
 	}
-	e, err := v2core.Open(root, testConfig(), v2core.Hooks{PublishBatchesWithInventory: publish})
+	e, err := v2core.Open(root, testConfig(), v2core.Hooks{PublishPending: publish})
 	if err != nil {
 		t.Fatal(err)
 	}

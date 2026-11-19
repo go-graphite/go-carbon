@@ -299,7 +299,7 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 		t.Fatalf("clock %d", got)
 	}
 	before := e.PartGCStats()[0]
-	changed, err := o.mergeSealedParts(nil)
+	changed, err := o.mergeSealedParts(nil, false)
 	if err != nil || !changed {
 		t.Fatalf("ttl rewrite changed=%v %v", changed, err)
 	}
@@ -347,7 +347,7 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 		t.Fatalf("parts %d -> %d", before.LiveParts, after.LiveParts)
 	}
 	o.ttlNext.Store(0)
-	if changed, err = o.mergeSealedParts(nil); err != nil || changed {
+	if changed, err = o.mergeSealedParts(nil, false); err != nil || changed {
 		t.Fatalf("repeated ttl rewrite changed=%v %v", changed, err)
 	}
 }
@@ -403,7 +403,7 @@ func TestMergeDiskGuard(t *testing.T) {
 	// Zero free space: no merge, no error, counted skip.
 	withFreeSpace(t, 0)
 	skips := MergeDiskSkips()
-	changed, err := o.mergeSealedParts(make(chan struct{}))
+	changed, err := o.mergeSealedParts(make(chan struct{}), false)
 	if err != nil || changed {
 		t.Fatalf("zero free: changed=%v err=%v", changed, err)
 	}

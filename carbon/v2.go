@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -118,9 +119,9 @@ func (app *App) startV2() error {
 	telemetry := newV2WriteTelemetry(shards, n)
 	updates := newV2CatalogUpdates(shards)
 	catalogTelemetry := &v2CatalogTelemetry{}
-	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: func(owner int, batches []v2core.Batch) {
-		telemetry.visible(owner, batches)
-		updates.visible(owner, batches)
+	hooks := v2core.Hooks{Identities: r.Identities, PublishPending: r.PublishPending, DenseRollups: true, SealTiming: telemetry.observeStage, VisiblePending: func(owner int, pending v2core.PendingView) {
+		telemetry.visiblePending(owner, pending)
+		updates.visiblePending(owner, pending)
 	}}
 	if app.v2Now != nil {
 		hooks.Now = app.v2Now
@@ -252,13 +253,15 @@ func (app *App) startV2() error {
 			if err != nil {
 				return err
 			}
+			// Owner names arrive sorted and unique; only classic names are sorted.
+			var classic []string
 			for _, name := range classicNames {
 				if !masks[name] {
-					names = append(names, name)
+					classic = append(classic, name)
 				}
 			}
-			slices.Sort(names)
-			names = slices.Compact(names)
+			slices.Sort(classic)
+			names = v2read.MergeNames(names, slices.Compact(classic))
 			if err := publishV2QuotasContext(ctx, v.quotas, quotaFence, r, names, historicalQuota); err != nil {
 				return err
 			}
@@ -377,7 +380,10 @@ func (app *App) startV2() error {
 		return receiver.OnOwner(index, run)
 	})
 	v.moves.SetNamesVisible(updates.changed)
-	app.Carbonserver.SetV2MoveAdmin(v.moves)
+	admin := http.NewServeMux()
+	admin.Handle("/admin/v2/move/", v.moves)
+	admin.HandleFunc("/admin/v2/merge", v.forceMerge)
+	app.Carbonserver.SetV2Admin(admin)
 	if err = app.listenCarbonserver(core, queue); err != nil {
 		return err
 	}
@@ -533,3 +539,20 @@ func (v *v2Runtime) close() {
 // v2PublishedCatalog exposes only the latest immutable publication to HTTP.
 // Its single background owner performs refresh and quota fencing.
 type v2PublishedCatalog struct{ v2index.Catalog }
+
+// forceMerge (POST /admin/v2/merge) merges every owner's parts down to one per
+// group and time partition and replies {"merges": n}. Repeat until n is 0.
+func (v *v2Runtime) forceMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "merge requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+	n, err := v.store.Core.ForceMerge()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, "{\"merges\":%d}\n", n)
+}

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Source returns a detached, immutable host-wide union of live catalog names.
@@ -298,12 +299,14 @@ func (c *cursor) skipTo(key string) {
 // inside Publish's successor Apply calls, so publication latency does not
 // grow with the host's name count. Apply installs a finished merge.
 type Catalog struct {
-	current atomic.Pointer[Snapshot]
-	writer  atomic.Bool // a Publish, Apply or Close is running
-	dir     string      // base files; empty keeps the base on the heap
-	seq     int
-	job     *baseMerge
-	err     atomic.Pointer[error]
+	current  atomic.Pointer[Snapshot]
+	writer   atomic.Bool // a Publish, Apply or Close is running
+	dir      string      // base files; empty keeps the base on the heap
+	seq      int
+	job      *baseMerge
+	err      atomic.Pointer[error] // the failure of the heap base's file write
+	failures atomic.Uint64
+	retryAt  time.Time // the next spill of a heap base after a failed write
 }
 
 // own asserts the single-writer contract and returns its release.
@@ -320,6 +323,7 @@ type baseMerge struct {
 	inputs []*level
 	done   chan struct{}
 	cancel context.CancelFunc
+	path   string
 	out    *run
 	err    error // the file write failed; out is on the heap
 }
@@ -331,8 +335,8 @@ func (c *Catalog) Snapshot() *Snapshot {
 	return &Snapshot{}
 }
 
-// Err returns the last base file failure. The index stays correct: the
-// merged base is then kept on the heap until the next file write succeeds.
+// Err returns the base file failure of the current streak. The index stays
+// correct: the base is kept on the heap until the next file write succeeds.
 func (c *Catalog) Err() error {
 	if p := c.err.Load(); p != nil {
 		return *p
@@ -340,14 +344,22 @@ func (c *Catalog) Err() error {
 	return nil
 }
 
-func namesCopy(names []string) ([]string, error) {
-	out := slices.Clone(names)
-	for _, name := range out {
+// sortedNames validates names once and returns them sorted and unique.
+// Sorted, unique input (the startup publication) is returned as is: no copy,
+// no sort. Callers must not modify the result.
+func sortedNames(names []string) ([]string, error) {
+	sorted := true
+	for i, name := range names {
 		// Slash/NUL and empty components do not have an unambiguous classic path.
 		if name == "" || strings.ContainsAny(name, "/\x00") || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
 			return nil, errors.New("v2 index: name has no classic metric path")
 		}
+		sorted = sorted && (i == 0 || names[i-1] < name)
 	}
+	if sorted {
+		return names, nil
+	}
+	out := slices.Clone(names)
 	slices.Sort(out)
 	return slices.Compact(out), nil
 }
@@ -360,7 +372,7 @@ func (c *Catalog) Publish(revision uint64, names []string) error {
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
 	}
-	next, err := namesCopy(names)
+	next, err := sortedNames(names)
 	if err != nil {
 		return err
 	}
@@ -410,7 +422,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 	if revision <= old.revision {
 		return errors.New("v2 index: stale catalog revision")
 	}
-	additions, err := namesCopy(add)
+	additions, err := sortedNames(add)
 	if err != nil {
 		return err
 	}
@@ -447,7 +459,7 @@ func (c *Catalog) ApplyBeforePublishContext(ctx context.Context, revision uint64
 		}
 		levels = append(levels, l)
 	}
-	fresh := additions[:0]
+	var fresh []string
 	for i, name := range additions {
 		if !drop[i] {
 			fresh = append(fresh, name)
@@ -501,11 +513,14 @@ func mergeDead(dead, kill, revive []uint32) []uint32 {
 // below floor (the base, and level 1 while the background merge reads it)
 // are never merged here. The input slice is private.
 func compact(ctx context.Context, levels []*level, floor int) ([]*level, error) {
-	for i := len(levels) - 1; i > floor; {
+	for i := len(levels) - 1; i >= floor; {
 		if levels[i].live() == 0 {
 			levels = slices.Delete(levels, i, i+1)
 			i = len(levels) - 1
 			continue
+		}
+		if i == floor {
+			break // keep the protected predecessor unchanged
 		}
 		if levels[i].n*levelFanout < levels[i-1].n {
 			i--
@@ -556,22 +571,21 @@ func (c *Catalog) startBaseMerge(levels []*level) {
 		return
 	}
 	base, k := levels[0], min(len(levels), 2)
-	spill := c.dir != "" && base.path == "" // a heap base moves to a file
+	spill := c.dir != "" && base.path == "" && time.Now().After(c.retryAt) // a heap base moves to a file
 	grown := k == 2 && levels[1].n*levelFanout >= base.n
 	if !spill && !grown && len(base.dead)*levelFanout < base.n {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	j := &baseMerge{inputs: slices.Clone(levels[:k]), done: make(chan struct{}), cancel: cancel}
+	j := &baseMerge{inputs: slices.Clone(levels[:k]), done: make(chan struct{}), cancel: cancel, path: c.nextPath()}
 	c.job = j
-	path := c.nextPath()
 	go func() {
 		defer close(j.done)
 		var b *level
 		if k == 2 {
 			b = j.inputs[1]
 		}
-		j.out, j.err = writeRun(ctx, path, func(w *levelWriter) error { return mergeInto(ctx, w, j.inputs[0], b) })
+		j.out, j.err = writeRun(ctx, j.path, func(w *levelWriter) error { return mergeInto(ctx, w, j.inputs[0], b) })
 	}()
 }
 
@@ -593,9 +607,6 @@ func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
 		}
 	}
 	c.job = nil
-	if j.err != nil {
-		c.err.Store(&j.err)
-	}
 	stale := j.out == nil || len(old.levels) < len(j.inputs) // canceled or replaced
 	for i := 0; !stale && i < len(j.inputs); i++ {
 		stale = old.levels[i].run != j.inputs[i].run // a Publish replaced the inputs
@@ -605,6 +616,7 @@ func (c *Catalog) install(old *Snapshot, wait bool) *Snapshot {
 		c.startBaseMerge(old.levels)
 		return old
 	}
+	c.noteBase(j.path, j.err)
 	k := len(j.inputs)
 	base := &level{run: j.out}
 	var revived []string
