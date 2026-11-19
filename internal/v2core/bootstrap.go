@@ -105,7 +105,7 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 		}
 		_, err = o.sealBatches(nil, nil, next)
 		if err == nil {
-			_, err = recoverCoreRollups(db)
+			_, err = recoverCoreRollups(db, "")
 		}
 		err = errors.Join(err, db.Close())
 		if err != nil {
