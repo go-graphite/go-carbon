@@ -26,7 +26,11 @@ type coreBatch struct {
 	Points     []row
 }
 type coreSealInput struct {
-	Rows    []row
+	Rows []row
+	// Pending is the frozen pending view; the rollup planner reads its rows
+	// in place. Batches carries the same applications decoded, for PlanSeal
+	// hooks and callers without a view; the planner reads Pending when set.
+	Pending PendingView
 	Batches []coreBatch
 	Next    coreFrontier
 }
@@ -86,10 +90,15 @@ type coreHooks struct {
 	// DenseRollups is retained for source compatibility; all rollup seals are dense.
 	DenseRollups bool
 
-	// Expire runs on the serial seal owner, after admitted batches are applied.
-	// It must be immutable and must remain false until journal replay finishes.
+	// Expire decides whether a name idle for its ExpiryTTL window expires now;
+	// it is asked about no other name. It runs on the serial seal owner, after
+	// admitted batches are applied, and must remain false until journal
+	// replay finishes.
 	Expire func(RollupPolicy, RollupMetadata, time.Time) bool
-	Now    func() time.Time
+	// ExpiryTTL, required with Expire, is a name's expiry window at now
+	// (<= 0: never) and when that answer may next change (zero: never).
+	ExpiryTTL func(RollupPolicy, time.Time) (time.Duration, time.Time)
+	Now       func() time.Time
 
 	// Stage is an optional fault-injection observer for offline recovery tests.
 	// It runs on owner goroutines; callers must serialize their own observer.
@@ -103,6 +112,9 @@ type coreHooks struct {
 	// Visible observes original batches after successful reader publication.
 	// Owners may call concurrently; batches are borrowed and can repeat.
 	Visible func(owner int, batches []coreBatch)
+	// VisiblePending is Visible over the pending view, without decoding
+	// points. When set it replaces Visible.
+	VisiblePending func(owner int, pending PendingView)
 
 	OwnerCPUs []int
 	Publish   func(int, *pebble.Snapshot, []row) error
@@ -114,7 +126,13 @@ type coreHooks struct {
 	PublishBatches func(int, *pebble.Snapshot, []coreBatch, uint64) error
 	// PublishBatchesWithInventory is the same transfer with the immutable binding
 	// set captured atomically with snapshot. When set, it replaces PublishBatches.
+	// snapshot is nil when the generation and inventory equal the previous
+	// successful publication's: the consumer keeps the snapshot it holds.
 	PublishBatchesWithInventory func(int, *pebble.Snapshot, []coreBatch, uint64, *RollupInventory) error
+	// PublishPending is PublishBatchesWithInventory over the owner's
+	// pointer-free pending view (name-once S5a-2). When set it replaces both
+	// []Batch hooks, which otherwise receive a per-publication decode.
+	PublishPending func(int, *pebble.Snapshot, PendingView, uint64, *RollupInventory) error
 	// PlanSeal is pure: no publication/mutation until Commit. Input buffers are
 	// owner-local and valid only for this call. The planner must detach retained
 	// output. An error prevents raw data, archives and frontier from committing.

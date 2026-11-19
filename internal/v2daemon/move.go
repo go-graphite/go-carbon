@@ -47,6 +47,9 @@ func (p *Producer) AdoptMove(ctx context.Context, prepared *v2core.PreparedMove,
 }
 
 func (p *Producer) prepareMoveIDs(prepared *v2core.PreparedMove) (map[string]uint64, error) {
+	if err := p.openCatalog(); err != nil {
+		return nil, err
+	}
 	policies := prepared.Policies()
 	names := make([]string, 0, len(policies))
 	for name := range policies {

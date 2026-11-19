@@ -219,6 +219,7 @@ func (w *sealSweepWorld) planner() *coreRollups {
 	r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
 		return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > sealSweepExpiry
 	}
+	r.setExpiryTTL(expiryWindow((sealSweepExpiry + 1) * time.Second))
 	return r
 }
 
@@ -235,8 +236,7 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 	slices.Sort(ids)
 	for _, id := range ids {
 		m := w.r.metrics[id]
-		next.install(id, m)
-		next.names[m.policy.Name] = id
+		next.install(id, m, w.r.metaOf(id))
 	}
 	return next
 }
@@ -247,7 +247,7 @@ func (w *sealSweepWorld) move(seal int) {
 	for id, m := range w.r.metrics {
 		if id%7 == uint64(seal%7) {
 			c := *m
-			w.r.install(id, &c)
+			w.r.install(id, &c, w.r.metaOf(id))
 		}
 	}
 }
@@ -392,7 +392,7 @@ func sealSweepState(r *coreRollups) sealSweepPlannerState {
 	}
 	slices.Sort(st.IDs)
 	for _, id := range st.IDs {
-		st.Meta = append(st.Meta, r.metrics[id].metadata())
+		st.Meta = append(st.Meta, r.metadataOf(id, r.metrics[id]))
 	}
 	for _, m := range r.dense {
 		st.Dense = append(st.Dense, m.policy.Name)
@@ -619,6 +619,7 @@ const sealSweepNames = 1000
 // positions-map planner (test-only oracle), side b the production seal sweep.
 // Part bytes must also be independent of planner parallelism (1 and 3 lanes).
 func TestSealSweepPlanDifferential(t *testing.T) {
+	t.Parallel()
 	var total sealSweepCoverage
 	for _, seed := range sealSweepSeeds(t) {
 		s := newSealSweepScript(seed)
@@ -702,22 +703,38 @@ func sealSweepSkipIdleClosure(r *coreRollups, in coreSealInput) (coreSealPlan, e
 	hidden := map[uint64]*rollupMetric{}
 	for id, m := range r.metrics {
 		archives := m.schema().Archives
-		if r.replaced || busy[id] || len(archives) < 2 || m.meta.Expired || m.meta.Version != 3 || m.meta.Frontier.Order == 0 ||
-			r.expire(m.rollupPolicy(), m.metadata(), now) {
+		if hasDeadSlot(r) || busy[id] || len(archives) < 2 {
+			continue
+		}
+		meta := r.metaOf(id)
+		if meta.Expired || meta.Version != 3 || meta.Frontier.Order == 0 || r.expire(m.rollupPolicy(), m.metadata(meta), now) {
 			continue
 		}
 		coarse := archives[len(archives)-1]
-		end := m.meta.Frontier.MaxTime - m.meta.Frontier.MaxTime%coarse.Step + coarse.Step
-		if m.meta.ClosedThrough < end && now.Unix() >= end {
+		end := meta.Frontier.MaxTime - meta.Frontier.MaxTime%coarse.Step + coarse.Step
+		if meta.ClosedThrough < end && now.Unix() >= end {
 			hidden[id] = m
 		}
 	}
-	for id := range hidden {
-		delete(r.metrics, id)
+	slots := map[uint32]bool{}
+	for id, m := range hidden {
+		slots[r.slotOf(id, m)] = true
+	}
+	saved := map[int64][]uint32{}
+	for end, filed := range r.calendar.slots {
+		var kept []uint32
+		for _, slot := range filed {
+			if !slots[slot] {
+				kept = append(kept, slot)
+			}
+		}
+		if len(kept) != len(filed) {
+			saved[end], r.calendar.slots[end] = filed, kept
+		}
 	}
 	defer func() {
-		for id, m := range hidden {
-			r.metrics[id] = m
+		for end, filed := range saved {
+			r.calendar.slots[end] = filed
 		}
 	}()
 	return r.planParts(in)

@@ -27,9 +27,8 @@ type retiredPart struct {
 }
 
 // sealedPartGC owns only original archive links, never Pebble's managed SSTs.
-// It uses Pebble's snapshot list as the reader reference count. A synced
-// deletion batch supplies the fence; snapshots at/before it can still name
-// retired files. No read-path lock or reader registration is required.
+// A retired file is unlinked once no opened publication holds it (parts) and
+// no Pebble snapshot at/before its synced deletion batch can still name it.
 type sealedPartGC struct {
 	mergeFailure         atomic.Pointer[coreFailure]
 	mergeRuns            atomic.Uint64
@@ -199,7 +198,7 @@ func (g *sealedPartGC) sweep() (uint64, error) {
 		if completed >= 64 {
 			break
 		}
-		if g.now().Sub(p.at) < g.grace || (snapshots.Count > 0 && p.sequence > 0 && snapshots.EarliestSeqNum <= p.sequence) {
+		if g.now().Sub(p.at) < g.grace || g.inventory.registry.held(id) || (snapshots.Count > 0 && p.sequence > 0 && snapshots.EarliestSeqNum <= p.sequence) {
 			continue
 		}
 		_, closer, err := g.db.Get(partBinding(sealedPartPrefix, id))

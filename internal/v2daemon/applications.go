@@ -35,15 +35,27 @@ type Application struct {
 // RegisteredApplication is an immutable producer-local catalog identity. It
 // cannot cross a producer, restart, or catalog epoch. Callers retain the handle
 // instead of resubmitting names and definitions for each original application.
+// It holds no name: the catalog (the shared identity on layer 3) owns the one
+// copy, and the cold paths that need the string resolve it by ID (24 B/name).
 type RegisteredApplication struct {
 	producer *Producer
 	id       uint64
-	name     string
 	policy   *v2core.ApplicationPolicy
 }
 
+// name resolves the registered name from its single owner. Callers are in the
+// producer's serialized append domain, like the catalog reads in
+// appendApplicationsStamped.
+func (r *RegisteredApplication) name() string {
+	if r.policy != nil {
+		return r.policy.Name()
+	}
+	name, _ := r.producer.catalog.Key(r.id)
+	return name
+}
+
 // RegisterApplication validates canonical identity and collision/definition
-// equality at admission. It retains no caller-owned policy bytes.
+// equality at admission. It retains no caller-owned bytes.
 func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredApplication, error) {
 	if p.failed != nil {
 		return nil, p.failed
@@ -51,13 +63,17 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	if p.layer < 2 {
 		return nil, errors.New("application registration requires a journal")
 	}
+	if err := p.openCatalog(); err != nil {
+		return nil, err
+	}
 	id, err := p.catalog.Intern(name, policy)
 	if err != nil {
 		return nil, err
 	}
-	if r := p.applicationPolicies[id]; r != nil {
-		return r, nil
+	if id < uint64(len(p.applications)) && p.applications[id] != nil {
+		return p.applications[id], nil
 	}
+	name, _ = p.catalog.Key(id) // the catalog's own string, not the caller's
 	var registered *v2core.ApplicationPolicy
 	// Classic mirroring consumes canonical bytes before core submission.
 	if p.layer == 3 && p.durableApplications == nil {
@@ -66,11 +82,11 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 			return nil, err
 		}
 	}
-	if p.applicationPolicies == nil {
-		p.applicationPolicies = make(map[uint64]*RegisteredApplication)
+	for uint64(len(p.applications)) <= id {
+		p.applications = append(p.applications, nil) // catalog IDs are dense
 	}
-	r := &RegisteredApplication{producer: p, id: id, name: name, policy: registered}
-	p.applicationPolicies[id] = r
+	r := &RegisteredApplication{producer: p, id: id, policy: registered}
+	p.applications[id] = r
 	return r, nil
 }
 
@@ -184,14 +200,10 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 var applicationMagic = []byte{'V', '2', 'A', 1}
 var applicationCRC = crc32.MakeTable(crc32.Castagnoli)
 
-// The existing PDC4 point codec is nested unchanged. The outer checksum binds
-// source IDs, application orders and sequences to those original PDC4 frames.
-func encodeApplications(cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
-	return appendApplicationRecord(nil, cursor, ids, batches, pdc4)
-}
-
 func applicationVarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
 
+// The existing PDC4 point codec is nested unchanged. The outer checksum binds
+// source IDs, application orders and sequences to those original PDC4 frames.
 // Append into producer-owned storage retained until the journal fsync succeeds.
 // Reserve the complete envelope once, including all original sequence varints.
 func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {

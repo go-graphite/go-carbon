@@ -40,6 +40,7 @@ type baselineClassic struct {
 // NativeRecords/CoreWriter conversion -> atomic daemon install -> original
 // journal applications -> pending/sealed reader -> retained-journal replay.
 func TestInstalledBaselineClassicInventory(t *testing.T) {
+	t.Parallel()
 	// Keep the complete schema × method × xFilesFactor matrix, but install
 	// bounded inventories. Each fetch opens and validates the installed part;
 	// one descriptor containing the whole matrix makes this oracle quadratic.
@@ -295,15 +296,16 @@ func checkInstalledBaselineClassicInventory(t *testing.T, first, stride int) {
 			for i := range reader.owners {
 				g := reader.owners[i].Load()
 				if g != nil && g.retain() {
-					g.once.Do(g.load)
+					g.load()
 					if g.err != nil {
 						g.release()
 						return false
 					}
-					g.sealed.index.Metadata(func(_ string, _ v2core.RollupPolicy, m v2core.RollupMetadata) { add(m.Frontier.Order) })
-					for _, b := range g.pending {
-						add(b.Order)
-					}
+					g.sealed.Metadata(func(_ string, _ v2core.RollupPolicy, m v2core.RollupMetadata) { add(m.Frontier.Order) })
+					g.view.Each(func(a *v2core.PendingApplication) bool {
+						add(a.Order)
+						return true
+					})
 					g.release()
 				}
 			}

@@ -23,7 +23,7 @@ func BenchmarkClosedWindowSealCPU(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		r.metrics[m.id], r.names[m.policy.Name] = m, m.id
+		r.install(m.id, m, freshMetadata)
 		input[i] = Batch{ID: m.id, Registered: m.PolicyIdentity, Points: make([]Row, 1)}
 	}
 	b.ReportAllocs()
@@ -78,7 +78,7 @@ func BenchmarkClosedWindowReadCost(b *testing.B) {
 				}
 				pin := e.DBs()[0].NewSnapshot()
 				defer pin.Close()
-				index, err := NewRollupSnapshot(context.Background(), pin, nil, 16<<20)
+				index, err := NewRollupSnapshot(context.Background(), pin, nil, nil, nil, 16<<20)
 				if err != nil {
 					b.Fatal(err)
 				}

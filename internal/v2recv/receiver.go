@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/parse"
 	"github.com/go-graphite/go-carbon/receiver/stream/codec"
@@ -23,12 +24,20 @@ import (
 
 // Owner is called by exactly one goroutine. Append borrows its arguments only
 // until return; plaintext names share one string per socket batch, so an owner
-// that keeps a name must clone it. Seal+Drain must journal-sync before
+// that keeps a name must clone it. hashes[i] is namefp.Route(names[i]), the hash
+// that routed the name to this owner. Seal+Drain must journal-sync before
 // publishing to the core.
 type Owner interface {
-	Append([]string, []points.Point, []uint64, int64) error
+	Append(names []string, hashes []uint64, data []points.Point, sequence []uint64, clock int64) error
 	Seal() error
 	Drain() error
+}
+
+// ByteOwner accepts plaintext names without making a batch string. Each name
+// spans text[ends[i-1]:ends[i]] (the first starts at zero). Like Append, it
+// borrows all arguments until return; retained names must be copied.
+type ByteOwner interface {
+	AppendBytes(text []byte, ends []int, hashes []uint64, data []points.Point, sequence []uint64, clock int64) error
 }
 
 type Config struct {
@@ -44,10 +53,11 @@ type Config struct {
 	Logger                                              *slog.Logger
 }
 type batch struct {
-	names []string
-	data  []points.Point
-	text  []byte // plaintext name bytes, converted once per batch by named
-	ends  []int  // end of each plaintext name in text; empty for codec batches
+	names  []string
+	hashes []uint64 // namefp.Route of each name, computed once for routing
+	data   []points.Point
+	text   []byte // plaintext name bytes, borrowed by ByteOwner until return
+	ends   []int  // end of each plaintext name in text; empty for codec batches
 }
 
 // named converts plaintext names with one allocation per batch instead of one
@@ -199,30 +209,38 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 	// existing serial worker, bounded by BatchSize and the existing sync tick.
 	// Per-name order survives this coalescing.
 	var pending batch
+	byteOwner, _ := o.(ByteOwner)
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
-	appendBatch := func(names []string, data []points.Point) {
+	appendBatch := func(b *batch) {
 		sequence = sequence[:0]
-		for range data {
+		for range b.data {
 			seq++
 			sequence = append(sequence, seq)
 		}
-		if err := o.Append(names, data, sequence, time.Now().Unix()); err != nil {
+		var err error
+		if byteOwner != nil && len(b.ends) != 0 {
+			err = byteOwner.AppendBytes(b.text, b.ends, b.hashes, b.data, sequence, time.Now().Unix())
+		} else {
+			b.named()
+			err = o.Append(b.names, b.hashes, b.data, sequence, time.Now().Unix())
+		}
+		if err != nil {
 			failed = true
-			s.stats.rejected.Add(uint64(len(data)))
+			s.stats.rejected.Add(uint64(len(b.data)))
 			s.stats.sink.Add(1)
 			s.fail(err)
 		} else {
-			s.stats.accepted.Add(uint64(len(data)))
+			s.stats.accepted.Add(uint64(len(b.data)))
 		}
 	}
 	appendPending := func() {
 		if failed || len(pending.data) == 0 {
 			return
 		}
-		appendBatch(pending.names, pending.data)
+		appendBatch(&pending)
 		clear(pending.names)
-		pending.names = pending.names[:0]
-		pending.data = pending.data[:0]
+		pending.names, pending.hashes, pending.data = pending.names[:0], pending.hashes[:0], pending.data[:0]
+		pending.text, pending.ends = pending.text[:0], pending.ends[:0]
 	}
 	syncOwner := func() {
 		appendPending()
@@ -235,10 +253,11 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 		}
 	}
 	consume := func(b *batch) {
-		originalNames, originalData := b.names, b.data
+		originalNames, originalHashes, originalData := b.names, b.hashes, b.data
 		recycle := func() {
 			clear(originalNames)
-			b.names, b.data = originalNames[:0], originalData[:0]
+			b.names, b.hashes, b.data = originalNames[:0], originalHashes[:0], originalData[:0]
+			b.text, b.ends = b.text[:0], b.ends[:0]
 			s.batches.Put(b)
 		}
 		if failed {
@@ -246,15 +265,37 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 			recycle()
 			return
 		}
-		if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
-			appendBatch(b.names, b.data)
-			b.names, b.data = b.names[:0], b.data[:0]
+		// Codec names already own immutable strings. Keep their batching path
+		// separate when connections with different protocols share an owner.
+		if len(pending.data) != 0 && (len(pending.ends) == 0) != (len(b.ends) == 0) {
+			appendPending()
+			if failed {
+				s.stats.rejected.Add(uint64(len(b.data)))
+				recycle()
+				return
+			}
 		}
+		if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
+			appendBatch(b)
+			b.names, b.hashes, b.data = b.names[:0], b.hashes[:0], b.data[:0]
+		}
+		textStart, nameIndex := 0, 0
 		for len(b.data) > 0 {
 			n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
+			if len(b.ends) != 0 {
+				ends := b.ends[nameIndex : nameIndex+n]
+				offset := len(pending.text) - textStart
+				pending.text = append(pending.text, b.text[textStart:ends[n-1]]...)
+				for _, end := range ends {
+					pending.ends = append(pending.ends, offset+end)
+				}
+				textStart = ends[n-1]
+				nameIndex += n
+			}
 			pending.names = append(pending.names, b.names[:n]...)
+			pending.hashes = append(pending.hashes, b.hashes[:n]...)
 			pending.data = append(pending.data, b.data[:n]...)
-			b.names, b.data = b.names[n:], b.data[n:]
+			b.names, b.hashes, b.data = b.names[n:], b.hashes[n:], b.data[n:]
 			if len(pending.data) == s.cfg.BatchSize {
 				appendPending()
 			}
@@ -379,21 +420,12 @@ func (r countedReader) Read(b []byte) (int, error) {
 
 type reference struct {
 	name  string
+	hash  uint64
 	owner int
 }
 
 // OwnerFor returns the stable producer used by unplaced TCP intake.
-func OwnerFor(name string, n int) int { return ownerFor(name, n) }
-
-// ownerFor hashes plaintext name bytes without converting them to a string.
-func ownerFor[T string | []byte](name T, n int) int {
-	h := uint64(14695981039346656037)
-	for i := 0; i < len(name); i++ {
-		h ^= uint64(name[i])
-		h *= 1099511628211
-	}
-	return int(h % uint64(n))
-}
+func OwnerFor(name string, n int) int { return int(namefp.Route(name) % uint64(n)) }
 func (s *Server) read(c net.Conn) error {
 	if s.cfg.Placement != nil {
 		return s.readPlaced(c)
@@ -404,7 +436,9 @@ func (s *Server) read(c net.Conn) error {
 		if b == nil || len(b.data) == 0 {
 			return nil
 		}
-		b.named()
+		if _, ok := s.owners[i].(ByteOwner); !ok {
+			b.named()
+		}
 		select {
 		case s.queues[i] <- b:
 			buffers[i] = nil
@@ -453,7 +487,7 @@ func (s *Server) read(c net.Conn) error {
 			if pooled := s.batches.Get(); pooled != nil {
 				b = pooled.(*batch)
 			} else {
-				b = &batch{names: make([]string, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
+				b = &batch{names: make([]string, 0, s.cfg.BatchSize), hashes: make([]uint64, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
 			}
 			buffers[owner] = b
 		}
@@ -472,10 +506,11 @@ func (s *Server) read(c net.Conn) error {
 		}
 		b := buffer(ref.owner)
 		b.names = append(b.names, ref.name)
+		b.hashes = append(b.hashes, ref.hash)
 		added(ref.owner, b, value, ts)
 	}
 	// addText copies a borrowed plaintext name into its owner's batch text.
-	addText := func(owner int, name []byte, value float64, ts int64) {
+	addText := func(owner int, hash uint64, name []byte, value float64, ts int64) {
 		if appendErr != nil {
 			s.stats.rejected.Add(1)
 			return
@@ -484,6 +519,7 @@ func (s *Server) read(c net.Conn) error {
 		b.text = append(b.text, name...)
 		b.ends = append(b.ends, len(b.text))
 		b.names = append(b.names, "")
+		b.hashes = append(b.hashes, hash)
 		added(owner, b, value, ts)
 	}
 	if head[0] == 0 {
@@ -506,7 +542,8 @@ func (s *Server) read(c net.Conn) error {
 			_, err = d.ReadFrame(r, func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 				if *slot == nil {
 					n := string(name)
-					*slot = &reference{name: n, owner: OwnerFor(n, len(s.queues))}
+					h := namefp.Route(n)
+					*slot = &reference{name: n, hash: h, owner: int(h % uint64(len(s.queues)))}
 				}
 				add((*slot).(*reference), value, ts)
 			})
@@ -540,7 +577,7 @@ func (s *Server) read(c net.Conn) error {
 	}
 	plain := bufio.NewReaderSize(source, 64<<10)
 	var previous []byte // last plaintext name, reused while consecutive lines repeat it
-	owner := 0
+	owner, hash := 0, uint64(0)
 	for {
 		line, err := plain.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
@@ -574,9 +611,10 @@ func (s *Server) read(c net.Conn) error {
 				// its stable owner until the name changes.
 				if previous == nil || !bytes.Equal(name, previous) {
 					previous = append(previous[:0], name...)
-					owner = ownerFor(previous, len(s.queues))
+					hash = namefp.Route(previous)
+					owner = int(hash % uint64(len(s.queues)))
 				}
-				addText(owner, name, value, ts)
+				addText(owner, hash, name, value, ts)
 			}
 		}
 		if appendErr != nil {

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,18 +68,20 @@ func resetRangeCaches(reader *Reader) {
 }
 
 func TestResolveRangeDifferential(t *testing.T) {
-	compared := 0
+	t.Parallel()
+	var compared atomic.Int64
+	t.Cleanup(func() { t.Logf("compared %d renders", compared.Load()) })
 	for _, def := range []string{"1s:1d,1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y", "10s:6h,1m:7d,10m:30d", "1s:1d"} {
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			// The full-history oracle decodes every slot per render; one XFF per
 			// method keeps every edge (0, partial, all) per schema.
 			xff := []float32{0, .5, 1}[int(method)%3]
 			t.Run(fmt.Sprintf("%s/%d/%g", def, method, xff), func(t *testing.T) {
-				compared += resolveRangeCase(t, def, method, xff, int64(method)*7+int64(xff*10))
+				t.Parallel() // each case owns its engine, reader and oracle
+				compared.Add(int64(resolveRangeCase(t, def, method, xff, int64(method)*7+int64(xff*10))))
 			})
 		}
 	}
-	t.Logf("compared %d renders", compared)
 }
 
 func resolveRangeCase(t *testing.T, def string, method sealrollup.Method, xff float32, seed int64) int {

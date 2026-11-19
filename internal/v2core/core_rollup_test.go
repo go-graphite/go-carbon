@@ -252,7 +252,7 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Commit()
-	before := r.metrics[7].meta
+	before := r.metaOf(7)
 	changed := policy
 	changed.Config.Method = sealrollup.Max
 	wrong, err := EncodeRollupPolicy(changed)
@@ -263,7 +263,7 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 		if _, err = r.plan(SealInput{Batches: []Batch{bad}}); err == nil {
 			t.Fatal("invalid application accepted")
 		}
-		if r.metrics[7].meta.Frontier != before.Frontier || r.metrics[7].meta.Revision != before.Revision || len(r.metrics) != 1 {
+		if r.metaOf(7).Frontier != before.Frontier || r.metaOf(7).Revision != before.Revision || len(r.metrics) != 1 {
 			t.Fatal("failed planner changed durable view")
 		}
 	}
@@ -293,7 +293,7 @@ func TestCoreRollupIngestFailureDoesNotPublish(t *testing.T) {
 	owner := &coreOwner{db: db, dir: root, cfg: cfg, plan: r.plan}
 	rows := []Row{{ID: 7, Time: 9990, Bits: math.Float64bits(3), Seq: 1}}
 	batches := []Batch{{ID: 7, Order: 1, Clock: 10000, Policy: policy, Points: rows}}
-	if _, err = owner.sealBatches(rows, batches, Frontier{Version: 1, Config: cfg, Cursors: []uint64{1}, NextPart: 1}); err == nil {
+	if _, err = owner.sealBatches(rows, len(rows), rows[0].Time, PendingBatches(batches), Frontier{Version: 1, Config: cfg, Cursors: []uint64{1}, NextPart: 1}); err == nil {
 		t.Fatal("read-only ingest succeeded")
 	}
 	if len(r.metrics) != 0 {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -70,7 +71,7 @@ func moveIndex(t *testing.T, db *pebble.DB, prior *RollupSnapshot) *RollupSnapsh
 	t.Helper()
 	snap := db.NewSnapshot()
 	t.Cleanup(func() { _ = snap.Close() })
-	index, e := NewRollupSnapshot(context.Background(), snap, prior)
+	index, e := NewRollupSnapshot(context.Background(), snap, prior, nil, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -196,7 +197,7 @@ func TestMoveCatalogCopiedPrecedenceAndRepair(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("metrics %d", count)
 	}
-	if _, e := recoverCoreRollups(db); e == nil || !strings.Contains(e.Error(), "adoption") {
+	if _, e := recoverCoreRollups(db, ""); e == nil || !strings.Contains(e.Error(), "adoption") {
 		t.Fatalf("unadopted writable recovery allowed: %v", e)
 	}
 }
@@ -244,7 +245,7 @@ func TestMoveCatalogRejectsUnrelatedDonorOrders(t *testing.T) {
 	}
 	snap := db.NewSnapshot()
 	defer snap.Close()
-	_, e = NewRollupSnapshot(context.Background(), snap, nil)
+	_, e = NewRollupSnapshot(context.Background(), snap, nil, nil, nil)
 	if e == nil || !strings.Contains(e.Error(), "incomparable") {
 		t.Fatalf("compared unrelated source orders: %v", e)
 	}
@@ -270,7 +271,7 @@ func TestMoveCatalogPersistedBindingIsExact(t *testing.T) {
 	defer db.Close()
 	snap := db.NewSnapshot()
 	defer snap.Close()
-	index, e := NewRollupSnapshot(context.Background(), snap, nil)
+	index, e := NewRollupSnapshot(context.Background(), snap, nil, nil, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -343,4 +344,13 @@ func TestMoveCrossBoundaryRollupRebuild(t *testing.T) {
 			}
 		})
 	}
+}
+
+func hasCopiedParts(db *pebble.DB) (bool, error) {
+	it, err := db.NewIter(&pebble.IterOptions{LowerBound: movePartPrefix, UpperBound: v2part.PrefixEnd(movePartPrefix)})
+	if err != nil {
+		return false, err
+	}
+	found := it.First()
+	return found, errors.Join(it.Error(), it.Close())
 }

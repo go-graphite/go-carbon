@@ -14,10 +14,16 @@ import (
 // Compare exact persisted winners with an unmerged store after original parts
 // are retired, unlinked and reopened. Late writes force cold older-window loads.
 func TestSealedMergeHistoryDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {
+				// Subtests own their engines; the parent's environment stays set
+				// until all of them finish.
+				t.Parallel()
 				_, policy := rollupTestPolicy(t, "history.metric", schema, method, .1)
 				cfg := coreTestConfig()
 				cfg.Shards = 1
@@ -50,7 +56,7 @@ func TestSealedMergeHistoryDifferential(t *testing.T) {
 					for _, e := range engines {
 						s := e.owners[0].db.NewSnapshot()
 						defer s.Close()
-						index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+						index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -152,7 +158,7 @@ func TestSealedMergeSparseMetadata(t *testing.T) {
 	read := func() map[string][]sealrollup.Record {
 		s := e.owners[0].db.NewSnapshot()
 		defer s.Close()
-		index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+		index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

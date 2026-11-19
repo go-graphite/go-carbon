@@ -4,96 +4,206 @@ import (
 	"cmp"
 	"math"
 	"slices"
+	"sort"
 )
 
 // stageKey assigns a stage its canonical sort key while the metric is hot.
 // A ranked metric keys 2*rank. An unranked one (fresh, or installed since the
 // last renumber) keys 2*L+1, where L dense metrics sort before it: it lands
 // between dense[L-1] (key 2*L) and dense[L] (key 2*L+2). Unranked stages
-// sharing a key tie-break by compareRollupMetrics, so the order is exact.
-func (r *coreRollups) stageKey(s *rollupStage) {
-	m := s.metric
+// sharing a key tie-break by compareRollupMetrics, so the order is exact. A
+// ranked metric whose hint another planner overwrote takes the search key,
+// which sorts identically.
+func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric) {
 	s.vshard = m.vshard
-	if m.rankOwner == r && m.rank != 0 {
-		s.sortKey = uint64(m.rank) << 1
+	if rk := r.metricRank(m); rk != 0 {
+		s.sortKey = uint64(rk) << 1
 		return
 	}
 	l, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics)
 	s.sortKey = uint64(l)<<1 | 1
 }
 
-// renumber merges the sorted unranked metrics into dense in one sequential
-// pass and rewrites every rank. Replaced IDs (adoption) drop their stale
-// metric here; metrics are otherwise never removed from a planner.
+// hintSlot returns the slot identity h names in this planner, when that slot
+// holds id. A missing, foreign or stale hint fails the check.
+func (r *coreRollups) hintSlot(h *PolicyIdentity, id uint64) (uint32, bool) {
+	if h == nil {
+		return 0, false
+	}
+	s := h.ownerSlot.Load() - 1 // no hint wraps past every slot
+	if uint64(s) < uint64(len(r.ids)) && r.ids[s] == id {
+		return s, true
+	}
+	return 0, false
+}
+
+// hintRank returns the rank of the name installed under id when hint h
+// leads to its slot here, 0 otherwise (the caller probes metrics). A slot
+// below len(dense) is the rank minus one.
+func (r *coreRollups) hintRank(h *PolicyIdentity, id uint64) uint32 {
+	if s, ok := r.hintSlot(h, id); ok && int(s) < len(r.dense) {
+		return s + 1
+	}
+	return 0
+}
+
+// metricRank returns m's rank when this planner ranks m itself (not an older
+// metric installed under the same ID) and m's hint is its own; 0 otherwise.
+func (r *coreRollups) metricRank(m *rollupMetric) uint32 {
+	if rk := r.hintRank(m.PolicyIdentity, m.id); rk != 0 && r.dense[rk-1] == m {
+		return rk
+	}
+	return 0
+}
+
+// deadSlot marks a dense slot whose metric was replaced (adoption). No hint
+// passes ids[s] == id there, and the next renumber drops the slot.
+const deadSlot = math.MaxUint64
+
+// slotOf returns the slot of m, installed under id. Its identity hint answers
+// in O(1). When another planner overwrote the hint, a binary search of dense
+// finds a ranked m and a scan of unranked (at most 1/rankSlack of dense) an
+// unranked one; the hint is then restored, so each lost hint costs one search.
+func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
+	if s, ok := r.hintSlot(m.PolicyIdentity, id); ok {
+		return s
+	}
+	s, found := uint32(0), false
+	for p, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics); p < len(r.dense) && compareRollupMetrics(r.dense[p], m) == 0; p++ {
+		if r.dense[p] == m && r.ids[p] == id {
+			s, found = uint32(p), true
+			break
+		}
+	}
+	for k := len(r.unranked) - 1; !found && k >= 0; k-- {
+		if r.unranked[k] == m {
+			s, found = uint32(len(r.dense)+k), true
+		}
+	}
+	if !found {
+		panic("v2core: installed rollup metric has no owner slot")
+	}
+	m.ownerSlot.Store(s + 1)
+	return s
+}
+
+// rollupTail is the unranked tail of the slot arrays: unranked[k] owns slot
+// len(dense)+k. It sorts the columns together; from keeps each entry's old
+// slot, so renumber can move the closure calendar.
+type rollupTail struct {
+	metrics []*rollupMetric
+	ids     []uint64
+	meta    []metricMetadata
+	ttl     []int64
+	expAt   []int64
+	from    []uint32
+}
+
+func (x rollupTail) Len() int { return len(x.metrics) }
+func (x rollupTail) Less(i, j int) bool {
+	return compareRollupMetrics(x.metrics[i], x.metrics[j]) < 0
+}
+func (x rollupTail) Swap(i, j int) {
+	x.metrics[i], x.metrics[j] = x.metrics[j], x.metrics[i]
+	x.ids[i], x.ids[j] = x.ids[j], x.ids[i]
+	x.meta[i], x.meta[j] = x.meta[j], x.meta[i]
+	x.ttl[i], x.ttl[j] = x.ttl[j], x.ttl[i]
+	x.expAt[i], x.expAt[j] = x.expAt[j], x.expAt[i]
+	x.from[i], x.from[j] = x.from[j], x.from[i]
+}
+
+// renumber merges the unranked tail into dense so every slot is again its
+// rank minus one: ids and meta move with their metric, in canonical order.
+// It sorts the tail, compacts dense over dead slots in place, then merges
+// from the back, so it needs only a tail-sized buffer. Dead (replaced) slots
+// drop here; metrics are otherwise never removed from a planner. It re-stores
+// every hint, which also restores the fast path after another planner
+// overwrote one.
 func (r *coreRollups) renumber() {
-	replaced := r.replaced
-	live := func(m *rollupMetric) bool { return r.metrics[m.id] == m }
-	// A metric this planner ranks is in dense; dead (replaced) ones drop.
-	fresh := slices.DeleteFunc(r.unranked, func(m *rollupMetric) bool {
-		return (m.rankOwner == r && m.rank != 0) || (replaced && !live(m))
-	})
-	slices.SortFunc(fresh, compareRollupMetrics)
-	fresh = slices.CompactFunc(fresh, func(a, b *rollupMetric) bool { return a == b })
-	dense := r.dense
-	if len(dense)+len(fresh) >= math.MaxUint32 {
+	d, f := len(r.dense), len(r.unranked)
+	if d+f >= math.MaxUint32 {
 		return // every new name stays unranked; plans stay exact on the search path
 	}
-	out := slices.Grow(r.denseSpare[:0], len(dense)+len(fresh))
-	i, j := 0, 0
-	for i < len(dense) || j < len(fresh) {
-		if i < len(dense) && replaced {
-			if m := dense[i]; m.rankOwner != r || m.rank != uint32(i+1) || !live(m) {
-				if m.rankOwner == r && m.rank == uint32(i+1) {
-					m.rank, m.rankOwner = 0, nil
-				}
-				i++
-				continue
+	tail := rollupTail{r.unranked, r.ids[d:], r.meta[d:], r.ttl[d:], r.expAt[d:], make([]uint32, f)}
+	for k := range tail.from {
+		tail.from[k] = uint32(d + k)
+	}
+	sort.Sort(tail)
+	fresh := rollupTail{slices.Clone(tail.metrics), slices.Clone(tail.ids), slices.Clone(tail.meta), slices.Clone(tail.ttl), slices.Clone(tail.expAt), tail.from}
+	// moved maps each old slot to its new one (gone for a dead slot); only
+	// the closure and expiry calendars hold slots across a renumber.
+	var moved []uint32
+	if len(r.calendar.slots) > 0 || len(r.expiries.slots) > 0 {
+		moved = make([]uint32, d+f)
+	}
+	n := 0
+	for i, id := range r.ids[:d] {
+		if id != deadSlot {
+			r.dense[n], r.ids[n], r.meta[n], r.ttl[n], r.expAt[n] = r.dense[i], id, r.meta[i], r.ttl[i], r.expAt[i]
+			if moved != nil {
+				moved[i] = uint32(n)
 			}
+			n++
+		} else if moved != nil {
+			moved[i] = gone
 		}
-		if j == len(fresh) || (i < len(dense) && compareRollupMetrics(dense[i], fresh[j]) < 0) {
-			out = append(out, dense[i])
-			i++
+	}
+	size := n + f
+	if size < d {
+		clear(r.dense[size:])
+	}
+	r.dense = slices.Grow(r.dense, size-len(r.dense))[:size]
+	r.ids, r.meta, r.ttl, r.expAt = r.ids[:size], r.meta[:size], r.ttl[:size], r.expAt[:size]
+	for i, j, w, o := n-1, f-1, size-1, d-1; j >= 0; w-- {
+		if i >= 0 && compareRollupMetrics(r.dense[i], fresh.metrics[j]) > 0 {
+			r.dense[w], r.ids[w], r.meta[w], r.ttl[w], r.expAt[w] = r.dense[i], r.ids[i], r.meta[i], r.ttl[i], r.expAt[i]
+			if moved != nil {
+				for moved[o] != uint32(i) { // compacted slot i came from old slot o
+					o--
+				}
+				moved[o] = uint32(w)
+				o--
+			}
+			i--
 		} else {
-			out = append(out, fresh[j])
-			j++
+			r.dense[w], r.ids[w], r.meta[w], r.ttl[w], r.expAt[w] = fresh.metrics[j], fresh.ids[j], fresh.meta[j], fresh.ttl[j], fresh.expAt[j]
+			if moved != nil {
+				moved[fresh.from[j]] = uint32(w)
+			}
+			j--
 		}
 	}
-	for k, m := range out {
-		m.rank, m.rankOwner = uint32(k+1), r
+	r.calendar.move(moved)
+	r.expiries.move(moved)
+	for s, m := range r.dense {
+		if m.ownerSlot.Load() != uint32(s)+1 {
+			m.ownerSlot.Store(uint32(s) + 1)
+		}
 	}
-	clear(dense)
-	r.dense, r.denseSpare = out, dense[:0]
 	clear(r.unranked)
 	r.unranked = r.unranked[:0]
-	r.replaced = false
 }
 
-// rollupRankRef is the 16-byte sort record of one stage.
+// rollupRankRef is the 16-byte, pointer-free sort record of one stage: its
+// key and its index in the planner's stages.
 type rollupRankRef struct {
-	key uint64
-	*rollupStage
-}
-
-func compareRollupRankRefs(a, b rollupRankRef) int {
-	if a.key != b.key {
-		if a.key < b.key {
-			return -1
-		}
-		return 1
-	}
-	if a.key&1 == 0 {
-		return 0
-	}
-	return compareRollupMetrics(a.metric, b.metric)
+	key   uint64
+	stage uint32
 }
 
 // sortRollupRanks orders refs by key with an LSD radix sort (11-bit digits,
 // only as many passes as the largest key needs), then sorts each run of equal
 // odd keys (unranked neighbours) by name. It returns the sorted slice and the
-// spare buffer for reuse.
-func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRankRef, []rollupRankRef) {
+// spare buffer for reuse. metrics[ref.stage] names each ref's metric.
+func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int, metrics []*rollupMetric) ([]rollupRankRef, []rollupRankRef) {
+	byName := func(a, b rollupRankRef) int { return compareRollupMetrics(metrics[a.stage], metrics[b.stage]) }
 	if len(refs) < 256 {
-		slices.SortFunc(refs, compareRollupRankRefs)
+		slices.SortFunc(refs, func(a, b rollupRankRef) int {
+			if c := cmp.Compare(a.key, b.key); c != 0 || a.key&1 == 0 {
+				return c
+			}
+			return byName(a, b)
+		})
 		return refs, scratch
 	}
 	const bits = 11
@@ -129,7 +239,7 @@ func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRank
 			j++
 		}
 		if j-i > 1 {
-			slices.SortFunc(src[i:j], compareRollupMetricsRef)
+			slices.SortFunc(src[i:j], byName)
 		}
 		i = j
 	}
@@ -137,67 +247,8 @@ func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int) ([]rollupRank
 	return src, tmp[:0]
 }
 
-func compareRollupMetricsRef(a, b rollupRankRef) int {
-	return compareRollupMetrics(a.metric, b.metric)
-}
-
-// sealBatchIndexMask selects the batch index from a sorted seal batch key.
-const sealBatchIndexMask = 1<<32 - 1
-
-// sortSealBatches returns the batch indices sorted by ID, stable, so each
-// name's batches form one run in arrival order and last-write-wins per slot
-// is preserved by construction. A key is ID<<32 | index; LSD radix passes run
-// over the ID bits only, as many as the largest ID needs, and the ascending
-// index bits keep equal IDs in arrival order. IDs of 32 bits or more take a
-// cold comparison-sort path on index-only keys. It also returns the spare
-// buffer for reuse and the largest ID.
-func sortSealBatches(batches []coreBatch, keys, spare []uint64) (sorted, tmp []uint64, maxID uint64) {
-	n := len(batches)
-	keys = slices.Grow(keys[:0], n)[:n]
-	for i := range batches {
-		maxID = max(maxID, batches[i].ID)
-	}
-	if maxID > sealBatchIndexMask || uint64(n) > sealBatchIndexMask {
-		for i := range keys {
-			keys[i] = uint64(i)
-		}
-		slices.SortStableFunc(keys, func(a, b uint64) int { return cmp.Compare(batches[a].ID, batches[b].ID) })
-		return keys, spare, maxID
-	}
-	for i := range batches {
-		keys[i] = batches[i].ID<<32 | uint64(i)
-	}
-	if n < 256 {
-		slices.Sort(keys)
-		return keys, spare, maxID
-	}
-	const bits = 11
-	const mask = 1<<bits - 1
-	var count [1 << bits]int
-	tmp = slices.Grow(spare[:0], n)[:n]
-	src := keys
-	for shift := uint(32); shift < 64 && maxID>>(shift-32) != 0; shift += bits {
-		clear(count[:])
-		for _, k := range src {
-			count[(k>>shift)&mask]++
-		}
-		sum := 0
-		for d, c := range count {
-			count[d] = sum
-			sum += c
-		}
-		for _, k := range src {
-			d := (k >> shift) & mask
-			tmp[count[d]] = k
-			count[d]++
-		}
-		src, tmp = tmp, src
-	}
-	return src, tmp[:0], maxID
-}
-
 // sealSeenWords sizes the idle pass's staged-ID bitset: one bit per ID up to
-// maxID, or 0 (binary search instead) when that exceeds two words per batch,
+// maxID, or 0 (binary search instead) when that exceeds two words per application,
 // so the bitset never outgrows the sort keys and their spare.
 func sealSeenWords(maxID uint64, batches int) int {
 	if maxID>>6 >= uint64(2*batches+1024) {
@@ -206,15 +257,24 @@ func sealSeenWords(maxID uint64, batches int) int {
 	return int(maxID>>6) + 1
 }
 
-// sealBatchSeen reports whether this seal staged id: a bitset probe when the
-// IDs were dense enough for one, otherwise a binary search of the sorted keys.
-func sealBatchSeen(batches []coreBatch, keys, seen []uint64, maxID, id uint64) bool {
-	if id > maxID {
-		return false
+// gone marks a dead slot in renumber's old-to-new slot map.
+const gone = math.MaxUint32
+
+// move rewrites every calendar entry to its slot's new number and drops
+// dead slots; moved is renumber's old-to-new map (nil: nothing filed). An
+// emptied second stays filed (heap and slots keep one entry per second)
+// until a pass drops it.
+func (c *calendar) move(moved []uint32) {
+	if moved == nil {
+		return
 	}
-	if len(seen) != 0 {
-		return seen[id>>6]&(1<<(id&63)) != 0
+	for end, slots := range c.slots {
+		kept := slots[:0]
+		for _, s := range slots {
+			if ns := moved[s]; ns != gone {
+				kept = append(kept, ns)
+			}
+		}
+		c.slots[end] = kept
 	}
-	_, ok := slices.BinarySearchFunc(keys, id, func(k, id uint64) int { return cmp.Compare(batches[k&sealBatchIndexMask].ID, id) })
-	return ok
 }

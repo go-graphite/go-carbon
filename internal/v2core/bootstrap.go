@@ -103,9 +103,9 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 		o.plan = func(coreSealInput) (coreSealPlan, error) {
 			return coreSealPlan{Files: plan}, nil
 		}
-		_, err = o.sealBatches(nil, nil, next)
+		_, err = o.sealBatches(nil, 0, 0, PendingView{}, next)
 		if err == nil {
-			_, err = recoverCoreRollups(db)
+			_, err = recoverCoreRollups(db, "")
 		}
 		err = errors.Join(err, db.Close())
 		if err != nil {

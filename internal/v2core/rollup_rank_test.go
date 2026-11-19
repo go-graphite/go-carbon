@@ -48,7 +48,7 @@ func checkDense(t *testing.T, r *coreRollups) {
 		t.Fatalf("dense %d != metrics %d", len(r.dense), len(r.metrics))
 	}
 	for i, m := range r.dense {
-		if m.rankOwner != r || m.rank != uint32(i+1) || r.metrics[m.id] != m {
+		if r.ids[i] != m.id || r.metrics[m.id] != m {
 			t.Fatalf("dense[%d] stale", i)
 		}
 		if i > 0 && compareRollupMetrics(r.dense[i-1], m) >= 0 {
@@ -70,7 +70,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				all[i] = rankTestMetric(i)
 			}
 			for _, i := range rng.Perm(n)[:n/2] {
-				r.install(all[i].id, all[i])
+				r.install(all[i].id, all[i], metricMetadata{})
 			}
 			r.renumber()
 			checkDense(t, r)
@@ -81,42 +81,43 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				if id%7 == 0 {
 					c := *m
 					origs[id] = m
-					r.install(id, &c)
+					r.install(id, &c, r.metaOf(id))
 					all[id-1] = &c
 				}
 			}
 			for id, m := range origs {
 				if id%2 == 0 {
-					r.install(id, m)
+					r.install(id, m, r.metaOf(id))
 					all[id-1] = m
 				}
 			}
 			// Unranked installs stay below the renumber threshold.
 			for i := range all {
 				if r.metrics[all[i].id] == nil && i%13 == 0 {
-					r.install(all[i].id, all[i])
+					r.install(all[i].id, all[i], metricMetadata{})
 				}
 			}
 			for round := 0; round < 2; round++ {
 				var refs []rollupRankRef
 				stages := make([]rollupStage, 0, n)
+				var metrics []*rollupMetric
 				for _, m := range all {
 					if r.metrics[m.id] == m || rng.IntN(4) == 0 {
-						stages = append(stages, rollupStage{metric: m})
-						r.stageKey(&stages[len(stages)-1])
+						stages, metrics = append(stages, rollupStage{}), append(metrics, m)
+						r.stageKey(&stages[len(stages)-1], m)
 					}
 				}
 				for i := range stages {
-					refs = append(refs, rollupRankRef{key: stages[i].sortKey, rollupStage: &stages[i]})
+					refs = append(refs, rollupRankRef{key: stages[i].sortKey, stage: uint32(i)})
 				}
-				got, _ := sortRollupRanks(refs, nil, new([]int))
-				want := make([]*rollupStage, len(stages))
+				got, _ := sortRollupRanks(refs, nil, new([]int), metrics)
+				want := make([]uint32, len(stages))
 				for i := range stages {
-					want[i] = &stages[i]
+					want[i] = uint32(i)
 				}
-				slices.SortFunc(want, func(a, b *rollupStage) int { return compareRollupMetrics(a.metric, b.metric) })
+				slices.SortFunc(want, func(a, b uint32) int { return compareRollupMetrics(metrics[a], metrics[b]) })
 				for i := range got {
-					if got[i].rollupStage != want[i] {
+					if got[i].stage != want[i] {
 						t.Fatalf("round %d: canonical order differs at %d of %d", round, i, len(got))
 					}
 				}
@@ -134,6 +135,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 // Names are born staggered, so unranked installed names linger below the
 // renumber threshold across seals.
 func TestRollupPlanRankDifferential(t *testing.T) {
+	t.Parallel()
 	for _, workers := range []int{1, 3} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(workers), 7))
@@ -185,14 +187,10 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
 					return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > 50
 				}
+				r.setExpiryTTL(expiryWindow(51 * time.Second))
 				return r
 			}
-			unrank := func(r *coreRollups) {
-				for _, m := range r.metrics {
-					m.rank, m.rankOwner = 0, nil
-				}
-				r.dense, r.unranked, r.replaced = r.dense[:0], r.unranked[:0], false
-			}
+			unrank := unrankAll
 			ranked, ref := newPlanner(), newPlanner()
 			order := uint64(0)
 			lingered, renumbered := 0, 0
@@ -205,8 +203,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						next := newPlanner()
 						next.identities = (*p).identities
 						for id, m := range (*p).metrics {
-							next.install(id, m)
-							next.names[m.policy.Name] = id
+							next.install(id, m, (*p).metaOf(id))
 						}
 						*p = next
 					}
@@ -216,7 +213,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						for id, m := range p.metrics {
 							if id%7 == uint64(seal%7) {
 								c := *m
-								p.install(id, &c)
+								p.install(id, &c, p.metaOf(id))
 							}
 						}
 					}

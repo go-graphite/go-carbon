@@ -19,7 +19,7 @@ type Placement interface {
 
 // Append remains the unversioned experiment path. A placed daemon must use
 // AppendPlaced; rejected routing metadata never poisons the producer journal.
-func (p *Producer) Append(names []string, data []points.Point, sequence []uint64, clock int64) error {
+func (p *Producer) Append(names []string, _ []uint64, data []points.Point, sequence []uint64, clock int64) error {
 	if p.admission != nil {
 		return v2placement.ErrUnversioned
 	}
@@ -67,7 +67,7 @@ func (p *Producer) AppendApplicationsPlaced(stamp v2placement.Stamp, apps []Appl
 			if app.Registered.producer != p || app.Name != "" || len(app.Policy) != 0 {
 				return fmt.Errorf("invalid registered application")
 			}
-			name = app.Registered.name
+			name = app.Registered.name()
 		}
 		if e = p.placement.CheckNames([]string{name}); e != nil {
 			return e

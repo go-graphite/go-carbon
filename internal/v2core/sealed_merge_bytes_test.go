@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -19,37 +20,65 @@ import (
 )
 
 // mergeByteDifferentialDigest is the SHA-256 of every merged part file and
-// descriptor that TestMergeByteDifferential writes, recorded on github
-// atimofieiev/v2 9f959a15aa7a (string merge keys). A merge must stay byte
-// identical: do not re-record it for a performance change.
-const mergeByteDifferentialDigest = "fb27b251cf5420cf2e301852a7d96db2e946d3b7482acabdebdc855cfd8a9d3e"
+// descriptor that TestMergeByteDifferential writes, with each name's envelope
+// folded into its last run. mergeByteDifferentialLegacyDigest is the same
+// merges written with v2part.LegacyEnvelopeKV, recorded on github
+// atimofieiev/v2 9f959a15aa7a (string merge keys) and re-recorded once when
+// merges began repacking short runs up to MaxDenseSlots. It pins every other
+// byte, so the folded digest differs only by the envelope's placement. Both
+// physical pins include aligned timestamps and tagged value encoding; the decoded pin is unchanged.
+// Do not re-record either for a performance change.
+const (
+	mergeByteDifferentialDigest       = "7b63a505d5883efe1c513cbb8172218d9a740d577e35df52548c13d9a599c13c"
+	mergeByteDifferentialLegacyDigest = "0491b83dcceaa95f461ec5e31ed8d42bfe8cc75a1c5cecc82be6b5775abf7c17"
+)
+
+// mergeDecodedDifferentialDigest is the SHA-256 of the same merged parts'
+// content independent of run layout and envelope placement (every slot as a
+// singleton record, every envelope at its own key, the descriptor without file
+// bytes, digest or KV count), recorded on github atimofieiev/v2 e9795c4c62e3
+// before merges repacked runs. Both envelope forms must reproduce it.
+const mergeDecodedDifferentialDigest = "266d1b35f1f24860c11a88321445ea9debcfb4591932bab481fcdb14cef56f42"
 
 // TestMergeByteDifferential runs multi-tier merges (seal parts, merges of
 // merges plus a late part) over length-tied, prefix-sharing and non-ASCII
 // names with late points, expired names, reset orders and a TTL floor, and
 // pins every merged part's bytes and descriptor to the recorded digest.
 func TestMergeByteDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	saved := mergePartID
 	defer func() { mergePartID = saved }()
-	var serial byte
-	mergePartID = func(id *v2part.PartID) error {
-		serial++
-		*id = v2part.PartID{0xA5, serial}
-		return nil
-	}
-	sum := sha256.New()
-	for seed := uint64(1); seed <= 3; seed++ {
-		for _, group := range []v2part.Group{"live", "g.long-group"} {
-			mergeByteDifferentialCase(t, seed, group, sum)
+	defer v2part.LegacyEnvelopeKV.Store(false)
+	for _, legacy := range []bool{true, false} {
+		v2part.LegacyEnvelopeKV.Store(legacy)
+		var serial byte
+		mergePartID = func(id *v2part.PartID) error {
+			serial++
+			*id = v2part.PartID{0xA5, serial}
+			return nil
 		}
-	}
-	got := hex.EncodeToString(sum.Sum(nil))
-	if got != mergeByteDifferentialDigest {
-		t.Fatalf("merged part bytes changed: digest %s, want %s", got, mergeByteDifferentialDigest)
+		sum, decoded := sha256.New(), sha256.New()
+		for seed := uint64(1); seed <= 3; seed++ {
+			for _, group := range []v2part.Group{"live", "g.long-group"} {
+				mergeByteDifferentialCase(t, seed, group, sum, decoded)
+			}
+		}
+		if got := hex.EncodeToString(decoded.Sum(nil)); got != mergeDecodedDifferentialDigest {
+			t.Errorf("legacy=%v: merged part content changed: decoded digest %s, want %s", legacy, got, mergeDecodedDifferentialDigest)
+		}
+		want := mergeByteDifferentialDigest
+		if legacy {
+			want = mergeByteDifferentialLegacyDigest
+		}
+		if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+			t.Errorf("legacy=%v: merged part bytes changed: digest %s, want %s", legacy, got, want)
+		}
 	}
 }
 
-func mergeByteDifferentialCase(t *testing.T, seed uint64, group v2part.Group, sum interface{ Write([]byte) (int, error) }) {
+func mergeByteDifferentialCase(t *testing.T, seed uint64, group v2part.Group, sum, decoded io.Writer) {
 	t.Helper()
 	rng := rand.New(rand.NewPCG(seed, uint64(len(group))))
 	dir := t.TempDir()
@@ -150,6 +179,7 @@ func mergeByteDifferentialCase(t *testing.T, seed uint64, group v2part.Group, su
 		}
 		_, _ = sum.Write(b)
 		_, _ = fmt.Fprintf(sum, "%+v\n", d)
+		writeDecodedPart(t, decoded, path, d)
 		if e = os.Rename(path, filepath.Join(dir, "parts", hex.EncodeToString(d.SHA256[:])+".sst")); e != nil {
 			t.Fatal(e)
 		}

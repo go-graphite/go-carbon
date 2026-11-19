@@ -55,7 +55,7 @@ func mergeAppend(t *testing.T, e *coreEngine, order uint64) {
 func mergeRead(t *testing.T, s *pebble.Snapshot) []sealrollup.Record {
 	t.Helper()
 	var out []sealrollup.Record
-	index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+	index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func mergeDrain(t *testing.T, o *coreOwner) int {
 	t.Helper()
 	count := 0
 	for {
-		changed, err := o.mergeSealedParts(nil)
+		changed, err := o.mergeSealedParts(nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -161,9 +161,11 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 		e := mergeFixtureIdle(t, root, func(stage string) {
 			if stage == phase {
 				_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+				// SIGKILL may land after Kill returns: never pass the boundary.
+				time.Sleep(time.Hour)
 			}
 		})
-		_, err := e.owners[0].mergeSealedParts(nil)
+		_, err := e.owners[0].mergeSealedParts(nil, false)
 		t.Fatalf("crash boundary missed: %v", err)
 	}
 	for _, phase := range []string{"merge-written", "merge-retained", "merge-before-publish", "merge-published"} {
@@ -195,9 +197,10 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 			if !reflect.DeepEqual(mergeRead(t, s), want) {
 				t.Fatal("crash lost or changed slots")
 			}
+			// The child runs one merge of the first smallMergeRatio parts.
 			expected := sealedMergeFanIn
 			if phase == "merge-published" {
-				expected = 1
+				expected = sealedMergeFanIn - smallMergeRatio + 1
 			}
 			if got := mergeCount(e.owners[0]); got != expected {
 				t.Fatalf("live=%d want %d", got, expected)
@@ -229,7 +232,7 @@ func TestSealedMergeMoveDuringWrite(t *testing.T) {
 	}
 	o := e.owners[0]
 	done := make(chan error, 1)
-	go func() { _, err := o.mergeSealedParts(nil); done <- err }()
+	go func() { _, err := o.mergeSealedParts(nil, false); done <- err }()
 	select {
 	case <-written:
 	case <-time.After(5 * time.Second):
@@ -339,7 +342,7 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 			for i, name := range []string{"merge.reset", "merge.other"} {
 				policies[i], encoded[i] = rollupTestPolicy(t, name, "1s:120,10s:1h", sealrollup.Last, .5)
 			}
-			for n := byte(1); n <= sealedMergeFanIn; n++ {
+			for n := byte(1); n <= smallMergeRatio; n++ {
 				metas := make([]RollupMetadata, 2)
 				rs := make([][]sealrollup.Record, 2)
 				for i := range metas {
@@ -351,9 +354,9 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 					if n >= 2 {
 						reset = 2
 					}
-					isExpired := n == 2 || (expired && n == sealedMergeFanIn)
-					if expired && n == sealedMergeFanIn {
-						reset = sealedMergeFanIn
+					isExpired := n == 2 || (expired && n == smallMergeRatio)
+					if expired && n == smallMergeRatio {
+						reset = smallMergeRatio
 					}
 					metas[i] = RollupMetadata{Version: 2, ID: uint64(i + 1), Policy: encoded[i], Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 1120, Policy: digest}, LastUpdate: 1130e9, Revision: uint64(n), ResetOrder: reset, Expired: isExpired}
 					if !isExpired {
@@ -381,7 +384,7 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 			if expired && len(got) != 0 {
 				t.Fatal("expired records retained")
 			}
-			if !expired && (len(got) != 2 || got[0].Order != sealedMergeFanIn || got[1].Order != sealedMergeFanIn) {
+			if !expired && (len(got) != 2 || got[0].Order != smallMergeRatio || got[1].Order != smallMergeRatio) {
 				t.Fatalf("reset lost revived winners: %v", got)
 			}
 			o.gc.mu.Lock()
@@ -488,5 +491,84 @@ func TestSealedMergeDeferredUntilResume(t *testing.T) {
 	}
 	if err := held2.close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ForceMerge takes every live part of the scope to one, below the size-tier
+// fan-in, and keeps the exact records.
+func TestForceMergeDifferential(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e := mergeFixture(t, t.TempDir(), nil)
+	defer e.close()
+	for order := uint64(1); order <= 21; order++ {
+		mergeAppend(t, e, order)
+	}
+	o := e.owners[0]
+	pin := o.db.NewSnapshot()
+	want := mergeRead(t, pin)
+	_ = pin.Close()
+	tiered := mergeDrain(t, o)
+	before := mergeCount(o)
+	if before < 2 {
+		t.Fatalf("fixture leaves %d parts after %d tier merges", before, tiered)
+	}
+	n, err := e.ForceMerge()
+	if err != nil || n == 0 || mergeCount(o) != 1 {
+		t.Fatalf("force merge: %d merges, %d -> %d parts, %v", n, before, mergeCount(o), err)
+	}
+	s := o.db.NewSnapshot()
+	defer s.Close()
+	if got := mergeRead(t, s); !reflect.DeepEqual(got, want) {
+		t.Fatalf("force merge changed exact records\ngot=%+v\nwant=%+v", got, want)
+	}
+	if n, err = e.ForceMerge(); err != nil || n != 0 {
+		t.Fatalf("second pass: %d merges, %v", n, err)
+	}
+}
+
+// HTTP shutdown has a deadline. A forced merge still publishing afterward must
+// finish before close releases the database, and queued calls must stop safely.
+func TestForceMergeClose(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	written, release := make(chan struct{}), make(chan struct{})
+	e := mergeFixture(t, t.TempDir(), func(phase string) {
+		if phase == "merge-written" {
+			close(written)
+			<-release
+		}
+	})
+	for order := uint64(1); order <= 2; order++ {
+		mergeAppend(t, e, order)
+	}
+	merged := make(chan error, 1)
+	go func() { _, err := e.ForceMerge(); merged <- err }()
+	select {
+	case <-written:
+	case <-time.After(10 * time.Second):
+		close(release)
+		_ = e.close()
+		t.Fatal("forced merge did not reach publication")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- e.close() }()
+	<-e.gcStop
+	var early bool
+	select {
+	case err := <-closed:
+		early = true
+		t.Errorf("close passed an active merge: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-merged; err != nil {
+		t.Errorf("forced merge: %v", err)
+	}
+	if !early {
+		if err := <-closed; err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}
+	if n, err := e.ForceMerge(); err != nil || n != 0 {
+		t.Fatalf("force merge after close: %d, %v", n, err)
 	}
 }

@@ -21,13 +21,25 @@ type catalogEntry struct {
 	split      bool
 }
 
+// CatalogBinding resolves producer-local IDs in an existing immutable catalog.
+// Bind must own and validate its inputs before returning. Bindings stay valid
+// for the NameCatalog's lifetime, including checkpoint and WAL recovery.
+// A bound NameCatalog retains only its numeric index, not per-name headers.
+type CatalogBinding interface {
+	Bind(uint64, string, []byte) error
+	Key(uint64) string
+	Definition(uint64) []byte
+	Matches(uint64, string, []byte) bool
+}
+
 // NameCatalog is single-owner, including its codecs. Each journal stream owns a
 // separate catalog. IDs are local to the random persisted epoch, never routing
 // or replica metric IDs. Sync the catalog BEFORE syncing referencing segments.
 // Checkpoint durably replaces the catalog prefix before reclaiming its WAL.
 // Predictor epochs must start at every independently retained segment boundary.
 type NameCatalog struct {
-	bindDefinition func(uint64, string, []byte) (string, []byte, error)
+	binding    CatalogBinding
+	boundCount uint64
 
 	definitionArena    []byte
 	definitionSuffixes map[string][]byte
@@ -118,13 +130,16 @@ func writeCatalogBytes(f *os.File, b []byte) error {
 // OpenNameCatalog recovers a durable checkpoint plus its append-only suffix.
 // Only a physically incomplete final WAL record is discarded. CRC failures,
 // ID holes, conflicting definitions and epoch mismatches fail closed.
-func OpenNameCatalog(dir string, bind ...func(uint64, string, []byte) (string, []byte, error)) (*NameCatalog, error) {
+func OpenNameCatalog(dir string, bind ...CatalogBinding) (*NameCatalog, error) {
 	if e := makeCatalogDir(filepath.Clean(dir)); e != nil {
 		return nil, e
 	}
 	c := &NameCatalog{dir: dir, entries: []catalogEntry{{}}}
 	if len(bind) > 0 {
-		c.bindDefinition = bind[0]
+		c.binding = bind[0]
+		if c.binding != nil {
+			c.entries = nil
+		}
 	}
 	checkpoint, err := os.Open(filepath.Join(dir, "catalog.checkpoint"))
 	hasCheckpoint := err == nil
@@ -289,25 +304,22 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 	id := d.u()
 	key := string(d.bytes())
 	def := d.bytes()
-	if d.err != nil || len(d.b) != 0 || key == "" || id == 0 || id > uint64(len(c.entries)) {
+	if d.err != nil || len(d.b) != 0 || key == "" || id == 0 || id > c.Count()+1 {
 		return 0, errCatalog
 	}
-	if id < uint64(len(c.entries)) {
-		old := c.entries[id]
-		if old.key != key || !old.definitionEqual(def) {
+	if id <= c.Count() {
+		if !c.Matches(id, key, def) {
 			return 0, errCatalog
 		}
 	} else {
 		hash := NameHash(key)
-		if c.ids.lookup(key, hash, c.entries) != 0 {
+		if c.ids.lookup(key, hash, c) != 0 {
 			return 0, errCatalog
 		}
 		c.ids.insert(hash, id)
-		entry, err := c.bindEntry(id, key, def)
-		if err != nil {
+		if err := c.bindEntry(id, key, def); err != nil {
 			return 0, err
 		}
-		c.entries = append(c.entries, entry)
 	}
 	return int64(size) + 12, nil
 }
@@ -321,8 +333,8 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 	if c.failed != nil {
 		return 0, c.failed
 	}
-	if id := c.ids.lookup(key, hash, c.entries); id != 0 {
-		if !c.entries[id].definitionEqual(definition) {
+	if id := c.ids.lookup(key, hash, c); id != 0 {
+		if !c.Matches(id, key, definition) {
 			return 0, fmt.Errorf("%w: changed definition", errCatalog)
 		}
 		return id, nil
@@ -330,7 +342,7 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 	if key == "" || len(key)+len(definition) > catalogLimit-32 {
 		return 0, errCatalog
 	}
-	id := uint64(len(c.entries))
+	id := c.Count() + 1
 	// Bound transient sorting/compression memory independently of cardinality.
 	if c.pendingBytes+len(key)+len(definition)+64 > catalogGroupLimit {
 		if e := c.flushGroup(); e != nil {
@@ -350,34 +362,64 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 	}
 	c.dirty = true
 	c.ids.insert(hash, id)
-	entry, err := c.bindEntry(id, key, definition)
-	if err != nil {
+	if err := c.bindEntry(id, key, definition); err != nil {
 		c.failed = err
 		return 0, err
 	}
-	c.entries = append(c.entries, entry)
 	return id, nil
 }
 
 // Lookup returns catalog-owned immutable metadata; callers must not modify it.
 func (c *NameCatalog) Lookup(id uint64) (string, []byte, bool) {
-	if id == 0 || id >= uint64(len(c.entries)) {
+	if id == 0 || id > c.Count() {
 		return "", nil, false
 	}
-	e := c.entries[id]
-	return e.key, e.definitionBytes(), true
+	return c.key(id), c.definition(id), true
 }
+
+// Key returns the catalog-owned name for id without rebuilding its definition.
+// With a bind hook it is the shared identity name, so callers can retain or key
+// maps by it instead of keeping another copy of the name.
+func (c *NameCatalog) Key(id uint64) (string, bool) {
+	if id == 0 || id > c.Count() {
+		return "", false
+	}
+	return c.key(id), true
+}
+
 // Matches reports whether id is bound to exactly name and definition, without
 // reconstructing the definition bytes.
 func (c *NameCatalog) Matches(id uint64, name string, definition []byte) bool {
-	if id == 0 || id >= uint64(len(c.entries)) {
+	if id == 0 || id > c.Count() {
 		return false
+	}
+	if c.binding != nil {
+		return c.binding.Matches(id, name, definition)
 	}
 	e := c.entries[id]
 	return e.key == name && e.definitionEqual(definition)
 }
 func (c *NameCatalog) Epoch() [16]byte { return c.epoch }
-func (c *NameCatalog) Count() uint64   { return uint64(len(c.entries) - 1) }
+func (c *NameCatalog) Count() uint64 {
+	if c.binding != nil {
+		return c.boundCount
+	}
+	return uint64(len(c.entries) - 1)
+}
+
+func (c *NameCatalog) key(id uint64) string {
+	if c.binding != nil {
+		return c.binding.Key(id)
+	}
+	return c.entries[id].key
+}
+
+func (c *NameCatalog) definition(id uint64) []byte {
+	if c.binding != nil {
+		return c.binding.Definition(id)
+	}
+	return c.entries[id].definitionBytes()
+}
 func (c *NameCatalog) Sync() error {
 	if c.failed != nil {
 		return c.failed
@@ -442,8 +484,7 @@ func (c *NameCatalog) checkpoint() error {
 		return e
 	}
 	for id := uint64(1); id <= c.Count(); id++ {
-		r := c.entries[id]
-		if _, e = compressed.Write(catalogRecord(id, r.key, r.definitionBytes())); e != nil {
+		if _, e = compressed.Write(catalogRecord(id, c.key(id), c.definition(id))); e != nil {
 			_ = compressed.Close()
 			return e
 		}

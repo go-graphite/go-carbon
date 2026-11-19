@@ -93,13 +93,12 @@ func (r *rollupOutput) fileID(group string, partition int64) string {
 	return r.lastFileID
 }
 
-func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stage func(string)) error {
+func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []sealrollup.Batch, records []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
 		r.files = map[string]*[]plannedKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
 		r.coverage = map[string]*rollupCoverage{}
 	}
-	m := s.metric
 	group := string(m.policy.Group)
 	name, vshard := m.policy.Name, m.vshard
 	var rank uint32
@@ -112,7 +111,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	schema := m.schema()
 	last := schema.Archives[len(schema.Archives)-1]
 	horizon := last.Step * last.Count
-	for _, b := range s.batches {
+	for _, b := range batches {
 		if s.next.Revision == 0 {
 			s.next.Revision = 1
 			s.next.LastUpdate = b.Now * 1e9
@@ -138,14 +137,14 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 	home := r.monthPartition(s.next.Frontier.MaxTime)
 	envelopeExpiry := rollupMetricExpiry(schema, s.next.Frontier.MaxTime)
 	partitions := append(r.partitions[:0], home)
-	for i := range s.records {
-		if p := r.monthPartition(s.records[i].Sample.Time); !slices.Contains(partitions, p) {
+	for i := range records {
+		if p := r.monthPartition(records[i].Sample.Time); !slices.Contains(partitions, p) {
 			partitions = append(partitions, p)
 		}
 	}
 	r.partitions = partitions
 	start := len(r.arena)
-	r.arena = m.appendMetadata(r.arena, s.next)
+	r.arena = m.appendMetadata(r.arena, m.metadataScalars(s.next))
 	metadata := r.arena[start:len(r.arena):len(r.arena)]
 	for _, partition := range partitions {
 		filePtr, coverage := r.file(r.fileID(group, partition))
@@ -155,7 +154,7 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
 			coverage.spec.Source.MinOrder = math.MaxUint64
 		}
-		digest := s.next.Frontier.Policy
+		digest := m.policy.prepared.Digest()
 		if !coverage.seen[digest] {
 			policies := r.definitions[digest]
 			if policies == nil {
@@ -181,8 +180,8 @@ func (r *rollupOutput) appendStage(s *rollupStage, part partsformat.PartID, stag
 		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
 		// Physical dense packing belongs exclusively to the shared v2part writer.
 		file := *filePtr
-		for i := range s.records {
-			record := &s.records[i]
+		for i := range records {
+			record := &records[i]
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
 			}
@@ -215,7 +214,8 @@ func (r *rollupOutput) release() {
 
 // Each lane owns a disjoint routed key range, planner workspace and output
 // arena until the one owner Commit/Abort. No worker publishes a frontier.
-func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) (coreSealPlan, error) {
+func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) {
+	stages, metrics := r.stages, r.stageMetrics
 	workers := r.parallelism
 	if workers == 0 {
 		workers = min(8, runtime.GOMAXPROCS(0))
@@ -232,7 +232,7 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 	for i := range stages {
 		s := &stages[i]
 		lane := int(s.vshard) * workers / 4096
-		r.lanes[lane].ranked = append(r.lanes[lane].ranked, rollupRankRef{key: s.sortKey, rollupStage: s})
+		r.lanes[lane].ranked = append(r.lanes[lane].ranked, rollupRankRef{key: s.sortKey, stage: uint32(i)})
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -241,10 +241,10 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 			history := rollupHistoryReader{db: r.db}
 			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
-			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts)
+			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts, metrics)
 			for _, ref := range lane.ranked {
-				s := ref.rollupStage
-				m := s.metric
+				s, m := &stages[ref.stage], metrics[ref.stage]
+				batches := r.batches[s.batch : s.batch+s.batches : s.batch+s.batches]
 				view, ranges := m.slots.View, m.slots.Range
 				var readErr error
 				if r.db != nil {
@@ -258,19 +258,21 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 						if result, ok := m.slots.RecentRange(a, start, end, dst); ok {
 							return result
 						}
-						result, err := lane.windows.rangeSamples(&history, m, a, start, end)
+						result, err := lane.windows.rangeSamples(&history, m, r.committed(s), a, start, end)
 						readErr = err
 						return append(dst, result...)
 					}
 				}
 				idleThrough := int64(0)
-				if len(s.batches) == 0 && !s.next.Expired {
+				if s.batches == 0 && !s.next.Expired {
 					idleThrough = time.Now().Unix()
 					if r.now != nil {
 						idleThrough = r.now().Unix()
 					}
 				}
-				plan, through, err := m.policy.prepared.PlanClosedInto(lane.records[len(lane.records):], s.next.Frontier, s.next.ClosedThrough, idleThrough, view, ranges, s.batches, &lane.workspace)
+				start := len(lane.records)
+				frontier := sealrollup.Frontier{Order: s.next.Frontier.Order, MaxTime: s.next.Frontier.MaxTime, Policy: m.policy.prepared.Digest()}
+				plan, through, err := m.policy.prepared.PlanClosedInto(lane.records[start:], frontier, s.next.ClosedThrough, idleThrough, view, ranges, batches, &lane.workspace)
 
 				s.next.Version, s.next.ClosedThrough = 3, through
 				if readErr != nil {
@@ -281,16 +283,27 @@ func (r *coreRollups) planStages(stages []rollupStage, part partsformat.PartID) 
 					lane.err = err
 					return
 				}
-				s.records = plan.Records
-				s.next.Frontier = plan.Next
-				if len(plan.Records) <= cap(lane.records)-len(lane.records) {
-					lane.records = lane.records[:len(lane.records)+len(plan.Records)]
+				s.next.Frontier.Order, s.next.Frontier.MaxTime = plan.Next.Order, plan.Next.MaxTime
+				// A plan that fit was written in place. Otherwise the full
+				// chunk stays put (tuples point into it) and a chunk twice as
+				// large takes this plan.
+				n := len(plan.Records)
+				if n > cap(lane.records)-start {
+					lane.chunks, lane.bases = append(lane.chunks, lane.records), append(lane.bases, lane.base)
+					lane.base += uint32(start)
+					lane.records = append(make([]sealrollup.Record, 0, max(2*cap(lane.records), n, 1024)), plan.Records...)
+					start = 0
 				} else {
-					lane.records = append(lane.records, plan.Records...)
+					lane.records = lane.records[:start+n]
 				}
+				if uint64(lane.base)+uint64(start+n) > math.MaxUint32 {
+					lane.err = errors.New("too many planned rollup records")
+					return
+				}
+				s.record, s.records = lane.base+uint32(start), uint32(n)
 				// Build while this metric's policy, metadata and batches are hot.
 				// The lane still retains all arenas until the owner joins ingest.
-				if lane.err = lane.output.appendStage(s, part, r.stage); lane.err != nil {
+				if lane.err = lane.output.appendStage(s, m, batches, lane.records[start:start+n:start+n], part, r.stage); lane.err != nil {
 					return
 				}
 			}
@@ -396,28 +409,32 @@ func (r *coreRollups) commitStages() {
 	var wg sync.WaitGroup
 	for i := range r.lanes {
 		work := func() {
-			for _, ref := range r.lanes[i].ranked {
-				s := ref.rollupStage
-				m := s.metric
+			lane := &r.lanes[i]
+			for _, ref := range lane.ranked {
+				s, m := &r.stages[ref.stage], r.stageMetrics[ref.stage]
+				records := lane.stageRecords(s)
 				if r.db != nil {
-					m.slots.KeepRecent(s.next.Frontier.MaxTime)
+					m.keepRecent(s.next.Frontier.MaxTime)
 				}
-				for _, record := range s.records {
+				for _, record := range records {
 					if r.db != nil {
-						m.slots.InstallRecent(record.Delta)
+						m.installRecent(record.Delta)
 					} else {
-						m.slots.Install(record.Delta)
+						m.residency().Install(record.Delta)
 					}
 				}
 				if r.db != nil {
-					if len(r.lanes[i].windows.entries) != 0 {
-						r.lanes[i].windows.commit(m, s.records, s.next.Expired)
+					if len(lane.windows.entries) != 0 {
+						lane.windows.commit(m, records, s.next.Expired)
 					}
 				}
 				if s.next.Expired {
-					m.slots = *m.policy.prepared.NewSlots()
+					m.slots = nil
 				}
-				m.meta = compactMetadata(s.next)
+				if !s.fresh { // a fresh metric gets its slot, and these scalars, at install
+					s.refile = r.refile(m, r.meta[s.slot], s.next)
+					r.meta[s.slot] = s.next
+				}
 			}
 		}
 		if len(r.lanes) == 1 {

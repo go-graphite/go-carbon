@@ -41,7 +41,7 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer core.Close()
-	recovered, err := recoverCoreRollups(core.DBs()[0])
+	recovered, err := recoverCoreRollups(core.DBs()[0], "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,11 +77,11 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoveredIdentity := metric.PolicyIdentity
-	if metric.meta.Frontier.Order != 1 {
+	if recovered.metaOf(7).Frontier.Order != 1 {
 		t.Fatal("planning changed recovered frontier")
 	}
 	plan.Abort()
-	if metric.PolicyIdentity != recoveredIdentity || metric.meta.Frontier.Order != 1 {
+	if metric.PolicyIdentity != recoveredIdentity || recovered.metaOf(7).Frontier.Order != 1 {
 		t.Fatal("aborted seal changed recovered metric")
 	}
 	if _, err = recovered.plan(SealInput{Batches: []Batch{batch(4, changed, wrong)}}); err == nil {
@@ -95,7 +95,7 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Commit()
-	if metric.PolicyIdentity != recoveredIdentity || metric.meta.Frontier.Order != 4 {
+	if metric.PolicyIdentity != recoveredIdentity || recovered.metaOf(7).Frontier.Order != 4 {
 		t.Fatal("committed matching seal did not bind recovered metric")
 	}
 }

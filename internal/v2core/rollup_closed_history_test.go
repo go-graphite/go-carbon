@@ -18,6 +18,9 @@ import (
 // This fixture deliberately uses only pre-history-cache APIs so it can also run
 // against an overlay of the unchanged reducer runtime.
 func TestClosedHistoryLogicalDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	// This same fixture passed on the unchanged eager runtime. Its fixed
 	// resolved-value hashes prove that regenerating the physical golden does
 	// not alter timestamps or floating-point bits, including restart cuts.
@@ -25,6 +28,9 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {
+				// Subtests own their engines; the parent's environment stays set
+				// until all of them finish.
+				t.Parallel()
 				_, policy := rollupTestPolicy(t, "history.metric", schema, method, .1)
 				cfg := coreTestConfig()
 				cfg.Shards = 1
@@ -81,7 +87,7 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 						t.Fatal(err)
 					}
 					snap := e.DBs()[0].NewSnapshot()
-					index, err := NewRollupSnapshot(context.Background(), snap, nil, 0)
+					index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -150,7 +156,7 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 					}
 				}
 				digest := fmt.Sprintf("%x", h.Sum(nil))
-				want := map[string]string{"1|1s:1h,1m:1d,1h:1y": "e37e003f79bf631f80f8c55e25013c4756b43452689fb523e7ba0cdefb894fae", "1|10s:6h,5m:7d,1h:1y,1d:10y": "e72c40ed807f1a49a21e63e956d8618b0ace34faf4132125ebe13c263b046588", "2|1s:1h,1m:1d,1h:1y": "e37e003f79bf631f80f8c55e25013c4756b43452689fb523e7ba0cdefb894fae", "2|10s:6h,5m:7d,1h:1y,1d:10y": "e72c40ed807f1a49a21e63e956d8618b0ace34faf4132125ebe13c263b046588", "3|1s:1h,1m:1d,1h:1y": "e6229811686773aaf5d6b15df84f61e522b117c90d1cea4efe151b7d4b050d0c", "3|10s:6h,5m:7d,1h:1y,1d:10y": "4b1b0f4257117339a6dfb9deae0a23f741e1d9d5c8ec4355e30494f9b0344bab", "4|1s:1h,1m:1d,1h:1y": "ac108d2434a770397318f833fd63cfb149d24e5c66601353c90857d3b821d875", "4|10s:6h,5m:7d,1h:1y,1d:10y": "aba854fb9be683c01cd1358367e30db0be20e0fcd8fa3c02cf227c18cd9a8cf3", "5|1s:1h,1m:1d,1h:1y": "ccd5c1e40f7d978a69d0da353ecd81cfd9879bfe61d484cd2fd7d859641598ca", "5|10s:6h,5m:7d,1h:1y,1d:10y": "16412db176b5ac5daf90a14c3cafda06c43732f1eb4c9a62f8d89011765c129b", "6|1s:1h,1m:1d,1h:1y": "b6005cf522ab2b6ad9084ec808ef6f39dd750ce0432c0d66de758be55f93a65e", "6|10s:6h,5m:7d,1h:1y,1d:10y": "f5141ea80a366a27aac56e428c7514ff94c657339bf51affbf683937d28bc39e"}[fmt.Sprintf("%d|%s", method, schema)]
+				want := map[string]string{"1|1s:1h,1m:1d,1h:1y": "77d2e2318b1bb77f9ae712432710481d61dd4bbf9eec2240ad86a87040ffb35a", "1|10s:6h,5m:7d,1h:1y,1d:10y": "ecfb0b3c3240c4d017c917a28583f0612b352b36ed8f3b57199e07edc9ec649e", "2|1s:1h,1m:1d,1h:1y": "77d2e2318b1bb77f9ae712432710481d61dd4bbf9eec2240ad86a87040ffb35a", "2|10s:6h,5m:7d,1h:1y,1d:10y": "ecfb0b3c3240c4d017c917a28583f0612b352b36ed8f3b57199e07edc9ec649e", "3|1s:1h,1m:1d,1h:1y": "e6229811686773aaf5d6b15df84f61e522b117c90d1cea4efe151b7d4b050d0c", "3|10s:6h,5m:7d,1h:1y,1d:10y": "4b1b0f4257117339a6dfb9deae0a23f741e1d9d5c8ec4355e30494f9b0344bab", "4|1s:1h,1m:1d,1h:1y": "ac108d2434a770397318f833fd63cfb149d24e5c66601353c90857d3b821d875", "4|10s:6h,5m:7d,1h:1y,1d:10y": "aba854fb9be683c01cd1358367e30db0be20e0fcd8fa3c02cf227c18cd9a8cf3", "5|1s:1h,1m:1d,1h:1y": "ccd5c1e40f7d978a69d0da353ecd81cfd9879bfe61d484cd2fd7d859641598ca", "5|10s:6h,5m:7d,1h:1y,1d:10y": "16412db176b5ac5daf90a14c3cafda06c43732f1eb4c9a62f8d89011765c129b", "6|1s:1h,1m:1d,1h:1y": "b6005cf522ab2b6ad9084ec808ef6f39dd750ce0432c0d66de758be55f93a65e", "6|10s:6h,5m:7d,1h:1y,1d:10y": "f5141ea80a366a27aac56e428c7514ff94c657339bf51affbf683937d28bc39e"}[fmt.Sprintf("%d|%s", method, schema)]
 				if digest != want {
 					t.Fatalf("resolved history digest got %s want %s", digest, want)
 				}

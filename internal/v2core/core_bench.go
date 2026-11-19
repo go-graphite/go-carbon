@@ -206,25 +206,11 @@ func coreSample(engine *coreEngine, stage string, start time.Time, offered uint6
 // A bounded synthetic durability/LSM workload, explicitly not captured traffic.
 // Time advances with offered input. Producer backpressure is visible as a
 // shortfall against rate*elapsed; submitted batches are never silently dropped.
-func coreBenchmark(out string, cfg coreConfig, duration time.Duration, rate uint64, metrics uint64, settle time.Duration) error {
-	return coreBenchmarkPipeline(out, cfg, duration, rate, metrics, settle, 0, 1)
-}
-
+//
 // Independent pipelines generate disjoint canonical IDs. Routing happens before
 // entry to a pipeline; no producer sends a packet to a remote node's owners.
-func coreBenchmarkPipeline(out string, cfg coreConfig, duration time.Duration, rate, metrics uint64, settle time.Duration, index, count int) error {
-	if count < 1 || index < 0 || index >= count || metrics < uint64(count) {
-		return os.ErrInvalid
-	}
-	return coreBenchmarkWithIdentity(out, cfg, duration, rate, metrics, settle, nil, index, count)
-}
-
-// A hook(-1,nil,nil) call ends publication and must join readers/release pins.
-func coreBenchmarkWithHook(out string, cfg coreConfig, duration time.Duration, rate uint64, metrics uint64, settle time.Duration, hook func(int, *pebble.Snapshot, []row) error) error {
-	return coreBenchmarkWithIdentity(out, cfg, duration, rate, metrics, settle, hook, 0, 1)
-}
-func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duration, rate uint64, metrics uint64, settle time.Duration, hook func(int, *pebble.Snapshot, []row) error, pipeline, pipelines int) error {
-	if duration <= 0 || rate == 0 || metrics == 0 {
+func coreBenchmarkPipeline(out string, cfg coreConfig, duration time.Duration, rate, metrics uint64, settle time.Duration, pipeline, pipelines int) error {
+	if pipelines < 1 || pipeline < 0 || pipeline >= pipelines || metrics < uint64(pipelines) || duration <= 0 || rate == 0 {
 		return os.ErrInvalid
 	}
 	ownerCPUs, err := parseCoreCPUs(os.Getenv("CORE_OWNER_CPUS"))
@@ -235,7 +221,7 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 	if err != nil {
 		return err
 	}
-	engine, err := openCoreWithHooks(out, cfg, coreHooks{Publish: hook, OwnerCPUs: ownerCPUs})
+	engine, err := openCoreWithHooks(out, cfg, coreHooks{OwnerCPUs: ownerCPUs})
 	if err != nil {
 		return err
 	}
@@ -315,9 +301,6 @@ func coreBenchmarkWithIdentity(out string, cfg coreConfig, duration time.Duratio
 	final["target_met"] = offered.Load() >= target
 	if final["committed"].(uint64) != offered.Load() {
 		err = errors.Join(err, errors.New("final seal did not commit all submitted points"))
-	}
-	if hook != nil {
-		err = errors.Join(err, hook(-1, nil, nil))
 	}
 	err = errors.Join(err, engine.close())
 	if err != nil {
