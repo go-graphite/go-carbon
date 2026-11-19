@@ -18,17 +18,26 @@ import (
 )
 
 // rollupStateDigest lists every installed name's identity, committed scalars,
-// residency and closure membership, in ID order.
+// residency and closure calendar ends, in ID order.
 func rollupStateDigest(r *coreRollups) string {
 	ids := make([]uint64, 0, len(r.metrics))
 	for id := range r.metrics {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
+	filed := map[uint64][]int64{}
+	for end, slots := range r.calendar.slots {
+		for _, s := range slots {
+			if id := r.ids[s]; id != deadSlot && !slices.Contains(filed[id], end) {
+				filed[id] = append(filed[id], end)
+			}
+		}
+	}
 	var b strings.Builder
 	for _, id := range ids {
 		m := r.metrics[id]
-		fmt.Fprintf(&b, "%d %s %+v %v closable=%v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], m.slots.AppendResident(nil), r.closable[id] != nil, nameIndexed(r, m))
+		slices.Sort(filed[id])
+		fmt.Fprintf(&b, "%d %s %+v %v calendar=%v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], m.slots.AppendResident(nil), filed[id], nameIndexed(r, m))
 	}
 	fmt.Fprintf(&b, "names=%d metrics=%d\n", r.names.Len(), len(r.metrics))
 	return b.String()
