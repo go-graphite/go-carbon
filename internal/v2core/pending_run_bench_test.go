@@ -7,9 +7,9 @@ import (
 )
 
 // pendingRunBenchHead appends rows one-point applications over ids IDs to a
-// head, publishing a view every pub rows, and returns the head with the
-// last view. raw publishes without runs (the cost before them).
-func pendingRunBenchHead(rows, ids, pub int, raw bool) (*pendingHead, PendingView) {
+// head, publishing a view every pub rows, and returns the last view.
+// raw publishes without runs (the cost before them).
+func pendingRunBenchHead(rows, ids, pub int, raw bool) PendingView {
 	rng := rand.New(rand.NewPCG(1, 2))
 	find := func(uint64) *ApplicationPolicy { return nil }
 	h := &pendingHead{}
@@ -29,14 +29,14 @@ func pendingRunBenchHead(rows, ids, pub int, raw bool) (*pendingHead, PendingVie
 			if raw {
 				v = h.rawView(find)
 			} else {
-				v = h.view(find)
+				h.view(find)
 				c.start(h)
 				c.wait(h)
 				v = h.view(find)
 			}
 		}
 	}
-	return h, v
+	return v
 }
 
 // BenchmarkPendingRunPublish is the owner's append-and-publish cost per
@@ -64,7 +64,7 @@ func BenchmarkPendingRunPublish(b *testing.B) {
 // its runs (Find) against the linear row scan it replaces.
 func BenchmarkPendingRunFind(b *testing.B) {
 	const rows, ids, pub = 1 << 18, 1 << 20, 1 << 12
-	_, v := pendingRunBenchHead(rows, ids, pub, false)
+	v := pendingRunBenchHead(rows, ids, pub, false)
 	none := func(*coreBatch) (bool, error) { return false, nil }
 	b.Run("runs", func(b *testing.B) {
 		b.ReportMetric(float64(len(v.runs)), "runs")
