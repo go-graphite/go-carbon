@@ -86,10 +86,15 @@ type coreHooks struct {
 	// DenseRollups is retained for source compatibility; all rollup seals are dense.
 	DenseRollups bool
 
-	// Expire runs on the serial seal owner, after admitted batches are applied.
-	// It must be immutable and must remain false until journal replay finishes.
+	// Expire decides whether a name idle for its ExpiryTTL window expires now;
+	// it is asked about no other name. It runs on the serial seal owner, after
+	// admitted batches are applied, and must remain false until journal
+	// replay finishes.
 	Expire func(RollupPolicy, RollupMetadata, time.Time) bool
-	Now    func() time.Time
+	// ExpiryTTL, required with Expire, is a name's expiry window at now
+	// (<= 0: never) and when that answer may next change (zero: never).
+	ExpiryTTL func(RollupPolicy, time.Time) (time.Duration, time.Time)
+	Now       func() time.Time
 
 	// Stage is an optional fault-injection observer for offline recovery tests.
 	// It runs on owner goroutines; callers must serialize their own observer.

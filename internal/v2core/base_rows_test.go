@@ -102,7 +102,7 @@ func TestOmitBaseRowsRenderDifferential(t *testing.T) {
 		var metas [2]map[string]RollupMetadata
 		for i, e := range es {
 			pin := e.owners[0].db.NewSnapshot()
-			index, err := NewRollupSnapshot(context.Background(), pin, nil, 0)
+			index, err := NewRollupSnapshot(context.Background(), pin, nil, nil, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
