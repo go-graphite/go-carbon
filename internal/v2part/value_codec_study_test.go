@@ -57,48 +57,7 @@ type studySeries struct {
 // VC_IN is a comma-separated list of floatcap .json.gz captures.
 func TestValueCodecStudy(t *testing.T) {
 	for _, path := range strings.Split(os.Getenv("VC_IN"), ",") {
-		f, err := os.Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		z, err := gzip.NewReader(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var series map[string]studySeries
-		if err := json.NewDecoder(z).Decode(&series); err != nil {
-			t.Fatal(err)
-		}
-		f.Close()
-		var runs [][]sealrollup.Record
-		points := 0
-		for _, s := range series {
-			var run []sealrollup.Record
-			for i, v := range s.Values {
-				var x float64
-				switch v := v.(type) {
-				case float64:
-					x = v
-				case string:
-					if x, err = strconv.ParseFloat(v, 64); err != nil {
-						continue
-					}
-				default:
-					continue
-				}
-				run = append(run, sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: int64(i),
-					Order: 1, Sample: sealrollup.Sample{Time: s.Start + int64(i)*s.Step, Bits: math.Float64bits(x)}}})
-				if len(run) == MaxDenseSlots {
-					runs, run = append(runs, run), nil
-				}
-			}
-			if len(run) > 0 {
-				runs = append(runs, run)
-			}
-		}
-		for _, r := range runs {
-			points += len(r)
-		}
+		runs, points := studyRuns(t, path)
 		enc, err := newDenseEncoder()
 		if err != nil {
 			t.Fatal(err)
@@ -121,10 +80,10 @@ func TestValueCodecStudy(t *testing.T) {
 			return total + len(out), float64(spent.Nanoseconds()) / float64(points)
 		}
 		before, beforeNs := compressed(legacyAppendSlots)
-		after, afterNs := compressed(appendValues)
+		after, afterNs := compressed(func(out []byte, r []sealrollup.Record) []byte { return appendValues(out, r, nil) })
 		rawIf := func(short bool) func([]byte, []sealrollup.Record) []byte {
 			return func(out []byte, r []sealrollup.Record) []byte {
-				v := appendValues(nil, r)
+				v := appendValues(nil, r, nil)
 				if v[0] != valuePlanes || (len(r) < 64) != short {
 					return append(out, v...)
 				}
@@ -137,7 +96,7 @@ func TestValueCodecStudy(t *testing.T) {
 		}
 		rawDistinct := func(ratio float64) func([]byte, []sealrollup.Record) []byte {
 			return func(out []byte, r []sealrollup.Record) []byte {
-				v := appendValues(nil, r)
+				v := appendValues(nil, r, nil)
 				if v[0] != valuePlanes || len(r) < 64 {
 					return append(out, v...)
 				}
@@ -183,7 +142,7 @@ func TestValueCodecStudy(t *testing.T) {
 		var decodeNs time.Duration
 		dst := make([]sealrollup.Record, MaxDenseSlots)
 		for _, r := range runs {
-			v := appendValues(nil, r)
+			v := appendValues(nil, r, nil)
 			kind := map[byte]string{valuePlanes: "planes", valueDelta1: "delta1", valueDelta2: "delta2"}[v[0]&^31]
 			tags[fmt.Sprintf("%s e%d", kind, v[0]&31)] += len(r)
 			rs := dst[:len(r)]
@@ -201,8 +160,8 @@ func TestValueCodecStudy(t *testing.T) {
 			}
 		}
 		name := strings.TrimSuffix(filepath.Base(path), ".json.gz")
-		t.Logf("%s series=%d runs=%d points=%d values B/pt before=%.4f after=%.4f saved=%.4f encode ns/pt before=%.1f after=%.1f decode ns/pt after=%.1f",
-			name, len(series), len(runs), points, float64(before)/float64(points), float64(after)/float64(points),
+		t.Logf("%s series=%d(n/a) runs=%d points=%d values B/pt before=%.4f after=%.4f saved=%.4f encode ns/pt before=%.1f after=%.1f decode ns/pt after=%.1f",
+			name, -1, len(runs), points, float64(before)/float64(points), float64(after)/float64(points),
 			float64(before-after)/float64(points), beforeNs, afterNs, float64(decodeNs.Nanoseconds())/float64(points))
 		t.Logf("%s tags (points): %v", name, tags)
 	}
@@ -261,4 +220,51 @@ func studyValues(out []byte, records []sealrollup.Record, maxCost int, xor bool)
 		}
 	}
 	return out
+}
+
+// studyRuns cuts every series of a floatcap capture into 4,096-point runs.
+func studyRuns(t *testing.T, path string) ([][]sealrollup.Record, int) {
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var series map[string]studySeries
+	if err := json.NewDecoder(z).Decode(&series); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	var runs [][]sealrollup.Record
+	points := 0
+	for _, s := range series {
+		var run []sealrollup.Record
+		for i, v := range s.Values {
+			var x float64
+			switch v := v.(type) {
+			case float64:
+				x = v
+			case string:
+				if x, err = strconv.ParseFloat(v, 64); err != nil {
+					continue
+				}
+			default:
+				continue
+			}
+			run = append(run, sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: int64(i),
+				Order: 1, Sample: sealrollup.Sample{Time: s.Start + int64(i)*s.Step, Bits: math.Float64bits(x)}}})
+			if len(run) == MaxDenseSlots {
+				runs, run = append(runs, run), nil
+			}
+		}
+		if len(run) > 0 {
+			runs = append(runs, run)
+		}
+	}
+	for _, r := range runs {
+		points += len(r)
+	}
+	return runs, points
 }
