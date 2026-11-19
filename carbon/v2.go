@@ -58,6 +58,8 @@ type v2Runtime struct {
 
 func (app *App) startV2() error {
 	c := app.Config
+	// v2 does not enter the classic startup path that applies these rates.
+	app.applyRuntimeProfiling()
 	mode, err := v2StorageMode(c.V2)
 	if err != nil {
 		return err
