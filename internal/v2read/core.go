@@ -156,22 +156,14 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	g := &generation{pending: pending}
 	// Retain the previous publication while borrowing its sealed index. Close
 	// may race publication; a failed retain means a fresh sealed resource is needed.
+	// The owner's part registry, carried by the inventory, shares opened parts
+	// with the previous publication, which stays installed until the swap.
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
 		g.index = nextPendingIndex(old.index, old.pending, pending)
 		if old.sealed.number == number && old.sealed.inventory == inventory {
 			g.sealed = old.sealed
 			g.sealed.refs.Add(1)
-		}
-		if g.sealed == nil && inventory != nil && snapshot != nil {
-			parts, err := v2core.OpenRollupPartsWithCache(context.Background(), snapshot, inventory, old.sealed.parts, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
-			if err != nil {
-				old.release()
-				_ = snapshot.Close()
-				return err
-			}
-			g.sealed = &sealedData{parts: parts, snapshot: snapshot, inventory: inventory, number: number, cache: &r.caches[owner], reader: r}
-			g.sealed.refs.Store(1)
 		}
 		old.release()
 	}

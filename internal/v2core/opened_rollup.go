@@ -7,17 +7,18 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// OpenedRollupParts owns a publication's immutable part references. Files and
-// their SST indexes are opened once and shared with every surviving generation.
-// Pebble snapshots remain the file-retirement fence.
+// OpenedRollupParts owns a publication's part references, taken from the
+// owner's registry: files and SST indexes open once per owner and stay open
+// while any publication holds them.
 type OpenedRollupParts struct {
+	registry   *partRegistry
 	blockCache *pebble.Cache
 	cacheBytes int64
 	parts      map[string]*openedRollupPart
@@ -32,11 +33,71 @@ type OpenedRollupParts struct {
 }
 type openedRollupPart struct {
 	descriptor v2part.Descriptor
-	refs       atomic.Int64
+	refs       int64 // guarded by partRegistry.mu
 	gate       chan struct{}
 	reader     *sstable.Reader
 	openErr    error
 	opened     bool
+}
+
+// partRegistry holds one owner's opened parts with their reference counts.
+// The part GC unlinks a retired file only when no publication holds it, as
+// VictoriaMetrics drops a partWrapper at refCount == 0 && mustDrop.
+type partRegistry struct {
+	mu    sync.Mutex
+	parts map[v2part.Digest]*openedRollupPart
+}
+
+// acquire references the part bound under key, parsing its descriptor only
+// when no publication holds it. A part without vshards returns nil.
+func (r *partRegistry) acquire(key string, value []byte) (*openedRollupPart, error) {
+	if len(key) != len(sealedPartPrefix)+32 {
+		return nil, errors.New("sealed descriptor binding mismatch")
+	}
+	var id v2part.Digest
+	copy(id[:], key[len(sealedPartPrefix):])
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.parts[id]; p != nil {
+		p.refs++
+		return p, nil
+	}
+	d, err := v2part.ParseDescriptor(value)
+	if err != nil {
+		return nil, err
+	}
+	if d.SHA256 != id {
+		return nil, errors.New("sealed descriptor binding mismatch")
+	}
+	if len(d.VShards) == 0 {
+		return nil, nil
+	}
+	p := &openedRollupPart{descriptor: d, gate: make(chan struct{}, 1), refs: 1}
+	p.gate <- struct{}{}
+	if r.parts == nil {
+		r.parts = map[v2part.Digest]*openedRollupPart{}
+	}
+	r.parts[id] = p
+	return p, nil
+}
+
+func (r *partRegistry) release(p *openedRollupPart) {
+	r.mu.Lock()
+	p.refs--
+	last := p.refs == 0
+	if last {
+		delete(r.parts, p.descriptor.SHA256)
+	}
+	r.mu.Unlock()
+	if last && p.reader != nil {
+		_ = p.reader.Close()
+	}
+}
+
+func (r *partRegistry) held(id v2part.Digest) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.parts[id] != nil
 }
 
 // OpenRollupParts performs no file I/O for ordinary descriptor publications.
@@ -87,7 +148,12 @@ func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 	if err != nil {
 		return nil, err
 	}
-	out := &OpenedRollupParts{parts: make(map[string]*openedRollupPart, len(inventory.bindings)), routes: map[uint16][]*openedRollupPart{}, byIdentity: map[archivePartIdentity]*openedRollupPart{}, directory: directory, identities: identities, legacyRows: legacyRows}
+	out := &OpenedRollupParts{registry: inventory.registry, parts: make(map[string]*openedRollupPart, len(inventory.bindings)), routes: map[uint16][]*openedRollupPart{}, byIdentity: map[archivePartIdentity]*openedRollupPart{}, directory: directory, identities: identities, legacyRows: legacyRows}
+	if out.registry == nil && prior != nil {
+		out.registry = prior.registry
+	} else if out.registry == nil {
+		out.registry = &partRegistry{}
+	}
 	if prior != nil {
 		out.blockCache = prior.blockCache
 		out.cacheBytes = prior.cacheBytes
@@ -110,25 +176,10 @@ func openRollupParts(ctx context.Context, snapshot *pebble.Snapshot, inventory *
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		var p *openedRollupPart
-		if prior != nil {
-			p = prior.parts[id]
+		p, err := out.registry.acquire(id, value)
+		if err != nil || p == nil {
+			return nil, err
 		}
-		if p == nil {
-			d, e := v2part.ParseDescriptor(value)
-			if e != nil {
-				return nil, e
-			}
-			if len(id) != len(sealedPartPrefix)+32 || !bytes.Equal([]byte(id)[len(sealedPartPrefix):], d.SHA256[:]) {
-				return nil, errors.New("sealed descriptor binding mismatch")
-			}
-			if len(d.VShards) == 0 {
-				return nil, nil
-			}
-			p = &openedRollupPart{descriptor: d, gate: make(chan struct{}, 1)}
-			p.gate <- struct{}{}
-		}
-		p.refs.Add(1)
 		out.parts[id] = p
 		identity := archivePartIdentity{p.descriptor.Scope.Group, p.descriptor.Scope.Part}
 		if out.byIdentity[identity] != nil {
@@ -147,9 +198,7 @@ func (s *OpenedRollupParts) Close() {
 		return
 	}
 	for _, p := range s.parts {
-		if p.refs.Add(-1) == 0 && p.reader != nil {
-			_ = p.reader.Close()
-		}
+		s.registry.release(p)
 	}
 	s.blockCache.Unref()
 }

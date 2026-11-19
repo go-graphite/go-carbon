@@ -20,6 +20,7 @@ import (
 type RollupInventory struct {
 	bindings map[string][]byte
 	bytes    int64
+	registry *partRegistry // the owner's opened parts; nil outside a core owner
 }
 
 func loadRollupInventory(db *pebble.DB) (*RollupInventory, error) {
@@ -39,7 +40,7 @@ func (s *RollupInventory) with(added []coreKV, removed map[v2part.Digest]bool) *
 	if len(added) == 0 && len(removed) == 0 {
 		return s
 	}
-	out := &RollupInventory{bindings: maps.Clone(s.bindings), bytes: s.bytes}
+	out := &RollupInventory{bindings: maps.Clone(s.bindings), bytes: s.bytes, registry: s.registry}
 	for _, kv := range added {
 		if old, ok := out.bindings[string(kv.Key)]; ok {
 			out.bytes -= int64(len(kv.Key) + len(old) + 64)

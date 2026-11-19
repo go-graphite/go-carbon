@@ -213,7 +213,10 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 	if err != context.Canceled {
 		t.Fatalf("cancellation: %v", err)
 	}
-	if p.refs.Load() != 1 {
-		t.Fatalf("references leaked: %d", p.refs.Load())
+	parts.registry.mu.Lock()
+	refs := p.refs
+	parts.registry.mu.Unlock()
+	if refs != 1 {
+		t.Fatalf("references leaked: %d", refs)
 	}
 }
