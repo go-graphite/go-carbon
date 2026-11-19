@@ -7,13 +7,13 @@ import (
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
-func rollupClosureDue(m *rollupMetric, now int64) bool {
-	if m.meta.Version != 3 || m.meta.Frontier.Order == 0 {
+func rollupClosureDue(m *rollupMetric, meta metricMetadata, now int64) bool {
+	if meta.Version != 3 || meta.Frontier.Order == 0 {
 		return false
 	}
 	for _, a := range m.schema().Archives[1:] {
-		end := m.meta.Frontier.MaxTime - m.meta.Frontier.MaxTime%a.Step + a.Step
-		if m.meta.ClosedThrough < end && now >= end {
+		end := meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step + a.Step
+		if meta.ClosedThrough < end && now >= end {
 			return true
 		}
 	}

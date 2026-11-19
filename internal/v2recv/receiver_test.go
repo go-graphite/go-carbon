@@ -186,7 +186,7 @@ type fakeOwner struct {
 	syncs   chan struct{}
 }
 
-func (o *fakeOwner) Append(_ []string, p []points.Point, _ []uint64, _ int64) error {
+func (o *fakeOwner) Append(_ []string, _ []uint64, p []points.Point, _ []uint64, _ int64) error {
 	o.once.Do(func() {
 		if o.entered != nil {
 			close(o.entered)

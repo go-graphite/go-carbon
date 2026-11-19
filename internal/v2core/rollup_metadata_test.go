@@ -178,8 +178,8 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan.Commit()
-	for _, m := range r.metrics {
-		if m.meta.Frontier.Order != 2 {
+	for id := range r.metrics {
+		if r.metaOf(id).Frontier.Order != 2 {
 			t.Fatal("second seal lost frontier")
 		}
 	}
