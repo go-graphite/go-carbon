@@ -142,7 +142,7 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	inv := o.gc.inventory
 	o.gc.mu.Unlock()
 	s = o.db.NewSnapshot()
-	opened, err := OpenRollupParts(context.Background(), s, inv, nil, nil)
+	opened, err := OpenRollupParts(context.Background(), s, inv, nil, testBlockCache(t), 4<<20)
 	if err != nil || opened == nil {
 		t.Fatalf("opened parts: %v", err)
 	}
