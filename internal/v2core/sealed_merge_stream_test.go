@@ -15,7 +15,7 @@ import (
 
 // Each input has a disjoint dense run large enough for the whole-run path. A
 // durable reset masks whole earlier runs; surviving runs must retain every bit
-// and coalesce into one run with the envelope beside it.
+// and coalesce into one run that carries the envelope.
 func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for _, reset := range []uint64{0, 8} {
@@ -43,7 +43,7 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 			s := e.owners[0].db.NewSnapshot()
 			want := mergeRead(t, s)
 			_ = s.Close()
-			if n := mergeDrain(t, e.owners[0]); n != 1 {
+			if n := mergeDrain(t, e.owners[0]); n != 5 || mergeCount(e.owners[0]) != 1 {
 				t.Fatalf("merges=%d", n)
 			}
 			s = e.owners[0].db.NewSnapshot()
@@ -59,7 +59,8 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if d.Coverage.Records != 2 {
+				// Surviving runs coalesce into one run that carries the envelope.
+				if d.Coverage.Records != 1 {
 					t.Fatalf("runs were not repacked or masked incorrectly: %d", d.Coverage.Records)
 				}
 				if err = v2part.ReadExpanded(context.Background(), gcPath(e.owners[0].gc, d), &d, nil); err != nil {

@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
@@ -20,6 +22,10 @@ import (
 )
 
 type restartGeometry struct{ Version, Layer, Producers, Shards int }
+
+// Version 3 binds producer ownership and fingerprints to XXH3-64. Older
+// journals and catalogues must be rebuilt, never replayed under another hash.
+const restartVersion = 3
 
 // lockRoot prevents two writable opens, including before core has opened its DBs.
 // Geometry is independent of tuning knobs and survives a process crash.
@@ -33,14 +39,13 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 		return fail(err)
 	}
 	path := filepath.Join(root, "restart.json")
-	want := restartGeometry{1, c.Layer, c.Producers, c.Shards}
+	want := restartGeometry{restartVersion, c.Layer, c.Producers, c.Shards}
 	b, err := os.ReadFile(path)
 	if err == nil {
 		var got restartGeometry
-		if json.Unmarshal(b, &got) != nil || (got.Version != 1 && got.Version != 2) {
+		if json.Unmarshal(b, &got) != nil || got.Version != restartVersion {
 			return fail(errors.New("unsupported restart format version"))
 		}
-		want.Version = got.Version
 		if got != want {
 			return fail(errors.New("restart geometry mismatch"))
 		}
@@ -76,16 +81,11 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 // decode -> the same AppendBatches queue -> synchronous final seal. Owners alone
 // decide which packets were already committed. Every segment resets predictors.
 func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
-	paths, err := filepath.Glob(filepath.Join(dir, "segment*.pdc4"))
+	paths, err := journalSegments(dir)
 	if err != nil {
 		return err
 	}
-	// The original segment sorts first; suffixes use fixed-width generations.
-	slices.Sort(paths)
-	original := filepath.Join(dir, "segment.pdc4")
-	if i := slices.Index(paths, original); i >= 0 {
-		paths = append([]string{original}, append(paths[:i], paths[i+1:]...)...)
-	}
+
 	skip, err := p.skipSegments(paths)
 	if err != nil {
 		return err
@@ -192,12 +192,36 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 			return err
 		}
 	}
-	p.journalDir, p.segment = dir, len(paths)
+	p.journalDir = dir
+	if len(paths) > 0 && filepath.Base(paths[len(paths)-1]) != "segment.pdc4" {
+		generation := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(paths[len(paths)-1]), "segment-"), ".pdc4")
+		n, err := strconv.Atoi(generation)
+		if err != nil || n < 1 || n == int(^uint(0)>>1) {
+			return errors.New("invalid journal generation")
+		}
+		p.segment = n + 1
+	} else {
+		p.segment = len(paths)
+	}
 	if err = p.openSegment(); err != nil {
 		return err
 	}
 	p.writer = bufio.NewWriterSize(p.journal, 1<<20)
 	return nil
+}
+
+// journalSegments lists the original segment before fixed-width generations.
+func journalSegments(dir string) ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "segment*.pdc4"))
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(paths)
+	original := filepath.Join(dir, "segment.pdc4")
+	if i := slices.Index(paths, original); i >= 0 {
+		paths = append([]string{original}, append(paths[:i], paths[i+1:]...)...)
+	}
+	return paths, nil
 }
 
 // openSegment creates the next fixed-width segment; names sort in write order.
@@ -230,19 +254,105 @@ func (p *Producer) rotateJournal() error {
 	p.writer.Reset(p.journal)
 	p.encoder.Close()
 	p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
+	// Independent replay consumers retain the whole log. Avoid scanning their
+	// ever-growing file list when retirement is disabled.
+	if p.fullReplay || p.placement != nil || p.durableApplications != nil {
+		return nil
+	}
+	paths, err := journalSegments(p.journalDir)
+	if err != nil {
+		return err
+	}
+	n, err := p.durablePrefix(paths)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths[:n] {
+		if p.stage != nil {
+			p.stage("retire")
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		if p.stage != nil {
+			p.stage("retired")
+		}
+	}
+	if n > 0 {
+		return syncDir(p.journalDir)
+	}
 	return nil
 }
 
-// skipSegments returns how many leading segments hold only records that every
-// owner has durably committed: all of them when the newest record is durable.
-// Segment j-1 ends where segment j's first record begins, so only plain record
-// headers are read; each segment starts with fresh predictor state. Placement
-// and classic-mirror stores replay everything: relay chains and the mirror
-// consume every retained record.
+// skipSegments uses the same durability boundary as retirement. A retired
+// prefix needs its cursor/order seed even when no further segment can be skipped.
 func (p *Producer) skipSegments(paths []string) (int, error) {
 	if p.fullReplay || p.placement != nil || p.durableApplications != nil || len(paths) == 0 {
 		return 0, nil
 	}
+	j, err := p.durablePrefix(paths)
+	if err != nil || len(paths) == 0 {
+		return j, err
+	}
+	// Retirement keeps a nonempty anchor segment. Fully sealed recovery can
+	// skip that anchor too, restoring the end cursor/order from retained input.
+	for k := len(paths) - 1; k >= 0; k-- {
+		end, order, ok, err := segmentEnd(paths[k], k == len(paths)-1)
+		if err != nil {
+			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(paths[k]), err)
+		}
+		if !ok {
+			continue
+		}
+		frontiers := p.engine.DurableFrontiers()
+		covered := len(frontiers) > 0
+		for _, frontier := range frontiers {
+			if end > frontier[p.index] {
+				covered = false
+				break
+			}
+		}
+		if !covered {
+			break
+		}
+		if order <= p.applyOrder {
+			return 0, errors.New("journal application order regressed")
+		}
+		p.cursor, p.applyOrder = end, order
+		return len(paths), nil
+	}
+	if j == 0 && filepath.Base(paths[0]) == "segment.pdc4" {
+		return 0, nil
+	}
+	start, order, ok, err := segmentStart(paths[j])
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, errors.New("retained journal has no starting record")
+	}
+	durable := p.engine.DurableFrontiers()
+	for _, f := range durable {
+		if start > f[p.index] {
+			return 0, errors.New("retained journal starts beyond core frontier")
+		}
+	}
+	if order <= p.applyOrder {
+		return 0, errors.New("journal application order regressed")
+	}
+	p.cursor, p.applyOrder = start, order-1
+	return j, nil
+}
+
+// durablePrefix is the leading prefix every owner has committed. Segment j-1
+// ends at segment j's first record. Keep j and later, including the active file.
+// Placement/relay and classic mirrors need their entire independent replay log.
+// This helper never changes the live producer cursor or application order.
+func (p *Producer) durablePrefix(paths []string) (int, error) {
+	if p.fullReplay || p.placement != nil || p.durableApplications != nil || len(paths) == 0 {
+		return 0, nil
+	}
+
 	frontiers := p.engine.DurableFrontiers()
 	if len(frontiers) == 0 {
 		return 0, nil
@@ -267,37 +377,14 @@ func (p *Producer) skipSegments(paths []string) (int, error) {
 		}
 		last = cursor
 	}
-	// A quiesced store: every owner sealed past the newest record, so no segment
-	// holds a row to replay. Empty newest segments are passed over.
 	for j := len(paths) - 1; j >= 0; j-- {
-		end, order, ok, err := segmentEnd(paths[j], j == len(paths)-1)
-		if err != nil {
-			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(paths[j]), err)
-		}
-		if !ok {
-			continue
-		}
-		if end > durable {
-			break
-		}
-		if order <= p.applyOrder {
-			return 0, errors.New("journal application order regressed")
-		}
-		p.cursor, p.applyOrder = end, order
-		return len(paths), nil
-	}
-	for j := len(paths) - 1; j > 0; j-- {
-		start, order, ok, err := segmentStart(paths[j])
+		start, _, ok, err := segmentStart(paths[j])
 		if err != nil {
 			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(paths[j]), err)
 		}
 		if !ok || start > durable {
 			continue
 		}
-		if order <= p.applyOrder {
-			return 0, errors.New("journal application order regressed")
-		}
-		p.cursor, p.applyOrder = start, order-1
 		return j, nil
 	}
 	return 0, nil

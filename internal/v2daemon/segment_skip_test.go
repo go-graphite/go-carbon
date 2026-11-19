@@ -32,7 +32,12 @@ func segmentSkipConfig() Config {
 // seal on their 32-row bound, so their frontiers differ per producer.
 func segmentSkipWrite(t *testing.T, s *Store, rounds int, after func(round int)) {
 	t.Helper()
-	for round := 0; round < rounds; round++ {
+	segmentSkipWriteFrom(t, s, 0, rounds, after)
+}
+
+func segmentSkipWriteFrom(t *testing.T, s *Store, first, rounds int, after func(round int)) {
+	t.Helper()
+	for round := first; round < first+rounds; round++ {
 		for i, p := range s.Producers {
 			writeRound := int(p.applyOrder / 2)
 			apps := restartApps(t, writeRound*2, writeRound*2+2)
@@ -130,6 +135,7 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 		var mu sync.Mutex
 		seen := 0
 		c := segmentSkipConfig()
+		c.fullReplay = true // Preserve the entire journal for the rebuild oracle.
 		c.Hooks = v2core.Hooks{Stage: func(stage string) {
 			if stage != "commit" || commits == 0 {
 				return
@@ -225,6 +231,7 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 func TestJournalSegmentSkipQuiesced(t *testing.T) {
 	if root := os.Getenv("V2_QUIESCED_CHILD"); root != "" {
 		c := segmentSkipConfig()
+		c.fullReplay = true // Preserve retired input for the independent rebuild oracle.
 		c.JournalSegmentBytes, _ = strconv.ParseInt(os.Getenv("V2_QUIESCED_SEGMENT"), 10, 64)
 		s, err := Open(root, c)
 		if err != nil {
@@ -297,6 +304,7 @@ func TestJournalSegmentSkipQuiesced(t *testing.T) {
 func TestJournalSegmentSkipLazyCatalog(t *testing.T) {
 	root := t.TempDir()
 	c := segmentSkipConfig()
+	c.fullReplay = true // Keep complete input for the rebuild oracle below.
 	s, err := Open(root, c)
 	if err != nil {
 		t.Fatal(err)
@@ -305,6 +313,7 @@ func TestJournalSegmentSkipLazyCatalog(t *testing.T) {
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
+	c.fullReplay = false
 	s, err = Open(root, c)
 	if err != nil {
 		t.Fatal(err)
@@ -317,6 +326,8 @@ func TestJournalSegmentSkipLazyCatalog(t *testing.T) {
 		if p.catalog != nil {
 			t.Fatal("sealed producer opened its catalog")
 		}
+		// Preserve the resumed journal too: the final oracle rebuilds without core.
+		p.fullReplay = true
 		apps := restartApps(t, 8, 10)
 		for j := range apps {
 			a := &apps[j]

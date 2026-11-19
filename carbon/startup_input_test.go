@@ -417,6 +417,10 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 			// A crash without a checkpoint discovers log-only names through the
 			// next ordinary scan; do not use the fixture's one-hour scan period.
 			cfg.Carbonserver.ScanFrequency = &Duration{100 * time.Millisecond}
+			// Reads open while the journal replays. The poll below repeats one
+			// render URL, which the query cache would answer for 60 s with
+			// the first result, possibly taken before the replay finished.
+			cfg.Carbonserver.QueryCacheEnabled = false
 			cfg.InputLog.Enabled, cfg.InputLog.Path = true, filepath.Join(t.TempDir(), "log")
 			cfg.InputLog.SegmentSize = 16 << 20
 			writeSharedConfig(t, path, cfg)

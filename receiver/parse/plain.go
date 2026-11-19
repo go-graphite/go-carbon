@@ -18,7 +18,14 @@ func unsafeString(b []byte) string {
 }
 
 func PlainLine(p []byte) ([]byte, float64, int64, error) {
-	p = bytes.Trim(p, " \n\r")
+	start, end := 0, len(p)
+	for start < end && (p[start] == ' ' || p[start] == '\n' || p[start] == '\r') {
+		start++
+	}
+	for end > start && (p[end-1] == ' ' || p[end-1] == '\n' || p[end-1] == '\r') {
+		end--
+	}
+	p = p[start:end]
 
 	i1 := bytes.IndexByte(p, ' ')
 	if i1 < 1 {

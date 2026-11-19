@@ -17,6 +17,9 @@ import (
 // This fixture deliberately uses only pre-history-cache APIs so it can also run
 // against an overlay of the unchanged reducer runtime.
 func TestRollupHistoryDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	// This golden guards the no-merge physical layout, including superseded
 	// replacements. Compaction legitimately changes that layout. Logical exactness
 	// with merges, retirement and reopen is TestSealedMergeHistoryDifferential.
@@ -24,6 +27,9 @@ func TestRollupHistoryDifferential(t *testing.T) {
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {
+				// Subtests own their engines; the parent's environment stays set
+				// until all of them finish.
+				t.Parallel()
 				_, policy := rollupTestPolicy(t, "history.metric", schema, method, .1)
 				cfg := coreTestConfig()
 				cfg.Shards = 1
@@ -138,18 +144,18 @@ func TestRollupHistoryDifferential(t *testing.T) {
 				// time. TestClosedHistoryLogicalDifferential proves the resolved values
 				// equal the original eager golden at every epoch and restart cut.
 				want := map[string]string{
-					"1|1s:1h,1m:1d,1h:1y":         "f5693199242f1a2fe005cfe8c512286edde5aa07e638ab29204fd32f9945428b",
-					"1|10s:6h,5m:7d,1h:1y,1d:10y": "8f9eeaaa9b82fc05f52d0afa4935eb2ad8de0bd0ef958ef6246785a11987468f",
-					"2|1s:1h,1m:1d,1h:1y":         "917e985c30e24a0f991d0381be755936c17c759758024419b9cae47954cd64af",
-					"2|10s:6h,5m:7d,1h:1y,1d:10y": "cdb7848f75d163b844db0abe79887a8e4d554fbd06508e48af191e8d7ca048a4",
-					"3|1s:1h,1m:1d,1h:1y":         "2aa37fd3ce0ff4d2f2bb36198408dcedf60cd308272161cbdfbe15e6730e7a00",
-					"3|10s:6h,5m:7d,1h:1y,1d:10y": "0d926c55f549bf6fa4eeb8de11933a80a8b97ec0644ed700348ea6e2eabd469e",
-					"4|1s:1h,1m:1d,1h:1y":         "766c834575f4b86cf29495746f74d9c7c6df9fdffc13321988f1c3ca21c162d6",
-					"4|10s:6h,5m:7d,1h:1y,1d:10y": "40fd7a65da98d4adbbb7c3e9b1b10b5d4017b277dadd758fbc992a4acd090be1",
-					"5|1s:1h,1m:1d,1h:1y":         "eb4b7a9b26aeb15803826f45c8f5d9d7f2f33f79071cacf04406d36640bd5029",
-					"5|10s:6h,5m:7d,1h:1y,1d:10y": "2e44270165585e6d4e76e3398d96097582995f926f89d7e0c6f58677bbafd9c1",
-					"6|1s:1h,1m:1d,1h:1y":         "371e618d44f5c031f82542b6b31157ab792a67d99461e3007316e14ca9de32a8",
-					"6|10s:6h,5m:7d,1h:1y,1d:10y": "8847ea828d04c7c7de06f703cda1f431ad2cb90772e8afe6ce43fe204b5c8adb"}[fmt.Sprintf("%d|%s", method, schema)]
+					"1|1s:1h,1m:1d,1h:1y":         "192b1560fcf498321c54d88a47fe8f747e1d3aaa0a2bf550ad5e4a8ea064e796",
+					"1|10s:6h,5m:7d,1h:1y,1d:10y": "e1aaeea5e391f28fcc85a2de556aa673d58f75914596329964862613c2d58ddb",
+					"2|1s:1h,1m:1d,1h:1y":         "1a92474b62c7cd58736329ed42fed91ab02f7c38b40d8f657f39bf0cc8175b12",
+					"2|10s:6h,5m:7d,1h:1y,1d:10y": "537d5619c2fefb1d80652b312397a4c6fa717f877fbe716ca09c76f1a18bbbab",
+					"3|1s:1h,1m:1d,1h:1y":         "5cc6d78dd678a9b17bc92fb832e98f14dee72e67e124fd86c14e4dbf2ecbe1e0",
+					"3|10s:6h,5m:7d,1h:1y,1d:10y": "9fae9d2aac85a8b14617b04897fcb0d6173de22fa41e3e974f035a015092b668",
+					"4|1s:1h,1m:1d,1h:1y":         "3a664d5105946ce15fbd90a2a2303bca399c7bd818e450e12dd79dc5b64476ee",
+					"4|10s:6h,5m:7d,1h:1y,1d:10y": "4a3e6230a8efb25680d8b62af796f3c617a82cf7bfb18ad953fbbb1cbbec57a7",
+					"5|1s:1h,1m:1d,1h:1y":         "d6baba5ad788ea773b66432fea72b636147df87263d49b2148bbd14aff24ede4",
+					"5|10s:6h,5m:7d,1h:1y,1d:10y": "2407603bc8796a863d2d2f543a9bca058b9c16aa0ba89f927a94e0efff068d50",
+					"6|1s:1h,1m:1d,1h:1y":         "41fdb55e78c1c02ce22f2b4684bf481c653738140ca38de22b75d53a7e7ed6ff",
+					"6|10s:6h,5m:7d,1h:1y,1d:10y": "aaf518c6e9cf12443bdd09d7a1c73d71ee705f2be06b63750679e8d81ee133c4"}[fmt.Sprintf("%d|%s", method, schema)]
 				if digest != want {
 					t.Fatalf("stored/read bit differential got %s want %s", digest, want)
 				}

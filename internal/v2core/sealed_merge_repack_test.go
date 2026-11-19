@@ -14,7 +14,8 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// forEachPartKV calls fn with every key and value of a part file in key order.
+// forEachPartKV calls fn with every logical key and value of a part file in
+// key order: a folded envelope follows its run at its own key.
 func forEachPartKV(t *testing.T, path string, fn func(key, value []byte)) {
 	t.Helper()
 	f, err := os.Open(path)
@@ -39,7 +40,7 @@ func forEachPartKV(t *testing.T, path string, fn func(key, value []byte)) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &tableCursor{it: it}
+	c := newHeaderCursor(&tableCursor{it: it}, nil)
 	defer c.Close()
 	for ok := c.First(); ok; ok = c.Next() {
 		fn(c.Key(), c.Value())
@@ -50,11 +51,15 @@ func forEachPartKV(t *testing.T, path string, fn func(key, value []byte)) {
 }
 
 // writeDecodedPart writes a merged part's content independent of its run
-// layout: every slot as its singleton key and record, every envelope as
-// stored, and the descriptor without file bytes, digest or KV count.
+// layout and envelope placement: every slot as its singleton key and record,
+// every envelope at its own key, and the descriptor without file bytes, digest
+// or KV count, with its logical last key (a folded part's physical last key is
+// its last run, before that run's envelope).
 func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descriptor) {
 	t.Helper()
+	var last []byte
 	forEachPartKV(t, path, func(key, value []byte) {
+		last = append(last[:0], key...)
 		k, err := v2part.Decode(key)
 		if err != nil {
 			t.Fatal(err)
@@ -76,7 +81,7 @@ func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descripto
 			_, _ = fmt.Fprintf(w, "%x=%x\n", enc, sealrollup.EncodeRecord(r))
 		}
 	})
-	d.Bytes, d.SHA256, d.Coverage.Records = 0, v2part.Digest{}, 0
+	d.Bytes, d.SHA256, d.Coverage.Records, d.LastKey = 0, v2part.Digest{}, 0, last
 	_, _ = fmt.Fprintf(w, "%+v\n", d)
 }
 
@@ -105,7 +110,7 @@ func partRunLengths(t *testing.T, path string) map[string][]int {
 
 // Merges repack adjacent non-overlapping runs of one name and archive into
 // runs of up to MaxDenseSlots, keep every slot exact, and copy runs that are
-// already full. Before repacking, every 300-slot input run stayed a run.
+// already full. Before repacking, every 1200-slot input run stayed a run.
 func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	e := mergeFixture(t, t.TempDir(), nil)
@@ -115,20 +120,20 @@ func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const perInput = 300
-	for n := 1; n <= sealedMergeFanIn; n++ {
+	const perInput = 1200
+	for n := 1; n <= smallMergeRatio; n++ {
 		var rs []sealrollup.Record
 		for i := 0; i < perInput; i++ {
 			slot := int64((n-1)*perInput + i)
 			order := uint64(n)
-			bits := uint64(n*1000 + i)
-			if n == 5 {
+			bits := uint64(n*10000 + i)
+			if n == 3 {
 				bits = 0x7ff8000000000042 // one float run inside integer runs
 			}
 			rs = append(rs, sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 1000 + slot, Bits: bits, Sequence: order}}, Correction: i%7 == 0})
 		}
 		rs = append(rs, sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: int64(n), Order: uint64(n), Sample: sealrollup.Sample{Time: 1000 + int64(n)*60, Bits: uint64(n), Sequence: uint64(n)}}})
-		m := RollupMetadata{Version: 2, ID: 7, Policy: raw, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 1000 + int64(sealedMergeFanIn*perInput), Policy: digest}, Revision: uint64(n)}
+		m := RollupMetadata{Version: 2, ID: 7, Policy: raw, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 1000 + int64(smallMergeRatio*perInput), Policy: digest}, Revision: uint64(n)}
 		installMergeRecords(t, e.owners[0], byte(n), []RollupMetadata{m}, [][]sealrollup.Record{rs})
 	}
 	s := e.owners[0].db.NewSnapshot()
@@ -153,12 +158,12 @@ func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		total := sealedMergeFanIn * perInput
+		total := smallMergeRatio * perInput
 		runs := partRunLengths(t, gcPath(e.owners[0].gc, d))
 		if got, want := runs["merge.repack/0"], []int{v2part.MaxDenseSlots, total - v2part.MaxDenseSlots}; !slices.Equal(got, want) {
 			t.Fatalf("archive 0 runs %v, want %v", got, want)
 		}
-		if got := runs["merge.repack/1"]; !slices.Equal(got, []int{sealedMergeFanIn}) {
+		if got := runs["merge.repack/1"]; !slices.Equal(got, []int{smallMergeRatio}) {
 			t.Fatalf("archive 1 runs %v", got)
 		}
 		// A second merge copies the full run and keeps the layout.

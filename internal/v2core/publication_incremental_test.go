@@ -29,20 +29,25 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 
 	const perPacket, packets, epochs = 256, 256, 4
 	const head = perPacket * packets // batches per seal
-	var published []coreBatch        // the reader keeps the latest publication
-	o.batchHook = func(b []coreBatch, _ uint64) error {
-		published = b
+	// The reader keeps the latest publication. Hooks walk the view and never
+	// decode it, so the measured bytes are the owner's alone. Every
+	// application here holds one point: positions count batches.
+	var published PendingView
+	o.batchHook = func(pv PendingView, _ uint64) error {
+		published = pv
 		return nil
 	}
 	seen := make([]uint8, head*epochs+1) // by order
 	visibleCalls, lastCall, observed := 0, 0, 0
-	o.visible = func(b []coreBatch) {
+	o.visible = func(pv PendingView) {
 		visibleCalls++
-		lastCall = len(b)
-		observed += len(b)
-		for i := range b {
-			seen[b[i].Order]++
-		}
+		lastCall = 0
+		pv.Each(func(a *PendingApplication) bool {
+			lastCall++
+			seen[a.Order]++
+			return true
+		})
+		observed += lastCall
 	}
 	q := newCoreQueue(coreQueueBytes)
 	o.queues = []*coreQueue{q}
@@ -97,10 +102,10 @@ func TestCorePublicationCopiesOnlyNewBatches(t *testing.T) {
 			poll()
 			runtime.ReadMemStats(&stats)
 			if b := stats.TotalAlloc - before; b > maxBytes {
-				maxBytes, maxAt = b, len(published)
+				maxBytes, maxAt = b, published.Len()
 			}
-			if len(published) != (i+1)*perPacket {
-				t.Fatalf("epoch %d packet %d: published %d batches, want %d", epoch, i, len(published), (i+1)*perPacket)
+			if published.Len() != (i+1)*perPacket {
+				t.Fatalf("epoch %d packet %d: published %d batches, want %d", epoch, i, published.Len(), (i+1)*perPacket)
 			}
 			if lastCall > perPacket || observed != int(order)+head*min(1, epoch/3) {
 				t.Fatalf("epoch %d packet %d: observer got %d batches in its last call (want at most the %d new ones), %d in all of %d", epoch, i, lastCall, perPacket, observed, order)

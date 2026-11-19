@@ -20,6 +20,7 @@ import (
 // writes, late corrections across a month boundary, restarts that toggle the
 // setting on an old store, and merges.
 func TestOmitBaseRowsRenderDifferential(t *testing.T) {
+	t.Parallel()
 	type metric struct {
 		id     uint64
 		name   string

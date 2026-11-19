@@ -73,11 +73,11 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 	if index.metrics["shared.metric"].latest.PolicyIdentity != h {
 		t.Fatal("reader copied immutable identity")
 	}
-	name, definition, err := e.BindDefinition(1, "shared.metric", raw)
+	bound, err := e.RegisterApplicationPolicy(1, "shared.metric", raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "shared.metric" || !bytes.Equal(definition, h.definitionBytes()) {
+	if bound != h || e.ApplicationPolicy(1) != h || !h.MatchesDefinition(raw) {
 		t.Fatal("journal binding changed policy")
 	}
 	if err := ScanRollups(snap, func(p RollupPolicy, m RollupMetadata, want []sealrollup.Record) error {

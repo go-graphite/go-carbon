@@ -55,9 +55,10 @@ type Config struct {
 	// group fsync once the current segment holds at least this many bytes. Each
 	// segment starts with fresh predictor state, so restart can skip every
 	// segment that ends at or below all owners' durable frontiers. Zero keeps one
-	// segment per process run. Rotation never deletes a segment.
+	// segment per process run. Rotation retires the prefix committed by every
+	// owner; placement and classic-mirror consumers retain their replay logs.
 	JournalSegmentBytes int64
-	// fullReplay disables segment skipping; tests use it as the oracle.
+	// fullReplay keeps and replays every segment; tests use it as the oracle.
 	fullReplay bool
 }
 
@@ -235,9 +236,7 @@ func (p *Producer) openCatalog() error {
 	}
 	var err error
 	if p.layer == 3 {
-		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), func(id uint64, name string, definition []byte) (string, []byte, error) {
-			return p.engine.BindDefinition(NumericID(id, p.index, p.count), name, definition)
-		})
+		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), catalogPolicies{engine: p.engine, producer: p.index, producers: p.count})
 	} else {
 		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"))
 	}

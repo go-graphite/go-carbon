@@ -29,10 +29,12 @@ func await(t *testing.T, f func() bool) {
 	}
 }
 func TestClassicPendingAndSealed(t *testing.T) {
+	t.Parallel()
 	for _, def := range []string{"1s:1d", "1s:1d,1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y"} {
 		for method := sealrollup.Average; method <= sealrollup.First; method++ {
 			for _, xff := range []float32{0, .5, 1} {
 				t.Run(fmt.Sprintf("%s/%d/%g", def, method, xff), func(t *testing.T) {
+					t.Parallel() // each case owns its reader, engine and whisper oracle
 					now := int64(1794700800)
 					clock := now
 					retentions := whisper.MustParseRetentionDefs(def)
@@ -55,7 +57,7 @@ func TestClassicPendingAndSealed(t *testing.T) {
 					// below the oracle's history to compare every slot it renders.
 					// It also holds idle closure below the data watermark: after each seal,
 					// all current coarse windows must still be projected from source slots.
-					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory, Now: func() time.Time { return time.Unix(1, 0) }})
+					engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: reader.PublishPending, Now: func() time.Time { return time.Unix(1, 0) }})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -88,11 +90,23 @@ func TestClassicPendingAndSealed(t *testing.T) {
 							t.Fatal(err)
 						}
 						b := v2core.Batch{ID: 7, Policy: encoded, Order: uint64(i + 1), Clock: clock, Points: rows}
-						previous := reader.owners[0].Load()
 						if err = engine.AppendBatches(0, []v2core.Batch{b}, uint64(i+1), false); err != nil {
 							t.Fatal(err)
 						}
-						await(t, func() bool { return reader.owners[0].Load() != previous })
+						// Wait for the publication that carries this batch: a background
+						// merge publishes too, possibly before the batch reaches the head.
+						await(t, func() bool {
+							g := reader.owners[0].Load()
+							if g == nil {
+								return false
+							}
+							found := false
+							g.view.Each(func(a *v2core.PendingApplication) bool {
+								found = a.Order == b.Order
+								return !found
+							})
+							return found
+						})
 						// Overwrite borrowed input after acknowledgment: the published head owns it.
 						for j := range rows {
 							rows[j].Bits = 0xdeadbeef
@@ -141,7 +155,7 @@ func TestClassicPendingAndSealed(t *testing.T) {
 
 func TestConcurrentPublicationAndClose(t *testing.T) {
 	reader, _ := New(1, 1<<28, 1<<20)
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: reader.PublishPending})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +199,7 @@ func TestConcurrentPublicationAndClose(t *testing.T) {
 func TestPinnedCallbackDoesNotBlockWriter(t *testing.T) {
 	reader, _ := New(1, 1<<28, 1<<20)
 	reader.Now = func() time.Time { return time.Unix(1000, 0) }
-	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: reader.PublishPending})
 	if err != nil {
 		t.Fatal(err)
 	}

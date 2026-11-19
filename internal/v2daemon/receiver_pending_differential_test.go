@@ -35,13 +35,24 @@ func (o fixedReceiverClock) Append(n []string, h []uint64, p []points.Point, seq
 	return o.p.engine.AppendBatches(o.p.index, nil, o.p.cursor, true)
 }
 
+func (o fixedReceiverClock) AppendBytes(text []byte, ends []int, h []uint64, p []points.Point, seq []uint64, _ int64) error {
+	if err := o.applicationOwner.AppendBytes(text, ends, h, p, seq, 1010); err != nil {
+		return err
+	}
+	if err := o.p.Drain(); err != nil {
+		return err
+	}
+	return o.p.engine.AppendBatches(o.p.index, nil, o.p.cursor, true)
+}
+
 func TestReceiverStoredRecordsAndReadsDifferential(t *testing.T) {
 	type image struct {
 		Records map[string][]sealrollup.Record
 		Reads   map[string][]uint64
 	}
 	var images []image
-	for _, tcp := range []bool{false, true} {
+	for _, mode := range []string{"direct", "binary", "bytes"} {
+		tcp := mode == "binary"
 		func() {
 			r, err := v2read.New(2, 16<<20, 1<<20)
 			if err != nil {
@@ -98,7 +109,13 @@ func TestReceiverStoredRecordsAndReadsDifferential(t *testing.T) {
 						}
 					}
 				} else {
-					if err = owners[v2recv.OwnerFor(name, 2)].Append([]string{name}, nil, []points.Point{p}, nil, 1010); err != nil {
+					owner := owners[v2recv.OwnerFor(name, 2)]
+					if mode == "bytes" {
+						err = owner.(v2recv.ByteOwner).AppendBytes([]byte(name), []int{len(name)}, nil, []points.Point{p}, nil, 1010)
+					} else {
+						err = owner.Append([]string{name}, nil, []points.Point{p}, nil, 1010)
+					}
+					if err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -176,11 +193,13 @@ func TestReceiverStoredRecordsAndReadsDifferential(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Logf("tcp=%t stored-records-reads-sha256=%x", tcp, sha256.Sum256(b))
+			t.Logf("mode=%s stored-records-reads-sha256=%x", mode, sha256.Sum256(b))
 			images = append(images, im)
 		}()
 	}
-	if !reflect.DeepEqual(images[0], images[1]) {
-		t.Fatal("TCP batching changed stored records or read bits")
+	for i := 1; i < len(images); i++ {
+		if !reflect.DeepEqual(images[0], images[i]) {
+			t.Fatalf("input mode %d changed stored records or read bits", i)
+		}
 	}
 }
