@@ -66,13 +66,13 @@ type archiveRange struct {
 	first, last int64
 }
 type archiveResult struct {
-	records            []sealrollup.Record
-	origins            map[int64]partOrigin
-	origin             partOrigin
-	parts              map[string]struct{}
-	bytes              int64
-	frontier, revision uint64
-	age                uint64
+	records  []sealrollup.Record
+	origins  map[int64]partOrigin
+	origin   partOrigin
+	parts    map[string]struct{}
+	bytes    int64
+	frontier uint64
+	age      uint64
 }
 
 type partRoute struct {
@@ -613,7 +613,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	if err = it.Error(); err != nil {
 		return err
 	}
-	result := &archiveResult{origin: s.metricOrigin(m), frontier: m.latest.meta.Frontier.Order, revision: m.latest.meta.Revision, parts: parts, origins: origins, records: make([]sealrollup.Record, 0, len(winners))}
+	result := &archiveResult{origin: s.metricOrigin(m), frontier: m.latest.meta.Frontier.Order, parts: parts, origins: origins, records: make([]sealrollup.Record, 0, len(winners))}
 	for _, record := range winners {
 		result.records = append(result.records, record)
 	}
@@ -628,8 +628,10 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	if result.bytes <= s.cache.limit {
 		entries := s.cache.entries[cacheKey]
 		duplicate := false
+		// Parts are immutable and the latest metadata comes from the same
+		// parts, so origin, frontier and part set identify the records.
 		for _, old := range entries {
-			if old.origin == result.origin && old.frontier == result.frontier && old.revision == result.revision && len(old.parts) == len(parts) {
+			if old.origin == result.origin && old.frontier == result.frontier && len(old.parts) == len(parts) {
 				duplicate = true
 				for id := range old.parts {
 					if _, ok := parts[id]; !ok {
