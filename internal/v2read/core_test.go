@@ -177,8 +177,8 @@ func TestConcurrentPublicationAndClose(t *testing.T) {
 	if err = engine.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if reader.Budget.Used() != 0 {
-		t.Fatal("budget leak")
+	if len(reader.renders) != 0 {
+		t.Fatal("render admission leak")
 	}
 }
 

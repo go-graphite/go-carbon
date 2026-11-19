@@ -72,6 +72,11 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	if len(mergeRead(t, pin)) != 2 {
 		t.Fatal("fixture")
 	}
+	// The merge prunes by the owner's retire clock, as age retirement does:
+	// the reader still returns the record until that clock passes its expiry.
+	f := *o.frontier.Load()
+	f.ArchiveClock = 2000
+	o.frontier.Store(&f)
 	if mergeDrain(t, o) != 1 {
 		t.Fatal("did not merge")
 	}

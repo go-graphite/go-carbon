@@ -4,68 +4,152 @@ import (
 	"cmp"
 	"math"
 	"slices"
+	"sort"
 )
 
 // stageKey assigns a stage its canonical sort key while the metric is hot.
 // A ranked metric keys 2*rank. An unranked one (fresh, or installed since the
 // last renumber) keys 2*L+1, where L dense metrics sort before it: it lands
 // between dense[L-1] (key 2*L) and dense[L] (key 2*L+2). Unranked stages
-// sharing a key tie-break by compareRollupMetrics, so the order is exact.
+// sharing a key tie-break by compareRollupMetrics, so the order is exact. A
+// ranked metric whose hint another planner overwrote takes the search key,
+// which sorts identically.
 func (r *coreRollups) stageKey(s *rollupStage) {
 	m := s.metric
 	s.vshard = m.vshard
-	if m.rankOwner == r && m.rank != 0 {
-		s.sortKey = uint64(m.rank) << 1
+	if rk := r.metricRank(m); rk != 0 {
+		s.sortKey = uint64(rk) << 1
 		return
 	}
 	l, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics)
 	s.sortKey = uint64(l)<<1 | 1
 }
 
-// renumber merges the sorted unranked metrics into dense in one sequential
-// pass and rewrites every rank. Replaced IDs (adoption) drop their stale
-// metric here; metrics are otherwise never removed from a planner.
+// hintSlot returns the slot identity h names in this planner, when that slot
+// holds id. A missing, foreign or stale hint fails the check.
+func (r *coreRollups) hintSlot(h *PolicyIdentity, id uint64) (uint32, bool) {
+	if h == nil {
+		return 0, false
+	}
+	s := h.ownerSlot.Load() - 1 // no hint wraps past every slot
+	if uint64(s) < uint64(len(r.ids)) && r.ids[s] == id {
+		return s, true
+	}
+	return 0, false
+}
+
+// hintRank returns the rank of the name installed under id when hint h
+// leads to its slot here, 0 otherwise (the caller probes metrics). A slot
+// below len(dense) is the rank minus one.
+func (r *coreRollups) hintRank(h *PolicyIdentity, id uint64) uint32 {
+	if s, ok := r.hintSlot(h, id); ok && int(s) < len(r.dense) {
+		return s + 1
+	}
+	return 0
+}
+
+// metricRank returns m's rank when this planner ranks m itself (not an older
+// metric installed under the same ID) and m's hint is its own; 0 otherwise.
+func (r *coreRollups) metricRank(m *rollupMetric) uint32 {
+	if rk := r.hintRank(m.PolicyIdentity, m.id); rk != 0 && r.dense[rk-1] == m {
+		return rk
+	}
+	return 0
+}
+
+// deadSlot marks a dense slot whose metric was replaced (adoption). No hint
+// passes ids[s] == id there, and the next renumber drops the slot.
+const deadSlot = math.MaxUint64
+
+// slotOf returns the slot of m, installed under id. Its identity hint answers
+// in O(1). When another planner overwrote the hint, a binary search of dense
+// finds a ranked m and a scan of unranked (at most 1/rankSlack of dense) an
+// unranked one; the hint is then restored, so each lost hint costs one search.
+func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
+	if s, ok := r.hintSlot(m.PolicyIdentity, id); ok {
+		return s
+	}
+	s, found := uint32(0), false
+	for p, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics); p < len(r.dense) && compareRollupMetrics(r.dense[p], m) == 0; p++ {
+		if r.dense[p] == m && r.ids[p] == id {
+			s, found = uint32(p), true
+			break
+		}
+	}
+	for k := len(r.unranked) - 1; !found && k >= 0; k-- {
+		if r.unranked[k] == m {
+			s, found = uint32(len(r.dense)+k), true
+		}
+	}
+	if !found {
+		panic("v2core: installed rollup metric has no owner slot")
+	}
+	m.ownerSlot.Store(s + 1)
+	return s
+}
+
+// rollupTail is the unranked tail of the slot arrays: unranked[k] owns slot
+// len(dense)+k. It sorts the three columns together.
+type rollupTail struct {
+	metrics []*rollupMetric
+	ids     []uint64
+	meta    []metricMetadata
+}
+
+func (x rollupTail) Len() int { return len(x.metrics) }
+func (x rollupTail) Less(i, j int) bool {
+	return compareRollupMetrics(x.metrics[i], x.metrics[j]) < 0
+}
+func (x rollupTail) Swap(i, j int) {
+	x.metrics[i], x.metrics[j] = x.metrics[j], x.metrics[i]
+	x.ids[i], x.ids[j] = x.ids[j], x.ids[i]
+	x.meta[i], x.meta[j] = x.meta[j], x.meta[i]
+}
+
+// renumber merges the unranked tail into dense so every slot is again its
+// rank minus one: ids and meta move with their metric, in canonical order.
+// It sorts the tail, compacts dense over dead slots in place, then merges
+// from the back, so it needs only a tail-sized buffer. Dead (replaced) slots
+// drop here; metrics are otherwise never removed from a planner. It re-stores
+// every hint, which also restores the fast path after another planner
+// overwrote one.
 func (r *coreRollups) renumber() {
-	replaced := r.replaced
-	live := func(m *rollupMetric) bool { return r.metrics[m.id] == m }
-	// A metric this planner ranks is in dense; dead (replaced) ones drop.
-	fresh := slices.DeleteFunc(r.unranked, func(m *rollupMetric) bool {
-		return (m.rankOwner == r && m.rank != 0) || (replaced && !live(m))
-	})
-	slices.SortFunc(fresh, compareRollupMetrics)
-	fresh = slices.CompactFunc(fresh, func(a, b *rollupMetric) bool { return a == b })
-	dense := r.dense
-	if len(dense)+len(fresh) >= math.MaxUint32 {
+	d, f := len(r.dense), len(r.unranked)
+	if d+f >= math.MaxUint32 {
 		return // every new name stays unranked; plans stay exact on the search path
 	}
-	out := slices.Grow(r.denseSpare[:0], len(dense)+len(fresh))
-	i, j := 0, 0
-	for i < len(dense) || j < len(fresh) {
-		if i < len(dense) && replaced {
-			if m := dense[i]; m.rankOwner != r || m.rank != uint32(i+1) || !live(m) {
-				if m.rankOwner == r && m.rank == uint32(i+1) {
-					m.rank, m.rankOwner = 0, nil
-				}
-				i++
-				continue
-			}
+	tail := rollupTail{r.unranked, r.ids[d:], r.meta[d:]}
+	sort.Sort(tail)
+	fresh := rollupTail{slices.Clone(tail.metrics), slices.Clone(tail.ids), slices.Clone(tail.meta)}
+	n := 0
+	for i, id := range r.ids[:d] {
+		if id != deadSlot {
+			r.dense[n], r.ids[n], r.meta[n] = r.dense[i], id, r.meta[i]
+			n++
 		}
-		if j == len(fresh) || (i < len(dense) && compareRollupMetrics(dense[i], fresh[j]) < 0) {
-			out = append(out, dense[i])
-			i++
+	}
+	size := n + f
+	if size < d {
+		clear(r.dense[size:])
+	}
+	r.dense = slices.Grow(r.dense, size-len(r.dense))[:size]
+	r.ids, r.meta = r.ids[:size], r.meta[:size]
+	for i, j, w := n-1, f-1, size-1; j >= 0; w-- {
+		if i >= 0 && compareRollupMetrics(r.dense[i], fresh.metrics[j]) > 0 {
+			r.dense[w], r.ids[w], r.meta[w] = r.dense[i], r.ids[i], r.meta[i]
+			i--
 		} else {
-			out = append(out, fresh[j])
-			j++
+			r.dense[w], r.ids[w], r.meta[w] = fresh.metrics[j], fresh.ids[j], fresh.meta[j]
+			j--
 		}
 	}
-	for k, m := range out {
-		m.rank, m.rankOwner = uint32(k+1), r
+	for s, m := range r.dense {
+		if m.ownerSlot.Load() != uint32(s)+1 {
+			m.ownerSlot.Store(uint32(s) + 1)
+		}
 	}
-	clear(dense)
-	r.dense, r.denseSpare = out, dense[:0]
 	clear(r.unranked)
 	r.unranked = r.unranked[:0]
-	r.replaced = false
 }
 
 // rollupRankRef is the 16-byte sort record of one stage.

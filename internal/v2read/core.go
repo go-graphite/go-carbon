@@ -3,7 +3,6 @@ package v2read
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -29,11 +28,16 @@ type Reader struct {
 	stages stageCounters
 	// scanAllOwners is the test oracle: every owner sees every name.
 	scanAllOwners bool
+	// fullHistory is the range-resolve oracle: pending names resolve over the
+	// whole sealed history instead of the request's touched slots.
+	fullHistory bool
 
-	closed    atomic.Bool
-	owners    []atomic.Pointer[generation]
-	caches    []sealedCache
-	Budget    *Budget
+	closed atomic.Bool
+	owners []atomic.Pointer[generation]
+	caches []sealedCache
+	// renders admits budgetBytes/WorkBytes concurrent renders; each holds at
+	// most WorkBytes (32B per slot) until its consumer returns.
+	renders   chan struct{}
 	WorkBytes int64
 	work      chan *sealrollup.Workspace
 	// Now is fixed by the caller before intake; nil uses time.Now.
@@ -86,22 +90,17 @@ type generation struct {
 	err       error
 }
 type sealedCache struct {
-	ranges         *v2core.RollupReadCache
-	loadGate       chan struct{}
-	mu             sync.Mutex // read-side only; Publish never acquires this lock
-	index          *v2core.RollupSnapshot
-	number         uint64
-	limit          int64
-	fullMu         sync.Mutex
-	full           []resolvedEntry
-	fullBytes      int64
-	pendingMu      sync.Mutex
-	reductions     []pendingReduction
-	reductionBytes int64
+	ranges   *v2core.RollupReadCache
+	loadGate chan struct{}
+	mu       sync.Mutex // read-side only; Publish never acquires this lock
+	index    *v2core.RollupSnapshot
+	number   uint64
+	limit    int64
 }
 type metricState struct {
 	sealed   *v2core.RollupSnapshot
 	name     string
+	identity *v2core.ApplicationPolicy // last pending handle checked against meta
 	policy   v2core.RollupPolicy
 	meta     v2core.RollupMetadata
 	records  []sealrollup.Record
@@ -116,7 +115,7 @@ func New(owners int, budgetBytes, workBytes int64) (*Reader, error) {
 	if owners < 1 || budgetBytes < 1 || workBytes < 0 {
 		return nil, errors.New("invalid read geometry/budget")
 	}
-	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), Budget: NewBudget(budgetBytes), WorkBytes: workBytes, work: make(chan *sealrollup.Workspace, owners)}
+	r := &Reader{owners: make([]atomic.Pointer[generation], owners), caches: make([]sealedCache, owners), renders: make(chan struct{}, budgetBytes/max(workBytes, 1)), WorkBytes: workBytes, work: make(chan *sealrollup.Workspace, owners)}
 	for i := range r.caches {
 		r.caches[i].loadGate = make(chan struct{}, 1)
 		r.caches[i].loadGate <- struct{}{}
@@ -257,38 +256,31 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		if g.err = ctx.Err(); g.err != nil {
 			return
 		}
-		if b.Registered != nil && len(b.Policy) == 0 {
-			b.Policy = b.Registered.Definition()
-		}
-		var p v2core.RollupPolicy
-		if g.err = json.Unmarshal(b.Policy, &p); g.err != nil {
+		// Admission interned every rollup batch through the catalog's canonical
+		// JSON oracle and published only that identity, never raw policy bytes.
+		h := b.Registered
+		if h == nil {
+			g.err = errors.New("pending batch without registered policy")
 			return
 		}
-		canonical, err := v2core.EncodeRollupPolicy(p)
-		if err != nil {
-			g.err = err
-			return
-		}
-		if !bytes.Equal(canonical, b.Policy) {
-			g.err = errors.New("noncanonical pending policy")
-			return
-		}
-		name := string(p.Name)
+		name := h.Name()
 		m := g.metrics[name]
 		if m == nil {
+			m = &metricState{name: name, reader: g.reader, resource: g}
 			if base := g.lookup(name); base != nil {
-				m = &metricState{policy: base.policy, meta: base.meta, sealed: base.sealed, name: name, reader: g.reader, resource: g}
-				g.metrics[name] = m
+				m.policy, m.meta, m.sealed = base.policy, base.meta, base.sealed
+			} else {
+				m.policy, m.meta, m.identity = h.RollupPolicy(), v2core.RollupMetadata{ID: b.ID, Policy: h.Definition()}, h
 			}
-		}
-		if m == nil {
-			m = &metricState{name: name, policy: p, meta: v2core.RollupMetadata{ID: b.ID, Policy: canonical}, reader: g.reader, resource: g}
 			g.metrics[name] = m
 		}
-		if m.meta.ID != b.ID || !bytes.Equal(m.meta.Policy, b.Policy) {
+		// One catalog hands every batch of an ID the same handle: compare the
+		// definition bytes once per name, then only the handle.
+		if m.meta.ID != b.ID || (h != m.identity && !bytes.Equal(m.meta.Policy, h.Definition())) {
 			g.err = errors.New("pending identity/policy mismatch")
 			return
 		}
+		m.identity = h
 		if b.Order <= m.meta.Frontier.Order {
 			g.err = errors.New("pending batch overlaps sealed frontier")
 			return
@@ -306,17 +298,26 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		m.meta.Expired = false
 	}
 }
-func (m *metricState) resolveContext(ctx context.Context) {
+
+// resolveContext reduces pending batches over the sealed slots the render
+// window [from, until) at now and the reducer can observe.
+func (m *metricState) resolveContext(ctx context.Context, from, until, now int64) {
 	if m.err = ctx.Err(); m.err != nil {
 		return
 	}
 	var base *resolvedSource
-	if m.sealed != nil {
-		base, m.err = m.resource.resolvedContext(ctx, m.name, m.policy, m.meta)
-		if m.err != nil {
+	switch {
+	case m.sealed != nil && m.reader.fullHistory:
+		var records []sealrollup.Record
+		if records, m.err = m.resource.sealed.Records(ctx, m.name); m.err != nil {
 			return
 		}
-	} else {
+		base = newResolvedSource(m.meta.ID, m.policy.Config.Archives, records)
+	case m.sealed != nil:
+		if base, m.err = m.resource.rangeBase(ctx, m, touchedRanges(m.policy.Config.Archives, m.pending, from, until, now)); m.err != nil {
+			return
+		}
+	default:
 		base = newResolvedSource(m.meta.ID, m.policy.Config.Archives, m.records)
 	}
 	if len(m.pending) == 0 {
@@ -324,14 +325,6 @@ func (m *metricState) resolveContext(ctx context.Context) {
 		return
 	}
 	batches, frontier := m.pending, m.meta.Frontier
-	if cached := m.resource.cachedReduction(m); cached != nil {
-		base, frontier = cached.source, cached.frontier
-		batches = batches[len(cached.batches):]
-		if len(batches) == 0 {
-			m.frozen = base
-			return
-		}
-	}
 	prepared, err := sealrollup.Prepare(m.policy.Config)
 	if err != nil {
 		m.err = err
@@ -377,7 +370,6 @@ func (m *metricState) resolveContext(ctx context.Context) {
 		return
 	}
 	m.frozen = base.replace(plan.Records)
-	m.resource.rememberReduction(m, plan.Next)
 }
 
 // FetchMany adapts the carbonserver fetch boundary for an already expanded set
@@ -459,7 +451,7 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 		var source Source
 		if len(metric.pending) > 0 || metric.sealed == nil {
 			stage = time.Now()
-			metric.resolveContext(ctx)
+			metric.resolveContext(ctx, from, until, now)
 			r.stages.observe(StageResolve, stage)
 			if metric.err != nil {
 				return metric.err
@@ -473,26 +465,19 @@ func (r *Reader) fetchMany(ctx context.Context, names []string, from, until, now
 			archives[i] = Archive{Step: a.Step, Points: a.Count}
 		}
 		m := Metric{ID: metric.meta.ID, Archives: archives, XFilesFactor: metric.policy.Config.XFilesFactor, AggregationMethod: aggregationName(metric.policy.Config.Method)}
-		catalog := CatalogFuncs{LookupFunc: func(n string) (Metric, bool) { return m, n == name }}
-		var p Publication
-		retained := 4 * metric.resource.cache.limit
-		if metric.sealed != nil {
-			retained += metric.sealed.RetainedBytes()
+		select {
+		case r.renders <- struct{}{}:
+		default:
+			return ErrAdmission
 		}
-		if metric.frozen != nil {
-			retained += metric.frozen.RetainedBytes()
-		}
-		p.Publish(View{Catalog: catalog, Blocks: []Source{source}, RetainedBytes: retained})
-		h, err := p.Pin(r.Budget, r.WorkBytes)
-		p.Close()
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			defer h.Close()
+		err := func() error {
+			defer func() { <-r.renders }()
 			stage := time.Now()
-			s, e := h.Render(ctx, name, from, until, now)
+			s, workspace, e := render(ctx, m, source, from, until, now, r.WorkBytes)
 			r.stages.observe(StageRender, stage)
+			if workspace != nil {
+				defer releaseRenderWorkspace(workspace)
+			}
 			if e != nil {
 				return e
 			}
