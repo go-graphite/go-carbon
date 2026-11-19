@@ -65,7 +65,7 @@ func TestPolicyCatalogSharedWithPinnedReadDirectory(t *testing.T) {
 	}
 	snap := e.owners[0].db.NewSnapshot()
 	defer snap.Close()
-	index, err := NewRollupSnapshotWithCatalog(context.Background(), snap, nil, c)
+	index, err := NewRollupSnapshot(context.Background(), snap, nil, c, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

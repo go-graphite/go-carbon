@@ -102,7 +102,7 @@ func TestDenseAlignedRejectsCorruptHeader(t *testing.T) {
 		"zero time":     run(2, 0, 60),
 		"time overflow": run(2, math.MaxUint32, 1),
 		"step overflow": run(2, 1, math.MaxUint32),
-		"unknown mode":  append(append(slices.Clone(denseMagic), 4), run(2, 1, 1)[5:]...),
+		"unknown mode":  append(append(slices.Clone(denseMagic), 8), run(2, 1, 1)[5:]...),
 	} {
 		if _, err := DecodeSlots(0, 0, b); err == nil {
 			t.Errorf("%s: corrupt run accepted", name)

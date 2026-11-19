@@ -101,7 +101,7 @@ func TestRollupHistoryDifferential(t *testing.T) {
 						put(uint64(len(entry)))
 						h.Write([]byte(entry))
 					}
-					index, err := NewRollupSnapshot(context.Background(), snap, nil, 0)
+					index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 					if err != nil {
 						t.Fatal(err)
 					}

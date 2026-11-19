@@ -118,7 +118,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		now = r.now()
 	}
 	if r.expire != nil || r.db != nil {
-		for id, m := range r.idleCandidates() {
+		for id, m := range r.metrics { // the full walk: single-archive names are never due
 			if _, seen := positions[id]; seen {
 				continue
 			}

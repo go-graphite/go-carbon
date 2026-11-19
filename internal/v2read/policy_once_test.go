@@ -53,7 +53,7 @@ func TestPendingPolicyCheckedAtAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	load := func(batches []v2core.Batch) error {
-		q := &generation{pending: batches, sealed: &sealedData{index: &v2core.RollupSnapshot{}, reader: r, cache: &r.caches[0]}}
+		q := &generation{pending: batches, sealed: &v2core.RollupSnapshot{}, reader: r, cache: &r.caches[0]}
 		q.loadPendingContext(context.Background())
 		return q.err
 	}

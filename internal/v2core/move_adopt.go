@@ -72,7 +72,7 @@ func prepareMove(ctx context.Context, dir string, parts []MovePart, trusted bool
 		p.parts = append(p.parts, part)
 	}
 	p.snapshot = db.NewSnapshot()
-	p.index, err = NewRollupSnapshot(ctx, p.snapshot, nil, 0)
+	p.index, err = NewRollupSnapshot(ctx, p.snapshot, nil, nil, nil, 0)
 	if err != nil {
 		return fail(err)
 	}
@@ -259,7 +259,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	}
 	snapshot := o.db.NewSnapshot()
 	defer snapshot.Close()
-	current, err := NewRollupSnapshot(ctx, snapshot, nil, 0)
+	current, err := NewRollupSnapshot(ctx, snapshot, nil, nil, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -278,10 +278,10 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.db = o.rollups.db
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
+	next.stage, next.expire, next.now, next.expiryTTL = o.rollups.stage, o.rollups.expire, o.rollups.now, o.rollups.expiryTTL
 	for id, m := range o.rollups.metrics {
 		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
 	}
-	next.stage, next.expire, next.now = o.rollups.stage, o.rollups.expire, o.rollups.now
 	for name, donor := range prepared.index.metrics {
 		id := ids[name]
 		if id == 0 {

@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -31,8 +32,12 @@ func TestV2SlowCatalogPublicationDoesNotBlockHTTP(t *testing.T) {
 	stamp := time.Now().Unix() - 120
 	fmt.Fprintf(c, "published.metric 17.25 %d\n", stamp)
 	c.Close()
+	base := "http://" + app.Carbonserver.HTTPListener().Addr().String()
+	// The maintenance loop is the catalog's single writer. Telemetry counts
+	// its publication after Apply returned; with no other name queued the loop
+	// then stays idle, so this test may take the writer role below.
 	deadline := time.Now().Add(2200 * time.Millisecond)
-	for app.v2.catalog.Snapshot().Len() == 0 {
+	for app.v2.catalog.Snapshot().Len() == 0 || v2CatalogPublications(t, base) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("new name not published within 2.2s")
 		}
@@ -49,7 +54,6 @@ func TestV2SlowCatalogPublicationDoesNotBlockHTTP(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	base := "http://" + app.Carbonserver.HTTPListener().Addr().String()
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	var wg sync.WaitGroup
 	for i := 0; i < 48; i++ {
@@ -84,6 +88,22 @@ func TestV2SlowCatalogPublicationDoesNotBlockHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
+}
+
+func v2CatalogPublications(t *testing.T, base string) uint64 {
+	t.Helper()
+	response, err := http.Get(base + "/admin/info?scopes=v2-catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var info struct {
+		Catalog struct{ Publications uint64 } `json:"v2-catalog"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	return info.Catalog.Publications
 }
 
 func TestV2IncrementalCatalogMatchesDiscovery(t *testing.T) {
