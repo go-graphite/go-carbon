@@ -74,7 +74,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			add(1, 1)
 			old := db.NewSnapshot()
 			defer old.Close()
-			prior, err := NewRollupSnapshot(ctx, old, nil)
+			prior, err := NewRollupSnapshot(ctx, old, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +85,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			add(2, 2)
 			current := db.NewSnapshot()
 			defer current.Close()
-			index, err := NewRollupSnapshot(ctx, current, prior)
+			index, err := NewRollupSnapshot(ctx, current, prior, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,7 +110,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 				}
 			}
 
-			same, err := NewRollupSnapshot(ctx, current, index)
+			same, err := NewRollupSnapshot(ctx, current, index, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -186,7 +186,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			}
 			// Reusing a newer directory's cache while loading an older pinned
 			// snapshot must discard the removed part's winning replacements.
-			rewind, err := NewRollupSnapshot(ctx, old, index)
+			rewind, err := NewRollupSnapshot(ctx, old, index, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -235,7 +235,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			put(2, 1, 10, []byte("bad unrequested value"))
 			corrupt := db.NewSnapshot()
 			defer corrupt.Close()
-			sparse, err := NewRollupSnapshot(ctx, corrupt, nil)
+			sparse, err := NewRollupSnapshot(ctx, corrupt, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -249,4 +249,12 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, p := range s.metricParts(m) {
+		ids[p.part.id] = struct{}{}
+	}
+	return ids
 }

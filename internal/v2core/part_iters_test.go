@@ -120,7 +120,7 @@ func TestOpenedPartItersMatchMerged(t *testing.T) {
 		t.Helper()
 		snap := db.NewSnapshot()
 		defer func() { _ = snap.Close() }()
-		parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, nil)
+		parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, testBlockCache(t), 4<<20)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +131,7 @@ func TestOpenedPartItersMatchMerged(t *testing.T) {
 		}
 		var whole *RollupSnapshot
 		if withMerged {
-			if whole, err = NewRollupSnapshotWithCatalogAndInventory(context.Background(), snap, nil, nil, inventory); err != nil {
+			if whole, err = NewRollupSnapshot(context.Background(), snap, nil, nil, inventory); err != nil {
 				t.Fatal(err)
 			}
 			if whole.opened != nil {
@@ -186,7 +186,7 @@ func TestOpenedPartItersMatchMerged(t *testing.T) {
 	}
 	t.Run("no legacy rows", func(t *testing.T) {
 		snap := db.NewSnapshot()
-		parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, nil)
+		parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, testBlockCache(t), 4<<20)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +204,7 @@ func TestOpenedPartItersMatchMerged(t *testing.T) {
 	partValue := func() []byte {
 		snap := db.NewSnapshot()
 		defer func() { _ = snap.Close() }()
-		parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, nil)
+		parts, err := OpenRollupParts(context.Background(), snap, inventory, nil, testBlockCache(t), 4<<20)
 		if err != nil {
 			t.Fatal(err)
 		}

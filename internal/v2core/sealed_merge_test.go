@@ -55,7 +55,7 @@ func mergeAppend(t *testing.T, e *coreEngine, order uint64) {
 func mergeRead(t *testing.T, s *pebble.Snapshot) []sealrollup.Record {
 	t.Helper()
 	var out []sealrollup.Record
-	index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+	index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
