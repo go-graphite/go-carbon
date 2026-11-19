@@ -114,9 +114,9 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 		return e, rollupStateDigest(o.rollups)
 	}
 	damage := map[string]func(string){
-		"missing":   func(dir string) { _ = os.Remove(filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
-		"flipped":   func(dir string) { flipByte(t, filepath.Join(dir, "owner-000", rollupCheckpointFile), 0.6) },
-		"truncated": func(dir string) { truncateHalf(t, filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
+		"missing":     func(dir string) { _ = os.Remove(filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
+		"flipped":     func(dir string) { flipByte(t, filepath.Join(dir, "owner-000", rollupCheckpointFile), 0.6) },
+		"truncated":   func(dir string) { truncateHalf(t, filepath.Join(dir, "owner-000", rollupCheckpointFile)) },
 		"wrong-magic": func(dir string) { flipByte(t, filepath.Join(dir, "owner-000", rollupCheckpointFile), 0) },
 	}
 	scanDir := copyTree(t, root)
@@ -184,6 +184,8 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 	if n == 0 {
 		t.Skip("set CKPT_MEASURE_NAMES")
 	}
+	delta, _ := strconv.Atoi(os.Getenv("CKPT_MEASURE_DELTA")) // seals newer than the kill arm's checkpoint
+	delta = max(delta, 1)
 	cfg := coreTestConfig()
 	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 4, 1, true, 1<<20
 	policies := make([][]byte, n)
@@ -213,8 +215,8 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 	}
 	seal(0)
 	seal(1)
-	// The kill arm keeps the checkpoint of the first two seals: one seal
-	// touching every name is newer than it, as after a SIGKILL.
+	// The kill arm keeps the checkpoint of the first two seals: delta seals
+	// touching every name are newer than it, as after a SIGKILL.
 	if err = e.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +229,9 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 	if e, err = Open(root, cfg, Hooks{}); err != nil {
 		t.Fatal(err)
 	}
-	seal(2)
+	for round := 2; round < 2+delta; round++ {
+		seal(round)
+	}
 	start := time.Now()
 	if err = e.Close(); err != nil {
 		t.Fatal(err)
@@ -254,7 +258,7 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 	}
 	for _, arm := range []struct {
 		name, dir string
-	}{{"scan", scanDir}, {"kill(checkpoint+1 seal)", killDir}, {"checkpoint", ckptDir}} {
+	}{{"scan", scanDir}, {fmt.Sprintf("kill(checkpoint+%d seals)", delta), killDir}, {"checkpoint", ckptDir}} {
 		start := time.Now()
 		e, err := Open(arm.dir, cfg, Hooks{})
 		if err != nil {
@@ -324,8 +328,51 @@ func checkpointVsScan(t *testing.T, cfg Config, policies [][]byte, root string, 
 }
 
 // TestRollupCheckpointStalePlusParts: a checkpoint written many seals ago,
-// plus the parts published after it, equals a full scan.
+// plus the parts published after it, equals a full scan. The merged arm folds
+// a merge output that re-carries rows the checkpoint already reflects, so a
+// resident must re-enter with its record Order to keep winning the tie.
 func TestRollupCheckpointStalePlusParts(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	for _, merge := range []bool{false, true} {
+		t.Run(fmt.Sprintf("merge=%v", merge), func(t *testing.T) {
+			cfg, policies := checkpointTestSetup(t)
+			root := t.TempDir()
+			e, err := Open(root, cfg, Hooks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpointFixture(t, e, policies, 0, 11)
+			if err = e.Close(); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(root, "owner-000", rollupCheckpointFile)
+			stale, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e, err = Open(root, cfg, Hooks{}); err != nil {
+				t.Fatal(err)
+			}
+			checkpointFixture(t, e, policies, 11, 13)
+			if merge && mergeDrain(t, e.owners[0]) == 0 {
+				t.Fatal("no merge ran")
+			}
+			if err = e.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(file, stale, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			checkpointVsScan(t, cfg, policies, root, 24, true)
+		})
+	}
+}
+
+// TestRollupCheckpointWriteFailureIsLoud: failed checkpoint writes are counted
+// and returned by Close, keep the previous file, and the next open folds the
+// parts published since that file.
+func TestRollupCheckpointWriteFailureIsLoud(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
 	cfg, policies := checkpointTestSetup(t)
 	root := t.TempDir()
 	e, err := Open(root, cfg, Hooks{})
@@ -336,19 +383,22 @@ func TestRollupCheckpointStalePlusParts(t *testing.T) {
 	if err = e.Close(); err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(root, "owner-000", rollupCheckpointFile)
-	stale, err := os.ReadFile(file)
-	if err != nil {
+	// A non-empty directory at the tmp path fails every write.
+	blocker := filepath.Join(root, "owner-000", rollupCheckpointFile+".tmp")
+	if err = os.MkdirAll(filepath.Join(blocker, "x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if e, err = Open(root, cfg, Hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	checkpointFixture(t, e, policies, 11, 13)
-	if err = e.Close(); err != nil {
-		t.Fatal(err)
+	if err = e.Close(); err == nil {
+		t.Fatal("Close hid a failed checkpoint write")
 	}
-	if err = os.WriteFile(file, stale, 0o644); err != nil {
+	if got := e.owners[0].ckptFailures.Load(); got != 2 { // first seal after open, and close
+		t.Fatalf("checkpoint failures=%d want 2", got)
+	}
+	if err = os.RemoveAll(blocker); err != nil {
 		t.Fatal(err)
 	}
 	checkpointVsScan(t, cfg, policies, root, 24, true)
