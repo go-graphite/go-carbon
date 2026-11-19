@@ -50,7 +50,7 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 					if layer == 0 {
 						err = producer.AppendNumeric(rows)
 					} else {
-						err = producer.Append(names, data, seq, int64(100+round))
+						err = producer.Append(names, nil, data, seq, int64(100+round))
 					}
 					if err != nil {
 						t.Fatal(err)
@@ -165,13 +165,13 @@ func TestPendingQuotaAndStickyFailure(t *testing.T) {
 	}
 	defer s.Close()
 	p := s.Producers[0]
-	if err = p.Append([]string{"a"}, []points.Point{{Timestamp: 1, Value: 1}}, []uint64{1}, 1); err != nil {
+	if err = p.Append([]string{"a"}, nil, []points.Point{{Timestamp: 1, Value: 1}}, []uint64{1}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if p.SyncGroups != 1 || p.ForcedGroups != 1 || len(p.packets) != 0 {
 		t.Fatal("quota did not durably release rows")
 	}
-	if err = p.Append([]string{"a"}, nil, nil, 2); err == nil {
+	if err = p.Append([]string{"a"}, nil, nil, nil, 2); err == nil {
 		t.Fatal("bad batch accepted")
 	}
 	if err = p.Seal(); err == nil {
@@ -196,7 +196,7 @@ func TestCatalogAdmissionAfterSeal(t *testing.T) {
 	p := s.Producers[0]
 	appendPoint := func(name string, stamp int64) {
 		t.Helper()
-		if err := p.Append([]string{name}, []points.Point{{Timestamp: stamp, Value: float64(stamp)}}, []uint64{uint64(stamp)}, stamp); err != nil {
+		if err := p.Append([]string{name}, nil, []points.Point{{Timestamp: stamp, Value: float64(stamp)}}, []uint64{uint64(stamp)}, stamp); err != nil {
 			t.Fatal(err)
 		}
 	}
