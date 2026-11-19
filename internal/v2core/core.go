@@ -67,6 +67,7 @@ type corePacket struct {
 	operation  func(*coreOwner) error
 	rows       []row
 	batches    []coreBatch
+	pending    *pendingRows // rollup applications, encoded by the router
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
@@ -81,6 +82,7 @@ type coreDispatch struct {
 	parts     [][]row
 	counts    []int
 	routes    []int
+	pending   []pendingRows
 	waitSince []time.Time
 	packets   []corePacket
 	router    *coreRouter
@@ -124,6 +126,9 @@ func (p *corePacket) size() uint64 {
 	n := corePacketBytes + uint64(len(p.rows))*uint64(unsafe.Sizeof(row{}))
 	for _, b := range p.batches {
 		n += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
+	}
+	if p.pending != nil {
+		n += p.pending.size()
 	}
 	return n
 }
@@ -846,7 +851,33 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		}
 	}
 	var byOwner [][]coreBatch
-	if len(batches) > 0 {
+	var pending []pendingRows
+	if e.cfg.Rollups && pendingBatchesFit(batches) {
+		// Every ID is interned above, so the owners' pendingRowsFit holds:
+		// encode each owner's 16-byte rows here, in the lease, and let the
+		// owner copy them. No per-point descriptor outlives the submission.
+		if len(d.pending) == 0 {
+			d.pending = make([]pendingRows, e.cfg.Shards)
+		}
+		pending = d.pending
+		for s := range pending {
+			pending[s].reset()
+		}
+		for _, b := range batches {
+			owner, err := routeBatch(b)
+			if err != nil {
+				return err
+			}
+			pk := &pending[owner]
+			pk.startApplication(b.Order, b.Clock, b.Points[0].Time, len(b.Points))
+			for _, r := range b.Points {
+				pk.addRow(b.ID, r.Time, r.Bits, r.Seq)
+			}
+		}
+		for s := range pending {
+			pending[s].closePacket()
+		}
+	} else if len(batches) > 0 {
 		// One immutable application and point arena per submitted packet. Owners
 		// retain these after releasing the dispatch lease; no caller slices or
 		// reusable routing storage escape into a seal or read snapshot.
@@ -902,7 +933,9 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	for s := range e.owners {
 		p := &d.packets[s]
 		*p = corePacket{rows: parts[s], cursor: cursor, seal: seal, lease: d}
-		if byOwner != nil {
+		if pending != nil {
+			p.pending = &pending[s]
+		} else if byOwner != nil {
 			p.batches = byOwner[s]
 		}
 		if seal && waitSeal {
@@ -1357,7 +1390,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				left--
 				continue
 			}
-			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 {
+			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 && p.pending == nil {
 				failure = errors.New("seal planner requires original apply batches")
 			}
 			if failure == nil && p.cursor > pending[producer] {
@@ -1386,7 +1419,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 						buffered += len(flight.rows)
 					}
 					o.bufferedPoints.Store(int64(buffered))
-					pend.add(p.batches, o.lookup)
+					if p.pending != nil {
+						pend.addRows(p.pending)
+					} else {
+						pend.add(p.batches, o.lookup)
+					}
 					pending[producer] = p.cursor
 				}
 			}
