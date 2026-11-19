@@ -309,7 +309,8 @@ func (b *syncLiveBackend) postInfo(ctx context.Context, base string, body []byte
 	data, err := b.post(ctx, base+"/info/?format=carbonapi_v3_pb&allowPartial=1", body)
 	var h *syncHTTPError
 	if errors.As(err, &h) && h.status == http.StatusBadRequest && h.body == "Bad request (unsupported format)" {
-		return nil, fmt.Errorf("info body read failed (%w): %w", err, io.ErrUnexpectedEOF)
+		// Keep the HTTP status diagnostic-only; wrapping it changes retry policy.
+		return nil, fmt.Errorf("info body read failed (%s): %w", err.Error(), io.ErrUnexpectedEOF)
 	}
 	return data, err
 }
