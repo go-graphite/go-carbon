@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"hash/maphash"
 	"sync"
 	"sync/atomic"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -20,7 +20,16 @@ type PolicyIdentity struct {
 	policy  policyName
 	vshard  uint16
 	plain   bool
-	// nameHash is NameHash(name), computed once at intern time while the name
+	// ownerSlot is a seal planner's hint: 1 + the owner-local slot install
+	// gave this name, 0 when none. It sits in padding (0 B per name). Planners
+	// sharing the identity (adoption) overwrite it, so it is only a hint:
+	// readers confirm ids[slot] == id and fall back to the metrics map.
+	ownerSlot atomic.Uint32
+	// route is namefp.Route(name)>>32, the second fingerprint half. It takes
+	// the struct from 56 B to 64 B, and both round up to Go's 64 B size class,
+	// so it costs 0 B of heap per name.
+	route uint32
+	// nameHash is namefp.Hash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.
 	nameHash uint64
 }
@@ -54,10 +63,10 @@ func (h *PolicyIdentity) Definition() []byte { return h.definitionBytes() }
 // NameHash returns the cached process-local 64-bit hash of Name.
 func (h *PolicyIdentity) NameHash() uint64 { return h.nameHash }
 
-var nameHashSeed = maphash.MakeSeed()
-
-// NameHash hashes a metric name with the seed PolicyIdentity.NameHash uses.
-func NameHash(name string) uint64 { return maphash.String(nameHashSeed, name) }
+// fingerprint identifies the name without reading its bytes.
+func (h *PolicyIdentity) fingerprint() namefp.Fingerprint {
+	return namefp.Fingerprint{Hash: h.nameHash, Route: h.route}
+}
 
 // Name returns the immutable registered metric name without encoding its policy.
 func (h *PolicyIdentity) Name() string { return string(h.policy.Name) }
@@ -90,7 +99,7 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
 	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
-	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: NameHash(string(p.Name))}
+	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: namefp.Hash(string(p.Name)), route: uint32(namefp.Route(p.Name) >> 32)}
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
@@ -157,7 +166,7 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 				return nil, errors.New("noncanonical rollup policy")
 			}
 			ownedName := string(definition[start:nameEnd])
-			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: NameHash(ownedName)}
+			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: namefp.Hash(ownedName), route: uint32(namefp.Route(ownedName) >> 32)}
 			return c.publish(h)
 		}
 	}
@@ -258,8 +267,12 @@ func (h *PolicyIdentity) metadata(m metricMetadata) RollupMetadata {
 func (h *PolicyIdentity) metadataScalars(m metricMetadata) RollupMetadata {
 	return RollupMetadata{ClosedThrough: m.ClosedThrough, BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
-func (m *rollupMetric) metadata() RollupMetadata    { return m.PolicyIdentity.metadata(m.meta) }
 func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
+
+// metadataOf returns the committed metadata of m, installed under id.
+func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {
+	return m.metadata(r.meta[r.slotOf(id, m)])
+}
 
 type policyName struct {
 	Name partsformat.ID

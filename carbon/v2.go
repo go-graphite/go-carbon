@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -219,6 +220,10 @@ func (app *App) startV2() error {
 	// never call discovery, take a refresh mutex, or wait for this work.
 	// Without quotas (whose projection needs every name at once) a backlog is
 	// published in bounded chunks, back to back, so no publication is long.
+	// The base level of the discovery index lives in files (page cache).
+	if err := v.catalog.SetDir(filepath.Join(c.V2.Path, "index")); err != nil {
+		return err
+	}
 	chunk := v2CatalogChunk
 	if v.quotas != nil {
 		chunk = 0
@@ -393,7 +398,7 @@ func (app *App) startV2() error {
 	if v.quotas != nil {
 		throttle = v.quotas.ShouldThrottleMetric
 	}
-	v.server, err = v.store.ReceiveApplicationsTCPWithAdmission(l, v2recv.Config{}, resolve, throttle)
+	v.server, err = v.store.ReceiveApplicationsTCPWithAdmission(l, v2recv.Config{}, resolve, throttle, func(name string, err error) { v.rejectName(core, name, err) })
 	if err != nil {
 		_ = l.Close()
 		return err
@@ -460,6 +465,31 @@ func (app *App) startV2() error {
 	}()
 	return nil
 }
+
+var v2NameRejectLogged atomic.Int64
+
+// rejectName counts one point refused by its name. Names classic cannot store
+// either (length or Whisper path limits, including ENAMETOOLONG from the
+// classic union probe) use classic's receiver_name_too_long counter; other
+// per-name policy errors use v2_name_rejected_points_total. Intake continues;
+// the warning is logged at most once a minute, as classic does.
+func (v *v2Runtime) rejectName(core *cache.Cache, name string, err error) {
+	if errors.Is(err, v2daemon.ErrNameTooLong) || errors.Is(err, syscall.ENAMETOOLONG) {
+		core.AddNameTooLongRejected(1)
+	} else {
+		v.metrics.rejectedNames.Add(1)
+	}
+	now := time.Now().UnixNano()
+	last := v2NameRejectLogged.Load()
+	if now-last < int64(time.Minute) || !v2NameRejectLogged.CompareAndSwap(last, now) {
+		return
+	}
+	zapwriter.Logger("v2").Warn("refused points: invalid metric name", zap.Int("name_bytes", len(name)),
+		zap.String("name_prefix", name[:min(len(name), 200)]), zap.Error(err),
+		zap.Uint64("name_too_long_rejected_points_total", core.NameTooLongRejectedPoints()),
+		zap.Uint64("name_rejected_points_total", v.metrics.rejectedNames.Load()))
+}
+
 func (v *v2Runtime) stopIntake() {
 	if v.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -479,6 +509,7 @@ func (v *v2Runtime) close() {
 	}
 	close(v.stop)
 	v.wg.Wait()
+	v.catalog.Close()
 	v.reader.Close()
 	if v.store != nil {
 		if err := v.store.Close(); err != nil {
