@@ -12,6 +12,13 @@ catalog epoch, sequence and predecessor CRC. Frame IDs use signed deltas from
 zero at each record boundary. Timestamp, clock and value prediction is identical
 to PDC3. Names and definitions come exclusively from the matching catalog.
 
+New PDC4 records set flag `0x10` and store predictor bytes directly, without a
+zstd payload pass. The declared raw length and outer CRC still cover the complete
+record. Readers accept both compressed legacy records and plain records. Older
+readers reject the plain flag, so a binary downgrade requires a compatible reader
+or conversion of all retained plain records. Catalog WAL/checkpoint compression
+is independent and remains unchanged.
+
 ```go
 catalog, err := partlog.OpenNameCatalog(catalogDirectory)
 // Handle err and defer catalog.Close().
