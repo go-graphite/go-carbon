@@ -3,10 +3,12 @@ package v2index
 import (
 	"encoding/json"
 	"errors"
+	"github.com/lomik/zapwriter"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -226,6 +228,7 @@ func TestNameLogMissingRebuilds(t *testing.T) {
 }
 
 func TestNameLogWriteFailureRebuilds(t *testing.T) {
+	defer zapwriter.Test()()
 	dir := t.TempDir()
 	var c Catalog
 	if err := c.SetDir(dir); err != nil {
@@ -242,8 +245,11 @@ func TestNameLogWriteFailureRebuilds(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := slices.Collect(c.Snapshot().Names())
-	if c.Err() == nil || !slices.Contains(got, "fresh.name") || slices.Contains(got, names[0]) {
+	if !strings.Contains(zapwriter.TestString(), "name log write failed") || !slices.Contains(got, "fresh.name") || slices.Contains(got, names[0]) {
 		t.Fatal("write failure damaged live view or was not reported")
+	}
+	if failures, _ := c.BaseFileStats(); failures != 0 || c.Err() != nil {
+		t.Fatal("name log failure changed base-file error stats")
 	}
 	c.Close()
 	var d Catalog

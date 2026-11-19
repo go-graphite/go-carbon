@@ -13,6 +13,10 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 // A base file is the base run's entries, then its block offsets (u64 each),
@@ -206,7 +210,7 @@ func (c *Catalog) appendLog(add, remove []string) {
 }
 
 func (c *Catalog) logFailed(err error) {
-	c.err.Store(&err)
+	zapwriter.Logger("v2").Error("v2 index name log write failed, startup projection discarded", zap.String("path", c.logPath(c.seq)), zap.Error(err))
 	if c.log != nil {
 		c.log.Close()
 	}
@@ -253,14 +257,40 @@ func (c *Catalog) nextPath(keep []*level) string {
 
 // writeBase writes a whole new base; a file failure keeps it on the heap.
 func (c *Catalog) writeBase(ctx context.Context, fill func(*levelWriter) error) (*run, error) {
-	r, err := writeRun(ctx, c.nextPath(nil), fill)
-	if err != nil {
-		c.err.Store(&err)
-	}
+	path := c.nextPath(nil)
+	r, err := writeRun(ctx, path, fill)
 	if r == nil {
 		return nil, ctx.Err()
 	}
+	c.noteBase(path, err)
 	return r, nil
+}
+
+// baseRetry spaces the rewrites that only move a heap base to a file after a
+// failed write: a full disk costs one whole-base attempt per interval.
+const baseRetry = time.Minute
+
+// noteBase records the outcome of the write of the next base. A failure keeps
+// it on the heap; a failure streak logs one ERROR, and its end one INFO.
+func (c *Catalog) noteBase(path string, err error) {
+	if err != nil {
+		c.failures.Add(1)
+		c.retryAt = time.Now().Add(baseRetry)
+		if c.err.Swap(&err) == nil {
+			zapwriter.Logger("v2").Error("v2 index base file write failed, base kept on the heap", zap.String("path", path), zap.Error(err))
+		}
+	} else if path != "" && c.err.Swap(nil) != nil {
+		zapwriter.Logger("v2").Info("v2 index base back on file, heap copy released", zap.String("path", path))
+	}
+}
+
+// BaseFileStats returns the failed base file writes and the heap bytes of a
+// base that belongs in a file. Safe concurrently with the writer.
+func (c *Catalog) BaseFileStats() (failures uint64, heapBytes int) {
+	if l := c.Snapshot().levels; c.dir != "" && len(l) > 0 && l[0].path == "" {
+		heapBytes = len(l[0].data)
+	}
+	return c.failures.Load(), heapBytes
 }
 
 // writeRun writes a run to path, or to the heap when path is empty or the

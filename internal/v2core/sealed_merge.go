@@ -140,7 +140,7 @@ func (e *coreEngine) runPartMerges(workers int) {
 					if unchanged[o] == inventory {
 						continue
 					}
-					changed, err := o.mergeSealedParts(e.gcStop)
+					changed, err := o.mergeSealedParts(e.gcStop, false)
 					if err != nil {
 						o.gc.mergeFailure.CompareAndSwap(nil, &coreFailure{err: err})
 						e.gcFailure.CompareAndSwap(nil, &coreFailure{err: err})
@@ -161,6 +161,45 @@ func (e *coreEngine) runPartMerges(workers int) {
 	wg.Wait()
 }
 
+// ForceMerge merges each owner's live local parts down to one part per group
+// and time partition, like VictoriaMetrics /internal/force_merge or ClickHouse
+// OPTIMIZE FINAL. Background merges keep running beside it. It returns the
+// number of merges done; a caller repeats it until that number is zero.
+func (e *coreEngine) ForceMerge() (int, error) {
+	workers, err := mergeWorkerCount(len(e.owners))
+	if err != nil {
+		return 0, err
+	}
+	var merged atomic.Int64
+	var failure atomic.Pointer[error]
+	var wg sync.WaitGroup
+	for worker := 0; worker < max(1, workers); worker++ {
+		wg.Go(func() {
+			for i := worker; i < len(e.owners); i += max(1, workers) {
+				o := e.owners[i]
+				if o.gc == nil || !o.cfg.Rollups {
+					continue
+				}
+				for failure.Load() == nil {
+					changed, err := o.mergeSealedParts(e.gcStop, true)
+					if err != nil {
+						failure.CompareAndSwap(nil, &err)
+					}
+					if !changed {
+						break
+					}
+					merged.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if p := failure.Load(); p != nil {
+		return int(merged.Load()), *p
+	}
+	return int(merged.Load()), nil
+}
+
 // Each size tier spans a factor of sixteen and retains at most fifteen quiescent
 // local parts per group/partition below the cap. Terminal parts trade bounded
 // rewrite size for a larger read inventory until their time partition expires.
@@ -169,10 +208,12 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 	if err != nil {
 		return nil, err
 	}
-	return o.selectMergeLimit(snapshot, limit)
+	return o.selectMergeLimit(snapshot, limit, false)
 }
 
-func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
+// full ignores size tiers: every live local part of a group/partition is one
+// candidate set, merged once at least two of them fit under the limit.
+func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, full bool) ([]v2part.Descriptor, error) {
 	type tier struct {
 		group     v2part.Group
 		partition int64
@@ -202,6 +243,9 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 			continue
 		}
 		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
+		if full {
+			t.size = 0
+		}
 		tiers[t] = append(tiers[t], d)
 	}
 	var chosen []v2part.Descriptor
@@ -216,25 +260,25 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 			}
 			return bytes.Compare(a.SHA256[:], b.SHA256[:])
 		})
-		var total uint64
-		if len(parts) < sealedMergeFanIn {
+		fanIn := sealedMergeFanIn
+		if full {
+			fanIn = 2
+		}
+		if len(parts) < fanIn {
 			continue
 		}
-		fits := true
-		total = 0
-		for _, d := range parts[:sealedMergeFanIn] {
-			if d.Bytes > limit-total {
-				fits = false
+		var total uint64
+		n := 0
+		for _, d := range parts {
+			if d.Bytes > limit-total || n == sealedMergeFanIn && !full {
 				break
 			}
 			total += d.Bytes
+			n++
 		}
-		if fits && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
-			chosen, best = parts, t
+		if n >= fanIn && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
+			chosen, best = parts[:n], t
 		}
-	}
-	if len(chosen) > sealedMergeFanIn {
-		chosen = chosen[:sealedMergeFanIn]
 	}
 	return chosen, nil
 }
@@ -290,7 +334,7 @@ type mergeBlock struct {
 
 type mergeCursor struct {
 	reader *sstable.Reader
-	cursor *tableCursor
+	cursor *headerCursor
 	// key is the current metric's identity with Metric left empty: the name
 	// stays encoded in ident, the validated key bytes before the archive, and
 	// ident[name:] is the GCP3 length-prefixed name. Merges compare and copy
@@ -524,7 +568,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			return v2part.Descriptor{}, e
 		}
 
-		c := &mergeCursor{reader: reader, cursor: &tableCursor{it: it}, part: spec.Scope.Part}
+		c := &mergeCursor{reader: reader, cursor: newHeaderCursor(&tableCursor{it: it}, nil), part: spec.Scope.Part}
 		cursors = append(cursors, c)
 		valid, e := c.readMetric(true)
 		if e != nil {
@@ -701,7 +745,14 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	return d, d.Validate()
 }
 
-func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
+func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, error) {
+	o.mergeMu.Lock()
+	defer o.mergeMu.Unlock()
+	select {
+	case <-stop:
+		return false, nil
+	default:
+	}
 	// Capture the pin and inventory under the same GC fence as publications.
 	o.gc.mu.Lock()
 	snapshot := o.db.NewSnapshot()
@@ -711,14 +762,14 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	inputs, err := o.selectMergeLimit(snapshot, limit)
+	inputs, err := o.selectMergeLimit(snapshot, limit, full)
 	if err != nil {
 		return false, err
 	}
 	retire := o.retireClock()
 	if len(inputs) == 0 && limit < configured {
 		// Disk-bound: tell "nothing due" from "due but no room".
-		if due, e := o.selectMergeLimit(snapshot, configured); e == nil && len(due) > 0 {
+		if due, e := o.selectMergeLimit(snapshot, configured, full); e == nil && len(due) > 0 {
 			mergeDiskSkip.Add(1)
 			slog.Warn("v2 merge skipped: not enough free disk", "dir", o.dir, "merge_limit_bytes", limit, "configured_cap_bytes", configured)
 			return false, nil

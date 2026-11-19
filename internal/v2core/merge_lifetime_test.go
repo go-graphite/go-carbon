@@ -139,7 +139,7 @@ func TestMergeLifetimeFixture(t *testing.T) {
 				next.depth = max(next.depth, a.depth+1)
 			}
 			before := e.PartGCStats()[0]
-			changed, err := o.mergeSealedParts(nil)
+			changed, err := o.mergeSealedParts(nil, false)
 			if err != nil || !changed {
 				t.Fatalf("merge %v %v", changed, err)
 			}
