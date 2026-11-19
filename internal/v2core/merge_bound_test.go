@@ -24,7 +24,7 @@ func TestMergeBoundSelection(t *testing.T) {
 	s := o.db.NewSnapshot()
 	defer s.Close()
 	inputs, err := o.selectMerge(s)
-	if err != nil || len(inputs) != 16 {
+	if err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("inputs=%d %v", len(inputs), err)
 	}
 	var total uint64
@@ -369,7 +369,7 @@ func TestMergeDiskGuard(t *testing.T) {
 	defer s.Close()
 	withFreeSpace(t, 1<<40)
 	inputs, err := o.selectMerge(s)
-	if err != nil || len(inputs) != 16 {
+	if err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("plenty of space: %d %v", len(inputs), err)
 	}
 	var total uint64
@@ -378,7 +378,7 @@ func TestMergeDiskGuard(t *testing.T) {
 	}
 	// free/4 bound: exactly enough, then one byte short.
 	withFreeSpace(t, total*4)
-	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 16 {
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("free/4 exact: %d %v", len(inputs), err)
 	}
 	withFreeSpace(t, total*4-4)
@@ -392,7 +392,7 @@ func TestMergeDiskGuard(t *testing.T) {
 		t.Fatalf("in-flight ignored: %d %v", len(inputs), err)
 	}
 	mergeInflight.Add(^uint64(100))
-	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 16 {
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("released in-flight: %d %v", len(inputs), err)
 	}
 	// Zero free space: no merge, no error, counted skip.

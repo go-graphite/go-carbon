@@ -4,6 +4,7 @@ package v2core
 // retain their move-catalog authority and are never reclassified by compaction.
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"crypto/rand"
@@ -13,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -161,9 +161,27 @@ func (e *coreEngine) runPartMerges(workers int) {
 	wg.Wait()
 }
 
-// Each size tier spans a factor of sixteen and retains at most fifteen quiescent
-// local parts per group/partition below the cap. Terminal parts trade bounded
-// rewrite size for a larger read inventory until their time partition expires.
+// Merges combine only sequence-adjacent local parts of one group/partition
+// (ClickHouse's rule), so their order ranges never interleave. A window of
+// adjacent parts qualifies once it holds at least ratio parts and its total is
+// at least ratio/2 times its largest part: a rewrite grows every point's part
+// by at least ratio/2 (ratio for equal parts), and a big part never absorbs a
+// few small ones. Small outputs use ratio 4, so new seals fold into a small
+// part every few seal intervals and few small parts stay live for renders.
+// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
+// parts quiescent below the cap. The cheapest qualifying window merges first.
+const (
+	smallMergeBytes = 64 << 20
+	smallMergeRatio = 4
+)
+
+func mergeRatio(total uint64) uint64 {
+	if total <= smallMergeBytes {
+		return smallMergeRatio
+	}
+	return sealedMergeFanIn
+}
+
 func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
 	limit, _, err := effectiveMergeLimit(o.dir)
 	if err != nil {
@@ -173,12 +191,11 @@ func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor,
 }
 
 func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([]v2part.Descriptor, error) {
-	type tier struct {
+	type scope struct {
 		group     v2part.Group
 		partition int64
-		size      int
 	}
-	tiers := map[tier][]v2part.Descriptor{}
+	scopes := map[scope][]v2part.Descriptor{}
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
 	o.gc.mu.Unlock()
@@ -187,7 +204,8 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		if err != nil {
 			return nil, err
 		}
-		if d.Bytes > limit || d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+		// Oversized parts stay in the sequence: a window stops at them.
+		if d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
 		k, err := v2part.Decode(d.FirstKey)
@@ -201,42 +219,35 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64) ([
 		if origin.Class != LivePart {
 			continue
 		}
-		t := tier{d.Scope.Group, d.Scope.Partition, (bits.Len64(d.Bytes) - 1) / 4}
-		tiers[t] = append(tiers[t], d)
+		s := scope{d.Scope.Group, d.Scope.Partition}
+		scopes[s] = append(scopes[s], d)
 	}
 	var chosen []v2part.Descriptor
-	var best tier
-	for t, parts := range tiers {
+	var best uint64
+	var bestScope scope
+	for s, parts := range scopes {
 		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
-			if a.Bytes < b.Bytes {
-				return -1
-			}
-			if a.Bytes > b.Bytes {
-				return 1
+			if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
+				return c
 			}
 			return bytes.Compare(a.SHA256[:], b.SHA256[:])
 		})
-		var total uint64
-		if len(parts) < sealedMergeFanIn {
-			continue
-		}
-		fits := true
-		total = 0
-		for _, d := range parts[:sealedMergeFanIn] {
-			if d.Bytes > limit-total {
-				fits = false
+		for i := range parts {
+			var total, largest uint64
+			for j := i; j < len(parts) && j-i < sealedMergeFanIn && parts[j].Bytes <= limit-total; j++ {
+				total += parts[j].Bytes
+				largest = max(largest, parts[j].Bytes)
+				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
+					continue
+				}
+				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
+					chosen, best, bestScope = parts[i:j+1], total, s
+				}
 				break
 			}
-			total += d.Bytes
-		}
-		if fits && (chosen == nil || t.size < best.size || (t.size == best.size && (t.group < best.group || t.group == best.group && t.partition < best.partition))) {
-			chosen, best = parts, t
 		}
 	}
-	if len(chosen) > sealedMergeFanIn {
-		chosen = chosen[:sealedMergeFanIn]
-	}
-	return chosen, nil
+	return slices.Clone(chosen), nil
 }
 
 // ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -175,8 +176,26 @@ func TestReadTailLoad(t *testing.T) {
 	}
 	before := r.StageObservations()
 	rtBefore := readRuntimeHists()
+	gcBefore := e.PartGCStats()
+	cpuBefore := cpuSeconds()
 	stop := make(chan struct{})
 	var prod sync.WaitGroup
+	// Sample every owner's live parts once a second for p50/max over time.
+	var liveSamples []uint64
+	prod.Go(func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+			for _, s := range e.PartGCStats() {
+				liveSamples = append(liveSamples, s.LiveParts)
+			}
+		}
+	})
 	var written int64
 	prod.Go(func() {
 		started := time.Now()
@@ -226,6 +245,18 @@ func TestReadTailLoad(t *testing.T) {
 	}
 	slices.Sort(all)
 	q := func(p float64) time.Duration { return all[min(len(all)-1, int(p*float64(len(all))))] }
+	cpu := cpuSeconds() - cpuBefore
+	var runs, readB, writtenB uint64
+	for i, s := range e.PartGCStats() {
+		runs += s.MergeRuns - gcBefore[i].MergeRuns
+		readB += s.MergeReadBytes - gcBefore[i].MergeReadBytes
+		writtenB += s.MergeWrittenBytes - gcBefore[i].MergeWrittenBytes
+	}
+	slices.Sort(liveSamples)
+	if n := len(liveSamples); n > 0 {
+		t.Logf("live parts per owner over time p50 %d p90 %d max %d (%d samples)", liveSamples[n/2], liveSamples[n*9/10], liveSamples[n-1], n)
+	}
+	t.Logf("merges %d runs, read %.2f MB/s, written %.2f MB/s; process CPU %.2f cores, %.3f cores per 1M/s", runs, float64(readB)/1e6/float64(secs), float64(writtenB)/1e6/float64(secs), cpu/float64(secs), cpu/float64(secs)/(float64(written)/float64(secs)/1e6))
 	t.Logf("live parts per owner at end %.1f", livePerOwner())
 	t.Logf("writes %.0f points/s (target %d), renders %d, p50 %v p90 %v p99 %v max %v", float64(written)/float64(secs), rate, len(all), q(.5), q(.9), q(.99), all[len(all)-1])
 	for i := range after {
@@ -247,6 +278,14 @@ func TestReadTailLoad(t *testing.T) {
 	for name, a := range rtAfter {
 		t.Logf("runtime %s: %s", name, histDelta(rtBefore[name], a))
 	}
+}
+
+func cpuSeconds() float64 {
+	var u syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &u); err != nil {
+		return 0
+	}
+	return time.Duration(u.Utime.Nano() + u.Stime.Nano()).Seconds()
 }
 
 var runtimeHistNames = []string{"/sched/pauses/total/gc:seconds", "/sched/latencies:seconds"}
