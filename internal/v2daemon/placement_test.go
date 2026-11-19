@@ -54,7 +54,7 @@ func TestPlacedSinksAndDurableFence(t *testing.T) {
 	names := []string{"metric.a"}
 	data := []points.Point{{Timestamp: 100, Value: 1}}
 	seq := []uint64{1}
-	if e := p.Append(names, data, seq, 100); !errors.Is(e, v2placement.ErrUnversioned) {
+	if e := p.Append(names, nil, data, seq, 100); !errors.Is(e, v2placement.ErrUnversioned) {
 		t.Fatal(e)
 	}
 	if e := p.AppendNumeric(nil); !errors.Is(e, v2placement.ErrUnversioned) {
@@ -127,7 +127,7 @@ func TestPlacedRestartRefusesUnstampedJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Producers[0].Append([]string{"a"}, []points.Point{{Timestamp: 100, Value: 1}}, []uint64{1}, 100); err != nil {
+	if err = s.Producers[0].Append([]string{"a"}, nil, []points.Point{{Timestamp: 100, Value: 1}}, []uint64{1}, 100); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {

@@ -21,7 +21,7 @@ func TestStoppedRootFrozenRecheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Producers[0].Append([]string{"a"}, []points.Point{{Timestamp: 60, Value: 2}}, []uint64{1}, 120); err != nil {
+	if err = s.Producers[0].Append([]string{"a"}, nil, []points.Point{{Timestamp: 60, Value: 2}}, []uint64{1}, 120); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
