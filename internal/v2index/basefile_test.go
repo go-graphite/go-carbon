@@ -42,7 +42,7 @@ func TestBaseFileWriteFailureKeepsOldBase(t *testing.T) {
 		}
 		return nil
 	}
-	defer func() { fileHook = nil }()
+	defer func() { c.Close(); fileHook = nil }() // after merges stop reading it
 	add := baseNames(5000, 2)
 	if err := c.Apply(2, add, nil); err != nil {
 		t.Fatal(err)
@@ -134,6 +134,7 @@ func TestBaseMergeOffPublishPath(t *testing.T) {
 	base := c.Snapshot().levels[0].run
 	block := make(chan struct{})
 	fileHook = func(int) error { <-block; return nil }
+	defer func() { c.Close(); fileHook = nil }() // after merges stop reading it
 	add := baseNames(10000, 2)
 	for i := 0; i < len(add); i += 1000 {
 		if err := c.Apply(uint64(2+i/1000), add[i:i+1000], nil); err != nil {
@@ -147,7 +148,6 @@ func TestBaseMergeOffPublishPath(t *testing.T) {
 		t.Fatal("no background base merge started")
 	}
 	close(block)
-	fileHook = nil
 	c.settle()
 	s := c.Snapshot()
 	if s.levels[0].run == base || s.levels[0].path == "" || s.Len() != 74000 {

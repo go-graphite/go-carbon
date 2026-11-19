@@ -186,6 +186,7 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				r.expire = func(_ RollupPolicy, m RollupMetadata, now time.Time) bool {
 					return m.LastUpdate > 0 && now.Unix()-m.LastUpdate/1e9 > 50
 				}
+				r.setExpiryTTL(expiryWindow(51 * time.Second))
 				return r
 			}
 			unrank := unrankAll
