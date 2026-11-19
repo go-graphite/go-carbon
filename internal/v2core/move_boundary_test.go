@@ -115,7 +115,12 @@ func TestMoveAdoptMatureHistoryKeepsPartsAndSparseRepairs(t *testing.T) {
 	}
 	defer prepared.Close()
 	root := t.TempDir()
-	e, err := Open(root, adoptConfig(), Hooks{})
+	// Background merges apply raw retention to the expired 1560 and 1810 rows
+	// on their own 20 ms schedule. Hold them so both snapshots show only what
+	// the restart itself keeps.
+	cfg := adoptConfig()
+	cfg.DeferMerges = true
+	e, err := Open(root, cfg, Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +177,7 @@ func TestMoveAdoptMatureHistoryKeepsPartsAndSparseRepairs(t *testing.T) {
 		t.Fatal(err)
 	}
 	e = nil
-	e, err = Open(root, adoptConfig(), Hooks{})
+	e, err = Open(root, cfg, Hooks{})
 	if err != nil {
 		t.Fatal(err)
 	}

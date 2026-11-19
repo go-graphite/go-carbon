@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -195,19 +194,6 @@ func (CoreWriter) Read(ctx context.Context, path string, fn func(Record) error) 
 		return fn(Record{Key: key, Value: value})
 	})
 }
-
-// Used only by raw-source diagnostics/tests; output uses v2part.Writer.
-type partFile struct{ f *os.File }
-
-func (p *partFile) Write(b []byte) error {
-	n, e := p.f.Write(b)
-	if e == nil && n != len(b) {
-		e = io.ErrShortWrite
-	}
-	return e
-}
-func (p *partFile) Finish() error { return errors.Join(p.f.Sync(), p.f.Close()) }
-func (p *partFile) Abort()        { p.f.Close() }
 
 // sameValue reports whether two stored values of key hold the same logical
 // record. Dense parts store envelopes without the definition, so envelopes

@@ -119,9 +119,9 @@ func (app *App) startV2() error {
 	telemetry := newV2WriteTelemetry(shards, n)
 	updates := newV2CatalogUpdates(shards)
 	catalogTelemetry := &v2CatalogTelemetry{}
-	hooks := v2core.Hooks{Identities: r.Identities, PublishBatchesWithInventory: r.PublishWithInventory, DenseRollups: true, SealTiming: telemetry.observeStage, Visible: func(owner int, batches []v2core.Batch) {
-		telemetry.visible(owner, batches)
-		updates.visible(owner, batches)
+	hooks := v2core.Hooks{Identities: r.Identities, PublishPending: r.PublishPending, DenseRollups: true, SealTiming: telemetry.observeStage, VisiblePending: func(owner int, pending v2core.PendingView) {
+		telemetry.visiblePending(owner, pending)
+		updates.visiblePending(owner, pending)
 	}}
 	if app.v2Now != nil {
 		hooks.Now = app.v2Now
@@ -253,13 +253,15 @@ func (app *App) startV2() error {
 			if err != nil {
 				return err
 			}
+			// Owner names arrive sorted and unique; only classic names are sorted.
+			var classic []string
 			for _, name := range classicNames {
 				if !masks[name] {
-					names = append(names, name)
+					classic = append(classic, name)
 				}
 			}
-			slices.Sort(names)
-			names = slices.Compact(names)
+			slices.Sort(classic)
+			names = v2read.MergeNames(names, slices.Compact(classic))
 			if err := publishV2QuotasContext(ctx, v.quotas, quotaFence, r, names, historicalQuota); err != nil {
 				return err
 			}

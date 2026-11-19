@@ -24,6 +24,9 @@ import (
 // decodes to the records of a rest-level part, and merging seal-level inputs
 // yields the same bytes as merging rest-level inputs.
 func TestSealCompressionDecodesAndMergesIdentically(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	restDir, sealDir := filepath.Join(root, "rest"), filepath.Join(root, "seal")
 	for _, dir := range []string{restDir, sealDir} {

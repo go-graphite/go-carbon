@@ -44,6 +44,9 @@ const mergeDecodedDifferentialDigest = "266d1b35f1f24860c11a88321445ea9debcfb459
 // names with late points, expired names, reset orders and a TTL floor, and
 // pins every merged part's bytes and descriptor to the recorded digest.
 func TestMergeByteDifferential(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
 	saved := mergePartID
 	defer func() { mergePartID = saved }()
 	defer v2part.LegacyEnvelopeKV.Store(false)

@@ -84,10 +84,13 @@ type generation struct {
 	cache     *sealedCache
 	reader    *Reader
 	sealed    *v2core.RollupSnapshot // request views only
-	pending   []v2core.Batch
-	index     *pendingIndex
-	metrics   map[string]*metricState
-	err       error
+	// view is an owner publication's pointer-free pending set; pending holds
+	// decoded applications only in per-request generations.
+	view    v2core.PendingView
+	pending []v2core.Batch
+	index   *pendingIndex
+	metrics map[string]*metricState
+	err     error
 }
 type sealedCache struct {
 	ranges   *v2core.RollupReadCache
@@ -136,6 +139,13 @@ func (r *Reader) Publish(owner int, snapshot *pebble.Snapshot, pending []v2core.
 // A nil snapshot is a head-only publication: number and inventory equal the
 // current generation's, whose parts it takes its own references on.
 func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pending []v2core.Batch, number uint64, inventory *v2core.RollupInventory) error {
+	return r.PublishPending(owner, snapshot, v2core.PendingBatches(pending), number, inventory)
+}
+
+// PublishPending is PublishWithInventory over the owner's pointer-free pending
+// view. The reader keeps the view; it never materializes the whole head. A nil
+// snapshot is a head-only publication, as for PublishWithInventory.
+func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2core.PendingView, number uint64, inventory *v2core.RollupInventory) error {
 	closeSnapshot := func() error {
 		if snapshot == nil {
 			return nil
@@ -149,7 +159,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 		_ = closeSnapshot()
 		return errors.New("invalid publication owner")
 	}
-	g := &generation{pending: pending, number: number, inventory: inventory, cache: &r.caches[owner], reader: r}
+	g := &generation{view: pending, number: number, inventory: inventory, cache: &r.caches[owner], reader: r}
 	// Retain the previous publication while sharing its sealed parts. Close
 	// may race publication; a failed retain means fresh parts are needed.
 	// The owner's part registry, carried by the inventory, shares opened parts
@@ -157,7 +167,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 	shared := false
 	old := r.owners[owner].Load()
 	if old != nil && old.retain() {
-		g.index = nextPendingIndex(old.index, old.pending, pending)
+		g.index = nextPendingIndex(old.index, old.view, pending)
 		if shared = old.number == number && old.inventory == inventory; shared {
 			g.parts = old.parts.Retain()
 			if g.snapshot = old.snapshot; g.snapshot != nil {
@@ -171,7 +181,7 @@ func (r *Reader) PublishWithInventory(owner int, snapshot *pebble.Snapshot, pend
 		old.release()
 	}
 	if g.index == nil {
-		g.index = nextPendingIndex(nil, nil, pending)
+		g.index = nextPendingIndex(nil, v2core.PendingView{}, pending)
 	}
 	if !shared && snapshot == nil {
 		if r.closed.Load() {
@@ -252,7 +262,11 @@ func (g *generation) lookup(name string) *metricState {
 
 func (g *generation) loadPendingContext(ctx context.Context) {
 	g.metrics = make(map[string]*metricState)
-	for _, b := range g.pending {
+	pending := g.pending
+	if pending == nil && g.view.Len() > 0 {
+		pending = g.view.Batches()
+	}
+	for _, b := range pending {
 		if g.err = ctx.Err(); g.err != nil {
 			return
 		}
@@ -558,30 +572,13 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 		return nil, err
 	}
 	stage = time.Now()
-	wanted := make(map[string]bool, len(names))
-	for _, n := range names {
-		wanted[n] = true
-	}
 	pendingIdx := g.index
 	if pendingIdx == nil {
-		pendingIdx = nextPendingIndex(nil, nil, g.pending)
+		pendingIdx = nextPendingIndex(nil, v2core.PendingView{}, g.view)
 	}
-	positions, err := pendingIdx.candidates(g.pending, names)
+	pending, err := selectPending(ctx, pendingIdx, g.view, names)
 	if err != nil {
 		return nil, err
-	}
-	var pending []v2core.Batch
-	for _, i := range positions {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		name, err := pendingName(&g.pending[i])
-		if err != nil {
-			return nil, err
-		}
-		if wanted[name] {
-			pending = append(pending, g.pending[i])
-		}
 	}
 	st.observe(StagePending, stage)
 	q := &generation{pending: pending, sealed: index, reader: g.reader, cache: g.cache, number: g.number}
@@ -618,7 +615,7 @@ func (g *generation) discover(ctx context.Context) (*generation, error) {
 		c.index, c.number = index, g.number
 	}
 	c.mu.Unlock()
-	q := &generation{pending: g.pending, sealed: index, reader: g.reader, cache: c, number: g.number}
+	q := &generation{pending: g.view.Batches(), sealed: index, reader: g.reader, cache: c, number: g.number}
 	q.loadPendingContext(ctx)
 	return q, q.err
 }
