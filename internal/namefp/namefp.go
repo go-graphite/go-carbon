@@ -23,6 +23,9 @@ var seed = maphash.MakeSeed()
 // Hash is the process-seeded 64-bit half of a fingerprint.
 func Hash(name string) uint64 { return maphash.String(seed, name) }
 
+// HashBytes is Hash for borrowed name bytes, with no string allocation.
+func HashBytes(name []byte) uint64 { return maphash.Bytes(seed, name) }
+
 // Route is XXH3-64 over the name bytes, the hash TCP intake routes by. Its high
 // 32 bits are the second half of a fingerprint.
 func Route[T ~string | ~[]byte](name T) uint64 {

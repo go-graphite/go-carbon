@@ -55,9 +55,10 @@ type Config struct {
 	// group fsync once the current segment holds at least this many bytes. Each
 	// segment starts with fresh predictor state, so restart can skip every
 	// segment that ends at or below all owners' durable frontiers. Zero keeps one
-	// segment per process run. Rotation never deletes a segment.
+	// segment per process run. Rotation retires the prefix committed by every
+	// owner; placement and classic-mirror consumers retain their replay logs.
 	JournalSegmentBytes int64
-	// fullReplay disables segment skipping; tests use it as the oracle.
+	// fullReplay keeps and replays every segment; tests use it as the oracle.
 	fullReplay bool
 }
 
@@ -203,18 +204,12 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			if c.Layer == 0 {
 				return nil
 			}
-			dir := filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
+			p.journalDir = filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
 			var err error
-			if c.Layer == 3 {
-				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"), catalogPolicies{engine: e, producer: i, producers: c.Producers})
+			if c.Layer >= 2 {
+				err = p.recoverProducer(ctx, p.journalDir)
 			} else {
-				p.catalog, err = partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
-			}
-			if err == nil {
-				p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
-				if c.Layer >= 2 {
-					err = p.recoverProducer(ctx, dir)
-				}
+				err = p.openCatalog()
 			}
 			if err != nil {
 				p.failed = err
@@ -232,6 +227,25 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 
 	return s, nil
 }
+
+// openCatalog runs on the producer's serial caller, on recovery only if a
+// journal tail needs names. Core parts remain authoritative for sealed data.
+func (p *Producer) openCatalog() error {
+	if p.catalog != nil {
+		return nil
+	}
+	var err error
+	if p.layer == 3 {
+		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), catalogPolicies{engine: p.engine, producer: p.index, producers: p.count})
+	} else {
+		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"))
+	}
+	if err == nil {
+		p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
+	}
+	return p.fail(err)
+}
+
 func syncDir(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {
@@ -352,8 +366,10 @@ func (p *Producer) Drain() error {
 		return nil
 	}
 	start := time.Now()
-	if err := p.catalog.Sync(); err != nil {
-		return p.fail(err)
+	if p.catalog != nil {
+		if err := p.catalog.Sync(); err != nil {
+			return p.fail(err)
+		}
 	}
 	p.CatalogSyncTime += time.Since(start)
 	if p.layer >= 2 {

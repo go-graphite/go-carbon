@@ -70,14 +70,19 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 			}
 		},
 		Stage: func(s string) {
+			// Hold only a background (threshold) seal and its commit. A
+			// maintenance flush is a synchronous seal on the owner loop; holding
+			// it would stop publication by construction.
 			switch s {
 			case "seal":
-				if sealStarts.Add(1) > 0 && armed.Load() && holdSeal.CompareAndSwap(false, true) {
+				sealStarts.Add(1)
+			case "background-seal":
+				if armed.Load() && holdSeal.CompareAndSwap(false, true) {
 					hold(atSeal, releaseSeal)
 				}
 			case "commit":
 				commits.Add(1)
-				if armed.Load() && holdCommit.CompareAndSwap(false, true) {
+				if holdSeal.Load() && holdCommit.CompareAndSwap(false, true) {
 					hold(atCommit, releaseCommit)
 				}
 			}
