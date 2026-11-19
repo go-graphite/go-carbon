@@ -27,7 +27,7 @@ func BenchmarkRollupSparseCatalog(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					r.metrics[id] = m
+					r.install(id, m, freshMetadata)
 					r.names[p.Name] = id
 				}
 				if i < 31 || i == size {

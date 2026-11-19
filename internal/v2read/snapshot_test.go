@@ -5,73 +5,68 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2core"
 )
 
-func testCatalog(archives []Archive) Catalog {
-	return CatalogFuncs{
-		LookupFunc: func(n string) (Metric, bool) { return Metric{ID: 7, Archives: archives}, n == "sample" },
-		FindFunc: func(ctx context.Context, p string, y func(string) error) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if p == "sample" || p == "*" {
-				return y("sample")
-			}
-			return nil
-		},
+func testMetric(archives []Archive) Metric { return Metric{ID: 7, Archives: archives} }
+
+// testRender renders into a fresh workspace and copies the result, so a test
+// never holds pooled buffers.
+func testRender(t testing.TB, source Source, archives []Archive, from, until, now, work int64) (*Series, error) {
+	t.Helper()
+	s, w, err := render(context.Background(), testMetric(archives), source, from, until, now, work)
+	if w == nil {
+		return s, err
 	}
+	defer releaseRenderWorkspace(w)
+	if s != nil {
+		s = &Series{Metric: s.Metric, From: s.From, Until: s.Until, Step: s.Step, Values: append([]float64(nil), s.Values...), Occupied: append([]bool(nil), s.Occupied...)}
+	}
+	return s, err
 }
-func TestPinnedGenerationAndByteAdmission(t *testing.T) {
-	var p Publication
-	var closed atomic.Int32
-	cat := testCatalog([]Archive{{1, 100}})
-	makeView := func(bits uint64) View {
-		return View{Catalog: cat, Head: []Source{Freeze([]Record{{7, 1, Sample{10, bits, 1}}})}, RetainedBytes: 40, Close: func() { closed.Add(1) }}
-	}
-	p.Publish(makeView(math.Float64bits(1)))
-	b := NewBudget(680)
-	old, err := p.Pin(b, 640)
+
+// The reader admits budgetBytes/workBytes renders and holds each admission and
+// its buffers until the consumer returns.
+func TestReaderAdmissionHeldUntilConsumed(t *testing.T) {
+	reader, _ := New(1, 1<<20, 1<<20)
+	reader.Now = func() time.Time { return time.Unix(1000, 0) }
+	engine, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishBatchesWithInventory: reader.PublishWithInventory})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Pin(b, 1); !errors.Is(err, ErrAdmission) {
+	defer func() {
+		reader.Close()
+		if err := engine.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	policy, _ := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: "metric", Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 100}}}})
+	if err = engine.AppendBatches(0, []v2core.Batch{{ID: 1, Order: 1, Clock: 1000, Policy: policy, Points: []v2core.Row{{ID: 1, Time: 990, Bits: math.Float64bits(1), Seq: 1}}}}, 1, true); err != nil {
 		t.Fatal(err)
 	}
-	p.Publish(makeView(math.Float64bits(2)))
-	if closed.Load() != 0 {
-		t.Fatal("closed pinned old generation")
+	if cap(reader.renders) != 1 {
+		t.Fatal("render slots", cap(reader.renders))
 	}
-	s, err := old.Render(context.Background(), "sample", 9, 10, 10)
-	if err != nil || s.Values[0] != 1 {
-		t.Fatal(s, err)
-	}
-	old.Close()
-	old.Close()
-	if closed.Load() != 1 || b.Used() != 0 {
-		t.Fatal("release", closed.Load(), b.Used())
-	}
-	p.Close()
-	if closed.Load() != 2 {
-		t.Fatal("publication leaked")
-	}
-	if _, err := p.Pin(b, 1); !errors.Is(err, ErrClosed) {
-		t.Fatal(err)
+	err = reader.FetchMany(context.Background(), []string{"metric"}, 980, 990, 1000, func(_ string, s *Series) error {
+		if len(reader.renders) != 1 || len(s.Values) != 10 || s.Values[9] != 1 {
+			return fmt.Errorf("render not admitted while consumed: %d %v", len(reader.renders), s.Values)
+		}
+		if e := reader.FetchMany(context.Background(), []string{"metric"}, 980, 990, 1000, func(string, *Series) error { return nil }); !errors.Is(e, ErrAdmission) {
+			return fmt.Errorf("second render admitted: %v", e)
+		}
+		return nil
+	})
+	if err != nil || len(reader.renders) != 0 {
+		t.Fatal(err, len(reader.renders))
 	}
 }
+
 func TestPhysicalSlotWinnerBeforeTimestampFilter(t *testing.T) {
-	var p Publication
-	p.Publish(View{Catalog: testCatalog([]Archive{{1, 10}}), Parts: []Source{Freeze([]Record{{7, 1, Sample{10, math.Float64bits(1), 1}}})}, Head: []Source{Freeze([]Record{{7, 1, Sample{20, math.Float64bits(2), 2}}})}})
-	defer p.Close()
-	h, err := p.Pin(NewBudget(1<<20), 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	s, err := h.Render(context.Background(), "sample", 9, 10, 10)
+	s, err := testRender(t, sources{Freeze([]Record{{7, 1, Sample{10, math.Float64bits(1), 1}}}), Freeze([]Record{{7, 1, Sample{20, math.Float64bits(2), 2}}})}, []Archive{{1, 10}}, 9, 10, 10, 1<<20)
 	if err != nil || !math.IsNaN(s.Values[0]) || !s.Occupied[0] {
 		t.Fatal("resurrected overwritten timestamp", s, err)
 	}
@@ -79,122 +74,51 @@ func TestPhysicalSlotWinnerBeforeTimestampFilter(t *testing.T) {
 func TestHeadPartBlockMergeExactBits(t *testing.T) {
 	nan := uint64(0x7ff8000000000042)
 	negzero := uint64(1) << 63
-	var p Publication
-	p.Publish(View{Catalog: testCatalog([]Archive{{1, 100}}), Blocks: []Source{Freeze([]Record{{7, 1, Sample{10, 0, 1}}, {7, 1, Sample{11, 0, 1}}})}, Parts: []Source{Freeze([]Record{{7, 1, Sample{10, nan, 2}}})}, Head: []Source{Freeze([]Record{{7, 1, Sample{11, negzero, 3}}})}})
-	defer p.Close()
-	h, _ := p.Pin(NewBudget(1<<20), 1<<20)
-	defer h.Close()
-	s, err := h.Render(context.Background(), "sample", 9, 11, 11)
+	blocks := Freeze([]Record{{7, 1, Sample{10, 0, 1}}, {7, 1, Sample{11, 0, 1}}})
+	parts := Freeze([]Record{{7, 1, Sample{10, nan, 2}}})
+	head := Freeze([]Record{{7, 1, Sample{11, negzero, 3}}})
+	s, err := testRender(t, sources{blocks, parts, head}, []Archive{{1, 100}}, 9, 11, 11, 1<<20)
 	if err != nil || math.Float64bits(s.Values[0]) != nan || math.Float64bits(s.Values[1]) != negzero {
 		t.Fatal(s, err)
-	}
-	var found []string
-	if err = h.Find(context.Background(), "*", func(n string) error { found = append(found, n); return nil }); err != nil || len(found) != 1 {
-		t.Fatal(found, err)
 	}
 }
 func TestConflictingSequenceFails(t *testing.T) {
 	f := Freeze([]Record{{7, 1, Sample{10, 0, 1}}, {7, 1, Sample{10, 1, 1}}})
-	var p Publication
-	p.Publish(View{Catalog: testCatalog([]Archive{{1, 100}}), Parts: []Source{f}})
-	defer p.Close()
-	h, _ := p.Pin(NewBudget(1<<20), 1<<20)
-	defer h.Close()
-	if _, err := h.Render(context.Background(), "sample", 9, 10, 10); !errors.Is(err, ErrConflict) {
-		t.Fatal(err)
-	}
-}
-func TestConcurrentPublishPinRelease(t *testing.T) {
-	var p Publication
-	var closed atomic.Int64
-	const count = 2000
-	cat := testCatalog([]Archive{{1, 100}})
-	p.Publish(View{Catalog: cat, Close: func() { closed.Add(1) }})
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			b := NewBudget(1 << 20)
-			for range count {
-				h, err := p.Pin(b, 1024)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				h.Close()
-			}
-			if b.Used() != 0 {
-				t.Error("budget leak")
-			}
-		}()
-	}
-	for range count {
-		p.Publish(View{Catalog: cat, Close: func() { closed.Add(1) }})
-	}
-	wg.Wait()
-	p.Close()
-	if closed.Load() != count+1 {
-		t.Fatal(closed.Load())
-	}
-}
-func TestQueryAdmissionAndCancellation(t *testing.T) {
-	var p Publication
-	p.Publish(View{Catalog: testCatalog([]Archive{{1, 100}})})
-	defer p.Close()
-	h, _ := p.Pin(NewBudget(100), 100)
-	defer h.Close()
-	if _, err := h.Render(context.Background(), "sample", 0, 50, 50); !errors.Is(err, ErrAdmission) {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := h.Render(ctx, "sample", 0, 1, 1); !errors.Is(err, context.Canceled) {
+	if _, err := testRender(t, f, []Archive{{1, 100}}, 9, 10, 10, 1<<20); !errors.Is(err, ErrConflict) {
 		t.Fatal(err)
 	}
 }
 
-func TestAdapterHoldsAdmissionUntilResponseConsumed(t *testing.T) {
-	var p Publication
-	p.Publish(View{Catalog: testCatalog([]Archive{{1, 100}})})
-	defer p.Close()
-	b := NewBudget(1024)
-	a := Adapter{Select: func(string) *Publication { return &p }, Catalog: &p, Budget: b, WorkBytes: 1024}
-	a.Now = func() time.Time { return time.Unix(20, 0) }
-	err := a.Fetch(context.Background(), "sample", 10, 20, func(s *Series) error {
-		if b.Used() != 1024 || len(s.Values) != 10 {
-			t.Fatal("response uncharged", b.Used())
-		}
-		if _, e := p.Pin(b, 1); !errors.Is(e, ErrAdmission) {
-			t.Fatal(e)
-		}
-		return nil
-	})
-	if err != nil || b.Used() != 0 {
-		t.Fatal(err, b.Used())
+// A render holds at most work/32 slots.
+func TestQueryAdmissionAndCancellation(t *testing.T) {
+	archives := []Archive{{1, 100}}
+	if _, err := testRender(t, sources{}, archives, 0, 50, 50, 100); !errors.Is(err, ErrAdmission) {
+		t.Fatal(err)
+	}
+	if s, err := testRender(t, sources{}, archives, 0, 50, 50, 50*32); err != nil || len(s.Values) != 50 {
+		t.Fatal("exact 32B/slot cap rejected", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, w, err := render(ctx, testMetric(archives), sources{}, 0, 1, 1, 1<<20); !errors.Is(err, context.Canceled) || w != nil {
+		t.Fatal(err)
 	}
 }
 
 func BenchmarkSparseRender(b *testing.B) {
 	for _, width := range []int64{1, 60, 720, 1440, 3600, 10080, 43200, 86400} {
 		b.Run(fmt.Sprint(width), func(b *testing.B) {
-			var p Publication
-			p.Publish(View{Catalog: testCatalog([]Archive{{1, 86400}}), Parts: []Source{Freeze([]Record{{7, 1, Sample{1800000000, math.Float64bits(42), 1}}})}})
-			defer p.Close()
-			budget := NewBudget(8 << 20)
+			source := Freeze([]Record{{7, 1, Sample{1800000000, math.Float64bits(42), 1}}})
+			m := testMetric([]Archive{{1, 86400}})
 			ctx := context.Background()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				h, e := p.Pin(budget, 4<<20)
-				if e != nil {
-					b.Fatal(e)
-				}
-				s, e := h.Render(ctx, "sample", 1800000000-width, 1800000000, 1800000000)
+				s, w, e := render(ctx, m, source, 1800000000-width, 1800000000, 1800000000, 4<<20)
 				if e != nil || len(s.Values) != int(width) {
 					b.Fatal(e)
 				}
-				h.Close()
+				releaseRenderWorkspace(w)
 			}
 		})
 	}
@@ -205,19 +129,14 @@ func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
 		t.Run(fmt.Sprint(width), func(t *testing.T) {
 			const now int64 = 1800000000
 			const bits uint64 = 0x7ff8000000000042
-			var p Publication
-			cat := testCatalog([]Archive{{1, 86400}})
-			p.Publish(View{Catalog: cat, Parts: []Source{Freeze([]Record{{7, 1, Sample{now, bits, 0}}})}})
-			budget := NewBudget(16 << 20)
-			h, e := p.Pin(budget, 8<<20)
+			ctx := context.Background()
+			m := testMetric([]Archive{{1, 86400}})
+			source := Freeze([]Record{{7, 1, Sample{now, bits, 0}}})
+			first, w1, e := render(ctx, m, source, now-width, now, now, 8<<20)
 			if e != nil {
 				t.Fatal(e)
 			}
-			first, e := h.Render(context.Background(), "sample", now-width, now, now)
-			if e != nil {
-				t.Fatal(e)
-			}
-			second, e := h.Render(context.Background(), "sample", now-width, now, now)
+			second, w2, e := render(ctx, m, source, now-width, now, now, 8<<20)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -230,13 +149,9 @@ func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
 			if !first.Occupied[last] || math.Float64bits(first.Values[last]) != bits {
 				t.Fatal("later render changed an earlier result")
 			}
-			h.Close()
-			p.Publish(View{Catalog: cat})
-			h, e = p.Pin(budget, 8<<20)
-			if e != nil {
-				t.Fatal(e)
-			}
-			empty, e := h.Render(context.Background(), "sample", now-width, now, now)
+			releaseRenderWorkspace(w1)
+			releaseRenderWorkspace(w2)
+			empty, w, e := render(ctx, m, sources{}, now-width, now, now, 8<<20)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -245,11 +160,7 @@ func TestRenderWorkspaceLifetimeAndReset(t *testing.T) {
 					t.Fatal("stale pooled slot", i)
 				}
 			}
-			h.Close()
-			p.Close()
-			if budget.Used() != 0 {
-				t.Fatal("budget leak")
-			}
+			releaseRenderWorkspace(w)
 		})
 	}
 }
@@ -263,29 +174,21 @@ func TestRenderWorkspaceResetAfterPartialFailure(t *testing.T) {
 		records = append(records, Record{7, 1, Sample{ts, math.Float64bits(float64(ts)), 0}})
 	}
 	records = append(records, Record{7, 1, Sample{now, 0x7ff8000000000042, 0}})
-	var p Publication
-	p.Publish(View{Catalog: testCatalog([]Archive{{1, 128}}), Parts: []Source{Freeze(records)}})
-	defer p.Close()
-	b := NewBudget(8192)
-	h, err := p.Pin(b, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = h.Render(context.Background(), "sample", 0, now, now); !errors.Is(err, ErrConflict) {
+	_, w, err := render(context.Background(), testMetric([]Archive{{1, 128}}), Freeze(records), 0, now, now, 4096)
+	if !errors.Is(err, ErrConflict) {
 		t.Fatal("expected a partially filled conflicting result", err)
 	}
-	w := h.workspaces
 	if w == nil || len(w.touched) != int(now) {
 		t.Fatal("fixture did not fill the workspace")
 	}
-	h.Close()
+	releaseRenderWorkspace(w)
 	for i, value := range w.values {
 		if !math.IsNaN(value) || w.seen[i] {
 			t.Fatal("failed render retained a dirty slot", i)
 		}
 	}
-	if len(w.touched) != 0 || b.Used() != 0 {
-		t.Fatal("workspace or budget retained")
+	if len(w.touched) != 0 {
+		t.Fatal("workspace retained")
 	}
 }
 
@@ -335,47 +238,5 @@ func TestSlotRangesAndFrozenVersions(t *testing.T) {
 				t.Fatal("extra records")
 			}
 		}
-	}
-}
-
-func TestRenderIntoPreservesUntouchedAndInvalidatesWrapped(t *testing.T) {
-	const payload uint64 = 0x7ff8000000000042
-	const negzero uint64 = 1 << 63
-	var pub Publication
-	pub.Publish(View{Catalog: testCatalog([]Archive{{1, 10}}), Parts: []Source{Freeze([]Record{
-		{7, 1, Sample{21, math.Float64bits(99), 3}},
-		{7, 1, Sample{12, payload, 2}},
-		{7, 1, Sample{13, negzero, 1}},
-	})}})
-	defer pub.Close()
-	b := NewBudget(4096)
-	h, e := pub.Pin(b, 4096)
-	if e != nil {
-		t.Fatal(e)
-	}
-	base := &Series{From: 11, Until: 15, Step: 1, Values: []float64{1, 2, 3, 4}}
-	bad := *base
-	bad.Step = 2
-	if _, e = h.RenderInto(context.Background(), "sample", 10, 14, 20, &bad); e == nil {
-		t.Fatal("shape mismatch accepted")
-	}
-	for i, v := range base.Values {
-		if v != float64(i+1) {
-			t.Fatal("bad shape changed base")
-		}
-	}
-	got, e := h.RenderInto(context.Background(), "sample", 10, 14, 20, base)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if &got.Values[0] != &base.Values[0] {
-		t.Fatal("overlay copied values")
-	}
-	if !math.IsNaN(got.Values[0]) || !got.Occupied[0] || math.Float64bits(got.Values[1]) != payload || math.Float64bits(got.Values[2]) != negzero || got.Values[3] != 4 || got.Occupied[3] {
-		t.Fatal("incorrect overlay", got)
-	}
-	h.Close()
-	if b.Used() != 0 || base.Values[3] != 4 {
-		t.Fatal("close changed caller ownership")
 	}
 }
