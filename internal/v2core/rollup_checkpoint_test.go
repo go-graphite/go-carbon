@@ -211,7 +211,7 @@ func TestRollupCheckpointOpenMeasure(t *testing.T) {
 	delta, _ := strconv.Atoi(os.Getenv("CKPT_MEASURE_DELTA")) // seals newer than the kill arm's checkpoint
 	delta = max(delta, 1)
 	cfg := coreTestConfig()
-	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 4, 1, true, max(1<<20, (n+3)/4+1024)
+	cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 4, 1, true, max(1<<20, n)
 	policies := make([][]byte, n)
 	for i := range policies {
 		def := "10s:6h,5m:7d,1h:1y"

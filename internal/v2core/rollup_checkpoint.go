@@ -35,8 +35,8 @@ const (
 
 var (
 	rollupCheckpointCRC       = crc32.MakeTable(crc32.Castagnoli)
-	rollupCheckpointZstd, _   = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
-	rollupCheckpointUnzstd, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(1<<32))
+	rollupCheckpointZstd, _   = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(16))
+	rollupCheckpointUnzstd, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(16), zstd.WithDecoderMaxMemory(1<<32))
 )
 
 // rollupCheckpointEvery spaces at-seal checkpoints; close always writes one.
