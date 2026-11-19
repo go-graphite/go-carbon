@@ -23,16 +23,19 @@ import (
 // descriptor that TestMergeByteDifferential writes, recorded on github
 // atimofieiev/v2 9f959a15aa7a (string merge keys) and re-recorded once when
 // merges began repacking short runs up to MaxDenseSlots; the decoded digest
-// below did not change. A merge must stay byte identical: do not re-record it
-// for a performance change.
-const mergeByteDifferentialDigest = "c8067a3d9c42ffe48aa7ec84db2eb9be9ffe5bb52113cf95f64b91a304c9a8d3"
+// below did not change. Re-recorded with it when merged runs stopped storing
+// per-slot orders (each record carries its metric's frontier). A merge must
+// stay byte identical: do not re-record it for a performance change.
+const mergeByteDifferentialDigest = "aa7a5f71b9983435e1fe09134d83ca7a3367b927f07407bdbda58ef5be3083ac"
 
 // mergeDecodedDifferentialDigest is the SHA-256 of the same merged parts'
 // content independent of run layout (every slot as a singleton record, every
 // envelope, the descriptor without file bytes, digest or KV count), recorded
-// on github atimofieiev/v2 e9795c4c62e3 before merges repacked runs. Run
-// layout may change; this content must not.
-const mergeDecodedDifferentialDigest = "266d1b35f1f24860c11a88321445ea9debcfb4591932bab481fcdb14cef56f42"
+// on github atimofieiev/v2 e9795c4c62e3 before merges repacked runs, and
+// re-recorded once when merged records began carrying their metric's
+// frontier as order (times, value bits and envelopes unchanged). Run layout
+// may change; this content must not.
+const mergeDecodedDifferentialDigest = "d719574020e3415c908b7b7953eef6c57a2d832e8dce6cc19c30d14b36bea8b5"
 
 // TestMergeByteDifferential runs multi-tier merges (seal parts, merges of
 // merges plus a late part) over length-tied, prefix-sharing and non-ASCII

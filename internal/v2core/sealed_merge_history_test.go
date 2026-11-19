@@ -79,14 +79,17 @@ func TestSealedMergeHistoryDifferential(t *testing.T) {
 					slices.SortFunc(got, less)
 					slices.SortFunc(want, less)
 					// Idle materialization may happen independently in the two
-					// owners. Correction selects physical placement; compare all
-					// logical fields (timestamp, IEEE bits and source order).
+					// owners. Correction selects physical placement, and merged
+					// runs carry their metric's frontier as order; compare the
+					// logical winner (timestamp and IEEE bits).
 					for i := range got {
 						got[i].Correction = false
 					}
 					for i := range want {
 						want[i].Correction = false
 					}
+					logicalWinners(got)
+					logicalWinners(want)
 					if !reflect.DeepEqual(got, want) {
 						t.Fatalf("epoch %d merged winners differ\ngot=%+v\nwant=%+v", epoch, got, want)
 					}

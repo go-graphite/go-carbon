@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	s := o.db.NewSnapshot()
 	got := mergeRead(t, s)
 	_ = s.Close()
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(logicalWinners(got), logicalWinners(slices.Clone(want))) {
 		t.Fatal("partition merge changed winners")
 	}
 	// The opened-name and cold-history paths must also retain partition scopes.
@@ -167,7 +168,7 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	s = o.db.NewSnapshot()
 	got = mergeRead(t, s)
 	_ = s.Close()
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(logicalWinners(got), logicalWinners(slices.Clone(want))) {
 		t.Fatal("partition restart changed winners")
 	}
 	before := e.PartGCStats()[0]
@@ -205,7 +206,7 @@ func TestMergeBoundPartitionReadDropAndRestart(t *testing.T) {
 	if len(mergeRead(t, s)) != 0 {
 		t.Fatal("expired partition rows remain")
 	}
-	if !reflect.DeepEqual(mergeRead(t, pin), want) {
+	if !reflect.DeepEqual(logicalWinners(mergeRead(t, pin)), logicalWinners(slices.Clone(want))) {
 		t.Fatal("drop violated pin")
 	}
 	// Every envelope expires no earlier than the data it masks; once all data

@@ -48,7 +48,7 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 			}
 			s = e.owners[0].db.NewSnapshot()
 			defer s.Close()
-			if got := mergeRead(t, s); !reflect.DeepEqual(got, want) {
+			if got := mergeRead(t, s); !reflect.DeepEqual(logicalWinners(got), logicalWinners(want)) {
 				t.Fatal("encoded copy changed exact winners")
 			}
 			e.owners[0].gc.mu.Lock()

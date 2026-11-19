@@ -80,12 +80,13 @@ func TestSealIntervalStoredWinnersDifferential(t *testing.T) {
 					return 0
 				})
 				// Correction records choose the physical correction stream based on
-				// prior seal boundaries. Compare the complete logical winner, including
-				// all value bits/order/sequence, independently of that placement hint.
+				// prior seal boundaries, and merged runs carry their metric's frontier
+				// as order. Compare the logical winner (time and all value bits),
+				// independently of both.
 				for i := range records {
 					records[i].Correction = false
 				}
-				return records
+				return logicalWinners(records)
 			}
 			want, got := get(es[0]), get(es[1])
 			if !reflect.DeepEqual(got, want) {

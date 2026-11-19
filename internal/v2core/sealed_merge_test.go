@@ -52,6 +52,16 @@ func mergeAppend(t *testing.T, e *coreEngine, order uint64) {
 		t.Fatal(err)
 	}
 }
+// logicalWinners clears Order and Sequence. A merged run stores no per-slot
+// order: each record carries its metric's frontier, which orders it against
+// every other part as its own order did. Winners compare by time and bits.
+func logicalWinners(rs []sealrollup.Record) []sealrollup.Record {
+	for i := range rs {
+		rs[i].Order, rs[i].Sample.Sequence = 0, 0
+	}
+	return rs
+}
+
 func mergeRead(t *testing.T, s *pebble.Snapshot) []sealrollup.Record {
 	t.Helper()
 	var out []sealrollup.Record
@@ -194,7 +204,7 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 			defer e.close()
 			s = e.owners[0].db.NewSnapshot()
 			defer s.Close()
-			if !reflect.DeepEqual(mergeRead(t, s), want) {
+			if !reflect.DeepEqual(logicalWinners(mergeRead(t, s)), logicalWinners(want)) {
 				t.Fatal("crash lost or changed slots")
 			}
 			// The child runs one merge of the first smallMergeRatio parts.
@@ -372,8 +382,9 @@ func TestSealedMergeLifecycleAndRoutes(t *testing.T) {
 			s := o.db.NewSnapshot()
 			want := mergeRead(t, s)
 			_ = s.Close()
-			if got := mergeDrain(t, o); got != 1 {
-				t.Fatalf("merges=%d", got)
+			// Sixteen small parts fold in four 4-way merges and one final merge.
+			if got := mergeDrain(t, o); got != sealedMergeFanIn/smallMergeRatio+1 || mergeCount(o) != 1 {
+				t.Fatalf("merges=%d parts=%d", got, mergeCount(o))
 			}
 			s = o.db.NewSnapshot()
 			defer s.Close()

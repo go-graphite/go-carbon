@@ -67,6 +67,8 @@ func TestMergeKeepsRecordsTheReaderReturns(t *testing.T) {
 			slices.SortFunc(out[name], func(a, b sealrollup.Record) int {
 				return cmp.Or(cmp.Compare(a.Archive, b.Archive), cmp.Compare(a.Slot, b.Slot))
 			})
+			// Merged runs carry their metric's frontier as order.
+			logicalWinners(out[name])
 		}
 		return out
 	}

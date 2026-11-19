@@ -578,6 +578,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			}
 		}
 		config = *chosen.config
+		// Merges combine only sequence-adjacent parts, so the metric's frontier
+		// bounds every record of the run and orders it against every other part.
+		if err = writer.ElideOrder(metadata.Frontier.Order); err != nil {
+			return v2part.Descriptor{}, err
+		}
 		// The output key is the input's validated identity with the output part:
 		// Encode(c.key) byte for byte, without a name string or route re-hash.
 		key = append(append(key[:0], c.ident...), make([]byte, 16)...)
