@@ -55,7 +55,7 @@ func TestMergeKeepsRecordsTheReaderReturns(t *testing.T) {
 	read := func() map[string][]sealrollup.Record {
 		s := o.db.NewSnapshot()
 		defer s.Close()
-		index, err := NewRollupSnapshot(context.Background(), s, nil, 0)
+		index, err := NewRollupSnapshot(context.Background(), s, nil, nil, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -87,8 +87,8 @@ func TestExpiryResetReopenResume(t *testing.T) {
 	if closeErr := snapshot.Close(); err != nil || closeErr != nil {
 		t.Fatalf("reset metadata %v %v", err, closeErr)
 	}
-	old.once.Do(old.load)
-	m := old.sealed.lookup("expiry.metric")
+	old.load()
+	m := old.lookup("expiry.metric")
 	if old.err != nil || m == nil || m.meta.Expired {
 		t.Fatal("old snapshot changed")
 	}

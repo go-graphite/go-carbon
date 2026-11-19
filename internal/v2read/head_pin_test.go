@@ -78,10 +78,26 @@ func TestHeadOnlyPublishPinsNothing(t *testing.T) {
 	if pins.Load() != 1 || unpinned.Load() < heads {
 		t.Fatalf("head-only publications took %d pins (want the initial one), %d unpinned", pins.Load(), unpinned.Load())
 	}
+	// Each head-only publication holds its own part references and no Pebble
+	// snapshot: the sealed publication closed its snapshot once parts were open.
+	if g := reader.owners[0].Load(); g == nil || g.snapshot != nil || g.base != nil || g.parts == nil {
+		t.Fatalf("head-only publication holds a snapshot or no parts: %+v", g)
+	}
 	b := v2core.Batch{ID: 1, Order: heads + 1, Clock: clock, Policy: policy, Points: []v2core.Row{{ID: 1, Time: clock - 30 + heads + 1, Bits: math.Float64bits(heads + 1), Seq: heads + 1}}}
 	if err := engine.AppendBatches(0, []v2core.Batch{b}, heads+1, true); err != nil {
 		t.Fatal(err)
 	}
 	await(t, func() bool { return pins.Load() >= 2 && published.Load() == 0 })
 	check(heads + 1)
+	if g := reader.owners[0].Load(); g == nil || g.snapshot != nil {
+		t.Fatal("sealed publication kept its snapshot after opening parts")
+	}
+	// A head-only publication over sealed parts reads them through its own
+	// registry references after the sealed publication is released.
+	b = v2core.Batch{ID: 1, Order: heads + 2, Clock: clock, Policy: policy, Points: []v2core.Row{{ID: 1, Time: clock - 30 + heads + 2, Bits: math.Float64bits(heads + 2), Seq: heads + 2}}}
+	if err := engine.AppendBatches(0, []v2core.Batch{b}, heads+2, false); err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool { return published.Load() == 1 })
+	check(heads + 2)
 }

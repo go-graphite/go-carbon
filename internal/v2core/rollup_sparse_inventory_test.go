@@ -68,7 +68,7 @@ func TestSparseRollupInventoryWorkBound(t *testing.T) {
 		if len(inventory) != int(order) || len(scopes) != int(order)*2 {
 			t.Fatalf("incomplete inventory: parts=%d scopes=%d", len(inventory), len(scopes))
 		}
-		prior, err = NewRollupSnapshot(context.Background(), pin, prior)
+		prior, err = NewRollupSnapshot(context.Background(), pin, prior, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +104,7 @@ func TestSparseRollupInventoryWorkBound(t *testing.T) {
 	}
 	pin := db.NewSnapshot()
 	defer pin.Close()
-	legacy, err := NewRollupSnapshot(context.Background(), pin, nil)
+	legacy, err := NewRollupSnapshot(context.Background(), pin, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

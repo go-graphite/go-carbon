@@ -112,35 +112,32 @@ type snapshotMove struct {
 	authority *moveAuthority
 }
 
-func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, nil, cacheLimit...)
-}
-func NewRollupSnapshotWithCatalog(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, identities, nil, cacheLimit...)
-}
-func NewRollupSnapshotWithInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
-	return NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, prior, nil, bindings, cacheLimit...)
-}
-
-// NewRollupSnapshotWithCatalogAndInventory reuses immutable identities and the owner binding set.
-func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
+// NewRollupSnapshot reuses immutable identities and the owner binding set;
+// nil identities come from prior, nil bindings scan the snapshot.
+func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *RollupSnapshot, identities *PolicyCatalog, bindings *RollupInventory, cacheLimit ...int64) (*RollupSnapshot, error) {
 	if identities == nil && prior != nil {
 		identities = prior.identities
 	}
 	if identities == nil {
 		identities = &PolicyCatalog{}
 	}
-	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
-		return nil, err
-	} else if found {
-		return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
+	// Opened parts exist only for stores without copied parts. With them and
+	// no legacy rows, the directory and its record reads use only registry-held
+	// parts and the inventory, so snapshot may be nil.
+	opened, _ := ctx.Value(openedPartsContext{}).(*OpenedRollupParts)
+	if opened == nil {
+		if found, err := snapshotHasCopiedParts(snapshot); err != nil {
+			return nil, err
+		} else if found {
+			return newCopiedRollupSnapshot(ctx, snapshot, prior, cacheLimit...)
+		}
 	}
 	limit := int64(rollupReadCacheBytes)
 	if len(cacheLimit) > 0 {
 		limit = max(0, min(limit, cacheLimit[0]))
 	}
 	directory, _ := ctx.Value(archiveDirectoryContext{}).(string)
-	out := &RollupSnapshot{identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
+	out := &RollupSnapshot{opened: opened, identities: identities, snapshot: snapshot, directory: directory, bindingSet: bindings, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}}
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache
 	} else {
@@ -163,8 +160,6 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 			return nil, err
 		}
 		defer it.Close()
-	}
-	if inventory == nil {
 		// Bare GCP3 fixtures have no core frontier or atomic inventory bindings.
 		for valid := it.First(); valid; {
 			if err := ctx.Err(); err != nil {
@@ -194,7 +189,7 @@ func NewRollupSnapshotWithCatalogAndInventory(ctx context.Context, snapshot *peb
 		}
 		for id := range prior.parts {
 			if !live[id] {
-				fresh, err := NewRollupSnapshotWithCatalogAndInventory(ctx, snapshot, nil, identities, bindings, cacheLimit...)
+				fresh, err := NewRollupSnapshot(ctx, snapshot, nil, identities, bindings, cacheLimit...)
 				if err == nil && prior.cache != nil && prior.cache.limit == limit {
 					fresh.cache = prior.cache
 				}
@@ -312,13 +307,6 @@ func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
 		out = append(out, &readPartMetric{part: p, readMetricState: readMetricState{PolicyIdentity: m.latest.PolicyIdentity}})
 	}
 	return out
-}
-func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
-	ids := map[string]struct{}{}
-	for _, p := range s.metricParts(m) {
-		ids[p.part.id] = struct{}{}
-	}
-	return ids
 }
 
 // RetainedBytes conservatively charges directory storage plus the maximum
