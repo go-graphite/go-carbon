@@ -45,13 +45,13 @@ func (e catalogEntry) definitionEqual(raw []byte) bool {
 	n := len(definitionNamePrefix) + len(e.key)
 	return len(raw) == n+len(e.definition) && bytes.HasPrefix(raw, []byte(definitionNamePrefix)) && string(raw[len(definitionNamePrefix):n]) == e.key && bytes.Equal(raw[n:], e.definition)
 }
-func (c *NameCatalog) bindEntry(id uint64, name string, definition []byte) (catalogEntry, error) {
-	if c.bindDefinition != nil {
-		var err error
-		name, definition, err = c.bindDefinition(id, name, definition)
-		if err != nil {
-			return catalogEntry{}, err
+func (c *NameCatalog) bindEntry(id uint64, name string, definition []byte) error {
+	if c.binding != nil {
+		if err := c.binding.Bind(id, name, definition); err != nil {
+			return err
 		}
+		c.boundCount = id
+		return nil
 	}
 	n := len(definitionNamePrefix) + len(name)
 	// JSON escapes cannot compare equal to the literal key, so use generic storage.
@@ -64,7 +64,9 @@ func (c *NameCatalog) bindEntry(id uint64, name string, definition []byte) (cata
 			suffix = c.copyDefinition(definition[n:])
 			c.definitionSuffixes[string(suffix)] = suffix
 		}
-		return catalogEntry{key: name, definition: suffix, split: true}, nil
+		c.entries = append(c.entries, catalogEntry{key: name, definition: suffix, split: true})
+		return nil
 	}
-	return catalogEntry{key: name, definition: c.copyDefinition(definition)}, nil
+	c.entries = append(c.entries, catalogEntry{key: name, definition: c.copyDefinition(definition)})
+	return nil
 }

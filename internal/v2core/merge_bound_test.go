@@ -24,7 +24,7 @@ func TestMergeBoundSelection(t *testing.T) {
 	s := o.db.NewSnapshot()
 	defer s.Close()
 	inputs, err := o.selectMerge(s)
-	if err != nil || len(inputs) != 16 {
+	if err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("inputs=%d %v", len(inputs), err)
 	}
 	var total uint64
@@ -62,7 +62,7 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	o := e.owners[0]
 	p, enc := rollupTestPolicy(t, "merge.prune", "1s:120,10s:1h", sealrollup.Last, .5)
 	digest, _ := sealrollup.PolicyDigest(p.Config)
-	for n := byte(1); n <= 16; n++ {
+	for n := byte(1); n <= smallMergeRatio; n++ {
 		m := RollupMetadata{Version: 1, ID: 1, Policy: enc, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 2000, Policy: digest}, LastUpdate: 2000e9, Revision: uint64(n)}
 		rs := []sealrollup.Record{{Delta: sealrollup.Delta{Archive: 0, Slot: 40, Order: uint64(n), Sample: sealrollup.Sample{Time: 1000, Bits: math.Float64bits(1)}}}, {Delta: sealrollup.Delta{Archive: 0, Slot: 41, Order: uint64(n), Sample: sealrollup.Sample{Time: 1961, Bits: math.Float64bits(2)}}}}
 		installMergeRecords(t, o, n, []RollupMetadata{m}, [][]sealrollup.Record{rs})
@@ -77,7 +77,8 @@ func TestMergeBoundPrunesExpiredCombinedPart(t *testing.T) {
 	f := *o.frontier.Load()
 	f.ArchiveClock = 2000
 	o.frontier.Store(&f)
-	if mergeDrain(t, o) != 1 {
+	// Four equal parts fold in one merge.
+	if mergeDrain(t, o) != 1 || mergeCount(o) != 1 {
 		t.Fatal("did not merge")
 	}
 	s := o.db.NewSnapshot()
@@ -374,7 +375,7 @@ func TestMergeDiskGuard(t *testing.T) {
 	defer s.Close()
 	withFreeSpace(t, 1<<40)
 	inputs, err := o.selectMerge(s)
-	if err != nil || len(inputs) != 16 {
+	if err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("plenty of space: %d %v", len(inputs), err)
 	}
 	var total uint64
@@ -383,7 +384,7 @@ func TestMergeDiskGuard(t *testing.T) {
 	}
 	// free/4 bound: exactly enough, then one byte short.
 	withFreeSpace(t, total*4)
-	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 16 {
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("free/4 exact: %d %v", len(inputs), err)
 	}
 	withFreeSpace(t, total*4-4)
@@ -397,7 +398,7 @@ func TestMergeDiskGuard(t *testing.T) {
 		t.Fatalf("in-flight ignored: %d %v", len(inputs), err)
 	}
 	mergeInflight.Add(^uint64(100))
-	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != 16 {
+	if inputs, err = o.selectMerge(s); err != nil || len(inputs) != smallMergeRatio {
 		t.Fatalf("released in-flight: %d %v", len(inputs), err)
 	}
 	// Zero free space: no merge, no error, counted skip.

@@ -9,24 +9,24 @@ import (
 
 func TestCatalogIndexCollisionsAndGrowth(t *testing.T) {
 	var index catalogIndex
-	entries := []catalogEntry{{}}
+	catalog := &NameCatalog{entries: []catalogEntry{{}}}
 	// Force zero hashes, full-hash collisions, wraparound and repeated growth.
 	for i := 1; i <= 4096; i++ {
 		key := fmt.Sprintf("series.%d\x00", i)
 		hash := []uint64{0, ^uint64(0), 7}[i%3]
-		if index.lookup(key, hash, entries) != 0 {
+		if index.lookup(key, hash, catalog) != 0 {
 			t.Fatal("unseen name found", key)
 		}
-		entries = append(entries, catalogEntry{key: key})
+		catalog.entries = append(catalog.entries, catalogEntry{key: key})
 		index.insert(hash, uint64(i))
 	}
-	for i := 1; i < len(entries); i++ {
+	for i := 1; i < len(catalog.entries); i++ {
 		hash := []uint64{0, ^uint64(0), 7}[i%3]
-		if id := index.lookup(entries[i].key, hash, entries); id != uint64(i) {
+		if id := index.lookup(catalog.entries[i].key, hash, catalog); id != uint64(i) {
 			t.Fatal(i, id)
 		}
 	}
-	if index.lookup("absent", 7, entries) != 0 {
+	if index.lookup("absent", 7, catalog) != 0 {
 		t.Fatal("hash collision admitted as a name")
 	}
 }

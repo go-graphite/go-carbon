@@ -112,7 +112,9 @@ remain separate qualification gates.
 `NewDenseWriter(path, spec)` accepts the published sorted singleton stream and
 produces `core-rollup-dense-v1` values. A value holds at most 4,096 occupied
 physical slots of one metric/archive. Slot deltas encode sparse archives without
-padding; timestamp delta-of-deltas retain physical ring wrap; XOR varints retain
+padding. An aligned run, where every timestamp is ts0 + (slot - slot0) × step,
+stores only ts0 and step; ring-wrap, unaligned and single-slot runs keep a
+timestamp delta-of-delta column. XOR varints retain
 original replacement orders; a bitmap retains correction flags. A one-byte
 tag names each run's value codec: decimal mantissas m with v = m / 10^e (one
 exponent per run, every value's float64 bits checked at encode) as zigzag first

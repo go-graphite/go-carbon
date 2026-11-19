@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -1056,7 +1057,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// maximum buffer for every owner at startup.
 		headCapacity = min(headCapacity, 64<<10)
 	}
+	// Without base rows a rollup seal reads only the batches, which carry the
+	// same points. Its head keeps the point count (MaxRows, sealRows,
+	// telemetry) and the oldest time (late-point admission), not the rows.
+	keepRows := !o.cfg.Rollups || o.cfg.KeepBaseRows || o.hook != nil
+	if !keepRows {
+		headCapacity = 0
+	}
 	head := make([]row, 0, headCapacity)
+	headPoints, headOldest := 0, int64(math.MaxInt64)
 	pending := slices.Clone(o.meta.Cursors)
 	// Pending applications live as pointer-free rows (name-once S5a-2). Each
 	// head is a fresh pendingHead; published views share its immutable prefix.
@@ -1099,6 +1108,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// publications show both until the part is published.
 	type sealFlight struct {
 		rows     []row
+		points   int
+		oldest   int64
 		pending  PendingView
 		next     coreFrontier
 		done     chan sealResult
@@ -1155,10 +1166,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.meta = f.next
 		o.readGeneration++
 		o.publishFrontier(f.next)
-		o.committed.Add(uint64(len(f.rows)))
+		o.committed.Add(uint64(f.points))
 		o.parts.Add(1)
 		o.bytes.Add(r.n)
-		o.bufferedPoints.Store(int64(len(head)))
+		o.bufferedPoints.Store(int64(headPoints))
 		o.bufferedSince.Store(headSince)
 		// The intake head is already separate; readers that still pin the
 		// frozen view keep it.
@@ -1210,7 +1221,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		frozen := pend.view(o.lookup)
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
-		f := &sealFlight{rows: head, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
+		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
 		pend = pendingHead{}
 		publishedBatches = 0
 		headExpiries = o.expiries.Load()
@@ -1223,13 +1234,17 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			head = make([]row, 0, headCapacity)
 		}
 		spareRows = nil
+		headPoints, headOldest = 0, math.MaxInt64
 		headSince = 0
 		deadline = time.Now().Add(sealInterval)
 		work := o.work
 		go func() {
+			if o.stage != nil {
+				o.stage("background-seal")
+			}
 			// The planner reads the frozen rows in place and copies samples
 			// into its own pointer-free scratch.
-			n, err := o.sealBatches(f.rows, f.pending, f.next)
+			n, err := o.sealBatches(f.rows, f.points, f.oldest, f.pending, f.next)
 			f.done <- sealResult{n: n, err: err}
 			if work != nil {
 				select {
@@ -1276,7 +1291,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		next.ArchiveClock = sealedPending.maxClock(next.ArchiveClock)
 		next.NextPart++
 		reported, since := min(publishedBatches, pend.n), headExpiries
-		n, err := o.sealBatches(head, sealedPending, next)
+		n, err := o.sealBatches(head, headPoints, headOldest, sealedPending, next)
 		if err != nil {
 			return err
 		}
@@ -1288,10 +1303,11 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// overwrite or clear it; the next head appends to fresh slices.
 		pend = pendingHead{}
 		publishedBatches = 0
-		o.committed.Add(uint64(len(head)))
+		o.committed.Add(uint64(headPoints))
 		o.parts.Add(1)
 		o.bytes.Add(n)
 		head = head[:0]
+		headPoints, headOldest = 0, math.MaxInt64
 		o.bufferedPoints.Store(0)
 		o.bufferedSince.Store(0)
 		deadline = time.Now().Add(sealInterval)
@@ -1324,12 +1340,12 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	// fullHead reports a data packet that the head cannot admit below MaxRows.
 	fullHead := func(p *corePacket, producer int) bool {
-		return p != nil && p.operation == nil && !p.stop && p.cursor > pending[producer] && len(head)+len(p.rows) > o.cfg.MaxRows
+		return p != nil && p.operation == nil && !p.stop && p.cursor > pending[producer] && headPoints+len(p.rows) > o.cfg.MaxRows
 	}
 	return func() (bool, bool) {
 		if failure == nil && flight != nil {
 			failure = pollFlight()
-			if failure == nil && flight == nil && (len(head) >= o.sealRows || time.Now().After(deadline)) {
+			if failure == nil && flight == nil && (headPoints >= o.sealRows || time.Now().After(deadline)) {
 				failure = startSeal()
 			}
 			if failure != nil {
@@ -1417,7 +1433,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				failure = errors.New("seal planner requires original apply batches")
 			}
 			if failure == nil && p.cursor > pending[producer] {
-				if len(head)+len(p.rows) > o.cfg.MaxRows {
+				if headPoints+len(p.rows) > o.cfg.MaxRows {
 					if asyncSeal {
 						// The loop above left this packet queued while a flight ran;
 						// the flight is published, so freeze the full head now.
@@ -1430,16 +1446,22 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					}
 				}
 				if failure == nil {
-					if len(head) == 0 && len(p.rows) > 0 {
+					if headPoints == 0 && len(p.rows) > 0 {
 						headSince = time.Now().UnixNano()
 						if flight == nil {
 							o.bufferedSince.Store(headSince)
 						}
 					}
-					head = append(head, p.rows...)
-					buffered := len(head)
+					if keepRows {
+						head = append(head, p.rows...)
+					}
+					for _, r := range p.rows {
+						headOldest = min(headOldest, r.Time)
+					}
+					headPoints += len(p.rows)
+					buffered := headPoints
 					if flight != nil {
-						buffered += len(flight.rows)
+						buffered += flight.points
 					}
 					o.bufferedPoints.Store(int64(buffered))
 					if p.pending != nil {
@@ -1461,7 +1483,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				lease.release()
 			}
 			sealPending = sealPending || seal
-			if failure == nil && (len(head) >= o.sealRows || time.Now().After(deadline)) {
+			if failure == nil && (headPoints >= o.sealRows || time.Now().After(deadline)) {
 				failure = thresholdSeal()
 			}
 			if failure == nil && o.hook != nil && !sealPending && time.Since(headPublication) >= time.Second {
@@ -1546,7 +1568,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if o.maintenance && maintenanceDeadline.Before(o.nextPoll) {
 			o.nextPoll = maintenanceDeadline
 		}
-		if len(head) > 0 {
+		if headPoints > 0 {
 			if o.batchHook != nil && pend.n > publishedBatches {
 				if next := batchPublication.Add(time.Second); next.Before(o.nextPoll) {
 					o.nextPoll = next
@@ -1674,10 +1696,10 @@ func sortCoreRows(head []row, seconds int64) {
 		return less(a, b)
 	})
 }
-func (o *coreOwner) seal(head []row, next coreFrontier) (uint64, error) {
-	return o.sealBatches(head, PendingView{}, next)
-}
-func (o *coreOwner) sealBatches(head []row, pending PendingView, next coreFrontier) (uint64, error) {
+
+// sealBatches seals points admitted rows whose earliest time is oldest.
+// Without base rows the rollup planner reads pending directly and head is empty.
+func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending PendingView, next coreFrontier) (uint64, error) {
 	if err := o.observeSealedMergeBudget(); err != nil {
 		return 0, err
 	}
@@ -1719,7 +1741,7 @@ func (o *coreOwner) sealBatches(head []row, pending PendingView, next coreFronti
 		if durable {
 			o.durableSeals.Add(1)
 			o.sealNames.Add(uint64(plan.Names))
-			o.sealPoints.Add(uint64(len(head)))
+			o.sealPoints.Add(uint64(points))
 		}
 	}()
 	if o.plan != nil {
@@ -1730,7 +1752,7 @@ func (o *coreOwner) sealBatches(head []row, pending PendingView, next coreFronti
 		if err = validateCoreSealPlan(plan); err != nil {
 			return 0, err
 		}
-		if plan.ReplaceRaw && len(head) > 0 && len(plan.Files) == 0 {
+		if plan.ReplaceRaw && points > 0 && len(plan.Files) == 0 {
 			return 0, errors.New("raw replacement requires output for nonempty input")
 		}
 	}
@@ -1739,14 +1761,10 @@ func (o *coreOwner) sealBatches(head []row, pending PendingView, next coreFronti
 	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
 	omitRaw := plan.ReplaceRaw || (o.cfg.Rollups && !o.cfg.KeepBaseRows)
-	if omitRaw && !plan.ReplaceRaw && len(head) > 0 {
+	if omitRaw && !plan.ReplaceRaw && points > 0 {
 		// Keep the base-row admission rule without sorting or encoding rows.
 		// Partitions are monotonic in time, so the oldest row decides.
-		low := head[0].Time
-		for _, r := range head[1:] {
-			low = min(low, r.Time)
-		}
-		if corePartition(low, o.cfg.PartitionSeconds) < next.ExpiredBefore {
+		if corePartition(oldest, o.cfg.PartitionSeconds) < next.ExpiredBefore {
 			return 0, errors.New("late point targets expired partition")
 		}
 	}
