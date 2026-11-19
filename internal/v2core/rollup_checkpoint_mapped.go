@@ -27,7 +27,6 @@ type mappedRollupCheckpoint struct {
 }
 type checkpointIndexEntry struct {
 	id, offset, size     uint64
-	ordinal              uint64
 	due                  int64
 	nameOffset, nameSize uint64
 }

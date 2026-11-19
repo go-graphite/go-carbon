@@ -220,10 +220,10 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 		last := min(first+128, len(entries))
 		start := entries[first].offset
 		end := entries[last-1].offset + entries[last-1].size
-		block := rollupCheckpointZstd.EncodeAll(body[start:end], nil)
 		offset := uint64(len(compressed))
-		compressed = binary.LittleEndian.AppendUint64(compressed, uint64(len(block)))
-		compressed = append(compressed, block...)
+		compressed = binary.LittleEndian.AppendUint64(compressed, 0)
+		compressed = rollupCheckpointZstd.EncodeAll(body[start:end], compressed)
+		binary.LittleEndian.PutUint64(compressed[offset:], uint64(len(compressed))-offset-8)
 		for i := first; i < last; i++ {
 			entries[i].size |= (entries[i].offset - start) << 32
 			entries[i].offset = offset
@@ -251,20 +251,25 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	indexes := make([]byte, 0, len(entries)*48)
 	indexOffset := uint64(len(out))
 
+	// The sorted IDs are no longer needed. Reuse their storage to sort
+	// ordinals instead of moving the much larger index records.
+	order := ids[:len(entries)]
 	for i := range entries {
 		e := &entries[i]
-		e.ordinal = uint64(i)
+		order[i] = uint64(i)
 		indexes = binary.LittleEndian.AppendUint64(indexes, e.id)
 		indexes = binary.LittleEndian.AppendUint64(indexes, e.offset+bodyOffset)
 		indexes = binary.LittleEndian.AppendUint64(indexes, e.size)
 	}
-	slices.SortFunc(entries, func(a, b checkpointIndexEntry) int {
+	slices.SortFunc(order, func(i, j uint64) int {
+		a, b := &entries[i], &entries[j]
 		return bytes.Compare(body[a.nameOffset:a.nameOffset+a.nameSize], body[b.nameOffset:b.nameOffset+b.nameSize])
 	})
-	for _, e := range entries {
-		indexes = binary.LittleEndian.AppendUint64(indexes, e.ordinal)
+	for _, ordinal := range order {
+		indexes = binary.LittleEndian.AppendUint64(indexes, ordinal)
 	}
-	slices.SortFunc(entries, func(a, b checkpointIndexEntry) int {
+	slices.SortFunc(order, func(i, j uint64) int {
+		a, b := &entries[i], &entries[j]
 		if a.due < b.due {
 			return -1
 		}
@@ -273,7 +278,8 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 		}
 		return 0
 	})
-	for _, e := range entries {
+	for _, ordinal := range order {
+		e := &entries[ordinal]
 		indexes = binary.LittleEndian.AppendUint64(indexes, uint64(e.due))
 		indexes = binary.LittleEndian.AppendUint64(indexes, e.id)
 	}

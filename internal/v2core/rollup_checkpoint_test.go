@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -740,5 +741,65 @@ func TestLazyCheckpointChangedExpiryMatchesScan(t *testing.T) {
 		if !meta.Expired {
 			t.Fatal("new TTL did not expire idle name")
 		}
+	}
+}
+
+// Checkpoint indexes contain record ordinals, not producer IDs. Sparse wide
+// IDs and escaped names must retain their name/ID binding after a rewrite.
+func TestLazyCheckpointSparseIDs(t *testing.T) {
+	cfg, _ := checkpointTestSetup(t)
+	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
+	ids := []uint64{1007, 1<<40 + 13, 42, 99, 1<<32 + 7}
+	names := []string{"sparse.z", "sparse.\"quoted", "sparse.\nline", "sparse.\\slash", "sparse.a"}
+	root := t.TempDir()
+	e, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := make([][]byte, len(ids))
+	var batches []Batch
+	for i, id := range ids {
+		_, policies[i] = rollupTestPolicy(t, names[i], "10s:6h,5m:7d,1h:1y", sealrollup.Average, 0)
+		batches = append(batches, Batch{ID: id, Order: 1, Clock: 1794700800, Policy: policies[i], Points: []Row{{ID: id, Time: 1794700800, Bits: math.Float64bits(float64(i) + .25), Seq: 1}}})
+	}
+	if err = e.AppendBatches(0, batches, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scanDir := copyTree(t, root)
+	if err = os.Remove(filepath.Join(scanDir, "owner-000", rollupCheckpointFile)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(root, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(scanDir, cfg, hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	r := a.owners[0].rollups
+	if !r.fromCheckpoint || len(r.metrics) != 0 {
+		t.Fatal("checkpoint did not stay lazy")
+	}
+	for i, id := range ids {
+		encodedName, err := json.Marshal(names[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := encodedName[1 : len(encodedName)-1]
+		if err = r.loadCheckpointName(name); err != nil {
+			t.Fatal(err)
+		}
+		if m := r.metrics[id]; m == nil || !m.definitionEqual(policies[i]) {
+			t.Fatalf("wrong name/ID binding for %d", id)
+		}
+	}
+	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+		t.Fatal("sparse-ID checkpoint differs from scan")
 	}
 }
