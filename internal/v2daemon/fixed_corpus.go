@@ -217,7 +217,7 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 					x = producer.AppendApplications(in.apps)
 					clear(in.apps)
 				} else {
-					x = producer.Append(in.names, in.data, in.seq, 1794700800+int64((seal+1)*4))
+					x = producer.Append(in.names, nil, in.data, in.seq, 1794700800+int64((seal+1)*4))
 				}
 				clear(in.names)
 				in.names = in.names[:0]

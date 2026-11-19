@@ -222,7 +222,6 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					for _, id := range adopted {
 						m := ranked.metrics[id]
 						next.install(id, m, ranked.metaOf(id))
-						next.names[m.policy.Name] = id
 					}
 					plan, err := next.plan(coreSealInput{Batches: batches})
 					if err != nil {
@@ -296,11 +295,13 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 	}
 }
 
-// TestPolicyIdentitySlotFitsPadding pins the slot hint at 0 B per name: it
-// lives in PolicyIdentity's padding, and rollupMetric keeps #1587's size.
-func TestPolicyIdentitySlotFitsPadding(t *testing.T) {
-	if got := reflect.TypeFor[PolicyIdentity]().Size(); got != 56 {
-		t.Fatalf("PolicyIdentity is %d B, want 56", got)
+// TestPolicyIdentityFitsSizeClass pins PolicyIdentity's per-name heap at Go's
+// 64 B size class. Each identity is allocated alone, and Go has no 56 B class,
+// so any size from 49 B to 64 B costs the same 64 B. The slot hint and the
+// fingerprint's route half both fit inside it. rollupMetric keeps #1587's size.
+func TestPolicyIdentityFitsSizeClass(t *testing.T) {
+	if got := reflect.TypeFor[PolicyIdentity]().Size(); got > 64 {
+		t.Fatalf("PolicyIdentity is %d B, past the 64 B size class", got)
 	}
 	// The committed scalars live in the owner's pointer-free meta array and
 	// KeepRecent residency behind a pointer that only coarse archives fill.

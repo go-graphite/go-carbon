@@ -466,7 +466,7 @@ func run() (retErr error) {
 		if len(batchData) == 0 {
 			return nil
 		}
-		e := producer.Append(batchNames, batchData, batchSeq, time.Now().Unix())
+		e := producer.Append(batchNames, nil, batchData, batchSeq, time.Now().Unix())
 		batchNames = batchNames[:0]
 		batchData = batchData[:0]
 		batchSeq = batchSeq[:0]

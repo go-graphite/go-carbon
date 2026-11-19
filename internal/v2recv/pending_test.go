@@ -10,18 +10,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/points"
 )
 
 type coalescingOwner struct {
-	calls []int
-	names []string
-	data  []points.Point
+	calls  []int
+	names  []string
+	hashes []uint64
+	data   []points.Point
 }
 
-func (o *coalescingOwner) Append(names []string, data []points.Point, _ []uint64, _ int64) error {
+func (o *coalescingOwner) Append(names []string, hashes []uint64, data []points.Point, _ []uint64, _ int64) error {
 	o.calls = append(o.calls, len(data))
 	o.names = append(o.names, names...)
+	o.hashes = append(o.hashes, hashes...)
 	o.data = append(o.data, data...)
 	return nil
 }
@@ -33,7 +36,7 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 	o := &coalescingOwner{}
 	for i := range 17 {
 		name := fmt.Sprintf("fragment.%d", i/3)
-		q <- &batch{names: []string{name}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
+		q <- &batch{names: []string{name}, hashes: []uint64{namefp.Route(name)}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
 	}
 	close(q)
 	s.workers.Add(1)
@@ -44,9 +47,15 @@ func TestOwnerCoalescesSocketFragments(t *testing.T) {
 	if s.Stats().Accepted != 17 {
 		t.Fatal(s.Stats())
 	}
+	if len(o.hashes) != 17 {
+		t.Fatal("hashes lane lost in coalescing", len(o.hashes))
+	}
 	for i := range 17 {
 		if o.names[i] != fmt.Sprintf("fragment.%d", i/3) || o.data[i].Timestamp != int64(i) || o.data[i].Value != float64(i)+.125 {
 			t.Fatal("changed point order/bits", i)
+		}
+		if o.hashes[i] != namefp.Route(o.names[i]) {
+			t.Fatal("hash lane misaligned with names", i)
 		}
 	}
 }
@@ -57,7 +66,7 @@ type fenceOwner struct {
 	once              sync.Once
 }
 
-func (o *fenceOwner) Append(names []string, _ []points.Point, _ []uint64, _ int64) error {
+func (o *fenceOwner) Append(names []string, _ []uint64, _ []points.Point, _ []uint64, _ int64) error {
 	if o.block != nil {
 		o.once.Do(func() { close(o.entered); <-o.block })
 	}
