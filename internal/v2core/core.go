@@ -1453,10 +1453,15 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				now = r.now()
 			}
 			due := false
-			for id, m := range r.idleCandidates() {
-				if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
-					due = true
-					break
+			if r.expire == nil {
+				due = r.closureDue(now.Unix())
+			} else {
+				// An expiry callback can fire for any metric.
+				for id, m := range r.metrics {
+					if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
+						due = true
+						break
+					}
 				}
 			}
 			for i := range batches {

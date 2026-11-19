@@ -418,7 +418,9 @@ func (r *coreRollups) commitStages() {
 					m.slots = *m.policy.prepared.NewSlots()
 				}
 				if !s.fresh { // a fresh metric gets its slot, and these scalars, at install
-					r.meta[s.slot] = compactMetadata(s.next)
+					next := compactMetadata(s.next)
+					s.refile = r.refile(m, r.meta[s.slot], next)
+					r.meta[s.slot] = next
 				}
 			}
 		}

@@ -83,9 +83,18 @@ type coreRollups struct {
 
 	stage   func(string)
 	metrics map[uint64]*rollupMetric
-	// closable is the subset of metrics with a coarse archive. Only these can
-	// become closure-due; single-archive names never enter idle scans.
-	closable     map[uint64]*rollupMetric
+	// calendar files each installed slot under the end of every coarse window
+	// it holds open (rollupOpenEnd). An idle pass drains only the ends at or
+	// before now; single-archive names are never filed. Entries are hints:
+	// a drained slot stages only if rollupClosureDue still holds. drained
+	// lists the ends this plan drained (deleted at commit); taken is the
+	// plan's bitset of slots staged from them, due those slots; planNow is the
+	// plan's clock.
+	calendar     map[int64][]uint32
+	drained      []int64
+	taken        []uint64
+	due          []uint32
+	planNow      int64
 	names        map[partsformat.ID]uint64
 	stages       []rollupStage
 	pendingNames map[partsformat.ID]uint64
@@ -140,11 +149,11 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, closable: map[uint64]*rollupMetric{}, names: map[partsformat.ID]uint64{}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, calendar: map[int64][]uint32{}, names: map[partsformat.ID]uint64{}}
 }
 
-// install is the only writer of metrics/closable, so the closure index can
-// never miss a coarse-archive metric. meta becomes id's committed scalars.
+// install is the only writer of metrics and files every open coarse window,
+// so the calendar can never miss one. meta becomes id's committed scalars.
 func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	old := r.metrics[id]
 	r.metrics[id] = m
@@ -169,20 +178,77 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 		r.unranked = append(r.unranked, m)
 		r.unrankedSlots = append(r.unrankedSlots, s)
 	}
-	if len(m.schema().Archives) > 1 {
-		r.closable[id] = m
-	} else {
-		delete(r.closable, id)
+	r.file(r.slotOf(id, m), m, meta, math.MaxUint16)
+}
+
+// file enters slot under the open window end of each coarse archive whose
+// bit (archive index - 1, the last bit also covering higher archives) is set.
+func (r *coreRollups) file(slot uint32, m *rollupMetric, meta metricMetadata, mask uint16) {
+	for i, a := range m.schema().Archives[1:] {
+		if end := rollupOpenEnd(meta, a); mask&(1<<min(i, 15)) != 0 && end != math.MaxInt64 {
+			r.calendar[end] = append(r.calendar[end], slot)
+		}
 	}
 }
 
-// idleCandidates returns the metrics an idle pass must visit. An expiry
-// callback can fire for any metric; without one only closure can be due.
-func (r *coreRollups) idleCandidates() map[uint64]*rollupMetric {
-	if r.expire != nil {
-		return r.metrics
+// refile marks the coarse archives whose open window next files anew: a new
+// window end, a reopened window, or an end this plan drained. A window end
+// only moves forward per archive, so one entry per open window suffices.
+func (r *coreRollups) refile(m *rollupMetric, old, next metricMetadata) uint16 {
+	mask := uint16(0)
+	for i, a := range m.schema().Archives[1:] {
+		end, prior := rollupOpenEnd(next, a), rollupOpenEnd(old, a)
+		if end != math.MaxInt64 && (end != prior || prior <= r.planNow) {
+			mask |= 1 << min(i, 15)
+		}
 	}
-	return r.closable
+	return mask
+}
+
+// slotMetric is the metric installed in slot.
+func (r *coreRollups) slotMetric(slot uint32) *rollupMetric {
+	if rk := r.rank[slot]; rk != 0 {
+		return r.dense[rk-1]
+	}
+	return r.metrics[r.ids[slot]]
+}
+
+// dueSlots appends, once each, the closure-due slots filed under the drained
+// ends, except those whose ID skip reports (already staged by batches).
+func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
+	words := (len(r.ids) + 63) / 64
+	taken := slices.Grow(r.taken[:0], words)[:words]
+	first := len(dst)
+	for _, end := range r.drained {
+		for _, slot := range r.calendar[end] {
+			if taken[slot>>6]&(1<<(slot&63)) == 0 && !skip(r.ids[slot]) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], r.planNow) {
+				taken[slot>>6] |= 1 << (slot & 63)
+				dst = append(dst, slot)
+			}
+		}
+	}
+	for _, slot := range dst[first:] {
+		taken[slot>>6] = 0
+	}
+	r.taken = taken
+	return dst
+}
+
+// closureDue reports whether any calendar end at or before now holds a
+// closure-due slot. Ends holding none are stale and dropped here.
+func (r *coreRollups) closureDue(now int64) bool {
+	for end, slots := range r.calendar {
+		if end > now {
+			continue
+		}
+		for _, slot := range slots {
+			if rollupClosureDue(r.slotMetric(slot), r.meta[slot], now) {
+				return true
+			}
+		}
+		delete(r.calendar, end)
+	}
+	return false
 }
 
 // needsMetadataSeal reports whether a not-yet-installed metric must seal before
@@ -227,6 +293,7 @@ type rollupStage struct {
 	batches    []sealrollup.Batch
 	records    []sealrollup.Record
 	fresh      bool
+	refile     uint16 // coarse archives to file at commit (coreRollups.refile)
 	batchCount int
 }
 
@@ -371,16 +438,31 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	if r.now != nil {
 		now = r.now()
 	}
-	if r.expire != nil || r.db != nil {
-		for id, m := range r.idleCandidates() {
+	r.planNow = now.Unix()
+	r.drained = r.drained[:0]
+	for end := range r.calendar {
+		if end <= r.planNow {
+			r.drained = append(r.drained, end)
+		}
+	}
+	if r.expire != nil {
+		// An expiry callback can fire for any metric, so expiry visits all.
+		for id, m := range r.metrics {
 			if sealBatchSeen(in.Batches, keys, seen, maxID, id) {
 				continue
 			}
 			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+			if meta := r.meta[slot]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, r.planNow)) {
 				stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(meta)})
 				r.stageKey(&stages[len(stages)-1])
 			}
+		}
+	} else if r.db != nil {
+		r.due = r.dueSlots(func(id uint64) bool { return sealBatchSeen(in.Batches, keys, seen, maxID, id) }, r.due[:0])
+		for _, slot := range r.due {
+			m := r.slotMetric(slot)
+			stages = append(stages, rollupStage{metric: m, slot: slot, next: m.metadata(r.meta[slot])})
+			r.stageKey(&stages[len(stages)-1])
 		}
 	}
 	// Expiry callbacks retain their serial owner contract. Idle plans do not
@@ -416,11 +498,17 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	out.Commit = func() {
 		defer r.release()
 		r.commitStages()
-		for _, s := range stages {
+		for _, end := range r.drained {
+			delete(r.calendar, end)
+		}
+		for i := range stages {
+			s := &stages[i]
 			m := s.metric
 			if s.fresh {
 				r.install(m.id, m, compactMetadata(s.next))
 				r.names[m.policy.Name] = m.id
+			} else if s.refile != 0 {
+				r.file(s.slot, m, r.meta[s.slot], s.refile)
 			}
 		}
 	}
