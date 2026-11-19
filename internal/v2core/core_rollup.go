@@ -63,11 +63,40 @@ type RollupMetadata struct {
 
 // rollupMetric holds what a name needs beyond its scalars: the shared
 // identity and, for coarse archives, KeepRecent residency. The committed
-// scalars live in coreRollups.meta, by owner slot.
+// scalars live in coreRollups.meta, by owner slot. slots is nil while the
+// name keeps no residency, which is always for a durable single-archive name,
+// so such a name costs one 24-B object.
 type rollupMetric struct {
 	*PolicyIdentity
-	slots  sealrollup.Slots
+	slots  *sealrollup.Slots
 	vshard uint16
+}
+
+// residency returns m's slots, allocating them on the first install.
+func (m *rollupMetric) residency() *sealrollup.Slots {
+	if m.slots == nil {
+		m.slots = m.policy.prepared.NewSlots()
+	}
+	return m.slots
+}
+
+// keepRecent is Slots.KeepRecent. A single archive keeps nothing, so its
+// slots drop to nil.
+func (m *rollupMetric) keepRecent(maxTime int64) {
+	if len(m.schema().Archives) == 1 {
+		m.slots = nil
+		return
+	}
+	m.residency().KeepRecent(maxTime)
+}
+
+// installRecent is Slots.InstallRecent, which never keeps the terminal
+// archive (a single-archive name's only one).
+func (m *rollupMetric) installRecent(d sealrollup.Delta) {
+	if d.Archive == len(m.schema().Archives)-1 {
+		return
+	}
+	m.residency().InstallRecent(d)
 }
 type rollupCoverage struct {
 	spec partsformat.Spec
@@ -204,7 +233,7 @@ func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
 }
 
 func newRollupMetric(h *PolicyIdentity) *rollupMetric {
-	return &rollupMetric{PolicyIdentity: h, slots: *h.policy.prepared.NewSlots(), vshard: h.vshard}
+	return &rollupMetric{PolicyIdentity: h, vshard: h.vshard}
 }
 
 // freshMetadata is the committed state of a name no seal has installed yet.
@@ -681,11 +710,11 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		if r.metrics[meta.ID] != nil {
 			return errors.New("duplicate recovered rollup ID")
 		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		for _, record := range records {
-			m.slots.InstallRecent(record.Delta)
+			m.installRecent(record.Delta)
 		}
-		m.slots.KeepRecent(meta.Frontier.MaxTime)
+		m.keepRecent(meta.Frontier.MaxTime)
 		r.install(meta.ID, m, compactMetadata(meta))
 		// Keep the recovered reverse index on the same immutable name as the
 		// metric. ScanRollups' decoded policy is temporary construction state.

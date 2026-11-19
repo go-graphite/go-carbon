@@ -291,9 +291,10 @@ func TestPolicyIdentitySlotFitsPadding(t *testing.T) {
 	if got := reflect.TypeFor[PolicyIdentity]().Size(); got != 56 {
 		t.Fatalf("PolicyIdentity is %d B, want 56", got)
 	}
-	// The committed scalars moved to the owner's pointer-free meta array.
-	if got := reflect.TypeFor[rollupMetric]().Size(); got != 96 {
-		t.Fatalf("rollupMetric is %d B, want 96", got)
+	// The committed scalars live in the owner's pointer-free meta array and
+	// KeepRecent residency behind a pointer that only coarse archives fill.
+	if got := reflect.TypeFor[rollupMetric]().Size(); got != 24 {
+		t.Fatalf("rollupMetric is %d B, want 24", got)
 	}
 }
 
