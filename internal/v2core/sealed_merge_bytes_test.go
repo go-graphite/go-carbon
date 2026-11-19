@@ -25,11 +25,12 @@ import (
 // merges written with v2part.LegacyEnvelopeKV, recorded on github
 // atimofieiev/v2 9f959a15aa7a (string merge keys) and re-recorded once when
 // merges began repacking short runs up to MaxDenseSlots. It pins every other
-// byte, so the folded digest differs only by the envelope's placement. A merge
-// must stay byte identical: do not re-record either for a performance change.
+// byte, so the folded digest differs only by the envelope's placement. Both
+// physical pins include aligned timestamp encoding; the decoded pin is unchanged.
+// Do not re-record either for a performance change.
 const (
-	mergeByteDifferentialDigest       = "8d17173363d77469eca0b4e8bddea9f296575e92e5f3656981aaf099e40be7b0"
-	mergeByteDifferentialLegacyDigest = "c8067a3d9c42ffe48aa7ec84db2eb9be9ffe5bb52113cf95f64b91a304c9a8d3"
+	mergeByteDifferentialDigest       = "ca7f36faa5016f70f769f1cc2510d05c33433e63ae2652129324cb6ffde208be"
+	mergeByteDifferentialLegacyDigest = "0a04266f16c94cface72b01ea4013b1106efa710f1b2f5f31c34f8a688fca0ea"
 )
 
 // mergeDecodedDifferentialDigest is the SHA-256 of the same merged parts'
