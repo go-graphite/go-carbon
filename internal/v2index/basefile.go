@@ -15,8 +15,8 @@ import (
 // A base file is the base run's entries, then its block offsets (u64 each),
 // then a footer: entry bytes, blocks, names (u64 each) and fileMagic. It is
 // written to a temporary name and renamed, so a kill at any point leaves the
-// preceding base file whole. There is no fsync: the files are a projection
-// that SetDir discards at startup, so they need no power-loss durability.
+// preceding base file whole. There is no fsync: a lost or torn file only
+// means the first publication after a restart waits for the rebuild.
 const (
 	fileMagic  = "v2idxfc1"
 	footerSize = 32
@@ -26,9 +26,12 @@ const (
 var fileHook func(size int) error
 
 // SetDir keeps the base level in files under dir (page cache) instead of the
-// Go heap. Call it before the first publication. Files of earlier processes
-// are removed: the index is a projection rebuilt at startup.
+// Go heap. Call it before the first publication. The newest whole base file
+// of an earlier process is published at once as revision 1, like an LSM
+// opening its parts: find answers from it while the startup rebuild runs,
+// and the rebuild's publication replaces it. Older and torn files are removed.
 func (c *Catalog) SetDir(dir string) error {
+	defer c.own()()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -36,14 +39,30 @@ func (c *Catalog) SetDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	newest, seq := "", 0
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "base-") {
+		var n int
+		if _, err := fmt.Sscanf(e.Name(), "base-%06d.fc", &n); err == nil && e.Name() == fmt.Sprintf("base-%06d.fc", n) && n > seq {
+			newest, seq = e.Name(), n
+		}
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "base-") && e.Name() != newest {
 			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
 				return err
 			}
 		}
 	}
-	c.dir = dir
+	c.dir, c.seq = dir, seq
+	if newest == "" || c.current.Load() != nil {
+		return nil
+	}
+	r, err := openRun(filepath.Join(dir, newest))
+	if err != nil {
+		// A corrupt projection is rebuilt, never served.
+		return os.Remove(filepath.Join(dir, newest))
+	}
+	c.current.Store(&Snapshot{revision: 1, levels: []*level{{run: r}}, n: r.n})
 	return nil
 }
 

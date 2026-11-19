@@ -111,12 +111,43 @@ func TestBaseFileKillDuringWrite(t *testing.T) {
 	if _, err := openRun(filepath.Join(dir, "base-000002.fc.tmp")); err == nil {
 		t.Fatal("partial base file opened")
 	}
+	// The next process serves the whole old base at once, as revision 1, and
+	// removes the partial file; the rebuild's publication then replaces it.
 	var c Catalog
 	if err := c.SetDir(dir); err != nil {
 		t.Fatal(err)
 	}
+	s := c.Snapshot()
+	if s.Revision() != 1 || !slices.Equal(slices.Collect(s.Names()), want) {
+		t.Fatalf("restart did not serve the old base: revision %d, %d names", s.Revision(), s.Len())
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, "base-*")); !slices.Equal(m, []string{filepath.Join(dir, "base-000001.fc")}) {
+		t.Fatalf("SetDir kept %v, want only the newest whole base", m)
+	}
+	rebuilt := baseNames(30000, 2)
+	if err := c.Publish(s.Revision()+1, rebuilt); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(rebuilt)
+	if got := slices.Collect(c.Snapshot().Names()); !slices.Equal(got, rebuilt) {
+		t.Fatal("rebuild did not replace the old base")
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, "base-*")); !slices.Equal(m, []string{filepath.Join(dir, "base-000002.fc")}) {
+		t.Fatalf("after the rebuild: %v, want only base-000002.fc", m)
+	}
+	// A corrupt newest base is removed and never served.
+	if err := os.WriteFile(filepath.Join(dir, "base-000003.fc"), []byte("torn"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Catalog
+	if err := d.SetDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if d.Snapshot().Len() != 0 {
+		t.Fatal("corrupt base served")
+	}
 	if m, _ := filepath.Glob(filepath.Join(dir, "base-*")); len(m) != 0 {
-		t.Fatalf("SetDir left files of an earlier process: %v", m)
+		t.Fatalf("SetDir left %v", m)
 	}
 }
 
