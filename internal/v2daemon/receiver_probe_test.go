@@ -147,10 +147,10 @@ func TestApplicationOwnerProbeGrowthAndSharing(t *testing.T) {
 		}
 		registered := p.applications[local]
 		owned, _ := p.catalog.Key(uint64(local))
-		if registered == nil || registered.name != name {
+		if registered == nil || registered.name() != name {
 			t.Fatalf("%q resolves to %v", name, registered)
 		}
-		at := unsafe.StringData(registered.name)
+		at := unsafe.StringData(registered.name())
 		if at != unsafe.StringData(owned) || at == unsafe.StringData(name) {
 			t.Fatalf("%q is a separate copy, not the catalog's string", name)
 		}
@@ -261,6 +261,46 @@ func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 	for i, want := range []string{"ok.a", "ok.a", "ok.b"} {
 		if got, _ := p.catalog.Key(p.applicationIDs[i]); got != want {
 			t.Fatalf("appended point %d journaled as %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestRegisteredApplicationHoldsNoName pins the handle at 24 B with no name
+// header: the catalog (the shared identity on layer 3) holds the one copy, and
+// name() resolves it by ID on both the identity and the catalog-only path.
+func TestRegisteredApplicationHoldsNoName(t *testing.T) {
+	if size := unsafe.Sizeof(RegisteredApplication{}); size != 24 {
+		t.Fatalf("RegisteredApplication is %d B, want 24 (no per-name name header)", size)
+	}
+	s3, resolve := openProbeStore(t)
+	s2, err := Open(t.TempDir(), Config{Layer: 2, Producers: 1, Shards: 1, GroupInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s2.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, p := range []*Producer{s3.Producers[0], s2.Producers[0]} {
+		for _, name := range []string{"a.b.c", "a.b.d", "x"} {
+			policy, err := resolve(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Clone(name)
+			r, err := p.RegisterApplication(text, policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := r.name()
+			owned, _ := p.catalog.Key(r.id)
+			if got != name || unsafe.StringData(got) != unsafe.StringData(owned) {
+				t.Fatalf("layer %d: name()=%q, want the catalog's own %q", p.layer, got, name)
+			}
+			if (p.layer == 3) != (r.policy != nil) {
+				t.Fatalf("layer %d: policy=%v", p.layer, r.policy)
+			}
 		}
 	}
 }
