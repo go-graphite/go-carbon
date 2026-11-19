@@ -562,7 +562,7 @@ func TestPendingNameHashesMatchRefs(t *testing.T) {
 		}
 	}
 	v := PendingBatches([]Batch{{Policy: []byte("{")}})
- if err := v.NameHashes(0, v.Len(), func(int, uint64) {}); err == nil {
+	if err := v.NameHashes(0, v.Len(), func(int, uint64) {}); err == nil {
 		t.Fatal("malformed cold policy accepted")
 	}
 }
