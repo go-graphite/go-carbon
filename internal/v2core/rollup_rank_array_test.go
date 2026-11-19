@@ -236,7 +236,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					t.Fatal(err)
 				}
 				for _, s := range ranked.stages {
-					if len(s.batches) == 0 && s.next.Expired {
+					if s.batches == 0 && s.next.Expired {
 						expiredStages++
 					}
 				}

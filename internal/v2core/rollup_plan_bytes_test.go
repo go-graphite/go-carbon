@@ -15,7 +15,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	if err != nil {
 		return out, err
 	}
-	out.Files, out.PartSpecs = expandPlannedParts(out.Parts, plannedOwners(r.stages))
+	out.Files, out.PartSpecs = expandPlannedParts(out.Parts, plannedOwners(r))
 	out.Parts = nil
 	return out, nil
 }
@@ -24,15 +24,18 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 // planner's stages: records by address, envelopes by name. The reference key
 // builder takes the name and vshard from that metric, not from the tuple, so a
 // tuple carrying the wrong name or vshard changes the reference bytes.
-func plannedOwners(stages []rollupStage) func(plannedKV) *rollupMetric {
+func plannedOwners(r *coreRollups) func(plannedKV) *rollupMetric {
 	byRecord := map[*sealrollup.Record]*rollupMetric{}
 	byName := map[v2part.ID]*rollupMetric{}
-	for i := range stages {
-		s := &stages[i]
-		for j := range s.records {
-			byRecord[&s.records[j]] = s.metric
+	for i := range r.lanes {
+		lane := &r.lanes[i]
+		for _, ref := range lane.ranked {
+			m, records := r.stageMetrics[ref.stage], lane.stageRecords(&r.stages[ref.stage])
+			for j := range records {
+				byRecord[&records[j]] = m
+			}
+			byName[m.policy.Name] = m
 		}
-		byName[s.metric.policy.Name] = s.metric
 	}
 	return func(kv plannedKV) *rollupMetric {
 		if kv.record != nil {
