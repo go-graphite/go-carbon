@@ -310,6 +310,9 @@ func TestJournalSegmentSkipLazyCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if got := s.Core.Observe().CheckpointBytes; got != 0 {
+		t.Fatalf("sealed recovery rewrote %d checkpoint bytes", got)
+	}
 	for i, p := range s.Producers {
 		if p.catalog != nil {
 			t.Fatal("sealed producer opened its catalog")

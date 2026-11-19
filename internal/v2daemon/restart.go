@@ -185,7 +185,9 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 			return errors.New("core frontier exceeds retained journal")
 		}
 	}
-	if p.cursor > 0 {
+	// No replay means the frontiers already cover every record. An empty seal
+	// here would rewrite owner checkpoints without making any input durable.
+	if p.cursor > 0 && skip < len(paths) {
 		if err = p.engine.AppendBatches(p.index, nil, p.cursor, true); err != nil {
 			return err
 		}
