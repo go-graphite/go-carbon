@@ -126,15 +126,9 @@ func (app *App) startV2() error {
 		hooks.Now = app.v2Now
 	}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
-		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, now time.Time) bool {
-			if !recovered.Load() || c.Whisper.StoreExpirationDryRun || m.LastUpdate == 0 {
-				return false
-			}
-			ttl := c.Whisper.StoreExpiration.Value()
-			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
-				ttl = c.Whisper.ExpirationRules[i].TTL()
-			}
-			if ttl <= 0 || now.Sub(time.Unix(0, m.LastUpdate)) < ttl {
+		// v2core asks Expire only about names idle for their ExpiryTTL window.
+		hooks.Expire = func(p v2core.RollupPolicy, m v2core.RollupMetadata, _ time.Time) bool {
+			if !recovered.Load() {
 				return false
 			}
 			if expiryAllowed.Load() {
@@ -143,6 +137,24 @@ func (app *App) startV2() error {
 			}
 			expiryNeeded.Store(true)
 			return false
+		}
+		// A name's window, resolved once per name; it may change only when a
+		// rule's Until passes. A dry run expires nothing.
+		hooks.ExpiryTTL = func(p v2core.RollupPolicy, now time.Time) (time.Duration, time.Time) {
+			if c.Whisper.StoreExpirationDryRun {
+				return 0, time.Time{}
+			}
+			ttl := c.Whisper.StoreExpiration.Value()
+			if i := c.Whisper.ExpirationRules.MatchIndex(string(p.Name), now); i >= 0 {
+				ttl = c.Whisper.ExpirationRules[i].TTL()
+			}
+			var until time.Time
+			for _, rule := range c.Whisper.ExpirationRules {
+				if !rule.Until.IsZero() && now.Before(rule.Until) && (until.IsZero() || rule.Until.Before(until)) {
+					until = rule.Until
+				}
+			}
+			return ttl, until
 		}
 	}
 	var sealInterval time.Duration

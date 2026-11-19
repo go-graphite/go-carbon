@@ -81,7 +81,7 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 						t.Fatal(err)
 					}
 					snap := e.DBs()[0].NewSnapshot()
-					index, err := NewRollupSnapshot(context.Background(), snap, nil, 0)
+					index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 					if err != nil {
 						t.Fatal(err)
 					}

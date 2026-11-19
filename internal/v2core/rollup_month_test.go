@@ -122,7 +122,7 @@ func TestClosedWindowAcrossMonthPartitions(t *testing.T) {
 			}
 			// Bounded read of the spanning slot: stored closed record or projection
 			// over source slots read from both month partitions.
-			index, err := NewRollupSnapshot(context.Background(), snap, nil, 0)
+			index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
