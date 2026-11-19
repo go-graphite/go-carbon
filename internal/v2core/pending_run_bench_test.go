@@ -137,8 +137,8 @@ func BenchmarkPendingRunVsHashIndex(b *testing.B) {
 	run := radix(keys())
 	wantID := uint64(window/2*2654435761%names) + 1
 	wantHash := lookup(wantID).NameHash()
-	var sink int
 	b.Run("lookup/hash-10-chunks", func(b *testing.B) {
+		sink := 0
 		mask := uint64(len(c.heads) - 1)
 		for b.Loop() {
 			for range runs {
@@ -149,8 +149,12 @@ func BenchmarkPendingRunVsHashIndex(b *testing.B) {
 				}
 			}
 		}
+		if sink == 0 {
+			b.Fatal("hash lookup found nothing")
+		}
 	})
 	b.Run("lookup/run-10-runs", func(b *testing.B) {
+		sink := 0
 		for b.Loop() {
 			for range runs {
 				i := sort.Search(len(run), func(i int) bool { return run[i]>>32 >= wantID })
@@ -159,8 +163,46 @@ func BenchmarkPendingRunVsHashIndex(b *testing.B) {
 				}
 			}
 		}
+		if sink == 0 {
+			b.Fatal("run lookup found nothing")
+		}
 	})
-	if sink == 0 {
-		b.Fatal("lookups found nothing")
+
+	// The owner's per-second maintenance scan visits every pending
+	// application and skips IDs its metric map already holds. A run built at
+	// publication could flag new IDs once, from its sorted keys, instead.
+	metrics := make(map[uint64]*rollupMetric, names)
+	known := &rollupMetric{}
+	for id := uint64(1); id <= names; id++ {
+		metrics[id] = known
+	}
+	var fresh int
+	b.Run("maint/scan-each-map", func(b *testing.B) {
+		for b.Loop() {
+			v.Each(func(a *PendingApplication) bool {
+				if metrics[a.ID] == nil {
+					fresh++
+				}
+				return true
+			})
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/window, "ns/row")
+	})
+	b.Run("maint/run-newid-map", func(b *testing.B) {
+		for b.Loop() {
+			last := ^uint64(0)
+			for _, k := range run {
+				if id := k >> 32; id != last {
+					last = id
+					if metrics[id] == nil {
+						fresh++
+					}
+				}
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/window, "ns/row")
+	})
+	if fresh != 0 {
+		b.Fatalf("%d IDs reported new, want 0", fresh)
 	}
 }
