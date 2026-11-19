@@ -603,8 +603,10 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			if r.Archive >= len(config.Archives) {
 				return v2part.Descriptor{}, errors.New("merge archive outside policy")
 			}
-			// A whole non-overlapping run can keep its exact dense encoding. Durable
+			// A whole non-overlapping run skips per-record winner selection. Durable
 			// reset/expiry masks must permit every slot; ties always use the slow path.
+			// The writer coalesces it with adjacent runs of the same name and archive
+			// up to MaxDenseSlots; only a full run keeps its exact dense encoding.
 			last := input.records[len(input.records)-1]
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
@@ -624,7 +626,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 				}
 				b := input.blocks[input.block-1]
 				setSlot(b.archive, b.slot)
-				if err = writer.SetSlotsEncoded(key, input.arena[b.start:b.end]); err != nil {
+				if err = writer.AppendSlots(key, input.arena[b.start:b.end], input.records); err != nil {
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
