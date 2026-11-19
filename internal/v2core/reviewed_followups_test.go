@@ -41,7 +41,7 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer core.Close()
-	recovered, err := recoverCoreRollups(core.DBs()[0])
+	recovered, err := recoverCoreRollups(core.DBs()[0], "")
 	if err != nil {
 		t.Fatal(err)
 	}
