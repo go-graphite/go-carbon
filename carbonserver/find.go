@@ -422,11 +422,18 @@ GATHER:
 }
 
 func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Context, logger *zap.Logger, handler string, queries []string) ([]globs, bool, error) {
-	// Exact native fetches do not need discovery. Keep this result out of the
-	// discovery cache, so a startup miss cannot mask the completed catalog.
-	if handler == "render" && listener.canRenderWithoutIndex() && listener.CurrentFileIndex() == nil && literalRenderTargets(queries) {
+	// Exact v2 fetches resolve names from their pinned reader publication, not
+	// the periodic discovery projection. Keep native startup reads and v2
+	// reads out of discovery caches so a miss cannot hide a new publication.
+	if handler == "render" && (listener.v2Reader != nil || listener.canRenderWithoutIndex() && listener.CurrentFileIndex() == nil) && literalRenderTargets(queries) {
 		result := make([]globs, 0, len(queries))
 		for _, name := range queries {
+			// Catalog expansion normalizes whitespace differently by backend.
+			// Preserve that behavior for noncanonical expressions.
+			if listener.v2Reader != nil && name != strings.TrimSpace(name) {
+				expanded, err := listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
+				return expanded, false, err
+			}
 			result = append(result, globs{Name: name, Files: []string{name}, Leafs: []bool{true}})
 		}
 		return result, false, nil
