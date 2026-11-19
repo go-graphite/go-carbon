@@ -30,7 +30,12 @@ func segmentSkipConfig() Config {
 // seal on their 32-row bound, so their frontiers differ per producer.
 func segmentSkipWrite(t *testing.T, s *Store, rounds int, after func(round int)) {
 	t.Helper()
-	for round := 0; round < rounds; round++ {
+	segmentSkipWriteFrom(t, s, 0, rounds, after)
+}
+
+func segmentSkipWriteFrom(t *testing.T, s *Store, first, rounds int, after func(round int)) {
+	t.Helper()
+	for round := first; round < first+rounds; round++ {
 		for i, p := range s.Producers {
 			apps := restartApps(t, round*2, round*2+2)
 			bits := []uint64{0, 1 << 63, 1, 0x7ff8000000000042, 0x7ff0000000000000, 0xfff0000000000000}
@@ -126,6 +131,7 @@ func TestJournalSegmentSkipKill(t *testing.T) {
 		var mu sync.Mutex
 		seen := 0
 		c := segmentSkipConfig()
+		c.fullReplay = true // Preserve the entire journal for the rebuild oracle.
 		c.Hooks = v2core.Hooks{Stage: func(stage string) {
 			if stage != "commit" || commits == 0 {
 				return
