@@ -132,11 +132,11 @@ func TestBaseFileKillDuringWrite(t *testing.T) {
 	if got := slices.Collect(c.Snapshot().Names()); !slices.Equal(got, rebuilt) {
 		t.Fatal("rebuild did not replace the old base")
 	}
-	if m, _ := filepath.Glob(filepath.Join(dir, "base-*")); !slices.Equal(m, []string{filepath.Join(dir, "base-000002.fc")}) {
-		t.Fatalf("after the rebuild: %v, want only base-000002.fc", m)
+	if m, _ := filepath.Glob(filepath.Join(dir, "base-*")); !slices.Equal(m, []string{filepath.Join(dir, "base-000003.fc")}) {
+		t.Fatalf("after the rebuild: %v, want only base-000003.fc", m)
 	}
 	// A corrupt newest base is removed and never served.
-	if err := os.WriteFile(filepath.Join(dir, "base-000003.fc"), []byte("torn"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "base-000004.fc"), []byte("torn"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var d Catalog
