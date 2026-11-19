@@ -13,8 +13,9 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// Each input has a disjoint dense run large enough for encoded copying. A
-// durable reset masks whole earlier runs; surviving runs must retain every bit.
+// Each input has a disjoint dense run large enough for the whole-run path. A
+// durable reset masks whole earlier runs; surviving runs must retain every bit
+// and coalesce into one run with the envelope beside it.
 func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for _, reset := range []uint64{0, 8} {
@@ -58,8 +59,8 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if d.Coverage.Records != uint64(sealedMergeFanIn)-reset+1 {
-					t.Fatalf("runs were repacked or masked incorrectly: %d", d.Coverage.Records)
+				if d.Coverage.Records != 2 {
+					t.Fatalf("runs were not repacked or masked incorrectly: %d", d.Coverage.Records)
 				}
 				if err = v2part.ReadExpanded(context.Background(), gcPath(e.owners[0].gc, d), &d, nil); err != nil {
 					t.Fatal(err)

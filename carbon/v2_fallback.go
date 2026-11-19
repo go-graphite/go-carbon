@@ -134,15 +134,21 @@ func (v *v2Runtime) mirrorClassic(core *cache.Cache) func(int, []v2core.Batch) e
 }
 
 type v2ModeMetrics struct {
-	mode       string
-	mirrored   atomic.Uint64
-	unregister func()
+	mode          string
+	mirrored      atomic.Uint64
+	rejectedNames atomic.Uint64
+	unregister    func()
 }
 
 var v2ModeDesc = prometheus.NewDesc("go_carbon_storage_mode", "Active storage mode (one hot). Changes require restart.", []string{"mode"}, nil)
 var v2MirroredDesc = prometheus.NewDesc("go_carbon_classic_mirrored_points_total", "Journaled points submitted to classic, including replay.", nil, nil)
+var v2RejectedNamesDesc = prometheus.NewDesc("v2_name_rejected_points_total", "Points refused at v2 intake because their name has no valid policy (for example no schema or a classic policy mismatch). Over-long names are in receiver_name_too_long_rejected_points_total.", nil, nil)
 
-func (m *v2ModeMetrics) Describe(ch chan<- *prometheus.Desc) { ch <- v2ModeDesc; ch <- v2MirroredDesc }
+func (m *v2ModeMetrics) Describe(ch chan<- *prometheus.Desc) {
+	ch <- v2ModeDesc
+	ch <- v2MirroredDesc
+	ch <- v2RejectedNamesDesc
+}
 func (m *v2ModeMetrics) Collect(ch chan<- prometheus.Metric) {
 	for _, mode := range []string{v2Shadow, v2ServingDual, v2Only} {
 		value := 0.0
@@ -152,4 +158,5 @@ func (m *v2ModeMetrics) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(v2ModeDesc, prometheus.GaugeValue, value, mode)
 	}
 	ch <- prometheus.MustNewConstMetric(v2MirroredDesc, prometheus.CounterValue, float64(m.mirrored.Load()))
+	ch <- prometheus.MustNewConstMetric(v2RejectedNamesDesc, prometheus.CounterValue, float64(m.rejectedNames.Load()))
 }

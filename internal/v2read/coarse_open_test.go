@@ -136,6 +136,11 @@ func testClassicCoarseOpenWindow(t *testing.T, retentions whisper.Retentions, me
 	}
 	order := uint64(0)
 	var unsealed []v2core.Batch
+	// Publications carry the engine's registered handle, never raw policy bytes.
+	registered, err := engine.RegisterApplicationPolicy(7, "", encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
 	write := func(clock int64, times ...int64) {
 		t.Helper()
 		wall.Store(clock)
@@ -154,6 +159,7 @@ func testClassicCoarseOpenWindow(t *testing.T, retentions whisper.Retentions, me
 		if err := engine.AppendBatches(0, []v2core.Batch{b}, order, false); err != nil {
 			t.Fatal(err)
 		}
+		b.Policy, b.Registered = nil, registered
 		unsealed = append(unsealed, b)
 	}
 	// pending renders the not yet sealed applications on the latest sealed

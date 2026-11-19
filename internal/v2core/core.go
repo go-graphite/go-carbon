@@ -239,7 +239,7 @@ type coreOwner struct {
 
 	failure                      atomic.Pointer[coreFailure]
 	hook                         func(*pebble.Snapshot, []row) error
-	batchHook                    func(*pebble.Snapshot, []coreBatch, uint64) error
+	batchHook                    func([]coreBatch, uint64) error
 	plan                         func(coreSealInput) (coreSealPlan, error)
 	frontier                     atomic.Pointer[coreFrontier]
 	db                           *pebble.DB
@@ -464,21 +464,32 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 			}
 			if hooks.PublishBatchesWithInventory != nil {
-				o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
-					// Replace the provisional pin with one captured under the GC binding
-					// fence. No reader acquires this owner/GC mutex.
-					_ = snap.Close()
-					if o.gc == nil {
-						return hooks.PublishBatchesWithInventory(s, o.db.NewSnapshot(), batches, generation, nil)
+				// The pin is captured with the binding set under the GC fence. A
+				// head-only publication (same sealed generation and binding set)
+				// pins nothing: the reader keeps the snapshot it holds for them.
+				var pinned bool
+				var pinnedGeneration uint64
+				var pinnedInventory *RollupInventory
+				o.batchHook = func(batches []coreBatch, generation uint64) error {
+					var pin *pebble.Snapshot
+					var inventory *RollupInventory
+					if o.gc != nil {
+						o.gc.mu.Lock()
+						inventory = o.gc.inventory
 					}
-					o.gc.mu.Lock()
-					pin, inventory := o.db.NewSnapshot(), o.gc.inventory
-					o.gc.mu.Unlock()
-					return hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+					if !pinned || generation != pinnedGeneration || inventory != pinnedInventory {
+						pin = o.db.NewSnapshot()
+					}
+					if o.gc != nil {
+						o.gc.mu.Unlock()
+					}
+					err := hooks.PublishBatchesWithInventory(s, pin, batches, generation, inventory)
+					pinned, pinnedGeneration, pinnedInventory = err == nil, generation, inventory
+					return err
 				}
 			} else if hooks.PublishBatches != nil {
-				o.batchHook = func(snap *pebble.Snapshot, batches []coreBatch, generation uint64) error {
-					return hooks.PublishBatches(s, snap, batches, generation)
+				o.batchHook = func(batches []coreBatch, generation uint64) error {
+					return hooks.PublishBatches(s, o.db.NewSnapshot(), batches, generation)
 				}
 			}
 			if hooks.PlanSeal != nil {
@@ -575,7 +586,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			o.readGeneration = o.meta.NextPart
 			o.pub.publish(o.db.NewSnapshot())
 			if o.batchHook != nil {
-				if err := o.batchHook(o.db.NewSnapshot(), nil, o.readGeneration); err != nil {
+				if err := o.batchHook(nil, o.readGeneration); err != nil {
 					return err
 				}
 			}
@@ -1062,7 +1073,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				generation++
 			}
 		}
-		err := o.batchHook(o.db.NewSnapshot(), published, generation)
+		err := o.batchHook(published, generation)
 		if err == nil && o.visible != nil {
 			o.visible(published[prev:])
 		}
