@@ -61,7 +61,7 @@ func TestArchivesAuthoritativeSnapshotRecoveryAndRelocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The indexed range reader follows exactly the same descriptor authority.
-	directory, err := NewRollupSnapshot(context.Background(), current, nil)
+	directory, err := NewRollupSnapshot(context.Background(), current, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

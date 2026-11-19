@@ -126,7 +126,7 @@ func TestSlimEnvelopeEngineDifferential(t *testing.T) {
 			t.Fatal(err)
 		}
 		slices.Sort(out.Scanned)
-		index, err := NewRollupSnapshot(ctx, pin, nil, 0)
+		index, err := NewRollupSnapshot(ctx, pin, nil, nil, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
