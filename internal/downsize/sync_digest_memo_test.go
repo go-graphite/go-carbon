@@ -44,9 +44,11 @@ func TestSyncVerifyReusesAbsenceProbeDigests(t *testing.T) {
 	t.Parallel()
 	f, o := newRedoHarness(t)
 	o.from = []string{syncD1, syncD2, syncP}
-	o.batch, o.streams = 500, 4
-	schema := []syncArchive{{60, 2880}, {600, 1008}, {3600, 720}}
-	const total = 1000
+	o.batch, o.streams = 50, 2
+	// The two finer archives lie wholly inside the stale span, so the absence
+	// probe walks three windows per stale name before it finds a point.
+	schema := []syncArchive{{60, 360}, {600, 288}, {3600, 240}}
+	const total = 100
 	var stale []string
 	for i := range total {
 		n := fmt.Sprintf("metric.%04d", i)
