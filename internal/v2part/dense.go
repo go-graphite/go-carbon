@@ -173,28 +173,37 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 
 func appendPredictedOrders(out []byte, records []sealrollup.Record) []byte {
 	first := records[0].Order
-	step := int64(records[len(records)-1].Order-first) / int64(len(records)-1)
+	n := len(records) - 1
+	step := int64(records[n].Order-first) / int64(n)
 	out = binary.AppendUvarint(out, first)
 	out = binary.AppendVarint(out, step)
+	residual := func(i int) uint64 { return zigzag(int64(records[i].Order - first - uint64(step)*uint64(i))) }
 	var union uint64
-	for i, r := range records[1:] {
-		union |= zigzag(int64(r.Order - first - uint64(step)*uint64(i+1)))
+	for i := 1; i <= n; i++ {
+		union |= residual(i)
 	}
 	width := bits.Len64(union)
 	out = append(out, byte(width))
-	stride := (len(records) - 1 + 7) / 8
+	// Bit b of residual i goes to bit (i-1)%8 of byte b*stride+(i-1)/8.
+	// Each group of eight residuals is computed once and transposed per byte.
+	stride := (n + 7) / 8
 	start := len(out)
 	out = append(out, make([]byte, width*stride)...)
-	for plane := 0; plane*8 < width; plane++ {
-		for i := 1; i < len(records); i += 8 {
-			var word uint64
-			for j := 0; j < 8 && i+j < len(records); j++ {
-				v := zigzag(int64(records[i+j].Order - first - uint64(step)*uint64(i+j)))
-				word |= uint64(byte(v>>uint(plane*8))) << uint(j*8)
+	planes := out[start:]
+	for g := 0; g < stride; g++ {
+		var v [8]uint64
+		for j := range v {
+			if i := 1 + 8*g + j; i <= n {
+				v[j] = residual(i)
 			}
-			word = transposeOrderBits(word)
-			for bit := 0; bit < 8 && plane*8+bit < width; bit++ {
-				out[start+(plane*8+bit)*stride+(i-1)/8] = byte(word >> uint(bit*8))
+		}
+		for plane := 0; plane*8 < width; plane++ {
+			sh := uint(plane * 8)
+			word := transposeOrderBits(uint64(byte(v[0]>>sh)) | uint64(byte(v[1]>>sh))<<8 | uint64(byte(v[2]>>sh))<<16 | uint64(byte(v[3]>>sh))<<24 |
+				uint64(byte(v[4]>>sh))<<32 | uint64(byte(v[5]>>sh))<<40 | uint64(byte(v[6]>>sh))<<48 | uint64(byte(v[7]>>sh))<<56)
+			for bit := plane * 8; bit < width && bit < plane*8+8; bit++ {
+				planes[bit*stride+g] = byte(word)
+				word >>= 8
 			}
 		}
 	}
@@ -475,16 +484,21 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 					}
 				}
 			}
-			for plane := 0; plane*8 < width; plane++ {
-				for i := 1; i < len(rs); i += 8 {
+			for g := 0; g < stride; g++ {
+				var v [8]uint64
+				for plane := 0; plane*8 < width; plane++ {
 					var word uint64
-					for bit := 0; bit < 8 && plane*8+bit < width; bit++ {
-						word |= uint64(p[(plane*8+bit)*stride+(i-1)/8]) << uint(bit*8)
+					for bit := min(width, plane*8+8) - 1; bit >= plane*8; bit-- {
+						word = word<<8 | uint64(p[bit*stride+g])
 					}
 					word = transposeOrderBits(word)
-					for j := 0; j < 8 && i+j < len(rs); j++ {
-						rs[i+j].Order |= uint64(byte(word>>uint(j*8))) << uint(plane*8)
+					sh := uint(plane * 8)
+					for j := range v {
+						v[j] |= uint64(byte(word>>uint(j*8))) << sh
 					}
+				}
+				for j, i := 0, 1+8*g; j < 8 && i < len(rs); j, i = j+1, i+1 {
+					rs[i].Order = v[j]
 				}
 			}
 			p = p[width*stride:]

@@ -134,3 +134,49 @@ func TestTransposeOrderBitsOracle(t *testing.T) {
 		}
 	}
 }
+
+// The predicted order column is pinned bit by bit, independently of the
+// transposing writer: bit b of residual i is bit (i-1)%8 of byte
+// b*stride+(i-1)/8 after the width byte.
+func TestPredictedOrderPlanesOracle(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 19))
+	for _, n := range []int{2, 3, 8, 9, 17, 66, 4096} {
+		for _, spread := range []uint64{0, 1, 1 << 7, 1 << 20, 1 << 33, math.MaxUint64} {
+			rs := make([]sealrollup.Record, n)
+			for i := range rs {
+				var noise uint64
+				if spread != 0 {
+					noise = rng.Uint64() % spread
+					if spread == math.MaxUint64 {
+						noise = rng.Uint64()
+					}
+				}
+				rs[i].Order = uint64(i)*104729 + noise + 1
+			}
+			first := rs[0].Order
+			step := int64(rs[n-1].Order-first) / int64(n-1)
+			want := binary.AppendVarint(binary.AppendUvarint(nil, first), step)
+			res := make([]uint64, n-1)
+			width := 0
+			for i := range res {
+				res[i] = zigzag(int64(rs[i+1].Order - first - uint64(step)*uint64(i+1)))
+				for res[i]>>uint(width) > 0 && width < 64 {
+					width++
+				}
+			}
+			want = append(want, byte(width))
+			for b := 0; b < width; b++ {
+				for i := 0; i < len(res); i += 8 {
+					var x byte
+					for j := 0; j < 8 && i+j < len(res); j++ {
+						x |= byte(res[i+j]>>uint(b)&1) << uint(j)
+					}
+					want = append(want, x)
+				}
+			}
+			if got := appendPredictedOrders(nil, rs); string(got) != string(want) {
+				t.Fatalf("n=%d spread=%d: order column differs from bit oracle", n, spread)
+			}
+		}
+	}
+}
