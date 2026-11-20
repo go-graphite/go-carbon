@@ -113,8 +113,7 @@ run diagnostically after an L1 failure, but must be labeled unqualified.
 Process writes, SST bytes ingested and compaction bytes before close, catalog/journal sizes,
 at-rest size, intake throughput and complete CPU are reported separately.
 A finite fixed-corpus run does not establish settled sustained throughput.
-CPU and blocking profiles cover admission, intake, drain and close, excluding
-read-back and the journal oracle. Reported stream stage times are summed elapsed
+Reported stream stage times are summed elapsed
 times across producers, not CPU time or additive process wall time. In particular,
 core submission includes queue and dispatch-credit waits. The synchronous L0
 control also waits for each seal acknowledgment; named layers pipeline them.
@@ -122,14 +121,10 @@ control also waits for each seal acknowledgment; named layers pipeline them.
 ## Usage
 
 ```sh
-go run ./tool/v2-daemon -layer 0 -root /scratch/l0
-go run ./tool/v2-daemon -layer 1 -root /scratch/l1
-go run ./tool/v2-daemon -layer 2 -root /scratch/l2
-go run ./tool/v2-daemon -layer 2 -root /scratch/l2-profile \
-  -cpuprofile /scratch/l2.cpu -blockprofile /scratch/l2.block
+go test ./internal/v2daemon -run TestFixedCorpusAllLayers
 ```
 
-Each command runs the fixed corpus and verifies every stored tuple through
+Each layer runs the fixed corpus and verifies every stored tuple through
 the existing `v2core.ScanRaw` decoder on reopened immutable snapshots. A bitmap
 rejects duplicate and missing metric/sequence pairs; timestamps and IEEE value
 bits are checked individually. All persisted catalog names are checked. Sample
