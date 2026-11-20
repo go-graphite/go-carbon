@@ -431,7 +431,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	// Limit concurrent Pebble opens, rollup reconstruction and part validation.
 	// No owner/merge/GC workers start until every owner has opened successfully.
 	var opening errgroup.Group
-	opening.SetLimit(min(16, runtime.GOMAXPROCS(0)))
+	opening.SetLimit(min(48, runtime.GOMAXPROCS(0)))
 	for s := 0; s < cfg.Shards; s++ {
 		opening.Go(func() error {
 			dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
