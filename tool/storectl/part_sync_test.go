@@ -105,7 +105,7 @@ func TestPartSyncRejectsCorruptionAndAuth(t *testing.T) {
 
 // Run the real receiver in a separate process so SIGKILL bypasses deferred
 // cleanup and releases the OS target lock without an orderly Close.
-func TestPartReceiverProcess(t *testing.T) {
+func TestPartReceiverProcess(_ *testing.T) {
 	if os.Getenv("PART_COPY_CHILD") != "1" {
 		return
 	}

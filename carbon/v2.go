@@ -60,6 +60,8 @@ type v2Runtime struct {
 
 func (app *App) startV2() error {
 	c := app.Config
+	// v2 does not enter the classic startup path that applies these rates.
+	app.applyRuntimeProfiling()
 	mode, err := v2StorageMode(c.V2)
 	if err != nil {
 		return err
@@ -293,11 +295,12 @@ func (app *App) startV2() error {
 		// seal or a concurrent recreation must stay visible, and copies skip intake.
 		for _, name := range expired {
 			_, err := r.Metadata(ctx, name)
-			if errors.Is(err, v2read.ErrNotFound) {
+			switch {
+			case errors.Is(err, v2read.ErrNotFound):
 				remove = append(remove, name)
-			} else if err != nil {
+			case err != nil:
 				return err
-			} else {
+			default:
 				add = append(add, name)
 			}
 		}

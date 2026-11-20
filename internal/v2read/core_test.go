@@ -2,6 +2,7 @@ package v2read
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -173,7 +174,7 @@ func TestConcurrentPublicationAndClose(t *testing.T) {
 				default:
 				}
 				err := reader.FetchMany(context.Background(), []string{"metric"}, 900, 1000, 1000, func(_ string, s *Series) error { return nil })
-				if err != nil && err != ErrNotFound {
+				if err != nil && !errors.Is(err, ErrNotFound) {
 					t.Error(err)
 					return
 				}

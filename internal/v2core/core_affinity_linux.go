@@ -3,8 +3,9 @@
 package v2core
 
 import (
-	"golang.org/x/sys/unix"
 	"runtime"
+
+	"golang.org/x/sys/unix"
 )
 
 func pinCoreThread(cpu int) (func(), error) {

@@ -141,7 +141,7 @@ func (q *WriteoutQueue) update() {
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
 	started := time.Now()
-	queue, next, _ := q.cache.makeQueuePlan(started)
+	queue, next := q.cache.makeQueueAt(started)
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
 		next = notBefore

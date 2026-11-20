@@ -29,11 +29,11 @@ func Scan(path string, newest bool, apply func([]byte) error) (int64, error) {
 	for {
 		var h [4]byte
 		n, err := io.ReadFull(r, h[:])
-		if err == io.EOF && n == 0 {
+		if errors.Is(err, io.EOF) && n == 0 {
 			return offset, nil
 		}
 		if err != nil {
-			if newest && (err == io.ErrUnexpectedEOF || err == io.EOF) {
+			if newest && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) {
 				return offset, errors.Join(f.Truncate(offset), f.Sync())
 			}
 			return offset, fmt.Errorf("journal header at %d: %w", offset, err)
@@ -47,7 +47,7 @@ func Scan(path string, newest bool, apply func([]byte) error) (int64, error) {
 		}
 		b := buf[:int(size)]
 		if _, err = io.ReadFull(r, b); err != nil {
-			if newest && (err == io.ErrUnexpectedEOF || err == io.EOF) {
+			if newest && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) {
 				return offset, errors.Join(f.Truncate(offset), f.Sync())
 			}
 			return offset, fmt.Errorf("journal payload at %d: %w", offset, err)

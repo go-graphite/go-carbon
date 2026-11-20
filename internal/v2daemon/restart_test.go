@@ -3,6 +3,7 @@ package v2daemon
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -131,7 +132,8 @@ func TestRestartSIGKILL(t *testing.T) {
 					t.Fatal(err)
 				}
 				err = cmd.Wait()
-				exit, ok := err.(*exec.ExitError)
+				exit := &exec.ExitError{}
+				ok := errors.As(err, &exit)
 				if !ok || !exit.Sys().(syscall.WaitStatus).Signaled() || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
 					t.Fatalf("not SIGKILL: %v", err)
 				}

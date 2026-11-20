@@ -266,7 +266,8 @@ func TestSealedGCCrashBoundaries(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestSealedGCCrashBoundaries$")
 			cmd.Env = append(os.Environ(), "V2_GC_CRASH_ROOT="+root, "V2_GC_CRASH_PHASE="+phase)
 			out, err := cmd.CombinedOutput()
-			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 62 {
+			exit := &exec.ExitError{}
+			if !errors.As(err, &exit) || exit.ExitCode() != 62 {
 				t.Fatalf("child: %v %s", err, out)
 			}
 			db, g := gcFixture(t, root)

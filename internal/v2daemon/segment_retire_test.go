@@ -111,8 +111,10 @@ func TestJournalRetireKill(t *testing.T) {
 				t.Fatal("no segment retired before crash")
 			}
 			oracle := t.TempDir()
-			copyTree(t, root, oracle)
+			// A kill can interrupt the archive write before the original is
+			// unlinked. Prefer that intact retained segment over its partial copy.
 			copyTree(t, root+"-archive", oracle)
+			copyTree(t, root, oracle)
 			want, _, _ := segmentSkipOpen(t, oracle, true, true)
 			got, _, _ := segmentSkipOpen(t, root, false, false)
 			if got != want {

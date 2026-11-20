@@ -257,7 +257,7 @@ func releaseOwners(pins []*generation) {
 // publication as the data. A reset keeps masking classic history after resume.
 func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 	_, masked, err := r.metadataWithMask(ctx, name, true)
-	if err == ErrNotFound {
+	if errors.Is(err, ErrNotFound) {
 		err = nil
 	}
 	return masked, err

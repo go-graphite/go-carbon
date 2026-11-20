@@ -30,8 +30,8 @@ func newV2CatalogUpdates(owners int) *v2CatalogUpdates {
 	}
 	return u
 }
-func (u *v2CatalogUpdates) visible(owner int, batches []v2core.Batch) {
-	u.visiblePending(owner, v2core.PendingBatches(batches))
+func (u *v2CatalogUpdates) visible(batches []v2core.Batch) {
+	u.visiblePending(0, v2core.PendingBatches(batches))
 }
 
 // visiblePending registers names newly visible in an owner's pending view.

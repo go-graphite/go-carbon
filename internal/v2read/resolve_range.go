@@ -83,7 +83,7 @@ func (s *generation) rangeBase(ctx context.Context, m *metricState, ranges [][]S
 	source.stored = func(ctx context.Context, archive int) (bool, error) {
 		found := errors.New("archive found")
 		err := s.sealed.ScanArchive(ctx, m.name, archive, 0, m.policy.Config.Archives[archive].Count, func(sealrollup.Record) error { return found })
-		if err == found {
+		if errors.Is(err, found) {
 			return true, nil
 		}
 		return false, err

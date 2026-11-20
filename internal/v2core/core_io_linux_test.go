@@ -4,6 +4,7 @@ package v2core
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -89,7 +90,7 @@ func TestCoreDirectShortWriteFailsBeforeSync(t *testing.T) {
 	}
 	defer file.Close()
 	_, err = coreWriteDirect(coreDirectShortFile{file}, []byte{1}, nil)
-	if err != io.ErrShortWrite {
+	if !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("got %v", err)
 	}
 }

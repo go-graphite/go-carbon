@@ -6,12 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	whisper "github.com/go-graphite/go-whisper"
 	"math"
 	"path/filepath"
 	"slices"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 // Frozen pre-coalescing export oracle from 6784e90e1.

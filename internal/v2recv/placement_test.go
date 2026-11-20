@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/go-graphite/go-carbon/internal/v2wire"
 	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2wire"
 )
 
 type ackTestSink struct {

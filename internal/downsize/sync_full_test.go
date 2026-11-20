@@ -14,7 +14,8 @@ import (
 
 // Point-only full-history path: the fixture compares complete ordered
 // verdicts against the current policy, including schema mismatch residuals.
-func (s *syncer) checkFullReference(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, now int64) error {
+func (s *syncer) checkFullReference(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive) error {
+	const now = syncTestNow
 	groups := map[string][]string{}
 	keyed := map[string][]syncArchive{}
 	for _, n := range names {
@@ -110,7 +111,7 @@ func TestSyncFullDigestParity(t *testing.T) {
 					s.masks.Store(n, uint64(7))
 				}
 				var want, got syncRow
-				if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+				if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 					t.Fatal(err)
 				}
 				before := f.fetches.Load()

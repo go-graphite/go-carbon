@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	pickle "github.com/lomik/og-rek"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
+
+	pickle "github.com/lomik/og-rek"
 
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"

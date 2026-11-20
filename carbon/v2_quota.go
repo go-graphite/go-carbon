@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 
@@ -94,7 +95,7 @@ func publishV2QuotasContext(ctx context.Context, q *carbonserver.V2Quotas, fence
 			continue
 		}
 		m, err := r.Metadata(ctx, name)
-		if err == v2read.ErrNotFound {
+		if errors.Is(err, v2read.ErrNotFound) {
 			continue
 		} // concurrent expiry; next refresh removes it
 		if err != nil {

@@ -2,6 +2,7 @@ package v2read
 
 import (
 	"context"
+	"errors"
 	"math"
 	"path/filepath"
 	"sync/atomic"
@@ -61,7 +62,7 @@ func TestExpiryResetReopenResume(t *testing.T) {
 	if err := e.AppendBatches(0, nil, 2, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Fetch(ctx, "expiry.metric", int(clock-10), int(clock)); err != ErrNotFound {
+	if _, err := r.Fetch(ctx, "expiry.metric", int(clock-10), int(clock)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired fetch: %v", err)
 	}
 	names, err := r.Names(ctx)

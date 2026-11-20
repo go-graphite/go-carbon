@@ -24,7 +24,7 @@ func (s *sealedSource) HasArchive(ctx context.Context, id uint64, step int64) (b
 	}
 	found := errors.New("archive found")
 	err := s.metric.sealed.ScanArchive(ctx, s.metric.name, archive, 0, s.metric.policy.Config.Archives[archive].Count, func(sealrollup.Record) error { return found })
-	if err == found {
+	if errors.Is(err, found) {
 		return true, nil
 	}
 	return false, err
