@@ -204,15 +204,29 @@ func (e *coreEngine) ForceMerge() (int, error) {
 // (ClickHouse's rule), so their order ranges never interleave. A window of
 // adjacent parts qualifies once it holds at least ratio parts and its total is
 // at least ratio/2 times its largest part, so a large input is not repeatedly
-// combined with only a few much smaller inputs. Small outputs use ratio 4,
-// so new seals fold into a small
-// part every few seal intervals and few small parts stay live for renders.
-// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
-// parts quiescent below the cap. The cheapest qualifying window merges first.
+// combined with only a few much smaller inputs. Small outputs follow
+// VictoriaMetrics: up to fifteen parts merge at once (defaultPartsToMerge) and
+// the output must be at least 1.7 times the largest input (minMergeMultiplier),
+// so a small part is rewritten in fewer levels. Larger outputs keep ratio
+// sixteen, which leaves at most fifteen similar parts quiescent below the cap.
+// The cheapest qualifying window merges first.
 const (
 	smallMergeBytes = 64 << 20
-	smallMergeRatio = 4
+	smallMergeRatio = 15
 )
+
+// mergeWindowOK reports whether n adjacent parts with the given total and
+// largest part form a merge window.
+func mergeWindowOK(n int, total, largest uint64) bool {
+	r := mergeRatio(total)
+	if uint64(n) < r {
+		return false
+	}
+	if r == smallMergeRatio {
+		return 10*total >= 17*largest
+	}
+	return 2*total >= r*largest
+}
 
 func mergeRatio(total uint64) uint64 {
 	if total <= smallMergeBytes {
@@ -276,7 +290,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 					}
 					continue
 				}
-				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
+				if !mergeWindowOK(j-i+1, total, largest) {
 					continue
 				}
 				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {

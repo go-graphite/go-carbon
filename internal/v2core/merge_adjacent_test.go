@@ -14,7 +14,7 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 	e := mergeFixtureIdle(t, t.TempDir(), nil)
 	defer e.close()
 	o := e.owners[0]
-	for n := uint64(1); n <= 9; n++ {
+	for n := uint64(1); n <= smallMergeRatio; n++ {
 		mergeAppend(t, e, n)
 	}
 	s := o.db.NewSnapshot()
@@ -33,7 +33,7 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 			t.Fatalf("inputs out of sequence order at %d", i)
 		}
 	}
-	if len(inputs) != smallMergeRatio || 2*total < smallMergeRatio*largest {
+	if len(inputs) != smallMergeRatio || !mergeWindowOK(len(inputs), total, largest) {
 		t.Fatalf("window of %d parts, total %d, largest %d", len(inputs), total, largest)
 	}
 	lo, hi := inputs[0].Source.MinOrder, inputs[len(inputs)-1].Source.MaxOrder
@@ -50,7 +50,7 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 		}
 	}
 
-	for n := uint64(10); n <= 16; n++ {
+	for n := uint64(smallMergeRatio + 1); n <= 2*smallMergeRatio; n++ {
 		mergeAppend(t, e, n)
 	}
 	s = o.db.NewSnapshot()
@@ -67,12 +67,33 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 		}
 		merges++
 	}
-	if live := e.PartGCStats()[0].LiveParts; live != 1 || merges != 5 {
-		t.Fatalf("16 parts folded into %d live parts with %d merges, want 1 and 5", live, merges)
+	if live := e.PartGCStats()[0].LiveParts; live != 2 || merges != 2 {
+		t.Fatalf("30 parts folded into %d live parts with %d merges, want 2 and 2", live, merges)
 	}
 	s = o.db.NewSnapshot()
 	defer s.Close()
 	if got := mergeRead(t, s); !reflect.DeepEqual(got, want) {
 		t.Fatalf("records changed by adjacent merges:\n got %v\nwant %v", got, want)
+	}
+}
+
+// Small outputs merge up to fifteen parts once the output is at least 1.7
+// times the largest input (VictoriaMetrics minMergeMultiplier).
+func TestMergeWindowSmallOutputRule(t *testing.T) {
+	cases := []struct {
+		n              int
+		total, largest uint64
+		want           bool
+	}{
+		{smallMergeRatio, smallMergeRatio * 10, 10, true},
+		{smallMergeRatio - 1, (smallMergeRatio - 1) * 10, 10, false},
+		{smallMergeRatio, 170, 100, true},
+		{smallMergeRatio, 169, 100, false},
+		{smallMergeRatio, 14 + 100, 100, false},
+	}
+	for _, c := range cases {
+		if got := mergeWindowOK(c.n, c.total, c.largest); got != c.want {
+			t.Errorf("mergeWindowOK(%d,%d,%d)=%v want %v", c.n, c.total, c.largest, got, c.want)
+		}
 	}
 }
