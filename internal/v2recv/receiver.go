@@ -48,10 +48,17 @@ type Config struct {
 	PlacementKey                                        []byte
 	PlacementProducer                                   string
 	BatchSize, QueueDepth, MaxConnections, MaxLineBytes int
-	SyncInterval                                        time.Duration
-	Stream                                              codec.Options
-	Logger                                              *slog.Logger
+	// BufferBytes bounds what one connection holds before handing it to the
+	// owners: name text plus rowBytes per point, summed over all owners.
+	BufferBytes  int
+	SyncInterval time.Duration
+	Stream       codec.Options
+	Logger       *slog.Logger
 }
+
+// rowBytes is the per-point cost of a batch: name header, hash, point and end.
+const rowBytes = 16 + 8 + 16 + 8
+
 type batch struct {
 	names  []string
 	hashes []uint64 // namefp.Route of each name, computed once for routing
@@ -122,13 +129,16 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	if cfg.MaxLineBytes == 0 {
 		cfg.MaxLineBytes = 1 << 20
 	}
+	if cfg.BufferBytes == 0 {
+		cfg.BufferBytes = 1 << 20
+	}
 	if cfg.SyncInterval == 0 {
 		cfg.SyncInterval = time.Second
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.BatchSize < 1 || cfg.BatchSize > 32768 || cfg.QueueDepth < 1 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.SyncInterval < 0 {
+	if cfg.BatchSize < 1 || cfg.BatchSize > 32768 || cfg.QueueDepth < 1 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.BufferBytes < 1 || cfg.SyncInterval < 0 {
 		return nil, errors.New("invalid receiver bounds")
 	}
 	if cfg.Placement != nil {
@@ -430,12 +440,17 @@ func (s *Server) read(c net.Conn) error {
 	if s.cfg.Placement != nil {
 		return s.readPlaced(c)
 	}
-	buffers := make([]*batch, len(s.queues))
+	// One byte budget per connection, shared by its per-owner batches: a busy
+	// stream rarely ends a read on a line boundary, so without it every owner
+	// batch of every connection would fill to BatchSize names. Handing a batch
+	// to a full owner queue blocks this connection; input is never dropped.
+	buffers, held := make([]*batch, len(s.queues)), 0
 	flush := func(i int) error {
 		b := buffers[i]
 		if b == nil || len(b.data) == 0 {
 			return nil
 		}
+		held -= len(b.text) + len(b.data)*rowBytes
 		if _, ok := s.owners[i].(ByteOwner); !ok {
 			b.named()
 		}
@@ -487,16 +502,18 @@ func (s *Server) read(c net.Conn) error {
 			if pooled := s.batches.Get(); pooled != nil {
 				b = pooled.(*batch)
 			} else {
-				b = &batch{names: make([]string, 0, s.cfg.BatchSize), hashes: make([]uint64, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
+				b = new(batch) // grows to what the byte budget lets in
 			}
 			buffers[owner] = b
 		}
 		return b
 	}
-	added := func(owner int, b *batch, value float64, ts int64) {
+	added := func(owner int, b *batch, text int, value float64, ts int64) {
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})
-		if len(b.data) >= s.cfg.BatchSize {
+		if held += text + rowBytes; len(b.data) >= s.cfg.BatchSize {
 			appendErr = flush(owner)
+		} else if held >= s.cfg.BufferBytes {
+			appendErr = flushAll()
 		}
 	}
 	add := func(ref *reference, value float64, ts int64) {
@@ -507,7 +524,7 @@ func (s *Server) read(c net.Conn) error {
 		b := buffer(ref.owner)
 		b.names = append(b.names, ref.name)
 		b.hashes = append(b.hashes, ref.hash)
-		added(ref.owner, b, value, ts)
+		added(ref.owner, b, 0, value, ts)
 	}
 	// addText copies a borrowed plaintext name into its owner's batch text.
 	addText := func(owner int, hash uint64, name []byte, value float64, ts int64) {
@@ -520,7 +537,7 @@ func (s *Server) read(c net.Conn) error {
 		b.ends = append(b.ends, len(b.text))
 		b.names = append(b.names, "")
 		b.hashes = append(b.hashes, hash)
-		added(owner, b, value, ts)
+		added(owner, b, len(name), value, ts)
 	}
 	if head[0] == 0 {
 		pre := make([]byte, codec.PreambleSize)
