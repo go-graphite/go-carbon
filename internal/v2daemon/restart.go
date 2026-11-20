@@ -81,6 +81,10 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 // decode -> the same AppendBatches queue -> synchronous final seal. Owners alone
 // decide which packets were already committed. Every segment resets predictors.
 func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
+	// A cut interrupted before its rename leaves the segment whole.
+	if err := os.Remove(filepath.Join(dir, seedTemp)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	paths, err := journalSegments(dir)
 	if err != nil {
 		return err
@@ -193,6 +197,11 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 		}
 	}
 	p.journalDir = dir
+	if p.retires() {
+		if p.closed, err = retainedSegments(paths); err != nil {
+			return err
+		}
+	}
 	if len(paths) > 0 && filepath.Base(paths[len(paths)-1]) != "segment.pdc4" {
 		generation := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(paths[len(paths)-1]), "segment-"), ".pdc4")
 		n, err := strconv.Atoi(generation)
@@ -238,8 +247,31 @@ func (p *Producer) openSegment() error {
 		return errors.Join(err, f.Close())
 	}
 	p.journal, p.segment, p.segmentBytes = f, p.segment+1, 0
+	p.segmentPath, p.segmentLast = f.Name(), -1
 	return nil
 }
+
+// journalSegment is a retained closed segment. end is the cursor after its
+// last record (the previous end while empty); last is that record's offset,
+// -1 when the segment holds none.
+type journalSegment struct {
+	path string
+	end  uint64
+	last int64
+}
+
+// seedTemp holds a cut segment's last record until it replaces the segment.
+const seedTemp = "seed.tmp"
+
+// replaysAll reports consumers whose replay obligations are independent of
+// the core frontier: placement/relay and classic mirrors (and the test oracle)
+// keep and replay every segment.
+func (p *Producer) replaysAll() bool {
+	return p.fullReplay || p.placement != nil || p.durableApplications != nil
+}
+
+// retires reports a standalone journal that rotates and so can retire input.
+func (p *Producer) retires() bool { return p.layer >= 2 && p.segmentLimit > 0 && !p.replaysAll() }
 
 // rotateJournal starts a new segment with fresh predictor state. The caller has
 // flushed and synced every record of the current segment and holds none encoded.
@@ -248,46 +280,153 @@ func (p *Producer) rotateJournal() error {
 		return err
 	}
 	p.journal = nil
+	closed := journalSegment{path: p.segmentPath, end: p.cursor, last: p.segmentLast}
 	if err := p.openSegment(); err != nil {
 		return err
 	}
 	p.writer.Reset(p.journal)
 	p.encoder.Close()
 	p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
-	// Independent replay consumers retain the whole log. Avoid scanning their
-	// ever-growing file list when retirement is disabled.
-	if p.fullReplay || p.placement != nil || p.durableApplications != nil {
+	if p.retires() {
+		p.closed = append(p.closed, closed)
+	}
+	return nil
+}
+
+// retireJournal unlinks the closed segments every owner has durably committed;
+// core parts hold their input. Recovery seeds the cursor and application order
+// from the first retained record, or from the last one when the frontiers cover
+// all input. So while the open segment is empty, the newest covered segment
+// holding a record stays, cut to that record; a covered open segment rotates
+// first, and an idle producer keeps one record. It runs on the producer's
+// caller with every record synced: after a rotation and on each idle Drain.
+func (p *Producer) retireJournal() error {
+	if !p.retires() || p.journal == nil || p.cursor == 0 || len(p.records) > 0 {
 		return nil
 	}
-	paths, err := journalSegments(p.journalDir)
-	if err != nil {
-		return err
-	}
-	n, err := p.durablePrefix(paths)
-	if err != nil {
-		return err
-	}
-	for _, path := range paths[:n] {
-		if p.stage != nil {
-			p.stage("retire")
+	durable := p.engine.DurableFrontier(p.index)
+	if p.segmentLast > 0 && durable >= p.cursor {
+		if err := p.rotateJournal(); err != nil {
+			return err
 		}
-		if err := os.Remove(path); err != nil {
+	}
+	n := 0
+	for n < len(p.closed) && p.closed[n].end <= durable {
+		n++
+	}
+	keep := -1
+	if p.segmentLast < 0 && n == len(p.closed) {
+		for keep = n - 1; keep >= 0 && p.closed[keep].last < 0; keep-- {
+		}
+		if keep < 0 {
+			return nil // nothing retained holds a record yet
+		}
+		if p.closed[keep].last > 0 {
+			if err := p.cutToLastRecord(&p.closed[keep]); err != nil {
+				return err
+			}
+		}
+	}
+	removed := 0
+	for i, segment := range p.closed[:n] {
+		if i == keep {
+			continue
+		}
+		if p.stage != nil {
+			p.stage("retire " + segment.path)
+		}
+		if err := os.Remove(segment.path); err != nil {
 			return err
 		}
 		if p.stage != nil {
 			p.stage("retired")
 		}
+		removed++
 	}
-	if n > 0 {
+	if keep >= 0 {
+		p.closed[0] = p.closed[keep]
+		p.closed = p.closed[:1]
+	} else {
+		p.closed = p.closed[:copy(p.closed, p.closed[n:])]
+	}
+	if removed > 0 {
 		return syncDir(p.journalDir)
 	}
 	return nil
 }
 
+// cutToLastRecord atomically replaces a covered closed segment by its last
+// record, byte for byte. Recovery reads only that record's checksummed plain
+// header (segmentEnd) and never decodes a covered segment, whose predictor
+// state the cut removed.
+func (p *Producer) cutToLastRecord(segment *journalSegment) error {
+	f, err := os.Open(segment.path)
+	if err != nil {
+		return err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return errors.Join(err, f.Close())
+	}
+	record := make([]byte, st.Size()-segment.last)
+	_, err = f.ReadAt(record, segment.last)
+	if err = errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	if len(record) < 4 || int(binary.LittleEndian.Uint32(record)) != len(record)-4 {
+		return fmt.Errorf("journal segment %s: last record does not end the segment", filepath.Base(segment.path))
+	}
+	if end, _, _, _, err := applicationHeader(record[4:]); err != nil || end != segment.end {
+		return fmt.Errorf("journal segment %s: last record does not end at cursor %d", filepath.Base(segment.path), segment.end)
+	}
+	temp := filepath.Join(p.journalDir, seedTemp)
+	out, err := os.OpenFile(temp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(record)
+	if err = errors.Join(err, out.Sync(), out.Close()); err != nil {
+		return err
+	}
+	if p.stage != nil {
+		p.stage("seed " + segment.path)
+	}
+	if err = os.Rename(temp, segment.path); err != nil {
+		return err
+	}
+	if err = syncDir(p.journalDir); err != nil {
+		return err
+	}
+	if p.stage != nil {
+		p.stage("seeded")
+	}
+	segment.last = 0
+	return nil
+}
+
+// retainedSegments lists every recovered segment as closed for retirement.
+func retainedSegments(paths []string) ([]journalSegment, error) {
+	out := make([]journalSegment, 0, len(paths))
+	var end uint64
+	for k, path := range paths {
+		e, _, last, ok, err := segmentEnd(path, k == len(paths)-1)
+		if err != nil {
+			return nil, fmt.Errorf("journal segment %s: %w", filepath.Base(path), err)
+		}
+		if ok {
+			end = e
+		} else {
+			last = -1
+		}
+		out = append(out, journalSegment{path: path, end: end, last: last})
+	}
+	return out, nil
+}
+
 // skipSegments uses the same durability boundary as retirement. A retired
 // prefix needs its cursor/order seed even when no further segment can be skipped.
 func (p *Producer) skipSegments(paths []string) (int, error) {
-	if p.fullReplay || p.placement != nil || p.durableApplications != nil || len(paths) == 0 {
+	if p.replaysAll() || len(paths) == 0 {
 		return 0, nil
 	}
 	j, err := p.durablePrefix(paths)
@@ -296,23 +435,16 @@ func (p *Producer) skipSegments(paths []string) (int, error) {
 	}
 	// Retirement keeps a nonempty anchor segment. Fully sealed recovery can
 	// skip that anchor too, restoring the end cursor/order from retained input.
+	durable := p.engine.DurableFrontier(p.index)
 	for k := len(paths) - 1; k >= 0; k-- {
-		end, order, ok, err := segmentEnd(paths[k], k == len(paths)-1)
+		end, order, _, ok, err := segmentEnd(paths[k], k == len(paths)-1)
 		if err != nil {
 			return 0, fmt.Errorf("journal segment %s: %w", filepath.Base(paths[k]), err)
 		}
 		if !ok {
 			continue
 		}
-		frontiers := p.engine.DurableFrontiers()
-		covered := len(frontiers) > 0
-		for _, frontier := range frontiers {
-			if end > frontier[p.index] {
-				covered = false
-				break
-			}
-		}
-		if !covered {
+		if end > durable {
 			break
 		}
 		if order <= p.applyOrder {
@@ -331,11 +463,8 @@ func (p *Producer) skipSegments(paths []string) (int, error) {
 	if !ok {
 		return 0, errors.New("retained journal has no starting record")
 	}
-	durable := p.engine.DurableFrontiers()
-	for _, f := range durable {
-		if start > f[p.index] {
-			return 0, errors.New("retained journal starts beyond core frontier")
-		}
+	if start > durable {
+		return 0, errors.New("retained journal starts beyond core frontier")
 	}
 	if order <= p.applyOrder {
 		return 0, errors.New("journal application order regressed")
@@ -349,18 +478,10 @@ func (p *Producer) skipSegments(paths []string) (int, error) {
 // Placement/relay and classic mirrors need their entire independent replay log.
 // This helper never changes the live producer cursor or application order.
 func (p *Producer) durablePrefix(paths []string) (int, error) {
-	if p.fullReplay || p.placement != nil || p.durableApplications != nil || len(paths) == 0 {
+	if p.replaysAll() || len(paths) == 0 {
 		return 0, nil
 	}
-
-	frontiers := p.engine.DurableFrontiers()
-	if len(frontiers) == 0 {
-		return 0, nil
-	}
-	durable := frontiers[0][p.index]
-	for _, f := range frontiers[1:] {
-		durable = min(durable, f[p.index])
-	}
+	durable := p.engine.DurableFrontier(p.index)
 	// Skipped segments are not decoded, so keep full replay's rejection of
 	// repeated or regressing segments: first-record cursors must increase.
 	var last uint64
@@ -444,52 +565,53 @@ func segmentStart(path string) (start, order uint64, ok bool, err error) {
 	return cursor - n, first, err == nil, err
 }
 
-// segmentEnd returns the cursor and last application order of a segment's last
-// complete record, reading only record lengths and that record. Like Scan, it
-// truncates a torn tail of the newest segment and rejects one anywhere else.
-// ok is false for a segment without a complete record.
-func segmentEnd(path string, newest bool) (end, order uint64, ok bool, err error) {
+// segmentEnd returns the cursor, last application order and offset of a
+// segment's last complete record, reading only record lengths and that record.
+// Like Scan, it truncates a torn tail of the newest segment and rejects one
+// anywhere else. ok is false for a segment without a complete record.
+func segmentEnd(path string, newest bool) (end, order uint64, last int64, ok bool, err error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, 0, false, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, 0, false, err
 	}
-	var offset, last int64 = 0, -1
+	var offset int64
+	last = -1
 	for offset < st.Size() {
 		var h [4]byte
 		if _, err = f.ReadAt(h[:], offset); err == nil {
 			size := binary.LittleEndian.Uint32(h[:])
 			if size == 0 || size > v2replay.MaxRecord {
-				return 0, 0, false, errors.New("invalid journal length")
+				return 0, 0, 0, false, errors.New("invalid journal length")
 			}
 			if offset+4+int64(size) <= st.Size() {
 				last, offset = offset, offset+4+int64(size)
 				continue
 			}
 		} else if !errors.Is(err, io.EOF) {
-			return 0, 0, false, err
+			return 0, 0, 0, false, err
 		}
 		if !newest {
-			return 0, 0, false, fmt.Errorf("torn journal record at %d", offset)
+			return 0, 0, 0, false, fmt.Errorf("torn journal record at %d", offset)
 		}
 		if err = errors.Join(f.Truncate(offset), f.Sync()); err != nil {
-			return 0, 0, false, err
+			return 0, 0, 0, false, err
 		}
 		break
 	}
 	if last < 0 {
-		return 0, 0, false, nil
+		return 0, 0, -1, false, nil
 	}
 	record := make([]byte, offset-last-4)
 	if _, err = f.ReadAt(record, last+4); err != nil {
-		return 0, 0, false, err
+		return 0, 0, 0, false, err
 	}
 	end, _, _, order, err = applicationHeader(record)
-	return end, order, err == nil, err
+	return end, order, last, err == nil, err
 }
 
 // applicationHeader verifies an original application record's checksum and

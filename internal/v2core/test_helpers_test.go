@@ -43,6 +43,17 @@ func (p *publication) acquire() *pinned {
 
 func (p *pendingRows) len() int { return len(p.rows) }
 
+// pendingBatchesFit reports whether every application has 1..pendingPacketRows
+// points, the range Outbox.Start accepts.
+func pendingBatchesFit(batches []coreBatch) bool {
+	for i := range batches {
+		if n := len(batches[i].Points); n == 0 || n > pendingPacketRows {
+			return false
+		}
+	}
+	return len(batches) > 0
+}
+
 // batches rebuilds the original applications exactly, with their
 // points in one arena so each batch's Points has cap == len, as submission
 // produces them.

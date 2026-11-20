@@ -238,10 +238,8 @@ func (e *coreEngine) submitBatchesMode(producer int, batches []coreBatch, cursor
 	}
 	router := &e.routers[producer]
 	if e.cfg.Rollups && len(batches) > 0 {
-		// Encode the applications into owner rows, as a producer's Outbox does.
-		if !pendingBatchesFit(batches) {
-			return errors.New("rollup application needs 1..32768 points")
-		}
+		// Encode the applications into owner rows, as a producer's Outbox
+		// does; Start refuses an application outside 1..32768 points.
 		if router.outbox == nil {
 			router.outbox = e.NewOutbox()
 		}

@@ -81,17 +81,6 @@ func pendingRowsFit(batches []coreBatch, lookup func(uint64) *ApplicationPolicy)
 	return true
 }
 
-// pendingBatchesFit reports whether rollup batches, whose IDs core has
-// interned, fit pendingRows: every application has 1..pendingPacketRows points.
-func pendingBatchesFit(batches []coreBatch) bool {
-	for i := range batches {
-		if n := len(batches[i].Points); n == 0 || n > pendingPacketRows {
-			return false
-		}
-	}
-	return len(batches) > 0
-}
-
 // appendRows copies closed rows encoded by append, startApplication and
 // addRow, rebasing their row and side-array offsets. The result equals
 // append over the same applications.

@@ -5,6 +5,7 @@ package v2core
 
 import (
 	"errors"
+	"math"
 	"os"
 
 	"github.com/cockroachdb/pebble"
@@ -114,6 +115,19 @@ func (e *coreEngine) ResumeMerges() {
 // DurableFrontiers returns conservative owner snapshots safe during intake.
 // Log retirement must also respect the journal's own fsync frontier.
 func (e *coreEngine) DurableFrontiers() [][]uint64 { return e.durableFrontiers() }
+
+// DurableFrontier is the producer cursor every owner has durably committed:
+// the minimum of its DurableFrontiers column, read without copying them.
+func (e *coreEngine) DurableFrontier(producer int) uint64 {
+	if len(e.owners) == 0 {
+		return 0
+	}
+	durable := uint64(math.MaxUint64)
+	for _, o := range e.owners {
+		durable = min(durable, o.frontier.Load().Cursors[producer])
+	}
+	return durable
+}
 
 // BenchmarkStats samples atomic owner counters and Pebble metrics. Call while
 // the experiment is open, before Close; it never reads mutable reducer state.
