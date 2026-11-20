@@ -329,6 +329,21 @@ func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationP
 	h.n += len(batches)
 }
 
+// next returns the following empty head with its open row arrays sized for
+// this head's rows plus 1/8. Steady intake then fills one allocation per seal
+// instead of a doubling chain whose smaller copies become garbage. Readers
+// keep this head's arrays through its frozen view; nothing is shared.
+func (h *pendingHead) next() pendingHead {
+	r := &h.rows
+	rows, packets, deltas, seqs := len(r.rows), len(r.packets), len(r.deltas), len(r.seqs)
+	for _, s := range h.segs {
+		rows, packets, deltas, seqs = rows+len(s.rows), packets+len(s.packets), deltas+len(s.deltas), seqs+len(s.seqs)
+	}
+	grow := func(n int) int { return n + n/8 }
+	return pendingHead{rows: pendingRows{rows: make([]pendingRow, 0, grow(rows)), packets: make([]pendingPacket, 0, grow(packets)),
+		deltas: make([]uint32, 0, grow(deltas)), seqs: make([]uint64, 0, grow(seqs))}}
+}
+
 // addRows is add for applications the router already encoded as rows.
 func (h *pendingHead) addRows(src *pendingRows) {
 	if len(src.rows) == 0 {

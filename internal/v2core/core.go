@@ -1240,7 +1240,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
 		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
-		pend = pendingHead{}
+		pend = pend.next()
 		publishedBatches = 0
 		headExpiries = o.expiries.Load()
 		o.sealPubMu.Lock()
@@ -1319,7 +1319,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.publishFrontier(next)
 		// Readers may still hold the published prefix of sealedPending. Never
 		// overwrite or clear it; the next head appends to fresh slices.
-		pend = pendingHead{}
+		pend = pend.next()
 		publishedBatches = 0
 		o.committed.Add(uint64(headPoints))
 		o.parts.Add(1)

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
@@ -599,5 +600,39 @@ func TestPendingRunsAcrossSealAvoidCatalog(t *testing.T) {
 				t.Fatalf("Find(%d): positions differ (got %d, want %d), error %v", id, len(got), len(positions), err)
 			}
 		}
+	}
+}
+
+// TestPendingHeadNextPresizesRows checks that the head after a seal receives
+// the same router-encoded intake without growing its row arrays, and that its
+// views still decode the same applications.
+func TestPendingHeadNextPresizesRows(t *testing.T) {
+	packets, pols := receiverPackets(1<<14, 64)
+	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
+	encoded := make([]pendingRows, len(packets))
+	for i, packet := range packets {
+		for _, bt := range packet {
+			encoded[i].startApplication(bt.Order, bt.Clock, bt.Points[0].Time, len(bt.Points))
+			for _, p := range bt.Points {
+				encoded[i].addRow(bt.ID, p.Time, p.Bits, p.Seq)
+			}
+		}
+		encoded[i].closePacket()
+	}
+	var first pendingHead
+	for i := range encoded {
+		first.addRows(&encoded[i])
+	}
+	want := first.rows.batches(lookup)
+	next := first.next()
+	base := unsafe.SliceData(next.rows.rows)
+	for i := range encoded {
+		next.addRows(&encoded[i])
+	}
+	if unsafe.SliceData(next.rows.rows) != base {
+		t.Fatalf("next head regrew its rows: cap %d for %d rows", cap(next.rows.rows), len(next.rows.rows))
+	}
+	if next.n != first.n || !reflect.DeepEqual(next.rows.batches(lookup), want) {
+		t.Fatal("next head decodes different applications")
 	}
 }
