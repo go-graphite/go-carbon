@@ -55,8 +55,8 @@ type Config struct {
 	// group fsync once the current segment holds at least this many bytes. Each
 	// segment starts with fresh predictor state, so restart can skip every
 	// segment that ends at or below all owners' durable frontiers. Zero keeps one
-	// segment per process run and retires nothing. Otherwise each Drain, idle
-	// ones included, unlinks the segments every owner has committed, down to one
+	// segment per process run and retires nothing. Otherwise rotation and every
+	// idle Drain unlink the segments every owner has committed, down to one
 	// record once all input is; placement and classic-mirror consumers retain
 	// their replay logs.
 	JournalSegmentBytes int64
@@ -383,6 +383,7 @@ func (p *Producer) Drain() error {
 		}
 	}
 	p.CatalogSyncTime += time.Since(start)
+	rotated := false
 	if p.layer >= 2 {
 		for _, record := range p.records {
 			var h [4]byte
@@ -428,6 +429,7 @@ func (p *Producer) Drain() error {
 			if err := p.rotateJournal(); err != nil {
 				return p.fail(err)
 			}
+			rotated = true
 		}
 	}
 	start = time.Now()
@@ -459,7 +461,12 @@ func (p *Producer) Drain() error {
 	p.packets = p.packets[:0]
 	p.pendingRows = 0
 	p.nextSync = time.Now().Add(p.interval)
-	return p.fail(p.retireJournal())
+	// A busy producer retires at rotation, as often as segments close; idle
+	// Drains above retire the rest once seals cover it.
+	if rotated {
+		return p.fail(p.retireJournal())
+	}
+	return nil
 }
 
 // Close drains stopped producers and closes their resources even after an error.

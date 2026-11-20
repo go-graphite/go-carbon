@@ -299,7 +299,7 @@ func (p *Producer) rotateJournal() error {
 // all input. So while the open segment is empty, the newest covered segment
 // holding a record stays, cut to that record; a covered open segment rotates
 // first, and an idle producer keeps one record. It runs on the producer's
-// caller with every record synced: after each Drain, idle ones included.
+// caller with every record synced: after a rotation and on each idle Drain.
 func (p *Producer) retireJournal() error {
 	if !p.retires() || p.journal == nil || p.cursor == 0 || len(p.records) > 0 {
 		return nil
