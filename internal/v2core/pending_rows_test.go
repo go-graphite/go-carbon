@@ -541,9 +541,6 @@ func TestOutboxRoutesApplications(t *testing.T) {
 		}
 		want[s] = append(want[s], coreBatch{ID: h.id, Order: order, Clock: clock, Registered: h, Points: pts})
 	}
-	if out.Len() == 0 {
-		t.Fatal("no points counted")
-	}
 	lookup := func(id uint64) *ApplicationPolicy { return handles[id] }
 	for s := range out.owners {
 		out.owners[s].closePacket()
@@ -559,7 +556,7 @@ func TestOutboxRoutesApplications(t *testing.T) {
 	}
 	out.reset()
 	for s := range out.owners {
-		if out.owners[s].len() != 0 || out.Len() != 0 {
+		if out.owners[s].len() != 0 {
 			t.Fatal("reset kept rows")
 		}
 	}

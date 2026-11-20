@@ -728,26 +728,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		return err
 	}
 	router := &e.routers[producer]
-	if e.cfg.Rollups {
-		for _, b := range batches {
-			policy := b.Policy
-			if b.Registered != nil {
-				if b.Registered.policy.policyDefinition == nil {
-					return errors.New("uninitialized application policy")
-				}
-				if len(policy) != 0 {
-					return errors.New("registered policy with mutable definition")
-				}
-				if b.Registered.catalog == e.identities && b.Registered.id == b.ID {
-					continue
-				}
-				policy = b.Registered.definitionBytes()
-			}
-			if _, err := e.identities.intern(b.ID, "", policy); err != nil {
-				return err
-			}
-		}
-	}
+	// Rollup applications arrive only as outboxes; batches are numeric-mode.
 	routeID := func(id uint64) (int, error) {
 		if !e.cfg.Rollups {
 			return coreShard(id, e.cfg.Shards), nil
@@ -757,14 +738,6 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			return 0, errors.New("rollup row requires original application policy")
 		}
 		return int(partsformat.Route(h.policy.Name)) % e.cfg.Shards, nil
-	}
-	// A registered batch borrows the shared catalog identity. Do not repeat
-	// contended catalog lookups or name hashing for every admitted point.
-	routeBatch := func(b coreBatch) (int, error) {
-		if e.cfg.Rollups && b.Registered != nil && b.Registered.catalog == e.identities && b.Registered.id == b.ID {
-			return int(b.Registered.vshard) % e.cfg.Shards, nil
-		}
-		return routeID(b.ID)
 	}
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {
@@ -844,36 +817,13 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		d.routes = make([]int, len(rows))
 	}
 	routes := d.routes[:len(rows)]
-	if e.cfg.Rollups && len(batches) != 0 {
-		// submitBatchesMode flattens original applications in this exact order.
-		// Keep the ID/length guard here so the routing hint cannot misroute a row.
-		offset := 0
-		for _, b := range batches {
-			owner, err := routeBatch(b)
-			if err != nil {
-				return err
-			}
-			for range b.Points {
-				if offset >= len(rows) || rows[offset].ID != b.ID {
-					return errors.New("mixed metric routing batch")
-				}
-				routes[offset] = owner
-				counts[owner]++
-				offset++
-			}
+	for i, r := range rows {
+		owner, err := routeID(r.ID)
+		if err != nil {
+			return err
 		}
-		if offset != len(rows) {
-			return errors.New("incomplete metric routing batch")
-		}
-	} else {
-		for i, r := range rows {
-			owner, err := routeID(r.ID)
-			if err != nil {
-				return err
-			}
-			routes[i] = owner
-			counts[owner]++
-		}
+		routes[i] = owner
+		counts[owner]++
 	}
 
 	for _, count := range counts {
@@ -928,15 +878,13 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		clear(counts)
 		pointCount, policyBytes := 0, 0
 		for _, b := range batches {
-			owner, err := routeBatch(b)
+			owner, err := routeID(b.ID)
 			if err != nil {
 				return err
 			}
 			counts[owner]++
 			pointCount += len(b.Points)
-			if !e.cfg.Rollups {
-				policyBytes += len(b.Policy)
-			}
+			policyBytes += len(b.Policy)
 		}
 		descriptors := make([]coreBatch, len(batches))
 		pointArena := make([]row, pointCount)
@@ -948,21 +896,16 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		}
 		pointOffset, policyOffset := 0, 0
 		for _, b := range batches {
-			owner, err := routeBatch(b)
+			owner, err := routeID(b.ID)
 			if err != nil {
 				return err
 			}
 			n := copy(pointArena[pointOffset:], b.Points)
 			b.Points = pointArena[pointOffset : pointOffset+n : pointOffset+n]
 			pointOffset += n
-			if e.cfg.Rollups {
-				b.Registered = e.identities.lookup(b.ID)
-				b.Policy = nil
-			} else {
-				n = copy(policyArena[policyOffset:], b.Policy)
-				b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]
-				policyOffset += n
-			}
+			n = copy(policyArena[policyOffset:], b.Policy)
+			b.Policy = policyArena[policyOffset : policyOffset+n : policyOffset+n]
+			policyOffset += n
 			byOwner[owner] = append(byOwner[owner], b)
 		}
 	}
