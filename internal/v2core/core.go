@@ -68,7 +68,7 @@ type corePacket struct {
 	operation  func(*coreOwner) error
 	rows       []row
 	batches    []coreBatch
-	pending    *pendingRows // rollup applications, encoded by the router
+	pending    *pendingRows // rollup applications, encoded by the producer (Outbox)
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
@@ -98,6 +98,7 @@ const (
 
 type coreRouter struct {
 	batchRows                   []row
+	outbox                      *Outbox // encodes rollup batches (replay, tests)
 	slots                       []coreDispatch
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
@@ -132,6 +133,14 @@ func (p *corePacket) size() uint64 {
 		n += p.pending.size()
 	}
 	return n
+}
+
+// points counts the packet's rows, numeric or encoded.
+func (p *corePacket) points() int {
+	if p.pending != nil {
+		return len(p.rows) + p.pending.len()
+	}
+	return len(p.rows)
 }
 func (d *coreDispatch) release() {
 	// Capture before publishing remaining=0: the producer may reuse d then.
@@ -690,7 +699,7 @@ func (e *coreEngine) submit(producer int, rows []row, cursor uint64, seal bool) 
 	return e.submitPacket(producer, rows, nil, cursor, seal)
 }
 func (e *coreEngine) submitPacket(producer int, rows []row, batches []coreBatch, cursor uint64, seal bool) error {
-	return e.submitPacketMode(producer, rows, batches, cursor, seal, true)
+	return e.submitPacketMode(producer, rows, batches, nil, cursor, seal, true)
 }
 
 func (e *coreEngine) submissionError() error {
@@ -710,7 +719,11 @@ func (e *coreEngine) submissionError() error {
 	return nil
 }
 
-func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBatch, cursor uint64, seal, waitSeal bool) error {
+// submitPacketMode fans one producer packet out to every owner: numeric rows,
+// detached batches, or an outbox of rows the producer encoded per owner. An
+// outbox's arrays move into the dispatch lease, and the outbox receives the
+// lease's released arrays in exchange.
+func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBatch, out *Outbox, cursor uint64, seal, waitSeal bool) error {
 	if err := e.submissionError(); err != nil {
 		return err
 	}
@@ -761,6 +774,15 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	charge := uint64(len(e.owners))*corePacketBytes + uint64(len(rows))*uint64(unsafe.Sizeof(row{}))
 	for _, b := range batches {
 		charge += uint64(unsafe.Sizeof(coreBatch{})) + uint64(len(b.Policy)) + uint64(len(b.Points))*uint64(unsafe.Sizeof(row{}))
+	}
+	if out != nil {
+		for s := range out.owners {
+			out.owners[s].closePacket()
+			if out.owners[s].len() > e.cfg.MaxRows {
+				return errors.New("producer batch exceeds owner head bound")
+			}
+			charge += out.owners[s].size()
+		}
 	}
 	if len(router.slots) == 0 {
 		router.slots = make([]coreDispatch, max(1, streamBytes/(uint64(len(e.owners))*corePacketBytes)))
@@ -889,31 +911,15 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 	}
 	var byOwner [][]coreBatch
 	var pending []pendingRows
-	if e.cfg.Rollups && pendingBatchesFit(batches) {
-		// Every ID is interned above, so the owners' pendingRowsFit holds:
-		// encode each owner's 16-byte rows here, in the lease, and let the
-		// owner copy them. No per-point descriptor outlives the submission.
-		if len(d.pending) == 0 {
-			d.pending = make([]pendingRows, e.cfg.Shards)
+	if out != nil {
+		// The owners read these arrays until they release the lease; the
+		// outbox refills the arrays the lease's previous owners released.
+		if len(d.pending) != len(out.owners) {
+			d.pending = make([]pendingRows, len(out.owners))
 		}
+		d.pending, out.owners = out.owners, d.pending
+		out.reset()
 		pending = d.pending
-		for s := range pending {
-			pending[s].reset()
-		}
-		for _, b := range batches {
-			owner, err := routeBatch(b)
-			if err != nil {
-				return err
-			}
-			pk := &pending[owner]
-			pk.startApplication(b.Order, b.Clock, b.Points[0].Time, len(b.Points))
-			for _, r := range b.Points {
-				pk.addRow(b.ID, r.Time, r.Bits, r.Seq)
-			}
-		}
-		for s := range pending {
-			pending[s].closePacket()
-		}
 	} else if len(batches) > 0 {
 		// One immutable application and point arena per submitted packet. Owners
 		// retain these after releasing the dispatch lease; no caller slices or
@@ -1240,7 +1246,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
 		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
-		pend = pend.next()
+		pend = pendingHead{}
 		publishedBatches = 0
 		headExpiries = o.expiries.Load()
 		o.sealPubMu.Lock()
@@ -1319,7 +1325,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.publishFrontier(next)
 		// Readers may still hold the published prefix of sealedPending. Never
 		// overwrite or clear it; the next head appends to fresh slices.
-		pend = pend.next()
+		pend = pendingHead{}
 		publishedBatches = 0
 		o.committed.Add(uint64(headPoints))
 		o.parts.Add(1)
@@ -1358,7 +1364,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	}
 	// fullHead reports a data packet that the head cannot admit below MaxRows.
 	fullHead := func(p *corePacket, producer int) bool {
-		return p != nil && p.operation == nil && !p.stop && p.cursor > pending[producer] && headPoints+len(p.rows) > o.cfg.MaxRows
+		return p != nil && p.operation == nil && !p.stop && p.cursor > pending[producer] && headPoints+p.points() > o.cfg.MaxRows
 	}
 	return func() (bool, bool) {
 		if failure == nil && flight != nil {
@@ -1452,7 +1458,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 				failure = errors.New("seal planner requires original apply batches")
 			}
 			if failure == nil && p.cursor > pending[producer] {
-				if headPoints+len(p.rows) > o.cfg.MaxRows {
+				points := p.points()
+				if headPoints+points > o.cfg.MaxRows {
 					if asyncSeal {
 						// The loop above left this packet queued while a flight ran;
 						// the flight is published, so freeze the full head now.
@@ -1465,7 +1472,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					}
 				}
 				if failure == nil {
-					if headPoints == 0 && len(p.rows) > 0 {
+					if headPoints == 0 && points > 0 {
 						headSince = time.Now().UnixNano()
 						if flight == nil {
 							o.bufferedSince.Store(headSince)
@@ -1473,11 +1480,19 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					}
 					if keepRows {
 						head = append(head, p.rows...)
+						if p.pending != nil {
+							for _, b := range p.pending.batches(o.lookup) {
+								head = append(head, b.Points...)
+							}
+						}
 					}
 					for _, r := range p.rows {
 						headOldest = min(headOldest, r.Time)
 					}
-					headPoints += len(p.rows)
+					if p.pending != nil && p.pending.len() > 0 {
+						headOldest = min(headOldest, p.pending.oldest)
+					}
+					headPoints += points
 					buffered := headPoints
 					if flight != nil {
 						buffered += flight.points

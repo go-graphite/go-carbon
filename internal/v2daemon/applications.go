@@ -120,23 +120,17 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 	p.applicationIDs = slices.Grow(p.applicationIDs[:0], len(apps))[:len(apps)]
 	frames, ids := p.applicationFrames, p.applicationIDs
 	defer clear(frames)
+	// Direct L3 producers encode straight into the owners' head rows. Classic
+	// mirroring and the non-rollup layer submit detached batches instead.
+	direct := p.layer == 3 && p.durableApplications == nil
+	var out *v2core.Outbox
 	var batches []v2core.Batch
-	if last := len(p.spareBatches); last > 0 {
-		batches = p.spareBatches[last-1]
-		p.spareBatches[last-1] = nil
-		p.spareBatches = p.spareBatches[:last-1]
-	}
-	batches = slices.Grow(batches[:0], len(apps))[:len(apps)]
 	var rows []v2core.Row
-	if last := len(p.spareRows); last > 0 {
-		rows = p.spareRows[last-1]
-		p.spareRows[last-1] = nil
-		p.spareRows = p.spareRows[:last-1]
-	}
-	if cap(rows) < n {
-		rows = make([]v2core.Row, 0, n)
+	if direct {
+		out = p.openOutbox()
 	} else {
-		rows = rows[:0]
+		batches = make([]v2core.Batch, len(apps))
+		rows = make([]v2core.Row, 0, n)
 	}
 	for i, a := range apps {
 		registered := a.Registered
@@ -150,14 +144,23 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		id := registered.id
 		ids[i] = id
 		frames[i] = partlog.CatalogFrame{ID: id, Clock: a.Clock, Points: a.Points}
+		if direct {
+			if err := out.Start(registered.policy, a.Order, a.Clock, a.Points[0].Timestamp, len(a.Points)); err != nil {
+				return p.fail(err)
+			}
+			for j, point := range a.Points {
+				out.Point(point.Timestamp, math.Float64bits(point.Value), a.Sequence[j])
+			}
+			continue
+		}
 		start := len(rows)
 		for j, point := range a.Points {
 			rows = append(rows, v2core.Row{ID: NumericID(id, p.index, p.count), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
 		}
 		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)], Registered: registered.policy}
 		if registered.policy == nil {
-			// Classic mirroring and the non-rollup compatibility path consume
-			// immutable catalog bytes; direct L3 carries its validated handle.
+			// Classic mirroring and the non-rollup layer consume immutable
+			// catalog bytes; direct L3 carries its validated handle.
 			_, batches[i].Policy, _ = p.catalog.Lookup(id)
 		}
 	}
@@ -174,7 +177,7 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		p.spareRecords[last] = nil
 		p.spareRecords = p.spareRecords[:last]
 	}
-	record = appendApplicationRecord(record, cursor, ids, batches, encoded)
+	record = appendApplicationRecord(record, cursor, ids, apps, encoded)
 	if stamp != nil {
 		record = encodePlacementEnvelope(*stamp, record)
 	}
@@ -183,7 +186,11 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 	}
 	p.EncodeTime += time.Since(start)
 	p.records = append(p.records, record)
-	p.packets = append(p.packets, packet{rows: rows, batches: batches, cursor: cursor})
+	if direct {
+		p.packets[len(p.packets)-1].cursor = cursor
+	} else {
+		p.packets = append(p.packets, packet{rows: rows, batches: batches, cursor: cursor})
+	}
 	p.cursor = cursor
 	p.applyOrder = order
 	p.pendingRows += n
@@ -197,6 +204,22 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 	return nil
 }
 
+// openOutbox returns the outbox of the last queued packet, or queues a packet
+// with a free one. Consecutive groups share one outbox until a seal or Drain.
+func (p *Producer) openOutbox() *v2core.Outbox {
+	if n := len(p.packets); n > 0 && p.packets[n-1].out != nil {
+		return p.packets[n-1].out
+	}
+	var out *v2core.Outbox
+	if n := len(p.outboxes); n > 0 {
+		out, p.outboxes = p.outboxes[n-1], p.outboxes[:n-1]
+	} else {
+		out = p.engine.NewOutbox()
+	}
+	p.packets = append(p.packets, packet{out: out})
+	return out
+}
+
 var applicationMagic = []byte{'V', '2', 'A', 1}
 var applicationCRC = crc32.MakeTable(crc32.Castagnoli)
 
@@ -206,24 +229,24 @@ func applicationVarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
 // source IDs, application orders and sequences to those original PDC4 frames.
 // Append into producer-owned storage retained until the journal fsync succeeds.
 // Reserve the complete envelope once, including all original sequence varints.
-func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, batches []v2core.Batch, pdc4 []byte) []byte {
-	size := len(applicationMagic) + applicationVarintLen(cursor) + applicationVarintLen(uint64(len(batches))) + applicationVarintLen(uint64(len(pdc4))) + len(pdc4) + 4
-	for i, a := range batches {
+func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, apps []Application, pdc4 []byte) []byte {
+	size := len(applicationMagic) + applicationVarintLen(cursor) + applicationVarintLen(uint64(len(apps))) + applicationVarintLen(uint64(len(pdc4))) + len(pdc4) + 4
+	for i, a := range apps {
 		size += applicationVarintLen(ids[i]) + applicationVarintLen(a.Order) + applicationVarintLen(uint64(len(a.Points)))
-		for _, p := range a.Points {
-			size += applicationVarintLen(p.Seq)
+		for _, seq := range a.Sequence {
+			size += applicationVarintLen(seq)
 		}
 	}
 	start := len(dst)
 	b := append(slices.Grow(dst, size), applicationMagic...)
 	b = binary.AppendUvarint(b, cursor)
-	b = binary.AppendUvarint(b, uint64(len(batches)))
-	for i, a := range batches {
+	b = binary.AppendUvarint(b, uint64(len(apps)))
+	for i, a := range apps {
 		b = binary.AppendUvarint(b, ids[i])
 		b = binary.AppendUvarint(b, a.Order)
 		b = binary.AppendUvarint(b, uint64(len(a.Points)))
-		for _, p := range a.Points {
-			b = binary.AppendUvarint(b, p.Seq)
+		for _, seq := range a.Sequence {
+			b = binary.AppendUvarint(b, seq)
 		}
 	}
 	b = binary.AppendUvarint(b, uint64(len(pdc4)))

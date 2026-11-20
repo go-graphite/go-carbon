@@ -4,6 +4,7 @@
 package v2core
 
 import (
+	"errors"
 	"os"
 
 	"github.com/cockroachdb/pebble"
@@ -78,7 +79,7 @@ func (e *coreEngine) AppendPipelined(producer int, rows []Row, cursor uint64, se
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return os.ErrInvalid
 	}
-	return e.submitPacketMode(producer, rows, nil, cursor, seal, false)
+	return e.submitPacketMode(producer, rows, nil, nil, cursor, seal, false)
 }
 
 // AppendBatches also preserves the original application groups for seal hooks.
@@ -91,6 +92,16 @@ func (e *coreEngine) AppendBatches(producer int, batches []Batch, cursor uint64,
 // seal or Close fences prior pipelined applications in the same producer FIFO.
 func (e *coreEngine) AppendBatchesPipelined(producer int, batches []Batch, cursor uint64, seal bool) error {
 	return e.submitBatchesMode(producer, batches, cursor, seal, false)
+}
+
+// AppendOutboxPipelined submits an outbox with the semantics of
+// AppendBatchesPipelined. On return the outbox is empty and holds the arrays
+// the owners released, ready for the producer's next applications.
+func (e *coreEngine) AppendOutboxPipelined(producer int, out *Outbox, cursor uint64, seal bool) error {
+	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 || !e.cfg.Rollups || out == nil || out.catalog != e.identities {
+		return errors.New("invalid outbox producer/cursor")
+	}
+	return e.submitPacketMode(producer, nil, nil, out, cursor, seal, false)
 }
 
 // ResumeMerges releases merges held by DeferMerges. It is idempotent.

@@ -603,12 +603,14 @@ func TestPendingRunsAcrossSealAvoidCatalog(t *testing.T) {
 	}
 }
 
-// TestPendingHeadNextPresizesRows checks that the head after a seal receives
-// the same router-encoded intake without growing its row arrays, and that its
-// views still decode the same applications.
-func TestPendingHeadNextPresizesRows(t *testing.T) {
-	packets, pols := receiverPackets(1<<14, 64)
+// TestPendingHeadBlocks checks that a head copies producer-encoded rows into
+// blocks of at most pendingBlockRows that are never reallocated once
+// published, wastes at most one block, and decodes the same applications as
+// one contiguous copy.
+func TestPendingHeadBlocks(t *testing.T) {
+	packets, pols := receiverPackets(5 * pendingBlockRows)
 	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
+	var flat pendingRows
 	encoded := make([]pendingRows, len(packets))
 	for i, packet := range packets {
 		for _, bt := range packet {
@@ -618,21 +620,36 @@ func TestPendingHeadNextPresizesRows(t *testing.T) {
 			}
 		}
 		encoded[i].closePacket()
+		flat.appendRows(&encoded[i])
 	}
-	var first pendingHead
+	var h pendingHead
+	var views []PendingView
 	for i := range encoded {
-		first.addRows(&encoded[i])
+		h.addRows(&encoded[i])
+		if i%7 == 0 {
+			views = append(views, h.view(lookup))
+		}
 	}
-	want := first.rows.batches(lookup)
-	next := first.next()
-	base := unsafe.SliceData(next.rows.rows)
-	for i := range encoded {
-		next.addRows(&encoded[i])
+	final := h.view(lookup)
+	if !reflect.DeepEqual(final.Batches(), flat.batches(lookup)) {
+		t.Fatal("blocks decode different applications")
 	}
-	if unsafe.SliceData(next.rows.rows) != base {
-		t.Fatalf("next head regrew its rows: cap %d for %d rows", cap(next.rows.rows), len(next.rows.rows))
+	used, reserved := 0, 0
+	for _, s := range final.segs {
+		if cap(s.rows) > pendingBlockRows {
+			t.Fatalf("block holds %d rows, cap %d", cap(s.rows), pendingBlockRows)
+		}
+		used, reserved = used+len(s.rows), reserved+cap(s.rows)
 	}
-	if next.n != first.n || !reflect.DeepEqual(next.rows.batches(lookup), want) {
-		t.Fatal("next head decodes different applications")
+	if used != len(flat.rows) || reserved-used > pendingBlockRows || len(final.segs) < 5 {
+		t.Fatalf("%d rows in %d blocks reserve %d", used, len(final.segs), reserved)
+	}
+	// Every earlier view still shares its blocks with the final view.
+	for _, v := range views {
+		for i, s := range v.segs {
+			if unsafe.SliceData(s.rows) != unsafe.SliceData(final.segs[i].rows) {
+				t.Fatalf("block %d was reallocated after publication", i)
+			}
+		}
 	}
 }

@@ -329,22 +329,14 @@ func (h *pendingHead) add(batches []coreBatch, lookup func(uint64) *ApplicationP
 	h.n += len(batches)
 }
 
-// next returns the following empty head with its open row arrays sized for
-// this head's rows plus 1/8. Steady intake then fills one allocation per seal
-// instead of a doubling chain whose smaller copies become garbage. Readers
-// keep this head's arrays through its frozen view; nothing is shared.
-func (h *pendingHead) next() pendingHead {
-	r := &h.rows
-	rows, packets, deltas, seqs := len(r.rows), len(r.packets), len(r.deltas), len(r.seqs)
-	for _, s := range h.segs {
-		rows, packets, deltas, seqs = rows+len(s.rows), packets+len(s.packets), deltas+len(s.deltas), seqs+len(s.seqs)
-	}
-	grow := func(n int) int { return n + n/8 }
-	return pendingHead{rows: pendingRows{rows: make([]pendingRow, 0, grow(rows)), packets: make([]pendingPacket, 0, grow(packets)),
-		deltas: make([]uint32, 0, grow(deltas)), seqs: make([]uint64, 0, grow(seqs))}}
-}
+// pendingBlockRows caps one head block. A head's blocks start at 1,024 rows
+// and double up to this cap; every application packet fits one block.
+const pendingBlockRows = pendingPacketRows
 
-// addRows is add for applications the router already encoded as rows.
+// addRows copies applications a producer encoded as rows (Outbox) into fixed
+// blocks. Whole packets go into the open block; one that does not fit closes
+// it and starts the next. So each row is written once, a published block is
+// never reallocated, and a head allocates its rows plus at most one block.
 func (h *pendingHead) addRows(src *pendingRows) {
 	if len(src.rows) == 0 {
 		return
@@ -352,7 +344,24 @@ func (h *pendingHead) addRows(src *pendingRows) {
 	if h.coldOpen {
 		h.closeOpen()
 	}
-	h.rows.appendRows(src)
+	for lo := 0; lo < len(src.packets); {
+		r := &h.rows
+		hi, free := lo, cap(r.rows)-len(r.rows)
+		for ; hi < len(src.packets) && int(src.packets[hi].Rows) <= free; hi++ {
+			free -= int(src.packets[hi].Rows)
+		}
+		if hi == lo {
+			if len(r.rows) > 0 {
+				h.closeOpen()
+			}
+			size := min(pendingBlockRows, 1024<<min(len(h.segs), 5))
+			h.rows.rows = make([]pendingRow, 0, max(size, int(src.packets[lo].Rows)))
+			continue
+		}
+		r.appendPackets(src, lo, hi)
+		lo = hi
+	}
+	h.rows.lastOrder = src.lastOrder
 	h.n += len(src.rows)
 }
 

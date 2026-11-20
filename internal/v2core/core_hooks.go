@@ -237,9 +237,27 @@ func (e *coreEngine) submitBatchesMode(producer int, batches []coreBatch, cursor
 	if producer < 0 || producer >= e.cfg.Producers || cursor == 0 {
 		return errors.New("invalid batch producer/cursor")
 	}
+	router := &e.routers[producer]
+	if e.cfg.Rollups && pendingBatchesFit(batches) {
+		// Encode the applications into owner rows, as a producer's Outbox does.
+		if router.outbox == nil {
+			router.outbox = e.NewOutbox()
+		}
+		out := router.outbox
+		for i := range batches {
+			if err := e.addBatch(out, &batches[i]); err != nil {
+				out.reset()
+				return err
+			}
+		}
+		err := e.submitPacketMode(producer, nil, nil, out, cursor, seal, waitSeal)
+		if err != nil {
+			out.reset()
+		}
+		return err
+	}
 	// Submission detaches every row before returning. Reuse producer-local
 	// flattening storage instead of growing a new slice for every packet.
-	router := &e.routers[producer]
 	n := 0
 	for _, b := range batches {
 		n += len(b.Points)
@@ -254,8 +272,42 @@ func (e *coreEngine) submitBatchesMode(producer int, batches []coreBatch, cursor
 		}
 	}
 	router.batchRows = rows
-	return e.submitPacketMode(producer, rows, batches, cursor, seal, waitSeal)
+	return e.submitPacketMode(producer, rows, batches, nil, cursor, seal, waitSeal)
 }
+
+// addBatch interns one application's identity and adds it to out.
+func (e *coreEngine) addBatch(out *Outbox, b *coreBatch) error {
+	h := b.Registered
+	if h == nil || h.catalog != e.identities || h.id != b.ID {
+		policy := b.Policy
+		if h != nil {
+			if h.policy.policyDefinition == nil {
+				return errors.New("uninitialized application policy")
+			}
+			if len(policy) != 0 {
+				return errors.New("registered policy with mutable definition")
+			}
+			policy = h.definitionBytes()
+		}
+		var err error
+		if h, err = e.identities.intern(b.ID, "", policy); err != nil {
+			return err
+		}
+	} else if len(b.Policy) != 0 {
+		return errors.New("registered policy with mutable definition")
+	}
+	if err := out.Start(h, b.Order, b.Clock, b.Points[0].Time, len(b.Points)); err != nil {
+		return err
+	}
+	for _, r := range b.Points {
+		if r.ID != b.ID {
+			return errors.New("mixed metric apply batch")
+		}
+		out.Point(r.Time, r.Bits, r.Seq)
+	}
+	return nil
+}
+
 func (o *coreOwner) publishFrontier(f coreFrontier) {
 	f.Cursors = slices.Clone(f.Cursors)
 	o.frontier.Store(&f)
