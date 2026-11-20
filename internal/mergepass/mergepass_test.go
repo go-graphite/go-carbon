@@ -244,6 +244,34 @@ func TestMergeRetriesTransientAndFailedBatches(t *testing.T) {
 	}
 }
 
+func TestMergeFallsBackWhenSourceLacksSumDigest(t *testing.T) {
+	target, donor := newStore(t), newStore(t)
+	put(t, target, "a", 10, map[int64]float64{30: 1})
+	put(t, donor, "a", 10, map[int64]float64{40: 4, 30: 3})
+	put(t, donor, "b", 10, map[int64]float64{30: 2})
+	var rejected atomic.Int32
+	old := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/transfer/digest" {
+				rejected.Add(1)
+				http.Error(w, `json: unknown field "Mode"`, 400) // an older daemon
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	o := options(t, serve(t, target, nil), serve(t, donor, old))
+	o.Batch, o.Streams, o.Sample = 1, 1, 0
+	r, err := Run(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Done != 2 || r.Pulled != 2 || r.SkippedNames != 0 || rejected.Load() != 1 {
+		t.Fatalf("report %+v rejected %d", r, rejected.Load())
+	}
+	equalPoints(t, "a", points(t, target, "a"), bits(map[int64]float64{40: 4, 30: 1}))
+}
+
 func TestMergeConfigErrors(t *testing.T) {
 	for _, o := range []Options{{}, {To: "x", From: []string{"http://a:1"}, State: "s"}, {To: "http://a:1", State: "s"}} {
 		if _, err := Run(context.Background(), o); err == nil {

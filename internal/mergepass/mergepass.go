@@ -116,6 +116,7 @@ type pass struct {
 	doneMu  sync.Mutex
 	report  Report
 	lastErr sync.Map // name -> Failure
+	noSum   sync.Map // source -> true when it cannot serve sum-v1 digests
 	limit   *gate
 }
 
@@ -240,6 +241,19 @@ func (p *pass) logf(format string, args ...any) {
 // streams file is read before each batch, so tuning needs no restart.
 func (p *pass) run(ctx context.Context, entries []entry, batch int) {
 	var wg sync.WaitGroup
+	ticker, stop := time.NewTicker(30*time.Second), make(chan struct{})
+	defer close(stop)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+			p.logf("merge_progress done=%d pulled=%d identical=%d retried=%d streams=%d", atomic.LoadInt64(&p.report.Done), atomic.LoadInt64(&p.report.Pulled), atomic.LoadInt64(&p.report.Identical), atomic.LoadInt64(&p.report.Retried), p.limit.size())
+		}
+	}()
 	for start := 0; start < len(entries) && ctx.Err() == nil; start += batch {
 		end := min(start+batch, len(entries))
 		p.limit.resize(p.streams())
@@ -283,7 +297,7 @@ func (p *pass) batch(ctx context.Context, work []entry) {
 			continue
 		}
 		need := names
-		if !p.o.NoDigest {
+		if _, off := p.noSum.Load(source); !p.o.NoDigest && !off {
 			var bad map[string]string
 			need, bad = p.differing(ctx, source, names)
 			for name, reason := range bad {
@@ -586,7 +600,9 @@ func (p *pass) retry(ctx context.Context, attempts int, fn func() error) error {
 			if time.Now().After(deadline) {
 				return err
 			}
-		} else if tries++; tries >= attempts || statusOf(err) == 413 || statusOf(err) == 404 {
+		} else if status := statusOf(err); status == 400 || status == 401 || status == 403 || status == 404 || status == 413 {
+			return err
+		} else if tries++; tries >= attempts {
 			return err
 		}
 		atomic.AddInt64(&p.report.Retried, 1)
@@ -616,10 +632,14 @@ func (p *pass) split(ctx context.Context, names []string, fn func([]string) erro
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		if len(part) == 1 {
-			failed[part[0]] = err.Error()
+		if status := statusOf(err); len(part) == 1 || status == 400 || status == 401 || status == 403 {
+			// Bad requests and auth failures are not per name: fail the part.
+			for _, name := range part {
+				failed[name] = err.Error()
+			}
 			return
 		}
+		p.logf("merge_split names=%d err=%q", len(part), err)
 		mid := len(part) / 2
 		walk(part[:mid])
 		walk(part[mid:])
@@ -733,6 +753,17 @@ func (p *pass) differing(ctx context.Context, source string, names []string) ([]
 		go func() { defer wg.Done(); dst, dstErr = p.digest(ctx, p.o.To, part) }()
 		src, srcErr = p.digest(ctx, source, part)
 		wg.Wait()
+		if statusOf(srcErr) == 400 && strings.Contains(srcErr.Error(), "Mode") {
+			// An older source cannot serve sum-v1: merge every name it holds.
+			if _, loaded := p.noSum.LoadOrStore(source, true); !loaded {
+				p.logf("merge_digest_unavailable source=%s fallback=pull err=%q", source, srcErr)
+			}
+			srcErr, dstErr = nil, nil
+			src = map[string]digestResult{}
+			for _, name := range part {
+				src[name] = digestResult{Name: name, Found: true, Archives: []digestArchive{{Count: 1}}}
+			}
+		}
 		if err := errors.Join(srcErr, dstErr); err != nil {
 			return err
 		}
