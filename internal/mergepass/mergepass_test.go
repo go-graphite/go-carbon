@@ -261,12 +261,12 @@ func TestMergeFallsBackWhenSourceLacksSumDigest(t *testing.T) {
 		})
 	}
 	o := options(t, serve(t, target, nil), serve(t, donor, old))
-	o.Batch, o.Streams, o.Sample = 1, 1, 0
+	o.Batch, o.Streams, o.Sample = 1, 1, 2
 	r, err := Run(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Done != 2 || r.Pulled != 2 || r.SkippedNames != 0 || rejected.Load() != 1 {
+	if r.Done != 2 || r.Pulled != 2 || r.SkippedNames != 0 || r.Parity[o.From[0]].Unsupported != 2 {
 		t.Fatalf("report %+v rejected %d", r, rejected.Load())
 	}
 	equalPoints(t, "a", points(t, target, "a"), bits(map[int64]float64{40: 4, 30: 1}))

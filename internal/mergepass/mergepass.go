@@ -86,6 +86,7 @@ type ParityCounts struct {
 	Differ        int `json:"differ"`
 	SourceAbsent  int `json:"source_absent"`
 	Errors        int `json:"errors"`
+	Unsupported   int `json:"unsupported_source"`
 }
 
 // ParityMismatch names one sampled name that is not equal.
@@ -818,6 +819,10 @@ func (p *pass) parity(ctx context.Context, entries []entry) {
 				dst, err = p.digest(ctx, p.o.To, names)
 				return err
 			})
+			if statusOf(err) == 400 && strings.Contains(err.Error(), "Mode") {
+				counts.Unsupported += len(names) // an older source cannot serve sum-v1
+				continue
+			}
 			if err != nil {
 				counts.Errors += len(names)
 				continue
