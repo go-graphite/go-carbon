@@ -310,31 +310,39 @@ func (s *Server) work(i int, o Owner) {
 		in.mu.Unlock()
 		b := &spare
 		defer b.reset()
-		if len(b.data) == 0 {
-			return
-		}
-		if failed {
-			s.stats.rejected.Add(uint64(len(b.data)))
-			return
-		}
-		sequence = sequence[:0]
-		for range b.data {
-			seq++
-			sequence = append(sequence, seq)
-		}
-		var err error
-		if byteOwner != nil {
-			err = byteOwner.AppendBytes(b.text, b.ends, b.hashes, b.data, sequence, time.Now().Unix())
-		} else {
-			err = o.Append(b.names, b.hashes, b.data, sequence, time.Now().Unix())
-		}
-		if err != nil {
-			failed = true
-			s.stats.rejected.Add(uint64(len(b.data)))
-			s.stats.sink.Add(1)
-			s.fail(err)
-		} else {
-			s.stats.accepted.Add(uint64(len(b.data)))
+		// Owner calls stay within BatchSize points: the last append may carry
+		// the inbox past it. Text chunks are rebased so each starts at zero.
+		for lo, base := 0, 0; lo < len(b.data); {
+			hi := min(len(b.data), lo+s.cfg.BatchSize)
+			if failed {
+				s.stats.rejected.Add(uint64(len(b.data) - lo))
+				return
+			}
+			sequence = sequence[:0]
+			for range hi - lo {
+				seq++
+				sequence = append(sequence, seq)
+			}
+			var err error
+			if byteOwner != nil {
+				ends := b.ends[lo:hi]
+				for k := range ends {
+					ends[k] -= base
+				}
+				err = byteOwner.AppendBytes(b.text[base:], ends, b.hashes[lo:hi], b.data[lo:hi], sequence, time.Now().Unix())
+				base += ends[len(ends)-1]
+			} else {
+				err = o.Append(b.names[lo:hi], b.hashes[lo:hi], b.data[lo:hi], sequence, time.Now().Unix())
+			}
+			if err != nil {
+				failed = true
+				s.stats.rejected.Add(uint64(hi - lo))
+				s.stats.sink.Add(1)
+				s.fail(err)
+			} else {
+				s.stats.accepted.Add(uint64(hi - lo))
+			}
+			lo = hi
 		}
 	}
 	syncOwner := func() {
