@@ -224,6 +224,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	if len(r.lanes) < workers {
 		r.lanes = slices.Grow(r.lanes, workers-len(r.lanes))[:workers]
 	}
+	r.takeLaneScratch()
 	for i := range r.lanes {
 		r.lanes[i].ranked = r.lanes[i].ranked[:0]
 	}

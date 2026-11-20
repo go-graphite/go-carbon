@@ -127,6 +127,16 @@ func (r *Reader) NamesWithMasks(ctx context.Context) ([]string, map[string]bool,
 			}
 			d, err := g.discover(ctx)
 			if err == nil {
+				// Enumeration projects names and masks; it need not retain the
+				// all-name metadata directory. Ordinary renders build request-local
+				// directories, and fallback readers can rebuild on their next read.
+				defer func() {
+					g.cache.mu.Lock()
+					if g.cache.index == d.sealed {
+						g.cache.index = nil
+					}
+					g.cache.mu.Unlock()
+				}()
 				err = d.sealed.MetadataContext(ctx, func(n string, _ v2core.RollupPolicy, meta v2core.RollupMetadata) {
 					if pending := d.metrics[n]; pending != nil {
 						meta = pending.meta
