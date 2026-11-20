@@ -106,9 +106,6 @@ type Key struct {
 	Ordinal    uint32
 }
 
-func PartitionPrefix(vshard uint16, partition int64) ([]byte, error) {
-	return PartitionPrefixForGroup("", vshard, partition)
-}
 func PartitionPrefixForGroup(group Group, vshard uint16, partition int64) ([]byte, error) {
 	if vshard >= VirtualShards {
 		return nil, errors.New("virtual shard out of range")

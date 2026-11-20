@@ -100,9 +100,3 @@ func (d *keyDecoder) decode(encoded []byte) (Key, error) {
 	d.key = k
 	return k, nil
 }
-
-// KeyDecoder reuses the validated identity prefix across neighboring archive
-// keys. Returned names remain owned after the source iterator advances.
-type KeyDecoder struct{ keyDecoder }
-
-func (d *KeyDecoder) Decode(encoded []byte) (Key, error) { return d.decode(encoded) }

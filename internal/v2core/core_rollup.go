@@ -1207,23 +1207,3 @@ func (r *coreRollups) installRecovered(policy RollupPolicy, meta RollupMetadata,
 	r.install(meta.ID, m, compactMetadata(meta))
 	return nil
 }
-
-// Match GCP3 key ordering without retaining a complete key for every name.
-func compareRollupIdentity(a, b *rollupMetric) int {
-	if len(a.policy.Group) != len(b.policy.Group) {
-		return len(a.policy.Group) - len(b.policy.Group)
-	}
-	if c := bytes.Compare([]byte(a.policy.Group), []byte(b.policy.Group)); c != 0 {
-		return c
-	}
-	if c := int(partsformat.Route(a.policy.Name)) - int(partsformat.Route(b.policy.Name)); c != 0 {
-		return c
-	}
-	if len(a.policy.Name) < len(b.policy.Name) {
-		return -1
-	}
-	if len(a.policy.Name) > len(b.policy.Name) {
-		return 1
-	}
-	return bytes.Compare([]byte(a.policy.Name), []byte(b.policy.Name))
-}
