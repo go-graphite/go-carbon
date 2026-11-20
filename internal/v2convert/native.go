@@ -129,16 +129,12 @@ type NativeSnapshotReader interface {
 	Snapshot(context.Context, string) (chunkstore.Snapshot, error)
 }
 
-// MaterializeNative reads an explicit bounded set of names from a coherent
+// MaterializeNativeWorkers reads an explicit bounded set of names from a coherent
 // checkpoint. A fixed baseline produces identical records regardless of source
 // SST boundaries or input name order. maxBytes bounds the decoded output; source
 // Snapshot also requires its own per-metric bound from the checkpoint owner.
-func MaterializeNative(ctx context.Context, source NativeSnapshotReader, names []string, baseline NativeBaseline, maxBytes int) ([]Record, error) {
-	return MaterializeNativeWorkers(ctx, source, names, baseline, maxBytes, 1)
-}
-
-// MaterializeNativeWorkers keeps one source decoder per worker and sorts the
-// resulting logical records once. Parallelism does not affect output bytes.
+// It keeps one source decoder per worker and sorts the resulting logical
+// records once. Parallelism does not affect output bytes.
 func MaterializeNativeWorkers(ctx context.Context, source NativeSnapshotReader, names []string, baseline NativeBaseline, maxBytes, workers int) ([]Record, error) {
 	if source == nil || maxBytes <= 0 {
 		return nil, errors.New("native source and positive memory bound required")

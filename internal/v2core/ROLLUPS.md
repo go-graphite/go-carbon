@@ -100,10 +100,8 @@ raw rows and owner frontier publish through descriptors in one atomic ingest.
 publishes persisted snapshots without reconstructing writable reducer state.
 The finite fixture uses it for complete raw and journal verification after the
 original timed Drain/Close; writable reopen/reducer recovery remains covered by
-the existing restart differential tests. `DefaultFixture.DeferArchiveOracle`
-explicitly defers the production-size classic archive scan. Literal small
-fixtures keep their complete archive/metadata oracle. The result labels this
-deferral and never reports an archive-oracle pass for that run.
+the existing restart differential tests. The small fixtures keep their complete
+archive/metadata oracle.
 
 
 ## Authoritative archive files

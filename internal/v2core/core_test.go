@@ -648,7 +648,6 @@ func TestCoreSealReturnsCopiedPacketLease(t *testing.T) {
 }
 
 func TestCoreDefaultCompactCodec(t *testing.T) {
-	t.Setenv("CORE_RAW_CODEC", "")
 	e, err := openCore(t.TempDir(), coreTestConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -656,63 +655,5 @@ func TestCoreDefaultCompactCodec(t *testing.T) {
 	defer e.Close()
 	if e.cfg.RawCodec != "run1" {
 		t.Fatalf("default codec %q", e.cfg.RawCodec)
-	}
-}
-
-// Seal scheduling must preserve exact values, sequence order and replay config.
-func TestCoreProcessSealPhaseExact(t *testing.T) {
-	t.Setenv("CORE_STAGGER_SEAL", "1")
-	var want string
-	thresholds := map[int]bool{}
-	for _, phase := range []string{"0", "512", "1023"} {
-		t.Setenv("CORE_SEAL_PHASE", phase)
-		cfg := coreTestConfig()
-		cfg.Shards = 1
-		cfg.MaxRows = 160
-		root := t.TempDir()
-		e, err := openCore(root, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		threshold := e.owners[0].sealRows
-		if threshold < 120 || threshold > 160 {
-			t.Fatal("unbounded seal threshold", threshold)
-		}
-		thresholds[threshold] = true
-		for b := 1; b <= 9; b++ {
-			for p := 0; p < cfg.Producers; p++ {
-				if err := e.submit(p, coreRows(p, b), uint64(b), false); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-		if err := e.close(); err != nil {
-			t.Fatal(err)
-		}
-		got, err := coreDigest(root, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want != "" && want != got {
-			t.Fatal("seal phase changed exact rows", phase, want, got)
-		}
-		want = got
-		// Execution phase may change across a restart without a format migration.
-		t.Setenv("CORE_SEAL_PHASE", "17")
-		e, err = openCore(root, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = e.close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(thresholds) != 3 {
-		t.Fatal("one-owner processes did not stagger", thresholds)
-	}
-	t.Setenv("CORE_SEAL_PHASE", "1024")
-	if e, err := openCore(t.TempDir(), coreTestConfig()); err == nil {
-		e.close()
-		t.Fatal("accepted out-of-range phase")
 	}
 }

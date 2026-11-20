@@ -116,8 +116,7 @@ type coreHooks struct {
 	// points. When set it replaces Visible.
 	VisiblePending func(owner int, pending PendingView)
 
-	OwnerCPUs []int
-	Publish   func(int, *pebble.Snapshot, []row) error
+	Publish func(int, *pebble.Snapshot, []row) error
 	// PublishBatches transfers an immutable snapshot and detached original pending
 	// applications. The consumer owns snapshot.Close, including on errors.
 	// Point and policy arenas are immutable and must never be modified.
@@ -325,13 +324,4 @@ func (e *coreEngine) durableFrontiers() [][]uint64 {
 		out[i] = slices.Clone(o.frontier.Load().Cursors)
 	}
 	return out
-}
-
-// An empty affinity list leaves scheduling to the runtime. Explicit lists are
-// benchmark options and never change persisted data layout or routing.
-func coreAffinity(cpus []int, index int) (func(), error) {
-	if len(cpus) == 0 {
-		return func() {}, nil
-	}
-	return pinCoreThread(cpus[index%len(cpus)])
 }

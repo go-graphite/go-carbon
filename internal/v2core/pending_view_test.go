@@ -631,7 +631,7 @@ func TestPendingHeadBlocks(t *testing.T) {
 		}
 	}
 	final := h.view(lookup)
-	if !reflect.DeepEqual(final.Batches(), flat.batches(lookup)) {
+	if !reflect.DeepEqual(final.Batches(), flat.decodeFrom(lookup)) {
 		t.Fatal("blocks decode different applications")
 	}
 	used, reserved := 0, 0

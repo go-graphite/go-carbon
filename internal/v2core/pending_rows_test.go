@@ -547,7 +547,7 @@ func TestOutboxRoutesApplications(t *testing.T) {
 		if len(want[s]) == 0 {
 			t.Fatalf("owner %d got no applications; widen the script", s)
 		}
-		if got := out.owners[s].batches(lookup); !reflect.DeepEqual(got, want[s]) {
+		if got := out.owners[s].decodeFrom(lookup); !reflect.DeepEqual(got, want[s]) {
 			t.Fatalf("owner %d decodes %d applications, want %d", s, len(got), len(want[s]))
 		}
 		if out.owners[s].oldest != oldest[s] {
@@ -556,7 +556,7 @@ func TestOutboxRoutesApplications(t *testing.T) {
 	}
 	out.reset()
 	for s := range out.owners {
-		if out.owners[s].len() != 0 {
+		if len(out.owners[s].rows) != 0 {
 			t.Fatal("reset kept rows")
 		}
 	}

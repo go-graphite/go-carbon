@@ -221,8 +221,6 @@ func (p *pendingRows) closePacket() {
 	}
 }
 
-func (p *pendingRows) len() int { return len(p.rows) }
-
 func (p *pendingRows) reset() {
 	p.rows, p.packets, p.deltas, p.seqs, p.escapes = p.rows[:0], p.packets[:0], p.deltas[:0], p.seqs[:0], p.escapes[:0]
 	p.open, p.lastOrder = false, 0
@@ -265,13 +263,6 @@ func (b *Outbox) reset() {
 		b.owners[i].reset()
 	}
 	b.open = nil
-}
-
-// batches rebuilds the original applications exactly, with their
-// points in one arena so each batch's Points has cap == len, as submission
-// produces them.
-func (p *pendingRows) batches(lookup func(uint64) *ApplicationPolicy) []coreBatch {
-	return p.decodeFrom(lookup)
 }
 
 // decodeFrom decodes p.packets, which may start after row 0 (a published

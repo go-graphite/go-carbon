@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,16 +26,10 @@ import (
 // The formula, per-name order, stamps, values and four-update barriers are copied,
 // not imported from the adapter. Geometry is identical in every layer.
 type Fixture struct {
-	DeferArchiveOracle                                       bool
-	CPUProfile                                               string
-	BlockProfile                                             string
 	Names, Rounds, Producers, Shards, BatchSize, SampleNames int
 	coreMaxRows                                              int // optional private bound for small correctness fixtures
 }
 
-func DefaultFixture() Fixture {
-	return Fixture{DeferArchiveOracle: true, Names: 1 << 20, Rounds: 256, Producers: 48, Shards: 12, BatchSize: 32768, SampleNames: 3}
-}
 func fixtureName(id int) string {
 	return fmt.Sprintf("bench.namespace%d.cluster1.host%07d.component.requests.value", id%4, id)
 }
@@ -88,15 +81,10 @@ func parallel(producers int, fn func(int) error) error {
 	return errors.Join(errs...)
 }
 
-// RunFixed writes one finite corpus, closes all resources, then verifies reopened
+// runFixed writes one finite corpus, closes all resources, then verifies reopened
 // snapshots. Read-back is outside timed intake/close and process CPU accounting.
-func RunFixed(root string, layer int, f Fixture, out io.Writer) (map[string]any, error) {
-	return runFixed(root, layer, f, out, procWritten)
-}
-
-// runFixed accepts the write-accounting sampler so portable correctness tests
-// can exercise the full fixture without Linux /proc. RunFixed always uses the
-// real counter and propagates errors rather than reporting invented measurements.
+// It accepts the write-accounting sampler so portable correctness tests can
+// exercise the full fixture without Linux /proc.
 func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (uint64, error)) (result map[string]any, err error) {
 	if f.Names < 1 || f.Rounds < 4 || f.Rounds%4 != 0 || f.Producers < 1 || f.Shards < 1 || f.BatchSize < 1 || f.BatchSize > 32768 || f.SampleNames < 1 {
 		return nil, errors.New("invalid fixture")
@@ -132,43 +120,6 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	// Live stores retain the default wall clock; only this benchmark pins idle time.
 	cfg := Config{Layer: layer, Producers: f.Producers, Shards: f.Shards, MaxCoreRows: f.coreMaxRows, KeepBaseRows: layer == 3,
 		Hooks: v2core.Hooks{Now: func() time.Time { return time.Unix(fixturePoint(0, 0).Timestamp, 0) }}}
-	var block *os.File
-	stopBlock := func() error {
-		if block == nil {
-			return nil
-		}
-		runtime.SetBlockProfileRate(0)
-		x := pprof.Lookup("block").WriteTo(block, 0)
-		x = errors.Join(x, block.Close())
-		block = nil
-		return x
-	}
-	if f.BlockProfile != "" {
-		block, err = os.Create(f.BlockProfile)
-		if err != nil {
-			return nil, err
-		}
-		runtime.SetBlockProfileRate(1000000)
-		defer func() { err = errors.Join(err, stopBlock()) }()
-	}
-	var profile *os.File
-	if f.CPUProfile != "" {
-		var x error
-		profile, x = os.Create(f.CPUProfile)
-		if x != nil {
-			return nil, x
-		}
-		if x = pprof.StartCPUProfile(profile); x != nil {
-			_ = profile.Close()
-			return nil, x
-		}
-		defer func() {
-			if profile != nil {
-				pprof.StopCPUProfile()
-				err = errors.Join(err, profile.Close())
-			}
-		}()
-	}
 	startCPU, e := processCPU()
 	if e != nil {
 		return nil, e
@@ -299,16 +250,6 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	}
 	endWrite, e := written()
 	if e != nil {
-		return nil, e
-	}
-	if profile != nil {
-		pprof.StopCPUProfile()
-		if e = profile.Close(); e != nil {
-			return nil, e
-		}
-		profile = nil
-	}
-	if e = stopBlock(); e != nil {
 		return nil, e
 	}
 	rest, catalog, journal, e := sizes(root)
@@ -451,16 +392,13 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 		}
 		result["exact_journal_points"] = f.Names * f.Rounds
 	}
-	if layer == 3 && !f.DeferArchiveOracle {
+	if layer == 3 {
 		checkedNames, checkedSlots, x := verifyFixedRollups(reader, f, names)
 		if x != nil {
 			return result, x
 		}
 		result["exact_archive_names"] = checkedNames
 		result["exact_archive_slots"] = checkedSlots
-	}
-	if layer == 3 && f.DeferArchiveOracle {
-		result["archive_oracle"] = "deferred for full-size fixture; small fixtures retain complete classic oracle"
 	}
 	result["exact_sample_names"] = f.SampleNames
 	result["exact_sample_points"] = f.SampleNames * f.Rounds
