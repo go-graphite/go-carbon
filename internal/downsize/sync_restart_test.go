@@ -37,7 +37,7 @@ func TestSyncRestartWaitNeverExpiresAndRealErrorsFail(t *testing.T) {
 	for _, failure := range []error{&apiError{403, "forbidden"}, &apiError{500, "corrupt storage"}, errors.New("bad checksum")} {
 		b := newSyncLiveBackend(syncLiveOptions{})
 		calls := 0
-		if err := b.wait(context.Background(), "test", "donor", func() error { calls++; return failure }); err != failure || calls != 1 {
+		if err := b.wait(context.Background(), "test", "donor", func() error { calls++; return failure }); !errors.Is(err, failure) || calls != 1 {
 			t.Fatal(calls, err)
 		}
 	}

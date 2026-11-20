@@ -136,7 +136,8 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 	// the newest envelope survives as long as any data it can mask.
 	home := r.monthPartition(s.next.Frontier.MaxTime)
 	envelopeExpiry := rollupMetricExpiry(schema, s.next.Frontier.MaxTime)
-	partitions := append(r.partitions[:0], home)
+	partitions := r.partitions[:0]
+	partitions = append(partitions, home)
 	for i := range records {
 		if p := r.monthPartition(records[i].Sample.Time); !slices.Contains(partitions, p) {
 			partitions = append(partitions, p)
@@ -193,7 +194,8 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 			coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, record.Order)
 		}
 		coverage.spec.MinExpiry, coverage.spec.MaxExpiry = expiry.min, expiry.max
-		*filePtr = append(file, plannedKV{name: name, value: metadata, vshard: vshard, rank: rank})
+		file = append(file, plannedKV{name: name, value: metadata, vshard: vshard, rank: rank})
+		*filePtr = file
 	}
 
 	return nil

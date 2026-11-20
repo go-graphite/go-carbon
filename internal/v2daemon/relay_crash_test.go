@@ -5,10 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/v2core"
-	"github.com/go-graphite/go-carbon/internal/v2placement"
-	"github.com/go-graphite/go-carbon/internal/v2recv"
-	"github.com/go-graphite/go-carbon/internal/v2wire"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +12,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2placement"
+	"github.com/go-graphite/go-carbon/internal/v2recv"
+	"github.com/go-graphite/go-carbon/internal/v2wire"
 )
 
 func relayCrashConfig(t *testing.T, root string) (Config, v2placement.Document) {

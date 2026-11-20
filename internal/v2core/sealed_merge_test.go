@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -186,7 +187,8 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSealedMergeKillRecovery$")
 			cmd.Env = append(os.Environ(), "V2_MERGE_CRASH_ROOT="+root, "V2_MERGE_CRASH_PHASE="+phase)
 			out, err := cmd.CombinedOutput()
-			exit, ok := err.(*exec.ExitError)
+			exit := &exec.ExitError{}
+			ok := errors.As(err, &exit)
 			if !ok || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
 				t.Fatalf("child not killed: %v %s", err, out)
 			}
@@ -213,7 +215,7 @@ func TestSealedMergeKillRecovery(t *testing.T) {
 func TestSealedMergeMoveDuringWrite(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	policy := adoptPolicy(t, sealrollup.Last)
-	donor := adoptDonor(t, policy, 100, moveSample(1000, 1), moveSample(1001, 3), sealrollup.Sample{Time: 1003, Bits: 1 << 63})
+	donor := adoptDonor(t, policy, moveSample(1000, 1), moveSample(1001, 3), sealrollup.Sample{Time: 1003, Bits: 1 << 63})
 	prepared, err := PrepareMove(context.Background(), t.TempDir(), []MovePart{donor})
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +286,7 @@ func TestSealedMergeBackgroundBound(t *testing.T) {
 
 // Install exact immutable fixture records through the ordinary descriptor
 // namespace; no reducer state is consulted by merge selection or publication.
-func installMergeRecords(t *testing.T, o *coreOwner, part byte, metas []RollupMetadata, records [][]sealrollup.Record) v2part.Descriptor {
+func installMergeRecords(t *testing.T, o *coreOwner, part byte, metas []RollupMetadata, records [][]sealrollup.Record) {
 	t.Helper()
 	var file []KV
 	for i, m := range metas {
@@ -326,7 +328,6 @@ func installMergeRecords(t *testing.T, o *coreOwner, part byte, metas []RollupMe
 		t.Fatal(err)
 	}
 	o.gc.inventory = o.gc.inventory.with([]coreKV{kv}, nil)
-	return d
 }
 
 func TestSealedMergeLifecycleAndRoutes(t *testing.T) {

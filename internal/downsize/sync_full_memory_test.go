@@ -66,7 +66,7 @@ func TestSyncFullHistoryMemoryBudgetParity(t *testing.T) {
 		s.masks.Store(n, uint64(7))
 	}
 	var want, got syncRow
-	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+	if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 		t.Fatal(err)
 	}
 	b.largest.Store(0)

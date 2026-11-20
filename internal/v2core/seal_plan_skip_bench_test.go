@@ -1,9 +1,10 @@
 package v2core
 
 import (
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
 func BenchmarkSealPlanNotDue(b *testing.B) { benchmarkSealPlanNotDue(b, false) }

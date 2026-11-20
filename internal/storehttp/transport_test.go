@@ -192,7 +192,7 @@ func TestInterruptedResponseRetiresOrigin(t *testing.T) {
 	}
 	_, err = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if err != io.ErrUnexpectedEOF || restarts.Load() != 1 || tr.pool(srv.URL) == old {
+	if !errors.Is(err, io.ErrUnexpectedEOF) || restarts.Load() != 1 || tr.pool(srv.URL) == old {
 		t.Fatalf("interrupted response retained pool: %v restarts=%d", err, restarts.Load())
 	}
 }
@@ -256,7 +256,11 @@ func TestLocalExhaustionPreservesPool(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
-	if _, err := tr.RoundTrip(req); !errors.Is(err, context.Canceled) {
+	resp, err := tr.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if tr.pool(srv.URL) != old || restarts.Load() != 0 {

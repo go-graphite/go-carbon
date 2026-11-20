@@ -7,13 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 

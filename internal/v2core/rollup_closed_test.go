@@ -1,10 +1,11 @@
 package v2core
 
 import (
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
 func TestClosedIdleWindowAndReplay(t *testing.T) {

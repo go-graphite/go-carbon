@@ -3,10 +3,11 @@ package v2recv
 import (
 	"bufio"
 	"errors"
-	"github.com/go-graphite/go-carbon/internal/v2wire"
 	"io"
 	"net"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2wire"
 )
 
 // PlacedSink returns only after original stamps/positions and data are durable.
@@ -28,7 +29,8 @@ func (s *Server) readPlaced(c net.Conn) error {
 				_, err := reader.Peek(1)
 				_ = c.SetReadDeadline(time.Time{})
 				if err != nil {
-					if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+					var timeout net.Error
+					if !errors.As(err, &timeout) || !timeout.Timeout() {
 						terminal = err
 					}
 					break
@@ -77,7 +79,7 @@ func (s *Server) readPlaced(c net.Conn) error {
 				return err
 			}
 		}
-		if terminal == io.EOF {
+		if errors.Is(terminal, io.EOF) {
 			return nil
 		}
 		if terminal != nil {

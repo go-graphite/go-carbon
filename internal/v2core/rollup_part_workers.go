@@ -50,17 +50,18 @@ func (o *coreOwner) startRollupPartWrites(plan coreSealPlan) *rollupPartWrites {
 				for j := worker; j < len(jobs); j += min(8, len(jobs)) {
 					i := jobs[j]
 					r := &p.results[i]
-					if i >= len(plan.Files) {
+					switch {
+					case i >= len(plan.Files):
 						part := plan.Parts[i-len(plan.Files)]
 						part.Spec.Source.Incarnation = o.partSource.Incarnation
 						part.Spec.Source.Stream = o.partSource.Stream
 						r.descriptor, r.err = writePlannedRollupTuples(r.path, part)
-					} else if len(plan.PartSpecs) == len(plan.Files) {
+					case len(plan.PartSpecs) == len(plan.Files):
 						spec := plan.PartSpecs[i]
 						spec.Source.Incarnation = o.partSource.Incarnation
 						spec.Source.Stream = o.partSource.Stream
 						r.descriptor, r.err = writePlannedRollupPart(r.path, plan.Files[i], spec)
-					} else {
+					default:
 						r.descriptor, r.err = WriteDenseRollupPart(r.path, plan.Files[i], o.partSource)
 					}
 				}

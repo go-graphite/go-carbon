@@ -3,12 +3,13 @@ package carbonserver
 import (
 	"context"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/v2index"
 	"math"
 	"reflect"
 	"slices"
 	"sync"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/v2index"
 )
 
 func v2Found(names []string, leaf []bool) []string {

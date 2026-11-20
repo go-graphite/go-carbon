@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -98,7 +99,7 @@ func Decode(r io.Reader) (Document, error) {
 		return d, e
 	}
 	var extra any
-	if e = dec.Decode(&extra); e != io.EOF {
+	if e = dec.Decode(&extra); !errors.Is(e, io.EOF) {
 		return d, fmt.Errorf("trailing placement content")
 	}
 	return d, d.Validate()

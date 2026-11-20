@@ -575,11 +575,13 @@ func (v PendingView) concat(w PendingView) PendingView {
 		s.start += v.n
 		segs = append(segs, s)
 	}
-	runs := append(v.runs[:len(v.runs):len(v.runs)], w.runs...)
+	runs := v.runs[:len(v.runs):len(v.runs)]
+	runs = append(runs, w.runs...)
 	for i := len(v.runs); i < len(runs); i++ {
 		runs[i].shift += v.n
 	}
-	fresh := append(v.fresh[:len(v.fresh):len(v.fresh)], w.fresh...)
+	fresh := v.fresh[:len(v.fresh):len(v.fresh)]
+	fresh = append(fresh, w.fresh...)
 	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, fresh: fresh, runs: runs}
 }
 

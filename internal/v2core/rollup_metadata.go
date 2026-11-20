@@ -96,7 +96,7 @@ func DecodeRollupMetadata(name partsformat.ID, group partsformat.Group, data []b
 		return m, err
 	}
 	if slim {
-		m.Policy, _, err = appendRollupDefinition(nil, name, group, m.Frontier.Policy)
+		m.Policy, err = appendRollupDefinition(nil, name, group, m.Frontier.Policy)
 	} else if len(data) >= 4 && bytes.Equal(data[:3], rollupMetadataMagic[:3]) {
 		m.Policy = bytes.Clone(m.Policy)
 	}
@@ -108,7 +108,7 @@ func DecodeRollupMetadata(name partsformat.ID, group partsformat.Group, data []b
 func decodeRollupMetadataView(name partsformat.ID, group partsformat.Group, data []byte) (RollupMetadata, error) {
 	m, slim, err := decodeRollupMetadataHeader(data)
 	if err == nil && slim {
-		m.Policy, _, err = appendRollupDefinition(nil, name, group, m.Frontier.Policy)
+		m.Policy, err = appendRollupDefinition(nil, name, group, m.Frontier.Policy)
 	}
 	return m, err
 }
@@ -168,17 +168,17 @@ var rollupDefinitionSuffixes sync.Map // rollupDefinitionKey -> []byte
 // appendRollupDefinition appends EncodeRollupPolicy({name, group, config})
 // where config is the part policy table entry whose PolicyDigest is policy.
 // It fails closed when no registered part table carries that policy.
-func appendRollupDefinition(dst []byte, name partsformat.ID, group partsformat.Group, policy [32]byte) ([]byte, *partsformat.SealedPolicy, error) {
+func appendRollupDefinition(dst []byte, name partsformat.ID, group partsformat.Group, policy [32]byte) ([]byte, error) {
 	resolved, ok := partsformat.ResolvePolicy(policy)
 	if !ok {
-		return dst, nil, errors.New("rollup metadata policy missing from part policy tables")
+		return dst, errors.New("rollup metadata policy missing from part policy tables")
 	}
 	key := rollupDefinitionKey{policy, group}
 	suffix, ok := rollupDefinitionSuffixes.Load(key)
 	if !ok {
 		g, err := json.Marshal(string(group))
 		if err != nil {
-			return dst, nil, err
+			return dst, err
 		}
 		s := append([]byte(`,"Group":`), g...)
 		s = append(s, `,"Config":`...)
@@ -194,11 +194,11 @@ func appendRollupDefinition(dst []byte, name partsformat.ID, group partsformat.G
 	} else {
 		n, err := json.Marshal(string(name))
 		if err != nil {
-			return dst, nil, err
+			return dst, err
 		}
 		dst = append(dst, n...)
 	}
-	return append(dst, suffix.([]byte)...), resolved, nil
+	return append(dst, suffix.([]byte)...), nil
 }
 
 // jsonPlainString reports whether encoding/json writes s unescaped.

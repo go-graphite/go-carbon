@@ -6,8 +6,9 @@ package partsrun
 import (
 	"encoding/binary"
 	"errors"
-	"github.com/golang/snappy"
 	"math/bits"
+
+	"github.com/golang/snappy"
 )
 
 type Sample struct {

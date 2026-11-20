@@ -279,7 +279,8 @@ func TestPendingRowsSealDifferential(t *testing.T) {
 
 // receiverPackets models receiver traffic: single-point applications with
 // contiguous orders, Seq == Order and one clock per packet.
-func receiverPackets(points, perPacket int) ([][]coreBatch, []*ApplicationPolicy) {
+func receiverPackets(points int) ([][]coreBatch, []*ApplicationPolicy) {
+	const perPacket = 512
 	pols := make([]*ApplicationPolicy, 1<<16)
 	for i := range pols {
 		pols[i] = &ApplicationPolicy{}
@@ -310,7 +311,7 @@ func receiverPackets(points, perPacket int) ([][]coreBatch, []*ApplicationPolicy
 // the GC cycle cost the live structure adds, per point.
 func BenchmarkPendingRows(b *testing.B) {
 	const points, perPacket = 1 << 20, 512
-	packets, pols := receiverPackets(points, perPacket)
+	packets, pols := receiverPackets(points)
 	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
 	todayAppend := func(dst []coreBatch, packet []coreBatch) []coreBatch {
 		// submitPacketMode: one descriptor and one point arena per packet.
@@ -405,7 +406,7 @@ func BenchmarkPendingRows(b *testing.B) {
 // per-owner rows plus the owner's copy (routed).
 func BenchmarkPendingRowsRouted(b *testing.B) {
 	const points, perPacket, owners = 1 << 20, 512, 4
-	packets, pols := receiverPackets(points, perPacket)
+	packets, pols := receiverPackets(points)
 	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
 	b.Run("descriptors", func(b *testing.B) {
 		var heads [owners]pendingHead

@@ -56,7 +56,7 @@ func TestReaderAdmissionHeldUntilConsumed(t *testing.T) {
 			return fmt.Errorf("render not admitted while consumed: %d %v", len(reader.renders), s.Values)
 		}
 		if e := reader.FetchMany(context.Background(), []string{"metric"}, 980, 990, 1000, func(string, *Series) error { return nil }); !errors.Is(e, ErrAdmission) {
-			return fmt.Errorf("second render admitted: %v", e)
+			return fmt.Errorf("second render admitted: %w", e)
 		}
 		return nil
 	})

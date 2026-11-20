@@ -72,7 +72,7 @@ func TestDenseSSTMultiBlockCompatibilityAndReuse(t *testing.T) {
 		if err = Read(context.Background(), path, &d, func(k Key, value []byte) error {
 			encoded, err := Encode(k)
 			if err != nil || !bytes.Equal(encoded, keys[seen]) || !bytes.Equal(value, values[seen]) {
-				return fmt.Errorf("record %d changed: %v", seen, err)
+				return fmt.Errorf("record %d changed: %w", seen, err)
 			}
 			seen++
 			return nil

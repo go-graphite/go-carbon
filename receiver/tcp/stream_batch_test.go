@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/go-graphite/go-carbon/cache"
-	"go.uber.org/zap"
 	"math"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/cache"
+	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/stream/codec"

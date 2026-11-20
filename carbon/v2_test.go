@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -370,7 +371,8 @@ func testV2RuntimeSIGKILLWithActiveTCP(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	err = cmd.Wait()
-	exit, ok := err.(*exec.ExitError)
+	exit := &exec.ExitError{}
+	ok := errors.As(err, &exit)
 	if !ok {
 		t.Fatalf("child was not killed: %v", err)
 	}

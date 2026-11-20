@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/v2placement"
-	"github.com/go-graphite/go-carbon/internal/v2recv"
-	"github.com/go-graphite/go-carbon/internal/v2wire"
-	"github.com/go-graphite/go-carbon/points"
 	"math"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2placement"
+	"github.com/go-graphite/go-carbon/internal/v2recv"
+	"github.com/go-graphite/go-carbon/internal/v2wire"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 type relayPosition struct {

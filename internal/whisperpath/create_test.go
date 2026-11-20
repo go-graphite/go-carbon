@@ -68,9 +68,7 @@ func TestCreateAtomicPreservesPublishedFile(t *testing.T) {
 	if err := os.WriteFile(path+".ooo", []byte("existing correction"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	f, err := CreateAtomic(path, func(tmp string) (*os.File, error) {
-		return os.Create(tmp)
-	}, os.Open, path+".ooo")
+	f, err := CreateAtomic(path, os.Create, os.Open, path+".ooo")
 	if err != nil {
 		t.Fatal(err)
 	}

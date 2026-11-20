@@ -1,16 +1,17 @@
 package main
 
 import (
-	"github.com/go-graphite/go-carbon/internal/v2core"
-	"github.com/go-graphite/go-carbon/internal/v2daemon"
-	"github.com/go-graphite/go-carbon/points"
-	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2daemon"
+	"github.com/go-graphite/go-carbon/points"
+	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 
 	"google.golang.org/protobuf/proto"
 )

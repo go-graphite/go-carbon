@@ -107,11 +107,12 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 			name = names[i]
 		}
 		var route uint64
-		if hashes != nil {
+		switch {
+		case hashes != nil:
 			route = hashes[i]
-		} else if ends != nil {
+		case ends != nil:
 			route = namefp.Route(raw)
-		} else {
+		default:
 			route = namefp.Route(name)
 		}
 		var hash uint64

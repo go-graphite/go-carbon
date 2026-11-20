@@ -101,7 +101,11 @@ func TestSyncJWTDoesNotEscapeStoreOriginsAndFailsClosed(t *testing.T) {
 	}
 	resp.Body.Close()
 	withSyncJWT(client, auth, server.URL)
-	if _, err := client.Get(server.URL); err == nil {
+	resp, err = client.Get(server.URL)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil {
 		t.Fatal("missing secret allowed request")
 	} else if errors.Is(err, context.Canceled) || err.Error() == "private secret material" {
 		t.Fatal("secret reader error leaked")

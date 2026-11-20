@@ -57,7 +57,8 @@ func (app *App) prepareV2Fallback(mode string) error {
 	want := v2FallbackState{Version: 1, ClassicPath: classic, DataPath: data, Backend: c.Whisper.StorageBackend, Finalized: mode == v2Only}
 	path := filepath.Join(root, "classic-fallback.json")
 	b, err := os.ReadFile(path)
-	if err == nil {
+	switch {
+	case err == nil:
 		var got v2FallbackState
 		if json.Unmarshal(b, &got) != nil || got.Version != 1 {
 			return errors.New("invalid v2 classic fallback receipt")
@@ -68,9 +69,9 @@ func (app *App) prepareV2Fallback(mode string) error {
 		if !want.Finalized || got.Finalized {
 			return nil
 		}
-	} else if !os.IsNotExist(err) {
+	case !os.IsNotExist(err):
 		return err
-	} else if mode != v2Only {
+	case mode != v2Only:
 		entries, err := os.ReadDir(root)
 		if err != nil && !os.IsNotExist(err) {
 			return err

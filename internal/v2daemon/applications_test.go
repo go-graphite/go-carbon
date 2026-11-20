@@ -2,6 +2,7 @@ package v2daemon
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"os"
@@ -115,7 +116,7 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 	for {
 		var h [4]byte
 		_, err = io.ReadFull(file, h[:])
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
