@@ -59,8 +59,9 @@ func TestOwnerByteFragmentsAndCodec(t *testing.T) {
 	}
 	close(s.closing)
 	s.workers.Wait()
-	if o.byteCalls != 3 {
-		t.Fatalf("byte calls=%d, want 3", o.byteCalls)
+	// Inboxes of 10, 11 and 1 points split into calls of at most 8: 8+2, 8+3, 1.
+	if o.byteCalls != 5 {
+		t.Fatalf("byte calls=%d, want 5", o.byteCalls)
 	}
 	if len(o.names) != index || s.Stats().Accepted != uint64(index) {
 		t.Fatal("lost points", len(o.names), s.Stats())
