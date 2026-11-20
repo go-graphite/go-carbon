@@ -607,7 +607,7 @@ func TestPendingRunsAcrossSealAvoidCatalog(t *testing.T) {
 // the same router-encoded intake without growing its row arrays, and that its
 // views still decode the same applications.
 func TestPendingHeadNextPresizesRows(t *testing.T) {
-	packets, pols := receiverPackets(1<<14, 64)
+	packets, pols := receiverPackets(1 << 14)
 	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
 	encoded := make([]pendingRows, len(packets))
 	for i, packet := range packets {
