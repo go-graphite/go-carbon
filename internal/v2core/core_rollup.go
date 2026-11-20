@@ -907,8 +907,12 @@ func scanIdentity(identities *PolicyCatalog, id uint64, name string, definition 
 	return detachedPolicy(id, policy, definition, prepared), nil
 }
 
-func (e *rollupScanEntry) addMetadata(identities *PolicyCatalog, k partsformat.Key, value []byte) error {
-	m, err := decodeRollupMetadataView(k.Metric, k.Group, value)
+func (e *rollupScanEntry) addMetadata(identities *PolicyCatalog, k partsformat.Key, value []byte, definition *[]byte) error {
+	m, slim, err := decodeRollupMetadataHeader(value)
+	if err == nil && slim {
+		m.Policy, err = appendRollupDefinition((*definition)[:0], k.Metric, k.Group, m.Frontier.Policy)
+		*definition = m.Policy
+	}
 	if identities == nil {
 		m.Policy = bytes.Clone(m.Policy)
 	}
@@ -968,12 +972,16 @@ func (e *rollupScanEntry) addRecord(record sealrollup.Record) error {
 
 // foldRollupKeys folds every rollup row of iter into series.
 func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, reducerOnly bool) error {
+	// Reuse key decoding and temporary slim definitions while folding rows.
+	// Catalog identities own their name and suffix before the next row.
+	var keys partsformat.KeyDecoder
+	var definition []byte
 	// A writable reducer never uses terminal-archive samples. Resolve the
 	// envelopes first so recovery can validate those runs without retaining
 	// and sorting their entire history in per-name slot maps.
 	if reducerOnly {
 		for iter.First(); iter.Valid(); iter.Next() {
-			k, err := partsformat.Decode(iter.Key())
+			k, err := keys.Decode(iter.Key())
 			if err != nil {
 				return err
 			}
@@ -988,7 +996,7 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 			if k.Ordinal != 0 || e.group != k.Group {
 				return errors.New("unexpected rollup partition")
 			}
-			if err := e.addMetadata(identities, k, iter.Value()); err != nil {
+			if err := e.addMetadata(identities, k, iter.Value(), &definition); err != nil {
 				return err
 			}
 		}
@@ -998,7 +1006,7 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 	}
 	var scratch []sealrollup.Record
 	for iter.First(); iter.Valid(); iter.Next() {
-		k, err := partsformat.Decode(iter.Key())
+		k, err := keys.Decode(iter.Key())
 		if err != nil {
 			return err
 		}
@@ -1012,7 +1020,7 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 		}
 		if k.Archive == rollupMetadataArchive {
 			if !reducerOnly {
-				err = e.addMetadata(identities, k, iter.Value())
+				err = e.addMetadata(identities, k, iter.Value(), &definition)
 			}
 			if err != nil {
 				return err

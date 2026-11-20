@@ -508,9 +508,15 @@ func (r *coreRollups) decodeCheckpointRecord(d *checkpointDecoder, table [][]byt
 	if d.err != nil || index >= uint64(len(table)) {
 		return errCheckpoint
 	}
-	def := make([]byte, 0, len(`{"Name":"`)+len(name)+len(table[index]))
-	def = append(append(append(def, `{"Name":"`...), name...), table[index]...)
-	if e := series[v2part.ID(name)]; e != nil {
+	e := series[v2part.ID(name)]
+	var def []byte
+	// A newer part already supplied and validated this identity. Rebuild the
+	// checkpoint definition only when its metadata can win, or it is untouched.
+	if e == nil || meta.after(e.meta) {
+		def = make([]byte, 0, len(`{"Name":"`)+len(name)+len(table[index]))
+		def = append(append(append(def, `{"Name":"`...), name...), table[index]...)
+	}
+	if e != nil {
 		// Touched since the stamp: merge the reflected state into the fold.
 		delete(series, v2part.ID(name))
 		if meta.after(e.meta) {
