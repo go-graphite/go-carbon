@@ -379,15 +379,15 @@ func TestJournalSegmentEndTornTail(t *testing.T) {
 			if err := os.WriteFile(path, append(append([]byte{}, framed...), tail...), 0600); err != nil {
 				t.Fatal(err)
 			}
-			end, order, ok, err := segmentEnd(path, newest)
+			end, order, last, ok, err := segmentEnd(path, newest)
 			if len(tail) > 0 && !newest {
 				if err == nil {
 					t.Fatal("accepted torn older segment")
 				}
 				continue
 			}
-			if err != nil || !ok || end != 3 || order != 7 {
-				t.Fatalf("end=%d order=%d ok=%v err=%v", end, order, ok, err)
+			if err != nil || !ok || end != 3 || order != 7 || last != 0 {
+				t.Fatalf("end=%d order=%d last=%d ok=%v err=%v", end, order, last, ok, err)
 			}
 			st, err := os.Stat(path)
 			if err != nil || st.Size() != int64(len(framed)) {
@@ -400,7 +400,7 @@ func TestJournalSegmentEndTornTail(t *testing.T) {
 	if err := os.WriteFile(path, framed, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := segmentEnd(path, true); err == nil {
+	if _, _, _, _, err := segmentEnd(path, true); err == nil {
 		t.Fatal("accepted corrupt final record")
 	}
 }
