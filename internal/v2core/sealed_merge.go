@@ -221,14 +221,6 @@ func mergeRatio(total uint64) uint64 {
 	return sealedMergeFanIn
 }
 
-func (o *coreOwner) selectMerge(snapshot *pebble.Snapshot) ([]v2part.Descriptor, error) {
-	limit, _, err := effectiveMergeLimit(o.dir)
-	if err != nil {
-		return nil, err
-	}
-	return o.selectMergeLimit(snapshot, limit, false)
-}
-
 // full keeps adjacency and the byte cap, but ignores background ratios and fan-in.
 func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, full bool) ([]v2part.Descriptor, error) {
 	type scope struct {

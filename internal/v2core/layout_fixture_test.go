@@ -3,6 +3,7 @@ package v2core
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -34,12 +35,6 @@ import (
 const buckets = 192
 const recordBytes = 32
 
-// Sequence is the input order, independent of sorting or part publication.
-type row struct {
-	ID        uint64
-	Time      int64
-	Bits, Seq uint64
-}
 type metric struct {
 	Name   string
 	Steps  []int
@@ -276,27 +271,6 @@ func produce(q *queue, root string, shard, shards, passes int, cat catalogue) {
 			f.Close()
 		}
 	}
-}
-func less(a, b row) int {
-	if a.ID < b.ID {
-		return -1
-	}
-	if a.ID > b.ID {
-		return 1
-	}
-	if a.Time < b.Time {
-		return -1
-	}
-	if a.Time > b.Time {
-		return 1
-	}
-	if a.Seq < b.Seq {
-		return -1
-	}
-	if a.Seq > b.Seq {
-		return 1
-	}
-	return 0
 }
 
 // canonical aligns fine slots and chooses the latest source sequence in each.
@@ -654,47 +628,6 @@ func runLayout(root, out string, shards, passes, maxRows, readers int, stepsOver
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "parts", "db_per_owner": dbPerOwner, "pebble_estimated_debt_bytes": debt, "pebble_compacted_bytes": compacted, "baseline_proc": baseline, "empty_reads": reads.Empty, "reads_1h": reads.OneHour, "reads_7d": reads.SevenDays, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": procStats(), "readers": readers, "reads": reads.N, "reads_per_second": float64(reads.N) / elapsed, "read_p50_ms": reads.quantile(.50), "read_p99_ms": reads.quantile(.99), "read_points": reads.Points, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "shards": shards, "points": total.Points, "seconds": elapsed, "points_per_second": float64(total.Points) / elapsed, "parts": total.Parts, "sst_bytes": total.Bytes, "sst_MB_per_second": float64(total.Bytes) / 1e6 / elapsed, "sst_bytes_per_input_point": float64(total.Bytes) / float64(total.Points), "pebble_metrics": metrics})
 }
 
-// A publisher owns one reference. Acquisition only increments a nonzero count;
-// the last release closes the Pebble snapshot, after all readers are done.
-type pinned struct {
-	s    *pebble.Snapshot
-	refs atomic.Int64
-}
-
-func (p *pinned) release() {
-	if p.refs.Add(-1) == 0 {
-		p.s.Close()
-	}
-}
-
-type publication struct{ current atomic.Pointer[pinned] }
-
-func (p *publication) publish(s *pebble.Snapshot) {
-	n := &pinned{s: s}
-	n.refs.Store(1)
-	if old := p.current.Swap(n); old != nil {
-		old.release()
-	}
-}
-func (p *publication) acquire() *pinned {
-	for {
-		n := p.current.Load()
-		if n == nil {
-			return nil
-		}
-		for r := n.refs.Load(); r > 0; r = n.refs.Load() {
-			if n.refs.CompareAndSwap(r, r+1) {
-				return n
-			}
-		}
-	}
-}
-func (p *publication) clear() {
-	if n := p.current.Swap(nil); n != nil {
-		n.release()
-	}
-}
-
 type readStats struct {
 	N, Points, Empty, OneHour, SevenDays uint64
 	Hist                                 [32]uint64
@@ -787,38 +720,6 @@ func readMetric(s *pebble.Snapshot, id uint64, lo, hi int64) ([]row, error) {
 	return out, it.Error()
 }
 
-// Linux /proc counters are process-wide, including Pebble background threads.
-func procStats() map[string]float64 {
-	out := map[string]float64{}
-	b, _ := os.ReadFile("/proc/self/io")
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 {
-			v, _ := strconv.ParseFloat(f[1], 64)
-			out[strings.TrimSuffix(f[0], ":")] = v
-		}
-	}
-	b, _ = os.ReadFile("/proc/self/status")
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) > 1 && (f[0] == "VmHWM:" || f[0] == "VmRSS:") {
-			v, _ := strconv.ParseFloat(f[1], 64)
-			out[strings.TrimSuffix(f[0], ":")+"_bytes"] = v * 1024
-		}
-	}
-	b, _ = os.ReadFile("/proc/self/stat")
-	i := strings.LastIndex(string(b), ")")
-	if i >= 0 {
-		f := strings.Fields(string(b[i+1:]))
-		if len(f) > 12 {
-			u, _ := strconv.ParseFloat(f[11], 64)
-			st, _ := strconv.ParseFloat(f[12], 64)
-			out["cpu_seconds_CLK_TCK100"] = (u + st) / 100
-		}
-	}
-	return out
-}
-
 func sealedFrontier(f *os.File, size int64) (int64, error) {
 	var seg [64]byte
 	if _, e := f.ReadAt(seg[:], 0); e != nil {
@@ -845,4 +746,112 @@ func sealedFrontier(f *os.File, size int64) (int64, error) {
 		offset += 52 + n
 	}
 	return offset, nil
+}
+
+// Replay a single immutable journal. The dictionary prefix is decoded again on
+// restart to reconstruct the collision-free canonical numeric ID catalogue.
+// Cursors count source points (not sorted points); a segment identity prevents
+// accidentally reusing a frontier with a different journal. Multi-segment/live
+// journal retirement is intentionally not implemented by this offline command.
+func coreReplay(journal, out string, cfg coreConfig) error {
+	return coreReplayWithHook(journal, out, cfg, nil)
+}
+func coreReplayWithHook(journal, out string, cfg coreConfig, hook func(int, *pebble.Snapshot, []row) error) error {
+	f, err := os.Open(journal)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var header [64]byte
+	if _, err = f.ReadAt(header[:], 0); err != nil {
+		return err
+	}
+	cfg.JournalIdentity = fmt.Sprintf("%x", sha256.Sum256(header[:]))
+	cfg.Producers = 1
+	engine, err := openCoreWithHook(out, cfg, hook)
+	if err != nil {
+		return err
+	}
+	var result error
+	defer func() {
+		if engine != nil {
+			_ = engine.close()
+		}
+	}()
+	from := engine.globalFrontier()[0]
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	frontier, err := sealedFrontier(f, st.Size())
+	if err != nil {
+		return err
+	}
+	replay, err := inputlog.NewSegmentReplay(f)
+	if err != nil {
+		return err
+	}
+	defer replay.Close()
+	ids := map[string]uint64{}
+	var seq uint64
+	batch := make([]row, 0, min(cfg.MaxRows, 32768))
+	flush := func(force bool) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := engine.submit(0, batch, seq, force)
+		batch = batch[:0]
+		return err
+	}
+	for {
+		records, _, _, e := replay.Next(frontier)
+		if errors.Is(e, io.EOF) {
+			break
+		}
+		if e != nil {
+			return e
+		}
+		for _, group := range records {
+			name, e := tags.Normalize(group.Metric)
+			if e != nil {
+				return e
+			}
+			id, ok := ids[name]
+			if !ok {
+				id = uint64(len(ids))
+				ids[name] = id
+			}
+			for _, point := range group.Data {
+				seq++
+				if seq <= from {
+					continue
+				}
+				batch = append(batch, row{id, point.Timestamp, math.Float64bits(point.Value), seq})
+				if len(batch) == cap(batch) {
+					if e = flush(false); e != nil {
+						return e
+					}
+				}
+			}
+		}
+	}
+	if seq < from {
+		return errors.New("journal ends before committed frontier")
+	}
+	if err = flush(true); err != nil {
+		return err
+	}
+	// Empty final barrier also seals previously queued full batches.
+	if seq > 0 {
+		if err = engine.submit(0, nil, seq, true); err != nil {
+			return err
+		}
+	}
+	cursors := engine.globalFrontier()
+	result = engine.close()
+	engine = nil
+	if result != nil {
+		return result
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "core_replay", "source_points": seq, "replayed_points": seq - from, "resume_from": from, "cursors": cursors, "metrics": len(ids), "journal_identity": cfg.JournalIdentity})
 }

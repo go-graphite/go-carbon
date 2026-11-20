@@ -291,11 +291,6 @@ func coreShard(id uint64, n int) int {
 	return int(id % uint64(n))
 }
 
-// The optional hook owns its snapshot and receives a detached immutable head.
-// It runs on the owner; callers must bound retained bytes and release snapshots.
-func openCoreWithHook(root string, cfg coreConfig, hook func(int, *pebble.Snapshot, []row) error) (*coreEngine, error) {
-	return openCoreWithHooks(root, cfg, coreHooks{Publish: hook})
-}
 func openCoreWithHooks(root string, cfg coreConfig, hooks coreHooks) (*coreEngine, error) {
 	return openCoreMode(root, cfg, hooks, false)
 }
@@ -328,9 +323,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	}
 	hook := hooks.Publish
 	if cfg.RawCodec == "" {
-		cfg.RawCodec = os.Getenv("CORE_RAW_CODEC")
-	}
-	if cfg.RawCodec == "" {
 		cfg.RawCodec = "run1"
 	} else if cfg.RawCodec == "legacy" {
 		// Preserve the original on-disk config for explicit legacy reopen.
@@ -349,14 +341,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	}
 	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 {
 		return nil, os.ErrInvalid
-	}
-	sealPhase := 0
-	if value := os.Getenv("CORE_SEAL_PHASE"); value != "" {
-		var err error
-		sealPhase, err = strconv.Atoi(value)
-		if err != nil || sealPhase < 0 || sealPhase >= 1024 {
-			return nil, errors.New("CORE_SEAL_PHASE must be between 0 and 1023")
-		}
 	}
 	if err := os.MkdirAll(root, 0750); err != nil {
 		return nil, err
@@ -425,12 +409,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				sealMaxRows = 128 << 10
 			}
 			o.sealRows = min(cfg.MaxRows, sealMaxRows)
-			if os.Getenv("CORE_STAGGER_SEAL") == "1" {
-				// Include the process phase: one DB per process must stagger too.
-				// This changes execution boundaries, never the persisted format.
-				phase := (sealPhase + 1024*s/cfg.Shards) % 1024
-				o.sealRows -= (o.sealRows / 4) * phase / 1024
-			}
 			e.owners[s] = o
 			if hook != nil {
 				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
@@ -2045,17 +2023,6 @@ func (e *coreEngine) close() error {
 	return err
 }
 
-// globalFrontier is conservative across shards and producers. Call only while
-// opening, before starting producers, or after a completed seal barrier.
-func (e *coreEngine) globalFrontier() []uint64 {
-	out := slices.Clone(e.owners[0].meta.Cursors)
-	for _, o := range e.owners[1:] {
-		for p, c := range o.meta.Cursors {
-			out[p] = min(out[p], c)
-		}
-	}
-	return out
-}
 func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 	it, err := s.NewIter(&pebble.IterOptions{LowerBound: []byte{1}, UpperBound: []byte{3}})
 	if err != nil {
