@@ -82,8 +82,8 @@ func BenchmarkReceiverNameBytes(b *testing.B) {
 	}
 }
 
-// Use V2_BENCH_BYTES=1 only with a receiver that supports ByteOwner. The default
-// prepares the named input that the base receiver's read loop queues.
+// Hands BatchSize-point batches to one owner through its inbox. V2_BENCH_BYTES=1
+// hands plaintext bytes to a byte owner; the default hands names to a string owner.
 func BenchmarkReceiverNameHandoff(b *testing.B) {
 	for _, size := range []int{32, 280} {
 		b.Run(fmt.Sprintf("name%d", size), func(b *testing.B) {
@@ -93,35 +93,26 @@ func BenchmarkReceiverNameHandoff(b *testing.B) {
 			for i := range ends {
 				ends[i] = (i + 1) * size
 			}
-			byteInput := os.Getenv("V2_BENCH_BYTES") == "1"
-			s := &Server{cfg: Config{BatchSize: count, SyncInterval: time.Hour}}
-			q := make(chan *batch, 2)
-			o := &bytesBenchOwner{seed: maphash.MakeSeed()}
-			done := make(chan struct{})
-			s.workers.Add(1)
-			go func() { s.work(o, q, make(chan ownerCall)); close(done) }()
+			var o Owner = stringBenchOwner{&bytesBenchOwner{seed: maphash.MakeSeed()}}
+			if os.Getenv("V2_BENCH_BYTES") == "1" {
+				o = &bytesBenchOwner{seed: maphash.MakeSeed()}
+			}
+			s := ownerOnly(o, Config{BatchSize: count, SyncInterval: time.Hour})
+			p := &batch{names: make([]string, count), hashes: make([]uint64, count), data: make([]points.Point, count)}
 			b.ReportAllocs()
 			b.SetBytes(int64(len(text)))
 			b.ResetTimer()
 			for range b.N {
-				var p *batch
-				if v := s.batches.Get(); v != nil {
-					p = v.(*batch)
-				} else {
-					p = &batch{names: make([]string, count), hashes: make([]uint64, count), data: make([]points.Point, count)}
-				}
-				p.names = p.names[:count]
-				p.hashes = p.hashes[:count]
-				p.data = p.data[:count]
+				p.names, p.hashes, p.data = p.names[:count], p.hashes[:count], p.data[:count]
 				p.text = append(p.text[:0], text...)
 				p.ends = append(p.ends[:0], ends...)
-				if !byteInput {
-					p.named()
+				if err := s.handOff(0, p); err != nil {
+					b.Fatal(err)
 				}
-				q <- p
+				p.reset()
 			}
-			close(q)
-			<-done
+			close(s.closing)
+			s.workers.Wait()
 			b.StopTimer()
 			if s.Stats().Accepted != uint64(b.N*count) {
 				b.Fatal(s.Stats())
@@ -129,4 +120,11 @@ func BenchmarkReceiverNameHandoff(b *testing.B) {
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*count), "ns/point")
 		})
 	}
+}
+
+// stringBenchOwner hides AppendBytes, so the inbox keeps names as strings.
+type stringBenchOwner struct{ *bytesBenchOwner }
+
+func (o stringBenchOwner) Append(names []string, hashes []uint64, data []points.Point, sequence []uint64, clock int64) error {
+	return o.bytesBenchOwner.Append(names, hashes, data, sequence, clock)
 }

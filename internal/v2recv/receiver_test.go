@@ -95,7 +95,7 @@ func TestTCP32ConnectionsExactCore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r, err := store.ReceiveTCP(l, v2recv.Config{BatchSize: 19, QueueDepth: 1, BufferBytes: run.buffer, Logger: quiet(), SyncInterval: 20 * time.Millisecond})
+			r, err := store.ReceiveTCP(l, v2recv.Config{BatchSize: 19, BufferBytes: run.buffer, Logger: quiet(), SyncInterval: 20 * time.Millisecond})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -257,7 +257,7 @@ func TestIdleSyncAndFailure(t *testing.T) {
 func TestBackpressureDoesNotDrop(t *testing.T) {
 	o := &fakeOwner{block: make(chan struct{}), entered: make(chan struct{})}
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	s, e := v2recv.Start(l, []v2recv.Owner{o}, v2recv.Config{BatchSize: 1, QueueDepth: 1, Logger: quiet()})
+	s, e := v2recv.Start(l, []v2recv.Owner{o}, v2recv.Config{BatchSize: 1, Logger: quiet()})
 	if e != nil {
 		t.Fatal(e)
 	}

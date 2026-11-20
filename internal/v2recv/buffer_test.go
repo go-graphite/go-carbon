@@ -94,7 +94,7 @@ func TestFullOwnerBlocksConnectionNeverDrops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := v2recv.Start(l, []v2recv.Owner{o}, v2recv.Config{BatchSize: 16, QueueDepth: 1, BufferBytes: 1024, SyncInterval: time.Hour, Logger: quiet()})
+	s, err := v2recv.Start(l, []v2recv.Owner{o}, v2recv.Config{BatchSize: 16, BufferBytes: 1024, SyncInterval: time.Hour, Logger: quiet()})
 	if err != nil {
 		t.Fatal(err)
 	}
