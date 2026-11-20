@@ -2,8 +2,7 @@
 
 PDC3 preserves name bytes, opaque definitions, signed 64-bit timestamps and
 arrival clocks, apply-group ordering, and IEEE value bits. Sparse clocks omit
-only zero deltas. Each instance belongs to one stream owner. Existing PDC3
-records remain readable with `PredictorV3Decoder`.
+only zero deltas. Each instance belongs to one stream owner.
 
 PDC4 uses a durable `NameCatalog` instead of repeating name definitions in every
 segment. These stable catalog IDs are local journal handles, separate from

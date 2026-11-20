@@ -3,14 +3,34 @@ package carbon
 import (
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-graphite/go-carbon/carbonserver"
-	"github.com/go-graphite/go-carbon/internal/v2life/classicquota"
 	"github.com/go-graphite/go-carbon/internal/v2read"
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-whisper"
 )
+
+// v2QuotaRules translates the storage-quotas.conf parser output with today's
+// report interval and shared-storage physical-quota semantics. The arithmetic
+// intentionally matches getCarbonserverQuotas.
+func v2QuotaRules(rules persister.WhisperQuotas, frequency time.Duration, ignorePhysical bool) ([]*carbonserver.Quota, error) {
+	var out []*carbonserver.Quota
+	for _, q := range rules {
+		if q.PhysicalSize > 0 && q.PhysicalSize != math.MaxInt64 && !ignorePhysical {
+			return nil, errors.New("physical-size quota unsupported for shared parts")
+		}
+		physical := q.PhysicalSize
+		if ignorePhysical {
+			physical = 0
+		}
+		out = append(out, &carbonserver.Quota{Pattern: q.Pattern, Namespaces: q.Namespaces, Metrics: q.Metrics, DataPoints: q.DataPoints, LogicalSize: q.LogicalSize, PhysicalSize: physical, Throughput: q.Throughput * int64(frequency/time.Minute), DroppingPolicy: carbonserver.ParseQuotaDroppingPolicy(q.DroppingPolicy), StatMetricPrefix: q.StatMetricPrefix})
+	}
+	return out, nil
+}
 
 func v2QuotaMetric(name string, archives int, count int64) carbonserver.V2QuotaMetric {
 	return carbonserver.V2QuotaMetric{Name: name, DataPoints: count, LogicalSize: 16 + 12*int64(archives) + 12*count}
@@ -23,7 +43,7 @@ func (app *App) newV2Quotas(classicNames []string) (*carbonserver.V2Quotas, map[
 	if len(c.Whisper.Quotas) == 0 {
 		return nil, nil, nil
 	}
-	rules, err := classicquota.Rules(c.Whisper.Quotas, c.Carbonserver.QuotaUsageReportFrequency.Value(), c.Whisper.PebbleChunkIgnorePhysicalQuotas)
+	rules, err := v2QuotaRules(c.Whisper.Quotas, c.Carbonserver.QuotaUsageReportFrequency.Value(), c.Whisper.PebbleChunkIgnorePhysicalQuotas)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -74,10 +94,6 @@ func (app *App) newV2Quotas(classicNames []string) (*carbonserver.V2Quotas, map[
 		historic[name] = v2QuotaMetric(name, archives, count)
 	}
 	return q, historic, nil
-}
-
-func publishV2Quotas(q *carbonserver.V2Quotas, fence uint64, r *v2read.Reader, names []string, historic map[string]carbonserver.V2QuotaMetric) error {
-	return publishV2QuotasContext(context.Background(), q, fence, r, names, historic)
 }
 
 func publishV2QuotasContext(ctx context.Context, q *carbonserver.V2Quotas, fence uint64, r *v2read.Reader, names []string, historic map[string]carbonserver.V2QuotaMetric) error {

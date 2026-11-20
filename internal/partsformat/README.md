@@ -1,7 +1,5 @@
 The GCP3 key codec is stable for offline copy/conversion consumers. The full
-production record, catalogue and lifecycle contract remains unfrozen. The running
-offline owner engine in `tool/immutable-parts/core.go` still uses numeric formats1/2 and
-host-local numeric IDs; it does not yet write this portable format.
+production record, catalogue and lifecycle contract remains unfrozen.
 
 The offline key order is:
 

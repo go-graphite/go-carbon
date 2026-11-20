@@ -151,7 +151,6 @@ func (e *coreEngine) AdoptMove(ctx context.Context, prepared *PreparedMove, ids 
 		if err := o.queues[0].push(packet, o.dead); err != nil {
 			return err
 		}
-		coreWake(e.routers[0].wake)
 		select {
 		case err := <-ack:
 			if err != nil {
