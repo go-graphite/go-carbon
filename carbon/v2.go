@@ -96,10 +96,6 @@ func (app *App) startV2() error {
 	if c.Whisper.Aggregation == nil || len(c.Whisper.Schemas) == 0 {
 		return errors.New("v2 requires loaded schema and aggregation policies")
 	}
-	// Bound the garbage allowance on large heaps while preserving operator tuning.
-	if os.Getenv("GOGC") == "" {
-		debug.SetGCPercent(75)
-	}
 	var core *cache.Cache
 	n := c.V2.Producers
 	if n == 0 {
@@ -436,6 +432,12 @@ func (app *App) startV2() error {
 	app.Collector = NewCollector(app)
 	if c.Prometheus.Enabled {
 		app.v2CollectorOnce.Do(func() { app.PromRegisterer.MustRegister(&v2Collector{app: app}) })
+	}
+	// Bound the garbage allowance on large heaps while preserving operator
+	// tuning. Recovery keeps the runtime's growth: it allocates in bursts and a
+	// smaller allowance there only lengthens restart.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(75)
 	}
 	recovered.Store(true)
 	v.wg.Add(1)
