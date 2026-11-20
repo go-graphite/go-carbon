@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 
 	"github.com/go-graphite/go-carbon/internal/downsize"
+	"github.com/go-graphite/go-carbon/internal/mergepass"
 )
 
 // BuildVersion may be set by release builds; source builds use Go's VCS stamp.
@@ -62,6 +63,8 @@ func run(args []string) error {
 			return maintain(args[1:])
 		case "inventory":
 			return inventoryMain(args[1:])
+		case "merge":
+			return mergepass.Main(args[1:])
 		}
 	}
 	return downsize.MainWithMetrics(args, version())
