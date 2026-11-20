@@ -85,7 +85,7 @@ func TestReceiverStoredRecordsAndReadsDifferential(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				srv, e = v2recv.Start(l, owners, v2recv.Config{BatchSize: 7, QueueDepth: 1, SyncInterval: time.Hour})
+				srv, e = v2recv.Start(l, owners, v2recv.Config{BatchSize: 7, SyncInterval: time.Hour})
 				if e != nil {
 					t.Fatal(e)
 				}
