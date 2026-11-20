@@ -1,4 +1,3 @@
-// immutable-parts is an offline experiment. It is not a daemon storage format.
 package v2core
 
 import (
@@ -8,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -17,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,11 +52,6 @@ type catalogue struct {
 	MinTime, MaxTime int64
 }
 
-func must(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
 func putRow(b []byte, r row) {
 	binary.LittleEndian.PutUint64(b, r.ID)
 	binary.LittleEndian.PutUint64(b[8:], uint64(r.Time))
@@ -660,77 +652,6 @@ func runLayout(root, out string, shards, passes, maxRows, readers int, stepsOver
 		return fmt.Errorf("point count mismatch: %d", total.Points)
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": "parts", "db_per_owner": dbPerOwner, "pebble_estimated_debt_bytes": debt, "pebble_compacted_bytes": compacted, "baseline_proc": baseline, "empty_reads": reads.Empty, "reads_1h": reads.OneHour, "reads_7d": reads.SevenDays, "gomaxprocs": runtime.GOMAXPROCS(0), "proc": procStats(), "readers": readers, "reads": reads.N, "reads_per_second": float64(reads.N) / elapsed, "read_p50_ms": reads.quantile(.50), "read_p99_ms": reads.quantile(.99), "read_points": reads.Points, "when_cet": time.Now().In(time.FixedZone("CET", 3600)).Format(time.RFC3339), "shards": shards, "points": total.Points, "seconds": elapsed, "points_per_second": float64(total.Points) / elapsed, "parts": total.Parts, "sst_bytes": total.Bytes, "sst_MB_per_second": float64(total.Bytes) / 1e6 / elapsed, "sst_bytes_per_input_point": float64(total.Bytes) / float64(total.Points), "pebble_metrics": metrics})
-}
-func Run() {
-	mode := flag.String("mode", "run", "prepare or run")
-	journal := flag.String("journal", "", "sealed input journal")
-	fixture := flag.String("fixture", "", "prepared records directory")
-	out := flag.String("out", "", "new output directory")
-	schemas := flag.String("schemas", "", "storage-schemas.conf (default 1s/60s/3600s)")
-	aggregation := flag.String("aggregation", "", "storage-aggregation.conf")
-	shards := flag.Int("shards", 16, "metric owner count (divisor of192)")
-	steps := flag.String("steps", "", "override retention steps in seconds for controlled trials")
-	dbPerOwner := flag.Bool("db-per-owner", false, "use a separate fresh Pebble per metric owner")
-	readers := flag.Int("readers", 0, "concurrent render-style readers")
-	passes := flag.Int("passes", 1, "fixture passes, later passes shifted in time")
-	maxRows := flag.Int("max-rows", 262144, "byte bound per owner /32")
-	limit := flag.Uint64("points", 450000000, "prepare point limit")
-	coreDuration := flag.Duration("core-duration", time.Minute, "core benchmark offered duration")
-	coreRate := flag.Uint64("core-rate", 25000000, "aggregate offered points per second")
-	coreMetrics := flag.Uint64("core-metrics", 16000000, "synthetic canonical IDs")
-	coreOwners := flag.Int("core-owners", 0, "execution owners, default one per database")
-	corePipeline := flag.Int("core-pipeline", 0, "local pipeline index for disjoint synthetic IDs")
-	corePipelines := flag.Int("core-pipelines", 1, "number of isolated synthetic pipelines")
-	coreProducers := flag.Int("core-producers", 16, "independent producer streams")
-	coreSettle := flag.Duration("core-settle", 10*time.Second, "post-input compaction observation")
-	coreAppend := flag.Bool("core-append-parts", false, "put immutable part before metric and ingest frontier separately")
-	coreBlind := flag.Bool("core-blind-batch", false, "compare blind WAL batches with atomic SST ingestion")
-	cpuProfile := flag.String("cpuprofile", "", "write CPU profile")
-	mutexProfile := flag.String("mutexprofile", "", "write sampled mutex profile")
-	blockProfile := flag.String("blockprofile", "", "write sampled blocking profile")
-	flag.Parse()
-	if *cpuProfile != "" {
-		f, e := os.Create(*cpuProfile)
-		must(e)
-		must(pprof.StartCPUProfile(f))
-		defer func() { pprof.StopCPUProfile(); _ = f.Close() }()
-	}
-	if *mutexProfile != "" {
-		runtime.SetMutexProfileFraction(100)
-		defer func() {
-			f, e := os.Create(*mutexProfile)
-			must(e)
-			defer f.Close()
-			must(pprof.Lookup("mutex").WriteTo(f, 0))
-		}()
-	}
-	if *blockProfile != "" {
-		runtime.SetBlockProfileRate(1000000)
-		defer func() {
-			f, e := os.Create(*blockProfile)
-			must(e)
-			defer f.Close()
-			must(pprof.Lookup("block").WriteTo(f, 0))
-		}()
-	}
-	cfg := coreConfig{Owners: *coreOwners, AppendParts: *coreAppend, Shards: *shards, Producers: *coreProducers, MaxRows: *maxRows, PartitionSeconds: 3600, BlindBatch: *coreBlind}
-	if *mode == "core-bench" {
-		must(coreBenchmarkPipeline(*out, cfg, *coreDuration, *coreRate, *coreMetrics, *coreSettle, *corePipeline, *corePipelines))
-		return
-	}
-	if *mode == "core-replay" {
-		must(coreReplay(*journal, *out, cfg))
-		return
-	}
-	if *mode == "prepare" {
-		must(prepare(*journal, *fixture, *schemas, *aggregation, *limit))
-	} else if *mode == "check" {
-		must(checkFixture(*fixture, *out))
-	} else if *mode == "run" {
-		must(runLayout(*fixture, *out, *shards, *passes, *maxRows, *readers, *steps, *dbPerOwner))
-	} else {
-		panic("unknown mode")
-	}
 }
 
 // A publisher owns one reference. Acquisition only increments a nonzero count;

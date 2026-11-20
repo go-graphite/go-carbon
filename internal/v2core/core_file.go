@@ -2,8 +2,6 @@ package v2core
 
 import (
 	"bufio"
-	"bytes"
-	"io"
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
@@ -12,32 +10,17 @@ import (
 // Keep the final durability sync observable separately from SST encoding.
 type coreMeasuredFile struct {
 	vfs.File
-	owner      *coreOwner
-	buffer     *bufio.Writer
-	whole      *bytes.Buffer
-	prepared   bool
-	prepareErr error
+	owner  *coreOwner
+	buffer *bufio.Writer
 }
 
 type coreFileBuffer struct {
 	writer *bufio.Writer
-	// Opt-in offline experiment: retain one encoded SST until its exact size
-	// is known, preallocate it, then write and sync before ingestion. This adds
-	// one encoded SST's retained capacity per owner to the memory budget. Direct
-	// output retains a second aligned copy, including at most 8190 padding bytes.
-	preallocate   bool
-	whole         bytes.Buffer
-	direct        bool
-	directScratch []byte
 }
 
 // One owner builds only one SST at a time. Reuse its output buffer across data,
 // extension and frontier files, and drain it before the original durable Sync.
 func (o *coreOwner) stageFile(f vfs.File) vfs.File {
-	if o.fileBuffer.preallocate {
-		o.fileBuffer.whole.Reset()
-		return &coreMeasuredFile{File: f, owner: o, whole: &o.fileBuffer.whole}
-	}
 	if o.fileBuffer.writer == nil {
 		o.fileBuffer.writer = bufio.NewWriterSize(f, 1<<20)
 	} else {
@@ -46,12 +29,6 @@ func (o *coreOwner) stageFile(f vfs.File) vfs.File {
 	return &coreMeasuredFile{File: f, owner: o, buffer: o.fileBuffer.writer}
 }
 func (f *coreMeasuredFile) Write(p []byte) (int, error) {
-	if f.whole != nil {
-		if f.prepared {
-			return 0, io.ErrClosedPipe
-		}
-		return f.whole.Write(p)
-	}
 	n, err := f.buffer.Write(p)
 	if err == nil && f.owner.stage != nil {
 		err = f.buffer.Flush()
@@ -61,36 +38,8 @@ func (f *coreMeasuredFile) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
-func (f *coreMeasuredFile) flush() error {
-	if f.whole == nil {
-		return f.buffer.Flush()
-	}
-	if f.prepared {
-		return f.prepareErr
-	}
-	f.prepared = true
-	data := f.whole.Bytes()
-	start := time.Now()
-	err := f.File.Preallocate(0, int64(len(data)))
-	f.owner.preallocateNS.Add(uint64(time.Since(start)))
-	if err == nil {
-		start = time.Now()
-		if f.owner.fileBuffer.direct {
-			f.owner.fileBuffer.directScratch, err = coreWriteDirect(f.File, data, f.owner.fileBuffer.directScratch)
-		} else {
-			var n int
-			n, err = f.File.Write(data)
-			if err == nil && n != len(data) {
-				err = io.ErrShortWrite
-			}
-		}
-		f.owner.fileWriteNS.Add(uint64(time.Since(start)))
-	}
-	f.prepareErr = err
-	return err
-}
 func (f *coreMeasuredFile) Close() error {
-	err := f.flush()
+	err := f.buffer.Flush()
 	closeErr := f.File.Close()
 	if err != nil {
 		return err
@@ -98,7 +47,7 @@ func (f *coreMeasuredFile) Close() error {
 	return closeErr
 }
 func (f *coreMeasuredFile) Sync() error {
-	if err := f.flush(); err != nil {
+	if err := f.buffer.Flush(); err != nil {
 		return err
 	}
 

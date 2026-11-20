@@ -102,7 +102,6 @@ type coreRouter struct {
 	bytes                       atomic.Uint64
 	leaseWaitNS, leaseWaitCount atomic.Uint64
 	leaseWaiting                atomic.Bool
-	wake                        chan struct{}
 }
 
 // The producer and consumer own write/read respectively. A byte quota limits
@@ -116,7 +115,6 @@ type coreQueue struct {
 	written     uint64
 	released    atomic.Uint64
 	blockedNS   atomic.Uint64
-	wake        chan struct{}
 	write, read uint64
 }
 
@@ -138,7 +136,6 @@ func (d *coreDispatch) release() {
 	router, n := d.router, d.bytes
 	if d.remaining.Add(-1) == 0 && router != nil {
 		router.bytes.Add(-n)
-		coreWake(router.wake)
 	}
 }
 func (q *coreQueue) pop() *corePacket {
@@ -149,7 +146,6 @@ func (q *coreQueue) pop() *corePacket {
 		if q.ready != nil && q.slots[q.read%uint64(len(q.slots))].Load() != nil {
 			q.ready.Or(q.readyMask)
 		}
-		coreWake(q.wake)
 	}
 	return p
 }
@@ -201,26 +197,6 @@ func coreWake(wake chan struct{}) {
 	default:
 	}
 }
-func coreWait(wake chan struct{}) {
-	if wake == nil {
-		time.Sleep(10 * time.Microsecond)
-		return
-	}
-	// Prefer a notification already available. Under scheduler pressure both
-	// a fresh timer and the wake can become ready before the select executes.
-	select {
-	case <-wake:
-		return
-	default:
-	}
-	// Retry periodically to observe owner failure even without a release.
-	timer := time.NewTimer(time.Millisecond)
-	select {
-	case <-wake:
-	case <-timer.C:
-	}
-	timer.Stop()
-}
 
 type coreOwner struct {
 	// ckptAt and ckptWriting belong to the owner goroutine (then to close):
@@ -267,12 +243,7 @@ type coreOwner struct {
 	committed, parts, bytes      atomic.Uint64
 	sortNS, encodeNS, ingestNS   atomic.Uint64
 	syncNS, syncMaxNS, syncCalls atomic.Uint64
-	preallocateNS, fileWriteNS   atomic.Uint64
 	fileBuffer                   coreFileBuffer
-	bucketSort                   bool
-	radixSort                    bool
-	sortScratch                  []row
-	radixWork                    []row
 	compact                      coreCompactWorkspace
 	sealRows                     int
 	sealCalls, sealNS            atomic.Uint64
@@ -283,17 +254,12 @@ type coreOwner struct {
 	// expiries counts Expire callbacks that returned true, on any goroutine.
 	expiries atomic.Uint64
 	index    int // owner index, staggers time-based seal deadlines
-	// syncSeal keeps threshold seals on the owner loop (CORE_SYNC_SEAL=1).
-	// Otherwise a threshold seal freezes the head and seals it in the
-	// background while intake and pending publication continue.
-	syncSeal bool
 	// sealPubMu orders a seal's atomic part publication against pending
 	// publications. A pin taken under it either predates the part and still
 	// carries the frozen batches, or includes the part (sealDurable) and omits
 	// them, so no point is ever invisible or counted twice.
 	sealPubMu   sync.Mutex
 	sealDurable bool
-	trace       bool
 }
 type coreFailure struct{ err error }
 type coreEngine struct {
@@ -306,14 +272,12 @@ type coreEngine struct {
 	resumed   atomic.Bool
 	gcFailure atomic.Pointer[coreFailure]
 
-	owners       []*coreOwner
-	routers      []coreRouter
-	cfg          coreConfig
-	stalls       atomic.Uint64
-	streamBytes  uint64
-	indexScatter bool
-	notifyWait   bool
-	readOnly     bool
+	owners      []*coreOwner
+	routers     []coreRouter
+	cfg         coreConfig
+	stalls      atomic.Uint64
+	streamBytes uint64
+	readOnly    bool
 }
 
 // Hash only the canonical numeric ID, with stable distribution independent of
@@ -394,7 +358,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			return nil, errors.New("CORE_SEAL_PHASE must be between 0 and 1023")
 		}
 	}
-	trace := os.Getenv("CORE_TRACE_PHASES") == "1"
 	if err := os.MkdirAll(root, 0750); err != nil {
 		return nil, err
 	}
@@ -408,7 +371,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	if identities == nil {
 		identities = &PolicyCatalog{}
 	}
-	e := &coreEngine{identities: identities, readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes, indexScatter: os.Getenv("CORE_INDEX_SCATTER") == "1", notifyWait: os.Getenv("CORE_NOTIFY_WAIT") == "1"}
+	e := &coreEngine{identities: identities, readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes}
 	fail := func(err error) (*coreEngine, error) {
 		for _, o := range e.owners {
 			if o == nil {
@@ -446,14 +409,12 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					}
 				},
 				WriteStallBegin: func(pebble.WriteStallBeginInfo) { e.stalls.Add(1) },
-				CompactionBegin: func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_begin", dir, info.JobID) },
-				CompactionEnd:   func(info pebble.CompactionInfo) { coreTrace(trace, "compaction_end", dir, info.JobID) },
 			}
 			db, err := pebble.Open(dir, opts)
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), trace: trace, lookup: identities.lookup}
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), lookup: identities.lookup}
 			if hooks.VisiblePending != nil {
 				o.visible = func(v PendingView) { hooks.VisiblePending(s, v) }
 			} else if hooks.Visible != nil {
@@ -470,11 +431,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				phase := (sealPhase + 1024*s/cfg.Shards) % 1024
 				o.sealRows -= (o.sealRows / 4) * phase / 1024
 			}
-			o.fileBuffer.direct = os.Getenv("CORE_SST_DIRECT") == "1"
-			o.fileBuffer.preallocate = os.Getenv("CORE_SST_PREALLOCATE") == "1" || o.fileBuffer.direct
-			o.bucketSort = os.Getenv("CORE_BUCKET_SORT") == "1"
-			o.radixSort = os.Getenv("CORE_RADIX_SORT") == "1"
-			o.syncSeal = os.Getenv("CORE_SYNC_SEAL") == "1"
 			e.owners[s] = o
 			if hook != nil {
 				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
@@ -642,15 +598,6 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	}
 	workers = min(workers, cfg.Shards)
 	groups := make([][]*coreOwner, workers)
-	if e.notifyWait {
-		for p := range e.routers {
-			wake := make(chan struct{}, 1)
-			e.routers[p].wake = wake
-			for _, o := range e.owners {
-				o.queues[p].wake = wake
-			}
-		}
-	}
 	for i, o := range e.owners {
 		groups[i%workers] = append(groups[i%workers], o)
 	}
@@ -674,8 +621,8 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 	}
 	go e.runPartMerges(mergeWorkers)
-	for i, group := range groups {
-		go runCoreOwnerGroup(group, hooks.OwnerCPUs, i)
+	for _, group := range groups {
+		go runCoreOwnerGroup(group)
 	}
 	return e, nil
 }
@@ -803,7 +750,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			default:
 			}
 		}
-		coreWait(router.wake)
+		time.Sleep(10 * time.Microsecond)
 	}
 	if !waitStart.IsZero() {
 		router.leaseWaitNS.Add(uint64(time.Since(waitStart)))
@@ -865,27 +812,13 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		d.storage = make([]row, len(rows))
 	}
 	storage := d.storage[:len(rows)]
-	if e.indexScatter {
-		offset := 0
-		for s, count := range counts {
-			parts[s] = storage[offset : offset+count : offset+count]
-			counts[s] = offset
-			offset += count
-		}
-		for i := range rows {
-			s := routes[i]
-			storage[counts[s]] = rows[i]
-			counts[s]++
-		}
-	} else {
-		for s, count := range counts {
-			parts[s] = storage[:0:count]
-			storage = storage[count:]
-		}
-		for i, r := range rows {
-			s := routes[i]
-			parts[s] = append(parts[s], r)
-		}
+	for s, count := range counts {
+		parts[s] = storage[:0:count]
+		storage = storage[count:]
+	}
+	for i, r := range rows {
+		s := routes[i]
+		parts[s] = append(parts[s], r)
 	}
 	var byOwner [][]coreBatch
 	var pending []pendingRows
@@ -1015,7 +948,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 			}
 		}
 		if left > 0 && !progress {
-			coreWait(router.wake)
+			time.Sleep(10 * time.Microsecond)
 		}
 	}
 
@@ -1130,7 +1063,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	var spareRows []row
 	var headSince int64
 	// Row-hook publication clones the head; it keeps synchronous seals.
-	asyncSeal := !o.syncSeal && o.hook == nil
+	asyncSeal := o.hook == nil
 	publishBatches := func() error {
 		if o.batchHook == nil {
 			return nil
@@ -1623,16 +1556,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 
 // One execution owner polls several independent databases. Database count is a
 // storage geometry choice, independent of producer and execution-owner counts.
-func runCoreOwnerGroup(owners []*coreOwner, cpus []int, index int) {
-	unpin, err := coreAffinity(cpus, index)
-	if err != nil {
-		for _, o := range owners {
-			o.done <- err
-			close(o.dead)
-		}
-		return
-	}
-	defer unpin()
+func runCoreOwnerGroup(owners []*coreOwner) {
 	polls := make([]func() (bool, bool), len(owners))
 	for i, o := range owners {
 		polls[i] = o.poller()
@@ -1745,13 +1669,11 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 	if o.stage != nil {
 		o.stage("seal")
 	}
-	coreTrace(o.trace, "seal_begin", o.dir, 0)
 	o.sealing.Store(true)
 	defer func() {
 		o.sealNS.Add(uint64(time.Since(sealStart)))
 		o.sealCalls.Add(1)
 		o.sealing.Store(false)
-		coreTrace(o.trace, "seal_end", o.dir, 0)
 	}()
 	var plan coreSealPlan
 	var err error
@@ -1809,10 +1731,6 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 			}
 			return less(a, b)
 		})
-	} else if o.radixSort {
-		o.sortScratch, o.radixWork = sortCoreRowsRadix(head, o.cfg.PartitionSeconds, o.sortScratch, o.radixWork)
-	} else if o.bucketSort {
-		o.sortScratch = sortCoreRowsBucketed(head, o.cfg.PartitionSeconds, o.sortScratch)
 	} else {
 		sortCoreRows(head, o.cfg.PartitionSeconds)
 	}
