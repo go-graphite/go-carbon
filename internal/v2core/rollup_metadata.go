@@ -243,5 +243,6 @@ func (r *coreRollups) release() {
 	}
 	r.samples = r.samples[:0]
 	r.arena = r.arena[:0]
+	r.returnScratch()
 	r.pending = false
 }

@@ -163,6 +163,7 @@ type coreRollups struct {
 	batches    []sealrollup.Batch
 	files      map[string][][]plannedKV
 	arena      []byte
+	scratch    *rollupScratch // held from planParts through Commit/Abort
 	pending    bool
 	coverage   map[string]*rollupCoverage
 
@@ -610,6 +611,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	if r.pending {
 		return coreSealPlan{}, errors.New("rollup plan still owns seal arenas")
 	}
+	r.takeScratch()
 	r.pending = true
 	returned := false
 	defer func() {
