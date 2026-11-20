@@ -910,7 +910,7 @@ func scanIdentity(identities *PolicyCatalog, id uint64, name string, definition 
 func (e *rollupScanEntry) addMetadata(identities *PolicyCatalog, k partsformat.Key, value []byte, definition *[]byte) error {
 	m, slim, err := decodeRollupMetadataHeader(value)
 	if err == nil && slim {
-		m.Policy, _, err = appendRollupDefinition((*definition)[:0], k.Metric, k.Group, m.Frontier.Policy)
+		m.Policy, err = appendRollupDefinition((*definition)[:0], k.Metric, k.Group, m.Frontier.Policy)
 		*definition = m.Policy
 	}
 	if identities == nil {
