@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"math"
+	"sync"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
@@ -167,6 +169,24 @@ func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, 
 	return out, err
 }
 
+// digestScratch is per-call hashing state. The hasher and its batch buffer are
+// reused because survivors serve thousands of digests per second.
+type digestScratch struct {
+	hash hash.Hash
+	buf  [digestBatchPoints * 16]byte
+}
+
+const (
+	digestBatchPoints = 256
+	// float64 exponent bits; all set means NaN or an infinity.
+	digestNonFinite = 0x7ff0000000000000
+)
+
+var digestScratchPool = sync.Pool{New: func() any { return &digestScratch{hash: sha256.New()} }}
+
+// digestSeries hashes the finite points of series inside [from, until). It
+// visits only the slots inside the window and hashes them in batches; the bytes
+// fed to sha256 are the same (timestamp, float64 bits) pairs in slot order.
 func digestSeries(series *chunkstore.Series, from, until int64) DigestArchive {
 	d := DigestArchive{Step: series.Step}
 	for _, retention := range series.Metadata.Retentions {
@@ -175,20 +195,44 @@ func digestSeries(series *chunkstore.Series, from, until int64) DigestArchive {
 			break
 		}
 	}
-	h := sha256.New()
-	var buf [16]byte
-	step := int64(series.Step)
-	for i, v := range series.Values {
-		ts := int64(series.FromTime) + int64(i)*step
-		if ts < from || ts >= until || math.IsNaN(v) || math.IsInf(v, 0) {
+	scratch := digestScratchPool.Get().(*digestScratch)
+	defer digestScratchPool.Put(scratch)
+	h, buf := scratch.hash, scratch.buf[:]
+	h.Reset()
+	step, first := int64(series.Step), int64(series.FromTime)
+	lo, hi := digestSlots(first, step, from, until, len(series.Values))
+	n := 0
+	for i, v := range series.Values[lo:hi] {
+		bits := math.Float64bits(v)
+		if bits&digestNonFinite == digestNonFinite {
 			continue
 		}
-		binary.BigEndian.PutUint64(buf[:8], uint64(ts))
-		binary.BigEndian.PutUint64(buf[8:], math.Float64bits(v))
-		_, _ = h.Write(buf[:])
+		binary.BigEndian.PutUint64(buf[n:], uint64(first+int64(lo+i)*step))
+		binary.BigEndian.PutUint64(buf[n+8:], bits)
 		d.Count++
+		if n += 16; n == len(buf) {
+			_, _ = h.Write(buf)
+			n = 0
+		}
 	}
-	sum := h.Sum(nil)
-	d.Hash = hex.EncodeToString(sum[:8])
+	_, _ = h.Write(buf[:n])
+	var sum [sha256.Size]byte
+	d.Hash = hex.EncodeToString(h.Sum(sum[:0])[:8])
 	return d
+}
+
+// digestSlots returns the slot range [lo, hi) whose timestamps
+// first+i*step fall inside [from, until), clamped to [0, n). step > 0.
+func digestSlots(first, step, from, until int64, n int) (int, int) {
+	slot := func(t int64) int {
+		// ceil((t-first)/step) for either sign, clamped to [0, n].
+		d := t - first
+		q := d / step
+		if d%step > 0 {
+			q++
+		}
+		return int(max(0, min(q, int64(n))))
+	}
+	lo, hi := slot(from), slot(until)
+	return lo, max(lo, hi)
 }
