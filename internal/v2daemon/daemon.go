@@ -55,8 +55,10 @@ type Config struct {
 	// group fsync once the current segment holds at least this many bytes. Each
 	// segment starts with fresh predictor state, so restart can skip every
 	// segment that ends at or below all owners' durable frontiers. Zero keeps one
-	// segment per process run. Rotation retires the prefix committed by every
-	// owner; placement and classic-mirror consumers retain their replay logs.
+	// segment per process run and retires nothing. Otherwise rotation and every
+	// idle Drain unlink the segments every owner has committed, down to one
+	// record once all input is; placement and classic-mirror consumers retain
+	// their replay logs.
 	JournalSegmentBytes int64
 	// fullReplay keeps and replays every segment; tests use it as the oracle.
 	fullReplay bool
@@ -103,7 +105,13 @@ type Producer struct {
 	journalDir                      string
 	segment                         int
 	segmentBytes, segmentLimit      int64
-	fullReplay                      bool
+	// The open segment's path and its last record's offset, -1 while empty.
+	// closed lists older retained segments, oldest first, on producers that
+	// retire them.
+	segmentPath string
+	segmentLast int64
+	closed      []journalSegment
+	fullReplay  bool
 	// Recovery counts journal segments skipped below the durable frontier and
 	// segments decoded; set once by Open.
 	RecoverySkippedSegments, RecoveryReplayedSegments            int
@@ -362,8 +370,11 @@ func (p *Producer) Drain() error {
 	if p.failed != nil {
 		return p.failed
 	}
-	if p.layer == 0 || len(p.packets) == 0 {
+	if p.layer == 0 {
 		return nil
+	}
+	if len(p.packets) == 0 {
+		return p.fail(p.retireJournal())
 	}
 	start := time.Now()
 	if p.catalog != nil {
@@ -372,6 +383,7 @@ func (p *Producer) Drain() error {
 		}
 	}
 	p.CatalogSyncTime += time.Since(start)
+	rotated := false
 	if p.layer >= 2 {
 		for _, record := range p.records {
 			var h [4]byte
@@ -379,6 +391,7 @@ func (p *Producer) Drain() error {
 			if _, err := p.writer.Write(h[:]); err != nil {
 				return p.fail(err)
 			}
+			p.segmentLast = p.segmentBytes
 			if p.stage != nil {
 				if err := p.writer.Flush(); err != nil {
 					return p.fail(err)
@@ -416,6 +429,7 @@ func (p *Producer) Drain() error {
 			if err := p.rotateJournal(); err != nil {
 				return p.fail(err)
 			}
+			rotated = true
 		}
 	}
 	start = time.Now()
@@ -447,6 +461,11 @@ func (p *Producer) Drain() error {
 	p.packets = p.packets[:0]
 	p.pendingRows = 0
 	p.nextSync = time.Now().Add(p.interval)
+	// A busy producer retires at rotation, as often as segments close; idle
+	// Drains above retire the rest once seals cover it.
+	if rotated {
+		return p.fail(p.retireJournal())
+	}
 	return nil
 }
 
