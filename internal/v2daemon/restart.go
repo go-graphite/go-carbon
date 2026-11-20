@@ -400,7 +400,7 @@ func segmentCursor(path string) (uint64, bool, error) {
 	defer f.Close()
 	var b [4 + 4 + binary.MaxVarintLen64]byte
 	n, err := io.ReadFull(f, b[:])
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return 0, false, err
 	}
 	if n < 9 {
@@ -470,7 +470,7 @@ func segmentEnd(path string, newest bool) (end, order uint64, ok bool, err error
 				last, offset = offset, offset+4+int64(size)
 				continue
 			}
-		} else if err != io.EOF {
+		} else if !errors.Is(err, io.EOF) {
 			return 0, 0, false, err
 		}
 		if !newest {

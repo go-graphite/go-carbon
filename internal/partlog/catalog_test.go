@@ -3,6 +3,7 @@ package partlog
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"os"
 	"os/exec"
@@ -199,7 +200,8 @@ func TestCatalogCheckpointSIGKILL(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestCatalogCheckpointSIGKILL$")
 			cmd.Env = append(os.Environ(), "CATALOG_KILL_DIR="+dir, "CATALOG_KILL_STAGE="+stage)
 			out, e := cmd.CombinedOutput()
-			exit, ok := e.(*exec.ExitError)
+			exit := &exec.ExitError{}
+			ok := errors.As(e, &exit)
 			if !ok {
 				t.Fatalf("expected SIGKILL: %v %s", e, out)
 			}

@@ -789,7 +789,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		}
 		meta, slim, err := decodeRollupMetadataHeader(it.Value())
 		if err == nil && slim {
-			definition, _, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
+			definition, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
 			meta.Policy = definition
 		}
 		if err != nil {

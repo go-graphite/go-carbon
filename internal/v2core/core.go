@@ -1790,10 +1790,11 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 			return 0, errors.New("late point targets expired partition")
 		}
 	}
-	if omitRaw {
+	switch {
+	case omitRaw:
 		// The replacement planner owns ordering and retention in its format;
 		// without base rows the archive planner already consumed the input.
-	} else if o.stage != nil {
+	case o.stage != nil:
 		observed := false
 		slices.SortFunc(head, func(a, b row) int {
 			if !observed {
@@ -1809,11 +1810,11 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 			}
 			return less(a, b)
 		})
-	} else if o.radixSort {
+	case o.radixSort:
 		o.sortScratch, o.radixWork = sortCoreRowsRadix(head, o.cfg.PartitionSeconds, o.sortScratch, o.radixWork)
-	} else if o.bucketSort {
+	case o.bucketSort:
 		o.sortScratch = sortCoreRowsBucketed(head, o.cfg.PartitionSeconds, o.sortScratch)
-	} else {
+	default:
 		sortCoreRows(head, o.cfg.PartitionSeconds)
 	}
 	o.sortNS.Add(uint64(time.Since(phaseStart)))

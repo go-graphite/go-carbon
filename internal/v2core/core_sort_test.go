@@ -63,11 +63,12 @@ func BenchmarkCoreSortCandidates(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				copy(rows, source)
-				if algorithm == "radix" {
+				switch algorithm {
+				case "radix":
 					scratch, work = sortCoreRowsRadix(rows, 3600, scratch, work)
-				} else if algorithm == "bucketed" {
+				case "bucketed":
 					scratch = sortCoreRowsBucketed(rows, 3600, scratch)
-				} else {
+				default:
 					sortCoreRows(rows, 3600)
 				}
 			}

@@ -188,7 +188,6 @@ func BenchmarkApplicationOwnerProbe(b *testing.B) {
 			}
 		}
 		b.StopTimer()
-		inputs = nil
 		runtime.GC()
 		runtime.ReadMemStats(&m1)
 		names := float64(b.N * batch)

@@ -2,6 +2,7 @@ package v2index
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"path/filepath"
@@ -69,7 +70,7 @@ func TestCatalogMatchCancellation(t *testing.T) {
 	defer cancel()
 	calls := 0
 	err := c.Snapshot().MatchPaths(ctx, "*", func(string) error { calls++; cancel(); return nil })
-	if err != context.Canceled || calls != 1 {
+	if !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatalf("err=%v visits=%d", err, calls)
 	}
 }

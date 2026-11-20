@@ -358,7 +358,8 @@ func TestPlacedRestartSIGKILL(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = cmd.Wait()
-	if exit, ok := err.(*exec.ExitError); !ok || !exit.Sys().(syscall.WaitStatus).Signaled() || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+	exit := &exec.ExitError{}
+	if !errors.As(err, &exit) || !exit.Sys().(syscall.WaitStatus).Signaled() || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
 		t.Fatalf("not SIGKILL: %v", err)
 	}
 	for attempt := 0; attempt < 2; attempt++ {

@@ -1,11 +1,12 @@
 package v2daemon
 
 import (
-	"github.com/go-graphite/go-carbon/internal/v2placement"
-	"github.com/go-graphite/go-carbon/internal/v2wire"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/v2placement"
+	"github.com/go-graphite/go-carbon/internal/v2wire"
 )
 
 func TestRelayBatchRecoveryAndRetryWindow(t *testing.T) {

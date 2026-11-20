@@ -3,12 +3,13 @@ package recovery
 import (
 	"bytes"
 	"errors"
-	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/klauspost/compress/zstd"

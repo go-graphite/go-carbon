@@ -3,13 +3,14 @@ package carbonserver
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/v2index"
 	"math"
 	"os"
 	"runtime"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/v2index"
 )
 
 // Opt in explicitly: V2_INDEX_SCALE=10000000 V2_INDEX_BACKEND=trie go test
@@ -36,7 +37,6 @@ func TestV2CatalogScale(t *testing.T) {
 	if err := c.Publish(1, names); err != nil {
 		t.Fatal(err)
 	}
-	names = nil
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)

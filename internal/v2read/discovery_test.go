@@ -2,6 +2,7 @@ package v2read
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -120,7 +121,7 @@ func TestDiscoveryParallelOwners(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := r.NamesWithMasks(ctx); err != context.Canceled {
+	if _, _, err := r.NamesWithMasks(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
 	r.Close()

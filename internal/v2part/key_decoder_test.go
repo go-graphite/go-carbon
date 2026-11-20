@@ -140,7 +140,8 @@ func TestDenseTypedWriterMatchesSingletonBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			if typed && key.Archive != MetadataArchive {
-				record, err := sealrollup.DecodeRecord(int(key.Archive), key.BlockStart, kv[1])
+				var record sealrollup.Record
+				record, err = sealrollup.DecodeRecord(int(key.Archive), key.BlockStart, kv[1])
 				if err != nil {
 					t.Fatal(err)
 				}

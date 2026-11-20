@@ -87,7 +87,8 @@ func OpenAuthority(root string, d Document, group, replica, store string) (*Auth
 	a := &Authority{path: filepath.Join(root, "placement.json"), group: group, replica: replica, store: store}
 	state := durableState{Document: cloneDocument(d), Group: group, Replica: replica, Store: store}
 	b, e := os.ReadFile(a.path)
-	if e == nil {
+	switch {
+	case e == nil:
 		if e = uniqueFields(b); e != nil {
 			return nil, e
 		}
@@ -121,7 +122,7 @@ func OpenAuthority(root string, d Document, group, replica, store string) (*Auth
 		if state.ClosedEpoch > r.Epoch {
 			return nil, fmt.Errorf("fence floor ahead of map")
 		}
-	} else if errors.Is(e, os.ErrNotExist) {
+	case errors.Is(e, os.ErrNotExist):
 		if d.Revision != 1 {
 			return nil, fmt.Errorf("new authority must bootstrap at revision one")
 		}
@@ -131,7 +132,7 @@ func OpenAuthority(root string, d Document, group, replica, store string) (*Auth
 		if e = a.save(state); e != nil {
 			return nil, e
 		}
-	} else {
+	default:
 		return nil, e
 	}
 	a.publish(state, false)

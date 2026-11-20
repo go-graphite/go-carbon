@@ -29,14 +29,14 @@ func adoptPolicy(t *testing.T, method sealrollup.Method) []byte {
 	return b
 }
 
-func adoptDonor(t *testing.T, policy []byte, order uint64, samples ...sealrollup.Sample) MovePart {
+func adoptDonor(t *testing.T, policy []byte, samples ...sealrollup.Sample) MovePart {
 	t.Helper()
 	r := newCoreRollups()
 	rows := make([]Row, len(samples))
 	for i, s := range samples {
 		rows[i] = Row{ID: 99, Time: s.Time, Bits: s.Bits, Seq: uint64(i + 1)}
 	}
-	plan, err := r.plan(coreSealInput{Batches: []Batch{{ID: 99, Order: order, Clock: 1010, Policy: policy, Points: rows}}})
+	plan, err := r.plan(coreSealInput{Batches: []Batch{{ID: 99, Order: 100, Clock: 1010, Policy: policy, Points: rows}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestMoveAdoptIdentityReducerRestart(t *testing.T) {
 				}
 			}()
 			adoptLive(t, e, policy, 1, 2, moveSample(1000, 2), moveSample(1002, 4))
-			donor := adoptDonor(t, policy, 100, moveSample(1000, 1), moveSample(1001, 3), moveSample(1002, 3), sealrollup.Sample{Time: 1003, Bits: 0x8000000000000000}, sealrollup.Sample{Time: 1004, Bits: 0x7ff8000000000042})
+			donor := adoptDonor(t, policy, moveSample(1000, 1), moveSample(1001, 3), moveSample(1002, 3), sealrollup.Sample{Time: 1003, Bits: 0x8000000000000000}, sealrollup.Sample{Time: 1004, Bits: 0x7ff8000000000042})
 			prepared, err := PrepareMove(ctx, t.TempDir(), []MovePart{donor})
 			if err != nil {
 				t.Fatal(err)
@@ -212,7 +212,7 @@ func TestMoveAdoptCrash(t *testing.T) {
 			if err = e.Close(); err != nil {
 				t.Fatal(err)
 			}
-			part := adoptDonor(t, policy, 100, moveSample(1000, 1), moveSample(1001, 3))
+			part := adoptDonor(t, policy, moveSample(1000, 1), moveSample(1001, 3))
 			b, _ := json.Marshal(part)
 			path := filepath.Join(t.TempDir(), "part.json")
 			if err = os.WriteFile(path, b, 0600); err != nil {
@@ -260,7 +260,7 @@ func TestMoveAdoptNewNameCoarseContinuation(t *testing.T) {
 	}
 	defer e.Close()
 	policy := adoptPolicy(t, sealrollup.Sum)
-	part := adoptDonor(t, policy, 100, moveSample(1000, 1), moveSample(1001, 2), moveSample(1002, 3), moveSample(1003, 4), moveSample(1004, 5))
+	part := adoptDonor(t, policy, moveSample(1000, 1), moveSample(1001, 2), moveSample(1002, 3), moveSample(1003, 4), moveSample(1004, 5))
 	prepared, err := PrepareMove(context.Background(), t.TempDir(), []MovePart{part})
 	if err != nil {
 		t.Fatal(err)

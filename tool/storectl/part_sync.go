@@ -274,14 +274,15 @@ func receivePartSnapshot(ctx context.Context, client *http.Client, base, token, 
 				}
 				skipped, n, e := receiveOnePart(ctx, client, base, token, dir, p)
 				mu.Lock()
-				if e != nil {
+				switch {
+				case e != nil:
 					if first == nil {
 						first = e
 					}
 					cancel()
-				} else if skipped {
+				case skipped:
 					out.Skipped++
-				} else {
+				default:
 					out.Parts++
 					out.Bytes += n
 				}

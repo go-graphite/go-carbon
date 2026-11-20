@@ -728,7 +728,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		} else {
 			full := *metadata
 			if full.Policy == nil {
-				if full.Policy, _, err = appendRollupDefinition(nil, v2part.ID(c.metricName()[4:]), c.key.Group, full.Frontier.Policy); err != nil {
+				if full.Policy, err = appendRollupDefinition(nil, v2part.ID(c.metricName()[4:]), c.key.Group, full.Frontier.Policy); err != nil {
 					return v2part.Descriptor{}, err
 				}
 			}

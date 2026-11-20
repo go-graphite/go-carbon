@@ -468,14 +468,15 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			started := time.Now()
 			var loaded int
 			var e error
-			if framed && inputlog.IsSegment(seg.file) {
+			switch {
+			case framed && inputlog.IsSegment(seg.file):
 				loaded, e = s.replayInputSegment(seg, sink, offset, func(end int64, n int) { s.historyPoints.Add(int64(n)); advance(end) })
-			} else if framed {
+			case framed:
 				loaded, e = s.replayCaptureBatches(reader, seg.source, sink, func(end int64, n int) {
 					s.historyPoints.Add(int64(n))
 					advance(offset + end)
 				})
-			} else {
+			default:
 				// Keep the reader's consumed record frontier separate from read-ahead.
 				buffer := bufio.NewReaderSize(reader, 1<<20)
 				apply := add(seg.source)

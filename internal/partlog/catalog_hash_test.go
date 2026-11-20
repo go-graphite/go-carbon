@@ -2,6 +2,7 @@ package partlog
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -143,7 +144,7 @@ func TestCatalogInternBatchOracle(t *testing.T) {
 		t.Fatal("changed batch definition accepted")
 	}
 	c.failed = errCatalog
-	if _, err := c.InternBatch([]string{"other"}, nil); err != errCatalog {
+	if _, err := c.InternBatch([]string{"other"}, nil); !errors.Is(err, errCatalog) {
 		t.Fatal("sticky failure lost", err)
 	}
 	c.failed = nil

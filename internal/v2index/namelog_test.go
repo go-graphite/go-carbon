@@ -3,7 +3,6 @@ package v2index
 import (
 	"encoding/json"
 	"errors"
-	"github.com/lomik/zapwriter"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/lomik/zapwriter"
 )
 
 // Kill after publishing small levels and expiry, including while a base merge

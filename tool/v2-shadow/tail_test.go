@@ -1,12 +1,13 @@
 package main
 
 import (
-	"github.com/go-graphite/go-carbon/internal/inputlog"
-	"github.com/go-graphite/go-carbon/points"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestShadowTail(t *testing.T) {

@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -91,7 +92,7 @@ func TestV2ExpiryConcurrentIntake(t *testing.T) {
 		if e == nil {
 			break
 		}
-		if e != v2read.ErrNotFound {
+		if !errors.Is(e, v2read.ErrNotFound) {
 			t.Fatal(e)
 		}
 		if time.Now().After(deadline) {
@@ -102,7 +103,7 @@ func TestV2ExpiryConcurrentIntake(t *testing.T) {
 	// Cross multiple inactivity windows while fresh points race maintenance.
 	until := time.Now().Add(4 * time.Second)
 	for time.Now().Before(until) {
-		if _, e := app.v2.reader.Metadata(t.Context(), "expiry.same"); e == v2read.ErrNotFound {
+		if _, e := app.v2.reader.Metadata(t.Context(), "expiry.same"); errors.Is(e, v2read.ErrNotFound) {
 			t.Fatal("active name expired during intake")
 		} else if e != nil {
 			t.Fatal(e)
