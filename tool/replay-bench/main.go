@@ -499,7 +499,11 @@ func check(data, api, base string, sample, step int) error {
 	}); err != nil {
 		return err
 	}
+	// carbonserver windows are (from, until]; query_range evaluates at start, start+step, ...
 	from, until := s.tmin-1, s.tmax+1
+	if api == "prom" {
+		from = s.tmin
+	}
 	var compared, changed, missing, sampledChanged, sampledMissing, sampledN int
 	var maxRel float64
 	shown := 0
