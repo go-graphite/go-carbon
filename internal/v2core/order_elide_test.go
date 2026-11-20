@@ -17,7 +17,7 @@ import (
 )
 
 // TestMergeOrderCodeExact writes two seals with regular large orders, merges
-// them (copied runs take the delta-of-delta order code), writes late duplicates
+// them (copied runs take the predicted order code), writes late duplicates
 // of two old slots with newer orders and merges again. Every merged record,
 // including Order and Sequence, equals the last-write-wins winner of the inputs.
 func TestMergeOrderCodeExact(t *testing.T) {
@@ -94,7 +94,7 @@ func TestMergeOrderCodeExact(t *testing.T) {
 				if k.Archive == v2part.MetadataArchive {
 					return nil
 				}
-				if b[4]&4 != 0 {
+				if b[4]&0x10 != 0 {
 					one++
 				}
 				rs, e := v2part.DecodeSlots(k.Archive, k.BlockStart, b)
@@ -132,7 +132,7 @@ func TestMergeOrderCodeExact(t *testing.T) {
 			t.Fatalf("m2 records differ:\ngot  %q\nwant %q", got2, want(true))
 		}
 		if one1 == 0 || one2 == 0 {
-			t.Fatalf("delta-of-delta runs: m1 %d, m2 %d, want both >0", one1, one2)
+			t.Fatalf("predicted order runs: m1 %d, m2 %d, want both >0", one1, one2)
 		}
 	}
 }

@@ -542,7 +542,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		return v2part.Descriptor{}, err
 	}
 	defer writer.Abort()
-	writer.OrderDeltas()
+	writer.PredictOrders()
 	limit, err := mergeMaxBytes()
 	if err != nil {
 		return v2part.Descriptor{}, err
