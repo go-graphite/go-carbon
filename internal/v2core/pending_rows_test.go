@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
 // pendingRowsScript is one random sequence of submitted packets.
@@ -474,4 +477,90 @@ func BenchmarkPendingRowsRouted(b *testing.B) {
 		b.StopTimer()
 		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/points, "ns/point")
 	})
+}
+
+// TestOutboxRoutesApplications checks that an Outbox puts each application,
+// with its order, clock, point times, value bits and sequences, into the
+// owner its vshard routes to, in arrival order, and tracks each owner's
+// oldest point. Wide IDs and times take the escape form.
+func TestOutboxRoutesApplications(t *testing.T) {
+	const shards = 7
+	c := &PolicyCatalog{}
+	out := &Outbox{catalog: c, owners: make([]pendingRows, shards)}
+	handles := map[uint64]*ApplicationPolicy{}
+	var ids []uint64
+	for i := range 64 {
+		id := uint64(i + 1)
+		if i == 63 {
+			id = 1 << 33
+		}
+		name := fmt.Sprintf("outbox.m%d", i)
+		raw, err := EncodeRollupPolicy(RollupPolicy{Name: partsformat.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, XFilesFactor: .5, Archives: []sealrollup.Archive{{Step: 1, Count: 60}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if handles[id], err = c.intern(id, name, raw); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := out.Start(handles[1], 1, 0, 0, 0); err == nil {
+		t.Fatal("empty application accepted")
+	}
+	if err := out.Start(&ApplicationPolicy{}, 1, 0, 0, 1); err == nil {
+		t.Fatal("foreign handle accepted")
+	}
+	rng := rand.New(rand.NewPCG(7, 11))
+	var want [shards][]coreBatch
+	var oldest [shards]int64
+	var seen [shards]bool
+	order := uint64(0)
+	for range 4000 {
+		h := handles[ids[rng.IntN(len(ids))]]
+		order += 1 + uint64(rng.IntN(3))
+		clock := int64(1_700_000_000) + int64(order/700)
+		pts := make([]row, 1+rng.IntN(3)*rng.IntN(2))
+		for j := range pts {
+			pts[j] = row{ID: h.id, Time: clock - int64(rng.IntN(4000)), Bits: rng.Uint64(), Seq: order}
+			if rng.IntN(50) == 0 {
+				pts[j].Time = clock - 1<<40
+			}
+			if rng.IntN(20) == 0 {
+				pts[j].Seq = rng.Uint64()
+			}
+		}
+		if err := out.Start(h, order, clock, pts[0].Time, len(pts)); err != nil {
+			t.Fatal(err)
+		}
+		s := int(h.vshard) % shards
+		for _, p := range pts {
+			out.Point(p.Time, p.Bits, p.Seq)
+			if !seen[s] || p.Time < oldest[s] {
+				oldest[s], seen[s] = p.Time, true
+			}
+		}
+		want[s] = append(want[s], coreBatch{ID: h.id, Order: order, Clock: clock, Registered: h, Points: pts})
+	}
+	if out.Len() == 0 {
+		t.Fatal("no points counted")
+	}
+	lookup := func(id uint64) *ApplicationPolicy { return handles[id] }
+	for s := range out.owners {
+		out.owners[s].closePacket()
+		if len(want[s]) == 0 {
+			t.Fatalf("owner %d got no applications; widen the script", s)
+		}
+		if got := out.owners[s].batches(lookup); !reflect.DeepEqual(got, want[s]) {
+			t.Fatalf("owner %d decodes %d applications, want %d", s, len(got), len(want[s]))
+		}
+		if out.owners[s].oldest != oldest[s] {
+			t.Fatalf("owner %d oldest %d, want %d", s, out.owners[s].oldest, oldest[s])
+		}
+	}
+	out.reset()
+	for s := range out.owners {
+		if out.owners[s].len() != 0 || out.Len() != 0 {
+			t.Fatal("reset kept rows")
+		}
+	}
 }
