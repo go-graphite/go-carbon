@@ -769,7 +769,7 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 		}
 		// The engine resolves a physical slot by the greatest record order across
 		// parts (later part on ties), not by install sequence.
-		for _, r := range got.Records {
+		for _, r := range got.Winners() {
 			k := key{r.Archive, r.Slot}
 			if o, ok := deferred[k]; !ok || r.Order >= o.Sequence {
 				s := r.Sample
@@ -961,7 +961,7 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 		for _, r := range want.Records {
 			install(eager, []Delta{r.Delta})
 		}
-		for _, r := range got.Records {
+		for _, r := range got.Winners() {
 			k := key{r.Archive, r.Slot}
 			if o, ok := deferred[k]; !ok || r.Order >= o.Sequence {
 				s := r.Sample
@@ -1149,7 +1149,13 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 //   - parts+batches-fallback: as parts+batches, but a seal-computed window is
 //     a fallback only: it bounds no event walk and loses order ties to the
 //     computed value. Reported only.
-var openStores = []string{"c3", "parts", "parts+batches", "parts+batches-fallback"}
+//
+// openStores are the part contents the open-window read is measured on. seal
+// is what PlanClosedInto writes (one version per slot per batch, Ghosts,
+// closed windows as fallback Mat records), read through Record.Version, and
+// must match Whisper on every slot. parts+batches-fallback models it with
+// guessed kinds and a stronger fallback order.
+var openStores = []string{"c3", "seal", "parts", "parts+batches", "parts+batches-fallback"}
 
 func TestOpenWindowRead(t *testing.T) {
 	gens := []func() fnCorpus{fnHandoff, fnDigest, fnHistory, fnSlim, fnRank, fnBackground}
@@ -1166,7 +1172,7 @@ func TestOpenWindowRead(t *testing.T) {
 			t.Parallel()
 			stores := openStores
 			if testing.Short() {
-				stores = stores[:1]
+				stores = stores[:2]
 			}
 			for _, store := range stores {
 				var slots, readOK, projectOK, worse int
@@ -1192,6 +1198,9 @@ func TestOpenWindowRead(t *testing.T) {
 				t.Logf("RESULT open-window store=%s corpus=%s slots=%d read_vs_whisper=%s projectopen_vs_whisper=%s read_misses_where_projectopen_matches=%d", store, corpus.name, slots, pct(readOK, slots), pct(projectOK, slots), worse)
 				if store == "c3" && readOK != slots {
 					t.Errorf("%s: open-window read misses %d of %d slots; first: %.3000s", corpus.name, slots-readOK, slots, firstMiss)
+				}
+				if store == "seal" && readOK != slots {
+					t.Errorf("%s: open-window read of sealed parts misses %d of %d slots (%d where ProjectOpen matches); first: %.3000s", corpus.name, slots-readOK, slots, worse, firstMiss)
 				}
 			}
 		})
@@ -1265,7 +1274,7 @@ func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int
 		for _, r := range want.Records {
 			install(eager, []Delta{r.Delta})
 		}
-		for _, r := range got.Records {
+		for _, r := range got.Winners() {
 			k := key{r.Archive, r.Slot}
 			if o, ok := deferred[k]; !ok || r.Order >= o.Sequence {
 				s := r.Sample
@@ -1276,11 +1285,15 @@ func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int
 		switch store {
 		case "c3":
 			stored = append(stored, rawPart(c, seal)...)
+		case "seal":
+			for _, r := range got.Records {
+				stored = append(stored, r.Version(0))
+			}
 		case "parts":
-			stored = append(stored, recordVersions(c, got.Records)...)
+			stored = append(stored, recordVersions(c, got.Winners())...)
 		case "parts+batches", "parts+batches-fallback":
 			raw := rawPart(c, seal)
-			for _, v := range recordVersions(c, got.Records) {
+			for _, v := range recordVersions(c, got.Winners()) {
 				if v.Mat {
 					if store == "parts+batches-fallback" {
 						// A seal-computed window is only a fallback: it bounds

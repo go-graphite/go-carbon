@@ -103,6 +103,29 @@ func WindowRanges(c Config, a int, w int64, visit func(level int, first, last in
 	return nil
 }
 
+// Version maps a stored record to the version the event walk reads. A Raw or
+// Ghost record's order becomes the tick (batch order, target archive), its
+// target archive being its own, so parts store no extra order bits. A Mat or
+// None record competes at its batch order's tick below its archive. upto 0
+// marks the seal's fallback window: the weakest version (order 1), it bounds
+// no event walk and is a slot's value only where the stored versions yield
+// no event at all. The seal's closed windows carry its known divergences
+// from Whisper; with any stronger order they leak into the open windows.
+func (r Record) Version(upto uint64) Version {
+	v := Version{Archive: r.Archive, Time: r.Sample.Time, Bits: r.Sample.Bits}
+	if r.Kind == KindRaw || r.Kind == KindGhost {
+		v.Order = Tick(r.Order, r.Archive)
+		v.Upto, v.Ghost = v.Order, r.Kind == KindGhost
+		return v
+	}
+	v.Order, v.Upto = Tick(r.Order, max(r.Archive-1, 0)), upto
+	if upto == 0 {
+		v.Order = 1
+	}
+	v.Mat, v.None = r.Kind == KindMat, r.Kind == KindNone
+	return v
+}
+
 // Tick orders the sub-steps of one batch. Whisper applies a batch one target
 // archive at a time, ascending: archive j's writes and their propagation see
 // direct writes of the same batch to archives <= j only. A version's order is

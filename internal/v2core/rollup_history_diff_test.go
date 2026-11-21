@@ -20,6 +20,23 @@ func TestRollupHistoryDifferential(t *testing.T) {
 	if coreTestProcess(t) {
 		return
 	}
+	rollupHistoryDifferential(t, rollupHistoryGolden)
+}
+
+// TestRollupHistoryDifferentialLegacyKinds proves the record-kind format
+// changed nothing else: parts written without kinds keep the goldens recorded
+// before kinds existed, byte for byte.
+func TestRollupHistoryDifferentialLegacyKinds(t *testing.T) {
+	if coreTestProcess(t) {
+		return
+	}
+	// Parallel subtests outlive this function: reset in a cleanup.
+	v2part.LegacyKinds.Store(true)
+	t.Cleanup(func() { v2part.LegacyKinds.Store(false) })
+	rollupHistoryDifferential(t, rollupHistoryLegacyGolden)
+}
+
+func rollupHistoryDifferential(t *testing.T, golden map[string]string) {
 	// This golden guards the no-merge physical layout, including superseded
 	// replacements. Compaction legitimately changes that layout. Logical exactness
 	// with merges, retirement and reopen is TestSealedMergeHistoryDifferential.
@@ -143,21 +160,9 @@ func TestRollupHistoryDifferential(t *testing.T) {
 				// Open coarse replacements are projected at read
 				// time. TestClosedHistoryLogicalDifferential proves the resolved values
 				// equal the original eager golden at every epoch and restart cut.
-				want := map[string]string{
-					"1|1s:1h,1m:1d,1h:1y":         "01accbf6a1d9cb2abc53794bc83d80b060831ca12836bc08f57800213fe65275",
-					"1|10s:6h,5m:7d,1h:1y,1d:10y": "1b0e7bec63f57c7d63437c0df0145c759941894498952f281150cd1670a77302",
-					"2|1s:1h,1m:1d,1h:1y":         "e486b8fec32a0168f4a2ec10e425246d4b672120f53d5e183d567bc171475e06",
-					"2|10s:6h,5m:7d,1h:1y,1d:10y": "2b206843a35585dbb11b861e77b78f05cc480c0afae43c50d53e0cfe9a5e6c5c",
-					"3|1s:1h,1m:1d,1h:1y":         "622017fa321e4aa780af44af056e02e75c07a20aab46740398c3d7f447aa0bf4",
-					"3|10s:6h,5m:7d,1h:1y,1d:10y": "aa48520e6485ceefe46790e045a82ea6cdd9f59e624c2a59d27cbfdc4fc42a63",
-					"4|1s:1h,1m:1d,1h:1y":         "05ce7a5925cba87b97235b710ba6aa584a524f9800dedf22fc4aa9e248758642",
-					"4|10s:6h,5m:7d,1h:1y,1d:10y": "30f5d846ef7dd26c9c7c078e53baca02e2a1d32d02a0d3b2f180cdde8ca44432",
-					"5|1s:1h,1m:1d,1h:1y":         "18085a1390c0735facf28f6699da1fe6616ade5c00a723feb2c55914b19dc9a9",
-					"5|10s:6h,5m:7d,1h:1y,1d:10y": "a34b90a26ff9d152a54e3bf7d307a145f79065aac596616823dae69370fd4531",
-					"6|1s:1h,1m:1d,1h:1y":         "d6f8e3de2df05f04243069956dec0fe5ef37b5134bae46516a9cacf18d8308aa",
-					"6|10s:6h,5m:7d,1h:1y,1d:10y": "efa3119cc25ec2a8b1a928fbfe1707e2b7952b252e26dec17e4af8c0bde59ac0"}[fmt.Sprintf("%d|%s", method, schema)]
-				if digest != want {
-					t.Fatalf("stored/read bit differential got %s want %s", digest, want)
+				id := fmt.Sprintf("%d|%s", method, schema)
+				if want := golden[id]; digest != want {
+					t.Fatalf("stored/read bit differential %q got %s want %s", id, digest, want)
 				}
 				t.Logf("history digest %s", digest)
 			})
@@ -174,3 +179,35 @@ func decodeHistoryKey(key []byte) (string, error) {
 	b, err := v2part.Encode(k)
 	return string(b), err
 }
+
+// rollupHistoryLegacyGolden was recorded before record kinds existed.
+var rollupHistoryLegacyGolden = map[string]string{
+	"1|1s:1h,1m:1d,1h:1y":         "01accbf6a1d9cb2abc53794bc83d80b060831ca12836bc08f57800213fe65275",
+	"1|10s:6h,5m:7d,1h:1y,1d:10y": "1b0e7bec63f57c7d63437c0df0145c759941894498952f281150cd1670a77302",
+	"2|1s:1h,1m:1d,1h:1y":         "e486b8fec32a0168f4a2ec10e425246d4b672120f53d5e183d567bc171475e06",
+	"2|10s:6h,5m:7d,1h:1y,1d:10y": "2b206843a35585dbb11b861e77b78f05cc480c0afae43c50d53e0cfe9a5e6c5c",
+	"3|1s:1h,1m:1d,1h:1y":         "622017fa321e4aa780af44af056e02e75c07a20aab46740398c3d7f447aa0bf4",
+	"3|10s:6h,5m:7d,1h:1y,1d:10y": "aa48520e6485ceefe46790e045a82ea6cdd9f59e624c2a59d27cbfdc4fc42a63",
+	"4|1s:1h,1m:1d,1h:1y":         "05ce7a5925cba87b97235b710ba6aa584a524f9800dedf22fc4aa9e248758642",
+	"4|10s:6h,5m:7d,1h:1y,1d:10y": "30f5d846ef7dd26c9c7c078e53baca02e2a1d32d02a0d3b2f180cdde8ca44432",
+	"5|1s:1h,1m:1d,1h:1y":         "18085a1390c0735facf28f6699da1fe6616ade5c00a723feb2c55914b19dc9a9",
+	"5|10s:6h,5m:7d,1h:1y,1d:10y": "a34b90a26ff9d152a54e3bf7d307a145f79065aac596616823dae69370fd4531",
+	"6|1s:1h,1m:1d,1h:1y":         "d6f8e3de2df05f04243069956dec0fe5ef37b5134bae46516a9cacf18d8308aa",
+	"6|10s:6h,5m:7d,1h:1y,1d:10y": "efa3119cc25ec2a8b1a928fbfe1707e2b7952b252e26dec17e4af8c0bde59ac0"}
+
+// rollupHistoryGolden adds the record versions and kinds column of runs that
+// hold superseded versions or the seal's closed windows (Mat); the resolved
+// records are the legacy ones (TestRollupHistoryDifferentialLegacyKinds).
+var rollupHistoryGolden = map[string]string{
+	"1|1s:1h,1m:1d,1h:1y":         "2440ffc621b36523dd3c14629244905851e25dfedd553ea17e6732b82fc105a1",
+	"1|10s:6h,5m:7d,1h:1y,1d:10y": "0038ea065ec22b1508a85fa6780bad3bee08b6b547a8956b2c76831a1657e445",
+	"2|1s:1h,1m:1d,1h:1y":         "4dcda2f13f43192eb4ac164d4e4354fd99045855dcfa7176f524f8f8364e0f6d",
+	"2|10s:6h,5m:7d,1h:1y,1d:10y": "d42688fa5e78be2c23624bac7afe3e316e81a49bf19daf408afc696bf4ac3c9b",
+	"3|1s:1h,1m:1d,1h:1y":         "09e8e11baee3432b97366f573dc80cda11ee12a8cb68727928593bf6e3e9e2e8",
+	"3|10s:6h,5m:7d,1h:1y,1d:10y": "9bed0f9c77f8b4ade555fb3a4e8a4ed30c703f4ff6327058bdfef33de3c82af1",
+	"4|1s:1h,1m:1d,1h:1y":         "312b2da0496b4c2055c01fe9315924faea2c15c0ece108730e2310385fa936be",
+	"4|10s:6h,5m:7d,1h:1y,1d:10y": "35faec7ce58f1da47ab1f0a5926bbd0e305293e6012dc63db746bdf27f2cda5e",
+	"5|1s:1h,1m:1d,1h:1y":         "09d8fb4918e6ba2b94f0f86fafa8f8bba82f6dd76a5185ba9ecd0c089e67bb39",
+	"5|10s:6h,5m:7d,1h:1y,1d:10y": "6145fc75706f854d207b7036e9d84e3010df88845d7c7a6c2fa9833195059cc6",
+	"6|1s:1h,1m:1d,1h:1y":         "75cafb322e2fe7c95fb9ebb866913c80f8578c3f9922010193bc6de2fe526974",
+	"6|10s:6h,5m:7d,1h:1y,1d:10y": "cb072cced78337817d1ace7e160053b44e7e69ebf8f67a10136e134f1117a15e"}
