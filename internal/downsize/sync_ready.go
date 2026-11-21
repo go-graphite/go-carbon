@@ -141,6 +141,9 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 				return err
 			}
 		}
+		// Without READY nothing attests target-only names, and no source can
+		// fill them, so verification covers only names a source holds.
+		o.sourceScope = true
 		return initial()
 	}
 	resume, err := inspectReadyResume(ctx, *o, r, b)

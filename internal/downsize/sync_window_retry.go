@@ -224,7 +224,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	s.prog.done.Store(int64(durable))
 	s.prog.replayed.Store(int64(durable))
 	if !s.legacyCopyReceipts {
-		s.prog.planVerification(int64(s.sum.Discovered))
+		s.prog.planVerification(int64(s.verifyScopeNames()))
 	}
 	workers := 1
 	if _, ok := s.b.(interface {

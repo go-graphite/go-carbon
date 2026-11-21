@@ -329,19 +329,33 @@ func openLines(path string) (*os.File, *bufio.Scanner, error) {
 	return f, scanner, nil
 }
 
-// unionSource streams the names to verify in round 1: on the target (or
-// copied by this sync) and held by at least one source.
+// verifyScopeNames is the size of the round-1 verification scope.
+func (s *syncer) verifyScopeNames() int {
+	if s.legacyCopyReceipts {
+		return s.both + len(s.copied)
+	}
+	return s.sum.Discovered - s.targetOnlySkipped()
+}
+
+// targetOnlySkipped counts names only the target held at discovery. With
+// sourceScope they are not verified: no source has points to give them.
+func (s *syncer) targetOnlySkipped() int {
+	if !s.o.sourceScope || s.legacyCopyReceipts {
+		return 0
+	}
+	return s.sum.OnTarget - s.both
+}
+
+// unionSource streams the names to verify in round 1: every discovered name,
+// or with sourceScope only names held by at least one source. Ordinals count
+// skipped lines too, so ids stay stable catalog line numbers.
 func (s *syncer) unionSource() syncNameSource {
 	ordinal := int64(-1)
 	var f *os.File
 	var scanner *bufio.Scanner
-	total := s.sum.Discovered
-	if s.legacyCopyReceipts {
-		total = s.both + len(s.copied)
-	}
 	return syncNameSource{
 		id:    func() int64 { return ordinal },
-		total: total,
+		total: s.verifyScopeNames(),
 		next: func() (string, uint64, error) {
 			if f == nil {
 				var err error
@@ -356,6 +370,9 @@ func (s *syncer) unionSource() syncNameSource {
 				}
 				ordinal++
 				if s.legacyCopyReceipts && (mask == 0 || (!onTarget && !s.copied[name])) {
+					continue
+				}
+				if s.o.sourceScope && mask == 0 && onTarget {
 					continue
 				}
 				return name, mask, nil
@@ -696,7 +713,7 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		return err
 	}
 	if !s.legacyCopyReceipts {
-		s.prog.planVerification(int64(s.sum.Discovered))
+		s.prog.planVerification(int64(s.verifyScopeNames()))
 	}
 	short := map[string]bool{}
 	work := 0
