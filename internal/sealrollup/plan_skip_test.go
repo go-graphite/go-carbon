@@ -29,13 +29,14 @@ func (p *Prepared) planClosedFull(records []Record, prior Frontier, through, clo
 		closing.advance = closeThrough
 		batches = []Batch{{Order: prior.Order, Now: closeThrough}}
 	}
-	deltas, err := reduceMode(p.config, view, ranges, batches, w, &closing)
+	winners, versions, err := reduceMode(p.config, view, ranges, batches, w, &closing, true)
 	if err != nil {
 		return SealPlan{}, through, err
 	}
-	plan := SealPlan{Next: next, Records: records[:0]}
-	for _, d := range deltas {
-		plan.Records = append(plan.Records, Record{Delta: d, Correction: d.Sample.Time <= prior.MaxTime})
+	plan := SealPlan{Next: next, Records: records[:0], Versions: len(versions)}
+	for _, d := range append(winners, versions...) {
+		d.Correction = d.Sample.Time <= prior.MaxTime
+		plan.Records = append(plan.Records, d)
 	}
 	return plan, closing.through, nil
 }

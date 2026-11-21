@@ -10,6 +10,8 @@ import (
 // committed data/idle watermark. An idle call may advance it with closeThrough;
 // input calls advance it only from sample time, preserving late-point routing.
 // The caller must persist the returned watermark with Records and Next.
+// Points are Raw records, one version per slot per batch (superseded ones and
+// Ghosts trail as plan.Versions); closed windows are fallback-only Mat records.
 func (p *Prepared) PlanClosedInto(records []Record, prior Frontier, through, closeThrough int64, view View, ranges RangeView, batches []Batch, w *Workspace) (SealPlan, int64, error) {
 	if prior.Policy != ([32]byte{}) && prior.Policy != p.policy || prior.Order != 0 && prior.Policy == ([32]byte{}) {
 		return SealPlan{}, through, fmt.Errorf("stored rollup policy changed")
@@ -49,13 +51,16 @@ func (p *Prepared) PlanClosedInto(records []Record, prior Frontier, through, clo
 		closing.through = max(watermark, next.MaxTime)
 		closure = nil
 	}
-	deltas, err := reduceMode(c, view, ranges, batches, w, closure)
+	winners, versions, err := reduceMode(c, view, ranges, batches, w, closure, true)
 	if err != nil {
 		return SealPlan{}, through, err
 	}
-	plan := SealPlan{Next: next, Records: records[:0]}
-	for _, d := range deltas {
-		plan.Records = append(plan.Records, Record{Delta: d, Correction: d.Sample.Time <= prior.MaxTime})
+	plan := SealPlan{Next: next, Records: records[:0], Versions: len(versions)}
+	for _, list := range [][]Record{winners, versions} {
+		for _, d := range list {
+			d.Correction = d.Sample.Time <= prior.MaxTime
+			plan.Records = append(plan.Records, d)
+		}
 	}
 	return plan, closing.through, nil
 }

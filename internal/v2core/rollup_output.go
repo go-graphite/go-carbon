@@ -93,7 +93,11 @@ func (r *rollupOutput) fileID(group string, partition int64) string {
 	return r.lastFileID
 }
 
-func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []sealrollup.Batch, records []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
+// appendStage files records, the winners of their slots, and versions, the
+// superseded versions of those slots (sealrollup.SealPlan): each slot's
+// versions go just before its winner, in the winner's partition, and count
+// toward no coverage, since only Mat and Raw winners are visible to readers.
+func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []sealrollup.Batch, records, versions []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
 		r.files = map[string]*[]plannedKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
@@ -181,10 +185,16 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 		coverage.spec.Source.MaxOrder = max(coverage.spec.Source.MaxOrder, s.next.Frontier.Order)
 		// Physical dense packing belongs exclusively to the shared v2part writer.
 		file := *filePtr
+		v := 0
 		for i := range records {
 			record := &records[i]
 			if len(partitions) > 1 && r.monthPartition(record.Sample.Time) != partition {
 				continue
+			}
+			for ; v < len(versions) && (versions[v].Archive < record.Archive || versions[v].Archive == record.Archive && versions[v].Slot <= record.Slot); v++ {
+				if versions[v].Archive == record.Archive && versions[v].Slot == record.Slot {
+					file = append(file, plannedKV{name: name, record: &versions[v], vshard: vshard, rank: rank})
+				}
 			}
 			file = append(file, plannedKV{name: name, record: record, vshard: vshard, rank: rank})
 			expiry.data(rollupRecordExpiry(schema, *record))
@@ -303,10 +313,11 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 					lane.err = errors.New("too many planned rollup records")
 					return
 				}
-				s.record, s.records = lane.base+uint32(start), uint32(n)
+				winners := n - plan.Versions
+				s.record, s.records, s.versions = lane.base+uint32(start), uint32(winners), uint32(plan.Versions)
 				// Build while this metric's policy, metadata and batches are hot.
 				// The lane still retains all arenas until the owner joins ingest.
-				if lane.err = lane.output.appendStage(s, m, batches, lane.records[start:start+n:start+n], part, r.stage); lane.err != nil {
+				if lane.err = lane.output.appendStage(s, m, batches, lane.records[start:start+winners:start+winners], lane.records[start+winners:start+n:start+n], part, r.stage); lane.err != nil {
 					return
 				}
 			}

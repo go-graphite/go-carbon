@@ -366,7 +366,7 @@ func TestJournalSegmentSkipLazyCatalog(t *testing.T) {
 func TestJournalSegmentEndTornTail(t *testing.T) {
 	// Header-only records deliberately omit a PDC4 payload: this path must not
 	// decode points that the core already owns.
-	record := append([]byte{}, applicationMagic...)
+	record := []byte{'V', '2', 'A', 1}
 	for _, n := range []uint64{3, 1, 1, 7, 3, 1, 2, 3, 0} {
 		record = binary.AppendUvarint(record, n)
 	}
