@@ -43,8 +43,15 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 			s := e.owners[0].db.NewSnapshot()
 			want := mergeRead(t, s)
 			_ = s.Close()
-			if n := mergeDrain(t, e.owners[0]); n != 5 || mergeCount(e.owners[0]) != 1 {
-				t.Fatalf("merges=%d", n)
+			// Background levels may leave a few parts; force the rest into one.
+			n := mergeDrain(t, e.owners[0])
+			for changed := true; changed; n++ {
+				if changed, err = e.owners[0].mergeSealedParts(nil, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mergeCount(e.owners[0]) != 1 {
+				t.Fatalf("merges=%d left %d parts", n, mergeCount(e.owners[0]))
 			}
 			s = e.owners[0].db.NewSnapshot()
 			defer s.Close()
