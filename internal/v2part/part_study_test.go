@@ -22,6 +22,13 @@ func TestPartStudy(t *testing.T) {
 	if path == "" {
 		t.Skip("PART_STUDY")
 	}
+	b, _ := json.Marshal(partStudy(t, path))
+	t.Log(string(b))
+}
+
+// partStudy returns the column attribution of one part file.
+func partStudy(t *testing.T, path string) map[string]any {
+	t.Helper()
 	f, e := os.Open(path)
 	if e != nil {
 		t.Fatal(e)
@@ -183,6 +190,5 @@ func TestPartStudy(t *testing.T) {
 	for c, n := range names {
 		result[n] = map[string]any{"raw": raw[c], "attributed": allocated[c], "bpp": allocated[c] / float64(points)}
 	}
-	b, _ := json.Marshal(result)
-	t.Log(string(b))
+	return result
 }

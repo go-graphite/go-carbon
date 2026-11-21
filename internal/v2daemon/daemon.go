@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sync/atomic"
 	"time"
 
@@ -74,6 +73,7 @@ type Store struct {
 	lock        *os.File
 }
 type packet struct {
+	out     *v2core.Outbox // direct L3 applications
 	rows    []v2core.Row
 	batches []v2core.Batch
 	cursor  uint64
@@ -95,8 +95,7 @@ type Producer struct {
 	packets                         []packet
 	records                         [][]byte
 	spareRecords                    [][]byte
-	spareRows                       [][]v2core.Row
-	spareBatches                    [][]v2core.Batch
+	outboxes                        []*v2core.Outbox // free; one in steady intake
 	applicationFrames               []partlog.CatalogFrame
 	applicationIDs                  []uint64
 	applications                    []*RegisteredApplication // by catalog ID
@@ -309,13 +308,7 @@ func (p *Producer) appendNamed(names []string, data []points.Point, sequence []u
 		}
 		return p.appendApplications(apps)
 	}
-	var rows []v2core.Row
-	if n := len(p.spareRows); n > 0 {
-		rows = p.spareRows[n-1]
-		p.spareRows[n-1] = nil
-		p.spareRows = p.spareRows[:n-1]
-	}
-	rows = slices.Grow(rows[:0], len(names))[:len(names)]
+	rows := make([]v2core.Row, len(names))
 	ids, err := p.catalog.InternBatch(names, nil)
 	if err != nil {
 		return p.fail(err)
@@ -440,20 +433,18 @@ func (p *Producer) Drain() error {
 			}
 		}
 		var err error
-		if packet.batches != nil || p.layer == 3 {
+		switch {
+		case packet.out != nil:
+			// The outbox comes back empty, holding the arrays owners released.
+			err = p.engine.AppendOutboxPipelined(p.index, packet.out, packet.cursor, packet.seal)
+			p.outboxes = append(p.outboxes, packet.out)
+		case packet.batches != nil || p.layer == 3:
 			err = p.engine.AppendBatchesPipelined(p.index, packet.batches, packet.cursor, packet.seal)
-		} else {
+		default:
 			err = p.engine.AppendPipelined(p.index, packet.rows, packet.cursor, packet.seal)
 		}
 		if err != nil {
 			return p.fail(err)
-		}
-		if packet.rows != nil {
-			p.spareRows = append(p.spareRows, packet.rows[:0])
-		}
-		if packet.batches != nil {
-			clear(packet.batches)
-			p.spareBatches = append(p.spareBatches, packet.batches[:0])
 		}
 	}
 	p.CoreSubmitTime += time.Since(start)
