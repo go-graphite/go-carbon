@@ -98,12 +98,12 @@ func BenchmarkReceiverNameHandoff(b *testing.B) {
 				o = &bytesBenchOwner{seed: maphash.MakeSeed()}
 			}
 			s := ownerOnly(o, Config{BatchSize: count, SyncInterval: time.Hour})
-			p := &batch{names: make([]string, count), hashes: make([]uint64, count), data: make([]points.Point, count)}
+			p := &batch{hashes: make([]uint64, count), data: make([]points.Point, count)}
 			b.ReportAllocs()
 			b.SetBytes(int64(len(text)))
 			b.ResetTimer()
 			for range b.N {
-				p.names, p.hashes, p.data = p.names[:count], p.hashes[:count], p.data[:count]
+				p.hashes, p.data = p.hashes[:count], p.data[:count]
 				p.text = append(p.text[:0], text...)
 				p.ends = append(p.ends[:0], ends...)
 				if err := s.handOff(0, p); err != nil {
