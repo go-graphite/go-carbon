@@ -1,7 +1,9 @@
 package v2core
 
 import (
+	"errors"
 	"math"
+	"slices"
 	"sort"
 	"unsafe"
 )
@@ -24,11 +26,10 @@ type pendingRows struct {
 	seqs    []uint64
 	escapes []pendingEscape
 
-	// Open-packet scratch, reused across packets.
-	openDeltas []uint32
-	openSeqs   []uint64
-	open       bool
-	lastOrder  uint64
+	open      bool
+	lastOrder uint64
+	// oldest is the earliest row time; it is valid while rows is nonempty.
+	oldest int64
 }
 
 type pendingRow struct {
@@ -80,41 +81,51 @@ func pendingRowsFit(batches []coreBatch, lookup func(uint64) *ApplicationPolicy)
 	return true
 }
 
-// pendingBatchesFit reports whether rollup batches, whose IDs core has
-// interned, fit pendingRows: every application has 1..pendingPacketRows points.
-func pendingBatchesFit(batches []coreBatch) bool {
-	for i := range batches {
-		if n := len(batches[i].Points); n == 0 || n > pendingPacketRows {
-			return false
-		}
-	}
-	return len(batches) > 0
-}
-
 // appendRows copies closed rows encoded by append, startApplication and
 // addRow, rebasing their row and side-array offsets. The result equals
 // append over the same applications.
 func (p *pendingRows) appendRows(src *pendingRows) {
+	if len(src.packets) > 0 {
+		p.appendPackets(src, 0, len(src.packets))
+	}
+	p.lastOrder = src.lastOrder
+}
+
+// appendPackets copies src's closed packets [lo, hi) with their rows, side
+// arrays and escapes. Side arrays take the capacity of rows on first use, so a
+// head block sized for its rows never reallocates them.
+func (p *pendingRows) appendPackets(src *pendingRows, lo, hi int) {
 	p.closePacket()
-	row, delta, seq := uint32(len(p.rows)), uint32(len(p.deltas)), uint32(len(p.seqs))
-	for _, pk := range src.packets {
-		pk.FirstRow += row
+	rowLo, shift := src.packets[lo].FirstRow, uint32(len(p.rows))-src.packets[lo].FirstRow
+	for _, pk := range src.packets[lo:hi] {
 		if pk.Flags&pendingMulti != 0 {
-			pk.Deltas += delta
+			d := src.deltas[pk.Deltas : pk.Deltas+pk.Rows]
+			pk.Deltas = uint32(len(p.deltas))
+			p.deltas = append(reserve(p.deltas, len(d), cap(p.rows)), d...)
 		}
 		if pk.Flags&pendingSeq != 0 {
-			pk.Seqs += seq
+			q := src.seqs[pk.Seqs : pk.Seqs+pk.Rows]
+			pk.Seqs = uint32(len(p.seqs))
+			p.seqs = append(reserve(p.seqs, len(q), cap(p.rows)), q...)
 		}
+		p.rows = append(p.rows, src.rows[pk.FirstRow:pk.FirstRow+pk.Rows]...)
+		pk.FirstRow += shift
 		p.packets = append(p.packets, pk)
 	}
-	for _, e := range src.escapes {
-		e.Row += row
+	rowHi := uint32(len(p.rows)) - shift
+	for i := sort.Search(len(src.escapes), func(i int) bool { return src.escapes[i].Row >= rowLo }); i < len(src.escapes) && src.escapes[i].Row < rowHi; i++ {
+		e := src.escapes[i]
+		e.Row += shift
 		p.escapes = append(p.escapes, e)
 	}
-	p.rows = append(p.rows, src.rows...)
-	p.deltas = append(p.deltas, src.deltas...)
-	p.seqs = append(p.seqs, src.seqs...)
-	p.lastOrder = src.lastOrder
+}
+
+// reserve returns s with room for n more elements, taking capacity c at once.
+func reserve[T any](s []T, n, c int) []T {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	return slices.Grow(s, max(n, c-len(s)))
 }
 
 // size is the packet's queue charge: its rows, headers and side arrays.
@@ -149,7 +160,9 @@ func (p *pendingRows) startApplication(order uint64, clock, base int64, n int) {
 		}
 	}
 	if !p.open {
-		p.packets = append(p.packets, pendingPacket{FirstOrder: order, Clock: clock, Base: base, FirstRow: uint32(len(p.rows))})
+		// The open packet writes its side arrays in place; closePacket drops
+		// the ones the packet does not need.
+		p.packets = append(p.packets, pendingPacket{FirstOrder: order, Clock: clock, Base: base, FirstRow: uint32(len(p.rows)), Deltas: uint32(len(p.deltas)), Seqs: uint32(len(p.seqs))})
 		p.open = true
 	}
 	p.lastOrder = order
@@ -157,6 +170,9 @@ func (p *pendingRows) startApplication(order uint64, clock, base int64, n int) {
 
 // addRow appends one point of the application startApplication opened.
 func (p *pendingRows) addRow(id uint64, t int64, bits, seq uint64) {
+	if len(p.rows) == 0 || t < p.oldest {
+		p.oldest = t
+	}
 	pk := &p.packets[len(p.packets)-1]
 	dt := t - pk.Base
 	if id > math.MaxUint32 || dt < math.MinInt32 || dt > math.MaxInt32 {
@@ -165,8 +181,8 @@ func (p *pendingRows) addRow(id uint64, t int64, bits, seq uint64) {
 	} else {
 		p.rows = append(p.rows, pendingRow{ID: uint32(id), DT: int32(dt), Bits: bits})
 	}
-	p.openDeltas = append(p.openDeltas, uint32(p.lastOrder-pk.FirstOrder))
-	p.openSeqs = append(p.openSeqs, seq)
+	p.deltas = append(p.deltas, uint32(p.lastOrder-pk.FirstOrder))
+	p.seqs = append(p.seqs, seq)
 	pk.Rows++
 }
 
@@ -177,29 +193,65 @@ func (p *pendingRows) closePacket() {
 	}
 	p.open = false
 	pk := &p.packets[len(p.packets)-1]
-	for i, d := range p.openDeltas {
+	deltas, seqs := p.deltas[pk.Deltas:], p.seqs[pk.Seqs:]
+	for i, d := range deltas {
 		if d != uint32(i) {
 			pk.Flags |= pendingMulti
-			pk.Deltas = uint32(len(p.deltas))
-			p.deltas = append(p.deltas, p.openDeltas...)
-			break
 		}
-	}
-	for i, s := range p.openSeqs {
-		if s != pk.FirstOrder+uint64(p.openDeltas[i]) {
+		if seqs[i] != pk.FirstOrder+uint64(d) {
 			pk.Flags |= pendingSeq
-			pk.Seqs = uint32(len(p.seqs))
-			p.seqs = append(p.seqs, p.openSeqs...)
-			break
 		}
 	}
-	p.openDeltas = p.openDeltas[:0]
-	p.openSeqs = p.openSeqs[:0]
+	if pk.Flags&pendingSeq == 0 {
+		p.seqs, pk.Seqs = p.seqs[:pk.Seqs], 0
+	}
+	if pk.Flags&pendingMulti == 0 {
+		p.deltas, pk.Deltas = p.deltas[:pk.Deltas], 0
+	}
 }
 
 func (p *pendingRows) reset() {
 	p.rows, p.packets, p.deltas, p.seqs, p.escapes = p.rows[:0], p.packets[:0], p.deltas[:0], p.seqs[:0], p.escapes[:0]
-	p.openDeltas, p.openSeqs, p.open, p.lastOrder = p.openDeltas[:0], p.openSeqs[:0], false, 0
+	p.open, p.lastOrder = false, 0
+}
+
+// Outbox is one producer's applications encoded straight into the owners'
+// pointer-free head rows, one pendingRows per owner, between journal syncs.
+// Submitting it hands those rows to the owners, which copy them into their
+// heads, and gives the outbox the arrays the owners released last, so steady
+// intake reuses the same memory and builds no intermediate batch.
+type Outbox struct {
+	catalog *PolicyCatalog
+	owners  []pendingRows
+	open    *pendingRows
+	id      uint64
+}
+
+// NewOutbox returns an empty outbox for one producer of e.
+func (e *coreEngine) NewOutbox() *Outbox {
+	return &Outbox{catalog: e.identities, owners: make([]pendingRows, e.cfg.Shards)}
+}
+
+// Start opens one original application of n points (1..32768) whose first
+// point is at time first. h is a handle this engine registered. Point then
+// adds the application's points in order.
+func (b *Outbox) Start(h *ApplicationPolicy, order uint64, clock, first int64, n int) error {
+	if h == nil || h.catalog != b.catalog || n < 1 || n > pendingPacketRows {
+		return errors.New("outbox application requires an engine policy and 1..32768 points")
+	}
+	b.open, b.id = &b.owners[int(h.vshard)%len(b.owners)], h.id
+	b.open.startApplication(order, clock, first, n)
+	return nil
+}
+
+// Point adds one point of the application Start opened.
+func (b *Outbox) Point(t int64, bits, seq uint64) { b.open.addRow(b.id, t, bits, seq) }
+
+func (b *Outbox) reset() {
+	for i := range b.owners {
+		b.owners[i].reset()
+	}
+	b.open = nil
 }
 
 // decodeFrom decodes p.packets, which may start after row 0 (a published
