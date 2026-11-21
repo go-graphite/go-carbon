@@ -56,6 +56,9 @@ type Spec struct {
 	// See Coverage.MinExpiry/MaxExpiry.
 	MinExpiry int64
 	MaxExpiry int64
+	// Generation, when nonzero, selects ID-keyed (GCI2) keys: the name
+	// dictionary generation every ID in the part resolves at.
+	Generation uint64
 }
 
 type Descriptor struct {
@@ -72,6 +75,9 @@ type Descriptor struct {
 	// VShards is the sorted, exact routed inventory recorded by the seal
 	// writer. Omitted by older producers; readers retain their scan fallback.
 	VShards []uint16 `json:",omitempty"`
+	// Generation is the name dictionary generation an ID-keyed part (schema
+	// IDFileVersion) needs; zero for name-keyed parts.
+	Generation uint64 `json:",omitempty"`
 }
 
 func validateSpec(s Spec) error {
@@ -80,6 +86,9 @@ func validateSpec(s Spec) error {
 	}
 	if !utf8.ValidString(string(s.Scope.Group)) || !utf8.ValidString(s.Encoding) || !utf8.ValidString(s.Source.Stream) {
 		return errors.New("invalid UTF-8 descriptor identity")
+	}
+	if s.Generation != 0 && s.Encoding != DenseEncoding {
+		return errors.New("ID-keyed parts require dense encoding")
 	}
 	vshard := s.Scope.VShard
 	if vshard == GroupVShard {
@@ -109,11 +118,15 @@ func validateSpec(s Spec) error {
 }
 
 func (d Descriptor) Validate() error {
-	wantVersion := uint32(SchemaVersion)
+	wantVersion, wantKey := uint32(SchemaVersion), uint32(KeyVersion)
 	if d.Encoding == DenseEncoding {
 		wantVersion = GroupFileVersion
 	}
-	if d.Version != wantVersion || d.KeyVersion != KeyVersion {
+	byID := d.Generation != 0
+	if byID {
+		wantVersion, wantKey = IDFileVersion, IDKeyVersion
+	}
+	if d.Version != wantVersion || d.KeyVersion != wantKey {
 		return errors.New("unsupported part schema/key version")
 	}
 	if err := validateSpec(d.spec()); err != nil {
@@ -122,13 +135,16 @@ func (d Descriptor) Validate() error {
 	if d.Bytes == 0 || d.SHA256 == (Digest{}) || d.Coverage.Names == 0 || d.Coverage.Records < d.Coverage.Names {
 		return errors.New("empty part descriptor")
 	}
-	first, err := Decode(d.FirstKey)
+	first, err := DecodeKey(d.FirstKey)
 	if err != nil {
 		return err
 	}
-	last, err := Decode(d.LastKey)
+	last, err := DecodeKey(d.LastKey)
 	if err != nil {
 		return err
+	}
+	if first.ByID != byID || last.ByID != byID {
+		return errors.New("part key generation does not match its schema")
 	}
 	if !d.Scope.contains(first) || !d.Scope.contains(last) || bytes.Compare(d.FirstKey, d.LastKey) > 0 {
 		return errors.New("part key range outside scope")
@@ -147,7 +163,7 @@ func (d Descriptor) Validate() error {
 }
 
 func (d Descriptor) spec() Spec {
-	return Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies, MinExpiry: d.Coverage.MinExpiry, MaxExpiry: d.Coverage.MaxExpiry}
+	return Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies, MinExpiry: d.Coverage.MinExpiry, MaxExpiry: d.Coverage.MaxExpiry, Generation: d.Generation}
 }
 
 func canonicalPolicies(in []ArchivePolicy) ([]ArchivePolicy, error) {

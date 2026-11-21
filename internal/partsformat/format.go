@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"math"
 	"slices"
 	"strings"
 	"unsafe"
@@ -17,6 +18,20 @@ const VirtualShards = 4096
 const MaxNameBytes = 1 << 20
 
 var magic = []byte{'G', 'C', 'P', 3}
+
+// idMagic starts ID-keyed (GCI2) keys. The magic is the key generation:
+// GCP3 keys carry the canonical name, GCI2 keys a vshard-local dictionary ID.
+var idMagic = []byte{'G', 'C', 'I', 2}
+
+// Key tails: the bytes after a key's identity prefix. GCP3 ends with archive
+// u32, physical slot u64 and ordinal u32; GCI2 with archive u8 (IDEnvelope for
+// the metric envelope) and slot u32. A GCI2 key has no ordinal (always 0).
+const (
+	NameKeyTail = 16
+	IDKeyTail   = 5
+	IDEnvelope  = 0xff
+)
+
 var routingTable = crc32.MakeTable(crc32.Castagnoli)
 
 // ID is the exact normalized canonical name, not a host-local catalogue ordinal
@@ -66,12 +81,17 @@ func AssignGroup(id ID, rules []PlacementRule) (Group, error) {
 	}
 	return Group(first), nil
 }
-func GroupRange(group Group) ([]byte, []byte, error) {
+func GroupRange(group Group) ([]byte, []byte, error) { return groupRange(magic, group) }
+
+// IDGroupRange is GroupRange for ID-keyed (GCI2) keys.
+func IDGroupRange(group Group) ([]byte, []byte, error) { return groupRange(idMagic, group) }
+
+func groupRange(m []byte, group Group) ([]byte, []byte, error) {
 	if len(group) > MaxNameBytes {
 		return nil, nil, errors.New("placement group too long")
 	}
 	lower := make([]byte, 8+len(group))
-	copy(lower, magic)
+	copy(lower, m)
 	binary.BigEndian.PutUint32(lower[4:8], uint32(len(group)))
 	copy(lower[8:], group)
 	return lower, PrefixEnd(lower), nil
@@ -104,13 +124,30 @@ type Key struct {
 	BlockStart int64
 	Part       PartID
 	Ordinal    uint32
+	// ByID marks an ID-keyed (GCI2) key: Local is the metric's vshard-local
+	// dictionary ID and Metric is empty. Name keys (GCP3) leave both zero.
+	ByID  bool
+	Local uint32
 }
 
+// SameMetric reports whether a and b name the same metric of one key
+// generation: equal names, or equal dictionary IDs.
+func SameMetric(a, b Key) bool { return a.Metric == b.Metric && a.Local == b.Local && a.ByID == b.ByID }
+
 func PartitionPrefixForGroup(group Group, vshard uint16, partition int64) ([]byte, error) {
+	return partitionPrefix(magic, group, vshard, partition)
+}
+
+// IDPartitionPrefixForGroup is PartitionPrefixForGroup for GCI2 keys.
+func IDPartitionPrefixForGroup(group Group, vshard uint16, partition int64) ([]byte, error) {
+	return partitionPrefix(idMagic, group, vshard, partition)
+}
+
+func partitionPrefix(m []byte, group Group, vshard uint16, partition int64) ([]byte, error) {
 	if vshard >= VirtualShards {
 		return nil, errors.New("virtual shard out of range")
 	}
-	lower, _, err := GroupRange(group)
+	lower, _, err := groupRange(m, group)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +185,9 @@ func VShardRangeForGroup(group Group, vshard uint16) ([]byte, []byte, error) {
 	return lower, PrefixEnd(lower), nil
 }
 func Encode(k Key) ([]byte, error) {
+	if k.ByID {
+		return EncodeID(k)
+	}
 	if len(k.Metric) == 0 || len(k.Metric) > MaxNameBytes {
 		return nil, errors.New("invalid canonical name length")
 	}
@@ -174,6 +214,93 @@ func Encode(k Key) ([]byte, error) {
 	binary.BigEndian.PutUint32(b[pos:], k.Ordinal)
 	return b, nil
 }
+
+// EncodeID encodes an ID-keyed (GCI2) key:
+// magic | u32 len(group) | group | vshard u16 | partition u64^ | part [16] |
+// local ID u32 | archive u8 | slot u32, all big endian, so keys sort by
+// ownership, partition, part, ID, archive, then slot.
+func EncodeID(k Key) ([]byte, error) {
+	if !k.ByID || k.Metric != "" {
+		return nil, errors.New("ID-keyed part key carries a name")
+	}
+	prefix, err := IDPartitionPrefixForGroup(k.Group, k.VShard, k.Partition)
+	if err != nil {
+		return nil, err
+	}
+	b := append(prefix, k.Part[:]...)
+	b = binary.BigEndian.AppendUint32(b, k.Local)
+	return AppendIDTail(b, k.Archive, k.BlockStart, k.Ordinal)
+}
+
+// AppendIDTail appends a GCI2 key's archive and slot. It rejects what GCI2
+// cannot hold: archives from 255 up (other than the envelope), slots outside
+// [0, 2^32) and nonzero ordinals.
+func AppendIDTail(dst []byte, archive uint32, slot int64, ordinal uint32) ([]byte, error) {
+	a := byte(IDEnvelope)
+	if archive != ^uint32(0) {
+		if archive >= IDEnvelope {
+			return nil, errors.New("archive does not fit an ID-keyed part key")
+		}
+		a = byte(archive)
+	}
+	if slot < 0 || slot > math.MaxUint32 || ordinal != 0 {
+		return nil, errors.New("slot or ordinal does not fit an ID-keyed part key")
+	}
+	return binary.BigEndian.AppendUint32(append(dst, a), uint32(slot)), nil
+}
+
+// IsIDKey reports whether b starts with the GCI2 magic.
+func IsIDKey(b []byte) bool { return bytes.HasPrefix(b, idMagic) }
+
+// DecodeKey decodes either key generation. A GCP3 key decodes as DecodeName
+// does; a GCI2 key returns ByID set, its ID in Local and a nil name.
+func DecodeKey(b []byte, group Group, metric ID) (Key, []byte, error) {
+	if !IsIDKey(b) {
+		k, name, err := DecodeName(b, group)
+		if err == nil {
+			if string(name) == string(metric) {
+				k.Metric = metric
+			} else {
+				k.Metric = ID(string(name))
+			}
+		}
+		return k, name, err
+	}
+	var k Key
+	if len(b) < 8 {
+		return k, nil, errors.New("invalid part key header")
+	}
+	gn32 := binary.BigEndian.Uint32(b[4:8])
+	if gn32 > MaxNameBytes || int(gn32) != len(b)-43 {
+		return k, nil, errors.New("invalid ID-keyed part key length")
+	}
+	gn := int(gn32)
+	if string(b[8:8+gn]) == string(group) {
+		k.Group = group
+	} else {
+		k.Group = Group(string(b[8 : 8+gn]))
+	}
+	pos := 8 + gn
+	k.VShard = binary.BigEndian.Uint16(b[pos:])
+	k.Partition = int64(binary.BigEndian.Uint64(b[pos+2:]) ^ (1 << 63))
+	copy(k.Part[:], b[pos+10:pos+26])
+	k.ByID, k.Local = true, binary.BigEndian.Uint32(b[pos+26:])
+	if k.VShard >= VirtualShards {
+		return Key{}, nil, errors.New("invalid part key routing")
+	}
+	DecodeIDTail(&k, b[pos+30:])
+	return k, nil, nil
+}
+
+// DecodeIDTail sets k's archive and slot from a GCI2 key tail.
+func DecodeIDTail(k *Key, tail []byte) {
+	k.Archive = uint32(tail[0])
+	if tail[0] == IDEnvelope {
+		k.Archive = ^uint32(0)
+	}
+	k.BlockStart, k.Ordinal = int64(binary.BigEndian.Uint32(tail[1:])), 0
+}
+
 func Decode(b []byte) (Key, error) { return DecodeReusing(b, "", "") }
 
 // DecodeReusing is Decode for callers that already hold the likely group and
