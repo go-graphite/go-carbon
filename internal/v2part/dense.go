@@ -677,6 +677,7 @@ type denseWorkspace struct {
 	rawPending bool
 	fold       bool
 	last       []byte
+	slotKey    []byte // AppendVersions' per-record key
 	// Planned input: the previous tuple, its planner rank and the scope's
 	// group key prefix.
 	prev     Key
@@ -838,10 +839,13 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	return err
 }
 
-// SetVersionsEncoded writes the versions of one physical slot, oldest first,
-// as SetRecordEncoded writes one record: key is the slot's key and every
-// version is validated against it. A full run never splits them.
-func (w *DenseWriter) SetVersionsEncoded(key []byte, versions []sealrollup.Record) error {
+// AppendVersions appends a decoded run of record versions of one archive:
+// slots never decrease (a slot's versions oldest first) and key is the first
+// record's key. Like AppendSlots it joins the pending run of its metric and
+// archive and re-encodes in runs of up to MaxDenseSlots, and a full run never
+// splits one slot's versions. Every record is validated as SetRecordEncoded
+// validates it; caller buffers are not retained.
+func (w *DenseWriter) AppendVersions(key []byte, records []sealrollup.Record) error {
 	if w.closed {
 		return io.ErrClosedPipe
 	}
@@ -849,13 +853,23 @@ func (w *DenseWriter) SetVersionsEncoded(key []byte, versions []sealrollup.Recor
 		return w.err
 	}
 	k, err := w.decodeInput(key)
-	for i := 0; err == nil && i < len(versions); i++ {
-		r := versions[i]
-		if k.Archive == MetadataArchive || k.Ordinal != 0 || r.Archive < 0 || uint64(r.Archive) != uint64(k.Archive) || r.Slot != k.BlockStart || !validSlotRecord(r) {
-			err = errors.New("dense slot versions do not match valid archive key")
+	if err == nil && (len(records) == 0 || k.Archive == MetadataArchive || k.Ordinal != 0 || records[0].Archive < 0 || uint64(records[0].Archive) != uint64(k.Archive) || records[0].Slot != k.BlockStart) {
+		err = errors.New("dense versions do not match valid archive key")
+	}
+	w.slotKey = append(w.slotKey[:0], key...)
+	for i := 0; err == nil && i < len(records); i++ {
+		r := records[i]
+		if r.Archive != records[0].Archive || !validSlotRecord(r) || i > 0 && r.Slot < records[i-1].Slot {
+			err = errors.New("invalid dense version record")
 			break
 		}
-		err = w.appendRecord(key, k, r)
+		k.BlockStart = r.Slot
+		binary.BigEndian.PutUint64(w.slotKey[len(w.slotKey)-12:], uint64(r.Slot)^(1<<63))
+		err = w.appendRecord(w.slotKey, k, r)
+	}
+	if err == nil {
+		// Future inputs must start after this run's last physical slot.
+		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(records[len(records)-1].Slot)^(1<<63))
 	}
 	w.err = err
 	return err

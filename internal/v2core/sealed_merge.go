@@ -651,19 +651,19 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
-		for _, g := range versions.groups(versioned) {
-			setSlot(uint32(g[0].Archive), g[0].Slot)
-			for _, r := range g {
+		for i := 0; i < len(versioned); {
+			j := i + 1
+			for j < len(versioned) && versioned[j].Archive == versioned[i].Archive {
+				j++
+			}
+			for _, r := range versioned[i:j] {
 				expiry.data(rollupRecordExpiry(config, r))
 			}
-			if len(g) == 1 {
-				err = writer.SetRecordEncoded(key, g[0])
-			} else {
-				err = writer.SetVersionsEncoded(key, g)
-			}
-			if err != nil {
+			setSlot(uint32(versioned[i].Archive), versioned[i].Slot)
+			if err = writer.AppendVersions(key, versioned[i:j]); err != nil {
 				return v2part.Descriptor{}, err
 			}
+			i = j
 		}
 		records = records[:0]
 		for _, input := range members {
@@ -1002,13 +1002,13 @@ type mergeVersions struct {
 	view                []int // records the write-down sees (live incarnation)
 	keep, gone, last    []bool
 	seen                map[[2]int64]int // (archive, slot) -> winner index
-	groupsOf            [][]sealrollup.Record
 }
 
 // merge returns the name's output records sorted by (archive, slot), or nil
 // when no input carries versions (the per-slot merge then runs unchanged).
 func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
-	if m.seen == nil {
+	// clear costs the map's capacity: drop a map one large name grew.
+	if m.seen == nil || len(m.records) > 4096 {
 		m.seen = map[[2]int64]int{}
 	}
 	clear(m.seen)
@@ -1123,18 +1123,4 @@ func (v versionOrder) Less(i, j int) bool {
 func (v versionOrder) Swap(i, j int) {
 	v.recs[i], v.recs[j] = v.recs[j], v.recs[i]
 	v.last[i], v.last[j] = v.last[j], v.last[i]
-}
-
-// groups splits sorted output records into runs of one physical slot.
-func (m *mergeVersions) groups(recs []sealrollup.Record) [][]sealrollup.Record {
-	m.groupsOf = m.groupsOf[:0]
-	for i := 0; i < len(recs); {
-		j := i + 1
-		for j < len(recs) && recs[j].Archive == recs[i].Archive && recs[j].Slot == recs[i].Slot {
-			j++
-		}
-		m.groupsOf = append(m.groupsOf, recs[i:j])
-		i = j
-	}
-	return m.groupsOf
 }
