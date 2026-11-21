@@ -195,6 +195,11 @@ func logicalStream(t *testing.T, path string, d Descriptor, dict *v2dict.Dict) m
 func TestIDKeyedPartRoundTrip(t *testing.T) {
 	spec := idFixtureSpec()
 	dict, ms := idFixture(t, spec.Scope.Group)
+	if _, err := writeIDFixture(filepath.Join(t.TempDir(), "off.sst"), spec, ms[:1], 1); err == nil {
+		t.Fatal("ID-keyed part written with IDKeys off")
+	}
+	IDKeys.Store(true)
+	t.Cleanup(func() { IDKeys.Store(false) })
 	gen := dict.Generation()
 	if gen == 0 {
 		t.Fatal("zero dictionary generation after Sync")
@@ -315,6 +320,19 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 			t.Errorf("%s: descriptor validated", name)
 		}
 	}
+	// Switched off, this build accepts exactly what the previous one did.
+	idJSON, err := id.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	IDKeys.Store(false)
+	if _, err := ParseDescriptor(idJSON); err == nil {
+		t.Error("schema 3 descriptor parsed with IDKeys off")
+	}
+	if err := Read(context.Background(), idPath, nil, nil); err == nil {
+		t.Error("ID-keyed part read with IDKeys off")
+	}
+	IDKeys.Store(true)
 	nameWithGen := nd
 	nameWithGen.Generation = gen
 	if err := nameWithGen.Validate(); err == nil {

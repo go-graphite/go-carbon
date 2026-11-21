@@ -310,7 +310,7 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 		if e != nil {
 			return e
 		}
-		if records > 0 && k.ByID != lastName.ByID || expected != nil && k.ByID != (expected.Generation != 0) {
+		if records > 0 && k.ByID != lastName.ByID || expected != nil && k.ByID != (expected.Generation != 0) || k.ByID && !IDKeys.Load() {
 			return errors.New("mixed part key generations")
 		}
 		if records == 0 {

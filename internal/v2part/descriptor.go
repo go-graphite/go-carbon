@@ -87,8 +87,8 @@ func validateSpec(s Spec) error {
 	if !utf8.ValidString(string(s.Scope.Group)) || !utf8.ValidString(s.Encoding) || !utf8.ValidString(s.Source.Stream) {
 		return errors.New("invalid UTF-8 descriptor identity")
 	}
-	if s.Generation != 0 && s.Encoding != DenseEncoding {
-		return errors.New("ID-keyed parts require dense encoding")
+	if s.Generation != 0 && (s.Encoding != DenseEncoding || !IDKeys.Load()) {
+		return errors.New("ID-keyed parts are switched off or not dense")
 	}
 	vshard := s.Scope.VShard
 	if vshard == GroupVShard {
