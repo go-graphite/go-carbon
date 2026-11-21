@@ -759,7 +759,7 @@ func projectOpenImage(c Config, state map[key]Sample, maxTime, through int64) ma
 		records = append(records, Record{Delta: Delta{Archive: k.archive, Slot: k.slot, Order: p.Sequence, Sample: p}})
 	}
 	out := map[key]Sample{}
-	for _, r := range ProjectOpen(c, maxTime, through, records) {
+	for _, r := range projectOpen(c, maxTime, through, records) {
 		out[key{r.Archive, r.Slot}] = r.Sample
 	}
 	return out
@@ -1060,7 +1060,7 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 // a merge of every part so far at every second seal (WriteDown, its windows
 // through the stored record form). parts+batches-fallback models it with
 // guessed kinds and a stronger fallback order.
-var openStores = []string{"c3", "seal", "seal+merged", "seal-lazy", "seal+merged-lazy", "seal+merged-wd-lazy", "parts", "parts+batches", "parts+batches-fallback"}
+var openStores = []string{"c3", "seal", "seal+merged", "seal-lazy", "seal+merged-lazy", "seal+merged-wd-lazy", "seal+up-lazy", "seal+merged-open", "seal+up-open", "parts", "parts+batches", "parts+batches-fallback"}
 
 func TestOpenWindowRead(t *testing.T) {
 	gens := []func() fnCorpus{fnHandoff, fnDigest, fnHistory, fnSlim, fnRank, fnBackground}
@@ -1105,7 +1105,7 @@ func TestOpenWindowRead(t *testing.T) {
 				if store == "c3" && readOK != slots {
 					t.Errorf("%s: open-window read misses %d of %d slots; first: %.3000s", corpus.name, slots-readOK, slots, firstMiss)
 				}
-				if (store == "seal" || store == "seal+merged" || os.Getenv("FN_LAZY_GATE") != "" && strings.HasSuffix(store, "-lazy")) && readOK != slots {
+				if (store == "seal" || store == "seal+merged" || strings.HasSuffix(store, "-open") || os.Getenv("FN_LAZY_GATE") != "" && strings.HasSuffix(store, "-lazy")) && readOK != slots {
 					t.Errorf("%s: open-window read of sealed parts misses %d of %d slots (%d where ProjectOpen matches); first: %.3000s", corpus.name, slots-readOK, slots, worse, firstMiss)
 				}
 			}
@@ -1192,7 +1192,7 @@ func openWindowRead(t *testing.T, m fnMetric, store string, loaded *[2]int64, ch
 		switch store {
 		case "c3":
 			stored = append(stored, rawPart(c, seal)...)
-		case "seal-lazy", "seal+merged-lazy", "seal+merged-wd-lazy":
+		case "seal-lazy", "seal+merged-lazy", "seal+merged-wd-lazy", "seal+up-lazy", "seal+merged-open", "seal+up-open":
 			storedRecs = append(storedRecs, got.Records...)
 			if store != "seal-lazy" && si%2 == 1 {
 				vs := make([]Version, len(storedRecs))
@@ -1210,6 +1210,9 @@ func openWindowRead(t *testing.T, m fnMetric, store string, loaded *[2]int64, ch
 					kept = append(kept, v.Record(c))
 				}
 				storedRecs = kept
+				if strings.HasPrefix(store, "seal+up") {
+					storedRecs = append(storedRecs, upgradeClosed(c, storedRecs)...)
+				}
 			}
 		case "seal", "seal+merged":
 			for _, r := range got.Records {
@@ -1267,8 +1270,44 @@ func openWindowRead(t *testing.T, m fnMetric, store string, loaded *[2]int64, ch
 			k := key{a, slot(w, c.Archives[a])}
 			read, readHas := NewVersions(c, sub).SlotValue(a, k.slot)
 			loaded[0] += int64(len(sub))
+			if strings.HasSuffix(store, "-open") {
+				read, readHas, err = OpenSlot(c, a, w, func(l int, first, last int64, _ uint64) ([]Record, error) {
+					var out []Record
+					defer func() { loaded[1] += int64(len(out)) }()
+					for _, r := range storedRecs {
+						if r.Archive == l && r.Slot >= first && r.Slot < last {
+							out = append(out, r)
+						}
+					}
+					return out, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			if strings.HasSuffix(store, "-lazy") {
-				read, readHas, err = openSlot(c, a, w, !strings.Contains(store, "-wd"), func(l int, first, last int64) ([]Record, error) {
+				settles := func(_ int, r Record) bool { return true } // any Mat, seal windows too
+				switch {
+				case strings.Contains(store, "-wd"):
+					settles = func(_ int, r Record) bool { return r.Upto > 0 }
+				case strings.Contains(store, "+up"):
+					// A written-down window settles only while no stored
+					// version under it is newer than its Upto: the read's
+					// per-part order bound, here over the whole store.
+					settles = func(l int, r Record) bool {
+						if r.Upto == 0 {
+							return false
+						}
+						end := r.Sample.Time + c.Archives[l].Step
+						for _, x := range storedRecs {
+							if x.Archive < l && x.Sample.Time >= r.Sample.Time && x.Sample.Time < end && x.Version().Order > r.Upto {
+								return false
+							}
+						}
+						return true
+					}
+				}
+				read, readHas, err = openSlot(c, a, w, settles, func(l int, first, last int64) ([]Record, error) {
 					var out []Record
 					defer func() { loaded[1] += int64(len(out)) }()
 					for _, r := range storedRecs {
@@ -1363,6 +1402,36 @@ func BenchmarkOpenSlotRead(b *testing.B) {
 					}
 				}
 			})
+			// The lazy read over the same versions, closed windows written
+			// down by a merge: it reads the open child chain only.
+			recs := make([]Record, len(all))
+			for i, v := range all {
+				recs[i] = v.Record(c)
+			}
+			var loaded int
+			load := func(l int, first, last int64, from uint64) ([]Record, error) {
+				var out []Record
+				for _, r := range recs {
+					if r.Archive == l && r.Slot >= first && r.Slot < last && r.Order >= from {
+						out = append(out, r)
+					}
+				}
+				loaded += len(out)
+				return out, nil
+			}
+			want, _ := NewVersions(c, sub).SlotValue(a, slot(w, c.Archives[a]))
+			if got, ok, _ := OpenSlot(c, a, w, load); !ok || got != want {
+				b.Fatalf("lazy read %+v, eager %+v", got, want)
+			}
+			b.Run(fmt.Sprintf("%s/archive%d/lazy", def, a), func(b *testing.B) {
+				loaded = 0
+				for range b.N {
+					if _, ok, _ := OpenSlot(c, a, w, load); !ok {
+						b.Fatal("open slot empty")
+					}
+				}
+				b.ReportMetric(float64(loaded)/float64(b.N), "versions/op")
+			})
 		}
 	}
 }
@@ -1376,10 +1445,9 @@ func BenchmarkOpenSlotRead(b *testing.B) {
 // child at every level, which the seal has not closed yet. Work is therefore
 // the sum of the step ratios, not every finest slot under the window. Every
 // window is computed by Versions, the function seals and merges use.
-// trustSeal lets a seal's fallback Mat settle its window too; otherwise only
-// a window a merge wrote down (Upto > 0) settles. Neither is exact (see
-// TestOpenWindowRead's -lazy stores): measurement only, no production caller.
-func openSlot(c Config, a int, w int64, trustSeal bool, load func(l int, first, last int64) ([]Record, error)) (Sample, bool, error) {
+// settles says which Mat stands for its window's history (see the -lazy
+// stores of TestOpenWindowRead). Measurement only, no production caller.
+func openSlot(c Config, a int, w int64, settles func(l int, r Record) bool, load func(l int, first, last int64) ([]Record, error)) (Sample, bool, error) {
 	var recs []Version
 	add := func(l int, first, last int64) (map[int64]bool, error) {
 		rs, err := load(l, first, last)
@@ -1389,7 +1457,7 @@ func openSlot(c Config, a int, w int64, trustSeal bool, load func(l int, first, 
 		mats := map[int64]bool{}
 		for _, r := range rs {
 			v := r.Version()
-			if r.Kind == KindMat && (r.Upto > 0 || trustSeal) {
+			if r.Kind == KindMat && settles(l, r) {
 				// A seal's closed window stands in for the finer history
 				// the read does not load: it competes at its event's tick.
 				if r.Upto == 0 {
@@ -1436,4 +1504,114 @@ func openSlot(c Config, a int, w int64, trustSeal bool, load func(l int, first, 
 	}
 	p, ok := NewVersions(c, recs).SlotValue(a, s)
 	return p, ok, nil
+}
+
+// upgradeClosed is a prefix merge that also writes down every window the seal
+// closed (a fallback Mat): recs hold every version at or below the merge's
+// newest order, so the window's value as of its newest event is exact. It
+// returns the written-down records it adds (one per window whose newest
+// written-down Upto is older than the window's newest event).
+func upgradeClosed(c Config, recs []Record) []Record {
+	vs := make([]Version, len(recs))
+	have := map[[2]int64]uint64{}
+	var closed [][2]int64
+	for i, r := range recs {
+		vs[i] = r.Version()
+		k := [2]int64{int64(r.Archive), r.Sample.Time}
+		if r.Kind == KindMat && r.Upto == 0 {
+			closed = append(closed, k)
+		}
+		if (r.Kind == KindMat || r.Kind == KindNone) && r.Upto > 0 {
+			have[k] = max(have[k], r.Upto)
+		}
+	}
+	f := NewVersions(c, vs)
+	top := uint64(math.MaxUint64)
+	var out []Record
+	done := map[[2]int64]bool{}
+	for _, k := range closed {
+		if done[k] {
+			continue
+		}
+		done[k] = true
+		a, w := int(k[0]), k[1]
+		v := f.valueAt(a, w, top)
+		upto := uint64(0)
+		if ev := f.events[a][w]; len(ev) > 0 {
+			upto = ev[len(ev)-1]
+		}
+		if d, ok := f.stored(a, w, top); ok {
+			upto = max(upto, d.Upto)
+		}
+		if u, ok := f.absent[k]; ok {
+			upto = max(upto, u)
+		}
+		if v.ok {
+			upto = max(upto, v.s.Sequence)
+		}
+		if upto == 0 || have[k] >= upto {
+			continue
+		}
+		if !v.ok {
+			out = append(out, Version{Archive: a, Time: w, Order: upto, Upto: upto, None: true}.Record(c))
+			continue
+		}
+		out = append(out, Version{Archive: a, Time: w, Bits: v.s.Bits, Order: v.s.Sequence, Upto: upto, Mat: true}.Record(c))
+	}
+	return out
+}
+
+// projectOpen is the open-window projection reads used before the version
+// read (OpenSlot): each open window aggregated from the resolved finer slots.
+// Kept as the comparison baseline of TestOpenWindowRead.
+func projectOpen(c Config, maxTime, through int64, records []Record) []Record {
+	var samples []Sample
+	for a := 1; a < len(c.Archives); a++ {
+		coarse := c.Archives[a]
+		start := align(maxTime, coarse.Step)
+		if start+coarse.Step <= through {
+			continue
+		}
+		samples = samples[:0]
+		old := -1
+		physical := slot(start, coarse)
+		for i, r := range records {
+			if r.Archive == a && r.Slot == physical {
+				old = i
+			}
+			if r.Archive == a-1 && r.Sample.Time >= start && r.Sample.Time < start+coarse.Step {
+				samples = append(samples, r.Sample)
+			}
+		}
+		slices.SortFunc(samples, func(a, b Sample) int {
+			if a.Time < b.Time {
+				return -1
+			}
+			if a.Time > b.Time {
+				return 1
+			}
+			return 0
+		})
+		if p, ok := AggregateWindow(c, a, start, samples); ok {
+			r := Record{Delta: Delta{Archive: a, Slot: physical, Order: p.Sequence, Sample: p}}
+			if old < 0 {
+				records = append(records, r)
+			} else if p.Time > records[old].Sample.Time || p.Time == records[old].Sample.Time && p.Sequence >= records[old].Order {
+				records[old] = r
+			}
+		}
+	}
+	slices.SortFunc(records, func(a, b Record) int {
+		if a.Archive != b.Archive {
+			return a.Archive - b.Archive
+		}
+		if a.Slot < b.Slot {
+			return -1
+		}
+		if a.Slot > b.Slot {
+			return 1
+		}
+		return 0
+	})
+	return records
 }
