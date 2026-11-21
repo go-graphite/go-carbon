@@ -988,91 +988,141 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 
 // mergeVersions merges one name whose inputs carry record versions: a run
 // with kinds (versions, ghosts, windows), or a physical slot more than one
-// input holds. A prefix merge writes windows down (sealrollup.WriteDown) and
-// then drops superseded versions, ghosts and expired records; any other merge
-// keeps every version but expired ones, so a later prefix merge still sees
-// them. Rollups stay a pure function of the stored records. Each slot keeps
-// the winner the per-slot readers chose before as its last Raw or seal Mat
-// record, so their renders do not change; written-down windows are visible to
-// the version reader only. Scratch is reused across names.
+// input holds. A prefix merge that drops a record (a superseded version, a
+// ghost or an expired record) first writes windows down
+// (sealrollup.WriteDown); any other merge keeps every version but expired
+// ones, so a later prefix merge still sees them. Rollups stay a pure function
+// of the stored records. Each slot keeps the winner the per-slot readers chose
+// before as its last Raw or seal Mat record, so their renders do not change;
+// written-down windows are visible to the version reader only. The work is a
+// walk of the inputs in slot order; the write-down runs only for names that
+// drop records. Scratch is reused across names.
 type mergeVersions struct {
 	records, block, out []sealrollup.Record
-	from                []int // records[i]'s input
+	from                []int   // records[i]'s input
+	order               []int32 // records by (archive, slot), then index
 	versions            []sealrollup.Version
 	view                []int // records the write-down sees (live incarnation)
-	keep, gone, last    []bool
-	seen                map[[2]int64]int // (archive, slot) -> winner index
+	keep, gone          []bool
+	win, last           []bool // records[i], out[i]: its slot's per-slot winner
 }
 
 // merge returns the name's output records sorted by (archive, slot), or nil
 // when no input carries versions (the per-slot merge then runs unchanged).
 func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
-	// clear costs the map's capacity: drop a map one large name grew.
-	if m.seen == nil || len(m.records) > 4096 {
-		m.seen = map[[2]int64]int{}
-	}
-	clear(m.seen)
 	m.records, m.from = m.records[:0], m.from[:0]
-	versioned := false
 	for mi, c := range members {
 		for _, b := range c.blocks {
 			var err error
 			if m.block, err = v2part.DecodeRecordsInto(m.block[:0], b.archive, b.slot, c.arena[b.start:b.end]); err != nil {
 				return nil, err
 			}
-			for _, r := range m.block {
-				if r.Archive >= len(config.Archives) {
+			for i := range m.block {
+				if m.block[i].Archive >= len(config.Archives) {
 					return nil, errors.New("merge archive outside policy")
 				}
-				k := [2]int64{int64(r.Archive), r.Slot}
-				if _, ok := m.seen[k]; ok || r.Kind != sealrollup.KindRaw {
-					versioned = true
-				}
-				m.seen[k] = len(m.records)
-				m.records = append(m.records, r)
 				m.from = append(m.from, mi)
 			}
+			m.records = append(m.records, m.block...)
 		}
+	}
+	return m.resolve(config, metadata, retire, prefix)
+}
+
+// resolve is merge over the decoded records of every input (records, from),
+// each input's records in (archive, slot) order, a slot's versions oldest
+// first.
+func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
+	recs := m.records
+	// Slot order: the inputs' records, stably merged by (archive, slot). Most
+	// names arrive already in order (one input, or inputs of disjoint slots).
+	m.order = m.order[:0]
+	versioned, sorted := false, true
+	for i := range recs {
+		if recs[i].Kind != sealrollup.KindRaw {
+			versioned = true
+		}
+		if i > 0 && !mergeSlotLess(recs[i-1], recs[i]) {
+			sorted = false
+		}
+		m.order = append(m.order, int32(i))
+	}
+	if !sorted {
+		slices.SortFunc(m.order, func(a, b int32) int {
+			x, y := &recs[a], &recs[b]
+			switch {
+			case x.Archive != y.Archive:
+				return x.Archive - y.Archive
+			case x.Slot != y.Slot:
+				return cmp.Compare(x.Slot, y.Slot)
+			}
+			return int(a - b)
+		})
+	}
+	dead := func(r *sealrollup.Record) bool { return metadata.Expired || r.Order <= metadata.ResetOrder }
+	expired := func(r *sealrollup.Record) bool { return rollupRecordExpiry(config, *r) < retire }
+	// One pass over each slot's records: the per-slot winner, as the per-slot
+	// merge picks it (of each input's per-slot view, its last Raw or seal Mat
+	// record of a slot, the live record with the greatest time, then order),
+	// and whether a prefix merge drops a record, which needs the write-down.
+	m.win = append(m.win[:0], make([]bool, len(recs))...)
+	drops := false
+	for g := 0; g < len(m.order); {
+		h := g + 1
+		first := &recs[m.order[g]]
+		for h < len(m.order) && recs[m.order[h]].Archive == first.Archive && recs[m.order[h]].Slot == first.Slot {
+			h++
+		}
+		versioned = versioned || h-g > 1
+		w, live := -1, 0
+		for _, i := range m.order[g:h] {
+			r := &recs[i]
+			if dead(r) {
+				continue
+			}
+			live++
+			ar := config.Archives[r.Archive]
+			if r.Kind == sealrollup.KindGhost || expired(r) || r.Slot != r.Sample.Time/ar.Step%ar.Count {
+				drops = true
+			}
+			if r.Kind != sealrollup.KindRaw && (r.Kind != sealrollup.KindMat || r.Upto != 0) || expired(r) {
+				continue
+			}
+			if w < 0 || m.from[w] == m.from[i] {
+				w = int(i)
+				continue
+			}
+			b := &recs[w]
+			newer, err := newerOrigin(partOrigin{Class: LivePart}, *r, partOrigin{Class: LivePart}, *b)
+			if err != nil {
+				return nil, err
+			}
+			if !newer && r.Sample.Time == b.Sample.Time && r.Order == b.Order && r.Delta != b.Delta {
+				return nil, errors.New("conflicting merge replacement order")
+			}
+			if newer {
+				w = int(i)
+			}
+		}
+		if live > 1 {
+			drops = true
+		}
+		if w >= 0 {
+			m.win[w] = true
+		}
+		g = h
 	}
 	if !versioned {
 		return nil, nil
 	}
-	recs := m.records
-	dead := func(r sealrollup.Record) bool { return metadata.Expired || r.Order <= metadata.ResetOrder }
-	expired := func(r sealrollup.Record) bool { return rollupRecordExpiry(config, r) < retire }
-	// The per-slot winner, as the per-slot merge picks it: of each input's
-	// per-slot view (its last Raw or seal Mat record of a slot), the live
-	// record with the greatest time, then order.
-	clear(m.seen)
-	for i, r := range recs {
-		if r.Kind != sealrollup.KindRaw && (r.Kind != sealrollup.KindMat || r.Upto != 0) || dead(r) || expired(r) {
-			continue
-		}
-		k := [2]int64{int64(r.Archive), r.Slot}
-		w, ok := m.seen[k]
-		if !ok || m.from[w] == m.from[i] {
-			m.seen[k] = i
-			continue
-		}
-		b := recs[w]
-		newer, err := newerOrigin(partOrigin{Class: LivePart}, r, partOrigin{Class: LivePart}, b)
-		if err != nil {
-			return nil, err
-		}
-		if !newer && r.Sample.Time == b.Sample.Time && r.Order == b.Order && r.Delta != b.Delta {
-			return nil, errors.New("conflicting merge replacement order")
-		}
-		if newer {
-			m.seen[k] = i
-		}
-	}
 	m.keep = append(m.keep[:0], make([]bool, len(recs))...)
 	var mats []sealrollup.Version
-	if prefix {
+	switch {
+	case prefix && drops:
 		// The write-down sees the live incarnation; a reset deletes the rest.
 		m.versions, m.view, m.gone = m.versions[:0], m.view[:0], m.gone[:0]
-		for i, r := range recs {
-			if !dead(r) {
+		for i := range recs {
+			if r := &recs[i]; !dead(r) {
 				m.versions = append(m.versions, r.Version())
 				m.view = append(m.view, i)
 				m.gone = append(m.gone, expired(r))
@@ -1083,26 +1133,41 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 		for j, i := range m.view {
 			m.keep[i] = keep[j]
 		}
-	} else {
-		for i, r := range recs {
-			m.keep[i] = !dead(r) && !expired(r)
+	default:
+		// Without a drop the write-down keeps every live version and writes
+		// nothing down.
+		for i := range recs {
+			m.keep[i] = !dead(&recs[i]) && !expired(&recs[i])
 		}
 	}
+	// Emit in slot order, each slot's winner last.
 	m.out, m.last = m.out[:0], m.last[:0]
-	for i, r := range recs {
-		w, ok := m.seen[[2]int64{int64(r.Archive), r.Slot}]
-		if win := ok && w == i; m.keep[i] || win {
-			m.out = append(m.out, r)
-			m.last = append(m.last, win)
+	for g := 0; g < len(m.order); {
+		h, w := g, -1
+		for ; h < len(m.order) && recs[m.order[h]].Archive == recs[m.order[g]].Archive && recs[m.order[h]].Slot == recs[m.order[g]].Slot; h++ {
+			if i := m.order[h]; m.win[i] {
+				w = int(i)
+			} else if m.keep[i] {
+				m.out = append(m.out, recs[i])
+				m.last = append(m.last, false)
+			}
 		}
+		if w >= 0 {
+			m.out = append(m.out, recs[w])
+			m.last = append(m.last, true)
+		}
+		g = h
+	}
+	if len(mats) == 0 {
+		return m.out, nil
 	}
 	for _, v := range mats {
-		if r := v.Record(config); !dead(r) && !expired(r) {
+		if r := v.Record(config); !dead(&r) && !expired(&r) {
 			m.out = append(m.out, r)
 			m.last = append(m.last, false)
 		}
 	}
-	// Sort by (archive, slot), the per-slot winner last in its slot.
+	// Sort the windows in: by (archive, slot), the per-slot winner last in its slot.
 	sort.Stable(versionOrder{m.out, m.last})
 	return m.out, nil
 }
