@@ -202,6 +202,7 @@ func (s *syncer) verifyBatch(ctx context.Context, round int, names []string) (sy
 }
 
 func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) error {
+	ctx = withSyncDigestMemo(ctx)
 	info, err := s.verifyInfo(ctx, s.o.to, names)
 	if errors.Is(err, errSyncStoreDown) {
 		s.markDown(s.o.to, err)
@@ -359,6 +360,26 @@ func (s *syncer) digest(ctx context.Context, store string, names []string, w syn
 	if s.noDigest(store) {
 		return nil, errSyncNoDigest
 	}
+	memo := syncDigestMemoFrom(ctx)
+	known, pending := memo.split(store, w, names)
+	if len(pending) == 0 {
+		return known, nil
+	}
+	got, err := s.digestRead(ctx, store, pending, w)
+	if err != nil {
+		return got, err
+	}
+	if got == nil {
+		got = map[string][]syncDigest{}
+	}
+	memo.remember(ctx, store, w, pending, got)
+	for n, d := range known {
+		got[n] = d
+	}
+	return got, nil
+}
+
+func (s *syncer) digestRead(ctx context.Context, store string, names []string, w syncRange) (map[string][]syncDigest, error) {
 	return splitVerifyRead(ctx, "digest", store, names, func(names []string) (map[string][]syncDigest, error) {
 		finish, err := s.redo.begin(ctx, "verify", store, names, w.From, w.Until)
 		if err != nil {
