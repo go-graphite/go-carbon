@@ -141,6 +141,14 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if c.copy.names != "" && c.copy.prefix != "" {
 		return c, errors.New("--names and --prefix are exclusive")
 	}
+	if c.copy.to == "" {
+		to, from := localBuckydEndpoint(c.goCarbonConfig, "/proc")
+		if to == "" {
+			return c, errors.New("--to required: no [buckyd] bind found in the local go-carbon config (--config)")
+		}
+		c.copy.to = to
+		event("sync_default_target", map[string]any{"target": to, "from_config": from})
+	}
 	c.sync.to, c.sync.from = c.copy.to, append([]string(nil), c.copy.froms...)
 	c.sync.ring, c.sync.state, c.sync.prefix = c.copy.ring, c.copy.state, c.copy.prefix
 	c.sync.streams, c.sync.progress = max(1, c.copy.streams), c.copy.progressInterval
@@ -252,6 +260,17 @@ func SyncMain(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Saved config keeps the typed hosts; requests use addresses, which is
+	// how a target's ring nodes and transfer-sources list them.
+	if c.sync.to, err = resolveEndpoint(ctx, c.sync.to); err != nil {
+		return fmt.Errorf("--to: %w", err)
+	}
+	for i, f := range c.sync.from {
+		if c.sync.from[i], err = resolveEndpoint(ctx, f); err != nil {
+			return fmt.Errorf("--source: %w", err)
+		}
+	}
+	c.copy.to, c.copy.froms = c.sync.to, append([]string(nil), c.sync.from...)
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)

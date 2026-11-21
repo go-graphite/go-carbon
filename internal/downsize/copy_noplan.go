@@ -89,9 +89,9 @@ func (l *originList) Set(value string) error {
 }
 
 func registerCopyFlags(flags *flag.FlagSet, o *copyOptions) {
-	flags.Var((*originList)(&o.froms), "source", "source buckyd origin, e.g. http://donor:4242; repeat (or comma-separate) to copy every donor of a block into --to in one run")
-	flags.Var((*originList)(&o.froms), "from", "compatibility alias for --source (URL)")
-	flags.StringVar(&o.to, "to", "", "target buckyd origin; the target pulls from --from")
+	flags.Var((*endpointList)(&o.froms), "source", "source buckyd: host, host:port or URL (default http, port 4242), e.g. donor-a; repeat (or comma-separate) to copy every donor of a block into --to in one run")
+	flags.Var((*endpointList)(&o.froms), "from", "compatibility alias for --source")
+	flags.Var(endpointValue{&o.to}, "to", "target buckyd: host, host:port or URL; the target pulls from --source (sync default: this host's own buckyd)")
 	flags.StringVar(&o.names, "names", "", "UTF-8 text file, one metric name per line, byte-sorted unique (LC_ALL=C sort -u); not JSON; default discovers catalogs")
 	flags.StringVar(&o.prefix, "prefix", "", "discover only source names with this prefix")
 	flags.StringVar(&o.ring, "ring", "", "optional ring file (resize spec: its new ring; or a bare topology); names the target does not own are skipped")

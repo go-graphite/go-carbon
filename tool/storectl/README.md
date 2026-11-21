@@ -6,6 +6,28 @@ resumable command. Build with
 `storectl --version` reports the release build revision (or the Go VCS stamp).
 The owning donor and receiver daemons must also contain the native engine.
 
+## Source and target addresses
+
+`--source` and `--to` take a bare host name, `host:port` or a full URL. No
+scheme means `http://`, no port means buckyd's default `4242`; the saved
+`config.json` stores the normalized URL, so `--resume` works for old and new
+states. On the survivor itself, `--to` may be omitted: it defaults to this
+host's own buckyd (the `[buckyd] bind` of the running go-carbon's `-config`,
+or `--config`; an unspecified bind address becomes `127.0.0.1`).
+
+```sh
+storectl sync --source host-a --source host-b --state /var/lib/carbon/sync-state
+storectl sync --source host-a.example.org:4242 --to host-c --state ./state
+```
+
+The target authorizes a pull source by the literal host, against its ring
+nodes and `transfer-sources`, which normally list addresses. For `http`
+origins `storectl` therefore resolves each host name through the system
+resolver (search domains apply; IPv4 preferred) before sending it to the
+target, and logs an `endpoint_resolved` event per source. An unresolvable
+name stops the run with an error naming the host. Addresses and `https`
+origins are sent unchanged.
+
 ## Controller progress metrics
 
 Every `storectl` command with a `--state` sends Graphite plaintext to `127.0.0.1:2003`
