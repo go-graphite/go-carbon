@@ -120,7 +120,7 @@ func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const perInput = 320
+	const perInput = 1200
 	for n := 1; n <= smallMergeRatio; n++ {
 		var rs []sealrollup.Record
 		for i := 0; i < perInput; i++ {

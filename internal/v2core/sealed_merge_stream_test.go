@@ -27,7 +27,7 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for n := 1; n <= smallMergeRatio; n++ {
+			for n := 1; n <= sealedMergeFanIn; n++ {
 				var rs []sealrollup.Record
 				for i := 0; i < 32; i++ {
 					slot := int64(n*32 + i)
@@ -35,7 +35,7 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 					rs = append(rs, sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 1000 + slot, Bits: []uint64{0, 1 << 63, 1, 0x7ff8000000000042, 0x7ff0000000000000, 0xfff0000000000000}[i%6], Sequence: order}}, Correction: i%3 == 0})
 				}
 				m := RollupMetadata{Version: 2, ID: 7, Policy: raw, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 2000, Policy: digest}, Revision: uint64(n)}
-				if n == smallMergeRatio {
+				if n == sealedMergeFanIn {
 					m.ResetOrder = reset
 				}
 				installMergeRecords(t, e.owners[0], byte(n), []RollupMetadata{m}, [][]sealrollup.Record{rs})
@@ -43,8 +43,15 @@ func TestSealedMergeDisjointEncodedRuns(t *testing.T) {
 			s := e.owners[0].db.NewSnapshot()
 			want := mergeRead(t, s)
 			_ = s.Close()
-			if n := mergeDrain(t, e.owners[0]); n != 1 || mergeCount(e.owners[0]) != 1 {
-				t.Fatalf("merges=%d", n)
+			// Background levels may leave a few parts; force the rest into one.
+			n := mergeDrain(t, e.owners[0])
+			for changed := true; changed; n++ {
+				if changed, err = e.owners[0].mergeSealedParts(nil, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mergeCount(e.owners[0]) != 1 {
+				t.Fatalf("merges=%d left %d parts", n, mergeCount(e.owners[0]))
 			}
 			s = e.owners[0].db.NewSnapshot()
 			defer s.Close()

@@ -202,30 +202,36 @@ func (e *coreEngine) ForceMerge() (int, error) {
 
 // Merges combine only sequence-adjacent local parts of one group/partition
 // (ClickHouse's rule), so their order ranges never interleave. A window of
-// adjacent parts qualifies once it holds at least ratio parts and its total is
-// at least ratio/2 times its largest part, so a large input is not repeatedly
-// combined with only a few much smaller inputs. Small outputs follow
-// VictoriaMetrics: up to fifteen parts merge at once (defaultPartsToMerge) and
-// the output must be at least 1.7 times the largest input (minMergeMultiplier),
-// so a small part is rewritten in fewer levels. Larger outputs keep ratio
-// sixteen, which leaves at most fifteen similar parts quiescent below the cap.
-// The cheapest qualifying window merges first.
+// adjacent parts qualifies once it holds at least ratio parts and the ingest it
+// covers is at least ratio/2 times that of its widest part, so a wide part is
+// not repeatedly rewritten with only a few narrow ones. Width is measured in
+// admitted orders, not compressed bytes (Prometheus levels blocks by covered
+// range for the same reason): a seal part repeats a key per name, so four
+// merged seals are barely larger on disk than one seal, and a byte rule merged
+// that output again with every three new seals. Small outputs (up to 64 MiB of
+// inputs) use ratio four, so live parts per group/partition stay at most three
+// per level; larger outputs use ratio sixteen. The cheapest window merges first.
 const (
 	smallMergeBytes = 64 << 20
-	smallMergeRatio = 15
+	smallMergeRatio = 4
 )
 
-// mergeWindowOK reports whether n adjacent parts with the given total and
-// largest part form a merge window.
-func mergeWindowOK(n int, total, largest uint64) bool {
-	r := mergeRatio(total)
-	if uint64(n) < r {
-		return false
+// orderWidths returns the orders each sequence-sorted part admitted after the
+// previous one. Window closures re-emit records with a metric's last order, so
+// a part's MinOrder may reach back; only the advance of its MaxOrder counts.
+func orderWidths(parts []v2part.Descriptor) []uint64 {
+	widths := make([]uint64, len(parts))
+	for i, d := range parts {
+		lo := d.Source.MinOrder
+		if i > 0 && parts[i-1].Source.MaxOrder >= lo {
+			lo = parts[i-1].Source.MaxOrder + 1
+		}
+		widths[i] = 1
+		if d.Source.MaxOrder >= lo {
+			widths[i] = d.Source.MaxOrder - lo + 1
+		}
 	}
-	if r == smallMergeRatio {
-		return 10*total >= 17*largest
-	}
-	return 2*total >= r*largest
+	return widths
 }
 
 func mergeRatio(total uint64) uint64 {
@@ -278,11 +284,13 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 			}
 			return bytes.Compare(a.SHA256[:], b.SHA256[:])
 		})
+		widths := orderWidths(parts)
 		for i := range parts {
-			var total, largest uint64
+			var total, covered, widest uint64
 			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total; j++ {
 				total += parts[j].Bytes
-				largest = max(largest, parts[j].Bytes)
+				covered += widths[j]
+				widest = max(widest, widths[j])
 				if full {
 					// Force the first maximal adjacent window that fits the cap.
 					if j > i && (j+1 == len(parts) || parts[j+1].Bytes > limit-total) {
@@ -290,7 +298,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 					}
 					continue
 				}
-				if !mergeWindowOK(j-i+1, total, largest) {
+				if r := mergeRatio(total); uint64(j-i+1) < r || 2*covered < r*widest {
 					continue
 				}
 				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
