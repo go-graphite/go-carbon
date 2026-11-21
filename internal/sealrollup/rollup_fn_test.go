@@ -1060,7 +1060,7 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 // a merge of every part so far at every second seal (WriteDown, its windows
 // through the stored record form). parts+batches-fallback models it with
 // guessed kinds and a stronger fallback order.
-var openStores = []string{"c3", "seal", "seal+merged", "parts", "parts+batches", "parts+batches-fallback"}
+var openStores = []string{"c3", "seal", "seal+merged", "seal-lazy", "seal+merged-lazy", "seal+merged-wd-lazy", "parts", "parts+batches", "parts+batches-fallback"}
 
 func TestOpenWindowRead(t *testing.T) {
 	gens := []func() fnCorpus{fnHandoff, fnDigest, fnHistory, fnSlim, fnRank, fnBackground}
@@ -1077,13 +1077,14 @@ func TestOpenWindowRead(t *testing.T) {
 			t.Parallel()
 			stores := openStores
 			if testing.Short() {
-				stores = stores[:3]
+				stores = stores[:5]
 			}
 			for _, store := range stores {
 				var slots, readOK, projectOK, worse int
 				var firstMiss string
+				var loaded [2]int64 // versions read: eager over WindowRanges, lazy descent
 				for _, m := range corpus.metrics {
-					openWindowRead(t, m, store, func(si, a int, o openOutcome) {
+					openWindowRead(t, m, store, &loaded, func(si, a int, o openOutcome) {
 						slots++
 						if o.projectOK() {
 							projectOK++
@@ -1100,11 +1101,11 @@ func TestOpenWindowRead(t *testing.T) {
 						}
 					})
 				}
-				t.Logf("RESULT open-window store=%s corpus=%s slots=%d read_vs_whisper=%s projectopen_vs_whisper=%s read_misses_where_projectopen_matches=%d", store, corpus.name, slots, pct(readOK, slots), pct(projectOK, slots), worse)
+				t.Logf("RESULT open-window store=%s corpus=%s slots=%d read_vs_whisper=%s projectopen_vs_whisper=%s read_misses_where_projectopen_matches=%d versions_eager=%d versions_lazy=%d", store, corpus.name, slots, pct(readOK, slots), pct(projectOK, slots), worse, loaded[0], loaded[1])
 				if store == "c3" && readOK != slots {
 					t.Errorf("%s: open-window read misses %d of %d slots; first: %.3000s", corpus.name, slots-readOK, slots, firstMiss)
 				}
-				if (store == "seal" || store == "seal+merged") && readOK != slots {
+				if (store == "seal" || store == "seal+merged" || os.Getenv("FN_LAZY_GATE") != "" && strings.HasSuffix(store, "-lazy")) && readOK != slots {
 					t.Errorf("%s: open-window read of sealed parts misses %d of %d slots (%d where ProjectOpen matches); first: %.3000s", corpus.name, slots-readOK, slots, worse, firstMiss)
 				}
 			}
@@ -1153,7 +1154,7 @@ func recordVersions(c Config, recs []Record) []Version {
 
 // openWindowRead seals m with the current seal, keeps the part content store
 // names, and calls check for each open coarse window after every seal.
-func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int, o openOutcome)) {
+func openWindowRead(t *testing.T, m fnMetric, store string, loaded *[2]int64, check func(si, a int, o openOutcome)) {
 	t.Helper()
 	c := m.cfg
 	p, err := Prepare(c)
@@ -1164,6 +1165,7 @@ func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int
 	var old, frontier Frontier
 	var through int64
 	var stored []Version
+	var storedRecs []Record
 	for si, seal := range m.seals {
 		if len(seal) == 0 {
 			continue
@@ -1190,6 +1192,25 @@ func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int
 		switch store {
 		case "c3":
 			stored = append(stored, rawPart(c, seal)...)
+		case "seal-lazy", "seal+merged-lazy", "seal+merged-wd-lazy":
+			storedRecs = append(storedRecs, got.Records...)
+			if store != "seal-lazy" && si%2 == 1 {
+				vs := make([]Version, len(storedRecs))
+				for i, r := range storedRecs {
+					vs[i] = r.Version()
+				}
+				keep, mats := WriteDown(c, vs, nil)
+				kept := storedRecs[:0:0]
+				for i, r := range storedRecs {
+					if keep[i] {
+						kept = append(kept, r)
+					}
+				}
+				for _, v := range mats {
+					kept = append(kept, v.Record(c))
+				}
+				storedRecs = kept
+			}
 		case "seal", "seal+merged":
 			for _, r := range got.Records {
 				stored = append(stored, r.Version())
@@ -1245,6 +1266,22 @@ func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int
 			}
 			k := key{a, slot(w, c.Archives[a])}
 			read, readHas := NewVersions(c, sub).SlotValue(a, k.slot)
+			loaded[0] += int64(len(sub))
+			if strings.HasSuffix(store, "-lazy") {
+				read, readHas, err = openSlot(c, a, w, !strings.Contains(store, "-wd"), func(l int, first, last int64) ([]Record, error) {
+					var out []Record
+					defer func() { loaded[1] += int64(len(out)) }()
+					for _, r := range storedRecs {
+						if r.Archive == l && r.Slot >= first && r.Slot < last {
+							out = append(out, r)
+						}
+					}
+					return out, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			wantS, wantOK := eager[k]
 			proj, projHas := projected[k]
 			check(si, a, openOutcome{
@@ -1267,7 +1304,7 @@ func TestOpenWindowMinimize(t *testing.T) {
 	for seed := uint64(1); seed <= 8 && found < fnMinCases; seed++ {
 		for _, m := range fnRandom(seed, 60).metrics {
 			miss := func(m fnMetric) (hit bool) {
-				openWindowRead(t, m, store, func(_, _ int, o openOutcome) { hit = hit || bad(o) })
+				openWindowRead(t, m, store, new([2]int64), func(_, _ int, o openOutcome) { hit = hit || bad(o) })
 				return hit
 			}
 			if !miss(m) {
@@ -1275,7 +1312,7 @@ func TestOpenWindowMinimize(t *testing.T) {
 			}
 			small := fnMinimize(m, miss)
 			var detail []string
-			openWindowRead(t, small, store, func(si, a int, o openOutcome) {
+			openWindowRead(t, small, store, new([2]int64), func(si, a int, o openOutcome) {
 				if bad(o) {
 					detail = append(detail, fmt.Sprintf("seal%d a%d whisper%v/%v read%v/%v projectopen%v/%v", si, a, o.want, o.wantOK, o.read, o.readHas, o.project, o.projHas))
 				}
@@ -1328,4 +1365,75 @@ func BenchmarkOpenSlotRead(b *testing.B) {
 			})
 		}
 	}
+}
+
+// openSlot is the value of window w of coarse level a, the window holding the
+// frontier, computed from stored records by lazy descent. load(l, first, last)
+// returns every stored record version of level l in physical slots
+// [first, last). The read loads level a-1 under the window first; a finer
+// window with a materialized value (a Mat of its epoch) stands for its own
+// history, so the read descends only into finer windows without one: the open
+// child at every level, which the seal has not closed yet. Work is therefore
+// the sum of the step ratios, not every finest slot under the window. Every
+// window is computed by Versions, the function seals and merges use.
+// trustSeal lets a seal's fallback Mat settle its window too; otherwise only
+// a window a merge wrote down (Upto > 0) settles. Neither is exact (see
+// TestOpenWindowRead's -lazy stores): measurement only, no production caller.
+func openSlot(c Config, a int, w int64, trustSeal bool, load func(l int, first, last int64) ([]Record, error)) (Sample, bool, error) {
+	var recs []Version
+	add := func(l int, first, last int64) (map[int64]bool, error) {
+		rs, err := load(l, first, last)
+		if err != nil {
+			return nil, err
+		}
+		mats := map[int64]bool{}
+		for _, r := range rs {
+			v := r.Version()
+			if r.Kind == KindMat && (r.Upto > 0 || trustSeal) {
+				// A seal's closed window stands in for the finer history
+				// the read does not load: it competes at its event's tick.
+				if r.Upto == 0 {
+					v.Order = Tick(r.Order, max(l-1, 0))
+					v.Upto = v.Order
+				}
+				mats[r.Sample.Time] = true
+			}
+			recs = append(recs, v)
+		}
+		return mats, nil
+	}
+	s := slot(w, c.Archives[a])
+	if _, err := add(a, s, s+1); err != nil {
+		return Sample{}, false, err
+	}
+	open := []int64{w}
+	for l := a - 1; l >= 0 && len(open) > 0; l-- {
+		al, span := c.Archives[l], c.Archives[l+1].Step
+		var next []int64
+		for _, pw := range open {
+			n := span / al.Step
+			var mats map[int64]bool
+			var err error
+			if first := slot(pw, al); n >= al.Count {
+				mats, err = add(l, 0, al.Count)
+			} else if mats, err = add(l, first, min(first+n, al.Count)); err == nil && first+n > al.Count {
+				var wrap map[int64]bool
+				wrap, err = add(l, 0, first+n-al.Count)
+				for t := range wrap {
+					mats[t] = true
+				}
+			}
+			if err != nil {
+				return Sample{}, false, err
+			}
+			for t := pw; l > 0 && t < pw+span; t += al.Step {
+				if !mats[t] {
+					next = append(next, t)
+				}
+			}
+		}
+		open = next
+	}
+	p, ok := NewVersions(c, recs).SlotValue(a, s)
+	return p, ok, nil
 }
