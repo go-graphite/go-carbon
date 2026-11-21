@@ -140,7 +140,7 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	}
 	kinds := false
 	for i, r := range records {
-		if !validSlotRecord(r) || r.Kind > sealrollup.KindNone {
+		if !validSlotRecord(r) || r.Kind > sealrollup.KindNone || r.Upto != 0 && r.Kind != sealrollup.KindMat && r.Kind != sealrollup.KindNone {
 			return nil, errors.New("invalid sealed archive record clock/order/slot")
 		}
 		if i > 0 && (r.Archive != records[0].Archive || r.Slot < records[i-1].Slot) {
@@ -205,7 +205,7 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 		}
 		for _, r := range records {
 			if r.Kind == sealrollup.KindMat || r.Kind == sealrollup.KindNone {
-				out = append(out, 0) // upto: the seal writes fallback windows only
+				out = binary.AppendUvarint(out, r.Upto)
 			}
 		}
 	}
@@ -385,11 +385,12 @@ func DecodeSlots(archive uint32, firstSlot int64, data []byte) ([]sealrollup.Rec
 
 // DecodeSlotsInto is DecodeSlots with caller-owned reusable scalar storage.
 // It returns what every per-slot reader resolves: of a run of versions, the
-// last Raw or Mat record of each physical slot; Ghosts, None records and
-// superseded versions are skipped, so slots strictly increase. Kinds are
-// cleared: the view equals what a part written without kinds decodes to.
+// last Raw record or seal-written Mat record (Upto 0) of each physical slot;
+// Ghosts, None records, windows a merge wrote down and superseded versions
+// are skipped, so slots strictly increase. Kinds are cleared: the view equals
+// what a part written without kinds decodes to.
 func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
-	rs, err := decodeRun(dst, archive, firstSlot, data, nil)
+	rs, err := decodeRun(dst, archive, firstSlot, data)
 	if err != nil {
 		return rs, err
 	}
@@ -398,7 +399,7 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 		kind := r.Kind
 		r.Kind = sealrollup.KindRaw
 		switch {
-		case kind != sealrollup.KindRaw && kind != sealrollup.KindMat:
+		case kind != sealrollup.KindRaw && (kind != sealrollup.KindMat || r.Upto != 0):
 		case len(live) > 0 && live[len(live)-1].Slot == r.Slot:
 			live[len(live)-1] = r
 		default:
@@ -408,33 +409,33 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	return live, nil
 }
 
+// DecodeRecordsInto returns every stored record version of a run, kinds and
+// Upto included, oldest version of a slot first: what a merge rewrites.
+func DecodeRecordsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
+	return decodeRun(dst, archive, firstSlot, data)
+}
+
 // DecodeVersionsInto returns every stored version of a run, the input of
-// sealrollup.Versions: Raw and Ghost orders become (batch, target archive)
-// ticks, a record's target archive being its own; a fallback Mat (upto 0)
-// loses ties to a window computed in its batch and bounds no event walk.
-// records is reusable scratch.
+// sealrollup.Versions (see sealrollup.Record.Version). records is reusable
+// scratch.
 func DecodeVersionsInto(dst []sealrollup.Version, records []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Version, []sealrollup.Record, error) {
-	var upto []uint64
-	records, err := decodeRun(records, archive, firstSlot, data, &upto)
+	records, err := decodeRun(records, archive, firstSlot, data)
 	if err != nil {
 		return dst, records, err
 	}
-	for i, r := range records {
-		dst = append(dst, r.Version(upto[i]))
+	for _, r := range records {
+		dst = append(dst, r.Version())
 	}
 	return dst, records, nil
 }
 
-// decodeRun decodes every record of a run. With upto, it also returns each
-// record's upto (0 for Raw, Ghost and runs without kinds).
-func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte, upto *[]uint64) ([]sealrollup.Record, error) {
+// decodeRun decodes every record of a run, Upto included (0 for Raw, Ghost
+// and runs without kinds).
+func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
 	if !bytes.HasPrefix(data, denseMagic) {
 		r, e := sealrollup.DecodeRecord(int(archive), firstSlot, data)
 		if e != nil {
 			return nil, e
-		}
-		if upto != nil {
-			*upto = append((*upto)[:0], 0)
 		}
 		return append(dst[:0], r), nil
 	}
@@ -585,9 +586,6 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 	for i := range rs {
 		rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
 	}
-	if upto != nil {
-		*upto = append((*upto)[:0], make([]uint64, len(rs))...)
-	}
 	if kinds {
 		nkinds := (len(rs) + 3) / 4
 		if len(p) < nkinds {
@@ -613,9 +611,7 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 			if !ok {
 				return nil, bad
 			}
-			if upto != nil {
-				(*upto)[i] = v
-			}
+			rs[i].Upto = v
 		}
 	}
 	tag := byte(valuePlanes)
@@ -813,16 +809,17 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	if err == nil {
 		err = w.flush()
 	}
-	if err == nil {
+	legacy := w.legacyKinds && len(value) > 4 && value[4]&denseExtended != 0
+	if err == nil && legacy {
+		// LegacyKinds re-encodes the run's per-slot view: winners, no kinds.
 		w.records, err = DecodeSlotsInto(w.records[:0], k.Archive, k.BlockStart, value)
+	} else if err == nil {
+		w.records, err = DecodeRecordsInto(w.records[:0], k.Archive, k.BlockStart, value)
 	}
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
 		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
-		// records is the run's per-slot view (winners, no kinds): re-encoding
-		// it, for LegacyKinds or predicted orders, drops superseded versions
-		// and kinds, as merges do until they write windows down.
-		legacy := w.legacyKinds && value[4]&denseExtended != 0
+		// A re-encode for predicted orders keeps every version and kind.
 		if legacy || w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
 			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.predictOrders && len(w.records) > 1)
 			w.encoded = value
@@ -837,6 +834,29 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 		}
 	}
 	w.records = w.records[:0]
+	w.err = err
+	return err
+}
+
+// SetVersionsEncoded writes the versions of one physical slot, oldest first,
+// as SetRecordEncoded writes one record: key is the slot's key and every
+// version is validated against it. A full run never splits them.
+func (w *DenseWriter) SetVersionsEncoded(key []byte, versions []sealrollup.Record) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	k, err := w.decodeInput(key)
+	for i := 0; err == nil && i < len(versions); i++ {
+		r := versions[i]
+		if k.Archive == MetadataArchive || k.Ordinal != 0 || r.Archive < 0 || uint64(r.Archive) != uint64(k.Archive) || r.Slot != k.BlockStart || !validSlotRecord(r) {
+			err = errors.New("dense slot versions do not match valid archive key")
+			break
+		}
+		err = w.appendRecord(key, k, r)
+	}
 	w.err = err
 	return err
 }
@@ -928,7 +948,7 @@ func (w *DenseWriter) set(key, value []byte) error {
 // appendRecord starts a run at key, or at k's formatted key when key is nil.
 func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error {
 	if w.legacyKinds {
-		if r.Kind != sealrollup.KindRaw && r.Kind != sealrollup.KindMat {
+		if r.Kind != sealrollup.KindRaw && (r.Kind != sealrollup.KindMat || r.Upto != 0) {
 			return nil
 		}
 		r.Kind = sealrollup.KindRaw

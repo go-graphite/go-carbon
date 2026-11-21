@@ -505,10 +505,15 @@ func TestForceMergeDifferential(t *testing.T) {
 		mergeAppend(t, e, order)
 	}
 	o := e.owners[0]
+	tiered := mergeDrain(t, o)
+	// Parts the tier merges have not reached yet (merges that keep record
+	// versions may tier everything above into one part).
+	for order := uint64(22); order <= 23; order++ {
+		mergeAppend(t, e, order)
+	}
 	pin := o.db.NewSnapshot()
 	want := mergeRead(t, pin)
 	_ = pin.Close()
-	tiered := mergeDrain(t, o)
 	before := mergeCount(o)
 	if before < 2 {
 		t.Fatalf("fixture leaves %d parts after %d tier merges", before, tiered)

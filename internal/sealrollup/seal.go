@@ -23,17 +23,21 @@ type Record struct {
 	Delta
 	Correction bool
 	Kind       Kind
+	// Upto is a Mat or None record's newest event order (a Tick) that its
+	// window accounts for; 0 for Raw and Ghost records and for the seal's
+	// fallback windows. Merges write it when they write windows down.
+	Upto uint64
 }
 
 // Kind says what a stored record version is. Raw is a point at the archive
 // its batch's admission clock routed it to, aligned to that archive's step.
 // Mat is a window value written down: the seal writes its closed windows as
-// fallback-only Mat records; merges will write windows down before dropping
-// superseded versions. Ghost is a point whose physical slot a later point of
+// fallback-only Mat records; merges write windows down (WriteDown) before
+// dropping superseded versions. Ghost is a point whose physical slot a later point of
 // the same batch (another epoch) took: an event, never a value. None is a
 // written-down absence: it bounds the event walk and never holds a value.
 // Readers that resolve one value per slot (every current reader) see only
-// Raw and Mat records; see v2part.DecodeSlotsInto.
+// Raw records and the seal's Mat records; see v2part.DecodeSlotsInto.
 type Kind uint8
 
 const (
