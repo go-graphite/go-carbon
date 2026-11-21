@@ -223,11 +223,6 @@ func (c *Cache) makeQueue() chan string {
 
 // The next deadline lets an empty queue sleep without rescanning deferred data.
 func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
-	queue, next, _ := c.makeQueuePlan(now)
-	return queue, next
-}
-
-func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	c.mu.Lock()
 	writeStrategy := c.writeStrategy
 	prevBuild := c.queueLastBuild
@@ -267,7 +262,7 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	if n == 0 {
 		// Keep the previous scratch and avoid allocating from empty tombstone
 		// tables. An arrival during this check wakes the next rebuild.
-		return nil, time.Time{}, false
+		return nil, time.Time{}
 	}
 	q, scratch := c.takeQueue(n, batch)
 	index := int32(0)
@@ -311,7 +306,6 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 		q = smaller
 	}
 
-	hasCold := false
 	switch writeStrategy {
 	case MaximumLength:
 		sort.Sort(sort.Reverse(byOrderKey(q)))
@@ -326,7 +320,6 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 					cut++
 				}
 			}
-			hasCold = cut < len(q)
 			sort.Sort(byOrderKey(q[:cut]))
 			sort.Sort(byOrderKey(q[cut:]))
 		} else {
@@ -341,7 +334,7 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	l := len(q)
 	if l == 0 {
 		c.releaseQueue(scratch, q)
-		return nil, next, false
+		return nil, next
 	}
 
 	ch := make(chan string, l)
@@ -371,14 +364,14 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 			}
 		}
 		c.releaseQueue(scratch, q)
-		return ch, next, hasCold
+		return ch, next
 	}
 	for _, i := range q {
 		ch <- i.metric
 	}
 
 	c.releaseQueue(scratch, q)
-	return ch, next, hasCold
+	return ch, next
 }
 
 // takeQueue reuses the previous rebuild's buffer. Batched queues reserve only

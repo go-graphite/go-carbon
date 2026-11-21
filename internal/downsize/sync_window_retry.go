@@ -214,7 +214,8 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 			revisit = append(revisit, group)
 		}
 	}
-	order = append(fresh, revisit...)
+	fresh = append(fresh, revisit...)
+	order = fresh
 	if err := s.beginPhase("window retry", 0, total); err != nil {
 		return err
 	}

@@ -111,3 +111,55 @@ func TestScopedDiscoveryMetadataError(t *testing.T) {
 	}
 	<-l.finished
 }
+
+// An empty destination needs neither a serving-archive digest nor per-name
+// metadata probes before copying all source names.
+func TestScopedDiscoveryEmptyTargetSkipsMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "names")
+	if err := os.WriteFile(path, []byte("a\nb\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b := &emptyTargetDiscovery{&metadataDiscovery{fakeSync: newFakeSync(), err: errors.New("must not probe empty target metadata")}}
+	s := &syncer{o: syncOptions{namesFile: path, to: syncT}, b: b}
+	l := s.startScopedList(context.Background(), syncT, "")
+	if err := l.advance(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-l.finished
+	if !l.done || b.calls.Load() != 0 {
+		t.Fatalf("empty destination did not skip metadata: done=%v calls=%d", l.done, b.calls.Load())
+	}
+}
+
+type emptyTargetDiscovery struct{ *metadataDiscovery }
+
+func (b *emptyTargetDiscovery) EmptyTarget(context.Context, string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.store(syncT).archives) == 0, nil
+}
+
+func (b *emptyTargetDiscovery) Info(ctx context.Context, origin string, names []string) (map[string][]syncArchive, error) {
+	if origin == syncT {
+		return nil, errors.New("empty target metadata must not be read")
+	}
+	return b.fakeSync.Info(ctx, origin, names)
+}
+func TestScopedDiscoveryEmptyTargetBulkCopies(t *testing.T) {
+	f := newFakeSync()
+	for _, n := range []string{"a", "b"} {
+		f.put(syncD1, n, syncTestSchema)
+	}
+	path := filepath.Join(t.TempDir(), "names")
+	if err := os.WriteFile(path, []byte("a\nb\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b := &emptyTargetDiscovery{&metadataDiscovery{fakeSync: f}}
+	o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), namesFile: path, streams: 2, batch: 500, maxRounds: 1, noVerify: true, includeShort: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+	if err := runSync(context.Background(), o, b); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.copies) != 1 || !reflect.DeepEqual(f.store(syncT).points, f.store(syncD1).points) {
+		t.Fatalf("not a complete bulk copy: %v", f.copies)
+	}
+}

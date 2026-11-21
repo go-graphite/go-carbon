@@ -40,6 +40,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/v2read"
+
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	_ "google.golang.org/grpc/encoding/gzip"
@@ -356,6 +358,10 @@ type CarbonserverListener struct {
 	realtimeIndex   int
 	newMetricsQueue *helper.MetricQueue
 
+	v2Admin      http.Handler
+	v2Reader     *v2read.Reader
+	v2Union      bool
+	v2Catalog    atomic.Pointer[v2CatalogBinding]
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
 	// Serializes index writers; readers use atomic trie links and publication.
@@ -2139,6 +2145,13 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	started := time.Now()
 	defer listener.logSlowGlobExpansion(logger, query, started, &matchedCount)
 
+	if binding := listener.v2Catalog.Load(); binding != nil {
+		response := listener.expandV2CatalogContext(ctx, binding, query)
+		matchedCount = len(response.Files)
+		resultCh <- response
+		return
+	}
+
 	if listener.trieIndex && listener.CurrentFileIndex() != nil {
 		files, leafs, nodes, lookups, err := listener.expandGlobsTrie(query)
 		resultCh <- &ExpandedGlobResponse{query, files, leafs, nodes, lookups, err}
@@ -2620,7 +2633,7 @@ func (listener *CarbonserverListener) checkRequestCtx(ctx context.Context) error
 }
 
 func (listener *CarbonserverListener) shouldBlockForIndex() bool {
-	return listener.NoServiceWhenIndexIsNotReady && listener.CurrentFileIndex() == nil
+	return listener.NoServiceWhenIndexIsNotReady && listener.v2Catalog.Load() == nil && listener.CurrentFileIndex() == nil
 }
 
 func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.HandlerFunc {
@@ -2889,6 +2902,9 @@ func (listener *CarbonserverListener) newHTTPMux() *http.ServeMux {
 	mux.HandleFunc("/forcescan", listener.forceScanHandler)
 	mux.HandleFunc("/admin/quota", listener.quotaHandler)
 	mux.HandleFunc("/admin/info", listener.adminInfoHandler)
+	if listener.v2Admin != nil {
+		mux.Handle("/admin/v2/", listener.v2Admin)
+	}
 	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "User-agent: *\nDisallow: /") })
 	return mux
 }
@@ -3314,4 +3330,10 @@ func (listener *CarbonserverListener) WaitForWarmup() {
 	if listener.indexWarmupDone != nil {
 		<-listener.indexWarmupDone
 	}
+}
+
+// SetV2Admin installs v2 administrative control (/admin/v2/) before the HTTP
+// listener starts.
+func (listener *CarbonserverListener) SetV2Admin(handler http.Handler) {
+	listener.v2Admin = handler
 }

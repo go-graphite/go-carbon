@@ -65,6 +65,9 @@ func TestStoreExpirationConfigDefaults(t *testing.T) {
 }
 
 func TestStoreExpirationSafetySettingsDoNotEnableExpiration(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Now()
 	app := &App{Config: NewConfig(), MetricStore: expirationTestDB(t, &now)}
 	// Even selecting reporting mode must not create an expiration policy.

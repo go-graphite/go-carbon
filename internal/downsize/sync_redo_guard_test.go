@@ -101,13 +101,13 @@ func TestRedoGuardImportExactMembershipAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.redo = newSyncRedoGuard(j)
-	if err := s.redoImport(context.Background(), syncD1, []string{"a", "b", "m", "z"}, "missing-batch"); err != nil {
+	if err := s.redoImport(syncD1, []string{"a", "b", "m", "z"}, "missing-batch"); err != nil {
 		t.Fatal(err)
 	}
 	if j.progress.RedoNames["import"] != 2 {
 		t.Fatalf("incorrect import redo: %v", j.progress.RedoNames)
 	}
-	if err := s.redoImport(context.Background(), syncD1, []string{"a"}, "fill"); err != nil {
+	if err := s.redoImport(syncD1, []string{"a"}, "fill"); err != nil {
 		t.Fatal(err)
 	}
 	if j.progress.RedoNames["import"] != 2 {
@@ -273,7 +273,7 @@ func TestRedoGuardInitialImportsRemainDoneAfterCheckpoint(t *testing.T) {
 	defer j.close()
 	j.checkpoint = &syncPhaseCheckpoint{}
 	s.redo = newSyncRedoGuard(j)
-	if err := s.redoImport(context.Background(), syncD1, []string{"a", "b"}, "missing-batch"); err != nil {
+	if err := s.redoImport(syncD1, []string{"a", "b"}, "missing-batch"); err != nil {
 		t.Fatal(err)
 	}
 	if j.progress.RedoNames["import"] != 2 {

@@ -336,16 +336,19 @@ func TestStartupSpoolReleaseCrashProcess(t *testing.T) {
 }
 
 func TestStartupSpoolReleaseCrashBitDifferential(t *testing.T) {
-	parallelTestMatrix(t) // Each crash stage owns independent files and globals.
+	// One fixture process owns the matrix; every stage still crashes a fresh
+	// child and recovers independent files. Avoid an extra wrapper per stage.
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, stage := range []string{"before_replay", "after_replay_before_persist", "after_confirm_before_sync", "after_persist", "after_unlink", "after_directory_sync", "after_release"} {
 		t.Run(stage, func(t *testing.T) {
 			if isolatedTestProcess(t) {
 				return
 			}
 			root := t.TempDir()
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartupSpoolReleaseCrashProcess$")
+			ctx := t.Context()
+			cmd := testCommand(t, "-test.run=^TestStartupSpoolReleaseCrashProcess$")
 			cmd.Env = append(os.Environ(), "SPOOL_RELEASE_CRASH_STAGE="+stage, "SPOOL_RELEASE_CRASH_ROOT="+root)
 			out, err := cmd.CombinedOutput()
 			var exit *exec.ExitError

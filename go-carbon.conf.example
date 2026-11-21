@@ -1511,3 +1511,29 @@ encoding-duration = "seconds"
 # encoding = "mixed"
 # encoding-time = "iso8601"
 # encoding-duration = "seconds"
+
+# Experimental canonical v2 writer. Restart-only; the mandatory producer log is
+# stored beneath path and synced once per second independently of [input-log].
+# Currently supports a fresh empty store with TCP + carbonserver only. Startup
+# refuses mixed classic roots, quota/expiry settings and other ingestion sinks.
+# Keep disabled until full lifecycle, placement and classic grouping qualification.
+[v2]
+# Verified immutable native conversion receipt directory. Installed atomically
+# before first admission; the installed root is self-contained on restart.
+# The fenced conversion plan must use Group="local".
+baseline-path = ""
+# Begin a new canary with shadow. Switch reads by restarting with
+# v2-serving-with-classic-dual-write; v2-only ends the classic rollback hold.
+# Empty mode preserves the existing v2-only behavior. See doc/v2-fallback.md.
+mode = ""
+enabled = false
+path = ""
+producers = 0                     # 0: one serial producer per current Go CPU
+shards = 0                        # 0: one immutable-part owner per producer
+# Restart-only time threshold; 0s also selects 10s. Size may seal earlier:
+# seal-max-rows is a runtime threshold; the hard owner limit is 2097152 rows.
+# One original application can cross the threshold. Rows are 32 bytes plus batches.
+# Pending reads publish every 1s; the mandatory input log still fsyncs every 1s.
+seal-interval = "10s"
+seal-max-rows = 131072
+read-budget-bytes = 268435456

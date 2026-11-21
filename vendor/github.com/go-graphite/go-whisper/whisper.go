@@ -1376,15 +1376,19 @@ func (whisper *Whisper) getPointOffset(start int, archive *archiveInfo) int64 {
 }
 
 func (whisper *Whisper) getBaseInterval(archive *archiveInfo) int {
-	if whisper.compressed {
-		return unpackInt(archive.buffer)
-	}
-
-	baseInterval, err := whisper.readInt(archive.Offset())
+	baseInterval, err := whisper.readBaseInterval(archive)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to read baseInterval: %s", err.Error()))
 	}
 	return baseInterval
+}
+
+// Read paths propagate storage failures instead of panicking on a short file.
+func (whisper *Whisper) readBaseInterval(archive *archiveInfo) (int, error) {
+	if whisper.compressed {
+		return unpackInt(archive.buffer), nil
+	}
+	return whisper.readInt(archive.Offset())
 }
 
 func (whisper *Whisper) lowerArchives(archive *archiveInfo) (lowerArchives []*archiveInfo) {
@@ -1583,7 +1587,11 @@ func (whisper *Whisper) fetchFromArchive(archive *archiveInfo, fromTime, untilTi
 			if sidecar, err := whisper.oooSidecar(false); err != nil {
 				return nil, err
 			} else if sidecar != nil {
-				populated = populated || sidecar.getBaseInterval(sidecar.archives[whisper.archiveIndexOf(archive)]) != 0
+				base, err := sidecar.readBaseInterval(sidecar.archives[whisper.archiveIndexOf(archive)])
+				if err != nil {
+					return nil, fmt.Errorf("read out-of-order base interval: %w", err)
+				}
+				populated = populated || base != 0
 			}
 			if populated {
 				untilInterval += archive.secondsPerPoint
@@ -1621,7 +1629,10 @@ func (whisper *Whisper) fetchFromArchive(archive *archiveInfo, fromTime, untilTi
 
 		return &TimeSeries{fromInterval, untilInterval, step, values}, nil
 	} else {
-		baseInterval := whisper.getBaseInterval(archive)
+		baseInterval, err := whisper.readBaseInterval(archive)
+		if err != nil {
+			return nil, fmt.Errorf("read archive base interval: %w", err)
+		}
 
 		if baseInterval == 0 {
 			step := archive.secondsPerPoint
