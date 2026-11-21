@@ -666,6 +666,17 @@ func (w *DenseWriter) LimitBytes(n uint64) { w.writer.out.limit = n }
 // only for parts a background merge rewrites; call before the first Set.
 func (w *DenseWriter) SealCompression() { w.writer.sst.(*denseSSTWriter).level = denseSealLevel }
 
+// IDKeyed makes this an ID-keyed part (GCI2 keys, descriptor schema 3) whose
+// IDs resolve at name dictionary generation (nonzero). Input then takes ID
+// keys or SetPlannedID* tuples. Requires IDKeys; call before the first Set.
+func (w *DenseWriter) IDKeyed(generation uint64) error {
+	if generation == 0 || !IDKeys.Load() || w.writer.records > 0 || w.havePrev || len(w.last) > 0 {
+		return errors.New("ID-keyed parts are switched off, or the writer has input")
+	}
+	w.writer.generation = generation
+	return nil
+}
+
 // SetExpiry records expiry bounds measured while streaming. Call before Close.
 func (w *DenseWriter) SetExpiry(minExpiry, maxExpiry int64) {
 	w.writer.spec.MinExpiry, w.writer.spec.MaxExpiry = minExpiry, maxExpiry
@@ -860,7 +871,7 @@ func (w *DenseWriter) AppendSlots(key, value []byte, records []sealrollup.Record
 	if w.err != nil {
 		return w.err
 	}
-	t := keyTail(w.writer.spec.Generation != 0)
+	t := keyTail(w.writer.generation != 0)
 	if len(records) == MaxDenseSlots && (len(w.records) == 0 || len(w.records) == MaxDenseSlots || w.records[0].Archive != records[0].Archive || !bytes.Equal(w.first[:len(w.first)-t], key[:max(len(key)-t, 0)])) {
 		return w.SetSlotsEncoded(key, value)
 	}
@@ -1042,8 +1053,8 @@ func (w *DenseWriter) setPlannedMetadata(k Key, err error, value []byte) error {
 	return err
 }
 
-// SetPlannedIDRecord is SetPlannedRecord for an ID-keyed writer (Spec.Generation
-// set): the metric is its vshard-local dictionary ID, and tuples sort by
+// SetPlannedIDRecord is SetPlannedRecord for an ID-keyed writer (IDKeyed):
+// the metric is its vshard-local dictionary ID, and tuples sort by
 // (vshard, ID, archive, slot).
 func (w *DenseWriter) SetPlannedIDRecord(vshard uint16, id uint32, r *sealrollup.Record) error {
 	if w.closed {
@@ -1082,7 +1093,7 @@ func (w *DenseWriter) SetPlannedIDMetadata(vshard uint16, id uint32, value []byt
 // and slot, and must fit GCI2 (archive below 255, slot below 2^32).
 func (w *DenseWriter) plannedIDKey(vshard uint16, id uint32, archive uint32, slot int64) (Key, error) {
 	s := w.writer.spec.Scope
-	if len(w.last) > 0 || w.writer.spec.Generation == 0 {
+	if len(w.last) > 0 || w.writer.generation == 0 {
 		return Key{}, errors.New("planned ID input needs an ID-keyed writer without encoded input")
 	}
 	if _, err := partsformat.AppendIDTail(nil, archive, slot, 0); err != nil {

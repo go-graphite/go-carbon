@@ -130,12 +130,16 @@ func idFixtureRecords(i int) []sealrollup.Record {
 // writeIDFixture writes ms (in its order) as a name-keyed part, or as an
 // ID-keyed part when generation is nonzero.
 func writeIDFixture(path string, spec Spec, ms []idFixtureMetric, generation uint64) (Descriptor, error) {
-	spec.Generation = generation
 	w, err := NewDenseWriter(path, spec)
 	if err != nil {
 		return Descriptor{}, err
 	}
 	defer w.Abort()
+	if generation != 0 {
+		if err := w.IDKeyed(generation); err != nil {
+			return Descriptor{}, err
+		}
+	}
 	for _, m := range ms {
 		i := int(m.id)
 		for _, r := range idFixtureRecords(i) {
@@ -225,8 +229,8 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id.Version != IDFileVersion || id.KeyVersion != IDKeyVersion || id.Generation != gen || nd.Version != GroupFileVersion || nd.Generation != 0 {
-		t.Fatalf("descriptors: name %d/%d/%d, ID %d/%d/%d", nd.Version, nd.KeyVersion, nd.Generation, id.Version, id.KeyVersion, id.Generation)
+	if id.Version != IDFileVersion || id.KeyVersion != IDKeyVersion || id.DictGeneration != gen || nd.Version != GroupFileVersion || nd.DictGeneration != 0 {
+		t.Fatalf("descriptors: name %d/%d/%d, ID %d/%d/%d", nd.Version, nd.KeyVersion, nd.DictGeneration, id.Version, id.KeyVersion, id.DictGeneration)
 	}
 	if id.Coverage.Names != uint64(len(ms)) || id.Coverage.Names != nd.Coverage.Names || id.Coverage.Records != nd.Coverage.Records {
 		t.Fatalf("coverage: name %+v, ID %+v", nd.Coverage, id.Coverage)
@@ -236,11 +240,11 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "Generation") != (d.Generation != 0) {
+		if strings.Contains(string(b), "DictGeneration") != (d.DictGeneration != 0) {
 			t.Fatalf("descriptor JSON: %s", b)
 		}
-		if p, err := ParseDescriptor(b); err != nil || p.Generation != d.Generation {
-			t.Fatal(p.Generation, err)
+		if p, err := ParseDescriptor(b); err != nil || p.DictGeneration != d.DictGeneration {
+			t.Fatal(p.DictGeneration, err)
 		}
 	}
 	want := logicalStream(t, namePath, nd, nil)
@@ -257,11 +261,16 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 
 	// Merge-style copy: runs through SetSlotsEncoded, envelopes as KVs.
 	copyPart := func(src string, d Descriptor, dst string) Descriptor {
-		w, err := NewDenseWriter(dst, spec2(spec, d.Generation))
+		w, err := NewDenseWriter(dst, spec)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer w.Abort()
+		if d.DictGeneration != 0 {
+			if err := w.IDKeyed(d.DictGeneration); err != nil {
+				t.Fatal(err)
+			}
+		}
 		err = Read(context.Background(), src, &d, func(k Key, v []byte) error {
 			b, err := Encode(k)
 			if err != nil {
@@ -308,7 +317,7 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 		t.Error("swapped dictionary IDs not detected")
 	}
 	for name, mutate := range map[string]func(*Descriptor){
-		"schema 3 without generation": func(d *Descriptor) { d.Generation = 0 },
+		"schema 3 without generation": func(d *Descriptor) { d.DictGeneration = 0 },
 		"key version 3 on ID part":    func(d *Descriptor) { d.KeyVersion = KeyVersion },
 		"schema 2 with generation":    func(d *Descriptor) { d.Version = GroupFileVersion },
 		"name first key":              func(d *Descriptor) { d.FirstKey = nd.FirstKey },
@@ -334,7 +343,7 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 	}
 	IDKeys.Store(true)
 	nameWithGen := nd
-	nameWithGen.Generation = gen
+	nameWithGen.DictGeneration = gen
 	if err := nameWithGen.Validate(); err == nil {
 		t.Error("GCP3 descriptor with a generation validated")
 	}
@@ -365,8 +374,11 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 			return w.SetPlannedIDRecord(1, 5, &r)
 		},
 	} {
-		w, err := NewDenseWriter(filepath.Join(dir, "bad.sst"), spec2(spec, gen))
+		w, err := NewDenseWriter(filepath.Join(dir, "bad.sst"), spec)
 		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.IDKeyed(gen); err != nil {
 			t.Fatal(err)
 		}
 		err = write(w)
@@ -389,11 +401,6 @@ func TestIDKeyedPartRoundTrip(t *testing.T) {
 		t.Error("ID input accepted by a name-keyed writer")
 	}
 	_ = w.Abort()
-}
-
-func spec2(s Spec, generation uint64) Spec {
-	s.Generation = generation
-	return s
 }
 
 // TestRekeyDense copies a donor's ID-keyed part into a live owner whose
@@ -484,9 +491,8 @@ func TestRekeyDense(t *testing.T) {
 	if _, err := writeRekeyedFixture(wantPath, ownerSpec, sorted(kept), names, owner.Generation()); err != nil {
 		t.Fatal(err)
 	}
-	ownerSpec.Generation = owner.Generation()
 	gotPath := filepath.Join(dir, "rekeyed.sst")
-	rd, err := RekeyDense(context.Background(), donorPath, dd, gotPath, ownerSpec, remap)
+	rd, err := RekeyDense(context.Background(), donorPath, dd, gotPath, ownerSpec, owner.Generation(), remap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,12 +501,12 @@ func TestRekeyDense(t *testing.T) {
 	if len(want) == 0 || !bytes.Equal(got, want) {
 		t.Fatalf("rekeyed part differs from the owner's own part (%d vs %d bytes)", len(got), len(want))
 	}
-	if rd.Coverage.Names != uint64(len(kept)) || rd.Generation != owner.Generation() {
-		t.Fatalf("rekeyed descriptor: %d names (want %d), generation %d", rd.Coverage.Names, len(kept), rd.Generation)
+	if rd.Coverage.Names != uint64(len(kept)) || rd.DictGeneration != owner.Generation() {
+		t.Fatalf("rekeyed descriptor: %d names (want %d), generation %d", rd.Coverage.Names, len(kept), rd.DictGeneration)
 	}
 	// Mutation: copying without the re-key resolves to other names.
 	identity := func(vshard uint16, id uint32) (uint32, bool) { _, ok := remap(vshard, id); return id, ok }
-	bad, err := RekeyDense(context.Background(), donorPath, dd, filepath.Join(dir, "identity.sst"), ownerSpec, identity)
+	bad, err := RekeyDense(context.Background(), donorPath, dd, filepath.Join(dir, "identity.sst"), ownerSpec, owner.Generation(), identity)
 	if err == nil {
 		if b, _ := os.ReadFile(filepath.Join(dir, "identity.sst")); bytes.Equal(b, want) || bad.SHA256 == rd.SHA256 {
 			t.Error("copy without re-key not detected")
@@ -515,12 +521,14 @@ func writeRekeyedFixture(path string, spec Spec, kept, names []idFixtureMetric, 
 	for _, m := range names {
 		donorID[m.name] = m.id
 	}
-	spec.Generation = generation
 	w, err := NewDenseWriter(path, spec)
 	if err != nil {
 		return Descriptor{}, err
 	}
 	defer w.Abort()
+	if err := w.IDKeyed(generation); err != nil {
+		return Descriptor{}, err
+	}
 	for _, m := range kept {
 		for _, r := range idFixtureRecords(int(donorID[m.name])) {
 			if err = w.SetPlannedIDRecord(m.vshard, m.id, &r); err != nil {

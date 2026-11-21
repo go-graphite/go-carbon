@@ -28,6 +28,9 @@ type Writer struct {
 		Set([]byte, []byte) error
 		Close() error
 	}
+	// generation is the dictionary generation of an ID-keyed writer; 0 for
+	// name keys (see DenseWriter.IDKeyed).
+	generation     uint64
 	first, last    []byte
 	lastName       Key
 	names, records uint64
@@ -146,7 +149,7 @@ func (w *Writer) setDecoded(key []byte, k Key, value []byte) error {
 	var err error
 	if !w.spec.Scope.contains(k) || (w.records > 0 && bytes.Compare(w.last, key) >= 0) {
 		err = errors.New("unsorted or foreign part key")
-	} else if k.ByID != (w.spec.Generation != 0) {
+	} else if k.ByID != (w.generation != 0) {
 		err = errors.New("part key generation does not match the writer")
 	}
 	if err == nil && !hasArchive(w.spec.Policies, k.Archive) {
@@ -210,8 +213,8 @@ func (w *Writer) Close() (Descriptor, error) {
 	if w.spec.Encoding == DenseEncoding {
 		d.Version = GroupFileVersion
 	}
-	if w.spec.Generation != 0 {
-		d.Version, d.KeyVersion, d.Generation = IDFileVersion, IDKeyVersion, w.spec.Generation
+	if w.generation != 0 {
+		d.Version, d.KeyVersion, d.DictGeneration = IDFileVersion, IDKeyVersion, w.generation
 	}
 	copy(d.SHA256[:], w.out.h.Sum(nil))
 	return d, d.Validate()
@@ -310,7 +313,7 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 		if e != nil {
 			return e
 		}
-		if records > 0 && k.ByID != lastName.ByID || expected != nil && k.ByID != (expected.Generation != 0) || k.ByID && !IDKeys.Load() {
+		if records > 0 && k.ByID != lastName.ByID || expected != nil && k.ByID != (expected.DictGeneration != 0) || k.ByID && !IDKeys.Load() {
 			return errors.New("mixed part key generations")
 		}
 		if records == 0 {

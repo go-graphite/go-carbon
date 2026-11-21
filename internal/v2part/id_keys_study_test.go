@@ -72,12 +72,17 @@ func idKeysRealPart(t *testing.T, path string, seal bool) {
 		def := []byte(fmt.Sprintf(`{"archive":%d}`, a))
 		spec.Policies = append(spec.Policies, ArchivePolicy{Archive: a, Digest: sha256.Sum256(def), Definition: def})
 	}
-	write := func(out string, spec Spec, recs []realRec) int64 {
+	write := func(out string, generation uint64, recs []realRec) int64 {
 		w, err := NewDenseWriter(out, spec)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer w.Abort()
+		if generation != 0 {
+			if err := w.IDKeyed(generation); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if seal {
 			w.SealCompression()
 		}
@@ -101,7 +106,7 @@ func idKeysRealPart(t *testing.T, path string, seal bool) {
 	dir := t.TempDir()
 	in, _ := os.ReadFile(path)
 	namePath := filepath.Join(dir, "names.sst")
-	nameBytes := write(namePath, spec, recs)
+	nameBytes := write(namePath, 0, recs)
 	same, _ := os.ReadFile(namePath)
 	if !bytes.Equal(same, in) {
 		t.Logf("note: GCP3 rewrite is %d B, input %d B (not byte-identical)", len(same), len(in))
@@ -147,10 +152,8 @@ func idKeysRealPart(t *testing.T, path string, seal bool) {
 	slices.SortStableFunc(idRecs, func(a, b realRec) int {
 		return cmp.Or(cmp.Compare(a.key.VShard, b.key.VShard), cmp.Compare(a.key.Local, b.key.Local))
 	})
-	idSpec := spec
-	idSpec.Generation = dict.Generation()
 	idPath := filepath.Join(dir, "ids.sst")
-	idBytes := write(idPath, idSpec, idRecs)
+	idBytes := write(idPath, dict.Generation(), idRecs)
 	// Round trip through the dictionary.
 	i := 0
 	var mismatch error

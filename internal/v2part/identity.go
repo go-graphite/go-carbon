@@ -30,12 +30,12 @@ const GroupFileVersion = 2
 
 // IDFileVersion is the descriptor schema of ID-keyed dense group files: their
 // keys are GCI2 (IDKeyVersion) and the descriptor records the dictionary
-// Generation its IDs need. Readers dispatch per file on the schema.
+// generation its IDs need (DictGeneration). Readers dispatch per file on the schema.
 const IDFileVersion = 3
 const IDKeyVersion = 2
 
 // IDKeys switches ID-keyed parts on. Off (the default), writers refuse
-// Spec.Generation and descriptors of schema IDFileVersion fail validation, so
+// IDKeyed and descriptors of schema IDFileVersion fail validation, so
 // this build accepts exactly the parts the previous one did, and no ID-keyed
 // part can reach a reader that only seeks name keys. The seal turns it on
 // once core reads resolve IDs through the name dictionary.

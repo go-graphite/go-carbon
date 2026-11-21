@@ -8,22 +8,26 @@ import (
 )
 
 // RekeyDense rewrites the ID-keyed dense part at src (descriptor d) as a new
-// ID-keyed part at dst under spec, mapping every record's ID through remap:
+// ID-keyed part at dst under spec and the target dictionary's generation,
+// mapping every record's ID through remap:
 // the streaming rewrite that copies a replica's parts into a live owner,
 // whose dictionary assigned the same names other IDs (v2dict Rekey). Records
 // whose ID remap rejects (deleted or unknown names) are dropped. Values are
 // copied byte for byte. Records re-sort by their new IDs one vshard at a
 // time, so only one vshard's records are buffered, and the output equals the
 // part a seal of the same records under the new IDs writes.
-func RekeyDense(ctx context.Context, src string, d Descriptor, dst string, spec Spec, remap func(vshard uint16, id uint32) (uint32, bool)) (Descriptor, error) {
-	if d.Generation == 0 || spec.Generation == 0 {
-		return Descriptor{}, errors.New("rekey needs ID-keyed input and output")
+func RekeyDense(ctx context.Context, src string, d Descriptor, dst string, spec Spec, generation uint64, remap func(vshard uint16, id uint32) (uint32, bool)) (Descriptor, error) {
+	if d.DictGeneration == 0 {
+		return Descriptor{}, errors.New("rekey needs an ID-keyed part")
 	}
 	w, err := NewDenseWriter(dst, spec)
 	if err != nil {
 		return Descriptor{}, err
 	}
 	defer w.Abort()
+	if err = w.IDKeyed(generation); err != nil {
+		return Descriptor{}, err
+	}
 	type rec struct {
 		id         uint32
 		key        Key
