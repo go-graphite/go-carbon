@@ -48,8 +48,10 @@ type syncCommand struct {
 	config         savedSyncConfig
 	jwtSecret      string
 	goCarbonConfig string
-	rate           int64
-	timeout        time.Duration
+	// jwtSecretConfig is the go-carbon config the default --jwt-secret came from.
+	jwtSecretConfig string
+	rate            int64
+	timeout         time.Duration
 }
 
 func parseSyncCommand(args []string) (syncCommand, error) {
@@ -66,7 +68,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only timeout, streams, rate and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", "", "buckyd JWT signing secret file; tokens refresh automatically before expiry (default: [buckyd] auth-jwt-secret-file from --config, else "+hostJWTSecretPath+")")
-	flags.StringVar(&c.goCarbonConfig, "config", defaultGoCarbonConfig, "local go-carbon config read for the default --jwt-secret")
+	flags.StringVar(&c.goCarbonConfig, "config", "", "local go-carbon config read for the default --jwt-secret (default: the -config of the running go-carbon, else "+defaultGoCarbonConfig+")")
 	flags.Bool("ready", false, "run the final READY attestation (off by default)")
 	c.copy.streams, c.copy.progressInterval = defaultSyncStreams, defaultSyncProgress
 	flags.Lookup("streams").DefValue, flags.Lookup("progress-interval").DefValue = strconv.Itoa(defaultSyncStreams), defaultSyncProgress.String()
@@ -108,7 +110,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	c.ready.noReady = flags.Lookup("ready").Value.String() != "true"
 	if c.jwtSecret == "" {
-		c.jwtSecret = defaultJWTSecretPath(c.goCarbonConfig)
+		c.jwtSecret, c.jwtSecretConfig = defaultJWTSecretPath(c.goCarbonConfig, "/proc")
 	}
 	if c.timeout < 0 {
 		return c, errors.New("--timeout must be nonnegative")
@@ -285,8 +287,9 @@ func SyncMain(ctx context.Context, args []string) error {
 	// The same cache serves discovery, native exports, verification and copy.
 	auth := &hostTokenCache{readSecret: func() ([]byte, error) { return os.ReadFile(c.jwtSecret) }}
 	if _, err := auth.get(c.jwtSecret); err != nil {
-		return fmt.Errorf("JWT secret file %s (--jwt-secret, else auth-jwt-secret-file from --config %s): %w", c.jwtSecret, c.goCarbonConfig, err)
+		return fmt.Errorf("JWT secret file %s (--jwt-secret, else auth-jwt-secret-file from --config or the running go-carbon config; found in %q): %w", c.jwtSecret, c.jwtSecretConfig, err)
 	}
+	event("sync_jwt_secret", map[string]any{"path": c.jwtSecret, "from_config": c.jwtSecretConfig})
 	c.copy.auth, c.live.auth = auth, auth
 	c.live.authOrigins = append(append([]string(nil), c.sync.from...), c.sync.to)
 	if c.ready.proofBlock != "" && !c.ready.noReady {

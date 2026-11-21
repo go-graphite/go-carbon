@@ -232,9 +232,10 @@ original flags once alongside `--resume`; the tool checks the journal identity
 and saves the configuration for subsequent resumes.
 
 Sync signs its own buckyd JWT using `--jwt-secret`. Without it, the path comes from
-`[buckyd] auth-jwt-secret-file` in the local go-carbon config (`--config`, default
-`/etc/go-carbon/go-carbon.conf`), falling back to `/etc/go-carbon/buckyd_api_jwt_secret`
-when the config or key is missing. A failing read names the path it tried. The shared signer renews its four-hour
+`[buckyd] auth-jwt-secret-file` in the local go-carbon config: `--config` when given,
+else the `-config` of the running go-carbon process, else `/etc/go-carbon/go-carbon.conf`,
+falling back to `/etc/go-carbon/buckyd_api_jwt_secret` when no config names a secret.
+The `sync_jwt_secret` event logs the path and the config it came from; a failing read names the path it tried. The shared signer renews its four-hour
 token hourly at request time, including after idle phases. It rereads the secret
 file on renewal. Only the secret path is saved; tokens and signing keys remain in
 memory. A token-minting wrapper or `BUCKYD_TOKEN` is unnecessary for sync.

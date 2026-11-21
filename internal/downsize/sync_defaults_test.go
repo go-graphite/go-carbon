@@ -29,8 +29,41 @@ func TestSyncDefaultsNoFlags(t *testing.T) {
 	if err := os.WriteFile(empty, []byte("[common]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := defaultJWTSecretPath(empty); got != hostJWTSecretPath {
+	if got, _ := defaultJWTSecretPath(empty, t.TempDir()); got != hostJWTSecretPath {
 		t.Fatal(got)
+	}
+}
+
+// Without --config the secret comes from the running go-carbon's -config.
+func TestSyncJWTSecretFromRunningGoCarbon(t *testing.T) {
+	t.Parallel()
+	dir, proc := t.TempDir(), t.TempDir()
+	cfg := filepath.Join(dir, "candidate.conf")
+	if err := os.WriteFile(cfg, []byte("[buckyd]\nauth-jwt-secret-file = \"/run/secret\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for pid, argv := range map[string]string{
+		"7":    "/usr/bin/storectl\x00-config\x00/nope\x00",
+		"40":   "/opt/go-carbon/go-carbon-canary\x00--config=" + filepath.Join(dir, "absent.conf") + "\x00",
+		"42":   "/opt/go-carbon/go-carbon\x00-config\x00" + cfg + "\x00",
+		"self": "/opt/go-carbon/go-carbon\x00-config=/nope\x00",
+	} {
+		if err := os.MkdirAll(filepath.Join(proc, pid), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte(argv), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := runningGoCarbonConfigs(proc); len(got) != 2 || got[0] != filepath.Join(dir, "absent.conf") || got[1] != cfg {
+		t.Fatalf("running configs %q", got)
+	}
+	if secret, from := defaultJWTSecretPath("", proc); secret != "/run/secret" || from != cfg {
+		t.Fatalf("secret %q from %q", secret, from)
+	}
+	// An explicit --config is the only candidate.
+	if secret, from := defaultJWTSecretPath(filepath.Join(dir, "missing.conf"), proc); secret != hostJWTSecretPath || from != "" {
+		t.Fatalf("explicit config: secret %q from %q", secret, from)
 	}
 }
 
