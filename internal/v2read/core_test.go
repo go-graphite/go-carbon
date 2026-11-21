@@ -17,7 +17,7 @@ import (
 )
 
 func testConfig() v2core.Config {
-	return v2core.Config{Rollups: true, AppendParts: true, JournalIdentity: "read-test", Shards: 1, Owners: 1, Producers: 1, MaxRows: 1 << 20, PartitionSeconds: 86400, RawCodec: "run1"}
+	return v2core.Config{PublishInterval: time.Nanosecond, Rollups: true, AppendParts: true, JournalIdentity: "read-test", Shards: 1, Owners: 1, Producers: 1, MaxRows: 1 << 20, PartitionSeconds: 86400, RawCodec: "run1"}
 }
 func await(t *testing.T, f func() bool) {
 	t.Helper()

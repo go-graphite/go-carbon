@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestPendingRowsSelectByID(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Each step checks whatever the owner has published: seal completions
-		// publish at once, the rest on the owner's 1 s timer. Every 25th step
+		// publish at once, the rest on the owner's publish interval. Every 25th step
 		// waits for its own batches so timed publications are covered too.
 		last := batches[len(batches)-1]
 		await(t, func() bool {
@@ -72,10 +73,7 @@ func TestPendingRowsSelectByID(t *testing.T) {
 			b, _, _ := g.view.Application(g.view.Len() - 1)
 			return b.Order >= last.Order
 		})
-		g := reader.owners[0].Load()
-		if !g.retain() {
-			t.Fatal("retain")
-		}
+		g := pinOwner(t, reader, 0)
 		g.view.IDs(0, g.view.Len(), func(_ int, _ uint64, cold *v2core.Batch) bool {
 			if cold == nil {
 				rowViews++
@@ -153,10 +151,7 @@ func TestPendingByIDSecondIDFailsLoudly(t *testing.T) {
 		g := reader.owners[0].Load()
 		return g != nil && g.view.Len() > 0
 	})
-	g := reader.owners[0].Load()
-	if !g.retain() {
-		t.Fatal("retain")
-	}
+	g := pinOwner(t, reader, 0)
 	_, err = g.forNames(context.Background(), []string{name}, &reader.stages)
 	g.release()
 	if err == nil || err.Error() != "pending identity/policy mismatch" {
@@ -169,4 +164,20 @@ func TestPendingByIDSecondIDFailsLoudly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "multiple producer IDs") {
 		t.Fatalf("seal of a name under a second ID: %v, want the owner to refuse it", err)
 	}
+}
+
+// pinOwner retains the owner's current generation as Reader.FetchMany does.
+// A retain fails only when a publication swapped the loaded generation out and
+// released it, so the next load sees its successor; a plain load-then-retain
+// fataled under load. The retry bound only turns a broken swap into a failure.
+func pinOwner(t *testing.T, r *Reader, owner int) *generation {
+	t.Helper()
+	for range 10000 {
+		if g := r.owners[owner].Load(); g != nil && g.retain() {
+			return g
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("no retainable generation")
+	return nil
 }
