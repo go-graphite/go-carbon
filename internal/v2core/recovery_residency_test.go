@@ -33,7 +33,7 @@ func TestReducerRecoveryKeepsOnlySourceArchives(t *testing.T) {
 		}
 		defer iter.Close()
 		series := map[partsformat.ID]*rollupScanEntry{}
-		if err := foldRollupKeys(iter, &PolicyCatalog{}, series, reducerOnly); err != nil {
+		if err := foldRollupKeys(iter, &PolicyCatalog{}, series, reducerOnly, false); err != nil {
 			t.Fatal(err)
 		}
 		return series

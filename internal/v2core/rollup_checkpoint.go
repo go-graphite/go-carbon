@@ -373,7 +373,7 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 		if err != nil {
 			return nil, err
 		}
-		err = foldRollupKeys(iter, identities, series, true)
+		err = foldRollupKeys(iter, identities, series, true, false)
 		if err = errors.Join(err, iter.Close()); err != nil {
 			return nil, errCheckpoint
 		}
