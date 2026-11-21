@@ -91,9 +91,8 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 	if got := p.catalog.Count(); got != 3 || o.names.Len() != 3 {
 		t.Fatalf("catalog names=%d table=%d, want 3", got, o.names.Len())
 	}
-	ids := p.applicationIDs[:len(names)]
 	for i, name := range names {
-		if got, _ := p.catalog.Key(ids[i]); got != name {
+		if got, _ := p.catalog.Key(p.applicationFrames[i].ID); got != name {
 			t.Fatalf("point %d (%q) journaled as %q", i, name, got)
 		}
 	}
@@ -258,7 +257,7 @@ func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 		t.Fatalf("refused=%d catalog=%d table=%d, want 3, 2, 2", len(refused), p.catalog.Count(), o.names.Len())
 	}
 	for i, want := range []string{"ok.a", "ok.a", "ok.b"} {
-		if got, _ := p.catalog.Key(p.applicationIDs[i]); got != want {
+		if got, _ := p.catalog.Key(p.applicationFrames[i].ID); got != want {
 			t.Fatalf("appended point %d journaled as %q, want %q", i, got, want)
 		}
 	}
