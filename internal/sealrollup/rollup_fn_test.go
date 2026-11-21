@@ -176,115 +176,18 @@ func (f *Versions) image() map[key]Sample {
 	return out
 }
 
-// merge drops every superseded version (all but the physical-slot winner).
-// Before that it materializes each coarse window a dropped version feeds, and
-// the windows above it, from the full pre-merge store. It returns the number
-// of dropped and materialized records.
+// merge is a merge of the whole store (WriteDown); it returns the number of
+// dropped and materialized records.
 func (f *Versions) merge() (dropped, materialized int) {
-	f.index()
-	drop := map[int]bool{}
-	for _, m := range f.bySlot {
-		for _, idx := range m {
-			win := idx[0]
-			for _, i := range idx[1:] {
-				r, b := f.recs[i], f.recs[win]
-				if r.Time == b.Time && r.Order == b.Order {
-					if r.Mat && !b.Mat {
-						win = i
-					}
-				} else if newer(r.Order, !r.Mat, r.Time, b.Order, !b.Mat, b.Time) {
-					win = i
-				}
-			}
-			for _, i := range idx {
-				if i != win {
-					drop[i] = true
-				}
-			}
-		}
-	}
-	for i, r := range f.recs {
-		if r.Ghost {
-			drop[i] = true
-		}
-	}
-	if len(drop) == 0 {
-		return 0, 0
-	}
-	// A dropped version changes the history of its slot. Every window whose
-	// event walk can read that slot (the parents of every epoch the slot held,
-	// at every level above) is materialized first, value or absence, and so on
-	// for the slots of those parents.
-	type lslot struct {
-		l int
-		s int64
-	}
-	need := map[[2]int64]bool{}
-	seen := map[lslot]bool{}
-	var queue []lslot
-	addParents := func(l int, t int64) {
-		for a := l + 1; a < len(f.c.Archives); a++ {
-			w := align(t, f.c.Archives[a].Step)
-			need[[2]int64{int64(a), w}] = true
-			if k := (lslot{a, slot(w, f.c.Archives[a])}); !seen[k] {
-				seen[k] = true
-				queue = append(queue, k)
-			}
-		}
-	}
-	for i := range drop {
-		r := f.recs[i]
-		addParents(r.Archive, r.Time)
-		if k := (lslot{r.Archive, slot(r.Time, f.c.Archives[r.Archive])}); !r.Ghost && !seen[k] {
-			seen[k] = true
-			queue = append(queue, k)
-		}
-	}
-	for len(queue) > 0 {
-		k := queue[0]
-		queue = queue[1:]
-		for w := range f.wins[k.l][k.s] {
-			addParents(k.l, w)
-		}
-	}
-	top := uint64(math.MaxUint64)
-	var mats []Version
-	for k := range need {
-		a, w := int(k[0]), k[1]
-		v := f.valueAt(a, w, top)
-		upto := uint64(0)
-		if ev := f.events[a][w]; len(ev) > 0 {
-			upto = ev[len(ev)-1]
-		}
-		if d, ok := f.stored(a, w, top); ok {
-			upto = max(upto, d.Upto)
-		}
-		if u, ok := f.absent[k]; ok {
-			upto = max(upto, u)
-		}
-		if !v.ok {
-			if upto > 0 {
-				mats = append(mats, Version{Archive: a, Time: w, Order: upto, Upto: upto, None: true})
-			}
-			continue
-		}
-		upto = max(upto, v.s.Sequence)
-		mats = append(mats, Version{Archive: a, Time: w, Bits: v.s.Bits, Order: v.s.Sequence, Upto: upto, Mat: true})
-	}
-	// Older absence markers of a window are superseded by the newest.
-	for i, r := range f.recs {
-		if r.None && (need[[2]int64{int64(r.Archive), r.Time}] || r.Upto < f.absent[[2]int64{int64(r.Archive), r.Time}]) {
-			drop[i] = true
-		}
-	}
+	keep, mats := WriteDown(f.c, f.recs, nil)
 	kept := f.recs[:0:0]
 	for i, r := range f.recs {
-		if !drop[i] {
+		if keep[i] {
 			kept = append(kept, r)
 		}
 	}
 	f.recs = append(kept, mats...)
-	return len(drop), len(mats)
+	return len(keep) - len(kept), len(mats)
 }
 
 // ---- corpora ----
@@ -1153,9 +1056,11 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 // openStores are the part contents the open-window read is measured on. seal
 // is what PlanClosedInto writes (one version per slot per batch, Ghosts,
 // closed windows as fallback Mat records), read through Record.Version, and
-// must match Whisper on every slot. parts+batches-fallback models it with
+// must match Whisper on every slot; so must seal+merged, the same parts after
+// a merge of every part so far at every second seal (WriteDown, its windows
+// through the stored record form). parts+batches-fallback models it with
 // guessed kinds and a stronger fallback order.
-var openStores = []string{"c3", "seal", "parts", "parts+batches", "parts+batches-fallback"}
+var openStores = []string{"c3", "seal", "seal+merged", "parts", "parts+batches", "parts+batches-fallback"}
 
 func TestOpenWindowRead(t *testing.T) {
 	gens := []func() fnCorpus{fnHandoff, fnDigest, fnHistory, fnSlim, fnRank, fnBackground}
@@ -1172,7 +1077,7 @@ func TestOpenWindowRead(t *testing.T) {
 			t.Parallel()
 			stores := openStores
 			if testing.Short() {
-				stores = stores[:2]
+				stores = stores[:3]
 			}
 			for _, store := range stores {
 				var slots, readOK, projectOK, worse int
@@ -1199,7 +1104,7 @@ func TestOpenWindowRead(t *testing.T) {
 				if store == "c3" && readOK != slots {
 					t.Errorf("%s: open-window read misses %d of %d slots; first: %.3000s", corpus.name, slots-readOK, slots, firstMiss)
 				}
-				if store == "seal" && readOK != slots {
+				if (store == "seal" || store == "seal+merged") && readOK != slots {
 					t.Errorf("%s: open-window read of sealed parts misses %d of %d slots (%d where ProjectOpen matches); first: %.3000s", corpus.name, slots-readOK, slots, worse, firstMiss)
 				}
 			}
@@ -1285,9 +1190,24 @@ func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int
 		switch store {
 		case "c3":
 			stored = append(stored, rawPart(c, seal)...)
-		case "seal":
+		case "seal", "seal+merged":
 			for _, r := range got.Records {
-				stored = append(stored, r.Version(0))
+				stored = append(stored, r.Version())
+			}
+			if store == "seal+merged" && si%2 == 1 {
+				// A merge of every part so far, its windows through the
+				// stored record form.
+				keep, mats := WriteDown(c, stored, nil)
+				kept := stored[:0:0]
+				for i, v := range stored {
+					if keep[i] {
+						kept = append(kept, v)
+					}
+				}
+				for _, v := range mats {
+					kept = append(kept, v.Record(c).Version())
+				}
+				stored = kept
 			}
 		case "parts":
 			stored = append(stored, recordVersions(c, got.Winners())...)

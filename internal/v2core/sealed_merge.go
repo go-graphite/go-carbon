@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -499,7 +500,14 @@ var mergePartID = func(id *v2part.PartID) error {
 // retire is the owner's age-retirement clock (retireClock): a record is dropped
 // only when its expiry precedes it, as whole-part retirement would, so a merge
 // never removes a record the reader still returns.
-func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (v2part.Descriptor, error) {
+	return mergeParts(ctx, dir, path, inputs, retire, true, stop)
+}
+
+// mergeParts is mergePartFiles; prefix says the inputs hold their scope's
+// oldest part, so every version at or below their newest order: only such a
+// merge writes windows down and drops the versions they carry (mergeVersions).
+func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, prefix bool, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
@@ -588,6 +596,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	var shards []uint16
 	var members []*mergeCursor
 	var records mergeRecordHeap
+	var versions mergeVersions
 	var key, metaBytes []byte
 	var config sealrollup.Config
 	var expiry expiryBounds
@@ -638,8 +647,29 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 			expiry.data(rollupRecordExpiry(config, winner))
 			return writer.SetRecordEncoded(key, winner)
 		}
+		versioned, e := versions.merge(members, config, metadata, retire, prefix)
+		if e != nil {
+			return v2part.Descriptor{}, e
+		}
+		for i := 0; i < len(versioned); {
+			j := i + 1
+			for j < len(versioned) && versioned[j].Archive == versioned[i].Archive {
+				j++
+			}
+			for _, r := range versioned[i:j] {
+				expiry.data(rollupRecordExpiry(config, r))
+			}
+			setSlot(uint32(versioned[i].Archive), versioned[i].Slot)
+			if err = writer.AppendVersions(key, versioned[i:j]); err != nil {
+				return v2part.Descriptor{}, err
+			}
+			i = j
+		}
 		records = records[:0]
 		for _, input := range members {
+			if versioned != nil {
+				break
+			}
 			valid, e := input.advanceRecord(true)
 			if e != nil {
 				return v2part.Descriptor{}, e
@@ -804,7 +834,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, retire, stop)
+	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, o.oldestInScope(inputs), stop)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
@@ -930,4 +960,167 @@ func (o *coreOwner) observeSealedMergeBudget() error {
 		o.gc.mergeOverBudgetSeals.Add(1)
 	}
 	return nil
+}
+
+// oldestInScope reports whether inputs, sequence-adjacent parts of one scope,
+// hold that scope's oldest part: no part of the scope from the owner's source
+// starts at a lower order. Parts from another source (moves, imports) carry
+// their windows as materialized values and are outside the merge's view.
+func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
+	first := inputs[0].Source.MinOrder
+	for _, d := range inputs {
+		first = min(first, d.Source.MinOrder)
+	}
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			return false
+		}
+		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.Incarnation == o.partSource.Incarnation && d.Source.Stream == o.partSource.Stream && d.Source.MinOrder < first {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeVersions merges one name whose inputs carry record versions: a run
+// with kinds (versions, ghosts, windows), or a physical slot more than one
+// input holds. A prefix merge writes windows down (sealrollup.WriteDown) and
+// then drops superseded versions, ghosts and expired records; any other merge
+// keeps every version but expired ones, so a later prefix merge still sees
+// them. Rollups stay a pure function of the stored records. Each slot keeps
+// the winner the per-slot readers chose before as its last Raw or seal Mat
+// record, so their renders do not change; written-down windows are visible to
+// the version reader only. Scratch is reused across names.
+type mergeVersions struct {
+	records, block, out []sealrollup.Record
+	from                []int // records[i]'s input
+	versions            []sealrollup.Version
+	view                []int // records the write-down sees (live incarnation)
+	keep, gone, last    []bool
+	seen                map[[2]int64]int // (archive, slot) -> winner index
+}
+
+// merge returns the name's output records sorted by (archive, slot), or nil
+// when no input carries versions (the per-slot merge then runs unchanged).
+func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
+	// clear costs the map's capacity: drop a map one large name grew.
+	if m.seen == nil || len(m.records) > 4096 {
+		m.seen = map[[2]int64]int{}
+	}
+	clear(m.seen)
+	m.records, m.from = m.records[:0], m.from[:0]
+	versioned := false
+	for mi, c := range members {
+		for _, b := range c.blocks {
+			var err error
+			if m.block, err = v2part.DecodeRecordsInto(m.block[:0], b.archive, b.slot, c.arena[b.start:b.end]); err != nil {
+				return nil, err
+			}
+			for _, r := range m.block {
+				if r.Archive >= len(config.Archives) {
+					return nil, errors.New("merge archive outside policy")
+				}
+				k := [2]int64{int64(r.Archive), r.Slot}
+				if _, ok := m.seen[k]; ok || r.Kind != sealrollup.KindRaw {
+					versioned = true
+				}
+				m.seen[k] = len(m.records)
+				m.records = append(m.records, r)
+				m.from = append(m.from, mi)
+			}
+		}
+	}
+	if !versioned {
+		return nil, nil
+	}
+	recs := m.records
+	dead := func(r sealrollup.Record) bool { return metadata.Expired || r.Order <= metadata.ResetOrder }
+	expired := func(r sealrollup.Record) bool { return rollupRecordExpiry(config, r) < retire }
+	// The per-slot winner, as the per-slot merge picks it: of each input's
+	// per-slot view (its last Raw or seal Mat record of a slot), the live
+	// record with the greatest time, then order.
+	clear(m.seen)
+	for i, r := range recs {
+		if r.Kind != sealrollup.KindRaw && (r.Kind != sealrollup.KindMat || r.Upto != 0) || dead(r) || expired(r) {
+			continue
+		}
+		k := [2]int64{int64(r.Archive), r.Slot}
+		w, ok := m.seen[k]
+		if !ok || m.from[w] == m.from[i] {
+			m.seen[k] = i
+			continue
+		}
+		b := recs[w]
+		newer, err := newerOrigin(partOrigin{Class: LivePart}, r, partOrigin{Class: LivePart}, b)
+		if err != nil {
+			return nil, err
+		}
+		if !newer && r.Sample.Time == b.Sample.Time && r.Order == b.Order && r.Delta != b.Delta {
+			return nil, errors.New("conflicting merge replacement order")
+		}
+		if newer {
+			m.seen[k] = i
+		}
+	}
+	m.keep = append(m.keep[:0], make([]bool, len(recs))...)
+	var mats []sealrollup.Version
+	if prefix {
+		// The write-down sees the live incarnation; a reset deletes the rest.
+		m.versions, m.view, m.gone = m.versions[:0], m.view[:0], m.gone[:0]
+		for i, r := range recs {
+			if !dead(r) {
+				m.versions = append(m.versions, r.Version())
+				m.view = append(m.view, i)
+				m.gone = append(m.gone, expired(r))
+			}
+		}
+		var keep []bool
+		keep, mats = sealrollup.WriteDown(config, m.versions, func(i int) bool { return m.gone[i] })
+		for j, i := range m.view {
+			m.keep[i] = keep[j]
+		}
+	} else {
+		for i, r := range recs {
+			m.keep[i] = !dead(r) && !expired(r)
+		}
+	}
+	m.out, m.last = m.out[:0], m.last[:0]
+	for i, r := range recs {
+		w, ok := m.seen[[2]int64{int64(r.Archive), r.Slot}]
+		if win := ok && w == i; m.keep[i] || win {
+			m.out = append(m.out, r)
+			m.last = append(m.last, win)
+		}
+	}
+	for _, v := range mats {
+		if r := v.Record(config); !dead(r) && !expired(r) {
+			m.out = append(m.out, r)
+			m.last = append(m.last, false)
+		}
+	}
+	// Sort by (archive, slot), the per-slot winner last in its slot.
+	sort.Stable(versionOrder{m.out, m.last})
+	return m.out, nil
+}
+
+type versionOrder struct {
+	recs []sealrollup.Record
+	last []bool
+}
+
+func (v versionOrder) Len() int { return len(v.recs) }
+func (v versionOrder) Less(i, j int) bool {
+	a, b := v.recs[i], v.recs[j]
+	if a.Archive != b.Archive || a.Slot != b.Slot {
+		return mergeSlotLess(a, b)
+	}
+	return !v.last[i] && v.last[j]
+}
+func (v versionOrder) Swap(i, j int) {
+	v.recs[i], v.recs[j] = v.recs[j], v.recs[i]
+	v.last[i], v.last[j] = v.last[j], v.last[i]
 }
