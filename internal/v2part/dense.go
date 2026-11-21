@@ -819,12 +819,10 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
 		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
+		// records is the run's per-slot view (winners, no kinds): re-encoding
+		// it, for LegacyKinds or predicted orders, drops superseded versions
+		// and kinds, as merges do until they write windows down.
 		legacy := w.legacyKinds && value[4]&denseExtended != 0
-		if legacy {
-			for i := range w.records {
-				w.records[i].Kind = sealrollup.KindRaw
-			}
-		}
 		if legacy || w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
 			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.predictOrders && len(w.records) > 1)
 			w.encoded = value
