@@ -46,7 +46,7 @@ func TestSealPlanFrontierCorrections(t *testing.T) {
 			t.Fatal("correction did not recompute full bucket")
 		}
 		got, e := DecodeRecord(r.Archive, r.Slot, EncodeRecord(r))
-		if e != nil || got != r {
+		if got.Kind = r.Kind; e != nil || got != r {
 			t.Fatalf("record round trip %+v %+v %v", r, got, e)
 		}
 	}
@@ -97,7 +97,7 @@ func TestSealPlanMatrix(t *testing.T) {
 					}
 					for _, r := range p.Records {
 						got, e := DecodeRecord(r.Archive, r.Slot, EncodeRecord(r))
-						if e != nil || got != r {
+						if got.Kind = r.Kind; e != nil || got != r {
 							t.Fatal("codec", e)
 						}
 						install(state, []Delta{got.Delta})

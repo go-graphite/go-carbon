@@ -1,13 +1,13 @@
 package sealrollup
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"math/rand"
 	randv2 "math/rand/v2"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -21,9 +21,9 @@ import (
 //
 //   - fnCurrent: current records only (newest per physical slot), no history:
 //     what a stateless read-time rollup over fully merged parts would see.
-//   - fnStore over all versions: a coarse window is the value of its newest
+//   - Versions over all versions: a coarse window is the value of its newest
 //     successful Whisper event, its finer slots resolved as of that event.
-//   - fnStore after merges: before a merge drops superseded versions it writes
+//   - Versions after merges: before a merge drops superseded versions it writes
 //     the windows whose history they carry as materialized records (a value or
 //     an absence, with the newest event order it covers).
 //
@@ -39,51 +39,21 @@ import (
 // current v2 path (PlanClosedInto + ProjectOpen), on the six differential
 // corpora and a randomized property corpus.
 
-// rawRec is one stored record. Raw records come from seals. mat records are
-// materialized coarse values written by merges: order is the write order of the
-// value (it competes for the physical slot with it), upto is the newest event
-// order of its window that the value already accounts for.
-type rawRec struct {
-	archive     int
-	time        int64
-	bits        uint64
-	order, upto uint64
-	mat         bool
-	// ghost is a point whose physical slot a later point of the same batch
-	// (another epoch) took. It is never a value, but Whisper still propagated
-	// its window in that batch, so it is an event there.
-	ghost bool
-	// none is a materialized absence: as of upto the window had no value. It
-	// only bounds the event walk; it never competes for a slot.
-	none bool
-}
-
 // rawPart is one seal's part: every batch routed by its own admission clock
 // and aligned, with the Whisper order inside the batch (stable by time, then
 // source sequence; the last write of a physical slot wins). The part keeps one
 // record per (physical slot, batch); only merges drop superseded versions, so
 // a merge, not the seal, decides when an older version may go.
-func rawPart(c Config, batches []Batch) []rawRec {
-	var out []rawRec
+func rawPart(c Config, batches []Batch) []Version {
+	var out []Version
 	for _, b := range batches {
 		out = append(out, rawBatch(c, b)...)
 	}
 	return out
 }
 
-// fnTick orders sub-steps of one batch. Whisper applies a batch one target
-// archive at a time, ascending: archive j's writes and their propagation see
-// direct writes of the same batch to archives <= j only. A record's order is
-// therefore (batch order, target archive).
-func fnTick(order uint64, archive int) uint64 {
-	if archive >= 16 {
-		panic("too many archives for fnTick")
-	}
-	return order<<4 | uint64(archive)
-}
-
 // rawBatch routes and aligns one batch; the last write of a physical slot wins.
-func rawBatch(c Config, b Batch) []rawRec {
+func rawBatch(c Config, b Batch) []Version {
 	points := slices.Clone(b.Points)
 	slices.SortStableFunc(points, func(a, z Sample) int {
 		if a.Time != z.Time {
@@ -92,7 +62,7 @@ func rawBatch(c Config, b Batch) []rawRec {
 		return cmpInt(a.Sequence, z.Sequence)
 	})
 	last := map[key]int{}
-	var recs, ghosts []rawRec
+	var recs, ghosts []Version
 	for _, p := range points {
 		target := -1
 		for j, r := range c.Archives {
@@ -107,12 +77,12 @@ func rawBatch(c Config, b Batch) []rawRec {
 		a := c.Archives[target]
 		t := align(p.Time, a.Step)
 		k := key{target, slot(t, a)}
-		tick := fnTick(b.Order, target)
-		r := rawRec{archive: target, time: t, bits: p.Bits, order: tick, upto: tick}
+		tick := Tick(b.Order, target)
+		r := Version{Archive: target, Time: t, Bits: p.Bits, Order: tick, Upto: tick}
 		if i, ok := last[k]; ok {
-			if recs[i].time != t {
+			if recs[i].Time != t {
 				g := recs[i]
-				g.ghost = true
+				g.Ghost = true
 				ghosts = append(ghosts, g)
 			}
 			recs[i] = r
@@ -134,35 +104,20 @@ func cmpInt[T int64 | uint64 | int](a, b T) int {
 	return 0
 }
 
-// newer reports whether a (order, stored, time) wins a physical slot over b.
-// Greatest order wins. In one batch Whisper applies the higher target archive
-// after the lower archive's propagation, so a stored record beats a computed
-// one of the same order; between equals the later (greater) time was written
-// last in the ascending pass.
-func newer(ao uint64, as bool, at int64, bo uint64, bs bool, bt int64) bool {
-	if ao != bo {
-		return ao > bo
-	}
-	if as != bs {
-		return as
-	}
-	return at > bt
-}
-
 // fnCurrent derives every archive from current records alone.
-func fnCurrent(c Config, recs []rawRec) map[key]Sample {
+func fnCurrent(c Config, recs []Version) map[key]Sample {
 	type entry struct {
 		s      Sample
 		stored bool
 	}
 	img := map[key]entry{}
 	for _, r := range recs {
-		if r.ghost {
+		if r.Ghost {
 			continue
 		}
-		k := key{r.archive, slot(r.time, c.Archives[r.archive])}
-		if old, ok := img[k]; !ok || newer(r.order, true, r.time, old.s.Sequence, true, old.s.Time) {
-			img[k] = entry{Sample{r.time, r.bits, r.order}, true}
+		k := key{r.Archive, slot(r.Time, c.Archives[r.Archive])}
+		if old, ok := img[k]; !ok || newer(r.Order, true, r.Time, old.s.Sequence, true, old.s.Time) {
+			img[k] = entry{Sample{r.Time, r.Bits, r.Order}, true}
 		}
 	}
 	for a := 1; a < len(c.Archives); a++ {
@@ -200,228 +155,7 @@ func fnCurrent(c Config, recs []rawRec) map[key]Sample {
 	return out
 }
 
-// fnStore evaluates coarse windows from every stored version.
-type fnStore struct {
-	c      Config
-	recs   []rawRec
-	orders []uint64                       // distinct stored orders, ascending
-	bySlot []map[int64][]int              // level -> physical slot -> stored records
-	wins   []map[int64]map[int64]bool     // level -> physical slot -> window starts with events/records
-	events []map[int64][]uint64           // level -> window start -> distinct raw orders below the level inside it
-	absent map[[2]int64]uint64            // (level, window) -> newest absence marker
-	passes map[uint64][]rawRec            // tick -> raw records (and ghosts) its pass wrote
-	memoC  map[[2]uint64]bool             // (tick, level) -> the pass wrote at that level
-	memoV  map[[3]int64]fnValue           // (level, window, asOf)
-	memoS  map[[3]int64]fnValue           // (level, slot, asOf)
-	stats  struct{ walks, deepWalks int } // events evaluated beyond the newest one
-}
-
-type fnValue struct {
-	s      Sample // Sequence is the write order
-	stored bool
-	ok     bool
-}
-
-func (f *fnStore) index() {
-	n := len(f.c.Archives)
-	f.bySlot = make([]map[int64][]int, n)
-	f.wins = make([]map[int64]map[int64]bool, n)
-	f.events = make([]map[int64][]uint64, n)
-	for l := range n {
-		f.bySlot[l], f.wins[l], f.events[l] = map[int64][]int{}, map[int64]map[int64]bool{}, map[int64][]uint64{}
-	}
-	addWin := func(l int, w int64) {
-		s := slot(w, f.c.Archives[l])
-		if f.wins[l][s] == nil {
-			f.wins[l][s] = map[int64]bool{}
-		}
-		f.wins[l][s][w] = true
-	}
-	f.orders = f.orders[:0]
-	f.absent = map[[2]int64]uint64{}
-	f.passes = map[uint64][]rawRec{}
-	f.memoC = map[[2]uint64]bool{}
-	for i, r := range f.recs {
-		if !r.mat && !r.none {
-			f.passes[r.order] = append(f.passes[r.order], r)
-		}
-		s := slot(r.time, f.c.Archives[r.archive])
-		if r.none {
-			k := [2]int64{int64(r.archive), r.time}
-			f.absent[k] = max(f.absent[k], r.upto)
-			f.orders = append(f.orders, r.upto)
-			addWin(r.archive, r.time)
-			continue
-		}
-		if !r.ghost {
-			f.bySlot[r.archive][s] = append(f.bySlot[r.archive][s], i)
-			addWin(r.archive, r.time)
-		}
-		f.orders = append(f.orders, r.order)
-		for a := r.archive + 1; a < n; a++ {
-			w := align(r.time, f.c.Archives[a].Step)
-			addWin(a, w)
-			if !r.mat {
-				f.events[a][w] = append(f.events[a][w], r.order)
-			}
-		}
-	}
-	slices.Sort(f.orders)
-	f.orders = slices.Compact(f.orders)
-	for a := range f.events {
-		for w, ev := range f.events[a] {
-			slices.Sort(ev)
-			f.events[a][w] = slices.Compact(ev)
-		}
-	}
-	f.memoV, f.memoS = map[[3]int64]fnValue{}, map[[3]int64]fnValue{}
-}
-
-// norm maps asOf to the newest stored order at or below it, so equal stored
-// prefixes share memo entries.
-func (f *fnStore) norm(asOf uint64) uint64 {
-	i := sort.Search(len(f.orders), func(i int) bool { return f.orders[i] > asOf })
-	if i == 0 {
-		return 0
-	}
-	return f.orders[i-1]
-}
-
-// stored returns the newest stored record of window w at level a at or before
-// asOf (raw direct write or materialized value).
-func (f *fnStore) stored(a int, w int64, asOf uint64) (rawRec, bool) {
-	var best rawRec
-	has := false
-	for _, i := range f.bySlot[a][slot(w, f.c.Archives[a])] {
-		r := f.recs[i]
-		if r.time != w || r.order > asOf {
-			continue
-		}
-		if !has || r.order > best.order || r.order == best.order && r.mat {
-			best, has = r, true
-		}
-	}
-	return best, has
-}
-
-// valueAt is the Whisper value of coarse window w at level a after every event
-// with order <= asOf: the newest event whose visible finer slots pass XFF, or
-// the stored record when it was written at/after that event. Failed XFF keeps
-// the older value, so the walk continues to older events.
-func (f *fnStore) valueAt(a int, w int64, asOf uint64) fnValue {
-	asOf = f.norm(asOf)
-	mk := [3]int64{int64(a), w, int64(asOf)}
-	if v, ok := f.memoV[mk]; ok {
-		return v
-	}
-	d, hasD := f.stored(a, w, asOf)
-	ev := f.events[a][w]
-	result := fnValue{}
-	stop := uint64(0)
-	if hasD {
-		result = fnValue{Sample{d.time, d.bits, d.order}, !d.mat, true}
-		stop = d.upto
-	}
-	if u, ok := f.absent[[2]int64{int64(a), w}]; ok && u <= asOf {
-		stop = max(stop, u)
-	}
-	first := true
-	for j := len(ev) - 1; j >= 0; j-- {
-		o := ev[j]
-		if o > asOf {
-			continue
-		}
-		if o <= stop {
-			break
-		}
-		if !f.chain(a, o) {
-			continue
-		}
-		if !first {
-			f.stats.deepWalks++
-		}
-		first = false
-		f.stats.walks++
-		samples := f.inputsAt(a-1, w, f.c.Archives[a].Step, o)
-		if p, ok := AggregateWindow(f.c, a, w, samples); ok {
-			p.Sequence = o
-			result = fnValue{p, false, true}
-			break
-		}
-	}
-	f.memoV[mk] = result
-	return result
-}
-
-// chain is Whisper's propagation stop: a pass reaches level a only if it wrote
-// some window at every level between its target archive and a.
-func (f *fnStore) chain(a int, tick uint64) bool {
-	pass := f.passes[tick]
-	if len(pass) == 0 {
-		return true
-	}
-	for l := pass[0].archive + 1; l < a; l++ {
-		mk := [2]uint64{tick, uint64(l)}
-		wrote, ok := f.memoC[mk]
-		if !ok {
-			step := f.c.Archives[l].Step
-			for _, r := range pass {
-				if v := f.valueAt(l, align(r.time, step), tick); v.ok && !v.stored && v.s.Sequence == tick {
-					wrote = true
-					break
-				}
-			}
-			f.memoC[mk] = wrote
-		}
-		if !wrote {
-			return false
-		}
-	}
-	return true
-}
-
-// inputsAt returns level l's visible winners inside [w, w+span) at order o.
-func (f *fnStore) inputsAt(l int, w, span int64, o uint64) []Sample {
-	al := f.c.Archives[l]
-	var samples []Sample
-	for ts := w; ts < w+span; ts += al.Step {
-		if v := f.slotAt(l, slot(ts, al), o); v.ok && v.s.Time == ts {
-			samples = append(samples, v.s)
-		}
-	}
-	return samples
-}
-
-// slotAt is the content of physical slot s at level l after events <= o.
-func (f *fnStore) slotAt(l int, s int64, o uint64) fnValue {
-	o = f.norm(o)
-	mk := [3]int64{int64(l), s, int64(o)}
-	if v, ok := f.memoS[mk]; ok {
-		return v
-	}
-	best := fnValue{}
-	consider := func(v fnValue) {
-		if v.ok && (!best.ok || newer(v.s.Sequence, v.stored, v.s.Time, best.s.Sequence, best.stored, best.s.Time)) {
-			best = v
-		}
-	}
-	for _, i := range f.bySlot[l][s] {
-		// A materialized value competes for its slot as the computed value it
-		// stands for; a raw direct write of the same batch was applied later.
-		if r := f.recs[i]; r.order <= o {
-			consider(fnValue{Sample{r.time, r.bits, r.order}, !r.mat, true})
-		}
-	}
-	if l > 0 {
-		for w := range f.wins[l][s] {
-			consider(f.valueAt(l, w, o))
-		}
-	}
-	f.memoS[mk] = best
-	return best
-}
-
-func (f *fnStore) image() map[key]Sample {
+func (f *Versions) image() map[key]Sample {
 	f.index()
 	top := uint64(math.MaxUint64)
 	out := map[key]Sample{}
@@ -446,7 +180,7 @@ func (f *fnStore) image() map[key]Sample {
 // Before that it materializes each coarse window a dropped version feeds, and
 // the windows above it, from the full pre-merge store. It returns the number
 // of dropped and materialized records.
-func (f *fnStore) merge() (dropped, materialized int) {
+func (f *Versions) merge() (dropped, materialized int) {
 	f.index()
 	drop := map[int]bool{}
 	for _, m := range f.bySlot {
@@ -454,11 +188,11 @@ func (f *fnStore) merge() (dropped, materialized int) {
 			win := idx[0]
 			for _, i := range idx[1:] {
 				r, b := f.recs[i], f.recs[win]
-				if r.time == b.time && r.order == b.order {
-					if r.mat && !b.mat {
+				if r.Time == b.Time && r.Order == b.Order {
+					if r.Mat && !b.Mat {
 						win = i
 					}
-				} else if newer(r.order, !r.mat, r.time, b.order, !b.mat, b.time) {
+				} else if newer(r.Order, !r.Mat, r.Time, b.Order, !b.Mat, b.Time) {
 					win = i
 				}
 			}
@@ -470,7 +204,7 @@ func (f *fnStore) merge() (dropped, materialized int) {
 		}
 	}
 	for i, r := range f.recs {
-		if r.ghost {
+		if r.Ghost {
 			drop[i] = true
 		}
 	}
@@ -500,8 +234,8 @@ func (f *fnStore) merge() (dropped, materialized int) {
 	}
 	for i := range drop {
 		r := f.recs[i]
-		addParents(r.archive, r.time)
-		if k := (lslot{r.archive, slot(r.time, f.c.Archives[r.archive])}); !r.ghost && !seen[k] {
+		addParents(r.Archive, r.Time)
+		if k := (lslot{r.Archive, slot(r.Time, f.c.Archives[r.Archive])}); !r.Ghost && !seen[k] {
 			seen[k] = true
 			queue = append(queue, k)
 		}
@@ -514,7 +248,7 @@ func (f *fnStore) merge() (dropped, materialized int) {
 		}
 	}
 	top := uint64(math.MaxUint64)
-	var mats []rawRec
+	var mats []Version
 	for k := range need {
 		a, w := int(k[0]), k[1]
 		v := f.valueAt(a, w, top)
@@ -523,23 +257,23 @@ func (f *fnStore) merge() (dropped, materialized int) {
 			upto = ev[len(ev)-1]
 		}
 		if d, ok := f.stored(a, w, top); ok {
-			upto = max(upto, d.upto)
+			upto = max(upto, d.Upto)
 		}
 		if u, ok := f.absent[k]; ok {
 			upto = max(upto, u)
 		}
 		if !v.ok {
 			if upto > 0 {
-				mats = append(mats, rawRec{archive: a, time: w, order: upto, upto: upto, none: true})
+				mats = append(mats, Version{Archive: a, Time: w, Order: upto, Upto: upto, None: true})
 			}
 			continue
 		}
 		upto = max(upto, v.s.Sequence)
-		mats = append(mats, rawRec{archive: a, time: w, bits: v.s.Bits, order: v.s.Sequence, upto: upto, mat: true})
+		mats = append(mats, Version{Archive: a, Time: w, Bits: v.s.Bits, Order: v.s.Sequence, Upto: upto, Mat: true})
 	}
 	// Older absence markers of a window are superseded by the newest.
 	for i, r := range f.recs {
-		if r.none && (need[[2]int64{int64(r.archive), r.time}] || r.upto < f.absent[[2]int64{int64(r.archive), r.time}]) {
+		if r.None && (need[[2]int64{int64(r.Archive), r.Time}] || r.Upto < f.absent[[2]int64{int64(r.Archive), r.Time}]) {
 			drop[i] = true
 		}
 	}
@@ -960,7 +694,7 @@ func sameSlot(a, b map[key][2]uint64, k key) bool {
 }
 
 // classify names the Whisper rule fnCurrent misses for one coarse slot.
-func classify(c Config, recs []rawRec, want, cur map[key][2]uint64, k key) string {
+func classify(c Config, recs []Version, want, cur map[key][2]uint64, k key) string {
 	w := int64(want[k][0])
 	if _, ok := want[k]; !ok {
 		w = int64(cur[k][0])
@@ -973,30 +707,30 @@ func classify(c Config, recs []rawRec, want, cur map[key][2]uint64, k key) strin
 		}
 	}
 	// A version inside the window whose physical slot now holds another stamp.
-	newest := map[key]rawRec{}
+	newest := map[key]Version{}
 	for _, r := range recs {
-		if r.ghost {
+		if r.Ghost {
 			continue
 		}
-		pk := key{r.archive, slot(r.time, c.Archives[r.archive])}
-		if o, ok := newest[pk]; !ok || r.order > o.order || r.order == o.order && r.time > o.time {
+		pk := key{r.Archive, slot(r.Time, c.Archives[r.Archive])}
+		if o, ok := newest[pk]; !ok || r.Order > o.Order || r.Order == o.Order && r.Time > o.Time {
 			newest[pk] = r
 		}
 	}
 	for _, r := range recs {
-		if r.ghost && r.archive < a && align(r.time, c.Archives[a].Step) == w {
+		if r.Ghost && r.Archive < a && align(r.Time, c.Archives[a].Step) == w {
 			return "same-batch slot takeover (ghost event)"
 		}
 	}
 	for _, r := range recs {
-		if !r.ghost && r.archive < a && align(r.time, c.Archives[a].Step) == w {
-			if n := newest[key{r.archive, slot(r.time, c.Archives[r.archive])}]; n.time != r.time {
+		if !r.Ghost && r.Archive < a && align(r.Time, c.Archives[a].Step) == w {
+			if n := newest[key{r.Archive, slot(r.Time, c.Archives[r.Archive])}]; n.Time != r.Time {
 				return "partial finer expiry (superseded input)"
 			}
 		}
 	}
 	for _, r := range recs {
-		if !r.ghost && r.archive == a && r.time == w {
+		if !r.Ghost && r.Archive == a && r.Time == w {
 			return "direct coarse write"
 		}
 	}
@@ -1016,8 +750,8 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 	eager, deferred := map[key]Sample{}, map[key]Sample{}
 	var old, frontier Frontier
 	var through int64
-	var store []rawRec
-	merged := &fnStore{c: c}
+	var store []Version
+	merged := &Versions{c: c}
 	for si, seal := range m.seals {
 		if len(seal) == 0 {
 			continue
@@ -1035,7 +769,7 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 		}
 		// The engine resolves a physical slot by the greatest record order across
 		// parts (later part on ties), not by install sequence.
-		for _, r := range got.Records {
+		for _, r := range got.Winners() {
 			k := key{r.Archive, r.Slot}
 			if o, ok := deferred[k]; !ok || r.Order >= o.Sequence {
 				s := r.Sample
@@ -1057,7 +791,7 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 			st.mat += n
 		}
 		current := logical(fnCurrent(c, store))
-		all := &fnStore{c: c, recs: store}
+		all := &Versions{c: c, recs: store}
 		versions := logical(all.image())
 		mergedImg := logical(merged.image())
 		st.walks += all.stats.walks + merged.stats.walks
@@ -1200,7 +934,7 @@ func TestRollupAsFunctionProperty(t *testing.T) {
 
 // fnImages runs one metric and calls check after every seal with the eager
 // Whisper image and the images under test.
-func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, closed, versions, merged map[key][2]uint64, store []rawRec) bool) {
+func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, closed, versions, merged map[key][2]uint64, store []Version) bool) {
 	c := m.cfg
 	p, err := Prepare(c)
 	if err != nil {
@@ -1210,8 +944,8 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 	eager, deferred := map[key]Sample{}, map[key]Sample{}
 	var old, frontier Frontier
 	var through int64
-	var store []rawRec
-	mg := &fnStore{c: c}
+	var store []Version
+	mg := &Versions{c: c}
 	for si, seal := range m.seals {
 		if len(seal) == 0 {
 			continue
@@ -1227,7 +961,7 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 		for _, r := range want.Records {
 			install(eager, []Delta{r.Delta})
 		}
-		for _, r := range got.Records {
+		for _, r := range got.Winners() {
 			k := key{r.Archive, r.Slot}
 			if o, ok := deferred[k]; !ok || r.Order >= o.Sequence {
 				s := r.Sample
@@ -1242,7 +976,7 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 		if mergeRng.IntN(3) == 0 {
 			mg.merge()
 		}
-		all := &fnStore{c: c, recs: store}
+		all := &Versions{c: c, recs: store}
 		if !check(si, logical(eager), logical(projectOpenImage(c, deferred, frontier.MaxTime, through)), logical(all.image()), logical(mg.image()), store) {
 			return
 		}
@@ -1345,7 +1079,7 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 		for seed := uint64(1); seed <= 8 && found < fnMinCases; seed++ {
 			for _, m := range fnRandom(seed, 60).metrics {
 				miss := func(m fnMetric) (hit bool) {
-					fnImages(m, 1, func(_ int, w, c, v, mg map[key][2]uint64, _ []rawRec) bool {
+					fnImages(m, 1, func(_ int, w, c, v, mg map[key][2]uint64, _ []Version) bool {
 						keys := map[key]bool{}
 						for _, img := range []map[key][2]uint64{w, c, v, mg} {
 							for k := range img {
@@ -1367,7 +1101,7 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 				}
 				small := fnMinimize(m, miss)
 				var detail []string
-				fnImages(small, 1, func(si int, w, c, v, mg map[key][2]uint64, _ []rawRec) bool {
+				fnImages(small, 1, func(si int, w, c, v, mg map[key][2]uint64, _ []Version) bool {
 					for k := range w {
 						if k.archive > 0 && bad(w, c, v, mg, k) {
 							detail = append(detail, fmt.Sprintf("seal%d a%d slot%d whisper%v closed%v versions%v merged%v", si, k.archive, k.slot, w[k], c[k], v[k], mg[k]))
@@ -1393,6 +1127,285 @@ func TestRollupAsFunctionMinimize(t *testing.T) {
 					break
 				}
 			}
+		}
+	}
+}
+
+// Open-window read (arch-review step C3a). The read computes a coarse slot
+// that is not materialized with SlotValue over the versions WindowRanges
+// selects. Three part contents are compared with eager Whisper on every open
+// coarse window after every seal, with ProjectOpen (the rule the read would
+// replace) counted alongside:
+//
+//   - c3: what a sort + encode seal stores (rawPart: one version per slot per
+//     batch, ghosts, (batch, target archive) orders, no seal-computed
+//     windows). The read must be exact here: this is the gate.
+//   - parts: what the current seal stores (PlanClosedInto records, one per
+//     slot per seal, batch orders, closed windows indistinguishable from
+//     direct writes), mapped with recordVersions. Reported only.
+//   - parts+batches: the current seal's records plus every per-batch version
+//     and ghost (a kind bit tells its computed windows from direct writes).
+//     Reported only.
+//   - parts+batches-fallback: as parts+batches, but a seal-computed window is
+//     a fallback only: it bounds no event walk and loses order ties to the
+//     computed value. Reported only.
+//
+// openStores are the part contents the open-window read is measured on. seal
+// is what PlanClosedInto writes (one version per slot per batch, Ghosts,
+// closed windows as fallback Mat records), read through Record.Version, and
+// must match Whisper on every slot. parts+batches-fallback models it with
+// guessed kinds and a stronger fallback order.
+var openStores = []string{"c3", "seal", "parts", "parts+batches", "parts+batches-fallback"}
+
+func TestOpenWindowRead(t *testing.T) {
+	gens := []func() fnCorpus{fnHandoff, fnDigest, fnHistory, fnSlim, fnRank, fnBackground}
+	seeds := []uint64{1, 2, 3, 4, 5, 6, 7, 8}
+	if testing.Short() {
+		seeds = []uint64{3, 8}
+	}
+	for _, seed := range seeds {
+		gens = append(gens, func() fnCorpus { return fnRandom(seed, 60) })
+	}
+	for _, gen := range gens {
+		corpus := gen()
+		t.Run(corpus.name, func(t *testing.T) {
+			t.Parallel()
+			stores := openStores
+			if testing.Short() {
+				stores = stores[:2]
+			}
+			for _, store := range stores {
+				var slots, readOK, projectOK, worse int
+				var firstMiss string
+				for _, m := range corpus.metrics {
+					openWindowRead(t, m, store, func(si, a int, o openOutcome) {
+						slots++
+						if o.projectOK() {
+							projectOK++
+						}
+						if o.readOK() {
+							readOK++
+							return
+						}
+						if o.projectOK() {
+							worse++
+						}
+						if firstMiss == "" {
+							firstMiss = fmt.Sprintf("%s m%d xff%g seal%d a%d whisper%v read%v history %+v", ladderString(m.cfg), m.cfg.Method, m.cfg.XFilesFactor, si, a, o.want, o.read, m.seals[:si+1])
+						}
+					})
+				}
+				t.Logf("RESULT open-window store=%s corpus=%s slots=%d read_vs_whisper=%s projectopen_vs_whisper=%s read_misses_where_projectopen_matches=%d", store, corpus.name, slots, pct(readOK, slots), pct(projectOK, slots), worse)
+				if store == "c3" && readOK != slots {
+					t.Errorf("%s: open-window read misses %d of %d slots; first: %.3000s", corpus.name, slots-readOK, slots, firstMiss)
+				}
+				if store == "seal" && readOK != slots {
+					t.Errorf("%s: open-window read of sealed parts misses %d of %d slots (%d where ProjectOpen matches); first: %.3000s", corpus.name, slots-readOK, slots, worse, firstMiss)
+				}
+			}
+		})
+	}
+}
+
+// openOutcome is one open coarse window's physical slot: eager Whisper, the
+// read under test and ProjectOpen, each as (time, bits) and presence.
+type openOutcome struct {
+	want, read, project      [2]uint64
+	wantOK, readHas, projHas bool
+}
+
+func (o openOutcome) readOK() bool    { return o.readHas == o.wantOK && o.read == o.want }
+func (o openOutcome) projectOK() bool { return o.projHas == o.wantOK && o.project == o.want }
+
+// recordVersions maps current-format records to versions: a record's target
+// archive is its own; a coarse record whose batch order equals a finer
+// record's inside its window counts as a window the seal computed (at the
+// finer target's sub-step) and is no event. The format carries neither the
+// target archive nor the kind, so this is a best guess.
+func recordVersions(c Config, recs []Record) []Version {
+	type event struct {
+		a int
+		w int64
+		o uint64
+	}
+	finer := map[event]bool{}
+	for _, r := range recs {
+		for a := r.Archive + 1; a < len(c.Archives); a++ {
+			finer[event{a, align(r.Sample.Time, c.Archives[a].Step), r.Order}] = true
+		}
+	}
+	out := make([]Version, len(recs))
+	for i, r := range recs {
+		v := Version{Archive: r.Archive, Time: r.Sample.Time, Bits: r.Sample.Bits, Order: Tick(r.Order, r.Archive)}
+		if r.Archive > 0 && finer[event{r.Archive, r.Sample.Time, r.Order}] {
+			v.Order, v.Mat = Tick(r.Order, r.Archive-1), true
+		}
+		v.Upto = v.Order
+		out[i] = v
+	}
+	return out
+}
+
+// openWindowRead seals m with the current seal, keeps the part content store
+// names, and calls check for each open coarse window after every seal.
+func openWindowRead(t *testing.T, m fnMetric, store string, check func(si, a int, o openOutcome)) {
+	t.Helper()
+	c := m.cfg
+	p, err := Prepare(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eager, deferred := map[key]Sample{}, map[key]Sample{}
+	var old, frontier Frontier
+	var through int64
+	var stored []Version
+	for si, seal := range m.seals {
+		if len(seal) == 0 {
+			continue
+		}
+		want, err := p.Plan(old, view(eager), nil, seal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, nextThrough, err := p.PlanClosedInto(nil, frontier, through, 0, view(deferred), nil, seal, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range want.Records {
+			install(eager, []Delta{r.Delta})
+		}
+		for _, r := range got.Winners() {
+			k := key{r.Archive, r.Slot}
+			if o, ok := deferred[k]; !ok || r.Order >= o.Sequence {
+				s := r.Sample
+				s.Sequence = r.Order
+				deferred[k] = s
+			}
+		}
+		switch store {
+		case "c3":
+			stored = append(stored, rawPart(c, seal)...)
+		case "seal":
+			for _, r := range got.Records {
+				stored = append(stored, r.Version(0))
+			}
+		case "parts":
+			stored = append(stored, recordVersions(c, got.Winners())...)
+		case "parts+batches", "parts+batches-fallback":
+			raw := rawPart(c, seal)
+			for _, v := range recordVersions(c, got.Winners()) {
+				if v.Mat {
+					if store == "parts+batches-fallback" {
+						// A seal-computed window is only a fallback: it bounds
+						// no walk and loses ties to the computed value.
+						v.Order, v.Upto = v.Order-1, 0
+					}
+					stored = append(stored, v)
+				}
+			}
+			stored = append(stored, raw...)
+		}
+		old, frontier, through = want.Next, got.Next, nextThrough
+		projected := projectOpenImage(c, deferred, frontier.MaxTime, through)
+		for a := 1; a < len(c.Archives); a++ {
+			w := align(frontier.MaxTime, c.Archives[a].Step)
+			if w+c.Archives[a].Step <= through {
+				continue
+			}
+			var sub []Version
+			if err := WindowRanges(c, a, w, func(l int, first, last int64) error {
+				for _, v := range stored {
+					if s := slot(v.Time, c.Archives[v.Archive]); v.Archive == l && s >= first && s < last {
+						sub = append(sub, v)
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			k := key{a, slot(w, c.Archives[a])}
+			read, readHas := NewVersions(c, sub).SlotValue(a, k.slot)
+			wantS, wantOK := eager[k]
+			proj, projHas := projected[k]
+			check(si, a, openOutcome{
+				want: [2]uint64{uint64(wantS.Time), wantS.Bits}, read: [2]uint64{uint64(read.Time), read.Bits}, project: [2]uint64{uint64(proj.Time), proj.Bits},
+				wantOK: wantOK, readHas: readHas, projHas: projHas,
+			})
+		}
+	}
+}
+
+// TestOpenWindowMinimize shrinks open-window misses of FN_OPEN_STORE (default
+// parts); FN_WORSE=1 keeps only misses where ProjectOpen matches Whisper.
+func TestOpenWindowMinimize(t *testing.T) {
+	if !testing.Verbose() || os.Getenv("FN_DEBUG") == "" {
+		t.Skip("set FN_DEBUG=1 and -v")
+	}
+	store := cmp.Or(os.Getenv("FN_OPEN_STORE"), "parts")
+	bad := func(o openOutcome) bool { return !o.readOK() && (os.Getenv("FN_WORSE") == "" || o.projectOK()) }
+	found := 0
+	for seed := uint64(1); seed <= 8 && found < fnMinCases; seed++ {
+		for _, m := range fnRandom(seed, 60).metrics {
+			miss := func(m fnMetric) (hit bool) {
+				openWindowRead(t, m, store, func(_, _ int, o openOutcome) { hit = hit || bad(o) })
+				return hit
+			}
+			if !miss(m) {
+				continue
+			}
+			small := fnMinimize(m, miss)
+			var detail []string
+			openWindowRead(t, small, store, func(si, a int, o openOutcome) {
+				if bad(o) {
+					detail = append(detail, fmt.Sprintf("seal%d a%d whisper%v/%v read%v/%v projectopen%v/%v", si, a, o.want, o.wantOK, o.read, o.readHas, o.project, o.projHas))
+				}
+			})
+			t.Logf("MIN open store=%s seed%d:\n%s  %s", store, seed, fnDescribe(small), strings.Join(detail, "\n  "))
+			if found++; found >= fnMinCases {
+				break
+			}
+		}
+	}
+}
+
+// BenchmarkOpenSlotRead is the read cost of one open coarse slot: the versions
+// WindowRanges selects (one per fine slot, seal-computed closed windows as
+// materialized records) indexed and evaluated with SlotValue.
+func BenchmarkOpenSlotRead(b *testing.B) {
+	for _, def := range []string{"10s:6h,1m:7d,10m:5y", "1m:30d,1h:1y,1d:10y", "1s:1d,1m:30d,1h:1y,1d:10y"} {
+		c := config(def, Average, .5)
+		now := int64(1794700800 + 86400 - 7)
+		var all []Version
+		order := uint64(1)
+		for ts := now - c.Archives[0].Step*c.Archives[0].Count + c.Archives[0].Step; ts <= now; ts += c.Archives[0].Step {
+			all = append(all, Version{Archive: 0, Time: align(ts, c.Archives[0].Step), Bits: uint64(ts), Order: Tick(order, 0), Upto: Tick(order, 0)})
+			order++
+		}
+		for a := 1; a < len(c.Archives); a++ {
+			open := align(now, c.Archives[a].Step)
+			for w := open - c.Archives[a].Step*(c.Archives[a].Count-1); w < open; w += c.Archives[a].Step {
+				o := Tick(uint64(max(1, (w+c.Archives[a].Step-1-(now-int64(order)+1)))), a-1)
+				all = append(all, Version{Archive: a, Time: w, Bits: uint64(w), Order: o, Upto: o, Mat: true})
+			}
+		}
+		for a := 1; a < len(c.Archives); a++ {
+			w := align(now, c.Archives[a].Step)
+			var sub []Version
+			_ = WindowRanges(c, a, w, func(l int, first, last int64) error {
+				for _, v := range all {
+					if s := slot(v.Time, c.Archives[v.Archive]); v.Archive == l && s >= first && s < last {
+						sub = append(sub, v)
+					}
+				}
+				return nil
+			})
+			b.Run(fmt.Sprintf("%s/archive%d/versions%d", def, a, len(sub)), func(b *testing.B) {
+				for range b.N {
+					if _, ok := NewVersions(c, sub).SlotValue(a, slot(w, c.Archives[a])); !ok {
+						b.Fatal("open slot empty")
+					}
+				}
+			})
 		}
 	}
 }

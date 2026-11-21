@@ -34,8 +34,24 @@ func sealPlanDigestMode(plan coreSealPlan, decoded bool) string {
 	// The part UUID is random per seal: mask it in keys and specs.
 	for i, file := range plan.Files {
 		part := plan.PartSpecs[i].Scope.Part
-		fmt.Fprintf(h, "file %d %d\n", i, len(file))
-		for _, kv := range file {
+		// The goldens cover what per-slot readers resolve: a slot's
+		// superseded versions (followed by a record of the same key) and the
+		// record kind are outside them; TestRollupHistoryDifferential and
+		// TestDenseRecordVersions cover those.
+		superseded := func(j int) bool {
+			return file[j].Record != nil && j+1 < len(file) && bytes.Equal(file[j].Key, file[j+1].Key)
+		}
+		n := 0
+		for j := range file {
+			if !superseded(j) {
+				n++
+			}
+		}
+		fmt.Fprintf(h, "file %d %d\n", i, n)
+		for j, kv := range file {
+			if superseded(j) {
+				continue
+			}
 			value := kv.Value
 			if decoded && kv.Record == nil {
 				k, err := v2part.Decode(kv.Key)
@@ -49,8 +65,11 @@ func sealPlanDigestMode(plan coreSealPlan, decoded bool) string {
 				value = AppendRollupMetadata(nil, m)
 			}
 			fmt.Fprintf(h, "%x %x", bytes.Replace(kv.Key, part[:], make([]byte, len(part)), 1), value)
-			if kv.Record != nil {
-				fmt.Fprintf(h, " %+v", *kv.Record)
+			if r := kv.Record; r != nil {
+				fmt.Fprintf(h, " %+v", struct {
+					sealrollup.Delta
+					Correction bool
+				}{r.Delta, r.Correction})
 			}
 			h.Write([]byte{'\n'})
 		}

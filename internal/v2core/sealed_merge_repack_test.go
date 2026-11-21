@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/sstable"
@@ -82,7 +83,11 @@ func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descripto
 		}
 	})
 	d.Bytes, d.SHA256, d.Coverage.Records, d.LastKey = 0, v2part.Digest{}, 0, last
-	_, _ = fmt.Fprintf(w, "%+v\n", d)
+	if d.DictGeneration != 0 {
+		t.Fatal("decoded part digests cover name-keyed parts")
+	}
+	// The goldens predate DictGeneration (zero here): print d as they did.
+	_, _ = fmt.Fprintf(w, "%s}\n", strings.TrimSuffix(fmt.Sprintf("%+v", d), " DictGeneration:0}"))
 }
 
 // partRunLengths lists the slot count of every dense run in a part, per name

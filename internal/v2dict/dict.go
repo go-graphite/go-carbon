@@ -79,6 +79,8 @@ type Dict struct {
 	logSeq  uint64 // sequence of the append level (its log and level file)
 	bufMin  uint64 // lowest log sequence the append level holds
 	pending []byte // log records not yet written
+	logRecs uint32 // records in log logSeq
+	synced  uint64 // Generation(): logSeq<<32 | logRecs at the last Sync, flush or open
 	scopeIx map[string]int
 	nextID  []uint32
 	err     error // sticky write failure
@@ -193,6 +195,7 @@ func Open(dir string, opt Options) (*Dict, error) {
 			}
 			continue
 		}
+		d.logRecs = 0
 		good, err := d.replay(logPath(dir, seq))
 		if err != nil {
 			return nil, err
@@ -221,6 +224,7 @@ func Open(dir string, opt Options) (*Dict, error) {
 			return nil, err
 		}
 	}
+	d.synced = d.logSeq<<32 | uint64(d.logRecs)
 	d.maybeMerge()
 	return d, nil
 }
@@ -269,6 +273,7 @@ func (d *Dict) replay(path string) (int, error) {
 			break
 		}
 		key, val := p[2:2+kl], p[2+kl:]
+		d.logRecs++
 		d.buf.put(key, val)
 		d.bumpNext(key[:scopeLen(key)], binary.LittleEndian.Uint32(val))
 		off += 8 + size
@@ -424,6 +429,7 @@ func (d *Dict) putLocked(key []byte, e Entry) error {
 	d.buf.put(key, val)
 	d.bumpNext(key[:scopeLen(key)], e.ID)
 	d.pending = appendRecord(d.pending, key, val)
+	d.logRecs++
 	if len(d.pending) >= 64<<10 {
 		if err := d.writePending(); err != nil {
 			return err
@@ -461,7 +467,21 @@ func (d *Dict) Sync() error {
 	if err := d.log.Sync(); err != nil {
 		d.err = fmt.Errorf("v2dict: log sync: %w", err)
 	}
+	if d.err == nil {
+		d.synced = d.logSeq<<32 | uint64(d.logRecs)
+	}
 	return d.err
+}
+
+// Generation is the durable dictionary state: the log sequence and the
+// records in that log at the last Sync, flush or open. It only grows, also
+// across restarts. Every ID appended before the Sync that produced it
+// resolves in any dictionary at that generation or later, so a part records
+// the generation its IDs need and a copy target checks it has at least that.
+func (d *Dict) Generation() uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.synced
 }
 
 // flushLocked writes the append level to a level file, installs it, and
@@ -493,6 +513,8 @@ func (d *Dict) flushLocked() error {
 	}
 	d.logSeq++
 	d.bufMin = d.logSeq
+	d.logRecs = 0
+	d.synced = d.logSeq << 32
 	if d.log, err = os.OpenFile(logPath(d.dir, d.logSeq), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err == nil {
 		err = syncDir(d.dir)
 	}

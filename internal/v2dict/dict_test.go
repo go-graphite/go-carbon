@@ -558,3 +558,66 @@ func TestDictScale(t *testing.T) {
 		float64(heapLevels)/float64(n), float64(heapOne)/float64(n), float64(heapReopen)/float64(n), float64(st1.FileBytes)/float64(n), st1.FileBytes>>20, st1.Levels, float64(st.FileBytes)/float64(n))
 	t.Logf("SCALE MergeAll=%.2fs lookup hit=%.0f ns miss=%.0f ns byID=%.0f ns scan=%.0f ns/name reopen=%.1f ms", mergeAll.Seconds(), hit, miss, byID, scanNs, float64(reopen.Microseconds())/1000)
 }
+
+// TestGeneration checks that the generation moves only at Sync, flush and
+// open, grows on every durable change, and never goes back across a reopen.
+func TestGeneration(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferBytes: 16 << 10, NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g0 := d.Generation()
+	if _, _, err := d.Append("a", 1, []byte("x.one"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if g := d.Generation(); g != g0 {
+		t.Fatalf("generation moved before Sync: %d -> %d", g0, g)
+	}
+	if err := d.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	g1 := d.Generation()
+	if g1 <= g0 {
+		t.Fatalf("Sync did not grow the generation: %d -> %d", g0, g1)
+	}
+	if _, _, err := d.Append("a", 1, []byte("x.one"), 0); err != nil || d.Sync() != nil || d.Generation() != g1 {
+		t.Fatalf("an existing name changed the generation: %d -> %d (%v)", g1, d.Generation(), err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if d, err = Open(dir, Options{BufferBytes: 16 << 10, NoMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	if g := d.Generation(); g != g1 {
+		t.Fatalf("reopen changed the generation: %d -> %d", g1, g)
+	}
+	last := g1
+	for i := 0; i < 2000; i++ { // several flushes
+		if _, _, err := d.Append("a", uint16(i%8), synthName(i), 0); err != nil {
+			t.Fatal(err)
+		}
+		if i%97 == 0 {
+			if err := d.Sync(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if g := d.Generation(); g < last {
+			t.Fatalf("generation went back: %d -> %d", last, g)
+		} else {
+			last = g
+		}
+	}
+	if st := d.Stats(); st.Levels < 2 {
+		t.Fatalf("want flushes, got %+v", st)
+	}
+	d.Close()
+	if d, err = Open(dir, Options{NoMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if g := d.Generation(); g < last {
+		t.Fatalf("reopen went back: %d -> %d", last, g)
+	}
+}
