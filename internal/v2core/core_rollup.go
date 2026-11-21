@@ -571,10 +571,12 @@ type rollupStage struct {
 	next            metricMetadata
 	batch, batches  uint32
 	record, records uint32
-	slot            uint32
-	vshard          uint16
-	refile          uint16 // coarse archives to file at commit (coreRollups.refile)
-	fresh           bool
+	// versions superseded slot versions follow the records in the arena.
+	versions uint32
+	slot     uint32
+	vshard   uint16
+	refile   uint16 // coarse archives to file at commit (coreRollups.refile)
+	fresh    bool
 }
 
 type rollupPlannerLane struct {
@@ -595,7 +597,8 @@ type rollupPlannerLane struct {
 	err     error
 }
 
-// stageRecords returns the records this lane planned for s.
+// stageRecords returns the slot winners this lane planned for s. Its capacity
+// extends over the stage's superseded versions, which only part files hold.
 func (l *rollupPlannerLane) stageRecords(s *rollupStage) []sealrollup.Record {
 	i, c := s.record, l.records
 	if i < l.base {
@@ -604,7 +607,7 @@ func (l *rollupPlannerLane) stageRecords(s *rollupStage) []sealrollup.Record {
 	} else {
 		i -= l.base
 	}
-	return c[i : i+s.records : i+s.records]
+	return c[i : i+s.records : i+s.records+s.versions]
 }
 
 func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {

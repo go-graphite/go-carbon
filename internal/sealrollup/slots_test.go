@@ -123,7 +123,7 @@ func TestWorkspacePositionReuse(t *testing.T) {
 			for i := range 1000 {
 				k := key{0, int64(i) % count}
 				d := Delta{Archive: 0, Slot: k.slot, Order: uint64(round + 1), Sample: Sample{Bits: uint64(i)}}
-				w.replace(k, d)
+				w.replace(k, Record{Delta: d})
 				got, ok := w.lookup(k)
 				if !ok || got != d {
 					t.Fatalf("count%d round%d slot%d: got%v", count, round, i, got)
@@ -138,7 +138,7 @@ func TestWorkspacePositionReuse(t *testing.T) {
 			w.preparePositions(c, 1000)
 			for i := range 1000 {
 				k := key{0, int64(i) % count}
-				w.replace(k, Delta{Archive: 0, Slot: k.slot})
+				w.replace(k, Record{Delta: Delta{Archive: 0, Slot: k.slot}})
 				w.lookup(k)
 			}
 		}); n != 0 {

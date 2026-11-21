@@ -4,6 +4,7 @@
 package sealrollup
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"slices"
@@ -100,17 +101,25 @@ func Reduce(c Config, view View, batches []Batch) ([]Delta, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	return reduce(c, view, nil, batches, nil)
+	records, err := reduce(c, view, nil, batches, nil)
+	deltas := make([]Delta, len(records))
+	for i, r := range records {
+		deltas[i] = r.Delta
+	}
+	return deltas, err
 }
 
 // Workspace is reusable scratch for one serial owner. No returned SealPlan
 // aliases it. Keep independent workspaces for concurrent planning calls.
 type Workspace struct {
-	positions                  []uint32
-	offsets                    []int
-	dense                      bool
-	sparseOnly                 bool
-	updates                    []Delta
+	positions  []uint32
+	offsets    []int
+	dense      bool
+	sparseOnly bool
+	updates    []Record
+	// keep makes replace retain superseded Raw versions and Ghosts in versions.
+	keep                       bool
+	versions                   []Record
 	points, current, neighbors []Sample
 	changed                    []int64
 }
@@ -171,15 +180,28 @@ func (w *Workspace) lookup(k key) (Delta, bool) {
 		return Delta{}, false
 	}
 	d := w.updates[int(i)-1]
-	return d, d.Archive == k.archive && d.Slot == k.slot
+	return d.Delta, d.Archive == k.archive && d.Slot == k.slot
 }
-func (w *Workspace) replace(k key, d Delta) {
+
+// replace makes d the slot's newest version. With keep, a Raw it supersedes
+// stays as a version, one per slot per batch: a later batch's point or a
+// window replaced it, or, as a Ghost, a point of another epoch in the same
+// batch took its slot. A Raw of the same batch and epoch is simply rewritten;
+// superseded Mat values are recomputable and dropped.
+func (w *Workspace) replace(k key, d Record) {
 	pos := w.position(k)
 	i := w.positions[pos]
 	if i != 0 && int(i) <= len(w.updates) {
-		old := w.updates[int(i)-1]
+		old := &w.updates[int(i)-1]
 		if old.Archive == k.archive && old.Slot == k.slot {
-			w.updates[int(i)-1] = d
+			if w.keep && old.Kind == KindRaw && (d.Kind != KindRaw || d.Order != old.Order || d.Sample.Time != old.Sample.Time) {
+				v := *old
+				if d.Kind == KindRaw && d.Order == old.Order {
+					v.Kind = KindGhost
+				}
+				w.versions = append(w.versions, v)
+			}
+			*old = d
 			return
 		}
 	}
@@ -189,26 +211,31 @@ func (w *Workspace) replace(k key, d Delta) {
 
 type windowClosure struct{ through, advance int64 }
 
-func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Delta, error) {
-	return reduceMode(c, view, ranges, batches, w, nil)
+func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Record, error) {
+	records, _, err := reduceMode(c, view, ranges, batches, w, nil, false)
+	return records, err
 }
-func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Workspace, closing *windowClosure) ([]Delta, error) {
+
+// reduceMode returns the winners sorted by (archive, slot) and, with keep,
+// the superseded versions sorted the same way, oldest first. Both alias w.
+func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Workspace, closing *windowClosure, keep bool) ([]Record, []Record, error) {
 	if w == nil {
 		// One-shot callers cannot amortize a direct retention-sized array.
 		w = &Workspace{sparseOnly: true}
 	}
+	w.keep, w.versions = keep, w.versions[:0]
 	pointCount := 0
 	for i, b := range batches {
 		pointCount += len(b.Points)
 		if b.Now <= 0 || b.Now > math.MaxUint32 {
-			return nil, fmt.Errorf("invalid batch clock")
+			return nil, nil, fmt.Errorf("invalid batch clock")
 		}
 		if i > 0 && b.Order <= batches[i-1].Order {
-			return nil, fmt.Errorf("batch order must increase")
+			return nil, nil, fmt.Errorf("batch order must increase")
 		}
 		for _, p := range b.Points {
 			if p.Time <= 0 || p.Time > math.MaxUint32 {
-				return nil, fmt.Errorf("timestamp outside storage range")
+				return nil, nil, fmt.Errorf("timestamp outside storage range")
 			}
 		}
 	}
@@ -251,10 +278,10 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 			}
 			return 0
 		})
-		set := func(a int, t int64, bits uint64) {
+		set := func(a int, t int64, bits uint64, kind Kind) {
 			p := Sample{Time: t, Bits: bits, Sequence: b.Order}
 			k := key{a, slot(t, c.Archives[a])}
-			w.replace(k, Delta{a, k.slot, b.Order, p})
+			w.replace(k, Record{Delta: Delta{a, k.slot, b.Order, p}, Kind: kind})
 		}
 
 		aggregateAt := func(lower int, start int64, closingWindow bool) bool {
@@ -295,7 +322,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 			if len(neighbors) == 0 || float32(len(neighbors))/float32(coarse.Step/higher.Step) < c.XFilesFactor {
 				return false
 			}
-			set(lower, start, math.Float64bits(aggregateSamples(c.Method, neighbors)))
+			set(lower, start, math.Float64bits(aggregateSamples(c.Method, neighbors)), KindMat)
 			if closingWindow {
 				var order uint64
 				for _, p := range neighbors {
@@ -304,7 +331,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 				k := key{lower, slot(start, coarse)}
 				d, _ := w.lookup(k)
 				d.Order, d.Sample.Sequence = order, order
-				w.replace(k, d)
+				w.replace(k, Record{Delta: d, Kind: KindMat})
 			}
 			return true
 		}
@@ -345,7 +372,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 			changed := w.changed[:0]
 			for _, p := range current {
 				t := align(p.Time, a.Step)
-				set(archive, t, p.Bits)
+				set(archive, t, p.Bits, KindRaw)
 				changed = append(changed, t)
 			}
 			w.changed = changed
@@ -375,23 +402,15 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 			}
 		}
 	}
-	out := w.updates
-	slices.SortFunc(out, func(a, b Delta) int {
-		if a.Archive < b.Archive {
-			return -1
+	bySlot := func(a, b Record) int {
+		if a.Archive != b.Archive {
+			return a.Archive - b.Archive
 		}
-		if a.Archive > b.Archive {
-			return 1
-		}
-		if a.Slot < b.Slot {
-			return -1
-		}
-		if a.Slot > b.Slot {
-			return 1
-		}
-		return 0
-	})
-	return out, nil
+		return cmp.Compare(a.Slot, b.Slot)
+	}
+	slices.SortFunc(w.updates, bySlot)
+	slices.SortStableFunc(w.versions, bySlot)
+	return w.updates, w.versions, nil
 }
 func aggregateSamples(method Method, values []Sample) float64 {
 	switch method {

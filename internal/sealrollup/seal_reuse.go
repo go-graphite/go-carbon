@@ -33,12 +33,12 @@ func (p *Prepared) PlanInto(records []Record, prior Frontier, view View, ranges 
 	}
 	plan := SealPlan{Next: next, Records: records[:0]}
 	for _, d := range deltas {
-		correction := d.Sample.Time <= prior.MaxTime
+		d.Correction = d.Sample.Time <= prior.MaxTime
 		if view != nil {
 			p, ok := view(d.Archive, d.Slot)
-			correction = correction || (ok && p.Time == d.Sample.Time)
+			d.Correction = d.Correction || (ok && p.Time == d.Sample.Time)
 		}
-		plan.Records = append(plan.Records, Record{Delta: d, Correction: correction})
+		plan.Records = append(plan.Records, d)
 	}
 	return plan, nil
 }
@@ -47,6 +47,6 @@ func (p *Prepared) PlanInto(records []Record, prior Frontier, view View, ranges 
 // Workspace value itself. Readers can discard oversized workspaces after use.
 func (w *Workspace) RetainedBytes() int64 {
 	return int64(cap(w.positions))*4 + int64(cap(w.offsets))*int64(unsafe.Sizeof(int(0))) +
-		int64(cap(w.updates))*int64(unsafe.Sizeof(Delta{})) +
+		int64(cap(w.updates)+cap(w.versions))*int64(unsafe.Sizeof(Record{})) +
 		int64(cap(w.points)+cap(w.current)+cap(w.neighbors))*int64(unsafe.Sizeof(Sample{})) + int64(cap(w.changed))*8
 }
