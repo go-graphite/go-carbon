@@ -104,7 +104,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				for _, m := range all {
 					if r.metrics[m.id] == m || rng.IntN(4) == 0 {
 						stages, metrics = append(stages, rollupStage{}), append(metrics, m)
-						r.stageKey(&stages[len(stages)-1], m)
+						_ = r.stageKey(&stages[len(stages)-1], m, nil) // name keys: never fails
 					}
 				}
 				for i := range stages {

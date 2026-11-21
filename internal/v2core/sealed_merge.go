@@ -8,7 +8,6 @@ import (
 	"container/heap"
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +26,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -240,7 +240,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 		if d.Encoding != v2part.DenseEncoding || d.Scope.VShard != v2part.GroupVShard || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
-		k, err := v2part.Decode(d.FirstKey)
+		k, err := v2part.DecodeKey(d.FirstKey)
 		if err != nil {
 			return nil, err
 		}
@@ -266,12 +266,15 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 		})
 		for i := range parts {
 			var total, largest uint64
-			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total; j++ {
+			// A window never spans a key generation change (name keys, then ID
+			// keys): one merge writes one generation, and adjacency is kept.
+			byID := descriptorByID(parts[i])
+			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total && descriptorByID(parts[j]) == byID; j++ {
 				total += parts[j].Bytes
 				largest = max(largest, parts[j].Bytes)
 				if full {
 					// Force the first maximal adjacent window that fits the cap.
-					if j > i && (j+1 == len(parts) || parts[j+1].Bytes > limit-total) {
+					if j > i && (j+1 == len(parts) || parts[j+1].Bytes > limit-total || descriptorByID(parts[j+1]) != byID) {
 						return slices.Clone(parts[i : j+1]), nil
 					}
 					continue
@@ -313,7 +316,7 @@ func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, lim
 		if chosen != nil && (c.MinExpiry > chosen[0].Coverage.MinExpiry || c.MinExpiry == chosen[0].Coverage.MinExpiry && bytes.Compare(d.SHA256[:], chosen[0].SHA256[:]) > 0) {
 			continue
 		}
-		k, err := v2part.Decode(d.FirstKey)
+		k, err := v2part.DecodeKey(d.FirstKey)
 		if err != nil {
 			return nil, err
 		}
@@ -343,11 +346,13 @@ type mergeCursor struct {
 	cursor *headerCursor
 	// key is the current metric's identity with Metric left empty: the name
 	// stays encoded in ident, the validated key bytes before the archive, and
-	// ident[name:] is the GCP3 length-prefixed name. Merges compare and copy
-	// these bytes; they never build a name string per key.
+	// ident[name:] is the GCP3 length-prefixed name or the GCI2 u32 ID.
+	// Merges compare and copy these bytes; they never build a name string per
+	// key. tail is the key generation's tail length after ident.
 	key         v2part.Key
 	ident       []byte
 	name        int
+	tail        int
 	part        v2part.PartID
 	metadata    RollupMetadata
 	policyBytes []byte
@@ -373,11 +378,13 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 	c.records = c.records[:0]
 	c.block, c.next = 0, 0
 	encoded := c.cursor.Key()
-	k, name, err := v2part.DecodeName(encoded, c.key.Group)
+	k, name, err := decodeMergeKey(encoded, c.key.Group)
 	if err != nil {
 		return false, err
 	}
-	c.ident = append(c.ident[:0], encoded[:len(encoded)-16]...)
+	c.tail = partKeyTail(k.ByID)
+	c.ident = append(c.ident[:0], encoded[:len(encoded)-c.tail]...)
+	// GCI2 decodes no name: ident[name:] is then the u32 ID.
 	c.name = len(c.ident) - len(name) - 4
 	c.key = k
 	c.key.Part = c.part
@@ -420,17 +427,14 @@ func (c *mergeCursor) readMetric(first bool) (bool, error) {
 			return false, errors.New("merge metric lacks metadata")
 		}
 		encoded = c.cursor.Key()
-		if len(encoded) == len(c.ident)+16 && bytes.Equal(encoded[:len(c.ident)], c.ident) {
-			tail := encoded[len(c.ident):]
-			k.Archive = binary.BigEndian.Uint32(tail)
-			k.BlockStart = int64(binary.BigEndian.Uint64(tail[4:]) ^ (1 << 63))
-			k.Ordinal = binary.BigEndian.Uint32(tail[12:])
+		if len(encoded) == len(c.ident)+c.tail && bytes.Equal(encoded[:len(c.ident)], c.ident) {
+			setKeyTail(&k, encoded[len(c.ident):])
 			continue
 		}
-		if k, name, err = v2part.DecodeName(encoded, c.key.Group); err != nil {
+		if k, name, err = decodeMergeKey(encoded, c.key.Group); err != nil {
 			return false, err
 		}
-		if k.VShard != c.key.VShard || !bytes.Equal(name, c.ident[c.name+4:]) {
+		if k.VShard != c.key.VShard || k.ByID != c.key.ByID || k.Local != c.key.Local || !bytes.Equal(name, c.ident[c.name+4:]) {
 			return false, errors.New("merge metric lacks metadata")
 		}
 	}
@@ -466,6 +470,7 @@ func (h mergeHeap) Less(i, j int) bool {
 	// All inputs share group/partition and normalize to the output part. GCP3
 	// orders the remaining identity by vshard, name byte length, then name bytes:
 	// the encoded big-endian length followed by the name compares the same way.
+	// GCI2 orders it by vshard, then ID: the big-endian u32 ID compares so.
 	a, b := h[i], h[j]
 	if a.key.VShard != b.key.VShard {
 		return a.key.VShard < b.key.VShard
@@ -499,7 +504,20 @@ var mergePartID = func(id *v2part.PartID) error {
 // retire is the owner's age-retirement clock (retireClock): a record is dropped
 // only when its expiry precedes it, as whole-part retirement would, so a merge
 // never removes a record the reader still returns.
-func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (v2part.Descriptor, error) {
+	return mergePartFilesDict(ctx, dir, path, inputs, retire, stop, nil)
+}
+
+// mergePartFilesDict is mergePartFiles with the store dictionary that
+// ID-keyed inputs resolve through: it drops deleted and revived-away IDs, and
+// names a GCI2 metric whose envelope needs its full definition. Inputs share
+// one key generation; the output keeps it.
+func mergePartFilesDict(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}, dict *v2dict.Dict) (_ v2part.Descriptor, err error) {
+	generation, err := mergeGeneration(inputs)
+	if err != nil {
+		return v2part.Descriptor{}, err
+	}
+	names := mergeNames{dict: dict}
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
@@ -534,6 +552,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		return v2part.Descriptor{}, err
 	}
 	defer writer.Abort()
+	if generation != 0 {
+		if err = writer.IDKeyed(generation); err != nil {
+			return v2part.Descriptor{}, err
+		}
+	}
 	writer.PredictOrders()
 	limit, err := mergeMaxBytes()
 	if err != nil {
@@ -591,6 +614,19 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 	var key, metaBytes []byte
 	var config sealrollup.Config
 	var expiry expiryBounds
+	// nextMetric moves every member to its next metric.
+	nextMetric := func() error {
+		for _, input := range members {
+			valid, e := input.readMetric(false)
+			if e != nil {
+				return e
+			}
+			if valid {
+				heap.Push(&h, input)
+			}
+		}
+		return nil
+	}
 	for len(h) > 0 {
 		if err = ctx.Err(); err != nil {
 			return v2part.Descriptor{}, err
@@ -604,6 +640,14 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		members = append(members[:0], c)
 		for len(h) > 0 && h[0].key.VShard == c.key.VShard && bytes.Equal(h[0].metricName(), c.metricName()) {
 			members = append(members, heap.Pop(&h).(*mergeCursor))
+		}
+		if live, e := names.live(c.key); e != nil {
+			return v2part.Descriptor{}, e
+		} else if !live {
+			if err = nextMetric(); err != nil {
+				return v2part.Descriptor{}, err
+			}
+			continue
 		}
 		// The definition is a function of the key (name, group) and the policy
 		// digest, so equal IDs, groups and digests mean equal definitions.
@@ -620,13 +664,10 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		config = *chosen.config
 		// The output key is the input's validated identity with the output part:
 		// Encode(c.key) byte for byte, without a name string or route re-hash.
-		key = append(append(key[:0], c.ident...), make([]byte, 16)...)
+		key = append(append(key[:0], c.ident...), make([]byte, c.tail)...)
 		copy(key[c.name-16:c.name], c.part[:])
-		tail := key[len(key)-16:]
-		setSlot := func(archive uint32, slot int64) {
-			binary.BigEndian.PutUint32(tail, archive)
-			binary.BigEndian.PutUint64(tail[4:], uint64(slot)^(1<<63))
-		}
+		tail := key[len(key)-c.tail:]
+		setSlot := func(archive uint32, slot int64) { putKeyTail(tail, archive, slot) }
 		var winner sealrollup.Record
 		occupied := false
 		flush := func() error {
@@ -720,7 +761,11 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		} else {
 			full := *metadata
 			if full.Policy == nil {
-				if full.Policy, err = appendRollupDefinition(nil, v2part.ID(c.metricName()[4:]), c.key.Group, full.Frontier.Policy); err != nil {
+				name, e := names.definitionName(c.key, c.metricName()[4:])
+				if e != nil {
+					return v2part.Descriptor{}, e
+				}
+				if full.Policy, err = appendRollupDefinition(nil, name, c.key.Group, full.Frontier.Policy); err != nil {
 					return v2part.Descriptor{}, err
 				}
 			}
@@ -732,14 +777,8 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 		if len(shards) == 0 || shards[len(shards)-1] != c.key.VShard {
 			shards = append(shards, c.key.VShard)
 		}
-		for _, input := range members {
-			valid, e := input.readMetric(false)
-			if e != nil {
-				return v2part.Descriptor{}, e
-			}
-			if valid {
-				heap.Push(&h, input)
-			}
+		if err = nextMetric(); err != nil {
+			return v2part.Descriptor{}, err
 		}
 	}
 	writer.SetExpiry(expiry.min, expiry.max)
@@ -804,7 +843,11 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergePartFiles(context.Background(), o.dir, path, inputs, retire, stop)
+	var dict *v2dict.Dict
+	if o.rollups != nil {
+		dict = o.rollups.identities.partDict()
+	}
+	d, err := mergePartFilesDict(context.Background(), o.dir, path, inputs, retire, stop, dict)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}

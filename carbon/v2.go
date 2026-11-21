@@ -43,6 +43,9 @@ type v2Config struct {
 	Producers       int    `toml:"producers"`
 	Shards          int    `toml:"shards"`
 	ReadBudgetBytes int64  `toml:"read-budget-bytes"`
+	// IDKeys makes seals write ID-keyed parts through the store name
+	// dictionary. Vshard moves of ID-keyed parts are not supported yet.
+	IDKeys bool `toml:"id-keys"`
 }
 type v2Runtime struct {
 	mode    string
@@ -57,6 +60,8 @@ type v2Runtime struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 }
+
+const v2SteadyGCPercent = 50
 
 func (app *App) startV2() error {
 	c := app.Config
@@ -96,10 +101,6 @@ func (app *App) startV2() error {
 	if c.Whisper.Aggregation == nil || len(c.Whisper.Schemas) == 0 {
 		return errors.New("v2 requires loaded schema and aggregation policies")
 	}
-	// Bound the garbage allowance on large heaps while preserving operator tuning.
-	if os.Getenv("GOGC") == "" {
-		debug.SetGCPercent(75)
-	}
 	var core *cache.Cache
 	n := c.V2.Producers
 	if n == 0 {
@@ -133,6 +134,10 @@ func (app *App) startV2() error {
 	}}
 	if app.v2Now != nil {
 		hooks.Now = app.v2Now
+	}
+	if c.V2.IDKeys {
+		v2part.IDKeys.Store(true)
+		hooks.IDKeys = true
 	}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		// v2core asks Expire only about names idle for their ExpiryTTL window.
@@ -436,6 +441,12 @@ func (app *App) startV2() error {
 	app.Collector = NewCollector(app)
 	if c.Prometheus.Enabled {
 		app.v2CollectorOnce.Do(func() { app.PromRegisterer.MustRegister(&v2Collector{app: app}) })
+	}
+	// Bound the garbage allowance on large heaps while preserving operator
+	// tuning. Recovery keeps the runtime's growth: it allocates in bursts and a
+	// smaller allowance there only lengthens restart.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(v2SteadyGCPercent)
 	}
 	recovered.Store(true)
 	v.wg.Add(1)

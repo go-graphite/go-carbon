@@ -218,6 +218,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if !wanted[archivePartIdentity{part.Descriptor.Scope.Group, part.Descriptor.Scope.Part}] {
 			continue
 		}
+		if descriptorByID(part.Descriptor) {
+			return errIDKeyedMove
+		}
 		k, err := v2part.Decode(part.Descriptor.FirstKey)
 		if err != nil {
 			return err

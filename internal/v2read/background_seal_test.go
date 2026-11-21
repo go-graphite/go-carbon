@@ -15,6 +15,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 	whisper "github.com/go-graphite/go-whisper"
 )
 
@@ -39,7 +40,15 @@ func TestBackgroundSealRendersMatchClassicLargeSeals(t *testing.T) {
 	testBackgroundSealRendersMatchClassic(t, 2<<20, 2<<20, 2*time.Second)
 }
 
-func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, interval time.Duration) {
+// TestBackgroundSealRendersMatchClassicIDKeys repeats it with seals writing
+// ID-keyed parts: renders resolve names through the store dictionary.
+func TestBackgroundSealRendersMatchClassicIDKeys(t *testing.T) {
+	v2part.IDKeys.Store(true)
+	t.Cleanup(func() { v2part.IDKeys.Store(false) })
+	testBackgroundSealRendersMatchClassic(t, 1<<20, 24, time.Hour, true)
+}
+
+func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, interval time.Duration, idKeys ...bool) {
 	rng := rand.New(rand.NewSource(1559))
 	now := int64(1794700800)
 	clock := now
@@ -62,7 +71,13 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 		}
 	}
 	reader, _ := New(1, 1<<30, 64<<20)
+	byID := len(idKeys) > 0 && idKeys[0]
+	if byID {
+		reader.Identities = &v2core.PolicyCatalog{}
+	}
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{
+		Identities:     reader.Identities,
+		IDKeys:         byID,
 		PublishPending: reader.PublishPending,
 		Visible: func(_ int, batches []v2core.Batch) {
 			for _, b := range batches {
