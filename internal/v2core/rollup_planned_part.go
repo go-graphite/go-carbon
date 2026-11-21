@@ -62,6 +62,11 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 	defer w.Abort()
 	// Size-tier merges rewrite fresh seal parts at the rest level.
 	w.SealCompression()
+	if part.Generation != 0 {
+		if err = w.IDKeyed(part.Generation); err != nil {
+			return v2part.Descriptor{}, err
+		}
+	}
 	var shards []uint16
 	for _, segment := range part.Segments {
 		for i, kv := range segment {
@@ -71,6 +76,18 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 			// Ranks order tuples within a segment; each segment's first tuple
 			// is checked against the previous segment by name.
 			rank := kv.rank
+			if part.Generation != 0 {
+				// An ID-keyed tuple's rank is its dictionary ID.
+				if kv.record != nil {
+					err = w.SetPlannedIDRecord(kv.vshard, rank, kv.record)
+				} else {
+					err = w.SetPlannedIDMetadata(kv.vshard, rank, kv.value)
+				}
+				if err != nil {
+					return v2part.Descriptor{}, err
+				}
+				continue
+			}
 			if i == 0 {
 				rank = 0
 			}

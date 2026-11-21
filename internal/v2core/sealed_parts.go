@@ -21,7 +21,7 @@ import (
 var sealedPartPrefix = []byte{255, 'V', '2', 'P', 0}
 
 func isRollupFile(file []coreKV) bool {
-	return len(file) > 0 && bytes.HasPrefix(file[0].Key, []byte{'G', 'C', 'P', 3})
+	return len(file) > 0 && (bytes.HasPrefix(file[0].Key, partKeyMagic) || bytes.HasPrefix(file[0].Key, idKeyMagic))
 }
 
 func openPartSource(root, journal string, source v2part.Provenance) (v2part.Provenance, error) {

@@ -90,6 +90,11 @@ type coreHooks struct {
 	// DenseRollups is retained for source compatibility; all rollup seals are dense.
 	DenseRollups bool
 
+	// IDKeys makes seals write ID-keyed (GCI2) parts through the store name
+	// dictionary under <root>/dict. It needs v2part.IDKeys on; parts already
+	// written with name keys stay readable.
+	IDKeys bool
+
 	// Expire decides whether a name idle for its ExpiryTTL window expires now;
 	// it is asked about no other name. It runs on the serial seal owner, after
 	// admitted batches are applied, and must remain false until journal

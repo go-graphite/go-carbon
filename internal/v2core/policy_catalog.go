@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -61,6 +62,9 @@ type PolicyCatalog struct {
 	ids         sync.Map // sparse overflow pages for IDs at or above 2^30
 	definitions sync.Map // canonical suffix -> *policyDefinition
 	shards      [partsformat.VirtualShards]atomic.Pointer[policyCatalogShard]
+	// dict is the store name dictionary that ID-keyed parts resolve through
+	// (id_keys.go); nil while the store writes name-keyed parts only.
+	dict atomic.Pointer[v2dict.Dict]
 }
 type policyCatalogShard struct {
 	mu        sync.Mutex

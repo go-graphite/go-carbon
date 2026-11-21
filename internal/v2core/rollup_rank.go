@@ -5,6 +5,8 @@ import (
 	"math"
 	"slices"
 	"sort"
+
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 )
 
 // stageKey assigns a stage its canonical sort key while the metric is hot.
@@ -14,14 +16,31 @@ import (
 // sharing a key tie-break by compareRollupMetrics, so the order is exact. A
 // ranked metric whose hint another planner overwrote takes the search key,
 // which sorts identically.
-func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric) {
+//
+// With the store dictionary (ID-keyed parts) the key is (vshard, ID), the
+// GCI2 key order, so no rank is consulted: a name the dictionary does not
+// hold yet is appended here, and the seal syncs before writing its parts.
+func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dict) error {
 	s.vshard = m.vshard
+	if dict != nil {
+		if m.dictID == 0 {
+			e, created, err := dict.Append(string(m.policy.Group), m.vshard, []byte(m.policy.Name), 0)
+			if err != nil {
+				return err
+			}
+			r.dictDirty = r.dictDirty || created
+			m.dictID = e.ID + 1
+		}
+		s.sortKey = uint64(m.vshard)<<32 | uint64(m.dictID-1)
+		return nil
+	}
 	if rk := r.metricRank(m); rk != 0 {
 		s.sortKey = uint64(rk) << 1
-		return
+		return nil
 	}
 	l, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics)
 	s.sortKey = uint64(l)<<1 | 1
+	return nil
 }
 
 // hintSlot returns the slot identity h names in this planner, when that slot

@@ -34,6 +34,9 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 	if len(file) == 0 {
 		return v2part.Descriptor{}, errors.New("empty rollup file")
 	}
+	if bytes.HasPrefix(file[0].Key, idKeyMagic) {
+		return v2part.Descriptor{}, errIDKeyedMove
+	}
 	// Portable compatibility exports materialize singleton values. Runtime seals
 	// pass typed records straight to writePlannedRollupPart instead.
 	for i, kv := range file {
