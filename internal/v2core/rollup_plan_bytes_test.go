@@ -31,6 +31,7 @@ func plannedOwners(r *coreRollups) func(plannedKV) *rollupMetric {
 		lane := &r.lanes[i]
 		for _, ref := range lane.ranked {
 			m, records := r.stageMetrics[ref.stage], lane.stageRecords(&r.stages[ref.stage])
+			records = records[:cap(records)] // with the superseded versions
 			for j := range records {
 				byRecord[&records[j]] = m
 			}

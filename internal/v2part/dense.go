@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"math/bits"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,12 +29,28 @@ var denseMagic = []byte{'G', 'C', 'D', 1}
 // header carries ts0 and step instead of a timestamp column. Ring wrap,
 // unaligned and single-slot runs keep the delta-of-delta timestamp column.
 // Older merged runs use denseModeOrderDoD; new merges use denseModeOrderLinear.
+// denseExtended marks a run with an extension byte right after the mode, the
+// one place later run formats add columns: the mode byte has no free bit.
+// Readers reject an extension byte of zero or with unknown bits.
+//
+// extKinds marks a run of record versions: a physical slot may repeat
+// (oldest version first, never aligned), and after the correction bitmap come
+// a 2-bit kind per record (sealrollup.Kind, four per byte, low bits first)
+// and one uvarint upto per Mat or None record (0: a seal's fallback window
+// that bounds no event walk). Runs of single Raw versions keep the older form.
+// The next bit is reserved for per-record order exceptions.
+const (
+	extKinds = 1 << 0
+	extKnown = extKinds
+)
+
 const (
 	denseInteger         = 1 << 0
 	denseAligned         = 1 << 1
 	denseModeOrderDoD    = 1 << 2
+	denseExtended        = 1 << 3
 	denseModeOrderLinear = 1 << 4
-	denseModes           = denseInteger | denseAligned | denseModeOrderDoD | denseModeOrderLinear | denseTagged
+	denseModes           = denseInteger | denseAligned | denseModeOrderDoD | denseExtended | denseModeOrderLinear | denseTagged
 )
 
 // alignedStep returns the run's slot step in seconds, or 0 if any timestamp
@@ -69,6 +86,12 @@ var headerMagic = []byte{'G', 'C', 'P', 1}
 // form older readers understand. It exists for compatibility tests and for a
 // rollback to a reader without header-in-run support.
 var LegacyEnvelopeKV atomic.Bool
+
+// LegacyKinds makes new writers store what per-slot readers resolve: each
+// slot's last Raw or Mat record, without kinds, the form readers without the
+// kinds column decode. It exists for compatibility tests and for a rollback
+// to such a reader (set it, let merges rewrite the parts, then roll back).
+var LegacyKinds atomic.Bool
 
 // SplitHeader returns a dense value's folded envelope and its run. A value
 // without a header returns a nil envelope and the value itself.
@@ -115,18 +138,22 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
+	kinds := false
 	for i, r := range records {
-		if !validSlotRecord(r) {
+		if !validSlotRecord(r) || r.Kind > sealrollup.KindNone {
 			return nil, errors.New("invalid sealed archive record clock/order/slot")
 		}
-		if i > 0 && (r.Archive != records[0].Archive || r.Slot <= records[i-1].Slot) {
+		if i > 0 && (r.Archive != records[0].Archive || r.Slot < records[i-1].Slot) {
 			return nil, errors.New("unordered dense slots")
 		}
+		kinds = kinds || r.Kind != sealrollup.KindRaw || i > 0 && r.Slot == records[i-1].Slot
 	}
 	out = append(out, denseMagic...)
 	mode := byte(denseTagged)
-	step := alignedStep(records)
-	if step != 0 {
+	step := int64(0)
+	if kinds {
+		mode |= denseExtended
+	} else if step = alignedStep(records); step != 0 {
 		mode |= denseAligned
 	}
 	predict := predictOrders && len(records) > 1
@@ -134,6 +161,9 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 		mode |= denseModeOrderLinear
 	}
 	out = append(out, mode)
+	if kinds {
+		out = append(out, extKinds)
+	}
 	out = binary.AppendUvarint(out, uint64(len(records)))
 	var slot, ts, dt int64
 	for _, r := range records {
@@ -165,6 +195,18 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	for i, r := range records {
 		if r.Correction {
 			out[flags+i/8] |= 1 << uint(i%8)
+		}
+	}
+	if kinds {
+		at := len(out)
+		out = append(out, make([]byte, (len(records)+3)/4)...)
+		for i, r := range records {
+			out[at+i/4] |= byte(r.Kind) << uint(2*(i%4))
+		}
+		for _, r := range records {
+			if r.Kind == sealrollup.KindMat || r.Kind == sealrollup.KindNone {
+				out = append(out, 0) // upto: the seal writes fallback windows only
+			}
 		}
 	}
 	return appendValues(out, records, table), nil
@@ -342,11 +384,57 @@ func DecodeSlots(archive uint32, firstSlot int64, data []byte) ([]sealrollup.Rec
 }
 
 // DecodeSlotsInto is DecodeSlots with caller-owned reusable scalar storage.
+// It returns what every per-slot reader resolves: of a run of versions, the
+// last Raw or Mat record of each physical slot; Ghosts, None records and
+// superseded versions are skipped, so slots strictly increase. Kinds are
+// cleared: the view equals what a part written without kinds decodes to.
 func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
+	rs, err := decodeRun(dst, archive, firstSlot, data, nil)
+	if err != nil {
+		return rs, err
+	}
+	live := rs[:0]
+	for _, r := range rs {
+		kind := r.Kind
+		r.Kind = sealrollup.KindRaw
+		switch {
+		case kind != sealrollup.KindRaw && kind != sealrollup.KindMat:
+		case len(live) > 0 && live[len(live)-1].Slot == r.Slot:
+			live[len(live)-1] = r
+		default:
+			live = append(live, r)
+		}
+	}
+	return live, nil
+}
+
+// DecodeVersionsInto returns every stored version of a run, the input of
+// sealrollup.Versions: Raw and Ghost orders become (batch, target archive)
+// ticks, a record's target archive being its own; a fallback Mat (upto 0)
+// loses ties to a window computed in its batch and bounds no event walk.
+// records is reusable scratch.
+func DecodeVersionsInto(dst []sealrollup.Version, records []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Version, []sealrollup.Record, error) {
+	var upto []uint64
+	records, err := decodeRun(records, archive, firstSlot, data, &upto)
+	if err != nil {
+		return dst, records, err
+	}
+	for i, r := range records {
+		dst = append(dst, r.Version(upto[i]))
+	}
+	return dst, records, nil
+}
+
+// decodeRun decodes every record of a run. With upto, it also returns each
+// record's upto (0 for Raw, Ghost and runs without kinds).
+func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte, upto *[]uint64) ([]sealrollup.Record, error) {
 	if !bytes.HasPrefix(data, denseMagic) {
 		r, e := sealrollup.DecodeRecord(int(archive), firstSlot, data)
 		if e != nil {
 			return nil, e
+		}
+		if upto != nil {
+			*upto = append((*upto)[:0], 0)
 		}
 		return append(dst[:0], r), nil
 	}
@@ -360,8 +448,14 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	if mode&^denseModes != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged || mode&(denseModeOrderDoD|denseModeOrderLinear) == denseModeOrderDoD|denseModeOrderLinear {
 		return nil, bad
 	}
-	aligned := mode&denseAligned != 0
-	p := data[5:]
+	aligned, kinds, p := mode&denseAligned != 0, false, data[5:]
+	if mode&denseExtended != 0 {
+		ext := p[0]
+		if aligned || ext == 0 || ext&^extKnown != 0 {
+			return nil, bad
+		}
+		kinds, p = ext&extKinds != 0, p[1:]
+	}
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(p)
 		if n <= 0 {
@@ -385,7 +479,7 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	var slot int64
 	for i := range rs {
 		v, ok := take()
-		if !ok || v > math.MaxInt64 || slot > math.MaxInt64-int64(v) || (i > 0 && v == 0) {
+		if !ok || v > math.MaxInt64 || slot > math.MaxInt64-int64(v) || (i > 0 && v == 0 && !kinds) {
 			return nil, bad
 		}
 		slot += int64(v)
@@ -491,6 +585,39 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	for i := range rs {
 		rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
 	}
+	if upto != nil {
+		*upto = append((*upto)[:0], make([]uint64, len(rs))...)
+	}
+	if kinds {
+		nkinds := (len(rs) + 3) / 4
+		if len(p) < nkinds {
+			return nil, bad
+		}
+		if n := uint(len(rs) % 4); n != 0 && p[nkinds-1]>>(2*n) != 0 {
+			return nil, bad
+		}
+		canonical := false // the writer sets the bit only for versions
+		for i := range rs {
+			rs[i].Kind = sealrollup.Kind(p[i/4] >> uint(2*(i%4)) & 3)
+			canonical = canonical || rs[i].Kind != sealrollup.KindRaw || i > 0 && rs[i].Slot == rs[i-1].Slot
+		}
+		if !canonical {
+			return nil, bad
+		}
+		p = p[nkinds:]
+		for i := range rs {
+			if rs[i].Kind != sealrollup.KindMat && rs[i].Kind != sealrollup.KindNone {
+				continue
+			}
+			v, ok := take()
+			if !ok {
+				return nil, bad
+			}
+			if upto != nil {
+				(*upto)[i] = v
+			}
+		}
+	}
 	tag := byte(valuePlanes)
 	legacyInteger := mode&denseInteger != 0
 	switch {
@@ -522,6 +649,7 @@ type DenseWriter struct {
 	closed bool
 	// predictOrders selects the merged order codec.
 	predictOrders bool
+	legacyKinds   bool
 }
 
 // PredictOrders replaces the seal order codec with endpoint-predicted byte planes,
@@ -590,7 +718,7 @@ func NewDenseWriter(path string, spec Spec) (*DenseWriter, error) {
 		b = &denseWorkspace{}
 	}
 	b.fold = !LegacyEnvelopeKV.Load()
-	return &DenseWriter{writer: w, denseWorkspace: b}, nil
+	return &DenseWriter{writer: w, denseWorkspace: b, legacyKinds: LegacyKinds.Load()}, nil
 }
 func (w *DenseWriter) flush() error { return w.flushWith(nil) }
 
@@ -691,8 +819,12 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
 		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
-		if w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
-			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, true)
+		// records is the run's per-slot view (winners, no kinds): re-encoding
+		// it, for LegacyKinds or predicted orders, drops superseded versions
+		// and kinds, as merges do until they write windows down.
+		legacy := w.legacyKinds && value[4]&denseExtended != 0
+		if legacy || w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
+			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.predictOrders && len(w.records) > 1)
 			w.encoded = value
 		}
 	}
@@ -795,12 +927,34 @@ func (w *DenseWriter) set(key, value []byte) error {
 
 // appendRecord starts a run at key, or at k's formatted key when key is nil.
 func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error {
+	if w.legacyKinds {
+		if r.Kind != sealrollup.KindRaw && r.Kind != sealrollup.KindMat {
+			return nil
+		}
+		r.Kind = sealrollup.KindRaw
+		if n := len(w.records); n > 0 && !w.rawPending && k.Metric == w.key.Metric && k.Archive == w.key.Archive && w.records[n-1].Slot == r.Slot {
+			w.records[n-1] = r
+			return nil
+		}
+	}
 	if w.rawPending {
 		if e := w.flush(); e != nil {
 			return e
 		}
 	}
+	var carry []sealrollup.Record
 	if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
+		// A full run never splits one slot's versions: they start the next run.
+		if g := len(w.records); g == MaxDenseSlots && k.Metric == w.key.Metric && k.Archive == w.key.Archive && w.records[g-1].Slot == r.Slot {
+			for g > 0 && w.records[g-1].Slot == r.Slot {
+				g--
+			}
+			if g == 0 {
+				return errors.New("slot versions exceed a dense run")
+			}
+			carry = slices.Clone(w.records[g:])
+			w.records = w.records[:g]
+		}
 		if e := w.flush(); e != nil {
 			return e
 		}
@@ -813,7 +967,7 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 			w.first = append(w.first[:0], key...)
 		}
 	}
-	w.records = append(w.records, r)
+	w.records = append(append(w.records, carry...), r)
 	return nil
 }
 
@@ -874,8 +1028,9 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 }
 
 // plannedKey checks that a tuple sorts strictly after the previous one in GCP3
-// key order (vshard, name length, name, archive, slot) and validates each new
-// name's length and scope once. Routing comes from the planner, without hashing
+// key order (vshard, name length, name, archive, slot), or repeats its archive
+// slot (the next version of that slot), and validates each new name's length
+// and scope once. Routing comes from the planner, without hashing
 // the name again. Two ranked tuples compare by rank, which
 // follows that name order, so the check reads no name bytes.
 func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive uint32, slot int64) (Key, error) {
@@ -896,7 +1051,7 @@ func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive 
 			if c = cmp.Compare(archive, p.Archive); c == 0 {
 				c = cmp.Compare(slot, p.BlockStart)
 			}
-			if c <= 0 {
+			if c < 0 || c == 0 && archive == MetadataArchive {
 				return Key{}, errors.New("unordered planned dense input")
 			}
 			p.Archive, p.BlockStart = archive, slot

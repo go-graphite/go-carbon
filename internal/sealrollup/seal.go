@@ -22,14 +22,45 @@ type Frontier struct {
 type Record struct {
 	Delta
 	Correction bool
+	Kind       Kind
 }
+
+// Kind says what a stored record version is. Raw is a point at the archive
+// its batch's admission clock routed it to, aligned to that archive's step.
+// Mat is a window value written down: the seal writes its closed windows as
+// fallback-only Mat records; merges will write windows down before dropping
+// superseded versions. Ghost is a point whose physical slot a later point of
+// the same batch (another epoch) took: an event, never a value. None is a
+// written-down absence: it bounds the event walk and never holds a value.
+// Readers that resolve one value per slot (every current reader) see only
+// Raw and Mat records; see v2part.DecodeSlotsInto.
+type Kind uint8
+
+const (
+	KindRaw Kind = iota
+	KindMat
+	KindGhost
+	KindNone
+)
 
 // SealPlan is detached from the immutable input view. Install Records and Next
 // only after the transaction containing raw input, records and frontier commits.
+//
+// The last Versions entries of Records are superseded versions of this seal
+// (PlanClosedInto only): a Raw point of an earlier batch whose slot a later
+// batch or a closed window took, or a Ghost. They are sorted by (archive,
+// slot), oldest first, and every one shares its (archive, slot) with exactly
+// one of the leading len(Records)-Versions records, the slot's winner. Part
+// writers store each slot's versions before its winner; state and per-slot
+// readers use the winners only.
 type SealPlan struct {
-	Records []Record
-	Next    Frontier
+	Records  []Record
+	Versions int
+	Next     Frontier
 }
+
+// Winners returns the records that resolve each touched slot.
+func (p SealPlan) Winners() []Record { return p.Records[:len(p.Records)-p.Versions] }
 
 // PolicyDigest includes full archive counts and the exact float32 XFF bits.
 func PolicyDigest(c Config) ([32]byte, error) {
@@ -105,18 +136,20 @@ func (p *Prepared) PlanWithWorkspace(prior Frontier, view View, ranges RangeView
 	}
 	plan := SealPlan{Next: next, Records: make([]Record, 0, len(deltas))}
 	for _, d := range deltas {
-		correction := d.Sample.Time <= prior.MaxTime
+		d.Correction = d.Sample.Time <= prior.MaxTime
 		if view != nil {
 			p, ok := view(d.Archive, d.Slot)
-			correction = correction || (ok && p.Time == d.Sample.Time)
+			d.Correction = d.Correction || (ok && p.Time == d.Sample.Time)
 		}
-		plan.Records = append(plan.Records, Record{Delta: d, Correction: correction})
+		plan.Records = append(plan.Records, d)
 	}
 	return plan, nil
 }
 
 // EncodeRecord preserves occupied NaNs, signed zero, source order and the actual
 // epoch of a ring slot. Key identity supplies metric/archive/physical slot.
+// Singleton values stay in their published form, which has no record kind:
+// kinds and versions live in dense runs only (v2part).
 func EncodeRecord(r Record) []byte {
 	return AppendRecord(nil, r)
 }
