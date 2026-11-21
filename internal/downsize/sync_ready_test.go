@@ -278,7 +278,7 @@ func TestSyncBlockExpandsScope(t *testing.T) {
 	if e := os.WriteFile(path, []byte(data), 0600); e != nil {
 		t.Fatal(e)
 	}
-	c, e := parseSyncCommand([]string{"--block", path, "--streams", "2"})
+	c, e := parseSyncCommand([]string{"--block", path, "--streams", "2", "--ready"})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -497,8 +497,8 @@ func TestSyncReadyBlockResumeWithoutOriginalDescriptor(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := []string{"--block", block, "--process-metrics-port", "7123"}
-			if noReady {
-				args = append(args, "--no-ready")
+			if !noReady {
+				args = append(args, "--ready")
 			}
 			c, err := parseSyncCommand(args)
 			if err != nil {

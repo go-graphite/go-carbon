@@ -104,7 +104,7 @@ type syncOptions struct {
 	settle           time.Duration
 	windows          syncRanges
 	readyFrontier    bool
-	sourceScope      bool // verify only names a source held at discovery (--no-ready)
+	sourceScope      bool // verify only names a source held at discovery (READY off, the default)
 	sampleEvery      int
 	includeShort     bool
 	fullHistory      bool

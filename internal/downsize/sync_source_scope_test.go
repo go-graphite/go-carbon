@@ -85,7 +85,7 @@ func round1Verified(t *testing.T, state string) int {
 	return total
 }
 
-func TestSyncNoReadyVerifiesOnlySourceHeldNames(t *testing.T) {
+func TestSyncWithoutReadyVerifiesOnlySourceHeldNames(t *testing.T) {
 	t.Parallel()
 	b, o, r, hole := sourceScopeFixture(t)
 	run := func() error {
@@ -95,7 +95,7 @@ func TestSyncNoReadyVerifiesOnlySourceHeldNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !o.sourceScope {
-		t.Fatal("--no-ready pass did not scope verification to source-held names")
+		t.Fatal("pass without READY did not scope verification to source-held names")
 	}
 	for n := range b.read {
 		if strings.HasPrefix(n, "t.only.") {
@@ -125,7 +125,7 @@ func TestSyncNoReadyVerifiesOnlySourceHeldNames(t *testing.T) {
 	}
 }
 
-// Without --no-ready the scope stays the full union: READY attests every
+// With READY the scope stays the full union: READY attests every
 // discovered name, including names a source may acquire after discovery.
 func TestSyncDefaultScopeKeepsTargetOnlyNames(t *testing.T) {
 	t.Parallel()
@@ -155,5 +155,34 @@ func TestSyncSourceScopeCounts(t *testing.T) {
 	s.o.sourceScope = false
 	if s.targetOnlySkipped() != 0 || s.verifyScopeNames() != 260 {
 		t.Fatal("default scope must cover every discovered name")
+	}
+}
+
+// READY is off by default, so a plain pass (no READY flag) verifies only
+// source-held names; --ready restores the full union.
+func TestSyncScopeFollowsReadyFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		args        []string
+		sourceScope bool
+		verified    int
+	}{{nil, true, 60}, {[]string{"--ready"}, false, 260}} {
+		c, err := parseSyncCommand(syncCLIArgs(t, append([]string{"--jwt-secret", "/test/secret"}, tc.args...)...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, o, r, _ := sourceScopeFixture(t)
+		r.noReady = c.ready.noReady
+		// READY may report NOT_READY on this fixture; only the verify scope matters.
+		_ = runSyncReady(context.Background(), &o, r, b, func() error { return runSync(context.Background(), o, b) })
+		if o.sourceScope != tc.sourceScope {
+			t.Fatalf("%v: sourceScope=%v, want %v", tc.args, o.sourceScope, tc.sourceScope)
+		}
+		if got := round1Verified(t, o.state); got != tc.verified {
+			t.Fatalf("%v: round 1 verified %d names, want %d", tc.args, got, tc.verified)
+		}
+		if b.read["t.only.000"] == tc.sourceScope {
+			t.Fatalf("%v: target-only name read=%v", tc.args, b.read["t.only.000"])
+		}
 	}
 }
