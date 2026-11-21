@@ -497,8 +497,8 @@ func TestSyncReadyBlockResumeWithoutOriginalDescriptor(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := []string{"--block", block, "--process-metrics-port", "7123"}
-			if noReady {
-				args = append(args)
+			if !noReady {
+				args = append(args, "--ready")
 			}
 			c, err := parseSyncCommand(args)
 			if err != nil {

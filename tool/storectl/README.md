@@ -276,7 +276,9 @@ live persistence in the same windows can also contribute to net additions.
 without an independent input inventory. Replica parity cannot prove that no such
 data was lost.
 
-READY is opt-in (`--ready`); without it sync stops after verification and fill. With `--ready` it writes atomic `STATE/ready.json`
+READY is opt-in (`--ready`); without it sync stops after verification and fill, and verifies only names
+some source held at discovery: target-only names have nothing to fill from and are counted as
+`target_only_skipped`. `--ready` verifies every discovered name. With `--ready` it writes atomic `STATE/ready.json`
 with `verdict: READY` or `NOT_READY`, reasons, scope, process snapshots, sample and
 counts. Exit 0 establishes READY; exit 2 reports incomplete sync or READY gates.
 An earlier verdict is invalidated before a new run. A run without `--ready`
