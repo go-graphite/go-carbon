@@ -60,7 +60,7 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "timeout", "streams", "rate", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
+		case "timeout", "streams", "rate", "ready", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
 			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; operational and READY inputs may override it; donor/target/ring/names/window changes select a preserved child scope", name)
@@ -74,6 +74,14 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if name == "no-ready" {
+			// Removed flag. States saved by older binaries keep their mode:
+			// no-ready=true is the new default, false meant READY was on.
+			if saved.Flags[name] != "true" {
+				_ = flags.Lookup("ready").Value.Set("true")
+			}
+			continue
+		}
 		f := flags.Lookup(name)
 		if f == nil {
 			return fmt.Errorf("saved config contains unsupported flag --%s", name)

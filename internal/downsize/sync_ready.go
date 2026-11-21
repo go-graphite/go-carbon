@@ -130,7 +130,7 @@ func runSyncReadyPrepared(ctx context.Context, o *syncOptions, r syncReadyOption
 	if r.noReady {
 		path := filepath.Join(o.state, "ready.json")
 		if _, e := os.Stat(path); e == nil {
-			if e = atomicStateJSON(path, readyReport{Schema: 1, Verdict: "NOT_READY", Reasons: []string{"READY disabled by --no-ready"}}); e != nil {
+			if e = atomicStateJSON(path, readyReport{Schema: 1, Verdict: "NOT_READY", Reasons: []string{"READY not requested (--ready)"}}); e != nil {
 				return e
 			}
 		} else if !errors.Is(e, os.ErrNotExist) {

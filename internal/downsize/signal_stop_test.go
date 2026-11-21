@@ -129,7 +129,7 @@ func TestStorectlSignalStopAndResume(t *testing.T) {
 				}
 				args := []string{"sync", "--source", donor.URL, "--to", survivor.URL, "--state", state,
 					"--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s",
-					"--include-short-retention", "--no-ready", "--streams=1", "--verify-batch=2", "--jwt-secret", secret,
+					"--include-short-retention", "--streams=1", "--verify-batch=2", "--jwt-secret", secret,
 					"--carbonserver-port", u.Port(), "--transfer-idle-timeout=1m"}
 				start := func(args []string) (*exec.Cmd, <-chan error, string) {
 					t.Helper()

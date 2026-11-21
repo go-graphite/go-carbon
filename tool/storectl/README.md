@@ -95,10 +95,10 @@ go directly to transfer after batched source retention checks; coverage comparis
 runs after transfer, when both stores hold the name.
 
 ```sh
-# sync signs and refreshes JWTs from --jwt-secret (the default path is used here)
+# sync signs and refreshes JWTs from the secret named by go-carbon's [buckyd] auth-jwt-secret-file (the default here)
 storectl sync \
   --source http://donor-a:4242 --source http://donor-b:4242 \
-  --to http://target:4242 --state ./block-state --streams 0 \
+  --to http://target:4242 --state ./block-state \
   --window period:1794500000:1794603600 \
   --window closed:1794592020:1794592680 \
   --window shard:1794595620:1794597120 \
@@ -128,8 +128,11 @@ Windows are half-open `[FROM, UNTIL)` in Unix seconds.
   `--full-history` remains an accepted compatibility spelling.
 - `--no-copy` makes verification read-only: missing coverage stays residual.
   `--no-verify` stops after discovery/copy and does not prove readiness.
-- `--streams` is the total per-host transfer budget. Zero resolves advertised
-  source/target capacity (the smallest advertised per-host cap for end-to-end sync). Verify and copy are serial phases, so each can use the
+- `--streams` is the total per-host transfer budget, default 64. Unless set explicitly,
+  the default is lowered to the smallest `max_transfers` the source or target
+  advertises, so it never causes 429 storms; an explicit value is used as given. Zero
+  resolves only the advertised capacity (the smallest advertised per-host cap for end-to-end sync).
+  `--progress-interval` defaults to 60s for sync. Verify and copy are serial phases, so each can use the
   entire budget. Native window fills run disjoint ranges of at most 4,096 names
   concurrently up to this budget, preserving donor order and durable range receipts.
   Fill `done` and `names_per_second` advance after each range completes all selected
@@ -228,8 +231,10 @@ authentication remain frozen. An old state without `config.json` needs its
 original flags once alongside `--resume`; the tool checks the journal identity
 and saves the configuration for subsequent resumes.
 
-Sync signs its own buckyd JWT using `--jwt-secret`, defaulting to
-`/etc/go-carbon/buckyd_api_jwt_secret`. The shared signer renews its four-hour
+Sync signs its own buckyd JWT using `--jwt-secret`. Without it, the path comes from
+`[buckyd] auth-jwt-secret-file` in the local go-carbon config (`--config`, default
+`/etc/go-carbon/go-carbon.conf`), falling back to `/etc/go-carbon/buckyd_api_jwt_secret`
+when the config or key is missing. A failing read names the path it tried. The shared signer renews its four-hour
 token hourly at request time, including after idle phases. It rereads the secret
 file on renewal. Only the secret path is saved; tokens and signing keys remain in
 memory. A token-minting wrapper or `BUCKYD_TOKEN` is unnecessary for sync.
@@ -271,11 +276,11 @@ live persistence in the same windows can also contribute to net additions.
 without an independent input inventory. Replica parity cannot prove that no such
 data was lost.
 
-READY is the final default phase of `sync`. It writes atomic `STATE/ready.json`
+READY is opt-in (`--ready`); without it sync stops after verification and fill. With `--ready` it writes atomic `STATE/ready.json`
 with `verdict: READY` or `NOT_READY`, reasons, scope, process snapshots, sample and
 counts. Exit 0 establishes READY; exit 2 reports incomplete sync or READY gates.
-An earlier verdict is invalidated before a new run. `--no-ready` opts out and
-invalidates a previous READY; `--no-verify` cannot establish readiness.
+An earlier verdict is invalidated before a new run. A run without `--ready`
+invalidates a previous READY (states saved by older versions with `no-ready` resume as before); `--no-verify` cannot establish readiness.
 `--no-full-history` requires explicit `--ready-scope windows` for a scoped proof.
 No separate ready, check, fill or verify command is needed.
 

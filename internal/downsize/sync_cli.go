@@ -37,18 +37,19 @@ type effectiveSyncPolicy struct {
 }
 
 type syncCommand struct {
-	freshReason   string
-	ready         syncReadyOptions
-	sync          syncOptions
-	copy          copyOptions
-	live          syncLiveOptions
-	legacyJournal bool
-	explicit      map[string]bool
-	resuming      bool
-	config        savedSyncConfig
-	jwtSecret     string
-	rate          int64
-	timeout       time.Duration
+	freshReason    string
+	ready          syncReadyOptions
+	sync           syncOptions
+	copy           copyOptions
+	live           syncLiveOptions
+	legacyJournal  bool
+	explicit       map[string]bool
+	resuming       bool
+	config         savedSyncConfig
+	jwtSecret      string
+	goCarbonConfig string
+	rate           int64
+	timeout        time.Duration
 }
 
 func parseSyncCommand(args []string) (syncCommand, error) {
@@ -64,8 +65,11 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
 	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only timeout, streams, rate and READY inputs may override it")
-	flags.StringVar(&c.jwtSecret, "jwt-secret", hostJWTSecretPath, "buckyd JWT signing secret file; tokens refresh automatically before expiry")
-	flags.BoolVar(&c.ready.noReady, "no-ready", false, "skip final READY attestation")
+	flags.StringVar(&c.jwtSecret, "jwt-secret", "", "buckyd JWT signing secret file; tokens refresh automatically before expiry (default: [buckyd] auth-jwt-secret-file from --config, else "+hostJWTSecretPath+")")
+	flags.StringVar(&c.goCarbonConfig, "config", defaultGoCarbonConfig, "local go-carbon config read for the default --jwt-secret")
+	flags.Bool("ready", false, "run the final READY attestation (off by default)")
+	c.copy.streams, c.copy.progressInterval = defaultSyncStreams, defaultSyncProgress
+	flags.Lookup("streams").DefValue, flags.Lookup("progress-interval").DefValue = strconv.Itoa(defaultSyncStreams), defaultSyncProgress.String()
 	flags.StringVar(&c.ready.scope, "ready-scope", "full-history", "READY coverage: full-history (default) or windows (requires --no-full-history --settle=0s)")
 	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
 	flags.Var((*originList)(&c.ready.gapSelection), "gapfill-window", "with --ready-block: fill only these gap IDs (repeat or comma-separate); other missing receipts still block READY")
@@ -75,7 +79,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.BoolVar(&c.ready.gapsComplete, "gap-ledger-complete", false, "attest that --window includes every known input gap")
 	flags.String("block", "", "generic JSON block file containing target, donors, peers, period, gaps and read-back URL")
 	flags.Lookup("state").Usage = "state directory; existing copy journal FILE resumes first, with sync state in FILE.sync"
-	flags.Lookup("streams").Usage = "total per-host transfer budget; 0 uses source/target advertised capacity; serial verify and copy phases share this budget"
+	flags.Lookup("streams").Usage = "total per-host transfer budget; the default 64 is lowered to the smallest max_transfers the source or target advertises, so it never causes 429s; an explicit value is used as given; 0 uses only the advertised capacity; serial verify and copy phases share this budget"
 	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
 	flags.IntVar(&c.sync.batch, "verify-batch", 500, "names per verification batch")
 	flags.IntVar(&c.sync.maxRounds, "max-rounds", 0, "optional round limit; 0 converges while making progress")
@@ -101,6 +105,10 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.Visit(func(f *flag.Flag) { c.explicit[f.Name] = true })
 	if err := c.restoreConfig(flags, *resume); err != nil {
 		return c, err
+	}
+	c.ready.noReady = flags.Lookup("ready").Value.String() != "true"
+	if c.jwtSecret == "" {
+		c.jwtSecret = defaultJWTSecretPath(c.goCarbonConfig)
 	}
 	if c.timeout < 0 {
 		return c, errors.New("--timeout must be nonnegative")
@@ -277,7 +285,7 @@ func SyncMain(ctx context.Context, args []string) error {
 	// The same cache serves discovery, native exports, verification and copy.
 	auth := &hostTokenCache{readSecret: func() ([]byte, error) { return os.ReadFile(c.jwtSecret) }}
 	if _, err := auth.get(c.jwtSecret); err != nil {
-		return fmt.Errorf("--jwt-secret %s: %w", c.jwtSecret, err)
+		return fmt.Errorf("JWT secret file %s (--jwt-secret, else auth-jwt-secret-file from --config %s): %w", c.jwtSecret, c.goCarbonConfig, err)
 	}
 	c.copy.auth, c.live.auth = auth, auth
 	c.live.authOrigins = append(append([]string(nil), c.sync.from...), c.sync.to)
@@ -298,7 +306,7 @@ func SyncMain(ctx context.Context, args []string) error {
 		var sourceCapacity int
 		var target copyStatus
 		for _, host := range c.live.authOrigins {
-			if streams != 0 && host != c.sync.to {
+			if capped := streams == 0 || !c.explicit["streams"]; !capped && host != c.sync.to {
 				continue
 			}
 			var status copyStatus
@@ -321,6 +329,8 @@ func SyncMain(ctx context.Context, args []string) error {
 		}
 		if streams == 0 {
 			streams = defaultCopyStreams(sourceCapacity, target.MaxTransfers)
+		} else if !c.explicit["streams"] {
+			streams = min(streams, defaultCopyStreams(sourceCapacity, target.MaxTransfers))
 		}
 		c.sync.streams = streams
 		c.live.copyStreams = streams

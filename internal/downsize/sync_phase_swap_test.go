@@ -132,7 +132,7 @@ func TestSyncPhaseResumeExecutableSwap(t *testing.T) {
 				}
 			}()
 			u, _ := url.Parse(carbon.URL)
-			args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", fmt.Sprintf("--verify-batch=%d", batch), "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port(), "--transfer-idle-timeout=1m"}
+			args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--streams=1", fmt.Sprintf("--verify-batch=%d", batch), "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port(), "--transfer-idle-timeout=1m"}
 			if phase == "window retry" {
 				// A real-shaped old journal: missing selection finished with uncertainty.
 				// The old executable resumes it, resolves group one and is killed in two.
@@ -471,7 +471,7 @@ func TestSyncReceiptResumeExecutableSwap(t *testing.T) {
 	}))
 	defer carbon.Close()
 	u, _ := url.Parse(carbon.URL)
-	args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
+	args := []string{"--source", donor.URL, "--to", survivor.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
 	c, err := parseSyncCommand(args)
 	if err != nil {
 		t.Fatal(err)
@@ -642,7 +642,7 @@ func TestSyncFillExecutableSwap(t *testing.T) {
 	}))
 	defer carbon.Close()
 	u, _ := url.Parse(carbon.URL)
-	args := []string{"--source", donor1.URL, "--source", donor2.URL, "--to", receiver.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--no-ready", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
+	args := []string{"--source", donor1.URL, "--source", donor2.URL, "--to", receiver.URL, "--state", state, "--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s", "--include-short-retention", "--streams=1", "--verify-batch=2", "--jwt-secret", syncTestJWTSecret(t), "--carbonserver-port", u.Port()}
 	start := func(binary string, args []string) (*exec.Cmd, <-chan error, *bytes.Buffer) {
 		cmd := exec.Command(binary, append([]string{"sync"}, args...)...)
 		cmd.Env = append(os.Environ(), "STORECTL_GRAPHITE_ADDR=127.0.0.1:0", "NO_PROXY=*", "no_proxy=*")

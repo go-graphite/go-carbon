@@ -158,7 +158,7 @@ func TestReadyNoopRepeatedBlock(t *testing.T) {
 			if err := os.WriteFile(block, []byte(data), 0600); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"--block", block, "--streams", "2", "--include-short-retention", "--settle=0s"}
+			args := []string{"--block", block, "--streams", "2", "--include-short-retention", "--settle=0s", "--ready"}
 			c, err := parseSyncCommand(args)
 			if err != nil {
 				t.Fatal(err)

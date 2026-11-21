@@ -94,7 +94,7 @@ func TestSyncOverallTimeoutDuringRestart(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("test-secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	err := SyncMain(context.Background(), []string{"--source", "http://source.example:4242", "--streams", "1", "--to", server.URL, "--state", filepath.Join(dir, "state"), "--jwt-secret", secret, "--no-ready", "--timeout", "250ms"})
+	err := SyncMain(context.Background(), []string{"--source", "http://source.example:4242", "--streams", "1", "--to", server.URL, "--state", filepath.Join(dir, "state"), "--jwt-secret", secret, "--timeout", "250ms"})
 	if !errors.Is(err, context.DeadlineExceeded) || calls.Load() == 0 {
 		t.Fatal(calls.Load(), err)
 	}
