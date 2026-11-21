@@ -31,22 +31,19 @@ func (o *recordingByteOwner) AppendBytes(text []byte, ends []int, hashes []uint6
 	return o.Append(names, hashes, data, sequence, clock)
 }
 
-// Fragments cross pending-batch boundaries and alternate with codec names.
-// Both layouts can share an owner; recycling must preserve names and hashes.
+// Fragments cross inbox boundaries and alternate with codec names. Both
+// layouts share a byte owner's inbox; the copy must preserve names and hashes.
 func TestOwnerByteFragmentsAndCodec(t *testing.T) {
-	s := &Server{cfg: Config{BatchSize: 8, SyncInterval: time.Hour}}
-	q := make(chan *batch, 5)
 	o := &recordingByteOwner{}
-	var batches []*batch
+	s := ownerOnly(o, Config{BatchSize: 8, SyncInterval: time.Hour})
 	index := 0
-	for k, n := range []int{3, 7, 2, 9, 1} {
+	for k, n := range []int{5, 7, 6, 9, 1} {
 		p := &batch{}
 		for range n {
 			name := fmt.Sprintf("metric.%d.%s", index, string(make([]byte, index%5+1)))
 			if k%2 == 0 {
 				p.text = append(p.text, name...)
 				p.ends = append(p.ends, len(p.text))
-				p.names = append(p.names, "")
 			} else {
 				p.names = append(p.names, name)
 			}
@@ -54,17 +51,18 @@ func TestOwnerByteFragmentsAndCodec(t *testing.T) {
 			p.data = append(p.data, points.Point{Timestamp: int64(index), Value: float64(index) + .125})
 			index++
 		}
-		batches = append(batches, p)
-		q <- p
+		if err := s.handOff(0, p); err != nil {
+			t.Fatal(err)
+		}
+		clear(p.text[:cap(p.text)]) // the inbox holds a copy
 	}
-	close(q)
-	s.workers.Add(1)
-	s.work(o, q, make(chan ownerCall))
-	for _, p := range batches {
-		clear(p.text[:cap(p.text)])
-	}
-	if o.byteCalls != 3 {
-		t.Fatalf("byte calls=%d, want 3", o.byteCalls)
+	close(s.closing)
+	s.workers.Wait()
+	// Hand-offs of 5, 7 (codec), 6, 9 (codec) and 1 points fill the inbox to
+	// exactly 8 before each call, splitting codec and text batches: 8, 8, 8,
+	// and the 4 left at close.
+	if o.byteCalls != 4 {
+		t.Fatalf("byte calls=%d, want 4", o.byteCalls)
 	}
 	if len(o.names) != index || s.Stats().Accepted != uint64(index) {
 		t.Fatal("lost points", len(o.names), s.Stats())
