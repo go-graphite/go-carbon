@@ -395,3 +395,141 @@ func spec2(s Spec, generation uint64) Spec {
 	s.Generation = generation
 	return s
 }
+
+// TestRekeyDense copies a donor's ID-keyed part into a live owner whose
+// dictionary admitted the names in another order and already holds some of
+// them. Through v2dict Rekey, the rewritten part equals, byte for byte, the
+// part the owner writes for the same records under its own IDs, minus the
+// names the donor deleted.
+func TestRekeyDense(t *testing.T) {
+	IDKeys.Store(true)
+	t.Cleanup(func() { IDKeys.Store(false) })
+	spec := idFixtureSpec()
+	group := string(spec.Scope.Group)
+	donor, ms := idFixture(t, spec.Scope.Group)
+	deleted := map[ID]bool{}
+	for i := 0; i < len(ms); i += 7 {
+		if ok, err := donor.Delete(group, ms[i].vshard, []byte(ms[i].name)); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+		deleted[ms[i].name] = true
+	}
+	if err := donor.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	// The owner already admitted every third name, in reverse order.
+	owner, err := v2dict.Open(t.TempDir(), v2dict.Options{NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	for i := len(ms) - 1; i >= 0; i -= 3 {
+		if _, _, err := owner.Append(group, ms[i].vshard, []byte(ms[i].name), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remaps := map[uint16][]uint32{}
+	for v := uint16(0); v < 8; v++ {
+		if remaps[v], err = owner.Rekey(group, v, donor.Entries(group, v)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := owner.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	remap := func(vshard uint16, id uint32) (uint32, bool) {
+		m := remaps[vshard]
+		if int(id) >= len(m) || m[id] == v2dict.NoID {
+			return 0, false
+		}
+		return m[id], true
+	}
+	sorted := func(ms []idFixtureMetric) []idFixtureMetric {
+		ms = slices.Clone(ms)
+		slices.SortFunc(ms, func(a, b idFixtureMetric) int {
+			return cmp.Or(cmp.Compare(a.vshard, b.vshard), cmp.Compare(a.id, b.id))
+		})
+		return ms
+	}
+	dir := t.TempDir()
+	donorPath := filepath.Join(dir, "donor.sst")
+	dd, err := writeIDFixture(donorPath, spec, sorted(ms), donor.Generation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The owner's own part for the kept names: same records (fixture values
+	// follow the donor ID), keyed by the owner's IDs.
+	ownerSpec := spec
+	ownerSpec.Scope.Part = PartID{7, 7, 7}
+	var kept, names []idFixtureMetric
+	moved := 0
+	for _, m := range ms {
+		if deleted[m.name] {
+			continue
+		}
+		e, ok := owner.Lookup(group, m.vshard, []byte(m.name))
+		if !ok {
+			t.Fatalf("owner lacks %s", m.name)
+		}
+		if e.ID != m.id {
+			moved++
+		}
+		names = append(names, m)
+		kept = append(kept, idFixtureMetric{name: m.name, vshard: m.vshard, id: e.ID})
+	}
+	if moved == 0 {
+		t.Fatal("fixture needs owner IDs to differ from donor IDs")
+	}
+	wantPath := filepath.Join(dir, "owner.sst")
+	if _, err := writeRekeyedFixture(wantPath, ownerSpec, sorted(kept), names, owner.Generation()); err != nil {
+		t.Fatal(err)
+	}
+	ownerSpec.Generation = owner.Generation()
+	gotPath := filepath.Join(dir, "rekeyed.sst")
+	rd, err := RekeyDense(context.Background(), donorPath, dd, gotPath, ownerSpec, remap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(gotPath)
+	want, _ := os.ReadFile(wantPath)
+	if len(want) == 0 || !bytes.Equal(got, want) {
+		t.Fatalf("rekeyed part differs from the owner's own part (%d vs %d bytes)", len(got), len(want))
+	}
+	if rd.Coverage.Names != uint64(len(kept)) || rd.Generation != owner.Generation() {
+		t.Fatalf("rekeyed descriptor: %d names (want %d), generation %d", rd.Coverage.Names, len(kept), rd.Generation)
+	}
+	// Mutation: copying without the re-key resolves to other names.
+	identity := func(vshard uint16, id uint32) (uint32, bool) { _, ok := remap(vshard, id); return id, ok }
+	bad, err := RekeyDense(context.Background(), donorPath, dd, filepath.Join(dir, "identity.sst"), ownerSpec, identity)
+	if err == nil {
+		if b, _ := os.ReadFile(filepath.Join(dir, "identity.sst")); bytes.Equal(b, want) || bad.SHA256 == rd.SHA256 {
+			t.Error("copy without re-key not detected")
+		}
+	}
+}
+
+// writeRekeyedFixture writes kept (owner IDs) with the records of names[i]'s
+// donor ID, matched by name.
+func writeRekeyedFixture(path string, spec Spec, kept, names []idFixtureMetric, generation uint64) (Descriptor, error) {
+	donorID := map[ID]uint32{}
+	for _, m := range names {
+		donorID[m.name] = m.id
+	}
+	spec.Generation = generation
+	w, err := NewDenseWriter(path, spec)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	defer w.Abort()
+	for _, m := range kept {
+		for _, r := range idFixtureRecords(int(donorID[m.name])) {
+			if err = w.SetPlannedIDRecord(m.vshard, m.id, &r); err != nil {
+				return Descriptor{}, err
+			}
+		}
+		if err = w.SetPlannedIDMetadata(m.vshard, m.id, []byte("envelope-"+string(m.name))); err != nil {
+			return Descriptor{}, err
+		}
+	}
+	return w.Close()
+}
