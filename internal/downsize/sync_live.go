@@ -59,6 +59,8 @@ type syncLiveBackend struct {
 	busy                 atomic.Int64  // retries after 429 (all transfer slots taken)
 	timings              sync.Map      // phase + store -> *syncIOTime
 	windowSelectionSlots sync.Map      // source -> *windowSelectionCapacity
+	evidenceOnce         sync.Once
+	evidenceSlots        chan struct{} // expiration-evidence requests in flight, all stores
 	windowMu             sync.RWMutex
 	windowSources        *nativeController // scoped to the missing-window scan
 	windowCopySources    *nativeController // committed history is for repair, never absence proofs

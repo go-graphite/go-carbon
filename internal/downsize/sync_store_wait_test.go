@@ -91,7 +91,7 @@ func TestSyncExpirationEvidenceBoundedParallel(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	b := newSyncLiveBackend(syncLiveOptions{copyStreams: 192})
+	b := newSyncLiveBackend(syncLiveOptions{copyStreams: 24})
 	names := copyNames("expiry.", 128*33+7)
 	done := make(chan error, 1)
 	go func() {
@@ -109,7 +109,7 @@ func TestSyncExpirationEvidenceBoundedParallel(t *testing.T) {
 		}
 		done <- err
 	}()
-	for range 16 {
+	for range 24 {
 		select {
 		case <-entered:
 		case <-time.After(5 * time.Second):
@@ -118,7 +118,7 @@ func TestSyncExpirationEvidenceBoundedParallel(t *testing.T) {
 			t.Fatal("evidence requests serialized")
 		}
 	}
-	if peak.Load() != 16 {
+	if peak.Load() != 24 {
 		cancel()
 		close(release)
 		t.Fatal("request bound", peak.Load())
@@ -127,7 +127,7 @@ func TestSyncExpirationEvidenceBoundedParallel(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 34 || active.Load() != 0 || peak.Load() > 16 {
+	if calls.Load() != 34 || active.Load() != 0 || peak.Load() > 24 {
 		t.Fatal(calls.Load(), active.Load(), peak.Load())
 	}
 }
