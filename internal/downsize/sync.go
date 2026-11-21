@@ -104,6 +104,7 @@ type syncOptions struct {
 	settle           time.Duration
 	windows          syncRanges
 	readyFrontier    bool
+	sourceScope      bool // verify only names a source held at discovery (--no-ready)
 	sampleEvery      int
 	includeShort     bool
 	fullHistory      bool
@@ -1456,7 +1457,7 @@ func (s *syncer) summary(err error) {
 		residual = residual[:shown]
 	}
 	fields := map[string]any{
-		"to": s.o.to, "discovered": s.sum.Discovered, "on_target_at_start": s.sum.OnTarget, "missing": s.sum.Missing,
+		"to": s.o.to, "discovered": s.sum.Discovered, "on_target_at_start": s.sum.OnTarget, "target_only_skipped": s.targetOnlySkipped(), "missing": s.sum.Missing,
 		"short_skipped": s.sum.Short, "not_owned": s.sum.NotOwned, "copied": s.sum.Copied, "copy_failed": s.sum.CopyFailed,
 		"verified": s.sum.Verified, "hole_names": s.sum.HoleNames, "hole_points": s.sum.HolePoints, "filled": s.sum.Filled,
 		"rounds": s.sum.Rounds, "residual": s.sum.Residual, "residual_names": s.sum.ResidualNames, "residual_points": points,
