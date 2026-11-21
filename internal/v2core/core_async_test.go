@@ -36,7 +36,7 @@ func TestCorePipelinedSealCreditOrderAndDurability(t *testing.T) {
 	rows := []row{{ID: 7, Time: -1, Bits: 1 << 63, Seq: 1}}
 	batch := []coreBatch{{ID: 7, Order: 11, Clock: -3, Policy: []byte("policy"), Points: rows}}
 	e.streamBytes = corePacketBytes + 2*uint64(unsafe.Sizeof(row{})) + uint64(unsafe.Sizeof(coreBatch{})) + 6
-	if err = e.submitPacketMode(0, rows, batch, 1, true, false); err != nil {
+	if err = e.submitPacketMode(0, rows, batch, nil, 1, true, false); err != nil {
 		t.Fatal(err)
 	}
 	<-entered
@@ -51,7 +51,7 @@ func TestCorePipelinedSealCreditOrderAndDurability(t *testing.T) {
 	next := []row{{ID: 7, Time: -1, Bits: 0x7ff8000000000042, Seq: 2}}
 	nextBatch := []coreBatch{{ID: 7, Order: 12, Clock: -2, Policy: []byte("policy"), Points: next}}
 	done := make(chan error, 1)
-	go func() { done <- e.submitPacketMode(0, next, nextBatch, 2, true, false) }()
+	go func() { done <- e.submitPacketMode(0, next, nextBatch, nil, 2, true, false) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for !e.routers[0].leaseWaiting.Load() {
 		if time.Now().After(deadline) {

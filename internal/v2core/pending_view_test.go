@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
@@ -597,6 +598,57 @@ func TestPendingRunsAcrossSealAvoidCatalog(t *testing.T) {
 			got, err := v.Find([]uint64{id}, func(*Batch) (bool, error) { t.Fatal("unexpected cold application"); return false, nil })
 			if err != nil || !slices.Equal(got, positions) {
 				t.Fatalf("Find(%d): positions differ (got %d, want %d), error %v", id, len(got), len(positions), err)
+			}
+		}
+	}
+}
+
+// TestPendingHeadBlocks checks that a head copies producer-encoded rows into
+// blocks of at most pendingBlockRows that are never reallocated once
+// published, wastes at most one block, and decodes the same applications as
+// one contiguous copy.
+func TestPendingHeadBlocks(t *testing.T) {
+	packets, pols := receiverPackets(5 * pendingBlockRows)
+	lookup := func(id uint64) *ApplicationPolicy { return pols[id-1] }
+	var flat pendingRows
+	encoded := make([]pendingRows, len(packets))
+	for i, packet := range packets {
+		for _, bt := range packet {
+			encoded[i].startApplication(bt.Order, bt.Clock, bt.Points[0].Time, len(bt.Points))
+			for _, p := range bt.Points {
+				encoded[i].addRow(bt.ID, p.Time, p.Bits, p.Seq)
+			}
+		}
+		encoded[i].closePacket()
+		flat.appendRows(&encoded[i])
+	}
+	var h pendingHead
+	var views []PendingView
+	for i := range encoded {
+		h.addRows(&encoded[i])
+		if i%7 == 0 {
+			views = append(views, h.view(lookup))
+		}
+	}
+	final := h.view(lookup)
+	if !reflect.DeepEqual(final.Batches(), flat.decodeFrom(lookup)) {
+		t.Fatal("blocks decode different applications")
+	}
+	used, reserved := 0, 0
+	for _, s := range final.segs {
+		if cap(s.rows) > pendingBlockRows {
+			t.Fatalf("block holds %d rows, cap %d", cap(s.rows), pendingBlockRows)
+		}
+		used, reserved = used+len(s.rows), reserved+cap(s.rows)
+	}
+	if used != len(flat.rows) || reserved-used > pendingBlockRows || len(final.segs) < 5 {
+		t.Fatalf("%d rows in %d blocks reserve %d", used, len(final.segs), reserved)
+	}
+	// Every earlier view still shares its blocks with the final view.
+	for _, v := range views {
+		for i, s := range v.segs {
+			if unsafe.SliceData(s.rows) != unsafe.SliceData(final.segs[i].rows) {
+				t.Fatalf("block %d was reallocated after publication", i)
 			}
 		}
 	}
