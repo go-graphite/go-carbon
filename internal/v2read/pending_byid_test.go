@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -23,6 +24,7 @@ import (
 func TestPendingRowsSelectByID(t *testing.T) {
 	rng := rand.New(rand.NewSource(1609))
 	cfg := testConfig()
+	cfg.PublishInterval = time.Nanosecond
 	cfg.SealMaxRows = 64
 	reader, _ := New(1, 1<<30, 64<<20)
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{Identities: reader.Identities, PublishPending: reader.PublishPending})

@@ -156,6 +156,7 @@ func TestPendingIndexRendersMatchClassic(t *testing.T) {
 	retentions := whisper.MustParseRetentionDefs("1s:1d,1m:30d,1h:1y")
 	const owners, metrics = 3, 12
 	cfg := testConfig()
+	cfg.PublishInterval = time.Nanosecond
 	cfg.Shards, cfg.Owners = owners, owners
 	reader, _ := New(owners, 1<<30, 64<<20)
 	engine, err := v2core.Open(t.TempDir(), cfg, v2core.Hooks{PublishPending: reader.PublishPending})
