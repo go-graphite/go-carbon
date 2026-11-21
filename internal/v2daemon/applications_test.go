@@ -126,7 +126,7 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 		if _, err = io.ReadFull(file, b); err != nil {
 			t.Fatal(err)
 		}
-		batches, cursor, err := DecodeApplications(b, &decoder, catalog, 0, 1)
+		batches, cursor, err := DecodeApplications(b, &decoder, 0, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +136,7 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 		}
 		// The checksum covers original batch order as well as PDC4 tuples.
 		b[5] ^= 1
-		if _, _, err = DecodeApplications(b, &decoder, catalog, 0, 1); err == nil {
+		if _, _, err = DecodeApplications(b, &decoder, 0, 1); err == nil {
 			t.Fatal("corrupt envelope accepted")
 		}
 	}

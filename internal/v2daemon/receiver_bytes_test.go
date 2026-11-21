@@ -67,7 +67,7 @@ func TestApplicationOwnerByteNames(t *testing.T) {
 			}
 			want = append(want, "ok.b")
 			for i, name := range want {
-				if got, _ := p.catalog.Key(p.applicationIDs[i]); got != name {
+				if got, _ := p.catalog.Key(p.applicationFrames[i].ID); got != name {
 					t.Fatalf("point %d name=%q want=%q", i, got, name)
 				}
 			}

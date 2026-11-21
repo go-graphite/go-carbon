@@ -130,7 +130,7 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 					if _, err = io.ReadFull(file, b); err != nil {
 						t.Fatal(err)
 					}
-					batches, cursor, err := DecodeApplications(b, &decoder, catalog, p, 2)
+					batches, cursor, err := DecodeApplications(b, &decoder, p, 2)
 					if err != nil || len(batches) != 2 || cursor != uint64((rounds+1)*2) {
 						t.Fatal("changed application packet", err)
 					}
