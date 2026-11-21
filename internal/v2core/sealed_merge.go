@@ -963,7 +963,9 @@ func (o *coreOwner) observeSealedMergeBudget() error {
 }
 
 // oldestInScope reports whether inputs, sequence-adjacent parts of one scope,
-// hold that scope's oldest part: no part of the scope starts at a lower order.
+// hold that scope's oldest part: no part of the scope from the owner's source
+// starts at a lower order. Parts from another source (moves, imports) carry
+// their windows as materialized values and are outside the merge's view.
 func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 	first := inputs[0].Source.MinOrder
 	for _, d := range inputs {
@@ -977,7 +979,7 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 		if err != nil {
 			return false
 		}
-		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.MinOrder < first {
+		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.Incarnation == o.partSource.Incarnation && d.Source.Stream == o.partSource.Stream && d.Source.MinOrder < first {
 			return false
 		}
 	}
