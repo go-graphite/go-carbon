@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -21,12 +22,16 @@ type sealCPUShape struct {
 	method   sealrollup.Method
 	points   int
 	step     int64
+	// mixed makes a third of the names full-entropy, a third counters and a
+	// third small-integer gauges instead of full-entropy for every name.
+	mixed bool
 }
 
 var sealCPUShapes = []sealCPUShape{
-	{"single1s", []sealrollup.Archive{{Step: 1, Count: 86400}}, sealrollup.Last, 3, 1},
-	{"single10s", []sealrollup.Archive{{Step: 10, Count: 8640}}, sealrollup.Last, 1, 10},
-	{"multi", []sealrollup.Archive{{Step: 10, Count: 8640}, {Step: 60, Count: 10080}, {Step: 600, Count: 52560}}, sealrollup.Average, 2, 10},
+	{"single1s", []sealrollup.Archive{{Step: 1, Count: 86400}}, sealrollup.Last, 3, 1, false},
+	{"single1s5", []sealrollup.Archive{{Step: 1, Count: 86400}}, sealrollup.Last, 5, 1, true},
+	{"single10s", []sealrollup.Archive{{Step: 10, Count: 8640}}, sealrollup.Last, 1, 10, false},
+	{"multi", []sealrollup.Archive{{Step: 10, Count: 8640}, {Step: 60, Count: 10080}, {Step: 600, Count: 52560}}, sealrollup.Average, 2, 10, false},
 }
 
 func sealCPUFixture(tb testing.TB, shape sealCPUShape, names int) (*coreRollups, []Batch, int) {
@@ -50,7 +55,16 @@ func sealCPUFixture(tb testing.TB, shape sealCPUShape, names int) (*coreRollups,
 		r.install(id, m, freshMetadata)
 		rows := make([]Row, shape.points)
 		for j := range rows {
-			rows[j] = Row{Time: 100000 + int64(j)*shape.step, Bits: uint64(rng.Int63()), Seq: uint64(j + 1)}
+			bits := uint64(rng.Int63())
+			if shape.mixed {
+				switch i % 3 {
+				case 1:
+					bits = math.Float64bits(float64(i*1000 + j*(i%7+1)))
+				case 2:
+					bits = math.Float64bits(float64(rng.Intn(100)))
+				}
+			}
+			rows[j] = Row{Time: 100000 + int64(j)*shape.step, Bits: bits, Seq: uint64(j + 1)}
 		}
 		points += len(rows)
 		batches[i] = Batch{ID: id, Registered: m.PolicyIdentity, Order: uint64(i + 1), Clock: 100000 + int64(shape.points)*shape.step, Points: rows}
@@ -95,17 +109,21 @@ func BenchmarkSealCPU(b *testing.B) {
 				}
 				b.ReportAllocs()
 				b.ResetTimer()
+				var bytes uint64
 				for i := 0; i < b.N; i++ {
 					for f, part := range plan.Parts {
 						part.Spec.Source.Incarnation, part.Spec.Source.Stream = v2part.PartID{1}, "bench"
-						if _, err := writePlannedRollupTuples(filepath.Join(dir, fmt.Sprintf("p%d-%d.sst", i, f)), part); err != nil {
+						d, err := writePlannedRollupTuples(filepath.Join(dir, fmt.Sprintf("p%d-%d.sst", i, f)), part)
+						if err != nil {
 							b.Fatal(err)
 						}
+						bytes += d.Bytes
 					}
 				}
 				b.StopTimer()
 				plan.Abort()
 				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*points), "ns/point")
+				b.ReportMetric(float64(bytes)/float64(b.N*points), "part-B/point")
 			})
 		}
 	}
