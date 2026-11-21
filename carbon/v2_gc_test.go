@@ -10,7 +10,7 @@ func TestV2DefaultGCPercent(t *testing.T) {
 		name, env string
 		want      int
 	}{
-		{"default", "", 75},
+		{"default", "", v2SteadyGCPercent},
 		{"explicit", "30", 200},
 		{"off", "off", 200},
 	} {
