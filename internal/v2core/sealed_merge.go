@@ -201,9 +201,12 @@ func (e *coreEngine) ForceMerge() (int, error) {
 	return int(merged.Load()), nil
 }
 
-// Merges combine only sequence-adjacent local parts of one group/partition
-// (ClickHouse's rule), so their order ranges never interleave. A window of
-// adjacent parts qualifies once it holds at least ratio parts and its total is
+// Merges combine only Seq-adjacent live local parts of one group/partition
+// (ClickHouse's block-number rule): a window never skips a live part sealed
+// between its inputs, so the output's Seq range interleaves with no other
+// part. Record order ranges may still interleave (a closure record can carry
+// an older order than an earlier seal's records). A window of adjacent parts
+// qualifies once it holds at least ratio parts and its total is
 // at least ratio/2 times its largest part, so a large input is not repeatedly
 // combined with only a few much smaller inputs. Small outputs use ratio 4,
 // so new seals fold into a small
@@ -259,12 +262,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 	var best uint64
 	var bestScope scope
 	for s, parts := range scopes {
-		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
-			if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
-				return c
-			}
-			return bytes.Compare(a.SHA256[:], b.SHA256[:])
-		})
+		slices.SortFunc(parts, seqCompare)
 		for i := range parts {
 			var total, largest uint64
 			for j := i; j < len(parts) && (full || j-i < sealedMergeFanIn) && parts[j].Bytes <= limit-total; j++ {
@@ -290,13 +288,26 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 	return slices.Clone(chosen), nil
 }
 
+// seqCompare orders one owner's parts of a scope by seal: Seq, then, for
+// parts from producers without Seq (all zero), MinOrder, then digest.
+func seqCompare(a, b v2part.Descriptor) int {
+	if c := cmp.Compare(a.Source.Seq, b.Source.Seq); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
+		return c
+	}
+	return bytes.Compare(a.SHA256[:], b.SHA256[:])
+}
+
 // ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per
 // four hours, so expiry work stays a small, bounded share of merge service.
 const ttlRewriteSeconds = 4 * 3600
 
-// When no size-tier merge is due, rewrite the local part whose earliest data
-// expiry has passed (ClickHouse TTL merge). Parts whose latest expiry has
-// passed are dropped whole by GC instead and are not rewritten.
+// When no size-tier merge is due, rewrite the oldest local part of its scope
+// whose earliest data expiry has passed (ClickHouse TTL merge): only a prefix
+// merge drops expired records. Parts whose latest expiry has passed are
+// dropped whole by GC instead and are not rewritten.
 func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, limit uint64) ([]v2part.Descriptor, error) {
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
@@ -322,7 +333,7 @@ func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, lim
 		if err != nil {
 			return nil, err
 		}
-		if origin.Class == LivePart {
+		if origin.Class == LivePart && o.oldestInScope([]v2part.Descriptor{d}) {
 			chosen = []v2part.Descriptor{d}
 		}
 	}
@@ -505,7 +516,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 }
 
 // mergeParts is mergePartFiles; prefix says the inputs hold their scope's
-// oldest part, so every version at or below their newest order: only such a
+// oldest part, so every version up to their newest Seq: only such a
 // merge writes windows down and drops the versions they carry (mergeVersions).
 func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, prefix bool, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
@@ -521,6 +532,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		spec.MaxTime = max(spec.MaxTime, d.Coverage.MaxTime)
 		spec.Source.MinOrder = min(spec.Source.MinOrder, d.Source.MinOrder)
 		spec.Source.MaxOrder = max(spec.Source.MaxOrder, d.Source.MaxOrder)
+		spec.Source.Seq = max(spec.Source.Seq, d.Source.Seq)
 		v2part.RegisterPolicies(d.Coverage.Policies)
 		for _, p := range d.Coverage.Policies {
 			id := struct {
@@ -968,14 +980,16 @@ func (o *coreOwner) observeSealedMergeBudget() error {
 	return nil
 }
 
-// oldestInScope reports whether inputs, sequence-adjacent parts of one scope,
+// oldestInScope reports whether inputs, Seq-adjacent parts of one scope,
 // hold that scope's oldest part: no part of the scope from the owner's source
-// starts at a lower order. Parts from another source (moves, imports) carry
-// their windows as materialized values and are outside the merge's view.
+// sorts before them (seqCompare). Parts from another source (moves, imports)
+// carry their windows as materialized values and are outside the merge's view.
 func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
-	first := inputs[0].Source.MinOrder
+	first := inputs[0]
 	for _, d := range inputs {
-		first = min(first, d.Source.MinOrder)
+		if seqCompare(d, first) < 0 {
+			first = d
+		}
 	}
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
@@ -985,7 +999,7 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 		if err != nil {
 			return false
 		}
-		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.Incarnation == o.partSource.Incarnation && d.Source.Stream == o.partSource.Stream && d.Source.MinOrder < first {
+		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.Incarnation == o.partSource.Incarnation && d.Source.Stream == o.partSource.Stream && seqCompare(d, first) < 0 {
 			return false
 		}
 	}

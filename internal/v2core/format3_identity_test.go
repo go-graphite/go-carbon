@@ -208,7 +208,8 @@ func sameAsLiveSeal(t *testing.T, what, root string, paths []string, livePath st
 		}
 	}
 	normalized := d
-	normalized.SHA256, normalized.Bytes = live.SHA256, live.Bytes
+	// Conversions write baseline parts without Seq: they sort before every seal.
+	normalized.SHA256, normalized.Bytes, normalized.Source.Seq = live.SHA256, live.Bytes, live.Source.Seq
 	if partPath == "" || !reflect.DeepEqual(normalized, live) {
 		t.Fatalf("%s changed the live seal descriptor", what)
 	}

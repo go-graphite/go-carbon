@@ -22,7 +22,8 @@ type rollupPartWrites struct {
 // Output workers only create private immutable parts. The owner joins all of
 // them before retaining descriptors and atomically ingesting the one frontier.
 // Raw encoding/sorting can run concurrently without changing file fanout.
-func (o *coreOwner) startRollupPartWrites(plan coreSealPlan) *rollupPartWrites {
+// seq is the seal's number, stamped on every part it writes (Provenance.Seq).
+func (o *coreOwner) startRollupPartWrites(plan coreSealPlan, seq uint64) *rollupPartWrites {
 	p := &rollupPartWrites{done: make(chan struct{}), results: make([]rollupPartResult, len(plan.Files)+len(plan.Parts))}
 	if o.cfg.BlindBatch && !o.cfg.Rollups {
 		close(p.done)
@@ -55,14 +56,18 @@ func (o *coreOwner) startRollupPartWrites(plan coreSealPlan) *rollupPartWrites {
 						part := plan.Parts[i-len(plan.Files)]
 						part.Spec.Source.Incarnation = o.partSource.Incarnation
 						part.Spec.Source.Stream = o.partSource.Stream
+						part.Spec.Source.Seq = seq
 						r.descriptor, r.err = writePlannedRollupTuples(r.path, part)
 					case len(plan.PartSpecs) == len(plan.Files):
 						spec := plan.PartSpecs[i]
 						spec.Source.Incarnation = o.partSource.Incarnation
 						spec.Source.Stream = o.partSource.Stream
+						spec.Source.Seq = seq
 						r.descriptor, r.err = writePlannedRollupPart(r.path, plan.Files[i], spec)
 					default:
-						r.descriptor, r.err = WriteDenseRollupPart(r.path, plan.Files[i], o.partSource)
+						source := o.partSource
+						source.Seq = seq
+						r.descriptor, r.err = WriteDenseRollupPart(r.path, plan.Files[i], source)
 					}
 				}
 			})

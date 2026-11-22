@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -84,7 +85,7 @@ func sealPlanDigestMode(plan coreSealPlan, decoded bool) string {
 			}
 			return int(a.Archive) - int(b.Archive)
 		})
-		fmt.Fprintf(h, "spec %+v\n", spec)
+		fmt.Fprint(h, withoutSeq(fmt.Sprintf("spec %+v\n", spec)))
 	}
 	return hex.EncodeToString(sum.Sum(nil))
 }
@@ -209,6 +210,10 @@ func TestSealPlanDifferentialDigest(t *testing.T) {
 		}
 	}
 }
+
+// withoutSeq drops a zero Provenance.Seq from a %+v dump, so digests recorded
+// before the field existed still cover every other field byte for byte.
+func withoutSeq(s string) string { return strings.Replace(s, " Seq:0}", "}", 1) }
 
 func sealPlanDigestJoin(d []string) string {
 	h := sha256.New()
