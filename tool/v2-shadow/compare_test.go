@@ -55,7 +55,7 @@ func TestClassicFetchExcludedFromBoundary(t *testing.T) {
 }
 
 func TestFrozenComparisonFreshSnapshotConvergence(t *testing.T) {
-	store, err := v2daemon.Open(t.TempDir(), v2daemon.Config{Layer: 2, Producers: 1, Shards: 1, GroupInterval: time.Second})
+	store, err := v2daemon.Open(t.TempDir(), v2daemon.Config{Layer: 1, Producers: 1, Shards: 1, GroupInterval: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestFrozenComparisonFreshSnapshotConvergence(t *testing.T) {
 }
 
 func TestSerialCatalogIdentityAndSnapshot(t *testing.T) {
-	store, err := v2daemon.Open(t.TempDir(), v2daemon.Config{Layer: 2, Producers: 1, Shards: 2, GroupInterval: time.Second})
+	store, err := v2daemon.Open(t.TempDir(), v2daemon.Config{Layer: 1, Producers: 1, Shards: 2, GroupInterval: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
