@@ -649,6 +649,10 @@ func (d *Dict) writeFrozen(frozen *memtable, minSeq, maxSeq uint64) {
 	}
 	log := d.frozenLog
 	d.frozenLog = nil
+	// Appends filled the next append level meanwhile: hand it on.
+	if !d.closed && d.buf.size() >= d.opt.BufferBytes {
+		_ = d.freezeLocked() // a failure is sticky in d.err
+	}
 	d.mu.Unlock()
 	log.Close()
 	for seq := minSeq; seq <= maxSeq; seq++ {
