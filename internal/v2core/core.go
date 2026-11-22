@@ -1021,7 +1021,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// L0 files precede visibility: a render never shows a row a kill -9
 		// loses. Without a publication hook they still follow its cadence.
 		if o.cfg.L0 && pend.n > l0Written {
-			path, err := o.writeL0(pend.view(o.lookup).Suffix(l0Written).Batches())
+			path, err := o.writeL0(pend.rawView(nil).Suffix(l0Written))
 			if err != nil {
 				return err
 			}

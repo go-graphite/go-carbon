@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,29 +25,113 @@ const l0Magic = "V2L0\x01"
 
 var l0Table = crc32.MakeTable(crc32.Castagnoli)
 
-// encodeL0 appends one file image: magic, application count, then per
-// application ID, Order, Clock, policy bytes and points (ID delta from the
-// application, time, value bits, sequence delta from Order); a CRC-32C of
-// everything before it ends the file.
-func encodeL0(dst []byte, batches []coreBatch) []byte {
+// encodeL0 appends one file image of v's applications: magic, application
+// count, then per application ID, Order, Clock, policy bytes and points (ID
+// delta from the application, time, value bits, sequence delta from Order); a
+// CRC-32C of everything before it ends the file. Row segments encode straight
+// from their packed arrays: no row objects and no catalog lookups (LoadL0
+// resolves handles).
+func encodeL0(dst []byte, v PendingView) []byte {
 	dst = append(dst[:0], l0Magic...)
-	dst = binary.AppendUvarint(dst, uint64(len(batches)))
-	for i := range batches {
-		b := &batches[i]
-		dst = binary.AppendUvarint(dst, b.ID)
-		dst = binary.AppendUvarint(dst, b.Order)
-		dst = binary.AppendVarint(dst, b.Clock)
-		dst = binary.AppendUvarint(dst, uint64(len(b.Policy)))
-		dst = append(dst, b.Policy...)
-		dst = binary.AppendUvarint(dst, uint64(len(b.Points)))
-		for _, p := range b.Points {
-			dst = binary.AppendVarint(dst, int64(p.ID-b.ID))
-			dst = binary.AppendVarint(dst, p.Time)
-			dst = binary.LittleEndian.AppendUint64(dst, p.Bits)
-			dst = binary.AppendVarint(dst, int64(p.Seq-b.Order))
+	apps := 0
+	for si := range v.segs {
+		s := &v.segs[si]
+		if s.cold != nil {
+			apps += len(s.cold)
+			continue
+		}
+		for pi := range s.packets {
+			pk := &s.packets[pi]
+			if pk.Flags&pendingMulti == 0 {
+				apps += int(pk.Rows)
+				continue
+			}
+			d := s.deltas[pk.Deltas : pk.Deltas+pk.Rows]
+			apps++
+			for k := 1; k < len(d); k++ {
+				if d[k] != d[k-1] {
+					apps++
+				}
+			}
 		}
 	}
+	dst = binary.AppendUvarint(dst, uint64(apps))
+	for si := range v.segs {
+		s := &v.segs[si]
+		if s.cold != nil {
+			for i := range s.cold {
+				dst = appendL0Batch(dst, &s.cold[i])
+			}
+			continue
+		}
+		dst = s.appendL0(dst)
+	}
 	return binary.LittleEndian.AppendUint32(dst, crc32.Checksum(dst, l0Table))
+}
+
+func appendL0Batch(dst []byte, b *coreBatch) []byte {
+	dst = binary.AppendUvarint(dst, b.ID)
+	dst = binary.AppendUvarint(dst, b.Order)
+	dst = binary.AppendVarint(dst, b.Clock)
+	dst = binary.AppendUvarint(dst, uint64(len(b.Policy)))
+	dst = append(dst, b.Policy...)
+	dst = binary.AppendUvarint(dst, uint64(len(b.Points)))
+	for _, p := range b.Points {
+		dst = binary.AppendVarint(dst, int64(p.ID-b.ID))
+		dst = binary.AppendVarint(dst, p.Time)
+		dst = binary.LittleEndian.AppendUint64(dst, p.Bits)
+		dst = binary.AppendVarint(dst, int64(p.Seq-b.Order))
+	}
+	return dst
+}
+
+// appendL0 encodes a row segment's applications as appendL0Batch would their
+// decoded batches. Rows ascend, so one cursor walks the escapes.
+func (s *pendingSegment) appendL0(dst []byte) []byte {
+	first := s.firstRow()
+	escape := sort.Search(len(s.escapes), func(i int) bool { return s.escapes[i].Row >= first })
+	idTime := func(pk *pendingPacket, k uint32) (uint64, int64) {
+		if escape < len(s.escapes) && s.escapes[escape].Row == k {
+			e := &s.escapes[escape]
+			escape++
+			return e.ID, e.Time
+		}
+		r := &s.rows[k]
+		return uint64(r.ID), pk.Base + int64(r.DT)
+	}
+	for pi := range s.packets {
+		pk := &s.packets[pi]
+		end := pk.FirstRow + pk.Rows
+		for lo := pk.FirstRow; lo < end; {
+			d := s.delta(pk, lo)
+			hi := lo + 1
+			for hi < end && s.delta(pk, hi) == d {
+				hi++
+			}
+			order := pk.FirstOrder + uint64(d)
+			app, t := idTime(pk, lo)
+			dst = binary.AppendUvarint(dst, app)
+			dst = binary.AppendUvarint(dst, order)
+			dst = binary.AppendVarint(dst, pk.Clock)
+			dst = append(dst, 0) // row applications carry no policy bytes
+			dst = binary.AppendUvarint(dst, uint64(hi-lo))
+			for k, id := lo, app; k < hi; k++ {
+				if k > lo {
+					id, t = idTime(pk, k)
+				}
+				seq := order
+				if pk.Flags&pendingSeq != 0 {
+					seq = s.seqs[pk.Seqs+k-pk.FirstRow]
+				}
+				dst = binary.AppendVarint(dst, int64(id-app))
+				dst = binary.AppendVarint(dst, t)
+				dst = binary.LittleEndian.AppendUint64(dst, s.rows[k].Bits)
+				dst = binary.AppendVarint(dst, int64(seq-order))
+			}
+			lo = hi
+		}
+	}
+	return dst
 }
 
 var errL0Corrupt = errors.New("corrupt L0 run file")
@@ -157,8 +242,8 @@ func (o *coreOwner) openL0() ([]string, uint64, error) {
 }
 
 // writeL0 publishes one run file through a temporary name and a rename.
-func (o *coreOwner) writeL0(batches []coreBatch) (string, error) {
-	o.l0Buf = encodeL0(o.l0Buf, batches)
+func (o *coreOwner) writeL0(v PendingView) (string, error) {
+	o.l0Buf = encodeL0(o.l0Buf, v)
 	path := filepath.Join(o.l0Dir(), fmt.Sprintf("l0-%020d", o.l0Next))
 	o.l0Next++
 	tmp := path + ".tmp"
