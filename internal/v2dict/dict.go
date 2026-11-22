@@ -229,6 +229,14 @@ func Open(dir string, opt Options) (*Dict, error) {
 	opened := false
 	defer func() {
 		if !opened {
+			if s := d.snap.Load(); s != nil {
+				for _, t := range s.frozen {
+					_ = t.release()
+				}
+			}
+			if d.frozenLog != nil {
+				_ = d.frozenLog.Close()
+			}
 			for i := range d.shards {
 				_ = d.shards[i].buf.release()
 			}
@@ -930,6 +938,10 @@ func (d *Dict) Close() error {
 	}
 	s := d.snap.Load()
 	d.snap.Store(&snapshot{levels: s.levels})
+	if d.frozenLog != nil {
+		err = errors.Join(err, d.frozenLog.Close())
+		d.frozenLog = nil
+	}
 	for _, t := range s.frozen {
 		err = errors.Join(err, t.release())
 	}
