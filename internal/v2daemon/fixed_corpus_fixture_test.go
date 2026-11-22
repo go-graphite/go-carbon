@@ -226,12 +226,8 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 		active += m.Compact.NumInProgress
 	}
 	for _, p := range s.Producers {
-		groups += p.SyncGroups
 		forced += p.ForcedGroups
-		encoded += p.JournalBytes
-		encodeTime += p.EncodeTime
 		catalogSyncTime += p.CatalogSyncTime
-		journalSyncTime += p.JournalSyncTime
 		coreSubmitTime += p.CoreSubmitTime
 	}
 	closeStart := time.Now()
@@ -385,12 +381,6 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 				return result, fmt.Errorf("name %s round %d: got %#v want %#v", names[id], round, row, want)
 			}
 		}
-	}
-	if layer >= 2 {
-		if e = verifyJournal(root, f, names, policies); e != nil {
-			return result, e
-		}
-		result["exact_journal_points"] = f.Names * f.Rounds
 	}
 	if layer == 3 {
 		checkedNames, checkedSlots, x := verifyFixedRollups(reader, f, names)

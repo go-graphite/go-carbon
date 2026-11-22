@@ -165,11 +165,8 @@ func (o *applicationOwner) Drain() error { return o.p.Drain() }
 func (o *applicationOwner) Flush() error { return o.p.Flush() }
 
 func (s *Store) ReceiveTCP(l net.Listener, cfg v2recv.Config) (*v2recv.Server, error) {
-	if s.cfg.Placement != nil {
-		return nil, errors.New("raw TCP requires unplaced input; stamped transport is not implemented")
-	}
-	if s.cfg.Layer != 1 && s.cfg.Layer != 2 {
-		return nil, errors.New("raw TCP adapter requires named layer 1 or journaled layer 2")
+	if s.cfg.Layer != 1 {
+		return nil, errors.New("raw TCP adapter requires named layer 1")
 	}
 	owners := make([]v2recv.Owner, len(s.Producers))
 	for i, p := range s.Producers {
@@ -187,8 +184,8 @@ func (s *Store) ReceiveApplicationsTCP(l net.Listener, cfg v2recv.Config, resolv
 // ReceiveApplicationsTCPWithAdmission applies the host quota gate before
 // journaling. reject sees each point refused by its name; intake continues.
 func (s *Store) ReceiveApplicationsTCPWithAdmission(l net.Listener, cfg v2recv.Config, resolve PolicyResolver, throttle func(*points.Points, bool) bool, reject func(string, error)) (*v2recv.Server, error) {
-	if s.cfg.Layer != 3 || resolve == nil || s.cfg.Placement != nil {
-		return nil, errors.New("L3 TCP requires policy resolver and unplaced input; stamped transport is not implemented")
+	if s.cfg.Layer != 3 || resolve == nil {
+		return nil, errors.New("L3 TCP requires a policy resolver")
 	}
 	owners := make([]v2recv.Owner, len(s.Producers))
 	for i, p := range s.Producers {

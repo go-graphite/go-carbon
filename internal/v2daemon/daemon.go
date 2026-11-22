@@ -3,28 +3,24 @@
 package v2daemon
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/v2core"
-	"github.com/go-graphite/go-carbon/internal/v2placement"
 	"github.com/go-graphite/go-carbon/points"
 	"golang.org/x/sync/errgroup"
 )
 
-// Config is fixed for the lifetime of a store. Layer is 0 (numeric), 1 (names),
-// 2 (journal), or 3 (rollups). Each producer has one caller, including Drain.
+// Config is fixed for the lifetime of a store. Layer is 0 (numeric), 1 (names)
+// or 3 (rollups over L0 run files); there is no producer journal. Each
+// producer has one caller, including Drain.
 type Config struct {
 	// BaselinePath names a verified converted native checkpoint, installed once
 	// before core publication, journal replay, or admission.
@@ -37,40 +33,26 @@ type Config struct {
 	// KeepBaseRows writes raw base rows next to layer-3 archive records. Only
 	// tests and the fixed-corpus verifier set it; production never does.
 	KeepBaseRows bool
-	// Placement requires stamped intake; one daemon root owns one PG.
-	Placement Placement
-	Hooks     v2core.Hooks
-	// DurableApplications receives the synced input prefix before core submission.
-	// It is also called during recovery, independently of core frontiers.
+	Hooks        v2core.Hooks
+	// Mirror receives each drained application batch before core submission
+	// (classic dual write; the classic engine's own input log recovers it).
 	// Each producer calls serially; different producers may call concurrently.
 	// The callback must finish consuming its borrowed batches before returning.
-	DurableApplications func(int, []v2core.Batch) error
+	Mirror func(int, []v2core.Batch) error
 	// Prepare runs under the root lock before opening core or replaying input.
 	Prepare func() error
 	// MaxCoreRows bounds each core owner's staging buffer. Zero retains the
 	// experiment default; small correctness fixtures can bound their memory.
 	MaxCoreRows int
-	// JournalSegmentBytes rotates a producer's journal to a new segment after a
-	// group fsync once the current segment holds at least this many bytes. Each
-	// segment starts with fresh predictor state, so restart can skip every
-	// segment that ends at or below all owners' durable frontiers. Zero keeps one
-	// segment per process run and retires nothing. Otherwise rotation and every
-	// idle Drain unlink the segments every owner has committed, down to one
-	// record once all input is; placement and classic-mirror consumers retain
-	// their replay logs.
-	JournalSegmentBytes int64
-	// fullReplay keeps and replays every segment; tests use it as the oracle.
-	fullReplay bool
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
 // Producer methods share no daemon mutex. Core owns all physical data layout.
 type Store struct {
-	relayActive atomic.Bool
-	Core        *v2core.Engine
-	Producers   []*Producer
-	cfg         Config
-	lock        *os.File
+	Core      *v2core.Engine
+	Producers []*Producer
+	cfg       Config
+	lock      *os.File
 }
 type packet struct {
 	out     *v2core.Outbox // direct L3 applications
@@ -80,46 +62,24 @@ type packet struct {
 	seal    bool
 }
 
-// Producer owns its catalog, predictors, pending rows and journal stream.
+// Producer owns its catalog, pending rows and the packets it hands to core.
 type Producer struct {
-	relayPositions                  map[v2placement.Stamp]relayPosition
-	admission                       v2placement.Sink
-	placement                       Placement
 	engine                          *v2core.Engine
-	durableApplications             func(int, []v2core.Batch) error
+	mirror                          func(int, []v2core.Batch) error
 	index, count, layer, maxPending int
 	catalog                         *partlog.NameCatalog
-	encoder                         partlog.CatalogEncoder
-	journal                         *os.File
-	writer                          *bufio.Writer
 	packets                         []packet
-	records                         [][]byte
-	spareRecords                    [][]byte
-	outboxes                        []*v2core.Outbox // free; one in steady intake
-	applicationFrames               []partlog.CatalogFrame
+	outboxes                        []*v2core.Outbox         // free; one in steady intake
 	applications                    []*RegisteredApplication // by catalog ID
 	cursor                          uint64
 	applyOrder                      uint64
 	journalDir                      string
-	segment                         int
-	segmentBytes, segmentLimit      int64
-	// The open segment's path and its last record's offset, -1 while empty.
-	// closed lists older retained segments, oldest first, on producers that
-	// retire them.
-	segmentPath string
-	segmentLast int64
-	closed      []journalSegment
-	fullReplay  bool
-	// Recovery counts journal segments skipped below the durable frontier and
-	// segments decoded; set once by Open.
-	RecoverySkippedSegments, RecoveryReplayedSegments            int
-	pendingRows                                                  int
-	nextSync                                                     time.Time
-	interval                                                     time.Duration
-	failed                                                       error
-	stage                                                        func(string)
-	JournalBytes, SyncGroups, ForcedGroups                       uint64
-	EncodeTime, CatalogSyncTime, JournalSyncTime, CoreSubmitTime time.Duration
+	pendingRows                     int
+	nextSync                        time.Time
+	interval                        time.Duration
+	failed                          error
+	ForcedGroups                    uint64
+	CatalogSyncTime, CoreSubmitTime time.Duration
 }
 
 func coreConfig(c Config) v2core.Config {
@@ -127,7 +87,7 @@ func coreConfig(c Config) v2core.Config {
 	if maxRows == 0 {
 		maxRows = 2 << 20
 	}
-	return v2core.Config{SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	return v2core.Config{L0: c.Layer == 3, SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open recovers durable journal layers through the normal core write queues.
@@ -141,14 +101,11 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 }
 
 func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers int) (*Store, error) {
-	if c.DurableApplications != nil && c.Layer != 3 {
-		return nil, errors.New("classic mirror requires application journal layer")
-	}
-	if c.Placement != nil && c.Layer < 2 {
-		return nil, errors.New("placement requires a durable journal layer")
+	if c.Mirror != nil && c.Layer != 3 {
+		return nil, errors.New("classic mirror requires the rollup layer")
 	}
 
-	if c.Layer < 0 || c.Layer > 3 || c.Producers < 1 || c.Shards < 1 {
+	if c.Layer < 0 || c.Layer > 3 || c.Layer == 2 || c.Producers < 1 || c.Shards < 1 {
 		return nil, errors.New("invalid layer or geometry")
 	}
 	if c.MaxPendingRows == 0 {
@@ -192,12 +149,8 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	s := &Store{Core: e, cfg: c, lock: lock}
 	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
-		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes, fullReplay: c.fullReplay}
-		if c.Placement != nil {
-			p.placement = c.Placement
-			p.admission = c.Placement.Register()
-		}
-		p.durableApplications = c.DurableApplications
+		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
+		p.mirror = c.Mirror
 		s.Producers = append(s.Producers, p)
 	}
 	group, ctx := errgroup.WithContext(context.Background())
@@ -212,8 +165,8 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			}
 			p.journalDir = filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
 			var err error
-			if c.Layer >= 2 {
-				err = p.recoverProducer(ctx, p.journalDir)
+			if c.Layer == 3 {
+				err = p.recoverL0(p.journalDir)
 			} else {
 				err = p.openCatalog()
 			}
@@ -228,6 +181,22 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	if err := group.Wait(); err != nil {
 		_ = s.Close()
 		return nil, err
+	}
+	if c.Layer == 3 {
+		// Continue each producer's order above every loaded application. An
+		// owner's frontier is the last order of each producer it sealed.
+		frontiers := e.DurableFrontiers()
+		err := e.LoadL0(func(owner int, b *v2core.Batch) bool {
+			producer := int((b.ID - 1) % uint64(c.Producers))
+			p := s.Producers[producer]
+			p.applyOrder = max(p.applyOrder, b.Order)
+			p.cursor = p.applyOrder
+			return b.Order > frontiers[owner][producer]
+		})
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("load L0 run files: %w", err)
+		}
 	}
 	e.ResumeMerges()
 
@@ -245,9 +214,6 @@ func (p *Producer) openCatalog() error {
 		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), catalogPolicies{engine: p.engine, producer: p.index, producers: p.count})
 	} else {
 		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"))
-	}
-	if err == nil {
-		p.encoder = partlog.CatalogEncoder{Catalog: p.catalog, SeriesClocks: true, SparseClocks: true}
 	}
 	return p.fail(err)
 }
@@ -274,9 +240,6 @@ func NumericID(local uint64, producer, producers int) uint64 {
 
 // AppendNumeric is the L0 control and does not admit names or journal input.
 func (p *Producer) AppendNumeric(rows []v2core.Row) error {
-	if p.admission != nil {
-		return v2placement.ErrUnversioned
-	}
 	if p.failed != nil {
 		return p.failed
 	}
@@ -287,9 +250,8 @@ func (p *Producer) AppendNumeric(rows []v2core.Row) error {
 	return p.fail(p.engine.Append(p.index, rows, p.cursor, false))
 }
 
-// Append resolves every name through the durable catalog. Returned success only
-// accepts memory: Drain is the durability acknowledgment. Inputs are borrowed
-// for this call only. Sequence is the exact per-name input order supplied by caller.
+// appendNamed resolves every name through the durable catalog. Returned
+// success only accepts memory. Inputs are borrowed for this call only. Sequence is the exact per-name input order supplied by caller.
 func (p *Producer) appendNamed(names []string, data []points.Point, sequence []uint64, clock int64) error {
 	if p.failed != nil {
 		return p.failed
@@ -300,13 +262,6 @@ func (p *Producer) appendNamed(names []string, data []points.Point, sequence []u
 	if p.layer == 0 || len(names) != len(data) || len(names) != len(sequence) || len(names) == 0 || len(names) > 32768 {
 		return p.fail(errors.New("invalid named batch"))
 	}
-	if p.layer == 2 {
-		apps := make([]Application, len(names))
-		for i, name := range names {
-			apps[i] = Application{Name: name, Order: p.applyOrder + uint64(i) + 1, Clock: clock, Points: data[i : i+1], Sequence: sequence[i : i+1]}
-		}
-		return p.appendApplications(apps)
-	}
 	rows := make([]v2core.Row, len(names))
 	ids, err := p.catalog.InternBatch(names, nil)
 	if err != nil {
@@ -315,15 +270,6 @@ func (p *Producer) appendNamed(names []string, data []points.Point, sequence []u
 	for i, id := range ids {
 		rows[i] = v2core.Row{ID: NumericID(id, p.index, p.count), Time: data[i].Timestamp, Bits: math.Float64bits(data[i].Value), Seq: sequence[i]}
 	}
-	if p.layer >= 2 {
-		start := time.Now()
-		record, err := p.encoder.EncodePoints(ids, data, clock)
-		p.EncodeTime += time.Since(start)
-		if err != nil {
-			return p.fail(err)
-		}
-		p.records = append(p.records, record)
-	}
 	p.cursor += uint64(len(data))
 	p.pendingRows += len(data)
 	p.packets = append(p.packets, packet{rows: rows, cursor: p.cursor})
@@ -331,14 +277,16 @@ func (p *Producer) appendNamed(names []string, data []points.Point, sequence []u
 		p.ForcedGroups++
 		return p.Drain()
 	}
-	if p.layer == 2 && !time.Now().Before(p.nextSync) {
-		return p.Drain()
-	}
 	return nil
 }
 
-// Seal retains a logical barrier without forcing a journal fsync on every seal.
-// L1 syncs new catalog entries then submits the seal; L2 releases it at group sync.
+// Append is the named layer's intake (raw TCP owners on layer 1).
+func (p *Producer) Append(names []string, _ []uint64, data []points.Point, sequence []uint64, clock int64) error {
+	return p.appendNamed(names, data, sequence, clock)
+}
+
+// Seal queues a core barrier. L1 syncs new catalog entries then submits it;
+// L3 hands it to core with the next drain.
 func (p *Producer) Seal() error {
 	if p.failed != nil {
 		return p.failed
@@ -356,8 +304,8 @@ func (p *Producer) Seal() error {
 	return nil
 }
 
-// Drain syncs catalog before journal, then sends the exact queued order to core.
-// It is a per-producer durable journal acknowledgment, not a global core seal.
+// Drain syncs the catalog, then sends the exact queued order to core. On
+// layer 3 core writes it to L0 run files at its next publication.
 func (p *Producer) Drain() error {
 	if p.failed != nil {
 		return p.failed
@@ -366,7 +314,7 @@ func (p *Producer) Drain() error {
 		return nil
 	}
 	if len(p.packets) == 0 {
-		return p.fail(p.retireJournal())
+		return nil
 	}
 	start := time.Now()
 	if p.catalog != nil {
@@ -375,59 +323,10 @@ func (p *Producer) Drain() error {
 		}
 	}
 	p.CatalogSyncTime += time.Since(start)
-	rotated := false
-	if p.layer >= 2 {
-		for _, record := range p.records {
-			var h [4]byte
-			binary.LittleEndian.PutUint32(h[:], uint32(len(record)))
-			if _, err := p.writer.Write(h[:]); err != nil {
-				return p.fail(err)
-			}
-			p.segmentLast = p.segmentBytes
-			if p.stage != nil {
-				if err := p.writer.Flush(); err != nil {
-					return p.fail(err)
-				}
-				p.stage("append")
-			}
-			if _, err := p.writer.Write(record); err != nil {
-				return p.fail(err)
-			}
-			p.JournalBytes += uint64(4 + len(record))
-			p.segmentBytes += int64(4 + len(record))
-		}
-		start = time.Now()
-		if err := p.writer.Flush(); err != nil {
-			return p.fail(err)
-		}
-		if err := p.journal.Sync(); err != nil {
-			return p.fail(err)
-		}
-		p.JournalSyncTime += time.Since(start)
-		p.SyncGroups++
-		// Write/Flush and fsync have finished consuming these detached records.
-		// No core packet aliases the serialized application envelope.
-		for _, record := range p.records {
-			// Placed envelopes currently allocate independently and never take
-			// a spare. Keep this pool bounded by recycling only plain frames.
-			if bytes.HasPrefix(record, applicationMagic) {
-				p.spareRecords = append(p.spareRecords, record[:0])
-			}
-		}
-		clear(p.records)
-		p.records = p.records[:0]
-		// Every record of this segment is synced and none is encoded ahead.
-		if p.segmentLimit > 0 && p.segmentBytes >= p.segmentLimit {
-			if err := p.rotateJournal(); err != nil {
-				return p.fail(err)
-			}
-			rotated = true
-		}
-	}
 	start = time.Now()
 	for _, packet := range p.packets {
-		if len(packet.batches) > 0 && p.durableApplications != nil {
-			if err := p.durableApplications(p.index, packet.batches); err != nil {
+		if len(packet.batches) > 0 && p.mirror != nil {
+			if err := p.mirror(p.index, packet.batches); err != nil {
 				return p.fail(err)
 			}
 		}
@@ -451,11 +350,6 @@ func (p *Producer) Drain() error {
 	p.packets = p.packets[:0]
 	p.pendingRows = 0
 	p.nextSync = time.Now().Add(p.interval)
-	// A busy producer retires at rotation, as often as segments close; idle
-	// Drains above retire the rest once seals cover it.
-	if rotated {
-		return p.fail(p.retireJournal())
-	}
 	return nil
 }
 
@@ -464,11 +358,6 @@ func (s *Store) Close() error {
 	var result error
 	for _, p := range s.Producers {
 		result = errors.Join(result, p.Drain())
-		p.encoder.Close()
-		if p.journal != nil {
-			result = errors.Join(result, p.journal.Close())
-			p.journal = nil
-		}
 		if p.catalog != nil {
 			result = errors.Join(result, p.catalog.Close())
 			p.catalog = nil

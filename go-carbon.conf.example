@@ -1533,7 +1533,11 @@ shards = 0                        # 0: one immutable-part owner per producer
 # Restart-only time threshold; 0s also selects 10s. Size may seal earlier:
 # seal-max-rows is a runtime threshold; the hard owner limit is 2097152 rows.
 # One original application can cross the threshold. Rows are 32 bytes plus batches.
-# Pending reads publish every 1s; the mandatory input log still fsyncs every 1s.
+# Pending reads publish every 1s. v2-only keeps no producer journal: each
+# publication first writes its new points to one unsynced L0 file per owner,
+# and the seal unlinks it. A kill -9 loses no visible point (about 1s of
+# accepted input), a power loss up to one seal interval. A store whose journal
+# build did not stop cleanly refuses to open; stop the old build cleanly first.
 seal-interval = "10s"
 seal-max-rows = 131072
 read-budget-bytes = 268435456

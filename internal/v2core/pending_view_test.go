@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand/v2"
 	"reflect"
@@ -148,6 +149,23 @@ func checkPendingView(t *testing.T, seed uint64, v PendingView, want []coreBatch
 	for i := range want {
 		if !samePendingApp(&got[i], &want[i]) {
 			t.Fatalf("seed %d: batch %d\n got %+v\nwant %+v", seed, i, got[i], want[i])
+		}
+	}
+	// The L0 image encodes the packed rows directly: the same bytes as the
+	// detached batches, and it decodes back to them.
+	image := encodeL0(nil, v)
+	if ref := encodeL0(nil, PendingBatches(want)); !bytes.Equal(image, ref) {
+		t.Fatalf("seed %d: L0 image of the view (%d bytes) differs from the batches' (%d bytes)", seed, len(image), len(ref))
+	}
+	decoded, err := decodeL0(image)
+	if err != nil || len(decoded) != len(want) {
+		t.Fatalf("seed %d: decodeL0: %d applications, %v; want %d", seed, len(decoded), err, len(want))
+	}
+	for i := range want {
+		w := want[i]
+		w.Registered = nil
+		if !samePendingApp(&decoded[i], &w) {
+			t.Fatalf("seed %d: L0 application %d\n got %+v\nwant %+v", seed, i, decoded[i], w)
 		}
 	}
 	i := 0
@@ -652,4 +670,25 @@ func TestPendingHeadBlocks(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestL0EncodeAllocs: an owner's L0 write of a row head encodes straight from
+// the packed arrays, so with a sized buffer it allocates nothing; decoding the
+// view into batches first (the earlier path) allocates per application.
+func TestL0EncodeAllocs(t *testing.T) {
+	s := newPendingRowsScript(3)
+	var h pendingHead
+	for _, packet := range s.packets {
+		h.add(packet, s.find)
+	}
+	v := h.rawView(nil)
+	buf := encodeL0(nil, v)
+	if n := testing.AllocsPerRun(20, func() { buf = encodeL0(buf, v) }); n != 0 {
+		t.Fatalf("encodeL0 of %d row positions: %.0f allocations, want 0", v.Len(), n)
+	}
+	viaBatches := testing.AllocsPerRun(20, func() { buf = encodeL0(buf, PendingBatches(h.rawView(s.find).Batches())) })
+	if viaBatches == 0 {
+		t.Fatalf("decoding to batches allocated nothing; the comparison is void")
+	}
+	t.Logf("%d positions: 0 allocations direct, %.0f via Batches", v.Len(), viaBatches)
 }
