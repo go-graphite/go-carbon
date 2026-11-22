@@ -34,37 +34,51 @@ func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dic
 }
 
 // dictKeys keys every stage by (vshard, ID). The names the dictionary does
-// not hold yet go to it in one AppendBatch, which appends them under the
-// lock of this owner's own dictionary shard; the seal syncs the dictionary
-// before it writes a part.
+// not hold yet go to it in AppendBatch calls of at most dictChunk names from
+// one fixed scratch, each appended under the lock of this owner's own
+// dictionary shard, so a first seal of many new names allocates nothing per
+// name; the seal syncs the dictionary before it writes a part.
 func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
-	var names []v2dict.NewName
+	var scratch [dictChunk]v2dict.NewName
+	var metrics [dictChunk]*rollupMetric
+	n := 0
+	appendNames := func() error {
+		err := dict.AppendBatch(scratch[:n])
+		for i := range n {
+			r.dictDirty = r.dictDirty || scratch[i].Created // every unresolved name on error
+			if err == nil {
+				metrics[i].dictID.Store(scratch[i].Entry.ID + 1)
+			}
+		}
+		n = 0
+		return err
+	}
 	for _, m := range r.stageMetrics {
-		if m.dictID.Load() == 0 {
-			names = append(names, v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.policy.Name)})
+		if m.dictID.Load() != 0 {
+			continue
+		}
+		scratch[n], metrics[n] = v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.policy.Name)}, m
+		if n++; n == dictChunk {
+			if err := appendNames(); err != nil {
+				return err
+			}
 		}
 	}
-	if len(names) > 0 {
-		err := dict.AppendBatch(names)
-		for i := range names {
-			r.dictDirty = r.dictDirty || names[i].Created // every unresolved name on error
-		}
-		if err != nil {
+	if n > 0 {
+		if err := appendNames(); err != nil {
 			return err
 		}
 	}
 	for i := range r.stages {
 		s, m := &r.stages[i], r.stageMetrics[i]
-		id := m.dictID.Load()
-		if id == 0 {
-			id = names[0].Entry.ID + 1
-			names = names[1:]
-			m.dictID.Store(id)
-		}
-		s.sortKey = uint64(m.vshard)<<32 | uint64(id-1)
+		s.sortKey = uint64(m.vshard)<<32 | uint64(m.dictID.Load()-1)
 	}
 	return nil
 }
+
+// dictChunk is the most names one dictKeys AppendBatch call takes: one
+// dictionary shard-lock hold.
+const dictChunk = 256
 
 // hintSlot returns the slot identity h names in this planner, when that slot
 // holds id. A missing, foreign or stale hint fails the check.
