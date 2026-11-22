@@ -204,7 +204,7 @@ func (w *Writer) Close() (Descriptor, error) {
 	if err != nil {
 		return Descriptor{}, errors.Join(err, os.Remove(w.path))
 	}
-	d := Descriptor{Version: SchemaVersion, KeyVersion: KeyVersion, Scope: w.spec.Scope, Encoding: w.spec.Encoding, Source: w.spec.Source, Bytes: w.out.n, FirstKey: w.first, LastKey: w.last, Coverage: Coverage{MinTime: w.spec.MinTime, MaxTime: w.spec.MaxTime, Names: w.names, Records: w.records, Policies: w.spec.Policies, MinExpiry: w.spec.MinExpiry, MaxExpiry: w.spec.MaxExpiry}}
+	d := Descriptor{Version: SchemaVersion, KeyVersion: KeyVersion, Scope: w.spec.Scope, Encoding: w.spec.Encoding, Source: w.spec.Source, Bytes: w.out.n, FirstKey: w.first, LastKey: w.last, Coverage: Coverage{MinClock: w.spec.MinClock, MinTime: w.spec.MinTime, MaxTime: w.spec.MaxTime, Names: w.names, Records: w.records, Policies: w.spec.Policies, MinExpiry: w.spec.MinExpiry, MaxExpiry: w.spec.MaxExpiry}}
 	if w.spec.Encoding == DenseEncoding {
 		d.Version = GroupFileVersion
 	}

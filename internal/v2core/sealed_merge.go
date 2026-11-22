@@ -513,14 +513,14 @@ var mergePartID = func(id *v2part.PartID) error {
 // only when its expiry precedes it, as whole-part retirement would, so a merge
 // never removes a record the reader still returns.
 func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (v2part.Descriptor, error) {
-	return mergeParts(ctx, dir, path, inputs, retire, true, stop)
+	return mergeParts(ctx, dir, path, inputs, retire, 0, true, stop)
 }
 
 // mergeParts is mergePartFiles; prefix says the inputs hold their scope's
 // oldest part, so every version up to their newest Seq: only such a
 // merge writes windows down and drops the versions they carry (mergeVersions).
-func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, prefix bool, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
-	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
+func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire, bound int64, prefix bool, stop <-chan struct{}) (_ v2part.Descriptor, err error) {
+	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinClock: inputs[0].Coverage.MinClock, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
 	}
@@ -529,6 +529,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		digest  v2part.Digest
 	}]bool{}
 	for _, d := range inputs {
+		spec.MinClock = min(spec.MinClock, d.Coverage.MinClock)
 		spec.MinTime = min(spec.MinTime, d.Coverage.MinTime)
 		spec.MaxTime = max(spec.MaxTime, d.Coverage.MaxTime)
 		spec.Source.MinOrder = min(spec.Source.MinOrder, d.Source.MinOrder)
@@ -646,17 +647,15 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			}
 		}
 		config = *chosen.config
-		// A record expires in this merge only as of the name's newest admission
-		// clock in it: a later batch of the name, in a part outside the merge,
-		// may still have propagated it (as Whisper read it before its slot was
-		// overwritten), and only the merge that holds that batch can write its
-		// window down. Later admissions are no earlier (clocks never go back).
-		// Only a prefix merge writes windows down, so only it drops expired
-		// records; other merges keep them until a prefix merge holds them.
+		// Only a prefix can write windows down before dropping their inputs.
+		// No later event can read a record expired before the oldest outside
+		// admission. Legacy parts retain the conservative per-name clock.
 		expireAt := int64(math.MinInt64)
 		if prefix {
 			expireAt = retire
-			if metadata.LastUpdate > 0 {
+			if bound != 0 && spec.MinClock != 0 {
+				expireAt = min(expireAt, bound)
+			} else if metadata.LastUpdate > 0 {
 				expireAt = min(expireAt, metadata.LastUpdate/1e9)
 			}
 		}
@@ -867,7 +866,11 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	}
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
-	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, o.oldestInScope(inputs), stop)
+	bound, err := o.mergeAdmissionBound(snapshot, inputs, retire)
+	if err != nil {
+		return false, err
+	}
+	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, bound, o.oldestInScope(inputs), stop)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
@@ -1272,4 +1275,37 @@ func (v versionOrder) Less(i, j int) bool {
 func (v versionOrder) Swap(i, j int) {
 	v.recs[i], v.recs[j] = v.recs[j], v.recs[i]
 	v.last[i], v.last[j] = v.last[j], v.last[i]
+}
+
+// mergeAdmissionBound excludes the inputs, then bounds expiry by every live
+// local part in their scope. Missing clocks force the legacy per-name bound.
+func (o *coreOwner) mergeAdmissionBound(snapshot *pebble.Snapshot, inputs []v2part.Descriptor, retire int64) (int64, error) {
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	bound := retire
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			return 0, err
+		}
+		if slices.ContainsFunc(inputs, func(input v2part.Descriptor) bool { return input.SHA256 == d.SHA256 }) {
+			continue
+		}
+		if d.Scope.Group != inputs[0].Scope.Group || d.Scope.Partition != inputs[0].Scope.Partition || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+			continue
+		}
+		k, err := v2part.Decode(d.FirstKey)
+		if err != nil {
+			return 0, err
+		}
+		origin, err := readPartOrigin(snapshot, k)
+		if err != nil {
+			return 0, err
+		}
+		if origin.Class == LivePart {
+			bound = min(bound, d.Coverage.MinClock)
+		}
+	}
+	return bound, nil
 }

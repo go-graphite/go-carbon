@@ -115,7 +115,10 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 	schema := m.schema()
 	last := schema.Archives[len(schema.Archives)-1]
 	horizon := last.Step * last.Count
+	// An idle closure has no admission event; it cannot lower this bound.
+	minClock := int64(math.MaxInt64)
 	for _, b := range batches {
+		minClock = min(minClock, b.Now)
 		if s.next.Revision == 0 {
 			s.next.Revision = 1
 			s.next.LastUpdate = b.Now * 1e9
@@ -156,9 +159,10 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 		physicalPart := part
 		binary.BigEndian.PutUint64(physicalPart[:8], binary.BigEndian.Uint64(part[:8])^uint64(partition))
 		if len(coverage.seen) == 0 {
-			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+			coverage.spec = partsformat.Spec{Scope: partsformat.Scope{Group: m.policy.Group, VShard: partsformat.GroupVShard, Partition: partition, Part: physicalPart}, Encoding: partsformat.DenseEncoding, MinClock: minClock, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
 			coverage.spec.Source.MinOrder = math.MaxUint64
 		}
+		coverage.spec.MinClock = min(coverage.spec.MinClock, minClock)
 		digest := m.policy.prepared.Digest()
 		if !coverage.seen[digest] {
 			policies := r.definitions[digest]
@@ -366,6 +370,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 					dst.seen[digest] = true
 				}
 			}
+			dst.spec.MinClock = min(dst.spec.MinClock, src.spec.MinClock)
 			dst.spec.MinTime = min(dst.spec.MinTime, src.spec.MinTime)
 			dst.spec.MaxTime = max(dst.spec.MaxTime, src.spec.MaxTime)
 			dst.spec.Source.MinOrder = min(dst.spec.Source.MinOrder, src.spec.Source.MinOrder)
