@@ -18,30 +18,51 @@ import (
 // which sorts identically.
 //
 // With the store dictionary (ID-keyed parts) the key is (vshard, ID), the
-// GCI2 key order, so no rank is consulted: a name the dictionary does not
-// hold yet is appended here, and the seal syncs before writing its parts.
-func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dict) error {
+// GCI2 key order, so no rank is consulted: dictKeys sets it once the seal's
+// new names are appended.
+func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dict) {
 	s.vshard = m.vshard
 	if dict != nil {
-		id := m.dictID.Load()
-		if id == 0 {
-			e, created, err := dict.Append(string(m.policy.Group), m.vshard, []byte(m.policy.Name), 0)
-			if err != nil {
-				return err
-			}
-			r.dictDirty = r.dictDirty || created
-			id = e.ID + 1
-			m.dictID.Store(id)
-		}
-		s.sortKey = uint64(m.vshard)<<32 | uint64(id-1)
-		return nil
+		return
 	}
 	if rk := r.metricRank(m); rk != 0 {
 		s.sortKey = uint64(rk) << 1
-		return nil
+		return
 	}
 	l, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics)
 	s.sortKey = uint64(l)<<1 | 1
+}
+
+// dictKeys keys every stage by (vshard, ID). The names the dictionary does
+// not hold yet go to it in one AppendBatch, so a seal takes the dictionary's
+// write lock once, not once per new name; the seal syncs the dictionary
+// before it writes a part.
+func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
+	var names []v2dict.NewName
+	for _, m := range r.stageMetrics {
+		if m.dictID.Load() == 0 {
+			names = append(names, v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.policy.Name)})
+		}
+	}
+	if len(names) > 0 {
+		err := dict.AppendBatch(names)
+		for i := range names {
+			r.dictDirty = r.dictDirty || names[i].Created // every unresolved name on error
+		}
+		if err != nil {
+			return err
+		}
+	}
+	for i := range r.stages {
+		s, m := &r.stages[i], r.stageMetrics[i]
+		id := m.dictID.Load()
+		if id == 0 {
+			id = names[0].Entry.ID + 1
+			names = names[1:]
+			m.dictID.Store(id)
+		}
+		s.sortKey = uint64(m.vshard)<<32 | uint64(id-1)
+	}
 	return nil
 }
 

@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 )
 
 // FlagDeleted marks a deleted (expired) name. The ID is never reused.
@@ -415,55 +416,109 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 // next ID of the vshard with policy when the name is new or deleted. The
 // entry is durable after the next successful Sync.
 func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (Entry, bool, error) {
-	if err := checkGroup(group); err != nil {
-		return Entry{}, false, err
+	// AppendBatch copies a name and keeps no reference, so it reads name in place.
+	n := [1]NewName{{Group: group, VShard: vshard, Name: unsafe.String(unsafe.SliceData(name), len(name)), Policy: policy}}
+	err := d.AppendBatch(n[:])
+	return n[0].Entry, n[0].Created, err
+}
+
+// NewName is one name of AppendBatch: the request, then the name's live
+// entry and whether the batch assigned it.
+type NewName struct {
+	Group   string
+	VShard  uint16
+	Name    string
+	Policy  uint16
+	Entry   Entry
+	Created bool
+}
+
+func (n *NewName) key(dst []byte) ([]byte, error) {
+	if err := checkGroup(n.Group); err != nil {
+		return nil, err
 	}
-	var ab [keyBuf]byte
-	key := append(scopeKey(ab[:0], group, vshard), name...)
+	key := append(scopeKey(dst, n.Group, n.VShard), n.Name...)
 	if len(key) > math.MaxUint16 {
-		return Entry{}, false, fmt.Errorf("v2dict: name too long (%d bytes)", len(name))
+		return nil, fmt.Errorf("v2dict: name too long (%d bytes)", len(n.Name))
 	}
-	// A live name is found without the write lock: the append level under
-	// the read lock, the level files lock-free in a snapshot taken with it.
-	// Concurrent seals then resolve their names in parallel, and only a new
-	// name serializes, for the append itself.
-	d.mu.RLock()
-	v, s := d.buf.get(key), d.snap.Load()
-	d.mu.RUnlock()
-	if v == nil {
-		if e, ok := s.get(key); ok && !e.Deleted() {
-			return e, false, nil
+	return key, nil
+}
+
+// AppendBatch is Append of every name. A live name is found without the
+// write lock: the append level under the read lock, the level files
+// lock-free in a snapshot taken with it, so concurrent seals resolve their
+// names in parallel. The new names then take the write lock once for the
+// whole batch: a seal of many new names waits on it once, not once per name,
+// and writes its log records as one run.
+func (d *Dict) AppendBatch(names []NewName) error {
+	var ab [keyBuf]byte
+	var first *snapshot // the first lookup's; any install since changes it
+	missing := false
+	for i := range names {
+		n := &names[i]
+		key, err := n.key(ab[:0])
+		if err != nil {
+			return err
 		}
-	} else if e := decode(v); !e.Deleted() {
-		return e, false, nil
+		d.mu.RLock()
+		v, s := d.buf.get(key), d.snap.Load()
+		d.mu.RUnlock()
+		if first == nil {
+			first = s
+		}
+		e, ok := Entry{}, v != nil
+		if ok {
+			e = decode(v)
+		} else {
+			e, ok = s.get(key)
+		}
+		// Created marks a name left to the write lock until it resolves.
+		n.Entry, n.Created = e, !ok || e.Deleted()
+		missing = missing || n.Created
+	}
+	if !missing {
+		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.writable(); err != nil {
-		return Entry{}, false, err
+		return err
 	}
-	// Another append of the name may have won in between; a flush moves the
-	// append level into a level this snapshot lacks.
-	if v := d.buf.get(key); v != nil {
-		if e := decode(v); !e.Deleted() {
-			return e, false, nil
+	for i := range names {
+		n := &names[i]
+		if !n.Created {
+			continue
 		}
-	} else if now := d.snap.Load(); now != s {
-		if e, ok := now.get(key); ok && !e.Deleted() {
-			return e, false, nil
+		key, _ := n.key(ab[:0])
+		// Another append of the name may have won in between (or an earlier
+		// name of this batch); a flush moves the append level into a level
+		// the lookup's snapshot lacks.
+		if v := d.buf.get(key); v != nil {
+			if e := decode(v); !e.Deleted() {
+				n.Entry, n.Created = e, false
+				continue
+			}
+		} else if now := d.snap.Load(); now != first {
+			if e, ok := now.get(key); ok && !e.Deleted() {
+				n.Entry, n.Created = e, false
+				continue
+			}
+		}
+		sk := key[:len(key)-len(n.Name)]
+		j, ok := d.scopeIx[string(sk)]
+		if ok && d.nextID[j] == NoID {
+			n.Created = false
+			return fmt.Errorf("v2dict: vshard %d of %q is out of IDs", n.VShard, n.Group)
+		}
+		n.Entry = Entry{Policy: n.Policy}
+		if ok {
+			n.Entry.ID = d.nextID[j]
+		}
+		if err := d.putLocked(key, n.Entry); err != nil {
+			return err
 		}
 	}
-	sk := key[:len(key)-len(name)]
-	i, ok := d.scopeIx[string(sk)]
-	if ok && d.nextID[i] == NoID {
-		return Entry{}, false, fmt.Errorf("v2dict: vshard %d of %q is out of IDs", vshard, group)
-	}
-	id := uint32(0)
-	if ok {
-		id = d.nextID[i]
-	}
-	e := Entry{ID: id, Policy: policy}
-	return e, true, d.putLocked(key, e)
+	return nil
 }
 
 // Delete sets FlagDeleted on the name's newest entry. It reports false when

@@ -761,8 +761,8 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		s.next.Expired = false
 		if rk != 0 && dict == nil {
 			s.vshard, s.sortKey = m.vshard, uint64(rk)<<1
-		} else if err := r.stageKey(s, m, dict); err != nil {
-			return coreSealPlan{}, err
+		} else {
+			r.stageKey(s, m, dict)
 		}
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
@@ -804,9 +804,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
 			stages, metrics = append(stages, rollupStage{next: r.meta[slot], slot: slot}), append(metrics, m)
-			if err := r.stageKey(&stages[len(stages)-1], m, dict); err != nil {
-				return coreSealPlan{}, err
-			}
+			r.stageKey(&stages[len(stages)-1], m, dict)
 		}
 	}
 	r.stages, r.stageMetrics = stages, metrics
@@ -816,6 +814,9 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	// Every ID this seal's parts carry is durable before a part is written.
 	r.generation = 0
 	if dict != nil && len(stages) > 0 {
+		if err := r.dictKeys(dict); err != nil {
+			return coreSealPlan{}, err
+		}
 		if r.dictDirty {
 			if err := dict.Sync(); err != nil {
 				return coreSealPlan{}, err
