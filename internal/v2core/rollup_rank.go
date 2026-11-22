@@ -23,15 +23,17 @@ import (
 func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dict) error {
 	s.vshard = m.vshard
 	if dict != nil {
-		if m.dictID == 0 {
+		id := m.dictID.Load()
+		if id == 0 {
 			e, created, err := dict.Append(string(m.policy.Group), m.vshard, []byte(m.policy.Name), 0)
 			if err != nil {
 				return err
 			}
 			r.dictDirty = r.dictDirty || created
-			m.dictID = e.ID + 1
+			id = e.ID + 1
+			m.dictID.Store(id)
 		}
-		s.sortKey = uint64(m.vshard)<<32 | uint64(m.dictID-1)
+		s.sortKey = uint64(m.vshard)<<32 | uint64(id-1)
 		return nil
 	}
 	if rk := r.metricRank(m); rk != 0 {

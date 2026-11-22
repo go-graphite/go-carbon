@@ -73,17 +73,25 @@ func archivePrefixLen(k []byte, byID bool) int {
 // looking its dictionary ID up once per (group, vshard).
 type metricIDs struct {
 	dict   *v2dict.Dict
+	known  *PolicyIdentity // the metric's identity, when the caller has it
 	group  v2part.Group
 	vshard uint16
 	id     uint32
 	state  uint8 // 0 not looked up, 1 found, 2 no live ID
 }
 
-// key is metricKey with the lookup cached.
+// key is metricKey with the lookup cached. The identity's own (group,
+// vshard) takes its remembered dictionary ID without the dictionary.
 func (c *metricIDs) key(k v2part.Key, name v2part.ID) (v2part.Key, bool, error) {
 	if !k.ByID {
 		k.Metric, k.Local = name, 0
 		return k, true, nil
+	}
+	if h := c.known; h != nil && k.Group == h.policy.Group && k.VShard == h.vshard {
+		if id := h.dictID.Load(); id != 0 {
+			k.Metric, k.Local = "", id-1
+			return k, true, nil
+		}
 	}
 	if c.state == 0 || c.group != k.Group || c.vshard != k.VShard {
 		found, ok, err := metricKey(k, name, c.dict)
@@ -123,17 +131,18 @@ func snapshotHasIDKeyedParts(snapshot *pebble.Snapshot) (bool, error) {
 	return found, errors.Join(it.Error(), it.Close())
 }
 
-// keyNames fills in the name of decoded ID-keyed keys, caching the last ID:
-// one metric's keys are adjacent in a part, so a scan resolves each metric
-// once per part.
+// keyNames fills in the names of decoded ID-keyed keys for scans that walk
+// parts in key order, which is vshard-major. On entering a (group, vshard)
+// it reads that vshard's dictionary entries in one sequential scan into a
+// table by ID, so each key resolves with one slice index instead of one
+// dictionary lookup per part and metric (recovery folds every part since
+// the checkpoint). The table holds one vshard at a time.
 type keyNames struct {
-	dict    *v2dict.Dict
-	group   v2part.Group
-	vshard  uint16
-	id      uint32
-	name    v2part.ID
-	cached  bool
-	scratch []byte
+	dict   *v2dict.Dict
+	group  v2part.Group
+	vshard uint16
+	loaded bool
+	names  []v2part.ID // by ID: the live name, "" for unknown or deleted IDs
 }
 
 // resolve sets k.Metric for an ID-keyed key; name keys pass unchanged.
@@ -141,13 +150,26 @@ func (c *keyNames) resolve(k *v2part.Key) error {
 	if !k.ByID {
 		return nil
 	}
-	if !c.cached || c.id != k.Local || c.vshard != k.VShard || c.group != k.Group {
-		name, err := keyName(*k, c.dict, c.scratch)
-		if err != nil {
-			return err
-		}
-		c.group, c.vshard, c.id, c.name, c.cached = k.Group, k.VShard, k.Local, name, true
+	if c.dict == nil {
+		return errNoPartDict
 	}
-	k.Metric = c.name
+	if !c.loaded || c.vshard != k.VShard || c.group != k.Group {
+		clear(c.names)
+		c.names = c.names[:0]
+		for name, e := range c.dict.Entries(string(k.Group), k.VShard) {
+			if e.Deleted() {
+				continue
+			}
+			if n := int(e.ID) + 1; n > len(c.names) {
+				c.names = append(c.names, make([]v2part.ID, n-len(c.names))...)
+			}
+			c.names[e.ID] = v2part.ID(name)
+		}
+		c.group, c.vshard, c.loaded = k.Group, k.VShard, true
+	}
+	if int(k.Local) >= len(c.names) || c.names[k.Local] == "" {
+		return errUnknownPartID
+	}
+	k.Metric = c.names[k.Local]
 	return nil
 }

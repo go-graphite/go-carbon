@@ -377,13 +377,35 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 	if len(key) > math.MaxUint16 {
 		return Entry{}, false, fmt.Errorf("v2dict: name too long (%d bytes)", len(name))
 	}
+	// A live name is found without the write lock: the append level under
+	// the read lock, the level files lock-free in a snapshot taken with it.
+	// Concurrent seals then resolve their names in parallel, and only a new
+	// name serializes, for the append itself.
+	d.mu.RLock()
+	v, s := d.buf.get(key), d.snap.Load()
+	d.mu.RUnlock()
+	if v == nil {
+		if e, ok := getLevels(s.levels, key, kb[:0]); ok && !e.Deleted() {
+			return e, false, nil
+		}
+	} else if e := decode(v); !e.Deleted() {
+		return e, false, nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.writable(); err != nil {
 		return Entry{}, false, err
 	}
-	if e, ok := d.getLocked(key, kb[:0]); ok && !e.Deleted() {
-		return e, false, nil
+	// Another append of the name may have won in between; a flush moves the
+	// append level into a level this snapshot lacks.
+	if v := d.buf.get(key); v != nil {
+		if e := decode(v); !e.Deleted() {
+			return e, false, nil
+		}
+	} else if now := d.snap.Load(); now != s {
+		if e, ok := getLevels(now.levels, key, kb[:0]); ok && !e.Deleted() {
+			return e, false, nil
+		}
 	}
 	sk := key[:len(key)-len(name)]
 	i, ok := d.scopeIx[string(sk)]

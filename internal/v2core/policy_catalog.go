@@ -30,6 +30,12 @@ type PolicyIdentity struct {
 	// the struct from 56 B to 64 B, and both round up to Go's 64 B size class,
 	// so it costs 0 B of heap per name.
 	route uint32
+	// dictID is 1 + the name's ID in the store dictionary (ID-keyed parts)
+	// once a seal or a read resolved it, 0 before. It fills the padding after
+	// route (0 B per name) and outlives the planner's per-owner state, so a
+	// name is appended to the dictionary once per process and later reads
+	// take the name from the catalog.
+	dictID atomic.Uint32
 	// nameHash is namefp.Hash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.
 	nameHash uint64

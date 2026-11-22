@@ -74,9 +74,6 @@ type rollupMetric struct {
 	*PolicyIdentity
 	slots  *sealrollup.Slots
 	vshard uint16
-	// dictID is 1 + the name's ID in the store dictionary once a seal keyed
-	// it (ID-keyed parts), 0 before. It sits in padding (0 B per name).
-	dictID uint32
 }
 
 // residency returns m's slots, allocating them on the first install.
@@ -1028,6 +1025,9 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 			}
 			if err := e.addMetadata(identities, k, iter.Value(), &definition); err != nil {
 				return err
+			}
+			if k.ByID && e.identity != nil {
+				e.identity.dictID.Store(k.Local + 1)
 			}
 		}
 		if err := iter.Error(); err != nil {

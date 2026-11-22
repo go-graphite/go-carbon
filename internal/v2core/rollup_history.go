@@ -233,7 +233,7 @@ func (r *rollupHistoryReader) load(m *rollupMetric, meta metricMetadata, a int, 
 		if err != nil {
 			return err
 		}
-		ids := metricIDs{dict: r.dict}
+		ids := metricIDs{dict: r.dict, known: m.PolicyIdentity}
 		for _, part := range r.parts[string(scope[len(partKeyMagic):len(scope)-8])] {
 			// Older logical timestamps cannot mask a winner in this window. Newer
 			// parts remain eligible even outside end: resolve ring epochs first.

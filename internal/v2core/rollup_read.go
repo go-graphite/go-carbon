@@ -515,7 +515,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	}
 	// ID-keyed parts resolve the name to its dictionary ID once per routed
 	// (group, vshard), not per part.
-	ids := metricIDs{dict: s.identities.partDict()}
+	ids := metricIDs{dict: s.identities.partDict(), known: m.latest.PolicyIdentity}
 	scan := func(it archiveCursor, part *readPartMetric) error {
 		if part.meta.Frontier.Order == 0 {
 			key, ok, e := ids.key(part.part.key, m.latest.policy.Name)
@@ -767,8 +767,8 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 	end := v2part.PrefixEnd(scope)
 	// Per-row scratch, reused across the part: the metadata key and a slim
 	// row's definition only feed the seek and intern below.
-	var encoded, definition, nameScratch []byte
-	dict := identities.partDict()
+	var encoded, definition []byte
+	names := keyNames{dict: identities.partDict()}
 	for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -776,11 +776,6 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		key, err := v2part.DecodeKey(it.Key())
 		if err != nil {
 			return nil, err
-		}
-		if key.ByID {
-			if key.Metric, err = keyName(key, dict, nameScratch); err != nil {
-				return nil, err
-			}
 		}
 		key.Archive = v2part.MetadataArchive
 		key.BlockStart = 0
@@ -796,9 +791,19 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			it.Next()
 		}
 		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
-			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
+			return nil, fmt.Errorf("missing rollup metadata for %s (ID %d)", key.Metric, key.Local)
 		}
 		meta, slim, err := decodeRollupMetadataHeader(it.Value())
+		if err == nil && key.ByID {
+			// The catalog already holds every name recovery installed, by the
+			// numeric ID the envelope carries: the dictionary is read only
+			// for a name the catalog has not seen.
+			if h := identities.lookup(meta.ID); h != nil && h.dictID.Load() == key.Local+1 {
+				key.Metric = h.policy.Name
+			} else {
+				err = names.resolve(&key)
+			}
+		}
 		if err == nil && slim {
 			definition, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
 			meta.Policy = definition
@@ -809,6 +814,9 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		h, err := identities.intern(meta.ID, string(key.Metric), meta.Policy)
 		if err != nil {
 			return nil, err
+		}
+		if key.ByID {
+			h.dictID.Store(key.Local + 1)
 		}
 		policy := h.rollupPolicy()
 		if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {

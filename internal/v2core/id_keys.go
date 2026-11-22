@@ -83,7 +83,9 @@ func keyName(k v2part.Key, dict *v2dict.Dict, dst []byte) (v2part.ID, error) {
 	}
 	name, e, ok := dict.LookupID(string(k.Group), k.VShard, k.Local, dst[:0])
 	if !ok || e.Deleted() {
-		return "", errors.New("ID-keyed part holds an unknown or deleted dictionary ID")
+		return "", errUnknownPartID
 	}
 	return v2part.ID(name), nil
 }
+
+var errUnknownPartID = errors.New("ID-keyed part holds an unknown or deleted dictionary ID")
