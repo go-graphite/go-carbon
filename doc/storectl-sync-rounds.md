@@ -29,9 +29,14 @@ explicit opt-in. Otherwise zero (including old saved defaults) means two rounds.
 A positive limit can permit more repair rounds without enabling union rescans.
 
 Round input scope is journaled and retained by checkpoints. An interrupted
-legacy union round continues that union round after upgrading; earlier rounds
-are replayed to reconstruct its input and fills, rather than stopping at the
-new default limit during replay. Valid completed observations and clean mutation
+legacy union round continues that union round after upgrading. If the saved
+phase is verification and that union round reaches or exceeds the effective
+round limit, completed earlier rounds are not replayed: the current union
+supersedes their observations and no further fill can use their history.
+One `sync_replay_skipped` event explains this decision. Its saved counter and
+receipts remain reusable, and existing journal records are retained unchanged.
+Otherwise earlier rounds are replayed to reconstruct input and fills, rather
+than stopping at the new default limit during replay. Valid observations and clean mutation
 proofs remain reusable. Changed or unknown proofs still require fresh reads;
 progress counters alone never authorize reuse. No state reset is needed.
 A legacy round beyond the new limit finishes its current verification and

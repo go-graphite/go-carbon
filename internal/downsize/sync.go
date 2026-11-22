@@ -924,7 +924,22 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	pending := map[string]bool{}
 	skippedLast := map[string]string{} // name -> reason of its latest skip
 	previousScore := int64(-1)
-	for round := 1; ; round++ {
+	firstRound := 1
+	currentRound := s.resume.Round - s.verificationBase
+	if limit := s.o.roundLimit(); s.resume.Phase == "verify" && limit > 0 && currentRound >= limit && currentRound > 1 {
+		fullUnion, err := s.roundUsesUnion(currentRound, scopedResume)
+		if err != nil {
+			return err
+		}
+		if fullUnion {
+			// This union replaces every earlier observation, and the limit
+			// prevents another fill. Earlier fill history cannot affect the
+			// verdict, so do not reconstruct ambiguous completed receipts.
+			firstRound = currentRound
+			event("sync_replay_skipped", map[string]any{"round": s.resume.Round, "round_limit": limit, "completed_rounds": currentRound - 1, "reason": "terminal union verification supersedes completed rounds"})
+		}
+	}
+	for round := firstRound; ; round++ {
 		s.sum.Rounds = round
 		var names syncNameSource
 		journalRound := round + s.verificationBase
