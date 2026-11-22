@@ -5,14 +5,13 @@ import (
 	"encoding/binary"
 	"hash/maphash"
 	"slices"
-	"syscall"
 )
 
 // memtable is the append level: the newest entries since the last flush, in
 // a byte arena (u16 key length, key, value) with two open-addressing tables
 // of record numbers, by key and by (scope, ID). It holds no per-name Go
 // objects; its size is bounded by Options.BufferBytes, except that it keeps
-// filling while the previous one is flushed. The arena is anonymous mmap-backed 64 MiB
+// filling while the previous one is flushed. The arena is fixed 64 KiB
 // chunks that never move, so it grows without copying itself. A key appears
 // once: a later put of the same key (a flag change, a revival) rewrites the
 // value in place.
@@ -34,8 +33,9 @@ func idHash(sk []byte, id uint32) uint64 {
 	return h ^ h>>29
 }
 
-// chunkBits sizes mmap chunks; a record (at most 2+65535+7 bytes) never spans two.
-const chunkBits = 26
+// chunkBits sizes arena chunks; a record (at most 2+65535+7 bytes) never
+// spans two, and one longer than a chunk gets a chunk of its own.
+const chunkBits = 16
 
 func (t *memtable) rec(r uint32) (key, val []byte) {
 	off := t.recs[r]
@@ -44,7 +44,7 @@ func (t *memtable) rec(r uint32) (key, val []byte) {
 	return c[2 : 2+kl], c[2+kl : 2+kl+valueSize]
 }
 
-// bytes is the memory reserved by the append level (heap and mmap).
+// bytes is the heap the append level holds.
 func (t *memtable) bytes() int {
 	n := 4 * (cap(t.recs) + len(t.byKey) + len(t.byID) + cap(t.sorted))
 	for _, c := range t.chunks {
@@ -113,7 +113,7 @@ func (t *memtable) next() memtable {
 	return memtable{chunks: make([][]byte, 0, len(t.chunks)), recs: make([]uint32, 0, len(t.recs)), byKey: make([]uint32, slots), byID: make([]uint32, slots)}
 }
 
-func (t *memtable) put(key, val []byte) error {
+func (t *memtable) put(key, val []byte) {
 	if 2*(len(t.recs)+1) > len(t.byKey) {
 		t.byKey = t.rehash(t.byKey, 2*len(t.byKey), func(r uint32) uint64 { k, _ := t.rec(r); return maphash.Bytes(seed, k) })
 	}
@@ -131,18 +131,14 @@ func (t *memtable) put(key, val []byte) error {
 		newID = binary.LittleEndian.Uint32(v) != binary.LittleEndian.Uint32(val)
 		copy(v, val)
 		if !newID {
-			return nil
+			return
 		}
 		t.insertID(r)
-		return nil
+		return
 	}
 	n, last := 2+len(key)+valueSize, len(t.chunks)-1
 	if last < 0 || len(t.chunks[last])+n > cap(t.chunks[last]) {
-		c, err := syscall.Mmap(-1, 0, 1<<chunkBits, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
-		if err != nil {
-			return err
-		}
-		t.chunks = append(t.chunks, c[:0])
+		t.chunks = append(t.chunks, make([]byte, 0, max(1<<chunkBits, n)))
 		last++
 	}
 	c := t.chunks[last]
@@ -155,7 +151,6 @@ func (t *memtable) put(key, val []byte) error {
 	t.byKey[i] = r
 	t.insertID(r)
 	t.dirty = true
-	return nil
 }
 
 func (t *memtable) insertID(r uint32) {
@@ -217,20 +212,4 @@ func (t *memtable) sortedRecs(prefix []byte) []uint32 {
 		return bytes.Compare(ka, kb)
 	})
 	return out
-}
-
-// release runs only after snapshot replacement under d.mu, excluding every
-// frozen reader, or under the shard lock for the active append level on Close.
-func (t *memtable) release() error {
-	var first error
-	if len(t.chunks) > 0 {
-		_ = hook("arena-unmap")
-	}
-	for _, c := range t.chunks {
-		if err := syscall.Munmap(c[:cap(c)]); err != nil && first == nil {
-			first = err
-		}
-	}
-	*t = memtable{}
-	return first
 }

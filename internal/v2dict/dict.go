@@ -129,7 +129,7 @@ func (d *Dict) shard(vshard uint16) *shard { return &d.shards[shardIx(vshard, le
 // snapshot is the immutable list of level files, oldest first, and the
 // frozen append level, by shard, a background flush is writing to the next
 // level file (nil when none). A frozen append level is never written again,
-// so readers search it under d.mu.RLock until its mmap chunks are released.
+// so readers search it without a lock, as they do level files.
 type snapshot struct {
 	frozen []*memtable
 	levels []*level
@@ -229,16 +229,8 @@ func Open(dir string, opt Options) (*Dict, error) {
 	opened := false
 	defer func() {
 		if !opened {
-			if s := d.snap.Load(); s != nil {
-				for _, t := range s.frozen {
-					_ = t.release()
-				}
-			}
 			if d.frozenLog != nil {
 				_ = d.frozenLog.Close()
-			}
-			for i := range d.shards {
-				_ = d.shards[i].buf.release()
 			}
 			if d.log != nil {
 				_ = d.log.Close()
@@ -364,9 +356,7 @@ func (d *Dict) replay(path string) (int, error) {
 		key, val := p[2:2+kl], p[2+kl:]
 		d.logRecs++
 		sh := &d.shards[keyShard(key, len(d.shards))]
-		if err := sh.buf.put(key, val); err != nil {
-			return off, err
-		}
+		sh.buf.put(key, val)
 		sh.bumpNext(key[:scopeLen(key)], binary.LittleEndian.Uint32(val))
 		off += 8 + size
 	}
@@ -393,8 +383,6 @@ func (d *Dict) getLocked(sh *shard, key []byte) (Entry, bool) {
 	if v := sh.buf.get(key); v != nil {
 		return decode(v), true
 	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
 	return d.snap.Load().get(key)
 }
 
@@ -418,10 +406,8 @@ func (d *Dict) Lookup(group string, vshard uint16, name []byte) (Entry, bool) {
 		sh.mu.RUnlock()
 		return e, true
 	}
-	d.mu.RLock()
 	s := d.snap.Load()
 	sh.mu.RUnlock()
-	defer d.mu.RUnlock()
 	return s.get(key)
 }
 
@@ -434,22 +420,23 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 	sk := scopeKey(ab[:0], group, vshard)
 	sh := d.shard(vshard)
 	sh.mu.RLock()
-	defer sh.mu.RUnlock()
-	d.mu.RLock()
-	defer d.mu.RUnlock()
 	if k, v := sh.buf.getID(sk, id); k != nil {
 		dst = append(dst, k[len(sk):]...)
 		e := decode(v)
+		sh.mu.RUnlock()
 		return dst, e, true
 	}
 	s := d.snap.Load()
+	sh.mu.RUnlock()
 	if s.frozen != nil {
 		if k, v := s.frozenTable(sk).getID(sk, id); k != nil {
 			e := decode(v)
+			sh.mu.RLock()
 			nv := sh.buf.get(k)
 			if nv != nil {
 				e = decode(nv)
 			}
+			sh.mu.RUnlock()
 			if e.ID != id {
 				return dst, Entry{}, false
 			}
@@ -465,13 +452,18 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 		key, val := l.at(pos, kb[:0])
 		e := decode(val)
 		// Only newer storage can hold a newer entry of the same name.
+		sh.mu.RLock()
 		v := sh.buf.get(key)
 		if v != nil {
 			e = decode(v)
-		} else if fv := s.frozenGet(key); fv != nil {
-			e = decode(fv)
-		} else if ne, ok := getLevels(s.levels[i+1:], key); ok {
-			e = ne
+		}
+		sh.mu.RUnlock()
+		if v == nil {
+			if fv := s.frozenGet(key); fv != nil {
+				e = decode(fv)
+			} else if ne, ok := getLevels(s.levels[i+1:], key); ok {
+				e = ne
+			}
 		}
 		if e.ID != id {
 			return dst, Entry{}, false
@@ -514,7 +506,7 @@ func (n *NewName) key(dst []byte) ([]byte, error) {
 }
 
 // AppendBatch is Append of every name. Each run of names of one shard, at
-// most batchNames, is looked up below the append level, then checked
+// most batchNames, is looked up in the level files lock-free, then checked
 // against the append level and its new names appended under the shard's
 // lock: seals of different shards never wait on each other, and a lookup
 // (a render) waits at most one short hold of its shard.
@@ -536,45 +528,43 @@ func (d *Dict) AppendBatch(names []NewName) error {
 // batchNames bounds one AppendBatch shard-lock hold: well under 1 ms.
 const batchNames = 256
 
-// lookupLevels resolves names below the append level, pinning its snapshot.
+// lookupLevels resolves names below the append level, in snapshot s.
 // Created marks a name with no live entry there.
-func (d *Dict) lookupLevels(names []NewName) (*snapshot, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	s := d.snap.Load()
+func lookupLevels(names []NewName, s *snapshot) error {
 	var ab [keyBuf]byte
 	for i := range names {
 		n := &names[i]
 		key, err := n.key(ab[:0])
 		if err != nil {
-			return s, err
+			return err
 		}
 		var ok bool
 		n.Entry, ok = s.get(key)
 		n.Created = !ok || n.Entry.Deleted()
 	}
-	return s, nil
+	return nil
 }
 
-// appendRun resolves names of one shard below the append level, then
+// appendRun resolves names of one shard in the level files, lock-free, then
 // against the shard's append level and appends the new ones, in one hold
 // of the shard lock. A freeze since the lookup moved append-level entries
-// into a newer snapshot, so the names are looked up there again,
+// into a newer snapshot, so the names are looked up there again, lock-free,
 // first; no freeze runs during the hold.
 func (d *Dict) appendRun(sh *shard, names []NewName) error {
-	s, err := d.lookupLevels(names)
-	if err != nil {
+	s := d.snap.Load()
+	if err := lookupLevels(names, s); err != nil {
 		return err
 	}
 	_ = hook("append-looked-up")
 	sh.mu.Lock()
 	for now := d.snap.Load(); now != s; now = d.snap.Load() {
 		sh.mu.Unlock()
-		s, _ = d.lookupLevels(names) // keys checked already
+		s = now
+		_ = lookupLevels(names, s) // keys checked already
 		sh.mu.Lock()
 	}
 	var ab [keyBuf]byte
-	err = nil
+	var err error
 	for i := range names {
 		n := &names[i]
 		key, _ := n.key(ab[:0])
@@ -598,9 +588,7 @@ func (d *Dict) appendRun(sh *shard, names []NewName) error {
 		if ok {
 			n.Entry.ID = sh.nextID[j]
 		}
-		if err = d.put(sh, key, n.Entry); err != nil {
-			break
-		}
+		d.put(sh, key, n.Entry)
 	}
 	err = errors.Join(err, d.commit(sh))
 	sh.mu.Unlock()
@@ -625,8 +613,8 @@ func (d *Dict) Delete(group string, vshard uint16, name []byte) (bool, error) {
 		return false, nil
 	}
 	e.Flags |= FlagDeleted
-	err := d.put(sh, key, e)
-	err = errors.Join(err, d.commit(sh))
+	d.put(sh, key, e)
+	err := d.commit(sh)
 	sh.mu.Unlock()
 	d.maybeFreeze()
 	return true, err
@@ -648,18 +636,15 @@ func (d *Dict) writableShared() error {
 
 // put sets key's entry in the shard's append level and queues its log
 // record for commit. The caller holds sh.mu.
-func (d *Dict) put(sh *shard, key []byte, e Entry) error {
+func (d *Dict) put(sh *shard, key []byte, e Entry) {
 	var vb [valueSize]byte
 	val := e.put(vb[:0])
 	size := sh.buf.size()
-	if err := sh.buf.put(key, val); err != nil {
-		return err
-	}
+	sh.buf.put(key, val)
 	d.bufSize.Add(int64(sh.buf.size() - size))
 	sh.bumpNext(key[:scopeLen(key)], e.ID)
 	sh.recs = appendRecord(sh.recs, key, val)
 	sh.nrecs++
-	return nil
 }
 
 // commit appends the hold's log records to the log, before the shard lock
@@ -852,7 +837,6 @@ func (d *Dict) writeFrozen(frozen []*memtable, minSeq, maxSeq uint64) {
 			w.add(rec(x))
 		}
 	})
-	_ = hook("flush-before-install")
 	d.mu.Lock()
 	if err != nil {
 		if d.err == nil {
@@ -863,12 +847,6 @@ func (d *Dict) writeFrozen(frozen []*memtable, minSeq, maxSeq uint64) {
 	}
 	cur := d.snap.Load()
 	d.snap.Store(&snapshot{levels: append(slices.Clip(cur.levels), l)})
-	// The exclusive lock waits for frozen readers; new readers see the file.
-	for _, t := range frozen {
-		if err := t.release(); err != nil && d.err == nil {
-			d.err = err
-		}
-	}
 	// Everything the frozen level held is durable in its level file.
 	d.synced = max(d.synced, (maxSeq+1)<<32)
 	if err := hook("flush-installed"); err != nil {
@@ -929,26 +907,6 @@ func (d *Dict) Close() error {
 	d.mu.Unlock()
 	d.flushWG.Wait()
 	d.mergeWG.Wait()
-	for i := range d.shards {
-		d.shards[i].mu.Lock()
-	}
-	d.mu.Lock()
-	for i := range d.shards {
-		err = errors.Join(err, d.shards[i].buf.release())
-	}
-	s := d.snap.Load()
-	d.snap.Store(&snapshot{levels: s.levels})
-	if d.frozenLog != nil {
-		err = errors.Join(err, d.frozenLog.Close())
-		d.frozenLog = nil
-	}
-	for _, t := range s.frozen {
-		err = errors.Join(err, t.release())
-	}
-	d.mu.Unlock()
-	for i := range d.shards {
-		d.shards[i].mu.Unlock()
-	}
 	return err
 }
 
@@ -957,7 +915,7 @@ type Stats struct {
 	Levels      int
 	Entries     int // level entries (a key can be in several levels until merged)
 	FileBytes   int // mapped level bytes (page cache)
-	BufferBytes int // append level reserved bytes (heap and mmap)
+	BufferBytes int // append level heap bytes
 	BufferNames int
 }
 

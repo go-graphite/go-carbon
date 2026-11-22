@@ -33,7 +33,6 @@ func (d *Dict) NewIter(group string, vshard uint16) *Iter {
 	it := &Iter{sk: scopeKey(nil, group, vshard)}
 	sh := d.shard(vshard)
 	sh.mu.Lock()
-	d.mu.RLock()
 	s := d.snap.Load()
 	var frozen []uint32
 	ft := s.frozenTable(it.sk)
@@ -81,7 +80,6 @@ func (d *Dict) NewIter(group string, vshard uint16) *Iter {
 		it.arena = append(it.arena, k...)
 		it.arena = append(it.arena, v...)
 	}
-	d.mu.RUnlock()
 	sh.mu.Unlock()
 	it.lv = make([]levelIter, len(s.levels))
 	for i, l := range s.levels {
@@ -203,10 +201,8 @@ func (d *Dict) Import(group string, vshard uint16, entries iter.Seq2[[]byte, Ent
 		key = append(append(key[:0], sk...), name...)
 		sh := d.shard(vshard)
 		sh.mu.Lock()
-		err = d.put(sh, key, e)
-		if err == nil {
-			err = d.commit(sh)
-		}
+		d.put(sh, key, e)
+		err = d.commit(sh)
 		sh.mu.Unlock()
 		d.maybeFreeze()
 		return err == nil
