@@ -7,7 +7,7 @@ must have one serial producer. Policy bytes come from `EncodeRollupPolicy` and
 bind an exact canonical name, placement group, retention ladder, method and XFF.
 
 The pending journal packet retains every original group, point sequence, order,
-clock and policy. Definitions sync before the unchanged PDC4 point payload and
+clock and policy. Definitions sync before the point payload and
 its checksummed application envelope. Core's existing owner cursor discards
 already durable packets before planning; a duplicate order inside a new packet
 fails. Writable daemon restart/replay remains a separate integration task.
