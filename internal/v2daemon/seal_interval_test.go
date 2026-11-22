@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -21,9 +22,19 @@ func TestSealIntervalSIGKILLUnsealedReplay(t *testing.T) {
 		if err = s.Producers[0].AppendApplications(restartApps(t, 0, 20)); err != nil {
 			t.Fatal(err)
 		}
-		// Drain fsyncs the real input log, without forcing a core seal.
+		// Drain hands the rows to core without a seal; the next publication
+		// writes them to an L0 run file.
 		if err = s.Producers[0].Drain(); err != nil {
 			t.Fatal(err)
+		}
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			files, _ := filepath.Glob(filepath.Join(root, "placement-group-00000001", "core", "owner-000", "l0", "l0-*[0-9]"))
+			if len(files) > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("no L0 run file")
+			}
 		}
 		if s.Core.Observe().Seals != 0 {
 			t.Fatal("already sealed")
@@ -72,6 +83,6 @@ func TestSealIntervalSIGKILLUnsealedReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	t.Logf("unsealed journal replay %s", time.Since(begin))
+	t.Logf("unsealed L0 load %s", time.Since(begin))
 	checkRestartOracle(t, s, restartApps(t, 0, 20), 3)
 }
