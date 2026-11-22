@@ -17,7 +17,7 @@ import (
 
 func TestStoppedRootFrozenRecheck(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "shadow")
-	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 2, Producers: 1, Shards: 1})
+	s, err := v2daemon.Open(root, v2daemon.Config{Layer: 1, Producers: 1, Shards: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

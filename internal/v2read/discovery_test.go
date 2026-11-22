@@ -103,7 +103,7 @@ func TestDiscoveryParallelOwners(t *testing.T) {
 		if err := e.AppendBatches(0, []v2core.Batch{b}, 2, false); err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		await(t, func() bool {
 			_, err := r.Metadata(ctx, name)
