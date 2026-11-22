@@ -35,6 +35,7 @@ func (*latencyFloorStore) PrewarmWriteout(context.Context, []string) {
 }
 
 func TestRestartFloorWithStoreLatency(t *testing.T) {
+	t.Parallel() // This test owns its cache, workers and virtual-time bubble.
 	for _, latency := range []time.Duration{time.Millisecond, 2 * time.Millisecond} {
 		t.Run(latency.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {

@@ -283,6 +283,7 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 // The same persister must keep its automatic admission when the shared budget
 // ends, including when that persister replaced a fixed-rate one during restart.
 func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
+	t.Parallel() // This test owns its cache, workers and virtual-time bubble.
 	// Keep the high-rate token path (>1000/s), worker counts and all ratios.
 	const scale = 10
 	for _, tc := range []struct{ initial, workers int }{{50000 / scale, 1}, {50000 / scale, 96}, {-1, 1}, {-1, 96}} {

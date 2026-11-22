@@ -14,6 +14,7 @@ import (
 // includes mandatory work and each confirmed write, so raising the safety
 // ceiling alone cannot pass by escaping the shared process allowance.
 func TestRestartCatchupDrainsWithinAvailableCPUHeadroom(t *testing.T) {
+	t.Parallel() // This test owns its cache, workers and virtual-time bubble.
 	for _, tc := range []struct {
 		name      string
 		mandatory float64
