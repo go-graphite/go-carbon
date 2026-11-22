@@ -204,12 +204,25 @@ func TestCrashPoints(t *testing.T) {
 	for _, point := range []string{"level-written", "flush-installed", "merge-installed"} {
 		t.Run(point, func(t *testing.T) {
 			dir := t.TempDir()
-			d, err := Open(dir, Options{BufferBytes: 8 << 10, NoMerge: true})
+			// Flushes run in the background: explicit ones (a buffer no fill
+			// reaches) leave a level, the append level the crashing flush
+			// writes or the second level a merge needs, and no flush still
+			// reading testHook.
+			d, err := Open(dir, Options{BufferBytes: 1 << 20, NoMerge: true})
 			if err != nil {
 				t.Fatal(err)
 			}
 			m := model{}
-			fill(t, d, 0, 2000, m)
+			fill(t, d, 0, 1000, m)
+			if err := d.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			fill(t, d, 1000, 2000, m)
+			if point == "merge-installed" {
+				if err := d.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := d.Sync(); err != nil {
 				t.Fatal(err)
 			}
@@ -620,4 +633,88 @@ func TestGeneration(t *testing.T) {
 	if g := d.Generation(); g < last {
 		t.Fatalf("reopen went back: %d -> %d", last, g)
 	}
+}
+
+// TestAppendDuringFlush: the level file of a full append level is written in
+// the background, so appends, syncs and lookups go on while that write is
+// stalled, and the frozen append level stays readable until its file
+// replaces it.
+func TestAppendDuringFlush(t *testing.T) {
+	dir := t.TempDir()
+	release, blocked := make(chan struct{}), make(chan struct{}, 1)
+	testHook = func(p string) error {
+		if p == "level-written" {
+			select {
+			case blocked <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return nil
+	}
+	defer func() { testHook = nil }()
+	d, err := Open(dir, Options{BufferBytes: 4 << 10, NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for stalled := false; !stalled; n++ {
+		if _, _, err := d.Append("g", 3, synthName(n), 0); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-blocked:
+			stalled = true
+		default:
+		}
+	}
+	total := n + 1000
+	done := make(chan error, 1)
+	go func() {
+		for i := n; i < total; i++ {
+			if _, _, err := d.Append("g", 3, synthName(i), 0); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- d.Sync()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("appends waited on a stalled level file write")
+	}
+	check := func(d *Dict) {
+		t.Helper()
+		for i := range total {
+			if e, ok := d.Lookup("g", 3, synthName(i)); !ok || e.ID != uint32(i) {
+				t.Fatalf("Lookup(%d) = %+v %v", i, e, ok)
+			}
+			if name, _, ok := d.LookupID("g", 3, uint32(i), nil); !ok || !bytes.Equal(name, synthName(i)) {
+				t.Fatalf("LookupID(%d) = %q %v", i, name, ok)
+			}
+		}
+		c := 0
+		d.Scan("g", 3, nil, func([]byte, Entry) bool { c++; return true })
+		if c != total {
+			t.Fatalf("Scan saw %d names, want %d", c, total)
+		}
+	}
+	check(d)
+	if st := d.Stats(); st.Levels != 0 {
+		t.Fatalf("a level was installed while its write was stalled: %+v", st)
+	}
+	close(release)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if d, err = Open(dir, Options{BufferBytes: 4 << 10, NoMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	check(d)
 }

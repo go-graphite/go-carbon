@@ -86,14 +86,43 @@ type Dict struct {
 	err     error // sticky write failure
 	closed  bool
 
+	// frozenLog is the log of the frozen append level until its level file
+	// is installed.
+	frozenLog *os.File
+
 	snap    atomic.Pointer[snapshot]
+	flushWG sync.WaitGroup // the background write of a frozen append level
 	merging atomic.Bool
 	mergeMu sync.Mutex // one merge at a time
 	mergeWG sync.WaitGroup
 }
 
-// snapshot is the immutable list of level files, oldest first.
-type snapshot struct{ levels []*level }
+// snapshot is the immutable list of level files, oldest first, and the
+// frozen append level a background flush is writing to the next level file
+// (nil when none). A frozen append level is never written again, so readers
+// search it without the lock, as they do level files.
+type snapshot struct {
+	frozen *memtable
+	levels []*level
+}
+
+// frozenGet returns key's value in the frozen append level, or nil.
+func (s *snapshot) frozenGet(key []byte) []byte {
+	if s.frozen == nil {
+		return nil
+	}
+	return s.frozen.get(key)
+}
+
+// get returns key's newest value below the append level.
+func (s *snapshot) get(key, kb []byte) (Entry, bool) {
+	if s.frozen != nil {
+		if v := s.frozen.get(key); v != nil {
+			return decode(v), true
+		}
+	}
+	return getLevels(s.levels, key, kb)
+}
 
 func scopeKey(dst []byte, group string, vshard uint16) []byte {
 	dst = append(dst, group...)
@@ -297,7 +326,7 @@ func (d *Dict) getLocked(key []byte, kb []byte) (Entry, bool) {
 	if v := d.buf.get(key); v != nil {
 		return decode(v), true
 	}
-	return getLevels(d.snap.Load().levels, key, kb)
+	return d.snap.Load().get(key, kb)
 }
 
 func getLevels(levels []*level, key []byte, kb []byte) (Entry, bool) {
@@ -321,7 +350,7 @@ func (d *Dict) Lookup(group string, vshard uint16, name []byte) (Entry, bool) {
 	}
 	s := d.snap.Load()
 	d.mu.RUnlock()
-	return getLevels(s.levels, key, kb[:0])
+	return s.get(key, kb[:0])
 }
 
 // LookupID appends the name of (group, vshard, id) to dst and returns its
@@ -339,6 +368,21 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 	}
 	s := d.snap.Load()
 	d.mu.RUnlock()
+	if s.frozen != nil {
+		if k, v := s.frozen.getID(sk, id); k != nil {
+			e := decode(v)
+			d.mu.RLock()
+			nv := d.buf.get(k)
+			d.mu.RUnlock()
+			if nv != nil {
+				e = decode(nv)
+			}
+			if e.ID != id {
+				return dst, Entry{}, false
+			}
+			return append(dst, k[len(sk):]...), e, true
+		}
+	}
 	for i := len(s.levels) - 1; i >= 0; i-- {
 		l := s.levels[i]
 		pos := l.position(sk, id)
@@ -354,6 +398,8 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 		d.mu.RUnlock()
 		if v != nil {
 			e = decode(v)
+		} else if fv := s.frozenGet(it.key); fv != nil {
+			e = decode(fv)
 		} else if ne, ok := getLevels(s.levels[i+1:], it.key, nb[:0]); ok {
 			e = ne
 		}
@@ -385,7 +431,7 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 	v, s := d.buf.get(key), d.snap.Load()
 	d.mu.RUnlock()
 	if v == nil {
-		if e, ok := getLevels(s.levels, key, kb[:0]); ok && !e.Deleted() {
+		if e, ok := s.get(key, kb[:0]); ok && !e.Deleted() {
 			return e, false, nil
 		}
 	} else if e := decode(v); !e.Deleted() {
@@ -403,7 +449,7 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 			return e, false, nil
 		}
 	} else if now := d.snap.Load(); now != s {
-		if e, ok := getLevels(now.levels, key, kb[:0]); ok && !e.Deleted() {
+		if e, ok := now.get(key, kb[:0]); ok && !e.Deleted() {
 			return e, false, nil
 		}
 	}
@@ -458,7 +504,7 @@ func (d *Dict) putLocked(key []byte, e Entry) error {
 		}
 	}
 	if d.buf.size() >= d.opt.BufferBytes {
-		return d.flushLocked()
+		return d.freezeLocked()
 	}
 	return nil
 }
@@ -476,21 +522,35 @@ func (d *Dict) writePending() error {
 }
 
 // Sync makes every earlier append and delete durable: the point admission
-// waits on before it writes a journal record that uses a new ID.
+// waits on before it writes a journal record that uses a new ID. The fsync
+// runs without the lock, so appends and lookups go on meanwhile; a frozen
+// append level's log is synced too until its level file is installed.
 func (d *Dict) Sync() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if err := d.writable(); err != nil {
+		d.mu.Unlock()
 		return err
 	}
 	if err := d.writePending(); err != nil {
+		d.mu.Unlock()
 		return err
 	}
-	if err := d.log.Sync(); err != nil {
+	log, frozenLog, gen := d.log, d.frozenLog, d.logSeq<<32|uint64(d.logRecs)
+	d.mu.Unlock()
+	err := log.Sync()
+	if err == nil && frozenLog != nil {
+		// Closed: its level file is installed, which is durable.
+		if err = frozenLog.Sync(); errors.Is(err, os.ErrClosed) {
+			err = nil
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil && d.err == nil {
 		d.err = fmt.Errorf("v2dict: log sync: %w", err)
 	}
 	if d.err == nil {
-		d.synced = d.logSeq<<32 | uint64(d.logRecs)
+		d.synced = max(d.synced, gen)
 	}
 	return d.err
 }
@@ -506,37 +566,48 @@ func (d *Dict) Generation() uint64 {
 	return d.synced
 }
 
-// flushLocked writes the append level to a level file, installs it, and
-// starts the next log. A failure is sticky: appends stop, reads go on.
+// flushLocked writes the append level to a level file and installs it
+// before it returns (open, Flush). The caller holds d.mu.
 func (d *Dict) flushLocked() error {
-	if len(d.buf.recs) == 0 {
+	for range 2 { // a flush already running, then this append level's
+		d.mu.Unlock()
+		d.flushWG.Wait()
+		d.mu.Lock()
+		if d.err != nil || len(d.buf.recs) == 0 {
+			return d.err
+		}
+		if err := d.freezeLocked(); err != nil {
+			return err
+		}
+	}
+	d.mu.Unlock()
+	d.flushWG.Wait()
+	d.mu.Lock()
+	return d.err
+}
+
+// freezeLocked hands the append level to a background flush and starts the
+// next log, so appends never wait on a level file write. The frozen level
+// stays readable in the snapshot until its level file replaces it. While one
+// flush runs, the append level keeps growing. A failure is sticky: appends
+// stop, reads go on.
+func (d *Dict) freezeLocked() error {
+	s := d.snap.Load()
+	if len(d.buf.recs) == 0 || s.frozen != nil {
 		return nil
 	}
-	l, err := writeLevel(levelPath(d.dir, d.bufMin, d.logSeq), d.bufMin, d.logSeq, func(w *levelWriter) {
-		for _, r := range d.buf.order() {
-			w.add(d.buf.rec(r))
-		}
-	})
-	if err != nil {
-		d.err = fmt.Errorf("v2dict: flush: %w", err)
-		return d.err
-	}
-	old := d.snap.Load().levels
-	d.snap.Store(&snapshot{levels: append(slices.Clip(old), l)})
-	d.buf.reset()
-	d.pending = d.pending[:0]
-	if err := hook("flush-installed"); err != nil {
-		d.err = err
+	if err := d.writePending(); err != nil {
 		return err
 	}
-	d.log.Close()
-	for seq := d.bufMin; seq <= d.logSeq; seq++ {
-		os.Remove(logPath(d.dir, seq))
-	}
+	frozen := new(memtable)
+	*frozen = d.buf
+	d.buf = memtable{}
+	minSeq, maxSeq := d.bufMin, d.logSeq
+	d.frozenLog = d.log
 	d.logSeq++
 	d.bufMin = d.logSeq
 	d.logRecs = 0
-	d.synced = d.logSeq << 32
+	var err error
 	if d.log, err = os.OpenFile(logPath(d.dir, d.logSeq), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err == nil {
 		err = syncDir(d.dir)
 	}
@@ -544,8 +615,46 @@ func (d *Dict) flushLocked() error {
 		d.err = fmt.Errorf("v2dict: new log: %w", err)
 		return d.err
 	}
-	d.maybeMerge()
+	d.snap.Store(&snapshot{frozen: frozen, levels: s.levels})
+	d.flushWG.Add(1)
+	go d.writeFrozen(frozen, minSeq, maxSeq)
 	return nil
+}
+
+// writeFrozen writes a frozen append level to its level file, installs it in
+// the frozen level's place and removes the logs it covers.
+func (d *Dict) writeFrozen(frozen *memtable, minSeq, maxSeq uint64) {
+	defer d.flushWG.Done()
+	l, err := writeLevel(levelPath(d.dir, minSeq, maxSeq), minSeq, maxSeq, func(w *levelWriter) {
+		for _, r := range frozen.sortedRecs(nil) {
+			w.add(frozen.rec(r))
+		}
+	})
+	d.mu.Lock()
+	if err != nil {
+		if d.err == nil {
+			d.err = fmt.Errorf("v2dict: flush: %w", err)
+		}
+		d.mu.Unlock()
+		return
+	}
+	cur := d.snap.Load()
+	d.snap.Store(&snapshot{levels: append(slices.Clip(cur.levels), l)})
+	// Everything the frozen level held is durable in its level file.
+	d.synced = max(d.synced, (maxSeq+1)<<32)
+	if err := hook("flush-installed"); err != nil {
+		d.err = err
+		d.mu.Unlock()
+		return
+	}
+	log := d.frozenLog
+	d.frozenLog = nil
+	d.mu.Unlock()
+	log.Close()
+	for seq := minSeq; seq <= maxSeq; seq++ {
+		os.Remove(logPath(d.dir, seq))
+	}
+	d.maybeMerge()
 }
 
 // Flush writes the append level to a level file now.
@@ -573,6 +682,7 @@ func (d *Dict) NextID(group string, vshard uint16) uint32 {
 // Close waits for a running merge, flushes nothing (the log holds the
 // append level) and syncs the log.
 func (d *Dict) Close() error {
+	d.flushWG.Wait() // the frozen level's file, which also closes its log
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -587,6 +697,7 @@ func (d *Dict) Close() error {
 	d.closed = true
 	d.log.Close()
 	d.mu.Unlock()
+	d.flushWG.Wait()
 	d.mergeWG.Wait()
 	return err
 }
@@ -604,7 +715,12 @@ func (d *Dict) Stats() Stats {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	st := Stats{BufferBytes: d.buf.bytes() + cap(d.pending), BufferNames: len(d.buf.recs)}
-	for _, l := range d.snap.Load().levels {
+	s := d.snap.Load()
+	if s.frozen != nil {
+		st.BufferBytes += s.frozen.bytes()
+		st.BufferNames += len(s.frozen.recs)
+	}
+	for _, l := range s.levels {
 		st.Levels++
 		st.Entries += l.n
 		st.FileBytes += l.fileBytes()

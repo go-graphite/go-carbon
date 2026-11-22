@@ -166,9 +166,20 @@ func (t *memtable) order() []uint32 {
 	return t.sorted
 }
 
-func (t *memtable) reset() {
-	t.arena, t.recs, t.sorted = t.arena[:0], t.recs[:0], t.sorted[:0]
-	clear(t.byKey)
-	clear(t.byID)
-	t.idUsed, t.dirty = 0, false
+// sortedRecs returns, in key order, the records of a memtable no one writes
+// any more (a frozen append level) whose keys start with prefix, in a new
+// slice: concurrent readers never share its sort state.
+func (t *memtable) sortedRecs(prefix []byte) []uint32 {
+	var out []uint32
+	for r := range t.recs {
+		if k, _ := t.rec(uint32(r)); bytes.HasPrefix(k, prefix) {
+			out = append(out, uint32(r))
+		}
+	}
+	slices.SortFunc(out, func(a, b uint32) int {
+		ka, _ := t.rec(a)
+		kb, _ := t.rec(b)
+		return bytes.Compare(ka, kb)
+	})
+	return out
 }
