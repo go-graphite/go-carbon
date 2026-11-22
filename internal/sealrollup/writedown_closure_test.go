@@ -41,8 +41,9 @@ func TestWriteDownClosureRecursion(t *testing.T) {
 }
 
 // A seal fallback marks a closed window but cannot bound an exact read. A
-// prefix merge upgrades it even when no raw version is superseded, then
-// leaves that write-down alone until a newer event arrives.
+// prefix merge writes the window down even when no raw version is superseded;
+// the next merge drops the outranked fallback and later merges write nothing
+// until a late point brings a new fallback (the seal's late recompute).
 func TestWriteDownUpgradesClosedWindow(t *testing.T) {
 	c := Config{Method: Last, Archives: []Archive{{Step: 10, Count: 100}, {Step: 60, Count: 100}, {Step: 600, Count: 100}}}
 	recs := []Version{
@@ -75,10 +76,21 @@ func TestWriteDownUpgradesClosedWindow(t *testing.T) {
 		t.Fatalf("closed window was not written down: %+v", mats)
 	}
 	check(merge(), 2)
-	if mats := merge(); len(mats) != 0 {
-		t.Fatalf("unchanged closed window rewritten: %+v", mats)
+	for _, m := range merge() {
+		if m.Archive == 1 && m.Time == 0 {
+			t.Fatalf("unchanged closed window rewritten: %+v", m)
+		}
 	}
-	recs = append(recs, Version{Archive: 0, Time: 30, Bits: math.Float64bits(3), Order: Tick(3, 0)})
+	for _, r := range recs {
+		if r.Mat && r.Upto == 0 {
+			t.Fatalf("outranked fallback kept: %+v", r)
+		}
+	}
+	if mats := merge(); len(mats) != 0 {
+		t.Fatalf("settled store rewritten: %+v", mats)
+	}
+	recs = append(recs, Version{Archive: 0, Time: 30, Bits: math.Float64bits(3), Order: Tick(3, 0)},
+		Version{Archive: 1, Time: 0, Bits: math.Float64bits(98), Order: 1, Mat: true})
 	check(merge(), 3)
 	for _, m := range merge() {
 		if m.Archive == 1 && m.Time == 0 {

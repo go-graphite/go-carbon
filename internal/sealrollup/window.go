@@ -159,8 +159,8 @@ func (v Version) Record(c Config) Record {
 // Upto). Older absence markers of a window go. keep reports the surviving
 // inputs; mats are the new versions. Rollups stay a pure function of the
 // stored versions: reads over keep + mats equal reads over recs. Seal-closed
-// fallback windows are also written down, so reads can stop above their finer
-// history once no newer event exists underneath them.
+// windows are written down too, so reads stop above their finer history while
+// no newer event lies under them.
 func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats []Version) {
 	f := NewVersions(c, recs)
 	keep = make([]bool, len(recs))
@@ -183,7 +183,7 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 				}
 			}
 			for _, i := range idx {
-				if i != win && !(recs[i].Mat && recs[i].Upto == 0) {
+				if i != win {
 					drop(i)
 					dropped = true
 				}
@@ -196,20 +196,24 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 			dropped = true
 		}
 	}
-	// A prefix merge also upgrades seal-closed fallback windows. Retain the
-	// fallback above: it marks closure, while the written-down value bounds
-	// future reads. Only a newer event needs another write-down.
+	// A prefix merge also writes down every seal-closed window (a fallback
+	// Mat) whose newest event is newer than its newest write-down, even when
+	// nothing above was superseded. The next merge drops the fallback, which
+	// the written-down window outranks; a late point brings a new fallback.
 	need := map[[2]int64]bool{}
-	have := map[[2]int64]uint64{}
-	for _, r := range recs {
-		if r.Mat || r.None {
-			k := [2]int64{int64(r.Archive), r.Time}
-			have[k] = max(have[k], r.Upto)
-		}
-	}
+	var have map[[2]int64]uint64 // newest write-down per window, built on the first fallback
 	for _, r := range recs {
 		if !r.Mat || r.Upto != 0 {
 			continue
+		}
+		if have == nil {
+			have = map[[2]int64]uint64{}
+			for _, x := range recs {
+				if x.Mat || x.None {
+					k := [2]int64{int64(x.Archive), x.Time}
+					have[k] = max(have[k], x.Upto)
+				}
+			}
 		}
 		k := [2]int64{int64(r.Archive), r.Time}
 		if ev := f.events[r.Archive][r.Time]; len(ev) > 0 && ev[len(ev)-1] > have[k] {
