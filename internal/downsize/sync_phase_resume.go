@@ -238,6 +238,23 @@ func (s *syncer) restorePhase() error {
 		saved.Done = max(saved.Done, durable)
 	}
 	s.resume = saved // retain the attempted position even when reporting a contradiction
+	if s.adoptingLegacyRound() {
+		// READY-off defaults introduced source-only filtering after this legacy
+		// union was entered. Restore its original catalog size, including when
+		// an intermediate binary checkpointed a smaller total.
+		if saved.Summary.Discovered > 0 {
+			saved.Total = int64(saved.Summary.Discovered)
+		}
+		if s.j.checkpoint != nil {
+			saved.Total = int64(s.j.checkpoint.Summary.Discovered)
+		}
+		for _, r := range s.j.rows {
+			if r.Kind == "discovered" {
+				saved.Total = int64(r.Names)
+			}
+		}
+		s.resume = saved
+	}
 	var verifyReceipts int64
 	if saved.Phase == "verify" {
 		seen := map[[2]string]bool{}

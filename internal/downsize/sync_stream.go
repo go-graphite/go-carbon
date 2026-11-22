@@ -331,6 +331,9 @@ func openLines(path string) (*os.File, *bufio.Scanner, error) {
 
 // verifyScopeNames is the size of the round-1 verification scope.
 func (s *syncer) verifyScopeNames() int {
+	if s.adoptingLegacyRound() {
+		return s.sum.Discovered
+	}
 	if s.legacyCopyReceipts {
 		return s.both + len(s.copied)
 	}
@@ -350,6 +353,9 @@ func (s *syncer) targetOnlySkipped() int {
 // or with sourceScope only names held by at least one source. Ordinals count
 // skipped lines too, so ids stay stable catalog line numbers.
 func (s *syncer) unionSource() syncNameSource {
+	// Old entered rounds included target-only names. A newer READY-off
+	// default must not shrink their input or invalidate their batch cursors.
+	legacyRound := s.adoptingLegacyRound()
 	ordinal := int64(-1)
 	var f *os.File
 	var scanner *bufio.Scanner
@@ -372,7 +378,7 @@ func (s *syncer) unionSource() syncNameSource {
 				if s.legacyCopyReceipts && (mask == 0 || (!onTarget && !s.copied[name])) {
 					continue
 				}
-				if s.o.sourceScope && mask == 0 && onTarget {
+				if s.o.sourceScope && !legacyRound && mask == 0 && onTarget {
 					continue
 				}
 				return name, mask, nil

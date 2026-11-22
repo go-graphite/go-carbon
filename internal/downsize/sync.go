@@ -1207,12 +1207,17 @@ func (s *syncer) sourceIndex(source string) int {
 }
 
 // verifyRound compares the names in batches of --verify-batch with --streams
-// workers. Completed batches are journaled with their holes; a resumed round
-// replays them instead of reading again (batch boundaries are deterministic).
+// workers. Completed batches retain their observations. Entered legacy union
+// rounds adopt durable traversal ranges; modern rounds retain proof validation.
 func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
 	journalRound := round + s.verificationBase
-	if s.phaseBeforeResume("verify", journalRound) {
+	if s.phaseBeforeResume("verify", journalRound) && !(journalRound == s.resume.Round && s.adoptingLegacyRound()) {
 		return s.replayVerifyRound(ctx, journalRound, set)
+	}
+	legacy, err := s.legacyRoundProgress(journalRound)
+	if err != nil {
+		set.close()
+		return nil, nil, nil, err
 	}
 	if s.frontier == nil {
 		if err := s.openFrontier(ctx); err != nil {
@@ -1236,8 +1241,8 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	frontierReused := 0
 	holeNames := map[string]bool{}
 	// Receipts can overlap after a resumed run changes batch boundaries. Only
-	// matching batches below prove progress in the current name stream; summing
-	// old rows can exceed the catalog and hide hours of fresh verification.
+	// matching batches below prove modern progress. Legacy ranges are counted by
+	// streaming membership once, so overlapping receipts cannot inflate progress.
 	if err := s.beginPhase("verify", journalRound, set.total); err != nil {
 		set.close()
 		return nil, nil, nil, err
@@ -1267,6 +1272,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 			}
 		}
 	}
+	legacy.observations(collect)
 	type job struct {
 		ids   []int64
 		names []string
@@ -1342,6 +1348,9 @@ feed:
 	for {
 		var chunk job
 		for len(chunk.names) < s.o.batch {
+			if ctx.Err() != nil {
+				break feed
+			}
 			name, mask, err := set.next()
 			if errors.Is(err, io.EOF) {
 				break
@@ -1356,6 +1365,13 @@ feed:
 				break feed
 			}
 			if skip {
+				continue
+			}
+			if legacy.contains(name) {
+				s.prog.done.Add(1)
+				s.prog.replayed.Add(1)
+				resumed++
+				fed++
 				continue
 			}
 			chunk.names = append(chunk.names, name)
@@ -1387,6 +1403,9 @@ feed:
 	}
 	if feedErr != nil {
 		return nil, nil, nil, feedErr
+	}
+	if legacy != nil {
+		event("sync_legacy_round_adopted", map[string]any{"round": journalRound, "names": resumed, "receipts": len(legacy.rows), "reason": "retain entered legacy round observations and traversal cursors"})
 	}
 	points := 0
 	for _, h := range holes {

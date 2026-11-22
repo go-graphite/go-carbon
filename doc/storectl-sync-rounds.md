@@ -33,12 +33,24 @@ legacy union round continues that union round after upgrading. If the saved
 phase is verification and that union round reaches or exceeds the effective
 round limit, completed earlier rounds are not replayed: the current union
 supersedes their observations and no further fill can use their history.
-One `sync_replay_skipped` event explains this decision. Its saved counter and
-receipts remain reusable, and existing journal records are retained unchanged.
-Otherwise earlier rounds are replayed to reconstruct input and fills, rather
-than stopping at the new default limit during replay. Valid observations and clean mutation
-proofs remain reusable. Changed or unknown proofs still require fresh reads;
-progress counters alone never authorize reuse. No state reset is needed.
+One `sync_replay_skipped` event explains this decision. Existing journal
+records remain unchanged.
+
+For an already entered legacy full-history union, the original union membership
+also stays fixed: a newer source-only default cannot remove target-only names
+or shift the saved batch cursors. Completed current-round receipt ranges are
+adopted without new data or metadata reads, including their recorded holes,
+skips and unindexed results. Earlier observations win overlapping recovery rows;
+newer recovery/planning rows cannot reduce the adopted progress. Gaps without a
+completed receipt still need verification. `sync_legacy_round_adopted` reports
+how many names were retained. This is scheduling compatibility with the old
+round's observations, not a claim that they prove the current live stores clean.
+The `cursors` map in progress.json belongs to discovery and never by itself
+proves verification completion.
+
+Otherwise earlier rounds are replayed to reconstruct input and fills. New
+rounds, explicit rescans, READY and closed-window proofs keep their mutation
+validation. No state reset is needed.
 A legacy round beyond the new limit finishes its current verification and
 reports the remaining holes without another fill. If a fill had already begun,
 it finishes that fill and verifies its repair set before reporting.
