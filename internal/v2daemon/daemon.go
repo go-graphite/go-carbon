@@ -51,15 +51,6 @@ type Config struct {
 	// MaxCoreRows bounds each core owner's staging buffer. Zero retains the
 	// experiment default; small correctness fixtures can bound their memory.
 	MaxCoreRows int
-	// JournalSegmentBytes rotates a producer's journal to a new segment after a
-	// group fsync once the current segment holds at least this many bytes. Each
-	// segment starts with fresh predictor state, so restart can skip every
-	// segment that ends at or below all owners' durable frontiers. Zero keeps one
-	// segment per process run and retires nothing. Otherwise rotation and every
-	// idle Drain unlink the segments every owner has committed, down to one
-	// record once all input is; placement and classic-mirror consumers retain
-	// their replay logs.
-	JournalSegmentBytes int64
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -81,37 +72,27 @@ type packet struct {
 
 // Producer owns its catalog, predictors, pending rows and journal stream.
 type Producer struct {
-	relayPositions                  map[v2placement.Stamp]relayPosition
-	admission                       v2placement.Sink
-	placement                       Placement
-	engine                          *v2core.Engine
-	mirror                          func(int, []v2core.Batch) error
-	index, count, layer, maxPending int
-	catalog                         *partlog.NameCatalog
-	encoder                         partlog.CatalogEncoder
-	journal                         *os.File
-	writer                          *bufio.Writer
-	packets                         []packet
-	records                         [][]byte
-	spareRecords                    [][]byte
-	outboxes                        []*v2core.Outbox // free; one in steady intake
-	applicationFrames               []partlog.CatalogFrame
-	applications                    []*RegisteredApplication // by catalog ID
-	cursor                          uint64
-	applyOrder                      uint64
-	l0                              bool
-	journalDir                      string
-	segment                         int
-	segmentBytes, segmentLimit      int64
-	// The open segment's path and its last record's offset, -1 while empty.
-	// closed lists older retained segments, oldest first, on producers that
-	// retire them.
-	segmentPath string
-	segmentLast int64
-	closed      []journalSegment
-	// Recovery counts journal segments skipped below the durable frontier and
-	// segments decoded; set once by Open.
-	RecoverySkippedSegments, RecoveryReplayedSegments            int
+	relayPositions                                               map[v2placement.Stamp]relayPosition
+	admission                                                    v2placement.Sink
+	placement                                                    Placement
+	engine                                                       *v2core.Engine
+	mirror                                                       func(int, []v2core.Batch) error
+	index, count, layer, maxPending                              int
+	catalog                                                      *partlog.NameCatalog
+	encoder                                                      partlog.CatalogEncoder
+	journal                                                      *os.File
+	writer                                                       *bufio.Writer
+	packets                                                      []packet
+	records                                                      [][]byte
+	spareRecords                                                 [][]byte
+	outboxes                                                     []*v2core.Outbox // free; one in steady intake
+	applicationFrames                                            []partlog.CatalogFrame
+	applications                                                 []*RegisteredApplication // by catalog ID
+	cursor                                                       uint64
+	applyOrder                                                   uint64
+	l0                                                           bool
+	journalDir                                                   string
+	segment                                                      int
 	pendingRows                                                  int
 	nextSync                                                     time.Time
 	interval                                                     time.Duration
@@ -191,7 +172,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	s := &Store{Core: e, cfg: c, lock: lock}
 	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
-		p := &Producer{l0: c.Layer == 3, applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes}
+		p := &Producer{l0: c.Layer == 3, applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
 		if c.Placement != nil {
 			p.placement = c.Placement
 			p.admission = c.Placement.Register()
@@ -383,10 +364,7 @@ func (p *Producer) Drain() error {
 		return nil
 	}
 	if len(p.packets) == 0 {
-		if p.l0 {
-			return nil
-		}
-		return p.fail(p.retireJournal())
+		return nil
 	}
 	start := time.Now()
 	if p.catalog != nil {
@@ -395,7 +373,6 @@ func (p *Producer) Drain() error {
 		}
 	}
 	p.CatalogSyncTime += time.Since(start)
-	rotated := false
 	if p.layer >= 2 && !p.l0 {
 		for _, record := range p.records {
 			var h [4]byte
@@ -403,7 +380,6 @@ func (p *Producer) Drain() error {
 			if _, err := p.writer.Write(h[:]); err != nil {
 				return p.fail(err)
 			}
-			p.segmentLast = p.segmentBytes
 			if p.stage != nil {
 				if err := p.writer.Flush(); err != nil {
 					return p.fail(err)
@@ -414,7 +390,6 @@ func (p *Producer) Drain() error {
 				return p.fail(err)
 			}
 			p.JournalBytes += uint64(4 + len(record))
-			p.segmentBytes += int64(4 + len(record))
 		}
 		start = time.Now()
 		if err := p.writer.Flush(); err != nil {
@@ -436,13 +411,6 @@ func (p *Producer) Drain() error {
 		}
 		clear(p.records)
 		p.records = p.records[:0]
-		// Every record of this segment is synced and none is encoded ahead.
-		if p.segmentLimit > 0 && p.segmentBytes >= p.segmentLimit {
-			if err := p.rotateJournal(); err != nil {
-				return p.fail(err)
-			}
-			rotated = true
-		}
 	}
 	start = time.Now()
 	for _, packet := range p.packets {
@@ -471,11 +439,6 @@ func (p *Producer) Drain() error {
 	p.packets = p.packets[:0]
 	p.pendingRows = 0
 	p.nextSync = time.Now().Add(p.interval)
-	// A busy producer retires at rotation, as often as segments close; idle
-	// Drains above retire the rest once seals cover it.
-	if rotated {
-		return p.fail(p.retireJournal())
-	}
 	return nil
 }
 

@@ -20,7 +20,7 @@ func restartMeasureConfig() Config {
 	if shards == 0 {
 		shards = 8
 	}
-	return Config{Layer: 3, Producers: 8, Shards: shards, GroupInterval: time.Hour, SealInterval: time.Hour, JournalSegmentBytes: segment}
+	return Config{Layer: 3, Producers: 8, Shards: shards, GroupInterval: time.Hour, SealInterval: time.Hour}
 }
 
 // TestCoreOpenMeasure times core open of a kept measurement store at several

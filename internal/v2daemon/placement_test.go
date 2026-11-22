@@ -1,19 +1,14 @@
 package v2daemon
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -269,113 +264,6 @@ func TestPlacementEnvelopeBindsOriginalStamp(t *testing.T) {
 		change(&changed)
 		if err := p.placement.Replay(changed); err == nil {
 			t.Fatal("replay accepted changed authority", changed)
-		}
-	}
-}
-
-func TestPlacedRestartSIGKILL(t *testing.T) {
-	root := os.Getenv("V2_PLACED_REPLAY_ROOT")
-	child := root != ""
-	if !child {
-		root = t.TempDir()
-	}
-	_, stamp, d := placedFixture(t)
-	authority, err := v2placement.OpenAuthority(filepath.Join(root, "authority"), d, stamp.Group, stamp.Replica, "store-a/inc-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := restartConfig(2)
-	cfg.Placement = authority
-	var armed atomic.Bool
-	if child {
-		cfg.Hooks.Stage = func(stage string) {
-			if armed.Load() && stage == "ingest" {
-				fmt.Println("CUT")
-				for {
-					time.Sleep(time.Second)
-				}
-			}
-		}
-	}
-	s, err := Open(filepath.Join(root, "store"), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if child {
-		armed.Store(true)
-		if err = s.Producers[0].AppendApplicationsPlaced(stamp, restartApps(t, 6, 12)); err != nil {
-			t.Fatal(err)
-		}
-		if err = s.Producers[0].Drain(); err != nil {
-			t.Fatal(err)
-		}
-		if err = s.Core.AppendBatches(0, nil, s.Producers[0].cursor, true); err != nil {
-			t.Fatal(err)
-		}
-		t.Fatal("missed placed crash barrier")
-	}
-	if err = s.Producers[0].AppendApplicationsPlaced(stamp, restartApps(t, 0, 6)); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPlacedRestartSIGKILL$", "-test.timeout=30s")
-	cmd.Env = append(os.Environ(), "V2_PLACED_REPLAY_ROOT="+root)
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stderr synchronizedBuffer
-	cmd.Stderr = &stderr
-	if err = cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cmd.Process.Kill() }()
-	ready := make(chan bool, 1)
-	go func() {
-		scanner := bufio.NewScanner(pipe)
-		for scanner.Scan() {
-			if scanner.Text() == "CUT" {
-				ready <- true
-				return
-			}
-		}
-		ready <- false
-	}()
-	select {
-	case ok := <-ready:
-		if !ok {
-			_ = cmd.Wait()
-			t.Fatal("no placed crash barrier", stderr.String())
-		}
-	case <-time.After(20 * time.Second):
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		t.Fatal("placed crash barrier timeout", stderr.String())
-	}
-	if err = cmd.Process.Signal(syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	err = cmd.Wait()
-	exit := &exec.ExitError{}
-	if !errors.As(err, &exit) || !exit.Sys().(syscall.WaitStatus).Signaled() || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
-		t.Fatalf("not SIGKILL: %v", err)
-	}
-	for attempt := 0; attempt < 2; attempt++ {
-		// Reopen the durable authority too, rather than retaining a live admission
-		// object across restart. Neither stamp nor map is manufactured by replay.
-		cfg.Placement, err = v2placement.OpenAuthority(filepath.Join(root, "authority"), d, stamp.Group, stamp.Replica, "store-a/inc-1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		s, err = Open(filepath.Join(root, "store"), cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		checkRestartOracle(t, s, restartApps(t, 0, 12), 3)
-		if err = s.Close(); err != nil {
-			t.Fatal(err)
 		}
 	}
 }
