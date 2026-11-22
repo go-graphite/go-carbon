@@ -158,7 +158,9 @@ func (v Version) Record(c Config) Record {
 // order it was written, Upto its newest event) or a None (no value as of
 // Upto). Older absence markers of a window go. keep reports the surviving
 // inputs; mats are the new versions. Rollups stay a pure function of the
-// stored versions: reads over keep + mats equal reads over recs.
+// stored versions: reads over keep + mats equal reads over recs. Seal-closed
+// fallback windows are also written down, so reads can stop above their finer
+// history once no newer event exists underneath them.
 func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats []Version) {
 	f := NewVersions(c, recs)
 	keep = make([]bool, len(recs))
@@ -181,7 +183,7 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 				}
 			}
 			for _, i := range idx {
-				if i != win {
+				if i != win && !(recs[i].Mat && recs[i].Upto == 0) {
 					drop(i)
 					dropped = true
 				}
@@ -194,14 +196,33 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 			dropped = true
 		}
 	}
-	if !dropped {
+	// A prefix merge also upgrades seal-closed fallback windows. Retain the
+	// fallback above: it marks closure, while the written-down value bounds
+	// future reads. Only a newer event needs another write-down.
+	need := map[[2]int64]bool{}
+	have := map[[2]int64]uint64{}
+	for _, r := range recs {
+		if r.Mat || r.None {
+			k := [2]int64{int64(r.Archive), r.Time}
+			have[k] = max(have[k], r.Upto)
+		}
+	}
+	for _, r := range recs {
+		if !r.Mat || r.Upto != 0 {
+			continue
+		}
+		k := [2]int64{int64(r.Archive), r.Time}
+		if ev := f.events[r.Archive][r.Time]; len(ev) > 0 && ev[len(ev)-1] > have[k] {
+			need[k] = true
+		}
+	}
+	if !dropped && len(need) == 0 {
 		return keep, nil
 	}
 	type lslot struct {
 		l int
 		s int64
 	}
-	need := map[[2]int64]bool{}
 	seen := map[lslot]bool{}
 	var queue []lslot
 	addParents := func(l int, t int64) {
