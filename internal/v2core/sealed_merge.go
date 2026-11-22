@@ -1358,7 +1358,7 @@ func (o *coreOwner) mergeAdmissionBound(snapshot *pebble.Snapshot, inputs []v2pa
 		if d.Scope.Group != inputs[0].Scope.Group || d.Scope.Partition != inputs[0].Scope.Partition || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
 			continue
 		}
-		k, err := v2part.Decode(d.FirstKey)
+		k, err := v2part.DecodeKey(d.FirstKey)
 		if err != nil {
 			return 0, err
 		}
