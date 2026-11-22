@@ -2,8 +2,10 @@ package v2daemon
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,33 +161,67 @@ func TestL0SIGKILL(t *testing.T) {
 	}
 }
 
-// TestL0RefusesUnsealedJournal: an L0 build never replays a journal tail.
-// The journal layer writes the same producer journal the old rollup build
-// wrote; with no seal covering it, opening the root refuses.
+// writeLegacySegment writes the journal segment an old journal build left: one
+// V2A2 lean record whose header says cursor and orders 1..count. Its coded
+// payload is never decoded.
+func writeLegacySegment(t *testing.T, root string, cursor, count uint64) {
+	t.Helper()
+	record := []byte{'V', '2', 'A', 2}
+	record = binary.AppendUvarint(record, cursor)
+	record = binary.AppendUvarint(record, count)
+	record = binary.AppendUvarint(record, 1)
+	record = binary.AppendUvarint(record, 3)
+	record = append(record, 1, 2, 3)
+	record = binary.LittleEndian.AppendUint32(record, crc32.Checksum(record, applicationCRC))
+	dir := filepath.Join(root, "placement-group-00000001", "journal", "producer-000")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	segment := binary.LittleEndian.AppendUint32(nil, uint32(len(record)))
+	if err := os.WriteFile(filepath.Join(dir, "segment.pdc4"), append(segment, record...), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestL0RefusesUnsealedJournal: an L0 build never replays a journal tail. A
+// journal whose newest record no seal covers refuses to open; a cleanly
+// stopped journal build (every record sealed) upgrades in place.
 func TestL0RefusesUnsealedJournal(t *testing.T) {
-	legacy := t.TempDir()
-	cfg := l0Config()
-	cfg.Layer = 2
-	s, err := Open(legacy, cfg)
+	root := t.TempDir()
+	writeLegacySegment(t, root, 12, 6)
+	if _, err := Open(root, l0Config()); !errors.Is(err, ErrLegacyJournal) {
+		t.Fatalf("unsealed journal: %v, want ErrLegacyJournal", err)
+	}
+	// The old build's clean stop sealed through its cursor, which counted
+	// points (12) and so ran above its last order (6).
+	root = t.TempDir()
+	s, err := Open(root, l0Config())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Producers[0].AppendApplications(restartApps(t, 0, 6)); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Producers[0].Drain(); err != nil {
-		t.Fatal(err)
-	}
-	root := t.TempDir()
-	journal := filepath.Join("placement-group-00000001", "journal")
-	if err = os.CopyFS(filepath.Join(root, journal), os.DirFS(filepath.Join(legacy, journal))); err != nil {
+	if err = s.Core.AppendBatches(0, nil, 12, true); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Open(root, l0Config()); !errors.Is(err, ErrLegacyJournal) {
-		t.Fatalf("unsealed journal: %v, want ErrLegacyJournal", err)
+	writeLegacySegment(t, root, 12, 6)
+	s, err = Open(root, l0Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Producers[0].applyOrder != 12 {
+		t.Fatalf("order after upgrade %d, want max(order 6, frontier 12)", s.Producers[0].applyOrder)
+	}
+	next := restartApps(t, 0, 6)
+	for i := range next {
+		next[i].Order += 12
+	}
+	if err = s.Producers[0].AppendApplications(next); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

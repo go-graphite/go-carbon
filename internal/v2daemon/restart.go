@@ -1,8 +1,6 @@
 package v2daemon
 
 import (
-	"bufio"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,12 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
-	"strings"
 	"syscall"
-
-	"github.com/go-graphite/go-carbon/internal/partlog"
-	"github.com/go-graphite/go-carbon/internal/v2replay"
 )
 
 type restartGeometry struct{ Version, Layer, Producers, Shards int }
@@ -77,123 +70,11 @@ func lockRoot(root string, c Config) (*os.File, bool, error) {
 	return f, false, nil
 }
 
-// recoverProducer ports the earlier loggedCore replay loop: ordered per-stream
-// decode -> the same AppendBatches queue -> synchronous final seal. Owners alone
-// decide which packets were already committed. Every segment resets predictors.
-func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
-	paths, err := journalSegments(dir)
-	if err != nil {
-		return err
-	}
-	// The journal layer keeps every segment (one per process run) and replays
-	// them all; core skips input its frontiers already cover.
-	p.journalDir = dir
-	if err := p.openCatalog(); err != nil {
-		return err
-	}
-	for i, path := range paths {
-		decoder := partlog.CatalogDecoder{Catalog: p.catalog}
-		_, err = v2replay.Scan(path, i == len(paths)-1, func(record []byte) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			inner, stamp, err := decodePlacementEnvelope(record)
-			if err != nil {
-				return err
-			}
-			if p.placement != nil {
-				if stamp == nil {
-					return errors.New("placement stamp missing from retained journal")
-				}
-				if err = p.placement.Replay(*stamp); err != nil {
-					return fmt.Errorf("journal placement authority: %w", err)
-				}
-			} else if stamp != nil {
-				return errors.New("placed journal requires placement authority")
-			}
-			if stamp != nil && stamp.RelaySequence != 0 {
-				if err := p.rememberRelay(*stamp); err != nil {
-					return err
-				}
-			}
-			batches, cursor, err := DecodeApplications(inner, &decoder, p.index, p.count)
-			if err != nil {
-				return err
-			}
-			if p.placement != nil {
-				names := make([]string, len(batches))
-				for j, batch := range batches {
-					id := (batch.ID-uint64(p.index)-1)/uint64(p.count) + 1
-					name, _, ok := p.catalog.Lookup(id)
-					if !ok {
-						return errors.New("journal placement name missing")
-					}
-					names[j] = name
-				}
-				if err = p.placement.CheckNames(names); err != nil {
-					return fmt.Errorf("journal placement names: %w", err)
-				}
-			}
-			var n uint64
-			for _, b := range batches {
-				n += uint64(len(b.Points))
-			}
-			// Packet boundaries are durable cursor boundaries. Never split an original
-			// application to accommodate a partially committed owner vector.
-			if cursor <= p.cursor {
-				return errors.New("repeated or regressing journal cursor")
-			}
-			if cursor-p.cursor != n {
-				return errors.New("journal cursor gap")
-			}
-			for _, b := range batches {
-				if b.Order <= p.applyOrder {
-					return errors.New("journal application order regressed")
-				}
-				p.applyOrder = b.Order
-			}
-			if err = p.engine.AppendBatchesPipelined(p.index, batches, cursor, false); err != nil {
-				return err
-			}
-			p.cursor = cursor
-			return nil
-		})
-		decoder.Close()
-		if err != nil {
-			return err
-		}
-	}
-	// A frontier beyond the retained journal would silently reuse cursors.
-	for _, frontier := range p.engine.DurableFrontiers() {
-		if frontier[p.index] > p.cursor {
-			return errors.New("core frontier exceeds retained journal")
-		}
-	}
-	// No replay means the frontiers already cover every record. An empty seal
-	// here would rewrite owner checkpoints without making any input durable.
-	if p.cursor > 0 && len(paths) > 0 {
-		if err = p.engine.AppendBatches(p.index, nil, p.cursor, true); err != nil {
-			return err
-		}
-	}
-	if len(paths) > 0 && filepath.Base(paths[len(paths)-1]) != "segment.pdc4" {
-		generation := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(paths[len(paths)-1]), "segment-"), ".pdc4")
-		n, err := strconv.Atoi(generation)
-		if err != nil || n < 1 || n == int(^uint(0)>>1) {
-			return errors.New("invalid journal generation")
-		}
-		p.segment = n + 1
-	} else {
-		p.segment = len(paths)
-	}
-	if err = p.openSegment(); err != nil {
-		return err
-	}
-	p.writer = bufio.NewWriterSize(p.journal, 1<<20)
-	return nil
-}
+// maxJournalRecord bounds one legacy journal record.
+const maxJournalRecord = 8 << 20
 
-// journalSegments lists the original segment before fixed-width generations.
+// journalSegments lists a legacy journal's original segment before its
+// fixed-width generations.
 func journalSegments(dir string) ([]string, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "segment*.pdc4"))
 	if err != nil {
@@ -205,23 +86,6 @@ func journalSegments(dir string) ([]string, error) {
 		paths = append([]string{original}, append(paths[:i], paths[i+1:]...)...)
 	}
 	return paths, nil
-}
-
-// openSegment creates the next fixed-width segment; names sort in write order.
-func (p *Producer) openSegment() error {
-	name := "segment.pdc4"
-	if p.segment > 0 {
-		name = fmt.Sprintf("segment-%020d.pdc4", p.segment)
-	}
-	f, err := os.OpenFile(filepath.Join(p.journalDir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	if err = syncDir(p.journalDir); err != nil {
-		return errors.Join(err, f.Close())
-	}
-	p.journal, p.segment = f, p.segment+1
-	return nil
 }
 
 // segmentEnd returns the cursor, last application order and offset of a
@@ -244,7 +108,7 @@ func segmentEnd(path string, newest bool) (end, order uint64, last int64, ok boo
 		var h [4]byte
 		if _, err = f.ReadAt(h[:], offset); err == nil {
 			size := binary.LittleEndian.Uint32(h[:])
-			if size == 0 || size > v2replay.MaxRecord {
+			if size == 0 || size > maxJournalRecord {
 				return 0, 0, 0, false, errors.New("invalid journal length")
 			}
 			if offset+4+int64(size) <= st.Size() {

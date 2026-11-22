@@ -69,7 +69,7 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 	if err = p.AppendApplications(apps[2:]); err != nil {
 		t.Fatal(err)
 	}
-	if p.SyncGroups != 0 || len(p.packets) != 3 {
+	if len(p.packets) != 3 {
 		t.Fatal("new queue or premature sync")
 	}
 	// Every caller-owned policy/point/sequence buffer may be reused immediately.
@@ -122,7 +122,7 @@ func TestApplicationsRejectBeforeAdmission(t *testing.T) {
 		{{Name: "a", Order: 1, Points: []points.Point{{}}, Sequence: nil}},
 		{{Name: "a", Order: 2, Points: []points.Point{{}}, Sequence: []uint64{1}}, {Name: "a", Order: 1, Points: []points.Point{{}}, Sequence: []uint64{2}}},
 	} {
-		s, err := Open(t.TempDir(), Config{Layer: 2, Producers: 1, Shards: 1})
+		s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,7 +130,7 @@ func TestApplicationsRejectBeforeAdmission(t *testing.T) {
 		if err = p.AppendApplications(apps); err == nil {
 			t.Fatal("invalid group accepted")
 		}
-		if p.cursor != 0 || len(p.packets) != 0 || len(p.records) != 0 || p.catalog.Count() != 0 {
+		if p.cursor != 0 || len(p.packets) != 0 || p.catalog.Count() != 0 {
 			t.Fatal("invalid group partially admitted")
 		}
 		if err = p.Drain(); err == nil {
