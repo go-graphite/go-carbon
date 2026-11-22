@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -299,6 +301,13 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 	if got := o.frontier.Load().ArchiveClock; got != clock {
 		t.Fatalf("clock %d", got)
 	}
+	// The coarse windows the expiring raw records roll up to, read from the
+	// stored versions: the TTL rewrite writes them down before it drops the
+	// raw records, so the version read does not change.
+	windows := []int64{now - 7200, now - 3600}
+	s = o.db.NewSnapshot()
+	wantWindows := versionWindows(t, s, mixed, 1, windows)
+	_ = s.Close()
 	before := e.PartGCStats()[0]
 	changed, err := o.mergeSealedParts(nil, false)
 	if err != nil || !changed {
@@ -306,6 +315,9 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 	}
 	s = o.db.NewSnapshot()
 	defer s.Close()
+	if got := versionWindows(t, s, mixed, 1, windows); len(wantWindows) != len(windows) || !reflect.DeepEqual(got, wantWindows) {
+		t.Fatalf("coarse windows after ttl rewrite %v want %v", got, wantWindows)
+	}
 	var kept []sealrollup.Record
 	for _, r := range mergeRead(t, s) {
 		if r.Archive == 0 && r.Sample.Time < now {
@@ -414,4 +426,45 @@ func TestMergeDiskGuard(t *testing.T) {
 	if mergeInflight.Load() != 0 {
 		t.Fatalf("in-flight leaked: %d", mergeInflight.Load())
 	}
+}
+
+// versionWindows is the version read (sealrollup.OpenSlot) of archive's
+// windows at starts of the one metric whose stored policy is policy.
+func versionWindows(t *testing.T, s *pebble.Snapshot, policy []byte, archive int, starts []int64) map[int64]sealrollup.Sample {
+	t.Helper()
+	ctx := context.Background()
+	index, err := NewRollupSnapshot(ctx, s, nil, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	index.Metadata(func(n string, p RollupPolicy, _ RollupMetadata) {
+		if encoded, err := EncodeRollupPolicy(p); err == nil && bytes.Equal(encoded, policy) {
+			name = n
+		}
+	})
+	m := index.metrics[name]
+	if m == nil {
+		t.Fatalf("no metric with policy %q", policy)
+	}
+	out := map[int64]sealrollup.Sample{}
+	for _, start := range starts {
+		p, ok, err := sealrollup.OpenSlot(m.latest.schema(), archive, start, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
+			var recs []sealrollup.Record
+			err := index.eachPartRecord(ctx, m, index.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
+				return from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
+			}, func(r sealrollup.Record, _ partOrigin) error {
+				recs = append(recs, r)
+				return nil
+			})
+			return recs, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			out[start] = p
+		}
+	}
+	return out
 }
