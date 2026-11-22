@@ -81,6 +81,7 @@ type Dict struct {
 	pending []byte // log records not yet written
 	logRecs uint32 // records in log logSeq
 	synced  uint64 // Generation(): logSeq<<32 | logRecs at the last Sync, flush or open
+	dirSeq  uint64 // highest log sequence whose directory entry is durable
 	scopeIx map[string]int
 	nextID  []uint32
 	err     error // sticky write failure
@@ -244,14 +245,19 @@ func Open(dir string, opt Options) (*Dict, error) {
 	if err := syncDir(dir); err != nil {
 		return nil, err
 	}
+	d.dirSeq = d.logSeq
 	if d.bufMin != d.logSeq {
 		// Several logs (a kill between a flush and the next log): fold them.
 		d.mu.Lock()
 		err = d.flushLocked()
 		d.mu.Unlock()
+		if err == nil {
+			err = syncDir(dir)
+		}
 		if err != nil {
 			return nil, err
 		}
+		d.dirSeq = d.logSeq
 	}
 	d.synced = d.logSeq<<32 | uint64(d.logRecs)
 	d.maybeMerge()
@@ -522,9 +528,10 @@ func (d *Dict) writePending() error {
 }
 
 // Sync makes every earlier append and delete durable: the point admission
-// waits on before it writes a journal record that uses a new ID. The fsync
-// runs without the lock, so appends and lookups go on meanwhile; a frozen
-// append level's log is synced too until its level file is installed.
+// waits on before it writes a journal record that uses a new ID. The fsyncs
+// run without the lock, so appends and lookups go on meanwhile; a frozen
+// append level's log is synced too until its level file is installed, and
+// the directory once per new log, which a freeze creates without syncing.
 func (d *Dict) Sync() error {
 	d.mu.Lock()
 	if err := d.writable(); err != nil {
@@ -535,7 +542,8 @@ func (d *Dict) Sync() error {
 		d.mu.Unlock()
 		return err
 	}
-	log, frozenLog, gen := d.log, d.frozenLog, d.logSeq<<32|uint64(d.logRecs)
+	log, frozenLog, seq, gen := d.log, d.frozenLog, d.logSeq, d.logSeq<<32|uint64(d.logRecs)
+	dirDone := d.dirSeq >= seq
 	d.mu.Unlock()
 	err := log.Sync()
 	if err == nil && frozenLog != nil {
@@ -544,13 +552,16 @@ func (d *Dict) Sync() error {
 			err = nil
 		}
 	}
+	if err == nil && !dirDone {
+		err = syncDir(d.dir)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err != nil && d.err == nil {
 		d.err = fmt.Errorf("v2dict: log sync: %w", err)
 	}
 	if d.err == nil {
-		d.synced = max(d.synced, gen)
+		d.synced, d.dirSeq = max(d.synced, gen), max(d.dirSeq, seq)
 	}
 	return d.err
 }
@@ -587,7 +598,8 @@ func (d *Dict) flushLocked() error {
 }
 
 // freezeLocked hands the append level to a background flush and starts the
-// next log, so appends never wait on a level file write. The frozen level
+// next log, so appends never wait on a level file write nor on an fsync:
+// the next Sync syncs the directory entry of the new log. The frozen level
 // stays readable in the snapshot until its level file replaces it. While one
 // flush runs, the append level keeps growing. A failure is sticky: appends
 // stop, reads go on.
@@ -608,10 +620,7 @@ func (d *Dict) freezeLocked() error {
 	d.bufMin = d.logSeq
 	d.logRecs = 0
 	var err error
-	if d.log, err = os.OpenFile(logPath(d.dir, d.logSeq), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err == nil {
-		err = syncDir(d.dir)
-	}
-	if err != nil {
+	if d.log, err = os.OpenFile(logPath(d.dir, d.logSeq), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err != nil {
 		d.err = fmt.Errorf("v2dict: new log: %w", err)
 		return d.err
 	}
@@ -696,6 +705,9 @@ func (d *Dict) Close() error {
 	if err == nil {
 		if err = d.writePending(); err == nil {
 			err = d.log.Sync()
+		}
+		if err == nil && d.dirSeq < d.logSeq {
+			err = syncDir(d.dir)
 		}
 	}
 	d.closed = true

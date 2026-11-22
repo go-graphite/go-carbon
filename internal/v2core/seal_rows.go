@@ -20,7 +20,7 @@ const sealKeyPosMask = 1<<32 - 1
 // position-only keys (wide). The caller bounds v.Len() to 32 bits. It also
 // returns the spare buffer for reuse, the largest ID and the point count.
 func (v PendingView) sealKeys(keys, spare []uint64) (sorted, tmp []uint64, maxID uint64, wide bool, points int) {
-	keys = slices.Grow(keys[:0], v.n)
+	keys = sealScratch(keys, v.n)
 	for si := range v.segs {
 		s := &v.segs[si]
 		start := uint64(s.start)
@@ -74,7 +74,7 @@ func (v PendingView) sealKeys(keys, spare []uint64) (sorted, tmp []uint64, maxID
 	const bits = 11
 	const mask = 1<<bits - 1
 	var count [1 << bits]int
-	tmp = slices.Grow(spare[:0], n)[:n]
+	tmp = sealScratch(spare, n)[:n]
 	src := keys
 	for shift := uint(32); shift < 64 && maxID>>(shift-32) != 0; shift += bits {
 		clear(count[:])
@@ -94,6 +94,16 @@ func (v PendingView) sealKeys(keys, spare []uint64) (sorted, tmp []uint64, maxID
 		src, tmp = tmp, src
 	}
 	return src, tmp[:0], maxID, false, points
+}
+
+// sealScratch returns s emptied with room for n. Scratch retained between
+// seals is sized by the current seal: a buffer over twice that (a first-wave
+// or catch-up seal) is dropped, so one large seal does not pin its peak.
+func sealScratch[S ~[]E, E any](s S, n int) S {
+	if cap(s) > 2*max(n, 4096) {
+		s = nil
+	}
+	return slices.Grow(s[:0], n)
 }
 
 // idAt returns the ID of the application holding pos.

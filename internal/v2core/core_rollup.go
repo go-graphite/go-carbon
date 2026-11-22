@@ -685,9 +685,9 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	r.seen = seen
 	// Samples and application descriptors live in retained planner storage.
 	// Every original boundary/order/clock remains distinct.
-	r.samples = slices.Grow(r.samples[:0], sampleCount)[:sampleCount]
+	r.samples = sealScratch(r.samples, sampleCount)[:sampleCount]
 	samples := r.samples
-	r.batches = slices.Grow(r.batches[:0], len(keys))[:len(keys)]
+	r.batches = sealScratch(r.batches, len(keys))[:len(keys)]
 	batchStorage := r.batches
 	offset, batch := 0, 0
 	for i := 0; i < len(keys); {
