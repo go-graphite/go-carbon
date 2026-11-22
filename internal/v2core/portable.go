@@ -83,7 +83,7 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 	if err != nil {
 		return v2part.Descriptor{}, err
 	}
-	spec := v2part.Spec{Scope: v2part.Scope{Group: first.Group, VShard: first.VShard, Partition: first.Partition, Part: first.Part}, Encoding: "core-rollup-v1", Source: source, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
+	spec := v2part.Spec{Scope: v2part.Scope{Group: first.Group, VShard: first.VShard, Partition: first.Partition, Part: first.Part}, Encoding: "core-rollup-v1", Source: source, MinClock: math.MaxInt64, MinTime: math.MaxInt64, MaxTime: math.MinInt64}
 	if dense {
 		spec.Scope.VShard = v2part.GroupVShard
 	}
@@ -115,6 +115,7 @@ func writePortableRollupPart(path string, file []KV, source v2part.Provenance, d
 		if d.meta, e = DecodeRollupMetadata(k.Metric, k.Group, kv.Value); e != nil {
 			return v2part.Descriptor{}, e
 		}
+		spec.MinClock = min(spec.MinClock, max(0, d.meta.LastUpdate/1e9))
 		if d.meta.BaselineOrder > d.meta.Frontier.Order || (d.meta.Version != 1 && d.meta.Version != 2 && d.meta.Version != 3) || d.meta.Frontier.Order == 0 || (d.meta.Version == 1 && (d.meta.ResetOrder != 0 || d.meta.Expired)) || d.meta.ResetOrder > d.meta.Frontier.Order || (d.meta.Expired && d.meta.ResetOrder != d.meta.Frontier.Order) {
 			return v2part.Descriptor{}, errors.New("unsupported rollup metadata")
 		}

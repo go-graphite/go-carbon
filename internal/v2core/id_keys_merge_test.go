@@ -225,7 +225,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 		}
 		install(nameDir, path, d)
 		path = filepath.Join(idDir, "merged.sst")
-		di, err := mergeParts(context.Background(), idDir, path, idIn, retire, true, nil, dict, nil)
+		di, err := mergeParts(context.Background(), idDir, path, idIn, retire, 0, true, nil, dict, nil)
 		if err != nil {
 			t.Fatalf("merge %d: %v", merges, err)
 		}
@@ -297,7 +297,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 	s6, s6i := writeInput(6, 5, 20, func(n int) bool { return n%4 == 3 }, nil)
 	merge([]v2part.Descriptor{m3, s6}, []v2part.Descriptor{m3i, s6i}, 100000+50)
 
-	if _, err = mergeParts(context.Background(), idDir, filepath.Join(idDir, "mixed.sst"), []v2part.Descriptor{m3, s6i}, 0, true, nil, dict, nil); err == nil {
+	if _, err = mergeParts(context.Background(), idDir, filepath.Join(idDir, "mixed.sst"), []v2part.Descriptor{m3, s6i}, 0, 0, true, nil, dict, nil); err == nil {
 		t.Fatal("merge of mixed key generations succeeded")
 	}
 	// A deleted name drops with all its records; the rest is unchanged.
@@ -307,7 +307,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 	}
 	next = v2part.PartID{0xA5, 3} // m3i's part, so rows compare byte for byte
 	path := filepath.Join(idDir, "dropped.sst")
-	dd, err := mergeParts(context.Background(), idDir, path, []v2part.Descriptor{m1i, m2i, latei}, 0, true, nil, dict, nil)
+	dd, err := mergeParts(context.Background(), idDir, path, []v2part.Descriptor{m1i, m2i, latei}, 0, 0, true, nil, dict, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer empty.Close()
-	if _, err = mergeParts(context.Background(), idDir, filepath.Join(idDir, "foreign.sst"), []v2part.Descriptor{m1i, m2i}, 0, true, nil, empty, nil); err == nil || !strings.Contains(err.Error(), "never assigned") {
+	if _, err = mergeParts(context.Background(), idDir, filepath.Join(idDir, "foreign.sst"), []v2part.Descriptor{m1i, m2i}, 0, 0, true, nil, empty, nil); err == nil || !strings.Contains(err.Error(), "never assigned") {
 		t.Fatalf("merge through a foreign dictionary: %v, want a never-assigned ID error", err)
 	}
 }

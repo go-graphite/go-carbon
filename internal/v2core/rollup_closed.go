@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"cmp"
 	"context"
 	"math"
 	"slices"
@@ -30,32 +31,26 @@ func rollupOpenEnd(meta metricMetadata, a sealrollup.Archive) int64 {
 	return end
 }
 
-// scanWithOpenSlot replaces the physical slot of archive's open window (the
-// window holding the frontier, not yet closed) with its value computed from
-// stored versions (sealrollup.OpenSlot); every other slot is the stored
-// per-slot winner. Only the open window's finer history is read, and only
-// where no written-down window settles it.
-func (s *RollupSnapshot) scanWithOpenSlot(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
+// scanWindows yields archive's physical slots [first, last), each as its
+// newest window at or before the frontier's, computed from stored versions
+// (windowRecords). Names with copied parts keep the move-aware open window.
+func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
 	m := s.metrics[name]
-	c, meta := m.latest.schema(), m.latest.meta
-	start, physical, open := openWindow(c, meta, archive)
 	if s.moves[m] != nil {
 		return s.scanMovedOpenArchive(ctx, name, archive, first, last, yield)
 	}
-	if !open || physical < first || physical >= last {
+	c, meta := m.latest.schema(), m.latest.meta
+	if meta.Version != 3 || meta.Frontier.Order == 0 {
 		return s.scanStoredArchive(ctx, name, archive, first, last, yield)
 	}
-	var old *sealrollup.Record
+	var stored []sealrollup.Record
 	if err := s.scanStoredArchive(ctx, name, archive, first, last, func(r sealrollup.Record) error {
-		if r.Slot == physical {
-			old = &r
-			return nil
-		}
-		return yield(r)
+		stored = append(stored, r)
+		return nil
 	}); err != nil {
 		return err
 	}
-	r, ok, err := openSlotRecord(c, archive, start, old, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
+	return windowRecords(c, meta, archive, first, last, stored, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
 		var out []sealrollup.Record
 		err := s.eachPartRecord(ctx, m, s.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
 			return from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
@@ -64,37 +59,67 @@ func (s *RollupSnapshot) scanWithOpenSlot(ctx context.Context, name string, arch
 			return nil
 		})
 		return out, err
-	})
-	if err != nil || !ok {
+	}, yield)
+}
+
+// windowRecords yields archive's physical slots [first, last) in slot order,
+// each slot as its newest window at or before the frontier's window, computed
+// from stored versions by one lazy descent (sealrollup.OpenSlots): windows a
+// merge settled stop at their written-down value, every level's physical
+// range is read once. A slot keeps its stored per-slot winner (stored, the
+// winners of the range) when that equals the computed value (its order then
+// stays the stored one) or when its window has no value (an older epoch).
+func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first, last int64, stored []sealrollup.Record, load func(l int, first, last int64, from uint64) ([]sealrollup.Record, error), yield func(sealrollup.Record) error) error {
+	a := c.Archives[archive]
+	open := meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step
+	phys := (open / a.Step) % a.Count
+	windows := make([]int64, 0, last-first)
+	for p := first; p < last; p++ {
+		if w := open - ((phys-p+a.Count)%a.Count)*a.Step; w >= 0 {
+			windows = append(windows, w)
+		}
+	}
+	var computed []sealrollup.Sample // values in slot order (windows ascend by slot)
+	if err := sealrollup.OpenSlots(c, archive, windows, load, func(_ int64, p sealrollup.Sample, ok bool) {
+		if ok {
+			computed = append(computed, p)
+		}
+	}); err != nil {
 		return err
 	}
-	return yield(r)
-}
-
-// openWindow is archive's window holding the frontier and its physical slot;
-// open reports that the seal has not closed it yet.
-func openWindow(c sealrollup.Config, meta metricMetadata, archive int) (start, physical int64, open bool) {
-	a := c.Archives[archive]
-	start = meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step
-	return start, (start / a.Step) % a.Count, meta.Version == 3 && !meta.Expired && start+a.Step > meta.ClosedThrough
-}
-
-// openSlotRecord is the open window's slot as a record: the stored per-slot
-// winner old when the version read resolves to it, else the computed value
-// at its event's batch order.
-func openSlotRecord(c sealrollup.Config, archive int, start int64, old *sealrollup.Record, load func(l int, first, last int64, from uint64) ([]sealrollup.Record, error)) (sealrollup.Record, bool, error) {
-	p, ok, err := sealrollup.OpenSlot(c, archive, start, load)
-	if err != nil || !ok {
-		if old != nil {
-			return *old, err == nil, err
+	if !slices.IsSortedFunc(stored, func(x, y sealrollup.Record) int { return cmp.Compare(x.Slot, y.Slot) }) {
+		slices.SortStableFunc(stored, func(x, y sealrollup.Record) int { return cmp.Compare(x.Slot, y.Slot) })
+	}
+	i, j := 0, 0
+	for p := first; p < last; p++ {
+		var old *sealrollup.Record
+		for i < len(stored) && stored[i].Slot < p {
+			i++
 		}
-		return sealrollup.Record{}, false, err
+		if i < len(stored) && stored[i].Slot == p {
+			old = &stored[i]
+		}
+		var v sealrollup.Sample
+		ok := j < len(computed) && (computed[j].Time/a.Step)%a.Count == p
+		if ok {
+			v = computed[j]
+			j++
+		}
+		switch {
+		case !ok && old == nil:
+			continue
+		case !ok, old != nil && old.Sample.Time == v.Time && old.Sample.Bits == v.Bits:
+			if err := yield(*old); err != nil {
+				return err
+			}
+			continue
+		}
+		v.Sequence >>= 4 // a tick (batch order, sub-step) back to its batch order
+		if err := yield(sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: p, Order: v.Sequence, Sample: v}}); err != nil {
+			return err
+		}
 	}
-	if old != nil && old.Sample.Time == p.Time && old.Sample.Bits == p.Bits {
-		return *old, true, nil
-	}
-	p.Sequence >>= 4 // a tick (batch order, sub-step) back to its batch order
-	return sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: (start / c.Archives[archive].Step) % c.Archives[archive].Count, Order: p.Sequence, Sample: p}}, true, nil
+	return nil
 }
 
 // scanMovedOpenArchive is the open window of a name with copied parts: their

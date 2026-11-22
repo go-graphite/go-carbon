@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -467,4 +468,73 @@ func versionWindows(t *testing.T, s *pebble.Snapshot, policy []byte, archive int
 		}
 	}
 	return out
+}
+
+// Outside admissions, including a quiet name's later neighbours, bound TTL
+// expiry. A legacy descriptor cannot certify that clock and must fall back.
+func TestMergeAdmissionBound(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e := mergeFixture(t, t.TempDir(), nil)
+	defer e.close()
+	o := e.owners[0]
+	for n := uint64(1); n <= 3; n++ {
+		mergeAppend(t, e, n)
+	}
+	o.gc.mu.Lock()
+	original := o.gc.inventory
+	o.gc.mu.Unlock()
+	var parts []v2part.Descriptor
+	for _, value := range original.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Coverage.MinClock != 1030 {
+			t.Fatalf("seal clock %d", d.Coverage.MinClock)
+		}
+		parts = append(parts, d)
+	}
+	slices.SortFunc(parts, func(a, b v2part.Descriptor) int { return int(a.Source.MinOrder) - int(b.Source.MinOrder) })
+	snapshot := o.db.NewSnapshot()
+	defer snapshot.Close()
+	for _, tc := range []struct {
+		name   string
+		clocks []int64
+		inputs int
+		want   int64
+	}{
+		{"oldest outside", []int64{100, 200, 300}, 1, 200},
+		{"minimum outside", []int64{100, 300, 200}, 1, 200},
+		{"all inputs", []int64{100, 200, 300}, 3, 400},
+		{"legacy outside", []int64{100, 0, 300}, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inventory := &RollupInventory{bindings: map[string][]byte{}}
+			for i, d := range parts {
+				d.Coverage.MinClock = tc.clocks[i]
+				value, err := d.MarshalBinary()
+				if err != nil {
+					t.Fatal(err)
+				}
+				inventory.bindings[string(partBinding(sealedPartPrefix, d.SHA256))] = value
+			}
+			o.gc.mu.Lock()
+			o.gc.inventory = inventory
+			o.gc.mu.Unlock()
+			defer func() {
+				o.gc.mu.Lock()
+				o.gc.inventory = original
+				o.gc.mu.Unlock()
+			}()
+			got, err := o.mergeAdmissionBound(snapshot, parts[:tc.inputs], 400)
+			if err != nil || got != tc.want {
+				t.Fatalf("bound %d want %d: %v", got, tc.want, err)
+			}
+		})
+	}
+	// Rewrites preserve the oldest admission, rather than inventing a new one.
+	d, err := mergePartFiles(context.Background(), o.dir, t.TempDir()+"/merged.sst", parts, 1030, nil)
+	if err != nil || d.Coverage.MinClock != 1030 {
+		t.Fatalf("merged clock %d: %v", d.Coverage.MinClock, err)
+	}
 }

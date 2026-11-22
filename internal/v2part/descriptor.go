@@ -35,6 +35,8 @@ type Provenance struct {
 }
 
 type Coverage struct {
+	// MinClock is the oldest admission clock in seconds; zero means unknown.
+	MinClock int64 `json:",omitempty"`
 	MinTime  int64
 	MaxTime  int64 // inclusive event time, NOT GCP3's physical BlockStart
 	Names    uint64
@@ -58,6 +60,7 @@ type Spec struct {
 	MinTime  int64
 	MaxTime  int64
 	Policies []ArchivePolicy
+	MinClock int64 // See Coverage.MinClock.
 	// See Coverage.MinExpiry/MaxExpiry.
 	MinExpiry int64
 	MaxExpiry int64
@@ -98,6 +101,9 @@ func validateSpec(s Spec) error {
 	}
 	if _, err := PartitionPrefixForGroup(s.Scope.Group, vshard, s.Scope.Partition); err != nil {
 		return err
+	}
+	if s.MinClock < 0 {
+		return errors.New("invalid part admission clock")
 	}
 	if s.MinTime > s.MaxTime || s.Source.MinOrder > s.Source.MaxOrder {
 		return errors.New("inverted part coverage")
@@ -165,7 +171,7 @@ func (d Descriptor) Validate() error {
 }
 
 func (d Descriptor) spec() Spec {
-	return Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies, MinExpiry: d.Coverage.MinExpiry, MaxExpiry: d.Coverage.MaxExpiry}
+	return Spec{Scope: d.Scope, Encoding: d.Encoding, Source: d.Source, MinClock: d.Coverage.MinClock, MinTime: d.Coverage.MinTime, MaxTime: d.Coverage.MaxTime, Policies: d.Coverage.Policies, MinExpiry: d.Coverage.MinExpiry, MaxExpiry: d.Coverage.MaxExpiry}
 }
 
 func canonicalPolicies(in []ArchivePolicy) ([]ArchivePolicy, error) {

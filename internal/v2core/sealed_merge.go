@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -124,7 +125,12 @@ func (e *coreEngine) runPartMerges(workers int) {
 			ticker := time.NewTicker(20 * time.Millisecond)
 			defer ticker.Stop()
 			unchanged := make(map[*coreOwner]*RollupInventory)
+			retry := time.Now().Add(10 * time.Second)
 			for {
+				if time.Now().After(retry) {
+					clear(unchanged)
+					retry = time.Now().Add(10 * time.Second)
+				}
 				for i := worker; i < len(e.owners); i += workers {
 					select {
 					case <-e.gcStop:
@@ -206,13 +212,13 @@ func (e *coreEngine) ForceMerge() (int, error) {
 // between its inputs, so the output's Seq range interleaves with no other
 // part. Record order ranges may still interleave (a closure record can carry
 // an older order than an earlier seal's records). A window of adjacent parts
-// qualifies once it holds at least ratio parts and its total is
+// qualifies once its total is
 // at least ratio/2 times its largest part, so a large input is not repeatedly
-// combined with only a few much smaller inputs. Small outputs use ratio 4,
+// combined with only a few much smaller inputs. Fresh windows also wait for
+// ratio inputs; aged windows need only the size balance. Small outputs use ratio 4,
 // so new seals fold into a small
 // part every few seal intervals and few small parts stay live for renders.
-// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
-// parts quiescent below the cap. The cheapest qualifying window merges first.
+// Larger outputs keep ratio sixteen. The cheapest qualifying range merges first.
 const (
 	smallMergeBytes = 64 << 20
 	smallMergeRatio = 4
@@ -278,17 +284,37 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 					}
 					continue
 				}
-				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
+				if j == i || 2*total < mergeRatio(total)*largest {
+					continue
+				}
+				if uint64(j-i+1) < mergeRatio(total) && !o.mergeRangeOld(parts[i:j+1]) {
 					continue
 				}
 				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
 					chosen, best, bestScope = parts[i:j+1], total, s
 				}
-				break
 			}
 		}
 	}
 	return slices.Clone(chosen), nil
+}
+
+// Fresh parts wait for a full batch. Once every input has waited two seal
+// intervals, only the size balance remains, as in ClickHouse's age-lowered
+// merge base. File age affects scheduling only; no persisted format changes.
+func (o *coreOwner) mergeRangeOld(parts []v2part.Descriptor) bool {
+	interval := o.cfg.SealInterval
+	if interval == 0 {
+		interval = 10 * time.Second
+	}
+	before := time.Now().Add(-2 * interval)
+	for _, d := range parts {
+		info, err := os.Stat(filepath.Join(o.dir, "parts", hex.EncodeToString(d.SHA256[:])+".sst"))
+		if err != nil || info.ModTime().After(before) {
+			return false
+		}
+	}
+	return true
 }
 
 // seqCompare orders one owner's parts of a scope by seal: Seq, then, for
@@ -517,23 +543,20 @@ var mergePartID = func(id *v2part.PartID) error {
 // only when its expiry precedes it, as whole-part retirement would, so a merge
 // never removes a record the reader still returns.
 func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (v2part.Descriptor, error) {
-	return mergeParts(ctx, dir, path, inputs, retire, true, stop, nil, nil)
+	return mergeParts(ctx, dir, path, inputs, retire, 0, true, stop, nil, nil)
 }
 
 // mergeParts is mergePartFiles; prefix says the inputs hold their scope's
 // oldest part, so every version up to their newest Seq: only such a
 // merge writes windows down and drops the versions they carry (mergeVersions).
-// dict and identities are the store dictionary that ID-keyed inputs resolve
-// through: it drops deleted and revived-away IDs, and names a GCI2 metric
-// whose envelope needs its full definition. Inputs share one key generation;
-// the output keeps it.
-func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, prefix bool, stop <-chan struct{}, dict *v2dict.Dict, identities *PolicyCatalog) (_ v2part.Descriptor, err error) {
+// dict and identities resolve ID-keyed inputs through the store dictionary.
+func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire, bound int64, prefix bool, stop <-chan struct{}, dict *v2dict.Dict, identities *PolicyCatalog) (_ v2part.Descriptor, err error) {
 	generation, err := mergeGeneration(inputs)
 	if err != nil {
 		return v2part.Descriptor{}, err
 	}
 	names := mergeNames{dict: dict, identities: identities}
-	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
+	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinClock: inputs[0].Coverage.MinClock, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
 	}
@@ -542,6 +565,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		digest  v2part.Digest
 	}]bool{}
 	for _, d := range inputs {
+		spec.MinClock = min(spec.MinClock, d.Coverage.MinClock)
 		spec.MinTime = min(spec.MinTime, d.Coverage.MinTime)
 		spec.MaxTime = max(spec.MaxTime, d.Coverage.MaxTime)
 		spec.Source.MinOrder = min(spec.Source.MinOrder, d.Source.MinOrder)
@@ -685,6 +709,18 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			}
 		}
 		config = *chosen.config
+		// Only a prefix can write windows down before dropping their inputs.
+		// No later event can read a record expired before the oldest outside
+		// admission. Legacy parts retain the conservative per-name clock.
+		expireAt := int64(math.MinInt64)
+		if prefix {
+			expireAt = retire
+			if bound != 0 && spec.MinClock != 0 {
+				expireAt = min(expireAt, bound)
+			} else if metadata.LastUpdate > 0 {
+				expireAt = min(expireAt, metadata.LastUpdate/1e9)
+			}
+		}
 		// The output key is the input's validated identity with the output part:
 		// Encode(c.key) byte for byte, without a name string or route re-hash.
 		key = append(append(key[:0], c.ident...), make([]byte, c.tail)...)
@@ -702,7 +738,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			expiry.data(rollupRecordExpiry(config, winner))
 			return writer.SetRecordEncoded(key, winner)
 		}
-		versioned, e := versions.merge(members, config, metadata, retire, prefix)
+		versioned, e := versions.merge(members, config, metadata, expireAt, prefix)
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
@@ -747,7 +783,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < retire {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < expireAt {
 						untouched = false
 						break
 					}
@@ -766,7 +802,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= retire {
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= expireAt {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -893,7 +929,11 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 		identities = o.rollups.identities
 		dict = identities.partDict()
 	}
-	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, o.oldestInScope(inputs), stop, dict, identities)
+	bound, err := o.mergeAdmissionBound(snapshot, inputs, retire)
+	if err != nil {
+		return false, err
+	}
+	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, bound, o.oldestInScope(inputs), stop, dict, identities)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
@@ -1051,8 +1091,8 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 // with kinds (versions, ghosts, windows), or a physical slot more than one
 // input holds, or, in a prefix merge, an expired record. A prefix merge that drops a record (a superseded version, a
 // ghost or an expired record) first writes windows down
-// (sealrollup.WriteDown); any other merge keeps every version but expired
-// ones, so a later prefix merge still sees them. Rollups stay a pure function
+// (sealrollup.WriteDown); any other merge keeps every version, expired ones
+// too, so a later prefix merge still sees them. Rollups stay a pure function
 // of the stored records. Each slot keeps the winner the per-slot readers chose
 // before as its last Raw or seal Mat record, so their renders do not change;
 // written-down windows are visible to the version reader only. The work is a
@@ -1298,4 +1338,37 @@ func (v versionOrder) Less(i, j int) bool {
 func (v versionOrder) Swap(i, j int) {
 	v.recs[i], v.recs[j] = v.recs[j], v.recs[i]
 	v.last[i], v.last[j] = v.last[j], v.last[i]
+}
+
+// mergeAdmissionBound excludes the inputs, then bounds expiry by every live
+// local part in their scope. Missing clocks force the legacy per-name bound.
+func (o *coreOwner) mergeAdmissionBound(snapshot *pebble.Snapshot, inputs []v2part.Descriptor, retire int64) (int64, error) {
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	bound := retire
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			return 0, err
+		}
+		if slices.ContainsFunc(inputs, func(input v2part.Descriptor) bool { return input.SHA256 == d.SHA256 }) {
+			continue
+		}
+		if d.Scope.Group != inputs[0].Scope.Group || d.Scope.Partition != inputs[0].Scope.Partition || d.Source.Incarnation != o.partSource.Incarnation || d.Source.Stream != o.partSource.Stream {
+			continue
+		}
+		k, err := v2part.Decode(d.FirstKey)
+		if err != nil {
+			return 0, err
+		}
+		origin, err := readPartOrigin(snapshot, k)
+		if err != nil {
+			return 0, err
+		}
+		if origin.Class == LivePart {
+			bound = min(bound, d.Coverage.MinClock)
+		}
+	}
+	return bound, nil
 }
