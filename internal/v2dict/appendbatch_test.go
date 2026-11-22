@@ -6,7 +6,7 @@ import (
 
 // TestAppendBatchMatchesAppend: a batch assigns the same entries as one
 // Append per name, in order: live, deleted (revived), repeated and new names,
-// across scopes and append-level flushes.
+// across scopes, append-level flushes and lock holds.
 func TestAppendBatchMatchesAppend(t *testing.T) {
 	one, err := Open(t.TempDir(), Options{BufferBytes: 4 << 10, NoMerge: true})
 	if err != nil {
@@ -40,10 +40,14 @@ func TestAppendBatchMatchesAppend(t *testing.T) {
 		g, vs := scopeOf(k)
 		names = append(names, NewName{Group: g, VShard: vs, Name: string(synthName(k)), Policy: uint16(k % 4)})
 	}
-	for lo := 0; lo < len(names); lo += 97 {
-		if err := batch.AppendBatch(names[lo:min(lo+97, len(names))]); err != nil {
+	// Small batches, then one batch of several lock holds.
+	for lo := 0; lo < 200; lo += 97 {
+		if err := batch.AppendBatch(names[lo:min(lo+97, 200)]); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := batch.AppendBatch(names[200:]); err != nil {
+		t.Fatal(err)
 	}
 	for i, n := range names {
 		e, created, err := one.Append(n.Group, n.VShard, []byte(n.Name), n.Policy)
