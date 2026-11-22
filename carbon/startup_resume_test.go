@@ -618,7 +618,7 @@ func TestStartupResumePartialJournalSnapshot(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- app.replayInputLogWith(app.Cache, s.replayStop, cfg.InputLog.Path, true, app.Cache.AddRecovered)
+		done <- app.replayInputLogWith(app.Cache, s.replayStop, cfg.InputLog.Path, true, nil)
 	}()
 	awaitCapture(t, func() bool { return app.Cache.Size() > 0 })
 	close(s.replayStop)
