@@ -84,7 +84,7 @@ func TestReceiverRejectsBadNamesLocally(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if srv, e = v2recv.Start(l, owners, v2recv.Config{BatchSize: 7, QueueDepth: 1, SyncInterval: 5 * time.Millisecond}); e != nil {
+			if srv, e = v2recv.Start(l, owners, v2recv.Config{BatchSize: 7, SyncInterval: 5 * time.Millisecond}); e != nil {
 				t.Fatal(e)
 			}
 		}

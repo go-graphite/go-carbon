@@ -30,17 +30,27 @@ func (o *coalescingOwner) Append(names []string, hashes []uint64, data []points.
 }
 func (o *coalescingOwner) Seal() error  { return nil }
 func (o *coalescingOwner) Drain() error { return nil }
+
+// ownerOnly runs one owner's worker without a listener, for hand-off tests.
+// Close s.closing and wait for s.workers to drain it.
+func ownerOnly(o Owner, cfg Config) *Server {
+	s := &Server{cfg: cfg, owners: []Owner{o}, inboxes: []*inbox{newInbox(o)}, controls: []chan ownerCall{make(chan ownerCall)}, done: make(chan struct{}), closing: make(chan struct{})}
+	s.workers.Add(1)
+	go s.work(0, o)
+	return s
+}
+
 func TestOwnerCoalescesSocketFragments(t *testing.T) {
-	s := &Server{cfg: Config{BatchSize: 8, SyncInterval: time.Hour}}
-	q := make(chan *batch, 17)
 	o := &coalescingOwner{}
+	s := ownerOnly(o, Config{BatchSize: 8, SyncInterval: time.Hour})
 	for i := range 17 {
 		name := fmt.Sprintf("fragment.%d", i/3)
-		q <- &batch{names: []string{name}, hashes: []uint64{namefp.Route(name)}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}
+		if err := s.handOff(0, &batch{names: []string{name}, hashes: []uint64{namefp.Route(name)}, data: []points.Point{{Timestamp: int64(i), Value: float64(i) + .125}}}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	close(q)
-	s.workers.Add(1)
-	s.work(o, q, make(chan ownerCall))
+	close(s.closing)
+	s.workers.Wait()
 	if fmt.Sprint(o.calls) != "[8 8 1]" {
 		t.Fatal("socket fragments escaped coalescing", o.calls)
 	}
@@ -127,7 +137,7 @@ func TestPendingConcurrentRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := Start(l, []Owner{o}, Config{BatchSize: 8, QueueDepth: 1, SyncInterval: time.Hour})
+	s, err := Start(l, []Owner{o}, Config{BatchSize: 8, SyncInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +193,7 @@ func TestPendingBatchesFenceDecodedQueueAndAbort(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s, err := Start(l, []Owner{o}, Config{BatchSize: 1, QueueDepth: 1, SyncInterval: time.Hour, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			s, err := Start(l, []Owner{o}, Config{BatchSize: 1, SyncInterval: time.Hour, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 			if err != nil {
 				t.Fatal(err)
 			}
