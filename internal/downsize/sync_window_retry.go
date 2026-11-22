@@ -150,14 +150,23 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	if !s.windowOnly() {
 		return nil
 	}
-	rows := s.j.find(func(r syncRow) bool { return r.Kind == "window-selected" && len(r.Skipped) > 0 })
+	saved, err := s.windowPersistence().load()
+	if err != nil {
+		return err
+	}
+	var rows []syncRow
+	for _, r := range saved.selections {
+		if len(r.Skipped) > 0 {
+			rows = append(rows, r)
+		}
+	}
 	if len(rows) == 0 {
 		return nil
 	}
 	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
 		defer b.beginWindowCopy()()
 	}
-	resolved := s.resolvedWindowSelections()
+	resolved := saved.resolved
 	sources := map[string]int{}
 	for i, source := range s.o.from {
 		sources[source] = i
@@ -168,10 +177,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	groups := map[int][]syncRow{}
 	var order []int
 	total, durable := 0, 0
-	visited := map[syncWindowSelectionKey]bool{}
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-retry-visited" }) {
-		visited[syncWindowSelectionKey{r.Round, r.Source}] = true
-	}
+	visited := saved.visited
 	for _, r := range rows {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		total += len(r.Skipped)
@@ -190,9 +196,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		groups[r.Round] = append(groups[r.Round], r)
 	}
 	floor := int64(durable)
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-retry-floor" }) {
-		floor = max(floor, int64(r.Names))
-	}
+	floor = max(floor, saved.floor)
 	// Resume unfinished groups before revisiting earlier uncertainty. A legacy
 	// attempted counter is only a scheduling hint; it never retires a name.
 	var fresh, revisit []int
@@ -283,7 +287,7 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 		if firstErr != nil || ctx.Err() != nil {
 			break
 		}
-		child := &syncer{o: s.o, b: s.b, j: s.j, redo: s.redo, legacyCopyReceipts: s.legacyCopyReceipts, forbid: map[string]bool{}}
+		child := &syncer{o: s.o, b: s.b, j: s.j, redo: s.redo, windowState: s.windowState, legacyCopyReceipts: s.legacyCopyReceipts, forbid: map[string]bool{}}
 		for source, forbidden := range s.forbid {
 			child.forbid[source] = forbidden
 		}
@@ -311,7 +315,11 @@ func (s *syncer) retryWindowSelections(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	resolved = s.resolvedWindowSelections()
+	saved, err = s.windowPersistence().load()
+	if err != nil {
+		return err
+	}
+	resolved = saved.resolved
 	// Rebuild selection uncertainty from the durable original selections and
 	// resolutions, including sources that are now forbidden. Copy and boundary
 	// failures have their own residuals and remain untouched.
@@ -562,7 +570,7 @@ func (s *syncer) retryWindowRows(ctx context.Context, rows []syncRow, resolved m
 			}
 		}
 		if len(done) > 0 {
-			if err := s.j.append(syncRow{Kind: "window-resolved", Round: r.Round, Source: r.Source, Selected: done, Copied: copied, Resolved: sourceProof}); err != nil {
+			if err := s.windowPersistence().append(syncRow{Kind: "window-resolved", Round: r.Round, Source: r.Source, Selected: done, Copied: copied, Resolved: sourceProof}); err != nil {
 				return stats, err
 			}
 			if resolved[k] == nil {
@@ -575,7 +583,7 @@ func (s *syncer) retryWindowRows(ctx context.Context, rows []syncRow, resolved m
 		}
 		stats.recovered += len(done)
 		stats.remaining += len(names) - len(done)
-		if err := s.j.append(syncRow{Kind: "window-retry-visited", Round: r.Round, Source: r.Source, Names: len(r.Skipped)}); err != nil {
+		if err := s.windowPersistence().append(syncRow{Kind: "window-retry-visited", Round: r.Round, Source: r.Source, Names: len(r.Skipped)}); err != nil {
 			return stats, err
 		}
 		stats.visited[k] = true
@@ -655,10 +663,12 @@ func (s *syncer) preserveWindowRetryProgress() error {
 	if p.Phase != "window retry" || p.Done <= 0 || p.Done > p.Total {
 		return nil
 	}
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-retry-floor" }) {
-		if int64(r.Names) >= p.Done {
-			return nil
-		}
+	saved, err := s.windowPersistence().load()
+	if err != nil {
+		return err
 	}
-	return s.j.append(syncRow{Kind: "window-retry-floor", Names: int(p.Done)})
+	if saved.floor >= p.Done {
+		return nil
+	}
+	return s.windowPersistence().append(syncRow{Kind: "window-retry-floor", Names: int(p.Done)})
 }

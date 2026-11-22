@@ -59,11 +59,8 @@ func (s *syncer) copyWindows() syncRanges {
 // Copy each batch immediately, rather than waiting for the complete catalog.
 // This separate phase leaves old full-history copy/precheck rows reusable.
 func (s *syncer) copyMissingWindow(ctx context.Context) error {
-	f, scan, err := openLines(s.missingPath())
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	catalog := s.catalogPersistence().source(true)
+	defer catalog.close()
 	policy, _ := json.Marshal([]any{s.o.batch, s.copyWindows()})
 	policies := s.j.find(func(r syncRow) bool { return r.Kind == "window-policy" })
 	if len(policies) > 0 && policies[0].Identity != string(policy) {
@@ -74,9 +71,11 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-resolved" }) {
-		s.sum.Copied += r.Copied
+	saved, err := s.windowPersistence().load()
+	if err != nil {
+		return err
 	}
+	s.sum.Copied += saved.copied
 	if b, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
 		defer b.beginWindowCopy()()
 	}
@@ -88,9 +87,9 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		s.prog.planVerification(int64(s.verifyScopeNames()))
 	}
 	selections, completed := map[syncWindowSelectionKey]syncRow{}, map[syncWindowSelectionKey]syncRow{}
-	for _, r := range s.j.find(func(r syncRow) bool {
-		return r.Kind == "window-selected" || r.Kind == "copied" && r.Phase == "window-missing"
-	}) {
+	for _, r := range append(saved.selections, s.j.find(func(r syncRow) bool {
+		return r.Kind == "copied" && r.Phase == "window-missing"
+	})...) {
 		k := syncWindowSelectionKey{r.Round, r.Source}
 		if r.Kind == "window-selected" {
 			selections[k] = r
@@ -163,24 +162,24 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 		}
 		var names []string
 		var masks []uint64
-		for len(names) < s.o.batch && scan.Scan() {
-			n, mask, onTarget, err := parseUnionLine(scan.Text())
+		for len(names) < s.o.batch {
+			n, mask, err := catalog.next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			if err != nil {
 				return err
 			}
-			if !onTarget && mask != 0 {
+			if !catalog.onTarget() && mask != 0 {
 				names = append(names, n)
 				masks = append(masks, mask)
 			}
-		}
-		if err := scan.Err(); err != nil {
-			return err
 		}
 		if len(names) == 0 {
 			break
 		}
 		group++
-		child := &syncer{o: s.o, b: s.b, j: s.j, copied: map[string]bool{}, failedCp: map[string]bool{}, forbid: map[string]bool{}}
+		child := &syncer{o: s.o, b: s.b, j: s.j, windowState: s.windowState, copied: map[string]bool{}, failedCp: map[string]bool{}, forbid: map[string]bool{}}
 		for source, forbidden := range s.forbid {
 			child.forbid[source] = forbidden
 		}
@@ -354,7 +353,7 @@ func (s *syncer) copyWindowGroup(ctx context.Context, group int, names []string,
 					selected = append(selected, n)
 				}
 			}
-			if err := s.j.append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, Skipped: skipped, SelectionComplete: true}); err != nil {
+			if err := s.windowPersistence().append(syncRow{Kind: "window-selected", Round: group, Source: source, First: names[0], Last: names[len(names)-1], Names: len(names), Selected: selected, Skipped: skipped, SelectionComplete: true}); err != nil {
 				return err
 			}
 		}

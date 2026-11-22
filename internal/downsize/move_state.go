@@ -237,8 +237,7 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer d.Close()
-	return d.Sync()
+	return errors.Join(d.Sync(), d.Close())
 }
 func (j *journal) close() { _ = j.file.Close(); _ = j.lock.Close() }
 func (j *journal) compact() error {

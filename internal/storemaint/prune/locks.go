@@ -32,7 +32,7 @@ func staleLock(parent int, name string, cutoff time.Time, dry bool) (bool, bool,
 	if err := unix.Fstat(fd, &held); err != nil {
 		return false, false, err
 	}
-	if held.Mode&unix.S_IFMT != unix.S_IFREG || held.Size != 0 || time.Unix(held.Mtim.Sec, held.Mtim.Nsec).After(cutoff) {
+	if held.Mode&unix.S_IFMT != unix.S_IFREG || held.Size != 0 || time.Unix(int64(held.Mtim.Sec), int64(held.Mtim.Nsec)).After(cutoff) {
 		return false, false, nil
 	}
 	if err := unix.Fstatat(parent, strings.TrimSuffix(name, ".lock"), &target, 0); err == nil {
@@ -45,7 +45,7 @@ func staleLock(parent int, name string, cutoff time.Time, dry bool) (bool, bool,
 	} else if err != nil {
 		return false, false, err
 	}
-	if named.Dev != held.Dev || named.Ino != held.Ino || named.Mode&unix.S_IFMT != unix.S_IFREG || named.Size != 0 || time.Unix(named.Mtim.Sec, named.Mtim.Nsec).After(cutoff) {
+	if named.Dev != held.Dev || named.Ino != held.Ino || named.Mode&unix.S_IFMT != unix.S_IFREG || named.Size != 0 || time.Unix(int64(named.Mtim.Sec), int64(named.Mtim.Nsec)).After(cutoff) {
 		return false, false, nil
 	}
 	if dry {
