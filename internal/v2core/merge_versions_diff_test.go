@@ -1,6 +1,7 @@
 package v2core
 
 import (
+	"cmp"
 	"errors"
 	"math"
 	"math/rand/v2"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // TestMergeVersionsDifferential compares complete ordered record output and
@@ -73,6 +75,98 @@ func TestMergeVersionsDifferential(t *testing.T) {
 				t.Fatalf("trial=%d prefix=%v retire=%d metadata=%+v\nrecords=%+v\nfrom=%v\ngot=%+v err=%v\nwant=%+v err=%v", trial, prefix, retire, meta, recs, from, got, err, want, werr)
 			}
 		}
+	}
+}
+
+// TestMergeVersionsEncodedDifferential runs merge over encoded input runs
+// (dense runs with and without kinds, singletons, several runs per input),
+// including the header-only skip of names without versions, against the
+// original implementation over the decoded records.
+func TestMergeVersionsEncodedDifferential(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 1696))
+	c := sealrollup.Config{Archives: []sealrollup.Archive{{Step: 1, Count: 12}, {Step: 3, Count: 12}, {Step: 12, Count: 12}}, Method: sealrollup.Average}
+	fast := mergeVersions{out: make([]sealrollup.Record, 0, 64)}
+	reference := referenceMergeVersions{out: make([]sealrollup.Record, 0, 64)}
+	skipped, versioned := 0, 0
+	for trial := 0; trial < 3000; trial++ {
+		var members []*mergeCursor
+		var recs []sealrollup.Record
+		var from []int
+		for input := 0; input < 1+rng.IntN(4); input++ {
+			var run []sealrollup.Record
+			for n := rng.IntN(16); n > 0; n-- {
+				a := rng.IntN(len(c.Archives))
+				slot := int64(rng.IntN(12))
+				if trial%3 == 0 { // inputs of disjoint slots
+					slot = int64(input*3 + rng.IntN(3))
+				}
+				r := sealrollup.Record{Delta: sealrollup.Delta{Archive: a, Slot: slot, Order: uint64(1 + rng.IntN(20)), Sample: sealrollup.Sample{Time: (12*int64(1+rng.IntN(6)) + slot) * c.Archives[a].Step, Bits: math.Float64bits(float64(rng.IntN(9)))}}}
+				if trial%2 == 1 {
+					r.Kind = sealrollup.Kind(rng.IntN(4))
+					if r.Kind == sealrollup.KindMat && rng.IntN(2) == 0 {
+						r.Upto = r.Order
+					}
+				}
+				run = append(run, r)
+			}
+			slices.SortStableFunc(run, func(a, b sealrollup.Record) int {
+				return cmp.Or(cmp.Compare(a.Archive, b.Archive), cmp.Compare(a.Slot, b.Slot))
+			})
+			if trial%2 == 0 { // plain runs: one Raw version per slot
+				run = slices.CompactFunc(run, func(a, b sealrollup.Record) bool { return a.Archive == b.Archive && a.Slot == b.Slot })
+			}
+			cur := &mergeCursor{}
+			for i := 0; i < len(run); {
+				j := i + 1
+				for j < len(run) && run[j].Archive == run[i].Archive && (run[j].Slot == run[j-1].Slot || rng.IntN(4) != 0) {
+					j++
+				}
+				var b []byte
+				var err error
+				if j == i+1 && run[i].Kind == sealrollup.KindRaw && rng.IntN(2) == 0 {
+					b = sealrollup.EncodeRecord(run[i])
+				} else if b, err = v2part.EncodeSlots(run[i:j]); err != nil {
+					t.Fatal(err)
+				}
+				cur.blocks = append(cur.blocks, mergeBlock{archive: uint32(run[i].Archive), slot: run[i].Slot, start: len(cur.arena), end: len(cur.arena) + len(b)})
+				cur.arena = append(cur.arena, b...)
+				decoded, err := v2part.DecodeRecordsInto(nil, uint32(run[i].Archive), run[i].Slot, b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recs = append(recs, decoded...)
+				for range decoded {
+					from = append(from, len(members))
+				}
+				i = j
+			}
+			members = append(members, cur)
+		}
+		meta := RollupMetadata{}
+		if trial%7 == 0 {
+			meta.ResetOrder = uint64(rng.IntN(15))
+		}
+		retire := int64(0)
+		if trial%5 == 0 {
+			retire = int64(rng.IntN(200))
+		}
+		for _, prefix := range []bool{false, true} {
+			got, err := fast.merge(members, c, &meta, retire, prefix)
+			reference.records, reference.from = recs, from
+			want, werr := reference.resolve(c, &meta, retire, prefix)
+			if (err == nil) != (werr == nil) || err != nil && err.Error() != werr.Error() || (got == nil) != (want == nil) || len(got)+len(want) > 0 && !reflect.DeepEqual(got, want) {
+				t.Fatalf("trial=%d prefix=%v retire=%d metadata=%+v\nrecords=%+v\nfrom=%v\ngot=%+v err=%v\nwant=%+v err=%v", trial, prefix, retire, meta, recs, from, got, err, want, werr)
+			}
+			if want == nil {
+				skipped++
+			} else {
+				versioned++
+			}
+		}
+	}
+	t.Logf("%d names without versions, %d with", skipped, versioned)
+	if skipped < 500 || versioned < 500 {
+		t.Fatalf("coverage: %d names without versions, %d with", skipped, versioned)
 	}
 }
 

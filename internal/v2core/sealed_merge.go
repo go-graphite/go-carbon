@@ -1005,11 +1005,57 @@ type mergeVersions struct {
 	view                []int // records the write-down sees (live incarnation)
 	keep, gone          []bool
 	win, last           []bool // records[i], out[i]: its slot's per-slot winner
+	spans               []mergeSpan
+}
+
+// mergeSpan is one input run's archive and physical slot range.
+type mergeSpan struct {
+	archive     uint32
+	first, last int64
+}
+
+// spanBefore reports that run a ends before run b starts.
+func spanBefore(a, b mergeSpan) bool {
+	return a.archive < b.archive || a.archive == b.archive && a.last < b.first
 }
 
 // merge returns the name's output records sorted by (archive, slot), or nil
 // when no input carries versions (the per-slot merge then runs unchanged).
 func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
+	// Most names hold no versions: runs without kinds whose slots no other
+	// run holds. Their headers and slot columns say so without decoding.
+	m.spans = m.spans[:0]
+	plain, sorted := true, true
+	for _, c := range members {
+		for _, b := range c.blocks {
+			last, ok := v2part.PlainRunSpan(b.slot, c.arena[b.start:b.end])
+			if plain = ok; !plain {
+				break
+			}
+			s := mergeSpan{b.archive, b.slot, last}
+			if n := len(m.spans); n > 0 && !spanBefore(m.spans[n-1], s) {
+				sorted = false
+			}
+			m.spans = append(m.spans, s)
+		}
+		if !plain {
+			break
+		}
+	}
+	if plain && !sorted {
+		slices.SortFunc(m.spans, func(a, b mergeSpan) int {
+			if a.archive != b.archive {
+				return cmp.Compare(a.archive, b.archive)
+			}
+			return cmp.Compare(a.first, b.first)
+		})
+		for i := 1; plain && i < len(m.spans); i++ {
+			plain = spanBefore(m.spans[i-1], m.spans[i])
+		}
+	}
+	if plain {
+		return nil, nil
+	}
 	m.records, m.from = m.records[:0], m.from[:0]
 	for mi, c := range members {
 		for _, b := range c.blocks {

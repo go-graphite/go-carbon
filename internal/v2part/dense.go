@@ -409,6 +409,40 @@ func DecodeSlotsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, d
 	return live, nil
 }
 
+// PlainRunSpan reads a run's header and slot column only. ok reports a run
+// without kinds: single Raw versions in strictly increasing slots (a
+// singleton value has no kind either), whose last physical slot is last.
+// A run of versions, or one whose header or slots do not parse, is not ok;
+// decoding it reports any error.
+func PlainRunSpan(firstSlot int64, data []byte) (last int64, ok bool) {
+	if !bytes.HasPrefix(data, denseMagic) {
+		return firstSlot, len(data) == 26
+	}
+	if len(data) < 6 {
+		return 0, false
+	}
+	p := data[5:]
+	if data[4]&denseExtended != 0 {
+		if p[0]&extKinds != 0 {
+			return 0, false
+		}
+		p = p[1:]
+	}
+	count, n := binary.Uvarint(p)
+	if n <= 0 || count == 0 || count > MaxDenseSlots {
+		return 0, false
+	}
+	p = p[n:]
+	for ; count > 0; count-- {
+		v, n := binary.Uvarint(p)
+		if n <= 0 || v > math.MaxInt64 || last > math.MaxInt64-int64(v) {
+			return 0, false
+		}
+		p, last = p[n:], last+int64(v)
+	}
+	return last, true
+}
+
 // DecodeRecordsInto returns every stored record version of a run, kinds and
 // Upto included, oldest version of a slot first: what a merge rewrites.
 func DecodeRecordsInto(dst []sealrollup.Record, archive uint32, firstSlot int64, data []byte) ([]sealrollup.Record, error) {
