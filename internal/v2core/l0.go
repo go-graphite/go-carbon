@@ -273,6 +273,23 @@ func unlinkL0(files []string) error {
 	return nil
 }
 
+// readL0 decodes run files in order into one application sequence.
+func readL0(files []string) ([]coreBatch, error) {
+	var batches []coreBatch
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		decoded, err := decodeL0(b)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
+		batches = append(batches, decoded...)
+	}
+	return batches, nil
+}
+
 // LoadL0 reads every L0 run file present into its owner's head, as published
 // rows the next seal covers and whose files it then unlinks. Call it once,
 // after the catalog that resolves application handles is open and before
@@ -290,17 +307,9 @@ func (e *coreEngine) LoadL0(keep func(owner int, b *Batch) bool) error {
 		if len(files) == 0 {
 			continue
 		}
-		var batches []coreBatch
-		for _, f := range files {
-			b, err := os.ReadFile(f)
-			if err != nil {
-				return err
-			}
-			decoded, err := decodeL0(b)
-			if err != nil {
-				return fmt.Errorf("%s: %w", f, err)
-			}
-			batches = append(batches, decoded...)
+		batches, err := readL0(files)
+		if err != nil {
+			return err
 		}
 		if keep != nil {
 			batches = slices.DeleteFunc(batches, func(b coreBatch) bool { return !keep(owner, &b) })
