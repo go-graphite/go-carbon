@@ -1288,6 +1288,18 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 						row, err = s.verifyBatch(workCtx, journalRound, jb.names)
 					}
 				}
+				// A read's own budget can expire while the pass remains live.
+				// Metadata/proof reads sit outside verifyBatch's split path;
+				// retain these uncertain names as residuals instead of aborting
+				// the rest of an otherwise finishable round.
+				if errors.Is(err, context.DeadlineExceeded) && workCtx.Err() == nil {
+					row = syncRow{Kind: "verified", Round: journalRound, First: jb.names[0], Last: jb.names[len(jb.names)-1], Names: len(jb.names)}
+					for _, n := range jb.names {
+						row.Skipped = append(row.Skipped, syncSkip{n, err.Error()})
+					}
+					event("sync_verification_read_timeout", map[string]any{"round": journalRound, "first": row.First, "names": row.Names, "error": err.Error()})
+					err = nil
+				}
 				for _, n := range jb.names {
 					s.masks.Delete(n)
 				}

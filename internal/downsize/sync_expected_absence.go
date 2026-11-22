@@ -108,6 +108,8 @@ func expectedAbsent(ctx context.Context, b syncBackend, o syncOptions, names []s
 }
 
 func (b *syncLiveBackend) ExpirationEvidence(ctx context.Context, store string, names []string, receiptsOnly bool) (map[string]buckyd.ExpirationEvidence, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	out := map[string]buckyd.ExpirationEvidence{}
 	var mu sync.Mutex
 	// Stores accept at most 128 names per request, so a copy wave needs many

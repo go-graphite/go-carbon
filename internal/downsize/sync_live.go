@@ -54,6 +54,7 @@ type syncLiveBackend struct {
 	waiting              atomic.Int64
 	waitLogMu            sync.Mutex
 	waitLog              time.Time
+	readTimeout          time.Duration // tests may shorten the verification read budget
 	retryTick            time.Duration // tests may shorten restart waits
 	waits                atomic.Int64  // retries while a store was unavailable
 	busy                 atomic.Int64  // retries after 429 (all transfer slots taken)
@@ -145,6 +146,17 @@ func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 	withSyncJWT(b.m.client, o.auth, o.authOrigins...)
 	withSyncJWT(b.client, o.auth, o.authOrigins...)
 	return b
+}
+
+// readContext bounds a read and all of its restart/busy retries together.
+// Keep the existing ten-minute allowance for healthy batched work. Expiration
+// returns to verification's split/skip path, with its parent still usable.
+func (b *syncLiveBackend) readContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := b.readTimeout
+	if budget <= 0 {
+		budget = 10 * time.Minute
+	}
+	return context.WithTimeout(ctx, budget)
 }
 
 // carbon maps a buckyd origin to the same host's carbonserver.
@@ -319,6 +331,8 @@ type syncDigestWire struct {
 // Digest asks buckyd for per-archive digests. 404/405 (an older build
 // without the endpoint) is errSyncNoDigest so the caller reads points.
 func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []string, from, until int64) (map[string][]syncDigest, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	request := struct {
 		Names       []string
 		From, Until int64
@@ -348,6 +362,8 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 // Proofs returns metadata-only mutation fences, including explicit absence.
 // Empty tokens mean unknown ownership. Old endpoints cannot authorize reuse.
 func (b *syncLiveBackend) Proofs(ctx context.Context, store string, names []string) ([]string, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	request := struct {
 		Names []string
 		Mode  string
@@ -387,6 +403,8 @@ func (b *syncLiveBackend) WindowProofs(ctx context.Context, host string, names [
 // WindowProofsPresence retains the explicit native absence already returned by
 // proof-v2. Unknown proofs and old responses never establish absence.
 func (b *syncLiveBackend) WindowProofsPresence(ctx context.Context, host string, names []string, from, until int64) ([]string, []bool, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	request := struct {
 		Names       []string
 		Mode        string
@@ -426,6 +444,8 @@ func (b *syncLiveBackend) WindowProofsPresence(ctx context.Context, host string,
 // SumDigest requires an explicit mode echo: older endpoints can ignore Mode
 // and return SHA digests with a superficially identical wire shape.
 func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []string, step, from, until int64) (map[string][]syncDigest, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	request := struct {
 		Names       []string
 		Mode        string
@@ -464,6 +484,8 @@ func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []s
 // not identify the missing name. Recursively split failing batches,
 // preserving healthy sub-batches and omitting only individual absent names.
 func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string) (map[string][]syncArchive, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	base, err := b.carbon(store)
 	if err != nil {
 		return nil, err
@@ -540,6 +562,8 @@ func syncInfoTooLarge(err error) bool {
 }
 
 func (b *syncLiveBackend) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
+	ctx, cancel := b.readContext(ctx)
+	defer cancel()
 	base, err := b.carbon(store)
 	if err != nil {
 		return nil, err

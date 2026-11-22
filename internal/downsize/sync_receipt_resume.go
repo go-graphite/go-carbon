@@ -10,13 +10,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Completed rounds are scheduling evidence. A legacy receipt proves only its
 // exact membership in that round's input, independent of today's batch size.
 // Gaps and overlapping observations are unproven; only their names need another
 // observation. Recovery is a subtask of the saved phase, never a phase rewind.
-func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
+func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameSource) (outHoles []syncHole, outUnindexed []string, outSkipped []syncSkip, retErr error) {
 	defer set.close()
 	var rows []syncRow
 	type recoveredName struct {
@@ -93,11 +96,67 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 	var holes []syncHole
 	var unindexed []string
 	var skipped []syncSkip
+	var collectMu sync.Mutex
 	collect := func(r syncRow) {
+		collectMu.Lock()
+		defer collectMu.Unlock()
 		holes = append(holes, r.Holes...)
 		unindexed = append(unindexed, r.Unindexed...)
 		skipped = append(skipped, r.Skipped...)
 	}
+	// Keep legacy reconstruction at the same bounded concurrency as an active
+	// verification round. The feeder owns membership/planning; workers receive
+	// immutable batches and publish durable observations before collecting them.
+	type repairJob struct {
+		names       []string
+		ids         []int64
+		masks       []uint64
+		key, reason string
+	}
+	work, cancel := context.WithCancel(ctx)
+	group, work := errgroup.WithContext(work)
+	jobs := make(chan repairJob)
+	for range s.o.verifyConcurrency() {
+		group.Go(func() error {
+			for jb := range jobs {
+				if work.Err() != nil {
+					return work.Err()
+				}
+				for i, n := range jb.names {
+					s.masks.Store(n, jb.masks[i])
+				}
+				workCtx := redoBatchContext(work, jb.names, jb.ids)
+				// Old seals cannot prove membership of this ambiguous set.
+				r, err := s.verifyBatch(workCtx, max(round, s.resume.Round), jb.names)
+				for _, n := range jb.names {
+					s.masks.Delete(n)
+				}
+				if err != nil {
+					return err
+				}
+				r.Kind, r.Round, r.Identity = "receipt-reverified", round, jb.key
+				r.Selected = jb.names
+				r.InvalidationReason = jb.reason
+				r.Work = s.redo.cleanWork(workCtx, r)
+				if err := s.j.append(r); err != nil {
+					return err
+				}
+				collect(r)
+			}
+			return nil
+		})
+	}
+	defer func() {
+		if retErr != nil {
+			cancel()
+		}
+		close(jobs)
+		if err := group.Wait(); err != nil && (retErr == nil || errors.Is(retErr, context.Canceled)) {
+			retErr = err
+		}
+		cancel()
+		outHoles, outUnindexed, outSkipped = holes, unindexed, skipped
+	}()
 	var names []string
 	var ids []int64
 	var masks []uint64
@@ -112,11 +171,11 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 		pendingMasks := make([]uint64, 0, len(masks))
 		for i, n := range names {
 			if r := repaired[n]; r != nil {
-				holes = append(holes, r.holes...)
-				skipped = append(skipped, r.skipped...)
+				row := syncRow{Holes: r.holes, Skipped: r.skipped}
 				if r.unindexed {
-					unindexed = append(unindexed, n)
+					row.Unindexed = []string{n}
 				}
+				collect(row)
 				continue
 			}
 			pendingNames = append(pendingNames, n)
@@ -150,26 +209,14 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 			}
 			event("sync_ambiguous_receipt", map[string]any{"reason": reason, "first": newlyPlanned[0], "last": newlyPlanned[len(newlyPlanned)-1], "names": len(newlyPlanned), "round": round, "current_round": s.resume.Round, "phase": s.resume.Phase, "prior_completed_work_retained": true})
 		}
-		for i, n := range names {
-			s.masks.Store(n, masks[i])
+		for start := 0; start < len(names); start += max(1, s.o.batch) {
+			end := min(start+max(1, s.o.batch), len(names))
+			select {
+			case jobs <- repairJob{append([]string(nil), names[start:end]...), append([]int64(nil), ids[start:end]...), append([]uint64(nil), masks[start:end]...), key, reason}:
+			case <-work.Done():
+				return work.Err()
+			}
 		}
-		workCtx := redoBatchContext(ctx, names, ids)
-		// Deliberately bypass old clean/observation seals for just this unproven set.
-		r, err := s.verifyBatch(workCtx, max(round, s.resume.Round), names)
-		for _, n := range names {
-			s.masks.Delete(n)
-		}
-		if err != nil {
-			return err
-		}
-		r.Kind, r.Round, r.Identity = "receipt-reverified", round, key
-		r.Selected = append([]string(nil), names...)
-		r.InvalidationReason = reason
-		r.Work = s.redo.cleanWork(workCtx, r)
-		if err := s.j.append(r); err != nil {
-			return err
-		}
-		collect(r)
 		return nil
 	}
 	// One lookahead lets us stream the catalog without allocating a round-sized
@@ -270,7 +317,7 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 	if e := repair("missing legacy receipt"); e != nil {
 		return nil, nil, nil, e
 	}
-	return holes, unindexed, skipped, nil
+	return nil, nil, nil, nil
 }
 
 func (s *syncer) receiptContradiction(reason string) error {

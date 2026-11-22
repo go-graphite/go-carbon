@@ -37,3 +37,15 @@ progress counters alone never authorize reuse. No state reset is needed.
 A legacy round beyond the new limit finishes its current verification and
 reports the remaining holes without another fill. If a fill had already begun,
 it finishes that fill and verifies its repair set before reporting.
+
+Legacy receipt reconstruction uses the same `--streams` verification budget as
+an active round. Ambiguous receipt memberships are planned durably and verified
+in bounded parallel batches; an interruption retains completed recovery receipts.
+The saved current-round counter can remain at its floor during reconstruction.
+
+Each verification backend read (data, schema, mutation proof or expiration
+evidence) has a ten-minute budget including restart and busy retries. Healthy
+requests retain the previous ten-minute HTTP allowance. An exhausted data read
+uses the existing split-and-skip path; timed-out proof/metadata batches remain
+skipped residuals without a clean proof. Parent cancellation still stops the pass.
+Copy/import retries retain their existing receipt and restart handling.
