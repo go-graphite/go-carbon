@@ -150,7 +150,10 @@ func TestAppendLooksUpAgainAfterFreeze(t *testing.T) {
 		}
 		return nil
 	}
-	defer func() { testHook = nil }()
+	defer func() {
+		d.flushWG.Wait() // the flush reads testHook
+		testHook = nil
+	}()
 	again, created, err := d.Append("g", 1, []byte("x"), 0)
 	if err != nil || !froze {
 		t.Fatal(err, froze)

@@ -801,7 +801,11 @@ func (d *Dict) writeFrozen(frozen []*memtable, minSeq, maxSeq uint64) {
 	defer d.flushWG.Done()
 	l, err := writeLevel(levelPath(d.dir, minSeq, maxSeq), minSeq, maxSeq, func(w *levelWriter) {
 		// Shards hold disjoint scopes: one key order over all of them.
-		var order []uint64 // shard<<32 | record
+		n := 0
+		for _, t := range frozen {
+			n += len(t.recs)
+		}
+		order := make([]uint64, 0, n) // shard<<32 | record
 		for i, t := range frozen {
 			for r := range t.recs {
 				order = append(order, uint64(i)<<32|uint64(r))
