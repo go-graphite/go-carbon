@@ -86,7 +86,7 @@ func TestTCP32ConnectionsExactCore(t *testing.T) {
 		t.Run(fmt.Sprintf("%s-buffer%d", mode, run.buffer), func(t *testing.T) {
 			const workers, connections, rounds = 4, 32, 127
 			root := t.TempDir()
-			store, err := v2daemon.Open(root, v2daemon.Config{Layer: 2, Producers: workers, Shards: 2, MaxPendingRows: 257})
+			store, err := v2daemon.Open(root, v2daemon.Config{Layer: 1, Producers: workers, Shards: 2, MaxPendingRows: 257})
 			if err != nil {
 				t.Fatal(err)
 			}
