@@ -487,3 +487,95 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 	f.memoS[mk] = best
 	return best
 }
+
+// OpenSlot is the value of window w of coarse level a, computed from stored
+// records by lazy descent. load(l, first, last, from) returns every stored
+// record version of level l in physical slots [first, last) from the parts
+// that may hold a batch order >= from (from 0: every part). The read loads
+// level a-1 under the window first and descends only into finer windows that
+// are not settled. A window is settled by a window value a merge wrote down
+// (Upto > 0) while no stored version under it is newer than that Upto: the
+// value then accounts for the window's whole history, so its finer slots are
+// never read. The seal's fallback windows settle nothing (they carry the
+// seal's divergences). Every window is computed by Versions, the function the
+// seal and merges use, so the read equals Versions over every version under
+// the window (WindowRanges).
+func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from uint64) ([]Record, error)) (Sample, bool, error) {
+	var recs []Version
+	s := slot(w, c.Archives[a])
+	rs, err := load(a, s, s+1, 0)
+	if err != nil {
+		return Sample{}, false, err
+	}
+	for _, r := range rs {
+		recs = append(recs, r.Version())
+	}
+	// settled reports whether no version under window t of level l (finer
+	// levels, from parts that may be newer than upto) is newer than upto.
+	settled := func(l int, t int64, upto uint64) (bool, error) {
+		quiet := true
+		err := WindowRanges(c, l, t, func(j int, first, last int64) error {
+			if j == l || !quiet {
+				return nil
+			}
+			rs, err := load(j, first, last, upto>>4)
+			for _, r := range rs {
+				if r.Sample.Time >= t && r.Sample.Time < t+c.Archives[l].Step && r.Version().Order > upto {
+					quiet = false
+				}
+			}
+			return err
+		})
+		return quiet, err
+	}
+	open := []int64{w}
+	for l := a - 1; l >= 0 && len(open) > 0; l-- {
+		al, span := c.Archives[l], c.Archives[l+1].Step
+		// One load per distinct physical range of this level.
+		var slots []int64
+		for _, pw := range open {
+			n := min(span/al.Step, al.Count)
+			for i := range n {
+				slots = append(slots, (slot(pw, al)+i)%al.Count)
+			}
+		}
+		slices.Sort(slots)
+		slots = slices.Compact(slots)
+		upto := map[int64]uint64{}
+		for i := 0; i < len(slots); {
+			j := i + 1
+			for j < len(slots) && slots[j] == slots[j-1]+1 {
+				j++
+			}
+			rs, err := load(l, slots[i], slots[j-1]+1, 0)
+			if err != nil {
+				return Sample{}, false, err
+			}
+			for _, r := range rs {
+				if r.Kind == KindMat && r.Upto > 0 {
+					upto[r.Sample.Time] = max(upto[r.Sample.Time], r.Upto)
+				}
+				recs = append(recs, r.Version())
+			}
+			i = j
+		}
+		var next []int64
+		for _, pw := range open {
+			for t := pw; l > 0 && t < pw+span; t += al.Step {
+				if u, ok := upto[t]; ok {
+					quiet, err := settled(l, t, u)
+					if err != nil {
+						return Sample{}, false, err
+					}
+					if quiet {
+						continue
+					}
+				}
+				next = append(next, t)
+			}
+		}
+		open = next
+	}
+	p, ok := NewVersions(c, recs).SlotValue(a, s)
+	return p, ok, nil
+}
