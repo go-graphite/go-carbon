@@ -266,8 +266,10 @@ func TestMetadataCheckpointPreparedAndChanged(t *testing.T) {
 			if err := db.CloseForExit(); err != nil {
 				t.Fatal(err)
 			}
-			if (db.MetadataCheckpointError() != nil) != changed {
-				t.Fatal(db.MetadataCheckpointError())
+			// A change after the save no longer discards the checkpoint:
+			// close fences the changed stripe and the loader skips it.
+			if err := db.MetadataCheckpointError(); err != nil {
+				t.Fatal(err)
 			}
 			db, err = Open(dir, checkpointOptions())
 			if err != nil {
@@ -275,7 +277,7 @@ func TestMetadataCheckpointPreparedAndChanged(t *testing.T) {
 			}
 			defer db.Close()
 			stats, err := db.LoadMetadataCheckpoint(context.Background(), nil)
-			if err != nil || stats.Valid == changed {
+			if err != nil || !stats.Valid || (stats.SkippedDirty != 0) != changed {
 				t.Fatal(stats, err)
 			}
 		})

@@ -148,6 +148,7 @@ func (s *Store) loadCheckpointRecords(ctx context.Context, reader io.Reader, opt
 		stats.Bytes += result.Bytes
 		stats.ReadBytes += result.ReadBytes
 		stats.Fenced += result.Fenced
+		stats.SkippedDirty += result.SkippedDirty
 		stats.Validated += result.Validated
 	}
 	return err
@@ -230,7 +231,13 @@ func (s *Store) loadCheckpointBlock(ctx context.Context, block []byte, options P
 			// The temporary name never escapes this window. The cache copies
 			// the complete record to its immutable arena, without a name object.
 			name := unsafeString(record[w : w+int(keyLen)])
-			next := &c.shards[s.metricStripe(name)]
+			stripe := s.metricStripe(name)
+			if s.checkpoint.dirtyStripe(stripe) {
+				// Mutated after the save fence: the store has the newer state.
+				stats.SkippedDirty++
+				continue
+			}
+			next := &c.shards[stripe]
 			if sh != next {
 				unlock()
 				sh = next
