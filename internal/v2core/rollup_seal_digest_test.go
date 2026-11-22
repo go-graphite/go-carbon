@@ -85,7 +85,10 @@ func sealPlanDigestMode(plan coreSealPlan, decoded bool) string {
 			}
 			return int(a.Archive) - int(b.Archive)
 		})
-		fmt.Fprint(h, withoutSeq(fmt.Sprintf("spec %+v\n", spec)))
+		// Preserve the pre-admission-coverage golden surface. MinClock is
+		// independently checked by TestMergeAdmissionBound; no rows are masked.
+		fmt.Fprint(h, withoutSeq(fmt.Sprintf("spec {Scope:%+v Encoding:%s Source:%+v MinTime:%d MaxTime:%d Policies:%+v MinExpiry:%d MaxExpiry:%d}\n",
+			spec.Scope, spec.Encoding, spec.Source, spec.MinTime, spec.MaxTime, spec.Policies, spec.MinExpiry, spec.MaxExpiry)))
 	}
 	return hex.EncodeToString(sum.Sum(nil))
 }

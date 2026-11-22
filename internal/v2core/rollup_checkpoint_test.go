@@ -132,7 +132,7 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 		if o.rollups.fromCheckpoint != wantCheckpoint {
 			t.Fatalf("%s: fromCheckpoint=%v want %v", dir, o.rollups.fromCheckpoint, wantCheckpoint)
 		}
-		state := rollupStateDigest(o.rollups)
+		state := ownerStateDigest(t, e)
 		if len(o.rollups.calendar.slots) == 0 {
 			t.Fatalf("%s: no open coarse window on the closure calendar", dir)
 		}
@@ -168,7 +168,7 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 	// The loaded state keeps sealing exactly like the scanned one.
 	checkpointFixture(t, ckptEngine, policies, 23, 9)
 	checkpointFixture(t, scanEngine, policies, 23, 9)
-	if a, b := rollupStateDigest(ckptEngine.owners[0].rollups), rollupStateDigest(scanEngine.owners[0].rollups); a != b {
+	if a, b := ownerStateDigest(t, ckptEngine), ownerStateDigest(t, scanEngine); a != b {
 		t.Fatalf("state after further seals differs:\n%s\n---\n%s", a, b)
 	}
 	if a, b := rollupScanDigest(t, ckptEngine), rollupScanDigest(t, scanEngine); a != b {
@@ -590,7 +590,7 @@ func TestLazyCheckpointFirstSealMatchesEager(t *testing.T) {
 		t.Fatal("lazy first seal differs from eager parts")
 	}
 	// The at-seal checkpoint may serialize remaining names. Verify all state too.
-	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatalf("lazy first seal differs from eager state:\n%s\n---\n%s", x, y)
 	}
 }
@@ -633,7 +633,7 @@ func TestLazyCheckpointIdleClosureMatchesEager(t *testing.T) {
 	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
 		t.Fatal("lazy idle closure differs from eager parts")
 	}
-	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatal("lazy idle closure differs from eager state")
 	}
 }
@@ -711,7 +711,7 @@ func TestLazyCheckpointCompressedBlocks(t *testing.T) {
 			t.Fatalf("wrong name after block reuse: ID %d", i+1)
 		}
 	}
-	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatal("compressed blocks differ from eager recovery")
 	}
 }
@@ -757,7 +757,7 @@ func TestLazyCheckpointChangedExpiryMatchesScan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatal("changed expiry differs from scan")
 	}
 	for _, meta := range a.owners[0].rollups.meta {
@@ -839,7 +839,7 @@ func TestLazyCheckpointSparseIDs(t *testing.T) {
 			t.Fatalf("wrong name/ID binding for %d", id)
 		}
 	}
-	if x, y := rollupStateDigest(r), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatal("sparse-ID checkpoint differs from scan")
 	}
 }
