@@ -282,8 +282,10 @@ func TestL0KillFences(t *testing.T) {
 		}
 	}
 	exact := 0
-	for _, c := range kills {
-		root := t.TempDir()
+	parent := t.TempDir()
+	for i, c := range kills {
+		// One store per kill, removed after its check: 401 stores fill a disk.
+		root := filepath.Join(parent, strconv.Itoa(i))
 		base := 2
 		if c.stage == "empty" {
 			base = 0
@@ -311,6 +313,7 @@ func TestL0KillFences(t *testing.T) {
 			t.Fatal(err)
 		}
 		visible := uint64(base)
+		var output synchronizedBuffer
 		ready := make(chan bool, 1)
 		go func() {
 			scan := bufio.NewScanner(pipe)
@@ -323,6 +326,8 @@ func TestL0KillFences(t *testing.T) {
 				if v, ok := strings.CutPrefix(line, "VIS "); ok {
 					n, _ := strconv.ParseUint(v, 10, 64)
 					visible = max(visible, n)
+				} else {
+					_, _ = output.Write([]byte(line + "\n"))
 				}
 			}
 			ready <- false
@@ -331,7 +336,7 @@ func TestL0KillFences(t *testing.T) {
 		case ok := <-ready:
 			if !ok {
 				_ = cmd.Wait()
-				t.Fatalf("%v: no crash barrier: %s", c, stderr.String())
+				t.Fatalf("%v: no crash barrier: %s", c, output.String())
 			}
 		case <-time.After(30 * time.Second):
 			_ = cmd.Process.Kill()
@@ -374,6 +379,9 @@ func TestL0KillFences(t *testing.T) {
 			checkRestartOracle(t, s, restartApps(t, 0, int(held)), 3)
 		}
 		if err = s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.RemoveAll(root); err != nil {
 			t.Fatal(err)
 		}
 		exact++
