@@ -24,7 +24,8 @@ import (
 )
 
 // Config is fixed for the lifetime of a store. Layer is 0 (numeric), 1 (names),
-// 2 (journal), or 3 (rollups). Each producer has one caller, including Drain.
+// 2 (journal), or 3 (rollups over L0 run files). Each producer has one caller,
+// including Drain.
 type Config struct {
 	// BaselinePath names a verified converted native checkpoint, installed once
 	// before core publication, journal replay, or admission.
@@ -40,11 +41,11 @@ type Config struct {
 	// Placement requires stamped intake; one daemon root owns one PG.
 	Placement Placement
 	Hooks     v2core.Hooks
-	// DurableApplications receives the synced input prefix before core submission.
-	// It is also called during recovery, independently of core frontiers.
+	// Mirror receives each drained application batch before core submission
+	// (classic dual write; the classic engine's own input log recovers it).
 	// Each producer calls serially; different producers may call concurrently.
 	// The callback must finish consuming its borrowed batches before returning.
-	DurableApplications func(int, []v2core.Batch) error
+	Mirror func(int, []v2core.Batch) error
 	// Prepare runs under the root lock before opening core or replaying input.
 	Prepare func() error
 	// MaxCoreRows bounds each core owner's staging buffer. Zero retains the
@@ -59,13 +60,6 @@ type Config struct {
 	// record once all input is; placement and classic-mirror consumers retain
 	// their replay logs.
 	JournalSegmentBytes int64
-	// L0 replaces the producer journal with core L0 run files (layer 3 only):
-	// producers submit straight to core after the catalog sync, each packet's
-	// cursor is its last application order, and restart loads the L0 files.
-	// A legacy journal must be fully sealed (clean stop of the old build).
-	L0 bool
-	// fullReplay keeps and replays every segment; tests use it as the oracle.
-	fullReplay bool
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -91,7 +85,7 @@ type Producer struct {
 	admission                       v2placement.Sink
 	placement                       Placement
 	engine                          *v2core.Engine
-	durableApplications             func(int, []v2core.Batch) error
+	mirror                          func(int, []v2core.Batch) error
 	index, count, layer, maxPending int
 	catalog                         *partlog.NameCatalog
 	encoder                         partlog.CatalogEncoder
@@ -115,7 +109,6 @@ type Producer struct {
 	segmentPath string
 	segmentLast int64
 	closed      []journalSegment
-	fullReplay  bool
 	// Recovery counts journal segments skipped below the durable frontier and
 	// segments decoded; set once by Open.
 	RecoverySkippedSegments, RecoveryReplayedSegments            int
@@ -133,7 +126,7 @@ func coreConfig(c Config) v2core.Config {
 	if maxRows == 0 {
 		maxRows = 2 << 20
 	}
-	return v2core.Config{L0: c.L0, SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	return v2core.Config{L0: c.Layer == 3, SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open recovers durable journal layers through the normal core write queues.
@@ -147,14 +140,11 @@ func openWithHooks(root string, c Config, hooks v2core.Hooks) (*Store, error) {
 }
 
 func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers int) (*Store, error) {
-	if c.DurableApplications != nil && c.Layer != 3 {
-		return nil, errors.New("classic mirror requires application journal layer")
+	if c.Mirror != nil && c.Layer != 3 {
+		return nil, errors.New("classic mirror requires the rollup layer")
 	}
-	if c.Placement != nil && c.Layer < 2 {
-		return nil, errors.New("placement requires a durable journal layer")
-	}
-	if c.L0 && (c.Layer != 3 || c.Placement != nil || c.DurableApplications != nil || c.fullReplay) {
-		return nil, errors.New("L0 run files require layer 3 without placement, classic mirror or full replay")
+	if c.Placement != nil && c.Layer != 2 {
+		return nil, errors.New("placement requires the journal layer")
 	}
 
 	if c.Layer < 0 || c.Layer > 3 || c.Producers < 1 || c.Shards < 1 {
@@ -201,12 +191,12 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	s := &Store{Core: e, cfg: c, lock: lock}
 	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
-		p := &Producer{l0: c.L0, applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes, fullReplay: c.fullReplay}
+		p := &Producer{l0: c.Layer == 3, applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes}
 		if c.Placement != nil {
 			p.placement = c.Placement
 			p.admission = c.Placement.Register()
 		}
-		p.durableApplications = c.DurableApplications
+		p.mirror = c.Mirror
 		s.Producers = append(s.Producers, p)
 	}
 	group, ctx := errgroup.WithContext(context.Background())
@@ -221,7 +211,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			}
 			p.journalDir = filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
 			var err error
-			if c.L0 {
+			if c.Layer == 3 {
 				err = p.recoverL0(p.journalDir)
 			} else if c.Layer >= 2 {
 				err = p.recoverProducer(ctx, p.journalDir)
@@ -240,7 +230,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		_ = s.Close()
 		return nil, err
 	}
-	if c.L0 {
+	if c.Layer == 3 {
 		// Continue each producer's order above every loaded application. An
 		// owner's frontier is the last order of each producer it sealed.
 		frontiers := e.DurableFrontiers()
@@ -456,8 +446,8 @@ func (p *Producer) Drain() error {
 	}
 	start = time.Now()
 	for _, packet := range p.packets {
-		if len(packet.batches) > 0 && p.durableApplications != nil {
-			if err := p.durableApplications(p.index, packet.batches); err != nil {
+		if len(packet.batches) > 0 && p.mirror != nil {
+			if err := p.mirror(p.index, packet.batches); err != nil {
 				return p.fail(err)
 			}
 		}

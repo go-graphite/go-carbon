@@ -129,23 +129,11 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 	if linked != 2 {
 		t.Fatalf("baseline part/descriptor copy inventory: got %d", linked)
 	}
-	p := store.Producers[v2recv.OwnerFor("baseline.metric", 2)]
 	app := Application{Name: "baseline.metric", Policy: policy, Order: 101, Clock: 1794700860, Points: []points.Point{{Timestamp: 1794700803, Value: 12}}, Sequence: []uint64{101}}
-	if err := p.AppendApplications([]Application{app}); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Drain(); err != nil {
-		t.Fatal(err)
-	}
 	reader.Close()
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	journal := filepath.Join("placement-group-00000001", "journal")
-	if err := os.RemoveAll(filepath.Join(replayRoot, journal)); err != nil {
-		t.Fatal(err)
-	}
-	copyBaselineTree(t, filepath.Join(root, journal), filepath.Join(replayRoot, journal))
 	cfg.BaselinePath = filepath.Join(directory, "source-removed")
 	open := func() {
 		t.Helper()
@@ -167,9 +155,17 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 			_ = store.Close()
 		}
 	}()
+	// Intake after the installed baseline continues its order.
+	p := store.Producers[v2recv.OwnerFor("baseline.metric", 2)]
+	if err := p.AppendApplications([]Application{app}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	series, masked, err := reader.FetchWithMask(context.Background(), "baseline.metric", 1794700739, 1794700860)
 	if err != nil || !masked || series.Step() != 60 || math.Float64bits(series.Values()[1]) != math.Float64bits(6) {
-		t.Fatalf("baseline + journal replay: series=%+v masked=%t err=%v", series, masked, err)
+		t.Fatalf("baseline + intake: series=%+v masked=%t err=%v", series, masked, err)
 	}
 	// Expiration masks every baseline archive, and readmission cannot resurrect it.
 	reader.Close()

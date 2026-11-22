@@ -78,8 +78,8 @@ func TestRestartSIGKILL(t *testing.T) {
 	}
 	for _, layer := range []int{2, 3} {
 		for _, stage := range []string{"append", "seal", "sort", "part-write", "ingest", "commit", "rollup"} {
-			if layer == 2 && stage == "rollup" {
-				continue
+			if (layer == 2 && stage == "rollup") || (layer == 3 && stage == "append") {
+				continue // no rollups on layer 2; layer 3 journals nothing (TestL0KillFences)
 			}
 			t.Run(fmt.Sprintf("L%d/%s", layer, stage), func(t *testing.T) {
 				root := t.TempDir()

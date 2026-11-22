@@ -75,7 +75,7 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*RegisteredA
 	name, _ = p.catalog.Key(id) // the catalog's own string, not the caller's
 	var registered *v2core.ApplicationPolicy
 	// Classic mirroring consumes canonical bytes before core submission.
-	if p.layer == 3 && p.durableApplications == nil {
+	if p.layer == 3 && p.mirror == nil {
 		registered, err = p.engine.RegisterApplicationPolicy(NumericID(id, p.index, p.count), name, policy)
 		if err != nil {
 			return nil, err
@@ -124,7 +124,7 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 	}()
 	// Direct L3 producers encode straight into the owners' head rows. Classic
 	// mirroring and the non-rollup layer submit detached batches instead.
-	direct := p.layer == 3 && p.durableApplications == nil
+	direct := p.layer == 3 && p.mirror == nil
 	var out *v2core.Outbox
 	var batches []v2core.Batch
 	var rows []v2core.Row

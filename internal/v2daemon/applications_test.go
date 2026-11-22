@@ -1,17 +1,11 @@
 package v2daemon
 
 import (
-	"encoding/binary"
-	"errors"
-	"io"
 	"math"
-	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -48,17 +42,6 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 		{Name: "test.a", Policy: a, Order: 7, Clock: 10000, Points: []points.Point{{Timestamp: 9990, Value: math.Float64frombits(0x7ff8000000000042)}, {Timestamp: 9990, Value: math.Copysign(0, -1)}, {Timestamp: 9991, Value: 2}}, Sequence: []uint64{3, 4, 5}},
 		{Name: "test.b", Policy: b, Order: 9, Clock: 10000, Points: []points.Point{{Timestamp: 9990, Value: 3}}, Sequence: []uint64{100}},
 		{Name: "test.a", Policy: a, Order: 10, Clock: 9999, Points: []points.Point{{Timestamp: 9980, Value: 4}}, Sequence: []uint64{6}},
-	}
-	expected := make([]v2core.Batch, len(apps))
-	for i, app := range apps {
-		id := uint64(1)
-		if app.Name == "test.b" {
-			id = 2
-		}
-		expected[i] = v2core.Batch{ID: id, Order: app.Order, Clock: app.Clock, Policy: append([]byte(nil), app.Policy...)}
-		for j, p := range app.Points {
-			expected[i].Points = append(expected[i].Points, v2core.Row{ID: id, Time: p.Timestamp, Bits: math.Float64bits(p.Value), Seq: app.Sequence[j]})
-		}
 	}
 	p := s.Producers[0]
 	if useRegistered {
@@ -99,50 +82,6 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 		t.Fatal(err)
 	}
 	closed = true
-	dir := filepath.Join(root, "placement-group-00000001", "journal", "producer-000")
-	catalog, err := partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer catalog.Close()
-	decoder := partlog.CatalogDecoder{Catalog: catalog}
-	defer decoder.Close()
-	file, err := os.Open(filepath.Join(dir, "segment.pdc4"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	var got []v2core.Batch
-	for {
-		var h [4]byte
-		_, err = io.ReadFull(file, h[:])
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		b := make([]byte, binary.LittleEndian.Uint32(h[:]))
-		if _, err = io.ReadFull(file, b); err != nil {
-			t.Fatal(err)
-		}
-		batches, cursor, err := DecodeApplications(b, &decoder, 0, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, batches...)
-		if cursor != 4 && cursor != 5 {
-			t.Fatal("lost journal cursor", cursor)
-		}
-		// The checksum covers original batch order as well as PDC4 tuples.
-		b[5] ^= 1
-		if _, _, err = DecodeApplications(b, &decoder, 0, 1); err == nil {
-			t.Fatal("corrupt envelope accepted")
-		}
-	}
-	if !reflect.DeepEqual(got, expected) {
-		t.Fatalf("journal groups changed\ngot%+v\nwant%+v", got, expected)
-	}
 	reader, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg), v2core.Hooks{})
 	if err != nil {
 		t.Fatal(err)

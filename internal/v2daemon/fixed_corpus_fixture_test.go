@@ -386,7 +386,7 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 			}
 		}
 	}
-	if layer >= 2 {
+	if layer == 2 {
 		if e = verifyJournal(root, f, names, policies); e != nil {
 			return result, e
 		}

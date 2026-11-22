@@ -142,7 +142,7 @@ func TestPlacedRestartRefusesUnstampedJournal(t *testing.T) {
 }
 
 func TestPlacedRestartPreservesAuthorityAndApplications(t *testing.T) {
-	for _, layer := range []int{2, 3} {
+	for _, layer := range []int{2} {
 		t.Run(fmt.Sprintf("L%d", layer), func(t *testing.T) {
 			fixture, stamp, _ := placedFixture(t)
 			cfg := restartConfig(layer)
@@ -284,7 +284,7 @@ func TestPlacedRestartSIGKILL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := restartConfig(3)
+	cfg := restartConfig(2)
 	cfg.Placement = authority
 	var armed atomic.Bool
 	if child {

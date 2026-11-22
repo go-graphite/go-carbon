@@ -167,11 +167,6 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 				}
 				p.applyOrder = b.Order
 			}
-			if p.durableApplications != nil {
-				if err := p.durableApplications(p.index, batches); err != nil {
-					return err
-				}
-			}
 			if err = p.engine.AppendBatchesPipelined(p.index, batches, cursor, false); err != nil {
 				return err
 			}
@@ -264,10 +259,9 @@ type journalSegment struct {
 const seedTemp = "seed.tmp"
 
 // replaysAll reports consumers whose replay obligations are independent of
-// the core frontier: placement/relay and classic mirrors (and the test oracle)
-// keep and replay every segment.
+// the core frontier: placement/relay keep and replay every segment.
 func (p *Producer) replaysAll() bool {
-	return p.fullReplay || p.placement != nil || p.durableApplications != nil
+	return p.placement != nil
 }
 
 // retires reports a standalone journal that rotates and so can retire input.

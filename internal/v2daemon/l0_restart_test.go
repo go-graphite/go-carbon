@@ -23,7 +23,7 @@ import (
 func l0Config() Config {
 	// One owner: with several, a cut owner blocks its execution group, and the
 	// rows of owners that had not published are legitimately lost.
-	return Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour, L0: true}
+	return Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour}
 }
 
 // TestL0SIGKILL kills a producer-journal-free store with a real SIGKILL at
@@ -159,11 +159,13 @@ func TestL0SIGKILL(t *testing.T) {
 }
 
 // TestL0RefusesUnsealedJournal: an L0 build never replays a journal tail.
+// The journal layer writes the same producer journal the old rollup build
+// wrote; with no seal covering it, opening the root refuses.
 func TestL0RefusesUnsealedJournal(t *testing.T) {
-	root := t.TempDir()
+	legacy := t.TempDir()
 	cfg := l0Config()
-	cfg.L0 = false
-	s, err := Open(root, cfg)
+	cfg.Layer = 2
+	s, err := Open(legacy, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,42 +175,16 @@ func TestL0RefusesUnsealedJournal(t *testing.T) {
 	if err = s.Producers[0].Drain(); err != nil {
 		t.Fatal(err)
 	}
-	// Leave the journal unsealed: copy the root while the store runs.
-	killed := t.TempDir()
-	if err = os.CopyFS(killed, os.DirFS(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Remove(filepath.Join(killed, "restart.lock")); err != nil {
+	root := t.TempDir()
+	journal := filepath.Join("placement-group-00000001", "journal")
+	if err = os.CopyFS(filepath.Join(root, journal), os.DirFS(filepath.Join(legacy, journal))); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Open(killed, l0Config()); !errors.Is(err, ErrLegacyJournal) {
+	if _, err = Open(root, l0Config()); !errors.Is(err, ErrLegacyJournal) {
 		t.Fatalf("unsealed journal: %v, want ErrLegacyJournal", err)
-	}
-	// A clean stop seals every record: the L0 build continues above it.
-	s, err = Open(root, l0Config())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The journal frontier counts points (12), above the last order (6).
-	if s.Producers[0].applyOrder != 12 {
-		t.Fatalf("order after upgrade %d, want max(order 6, frontier 12)", s.Producers[0].applyOrder)
-	}
-	next := restartApps(t, 6, 12)
-	for i := range next {
-		next[i].Order += 6
-	}
-	if err = s.Producers[0].AppendApplications(next); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Producers[0].Drain(); err != nil {
-		t.Fatal(err)
-	}
-	checkRestartOracle(t, s, append(restartApps(t, 0, 6), next...), 3)
-	if err = s.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
