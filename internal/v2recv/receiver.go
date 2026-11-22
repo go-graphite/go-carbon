@@ -23,7 +23,7 @@ import (
 )
 
 // Owner is called by exactly one goroutine. Append borrows its arguments only
-// until return; plaintext names share one string per socket batch, so an owner
+// until return; plaintext names share one string per batch, so an owner
 // that keeps a name must clone it. hashes[i] is namefp.Route(names[i]), the hash
 // that routed the name to this owner. Seal+Drain must journal-sync before
 // publishing to the core.
@@ -43,15 +43,24 @@ type ByteOwner interface {
 type Config struct {
 	OnStopped func() // called once after Wait drains handlers and owners
 
-	PlacementKeys                                       map[string][]byte
-	Placement                                           PlacedSink
-	PlacementKey                                        []byte
-	PlacementProducer                                   string
-	BatchSize, QueueDepth, MaxConnections, MaxLineBytes int
-	SyncInterval                                        time.Duration
-	Stream                                              codec.Options
-	Logger                                              *slog.Logger
+	PlacementKeys                           map[string][]byte
+	Placement                               PlacedSink
+	PlacementKey                            []byte
+	PlacementProducer                       string
+	BatchSize, MaxConnections, MaxLineBytes int
+	// BufferBytes bounds what one connection holds before handing it to the
+	// owners: name text plus rowBytes per point, summed over all owners.
+	BufferBytes  int
+	SyncInterval time.Duration
+	Stream       codec.Options
+	Logger       *slog.Logger
 }
+
+// rowBytes is the per-point cost of a batch: name header, hash, point and end.
+const rowBytes = 16 + 8 + 16 + 8
+
+// batch holds each name either as text bytes (plaintext; ends set, names
+// empty) or as a string (codec frames; names set).
 type batch struct {
 	names  []string
 	hashes []uint64 // namefp.Route of each name, computed once for routing
@@ -67,28 +76,76 @@ func (b *batch) named() {
 		return
 	}
 	text, start := string(b.text), 0
-	for i, end := range b.ends {
-		b.names[i] = text[start:end]
+	for _, end := range b.ends {
+		b.names = append(b.names, text[start:end])
 		start = end
 	}
 	b.text, b.ends = b.text[:0], b.ends[:0]
 }
 
+// add copies p to the end of b in one bulk copy per column. A text batch
+// keeps every name as bytes; any other batch keeps strings, so p must be
+// named first.
+func (b *batch) add(p *batch, text bool) {
+	switch {
+	case text && len(p.ends) != 0:
+		offset := len(b.text)
+		b.text = append(b.text, p.text...)
+		for _, end := range p.ends {
+			b.ends = append(b.ends, offset+end)
+		}
+	case text:
+		for _, name := range p.names {
+			b.text = append(b.text, name...)
+			b.ends = append(b.ends, len(b.text))
+		}
+	default:
+		b.names = append(b.names, p.names...)
+	}
+	b.hashes = append(b.hashes, p.hashes...)
+	b.data = append(b.data, p.data...)
+}
+
+func (b *batch) reset() {
+	clear(b.names)
+	b.names, b.hashes, b.data, b.text, b.ends = b.names[:0], b.hashes[:0], b.data[:0], b.text[:0], b.ends[:0]
+}
+
+// inbox is one owner's input, shared by all connections, like a VictoriaMetrics
+// raw-rows shard. A connection copies its whole batch (at most BatchSize
+// points) in under mu and wakes the owner's worker once the inbox holds
+// BatchSize points; until the worker takes it, further appends wait. The
+// worker swaps the inbox (fewer than 2*BatchSize points) for its empty spare
+// and calls the owner once, without mu.
+type inbox struct {
+	mu    sync.Mutex
+	space sync.Cond // broadcast when the worker takes the inbox or the server stops
+	b     batch
+	text  bool          // the owner is a ByteOwner: names stay bytes
+	full  chan struct{} // capacity 1: the inbox reached BatchSize
+}
+
+func newInbox(o Owner) *inbox {
+	_, text := o.(ByteOwner)
+	in := &inbox{text: text, full: make(chan struct{}, 1)}
+	in.space.L = &in.mu
+	return in
+}
+
 type ownerCall struct {
-	run   func() error
-	ack   chan error
-	drain bool
+	run func() error
+	ack chan error
 }
 type counters struct{ accepted, rejected, parse, transport, sink, wire, connections atomic.Uint64 }
 type Stats struct{ Accepted, Rejected, ParseErrors, TransportErrors, SinkErrors, WireBytes, Connections uint64 }
 
 // Server shares a buffer-level maintenance fence. The mutex protects connection
-// lifetime and the first terminal error; every owner has a private input queue.
+// lifetime and the first terminal error; every owner has one inbox.
 type Server struct {
 	cfg      Config
 	listener net.Listener
-	queues   []chan *batch
-	batches  sync.Pool
+	inboxes  []*inbox
+	closing  chan struct{} // closed once every connection handler has returned
 	controls []chan ownerCall
 	owners   []Owner
 	done     chan struct{}
@@ -113,14 +170,14 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	if cfg.BatchSize == 0 {
 		cfg.BatchSize = 1024
 	}
-	if cfg.QueueDepth == 0 {
-		cfg.QueueDepth = 2
-	}
 	if cfg.MaxConnections == 0 {
 		cfg.MaxConnections = 128
 	}
 	if cfg.MaxLineBytes == 0 {
 		cfg.MaxLineBytes = 1 << 20
+	}
+	if cfg.BufferBytes == 0 {
+		cfg.BufferBytes = 1 << 20
 	}
 	if cfg.SyncInterval == 0 {
 		cfg.SyncInterval = time.Second
@@ -128,7 +185,9 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.BatchSize < 1 || cfg.BatchSize > 32768 || cfg.QueueDepth < 1 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.SyncInterval < 0 {
+	// An inbox holds fewer than 2*BatchSize points: within an owner call's
+	// 32768-point limit.
+	if cfg.BatchSize < 1 || cfg.BatchSize > 16384 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.BufferBytes < 1 || cfg.SyncInterval < 0 {
 		return nil, errors.New("invalid receiver bounds")
 	}
 	if cfg.Placement != nil {
@@ -159,19 +218,19 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	d.Close()
-	s := &Server{cfg: cfg, listener: l, owners: owners, done: make(chan struct{}), finished: make(chan struct{}), conns: make(map[net.Conn]struct{})}
+	s := &Server{cfg: cfg, listener: l, owners: owners, done: make(chan struct{}), closing: make(chan struct{}), finished: make(chan struct{}), conns: make(map[net.Conn]struct{})}
 	for _, o := range owners {
 		if o == nil {
 			return nil, errors.New("nil owner")
 		}
 	}
 	for _, o := range owners {
-		q := make(chan *batch, cfg.QueueDepth)
-		control := make(chan ownerCall)
-		s.controls = append(s.controls, control)
-		s.queues = append(s.queues, q)
+		s.inboxes = append(s.inboxes, newInbox(o))
+		s.controls = append(s.controls, make(chan ownerCall))
+	}
+	for i, o := range owners {
 		s.workers.Add(1)
-		go s.work(o, q, control)
+		go s.work(i, o)
 	}
 	s.accept.Add(1)
 	go s.listen()
@@ -197,31 +256,85 @@ func (s *Server) fail(err error) {
 			_ = c.Close()
 		}
 		s.mu.Unlock()
+		for _, in := range s.inboxes {
+			in.mu.Lock()
+			in.space.Broadcast()
+			in.mu.Unlock()
+		}
 	})
 }
-func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
+
+func (s *Server) stopped() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// handOff copies a connection's batch for owner i into its inbox. A full inbox
+// blocks the connection until the worker takes it; input is dropped (and
+// counted) only once the server has stopped.
+func (s *Server) handOff(i int, b *batch) error {
+	in := s.inboxes[i]
+	if !in.text {
+		b.named()
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for len(in.b.data) >= s.cfg.BatchSize && !s.stopped() {
+		in.space.Wait()
+	}
+	if s.stopped() {
+		s.stats.rejected.Add(uint64(len(b.data)))
+		return errors.New("receiver stopped")
+	}
+	in.b.add(b, in.text)
+	if len(in.b.data) >= s.cfg.BatchSize {
+		select {
+		case in.full <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+func (s *Server) work(i int, o Owner) {
 	defer s.workers.Done()
 	tick := time.NewTicker(s.cfg.SyncInterval)
 	defer tick.Stop()
+	in, control := s.inboxes[i], s.controls[i]
 	var seq uint64
 	failed := false
-	// Socket flushes can contain one point per owner. Accumulate on the
-	// existing serial worker, bounded by BatchSize and the existing sync tick.
-	// Per-name order survives this coalescing.
-	var pending batch
 	byteOwner, _ := o.(ByteOwner)
+	var spare batch // the inbox taken last, emptied for the next swap
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
-	appendBatch := func(b *batch) {
+	// take swaps the inbox (fewer than 2*BatchSize points) for the empty spare
+	// and appends it outside the lock in one owner call. Per-name order survives:
+	// appends keep arrival order within the inbox.
+	take := func() {
+		in.mu.Lock()
+		in.b, spare = spare, in.b
+		in.space.Broadcast()
+		in.mu.Unlock()
+		b := &spare
+		defer b.reset()
+		if len(b.data) == 0 {
+			return
+		}
+		if failed {
+			s.stats.rejected.Add(uint64(len(b.data)))
+			return
+		}
 		sequence = sequence[:0]
 		for range b.data {
 			seq++
 			sequence = append(sequence, seq)
 		}
 		var err error
-		if byteOwner != nil && len(b.ends) != 0 {
+		if byteOwner != nil {
 			err = byteOwner.AppendBytes(b.text, b.ends, b.hashes, b.data, sequence, time.Now().Unix())
 		} else {
-			b.named()
 			err = o.Append(b.names, b.hashes, b.data, sequence, time.Now().Unix())
 		}
 		if err != nil {
@@ -233,17 +346,8 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 			s.stats.accepted.Add(uint64(len(b.data)))
 		}
 	}
-	appendPending := func() {
-		if failed || len(pending.data) == 0 {
-			return
-		}
-		appendBatch(&pending)
-		clear(pending.names)
-		pending.names, pending.hashes, pending.data = pending.names[:0], pending.hashes[:0], pending.data[:0]
-		pending.text, pending.ends = pending.text[:0], pending.ends[:0]
-	}
 	syncOwner := func() {
-		appendPending()
+		take()
 		if !failed {
 			if err := errors.Join(o.Seal(), o.Drain()); err != nil {
 				failed = true
@@ -252,84 +356,24 @@ func (s *Server) work(o Owner, q <-chan *batch, control <-chan ownerCall) {
 			}
 		}
 	}
-	consume := func(b *batch) {
-		originalNames, originalHashes, originalData := b.names, b.hashes, b.data
-		recycle := func() {
-			clear(originalNames)
-			b.names, b.hashes, b.data = originalNames[:0], originalHashes[:0], originalData[:0]
-			b.text, b.ends = b.text[:0], b.ends[:0]
-			s.batches.Put(b)
-		}
-		if failed {
-			s.stats.rejected.Add(uint64(len(b.data)))
-			recycle()
-			return
-		}
-		// Codec names already own immutable strings. Keep their batching path
-		// separate when connections with different protocols share an owner.
-		if len(pending.data) != 0 && (len(pending.ends) == 0) != (len(b.ends) == 0) {
-			appendPending()
-			if failed {
-				s.stats.rejected.Add(uint64(len(b.data)))
-				recycle()
-				return
-			}
-		}
-		if len(pending.data) == 0 && len(b.data) == s.cfg.BatchSize {
-			appendBatch(b)
-			b.names, b.hashes, b.data = b.names[:0], b.hashes[:0], b.data[:0]
-		}
-		textStart, nameIndex := 0, 0
-		for len(b.data) > 0 {
-			n := min(len(b.data), s.cfg.BatchSize-len(pending.data))
-			if len(b.ends) != 0 {
-				ends := b.ends[nameIndex : nameIndex+n]
-				offset := len(pending.text) - textStart
-				pending.text = append(pending.text, b.text[textStart:ends[n-1]]...)
-				for _, end := range ends {
-					pending.ends = append(pending.ends, offset+end)
-				}
-				textStart = ends[n-1]
-				nameIndex += n
-			}
-			pending.names = append(pending.names, b.names[:n]...)
-			pending.hashes = append(pending.hashes, b.hashes[:n]...)
-			pending.data = append(pending.data, b.data[:n]...)
-			b.names, b.hashes, b.data = b.names[n:], b.hashes[n:], b.data[n:]
-			if len(pending.data) == s.cfg.BatchSize {
-				appendPending()
-			}
-			if failed {
-				s.stats.rejected.Add(uint64(len(b.data)))
-				break
-			}
-		}
-		recycle()
-	}
 	for {
 		select {
 		case call := <-control:
-			// A fenced control holds intake exclusively, so this finite queue
-			// prefix cannot grow while it is drained.
-			if call.drain {
-				for len(q) > 0 {
-					consume(<-q)
-				}
-			}
-			appendPending()
+			// A fenced control holds intake exclusively and has flushed every
+			// connection, so the inbox it takes holds all decoded input.
+			take()
 			if failed {
 				call.ack <- errors.New("receiver owner failed")
 			} else {
 				call.ack <- call.run()
 			}
-		case b, ok := <-q:
-			if !ok {
-				syncOwner()
-				return
-			}
-			consume(b)
+		case <-in.full:
+			take()
 		case <-tick.C:
 			syncOwner()
+		case <-s.closing:
+			syncOwner()
+			return
 		}
 	}
 }
@@ -383,9 +427,7 @@ func (s *Server) Wait(ctx context.Context) error {
 		go func() {
 			s.accept.Wait()
 			s.handlers.Wait()
-			for _, q := range s.queues {
-				close(q)
-			}
+			close(s.closing)
 			s.workers.Wait()
 			if s.cfg.OnStopped != nil {
 				s.cfg.OnStopped()
@@ -424,38 +466,47 @@ type reference struct {
 	owner int
 }
 
+// connBuffers is one connection's per-owner batches and the bytes they hold.
+// held changes on every point, so the struct fills whole cache lines and never
+// shares one with another connection (as VictoriaMetrics pads raw-rows shards).
+type connBuffers struct {
+	s       *Server
+	buffers []batch
+	held    int
+	_       [128 - 8 - 24 - 8]byte
+}
+
+func (c *connBuffers) flush(i int) error {
+	b := &c.buffers[i]
+	if len(b.data) == 0 {
+		return nil
+	}
+	c.held -= len(b.text) + len(b.data)*rowBytes
+	err := c.s.handOff(i, b)
+	b.reset()
+	return err
+}
+
+func (c *connBuffers) flushAll() error {
+	var err error
+	for i := range c.buffers {
+		err = errors.Join(err, c.flush(i))
+	}
+	return err
+}
+
 // OwnerFor returns the stable producer used by unplaced TCP intake.
 func OwnerFor(name string, n int) int { return int(namefp.Route(name) % uint64(n)) }
 func (s *Server) read(c net.Conn) error {
 	if s.cfg.Placement != nil {
 		return s.readPlaced(c)
 	}
-	buffers := make([]*batch, len(s.queues))
-	flush := func(i int) error {
-		b := buffers[i]
-		if b == nil || len(b.data) == 0 {
-			return nil
-		}
-		if _, ok := s.owners[i].(ByteOwner); !ok {
-			b.named()
-		}
-		select {
-		case s.queues[i] <- b:
-			buffers[i] = nil
-			return nil
-		case <-s.done:
-			s.stats.rejected.Add(uint64(len(b.data)))
-			buffers[i] = nil
-			return errors.New("receiver stopped")
-		}
-	}
-	flushAll := func() error {
-		var err error
-		for i := range buffers {
-			err = errors.Join(err, flush(i))
-		}
-		return err
-	}
+	// One byte budget per connection, shared by its per-owner batches: a busy
+	// stream rarely ends a read on a line boundary, so without it every owner
+	// batch of every connection would fill to BatchSize names. A full owner
+	// inbox blocks this connection; input is never dropped.
+	conn := &connBuffers{s: s, buffers: make([]batch, len(s.inboxes))}
+	flush, flushAll := conn.flush, conn.flushAll
 	input := &fencedReader{Reader: countedReader{c, &s.stats.wire}, gate: &s.intake}
 	s.intake.Lock()
 	if s.decoded == nil {
@@ -481,22 +532,13 @@ func (s *Server) read(c net.Conn) error {
 	}
 
 	var appendErr error
-	buffer := func(owner int) *batch {
-		b := buffers[owner]
-		if b == nil {
-			if pooled := s.batches.Get(); pooled != nil {
-				b = pooled.(*batch)
-			} else {
-				b = &batch{names: make([]string, 0, s.cfg.BatchSize), hashes: make([]uint64, 0, s.cfg.BatchSize), data: make([]points.Point, 0, s.cfg.BatchSize)}
-			}
-			buffers[owner] = b
-		}
-		return b
-	}
-	added := func(owner int, b *batch, value float64, ts int64) {
+	buffer := func(owner int) *batch { return &conn.buffers[owner] } // grows to what the byte budget lets in
+	added := func(owner int, b *batch, text int, value float64, ts int64) {
 		b.data = append(b.data, points.Point{Value: value, Timestamp: ts})
-		if len(b.data) >= s.cfg.BatchSize {
+		if conn.held += text + rowBytes; len(b.data) >= s.cfg.BatchSize {
 			appendErr = flush(owner)
+		} else if conn.held >= s.cfg.BufferBytes {
+			appendErr = flushAll()
 		}
 	}
 	add := func(ref *reference, value float64, ts int64) {
@@ -507,7 +549,7 @@ func (s *Server) read(c net.Conn) error {
 		b := buffer(ref.owner)
 		b.names = append(b.names, ref.name)
 		b.hashes = append(b.hashes, ref.hash)
-		added(ref.owner, b, value, ts)
+		added(ref.owner, b, 0, value, ts)
 	}
 	// addText copies a borrowed plaintext name into its owner's batch text.
 	addText := func(owner int, hash uint64, name []byte, value float64, ts int64) {
@@ -518,9 +560,8 @@ func (s *Server) read(c net.Conn) error {
 		b := buffer(owner)
 		b.text = append(b.text, name...)
 		b.ends = append(b.ends, len(b.text))
-		b.names = append(b.names, "")
 		b.hashes = append(b.hashes, hash)
-		added(owner, b, value, ts)
+		added(owner, b, len(name), value, ts)
 	}
 	if head[0] == 0 {
 		pre := make([]byte, codec.PreambleSize)
@@ -543,7 +584,7 @@ func (s *Server) read(c net.Conn) error {
 				if *slot == nil {
 					n := string(name)
 					h := namefp.Route(n)
-					*slot = &reference{name: n, hash: h, owner: int(h % uint64(len(s.queues)))}
+					*slot = &reference{name: n, hash: h, owner: int(h % uint64(len(s.inboxes)))}
 				}
 				add((*slot).(*reference), value, ts)
 			})
@@ -612,7 +653,7 @@ func (s *Server) read(c net.Conn) error {
 				if previous == nil || !bytes.Equal(name, previous) {
 					previous = append(previous[:0], name...)
 					hash = namefp.Route(previous)
-					owner = int(hash % uint64(len(s.queues)))
+					owner = int(hash % uint64(len(s.inboxes)))
 				}
 				addText(owner, hash, name, value, ts)
 			}

@@ -2,7 +2,6 @@ package v2daemon
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -131,7 +131,7 @@ func (p *Producer) recoverProducer(ctx context.Context, dir string) error {
 					return err
 				}
 			}
-			batches, cursor, err := DecodeApplications(inner, &decoder, p.catalog, p.index, p.count)
+			batches, cursor, err := DecodeApplications(inner, &decoder, p.index, p.count)
 			if err != nil {
 				return err
 			}
@@ -527,7 +527,7 @@ func segmentCursor(path string) (uint64, bool, error) {
 	if n < 9 {
 		return 0, false, nil
 	}
-	if !bytes.Equal(b[4:8], applicationMagic) {
+	if !isApplicationRecord(b[4:n]) {
 		return 0, false, errors.New("invalid original application envelope")
 	}
 	cursor, m := binary.Uvarint(b[8:n])
@@ -619,9 +619,10 @@ func segmentEnd(path string, newest bool) (end, order uint64, last int64, ok boo
 // first and last application orders. The coded payload is not decoded.
 func applicationHeader(record []byte) (cursor, n, first, last uint64, err error) {
 	invalid := errors.New("invalid original application envelope")
-	if len(record) < 8 || !bytes.Equal(record[:4], applicationMagic) || crc32.Checksum(record[:len(record)-4], applicationCRC) != binary.LittleEndian.Uint32(record[len(record)-4:]) {
+	if len(record) < 8 || !isApplicationRecord(record) || crc32.Checksum(record[:len(record)-4], applicationCRC) != binary.LittleEndian.Uint32(record[len(record)-4:]) {
 		return 0, 0, 0, 0, invalid
 	}
+	v1 := record[3] == 1
 	b := record[4 : len(record)-4]
 	read := func() uint64 {
 		v, m := binary.Uvarint(b)
@@ -637,8 +638,17 @@ func applicationHeader(record []byte) (cursor, n, first, last uint64, err error)
 	if count == 0 || count > 32768 {
 		return 0, 0, 0, 0, invalid
 	}
-	for i := uint64(0); i < count && err == nil; i++ {
-		if read() == 0 {
+	var base uint64 // V2A2 lean form: one point per application, orders base, base+1, ...
+	if !v1 {
+		if base = read(); base > math.MaxUint64-count+1 {
+			return 0, 0, 0, 0, invalid
+		}
+	}
+	if base != 0 {
+		n, first, last = count, base, base+count-1
+	}
+	for i := uint64(0); base == 0 && i < count && err == nil; i++ {
+		if v1 && read() == 0 {
 			err = invalid
 		}
 		previous := last

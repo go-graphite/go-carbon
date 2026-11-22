@@ -392,7 +392,7 @@ func (d *CatalogDecoder) Decode(b []byte) ([]DictionaryFrame, error) {
 		if r.err != nil || np == 0 || np > uint64(len(r.b)) || np > v.n-v.off {
 			return nil, errPredictorV3
 		}
-		f := DictionaryFrame{Key: s.key, Definition: s.definition, Clock: clock, Points: make([]points.Point, int(np))}
+		f := DictionaryFrame{ID: id, Key: s.key, Definition: s.definition, Clock: clock, Points: make([]points.Point, int(np))}
 		for i := range f.Points {
 			s.delta += r.i()
 			s.timestamp += s.delta

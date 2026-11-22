@@ -106,24 +106,167 @@ func WindowRanges(c Config, a int, w int64, visit func(level int, first, last in
 // Version maps a stored record to the version the event walk reads. A Raw or
 // Ghost record's order becomes the tick (batch order, target archive), its
 // target archive being its own, so parts store no extra order bits. A Mat or
-// None record competes at its batch order's tick below its archive. upto 0
-// marks the seal's fallback window: the weakest version (order 1), it bounds
-// no event walk and is a slot's value only where the stored versions yield
-// no event at all. The seal's closed windows carry its known divergences
-// from Whisper; with any stronger order they leak into the open windows.
-func (r Record) Version(upto uint64) Version {
+// None record competes at its batch order's tick below its archive and bounds
+// the walk at its Upto. Upto 0 marks the seal's fallback window: the weakest
+// version (order 1), it bounds no event walk and is a slot's value only where
+// the stored versions yield no event at all. The seal's closed windows carry
+// its known divergences from Whisper; with any stronger order they leak into
+// the open windows.
+func (r Record) Version() Version {
 	v := Version{Archive: r.Archive, Time: r.Sample.Time, Bits: r.Sample.Bits}
 	if r.Kind == KindRaw || r.Kind == KindGhost {
 		v.Order = Tick(r.Order, r.Archive)
 		v.Upto, v.Ghost = v.Order, r.Kind == KindGhost
 		return v
 	}
-	v.Order, v.Upto = Tick(r.Order, max(r.Archive-1, 0)), upto
-	if upto == 0 {
+	v.Order, v.Upto = Tick(r.Order, max(r.Archive-1, 0)), r.Upto
+	if r.Upto == 0 {
 		v.Order = 1
 	}
 	v.Mat, v.None = r.Kind == KindMat, r.Kind == KindNone
 	return v
+}
+
+// Record is the stored form of a window WriteDown materialized: Version maps
+// it back to v. A Mat's order is the tick of the event (or stored version) its
+// value came from; the stored batch order keeps that tick's batch, and the
+// archive below the Mat's own stands for the sub-step (see Version).
+func (v Version) Record(c Config) Record {
+	r := Record{Delta: Delta{Archive: v.Archive, Slot: slot(v.Time, c.Archives[v.Archive]), Order: max(v.Order>>4, 1), Sample: Sample{Time: v.Time, Bits: v.Bits}}, Upto: v.Upto}
+	r.Sample.Sequence = r.Order
+	switch {
+	case v.None:
+		r.Kind, r.Sample.Bits = KindNone, 0
+	case v.Mat:
+		r.Kind = KindMat
+	case v.Ghost:
+		r.Kind, r.Upto = KindGhost, 0
+	default:
+		r.Upto = 0
+	}
+	return r
+}
+
+// WriteDown is a merge's rollup write-down. recs must hold every version of
+// one name at or below the merge's newest order: the merge holds the owner's
+// oldest part, so no older version lies outside it. It drops every superseded
+// version (all but each physical slot's winner), every ghost and every
+// version gone reports (expired), and before that materializes each window
+// whose event walk could read a dropped version: the parents, at every level
+// above, of every epoch the dropped version's slot held, and recursively the
+// slots of those parents. Each such window becomes a Mat (its value, at the
+// order it was written, Upto its newest event) or a None (no value as of
+// Upto). Older absence markers of a window go. keep reports the surviving
+// inputs; mats are the new versions. Rollups stay a pure function of the
+// stored versions: reads over keep + mats equal reads over recs.
+func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats []Version) {
+	f := NewVersions(c, recs)
+	keep = make([]bool, len(recs))
+	drop := func(i int) { keep[i] = false }
+	for i := range keep {
+		keep[i] = true
+	}
+	dropped := false
+	for _, m := range f.bySlot {
+		for _, idx := range m {
+			win := idx[0]
+			for _, i := range idx[1:] {
+				r, b := recs[i], recs[win]
+				if r.Time == b.Time && r.Order == b.Order {
+					if r.Mat && !b.Mat {
+						win = i
+					}
+				} else if newer(r.Order, !r.Mat, r.Time, b.Order, !b.Mat, b.Time) {
+					win = i
+				}
+			}
+			for _, i := range idx {
+				if i != win {
+					drop(i)
+					dropped = true
+				}
+			}
+		}
+	}
+	for i, r := range recs {
+		if r.Ghost || gone != nil && gone(i) {
+			drop(i)
+			dropped = true
+		}
+	}
+	if !dropped {
+		return keep, nil
+	}
+	type lslot struct {
+		l int
+		s int64
+	}
+	need := map[[2]int64]bool{}
+	seen := map[lslot]bool{}
+	var queue []lslot
+	addParents := func(l int, t int64) {
+		for a := l + 1; a < len(c.Archives); a++ {
+			w := align(t, c.Archives[a].Step)
+			need[[2]int64{int64(a), w}] = true
+			if k := (lslot{a, slot(w, c.Archives[a])}); !seen[k] {
+				seen[k] = true
+				queue = append(queue, k)
+			}
+		}
+	}
+	for i, r := range recs {
+		if keep[i] {
+			continue
+		}
+		addParents(r.Archive, r.Time)
+		if k := (lslot{r.Archive, slot(r.Time, c.Archives[r.Archive])}); !r.Ghost && !seen[k] {
+			seen[k] = true
+			queue = append(queue, k)
+		}
+	}
+	for len(queue) > 0 {
+		k := queue[0]
+		queue = queue[1:]
+		for w := range f.wins[k.l][k.s] {
+			addParents(k.l, w)
+		}
+	}
+	top := uint64(math.MaxUint64)
+	for k := range need {
+		a, w := int(k[0]), k[1]
+		v := f.valueAt(a, w, top)
+		upto := uint64(0)
+		if ev := f.events[a][w]; len(ev) > 0 {
+			upto = ev[len(ev)-1]
+		}
+		if d, ok := f.stored(a, w, top); ok {
+			upto = max(upto, d.Upto)
+		}
+		if u, ok := f.absent[k]; ok {
+			upto = max(upto, u)
+		}
+		if !v.ok {
+			if upto > 0 {
+				mats = append(mats, Version{Archive: a, Time: w, Order: upto, Upto: upto, None: true})
+			}
+			continue
+		}
+		upto = max(upto, v.s.Sequence)
+		mats = append(mats, Version{Archive: a, Time: w, Bits: v.s.Bits, Order: v.s.Sequence, Upto: upto, Mat: true})
+	}
+	// Map iteration order must not reach the output.
+	slices.SortFunc(mats, func(x, y Version) int {
+		if x.Archive != y.Archive {
+			return x.Archive - y.Archive
+		}
+		return int(x.Time - y.Time)
+	})
+	for i, r := range recs {
+		if r.None && (need[[2]int64{int64(r.Archive), r.Time}] || r.Upto < f.absent[[2]int64{int64(r.Archive), r.Time}]) {
+			drop(i)
+		}
+	}
+	return keep, mats
 }
 
 // Tick orders the sub-steps of one batch. Whisper applies a batch one target
@@ -343,4 +486,96 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 	}
 	f.memoS[mk] = best
 	return best
+}
+
+// OpenSlot is the value of window w of coarse level a, computed from stored
+// records by lazy descent. load(l, first, last, from) returns every stored
+// record version of level l in physical slots [first, last) from the parts
+// that may hold a batch order >= from (from 0: every part). The read loads
+// level a-1 under the window first and descends only into finer windows that
+// are not settled. A window is settled by a window value a merge wrote down
+// (Upto > 0) while no stored version under it is newer than that Upto: the
+// value then accounts for the window's whole history, so its finer slots are
+// never read. The seal's fallback windows settle nothing (they carry the
+// seal's divergences). Every window is computed by Versions, the function the
+// seal and merges use, so the read equals Versions over every version under
+// the window (WindowRanges).
+func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from uint64) ([]Record, error)) (Sample, bool, error) {
+	var recs []Version
+	s := slot(w, c.Archives[a])
+	rs, err := load(a, s, s+1, 0)
+	if err != nil {
+		return Sample{}, false, err
+	}
+	for _, r := range rs {
+		recs = append(recs, r.Version())
+	}
+	// settled reports whether no version under window t of level l (finer
+	// levels, from parts that may be newer than upto) is newer than upto.
+	settled := func(l int, t int64, upto uint64) (bool, error) {
+		quiet := true
+		err := WindowRanges(c, l, t, func(j int, first, last int64) error {
+			if j == l || !quiet {
+				return nil
+			}
+			rs, err := load(j, first, last, upto>>4)
+			for _, r := range rs {
+				if r.Sample.Time >= t && r.Sample.Time < t+c.Archives[l].Step && r.Version().Order > upto {
+					quiet = false
+				}
+			}
+			return err
+		})
+		return quiet, err
+	}
+	open := []int64{w}
+	for l := a - 1; l >= 0 && len(open) > 0; l-- {
+		al, span := c.Archives[l], c.Archives[l+1].Step
+		// One load per distinct physical range of this level.
+		var slots []int64
+		for _, pw := range open {
+			n := min(span/al.Step, al.Count)
+			for i := range n {
+				slots = append(slots, (slot(pw, al)+i)%al.Count)
+			}
+		}
+		slices.Sort(slots)
+		slots = slices.Compact(slots)
+		upto := map[int64]uint64{}
+		for i := 0; i < len(slots); {
+			j := i + 1
+			for j < len(slots) && slots[j] == slots[j-1]+1 {
+				j++
+			}
+			rs, err := load(l, slots[i], slots[j-1]+1, 0)
+			if err != nil {
+				return Sample{}, false, err
+			}
+			for _, r := range rs {
+				if r.Kind == KindMat && r.Upto > 0 {
+					upto[r.Sample.Time] = max(upto[r.Sample.Time], r.Upto)
+				}
+				recs = append(recs, r.Version())
+			}
+			i = j
+		}
+		var next []int64
+		for _, pw := range open {
+			for t := pw; l > 0 && t < pw+span; t += al.Step {
+				if u, ok := upto[t]; ok {
+					quiet, err := settled(l, t, u)
+					if err != nil {
+						return Sample{}, false, err
+					}
+					if quiet {
+						continue
+					}
+				}
+				next = append(next, t)
+			}
+		}
+		open = next
+	}
+	p, ok := NewVersions(c, recs).SlotValue(a, s)
+	return p, ok, nil
 }

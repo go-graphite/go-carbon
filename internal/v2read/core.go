@@ -46,8 +46,11 @@ type Reader struct {
 	// share; fixed before the first publication, zero uses the default.
 	BlockCacheBytes int64
 	blocksOnce      sync.Once
-	blocks          *pebble.Cache
-	closedBlocks    atomic.Bool
+	// cacheMu orders block cache references against Close: publications
+	// re-check closed and open parts under the read side; Close drops the
+	// Reader's own reference under the write side.
+	cacheMu sync.RWMutex
+	blocks  *pebble.Cache
 }
 
 // DefaultBlockCacheBytes holds the index and data blocks a cold single-name
@@ -184,7 +187,15 @@ func (r *Reader) PublishPending(owner int, snapshot *pebble.Snapshot, pending v2
 	if shared && g.snapshot != snapshot {
 		_ = closeSnapshot()
 	} else if !shared {
+		// A publication past the first closed check must not take a block
+		// cache reference after Close dropped the Reader's last one.
+		r.cacheMu.RLock()
+		if r.closed.Load() {
+			r.cacheMu.RUnlock()
+			return closeSnapshot()
+		}
 		parts, err := v2core.OpenRollupParts(context.Background(), snapshot, inventory, r.Identities, r.blockCache(), min(4<<20, r.caches[owner].limit))
+		r.cacheMu.RUnlock()
 		if err != nil {
 			_ = snapshot.Close()
 			return err
@@ -235,10 +246,14 @@ func (r *Reader) Close() {
 		}
 	}
 	// Open parts hold their own references; this drops only the Reader's.
-	r.blocksOnce.Do(func() {})
-	if r.blocks != nil && r.closedBlocks.CompareAndSwap(false, true) {
+	// Publications see closed before they open parts, so none reaches the
+	// cache after this.
+	r.cacheMu.Lock()
+	if r.blocks != nil {
 		r.blocks.Unref()
+		r.blocks = nil
 	}
+	r.cacheMu.Unlock()
 }
 
 // lookup reads a request view's sealed directory.

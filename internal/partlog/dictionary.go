@@ -9,7 +9,9 @@ import (
 
 // DictionaryFrame preserves one original apply boundary. Definition is opaque
 // policy/placement metadata. Key and Definition must remain stable in an epoch.
+// ID is the catalog ID CatalogDecoder.Decode resolved; encoders ignore it.
 type DictionaryFrame struct {
+	ID         uint64
 	Key        string
 	Definition []byte
 	Clock      int64

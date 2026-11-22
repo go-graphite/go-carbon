@@ -14,9 +14,15 @@ func versionRecord(slot, ts int64, order, bits uint64, kind sealrollup.Kind) sea
 	return sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 1700000000 + ts, Bits: bits, Sequence: order}}, Kind: kind}
 }
 
+func withUpto(r sealrollup.Record, upto uint64) sealrollup.Record {
+	r.Upto = upto
+	return r
+}
+
 // TestDenseRecordVersions checks the kinds column: a run of versions keeps
-// every version, kind and slot repeat; per-slot readers see the last Raw or
-// Mat record of each slot, without kinds; the version reader maps orders to ticks; Raw-only
+// every version, kind, slot repeat and upto; per-slot readers see the last Raw
+// or seal-written Mat record of each slot, without kinds (windows a merge
+// wrote down stay invisible to them); the version reader maps orders to ticks; Raw-only
 // runs keep the older form; and a reader without kinds rejects versions.
 func TestDenseRecordVersions(t *testing.T) {
 	K := sealrollup.KindRaw
@@ -28,14 +34,16 @@ func TestDenseRecordVersions(t *testing.T) {
 		// slot 12: batch 4's point superseded by batch 8's correction.
 		versionRecord(12, 900, 4, 5, K), versionRecord(12, 900, 8, 6, K),
 		versionRecord(13, 960, 8, 7, sealrollup.KindMat),
+		// slot 14: a window a merge wrote down, then a written-down absence.
+		withUpto(versionRecord(14, 1020, 9, 8, sealrollup.KindMat), sealrollup.Tick(9, 0)),
+		withUpto(versionRecord(15, 1080, 9, 0, sealrollup.KindNone), sealrollup.Tick(10, 0)),
 	}
 	b, err := appendSlotsOrder(nil, rs, nil, false)
 	if err != nil || b[4]&denseExtended == 0 || b[4]&denseAligned != 0 {
 		t.Fatalf("encode: mode %08b, %v", b[4], err)
 	}
-	var upto []uint64
-	all, err := decodeRun(nil, 1, 3, b, &upto)
-	if err != nil || !reflect.DeepEqual(all, rs) || !reflect.DeepEqual(upto, make([]uint64, len(rs))) {
+	all, err := DecodeRecordsInto(nil, 1, 3, b)
+	if err != nil || !reflect.DeepEqual(all, rs) {
 		t.Fatalf("versions round trip: %v\n got %+v\nwant %+v", err, all, rs)
 	}
 	live, err := DecodeSlotsInto(nil, 1, 3, b)
@@ -58,6 +66,16 @@ func TestDenseRecordVersions(t *testing.T) {
 	}
 	if v := vs[2]; v.Order != 1 || v.Upto != 0 || !v.Mat {
 		t.Errorf("fallback window version %+v", v)
+	}
+	if v := vs[7]; v.Order != sealrollup.Tick(9, 0) || v.Upto != sealrollup.Tick(9, 0) || !v.Mat {
+		t.Errorf("written-down window version %+v", v)
+	}
+	if v := vs[8]; v.Upto != sealrollup.Tick(10, 0) || !v.None {
+		t.Errorf("written-down absence version %+v", v)
+	}
+	// Upto belongs to Mat and None records only.
+	if _, err := appendSlotsOrder(nil, []sealrollup.Record{withUpto(versionRecord(3, 0, 5, 1, K), 7)}, nil, false); err == nil {
+		t.Error("raw record with upto encoded")
 	}
 	// Raw-only runs, including the common aligned run, keep the older bytes.
 	plain := []sealrollup.Record{versionRecord(3, 0, 5, 1, K), versionRecord(4, 60, 5, 2, K)}

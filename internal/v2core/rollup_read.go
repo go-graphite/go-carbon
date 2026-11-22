@@ -374,7 +374,7 @@ func (s *RollupSnapshot) MetricVersion(name string) any {
 // snapshots decode only added parts; removed parts invalidate cached authority.
 func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
 	if m := s.metrics[name]; m != nil && !m.latest.meta.Expired && archive > 0 && archive < len(m.latest.schema().Archives) && first >= 0 && first < last && last <= m.latest.schema().Archives[archive].Count {
-		return s.scanOpenArchive(ctx, name, archive, first, last, yield)
+		return s.scanWithOpenSlot(ctx, name, archive, first, last, yield)
 	}
 	return s.scanStoredArchive(ctx, name, archive, first, last, yield)
 }
@@ -479,159 +479,15 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			}
 		}
 	}
-	if s.directory != "" {
-		ctx = WithRollupDirectory(ctx, s.directory)
+	var skip func(*readPartMetric) bool
+	if cached != nil {
+		skip = func(part *readPartMetric) bool { _, ok := cached.parts[part.part.id]; return ok }
 	}
-	var shared *archiveIter
-	if s.opened == nil {
-		// Copied and bare-fixture stores keep one merged iterator over the
-		// legacy namespace and every selected file.
-		selected := make(map[archivePartIdentity]bool, len(partList))
-		var exact []v2part.Descriptor
-		seen := make(map[v2part.Digest]bool, len(partList))
-		complete := true
-		for _, part := range partList {
-			id := archivePartIdentity{part.part.key.Group, part.part.key.Part}
-			selected[id] = true
-			if d := part.part.descriptor; d != nil {
-				if !seen[d.SHA256] {
-					seen[d.SHA256] = true
-					exact = append(exact, *d)
-				}
-			} else {
-				complete = false
-			}
-		}
-		// Legacy/copied scopes without retained descriptors keep the manifest
-		// scan. Exact descriptors belong to this pinned immutable inventory.
-		if !complete {
-			exact = nil
-		}
-		var err error
-		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected, exact...); err != nil {
-			return err
-		}
-		defer shared.Close()
-	}
-	scan := func(it archiveCursor, part *readPartMetric) error {
-		if part.meta.Frontier.Order == 0 {
-			key := part.part.key
-			key.Metric = m.latest.policy.Name
-			key.Archive = v2part.MetadataArchive
-			key.BlockStart = 0
-			key.Ordinal = 0
-			encoded, e := v2part.Encode(key)
-			if e != nil {
-				return e
-			}
-			if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
-				return nil
-			}
-			// compactMetadata keeps no definition: decode the header only, so
-			// slim rows do not rebuild one per part.
-			meta, _, e := decodeRollupMetadataHeader(it.Value())
-			if e != nil {
-				return e
-			}
-			part.meta = compactMetadata(meta)
-		}
-		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
-			return nil
-		}
-		key := part.part.key
-		key.Metric = part.policy.Name
-		key.Archive = uint32(archive)
-		key.BlockStart = first
-		lower, err := v2part.Encode(key)
-		if err != nil {
-			return err
-		}
-		prefix := lower[:len(lower)-12]
-		emit := func(record sealrollup.Record) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if record.Slot >= archiveCount || record.Order > part.meta.Frontier.Order {
-				return errors.New("invalid rollup slot/frontier")
-			}
-			if record.Slot >= first && record.Slot < last && s.recordVisible(m, part.part.origin, record.Order) {
-				found = append(found, slotCandidate{record, part.part.origin})
-			}
-			return nil
-		}
-		// A run may straddle the lower bound. Never cross metric/archive/part.
-		valid := it.SeekLT(lower)
-		if !valid || !bytes.HasPrefix(it.Key(), prefix) {
-			valid = it.SeekGE(lower)
-		}
-		for valid && bytes.HasPrefix(it.Key(), prefix) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			key, err = v2part.Decode(it.Key())
-			if err != nil {
-				return err
-			}
-			if key.BlockStart >= last {
-				break
-			}
-			if key.Ordinal != 0 {
-				return errors.New("unexpected rollup ordinal")
-			}
-			value := it.Value()
-			if len(value) >= 4 && bytes.Equal(value[:4], []byte{'G', 'C', 'D', 1}) {
-				records, err := v2part.DecodeSlots(key.Archive, key.BlockStart, value)
-				if err != nil {
-					return err
-				}
-				for _, record := range records {
-					if err = emit(record); err != nil {
-						return err
-					}
-				}
-			} else {
-				record, err := sealrollup.DecodeRecord(archive, key.BlockStart, value)
-				if err != nil {
-					return err
-				}
-				if err = emit(record); err != nil {
-					return err
-				}
-			}
-			valid = it.Next()
-		}
+	if err := s.eachPartRecord(ctx, m, partList, archive, first, last, false, skip, func(record sealrollup.Record, origin partOrigin) error {
+		found = append(found, slotCandidate{record, origin})
 		return nil
-	}
-	for _, part := range partList {
-		if cached != nil {
-			if _, ok := cached.parts[part.part.id]; ok {
-				continue
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if shared != nil {
-			if err := scan(shared, part); err != nil {
-				return err
-			}
-			continue
-		}
-		it, err := s.opened.partCursor(ctx, s.snapshot, archivePartIdentity{part.part.key.Group, part.part.key.Part})
-		if err != nil {
-			return err
-		}
-		if it == nil {
-			continue
-		}
-		if err = errors.Join(scan(it, part), it.Error(), it.Close()); err != nil {
-			return err
-		}
-	}
-	if shared != nil {
-		if err := shared.Error(); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
 	}
 	if !slices.IsSortedFunc(found, compareCandidateSlot) {
 		slices.SortStableFunc(found, compareCandidateSlot)
@@ -731,6 +587,174 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		}
 	}
 	return ctx.Err()
+}
+
+// eachPartRecord visits the visible records of archive in physical slots
+// [first, last) of every part in partList that skip does not exclude, in part
+// order: each slot's per-slot winner per part, or with versions every stored
+// version (kinds and Upto included).
+func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, partList []*readPartMetric, archive int, first, last int64, versions bool, skip func(*readPartMetric) bool, visit func(sealrollup.Record, partOrigin) error) error {
+	archiveCount := m.latest.schema().Archives[archive].Count
+	if s.directory != "" {
+		ctx = WithRollupDirectory(ctx, s.directory)
+	}
+	var shared *archiveIter
+	if s.opened == nil {
+		// Copied and bare-fixture stores keep one merged iterator over the
+		// legacy namespace and every selected file.
+		selected := make(map[archivePartIdentity]bool, len(partList))
+		var exact []v2part.Descriptor
+		seen := make(map[v2part.Digest]bool, len(partList))
+		complete := true
+		for _, part := range partList {
+			id := archivePartIdentity{part.part.key.Group, part.part.key.Part}
+			selected[id] = true
+			if d := part.part.descriptor; d != nil {
+				if !seen[d.SHA256] {
+					seen[d.SHA256] = true
+					exact = append(exact, *d)
+				}
+			} else {
+				complete = false
+			}
+		}
+		// Legacy/copied scopes without retained descriptors keep the manifest
+		// scan. Exact descriptors belong to this pinned immutable inventory.
+		if !complete {
+			exact = nil
+		}
+		var err error
+		if shared, err = newArchiveIterSelected(ctx, s.snapshot, nil, selected, exact...); err != nil {
+			return err
+		}
+		defer shared.Close()
+	}
+	scan := func(it archiveCursor, part *readPartMetric) error {
+		if part.meta.Frontier.Order == 0 {
+			key := part.part.key
+			key.Metric = m.latest.policy.Name
+			key.Archive = v2part.MetadataArchive
+			key.BlockStart = 0
+			key.Ordinal = 0
+			encoded, e := v2part.Encode(key)
+			if e != nil {
+				return e
+			}
+			if !it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded) {
+				return nil
+			}
+			// compactMetadata keeps no definition: decode the header only, so
+			// slim rows do not rebuild one per part.
+			meta, _, e := decodeRollupMetadataHeader(it.Value())
+			if e != nil {
+				return e
+			}
+			part.meta = compactMetadata(meta)
+		}
+		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
+			return nil
+		}
+		key := part.part.key
+		key.Metric = part.policy.Name
+		key.Archive = uint32(archive)
+		key.BlockStart = first
+		lower, err := v2part.Encode(key)
+		if err != nil {
+			return err
+		}
+		prefix := lower[:len(lower)-12]
+		emit := func(record sealrollup.Record) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if record.Slot >= archiveCount || record.Order > part.meta.Frontier.Order {
+				return errors.New("invalid rollup slot/frontier")
+			}
+			if record.Slot >= first && record.Slot < last && s.recordVisible(m, part.part.origin, record.Order) {
+				if err := visit(record, part.part.origin); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		// A run may straddle the lower bound. Never cross metric/archive/part.
+		valid := it.SeekLT(lower)
+		if !valid || !bytes.HasPrefix(it.Key(), prefix) {
+			valid = it.SeekGE(lower)
+		}
+		for valid && bytes.HasPrefix(it.Key(), prefix) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			key, err = v2part.Decode(it.Key())
+			if err != nil {
+				return err
+			}
+			if key.BlockStart >= last {
+				break
+			}
+			if key.Ordinal != 0 {
+				return errors.New("unexpected rollup ordinal")
+			}
+			value := it.Value()
+			if len(value) >= 4 && bytes.Equal(value[:4], []byte{'G', 'C', 'D', 1}) {
+				var records []sealrollup.Record
+				if versions {
+					records, err = v2part.DecodeRecordsInto(nil, key.Archive, key.BlockStart, value)
+				} else {
+					records, err = v2part.DecodeSlots(key.Archive, key.BlockStart, value)
+				}
+				if err != nil {
+					return err
+				}
+				for _, record := range records {
+					if err = emit(record); err != nil {
+						return err
+					}
+				}
+			} else {
+				record, err := sealrollup.DecodeRecord(archive, key.BlockStart, value)
+				if err != nil {
+					return err
+				}
+				if err = emit(record); err != nil {
+					return err
+				}
+			}
+			valid = it.Next()
+		}
+		return nil
+	}
+	for _, part := range partList {
+		if skip != nil && skip(part) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if shared != nil {
+			if err := scan(shared, part); err != nil {
+				return err
+			}
+			continue
+		}
+		it, err := s.opened.partCursor(ctx, s.snapshot, archivePartIdentity{part.part.key.Group, part.part.key.Part})
+		if err != nil {
+			return err
+		}
+		if it == nil {
+			continue
+		}
+		if err = errors.Join(scan(it, part), it.Error(), it.Close()); err != nil {
+			return err
+		}
+	}
+	if shared != nil {
+		if err := shared.Error(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Records resolves the canonical full state needed by pending rollup planning.

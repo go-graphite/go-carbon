@@ -97,7 +97,6 @@ type Producer struct {
 	spareRecords                    [][]byte
 	outboxes                        []*v2core.Outbox // free; one in steady intake
 	applicationFrames               []partlog.CatalogFrame
-	applicationIDs                  []uint64
 	applications                    []*RegisteredApplication // by catalog ID
 	cursor                          uint64
 	applyOrder                      uint64
