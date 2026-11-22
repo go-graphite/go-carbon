@@ -44,6 +44,7 @@ type syncLiveOptions struct {
 }
 
 type syncLiveBackend struct {
+	health               *targetHealthGate
 	o                    syncLiveOptions
 	m                    *mover
 	client               *http.Client
@@ -152,6 +153,8 @@ func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 // Keep the existing ten-minute allowance for healthy batched work. Expiration
 // returns to verification's split/skip path, with its parent still usable.
 func (b *syncLiveBackend) readContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	// A canceled wait leaves ctx canceled; callers observe it through the read.
+	_ = b.health.wait(ctx)
 	budget := b.readTimeout
 	if budget <= 0 {
 		budget = 10 * time.Minute
@@ -607,7 +610,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 	if idle == 0 {
 		idle = defaultTransferIdle
 	}
-	o := copyOptions{onWaiting: func(waiting bool) {
+	o := copyOptions{health: b.health, onWaiting: func(waiting bool) {
 		if waiting {
 			b.waiting.Add(1)
 		} else {
@@ -633,6 +636,9 @@ type syncCopyDurableProgressKey struct{}
 // aborts (a store restarting) are rerun from its journal up to
 // --copy-attempts; names still failing are reported, not fatal.
 func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names []string, journal string) (syncCopyResult, error) {
+	if err := b.health.wait(ctx); err != nil {
+		return syncCopyResult{}, err
+	}
 	if b.o.noCopy {
 		return syncCopyResult{Failed: append([]string(nil), names...)}, nil
 	}

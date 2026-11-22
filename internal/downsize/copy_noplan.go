@@ -32,6 +32,7 @@ import (
 // points win in the importer, so redoing a batch is harmless.
 
 type copyOptions struct {
+	health                                           *targetHealthGate
 	stallNow                                         func() time.Time // optional clock for stall accounting; nil uses time.Now
 	onWaiting                                        func(bool)
 	onCommitted                                      func(int)         // optional observer, called after a durable new batch receipt
@@ -506,6 +507,9 @@ func (c *planFreeCopier) produce(ctx context.Context, source copySource, owner f
 // other definitive rejections split a multi-name batch in half; a single name
 // that still fails is journaled as a failure and skipped, so nothing stalls.
 func (c *planFreeCopier) send(ctx context.Context, source string, names []string, settled bool) error {
+	if err := c.o.health.wait(ctx); err != nil {
+		return err
+	}
 	if len(names) == 1 {
 		if err := chunkstore.ValidateMetricName(names[0]); err != nil {
 			return c.rejectName(source, names[0], 0, err)
@@ -673,6 +677,7 @@ func (c *planFreeCopier) summary(err error, skippedFile string) {
 	skipped := c.skippedCount()
 	backpressure, target429 := c.m.backpressureSnapshot(c.o.to)
 	fields := map[string]any{"discovered": c.stats.discovered.Load(), "resumed_skipped": c.stats.resumed.Load(), "not_owned": c.stats.notOwned.Load(), "copied": c.stats.copied.Load(), "skip_events": c.stats.failed.Load(), "skipped": skipped, "batches": c.stats.batches.Load(), "bytes": c.stats.bytes.Load(), "seconds": seconds, "retries": c.progress.retries.Load(), "http_429s": backpressure, "target_429s": target429.total(), "source_429s": backpressure - target429.total(), "target_429_reasons": target429.reasons()}
+	_, fields["target_health_pause_seconds"] = c.o.health.snapshot()
 	if skippedFile != "" {
 		fields["skipped_file"] = skippedFile
 		c.skipMu.Lock()

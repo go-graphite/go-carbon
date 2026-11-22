@@ -496,6 +496,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 		s.prog.mu.Unlock()
 		if live, ok := s.b.(*syncLiveBackend); ok {
 			snap.WaitingForStore = live.waiting.Load() > 0
+			snap.WaitingForTargetHealth, snap.TargetHealthPauseSeconds = live.health.snapshot()
 		}
 		snap.Quarantined, snap.PolicySkipped = o.issues.counts()
 		snap.Effective = o.policy
@@ -1544,6 +1545,9 @@ func (s *syncer) summary(err error) {
 		"verified": s.sum.Verified, "hole_names": s.sum.HoleNames, "hole_points": s.sum.HolePoints, "filled": s.sum.Filled,
 		"rounds": s.sum.Rounds, "residual": s.sum.Residual, "residual_names": s.sum.ResidualNames, "residual_points": points,
 		"pending_selections": pendingSelections, "residual_detail": residual, "forbidden_sources": forbidden, "phases": phases, "seconds": time.Since(s.started).Seconds(),
+	}
+	if live, ok := s.b.(*syncLiveBackend); ok {
+		_, fields["target_health_pause_seconds"] = live.health.snapshot()
 	}
 	fields["quarantined"], fields["policy_skipped"] = s.o.issues.counts()
 	if err != nil {
