@@ -124,7 +124,12 @@ func (e *coreEngine) runPartMerges(workers int) {
 			ticker := time.NewTicker(20 * time.Millisecond)
 			defer ticker.Stop()
 			unchanged := make(map[*coreOwner]*RollupInventory)
+			retry := time.Now().Add(10 * time.Second)
 			for {
+				if time.Now().After(retry) {
+					clear(unchanged)
+					retry = time.Now().Add(10 * time.Second)
+				}
 				for i := worker; i < len(e.owners); i += workers {
 					select {
 					case <-e.gcStop:
@@ -206,13 +211,13 @@ func (e *coreEngine) ForceMerge() (int, error) {
 // between its inputs, so the output's Seq range interleaves with no other
 // part. Record order ranges may still interleave (a closure record can carry
 // an older order than an earlier seal's records). A window of adjacent parts
-// qualifies once it holds at least ratio parts and its total is
+// qualifies once its total is
 // at least ratio/2 times its largest part, so a large input is not repeatedly
-// combined with only a few much smaller inputs. Small outputs use ratio 4,
+// combined with only a few much smaller inputs. Fresh windows also wait for
+// ratio inputs; aged windows need only the size balance. Small outputs use ratio 4,
 // so new seals fold into a small
 // part every few seal intervals and few small parts stay live for renders.
-// Larger outputs keep ratio sixteen, which leaves at most fifteen similar
-// parts quiescent below the cap. The cheapest qualifying window merges first.
+// Larger outputs keep ratio sixteen. The cheapest qualifying range merges first.
 const (
 	smallMergeBytes = 64 << 20
 	smallMergeRatio = 4
@@ -275,17 +280,37 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 					}
 					continue
 				}
-				if r := mergeRatio(total); uint64(j-i+1) < r || 2*total < r*largest {
+				if j == i || 2*total < mergeRatio(total)*largest {
+					continue
+				}
+				if uint64(j-i+1) < mergeRatio(total) && !o.mergeRangeOld(parts[i:j+1]) {
 					continue
 				}
 				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
 					chosen, best, bestScope = parts[i:j+1], total, s
 				}
-				break
 			}
 		}
 	}
 	return slices.Clone(chosen), nil
+}
+
+// Fresh parts wait for a full batch. Once every input has waited two seal
+// intervals, only the size balance remains, as in ClickHouse's age-lowered
+// merge base. File age affects scheduling only; no persisted format changes.
+func (o *coreOwner) mergeRangeOld(parts []v2part.Descriptor) bool {
+	interval := o.cfg.SealInterval
+	if interval == 0 {
+		interval = 10 * time.Second
+	}
+	before := time.Now().Add(-2 * interval)
+	for _, d := range parts {
+		info, err := os.Stat(filepath.Join(o.dir, "parts", hex.EncodeToString(d.SHA256[:])+".sst"))
+		if err != nil || info.ModTime().After(before) {
+			return false
+		}
+	}
+	return true
 }
 
 // seqCompare orders one owner's parts of a scope by seal: Seq, then, for
