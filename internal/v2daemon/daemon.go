@@ -59,6 +59,11 @@ type Config struct {
 	// record once all input is; placement and classic-mirror consumers retain
 	// their replay logs.
 	JournalSegmentBytes int64
+	// L0 replaces the producer journal with core L0 run files (layer 3 only):
+	// producers submit straight to core after the catalog sync, each packet's
+	// cursor is its last application order, and restart loads the L0 files.
+	// A legacy journal must be fully sealed (clean stop of the old build).
+	L0 bool
 	// fullReplay keeps and replays every segment; tests use it as the oracle.
 	fullReplay bool
 }
@@ -100,6 +105,7 @@ type Producer struct {
 	applications                    []*RegisteredApplication // by catalog ID
 	cursor                          uint64
 	applyOrder                      uint64
+	l0                              bool
 	journalDir                      string
 	segment                         int
 	segmentBytes, segmentLimit      int64
@@ -127,7 +133,7 @@ func coreConfig(c Config) v2core.Config {
 	if maxRows == 0 {
 		maxRows = 2 << 20
 	}
-	return v2core.Config{SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	return v2core.Config{L0: c.L0, SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open recovers durable journal layers through the normal core write queues.
@@ -146,6 +152,9 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	}
 	if c.Placement != nil && c.Layer < 2 {
 		return nil, errors.New("placement requires a durable journal layer")
+	}
+	if c.L0 && (c.Layer != 3 || c.Placement != nil || c.DurableApplications != nil || c.fullReplay) {
+		return nil, errors.New("L0 run files require layer 3 without placement, classic mirror or full replay")
 	}
 
 	if c.Layer < 0 || c.Layer > 3 || c.Producers < 1 || c.Shards < 1 {
@@ -192,7 +201,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	s := &Store{Core: e, cfg: c, lock: lock}
 	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
-		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes, fullReplay: c.fullReplay}
+		p := &Producer{l0: c.L0, applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval), segmentLimit: c.JournalSegmentBytes, fullReplay: c.fullReplay}
 		if c.Placement != nil {
 			p.placement = c.Placement
 			p.admission = c.Placement.Register()
@@ -212,7 +221,9 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			}
 			p.journalDir = filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", i))
 			var err error
-			if c.Layer >= 2 {
+			if c.L0 {
+				err = p.recoverL0(p.journalDir)
+			} else if c.Layer >= 2 {
 				err = p.recoverProducer(ctx, p.journalDir)
 			} else {
 				err = p.openCatalog()
@@ -228,6 +239,22 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	if err := group.Wait(); err != nil {
 		_ = s.Close()
 		return nil, err
+	}
+	if c.L0 {
+		// Continue each producer's order above every loaded application. An
+		// owner's frontier is the last order of each producer it sealed.
+		frontiers := e.DurableFrontiers()
+		err := e.LoadL0(func(owner int, b *v2core.Batch) bool {
+			producer := int((b.ID - 1) % uint64(c.Producers))
+			p := s.Producers[producer]
+			p.applyOrder = max(p.applyOrder, b.Order)
+			p.cursor = p.applyOrder
+			return b.Order > frontiers[owner][producer]
+		})
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("load L0 run files: %w", err)
+		}
 	}
 	e.ResumeMerges()
 
@@ -366,6 +393,9 @@ func (p *Producer) Drain() error {
 		return nil
 	}
 	if len(p.packets) == 0 {
+		if p.l0 {
+			return nil
+		}
 		return p.fail(p.retireJournal())
 	}
 	start := time.Now()
@@ -376,7 +406,7 @@ func (p *Producer) Drain() error {
 	}
 	p.CatalogSyncTime += time.Since(start)
 	rotated := false
-	if p.layer >= 2 {
+	if p.layer >= 2 && !p.l0 {
 		for _, record := range p.records {
 			var h [4]byte
 			binary.LittleEndian.PutUint32(h[:], uint32(len(record)))

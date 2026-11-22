@@ -1536,4 +1536,10 @@ shards = 0                        # 0: one immutable-part owner per producer
 # Pending reads publish every 1s; the mandatory input log still fsyncs every 1s.
 seal-interval = "10s"
 seal-max-rows = 131072
+# Standalone only: replace the producer journal with L0 run files. Each 1s
+# publication writes its new points to one unsynced file per owner before
+# readers see them; the seal unlinks it. A kill -9 loses no visible point, a
+# power loss up to one seal interval. Start only on a store whose previous
+# build stopped cleanly: a journal with unsealed records refuses to open.
+l0 = false
 read-budget-bytes = 268435456

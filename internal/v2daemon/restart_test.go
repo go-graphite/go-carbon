@@ -220,6 +220,9 @@ func checkRestartOracle(t *testing.T, s *Store, apps []Application, layer int) {
 		}
 	}
 	for id, rows := range want {
+		if layer == 3 && !s.cfg.KeepBaseRows {
+			break // archive records only, as in production
+		}
 		owner := v2core.Shard(id, s.cfg.Shards)
 		if layer == 3 {
 			owner = int(partsformat.Route(partsformat.ID(fmt.Sprintf("replay.%d", id-1)))) % s.cfg.Shards

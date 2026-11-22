@@ -165,6 +165,25 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 			_, batches[i].Policy, _ = p.catalog.Lookup(id)
 		}
 	}
+	if p.l0 {
+		// The packet's cursor is its last order: restart continues above
+		// max(sealed cursor, loaded L0 order) without a journal.
+		if direct {
+			p.packets[len(p.packets)-1].cursor = order
+		} else {
+			p.packets = append(p.packets, packet{rows: rows, batches: batches, cursor: order})
+		}
+		p.cursor, p.applyOrder = order, order
+		p.pendingRows += n
+		if p.pendingRows >= p.maxPending {
+			p.ForcedGroups++
+			return p.Drain()
+		}
+		if !time.Now().Before(p.nextSync) {
+			return p.Drain()
+		}
+		return nil
+	}
 	start := time.Now()
 	encoded, err := p.encoder.EncodeFrames(frames)
 	if err != nil {

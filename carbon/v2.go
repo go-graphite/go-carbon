@@ -36,6 +36,8 @@ type v2Config struct {
 	BaselinePath string    `toml:"baseline-path"`
 	SealInterval *Duration `toml:"seal-interval"`
 	SealMaxRows  int       `toml:"seal-max-rows"`
+	// L0 replaces the producer journal with L0 run files (standalone mode).
+	L0 bool `toml:"l0"`
 
 	Enabled         bool   `toml:"enabled"`
 	Mode            string `toml:"mode"`
@@ -194,6 +196,12 @@ func (app *App) startV2() error {
 		}
 
 		return nil
+	}
+	if c.V2.L0 {
+		if dual {
+			return errors.New("v2 l0 run files require standalone mode; classic dual write still mirrors through the producer journal")
+		}
+		storeConfig.L0 = true
 	}
 	if dual {
 		// Mirrors retain the whole log; finer rotation cannot reclaim their tail.
