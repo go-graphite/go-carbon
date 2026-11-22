@@ -876,8 +876,8 @@ func (r *coreRollups) commitPlan() {
 // ScanRollups reads one immutable core snapshot. It resolves each physical slot
 // by logical timestamp, then class and source-local order, before time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
-// Each open coarse window's slot is computed from the stored versions as
-// reads compute it (sealrollup.OpenSlot).
+// Every coarse window is computed from the stored versions as reads compute
+// it (windowRecords).
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	return scanRollupsWith(snapshot, nil, true, visit)
 }
@@ -894,40 +894,45 @@ type rollupScanEntry struct {
 	versions  []sealrollup.Record // every stored version, for ScanRollups only
 }
 
-// projectOpen replaces each open coarse window's slot in records (archive and
-// slot order) with its value computed from every visible stored version.
-func (e *rollupScanEntry) projectOpen(c sealrollup.Config, meta metricMetadata, records []sealrollup.Record) ([]sealrollup.Record, error) {
-	for a := 1; a < len(c.Archives); a++ {
-		start, physical, open := openWindow(c, meta, a)
-		if !open {
+// projectWindows replaces every coarse archive's slots in records (archive
+// and slot order) with their windows computed from every visible stored
+// version, as reads compute them (windowRecords).
+func (e *rollupScanEntry) projectWindows(c sealrollup.Config, meta metricMetadata, records []sealrollup.Record) ([]sealrollup.Record, error) {
+	if meta.Frontier.Order == 0 {
+		return records, nil
+	}
+	byKey := func(r sealrollup.Record, k [2]int64) int {
+		return cmp.Or(cmp.Compare(int64(r.Archive), k[0]), cmp.Compare(r.Slot, k[1]))
+	}
+	versions := slices.Clone(e.versions)
+	slices.SortStableFunc(versions, func(x, y sealrollup.Record) int { return byKey(x, [2]int64{int64(y.Archive), y.Slot}) })
+	load := func(l int, first, last int64, _ uint64) ([]sealrollup.Record, error) {
+		lo, _ := slices.BinarySearchFunc(versions, [2]int64{int64(l), first}, byKey)
+		hi, _ := slices.BinarySearchFunc(versions, [2]int64{int64(l), last}, byKey)
+		var out []sealrollup.Record
+		for _, r := range versions[lo:hi] {
+			if r.Order > meta.ResetOrder {
+				out = append(out, r)
+			}
+		}
+		return out, nil
+	}
+	out := make([]sealrollup.Record, 0, len(records))
+	for a := range c.Archives {
+		lo, _ := slices.BinarySearchFunc(records, [2]int64{int64(a), 0}, byKey)
+		hi, _ := slices.BinarySearchFunc(records, [2]int64{int64(a + 1), 0}, byKey)
+		if a == 0 {
+			out = append(out, records[lo:hi]...)
 			continue
 		}
-		i, found := slices.BinarySearchFunc(records, [2]int64{int64(a), physical}, func(r sealrollup.Record, k [2]int64) int {
-			return cmp.Or(cmp.Compare(int64(r.Archive), k[0]), cmp.Compare(r.Slot, k[1]))
-		})
-		var old *sealrollup.Record
-		if found {
-			old = &records[i]
-		}
-		r, ok, err := openSlotRecord(c, a, start, old, func(l int, first, last int64, _ uint64) ([]sealrollup.Record, error) {
-			var out []sealrollup.Record
-			for _, r := range e.versions {
-				if r.Archive == l && r.Slot >= first && r.Slot < last && r.Order > meta.ResetOrder {
-					out = append(out, r)
-				}
-			}
-			return out, nil
-		})
-		switch {
-		case err != nil:
+		if err := windowRecords(c, meta, a, 0, c.Archives[a].Count, records[lo:hi], load, func(r sealrollup.Record) error {
+			out = append(out, r)
+			return nil
+		}); err != nil {
 			return nil, err
-		case ok && found:
-			records[i] = r
-		case ok:
-			records = slices.Insert(records, i, r)
 		}
 	}
-	return records, nil
+	return out, nil
 }
 
 func scanIdentity(identities *PolicyCatalog, id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -1175,7 +1180,7 @@ func scanRollupsWith(snapshot *pebble.Snapshot, identities *PolicyCatalog, open 
 			return err
 		}
 		if open && meta.Version == 3 && !meta.Expired {
-			if records, err = e.projectOpen(policy.Config, compactMetadata(meta), records); err != nil {
+			if records, err = e.projectWindows(policy.Config, compactMetadata(meta), records); err != nil {
 				return err
 			}
 		}
