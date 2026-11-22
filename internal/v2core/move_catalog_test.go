@@ -318,10 +318,33 @@ func TestMoveCrossBoundaryRollupRebuild(t *testing.T) {
 				all = append(all, sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: p.Time % 100, Order: order, Sample: p}})
 			}
 			// This intentionally wrong existing partial must be replaced, not accumulated.
-			all = append(all, sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: 0, Order: 1, Sample: moveSample(1000, 40)}})
-			got, e := PlanMoveRollupRebuild(policy, all, 1010, 2)
-			if e != nil {
-				t.Fatal(e)
+			all = append(all, sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: 0, Order: 1, Sample: moveSample(1000, 40)}, Kind: sealrollup.KindMat})
+			var versions []sealrollup.Record
+			for _, r := range all {
+				var binding *partImport
+				if r.Order == 100 {
+					binding = &partImport{BaseOrder: 100, Descriptor: v2part.Descriptor{Source: v2part.Provenance{MinOrder: 100}}}
+				}
+				mapped, err := moveVersionRecord(r, binding)
+				if err != nil {
+					t.Fatal(err)
+				}
+				versions = append(versions, mapped)
+			}
+			var got []sealrollup.Record
+			meta := metricMetadata{Version: 3}
+			meta.Frontier.Order, meta.Frontier.MaxTime = 1, 1009
+			err := windowRecords(policy.Config, meta, 1, 0, 100, nil, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
+				var out []sealrollup.Record
+				for _, r := range versions {
+					if r.Archive == l && r.Slot >= first && r.Slot < last {
+						out = append(out, r)
+					}
+				}
+				return out, nil
+			}, func(r sealrollup.Record) error { got = append(got, r); return nil }, true)
+			if err != nil {
+				t.Fatal(err)
 			}
 			expectedBits := map[sealrollup.Method]uint64{sealrollup.Sum: math.Float64bits(55), sealrollup.Average: math.Float64bits(5.5), sealrollup.Last: math.Float64bits(10), sealrollup.First: math.Float64bits(1), sealrollup.Min: math.Float64bits(1), sealrollup.Max: math.Float64bits(10)}[method]
 
@@ -334,7 +357,7 @@ func TestMoveCrossBoundaryRollupRebuild(t *testing.T) {
 					}
 				} else {
 					count++
-					if r.Sample.Time != 1000 || r.Slot != 0 || r.Sample.Bits != expectedBits || r.Order != 2 {
+					if r.Sample.Time != 1000 || r.Slot != 0 || r.Sample.Bits != expectedBits || r.Order != moveLiveOrder+1 {
 						t.Fatalf("coarse mismatch got %+v want bits %x", r, expectedBits)
 					}
 				}

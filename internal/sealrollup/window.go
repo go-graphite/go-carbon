@@ -32,18 +32,19 @@ type Version struct {
 // Build one per read over the versions the pinned generation holds for the
 // name's ranges; it memoizes by (level, window or slot, as-of order).
 type Versions struct {
-	c      Config
-	recs   []Version
-	orders []uint64                   // distinct stored orders, ascending
-	bySlot []map[int64][]int          // level -> physical slot -> stored versions
-	wins   []map[int64]map[int64]bool // level -> physical slot -> window starts with events/versions
-	events []map[int64][]uint64       // level -> window start -> distinct raw orders below the level inside it
-	absent map[[2]int64]uint64        // (level, window) -> newest absence marker
-	passes map[uint64][]Version       // order -> raw versions (and ghosts) its pass wrote
-	memoC  map[[2]uint64]bool         // (order, level) -> the pass wrote at that level
-	memoV  map[[3]int64]slotValue     // (level, window, asOf)
-	memoS  map[[3]int64]slotValue     // (level, slot, asOf)
-	stats  struct{ walks, deepWalks int }
+	timeFirst bool
+	c         Config
+	recs      []Version
+	orders    []uint64                   // distinct stored orders, ascending
+	bySlot    []map[int64][]int          // level -> physical slot -> stored versions
+	wins      []map[int64]map[int64]bool // level -> physical slot -> window starts with events/versions
+	events    []map[int64][]uint64       // level -> window start -> distinct raw orders below the level inside it
+	absent    map[[2]int64]uint64        // (level, window) -> newest absence marker
+	passes    map[uint64][]Version       // order -> raw versions (and ghosts) its pass wrote
+	memoC     map[[2]uint64]bool         // (order, level) -> the pass wrote at that level
+	memoV     map[[3]int64]slotValue     // (level, window, asOf)
+	memoS     map[[3]int64]slotValue     // (level, slot, asOf)
+	stats     struct{ walks, deepWalks int }
 }
 
 type slotValue struct {
@@ -53,8 +54,11 @@ type slotValue struct {
 }
 
 // NewVersions indexes recs. It keeps recs; the caller must not modify them.
-func NewVersions(c Config, recs []Version) *Versions {
+func NewVersions(c Config, recs []Version, timeFirst ...bool) *Versions {
 	v := &Versions{c: c, recs: recs}
+	if len(timeFirst) > 0 {
+		v.timeFirst = timeFirst[0]
+	}
 	v.index()
 	return v
 }
@@ -495,7 +499,11 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 	}
 	best := slotValue{}
 	consider := func(v slotValue) {
-		if v.ok && (!best.ok || newer(v.s.Sequence, v.stored, v.s.Time, best.s.Sequence, best.stored, best.s.Time)) {
+		isNewer := newer(v.s.Sequence, v.stored, v.s.Time, best.s.Sequence, best.stored, best.s.Time)
+		if f.timeFirst && v.s.Time != best.s.Time {
+			isNewer = v.s.Time > best.s.Time
+		}
+		if v.ok && (!best.ok || isNewer) {
 			best = v
 		}
 	}
@@ -537,7 +545,7 @@ func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from
 // contiguous run of slots), and once more for the settle check. Every window
 // is computed by Versions, the function the seal and merges use, so the read
 // equals Versions over every version under the window (WindowRanges).
-func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last int64, from uint64) ([]Record, error), visit func(w int64, p Sample, ok bool)) error {
+func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last int64, from uint64) ([]Record, error), visit func(w int64, p Sample, ok bool), timeFirst ...bool) error {
 	// The descent tracks time spans still open, not windows: a long range
 	// has few spans but a huge number of finer windows.
 	type span struct{ lo, hi int64 }
@@ -637,7 +645,7 @@ func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last in
 		}
 		open = next
 	}
-	versions := NewVersions(c, recs)
+	versions := NewVersions(c, recs, timeFirst...)
 	for _, w := range windows {
 		p, ok := versions.SlotValue(a, slot(w, c.Archives[a]))
 		visit(w, p, ok)

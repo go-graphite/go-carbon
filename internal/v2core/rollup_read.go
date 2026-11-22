@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -91,6 +92,7 @@ type readPart struct {
 	metrics     map[string]*readPartMetric
 	bytes       int64
 	origin      partOrigin
+	imported    *partImport
 }
 type readMetricState struct {
 	*PolicyIdentity
@@ -386,12 +388,6 @@ func (s *RollupSnapshot) scanStoredArchive(ctx context.Context, name string, arc
 	if archive < 0 || archive >= len(m.latest.schema().Archives) || first < 0 || last > m.latest.schema().Archives[archive].Count {
 		return errors.New("invalid archive range")
 	}
-	if archive > 0 && s.moves[m] != nil && s.moves[m].authority != nil {
-		return s.scanAdoptedCoarse(ctx, name, archive, first, last, yield)
-	}
-	if archive > 0 && s.moves[m] != nil && len(s.moves[m].origins) > 1 {
-		return errors.New("mixed-origin coarse reads require installed rollup rebuild authority")
-	}
 	return s.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, _ partOrigin) error { return yield(record) })
 }
 
@@ -678,6 +674,13 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 				return errors.New("invalid rollup slot/frontier")
 			}
 			if record.Slot >= first && record.Slot < last && s.recordVisible(m, part.part.origin, record.Order) {
+				if versions && s.hasCopied {
+					var err error
+					record, err = moveVersionRecord(record, part.part.imported)
+					if err != nil {
+						return err
+					}
+				}
 				if err := visit(record, part.part.origin); err != nil {
 					return err
 				}
@@ -936,6 +939,23 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 			if origin.Class == hiddenPart {
 				valid = it.SeekGE(v2part.PrefixEnd(scope))
 				continue
+			}
+			if origin.Class == CopiedPart {
+				key, e := moveCatalogKey(key)
+				if e != nil {
+					return nil, e
+				}
+				b, closer, e := snapshot.Get(key)
+				if e != nil {
+					return nil, e
+				}
+				var binding partImport
+				e = json.Unmarshal(b, &binding)
+				_ = closer.Close()
+				if e != nil {
+					return nil, e
+				}
+				part.imported = &binding
 			}
 			part.origin = origin
 			end := v2part.PrefixEnd(scope)

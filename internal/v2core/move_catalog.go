@@ -28,6 +28,7 @@ const (
 var movePartPrefix = []byte{255, 'V', '2', 'M', 0}
 
 type partImport struct {
+	BaseOrder  uint64 `json:",omitempty"`
 	Version    int
 	Origin     partOrigin
 	Descriptor v2part.Descriptor
@@ -346,4 +347,100 @@ func copiedNameVisible(snapshot *pebble.Snapshot, k v2part.Key) (bool, error) {
 		return false, errors.New("invalid copied owner placement")
 	}
 	return binding.Owners == 0 || int(v2part.Route(k.Metric))%binding.Owners == binding.Owner, nil
+}
+
+// The comparison class occupies one bit in the query's order space. This is
+// deliberately below Tick's four archive bits, and is never written into an SST.
+// Receiver writes, including pre-attach writes, win equal-time conflicts.
+const moveLiveOrder = uint64(1) << 58
+
+func moveVersionRecord(r sealrollup.Record, binding *partImport) (sealrollup.Record, error) {
+	mapOrder := func(order uint64) (uint64, error) {
+		if order == 0 {
+			return 0, nil
+		}
+		if order >= moveLiveOrder {
+			return 0, errors.New("move version order exhausted")
+		}
+		if binding == nil {
+			return moveLiveOrder + order, nil
+		}
+		base := binding.BaseOrder
+		if base == 0 {
+			base = binding.Descriptor.Source.MinOrder
+		}
+		minOrder := binding.Descriptor.Source.MinOrder
+		if base < minOrder || order >= moveLiveOrder-(base-minOrder) {
+			return 0, errors.New("copied version order exhausted")
+		}
+		return base + order - minOrder, nil
+	}
+	var err error
+	if r.Order, err = mapOrder(r.Order); err != nil {
+		return r, err
+	}
+	r.Sample.Sequence = r.Order
+	if r.Upto != 0 {
+		order, e := mapOrder(r.Upto >> 4)
+		if e != nil {
+			return r, e
+		}
+		r.Upto = sealrollup.Tick(order, int(r.Upto&15))
+	}
+	return r, nil
+}
+
+// Allocate one receiving range per donor stream, retaining holes so bounds on
+// older events (Upto) translate by the same offset as records. Bindings and the
+// receiving identity are published in the same manifest edit.
+func moveOrderBases(db *pebble.DB, parts []MovePart) (map[partOrigin]uint64, error) {
+	bases := map[partOrigin]uint64{}
+	next := uint64(0)
+	it, err := db.NewIter(&pebble.IterOptions{LowerBound: movePartPrefix, UpperBound: v2part.PrefixEnd(movePartPrefix)})
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+	for valid := it.First(); valid; valid = it.Next() {
+		var b partImport
+		if err = json.Unmarshal(it.Value(), &b); err != nil {
+			return nil, err
+		}
+		if b.Pending || b.BaseOrder == 0 {
+			continue
+		}
+		if b.BaseOrder < b.Descriptor.Source.MinOrder {
+			return nil, errors.New("invalid copied order base")
+		}
+		offset := b.BaseOrder - b.Descriptor.Source.MinOrder
+		if old, ok := bases[b.Origin]; ok && old != offset {
+			return nil, errors.New("copied stream order range changed")
+		}
+		bases[b.Origin] = offset
+		next = max(next, offset+b.Descriptor.Source.MaxOrder)
+	}
+	if err = it.Error(); err != nil {
+		return nil, err
+	}
+	maxima := map[partOrigin]uint64{}
+	var streams []partOrigin
+	for _, part := range parts {
+		d := part.Descriptor
+		o := partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}
+		if _, ok := maxima[o]; !ok {
+			streams = append(streams, o)
+		}
+		maxima[o] = max(maxima[o], d.Source.MaxOrder)
+	}
+	for _, o := range streams {
+		if _, ok := bases[o]; ok {
+			continue
+		}
+		if maxima[o] >= moveLiveOrder-next {
+			return nil, errors.New("copied order range exhausted")
+		}
+		bases[o] = next
+		next += maxima[o]
+	}
+	return bases, nil
 }
