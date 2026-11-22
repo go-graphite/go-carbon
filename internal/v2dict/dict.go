@@ -328,7 +328,7 @@ func (d *Dict) Lookup(group string, vshard uint16, name []byte) (Entry, bool) {
 // entry. It reports false for an ID never assigned or no longer any name's
 // newest entry (a revived name's old ID, which is always deleted).
 func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]byte, Entry, bool) {
-	var ab, kb [256]byte
+	var ab, kb, nb [256]byte
 	sk := scopeKey(ab[:0], group, vshard)
 	d.mu.RLock()
 	if k, v := d.buf.getID(sk, id); k != nil {
@@ -354,7 +354,7 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 		d.mu.RUnlock()
 		if v != nil {
 			e = decode(v)
-		} else if ne, ok := getLevels(s.levels[i+1:], it.key, nil); ok {
+		} else if ne, ok := getLevels(s.levels[i+1:], it.key, nb[:0]); ok {
 			e = ne
 		}
 		if e.ID != id {
