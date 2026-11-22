@@ -15,6 +15,7 @@ func (r *coreRollups) plan(in coreSealInput) (coreSealPlan, error) {
 	if err != nil {
 		return out, err
 	}
+	orderProofPlanned(r, &out)
 	out.Files, out.PartSpecs = expandPlannedParts(out.Parts, plannedOwners(r))
 	out.Parts = nil
 	return out, nil

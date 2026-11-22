@@ -27,6 +27,11 @@ type Provenance struct {
 	Stream      string
 	MinOrder    uint64
 	MaxOrder    uint64
+	// Seq is the owner's seal number (its frontier NextPart) at publish; a
+	// merged part takes its inputs' maximum. Merges take only Seq-adjacent
+	// parts. Older producers omit it (zero): such parts sort before every
+	// numbered part, among themselves by MinOrder, which was their order.
+	Seq uint64 `json:",omitempty"`
 }
 
 type Coverage struct {

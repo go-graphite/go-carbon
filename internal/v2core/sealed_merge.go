@@ -201,9 +201,12 @@ func (e *coreEngine) ForceMerge() (int, error) {
 	return int(merged.Load()), nil
 }
 
-// Merges combine only sequence-adjacent local parts of one group/partition
-// (ClickHouse's rule), so their order ranges never interleave. A window of
-// adjacent parts qualifies once it holds at least ratio parts and its total is
+// Merges combine only Seq-adjacent live local parts of one group/partition
+// (ClickHouse's block-number rule): a window never skips a live part sealed
+// between its inputs, so the output's Seq range interleaves with no other
+// part. Record order ranges may still interleave (a closure record can carry
+// an older order than an earlier seal's records). A window of adjacent parts
+// qualifies once it holds at least ratio parts and its total is
 // at least ratio/2 times its largest part, so a large input is not repeatedly
 // combined with only a few much smaller inputs. Small outputs use ratio 4,
 // so new seals fold into a small
@@ -259,12 +262,7 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 	var best uint64
 	var bestScope scope
 	for s, parts := range scopes {
-		slices.SortFunc(parts, func(a, b v2part.Descriptor) int {
-			if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
-				return c
-			}
-			return bytes.Compare(a.SHA256[:], b.SHA256[:])
-		})
+		slices.SortFunc(parts, seqCompare)
 		for i := range parts {
 			var total, largest uint64
 			// A window never spans a key generation change (name keys, then ID
@@ -293,13 +291,26 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 	return slices.Clone(chosen), nil
 }
 
+// seqCompare orders one owner's parts of a scope by seal: Seq, then, for
+// parts from producers without Seq (all zero), MinOrder, then digest.
+func seqCompare(a, b v2part.Descriptor) int {
+	if c := cmp.Compare(a.Source.Seq, b.Source.Seq); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.Source.MinOrder, b.Source.MinOrder); c != 0 {
+		return c
+	}
+	return bytes.Compare(a.SHA256[:], b.SHA256[:])
+}
+
 // ClickHouse merge_with_ttl_timeout: at most one TTL rewrite per owner per
 // four hours, so expiry work stays a small, bounded share of merge service.
 const ttlRewriteSeconds = 4 * 3600
 
-// When no size-tier merge is due, rewrite the local part whose earliest data
-// expiry has passed (ClickHouse TTL merge). Parts whose latest expiry has
-// passed are dropped whole by GC instead and are not rewritten.
+// When no size-tier merge is due, rewrite the oldest local part of its scope
+// whose earliest data expiry has passed (ClickHouse TTL merge): only a prefix
+// merge drops expired records. Parts whose latest expiry has passed are
+// dropped whole by GC instead and are not rewritten.
 func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, limit uint64) ([]v2part.Descriptor, error) {
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
@@ -325,7 +336,7 @@ func (o *coreOwner) selectTTLRewrite(snapshot *pebble.Snapshot, clock int64, lim
 		if err != nil {
 			return nil, err
 		}
-		if origin.Class == LivePart {
+		if origin.Class == LivePart && o.oldestInScope([]v2part.Descriptor{d}) {
 			chosen = []v2part.Descriptor{d}
 		}
 	}
@@ -510,7 +521,7 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 }
 
 // mergeParts is mergePartFiles; prefix says the inputs hold their scope's
-// oldest part, so every version at or below their newest order: only such a
+// oldest part, so every version up to their newest Seq: only such a
 // merge writes windows down and drops the versions they carry (mergeVersions).
 // dict and identities are the store dictionary that ID-keyed inputs resolve
 // through: it drops deleted and revived-away IDs, and names a GCI2 metric
@@ -535,6 +546,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		spec.MaxTime = max(spec.MaxTime, d.Coverage.MaxTime)
 		spec.Source.MinOrder = min(spec.Source.MinOrder, d.Source.MinOrder)
 		spec.Source.MaxOrder = max(spec.Source.MaxOrder, d.Source.MaxOrder)
+		spec.Source.Seq = max(spec.Source.Seq, d.Source.Seq)
 		v2part.RegisterPolicies(d.Coverage.Policies)
 		for _, p := range d.Coverage.Policies {
 			id := struct {
@@ -616,6 +628,12 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 	var members []*mergeCursor
 	var records mergeRecordHeap
 	var versions mergeVersions
+	// A prefix merge that drops expired records writes their windows down
+	// first, also for names without versions: the TTL write-down
+	// (ClickHouse TTL merge), so a coarse window outlives its raw records.
+	for _, d := range inputs {
+		versions.ttl = versions.ttl || prefix && d.Coverage.MinExpiry != 0 && d.Coverage.MinExpiry < retire
+	}
 	var key, metaBytes []byte
 	var config sealrollup.Config
 	var expiry expiryBounds
@@ -1003,14 +1021,16 @@ func (o *coreOwner) observeSealedMergeBudget() error {
 	return nil
 }
 
-// oldestInScope reports whether inputs, sequence-adjacent parts of one scope,
+// oldestInScope reports whether inputs, Seq-adjacent parts of one scope,
 // hold that scope's oldest part: no part of the scope from the owner's source
-// starts at a lower order. Parts from another source (moves, imports) carry
-// their windows as materialized values and are outside the merge's view.
+// sorts before them (seqCompare). Parts from another source (moves, imports)
+// carry their windows as materialized values and are outside the merge's view.
 func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
-	first := inputs[0].Source.MinOrder
+	first := inputs[0]
 	for _, d := range inputs {
-		first = min(first, d.Source.MinOrder)
+		if seqCompare(d, first) < 0 {
+			first = d
+		}
 	}
 	o.gc.mu.Lock()
 	inventory := o.gc.inventory
@@ -1020,7 +1040,7 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 		if err != nil {
 			return false
 		}
-		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.Incarnation == o.partSource.Incarnation && d.Source.Stream == o.partSource.Stream && d.Source.MinOrder < first {
+		if d.Scope.Group == inputs[0].Scope.Group && d.Scope.Partition == inputs[0].Scope.Partition && d.Source.Incarnation == o.partSource.Incarnation && d.Source.Stream == o.partSource.Stream && seqCompare(d, first) < 0 {
 			return false
 		}
 	}
@@ -1029,7 +1049,7 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 
 // mergeVersions merges one name whose inputs carry record versions: a run
 // with kinds (versions, ghosts, windows), or a physical slot more than one
-// input holds. A prefix merge that drops a record (a superseded version, a
+// input holds, or, in a prefix merge, an expired record. A prefix merge that drops a record (a superseded version, a
 // ghost or an expired record) first writes windows down
 // (sealrollup.WriteDown); any other merge keeps every version but expired
 // ones, so a later prefix merge still sees them. Rollups stay a pure function
@@ -1047,6 +1067,7 @@ type mergeVersions struct {
 	keep, gone          []bool
 	win, last           []bool // records[i], out[i]: its slot's per-slot winner
 	spans               []mergeSpan
+	ttl                 bool // a prefix merge whose inputs hold expired records
 }
 
 // mergeSpan is one input run's archive and physical slot range.
@@ -1061,7 +1082,8 @@ func spanBefore(a, b mergeSpan) bool {
 }
 
 // merge returns the name's output records sorted by (archive, slot), or nil
-// when no input carries versions (the per-slot merge then runs unchanged).
+// when no input carries versions and a prefix merge drops no expired record
+// (the per-slot merge then runs unchanged).
 func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
 	// Most names hold no versions: runs without kinds whose slots no other
 	// run holds. Their headers and slot columns say so without decoding.
@@ -1094,7 +1116,7 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 			plain = spanBefore(m.spans[i-1], m.spans[i])
 		}
 	}
-	if plain {
+	if plain && !m.ttl {
 		return nil, nil
 	}
 	m.records, m.from = m.records[:0], m.from[:0]
@@ -1153,7 +1175,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 	// record of a slot, the live record with the greatest time, then order),
 	// and whether a prefix merge drops a record, which needs the write-down.
 	m.win = append(m.win[:0], make([]bool, len(recs))...)
-	drops := false
+	drops, expiring := false, false
 	for g := 0; g < len(m.order); {
 		h := g + 1
 		first := &recs[m.order[g]]
@@ -1172,6 +1194,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 			if r.Kind == sealrollup.KindGhost || expired(r) || r.Slot != r.Sample.Time/ar.Step%ar.Count {
 				drops = true
 			}
+			expiring = expiring || expired(r)
 			if r.Kind != sealrollup.KindRaw && (r.Kind != sealrollup.KindMat || r.Upto != 0) || expired(r) {
 				continue
 			}
@@ -1199,7 +1222,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		}
 		g = h
 	}
-	if !versioned {
+	if !versioned && !(prefix && expiring) {
 		return nil, nil
 	}
 	m.keep = append(m.keep[:0], make([]bool, len(recs))...)

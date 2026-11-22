@@ -86,8 +86,8 @@ func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descripto
 	if d.DictGeneration != 0 {
 		t.Fatal("decoded part digests cover name-keyed parts")
 	}
-	// The goldens predate DictGeneration (zero here): print d as they did.
-	_, _ = fmt.Fprintf(w, "%s}\n", strings.TrimSuffix(fmt.Sprintf("%+v", d), " DictGeneration:0}"))
+	// The goldens predate DictGeneration and part publication sequences.
+	_, _ = fmt.Fprint(w, withoutSeq(strings.TrimSuffix(fmt.Sprintf("%+v", d), " DictGeneration:0}")+"}\n"))
 }
 
 // partRunLengths lists the slot count of every dense run in a part, per name
