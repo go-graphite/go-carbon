@@ -65,13 +65,15 @@ var errCatalog = errors.New("invalid name catalog")
 
 const catalogLimit = 64 << 20
 
+var catalogCRC = crc32.MakeTable(crc32.Castagnoli)
+
 func catalogHeader(epoch [16]byte) []byte {
 	b := append([]byte("GCNCAT02"), epoch[:]...)
-	return binary.LittleEndian.AppendUint32(b, crc32.Checksum(b, predictorV3CRC))
+	return binary.LittleEndian.AppendUint32(b, crc32.Checksum(b, catalogCRC))
 }
 func parseCatalogHeader(b []byte) ([16]byte, error) {
 	var e [16]byte
-	if len(b) != 28 || string(b[:8]) != "GCNCAT02" || crc32.Checksum(b[:24], predictorV3CRC) != binary.LittleEndian.Uint32(b[24:]) {
+	if len(b) != 28 || string(b[:8]) != "GCNCAT02" || crc32.Checksum(b[:24], catalogCRC) != binary.LittleEndian.Uint32(b[24:]) {
 		return e, errCatalog
 	}
 	copy(e[:], b[8:24])
@@ -84,9 +86,9 @@ func catalogRecord(id uint64, key string, definition []byte) []byte {
 	b = binary.AppendUvarint(b, uint64(len(definition)))
 	b = append(b, definition...)
 	out := binary.LittleEndian.AppendUint32(nil, uint32(len(b)))
-	out = binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, predictorV3CRC))
+	out = binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, catalogCRC))
 	out = append(out, b...)
-	return binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, predictorV3CRC))
+	return binary.LittleEndian.AppendUint32(out, crc32.Checksum(out, catalogCRC))
 }
 func syncCatalogDir(dir string) error {
 	f, e := os.Open(dir)
@@ -235,7 +237,7 @@ func (c *NameCatalog) recoverCheckpoint(f *os.File) error {
 	if st.Size() < 40 {
 		return errCatalog
 	}
-	crc := crc32.New(predictorV3CRC)
+	crc := crc32.New(catalogCRC)
 	if _, err = io.Copy(crc, io.NewSectionReader(f, 0, st.Size()-4)); err != nil {
 		return err
 	}
@@ -278,7 +280,7 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 	if e != nil {
 		return int64(n), e
 	}
-	if crc32.Checksum(h[:4], predictorV3CRC) != binary.LittleEndian.Uint32(h[4:]) {
+	if crc32.Checksum(h[:4], catalogCRC) != binary.LittleEndian.Uint32(h[4:]) {
 		return 0, errCatalog
 	}
 	size := binary.LittleEndian.Uint32(h[:])
@@ -292,8 +294,8 @@ func (c *NameCatalog) readRecord(r io.Reader) (int64, error) {
 	if e != nil {
 		return int64(n) + 4, e
 	}
-	crc := crc32.Update(0, predictorV3CRC, h[:])
-	crc = crc32.Update(crc, predictorV3CRC, b[:size])
+	crc := crc32.Update(0, catalogCRC, h[:])
+	crc = crc32.Update(crc, catalogCRC, b[:size])
 	if crc != binary.LittleEndian.Uint32(b[size:]) {
 		return 0, errCatalog
 	}
@@ -474,7 +476,7 @@ func (c *NameCatalog) checkpoint() error {
 	}()
 	b := catalogHeader(c.epoch)
 	b = binary.LittleEndian.AppendUint64(b, c.Count())
-	crc := crc32.New(predictorV3CRC)
+	crc := crc32.New(catalogCRC)
 	write := func(b []byte) error { _, _ = crc.Write(b); return writeCatalogBytes(f, b) }
 	if e = write(b); e != nil {
 		return e

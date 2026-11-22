@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,76 +20,47 @@ func newTestCatalog(t testing.TB) *NameCatalog {
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
+
+// nameFixture is deterministic: binary keys, varied definitions, 2000 names.
+func nameFixture() (keys []string, defs [][]byte) {
+	for i := 0; i < 2000; i++ {
+		keys = append(keys, string([]byte{'a', 0, byte(i % 31), byte(i), byte(i >> 8)}))
+		defs = append(defs, []byte{0, 1, byte(i % 7), 255})
+	}
+	return keys, defs
+}
+
+// checkNames asserts IDs 1..n resolve to the fixture names and definitions.
+func checkNames(t testing.TB, c *NameCatalog, keys []string, defs [][]byte) {
+	t.Helper()
+	for i, k := range keys {
+		key, def, ok := c.Lookup(uint64(i + 1))
+		if !ok || key != k || !bytes.Equal(def, defs[i]) {
+			t.Fatal("id", i+1)
+		}
+	}
+}
+
+// Interning in chunks with checkpoints between them keeps every ID stable, and
+// re-interning an existing name returns its ID.
 func TestCatalogSegmentsExact(t *testing.T) {
 	t.Parallel()
 	c := newTestCatalog(t)
-	fs := v3Fixture()
-	for _, sparse := range []bool{false, true} {
-		for _, chunk := range [][]DictionaryFrame{fs[:700], fs[700:1400], fs[1400:]} {
-			e := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: sparse}
-			b, err := e.Encode(chunk)
-			e.Close()
-			if err != nil {
-				t.Fatal(err)
+	keys, defs := nameFixture()
+	for _, r := range [][2]int{{0, 700}, {700, 1400}, {1400, 2000}} {
+		for i := r[0]; i < r[1]; i++ {
+			id, err := c.Intern(keys[i], defs[i])
+			if err != nil || id != uint64(i+1) {
+				t.Fatal(i, id, err)
 			}
-			if err = c.Checkpoint(); err != nil {
-				t.Fatal(err)
-			}
-			d := CatalogDecoder{Catalog: c}
-			got, err := d.Decode(b)
-			d.Close()
-			if err != nil {
-				t.Fatal(err)
-			}
-			exactV3(t, chunk, got)
+		}
+		if err := c.Checkpoint(); err != nil {
+			t.Fatal(err)
 		}
 	}
-	other := newTestCatalog(t)
-	e := CatalogEncoder{Catalog: c}
-	b, err := e.Encode(fs[:2])
-	e.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := CatalogDecoder{Catalog: other}
-	defer d.Close()
-	if _, err = d.Decode(b); err == nil {
-		t.Fatal("epoch mismatch accepted")
-	}
-}
-func TestCatalogCodecCorrupt(t *testing.T) {
-	t.Parallel()
-	c := newTestCatalog(t)
-	e := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
-	defer e.Close()
-	b, err := e.Encode(v3Fixture()[:3])
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range b {
-		d := CatalogDecoder{Catalog: c}
-		_, err = d.Decode(b[:i])
-		d.Close()
-		if err == nil {
-			t.Fatal("truncation", i)
-		}
-		bad := bytes.Clone(b)
-		bad[i] ^= 1
-		d = CatalogDecoder{Catalog: c}
-		_, err = d.Decode(bad)
-		d.Close()
-		if err == nil {
-			t.Fatal("corruption", i)
-		}
-	}
-	next, err := e.Encode(v3Fixture()[3:6])
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := CatalogDecoder{Catalog: c}
-	defer d.Close()
-	if _, err = d.Decode(next); err == nil {
-		t.Fatal("missing prefix accepted")
+	checkNames(t, c, keys, defs)
+	if id, err := c.Intern(keys[5], defs[5]); err != nil || id != 6 {
+		t.Fatal("re-intern", id, err)
 	}
 }
 func TestCatalogWALTruncationAndCorrupt(t *testing.T) {
@@ -147,27 +117,13 @@ func TestCatalogCheckpointSIGKILL(t *testing.T) {
 		if e != nil {
 			panic(e)
 		}
-		fs := v3Fixture()[:50]
-		enc := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
-		b, e := enc.Encode(fs)
-		if e != nil {
-			panic(e)
+		keys, defs := nameFixture()
+		for i := range 50 {
+			if _, e = c.Intern(keys[i], defs[i]); e != nil {
+				panic(e)
+			}
 		}
 		if e = c.Sync(); e != nil {
-			panic(e)
-		}
-		f, e := os.Create(filepath.Join(dir, "segment"))
-		if e != nil {
-			panic(e)
-		}
-		if e = writeCatalogBytes(f, b); e != nil {
-			panic(e)
-		}
-		if e = f.Sync(); e != nil {
-			panic(e)
-		}
-		_ = f.Close()
-		if e = syncCatalogDir(dir); e != nil {
 			panic(e)
 		}
 		stage := os.Getenv("CATALOG_KILL_STAGE")
@@ -214,19 +170,13 @@ func TestCatalogCheckpointSIGKILL(t *testing.T) {
 				t.Fatal(e)
 			}
 			defer c.Close()
-			b, e := os.ReadFile(filepath.Join(dir, "segment"))
-			if e != nil {
-				t.Fatal(e)
+			keys, defs := nameFixture()
+			if c.Count() != 50 {
+				t.Fatal("count", c.Count())
 			}
-			d := CatalogDecoder{Catalog: c}
-			defer d.Close()
-			got, e := d.Decode(b)
-			if e != nil {
-				t.Fatal(e)
-			}
-			exactV3(t, v3Fixture()[:50], got)
-			if _, e = c.Intern("after restart", []byte{0, 255}); e != nil {
-				t.Fatal(e)
+			checkNames(t, c, keys[:50], defs[:50])
+			if id, e := c.Intern("after restart", []byte{0, 255}); e != nil || id != 51 {
+				t.Fatal(id, e)
 			}
 			if e = c.Checkpoint(); e != nil {
 				t.Fatal(e)
@@ -234,16 +184,31 @@ func TestCatalogCheckpointSIGKILL(t *testing.T) {
 		})
 	}
 }
+
+// Arbitrary WAL bytes must open with an error or a consistent catalog, never panic.
 func FuzzCatalogDecode(f *testing.F) {
-	c := newTestCatalog(f)
-	e := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
-	b, err := e.Encode(v3Fixture()[:2])
-	e.Close()
+	dir := f.TempDir()
+	c, err := OpenNameCatalog(dir)
 	if err != nil {
 		f.Fatal(err)
 	}
-	f.Add(b)
-	f.Fuzz(func(t *testing.T, b []byte) { d := CatalogDecoder{Catalog: c}; defer d.Close(); _, _ = d.Decode(b) })
+	_, _ = c.Intern("one", []byte{1})
+	_ = c.Sync()
+	_ = c.Close()
+	seed, err := os.ReadFile(filepath.Join(dir, "catalog.wal"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(seed)
+	f.Fuzz(func(t *testing.T, b []byte) {
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "catalog.wal"), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if c, err := OpenNameCatalog(d); err == nil {
+			_ = c.Close()
+		}
+	})
 }
 
 func TestCatalogCheckpointReopen(t *testing.T) {
@@ -306,52 +271,29 @@ func FuzzCatalogRoundtrip(f *testing.F) {
 		if len(b) == 0 || len(b) > 512 {
 			return
 		}
-		c := newTestCatalog(t)
-		fs := v3Fixture()[:1]
-		fs[0].Key = string(b)
-		fs[0].Definition = bytes.Clone(b)
-		for i := range fs[0].Points {
-			var bits uint64
-			for j := range 8 {
-				bits = bits<<8 | uint64(b[(i+j)%len(b)])
-			}
-			fs[0].Points[i].Timestamp = int64(bits)
-			fs[0].Points[i].Value = math.Float64frombits(bits)
-			fs[0].Clock = int64(bits)
-		}
-		e := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: true}
-		record, err := e.Encode(fs)
-		e.Close()
+		dir := t.TempDir()
+		c, err := OpenNameCatalog(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		d := CatalogDecoder{Catalog: c}
-		got, err := d.Decode(record)
-		d.Close()
+		id, err := c.Intern(string(b), bytes.Clone(b))
 		if err != nil {
 			t.Fatal(err)
 		}
-		exactV3(t, fs, got)
+		if err = c.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.Close()
+		c, err = OpenNameCatalog(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		key, def, ok := c.Lookup(id)
+		if !ok || key != string(b) || !bytes.Equal(def, b) {
+			t.Fatal("roundtrip")
+		}
 	})
-}
-
-func TestCatalogFieldAccounting(t *testing.T) {
-	t.Parallel()
-	for _, sparse := range []bool{false, true} {
-		c := newTestCatalog(t)
-		var a PredictorV3Accounting
-		e := CatalogEncoder{Catalog: c, SeriesClocks: true, SparseClocks: sparse, Accounting: &a}
-		b, err := e.Encode(v3Fixture())
-		e.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw := int64(binary.LittleEndian.Uint32(b[17:]))
-		sum := a.Names + a.Definitions + a.IDs + a.Clocks + a.Framing + a.Timestamps + a.Values
-		if sum != raw || a.Names != 0 || a.Definitions != 0 || a.Headers != 73 || a.Encoded != int64(len(b)+32) {
-			t.Fatal("accounting", sum, raw, a)
-		}
-	}
 }
 
 // Exercise recovery across compressed blocks without materialising decoded

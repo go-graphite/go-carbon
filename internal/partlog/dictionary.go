@@ -3,20 +3,7 @@ package partlog
 import (
 	"encoding/binary"
 	"errors"
-
-	"github.com/go-graphite/go-carbon/points"
 )
-
-// DictionaryFrame preserves one original apply boundary. Definition is opaque
-// policy/placement metadata. Key and Definition must remain stable in an epoch.
-// ID is the catalog ID CatalogDecoder.Decode resolved; encoders ignore it.
-type DictionaryFrame struct {
-	ID         uint64
-	Key        string
-	Definition []byte
-	Clock      int64
-	Points     []points.Point
-}
 
 var errDictionary = errors.New("invalid journal dictionary record")
 
