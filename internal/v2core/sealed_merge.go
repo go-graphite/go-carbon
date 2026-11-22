@@ -597,6 +597,12 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 	var members []*mergeCursor
 	var records mergeRecordHeap
 	var versions mergeVersions
+	// A prefix merge that drops expired records writes their windows down
+	// first, also for names without versions: the TTL write-down
+	// (ClickHouse TTL merge), so a coarse window outlives its raw records.
+	for _, d := range inputs {
+		versions.ttl = versions.ttl || prefix && d.Coverage.MinExpiry != 0 && d.Coverage.MinExpiry < retire
+	}
 	var key, metaBytes []byte
 	var config sealrollup.Config
 	var expiry expiryBounds
@@ -988,7 +994,7 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 
 // mergeVersions merges one name whose inputs carry record versions: a run
 // with kinds (versions, ghosts, windows), or a physical slot more than one
-// input holds. A prefix merge that drops a record (a superseded version, a
+// input holds, or, in a prefix merge, an expired record. A prefix merge that drops a record (a superseded version, a
 // ghost or an expired record) first writes windows down
 // (sealrollup.WriteDown); any other merge keeps every version but expired
 // ones, so a later prefix merge still sees them. Rollups stay a pure function
@@ -1006,6 +1012,7 @@ type mergeVersions struct {
 	keep, gone          []bool
 	win, last           []bool // records[i], out[i]: its slot's per-slot winner
 	spans               []mergeSpan
+	ttl                 bool // a prefix merge whose inputs hold expired records
 }
 
 // mergeSpan is one input run's archive and physical slot range.
@@ -1020,7 +1027,8 @@ func spanBefore(a, b mergeSpan) bool {
 }
 
 // merge returns the name's output records sorted by (archive, slot), or nil
-// when no input carries versions (the per-slot merge then runs unchanged).
+// when no input carries versions and a prefix merge drops no expired record
+// (the per-slot merge then runs unchanged).
 func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
 	// Most names hold no versions: runs without kinds whose slots no other
 	// run holds. Their headers and slot columns say so without decoding.
@@ -1053,7 +1061,7 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 			plain = spanBefore(m.spans[i-1], m.spans[i])
 		}
 	}
-	if plain {
+	if plain && !m.ttl {
 		return nil, nil
 	}
 	m.records, m.from = m.records[:0], m.from[:0]
@@ -1112,7 +1120,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 	// record of a slot, the live record with the greatest time, then order),
 	// and whether a prefix merge drops a record, which needs the write-down.
 	m.win = append(m.win[:0], make([]bool, len(recs))...)
-	drops := false
+	drops, expiring := false, false
 	for g := 0; g < len(m.order); {
 		h := g + 1
 		first := &recs[m.order[g]]
@@ -1131,6 +1139,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 			if r.Kind == sealrollup.KindGhost || expired(r) || r.Slot != r.Sample.Time/ar.Step%ar.Count {
 				drops = true
 			}
+			expiring = expiring || expired(r)
 			if r.Kind != sealrollup.KindRaw && (r.Kind != sealrollup.KindMat || r.Upto != 0) || expired(r) {
 				continue
 			}
@@ -1158,7 +1167,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		}
 		g = h
 	}
-	if !versioned {
+	if !versioned && !(prefix && expiring) {
 		return nil, nil
 	}
 	m.keep = append(m.keep[:0], make([]bool, len(recs))...)
