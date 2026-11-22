@@ -199,6 +199,16 @@ func metadataPrewarmFull(core *cache.Cache, maxSize, maxBytes uint64) func() boo
 	}
 }
 
+// metadataCheckpointInputAtRisk is true within 1/16 of max-size or max-bytes,
+// where the cache starts dropping input; the save polls every 100ms, far less
+// than 1/16 of any cache's fill. Unlimited caches never stop the save.
+func metadataCheckpointInputAtRisk(core *cache.Cache, maxSize, maxBytes uint64) func() bool {
+	return func() bool {
+		return maxSize > 0 && uint64(core.Size()) >= maxSize-maxSize/16 ||
+			maxBytes > 0 && uint64(core.EstimatedBytes()) >= maxBytes-maxBytes/16
+	}
+}
+
 func metadataPrewarmWait(conf whisperConfig) time.Duration {
 	if wait := conf.StoreMetadataCachePrewarmWait; wait != nil {
 		return wait.Value()
