@@ -308,6 +308,10 @@ func (s *syncer) restorePhase() error {
 // changes. Check metadata in a separate scope-validation step, then schedule
 // only invalidated names as new work; never reopen a completed data phase.
 func (s *syncer) reopenChangedScope(ctx context.Context) (changed bool, err error) {
+	// A finished full-history pass is a report, not a live convergence job.
+	if !s.o.rescanAll && !s.o.readyFrontier && !s.windowOnly() {
+		return false, nil
+	}
 	if _, ok := s.b.(syncProofBackend); !ok {
 		return false, nil
 	}

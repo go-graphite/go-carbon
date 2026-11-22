@@ -32,7 +32,7 @@ import (
 //     timestamp where a source has a finite point and the target has none.
 //  4. fill: re-pull names with holes from each source that has the points
 //     (the importer keeps existing target points), then re-verify only them.
-//  5. repeat 3-4 while verification makes progress.
+//  5. report remaining holes after the repair verification (two rounds by default).
 //
 // Every phase is journaled under --state; --resume restores the saved run.
 // The stores are reached through syncBackend so the copy engine and the read
@@ -101,6 +101,7 @@ type syncOptions struct {
 	streams          int
 	batch            int
 	maxRounds        int
+	rescanAll        bool // opt in to full-catalog convergence with a mutation frontier
 	settle           time.Duration
 	windows          syncRanges
 	readyFrontier    bool
@@ -460,7 +461,7 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	}
 	// Authorization is live configuration. A source rejected by a previous
 	// invocation must be probed again after its allowlist has been repaired.
-	event("sync_start", map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "state": o.state, "streams": o.streams, "verify_batch": o.batch, "max_rounds": o.maxRounds, "windows": o.windows.String(), "sample_every": o.sampleEvery, "resumed_rows": len(j.rows) - 1, "effective": o.policy})
+	event("sync_start", map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "state": o.state, "streams": o.streams, "verify_batch": o.batch, "max_rounds": o.maxRounds, "round_limit": o.roundLimit(), "rescan_all": o.rescanAll, "windows": o.windows.String(), "sample_every": o.sampleEvery, "resumed_rows": len(j.rows) - 1, "effective": o.policy})
 	ctx, cancelFile := context.WithCancelCause(ctx)
 	defer cancelFile(nil)
 	progressCtx, stopProgress := context.WithCancel(ctx)
@@ -890,9 +891,9 @@ type syncKey struct{ name, source string }
 
 // verifyAndFill runs verify/fill rounds. Round 1 verifies every name present
 // on the target and on at least one source; later rounds only names filled
-// or not yet indexed in the previous round. A mutation frontier checks metadata
-// for the whole catalog, reading data only for dirty names. Closed windows
-// retain clean data proofs while rechecking repairs and changed mutation fences.
+// or not yet indexed in the previous round, plus skipped names. Full-catalog
+// convergence requires rescanAll. An interrupted legacy union round retains its
+// input so its completed receipts remain reusable.
 func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	if err := s.prepareWindowRepairVerification(); err != nil {
 		return err
@@ -926,9 +927,12 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	for round := 1; ; round++ {
 		s.sum.Rounds = round
 		var names syncNameSource
-		// A mutation frontier must not expand an authenticated sparse resume back
-		// into the union catalog, including its following convergence rounds.
-		if (s.frontier == nil || scopedResume) && round > 1 || round == 1 && (scopedResume || len(s.newScope) > 0) {
+		journalRound := round + s.verificationBase
+		fullUnion, e := s.roundUsesUnion(round, scopedResume)
+		if e != nil {
+			return e
+		}
+		if !fullUnion {
 			if names, err = s.setSource(set); err != nil {
 				return err
 			}
@@ -938,6 +942,11 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		holes, unindexed, skipped, err := s.verifyRound(ctx, round, names)
 		if err != nil {
 			return fmt.Errorf("verify round %d: %w", round, err)
+		}
+		if fullUnion {
+			latest = map[string][]syncHole{}
+			pending = map[string]bool{}
+			skippedLast = map[string]string{}
 		}
 		for _, n := range set {
 			delete(latest, n)
@@ -977,6 +986,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		next := map[string]bool{}
 		fillable := 0
 		for _, h := range holes {
+			next[h.Name] = true
 			k := syncKey{h.Name, h.Source}
 			if s.forbid[h.Source] || failedAttempts[k] >= 3 || (s.windowOnly() && filledBefore[k]) {
 				continue
@@ -996,7 +1006,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		for _, k := range skipped { // retried once more in the next round
 			next[k.Name] = true
 		}
-		event("sync_round", map[string]any{"round": round, "verified": len(set), "holes": len(holes), "fillable": fillable, "unindexed": len(unindexed), "skipped": len(skipped)})
+		event("sync_round", map[string]any{"round": round, "verified": names.total, "full_union": fullUnion, "holes": len(holes), "fillable": fillable, "unindexed": len(unindexed), "skipped": len(skipped)})
 		score := int64(len(unindexed) + len(skipped))
 		for _, h := range holes {
 			score += int64(max(1, h.Points))
@@ -1014,7 +1024,12 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 			}
 		}
 		previousScore = score
-		if s.o.noCopy || (fillable == 0 && len(next) == 0) || (stalled && !retryFailed) || (s.o.maxRounds > 0 && round == s.o.maxRounds) {
+		// Replay every already-entered fill before applying a new scheduling
+		// limit. In particular, upgrading during round N must not stop while
+		// replaying round 2 or abandon an interrupted fill.
+		mustReplayFill := (s.resume.Phase == "verify" || s.resume.Phase == "fill") && phaseOrder("fill", journalRound) <= phaseOrder(s.resume.Phase, s.resume.Round)
+		limit := s.o.roundLimit()
+		if !mustReplayFill && (s.o.noCopy || (fillable == 0 && len(unindexed) == 0 && len(skipped) == 0) || (stalled && !retryFailed) || (limit > 0 && round >= limit)) {
 			break
 		}
 		retryFailed = false
@@ -1132,7 +1147,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	for _, n := range names {
 		for _, h := range latest[n] {
 			reason := "copy_failed"
-			if s.o.maxRounds > 0 && s.sum.Rounds >= s.o.maxRounds {
+			if limit := s.o.roundLimit(); limit > 0 && s.sum.Rounds >= limit {
 				reason = "round_limit"
 			}
 			switch {

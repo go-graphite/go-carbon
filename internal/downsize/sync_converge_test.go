@@ -22,7 +22,8 @@ func (f staleSync) List(ctx context.Context, store, prefix, after string, limit 
 	return f.fakeSync.List(ctx, store, prefix, after, limit)
 }
 func convergeOptions(t *testing.T) syncOptions {
-	return syncOptions{to: syncT, from: []string{syncD1, syncP}, state: t.TempDir(), streams: 2, batch: 64, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+	// These fixtures explicitly exercise convergence beyond one repair pass.
+	return syncOptions{rescanAll: true, to: syncT, from: []string{syncD1, syncP}, state: t.TempDir(), streams: 2, batch: 64, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
 }
 func TestSyncConvergeAbsentAllSources(t *testing.T) {
 	t.Parallel()

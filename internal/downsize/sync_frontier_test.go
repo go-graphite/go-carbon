@@ -81,7 +81,8 @@ func frontierFixture(t *testing.T) (*proofFixture, syncOptions) {
 		}
 	}
 	delete(f.store(syncT).points["metric.19"][3600], syncTestNow-5*3600)
-	o := syncOptions{to: syncT, from: []string{syncD1, syncD2}, state: t.TempDir(), batch: 7, streams: 2, maxRounds: 1, noCopy: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+	// Frontier fixtures exercise the opt-in continuous convergence behavior.
+	o := syncOptions{rescanAll: true, to: syncT, from: []string{syncD1, syncD2}, state: t.TempDir(), batch: 7, streams: 2, maxRounds: 1, noCopy: true, now: func() time.Time { return time.Unix(syncTestNow, 0) }}
 	return f, o
 }
 func seenProofNames(f *proofFixture) []string {

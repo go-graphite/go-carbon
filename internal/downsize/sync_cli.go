@@ -66,7 +66,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.DurationVar(&c.timeout, "timeout", 0, "overall sync deadline including store restart waits; 0 waits without limit")
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
 	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
-	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only timeout, streams, rate and READY inputs may override it")
+	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only operational scheduling, timeout, streams, rate and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", "", "buckyd JWT signing secret file; tokens refresh automatically before expiry (default: [buckyd] auth-jwt-secret-file from --config, else "+hostJWTSecretPath+")")
 	flags.StringVar(&c.goCarbonConfig, "config", "", "local go-carbon config read for the default --jwt-secret (default: the -config of the running go-carbon, else "+defaultGoCarbonConfig+")")
 	flags.Bool("ready", false, "run the final READY attestation (off by default)")
@@ -84,7 +84,8 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.Lookup("streams").Usage = "total per-host transfer budget; the default 64 is lowered to the smallest max_transfers the source or target advertises, so it never causes 429s; an explicit value is used as given; 0 uses only the advertised capacity; serial verify and copy phases share this budget"
 	flags.Var(&c.sync.windows, "window", "[label:]FROM:UNTIL in Unix seconds; repeat for ALL gap windows in this run; full history is also checked/copied unless --no-full-history")
 	flags.IntVar(&c.sync.batch, "verify-batch", 500, "names per verification batch")
-	flags.IntVar(&c.sync.maxRounds, "max-rounds", 0, "optional round limit; 0 converges while making progress")
+	flags.IntVar(&c.sync.maxRounds, "max-rounds", 2, "verification round limit; default verifies once, fills, then verifies repairs; 0 uses two rounds unless --rescan-all")
+	flags.BoolVar(&c.sync.rescanAll, "rescan-all", false, "opt in to full-catalog convergence with mutation proofs; --max-rounds=0 converges while making progress")
 	flags.DurationVar(&c.sync.settle, "settle", 10*time.Minute, "ignore the newest points while replicas are writing")
 	flags.IntVar(&c.sync.sampleEvery, "sample-every", 1, "only with --window and full history enabled: check 1 in N full histories (1 all, 0 none)")
 	flags.BoolVar(&c.sync.fullHistory, "full-history", true, "compatibility flag: full-history copy/fill is enabled by default; use --no-full-history for window-only work")
