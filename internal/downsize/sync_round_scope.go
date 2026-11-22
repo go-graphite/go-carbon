@@ -16,6 +16,9 @@ func (o syncOptions) roundLimit() int {
 // across an upgrade, including rounds replayed to reconstruct the repair set.
 func (s *syncer) roundUsesUnion(round int, scoped bool) (bool, error) {
 	journalRound := round + s.verificationBase
+	if !s.o.rescanAll && s.legacyRepairScope(journalRound) != nil {
+		return false, nil
+	}
 	for _, row := range s.j.rows {
 		if row.Kind == "verification-round-scope" && row.Round == journalRound {
 			switch row.Phase {

@@ -892,8 +892,8 @@ type syncKey struct{ name, source string }
 // verifyAndFill runs verify/fill rounds. Round 1 verifies every name present
 // on the target and on at least one source; later rounds only names filled
 // or not yet indexed in the previous round, plus skipped names. Full-catalog
-// convergence requires rescanAll. An interrupted legacy union round retains its
-// input so its completed receipts remain reusable.
+// convergence requires rescanAll. Entered legacy rounds >=2 switch to the
+// preceding round's repair set without replaying the union.
 func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	if err := s.prepareWindowRepairVerification(); err != nil {
 		return err
@@ -926,7 +926,15 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 	previousScore := int64(-1)
 	firstRound := 1
 	currentRound := s.resume.Round - s.verificationBase
-	if limit := s.o.roundLimit(); s.resume.Phase == "verify" && limit > 0 && currentRound >= limit && currentRound > 1 {
+	set, switched, err := s.prepareLegacyRepair(set, scopedResume, filledBefore)
+	if err != nil {
+		return err
+	}
+	if switched {
+		scopedResume = true
+		firstRound = currentRound
+	}
+	if limit := s.o.roundLimit(); !switched && s.resume.Phase == "verify" && limit > 0 && currentRound >= limit && currentRound > 1 {
 		fullUnion, err := s.roundUsesUnion(currentRound, scopedResume)
 		if err != nil {
 			return err
@@ -1214,7 +1222,17 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 	if s.phaseBeforeResume("verify", journalRound) && !(journalRound == s.resume.Round && s.adoptingLegacyRound()) {
 		return s.replayVerifyRound(ctx, journalRound, set)
 	}
-	legacy, err := s.legacyRoundProgress(journalRound)
+	repairScope := s.legacyRepairScope(journalRound)
+	var legacy *legacyRoundProgress
+	var err error
+	if repairScope != nil && !s.o.rescanAll {
+		legacy, err = s.legacyRoundReceipts(journalRound, true, true)
+		if err == nil {
+			legacy = legacy.restrict(repairScope.Selected)
+		}
+	} else {
+		legacy, err = s.legacyRoundProgress(journalRound)
+	}
 	if err != nil {
 		set.close()
 		return nil, nil, nil, err
@@ -1325,6 +1343,9 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 					s.masks.Delete(n)
 				}
 				if err == nil {
+					if repairScope != nil && !s.o.rescanAll {
+						row.Selected, row.SelectionComplete = jb.names, true
+					}
 					row.Work = s.redo.cleanWork(workCtx, row)
 					err = s.j.append(row)
 				}

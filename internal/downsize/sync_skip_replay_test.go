@@ -122,6 +122,19 @@ func TestSyncResumeSkipCompletedReplay(t *testing.T) {
 			if err := s.verifyAndFill(context.Background()); err != nil {
 				t.Fatal(err)
 			}
+			if !tc.rescan && !tc.sparse && !tc.fill {
+				// Both previous residual names already have clean current-round
+				// observations. Switching scopes needs no further store reads.
+				transition := s.legacyRepairScope(tc.round)
+				if transition == nil || len(transition.Selected) != 2 || b.firstRead || len(b.reads) != 0 || len(f.copies) != 0 || len(s.sum.residual) != 0 || s.sum.Rounds != tc.round {
+					t.Fatalf("repair scope did not reuse clean observations: transition=%+v reads=%v residual=%v", transition, b.reads, s.sum.residual)
+				}
+				after, err := os.ReadFile(s.j.file.Name())
+				if err != nil || !bytes.HasPrefix(after, before) {
+					t.Fatalf("existing journal changed: %v", err)
+				}
+				return
+			}
 			if !b.firstRead || b.floor != 7 {
 				t.Fatalf("saved counter lost: first read=%v floor=%d", b.firstRead, b.floor)
 			}

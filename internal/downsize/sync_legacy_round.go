@@ -14,8 +14,13 @@ func (s *syncer) adoptingLegacyRound() bool {
 	if s.resume.Phase != "verify" || s.windowOnly() || s.o.readyFrontier || s.o.rescanAll {
 		return false
 	}
-	legacy, scopeSeen, union := false, false, false
+	s.j.mu.Lock()
+	defer s.j.mu.Unlock()
+	legacy, priorLegacy, observed, scopeSeen, union := false, false, false, false, false
 	for _, r := range s.j.rows {
+		if r.Kind == "legacy-round-repair" && r.Round == s.resume.Round {
+			return true
+		}
 		if r.Kind == "verification-round-scope" {
 			if r.Round == s.resume.Round && r.Phase != "union" {
 				return false
@@ -25,10 +30,21 @@ func (s *syncer) adoptingLegacyRound() bool {
 				union = true
 			}
 		}
-		if !scopeSeen && r.Kind == "verified" && r.Round == s.resume.Round {
-			legacy = true
+		if r.Kind == "verified" {
+			if r.Round == s.resume.Round {
+				observed = true
+			}
+			if !scopeSeen && r.Round == s.resume.Round {
+				legacy = true
+			}
+			if !scopeSeen && r.Round == s.resume.Round-1 {
+				priorLegacy = true
+			}
 		}
 	}
+	// A kill immediately after entering the next legacy round can precede its
+	// first receipt. The preceding original round still establishes provenance.
+	legacy = legacy || !observed && priorLegacy && s.resume.Round > 1
 	// Later legacy rounds without a frontier used sparse repair sets.
 	if legacy && s.resume.Round > 1 && !union {
 		_, err := os.Stat(filepath.Join(s.o.state, "verification-scope.json"))
@@ -64,6 +80,11 @@ func (s *syncer) legacyRoundProgress(round int) (*legacyRoundProgress, error) {
 	if round != s.resume.Round || !s.adoptingLegacyRound() {
 		return nil, nil
 	}
+	return s.legacyRoundReceipts(round, false, true)
+}
+
+// Reconstruct observations without reading stores or replaying completed fills.
+func (s *syncer) legacyRoundReceipts(round int, newest, recordBoundary bool) (*legacyRoundProgress, error) {
 	p := &legacyRoundProgress{}
 	type edge struct {
 		name  string
@@ -73,7 +94,9 @@ func (s *syncer) legacyRoundProgress(round int) (*legacyRoundProgress, error) {
 	var edges []edge
 	scopeSeen, adopted := false, false
 	original := map[string]int{}
-	for _, r := range s.j.rows {
+	for _, r := range s.j.find(func(r syncRow) bool {
+		return r.Kind == "verification-round-scope" || r.Kind == "legacy-round-adoption" && r.Round == round || r.Kind == "verified" && r.Round == round
+	}) {
 		if r.Kind == "verification-round-scope" {
 			scopeSeen = true
 		}
@@ -91,7 +114,7 @@ func (s *syncer) legacyRoundProgress(round int) (*legacyRoundProgress, error) {
 		if r.Names <= 0 || r.First == "" || r.Last < r.First {
 			return nil, s.receiptContradiction("invalid legacy round receipt")
 		}
-		if !scopeSeen && !adopted {
+		if !scopeSeen && !adopted && !newest {
 			// The old verifier indexed receipts by First, with the last saved
 			// observation winning. Keep that rule within the original prefix.
 			if i, ok := original[r.First]; ok {
@@ -102,9 +125,22 @@ func (s *syncer) legacyRoundProgress(round int) (*legacyRoundProgress, error) {
 		}
 		p.rows = append(p.rows, r)
 	}
+	if newest {
+		for i, k := 0, len(p.rows)-1; i < k; i, k = i+1, k-1 {
+			p.rows[i], p.rows[k] = p.rows[k], p.rows[i]
+		}
+	}
 	for i, r := range p.rows {
-		// Metric names contain no NUL, so Last+NUL is an exclusive bound.
-		edges = append(edges, edge{r.First, i, true}, edge{r.Last + "\x00", i, false})
+		// Sparse repair batches can straddle names whose newer observations
+		// were already adopted. Their bounds cannot overwrite those names.
+		if r.SelectionComplete {
+			for _, n := range r.Selected {
+				edges = append(edges, edge{n, i, true}, edge{n + "\x00", i, false})
+			}
+		} else {
+			// Metric names contain no NUL, so Last+NUL is exclusive.
+			edges = append(edges, edge{r.First, i, true}, edge{r.Last + "\x00", i, false})
+		}
 	}
 	sort.Slice(edges, func(i, j int) bool { return edges[i].name < edges[j].name })
 	active := make([]bool, len(p.rows))
@@ -128,7 +164,7 @@ func (s *syncer) legacyRoundProgress(round int) (*legacyRoundProgress, error) {
 		}
 		prev = name
 	}
-	if !adopted {
+	if !adopted && recordBoundary {
 		if err := s.j.append(syncRow{Kind: "legacy-round-adoption", Round: round}); err != nil {
 			return nil, err
 		}

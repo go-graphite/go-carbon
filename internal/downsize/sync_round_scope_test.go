@@ -223,27 +223,34 @@ func TestSyncFinishFirstResumeBeyondLimit(t *testing.T) {
 	}
 	b.cancel = nil
 	o.rescanAll = false
-	if err := runSync(context.Background(), o, b); !errors.Is(err, ErrSyncResidual) {
-		t.Fatalf("want round-four residual report: %v", err)
+	if err := runSync(context.Background(), o, b); err != nil {
+		t.Fatalf("want completed repair round: %v", err)
 	}
 	if b.imports.Load() != 3 {
 		t.Fatalf("replayed fills or filled beyond limit: %d", b.imports.Load())
-	}
-	rows := readRoundRows(t, o.state, 4)
-	byFirst := map[string]int{}
-	for _, row := range rows {
-		byFirst[row.First] = row.Names
-	}
-	count := 0
-	for _, n := range byFirst {
-		count += n
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.HasPrefix(after, retained) {
 		t.Fatalf("lost previously journaled observations: %v", err)
 	}
-	if count != 20 {
-		t.Fatalf("lost active union scope: verified %d names", count)
+	var switched bool
+	for _, line := range bytes.Split(after[len(retained):], []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var r syncRow
+		if err := json.Unmarshal(line, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "legacy-round-repair" {
+			switched = reflect.DeepEqual(r.Selected, []string{"metric.03"})
+		}
+		if r.Kind == "verified" && r.Round == 4 && (r.Names != 1 || r.First != "metric.03") {
+			t.Fatalf("read outside previous repair set: %+v", r)
+		}
+	}
+	if !switched {
+		t.Fatal("missing repair scope transition")
 	}
 	if len(readRoundRows(t, o.state, 5)) != 0 {
 		t.Fatal("continued past current round")

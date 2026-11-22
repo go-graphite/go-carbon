@@ -128,7 +128,7 @@ func (s *syncer) restorePhase() error {
 	var saved syncPhasePosition
 	hasPosition := false
 	for _, r := range s.j.rows {
-		if (r.Kind == "phase-position" || r.Kind == "phase-scope") && r.Position != nil {
+		if (r.Kind == "phase-position" || r.Kind == "phase-scope" || r.Kind == "legacy-round-repair") && r.Position != nil {
 			if phaseOrder(r.Position.Phase, r.Position.Round) < 1 || r.Position.Round < 0 || r.Position.Done < 0 || r.Position.Total < 0 {
 				return errors.New("ambiguous journal phase or counters; refusing fresh start")
 			}
@@ -157,7 +157,7 @@ func (s *syncer) restorePhase() error {
 			return errors.New("ambiguous saved phase or counters")
 		}
 		// Modern journal positions supersede stale snapshots from a previous phase.
-		if phaseOrder(phase, round) >= phaseOrder(saved.Phase, saved.Round) {
+		if !(phase == "verify" && s.legacyRepairScope(round) != nil) && phaseOrder(phase, round) >= phaseOrder(saved.Phase, saved.Round) {
 			if phase == saved.Phase && round == saved.Round {
 				saved.Done = max(saved.Done, old.Done)
 			} else if saved.Phase == "" {
@@ -238,7 +238,7 @@ func (s *syncer) restorePhase() error {
 		saved.Done = max(saved.Done, durable)
 	}
 	s.resume = saved // retain the attempted position even when reporting a contradiction
-	if s.adoptingLegacyRound() {
+	if s.adoptingLegacyRound() && s.legacyRepairScope(saved.Round) == nil {
 		// READY-off defaults introduced source-only filtering after this legacy
 		// union was entered. Restore its original catalog size, including when
 		// an intermediate binary checkpointed a smaller total.
@@ -415,7 +415,7 @@ func (j *syncJournal) observePhase(r syncRow, row int) {
 	if r.Position == nil {
 		return
 	}
-	if r.Kind == "phase-position" || r.Kind == "phase-scope" || r.Kind == "phase-progress" && j.phaseGuard != nil && r.Position.Phase == j.phaseGuard.Phase && r.Position.Round == j.phaseGuard.Round {
+	if r.Kind == "phase-position" || r.Kind == "phase-scope" || r.Kind == "legacy-round-repair" || r.Kind == "phase-progress" && j.phaseGuard != nil && r.Position.Phase == j.phaseGuard.Phase && r.Position.Round == j.phaseGuard.Round {
 		p := *r.Position
 		j.phaseGuard, j.phaseGuardRow = &p, row
 	}
