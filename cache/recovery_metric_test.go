@@ -18,7 +18,7 @@ func TestRecoveryMetricSurvivesEvictionAndNormalization(t *testing.T) {
 	var stream RecoveryStream
 	source := stream.Next()
 	c.AddRecoveryMetric(m, points.OnePoint(m.Name(), 1, 2), source, false)
-	existing := c.ResolveRecoveryMetric([]byte(m.Name()))
+	existing := c.ResolveRecoveryMetricString(m.Name())
 	if existing.OverheadBytes() != 0 {
 		t.Fatal("active metric charged as new")
 	}

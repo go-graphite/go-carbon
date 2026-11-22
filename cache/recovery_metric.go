@@ -33,6 +33,23 @@ func (c *Cache) ResolveRecoveryMetric(name []byte) RecoveryMetric {
 	return RecoveryMetric{name: string(name), hash: hash, overhead: int64(len(name)) + 1024}
 }
 
+// ResolveRecoveryMetricString resolves a decoded, immutable metric name without
+// copying it through a byte buffer. The returned metric retains name if it is
+// absent from the active map; callers must provide an owned string.
+func (c *Cache) ResolveRecoveryMetricString(name string) RecoveryMetric {
+	hash := xxh3.HashString(name)
+	sh := c.data[hash&(shardCount-1)]
+	sh.mu.RLock()
+	it := sh.items.getHashed(hash, name)
+	if it != nil {
+		canonical := it.Metric
+		sh.mu.RUnlock()
+		return RecoveryMetric{name: canonical, hash: hash}
+	}
+	sh.mu.RUnlock()
+	return RecoveryMetric{name: name, hash: hash, overhead: int64(len(name)) + 1024}
+}
+
 // AddRecoveryMetric applies an admitted group through ordinary recovery/source
 // tracking. Tags still normalize before routing; a precomputed hash is used only
 // when normalization leaves the resolved name unchanged.

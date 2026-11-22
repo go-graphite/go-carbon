@@ -55,7 +55,14 @@ func TestStartupDirectDrainsEarlierSourcesAtZeroInput(t *testing.T) {
 	p.SetMockStore(func() (persister.StoreFunc, func()) {
 		return func(name string) {
 			batch, ok := core.PopNotConfirmed(name)
-			if !ok || len(batch.Data) != 1 {
+			// Queue plans contain names, not batch reservations. A refresh can
+			// overlap the old plan, so another worker may already have popped
+			// this name after both passed WriteoutReady. The real store checks
+			// again under its metric lock; an empty pop is not a receipt.
+			if !ok {
+				return
+			}
+			if len(batch.Data) != 1 {
 				t.Error("missing journal receipt", name)
 				return
 			}

@@ -173,6 +173,7 @@ type App struct {
 	storeRestoreDone    <-chan struct{}
 	storeRestoreLoaded  <-chan struct{} // native copy waits for loading, not saved-history writeout
 	inputLog            atomic.Pointer[inputlog.Log]
+	startupDiscarded    atomic.Int64
 	copyInputSealed     bool
 	restart             restartState
 	restartMetrics      *restartMetrics
