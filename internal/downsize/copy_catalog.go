@@ -188,6 +188,7 @@ func (c *planFreeCopier) closeCatalogs() {
 }
 func (c *planFreeCopier) progressSnapshot() progressSnapshot {
 	p := progressSnapshot{Effective: c.o.policy, Done: c.stats.copied.Load() + int64(c.skippedCount()), Total: max(0, c.progress.total.Load()), Phase: "copy", Cursors: map[string]string{}, Copied: c.stats.copied.Load()}
+	p.WaitingForTargetHealth, p.TargetHealthPauseSeconds = c.o.health.snapshot()
 	p.FreshDoneAvailable, p.FreshDone = true, c.stats.copied.Load()
 	if c.journal != nil {
 		c.journal.mu.Lock()

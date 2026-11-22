@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +38,7 @@ type effectiveSyncPolicy struct {
 }
 
 type syncCommand struct {
+	health         targetHealthOptions
 	freshReason    string
 	ready          syncReadyOptions
 	sync           syncOptions
@@ -63,6 +65,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
+	flags.BoolVar(&c.health.enabled, "target-health", true, "pause new sync batches while the target ingest cache is overloaded; monitoring failures log and continue")
+	flags.Float64Var(&c.health.high, "target-health-high", 0.75, "pause at or above this fraction of the target cache limit")
+	flags.Float64Var(&c.health.low, "target-health-low", 0.60, "resume below this fraction of the target cache limit")
 	flags.DurationVar(&c.timeout, "timeout", 0, "overall sync deadline including store restart waits; 0 waits without limit")
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
 	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
@@ -76,7 +81,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.StringVar(&c.ready.carbonAPI, "carbonapi-url", "", "read API base URL for final READY read-back")
 	flags.Var((*originList)(&c.ready.gapSelection), "gapfill-window", "with --ready-block: fill only these gap IDs (repeat or comma-separate); other missing receipts still block READY")
 	flags.StringVar(&c.ready.proofBlock, "ready-block", "", "independent JSON block for exhaustive final READY proof; preserves the original copy scope")
-	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for process_start_time_seconds on every store")
+	flags.IntVar(&c.ready.metricsPort, "process-metrics-port", 7007, "metrics port for target cache health and READY process_start_time_seconds on every store")
 	flags.Var(&c.ready.period, "period", "FROM:UNTIL block copy/cutover period in Unix seconds")
 	flags.BoolVar(&c.ready.gapsComplete, "gap-ledger-complete", false, "attest that --window includes every known input gap")
 	flags.String("block", "", "generic JSON block file containing target, donors, peers, period, gaps and read-back URL")
@@ -112,6 +117,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	c.ready.noReady = flags.Lookup("ready").Value.String() != "true"
 	if c.jwtSecret == "" {
 		c.jwtSecret, c.jwtSecretConfig = defaultJWTSecretPath(c.goCarbonConfig, "/proc")
+	}
+	if math.IsNaN(c.health.low) || math.IsNaN(c.health.high) || c.health.low <= 0 || c.health.low >= c.health.high || c.health.high > 1 {
+		return c, errors.New("target health thresholds must satisfy 0 < --target-health-low < --target-health-high <= 1")
 	}
 	if c.timeout < 0 {
 		return c, errors.New("--timeout must be nonnegative")
@@ -322,6 +330,11 @@ func SyncMain(ctx context.Context, args []string) error {
 	limiter := &syncRateLimit{bytesPerSecond: c.rate}
 	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
+	if c.health.enabled {
+		backend.health = newTargetHealthGate(c.sync.to, c.health.high, c.health.low)
+		c.copy.health = backend.health
+		defer backend.health.monitor(ctx, targetHealthURL(c.sync.to, c.ready.metricsPort), 10*time.Second)()
+	}
 	defer backend.client.CloseIdleConnections()
 	defer backend.m.client.CloseIdleConnections()
 	err = runSyncReadyPrepared(ctx, &c.sync, c.ready, backend, func() error {

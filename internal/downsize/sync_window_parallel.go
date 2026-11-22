@@ -87,6 +87,11 @@ func (b *syncLiveBackend) executeWindowRange(ctx context.Context, c *nativeContr
 	deadline := time.Now().Add(wait)
 	transfers := 0
 	for attempt := 0; ; attempt++ {
+		started := time.Now()
+		if err := b.health.wait(ctx); err != nil {
+			return err
+		}
+		deadline = deadline.Add(time.Since(started))
 		// Replaying the initial receipt cannot make deferred ordinals progress.
 		// Reuse the native deferred protocol, whose chained receipt identities
 		// retain lost-ack safety while allowing a fresh source snapshot.

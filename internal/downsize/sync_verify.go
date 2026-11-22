@@ -1091,6 +1091,9 @@ func (s *syncer) progressLine() {
 	elapsed := time.Since(started).Seconds()
 	fields := map[string]any{"phase": phase, "done": done, "total": total, "skipped": p.skipped.Load(),
 		"compared_by_digest": p.digests.Load(), "read_point_by_point": p.reads.Load(), "limiter": fmt.Sprintf("streams=%d verify_streams=%d", s.o.streams, s.o.verifyConcurrency())}
+	if live, ok := s.b.(*syncLiveBackend); ok {
+		fields["waiting_for_target_health"], fields["target_health_pause_seconds"] = live.health.snapshot()
+	}
 	fields["verify_batches"] = p.batches.Load()
 	fields["batch_seconds"] = float64(p.batchNanos.Load()) / float64(time.Second)
 	fields["compare_seconds"] = float64(p.compareNanos.Load()) / float64(time.Second)

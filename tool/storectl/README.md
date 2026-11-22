@@ -30,6 +30,23 @@ origins are sent unchanged.
 
 ## Controller progress metrics
 
+Sync protects the target's live ingest by default. Before starting work and every
+10s, it reads `cache_points`, `cache_limit_points`, and
+`cache_overflow_dropped_points_total` from the target's `/metrics` endpoint
+(default port 7007; configurable with `--process-metrics-port`). New verify,
+fill, and copy batches wait when cache occupancy reaches 75% or the overflow
+counter increases. In-flight batches finish. Work resumes below 60% once the
+overflow counter stops increasing. Health waits retain every name and do not
+consume per-batch timeouts. An unreachable, invalid, or timed-out health endpoint
+logs a warning and allows work to continue; each scrape has a 5s timeout.
+
+Use `--target-health-high=0.75 --target-health-low=0.60` to change the thresholds,
+or `--target-health=false` to disable monitoring. These operational settings may
+also be overridden with `--resume`. `progress.json` exposes
+`waiting_for_target_health` and `target_health_pause_seconds`; the summary counts
+elapsed pause seconds once per target, including any active pause, for the current
+invocation. Pause and resume events include cache occupancy when available.
+
 Every `storectl` command with a `--state` sends Graphite plaintext to `127.0.0.1:2003`
 by default. Set `STORECTL_GRAPHITE_ADDR=receiver:2003` when the controller
 runs elsewhere. The receiver must accept and route this namespace. No daemon

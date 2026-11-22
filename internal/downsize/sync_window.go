@@ -419,6 +419,9 @@ func (b *syncLiveBackend) splitWindowRange(ctx context.Context, source, target s
 }
 
 func (b *syncLiveBackend) CopyWindow(ctx context.Context, source, target string, names []string, journalPath string, windows syncRanges) (syncCopyResult, error) {
+	if err := b.health.wait(ctx); err != nil {
+		return syncCopyResult{}, err
+	}
 	var result syncCopyResult
 	err := b.wait(ctx, "CopyWindow", source, func() error {
 		var err error
@@ -653,6 +656,9 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 // gaps are ignored. Precise copy windows still own boundary skips and receipts;
 // an envelope may conservatively select a trailing coarse bucket for that copy.
 func (b *syncLiveBackend) WindowPresenceRanges(ctx context.Context, source string, names []string, windows syncRanges) (map[string][]syncDigest, error) {
+	if err := b.health.wait(ctx); err != nil {
+		return nil, err
+	}
 	var result map[string][]syncDigest
 	err := b.wait(ctx, "WindowPresenceRanges", source, func() error {
 		var err error
