@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -645,6 +646,20 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			}
 		}
 		config = *chosen.config
+		// A record expires in this merge only as of the name's newest admission
+		// clock in it: a later batch of the name, in a part outside the merge,
+		// may still have propagated it (as Whisper read it before its slot was
+		// overwritten), and only the merge that holds that batch can write its
+		// window down. Later admissions are no earlier (clocks never go back).
+		// Only a prefix merge writes windows down, so only it drops expired
+		// records; other merges keep them until a prefix merge holds them.
+		expireAt := int64(math.MinInt64)
+		if prefix {
+			expireAt = retire
+			if metadata.LastUpdate > 0 {
+				expireAt = min(expireAt, metadata.LastUpdate/1e9)
+			}
+		}
 		// The output key is the input's validated identity with the output part:
 		// Encode(c.key) byte for byte, without a name string or route re-hash.
 		key = append(append(key[:0], c.ident...), make([]byte, 16)...)
@@ -665,7 +680,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			expiry.data(rollupRecordExpiry(config, winner))
 			return writer.SetRecordEncoded(key, winner)
 		}
-		versioned, e := versions.merge(members, config, metadata, retire, prefix)
+		versioned, e := versions.merge(members, config, metadata, expireAt, prefix)
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
@@ -710,7 +725,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < retire {
+					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < expireAt {
 						untouched = false
 						break
 					}
@@ -729,7 +744,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= retire {
+			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= expireAt {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -1010,8 +1025,8 @@ func (o *coreOwner) oldestInScope(inputs []v2part.Descriptor) bool {
 // with kinds (versions, ghosts, windows), or a physical slot more than one
 // input holds, or, in a prefix merge, an expired record. A prefix merge that drops a record (a superseded version, a
 // ghost or an expired record) first writes windows down
-// (sealrollup.WriteDown); any other merge keeps every version but expired
-// ones, so a later prefix merge still sees them. Rollups stay a pure function
+// (sealrollup.WriteDown); any other merge keeps every version, expired ones
+// too, so a later prefix merge still sees them. Rollups stay a pure function
 // of the stored records. Each slot keeps the winner the per-slot readers chose
 // before as its last Raw or seal Mat record, so their renders do not change;
 // written-down windows are visible to the version reader only. The work is a
