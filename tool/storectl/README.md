@@ -262,6 +262,44 @@ token hourly at request time, including after idle phases. It rereads the secret
 file on renewal. Only the secret path is saved; tokens and signing keys remain in
 memory. A token-minting wrapper or `BUCKYD_TOKEN` is unnecessary for sync.
 
+## Finish-first merge (`merge`)
+
+`storectl merge` folds donor stores into a target with bucky semantics and no
+READY phase. The pass is done when it completes, and skipped names are reported.
+
+```bash
+storectl merge --to http://TARGET:4242 --from http://DONOR1:4242,http://DONOR2:4242 \
+  --state /var/lib/carbon/merge --streams 32 --until CUTOVER_UNIX
+```
+
+- The name list is the union of the donors' names, written once to
+  `STATE/names`. `--limit` and `--after` select a range.
+- For each batch of names and each donor, the tool reads a `sum-v1` digest of
+  both sides over `[1, --until)`; `--until 0` digests the full history. Names
+  whose non-empty donor archives already equal the target's are done without a
+  write. All other names are merged with `POST /v1/transfer/pull` on the target.
+  The target exports them from the donor and imports them with a union: existing
+  target points win and donor-only points are added. A retention mismatch is a
+  409 and the name is skipped. `--no-digest` pulls every name.
+- Choose `--until` at or just after the donor's last write. Target points
+  written after that time make the digests differ, which costs only extra pulls.
+  A window that ends before the donor's last write can miss donor points written
+  after its end.
+- `STATE/done.log` and `STATE/errors.log` (name, source, reason) are append-only
+  and fsynced. A rerun with the same `--state` skips done names.
+- A failing batch is retried and then halved until single names fail on their
+  own. A single name gets `--retries` attempts. 429, 502, 503, 504 and
+  connection errors are waited out for up to `--wait-out` (default 30m).
+  Afterwards, one retry pass runs over every name that is not done.
+- `STATE/streams`, when present, sets the stream count and is read before
+  each batch, so tuning needs no restart.
+- `STATE/report.json` holds the totals, the skipped names with their reasons and
+  a digest parity sample of `--sample` names against every donor (equal, missing
+  on target, differ). With target-wins merges, "differ" is expected wherever the
+  target kept its own value.
+- Exit status is 0 when the pass completed, even with skipped names. A
+  configuration or state-directory error exits non-zero.
+
 ## READY and block inputs
 
 For a closed crash repair, explicitly scope READY to the declared windows:
