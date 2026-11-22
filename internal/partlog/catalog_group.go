@@ -46,8 +46,8 @@ func (c *NameCatalog) flushGroup() error {
 	body := binary.LittleEndian.AppendUint32(nil, uint32(len(raw)))
 	body = c.groupEncoder.EncodeAll(raw, body)
 	h := binary.LittleEndian.AppendUint32(nil, uint32(len(body))|catalogGroupFlag)
-	h = binary.LittleEndian.AppendUint32(h, crc32.Checksum(h, predictorV3CRC))
-	crc := crc32.Update(crc32.Checksum(h, predictorV3CRC), predictorV3CRC, body)
+	h = binary.LittleEndian.AppendUint32(h, crc32.Checksum(h, catalogCRC))
+	crc := crc32.Update(crc32.Checksum(h, catalogCRC), catalogCRC, body)
 	if _, err := c.buffer.Write(h); err != nil {
 		return err
 	}

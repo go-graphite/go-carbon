@@ -321,6 +321,29 @@ func checkpointTestSetup(t *testing.T) (Config, [][]byte) {
 // checkpointVsScan opens a copy of root with its checkpoint and a copy
 // without, requires identical state, seals more rounds on both and requires
 // identical state and parts again.
+// ownerStateDigest takes rollupStateDigest of a live engine on its owner
+// goroutine, as an owner operation: the planner state belongs to that
+// goroutine, whose maintenance pass loads checkpoint names concurrently.
+func ownerStateDigest(t *testing.T, e *Engine) string {
+	t.Helper()
+	var digest string
+	ack := make(chan error, 1)
+	o := e.owners[0]
+	op := func(o *coreOwner) error { digest = rollupStateDigest(o.rollups); return nil }
+	if err := o.queues[0].push(&corePacket{ack: ack, operation: op}, o.dead); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ack:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-o.dead:
+		t.Fatal("owner stopped")
+	}
+	return digest
+}
+
 func checkpointVsScan(t *testing.T, cfg Config, policies [][]byte, root string, base int, wantCheckpoint bool) {
 	t.Helper()
 	ckptDir, scanDir := copyTree(t, root), copyTree(t, root)
@@ -340,12 +363,12 @@ func checkpointVsScan(t *testing.T, cfg Config, policies [][]byte, root string, 
 	if b.owners[0].rollups.fromCheckpoint {
 		t.Fatal("scan copy loaded a checkpoint")
 	}
-	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatalf("checkpoint+delta state differs from scan:\n--- checkpoint\n%s\n--- scan\n%s", x, y)
 	}
 	checkpointFixture(t, a, policies, base, 7)
 	checkpointFixture(t, b, policies, base, 7)
-	if x, y := rollupStateDigest(a.owners[0].rollups), rollupStateDigest(b.owners[0].rollups); x != y {
+	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatalf("state after further seals differs:\n%s\n---\n%s", x, y)
 	}
 	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
