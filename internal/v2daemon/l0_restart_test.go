@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 )
@@ -195,7 +196,22 @@ func TestL0RefusesUnsealedJournal(t *testing.T) {
 // exactly the classic image of an application prefix that contains every
 // application a reader saw. V2_L0_KILL_ROUNDS sets rounds (default 3; the
 // oracle used 100).
-func TestL0KillFences(t *testing.T) {
+func TestL0KillFences(t *testing.T) { testL0KillFences(t, "TestL0KillFences", 1) }
+
+// TestL0KillFencesMultiOwner runs the same kills with the two names on two
+// owners. A cut owner blocks only itself, so at the kill each owner may hold
+// a different prefix: each must hold every application a reader saw from it
+// and exactly the classic image of its own prefix.
+func TestL0KillFencesMultiOwner(t *testing.T) { testL0KillFences(t, "TestL0KillFencesMultiOwner", 2) }
+
+func testL0KillFences(t *testing.T, name string, shards int) {
+	config := func() Config { c := l0Config(); c.Shards = shards; return c }
+	owner := func(app Application) int {
+		return int(partsformat.Route(partsformat.ID(app.Name))) % shards
+	}
+	if shards > 1 && owner(restartApps(t, 0, 1)[0]) == owner(restartApps(t, 1, 2)[0]) {
+		t.Fatal("both names route to one owner")
+	}
 	if root := os.Getenv("V2_L0_FENCE_ROOT"); root != "" {
 		stage := os.Getenv("V2_L0_FENCE_STAGE")
 		k, _ := strconv.Atoi(os.Getenv("V2_L0_FENCE_K"))
@@ -217,13 +233,13 @@ func TestL0KillFences(t *testing.T) {
 				}
 				return nil
 			},
-			VisiblePending: func(_ int, v v2core.PendingView) {
+			VisiblePending: func(o int, v v2core.PendingView) {
 				var top uint64
 				v.Each(func(a *v2core.PendingApplication) bool { top = max(top, a.Order); return true })
-				fmt.Println("VIS", top)
+				fmt.Println("VIS", o, top)
 			},
 		}
-		s, err := openWithHooks(root, l0Config(), hooks)
+		s, err := openWithHooks(root, config(), hooks)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -266,7 +282,7 @@ func TestL0KillFences(t *testing.T) {
 		if c.stage == "empty" {
 			base = 0
 		} else {
-			s, err := Open(root, l0Config())
+			s, err := Open(root, config())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -277,7 +293,7 @@ func TestL0KillFences(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		cmd := exec.Command(os.Args[0], "-test.run=^TestL0KillFences$", "-test.timeout=60s")
+		cmd := exec.Command(os.Args[0], "-test.run=^"+name+"$", "-test.timeout=60s")
 		cmd.Env = append(os.Environ(), "V2_L0_FENCE_ROOT="+root, "V2_L0_FENCE_STAGE="+c.stage, fmt.Sprintf("V2_L0_FENCE_K=%d", c.k), fmt.Sprintf("V2_L0_FENCE_ROUNDS=%d", rounds))
 		pipe, err := cmd.StdoutPipe()
 		if err != nil {
@@ -288,7 +304,11 @@ func TestL0KillFences(t *testing.T) {
 		if err = cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		visible := uint64(base)
+		// Order of the last application each owner showed a reader.
+		visible := make([]uint64, shards)
+		for _, app := range restartApps(t, 0, base) {
+			visible[owner(app)] = max(visible[owner(app)], app.Order)
+		}
 		var output synchronizedBuffer
 		ready := make(chan bool, 1)
 		go func() {
@@ -300,8 +320,11 @@ func TestL0KillFences(t *testing.T) {
 					return
 				}
 				if v, ok := strings.CutPrefix(line, "VIS "); ok {
-					n, _ := strconv.ParseUint(v, 10, 64)
-					visible = max(visible, n)
+					var o int
+					var n uint64
+					if _, err := fmt.Sscan(v, &o, &n); err == nil && o < shards {
+						visible[o] = max(visible[o], n)
+					}
 				} else {
 					_, _ = output.Write([]byte(line + "\n"))
 				}
@@ -325,16 +348,22 @@ func TestL0KillFences(t *testing.T) {
 		if err = cmd.Wait(); err == nil {
 			t.Fatalf("%v: child exited cleanly", c)
 		}
-		s, err := Open(root, l0Config())
+		s, err := Open(root, config())
 		if err != nil {
 			t.Fatalf("%v: %v", c, err)
 		}
-		// The store's last order per name tells which prefix it holds.
-		var held uint64
-		for _, db := range s.Core.DBs() {
+		// Seal the loaded L0 rows, then each owner's last order per name
+		// tells which prefix of its own applications it holds.
+		if p := s.Producers[0]; p.cursor > 0 {
+			if err = s.Core.AppendBatches(0, nil, p.cursor, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		held := make([]uint64, shards)
+		for o, db := range s.Core.DBs() {
 			snap := db.NewSnapshot()
 			err := v2core.ScanRollups(snap, func(_ v2core.RollupPolicy, m v2core.RollupMetadata, _ []sealrollup.Record) error {
-				held = max(held, m.Frontier.Order)
+				held[o] = max(held[o], m.Frontier.Order)
 				return nil
 			})
 			_ = snap.Close()
@@ -342,17 +371,22 @@ func TestL0KillFences(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// Loaded L0 rows are sealed by the oracle's own seal below; before it
-		// the producer order already covers them.
-		held = max(held, s.Producers[0].applyOrder)
-		if held < visible {
-			t.Fatalf("%v: store continues at order %d, below visible %d", c, held, visible)
+		var prefix []Application
+		for _, app := range restartApps(t, 0, base+2*rounds) {
+			if app.Order <= held[owner(app)] {
+				prefix = append(prefix, app)
+			}
 		}
-		if held > uint64(base+2*rounds) {
-			t.Fatalf("%v: store holds order %d beyond input", c, held)
+		for o := range shards {
+			if held[o] < visible[o] {
+				t.Fatalf("%v: owner %d holds order %d, below visible %d", c, o, held[o], visible[o])
+			}
+			if held[o] > uint64(base+2*rounds) {
+				t.Fatalf("%v: owner %d holds order %d beyond input", c, o, held[o])
+			}
 		}
-		if held > 0 {
-			checkRestartOracle(t, s, restartApps(t, 0, int(held)), 3)
+		if len(prefix) > 0 {
+			checkRestartOracle(t, s, prefix, 3)
 		}
 		if err = s.Close(); err != nil {
 			t.Fatal(err)
