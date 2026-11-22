@@ -1688,7 +1688,7 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 		}
 	}
 	planEnd = time.Now()
-	rollupWrites := o.startRollupPartWrites(plan)
+	rollupWrites := o.startRollupPartWrites(plan, next.NextPart)
 	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
 	omitRaw := plan.ReplaceRaw || (o.cfg.Rollups && !o.cfg.KeepBaseRows)

@@ -82,7 +82,7 @@ func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descripto
 		}
 	})
 	d.Bytes, d.SHA256, d.Coverage.Records, d.LastKey = 0, v2part.Digest{}, 0, last
-	_, _ = fmt.Fprintf(w, "%+v\n", d)
+	_, _ = fmt.Fprint(w, withoutSeq(fmt.Sprintf("%+v\n", d)))
 }
 
 // partRunLengths lists the slot count of every dense run in a part, per name
