@@ -41,6 +41,7 @@ type sealedPartGC struct {
 	fileMu               sync.Mutex // serializes seal file publication with unlink; readers never acquire it
 	mu                   sync.Mutex
 	inventory            *RollupInventory // immutable; captured/updated under mu
+	moveEpoch            uint64           // attachment invalidates in-flight merge proposals; under mu
 	db                   *pebble.DB
 	dir                  string
 	pending              map[v2part.Digest]retiredPart

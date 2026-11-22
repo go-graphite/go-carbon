@@ -375,7 +375,11 @@ func (s *RollupSnapshot) MetricVersion(name string) any {
 // carries only immutable results and part identities across generations. New
 // snapshots decode only added parts; removed parts invalidate cached authority.
 func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
+
 	if m := s.metrics[name]; m != nil && !m.latest.meta.Expired && archive > 0 && archive < len(m.latest.schema().Archives) && first >= 0 && first < last && last <= m.latest.schema().Archives[archive].Count {
+		if move := s.moves[m]; move != nil && move.authority != nil && move.authority.Version < 3 {
+			return s.scanLegacyMoveArchive(ctx, name, archive, first, last, func(r sealrollup.Record, _ partOrigin) error { return yield(r) })
+		}
 		return s.scanWindows(ctx, name, archive, first, last, yield)
 	}
 	return s.scanStoredArchive(ctx, name, archive, first, last, yield)

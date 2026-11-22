@@ -550,12 +550,13 @@ func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descr
 // oldest part, so every version up to their newest Seq: only such a
 // merge writes windows down and drops the versions they carry (mergeVersions).
 // dict and identities resolve ID-keyed inputs through the store dictionary.
-func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire, bound int64, prefix bool, stop <-chan struct{}, dict *v2dict.Dict, identities *PolicyCatalog) (_ v2part.Descriptor, err error) {
+func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire, bound int64, prefix bool, stop <-chan struct{}, dict *v2dict.Dict, identities *PolicyCatalog, excluded ...map[string]bool) (_ v2part.Descriptor, err error) {
 	generation, err := mergeGeneration(inputs)
 	if err != nil {
 		return v2part.Descriptor{}, err
 	}
 	names := mergeNames{dict: dict, identities: identities}
+
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinClock: inputs[0].Coverage.MinClock, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
@@ -709,11 +710,17 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			}
 		}
 		config = *chosen.config
+		namePrefix := prefix
+		if len(excluded) > 0 && excluded[0] != nil {
+            name, e := names.definitionName(c.key, c.metricName()[4:])
+            if e != nil { return v2part.Descriptor{}, e }
+            if excluded[0][string(name)] { namePrefix = false }
+        }
 		// Only a prefix can write windows down before dropping their inputs.
 		// No later event can read a record expired before the oldest outside
 		// admission. Legacy parts retain the conservative per-name clock.
 		expireAt := int64(math.MinInt64)
-		if prefix {
+		if namePrefix {
 			expireAt = retire
 			if bound != 0 && spec.MinClock != 0 {
 				expireAt = min(expireAt, bound)
@@ -738,7 +745,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			expiry.data(rollupRecordExpiry(config, winner))
 			return writer.SetRecordEncoded(key, winner)
 		}
-		versioned, e := versions.merge(members, config, metadata, expireAt, prefix)
+		versioned, e := versions.merge(members, config, metadata, expireAt, namePrefix)
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
@@ -881,6 +888,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	// Capture the pin and inventory under the same GC fence as publications.
 	o.gc.mu.Lock()
 	snapshot := o.db.NewSnapshot()
+	moveEpoch := o.gc.moveEpoch
 	o.gc.mu.Unlock()
 	defer snapshot.Close()
 	limit, configured, err := effectiveMergeLimit(o.dir)
@@ -933,7 +941,25 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	if err != nil {
 		return false, err
 	}
-	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, bound, o.oldestInScope(inputs), stop, dict, identities)
+	var excluded map[string]bool
+	if copied, e := snapshotHasCopiedParts(snapshot); e != nil {
+		return false, e
+	} else if copied {
+		index, e := NewRollupSnapshot(context.Background(), snapshot, nil, identities, nil, 0)
+		if e != nil {
+			return false, e
+		}
+		excluded = map[string]bool{}
+		for name, m := range index.metrics {
+			if index.moves[m] != nil && index.moves[m].copied {
+				excluded[name] = true
+			}
+		}
+	}
+	// Copied parts are outside the local merge inventory. Until they join its
+	// lifecycle, retain this name's dependencies and do no partial write-down.
+	d, err := mergeParts(context.Background(), o.dir, path, inputs, retire, bound, o.oldestInScope(inputs), stop, dict, identities, excluded)
+
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
@@ -945,7 +971,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	}
 	o.gc.fileMu.Lock()
 	defer o.gc.fileMu.Unlock()
-	changed, err := o.gc.replaceMerged(inputs, path, d)
+	changed, err := o.gc.replaceMerged(inputs, path, d, moveEpoch)
 	if changed {
 		o.gcDirty.Store(true)
 		coreWake(o.work)
@@ -959,7 +985,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 // their unlink. Concurrent retire/move activity invalidates the whole proposal.
 // The output is linked and synced before the binding fence (g.mu): the caller's
 // fileMu already excludes unlink, so publications wait only for the commit.
-func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d v2part.Descriptor) (bool, error) {
+func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d v2part.Descriptor, moveEpoch uint64) (bool, error) {
 	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
 	if err != nil {
 		return false, err
@@ -969,6 +995,13 @@ func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d 
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.moveEpoch != moveEpoch {
+		// Attachment changed which streams this merge must include. Keep the
+		// original dependencies; the retained proposal is an ordinary orphan.
+		g.pending[d.SHA256] = retiredPart{at: g.now()}
+		g.pendingCount.Store(uint64(len(g.pending)))
+		return false, nil
+	}
 	for _, old := range inputs {
 		value, closer, err := g.db.Get(partBinding(sealedPartPrefix, old.SHA256))
 		if errors.Is(err, pebble.ErrNotFound) {

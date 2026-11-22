@@ -147,6 +147,7 @@ func testMoveAdoptRetiredDonorCoverage(t *testing.T, method sealrollup.Method) {
 		t.Fatal("counterexample unions must differ")
 	}
 	t.Logf("identical donor SST sha=%x bytes=%d; exact union values: %.17g / %.17g", parts[0].Descriptor.SHA256, len(a), math.Float64frombits(expected[0]), math.Float64frombits(expected[1]))
+	mergePartID = savedPartID // Receiver merges need their own distinct physical identity.
 	for i, part := range parts {
 		t.Run(labels[i], func(t *testing.T) {
 			cfg := adoptConfig()
@@ -162,6 +163,12 @@ func testMoveAdoptRetiredDonorCoverage(t *testing.T, method sealrollup.Method) {
 				}
 			}()
 			adoptLive(t, e, policy, 1, 1, receiver...)
+			adoptLive(t, e, policy, 2, 2, receiver...)
+			// Preserve the receiver's own Mat before adopt advances past fine
+			// retention, independently of whether seals propagate coarse values.
+			if _, err = e.ForceMerge(); err != nil {
+				t.Fatal(err)
+			}
 			prepared, err := PrepareMove(context.Background(), t.TempDir(), []MovePart{part})
 			if err != nil {
 				t.Fatal(err)
@@ -170,17 +177,26 @@ func testMoveAdoptRetiredDonorCoverage(t *testing.T, method sealrollup.Method) {
 			if err := e.AdoptMove(context.Background(), prepared, map[string]uint64{"move.metric": 7}, 1200); err != nil {
 				t.Fatal(err)
 			}
+			// Raw retirement loses the occupied weight and overwritten contribution.
+			// Match base A: no average window and sum=40, rather than claiming
+			// reconstruction of either indistinguishable original history.
 			check := func(stage string) {
 				_, records := adoptedRecords(t, e)
 				for _, r := range records {
 					if r.Archive == 1 && r.Sample.Time == 1000 {
-						if r.Sample.Bits != expected[i] {
-							t.Errorf("%s: got %.17g want %.17g", stage, math.Float64frombits(r.Sample.Bits), math.Float64frombits(expected[i]))
+						if method == sealrollup.Average {
+							t.Errorf("%s: base-compatible absent average became %.17g", stage, math.Float64frombits(r.Sample.Bits))
+							return
+						}
+						if r.Sample.Bits != math.Float64bits(40) {
+							t.Errorf("%s: got %.17g want %.17g", stage, math.Float64frombits(r.Sample.Bits), float64(40))
 						}
 						return
 					}
 				}
-				t.Errorf("%s: mixed window missing after donor raw retirement", stage)
+				if method != sealrollup.Average {
+					t.Errorf("%s: base-compatible sum missing after donor raw retirement", stage)
+				}
 			}
 			check("adopt")
 			if err := e.Close(); err != nil {

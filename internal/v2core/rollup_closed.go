@@ -47,6 +47,23 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 	}); err != nil {
 		return err
 	}
+	if move := s.moves[m]; move != nil && move.authority != nil && meta.ResetOrder <= move.authority.AtOrder {
+		for _, r := range move.authority.Coarse {
+			if r.Archive != archive || r.Slot < first || r.Slot >= last {
+				continue
+			}
+			kept := stored[:0]
+			for _, old := range stored {
+				if old.Sample.Time != r.Sample.Time {
+					kept = append(kept, old)
+				}
+			}
+			stored = kept
+			if r.Kind != sealrollup.KindNone {
+				stored = append(stored, r)
+			}
+		}
+	}
 	return windowRecords(c, meta, archive, first, last, stored, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
 		var out []sealrollup.Record
 		err := s.eachPartRecord(ctx, m, s.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
@@ -55,6 +72,27 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 			out = append(out, r)
 			return nil
 		})
+		if move := s.moves[m]; move != nil && move.authority != nil && meta.ResetOrder <= move.authority.AtOrder {
+			for _, r := range move.authority.Coarse {
+				if r.Archive != l || r.Slot < first || r.Slot >= last {
+					continue
+				}
+				// This Mat is the union at adopt, so its bound covers both
+				// classes. Original Mats describe only their source stream.
+				kept := out[:0]
+				for _, old := range out {
+					if old.Sample.Time != r.Sample.Time || old.Kind == sealrollup.KindRaw || old.Kind == sealrollup.KindGhost {
+						kept = append(kept, old)
+					}
+				}
+				out = kept
+				mapped, e := moveVersionRecord(r, nil)
+				if e != nil {
+					return nil, e
+				}
+				out = append(out, mapped)
+			}
+		}
 		return out, err
 	}, func(r sealrollup.Record) error {
 		if s.moves[m] != nil && r.Order >= moveLiveOrder {

@@ -104,11 +104,14 @@ func (p *PreparedMove) Policies() map[string][]byte {
 var moveAuthorityPrefix = []byte{255, 'V', '2', 'A', 0}
 
 // moveAuthority binds receiving identity and lifecycle metadata atomically with
-// the imported part bindings. Window values remain in the immutable parts.
+// the imported part bindings. Coarse holds only mixed-window Mats; untouched
+// history remains in the immutable parts. Versions 1/2 retain their old overlay.
 type moveAuthority struct {
 	Version int
 	Meta    RollupMetadata
 	AtOrder uint64
+	Coarse  []sealrollup.Record `json:",omitempty"`
+	Origins []partOrigin        `json:",omitempty"`
 }
 
 func moveAuthorityKey(name string) []byte { return append(bytes.Clone(moveAuthorityPrefix), name...) }
@@ -188,6 +191,9 @@ func collectMoveArchive(ctx context.Context, index *RollupSnapshot, name string,
 		}
 		winners[record.Slot] = moveWinner{record, origin}
 		return nil
+	}
+	if move := index.moves[m]; archive > 0 && move != nil && move.authority != nil && move.authority.Version < 3 {
+		return index.scanLegacyMoveArchive(ctx, name, archive, 0, m.latest.schema().Archives[archive].Count, yield)
 	}
 	return index.scanArchiveParts(ctx, name, archive, 0, m.latest.schema().Archives[archive].Count, yield)
 }
@@ -322,13 +328,36 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		local.Version = 3
 		meta := compactMetadata(local)
+		authority := moveAuthority{Version: 3, AtOrder: local.Frontier.Order}
+		authority.Coarse, err = moveUnionWindows(ctx, prepared.index, current, name, policy.Config, local.Frontier.Order, now)
+		if err != nil {
+			return err
+		}
+		if old := current.metrics[name]; old != nil && current.moves[old] != nil && current.moves[old].authority != nil {
+			for _, prior := range current.moves[old].authority.Coarse {
+				if !slices.ContainsFunc(authority.Coarse, func(r sealrollup.Record) bool {
+					return r.Archive == prior.Archive && r.Sample.Time == prior.Sample.Time
+				}) {
+					authority.Coarse = append(authority.Coarse, prior)
+				}
+			}
+		}
 		for _, record := range winning {
+			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
+			if slices.ContainsFunc(authority.Coarse, func(r sealrollup.Record) bool {
+				return r.Archive == record.Archive && r.Sample.Time == record.Sample.Time
+			}) {
+				continue
+			}
 			record.Order = local.Frontier.Order
 			record.Sample.Sequence = record.Order
 			m.residency().Install(record.Delta)
-			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
 		}
-		authority := moveAuthority{Version: 3, AtOrder: local.Frontier.Order}
+		for _, r := range authority.Coarse {
+			if r.Kind != sealrollup.KindNone {
+				m.residency().Install(r.Delta)
+			}
+		}
 		authority.Meta = m.metadata(meta)
 		if next.db != nil {
 			m.keepRecent(meta.Frontier.MaxTime)
@@ -383,7 +412,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	if o.stage != nil {
 		o.stage("move-before-ingest")
 	}
-	if err = o.db.Ingest([]string{path}); err != nil {
+	o.gc.mu.Lock()
+	err = o.db.Ingest([]string{path})
+	if err == nil {
+		o.gc.moveEpoch++
+	}
+	o.gc.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	if o.stage != nil {
@@ -412,7 +447,7 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if a.Version != 3 || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || a.Meta.Frontier.Order != a.AtOrder {
+		if (a.Version < 1 || a.Version > 3) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || a.Meta.Frontier.Order != a.AtOrder {
 			return errors.New("invalid move authority")
 		}
 		if s.moves[m].origin.Class == LivePart {
@@ -434,4 +469,65 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		s.moves[m].authority = &a
 	}
 	return nil
+}
+
+// scanLegacyMoveArchive preserves persisted v1 full baselines and v2 sparse
+// overlays. New adoptions store actual Mat/None versions in the common reader.
+func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
+	m := s.metrics[name]
+	a := s.moves[m].authority
+	winners := map[int64]moveWinner{}
+	base := s
+	if a.Version == 1 {
+		// Legacy authorities contain the entire baseline. Only subsequent local
+		// replacements compete with it; old underlying coarse rows stay masked.
+		live := *m
+		var liveParts []*readPartMetric
+		for _, part := range s.metricParts(m) {
+			if part.part.origin.Class == LivePart {
+				liveParts = append(liveParts, part)
+			}
+		}
+		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, partOverrides: map[*snapshotMetric][]*readPartMetric{&live: liveParts}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
+	}
+	if err := base.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, origin partOrigin) error {
+		if a.Version != 1 || record.Order > a.AtOrder {
+			winners[record.Slot] = moveWinner{record, origin}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if m.latest.meta.ResetOrder <= a.AtOrder {
+		for i, record := range a.Coarse {
+			if record.Archive != archive || record.Slot < first || record.Slot >= last {
+				continue
+			}
+			origin := partOrigin{Class: LivePart}
+			if len(a.Origins) == len(a.Coarse) {
+				origin = a.Origins[i]
+			}
+			old, exists := winners[record.Slot]
+			if exists {
+				comparison := record
+				if origin.Class == LivePart {
+					comparison.Order = a.AtOrder
+				}
+				newer, err := newerOrigin(origin, comparison, old.origin, old.record)
+				if err != nil {
+					return err
+				}
+				if !newer && !(origin == old.origin && comparison.Sample.Time == old.record.Sample.Time && comparison.Order == old.record.Order) {
+					continue
+				}
+			}
+			winners[record.Slot] = moveWinner{record, origin}
+		}
+	}
+	for _, winner := range winners {
+		if err := yield(winner.record, winner.origin); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }

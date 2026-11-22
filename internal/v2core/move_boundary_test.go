@@ -130,11 +130,21 @@ func TestMoveAdoptMatureHistoryKeepsPartsAndSparseRepairs(t *testing.T) {
 	if err = e.AppendBatches(0, oldBatches, 10, true); err != nil {
 		t.Fatal(err)
 	}
+	settle := oldBatches[1]
+	settle.Order = 3
+	if err = e.AppendBatches(0, []Batch{settle}, 11, true); err != nil {
+		t.Fatal(err)
+	}
+	// Settle receiver history before advancing beyond its fine retention,
+	// just as the donor fixture does; raw-only seals do not write these Mats.
+	if _, err = e.ForceMerge(); err != nil {
+		t.Fatal(err)
+	}
 	var rows []Row
 	for ts := int64(1995); ts < 2000; ts++ {
 		rows = append(rows, Row{ID: 7, Time: ts, Bits: math.Float64bits(float64(ts - 1989)), Seq: uint64(ts - 1994)})
 	}
-	if err = e.AppendBatches(0, []Batch{{ID: 7, Order: 3, Clock: 2000, Policy: policy, Points: rows}}, 15, true); err != nil {
+	if err = e.AppendBatches(0, []Batch{{ID: 7, Order: 4, Clock: 2000, Policy: policy, Points: rows}}, 15, true); err != nil {
 		t.Fatal(err)
 	}
 	if err = e.AdoptMove(ctx, prepared, map[string]uint64{"move.metric": 7}, 2000); err != nil {

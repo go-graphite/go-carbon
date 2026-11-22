@@ -395,7 +395,14 @@ func moveVersionRecord(r sealrollup.Record, binding *partImport) (sealrollup.Rec
 // receiving identity are published in the same manifest edit.
 func moveOrderBases(db *pebble.DB, parts []MovePart) (map[partOrigin]uint64, error) {
 	bases := map[partOrigin]uint64{}
-	next := uint64(0)
+	maxima := map[partOrigin]uint64{}
+	var streams []partOrigin
+	remember := func(o partOrigin, maximum uint64) {
+		if _, ok := maxima[o]; !ok {
+			streams = append(streams, o)
+		}
+		maxima[o] = max(maxima[o], maximum)
+	}
 	it, err := db.NewIter(&pebble.IterOptions{LowerBound: movePartPrefix, UpperBound: v2part.PrefixEnd(movePartPrefix)})
 	if err != nil {
 		return nil, err
@@ -406,31 +413,40 @@ func moveOrderBases(db *pebble.DB, parts []MovePart) (map[partOrigin]uint64, err
 		if err = json.Unmarshal(it.Value(), &b); err != nil {
 			return nil, err
 		}
-		if b.Pending || b.BaseOrder == 0 {
+		if b.Pending {
 			continue
 		}
-		if b.BaseOrder < b.Descriptor.Source.MinOrder {
+		minimum, maximum := b.Descriptor.Source.MinOrder, b.Descriptor.Source.MaxOrder
+		base := b.BaseOrder
+		if base == 0 {
+			base = minimum
+		} // legacy identity mapping
+		if minimum == 0 || maximum < minimum || base < minimum {
 			return nil, errors.New("invalid copied order base")
 		}
-		offset := b.BaseOrder - b.Descriptor.Source.MinOrder
+		offset := base - minimum
 		if old, ok := bases[b.Origin]; ok && old != offset {
 			return nil, errors.New("copied stream order range changed")
 		}
 		bases[b.Origin] = offset
-		next = max(next, offset+b.Descriptor.Source.MaxOrder)
+		remember(b.Origin, maximum)
 	}
 	if err = it.Error(); err != nil {
 		return nil, err
 	}
-	maxima := map[partOrigin]uint64{}
-	var streams []partOrigin
 	for _, part := range parts {
 		d := part.Descriptor
-		o := partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}
-		if _, ok := maxima[o]; !ok {
-			streams = append(streams, o)
+		if d.Source.MinOrder == 0 || d.Source.MaxOrder < d.Source.MinOrder {
+			return nil, errors.New("invalid copied order range")
 		}
-		maxima[o] = max(maxima[o], d.Source.MaxOrder)
+		remember(partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, d.Source.MaxOrder)
+	}
+	next := uint64(0)
+	for o, offset := range bases {
+		if offset >= moveLiveOrder || maxima[o] >= moveLiveOrder-offset {
+			return nil, errors.New("copied order range exhausted")
+		}
+		next = max(next, offset+maxima[o])
 	}
 	for _, o := range streams {
 		if _, ok := bases[o]; ok {
@@ -441,6 +457,15 @@ func moveOrderBases(db *pebble.DB, parts []MovePart) (map[partOrigin]uint64, err
 		}
 		bases[o] = next
 		next += maxima[o]
+	}
+	// Stream extensions keep their offset. They may not consume another
+	// stream's reserved prefix, including holes retained for old Upto bounds.
+	for i, o := range streams {
+		for _, other := range streams[:i] {
+			if bases[o] < bases[other]+maxima[other] && bases[other] < bases[o]+maxima[o] {
+				return nil, errors.New("copied stream order ranges overlap")
+			}
+		}
 	}
 	return bases, nil
 }
