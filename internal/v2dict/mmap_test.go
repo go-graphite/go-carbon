@@ -2,6 +2,8 @@ package v2dict
 
 import (
 	"bytes"
+	"encoding/binary"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -120,5 +122,36 @@ func TestCloseUnmapsActiveArena(t *testing.T) {
 	}
 	if len(d.shards[0].buf.chunks) != 0 {
 		t.Fatal("Close retained mmap chunks")
+	}
+}
+
+// Crossing a chunk boundary must keep records intact without allocating
+// their name bytes on the Go heap. This also catches falling back to make.
+func TestArenaChunksStayOffHeap(t *testing.T) {
+	var table memtable
+	defer table.release()
+	key := append(scopeKey(nil, "g", 2), bytes.Repeat([]byte("n"), 65400)...)
+	var val [valueSize]byte
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := range 1030 {
+		binary.LittleEndian.PutUint32(key[len(key)-4:], uint32(i))
+		binary.LittleEndian.PutUint32(val[:], uint32(i))
+		if err := table.put(key, val[:]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if len(table.chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2", len(table.chunks))
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > 8<<20 {
+		t.Fatalf("arena allocated %d heap bytes, want <8 MiB", n)
+	}
+	for i := range 1030 {
+		k, v := table.rec(uint32(i))
+		if binary.LittleEndian.Uint32(k[len(k)-4:]) != uint32(i) || binary.LittleEndian.Uint32(v) != uint32(i) {
+			t.Fatalf("record %d corrupted across chunk boundary", i)
+		}
 	}
 }
