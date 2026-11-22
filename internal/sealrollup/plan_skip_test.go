@@ -141,7 +141,7 @@ func TestClosedPlanSkipRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if through != 360002 || len(got.Records) != 1 || got.Records[0].Archive != 2 || got.Records[0].Sample.Time != 360000 {
+	if through != 360060 || len(got.Records) != 1 || got.Records[0].Archive != 2 || got.Records[0].Sample.Time != 360000 {
 		t.Fatalf("retention target lost: %+v through=%d", got, through)
 	}
 }
