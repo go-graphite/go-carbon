@@ -124,17 +124,43 @@ func buildReferencedProbeStore(root string, buckets bool) (int64, error) {
 
 func (t *referencedProbeTemplate) template(buckets bool) (string, int64, error) {
 	t.once.Do(func() {
-		t.dir = filepath.Join(os.TempDir(), fmt.Sprintf("go-carbon-referenced-probe-v1-buckets-%v", buckets))
-		marker := filepath.Join(t.dir, "built")
-		if data, err := os.ReadFile(marker); err == nil {
+		t.dir = filepath.Join(os.TempDir(), fmt.Sprintf("go-carbon-referenced-probe-v2-buckets-%v", buckets))
+		// The template is shared by every test process on the machine, so it
+		// is built in a private directory and renamed into place complete
+		// (marker included). A process never deletes or writes a directory
+		// another process may be reading; concurrent builders race only on
+		// the rename, and the loser uses the winner's template.
+		read := func() bool {
+			data, err := os.ReadFile(filepath.Join(t.dir, "built"))
+			if err != nil {
+				return false
+			}
 			_, t.err = fmt.Sscan(string(data), &t.now)
+			return true
+		}
+		if read() {
 			return
 		}
-		if t.err = os.RemoveAll(t.dir); t.err != nil {
+		build, err := os.MkdirTemp(os.TempDir(), filepath.Base(t.dir)+".build-")
+		if err != nil {
+			t.err = err
 			return
 		}
-		if t.now, t.err = buildReferencedProbeStore(t.dir, buckets); t.err == nil {
-			t.err = os.WriteFile(marker, []byte(fmt.Sprint(t.now)), 0600)
+		defer os.RemoveAll(build)
+		now, err := buildReferencedProbeStore(build, buckets)
+		if err == nil {
+			err = os.WriteFile(filepath.Join(build, "built"), []byte(fmt.Sprint(now)), 0600)
+		}
+		if err != nil {
+			t.err = err
+			return
+		}
+		if err = os.Rename(build, t.dir); err == nil {
+			t.now = now
+			return
+		}
+		if !read() {
+			t.err = err
 		}
 	})
 	return filepath.Join(t.dir, "shared"), t.now, t.err
