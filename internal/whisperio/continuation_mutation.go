@@ -1,8 +1,11 @@
 package whisperio
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"math"
+	"reflect"
 	"sort"
 	"time"
 
@@ -29,8 +32,21 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 	if err != nil {
 		return err
 	}
-	if err = c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance); err != nil {
+	// Classic updates already stage private attempts. Retain their final write
+	// set to refine only changed groups, including writes from propagation.
+	var changes *continuationOverlay
+	writeKV := kv
+	if !before.compressed {
+		changes = newContinuationOverlay(kv)
+		writeKV = changes
+	}
+	if err = c.updateWithSumCache(ctx, writeKV, m, input, retention, clock, maintenance); err != nil {
 		return err
+	}
+	if changes != nil {
+		if err := changes.commit(); err != nil {
+			return err
+		}
 	}
 	after, err := readSumWriteView(kv, clock)
 	if err != nil {
@@ -123,6 +139,9 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 			}
 		}
 	}
+	if changes != nil {
+		return refineClassicMutation(baseline, kv, changes, before, after, windows, recorder, clock)
+	}
 	open := func(source store.ContinuationIO) (*whisper.Whisper, error) {
 		fs := newContinuationFiles(source, true).withClock(clock)
 		fs.rangeReads = true
@@ -156,6 +175,105 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 					ts := int64(a.FromTime() + i*a.Step())
 					recorder.RecordMutation(w.Archive, ts, ts+1)
 				}
+			}
+		}
+	}
+	recorder.CompleteMutation()
+	return nil
+}
+
+// refineClassicMutation compares physical slots only in the final write set.
+// Both owners of a replaced/deleted slot matter. A stable classic header and
+// circular anchor ensure untouched groups retain the same logical meaning.
+// Unknown key kinds and structural rewrites keep the whole-revision fence.
+func refineClassicMutation(baseline, current store.ContinuationIO, changes *continuationOverlay, before, after sumWriteView, windows [][]whisper.ArchiveWindow, recorder store.ContinuationMutationRecorder, clock func() time.Time) error {
+	if before.file != after.file || after.compressed || before.sidecar || after.sidecar {
+		return nil
+	}
+	for _, prefix := range changes.prefixes {
+		if !bytes.Equal(prefix, sumRevisionKey) {
+			return nil
+		}
+	}
+	oldFS := newContinuationFiles(baseline, true).withClock(clock)
+	newFS := newContinuationFiles(current, true).withClock(clock)
+	oldData, err := oldFS.load("main.wsp")
+	if err != nil {
+		return err
+	}
+	newData, err := newFS.load("main.wsp")
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(oldData.header, newData.header) || !reflect.DeepEqual(oldData.layout, newData.layout) {
+		return nil
+	}
+	oldFile := &continuationFile{fs: oldFS, data: oldData}
+	newFile := &continuationFile{fs: newFS, data: newData}
+	groups := make(map[string]bool)
+	check := func(key string) bool {
+		k := []byte(key)
+		if bytes.HasPrefix(k, sumRevisionKey) {
+			return true // Disposable digest cache, never point data.
+		}
+		if len(k) < 10 || !bytes.Equal(k[:9], continuationFilePrefix(before.file)) {
+			return false
+		}
+		if len(k) == 10 && (k[9] == 'h' || k[9] == 'w') {
+			return true // Manifest checked above; optional window index is a cache.
+		}
+		if len(k) != 20 || k[9] != 'p' || binary.BigEndian.Uint32(k[12:16]) != 0 {
+			return false // Includes alias retirement and sidecar/namespace changes.
+		}
+		groups[key] = true
+		return len(groups) <= mutationCompareSlots/128
+	}
+	for key := range changes.values {
+		if !check(key) {
+			return nil
+		}
+	}
+	for key := range changes.deleted {
+		if !check(key) {
+			return nil
+		}
+	}
+	mark := func(ai int, ts int64) {
+		for _, w := range windows[ai] {
+			if ts >= int64(w.From) && ts < int64(w.Until) {
+				recorder.RecordMutation(ai, ts, ts+1)
+				return
+			}
+		}
+	}
+	for key := range groups {
+		k := []byte(key)
+		ai, gi := int(binary.BigEndian.Uint16(k[10:12])), int(binary.BigEndian.Uint32(k[16:20]))
+		if ai >= len(oldData.layout.Archives) || gi*128 >= oldData.layout.Archives[ai].Count {
+			return nil
+		}
+		a, err := oldFile.classicGroup(ai, oldData.layout.Archives[ai], gi, false)
+		if err != nil {
+			return err
+		}
+		b, err := newFile.classicGroup(ai, newData.layout.Archives[ai], gi, false)
+		if err != nil {
+			return err
+		}
+		if gi == 0 && (a.Present[0]&1 != b.Present[0]&1 || a.Points[0].Timestamp != b.Points[0].Timestamp) {
+			return nil // Moving the circular anchor can change untouched groups.
+		}
+		for i, p := range a.Points {
+			ap, bp := a.Present[i/64]&(1<<uint(i%64)) != 0, b.Present[i/64]&(1<<uint(i%64)) != 0
+			q := b.Points[i]
+			if ap == bp && (!ap || p.Timestamp == q.Timestamp && math.Float64bits(p.Value) == math.Float64bits(q.Value)) {
+				continue
+			}
+			if ap {
+				mark(ai, p.Timestamp)
+			}
+			if bp {
+				mark(ai, q.Timestamp)
 			}
 		}
 	}
