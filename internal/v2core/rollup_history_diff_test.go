@@ -84,6 +84,7 @@ func rollupHistoryDifferential(t *testing.T, golden map[string]string) {
 					if err = e.AppendBatches(0, []Batch{{ID: 1, Policy: policy, Order: order, Clock: now, Points: rows}}, order, true); err != nil {
 						t.Fatal(err)
 					}
+					orderProofObserve(t, t.Name(), e)
 					snap := e.DBs()[0].NewSnapshot()
 					// Hash full physical replacements as published, normalizing only the
 					// random part ID. A second digest surface is resolved archive reads.

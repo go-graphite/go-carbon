@@ -161,6 +161,7 @@ func writeSlimEnvelopeImages(t *testing.T, full bool) {
 		engine = e
 	}
 	image := func() envelopeImage {
+		orderProofObserve(t, t.Name(), engine)
 		var out envelopeImage
 		ctx := context.Background()
 		pin := engine.DBs()[0].NewSnapshot()
