@@ -57,8 +57,8 @@ func verifyJournal(root string, f Fixture, names []string, policies [][]byte) er
 			if _, err = io.ReadFull(file, record); err != nil {
 				return err
 			}
-			if len(record) >= 4 && string(record[:4]) == string(applicationMagic) {
-				batches, cursor, err := DecodeApplications(record, &decoder, catalog, p, f.Producers)
+			if isApplicationRecord(record) {
+				batches, cursor, err := DecodeApplications(record, &decoder, p, f.Producers)
 				if err != nil {
 					return err
 				}

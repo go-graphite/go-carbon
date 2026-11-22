@@ -102,10 +102,11 @@ func referencePlaintext(t *testing.T, input []byte, owners int) [][]parsedPoint 
 
 func TestPlaintextBatchTextDifferential(t *testing.T) {
 	for _, tc := range []struct {
-		batch, owners   int
-		zstd, byteNames bool
-	}{{7, 5, false, false}, {1024, 3, false, false}, {64, 4, true, false}, {1, 1, false, false}, {7, 5, false, true}, {1024, 3, false, true}, {64, 4, true, true}, {1, 1, false, true}} {
-		t.Run(fmt.Sprintf("batch%d-owners%d-zstd%v-bytes%v", tc.batch, tc.owners, tc.zstd, tc.byteNames), func(t *testing.T) {
+		batch, owners, buffer int
+		zstd, byteNames       bool
+	}{{7, 5, 0, false, false}, {1024, 3, 0, false, false}, {64, 4, 0, true, false}, {1, 1, 0, false, false}, {7, 5, 0, false, true}, {1024, 3, 0, false, true}, {64, 4, 0, true, true}, {1, 1, 0, false, true},
+		{1024, 5, 600, false, false}, {1024, 5, 600, false, true}, {64, 4, 1, true, true}} {
+		t.Run(fmt.Sprintf("batch%d-owners%d-buffer%d-zstd%v-bytes%v", tc.batch, tc.owners, tc.buffer, tc.zstd, tc.byteNames), func(t *testing.T) {
 			conns := [][]byte{mixedPlaintext(1, 5000), mixedPlaintext(2, 3000), mixedPlaintext(3, 1)}
 			owners := make([]v2recv.Owner, tc.owners)
 			recorded := make([]*retainingOwner, tc.owners)
@@ -120,7 +121,7 @@ func TestPlaintextBatchTextDifferential(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s, err := v2recv.Start(l, owners, v2recv.Config{Logger: quiet(), BatchSize: tc.batch})
+			s, err := v2recv.Start(l, owners, v2recv.Config{Logger: quiet(), BatchSize: tc.batch, BufferBytes: tc.buffer})
 			if err != nil {
 				t.Fatal(err)
 			}

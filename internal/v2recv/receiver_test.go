@@ -78,8 +78,12 @@ func wire(t *testing.T, mode string, conn, rounds int) []byte {
 	return out
 }
 func TestTCP32ConnectionsExactCore(t *testing.T) {
-	for _, mode := range []string{"plaintext", "zstd-plaintext", "binary", "binary-zstd"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, run := range []struct {
+		mode   string
+		buffer int
+	}{{"plaintext", 0}, {"zstd-plaintext", 0}, {"binary", 0}, {"binary-zstd", 0}, {"plaintext", 300}, {"binary-zstd", 300}} {
+		mode := run.mode
+		t.Run(fmt.Sprintf("%s-buffer%d", mode, run.buffer), func(t *testing.T) {
 			const workers, connections, rounds = 4, 32, 127
 			root := t.TempDir()
 			store, err := v2daemon.Open(root, v2daemon.Config{Layer: 2, Producers: workers, Shards: 2, MaxPendingRows: 257})
@@ -91,7 +95,7 @@ func TestTCP32ConnectionsExactCore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r, err := store.ReceiveTCP(l, v2recv.Config{BatchSize: 19, QueueDepth: 1, Logger: quiet(), SyncInterval: 20 * time.Millisecond})
+			r, err := store.ReceiveTCP(l, v2recv.Config{BatchSize: 19, BufferBytes: run.buffer, Logger: quiet(), SyncInterval: 20 * time.Millisecond})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -253,7 +257,7 @@ func TestIdleSyncAndFailure(t *testing.T) {
 func TestBackpressureDoesNotDrop(t *testing.T) {
 	o := &fakeOwner{block: make(chan struct{}), entered: make(chan struct{})}
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	s, e := v2recv.Start(l, []v2recv.Owner{o}, v2recv.Config{BatchSize: 1, QueueDepth: 1, Logger: quiet()})
+	s, e := v2recv.Start(l, []v2recv.Owner{o}, v2recv.Config{BatchSize: 1, Logger: quiet()})
 	if e != nil {
 		t.Fatal(e)
 	}

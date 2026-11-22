@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"crypto/rand"
@@ -895,13 +896,10 @@ func (r *coreRollups) commitPlan() {
 // ScanRollups reads one immutable core snapshot. It resolves each physical slot
 // by logical timestamp, then class and source-local order, before time filters.
 // The snapshot must include metadata and all archive SSTs from one publication.
+// Each open coarse window's slot is computed from the stored versions as
+// reads compute it (sealrollup.OpenSlot).
 func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
-	return scanRollups(snapshot, nil, func(p RollupPolicy, m RollupMetadata, records []sealrollup.Record) error {
-		if m.Version == 3 && !m.Expired {
-			records = sealrollup.ProjectOpen(p.Config, m.Frontier.MaxTime, m.ClosedThrough, records)
-		}
-		return visit(p, m, records)
-	})
+	return scanRollupsWith(snapshot, nil, true, visit)
 }
 
 // rollupScanEntry folds one name's rollup rows as recovery does: the newest
@@ -913,6 +911,43 @@ type rollupScanEntry struct {
 	records   map[[2]int64]sealrollup.Record
 	single    [1]sealrollup.Record
 	hasSingle bool
+	versions  []sealrollup.Record // every stored version, for ScanRollups only
+}
+
+// projectOpen replaces each open coarse window's slot in records (archive and
+// slot order) with its value computed from every visible stored version.
+func (e *rollupScanEntry) projectOpen(c sealrollup.Config, meta metricMetadata, records []sealrollup.Record) ([]sealrollup.Record, error) {
+	for a := 1; a < len(c.Archives); a++ {
+		start, physical, open := openWindow(c, meta, a)
+		if !open {
+			continue
+		}
+		i, found := slices.BinarySearchFunc(records, [2]int64{int64(a), physical}, func(r sealrollup.Record, k [2]int64) int {
+			return cmp.Or(cmp.Compare(int64(r.Archive), k[0]), cmp.Compare(r.Slot, k[1]))
+		})
+		var old *sealrollup.Record
+		if found {
+			old = &records[i]
+		}
+		r, ok, err := openSlotRecord(c, a, start, old, func(l int, first, last int64, _ uint64) ([]sealrollup.Record, error) {
+			var out []sealrollup.Record
+			for _, r := range e.versions {
+				if r.Archive == l && r.Slot >= first && r.Slot < last && r.Order > meta.ResetOrder {
+					out = append(out, r)
+				}
+			}
+			return out, nil
+		})
+		switch {
+		case err != nil:
+			return nil, err
+		case ok && found:
+			records[i] = r
+		case ok:
+			records = slices.Insert(records, i, r)
+		}
+	}
+	return records, nil
 }
 
 func scanIdentity(identities *PolicyCatalog, id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -994,7 +1029,7 @@ func (e *rollupScanEntry) addRecord(record sealrollup.Record) error {
 }
 
 // foldRollupKeys folds every rollup row of iter into series.
-func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, reducerOnly bool) error {
+func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, reducerOnly, versions bool) error {
 	// Reuse key decoding and temporary slim definitions while folding rows.
 	// Catalog identities own their name and suffix before the next row.
 	var keys partsformat.KeyDecoder
@@ -1062,6 +1097,13 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 		}
 		terminal := reducerOnly && e.identity != nil && int(k.Archive) == len(e.identity.schema().Archives)-1
 		value := iter.Value()
+		if versions {
+			all, err := partsformat.DecodeRecordsInto(nil, k.Archive, k.BlockStart, value)
+			if err != nil {
+				return err
+			}
+			e.versions = append(e.versions, all...)
+		}
 		decoded, err := partsformat.DecodeSlotsInto(scratch, k.Archive, k.BlockStart, value)
 		if err != nil {
 			return err
@@ -1137,6 +1179,12 @@ func (e *rollupScanEntry) finish(name partsformat.ID) (RollupPolicy, RollupMetad
 }
 
 func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	return scanRollupsWith(snapshot, identities, false, visit)
+}
+
+// scanRollupsWith folds every name; open also projects open windows from
+// every stored version (no part of a live store is newer than the scan).
+func scanRollupsWith(snapshot *pebble.Snapshot, identities *PolicyCatalog, open bool, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
 		return err
 	} else if copied {
@@ -1148,13 +1196,18 @@ func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit fun
 		return err
 	}
 	defer iter.Close()
-	if err = foldRollupKeys(iter, identities, series, false); err != nil {
+	if err = foldRollupKeys(iter, identities, series, false, open); err != nil {
 		return err
 	}
 	for name, e := range series {
 		policy, meta, records, err := e.finish(name)
 		if err != nil {
 			return err
+		}
+		if open && meta.Version == 3 && !meta.Expired {
+			if records, err = e.projectOpen(policy.Config, compactMetadata(meta), records); err != nil {
+				return err
+			}
 		}
 		if err = visit(policy, meta, records); err != nil {
 			return err

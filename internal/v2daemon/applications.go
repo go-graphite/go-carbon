@@ -1,7 +1,6 @@
 package v2daemon
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -117,9 +116,12 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		return p.fail(errors.New("application cursor exhausted"))
 	}
 	p.applicationFrames = slices.Grow(p.applicationFrames[:0], len(apps))[:len(apps)]
-	p.applicationIDs = slices.Grow(p.applicationIDs[:0], len(apps))[:len(apps)]
-	frames, ids := p.applicationFrames, p.applicationIDs
-	defer clear(frames)
+	frames := p.applicationFrames
+	defer func() {
+		for i := range frames {
+			frames[i].Points = nil // borrowed from the caller
+		}
+	}()
 	// Direct L3 producers encode straight into the owners' head rows. Classic
 	// mirroring and the non-rollup layer submit detached batches instead.
 	direct := p.layer == 3 && p.durableApplications == nil
@@ -142,7 +144,6 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 			}
 		}
 		id := registered.id
-		ids[i] = id
 		frames[i] = partlog.CatalogFrame{ID: id, Clock: a.Clock, Points: a.Points}
 		if direct {
 			if err := out.Start(registered.policy, a.Order, a.Clock, a.Points[0].Timestamp, len(a.Points)); err != nil {
@@ -177,7 +178,7 @@ func (p *Producer) appendApplicationsStamped(apps []Application, stamp *v2placem
 		p.spareRecords[last] = nil
 		p.spareRecords = p.spareRecords[:last]
 	}
-	record = appendApplicationRecord(record, cursor, ids, apps, encoded)
+	record = appendApplicationRecord(record, cursor, apps, encoded)
 	if stamp != nil {
 		record = encodePlacementEnvelope(*stamp, record)
 	}
@@ -220,20 +221,40 @@ func (p *Producer) openOutbox() *v2core.Outbox {
 	return out
 }
 
-var applicationMagic = []byte{'V', '2', 'A', 1}
+// applicationMagic is the V2A2 record written now. Decoders still accept V2A1,
+// which repeated the catalog ID and point count of every PDC4 frame and stored
+// orders and sequences per application.
+var applicationMagic = []byte{'V', '2', 'A', 2}
 var applicationCRC = crc32.MakeTable(crc32.Castagnoli)
+
+func isApplicationRecord(b []byte) bool {
+	return len(b) >= 4 && string(b[:3]) == "V2A" && (b[3] == 1 || b[3] == 2)
+}
 
 func applicationVarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
 
-// The existing PDC4 point codec is nested unchanged. The outer checksum binds
-// source IDs, application orders and sequences to those original PDC4 frames.
-// Append into producer-owned storage retained until the journal fsync succeeds.
-// Reserve the complete envelope once, including all original sequence varints.
-func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, apps []Application, pdc4 []byte) []byte {
-	size := len(applicationMagic) + applicationVarintLen(cursor) + applicationVarintLen(uint64(len(apps))) + applicationVarintLen(uint64(len(pdc4))) + len(pdc4) + 4
+// applicationBase returns the first order when application i holds one point
+// whose order and sequence are both base+i, as on the TCP path. Otherwise it
+// returns 0 and the record keeps explicit orders and sequences.
+func applicationBase(apps []Application) uint64 {
 	for i, a := range apps {
-		size += applicationVarintLen(ids[i]) + applicationVarintLen(a.Order) + applicationVarintLen(uint64(len(a.Points)))
-		for _, seq := range a.Sequence {
+		if len(a.Points) != 1 || a.Order != apps[0].Order+uint64(i) || a.Sequence[0] != a.Order {
+			return 0
+		}
+	}
+	return apps[0].Order
+}
+
+// The existing PDC4 point codec is nested unchanged and carries each
+// application's catalog ID and points. The outer checksum binds application
+// orders and sequences to those original PDC4 frames. Append into
+// producer-owned storage retained until the journal fsync succeeds.
+func appendApplicationRecord(dst []byte, cursor uint64, apps []Application, pdc4 []byte) []byte {
+	base := applicationBase(apps)
+	size := len(applicationMagic) + applicationVarintLen(cursor) + applicationVarintLen(uint64(len(apps))) + applicationVarintLen(base) + applicationVarintLen(uint64(len(pdc4))) + len(pdc4) + 4
+	for i := 0; base == 0 && i < len(apps); i++ {
+		size += applicationVarintLen(apps[i].Order) + applicationVarintLen(uint64(len(apps[i].Points)))
+		for _, seq := range apps[i].Sequence {
 			size += applicationVarintLen(seq)
 		}
 	}
@@ -241,11 +262,11 @@ func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, apps []App
 	b := append(slices.Grow(dst, size), applicationMagic...)
 	b = binary.AppendUvarint(b, cursor)
 	b = binary.AppendUvarint(b, uint64(len(apps)))
-	for i, a := range apps {
-		b = binary.AppendUvarint(b, ids[i])
-		b = binary.AppendUvarint(b, a.Order)
-		b = binary.AppendUvarint(b, uint64(len(a.Points)))
-		for _, seq := range a.Sequence {
+	b = binary.AppendUvarint(b, base)
+	for i := 0; base == 0 && i < len(apps); i++ {
+		b = binary.AppendUvarint(b, apps[i].Order)
+		b = binary.AppendUvarint(b, uint64(len(apps[i].Points)))
+		for _, seq := range apps[i].Sequence {
 			b = binary.AppendUvarint(b, seq)
 		}
 	}
@@ -257,16 +278,17 @@ func appendApplicationRecord(dst []byte, cursor uint64, ids []uint64, apps []App
 // DecodeApplications verifies a journal application packet against the synced
 // catalog and returns detached original groups. It does not mutate core state.
 // The decoder retains PDC4 segment predictor state and must be reused in order.
-func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, catalog *partlog.NameCatalog, producer, producers int) ([]v2core.Batch, uint64, error) {
+func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, producer, producers int) ([]v2core.Batch, uint64, error) {
 	var err error
 	record, _, err = decodePlacementEnvelope(record)
 	if err != nil {
 		return nil, 0, err
 	}
 	invalid := errors.New("invalid original application envelope")
-	if producer < 0 || producers < 1 || producer >= producers || len(record) < 8 || !bytes.Equal(record[:4], applicationMagic) || crc32.Checksum(record[:len(record)-4], applicationCRC) != binary.LittleEndian.Uint32(record[len(record)-4:]) {
+	if producer < 0 || producers < 1 || producer >= producers || len(record) < 8 || !isApplicationRecord(record) || crc32.Checksum(record[:len(record)-4], applicationCRC) != binary.LittleEndian.Uint32(record[len(record)-4:]) {
 		return nil, 0, invalid
 	}
+	v1 := record[3] == 1
 	b := record[4 : len(record)-4]
 	read := func() (uint64, bool) {
 		v, n := binary.Uvarint(b)
@@ -284,14 +306,26 @@ func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, catalog 
 	if !ok || count == 0 || count > 32768 {
 		return nil, 0, invalid
 	}
+	base := uint64(0)
+	if !v1 {
+		if base, ok = read(); !ok || base > math.MaxUint64-count+1 {
+			return nil, 0, invalid
+		}
+	}
 	out := make([]v2core.Batch, int(count))
-	ids := make([]uint64, int(count))
 	total := uint64(0)
 	order := uint64(0)
 	for i := range out {
-		id, ok := read()
-		if !ok || id == 0 || id-1 > (math.MaxUint64-uint64(producer)-1)/uint64(producers) {
-			return nil, 0, invalid
+		if base != 0 {
+			o := base + uint64(i)
+			out[i] = v2core.Batch{Order: o, Points: []v2core.Row{{Seq: o}}}
+			total++
+			continue
+		}
+		if v1 {
+			if _, ok = read(); !ok { // the catalog ID PDC4 repeats
+				return nil, 0, invalid
+			}
 		}
 		o, ok := read()
 		if !ok || o <= order {
@@ -303,8 +337,7 @@ func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, catalog 
 			return nil, 0, invalid
 		}
 		total += n
-		ids[i] = id
-		out[i] = v2core.Batch{ID: NumericID(id, producer, producers), Order: o, Points: make([]v2core.Row, int(n))}
+		out[i] = v2core.Batch{Order: o, Points: make([]v2core.Row, int(n))}
 		for j := range out[i].Points {
 			seq, ok := read()
 			if !ok {
@@ -325,9 +358,10 @@ func DecodeApplications(record []byte, decoder *partlog.CatalogDecoder, catalog 
 		return nil, 0, invalid
 	}
 	for i, f := range frames {
-		if !catalog.Matches(ids[i], f.Key, f.Definition) || len(f.Points) != len(out[i].Points) {
+		if f.ID == 0 || f.ID-1 > (math.MaxUint64-uint64(producer)-1)/uint64(producers) || len(f.Points) != len(out[i].Points) {
 			return nil, 0, invalid
 		}
+		out[i].ID = NumericID(f.ID, producer, producers)
 		out[i].Clock = f.Clock
 		// Immutable catalog bytes; core copies policies into its own arena.
 		out[i].Policy = f.Definition

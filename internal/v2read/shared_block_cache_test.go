@@ -3,6 +3,7 @@ package v2read
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -85,4 +86,62 @@ func TestSharedBlockCacheServesRepeatReads(t *testing.T) {
 		t.Fatalf("repeat read not served by the shared cache: size %d, hits %d->%d, misses %d->%d", m1.Size, m1.Hits, m2.Hits, m1.Misses, m2.Misses)
 	}
 	t.Logf("shared cache %d bytes, repeat read hits +%d, misses +%d", m2.Size, m2.Hits-m1.Hits, m2.Misses-m1.Misses)
+}
+
+// TestCloseRacesPartsPublication closes Readers while a publication opens
+// fresh parts on the shared block cache. Close drops the Reader's cache
+// reference; a publication that had already passed its first closed check
+// then took a reference on the freed cache and panicked with "pebble:
+// inconsistent reference count" when a Reader closed before its engine.
+func TestCloseRacesPartsPublication(t *testing.T) {
+	r, err := New(1, 1<<20, 1<<16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: r.PublishPending})
+	if err != nil {
+		r.Close()
+		t.Fatal(err)
+	}
+	defer func() {
+		r.Close()
+		if err := e.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: "close.metric", Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 100}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AppendBatches(0, []v2core.Batch{{ID: 1, Policy: policy, Order: 1, Clock: 1000, Points: []v2core.Row{{ID: 1, Time: 990, Bits: math.Float64bits(1), Seq: 1}}}}, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	g := r.owners[0].Load()
+	if g == nil || g.inventory == nil {
+		t.Fatal("no sealed publication")
+	}
+	number, inventory, db := g.number, g.inventory, e.DBs()[0]
+	for i := range 300 {
+		c, err := New(1, 1<<20, 1<<16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.BlockCacheBytes = 1 << 20
+		// The installed generation's parts hold the cache's only other reference.
+		if err := c.PublishPending(0, db.NewSnapshot(), v2core.PendingBatches(nil), number, inventory); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			// Another number cannot share the installed parts: this opens its own.
+			done <- c.PublishPending(0, db.NewSnapshot(), v2core.PendingBatches(nil), number+1, inventory)
+		}()
+		for range i % 32 {
+			runtime.Gosched()
+		}
+		c.Close()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
 }

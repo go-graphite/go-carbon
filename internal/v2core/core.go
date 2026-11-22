@@ -35,7 +35,9 @@ var coreMetaKey = []byte{0xff, 'f'}
 
 type coreConfig struct {
 	// SealInterval is a runtime threshold, independent of the persisted format.
-	SealInterval               time.Duration `json:"-"`
+	SealInterval time.Duration `json:"-"`
+	// PublishInterval spaces head-only pending publications; zero is one second.
+	PublishInterval            time.Duration `json:"-"`
 	SealMaxRows                int           `json:"-"`
 	Rollups                    bool
 	RollupRoutingVersion       uint8
@@ -351,7 +353,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		}
 		streamBytes = n
 	}
-	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.SealMaxRows < 0 {
+	if cfg.Shards < 1 || cfg.Producers < 1 || cfg.MaxRows < 1 || cfg.PartitionSeconds < 1 || cfg.Owners < 0 || cfg.SealInterval < 0 || cfg.PublishInterval < 0 || cfg.SealMaxRows < 0 {
 		return nil, os.ErrInvalid
 	}
 	if err := os.MkdirAll(root, 0750); err != nil {
@@ -956,6 +958,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// head is a fresh pendingHead; published views share its immutable prefix.
 	var pend pendingHead
 	var pendingMerge pendingCompaction
+	publishInterval := o.cfg.PublishInterval
+	if publishInterval == 0 {
+		publishInterval = time.Second
+	}
 	sealInterval := o.cfg.SealInterval
 	if sealInterval == 0 {
 		sealInterval = 10 * time.Second
@@ -1419,7 +1425,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			failure = o.hook(o.db.NewSnapshot(), slices.Clone(head))
 			headPublication = time.Now()
 		}
-		if failure == nil && !sealPending && pend.n > publishedBatches && time.Since(batchPublication) >= time.Second {
+		if failure == nil && !sealPending && pend.n > publishedBatches && time.Since(batchPublication) >= publishInterval {
 			failure = publishBatches()
 		}
 		if failure != nil {
@@ -1477,7 +1483,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		if headPoints > 0 {
 			if o.batchHook != nil && pend.n > publishedBatches {
-				if next := batchPublication.Add(time.Second); next.Before(o.nextPoll) {
+				if next := batchPublication.Add(publishInterval); next.Before(o.nextPoll) {
 					o.nextPoll = next
 				}
 			}
