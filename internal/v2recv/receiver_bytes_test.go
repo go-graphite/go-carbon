@@ -37,7 +37,7 @@ func TestOwnerByteFragmentsAndCodec(t *testing.T) {
 	o := &recordingByteOwner{}
 	s := ownerOnly(o, Config{BatchSize: 8, SyncInterval: time.Hour})
 	index := 0
-	for k, n := range []int{5, 7, 6, 9, 1} {
+	for k, n := range []int{3, 2, 4, 8, 1} {
 		p := &batch{}
 		for range n {
 			name := fmt.Sprintf("metric.%d.%s", index, string(make([]byte, index%5+1)))
@@ -58,11 +58,10 @@ func TestOwnerByteFragmentsAndCodec(t *testing.T) {
 	}
 	close(s.closing)
 	s.workers.Wait()
-	// Hand-offs of 5, 7 (codec), 6, 9 (codec) and 1 points fill the inbox to
-	// exactly 8 before each call, splitting codec and text batches: 8, 8, 8,
-	// and the 4 left at close.
-	if o.byteCalls != 4 {
-		t.Fatalf("byte calls=%d, want 4", o.byteCalls)
+	// Hand-offs of 3, 2 (codec), 4, 8 (codec) and 1 points: the inbox is
+	// taken whole once it reaches 8, one call each: 9, 8, and 1 at close.
+	if o.byteCalls != 3 {
+		t.Fatalf("byte calls=%d, want 3", o.byteCalls)
 	}
 	if len(o.names) != index || s.Stats().Accepted != uint64(index) {
 		t.Fatal("lost points", len(o.names), s.Stats())

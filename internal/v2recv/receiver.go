@@ -83,31 +83,27 @@ func (b *batch) named() {
 	b.text, b.ends = b.text[:0], b.ends[:0]
 }
 
-// add copies points [lo, hi) of p to the end of b in one bulk copy per
-// column. A text batch keeps every name as bytes; any other batch keeps
-// strings, so p must be named first.
-func (b *batch) add(p *batch, lo, hi int, text bool) {
+// add copies p to the end of b in one bulk copy per column. A text batch
+// keeps every name as bytes; any other batch keeps strings, so p must be
+// named first.
+func (b *batch) add(p *batch, text bool) {
 	switch {
 	case text && len(p.ends) != 0:
-		start := 0
-		if lo > 0 {
-			start = p.ends[lo-1]
-		}
-		offset := len(b.text) - start
-		b.text = append(b.text, p.text[start:p.ends[hi-1]]...)
-		for _, end := range p.ends[lo:hi] {
+		offset := len(b.text)
+		b.text = append(b.text, p.text...)
+		for _, end := range p.ends {
 			b.ends = append(b.ends, offset+end)
 		}
 	case text:
-		for _, name := range p.names[lo:hi] {
+		for _, name := range p.names {
 			b.text = append(b.text, name...)
 			b.ends = append(b.ends, len(b.text))
 		}
 	default:
-		b.names = append(b.names, p.names[lo:hi]...)
+		b.names = append(b.names, p.names...)
 	}
-	b.hashes = append(b.hashes, p.hashes[lo:hi]...)
-	b.data = append(b.data, p.data[lo:hi]...)
+	b.hashes = append(b.hashes, p.hashes...)
+	b.data = append(b.data, p.data...)
 }
 
 func (b *batch) reset() {
@@ -116,11 +112,11 @@ func (b *batch) reset() {
 }
 
 // inbox is one owner's input, shared by all connections, like a VictoriaMetrics
-// raw-rows shard. A connection copies its batch for the owner in under mu,
-// filling the inbox to exactly BatchSize points, and then wakes the owner's
-// worker; the rest of the batch waits until the worker takes the inbox. The
-// worker swaps the inbox for its empty spare and calls the owner without mu,
-// so every owner call outside sync ticks carries BatchSize points.
+// raw-rows shard. A connection copies its whole batch (at most BatchSize
+// points) in under mu and wakes the owner's worker once the inbox holds
+// BatchSize points; until the worker takes it, further appends wait. The
+// worker swaps the inbox (fewer than 2*BatchSize points) for its empty spare
+// and calls the owner once, without mu.
 type inbox struct {
 	mu    sync.Mutex
 	space sync.Cond // broadcast when the worker takes the inbox or the server stops
@@ -189,7 +185,9 @@ func Start(l net.Listener, owners []Owner, cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.BatchSize < 1 || cfg.BatchSize > 32768 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.BufferBytes < 1 || cfg.SyncInterval < 0 {
+	// An inbox holds fewer than 2*BatchSize points: within an owner call's
+	// 32768-point limit.
+	if cfg.BatchSize < 1 || cfg.BatchSize > 16384 || cfg.MaxConnections < 1 || cfg.MaxLineBytes < 1 || cfg.BufferBytes < 1 || cfg.SyncInterval < 0 {
 		return nil, errors.New("invalid receiver bounds")
 	}
 	if cfg.Placement != nil {
@@ -285,22 +283,18 @@ func (s *Server) handOff(i int, b *batch) error {
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	for lo := 0; lo < len(b.data); {
-		for len(in.b.data) >= s.cfg.BatchSize && !s.stopped() {
-			in.space.Wait()
-		}
-		if s.stopped() {
-			s.stats.rejected.Add(uint64(len(b.data) - lo))
-			return errors.New("receiver stopped")
-		}
-		hi := min(len(b.data), lo+s.cfg.BatchSize-len(in.b.data))
-		in.b.add(b, lo, hi, in.text)
-		lo = hi
-		if len(in.b.data) == s.cfg.BatchSize {
-			select {
-			case in.full <- struct{}{}:
-			default:
-			}
+	for len(in.b.data) >= s.cfg.BatchSize && !s.stopped() {
+		in.space.Wait()
+	}
+	if s.stopped() {
+		s.stats.rejected.Add(uint64(len(b.data)))
+		return errors.New("receiver stopped")
+	}
+	in.b.add(b, in.text)
+	if len(in.b.data) >= s.cfg.BatchSize {
+		select {
+		case in.full <- struct{}{}:
+		default:
 		}
 	}
 	return nil
@@ -315,8 +309,8 @@ func (s *Server) work(i int, o Owner) {
 	byteOwner, _ := o.(ByteOwner)
 	var spare batch // the inbox taken last, emptied for the next swap
 	sequence := make([]uint64, 0, s.cfg.BatchSize)
-	// take swaps the inbox (at most BatchSize points) for the empty spare and
-	// appends it outside the lock in one owner call. Per-name order survives:
+	// take swaps the inbox (fewer than 2*BatchSize points) for the empty spare
+	// and appends it outside the lock in one owner call. Per-name order survives:
 	// appends keep arrival order within the inbox.
 	take := func() {
 		in.mu.Lock()
