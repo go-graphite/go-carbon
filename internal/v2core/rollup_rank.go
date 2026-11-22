@@ -34,8 +34,8 @@ func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dic
 }
 
 // dictKeys keys every stage by (vshard, ID). The names the dictionary does
-// not hold yet go to it in one AppendBatch, so a seal takes the dictionary's
-// write lock once, not once per new name; the seal syncs the dictionary
+// not hold yet go to it in one AppendBatch, which appends them under the
+// lock of this owner's own dictionary shard; the seal syncs the dictionary
 // before it writes a part.
 func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
 	var names []v2dict.NewName

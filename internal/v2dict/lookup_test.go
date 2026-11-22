@@ -74,7 +74,7 @@ func TestLevelGetPrefixes(t *testing.T) {
 			t.Fatalf("Lookup(%.40q... len %d) = %+v %v, want %d %v", p, len(p), e, ok, id, in)
 		}
 	}
-	if s := d.snap.Load(); len(s.levels) != 1 || s.frozen != nil || len(d.buf.recs) != 0 {
+	if s := d.snap.Load(); len(s.levels) != 1 || s.frozen != nil || d.bufSize.Load() != 0 {
 		t.Fatalf("want one level and nothing above it, have %d levels", len(s.levels))
 	}
 }

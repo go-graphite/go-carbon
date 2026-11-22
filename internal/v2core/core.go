@@ -385,7 +385,9 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			return nil, errors.New("ID-keyed seals need v2part.IDKeys on")
 		}
 		// Seals key parts by dictionary ID; recovery below already reads them.
-		d, err := v2dict.Open(storeDictDir(root), v2dict.Options{})
+		// A seal owner owns the vshards v with v % Shards == owner, so one
+		// dictionary shard per owner gives each owner its own append lock.
+		d, err := v2dict.Open(storeDictDir(root), v2dict.Options{Shards: cfg.Shards})
 		if err != nil {
 			return nil, err
 		}
