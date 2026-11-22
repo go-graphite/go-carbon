@@ -480,8 +480,11 @@ func TestMergeAdmissionBound(t *testing.T) {
 	for n := uint64(1); n <= 3; n++ {
 		mergeAppend(t, e, n)
 	}
+	o.gc.mu.Lock()
+	original := o.gc.inventory
+	o.gc.mu.Unlock()
 	var parts []v2part.Descriptor
-	for _, value := range o.gc.inventory.bindings {
+	for _, value := range original.bindings {
 		d, err := v2part.ParseDescriptor(value)
 		if err != nil {
 			t.Fatal(err)
@@ -494,7 +497,6 @@ func TestMergeAdmissionBound(t *testing.T) {
 	slices.SortFunc(parts, func(a, b v2part.Descriptor) int { return int(a.Source.MinOrder) - int(b.Source.MinOrder) })
 	snapshot := o.db.NewSnapshot()
 	defer snapshot.Close()
-	original := o.gc.inventory
 	for _, tc := range []struct {
 		name   string
 		clocks []int64
@@ -507,16 +509,23 @@ func TestMergeAdmissionBound(t *testing.T) {
 		{"legacy outside", []int64{100, 0, 300}, 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			o.gc.inventory = &RollupInventory{bindings: map[string][]byte{}}
-			defer func() { o.gc.inventory = original }()
+			inventory := &RollupInventory{bindings: map[string][]byte{}}
 			for i, d := range parts {
 				d.Coverage.MinClock = tc.clocks[i]
 				value, err := d.MarshalBinary()
 				if err != nil {
 					t.Fatal(err)
 				}
-				o.gc.inventory.bindings[string(partBinding(sealedPartPrefix, d.SHA256))] = value
+				inventory.bindings[string(partBinding(sealedPartPrefix, d.SHA256))] = value
 			}
+			o.gc.mu.Lock()
+			o.gc.inventory = inventory
+			o.gc.mu.Unlock()
+			defer func() {
+				o.gc.mu.Lock()
+				o.gc.inventory = original
+				o.gc.mu.Unlock()
+			}()
 			got, err := o.mergeAdmissionBound(snapshot, parts[:tc.inputs], 400)
 			if err != nil || got != tc.want {
 				t.Fatalf("bound %d want %d: %v", got, tc.want, err)
