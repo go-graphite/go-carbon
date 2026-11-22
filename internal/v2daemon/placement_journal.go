@@ -47,7 +47,7 @@ func decodePlacementEnvelope(record []byte) ([]byte, *v2placement.Stamp, error) 
 		return nil, nil, invalid
 	}
 	inner := b[int(size):]
-	if len(inner) < 4 || !bytes.Equal(inner[:4], applicationMagic) {
+	if !isApplicationRecord(inner) {
 		return nil, nil, invalid
 	}
 	return inner, &stamp, nil
