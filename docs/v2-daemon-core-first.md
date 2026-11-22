@@ -7,13 +7,13 @@ It is an offline harness, not a replacement production daemon.
 ## Package boundaries
 
 `internal/v2daemon` owns independent, single-caller producers. Each producer owns
-its name catalog, PDC4 encoder, pending rows, journal file and cursor. No mutex is
+its name catalog, pending rows, journal file and cursor. No mutex is
 shared by producers. `internal/v2core.Engine.AppendPipelined` copies named-layer numeric rows into
 the existing bounded owner queues. The numeric L0 control keeps synchronous seals
 through `Append`. The core retains its own sorting, immutable SST
 creation, monotonic parts, snapshots and durability frontiers.
 
-`internal/partlog` owns the durable catalog and the existing PDC4 codec.
+`internal/partlog` owns the durable name catalog.
 `NameCatalog.InternBatch` hashes each name once before probing its single
 collision-safe index. Hash slots refer to canonical catalog metadata; complete
 name equality decides identity even on full-hash collisions. Compact catalog
@@ -21,9 +21,7 @@ entries contain names and definitions, without unused predictor state.
 `InternHashed` also accepts a hash already computed by a routing caller. The
 current harness routes by numeric ID and does not hash names for core routing.
 Metadata is appended only for unseen names; changed definitions are rejected.
-`CatalogEncoder.EncodePoints` borrows the resolved IDs and input points at a
-common arrival clock. It removes temporary singleton name frames while using
-the same PDC4 encoder, predictor state, record framing and exact bytes. Stream-local catalog IDs are
+Stream-local catalog IDs are
 mapped bijectively to core IDs as `(localID-1)*producers + producer + 1`.
 Producer count and name-to-producer ownership must remain stable. IDs are scoped
 to this experiment, not portable replica identities. A future receiver must
@@ -100,7 +98,7 @@ reader modules; this harness does not claim classic render parity yet.
 | --- | --- | --- |
 | L0 | Core only | Same-run numeric baseline |
 | L1 | Durable catalog IDs | Cumulative throughput >=95% of L0 in two consecutive pairs |
-| L2 | PDC4 journal | Cumulative >=90%; journal <=4 B/point |
+| L2 | Journal | Cumulative >=90%; journal <=4 B/point |
 | L3 | Exact seal rollups | Existing reducer, exact classic behavior |
 | L4 | Immutable reader publication | Existing snapshot reader/publisher |
 | L5 | TCP receivers | At least 32 connections |
