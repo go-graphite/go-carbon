@@ -179,7 +179,7 @@ func keepVerificationRow(row syncRow) bool {
 		return true
 	}
 	switch row.Kind {
-	case "verification-invalidated", "ambiguous-receipt", "receipt-reverified", "receipt-contradiction", "redo", "phase-regression", "phase-scope", "phase-progress", "phase-position", "header", "verified", "verification-retry", "verification-incomplete", "verification-pass", "window-resolved", "window-retry-visited", "window-retry-floor", "window-retry-terminal", "window-policy":
+	case "legacy-round-repair", "legacy-round-adoption", "verification-round-scope", "verification-invalidated", "ambiguous-receipt", "receipt-reverified", "receipt-contradiction", "redo", "phase-regression", "phase-scope", "phase-progress", "phase-position", "header", "verified", "verification-retry", "verification-incomplete", "verification-pass", "window-resolved", "window-retry-visited", "window-retry-floor", "window-retry-terminal", "window-policy":
 		return true
 	case "window-selected":
 		return len(row.Skipped) > 0

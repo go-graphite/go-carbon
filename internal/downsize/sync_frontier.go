@@ -61,21 +61,32 @@ func (s *syncer) openFrontier(ctx context.Context) error {
 	}
 	// Negotiate every holder before adopting a fixed verification generation.
 	// A legacy holder keeps the complete current verification path.
-	for _, store := range append([]string{s.o.to}, s.o.from...) {
-		got, err := b.Proofs(ctx, store, []string{name})
-		if errors.Is(err, errSyncNoProof) {
-			if _, e := os.Stat(filepath.Join(s.o.state, "verification-scope.json")); errors.Is(e, os.ErrNotExist) {
-				return nil
-			} else if e != nil {
-				return e
+	// A legacy resume already negotiated and persisted this scope. Do not
+	// issue a proof request for a completed name just to reopen its frontier.
+	_, savedScopeErr := os.Stat(filepath.Join(s.o.state, "verification-scope.json"))
+	legacyRound := s.adoptingLegacyRound()
+	if legacyRound && errors.Is(savedScopeErr, os.ErrNotExist) {
+		// The old round ran without a frontier. Preserve that mode until its
+		// cursor is consumed, rather than negotiating against an earlier name.
+		return nil
+	}
+	if !legacyRound || savedScopeErr != nil {
+		for _, store := range append([]string{s.o.to}, s.o.from...) {
+			got, err := b.Proofs(ctx, store, []string{name})
+			if errors.Is(err, errSyncNoProof) {
+				if _, e := os.Stat(filepath.Join(s.o.state, "verification-scope.json")); errors.Is(e, os.ErrNotExist) {
+					return nil
+				} else if e != nil {
+					return e
+				}
+				continue
 			}
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if len(got) != 1 {
-			return errors.New("invalid mutation proof response")
+			if err != nil {
+				return err
+			}
+			if len(got) != 1 {
+				return errors.New("invalid mutation proof response")
+			}
 		}
 	}
 	for _, w := range s.o.windows {

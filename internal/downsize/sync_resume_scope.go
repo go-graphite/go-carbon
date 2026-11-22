@@ -13,7 +13,18 @@ var errSyncWindowIncompleteProof = errors.New("window verification checkpoint ha
 // catalog, then replay exact sparse membership. Never treat First/Last alone as
 // proof that an omitted name participated in a later sparse verification batch.
 func (s *syncer) windowResumeSet() ([]string, bool, error) {
-	if !s.windowOnly() || s.verificationBase == 0 {
+	if s.verificationBase == 0 {
+		return nil, false, nil
+	}
+	if !s.windowOnly() {
+		if !s.o.rescanAll {
+			for i := len(s.j.rows) - 1; i >= 0; i-- {
+				row := s.j.rows[i]
+				if row.Kind == "verification-retry" && row.Round == s.verificationBase && row.SelectionComplete {
+					return append([]string(nil), row.Selected...), true, nil
+				}
+			}
+		}
 		return nil, false, nil
 	}
 	dirty := map[string]bool{}

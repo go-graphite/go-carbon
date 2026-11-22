@@ -128,7 +128,7 @@ func (s *syncer) restorePhase() error {
 	var saved syncPhasePosition
 	hasPosition := false
 	for _, r := range s.j.rows {
-		if (r.Kind == "phase-position" || r.Kind == "phase-scope") && r.Position != nil {
+		if (r.Kind == "phase-position" || r.Kind == "phase-scope" || r.Kind == "legacy-round-repair") && r.Position != nil {
 			if phaseOrder(r.Position.Phase, r.Position.Round) < 1 || r.Position.Round < 0 || r.Position.Done < 0 || r.Position.Total < 0 {
 				return errors.New("ambiguous journal phase or counters; refusing fresh start")
 			}
@@ -157,7 +157,7 @@ func (s *syncer) restorePhase() error {
 			return errors.New("ambiguous saved phase or counters")
 		}
 		// Modern journal positions supersede stale snapshots from a previous phase.
-		if phaseOrder(phase, round) >= phaseOrder(saved.Phase, saved.Round) {
+		if !(phase == "verify" && s.legacyRepairScope(round) != nil) && phaseOrder(phase, round) >= phaseOrder(saved.Phase, saved.Round) {
 			if phase == saved.Phase && round == saved.Round {
 				saved.Done = max(saved.Done, old.Done)
 			} else if saved.Phase == "" {
@@ -238,6 +238,23 @@ func (s *syncer) restorePhase() error {
 		saved.Done = max(saved.Done, durable)
 	}
 	s.resume = saved // retain the attempted position even when reporting a contradiction
+	if s.adoptingLegacyRound() && s.legacyRepairScope(saved.Round) == nil {
+		// READY-off defaults introduced source-only filtering after this legacy
+		// union was entered. Restore its original catalog size, including when
+		// an intermediate binary checkpointed a smaller total.
+		if saved.Summary.Discovered > 0 {
+			saved.Total = int64(saved.Summary.Discovered)
+		}
+		if s.j.checkpoint != nil {
+			saved.Total = int64(s.j.checkpoint.Summary.Discovered)
+		}
+		for _, r := range s.j.rows {
+			if r.Kind == "discovered" {
+				saved.Total = int64(r.Names)
+			}
+		}
+		s.resume = saved
+	}
 	var verifyReceipts int64
 	if saved.Phase == "verify" {
 		seen := map[[2]string]bool{}
@@ -308,6 +325,10 @@ func (s *syncer) restorePhase() error {
 // changes. Check metadata in a separate scope-validation step, then schedule
 // only invalidated names as new work; never reopen a completed data phase.
 func (s *syncer) reopenChangedScope(ctx context.Context) (changed bool, err error) {
+	// A finished full-history pass is a report, not a live convergence job.
+	if !s.o.rescanAll && !s.o.readyFrontier && !s.windowOnly() {
+		return false, nil
+	}
 	if _, ok := s.b.(syncProofBackend); !ok {
 		return false, nil
 	}
@@ -394,7 +415,7 @@ func (j *syncJournal) observePhase(r syncRow, row int) {
 	if r.Position == nil {
 		return
 	}
-	if r.Kind == "phase-position" || r.Kind == "phase-scope" || r.Kind == "phase-progress" && j.phaseGuard != nil && r.Position.Phase == j.phaseGuard.Phase && r.Position.Round == j.phaseGuard.Round {
+	if r.Kind == "phase-position" || r.Kind == "phase-scope" || r.Kind == "legacy-round-repair" || r.Kind == "phase-progress" && j.phaseGuard != nil && r.Position.Phase == j.phaseGuard.Phase && r.Position.Round == j.phaseGuard.Round {
 		p := *r.Position
 		j.phaseGuard, j.phaseGuardRow = &p, row
 	}
