@@ -444,82 +444,65 @@ func (n *NewName) key(dst []byte) ([]byte, error) {
 	return key, nil
 }
 
-// AppendBatch is Append of every name, up to batchNames names per lock
-// hold. A live name is found without the write lock: the append level under
-// the read lock, the level files lock-free in a snapshot taken with it, so
-// concurrent seals resolve their names in parallel. The new names of those
-// batchNames then take the write lock once. A seal of many new names thus
-// waits on the lock once per batchNames names, not once per name, and a hold
-// stays short enough that lookups (renders, other seals) barely wait on it.
+// AppendBatch is Append of every name. It looks names up in the level
+// files lock-free, in one snapshot, so concurrent seals do the costly part
+// in parallel; it never takes the read lock, so seals do not ping-pong
+// with each other's write holds. The append level is checked and new names
+// appended under the write lock, held for at most batchNames names: a seal
+// of many new names waits on the lock once per batchNames names, not once
+// per name, and lookups (renders) wait at most one short hold.
 func (d *Dict) AppendBatch(names []NewName) error {
-	for len(names) > 0 {
-		n := min(len(names), batchNames)
-		if err := d.appendBatch(names[:n]); err != nil {
+	var ab [keyBuf]byte
+	s := d.snap.Load()
+	for i := range names {
+		n := &names[i]
+		key, err := n.key(ab[:0])
+		if err != nil {
 			return err
 		}
-		names = names[n:]
+		var ok bool
+		n.Entry, ok = s.get(key)
+		// Created marks a name with no live entry below the append level.
+		n.Created = !ok || n.Entry.Deleted()
+	}
+	for len(names) > 0 {
+		k := min(len(names), batchNames)
+		if err := d.appendBatch(names[:k], s); err != nil {
+			return err
+		}
+		names = names[k:]
 	}
 	return nil
 }
 
-// batchNames bounds one AppendBatch lock hold: about 0.1 ms of appends.
-const batchNames = 256
+// batchNames bounds one AppendBatch write-lock hold: well under 1 ms.
+const batchNames = 1024
 
-func (d *Dict) appendBatch(names []NewName) error {
+// appendBatch resolves names against the append level, and against the
+// current snapshot when it is newer than s, and appends the new ones.
+func (d *Dict) appendBatch(names []NewName, s *snapshot) error {
 	var ab [keyBuf]byte
-	var inBuf [batchNames]bool
-	d.mu.RLock()
-	s := d.snap.Load()
-	for i := range names {
-		key, err := names[i].key(ab[:0])
-		if err != nil {
-			d.mu.RUnlock()
-			return err
-		}
-		if v := d.buf.get(key); v != nil {
-			names[i].Entry, inBuf[i] = decode(v), true
-		}
-	}
-	d.mu.RUnlock()
-	missing := false
-	for i := range names {
-		n := &names[i]
-		ok := inBuf[i]
-		if !ok {
-			key, _ := n.key(ab[:0])
-			n.Entry, ok = s.get(key)
-		}
-		// Created marks a name left to the write lock until it resolves.
-		n.Created = !ok || n.Entry.Deleted()
-		missing = missing || n.Created
-	}
-	if !missing {
-		return nil
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.writable(); err != nil {
 		return err
 	}
+	now := d.snap.Load()
 	for i := range names {
 		n := &names[i]
+		key, _ := n.key(ab[:0])
+		// The append level holds the newest entry; another append of the
+		// name may have won since s, or an earlier name of this batch; a
+		// flush moves the append level into a level s lacks.
+		if v := d.buf.get(key); v != nil {
+			n.Entry = decode(v)
+			n.Created = n.Entry.Deleted()
+		} else if now != s {
+			e, ok := now.get(key)
+			n.Entry, n.Created = e, !ok || e.Deleted()
+		}
 		if !n.Created {
 			continue
-		}
-		key, _ := n.key(ab[:0])
-		// Another append of the name may have won in between (or an earlier
-		// name of this batch); a flush moves the append level into a level
-		// the lookup's snapshot lacks.
-		if v := d.buf.get(key); v != nil {
-			if e := decode(v); !e.Deleted() {
-				n.Entry, n.Created = e, false
-				continue
-			}
-		} else if now := d.snap.Load(); now != s {
-			if e, ok := now.get(key); ok && !e.Deleted() {
-				n.Entry, n.Created = e, false
-				continue
-			}
 		}
 		sk := key[:len(key)-len(n.Name)]
 		j, ok := d.scopeIx[string(sk)]
@@ -534,6 +517,7 @@ func (d *Dict) appendBatch(names []NewName) error {
 		if err := d.putLocked(key, n.Entry); err != nil {
 			return err
 		}
+		now = d.snap.Load() // a full append level froze into a newer snapshot
 	}
 	return nil
 }
