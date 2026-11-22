@@ -137,19 +137,31 @@ func readTargetHealth(ctx context.Context, client *http.Client, endpoint string)
 	seen := map[string]bool{}
 	scan := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
 	for scan.Scan() {
-		fields := strings.Fields(scan.Text())
-		if len(fields) < 2 {
+		// go-carbon labels every series (cluster, location, ring), so match on
+		// the name before "{" and read the value after the label set.
+		line := scan.Text()
+		i := strings.IndexAny(line, "{ ")
+		if i < 0 {
 			continue
 		}
-		dest, ok := values[fields[0]]
-		if !ok {
+		name, rest := line[:i], line[i:]
+		if rest[0] == '{' {
+			j := strings.LastIndexByte(rest, '}')
+			if j < 0 {
+				continue
+			}
+			rest = rest[j+1:]
+		}
+		dest, ok := values[name]
+		fields := strings.Fields(rest)
+		if !ok || len(fields) == 0 {
 			continue
 		}
-		value, err := strconv.ParseFloat(fields[1], 64)
-		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || seen[fields[0]] {
-			return sample, fmt.Errorf("invalid target health metric %s", fields[0])
+		value, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || seen[name] {
+			return sample, fmt.Errorf("invalid target health metric %s", name)
 		}
-		*dest, seen[fields[0]] = value, true
+		*dest, seen[name] = value, true
 	}
 	if err := scan.Err(); err != nil {
 		return sample, err

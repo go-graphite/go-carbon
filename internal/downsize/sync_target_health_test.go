@@ -141,6 +141,23 @@ func TestTargetHealthMonitorUnreachableDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestTargetHealthReadLabelledMetrics(t *testing.T) {
+	body := "# HELP cache_points Points in cache\n# TYPE cache_points gauge\n" +
+		`cache_limit_points{cluster="a",location="b c",ring="000"} 8.1e+10` + "\n" +
+		`cache_overflow_dropped_points_total{cluster="a",location="b c",ring="000"} 7.1e+09` + "\n" +
+		`cache_points{cluster="a",location="b c",ring="000"} 1.9e+10 1795374888000` + "\n"
+	client := &http.Client{Transport: targetHealthTransport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+	sample, err := readTargetHealth(context.Background(), client, "http://target/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.points != 1.9e10 || sample.limit != 8.1e10 || sample.dropped != 7.1e9 {
+		t.Fatalf("sample %+v", sample)
+	}
+}
+
 func TestTargetHealthReadRejectsInvalidMetrics(t *testing.T) {
 	for _, body := range []string{
 		"cache_points 75\ncache_limit_points 100\n",
