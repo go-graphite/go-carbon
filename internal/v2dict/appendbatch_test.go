@@ -31,8 +31,11 @@ func TestAppendBatchMatchesAppend(t *testing.T) {
 	var names []NewName
 	for i := 250; i < 900; i++ {
 		k := i
-		if i%5 == 0 {
-			k = i / 3 // a repeat or an older name
+		switch {
+		case i%11 == 0:
+			k = i / 3 // an older name, live or deleted
+		case i%5 == 0:
+			k = i - 3 // a repeat within the batch
 		}
 		g, vs := scopeOf(k)
 		names = append(names, NewName{Group: g, VShard: vs, Name: string(synthName(k)), Policy: uint16(k % 4)})
