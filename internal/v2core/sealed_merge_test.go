@@ -499,7 +499,9 @@ func TestSealedMergeDeferredUntilResume(t *testing.T) {
 // fan-in, and keeps the exact records.
 func TestForceMergeDifferential(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
-	e := mergeFixture(t, t.TempDir(), nil)
+	// An idle closure seal would change the part count while tiering. Keep
+	// the clock below the fixture's rows, just as in the crash-recovery test.
+	e := mergeFixtureIdle(t, t.TempDir(), nil)
 	defer e.close()
 	for order := uint64(1); order <= 21; order++ {
 		mergeAppend(t, e, order)
