@@ -34,7 +34,8 @@ type PolicyIdentity struct {
 	// once a seal or a read resolved it, 0 before. It fills the padding after
 	// route (0 B per name) and outlives the planner's per-owner state, so a
 	// name is appended to the dictionary once per process and later reads
-	// take the name from the catalog.
+	// take the name from the catalog. Merges treat it as the name's live ID,
+	// so a dictionary Delete of the name must clear it.
 	dictID atomic.Uint32
 	// nameHash is namefp.Hash(name), computed once at intern time while the name
 	// bytes are hot, so readers index names without touching them.

@@ -73,7 +73,10 @@ func mergeGeneration(inputs []v2part.Descriptor) (uint64, error) {
 // mergeNames resolves the dictionary IDs of one GCI2 merge, once per metric.
 type mergeNames struct {
 	dict *v2dict.Dict
-	name []byte
+	// identities is the store catalog, whose identities remember their
+	// current dictionary ID; nil reads every ID from the dictionary.
+	identities *PolicyCatalog
+	name       []byte
 }
 
 // live reports whether the merge keeps ID-keyed metric k: its ID is the
@@ -82,9 +85,18 @@ type mergeNames struct {
 // with all their records. An ID the dictionary never assigned is an error,
 // never a drop: a lost or foreign dictionary must not delete data. Without
 // a dictionary every metric is kept.
-func (n *mergeNames) live(k v2part.Key) (bool, error) {
+//
+// The common case reads no dictionary: the identity of the envelope's
+// numeric ID (metaID) holds k's ID as its current one, set by the seal that
+// appended the name or by a read that resolved it.
+func (n *mergeNames) live(k v2part.Key, metaID uint64) (bool, error) {
 	if n.dict == nil || !k.ByID {
 		return true, nil
+	}
+	if n.identities != nil {
+		if h := n.identities.lookup(metaID); h != nil && h.dictID.Load() == k.Local+1 {
+			return true, nil
+		}
 	}
 	var e v2dict.Entry
 	var ok bool

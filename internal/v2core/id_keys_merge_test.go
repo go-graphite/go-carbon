@@ -225,7 +225,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 		}
 		install(nameDir, path, d)
 		path = filepath.Join(idDir, "merged.sst")
-		di, err := mergePartFilesDict(context.Background(), idDir, path, idIn, retire, nil, dict)
+		di, err := mergePartFilesDict(context.Background(), idDir, path, idIn, retire, nil, dict, nil)
 		if err != nil {
 			t.Fatalf("merge %d: %v", merges, err)
 		}
@@ -297,7 +297,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 	s6, s6i := writeInput(6, 5, 20, func(n int) bool { return n%4 == 3 }, nil)
 	merge([]v2part.Descriptor{m3, s6}, []v2part.Descriptor{m3i, s6i}, 100000+50)
 
-	if _, err = mergePartFilesDict(context.Background(), idDir, filepath.Join(idDir, "mixed.sst"), []v2part.Descriptor{m3, s6i}, 0, nil, dict); err == nil {
+	if _, err = mergePartFilesDict(context.Background(), idDir, filepath.Join(idDir, "mixed.sst"), []v2part.Descriptor{m3, s6i}, 0, nil, dict, nil); err == nil {
 		t.Fatal("merge of mixed key generations succeeded")
 	}
 	// A deleted name drops with all its records; the rest is unchanged.
@@ -307,7 +307,7 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 	}
 	next = v2part.PartID{0xA5, 3} // m3i's part, so rows compare byte for byte
 	path := filepath.Join(idDir, "dropped.sst")
-	dd, err := mergePartFilesDict(context.Background(), idDir, path, []v2part.Descriptor{m1i, m2i, latei}, 0, nil, dict)
+	dd, err := mergePartFilesDict(context.Background(), idDir, path, []v2part.Descriptor{m1i, m2i, latei}, 0, nil, dict, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,66 @@ func TestIDKeyedMergeMatchesNameKeyed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer empty.Close()
-	if _, err = mergePartFilesDict(context.Background(), idDir, filepath.Join(idDir, "foreign.sst"), []v2part.Descriptor{m1i, m2i}, 0, nil, empty); err == nil || !strings.Contains(err.Error(), "never assigned") {
+	if _, err = mergePartFilesDict(context.Background(), idDir, filepath.Join(idDir, "foreign.sst"), []v2part.Descriptor{m1i, m2i}, 0, nil, empty, nil); err == nil || !strings.Contains(err.Error(), "never assigned") {
 		t.Fatalf("merge through a foreign dictionary: %v, want a never-assigned ID error", err)
+	}
+}
+
+// TestMergeNamesCatalogLive: a merge keeps an ID-keyed metric without a
+// dictionary read when the catalog identity holds that ID as the name's
+// current one; any other ID (a revived name's old one, an identity that has
+// not resolved its ID) is decided by the dictionary.
+func TestMergeNamesCatalogLive(t *testing.T) {
+	dict, err := v2dict.Open(t.TempDir(), v2dict.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dict.Close()
+	const name = "svc.catalog.live"
+	_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
+	cat := &PolicyCatalog{}
+	h, err := cat.intern(7, name, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, vshard := string(h.policy.Group), h.vshard
+	old, _, err := dict.Append(group, vshard, []byte(name), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dict.Delete(group, vshard, []byte(name)); err != nil {
+		t.Fatal(err)
+	}
+	cur, _, err := dict.Append(group, vshard, []byte(name), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := func(id uint32) v2part.Key {
+		return v2part.Key{Group: h.policy.Group, VShard: vshard, ByID: true, Local: id}
+	}
+	n := mergeNames{dict: dict, identities: cat}
+	for _, c := range []struct {
+		hint uint32
+		id   uint32
+		want bool
+	}{
+		{0, cur.ID, true}, {0, old.ID, false}, // no hint: the dictionary decides
+		{cur.ID + 1, cur.ID, true}, {cur.ID + 1, old.ID, false}, // the current ID only
+	} {
+		h.dictID.Store(c.hint)
+		if live, err := n.live(key(c.id), 7); err != nil || live != c.want {
+			t.Fatalf("hint %d, ID %d: live %v %v, want %v", c.hint, c.id, live, err, c.want)
+		}
+	}
+	// The hint answers without the dictionary: a dictionary that never
+	// assigned the ID would fail the read.
+	empty, err := v2dict.Open(t.TempDir(), v2dict.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer empty.Close()
+	h.dictID.Store(cur.ID + 1)
+	if live, err := (&mergeNames{dict: empty, identities: cat}).live(key(cur.ID), 7); err != nil || !live {
+		t.Fatalf("catalog hint not used: %v %v", live, err)
 	}
 }

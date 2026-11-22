@@ -505,19 +505,19 @@ var mergePartID = func(id *v2part.PartID) error {
 // only when its expiry precedes it, as whole-part retirement would, so a merge
 // never removes a record the reader still returns.
 func mergePartFiles(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}) (v2part.Descriptor, error) {
-	return mergePartFilesDict(ctx, dir, path, inputs, retire, stop, nil)
+	return mergePartFilesDict(ctx, dir, path, inputs, retire, stop, nil, nil)
 }
 
 // mergePartFilesDict is mergePartFiles with the store dictionary that
 // ID-keyed inputs resolve through: it drops deleted and revived-away IDs, and
 // names a GCI2 metric whose envelope needs its full definition. Inputs share
 // one key generation; the output keeps it.
-func mergePartFilesDict(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}, dict *v2dict.Dict) (_ v2part.Descriptor, err error) {
+func mergePartFilesDict(ctx context.Context, dir, path string, inputs []v2part.Descriptor, retire int64, stop <-chan struct{}, dict *v2dict.Dict, identities *PolicyCatalog) (_ v2part.Descriptor, err error) {
 	generation, err := mergeGeneration(inputs)
 	if err != nil {
 		return v2part.Descriptor{}, err
 	}
-	names := mergeNames{dict: dict}
+	names := mergeNames{dict: dict, identities: identities}
 	spec := v2part.Spec{Scope: inputs[0].Scope, Source: inputs[0].Source, MinTime: inputs[0].Coverage.MinTime, MaxTime: inputs[0].Coverage.MaxTime}
 	if err = mergePartID(&spec.Scope.Part); err != nil {
 		return v2part.Descriptor{}, err
@@ -641,7 +641,7 @@ func mergePartFilesDict(ctx context.Context, dir, path string, inputs []v2part.D
 		for len(h) > 0 && h[0].key.VShard == c.key.VShard && bytes.Equal(h[0].metricName(), c.metricName()) {
 			members = append(members, heap.Pop(&h).(*mergeCursor))
 		}
-		if live, e := names.live(c.key); e != nil {
+		if live, e := names.live(c.key, c.metadata.ID); e != nil {
 			return v2part.Descriptor{}, e
 		} else if !live {
 			if err = nextMetric(); err != nil {
@@ -844,10 +844,12 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 	defer os.RemoveAll(stage)
 	path := filepath.Join(stage, "output.sst")
 	var dict *v2dict.Dict
+	var identities *PolicyCatalog
 	if o.rollups != nil {
-		dict = o.rollups.identities.partDict()
+		identities = o.rollups.identities
+		dict = identities.partDict()
 	}
-	d, err := mergePartFilesDict(context.Background(), o.dir, path, inputs, retire, stop, dict)
+	d, err := mergePartFilesDict(context.Background(), o.dir, path, inputs, retire, stop, dict, identities)
 	if errors.Is(err, context.Canceled) || errors.Is(err, v2part.ErrPartSizeLimit) {
 		return false, nil
 	}
