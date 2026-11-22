@@ -1,17 +1,11 @@
 package v2daemon
 
 import (
-	"encoding/binary"
-	"errors"
-	"io"
 	"math"
-	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -49,17 +43,6 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 		{Name: "test.b", Policy: b, Order: 9, Clock: 10000, Points: []points.Point{{Timestamp: 9990, Value: 3}}, Sequence: []uint64{100}},
 		{Name: "test.a", Policy: a, Order: 10, Clock: 9999, Points: []points.Point{{Timestamp: 9980, Value: 4}}, Sequence: []uint64{6}},
 	}
-	expected := make([]v2core.Batch, len(apps))
-	for i, app := range apps {
-		id := uint64(1)
-		if app.Name == "test.b" {
-			id = 2
-		}
-		expected[i] = v2core.Batch{ID: id, Order: app.Order, Clock: app.Clock, Policy: append([]byte(nil), app.Policy...)}
-		for j, p := range app.Points {
-			expected[i].Points = append(expected[i].Points, v2core.Row{ID: id, Time: p.Timestamp, Bits: math.Float64bits(p.Value), Seq: app.Sequence[j]})
-		}
-	}
 	p := s.Producers[0]
 	if useRegistered {
 		registered, err := p.RegisterApplication("test.a", a)
@@ -86,7 +69,7 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 	if err = p.AppendApplications(apps[2:]); err != nil {
 		t.Fatal(err)
 	}
-	if p.SyncGroups != 0 || len(p.packets) != 3 {
+	if len(p.packets) != 3 {
 		t.Fatal("new queue or premature sync")
 	}
 	// Every caller-owned policy/point/sequence buffer may be reused immediately.
@@ -99,50 +82,6 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 		t.Fatal(err)
 	}
 	closed = true
-	dir := filepath.Join(root, "placement-group-00000001", "journal", "producer-000")
-	catalog, err := partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer catalog.Close()
-	decoder := partlog.CatalogDecoder{Catalog: catalog}
-	defer decoder.Close()
-	file, err := os.Open(filepath.Join(dir, "segment.pdc4"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	var got []v2core.Batch
-	for {
-		var h [4]byte
-		_, err = io.ReadFull(file, h[:])
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		b := make([]byte, binary.LittleEndian.Uint32(h[:]))
-		if _, err = io.ReadFull(file, b); err != nil {
-			t.Fatal(err)
-		}
-		batches, cursor, err := DecodeApplications(b, &decoder, 0, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, batches...)
-		if cursor != 4 && cursor != 5 {
-			t.Fatal("lost journal cursor", cursor)
-		}
-		// The checksum covers original batch order as well as PDC4 tuples.
-		b[5] ^= 1
-		if _, _, err = DecodeApplications(b, &decoder, 0, 1); err == nil {
-			t.Fatal("corrupt envelope accepted")
-		}
-	}
-	if !reflect.DeepEqual(got, expected) {
-		t.Fatalf("journal groups changed\ngot%+v\nwant%+v", got, expected)
-	}
 	reader, err := v2core.Open(filepath.Join(root, "placement-group-00000001", "core"), coreConfig(cfg), v2core.Hooks{})
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +122,7 @@ func TestApplicationsRejectBeforeAdmission(t *testing.T) {
 		{{Name: "a", Order: 1, Points: []points.Point{{}}, Sequence: nil}},
 		{{Name: "a", Order: 2, Points: []points.Point{{}}, Sequence: []uint64{1}}, {Name: "a", Order: 1, Points: []points.Point{{}}, Sequence: []uint64{2}}},
 	} {
-		s, err := Open(t.TempDir(), Config{Layer: 2, Producers: 1, Shards: 1})
+		s, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -191,7 +130,7 @@ func TestApplicationsRejectBeforeAdmission(t *testing.T) {
 		if err = p.AppendApplications(apps); err == nil {
 			t.Fatal("invalid group accepted")
 		}
-		if p.cursor != 0 || len(p.packets) != 0 || len(p.records) != 0 || p.catalog.Count() != 0 {
+		if p.cursor != 0 || len(p.packets) != 0 || p.catalog.Count() != 0 {
 			t.Fatal("invalid group partially admitted")
 		}
 		if err = p.Drain(); err == nil {

@@ -292,7 +292,7 @@ func run() (retErr error) {
 	sampleEvery := flag.Uint64("sample-every", 1, "admit all points only for names whose FNV64a hash modulo this value is zero; 1 admits all")
 	policyFile := flag.String("policies", "", "fixed JSON name-to-policy map; L3 admits only this population and performs no policy lookups")
 	capacityOnly := flag.Bool("capacity-only", false, "measure admission without expensive parity scans")
-	layer := flag.Int("layer", 2, "2 raw or 3 rollup; L3 reconstructs receiver applications, not original classic applications")
+	layer := flag.Int("layer", 3, "3 rollup (v2 has no raw journal layer); L3 reconstructs receiver applications, not original classic applications")
 	fullL3 := flag.Bool("full-l3", false, "admit every name with classic info or paired classic policy files; fail on missing policy")
 	workers := flag.Int("workers", 0, "partition-parallel decoder/catalog workers (1..16); requires capacity-only or fixed L3 policies")
 	receipts := flag.String("classic-receipts", "", "JSON array of frozen differences to reobserve through classic read API")
@@ -498,7 +498,6 @@ func run() (retErr error) {
 			stats["decoded_points"] = decodedPoints
 			stats["sample_every"] = *sampleEvery
 			stats["source_lag_seconds"] = time.Since(lastCaughtUp).Seconds()
-			stats["journal_sync_groups"] = producer.SyncGroups
 			stats["source_backlog"] = sourceBacklog(*source, path, tail.offset)
 			selfCPU, _ := os.ReadFile("/proc/self/stat")
 			stats["self_cpu_stat"] = string(selfCPU)

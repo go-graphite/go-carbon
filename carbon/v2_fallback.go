@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -125,9 +126,12 @@ func (v *v2Runtime) mirrorClassic(core *cache.Cache) func(int, []v2core.Batch) e
 			for i, p := range b.Points {
 				ps.Data[i] = points.Point{Value: math.Float64frombits(p.Bits), Timestamp: p.Time}
 			}
-			// This accepted prefix must wait for capacity rather than use live drops.
-			// The retained common journal remains its crash-recovery source.
-			core.AddRestoredBeforeInput(ps)
+			// Accepted v2 input waits for classic capacity instead of a live
+			// drop, and the classic input log records it like any input.
+			for !core.HasRecoveryCapacityFor(ps.Metric, len(ps.Data)) {
+				time.Sleep(time.Millisecond)
+			}
+			core.Add(ps)
 			v.metrics.mirrored.Add(uint64(len(ps.Data)))
 		}
 		return nil
@@ -142,7 +146,7 @@ type v2ModeMetrics struct {
 }
 
 var v2ModeDesc = prometheus.NewDesc("go_carbon_storage_mode", "Active storage mode (one hot). Changes require restart.", []string{"mode"}, nil)
-var v2MirroredDesc = prometheus.NewDesc("go_carbon_classic_mirrored_points_total", "Journaled points submitted to classic, including replay.", nil, nil)
+var v2MirroredDesc = prometheus.NewDesc("go_carbon_classic_mirrored_points_total", "Points v2 intake submitted to classic.", nil, nil)
 var v2RejectedNamesDesc = prometheus.NewDesc("v2_name_rejected_points_total", "Points refused at v2 intake because their name has no valid policy (for example no schema or a classic policy mismatch). Over-long names are in receiver_name_too_long_rejected_points_total.", nil, nil)
 
 func (m *v2ModeMetrics) Describe(ch chan<- *prometheus.Desc) {

@@ -64,23 +64,34 @@ func TestRestartSIGKILL(t *testing.T) {
 			t.Fatal(err)
 		}
 		armed.Store(true)
-		s.Producers[0].stage = cut
 		if err = s.Producers[0].AppendApplications(restartApps(t, 6, 12)); err != nil {
 			t.Fatal(err)
 		}
 		if err = s.Producers[0].Drain(); err != nil {
 			t.Fatal(err)
 		}
+		// Drained rows are durable once a publication wrote them to L0 run
+		// files (one per owner holding them); only then cut the seal.
+		owners := map[int]bool{}
+		for _, app := range restartApps(t, 6, 12) {
+			owners[int(partsformat.Route(partsformat.ID(app.Name)))%s.cfg.Shards] = true
+		}
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			files, _ := filepath.Glob(filepath.Join(root, "placement-group-00000001", "core", "owner-*", "l0", "l0-*[0-9]"))
+			if len(files) >= len(owners) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("no L0 run files")
+			}
+		}
 		if err = s.Core.AppendBatches(0, nil, s.Producers[0].cursor, true); err != nil {
 			t.Fatal(err)
 		}
 		t.Fatal("missed crash stage", stage)
 	}
-	for _, layer := range []int{2, 3} {
-		for _, stage := range []string{"append", "seal", "sort", "part-write", "ingest", "commit", "rollup"} {
-			if layer == 2 && stage == "rollup" {
-				continue
-			}
+	for _, layer := range []int{3} {
+		for _, stage := range []string{"seal", "sort", "part-write", "ingest", "commit", "rollup"} {
 			t.Run(fmt.Sprintf("L%d/%s", layer, stage), func(t *testing.T) {
 				root := t.TempDir()
 				cfg := restartConfig(layer)
@@ -220,6 +231,9 @@ func checkRestartOracle(t *testing.T, s *Store, apps []Application, layer int) {
 		}
 	}
 	for id, rows := range want {
+		if layer == 3 && !s.cfg.KeepBaseRows {
+			break // archive records only, as in production
+		}
 		owner := v2core.Shard(id, s.cfg.Shards)
 		if layer == 3 {
 			owner = int(partsformat.Route(partsformat.ID(fmt.Sprintf("replay.%d", id-1)))) % s.cfg.Shards
@@ -292,7 +306,7 @@ func checkRestartOracle(t *testing.T, s *Store, apps []Application, layer int) {
 
 func TestRestartExclusionGeometryAndAppend(t *testing.T) {
 	root := t.TempDir()
-	cfg := restartConfig(2)
+	cfg := restartConfig(3)
 	s, err := Open(root, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -327,91 +341,7 @@ func TestRestartExclusionGeometryAndAppend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkRestartOracle(t, s, restartApps(t, 0, 12), 2)
-	if err = s.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRestartRejectsJournalDamage(t *testing.T) {
-	for _, damage := range []string{"checksum", "duplicate", "missing"} {
-		t.Run(damage, func(t *testing.T) {
-			root := t.TempDir()
-			cfg := restartConfig(2)
-			s, err := Open(root, cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = s.Producers[0].AppendApplications(restartApps(t, 0, 6)); err != nil {
-				t.Fatal(err)
-			}
-			if err = s.Close(); err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(root, "placement-group-00000001", "journal", "producer-000", "segment.pdc4")
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch damage {
-			case "checksum":
-				data[len(data)-1] ^= 1
-			case "duplicate":
-				if err = os.WriteFile(filepath.Join(filepath.Dir(path), "segment-00000000000000000001.pdc4"), data, 0600); err != nil {
-					t.Fatal(err)
-				}
-			case "missing":
-				data = nil
-			}
-			if damage != "duplicate" {
-				if err = os.WriteFile(path, data, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if s, err = Open(root, cfg); err == nil {
-				_ = s.Close()
-				t.Fatal("damaged journal accepted")
-			}
-		})
-	}
-}
-
-func TestRestartNamedAppendPreservesBitsAndSequence(t *testing.T) {
-	root := t.TempDir()
-	cfg := restartConfig(2)
-	bits := []uint64{0x7ff8000000000042, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0}
-	var want []v2core.Row
-	for epoch := 0; epoch < 3; epoch++ {
-		s, err := Open(root, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i := 0; i < 2; i++ {
-			n := epoch*2 + i
-			seq := uint64(n*13 + 7)
-			point := points.Point{Timestamp: int64(100 + n), Value: math.Float64frombits(bits[n])}
-			if err = s.Producers[0].Append([]string{"special"}, nil, []points.Point{point}, []uint64{seq}, 123); err != nil {
-				t.Fatal(err)
-			}
-			want = append(want, v2core.Row{ID: 1, Time: point.Timestamp, Bits: bits[n], Seq: seq})
-		}
-		if err = s.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	s, err := Open(root, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Core.AppendBatches(0, nil, s.Producers[0].cursor, true); err != nil {
-		t.Fatal(err)
-	}
-	snap := s.Core.DBs()[v2core.Shard(1, cfg.Shards)].NewSnapshot()
-	got, err := v2core.Read(snap, 1)
-	_ = snap.Close()
-	if err != nil || !slices.Equal(got, want) {
-		t.Fatal(got, want, err)
-	}
+	checkRestartOracle(t, s, restartApps(t, 0, 12), 3)
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}

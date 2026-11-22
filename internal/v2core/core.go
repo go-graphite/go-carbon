@@ -57,6 +57,9 @@ type coreConfig struct {
 	// journal, so tests use this to build stores in the older format and to
 	// assert that they stay readable. Runtime-only.
 	KeepBaseRows bool `json:"-"`
+	// L0 writes each publication's new applications to an L0 run file before
+	// readers see them (l0.go); restart loads them with LoadL0. Runtime only.
+	L0 bool `json:"-"`
 }
 
 type coreFrontier struct {
@@ -72,6 +75,7 @@ type corePacket struct {
 	rows       []row
 	batches    []coreBatch
 	pending    *pendingRows // rollup applications, encoded by the producer (Outbox)
+	l0         []string     // L0 files these loaded batches came from (LoadL0)
 	cursor     uint64
 	seal, stop bool
 	ack        chan error
@@ -272,6 +276,12 @@ type coreOwner struct {
 	// them, so no point is ever invisible or counted twice.
 	sealPubMu   sync.Mutex
 	sealDurable bool
+	// L0 files found at open (LoadL0 consumes them), the next file number,
+	// the owner goroutine's encode buffer and bytes written.
+	l0Files []string
+	l0Next  uint64
+	l0Buf   []byte
+	l0Bytes atomic.Uint64
 }
 type coreFailure struct{ err error }
 type coreEngine struct {
@@ -437,6 +447,11 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			}
 			o.sealRows = min(cfg.MaxRows, sealMaxRows)
 			e.owners[s] = o
+			if cfg.L0 && !readOnly {
+				if o.l0Files, o.l0Next, err = o.openL0(); err != nil {
+					return err
+				}
+			}
 			if hook != nil {
 				o.hook = func(snap *pebble.Snapshot, head []row) error { return hook(s, snap, head) }
 			}
@@ -974,6 +989,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	maintenanceDeadline := time.Now().Add(time.Second)
 	var headPublication, batchPublication time.Time
 	publishedBatches := 0
+	// L0: positions [0, l0Written) of pend are in the files l0Cover; l0Loaded
+	// marks a head holding rows LoadL0 restored, which the next seal covers.
+	l0Written, l0Loaded := 0, false
+	var l0Cover []string
 	// Publication already shows each batch to o.visible once, and observers
 	// dedupe repeats. A seal reports only batches no publication reported,
 	// unless an expiry since its head began may have dropped an already
@@ -1005,8 +1024,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		pending  PendingView
 		next     coreFrontier
 		done     chan sealResult
-		reported int    // pending positions [0, reported) already reached o.visible
-		expiries uint64 // o.expiries when this head began
+		l0       []string // L0 files this seal covers
+		reported int      // pending positions [0, reported) already reached o.visible
+		expiries uint64   // o.expiries when this head began
 	}
 	var flight *sealFlight
 	var spareRows []row
@@ -1014,6 +1034,17 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// Row-hook publication clones the head; it keeps synchronous seals.
 	asyncSeal := o.hook == nil
 	publishBatches := func() error {
+		// L0 files precede visibility: a render never shows a row a kill -9
+		// loses. Without a publication hook they still follow its cadence.
+		if o.cfg.L0 && pend.n > l0Written {
+			path, err := o.writeL0(pend.rawView(nil).Suffix(l0Written))
+			if err != nil {
+				return err
+			}
+			l0Cover = append(l0Cover, path)
+			l0Written = pend.n
+			batchPublication = time.Now()
+		}
 		if o.batchHook == nil {
 			return nil
 		}
@@ -1066,6 +1097,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.meta = f.next
 		o.readGeneration++
 		o.publishFrontier(f.next)
+		if err := unlinkL0(f.l0); err != nil {
+			return err
+		}
 		o.committed.Add(uint64(f.points))
 		o.parts.Add(1)
 		o.bytes.Add(r.n)
@@ -1104,7 +1138,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// keeps admitting rows into a new head and publishing it every second.
 	// Callers ensure no seal is in flight.
 	startSeal := func() error {
-		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
+		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance && !l0Loaded {
 			deadline = time.Now().Add(sealInterval)
 			return nil
 		}
@@ -1121,9 +1155,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		frozen := pend.view(o.lookup)
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
-		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), reported: min(publishedBatches, pend.n), expiries: headExpiries}
+		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), l0: l0Cover, reported: min(publishedBatches, pend.n), expiries: headExpiries}
 		pend = pendingHead{}
 		publishedBatches = 0
+		l0Cover, l0Written, l0Loaded = nil, 0, false
 		headExpiries = o.expiries.Load()
 		o.sealPubMu.Lock()
 		o.sealDurable = false
@@ -1170,7 +1205,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if err := awaitFlight(); err != nil {
 			return err
 		}
-		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance {
+		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance && !l0Loaded {
 			return nil
 		}
 		// Publish the last intake tail before synchronous rollup/disk work. A
@@ -1199,10 +1234,14 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		o.meta = next
 		o.readGeneration++
 		o.publishFrontier(next)
+		if err := unlinkL0(l0Cover); err != nil {
+			return err
+		}
 		// Readers may still hold the published prefix of sealedPending. Never
 		// overwrite or clear it; the next head appends to fresh slices.
 		pend = pendingHead{}
 		publishedBatches = 0
+		l0Cover, l0Written, l0Loaded = nil, 0, false
 		o.committed.Add(uint64(headPoints))
 		o.parts.Add(1)
 		o.bytes.Add(n)
@@ -1333,7 +1372,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if failure == nil && o.plan != nil && len(p.rows) > 0 && len(p.batches) == 0 && p.pending == nil {
 				failure = errors.New("seal planner requires original apply batches")
 			}
-			if failure == nil && p.cursor > pending[producer] {
+			if failure == nil && (p.cursor > pending[producer] || p.l0 != nil) {
 				points := p.points()
 				if headPoints+points > o.cfg.MaxRows {
 					if asyncSeal {
@@ -1379,7 +1418,13 @@ func (o *coreOwner) poller() func() (bool, bool) {
 					} else {
 						pend.add(p.batches, o.lookup)
 					}
-					pending[producer] = p.cursor
+					if p.l0 != nil {
+						// Loaded rows are in their files already; publish them, do
+						// not write them again, and let the next seal unlink them.
+						l0Cover = append(l0Cover, p.l0...)
+						l0Written, l0Loaded = pend.n, true
+					}
+					pending[producer] = max(pending[producer], p.cursor)
 				}
 			}
 			// The head owns copied rows and detached batch descriptors now.

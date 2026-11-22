@@ -63,6 +63,10 @@ type v2Runtime struct {
 
 const v2SteadyGCPercent = 50
 
+// v2L0Drain bounds how long an accepted point waits in its producer before
+// core takes it and writes it to an L0 file at the next publication.
+const v2L0Drain = 100 * time.Millisecond
+
 func (app *App) startV2() error {
 	c := app.Config
 	// v2 does not enter the classic startup path that applies these rates.
@@ -81,8 +85,13 @@ func (app *App) startV2() error {
 	if c.Tcp == nil || c.Udp == nil || c.Pickle == nil {
 		return errors.New("v2 requires receiver settings")
 	}
-	if !c.Tcp.Enabled || !c.Carbonserver.Enabled || c.Udp.Enabled || c.Pickle.Enabled || c.Carbonlink.Enabled || c.Grpc.Enabled || len(c.Receiver) > 0 || c.Buckyd.Enabled || c.Dump.Enabled || c.InputLog.Enabled {
-		return errors.New("v2 currently requires TCP and carbonserver only; disable other receivers, buckyd, dump and classic input-log")
+	if !c.Tcp.Enabled || !c.Carbonserver.Enabled || c.Udp.Enabled || c.Pickle.Enabled || c.Carbonlink.Enabled || c.Grpc.Enabled || len(c.Receiver) > 0 || c.Buckyd.Enabled || c.Dump.Enabled {
+		return errors.New("v2 currently requires TCP and carbonserver only; disable other receivers, buckyd and dump")
+	}
+	// v2 recovers from its L0 run files; the classic engine of a dual mode
+	// recovers from its own input log, so each loses at most its own window.
+	if c.InputLog.Enabled != dual {
+		return errors.New("v2 dual write and shadow require the classic input-log; v2-only must disable it")
 	}
 
 	for _, path := range []string{c.Whisper.DataDir, c.Whisper.StoreDir} {
@@ -175,10 +184,10 @@ func (app *App) startV2() error {
 	if c.V2.SealInterval != nil {
 		sealInterval = c.V2.SealInterval.Value()
 	}
-	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks,
-		// Smaller segments bound the durable boundary/active tail retained by
-		// standalone stores without changing journal or core durability.
-		JournalSegmentBytes: 8 << 20}
+	// v2 keeps no producer journal: core writes L0 run files before each
+	// publication. With no fsync to batch, producers hand rows to core every
+	// 100 ms, so the kill-loss window is about one publication.
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: v2L0Drain, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
@@ -194,6 +203,10 @@ func (app *App) startV2() error {
 			if err = app.startPersister(); err != nil {
 				return err
 			}
+			// Classic replays its own input-log tail before v2 opens.
+			if err = app.replayInputLog(core); err != nil {
+				return err
+			}
 			close(app.metadataPrewarmReady)
 		} else {
 			core = cache.New()
@@ -203,34 +216,12 @@ func (app *App) startV2() error {
 		return nil
 	}
 	if dual {
-		// Mirrors retain the whole log; finer rotation cannot reclaim their tail.
-		storeConfig.JournalSegmentBytes = 16 << 20
-		storeConfig.DurableApplications = func(producer int, batches []v2core.Batch) error { return v.mirrorClassic(core)(producer, batches) }
+		// Prepare starts classic inside Open: resolve core at the first call.
+		storeConfig.Mirror = func(producer int, batches []v2core.Batch) error { return v.mirrorClassic(core)(producer, batches) }
 	}
 	v.store, err = v2daemon.Open(c.V2.Path, storeConfig)
 	if err != nil {
 		return err
-	}
-	if dual {
-		deadline := time.Now().Add(5 * time.Minute)
-		diagnosticAt := time.Now().Add(5 * time.Second)
-		for !core.IsEmpty() {
-			if !diagnosticAt.IsZero() && time.Now().After(diagnosticAt) {
-				// One bounded diagnostic per startup, including an idle queue
-				// with unconfirmed batches that cannot be offered again.
-				pebbleWrites, whisperWrites := app.Persister.WriteStats()
-				zapwriter.Logger("v2").Warn("waiting for classic replay drain",
-					zap.Int64("cache-points", core.Size()), zap.Int32("unconfirmed", core.NotConfirmedLength()),
-					zap.Any("writeout", core.WriteoutState()), zap.String("queue", core.WriteoutQueue().DebugState()),
-					zap.Any("pebble-writes", pebbleWrites), zap.Any("whisper-writes", whisperWrites),
-					zap.Uint64("committed-points", app.Persister.CommittedPoints()))
-				diagnosticAt = time.Time{}
-			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("classic replay did not drain; refusing to serve: points=%d unconfirmed=%d writeout=%+v committed=%d", core.Size(), core.NotConfirmedLength(), core.WriteoutState(), app.Persister.CommittedPoints())
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
 	}
 	classicNames, err := app.openV2Classic()
 	if err != nil {
@@ -432,7 +423,7 @@ func (app *App) startV2() error {
 	if v.quotas != nil {
 		throttle = v.quotas.ShouldThrottleMetric
 	}
-	v.server, err = v.store.ReceiveApplicationsTCPWithAdmission(l, v2recv.Config{}, resolve, throttle, func(name string, err error) { v.rejectName(core, name, err) })
+	v.server, err = v.store.ReceiveApplicationsTCPWithAdmission(l, v2recv.Config{SyncInterval: storeConfig.GroupInterval}, resolve, throttle, func(name string, err error) { v.rejectName(core, name, err) })
 	if err != nil {
 		_ = l.Close()
 		return err

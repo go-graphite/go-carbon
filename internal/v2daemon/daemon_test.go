@@ -1,26 +1,21 @@
 package v2daemon
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/points"
 )
 
-func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
+func TestLayersPreserveExactCore(t *testing.T) {
 	t.Parallel()
 	bits := []uint64{0, 1 << 63, 1, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042, 0x7ff0000000000001, 0x3ff0000000000000}
-	for layer := 0; layer <= 2; layer++ {
+	for layer := 0; layer <= 1; layer++ {
 		t.Run(fmt.Sprint(layer), func(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
@@ -65,13 +60,6 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 					}
 				}
 			}
-			if layer == 2 {
-				for _, p := range s.Producers {
-					if p.SyncGroups != 0 {
-						t.Fatal("barriers forced group sync")
-					}
-				}
-			}
 			if err = s.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -102,65 +90,13 @@ func TestLayersPreserveExactCoreAndJournal(t *testing.T) {
 					t.Fatalf("id %d got %#v want %#v: %v", id, got, expected, err)
 				}
 			}
-			if layer != 2 {
-				return
-			}
-			for p := 0; p < 2; p++ {
-				dir := filepath.Join(root, "placement-group-00000001", "journal", fmt.Sprintf("producer-%03d", p))
-				catalog, err := partlog.OpenNameCatalog(filepath.Join(dir, "catalog"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				decoder := partlog.CatalogDecoder{Catalog: catalog}
-				file, err := os.Open(filepath.Join(dir, "segment.pdc4"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				rounds := 0
-				for {
-					var h [4]byte
-					_, err = io.ReadFull(file, h[:])
-					if errors.Is(err, io.EOF) {
-						break
-					}
-					if err != nil {
-						t.Fatal(err)
-					}
-					b := make([]byte, binary.LittleEndian.Uint32(h[:]))
-					if _, err = io.ReadFull(file, b); err != nil {
-						t.Fatal(err)
-					}
-					batches, cursor, err := DecodeApplications(b, &decoder, p, 2)
-					if err != nil || len(batches) != 2 || cursor != uint64((rounds+1)*2) {
-						t.Fatal("changed application packet", err)
-					}
-					for i, batch := range batches {
-						if batch.Clock != int64(100+rounds) || len(batch.Points) != 1 {
-							t.Fatal(batch)
-						}
-						point := batch.Points[0]
-						if point.Time != int64(rounds-4) || point.Bits != bits[(rounds+i)%len(bits)] || point.Seq != uint64(rounds+1) {
-							t.Fatal(point)
-						}
-					}
-					rounds++
-				}
-				if rounds != 8 {
-					t.Fatal("lost journal records", rounds)
-				}
-				_ = file.Close()
-				decoder.Close()
-				if err = catalog.Close(); err != nil {
-					t.Fatal(err)
-				}
-			}
 		})
 	}
 }
 
 func TestPendingQuotaAndStickyFailure(t *testing.T) {
 	t.Parallel()
-	s, err := Open(t.TempDir(), Config{Layer: 2, Producers: 1, Shards: 1, MaxPendingRows: 1, GroupInterval: time.Hour})
+	s, err := Open(t.TempDir(), Config{Layer: 1, Producers: 1, Shards: 1, MaxPendingRows: 1, GroupInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +105,8 @@ func TestPendingQuotaAndStickyFailure(t *testing.T) {
 	if err = p.Append([]string{"a"}, nil, []points.Point{{Timestamp: 1, Value: 1}}, []uint64{1}, 1); err != nil {
 		t.Fatal(err)
 	}
-	if p.SyncGroups != 1 || p.ForcedGroups != 1 || len(p.packets) != 0 {
-		t.Fatal("quota did not durably release rows")
+	if p.ForcedGroups != 1 || len(p.packets) != 0 {
+		t.Fatal("quota did not release rows")
 	}
 	if err = p.Append([]string{"a"}, nil, nil, nil, 2); err == nil {
 		t.Fatal("bad batch accepted")

@@ -33,7 +33,7 @@ func TestV2FallbackModes(t *testing.T) {
 			t.Run(from+"/"+to, func(t *testing.T) {
 				root := t.TempDir()
 				a := v2FallbackTestApp(t, root)
-				a.Config.V2.Mode = from
+				setV2Mode(a, from)
 				if err := a.Start(); err != nil {
 					t.Fatal(err)
 				}
@@ -53,7 +53,7 @@ func TestV2FallbackModes(t *testing.T) {
 				}
 				a.Stop()
 				a = v2FallbackTestApp(t, root)
-				a.Config.V2.Mode = to
+				setV2Mode(a, to)
 				err := a.Start()
 				if from == v2Only && to != v2Only {
 					if err == nil {
@@ -72,7 +72,7 @@ func TestV2FallbackModes(t *testing.T) {
 func TestV2FallbackReadsClassicDuringShadow(t *testing.T) {
 	root := t.TempDir()
 	a := v2FallbackTestApp(t, root)
-	a.Config.V2.Mode = v2Shadow
+	setV2Mode(a, v2Shadow)
 	if err := a.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -151,13 +151,13 @@ func TestV2FallbackTargetAndHistoryGuards(t *testing.T) {
 	t.Run("target", func(t *testing.T) {
 		root := t.TempDir()
 		a := v2FallbackTestApp(t, root)
-		a.Config.V2.Mode = v2Shadow
+		setV2Mode(a, v2Shadow)
 		if err := a.Start(); err != nil {
 			t.Fatal(err)
 		}
 		a.Stop()
 		a = v2FallbackTestApp(t, root)
-		a.Config.V2.Mode = v2Shadow
+		setV2Mode(a, v2Shadow)
 		a.Config.Whisper.DataDir = filepath.Join(root, "different")
 		if err := a.Start(); err == nil {
 			a.Stop()
@@ -168,7 +168,7 @@ func TestV2FallbackTargetAndHistoryGuards(t *testing.T) {
 	t.Run("history", func(t *testing.T) {
 		root := t.TempDir()
 		a := v2FallbackTestApp(t, root)
-		a.Config.V2.Mode = v2Shadow
+		setV2Mode(a, v2Shadow)
 		if err := os.MkdirAll(a.Config.V2.Path, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +183,7 @@ func TestV2FallbackTargetAndHistoryGuards(t *testing.T) {
 	})
 	t.Run("unknown-mode", func(t *testing.T) {
 		a := v2FallbackTestApp(t, t.TempDir())
-		a.Config.V2.Mode = "typo"
+		setV2Mode(a, "typo")
 		if err := a.Start(); err == nil || !strings.Contains(err.Error(), "unknown v2.mode") {
 			a.Stop()
 			t.Fatal(err)
@@ -205,7 +205,7 @@ func TestV2FallbackCostFixture(t *testing.T) {
 	}
 	root := t.TempDir()
 	a := v2FallbackTestApp(t, root)
-	a.Config.V2.Mode = mode
+	setV2Mode(a, mode)
 	a.Config.Carbonserver.ScanFrequency = &Duration{time.Hour}
 	if mode == "classic" {
 		a.Config.V2 = v2Config{}
@@ -308,7 +308,7 @@ func TestV2FallbackCostFixture(t *testing.T) {
 func TestV2FallbackRejectsUnseededRollupCutover(t *testing.T) {
 	root := t.TempDir()
 	a := v2FallbackTestApp(t, root)
-	a.Config.V2.Mode = v2Shadow
+	setV2Mode(a, v2Shadow)
 	if err := a.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestV2FallbackRejectsUnseededRollupCutover(t *testing.T) {
 	}
 	a.Stop()
 	a = v2FallbackTestApp(t, root)
-	a.Config.V2.Mode = v2ServingDual
+	setV2Mode(a, v2ServingDual)
 	err = a.Start()
 	if err == nil {
 		a.Stop()

@@ -50,7 +50,7 @@ func TestRestartRejectsOldNameRouting(t *testing.T) {
 func TestRestartWritesCurrentNameRouting(t *testing.T) {
 	root := t.TempDir()
 	for i := 0; i < 2; i++ {
-		s, err := Open(root, Config{Layer: 2, Producers: 2, Shards: 4})
+		s, err := Open(root, Config{Layer: 3, Producers: 2, Shards: 4})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -52,6 +52,15 @@ func v2TestApp(t *testing.T, root string) *App {
 	c.Carbonserver.ScanFrequency = &Duration{time.Hour}
 	return app
 }
+// setV2Mode selects a storage mode. Dual modes run the classic input log,
+// which recovers the classic engine after a crash.
+func setV2Mode(a *App, mode string) {
+	a.Config.V2.Mode = mode
+	a.Config.InputLog.Enabled = mode == v2Shadow || mode == v2ServingDual
+	a.Config.InputLog.Path = filepath.Join(filepath.Dir(a.Config.V2.Path), "input-log")
+	a.Config.InputLog.SyncInterval = Duration{10 * time.Millisecond}
+}
+
 func v2HTTP(t *testing.T, app *App, path string) []byte {
 	t.Helper()
 	client := http.Client{Timeout: 3 * time.Second}
@@ -298,7 +307,7 @@ func TestV2CrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := v2TestApp(t, root)
-	app.Config.V2.Mode = os.Getenv("V2_WIRE_MODE")
+	setV2Mode(app, os.Getenv("V2_WIRE_MODE"))
 	if app.Config.V2.Mode == v2ServingDual {
 		app.Config.Whisper.Schemas[0].Retentions = app.Config.Whisper.Schemas[0].Retentions[:1]
 	}
@@ -325,6 +334,10 @@ func TestV2CrashChild(t *testing.T) {
 			t.Fatalf("durable prefix not published: %v", err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if app.Config.InputLog.Enabled {
+		// The mirror ran before v2 published; let the input log sync it.
+		time.Sleep(200 * time.Millisecond)
 	}
 	if err := os.WriteFile(filepath.Join(root, "crash-ready"), []byte("ready"), 0600); err != nil {
 		t.Fatal(err)
@@ -381,7 +394,7 @@ func testV2RuntimeSIGKILLWithActiveTCP(t *testing.T, mode string) {
 		t.Fatalf("wrong exit: %v", err)
 	}
 	app := v2TestApp(t, root)
-	app.Config.V2.Mode = mode
+	setV2Mode(app, mode)
 	if mode == v2ServingDual {
 		app.Config.Whisper.Schemas[0].Retentions = app.Config.Whisper.Schemas[0].Retentions[:1]
 	}

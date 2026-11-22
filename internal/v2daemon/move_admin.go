@@ -664,7 +664,7 @@ func (a *MoveAdmin) cleanup(m *moveRecord) error {
 	return syncDir(dir)
 }
 func (a *MoveAdmin) adopt(ctx context.Context, p *v2core.PreparedMove, now int64) error {
-	if a.store.cfg.Layer != 3 || a.store.cfg.Placement != nil {
+	if a.store.cfg.Layer != 3 {
 		return errors.New("move requires unplaced L3 daemon")
 	}
 	ids := map[string]uint64{}

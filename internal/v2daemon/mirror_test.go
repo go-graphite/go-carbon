@@ -12,7 +12,10 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
-func TestDurableApplicationsMirrorAndReplay(t *testing.T) {
+// TestMirrorAtDrain: the classic mirror sees each drained application with
+// its canonical policy before core does, and never on recovery: classic
+// replays its own input log. A mirror failure fails the producer.
+func TestMirrorAtDrain(t *testing.T) {
 	root := t.TempDir()
 	policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID("mirror.metric"), Group: "test", Config: sealrollup.Config{Method: sealrollup.Sum, Archives: []sealrollup.Archive{{Step: 1, Count: 120}}}})
 	if err != nil {
@@ -22,12 +25,12 @@ func TestDurableApplicationsMirrorAndReplay(t *testing.T) {
 	cfg := Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour, MaxCoreRows: 256}
 	prepared := false
 	cfg.Prepare = func() error { prepared = true; return nil }
-	cfg.DurableApplications = func(producer int, b []v2core.Batch) error {
+	cfg.Mirror = func(producer int, b []v2core.Batch) error {
 		if !prepared || producer != 0 || len(b) != 1 || len(b[0].Points) != 1 || b[0].Order != 1 {
 			t.Fatal("invalid mirror application")
 		}
 		if !bytes.Equal(b[0].Policy, policy) {
-			t.Fatal("mirror must receive canonical policy on live input and replay")
+			t.Fatal("mirror must receive the canonical policy")
 		}
 		calls++
 		return nil
@@ -37,42 +40,43 @@ func TestDurableApplicationsMirrorAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := s.Producers[0]
-	if err := p.AppendApplications([]Application{{Name: "mirror.metric", Policy: policy, Order: 1, Clock: 10000, Points: []points.Point{{Timestamp: 9990, Value: 3}}, Sequence: []uint64{1}}}); err != nil {
+	app := []Application{{Name: "mirror.metric", Policy: policy, Order: 1, Clock: 10000, Points: []points.Point{{Timestamp: 9990, Value: 3}}, Sequence: []uint64{1}}}
+	if err := p.AppendApplications(app); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 0 {
-		t.Fatal("mirror ran before journal sync")
-	}
-	if err := p.Seal(); err != nil {
-		t.Fatal(err)
+		t.Fatal("mirror ran before the drain")
 	}
 	if err := p.Drain(); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || p.SyncGroups != 1 {
-		t.Fatalf("mirror calls=%d groups=%d", calls, p.SyncGroups)
+	if calls != 1 {
+		t.Fatalf("mirror calls=%d", calls)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// A committed core frontier must not suppress recovery of the second sink.
 	prepared = false
 	s, err = Open(root, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Fatalf("durable classic prefix not replayed: %d", calls)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
+	if calls != 1 {
+		t.Fatalf("recovery mirrored again: %d", calls)
 	}
 	sentinel := errors.New("classic unavailable")
-	cfg.DurableApplications = func(int, []v2core.Batch) error { return sentinel }
-	if s, err := Open(root, cfg); !errors.Is(err, sentinel) {
-		if s != nil {
-			_ = s.Close()
-		}
-		t.Fatalf("classic recovery failure ignored: %v", err)
+	s.Producers[0].mirror = func(int, []v2core.Batch) error { return sentinel }
+	app[0].Order = s.Producers[0].applyOrder + 1
+	app[0].Name, app[0].Policy = "", nil
+	app[0].Registered, err = s.Producers[0].RegisterApplication("mirror.metric", policy)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := s.Producers[0].AppendApplications(app); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Producers[0].Drain(); !errors.Is(err, sentinel) {
+		t.Fatalf("mirror failure ignored: %v", err)
+	}
+	_ = s.Close()
 }

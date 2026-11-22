@@ -19,6 +19,15 @@ import (
 
 // openProbeStore opens a layer-3 store whose catalog binds names to the shared
 // policy identities, as the daemon does.
+// mirrorQueue makes p keep detached batches in its packets, as classic
+// mirroring does; queuedName names the i-th application of its last packet.
+func mirrorQueue(p *Producer) { p.mirror = func(int, []v2core.Batch) error { return nil } }
+func queuedName(p *Producer, i int) string {
+	b := p.packets[len(p.packets)-1].batches[i]
+	name, _ := p.catalog.Key((b.ID-1)/uint64(p.count) + 1)
+	return name
+}
+
 func openProbeStore(tb testing.TB) (*Store, PolicyResolver) {
 	tb.Helper()
 	r, err := v2read.New(2, 16<<20, 1<<20)
@@ -79,6 +88,7 @@ func probePoints(n int) []points.Point {
 func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 	s, resolve := openProbeStore(t)
 	p := s.Producers[0]
+	mirrorQueue(p)
 	o := &applicationOwner{p: p, resolve: resolve}
 	names := []string{"collide.a", "collide.b", "collide.b", "collide.a", "collide.c", "collide.a"}
 	hashes := make([]uint64, len(names))
@@ -92,8 +102,8 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 		t.Fatalf("catalog names=%d table=%d, want 3", got, o.names.Len())
 	}
 	for i, name := range names {
-		if got, _ := p.catalog.Key(p.applicationFrames[i].ID); got != name {
-			t.Fatalf("point %d (%q) journaled as %q", i, name, got)
+		if got := queuedName(p, i); got != name {
+			t.Fatalf("point %d (%q) queued as %q", i, name, got)
 		}
 	}
 	// Forced equal maphash: only the Route half tells these apart.
@@ -241,6 +251,7 @@ func BenchmarkApplicationOwnerProbe(b *testing.B) {
 func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 	s, resolve := openProbeStore(t)
 	p := s.Producers[0]
+	mirrorQueue(p)
 	var refused []string
 	o := &applicationOwner{p: p, resolve: resolve, reject: func(name string, err error) {
 		if !errors.Is(err, ErrNameTooLong) {
@@ -257,8 +268,8 @@ func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 		t.Fatalf("refused=%d catalog=%d table=%d, want 3, 2, 2", len(refused), p.catalog.Count(), o.names.Len())
 	}
 	for i, want := range []string{"ok.a", "ok.a", "ok.b"} {
-		if got, _ := p.catalog.Key(p.applicationFrames[i].ID); got != want {
-			t.Fatalf("appended point %d journaled as %q, want %q", i, got, want)
+		if got := queuedName(p, i); got != want {
+			t.Fatalf("appended point %d queued as %q, want %q", i, got, want)
 		}
 	}
 }
@@ -271,7 +282,8 @@ func TestRegisteredApplicationHoldsNoName(t *testing.T) {
 		t.Fatalf("RegisteredApplication is %d B, want 24 (no per-name name header)", size)
 	}
 	s3, resolve := openProbeStore(t)
-	s2, err := Open(t.TempDir(), Config{Layer: 2, Producers: 1, Shards: 1, GroupInterval: time.Hour})
+	// A mirroring store registers catalog-only handles (no core identity).
+	s2, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour, Mirror: func(int, []v2core.Batch) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,8 +308,8 @@ func TestRegisteredApplicationHoldsNoName(t *testing.T) {
 			if got != name || unsafe.StringData(got) != unsafe.StringData(owned) {
 				t.Fatalf("layer %d: name()=%q, want the catalog's own %q", p.layer, got, name)
 			}
-			if (p.layer == 3) != (r.policy != nil) {
-				t.Fatalf("layer %d: policy=%v", p.layer, r.policy)
+			if (p.mirror == nil) != (r.policy != nil) {
+				t.Fatalf("mirror %t: policy=%v", p.mirror != nil, r.policy)
 			}
 		}
 	}

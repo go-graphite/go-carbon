@@ -39,8 +39,8 @@ func installBaseline(root string, c Config) (uint64, error) {
 	if c.BaselinePath == "" {
 		return 0, nil
 	}
-	if c.Layer != 3 || c.Placement != nil {
-		return 0, errors.New("baseline requires unplaced rollup layer")
+	if c.Layer != 3 {
+		return 0, errors.New("baseline requires the rollup layer")
 	}
 	if _, err := os.Stat(group); !errors.Is(err, os.ErrNotExist) {
 		return 0, errors.New("baseline must be installed before first admission")
