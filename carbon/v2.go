@@ -36,8 +36,6 @@ type v2Config struct {
 	BaselinePath string    `toml:"baseline-path"`
 	SealInterval *Duration `toml:"seal-interval"`
 	SealMaxRows  int       `toml:"seal-max-rows"`
-	// L0 replaces the producer journal with L0 run files (standalone mode).
-	L0 bool `toml:"l0"`
 
 	Enabled         bool   `toml:"enabled"`
 	Mode            string `toml:"mode"`
@@ -61,6 +59,10 @@ type v2Runtime struct {
 }
 
 const v2SteadyGCPercent = 50
+
+// v2L0Drain bounds how long an accepted point waits in its producer before
+// core takes it and writes it to an L0 file at the next publication.
+const v2L0Drain = 100 * time.Millisecond
 
 func (app *App) startV2() error {
 	c := app.Config
@@ -170,10 +172,10 @@ func (app *App) startV2() error {
 	if c.V2.SealInterval != nil {
 		sealInterval = c.V2.SealInterval.Value()
 	}
-	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: time.Second, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks,
-		// Smaller segments bound the durable boundary/active tail retained by
-		// standalone stores without changing journal or core durability.
-		JournalSegmentBytes: 8 << 20}
+	// Standalone keeps no producer journal: core writes L0 run files before
+	// each publication. With no fsync to batch, producers hand rows to core
+	// every 100 ms, so the kill-loss window is about one publication.
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: v2L0Drain, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks, L0: !dual}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
@@ -197,14 +199,10 @@ func (app *App) startV2() error {
 
 		return nil
 	}
-	if c.V2.L0 {
-		if dual {
-			return errors.New("v2 l0 run files require standalone mode; classic dual write still mirrors through the producer journal")
-		}
-		storeConfig.L0 = true
-	}
 	if dual {
+		// Classic dual write still mirrors through the producer journal.
 		// Mirrors retain the whole log; finer rotation cannot reclaim their tail.
+		storeConfig.GroupInterval = time.Second
 		storeConfig.JournalSegmentBytes = 16 << 20
 		storeConfig.DurableApplications = func(producer int, batches []v2core.Batch) error { return v.mirrorClassic(core)(producer, batches) }
 	}
@@ -433,7 +431,7 @@ func (app *App) startV2() error {
 	if v.quotas != nil {
 		throttle = v.quotas.ShouldThrottleMetric
 	}
-	v.server, err = v.store.ReceiveApplicationsTCPWithAdmission(l, v2recv.Config{}, resolve, throttle, func(name string, err error) { v.rejectName(core, name, err) })
+	v.server, err = v.store.ReceiveApplicationsTCPWithAdmission(l, v2recv.Config{SyncInterval: storeConfig.GroupInterval}, resolve, throttle, func(name string, err error) { v.rejectName(core, name, err) })
 	if err != nil {
 		_ = l.Close()
 		return err
