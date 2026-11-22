@@ -115,13 +115,13 @@ func (s *snapshot) frozenGet(key []byte) []byte {
 }
 
 // get returns key's newest value below the append level.
-func (s *snapshot) get(key, kb []byte) (Entry, bool) {
+func (s *snapshot) get(key []byte) (Entry, bool) {
 	if s.frozen != nil {
 		if v := s.frozen.get(key); v != nil {
 			return decode(v), true
 		}
 	}
-	return getLevels(s.levels, key, kb)
+	return getLevels(s.levels, key)
 }
 
 func scopeKey(dst []byte, group string, vshard uint16) []byte {
@@ -322,16 +322,16 @@ func (d *Dict) bumpNext(sk []byte, id uint32) {
 
 // getLocked returns key's newest value: append level, then levels newest
 // first. The caller holds d.mu.
-func (d *Dict) getLocked(key []byte, kb []byte) (Entry, bool) {
+func (d *Dict) getLocked(key []byte) (Entry, bool) {
 	if v := d.buf.get(key); v != nil {
 		return decode(v), true
 	}
-	return d.snap.Load().get(key, kb)
+	return d.snap.Load().get(key)
 }
 
-func getLevels(levels []*level, key []byte, kb []byte) (Entry, bool) {
+func getLevels(levels []*level, key []byte) (Entry, bool) {
 	for i := len(levels) - 1; i >= 0; i-- {
-		if v := levels[i].get(key, kb); v != nil {
+		if v := levels[i].get(key); v != nil {
 			return decode(v), true
 		}
 	}
@@ -340,7 +340,7 @@ func getLevels(levels []*level, key []byte, kb []byte) (Entry, bool) {
 
 // Lookup returns the newest entry of (group, vshard, name), deleted or not.
 func (d *Dict) Lookup(group string, vshard uint16, name []byte) (Entry, bool) {
-	var ab, kb [256]byte
+	var ab [keyBuf]byte
 	key := append(scopeKey(ab[:0], group, vshard), name...)
 	d.mu.RLock()
 	if v := d.buf.get(key); v != nil {
@@ -350,14 +350,15 @@ func (d *Dict) Lookup(group string, vshard uint16, name []byte) (Entry, bool) {
 	}
 	s := d.snap.Load()
 	d.mu.RUnlock()
-	return s.get(key, kb[:0])
+	return s.get(key)
 }
 
 // LookupID appends the name of (group, vshard, id) to dst and returns its
 // entry. It reports false for an ID never assigned or no longer any name's
 // newest entry (a revived name's old ID, which is always deleted).
 func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]byte, Entry, bool) {
-	var ab, kb, nb [256]byte
+	var ab [256]byte
+	var kb [keyBuf]byte
 	sk := scopeKey(ab[:0], group, vshard)
 	d.mu.RLock()
 	if k, v := d.buf.getID(sk, id); k != nil {
@@ -389,24 +390,23 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 		if pos < 0 {
 			continue
 		}
-		it := levelIter{l: l, key: kb[:0]}
-		it.at(pos)
-		e := decode(it.val)
+		key, val := l.at(pos, kb[:0])
+		e := decode(val)
 		// Only newer storage can hold a newer entry of the same name.
 		d.mu.RLock()
-		v := d.buf.get(it.key)
+		v := d.buf.get(key)
 		d.mu.RUnlock()
 		if v != nil {
 			e = decode(v)
-		} else if fv := s.frozenGet(it.key); fv != nil {
+		} else if fv := s.frozenGet(key); fv != nil {
 			e = decode(fv)
-		} else if ne, ok := getLevels(s.levels[i+1:], it.key, nb[:0]); ok {
+		} else if ne, ok := getLevels(s.levels[i+1:], key); ok {
 			e = ne
 		}
 		if e.ID != id {
 			return dst, Entry{}, false
 		}
-		return append(dst, it.key[len(sk):]...), e, true
+		return append(dst, key[len(sk):]...), e, true
 	}
 	return dst, Entry{}, false
 }
@@ -418,7 +418,7 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 	if err := checkGroup(group); err != nil {
 		return Entry{}, false, err
 	}
-	var ab, kb [256]byte
+	var ab [keyBuf]byte
 	key := append(scopeKey(ab[:0], group, vshard), name...)
 	if len(key) > math.MaxUint16 {
 		return Entry{}, false, fmt.Errorf("v2dict: name too long (%d bytes)", len(name))
@@ -431,7 +431,7 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 	v, s := d.buf.get(key), d.snap.Load()
 	d.mu.RUnlock()
 	if v == nil {
-		if e, ok := s.get(key, kb[:0]); ok && !e.Deleted() {
+		if e, ok := s.get(key); ok && !e.Deleted() {
 			return e, false, nil
 		}
 	} else if e := decode(v); !e.Deleted() {
@@ -449,7 +449,7 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 			return e, false, nil
 		}
 	} else if now := d.snap.Load(); now != s {
-		if e, ok := now.get(key, kb[:0]); ok && !e.Deleted() {
+		if e, ok := now.get(key); ok && !e.Deleted() {
 			return e, false, nil
 		}
 	}
@@ -469,14 +469,14 @@ func (d *Dict) Append(group string, vshard uint16, name []byte, policy uint16) (
 // Delete sets FlagDeleted on the name's newest entry. It reports false when
 // the name is unknown or already deleted.
 func (d *Dict) Delete(group string, vshard uint16, name []byte) (bool, error) {
-	var ab, kb [256]byte
+	var ab [keyBuf]byte
 	key := append(scopeKey(ab[:0], group, vshard), name...)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.writable(); err != nil {
 		return false, err
 	}
-	e, ok := d.getLocked(key, kb[:0])
+	e, ok := d.getLocked(key)
 	if !ok || e.Deleted() {
 		return false, nil
 	}
@@ -601,7 +601,7 @@ func (d *Dict) freezeLocked() error {
 	}
 	frozen := new(memtable)
 	*frozen = d.buf
-	d.buf = memtable{}
+	d.buf = frozen.next()
 	minSeq, maxSeq := d.bufMin, d.logSeq
 	d.frozenLog = d.log
 	d.logSeq++

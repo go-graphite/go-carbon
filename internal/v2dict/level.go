@@ -38,6 +38,9 @@ const (
 	footerSize   = 4*8 + 8
 	blockEntries = 32
 	valueSize    = 7 // ID u32, policy u16, flags u8, little endian
+	// keyBuf is the stack buffer a lookup builds its key in; only a longer
+	// key (scope and name) allocates.
+	keyBuf = 1024
 )
 
 // scope is one (group, vshard) range of a level.
@@ -88,36 +91,48 @@ func (it *levelIter) next() bool {
 		it.valid = false
 		return false
 	}
-	d := it.l.m
-	shared, k := binary.Uvarint(d[it.off:])
-	it.off += k
-	size, k := binary.Uvarint(d[it.off:])
-	it.off += k
-	it.key = append(it.key[:shared], d[it.off:it.off+int(size)]...)
-	it.off += int(size)
-	it.val = d[it.off : it.off+valueSize : it.off+valueSize]
-	it.off += valueSize
+	it.key, it.val, it.off = it.l.entry(it.off, it.key)
 	it.i++
 	it.valid = true
 	return true
 }
 
-// seekGE positions the iterator on the first key >= key of key's scope;
-// false when the scope has none. The heap scope table narrows the block
-// search to the scope's blocks (a few per vshard), and a level without the
-// scope answers without touching the mapping.
-func (it *levelIter) seekGE(key []byte) bool {
-	l := it.l
+// entry decodes the entry at off onto key, the previous entry's key, and
+// returns its key, its value (pointing into the mapping) and the next offset.
+func (l *level) entry(off int, key []byte) ([]byte, []byte, int) {
+	d := l.m
+	shared, k := binary.Uvarint(d[off:])
+	off += k
+	size, k := binary.Uvarint(d[off:])
+	off += k
+	key = append(key[:shared], d[off:off+int(size)]...)
+	off += int(size)
+	return key, d[off : off+valueSize : off+valueSize], off + valueSize
+}
+
+// seekBlock returns the first block of key's scope that can hold key and
+// the scope's end entry; false when the level lacks the scope. The heap scope table narrows the block search to the
+// scope's blocks (a few per vshard), and a level without the scope answers
+// without touching the mapping.
+func (l *level) seekBlock(key []byte) (b, end int, ok bool) {
 	sc, ok := l.scope(key[:scopeLen(key)])
+	if !ok {
+		return 0, 0, false
+	}
+	lo, hi := int(sc.first)/blockEntries, (int(sc.first+sc.count)-1)/blockEntries+1
+	b = lo + sort.Search(hi-lo, func(j int) bool { return bytes.Compare(l.first(lo+j), key) > 0 }) - 1
+	return max(b, lo), int(sc.first + sc.count), true
+}
+
+// seekGE positions the iterator on the first key >= key of key's scope;
+// false when the scope has none.
+func (it *levelIter) seekGE(key []byte) bool {
+	b, end, ok := it.l.seekBlock(key)
 	if !ok {
 		it.valid = false
 		return false
 	}
-	lo, hi := int(sc.first)/blockEntries, (int(sc.first+sc.count)-1)/blockEntries+1
-	b := lo + sort.Search(hi-lo, func(j int) bool { return bytes.Compare(l.first(lo+j), key) > 0 }) - 1
-	b = max(b, lo)
-	it.off, it.i, it.key = l.block(b), b*blockEntries, it.key[:0]
-	end := int(sc.first + sc.count)
+	it.off, it.i, it.key = it.l.block(b), b*blockEntries, it.key[:0]
 	for it.i < end && it.next() {
 		if bytes.Compare(it.key, key) >= 0 {
 			return true
@@ -127,20 +142,51 @@ func (it *levelIter) seekGE(key []byte) bool {
 	return false
 }
 
-// at positions the iterator on entry pos: one block decode at most.
-func (it *levelIter) at(pos int) {
+// at returns entry pos's key, decoded onto buf[:0], and value: one block
+// decode at most. buf is the caller's scratch; the key may outgrow it.
+func (l *level) at(pos int, buf []byte) (key, val []byte) {
 	b := pos / blockEntries
-	it.off, it.i, it.key = it.l.block(b), b*blockEntries, it.key[:0]
-	for it.i <= pos {
-		it.next()
+	key, off := buf[:0], l.block(b)
+	for i := b * blockEntries; i <= pos; i++ {
+		key, val, off = l.entry(off, key)
 	}
+	return key, val
 }
 
-// get returns key's value, or nil.
-func (l *level) get(key []byte, buf []byte) []byte {
-	it := levelIter{l: l, key: buf[:0]}
-	if it.seekGE(key) && bytes.Equal(it.key, key) {
-		return it.val
+// get returns key's value, or nil. It decodes no key: each entry is
+// compared with key through the bytes it shares with the previous entry
+// (match is how many of those equal key's; entries ascend, and a block's
+// first entry shares none), so lookups need no key buffer.
+func (l *level) get(key []byte) []byte {
+	b, end, ok := l.seekBlock(key)
+	if !ok {
+		return nil
+	}
+	d, off, match := l.m, l.block(b), 0
+	for i := b * blockEntries; i < end; i++ {
+		shared, k := binary.Uvarint(d[off:])
+		off += k
+		size, k := binary.Uvarint(d[off:])
+		off += k
+		suffix := d[off : off+int(size)]
+		off += int(size) + valueSize
+		switch s := int(shared); {
+		case s < match:
+			return nil // the entry sorts after key
+		case s > match:
+			continue // still before key
+		}
+		c := sharedPrefix(suffix, key[match:])
+		match += c
+		if c == len(suffix) {
+			if match == len(key) {
+				return d[off-valueSize : off : off]
+			}
+			continue // a prefix of key: before it
+		}
+		if match == len(key) || suffix[c] > key[match] {
+			return nil
+		}
 	}
 	return nil
 }
