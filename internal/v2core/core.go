@@ -932,11 +932,6 @@ func (o *coreOwner) initQueueSignals(work chan struct{}) {
 }
 
 func (o *coreOwner) poller() func() (bool, bool) {
-	// Every rollup owner closes idle tails through the existing maintenance
-	// pass, including callers without an inactivity-expiry callback.
-	if o.rollups != nil {
-		o.maintenance = true
-	}
 	if o.ready == nil {
 		o.initQueueSignals(nil)
 	}
