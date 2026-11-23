@@ -134,7 +134,11 @@ func (h *PolicyIdentity) definitionBytes() []byte {
 
 // appendDefinition writes the canonical definition directly into an owner arena.
 func (h *PolicyIdentity) appendDefinition(out []byte) []byte {
-	name := h.Name()
+	return h.appendDefinitionName(out, h.Name())
+}
+
+// appendDefinitionName reuses a name already validated by a directory or scan.
+func (h *PolicyIdentity) appendDefinitionName(out []byte, name string) []byte {
 	out = append(out, `{"Name":"`...)
 	if h.plain {
 		out = append(out, name...)
@@ -150,8 +154,22 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 	}
 	const prefix = `{"Name":"`
 	n := len(prefix) + int(h.nameLen)
-	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && string(raw[len(prefix):n]) == string(h.metricName()) && bytes.Equal(raw[n:], h.policy.suffix)
+	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && h.matchesName(string(raw[len(prefix):n])) && bytes.Equal(raw[n:], h.policy.suffix)
 }
+
+// matchesName checks exact dictionary bytes through its forward index. Reverse
+// lookup would decompress and allocate the same name again during recovery.
+func (h *PolicyIdentity) matchesName(name string) bool {
+	if len(name) != int(h.nameLen) {
+		return false
+	}
+	if p := h.name.Load(); p != nil {
+		return name == unsafe.String(p, int(h.nameLen))
+	}
+	e, ok := h.catalog.partDict().Lookup(string(h.policy.Group), h.vshard, []byte(name))
+	return ok && !e.Deleted() && e.ID+1 == h.dictID.Load()
+}
+
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
 	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
@@ -159,7 +177,7 @@ func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
-	if (name != "" && string(old.metricName()) != name) || !old.definitionEqual(definition) {
+	if (name != "" && !old.matchesName(name)) || !old.definitionEqual(definition) {
 		return nil, errors.New("stored rollup policy changed")
 	}
 	return old, nil
@@ -367,6 +385,14 @@ func (h *PolicyIdentity) metadataScalars(m metricMetadata) RollupMetadata {
 	return RollupMetadata{BaselineOrder: m.BaselineOrder, ResetOrder: m.ResetOrder, Expired: m.Expired, Version: m.Version, ID: h.id, Frontier: sealrollup.Frontier{Order: m.Frontier.Order, MaxTime: m.Frontier.MaxTime, Policy: h.policy.prepared.Digest()}, LastUpdate: m.LastUpdate, Revision: m.Revision}
 }
 func (m *readMetricState) metadata() RollupMetadata { return m.PolicyIdentity.metadata(m.meta) }
+
+// Directory keys were validated when their immutable identity was installed.
+func (m *readMetricState) metadataForName(name string) (RollupPolicy, RollupMetadata) {
+	h := m.PolicyIdentity
+	out := h.metadataScalars(m.meta)
+	out.Policy = h.appendDefinitionName(make([]byte, 0, len(name)+len(h.policy.suffix)+16), name)
+	return RollupPolicy{Name: partsformat.ID(name), Group: h.policy.Group, Config: h.schema()}, out
+}
 
 // metadataOf returns the committed metadata of m, installed under id.
 func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {

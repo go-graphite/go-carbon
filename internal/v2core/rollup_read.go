@@ -340,7 +340,8 @@ func (s *RollupSnapshot) MetadataContext(ctx context.Context, visit func(string,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		visit(name, m.latest.rollupPolicy(), m.latest.metadata())
+		policy, meta := m.latest.metadataForName(name)
+		visit(name, policy, meta)
 	}
 	return ctx.Err()
 }
@@ -352,7 +353,8 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 	if m == nil {
 		return RollupPolicy{}, RollupMetadata{}, false
 	}
-	return m.latest.rollupPolicy(), m.latest.metadata(), true
+	policy, meta := m.latest.metadataForName(name)
+	return policy, meta, true
 }
 
 // MetricVersion identifies an immutable name's complete part set and metadata.
@@ -829,45 +831,21 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			return nil, fmt.Errorf("missing rollup metadata for %s (ID %d)", key.Metric, key.Local)
 		}
 		meta, slim, err := decodeRollupMetadataHeader(it.Value())
-		if err == nil && key.ByID {
-			// The catalog already holds every name recovery installed, by the
-			// numeric ID the envelope carries: the dictionary is read only
-			// for a name the catalog has not seen.
-			if h := identities.lookup(meta.ID); h != nil && h.dictID.Load() == key.Local+1 {
-				key.Metric = h.metricName()
-			} else {
-				err = names.resolve(&key)
-			}
-		}
-		if err == nil && slim {
-			definition, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
-			meta.Policy = definition
+		if err == nil {
+			err = names.resolve(&key)
 		}
 		if err != nil {
 			return nil, err
 		}
-		h, err := identities.intern(meta.ID, string(key.Metric), meta.Policy)
+		h, err := identities.readIdentity(meta, slim, key, &definition)
 		if err != nil {
 			return nil, err
-		}
-		if key.ByID {
-			h.rememberDictID(key.Local)
-		}
-		policy := h.rollupPolicy()
-		if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
-			return nil, errors.New("invalid rollup metadata")
-		}
-		if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
-			return nil, errors.New("invalid rollup reset frontier")
-		}
-		if h.policy.prepared.Digest() != meta.Frontier.Policy {
-			return nil, errors.New("rollup policy/frontier mismatch")
 		}
 		if len(part.metrics) == 0 {
 			part.key = key
 			part.key.Metric, part.key.Local = "", 0
 		}
-		name := string(policy.Name)
+		name := string(key.Metric)
 		if part.first == "" || name < part.first {
 			part.first = name
 		}

@@ -965,8 +965,8 @@ func (e *rollupScanEntry) finish(name partsformat.ID) (RollupPolicy, RollupMetad
 	if e.identity == nil {
 		return RollupPolicy{}, RollupMetadata{}, nil, fmt.Errorf("missing rollup metadata for %s", name)
 	}
-	policy, meta := e.identity.rollupPolicy(), e.identity.metadata(e.meta)
-	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || policy.Group != e.group || policy.Name != name || meta.ID == 0 || meta.Frontier.Order == 0 {
+	policy, meta := (&readMetricState{PolicyIdentity: e.identity, meta: e.meta}).metadataForName(string(name))
+	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || policy.Group != e.group || !e.identity.matchesName(string(name)) || meta.ID == 0 || meta.Frontier.Order == 0 {
 		return policy, meta, nil, fmt.Errorf("missing rollup metadata for %s", name)
 	}
 	if meta.BaselineOrder > meta.Frontier.Order {
