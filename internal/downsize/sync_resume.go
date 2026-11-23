@@ -60,7 +60,7 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "target-health", "target-health-high", "target-health-low", "max-rounds", "rescan-all", "timeout", "streams", "rate", "cache-threshold", "ready", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
+		case "fill-path", "fill-ingest", "target-health", "target-health-high", "target-health-low", "max-rounds", "rescan-all", "timeout", "streams", "rate", "cache-threshold", "ready", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
 			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; operational and READY inputs may override it; donor/target/ring/names/window changes select a preserved child scope", name)
