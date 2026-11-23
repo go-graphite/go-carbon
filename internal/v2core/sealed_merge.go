@@ -1359,8 +1359,12 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 	if len(mats) == 0 {
 		return m.out, nil
 	}
+	var seq uint64
+	for _, s := range m.seqs {
+		seq = max(seq, s)
+	}
 	for _, v := range mats {
-		if r := v.Record(config); !metadata.Expired && !expired(&r) {
+		if r := v.Record(config); !metadata.Expired && !compactMetadata(*metadata).beforeReset(seq, r.Order) && !expired(&r) {
 			m.out = append(m.out, r)
 			m.last = append(m.last, false)
 		}
