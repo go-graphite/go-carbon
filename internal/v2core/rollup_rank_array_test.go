@@ -80,7 +80,9 @@ func unrankAll(r *coreRollups) {
 		r.metrics[id] = uint32(len(ms))
 		ms = append(ms, m)
 		ids, meta = append(ids, id), append(meta, r.meta[s])
-		ttl, expAt = append(ttl, r.ttl[s]), append(expAt, r.expAt[s])
+		if r.ttl != nil {
+			ttl, expAt = append(ttl, r.ttl[s]), append(expAt, r.expAt[s])
+		}
 	}
 	r.expiries.move(moved)
 	r.dense, r.unranked, r.ids, r.meta, r.ttl, r.expAt = r.dense[:0], ms, ids, meta, ttl, expAt

@@ -182,13 +182,16 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	default:
 		if old != nil {
 			// The next renumber drops it; ttl 0 keeps it off the expiry calendar.
-			r.ids[s], r.ttl[s], s = deadSlot, 0, uint32(len(r.ids))
+			r.ids[s] = deadSlot
+			if r.ttl != nil {
+				r.ttl[s] = 0
+			}
+			s = uint32(len(r.ids))
 		}
 		if id == deadSlot {
 			panic("v2core: rollup NumericID collides with deadSlot")
 		}
 		r.ids, r.meta, r.unranked = append(r.ids, id), append(r.meta, metricMetadata{}), append(r.unranked, m)
-		r.ttl, r.expAt = append(r.ttl, 0), append(r.expAt, 0)
 	}
 	r.meta[s] = meta
 	r.metrics[id] = s
@@ -223,6 +226,12 @@ func (r *coreRollups) clock() time.Time {
 
 // resolveTTL caches slot's expiry window and tracks when any answer expires.
 func (r *coreRollups) resolveTTL(slot uint32, m *rollupMetric, now time.Time) {
+	// Recovery and expiry-off owners have no columns. Activation fills all
+	// existing slots; subsequent installs extend them with the slot arrays.
+	if n := len(r.ids) - len(r.ttl); n > 0 {
+		r.ttl = append(r.ttl, make([]int64, n)...)
+		r.expAt = append(r.expAt, make([]int64, n)...)
+	}
 	ttl, until := r.expiryTTL(m.rollupPolicy(), now)
 	r.ttl[slot] = int64(ttl)
 	if !until.IsZero() && (r.ttlUntil == 0 || until.UnixNano() < r.ttlUntil) {
