@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 )
 
 func TestPolicyCatalogImmutableOwnership(t *testing.T) {
@@ -23,7 +26,7 @@ func TestPolicyCatalogImmutableOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			clear(raw)
-			if h.catalog != c || string(h.policy.Name) != name || !bytes.Equal(h.definitionBytes(), original) {
+			if h.catalog != c || string(h.metricName()) != name || !bytes.Equal(h.definitionBytes(), original) {
 				t.Fatal("borrowed caller memory")
 			}
 			_ = append(h.definitionBytes(), 255)
@@ -174,5 +177,51 @@ func TestPolicyCatalogConcurrentPageGrowth(t *testing.T) {
 				t.Fatalf("lost id %d after growth", id)
 			}
 		}
+	}
+}
+
+// Canonical identity validation uses the existing dictionary without temporary names.
+func TestIdentityValidationCost(t *testing.T) {
+	d, err := v2dict.Open(t.TempDir(), v2dict.Options{BufferBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	c := &PolicyCatalog{}
+	c.dict.Store(d)
+	for i, name := range []string{"identity." + strings.Repeat("metric.", 45), `identity.\"escaped`, "identity.<html>", "identity.é"} {
+		_, raw := rollupTestPolicy(t, name, "1s:1h,1m:1d", sealrollup.Last, .5)
+		h, err := c.intern(uint64(i+1), name, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < 512; j++ {
+			if _, _, err = d.Append(string(h.policy.Group), h.vshard, []byte(fmt.Sprintf("prefix.%04d", j)), 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e, _, err := d.Append(string(h.policy.Group), h.vshard, []byte(name), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.rememberDictID(e.ID)
+		if err = d.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		allocs := testing.AllocsPerRun(2000, func() {
+			got, err := c.intern(h.id, name, raw)
+			if err != nil || got != h {
+				panic("identity validation changed")
+			}
+		})
+		if h.plain && allocs != 0 {
+			t.Fatalf("plain identity validation allocated %.0f times", allocs)
+		}
+		if _, err := c.intern(h.id, name+"changed", raw); err == nil {
+			t.Fatal("accepted changed supplied name")
+		}
+		t.Logf("IDENTITY_VALIDATION plain=%v ns/row=%d allocs/row=%.0f", h.plain, time.Since(start).Nanoseconds()/2001, allocs)
+
 	}
 }

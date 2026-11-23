@@ -20,7 +20,7 @@ func rollupStateDigest(r *coreRollups) string {
 	slices.Sort(ids)
 	var b strings.Builder
 	for _, id := range ids {
-		m := r.metrics[id]
+		m := r.installed(id)
 		fmt.Fprintf(&b, "%d %s %+v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], nameIndexed(r, m))
 	}
 	fmt.Fprintf(&b, "names=%d metrics=%d\n", r.names.Len(), len(r.metrics))

@@ -234,6 +234,7 @@ func (p *openedRollupPart) open(ctx context.Context, directory string, cache *pe
 func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebble.Snapshot, names []string, cache *RollupReadCache) (*RollupSnapshot, error) {
 	out := &RollupSnapshot{identities: s.identities, snapshot: snapshot, directory: s.directory, parts: map[string]*readPart{}, metrics: map[string]*snapshotMetric{}, routes: map[partRoute][]*readPart{}, opened: s, cache: cache}
 	out.directoryBytes = s.cacheBytes + int64(len(s.parts))*256
+	var definition []byte
 	for _, name := range names {
 		shard := v2part.Route(v2part.ID(name))
 		ids := metricIDs{dict: s.identities.partDict()}
@@ -268,15 +269,12 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 				continue
 			}
 			raw := c.Value()
-			meta, err := decodeRollupMetadataView(key.Metric, key.Group, raw)
+			meta, slim, err := decodeRollupMetadataHeader(raw)
 			if err != nil {
 				_ = c.Close()
 				return nil, err
 			}
-			h, err := s.identities.intern(meta.ID, name, meta.Policy)
-			if err == nil {
-				err = validateReadMetadata(h, meta, key)
-			}
+			h, err := s.identities.readIdentity(meta, slim, key, &definition)
 			if err != nil {
 				_ = c.Close()
 				return nil, err
@@ -314,8 +312,39 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 	}
 	return out, ctx.Err()
 }
+
+// readIdentity reuses a slim row's validated dictionary identity and digest.
+// Full definitions and the first encounter still pass the canonical byte oracle.
+func (c *PolicyCatalog) readIdentity(meta RollupMetadata, slim bool, key v2part.Key, definition *[]byte) (*PolicyIdentity, error) {
+	h := c.lookup(meta.ID)
+	known := key.ByID && h != nil && h.dictID.Load() != 0
+	if known && (h.policy.Group != key.Group || h.vshard != key.VShard || h.dictID.Load() != key.Local+1) {
+		return nil, errors.New("inconsistent rollup dictionary identity")
+	}
+	var err error
+	if !slim || !known {
+		if slim {
+			*definition, err = appendRollupDefinition((*definition)[:0], key.Metric, key.Group, meta.Frontier.Policy)
+			meta.Policy = *definition
+		}
+		if err == nil {
+			h, err = c.intern(meta.ID, string(key.Metric), meta.Policy)
+		}
+	}
+	if err == nil {
+		err = validateReadMetadata(h, meta, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if key.ByID && !known {
+		h.rememberDictID(key.Local)
+	}
+	return h, nil
+}
+
 func validateReadMetadata(h *PolicyIdentity, meta RollupMetadata, key v2part.Key) error {
-	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || h.policy.Name != key.Metric || h.policy.Group != key.Group {
+	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || h.policy.Group != key.Group || h.vshard != key.VShard || (!(key.ByID && h.dictID.Load() == key.Local+1) && !h.matchesName(string(key.Metric))) {
 		return errors.New("invalid rollup metadata")
 	}
 	if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {

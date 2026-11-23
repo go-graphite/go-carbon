@@ -107,7 +107,7 @@ func TestPolicyCatalogConcurrentConflictingID(t *testing.T) {
 	if h == nil {
 		t.Fatal("missing winner")
 	}
-	got, err := c.intern(7, string(h.policy.Name), h.definitionBytes())
+	got, err := c.intern(7, string(h.metricName()), h.definitionBytes())
 	if err != nil || got != h {
 		t.Fatal("published identity changed", err)
 	}

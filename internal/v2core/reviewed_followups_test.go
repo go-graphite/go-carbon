@@ -45,7 +45,7 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metric := recovered.metrics[7]
+	metric := recovered.installed(7)
 	if metric == nil || metric.PolicyIdentity == nil {
 		t.Fatal("expected recovered metric with shared immutable identity")
 	}
