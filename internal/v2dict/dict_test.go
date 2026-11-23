@@ -622,6 +622,16 @@ func TestGeneration(t *testing.T) {
 			last = g
 		}
 	}
+	// A background flush can still hold the first frozen level while the
+	// remaining appends accumulate. Flush waits and publishes that remainder.
+	if err := d.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if g := d.Generation(); g < last {
+		t.Fatalf("flush went back: %d -> %d", last, g)
+	} else {
+		last = g
+	}
 	if st := d.Stats(); st.Levels < 2 {
 		t.Fatalf("want flushes, got %+v", st)
 	}
