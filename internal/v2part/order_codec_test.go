@@ -34,7 +34,7 @@ func TestDensePredictedOrders(t *testing.T) {
 				}
 				rs[i] = sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: int64(i + 1), Order: order, Sample: sealrollup.Sample{Time: int64(1700000000 + i), Bits: rng.Uint64(), Sequence: order}}, Correction: i%3 == 0}
 			}
-			b, e := appendSlotsOrder(nil, rs, nil, true)
+			b, e := appendSlotsOrder(nil, rs, nil, PredictedOrders)
 			if e != nil {
 				t.Fatal(e)
 			}

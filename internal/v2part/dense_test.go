@@ -51,7 +51,7 @@ func TestDenseBitExact(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			b, e := appendSlotsOrder(nil, rs, nil, true)
+			b, e := appendSlotsOrder(nil, rs, nil, PredictedOrders)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -416,5 +416,152 @@ func TestDenseWriterByteLimit(t *testing.T) {
 	_ = w.Abort()
 	if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("staging remains: %v", err)
+	}
+}
+
+func TestDenseOrderSummary(t *testing.T) {
+	for _, n := range []int{1, 2, 127, MaxDenseSlots} {
+		for _, aligned := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d/aligned=%v", n, aligned), func(t *testing.T) {
+				rs := make([]sealrollup.Record, n)
+				var maximum uint64
+				for i := range rs {
+					stamp := int64(1000 + i)
+					if !aligned {
+						stamp = 1000 + int64(i/2)*2
+					}
+					order := uint64(i*997 + 1)
+					maximum = max(maximum, order)
+					rs[i] = sealrollup.Record{Delta: sealrollup.Delta{Slot: int64(i), Order: order, Sample: sealrollup.Sample{Time: stamp, Bits: uint64(i) * 0x7000000000000001}}, Correction: i%3 == 0}
+				}
+				b, err := appendSlotsOrder(nil, rs, nil, SummaryOrders)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !HasOrderSummary(b) || (b[4]&denseAligned != 0) != (aligned && n > 1) {
+					t.Fatalf("mode %x", b[:6])
+				}
+				got, err := DecodeRecordsInto(nil, 0, 0, b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := range rs {
+					rs[i].Order = maximum
+					rs[i].Sample.Sequence = maximum
+				}
+				if !reflect.DeepEqual(got, rs) {
+					t.Fatal("summary changed sample/flags")
+				}
+				for cut := 0; cut < len(b); cut++ {
+					if _, err = DecodeRecordsInto(nil, 0, 0, b[:cut]); err == nil {
+						t.Fatalf("accepted truncation %d", cut)
+					}
+				}
+				for _, ext := range []byte{0, extKnown, 4, 0xff} {
+					bad := bytes.Clone(b)
+					bad[5] = ext
+					if _, err = DecodeRecordsInto(nil, 0, 0, bad); err == nil {
+						t.Fatalf("accepted extension %x", ext)
+					}
+				}
+				for _, flag := range []byte{denseModeOrderDoD, denseModeOrderLinear} {
+					bad := bytes.Clone(b)
+					bad[4] |= flag
+					if _, err = DecodeRecordsInto(nil, 0, 0, bad); err == nil {
+						t.Fatal("accepted exact/summary flags")
+					}
+				}
+				if n == 1 {
+					bad := bytes.Clone(b)
+					bad[10] = 0
+					if _, err = DecodeRecordsInto(nil, 0, 0, bad); err == nil {
+						t.Fatal("accepted zero maximum")
+					}
+				}
+			})
+		}
+	}
+	for _, rs := range [][]sealrollup.Record{
+		{{Delta: sealrollup.Delta{Slot: 1, Order: 1, Sample: sealrollup.Sample{Time: 1000}}, Kind: sealrollup.KindMat}},
+		{{Delta: sealrollup.Delta{Slot: 1, Order: 1, Sample: sealrollup.Sample{Time: 1000}}}, {Delta: sealrollup.Delta{Slot: 1, Order: 2, Sample: sealrollup.Sample{Time: 1001}}}},
+	} {
+		if _, err := appendSlotsOrder(nil, rs, nil, SummaryOrders); err == nil {
+			t.Fatal("summarized versions")
+		}
+	}
+}
+
+func TestDenseOrderSummaryCopyAndSwitch(t *testing.T) {
+	for _, appendRun := range []bool{false, true} {
+		t.Run(fmt.Sprint(appendRun), func(t *testing.T) {
+			spec := fixtureSpec()
+			spec.Encoding = DenseEncoding
+			key := fixtureKey(spec, 0)
+			key.Ordinal = 0
+			key.BlockStart = 0
+			rs := make([]sealrollup.Record, MaxDenseSlots)
+			for i := range rs {
+				rs[i] = sealrollup.Record{Delta: sealrollup.Delta{Archive: int(key.Archive), Slot: int64(i), Order: uint64(i + 1), Sample: sealrollup.Sample{Time: int64(1000 + i), Bits: uint64(i)}}}
+			}
+			exact, err := EncodeSlots(rs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "summary.sst")
+			w, err := NewDenseWriter(path, spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Abort()
+			if err = w.SetOrderEncoding(SummaryOrders); err != nil {
+				t.Fatal(err)
+			}
+			k, _ := Encode(key)
+			if appendRun {
+				err = w.AppendSlots(k, exact, rs)
+			} else {
+				err = w.SetSlotsEncoded(k, exact)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Switching must flush the pending summary, including a folded/raw copy.
+			if err = w.SetOrderEncoding(PredictedOrders); err != nil {
+				t.Fatal(err)
+			}
+			r := rs[0]
+			r.Slot = MaxDenseSlots
+			r.Order = 7
+			key.BlockStart = r.Slot
+			k, _ = Encode(key)
+			if err = w.SetRecordEncoded(k, r); err != nil {
+				t.Fatal(err)
+			}
+			d, err := w.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := 0
+			err = Read(context.Background(), path, &d, func(k Key, b []byte) error {
+				got, e := DecodeRecordsInto(nil, k.Archive, k.BlockStart, b)
+				if e != nil {
+					return e
+				}
+				if HasOrderSummary(b) != (seen == 0) {
+					t.Fatal("copy or selector bypassed summary")
+				}
+				if seen == 0 && (len(got) != MaxDenseSlots || got[0].Order != MaxDenseSlots) {
+					t.Fatal("wrong maximum")
+				}
+				if seen == 1 && got[0].Order != 7 {
+					t.Fatal("summary leaked to next run")
+				}
+				seen++
+				return nil
+			})
+			if err != nil || seen != 2 {
+				t.Fatalf("runs=%d: %v", seen, err)
+			}
+		})
 	}
 }

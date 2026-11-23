@@ -755,6 +755,22 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		if e != nil {
 			return v2part.Descriptor{}, e
 		}
+		// The plain stream resolves one Raw winner per slot. Buffered versions
+		// must certify the complete name, including output run boundaries.
+		summary := namePrefix && len(config.Archives) == 1 && (metadata.Version >= 4 || metadata.ResetOrder == 0)
+		for _, member := range members {
+			summary = summary && member.seq != 0
+		}
+		for i, r := range versioned {
+			summary = summary && r.Kind == sealrollup.KindRaw && r.Upto == 0 && (i == 0 || mergeSlotLess(versioned[i-1], r))
+		}
+		orders := v2part.PredictedOrders
+		if summary {
+			orders = v2part.SummaryOrders
+		}
+		if err = writer.SetOrderEncoding(orders); err != nil {
+			return v2part.Descriptor{}, err
+		}
 		for i := 0; i < len(versioned); {
 			j := i + 1
 			for j < len(versioned) && versioned[j].Archive == versioned[i].Archive {
@@ -1169,6 +1185,9 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 	plain, sorted := true, true
 	for _, c := range members {
 		for _, b := range c.blocks {
+			if v2part.HasOrderSummary(c.arena[b.start:b.end]) && (len(config.Archives) != 1 || metadata.Version < 4 && metadata.ResetOrder != 0) {
+				return nil, errors.New("order summary under history policy or legacy reset")
+			}
 			last, ok := v2part.PlainRunSpan(b.slot, c.arena[b.start:b.end])
 			if plain = ok; !plain {
 				break
