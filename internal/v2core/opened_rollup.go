@@ -406,7 +406,7 @@ func (c *tableCursor) Value() []byte { return c.value }
 func (c *tableCursor) Error() error  { return errors.Join(c.err, c.it.Error()) }
 func (c *tableCursor) Close() error  { return c.it.Close() }
 func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Snapshot, selected map[archivePartIdentity]bool) (_ *archiveIter, err error) {
-	out := &archiveIter{selected: -1, descriptors: map[archivePartIdentity]v2part.Descriptor{}}
+	out := &archiveIter{selected: -1}
 	defer func() {
 		if err != nil {
 			_ = out.Close()
@@ -426,7 +426,6 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 			continue
 		}
 		seen[p] = true
-		out.descriptors[archivePartIdentity{p.descriptor.Scope.Group, p.descriptor.Scope.Part}] = p.descriptor
 		c, e := p.cursor(ctx, s.directory, s.blockCache)
 		if e != nil {
 			return nil, e

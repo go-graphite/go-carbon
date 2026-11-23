@@ -12,8 +12,8 @@ import (
 )
 
 func TestPartSequenceComparison(t *testing.T) {
-	record := func(stamp int64, order uint64) sealrollup.Record {
-		return sealrollup.Record{Delta: sealrollup.Delta{Order: order, Sample: sealrollup.Sample{Time: stamp}}}
+	record := func(stamp int64, order, seq uint64) sealrollup.Record {
+		return sealrollup.Record{Delta: sealrollup.Delta{Order: order, Sample: sealrollup.Sample{Time: stamp, Sequence: seq}}}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -21,11 +21,11 @@ func TestPartSequenceComparison(t *testing.T) {
 		ar, br sealrollup.Record
 		want   bool
 	}{
-		{"time", partOrigin{Class: CopiedPart, Seq: 1}, partOrigin{Class: LivePart, Seq: 9}, record(11, 1), record(10, 100), true},
-		{"class", partOrigin{Class: LivePart, Seq: 1}, partOrigin{Class: CopiedPart, Seq: 9}, record(10, 1), record(10, 100), true},
-		{"sequence", partOrigin{Class: LivePart, Seq: 2}, partOrigin{Class: LivePart, Seq: 1}, record(10, 1), record(10, 100), true},
-		{"order", partOrigin{Class: LivePart, Seq: 2}, partOrigin{Class: LivePart, Seq: 2}, record(10, 3), record(10, 2), true},
-		{"older sequence", partOrigin{Class: LivePart, Seq: 1}, partOrigin{Class: LivePart, Seq: 2}, record(10, 100), record(10, 1), false},
+		{"time", partOrigin{Class: CopiedPart}, partOrigin{Class: LivePart}, record(11, 1, 1), record(10, 100, 9), true},
+		{"class", partOrigin{Class: LivePart}, partOrigin{Class: CopiedPart}, record(10, 1, 1), record(10, 100, 9), true},
+		{"sequence", partOrigin{Class: LivePart}, partOrigin{Class: LivePart}, record(10, 1, 2), record(10, 100, 1), true},
+		{"order", partOrigin{Class: LivePart}, partOrigin{Class: LivePart}, record(10, 3, 2), record(10, 2, 2), true},
+		{"older sequence", partOrigin{Class: LivePart}, partOrigin{Class: LivePart}, record(10, 100, 1), record(10, 1, 2), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := newerOrigin(tc.a, tc.ar, tc.b, tc.br)
@@ -91,20 +91,12 @@ func TestPartSequenceReadMergeHistoryRecovery(t *testing.T) {
 			if err := ScanRollups(snap, func(_ RollupPolicy, _ RollupMetadata, rs []sealrollup.Record) error { check(rs); return nil }); err != nil {
 				t.Fatal(err)
 			}
-			it, err := newArchiveIter(context.Background(), snap, rollupScanBounds())
-			if err != nil {
+			// Owner recovery uses only envelopes; full record validation shares
+			// the snapshot reader rather than retaining another sample fold.
+			if err := scanRollups(snap, nil, func(_ RollupPolicy, _ RollupMetadata, rs []sealrollup.Record) error { check(rs); return nil }); err != nil {
 				t.Fatal(err)
 			}
-			defer it.Close()
-			series := map[v2part.ID]*rollupScanEntry{}
-			if err := foldRollupKeys(it, nil, series, false, false); err != nil {
-				t.Fatal(err)
-			}
-			_, _, rs, err := series[policy.Name].finish(policy.Name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			check(rs)
+			var rs []sealrollup.Record
 			var inputs []v2part.Descriptor
 			for _, b := range o.gc.inventory.bindings {
 				d, err := v2part.ParseDescriptor(b)

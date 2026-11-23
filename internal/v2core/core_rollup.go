@@ -2,7 +2,6 @@ package v2core
 
 import (
 	"bytes"
-	"cmp"
 	"container/heap"
 	"context"
 	"crypto/rand"
@@ -781,15 +780,11 @@ func ScanRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetad
 	return scanRollupsWith(snapshot, nil, true, visit)
 }
 
-// rollupScanEntry folds one name's rollup rows as recovery does: the newest
-// metadata by after(), and per physical slot the newest record by newerOrigin.
+// rollupScanEntry validates one recovered name's durable metadata envelope.
 type rollupScanEntry struct {
-	group     partsformat.Group
-	identity  *PolicyIdentity
-	meta      metricMetadata
-	records   map[[2]int64]slotCandidate
-	single    [1]slotCandidate
-	hasSingle bool
+	group    partsformat.Group
+	identity *PolicyIdentity
+	meta     metricMetadata
 }
 
 func scanIdentity(identities *PolicyCatalog, id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -833,80 +828,19 @@ func (e *rollupScanEntry) addMetadata(identities *PolicyCatalog, k partsformat.K
 	return nil
 }
 
-// addRecord keeps the newest record per physical slot. Legacy singleton rows
-// need no temporary decoded slice.
-func (e *rollupScanEntry) addRecord(record sealrollup.Record, seq uint64) error {
-	candidate := slotCandidate{record, partOrigin{Class: LivePart, Seq: seq}}
-	slot := [2]int64{int64(record.Archive), record.Slot}
-	if e.records == nil {
-		if !e.hasSingle {
-			e.single[0], e.hasSingle = candidate, true
-			return nil
-		}
-		old := e.single[0]
-		if old.record.Archive == record.Archive && old.record.Slot == record.Slot {
-			newer, err := newerOrigin(candidate.origin, record, old.origin, old.record)
-			if newer {
-				e.single[0] = candidate
-			}
-			return err
-		}
-		e.records = map[[2]int64]slotCandidate{{int64(old.record.Archive), old.record.Slot}: old}
-	}
-	old, ok := e.records[slot]
-	newer := !ok
-	if ok {
-		var err error
-		newer, err = newerOrigin(candidate.origin, record, old.origin, old.record)
-		if err != nil {
-			return err
-		}
-	}
-	if newer {
-		e.records[slot] = candidate
-	}
-	return nil
-}
-
-// finish validates the folded name and returns its live records in archive
-// and slot order.
-func (e *rollupScanEntry) finish(name partsformat.ID) (RollupPolicy, RollupMetadata, []sealrollup.Record, error) {
+// finish validates the recovered envelope. Samples remain in immutable parts.
+func (e *rollupScanEntry) finish(name partsformat.ID) (RollupMetadata, error) {
 	if e.identity == nil {
-		return RollupPolicy{}, RollupMetadata{}, nil, fmt.Errorf("missing rollup metadata for %s", name)
+		return RollupMetadata{}, fmt.Errorf("missing rollup metadata for %s", name)
 	}
 	policy, meta := (&readMetricState{PolicyIdentity: e.identity, meta: e.meta}).metadataForName(string(name))
 	if (meta.Version < 1 || meta.Version > 4) || policy.Group != e.group || !e.identity.matchesName(string(name)) || meta.ID == 0 || meta.Frontier.Order == 0 {
-		return policy, meta, nil, fmt.Errorf("missing rollup metadata for %s", name)
+		return meta, fmt.Errorf("missing rollup metadata for %s", name)
 	}
 	if meta.Version < 4 && meta.BaselineOrder > meta.Frontier.Order || (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.Version < 4 && meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.Version < 4 && meta.ResetOrder != meta.Frontier.Order) {
-		return policy, meta, nil, errors.New("invalid rollup reset frontier")
+		return meta, errors.New("invalid rollup reset frontier")
 	}
-	var records []sealrollup.Record
-	if e.records != nil {
-		records = make([]sealrollup.Record, 0, len(e.records))
-	}
-	add := func(candidate slotCandidate) error {
-		r := candidate.record
-		if r.Archive >= len(policy.Config.Archives) || r.Slot >= policy.Config.Archives[r.Archive].Count || r.Order > meta.Frontier.Order {
-			return errors.New("invalid rollup slot/frontier")
-		}
-		records = append(records, r)
-		return nil
-	}
-	if e.records == nil && e.hasSingle {
-		if err := add(e.single[0]); err != nil {
-			return policy, meta, nil, err
-		}
-	}
-	for _, candidate := range e.records {
-		if err := add(candidate); err != nil {
-			return policy, meta, nil, err
-		}
-	}
-	slices.SortFunc(records, func(a, b sealrollup.Record) int {
-		return cmp.Or(cmp.Compare(a.Archive, b.Archive), cmp.Compare(a.Slot, b.Slot))
-	})
-	return policy, meta, records, nil
+	return meta, nil
 }
 
 func scanRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
@@ -1000,7 +934,7 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		if err = entry.addMetadata(r.identities, k, iter.Value(), &definition); err != nil {
 			return nil, false, err
 		}
-		_, meta, _, err := entry.finish(k.Metric)
+		meta, err := entry.finish(k.Metric)
 		if err != nil || k.Ordinal != 0 {
 			return nil, false, errors.Join(err, errors.New("invalid recovery envelope"))
 		}

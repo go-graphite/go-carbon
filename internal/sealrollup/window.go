@@ -47,7 +47,7 @@ type Versions struct {
 	orders    []uint64                   // distinct stored orders, ascending
 	bySlot    []map[int64][]int          // level -> physical slot -> stored versions
 	wins      []map[int64]map[int64]bool // level -> physical slot -> window starts with events/versions
-	events    []map[int64][]uint64       // level -> window start -> distinct raw orders below the level inside it
+	events    []map[int64][]int          // level -> window start -> raw-version indices below the level, one per order
 	absent    map[[2]int64]uint64        // (level, window) -> newest absence marker
 	passes    map[uint64][]Version       // order -> raw versions (and ghosts) its pass wrote
 	memoC     map[[2]uint64]bool         // (order, level) -> the pass wrote at that level
@@ -233,7 +233,7 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 			}
 		}
 		k := [2]int64{int64(r.Archive), r.Time}
-		if ev := f.events[r.Archive][r.Time]; len(ev) > 0 && ev[len(ev)-1] > have[k] {
+		if ev := f.events[r.Archive][r.Time]; len(ev) > 0 && f.recs[ev[len(ev)-1]].Order > have[k] {
 			need[k] = true
 		}
 	}
@@ -279,7 +279,7 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 		v := f.valueAt(a, w, top)
 		upto := uint64(0)
 		if ev := f.events[a][w]; len(ev) > 0 {
-			upto = ev[len(ev)-1]
+			upto = f.recs[ev[len(ev)-1]].Order
 		}
 		if d, ok := f.stored(a, w, top); ok {
 			upto = max(upto, d.Upto)
@@ -336,9 +336,9 @@ func (f *Versions) index() {
 	n := len(f.c.Archives)
 	f.bySlot = make([]map[int64][]int, n)
 	f.wins = make([]map[int64]map[int64]bool, n)
-	f.events = make([]map[int64][]uint64, n)
+	f.events = make([]map[int64][]int, n)
 	for l := range n {
-		f.bySlot[l], f.wins[l], f.events[l] = map[int64][]int{}, map[int64]map[int64]bool{}, map[int64][]uint64{}
+		f.bySlot[l], f.wins[l], f.events[l] = map[int64][]int{}, map[int64]map[int64]bool{}, map[int64][]int{}
 	}
 	addWin := func(l int, w int64) {
 		s := slot(w, f.c.Archives[l])
@@ -372,7 +372,7 @@ func (f *Versions) index() {
 			w := align(r.Time, f.c.Archives[a].Step)
 			addWin(a, w)
 			if !r.Mat {
-				f.events[a][w] = append(f.events[a][w], r.Order)
+				f.events[a][w] = append(f.events[a][w], i)
 			}
 		}
 	}
@@ -380,8 +380,11 @@ func (f *Versions) index() {
 	f.orders = slices.Compact(f.orders)
 	for a := range f.events {
 		for w, ev := range f.events[a] {
-			slices.Sort(ev)
-			f.events[a][w] = slices.Compact(ev)
+			slices.SortFunc(ev, func(i, j int) int {
+				x, y := f.recs[i], f.recs[j]
+				return cmp.Or(cmp.Compare(x.Order, y.Order), cmp.Compare(y.Class, x.Class), cmp.Compare(y.Seq, x.Seq))
+			})
+			f.events[a][w] = slices.CompactFunc(ev, func(i, j int) bool { return f.recs[i].Order == f.recs[j].Order })
 		}
 	}
 	f.memoV, f.memoS = map[[3]int64]slotValue{}, map[[3]int64]slotValue{}
@@ -436,7 +439,8 @@ func (f *Versions) valueAt(a int, w int64, asOf uint64) slotValue {
 	}
 	first := true
 	for j := len(ev) - 1; j >= 0; j-- {
-		o := ev[j]
+		event := f.recs[ev[j]]
+		o := event.Order
 		if o > asOf {
 			continue
 		}
@@ -454,12 +458,7 @@ func (f *Versions) valueAt(a int, w int64, asOf uint64) slotValue {
 		samples := f.inputsAt(a-1, w, f.c.Archives[a].Step, o)
 		if p, ok := AggregateWindow(f.c, a, w, samples); ok {
 			p.Sequence = o
-			candidate := slotValue{p, false, true, 0, 0}
-			for _, r := range f.passes[o] {
-				if r.Class > candidate.class || r.Class == candidate.class && r.Seq > candidate.seq {
-					candidate.seq, candidate.class = r.Seq, r.Class
-				}
-			}
+			candidate := slotValue{p, false, true, event.Seq, event.Class}
 			if !result.ok || candidate.class > result.class || candidate.class == result.class && candidate.seq >= result.seq {
 				result = candidate
 			}

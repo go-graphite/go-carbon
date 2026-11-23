@@ -479,7 +479,7 @@ func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string,
 		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, partOverrides: map[*snapshotMetric][]*readPartMetric{&live: liveParts}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
 	}
 	if err := base.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, origin partOrigin) error {
-		if a.Version != 1 || origin.Seq > a.AtSeq || a.Version < 4 && record.Order > a.AtSeq {
+		if a.Version != 1 || record.Sample.Sequence > a.AtSeq || a.Version < 4 && record.Order > a.AtSeq {
 			winners[record.Slot] = moveWinner{record, origin}
 		}
 		return nil
@@ -500,7 +500,10 @@ func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string,
 				comparison := record
 				if origin.Class == LivePart {
 					comparison.Order = a.AtSeq
-					comparison.Sample.Sequence = comparison.Order
+					comparison.Sample.Sequence = 0
+					if a.Version >= 4 {
+						comparison.Sample.Sequence = a.AtSeq
+					}
 				}
 				newer, err := newerOrigin(origin, comparison, old.origin, old.record)
 				if err != nil {

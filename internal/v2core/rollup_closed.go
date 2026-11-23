@@ -47,7 +47,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 			return s.moves[m] == nil && from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
 		}, func(r sealrollup.Record, origin partOrigin) error {
 			v := r.Version()
-			v.Seq, v.Class = origin.Seq, origin.Class
+			v.Seq, v.Class = r.Sample.Sequence, origin.Class
 			out = append(out, v)
 			return nil
 		})

@@ -42,7 +42,6 @@ type partOrigin struct {
 	Class       uint8
 	Incarnation v2part.PartID
 	Stream      string
-	Seq         uint64 `json:"-"` // transient: the immutable descriptor owns it
 }
 
 func partScopeKey(k v2part.Key) ([]byte, error) {
@@ -102,18 +101,15 @@ func newerOrigin(a partOrigin, ar sealrollup.Record, b partOrigin, br sealrollup
 	if ar.Sample.Time != br.Sample.Time {
 		return ar.Sample.Time > br.Sample.Time, nil
 	}
-	if a.Class == b.Class && a.source() == b.source() && a.Seq != b.Seq {
-		return a.Seq > b.Seq, nil
+	if a == b && ar.Sample.Sequence != br.Sample.Sequence {
+		return ar.Sample.Sequence > br.Sample.Sequence, nil
 	}
 	return newerSource(a, ar.Order, b, br.Order)
 }
 
-func (o partOrigin) source() partOrigin { o.Seq = 0; return o }
-
 // Metadata has no physical slot or logical timestamp. Its authority remains
 // source-local, with the receiving catalog taking precedence over a donor.
 func newerSource(a partOrigin, ao uint64, b partOrigin, bo uint64) (bool, error) {
-	a, b = a.source(), b.source()
 	if a.Class != b.Class {
 		return a.Class > b.Class, nil
 	}
