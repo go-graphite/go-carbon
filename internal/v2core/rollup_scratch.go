@@ -3,11 +3,12 @@ package v2core
 import (
 	"slices"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
-// rollupScratch is one seal's planner working set: stages, per-row sample and
-// batch storage, lane records and lane part outputs. A planner holds one only
+// rollupScratch is one seal's planner working set: keys, fresh names, expiry
+// bitset, stages, per-row samples and batches, lane records and part outputs. A planner holds one only
 // between planParts and Commit/Abort and returns it to a bounded shared cache, so
 // retained capacity follows the seals in flight instead of the high-water
 // capacity of every owner. Owner seal deadlines are staggered, so few owners
@@ -15,6 +16,10 @@ import (
 //
 // Per-owner state (metrics, ranks, history window caches) never moves here.
 type rollupScratch struct {
+	sweepKeys    []uint64
+	sweepSpare   []uint64
+	seen         []uint64
+	pendingNames namefp.Table
 	stages       []rollupStage
 	stageMetrics []*rollupMetric
 	samples      []sealrollup.Sample
@@ -50,6 +55,8 @@ func (r *coreRollups) takeScratch() {
 		s = &rollupScratch{}
 	}
 	r.scratch = s
+	r.sweepKeys, r.sweepSpare, r.seen, r.pendingNames = s.sweepKeys, s.sweepSpare, s.seen, s.pendingNames
+	s.sweepKeys, s.sweepSpare, s.seen, s.pendingNames = nil, nil, nil, namefp.Table{}
 	r.stages, r.stageMetrics, r.samples, r.batches = s.stages, s.stageMetrics, s.samples, s.batches
 	r.files, r.coverage, r.arena = s.files, s.coverage, s.arena
 	s.stages, s.stageMetrics, s.samples, s.batches = nil, nil, nil, nil
@@ -78,6 +85,8 @@ func (r *coreRollups) returnScratch() {
 		s = &rollupScratch{}
 	}
 	r.scratch = nil
+	s.sweepKeys, s.sweepSpare, s.seen, s.pendingNames = r.sweepKeys, r.sweepSpare, r.seen, r.pendingNames
+	r.sweepKeys, r.sweepSpare, r.seen, r.pendingNames = nil, nil, nil, namefp.Table{}
 	s.stages, s.stageMetrics, s.samples, s.batches = r.stages, r.stageMetrics, r.samples, r.batches
 	s.files, s.coverage, s.arena = r.files, r.coverage, r.arena
 	r.stages, r.stageMetrics, r.samples, r.batches = nil, nil, nil, nil
