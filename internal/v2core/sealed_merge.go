@@ -1188,18 +1188,18 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 			if v2part.HasOrderSummary(c.arena[b.start:b.end]) && (len(config.Archives) != 1 || metadata.Version < 4 && metadata.ResetOrder != 0) {
 				return nil, errors.New("order summary under history policy or legacy reset")
 			}
+			if !plain {
+				continue
+			}
 			last, ok := v2part.PlainRunSpan(b.slot, c.arena[b.start:b.end])
 			if plain = ok; !plain {
-				break
+				continue
 			}
 			s := mergeSpan{b.archive, b.slot, last}
 			if n := len(m.spans); n > 0 && !spanBefore(m.spans[n-1], s) {
 				sorted = false
 			}
 			m.spans = append(m.spans, s)
-		}
-		if !plain {
-			break
 		}
 	}
 	if plain && !sorted {

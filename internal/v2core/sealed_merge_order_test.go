@@ -5,13 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/cockroachdb/pebble"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/cockroachdb/pebble"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
@@ -258,4 +259,41 @@ func TestMergeOrderSummaryMixedRestartAdoption(t *testing.T) {
 	}
 	e = mergeFixtureIdle(t, root, nil)
 	check(want)
+}
+
+// A kinds run takes the versioned path, but later blocks and members must still
+// reject summaries whose policy needs exact history orders.
+func TestMergeOrderSummaryMixedLegacyReject(t *testing.T) {
+	r := sealrollup.Record{Delta: sealrollup.Delta{Slot: 1, Order: 1, Sample: sealrollup.Sample{Time: 1, Bits: math.Float64bits(1)}}}
+	raw, err := v2part.EncodeSlots([]sealrollup.Record{r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := append([]byte(nil), raw[:5]...)
+	summary[4] |= 1 << 3
+	summary = append(summary, 1<<1)
+	summary = append(summary, raw[5:]...)
+	if _, err = v2part.DecodeSlots(0, 1, summary); err != nil {
+		t.Fatal(err)
+	}
+	r.Kind, r.Upto = sealrollup.KindMat, 1
+	kinds, err := v2part.EncodeSlots([]sealrollup.Record{r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 100}, {Step: 10, Count: 100}}}
+	for _, split := range []bool{false, true} {
+		first := &mergeCursor{seq: 1, arena: append([]byte(nil), kinds...), blocks: []mergeBlock{{archive: 0, slot: 1, start: 0, end: len(kinds)}}}
+		members := []*mergeCursor{first}
+		if split {
+			members = append(members, &mergeCursor{seq: 2, arena: summary, blocks: []mergeBlock{{archive: 0, slot: 1, start: 0, end: len(summary)}}})
+		} else {
+			first.arena = append(first.arena, summary...)
+			first.blocks = append(first.blocks, mergeBlock{archive: 0, slot: 1, start: len(kinds), end: len(first.arena)})
+		}
+		var versions mergeVersions
+		if _, err = versions.merge(members, config, &RollupMetadata{Version: 4}, 0, true); err == nil || !strings.Contains(err.Error(), "order summary") {
+			t.Fatalf("split=%v: accepted invalid mixed summary: %v", split, err)
+		}
+	}
 }
