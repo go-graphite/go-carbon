@@ -42,6 +42,7 @@ func TestSealRenderDifferentialDigest(t *testing.T) {
 	groups := []v2part.Group{"g", "group-b", "ga"}
 	for seed := int64(1); seed <= 6; seed++ {
 		for _, parallelism := range []int{1, 4} {
+			key := fmt.Sprintf("seed%d/p%d", seed, parallelism)
 			rng := rand.New(rand.NewSource(seed))
 			cfg := coreTestConfig()
 			cfg.Shards, cfg.Producers, cfg.Rollups, cfg.MaxRows = 1, 1, true, 1<<20
@@ -117,7 +118,7 @@ func TestSealRenderDifferentialDigest(t *testing.T) {
 				for _, b := range batches {
 					seen[b.ID] = true
 				}
-				orderProofObserve(t, t.Name(), e)
+				orderProofObserve(t, t.Name()+"/"+key, e)
 				snap := e.DBs()[0].NewSnapshot()
 				index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 				if err != nil {
@@ -141,7 +142,6 @@ func TestSealRenderDifferentialDigest(t *testing.T) {
 				}
 				snap.Close()
 			}
-			key := fmt.Sprintf("seed%d/p%d", seed, parallelism)
 			got := fmt.Sprintf("%x", h.Sum(nil))
 			if want := sealRenderGolden[key]; want != got {
 				t.Errorf("%s: render digest %s, want %s", key, got, want)
