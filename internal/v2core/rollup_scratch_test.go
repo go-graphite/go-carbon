@@ -8,12 +8,11 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"time"
-
-	"github.com/cockroachdb/pebble"
 	"testing"
+	"time"
 	"unsafe"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
