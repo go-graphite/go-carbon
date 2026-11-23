@@ -53,6 +53,7 @@ type syncCommand struct {
 	// jwtSecretConfig is the go-carbon config the default --jwt-secret came from.
 	jwtSecretConfig string
 	rate            int64
+	cacheGuard      float64
 	timeout         time.Duration
 }
 
@@ -70,8 +71,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.Float64Var(&c.health.low, "target-health-low", 0.60, "resume below this fraction of the target cache limit")
 	flags.DurationVar(&c.timeout, "timeout", 0, "overall sync deadline including store restart waits; 0 waits without limit")
 	flags.Int64Var(&c.rate, "rate", 0, "aggregate copied bytes per second, paced between completed batches; 0 unlimited")
+	flags.Float64Var(&c.cacheGuard, "cache-threshold", 0.75, "slow the copy while any source or target write cache is at least this full (0..1), and pause it at 95%; 0 disables")
 	flags.StringVar(&c.freshReason, "allow-fresh-start", "", "reason for a new child state directory when --state already contains work; preserves prior state")
-	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only operational scheduling, timeout, streams, rate and READY inputs may override it")
+	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only operational scheduling, timeout, streams, rate, cache-threshold and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", "", "buckyd JWT signing secret file; tokens refresh automatically before expiry (default: [buckyd] auth-jwt-secret-file from --config, else "+hostJWTSecretPath+")")
 	flags.StringVar(&c.goCarbonConfig, "config", "", "local go-carbon config read for the default --jwt-secret (default: the -config of the running go-carbon, else "+defaultGoCarbonConfig+")")
 	flags.Bool("ready", false, "run the final READY attestation (off by default)")
@@ -123,6 +125,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	if c.timeout < 0 {
 		return c, errors.New("--timeout must be nonnegative")
+	}
+	if !(c.cacheGuard >= 0 && c.cacheGuard <= 1) {
+		return c, errors.New("--cache-threshold must be between 0 and 1")
 	}
 	if *noFullHistory {
 		c.sync.fullHistory = false
@@ -337,6 +342,26 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	defer backend.client.CloseIdleConnections()
 	defer backend.m.client.CloseIdleConnections()
+	if c.cacheGuard > 0 && !c.sync.noCopy {
+		urls := map[string]string{}
+		for _, store := range append(append([]string(nil), c.sync.from...), c.sync.to) {
+			carbon, err := backend.carbon(store)
+			if err != nil {
+				return err
+			}
+			urls[store] = carbon + "/admin/info?scopes=cache"
+		}
+		governed, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			limiter.govern(governed, backend.client, urls, c.cacheGuard, 10*time.Second)
+		}()
+		defer func() {
+			stop()
+			<-done
+		}()
+	}
 	err = runSyncReadyPrepared(ctx, &c.sync, c.ready, backend, func() error {
 		streams := c.copy.streams
 		var sourceCapacity int

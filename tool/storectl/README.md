@@ -315,6 +315,27 @@ an existing window-only journal, and `--full-history` (or no scope flag) for an
 existing full-history journal. Scope is bound to the journal identity, so an
 incompatible resume fails rather than silently widening old work.
 
+### Cache guard
+
+`sync` polls every source and the target carbonserver
+(`/admin/info?scopes=cache`, `--carbonserver-port`) every 10s and slows the copy
+while a write cache fills. It uses the larger of the point and byte fill
+ratios. The target ingest health check also gates new batches using cache
+occupancy and dropped points from the target's metrics endpoint.
+
+- At or above `--cache-threshold` (default `0.75`): each poll halves the copy
+  rate, down to 1 MiB/s.
+- At or above 95%: the copy pauses until the cache is below both limits.
+  Streams finish their in-flight batch first.
+- Under the threshold: each poll raises the rate by a quarter, back to `--rate`
+  or unlimited.
+- Unreachable telemetry holds the current rate; after three failed polls a
+  paused copy resumes at its reduced rate.
+
+`--cache-threshold 0` disables the guard. State changes are logged as
+`sync_cache_throttle` events and named in the progress `limiter` field. A store
+without a cache limit cannot throttle the copy and is reported once.
+
 ### Resume without reconstructing a command
 
 `sync` saves its effective flags and local ring/names/block inputs in the state
@@ -325,8 +346,8 @@ storectl sync --resume /var/lib/carbon/sync-state
 storectl sync --resume /var/lib/carbon/sync-state --streams 8 --rate 100000000
 ```
 
-`--streams` and `--rate` (aggregate copied bytes/s, paced between completed
-batches; zero means unlimited), plus the READY inputs `--carbonapi-url`,
+`--streams`, `--rate` (aggregate copied bytes/s, paced between completed
+batches; zero means unlimited) and `--cache-threshold`, plus the READY inputs `--carbonapi-url`,
 `--period` and `--gap-ledger-complete`, may override a saved run. For example,
 finish configuring a copy that started before its READY evidence was available:
 

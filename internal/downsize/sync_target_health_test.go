@@ -329,14 +329,14 @@ func TestTargetHealthFlagsAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.health.enabled || c.health.high != .75 || c.health.low != .60 {
-		t.Fatal(c.health)
+	if !c.health.enabled || c.health.high != .75 || c.health.low != .60 || c.cacheGuard != .75 {
+		t.Fatalf("health: %+v, cache threshold: %g", c.health, c.cacheGuard)
 	}
 	if got := targetHealthURL("http://[::1]:4242", 7007); !strings.HasPrefix(got, "http://[::1]:7007/metrics?") || !strings.Contains(got, "cache_overflow_dropped_points_total") {
 		t.Fatal(got)
 	}
 	for _, args := range [][]string{
-		{"--target-health-high", "NaN"}, {"--target-health-low", "0"}, {"--target-health-low", "0.8"}, {"--target-health-high", "1.1"},
+		{"--target-health-high", "NaN"}, {"--target-health-low", "0"}, {"--target-health-low", "0.8"}, {"--target-health-high", "1.1"}, {"--cache-threshold", "NaN"}, {"--cache-threshold", "1.1"},
 	} {
 		if _, err := parseSyncCommand(syncCLIArgs(t, args...)); err == nil {
 			t.Fatal("accepted", args)
@@ -348,12 +348,12 @@ func TestTargetHealthFlagsAndResume(t *testing.T) {
 	if err := c.saveConfig(); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := parseSyncCommand([]string{"--resume", c.sync.state, "--target-health=false", "--target-health-high=.8", "--target-health-low=.5"})
+	restored, err := parseSyncCommand([]string{"--resume", c.sync.state, "--target-health=false", "--target-health-high=.8", "--target-health-low=.5", "--cache-threshold=0"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored.health.enabled || restored.health.high != .8 || restored.health.low != .5 {
-		t.Fatal(restored.health)
+	if restored.health.enabled || restored.health.high != .8 || restored.health.low != .5 || restored.cacheGuard != 0 {
+		t.Fatalf("health: %+v, cache threshold: %g", restored.health, restored.cacheGuard)
 	}
 	// Old configs without health flags adopt safe defaults on binary upgrade.
 	data, err := os.ReadFile(filepath.Join(c.sync.state, "config.json"))
@@ -367,7 +367,7 @@ func TestTargetHealthFlagsAndResume(t *testing.T) {
 	if err := json.Unmarshal(data, &legacy); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"target-health", "target-health-high", "target-health-low"} {
+	for _, key := range []string{"target-health", "target-health-high", "target-health-low", "cache-threshold"} {
 		delete(legacy.Flags, key)
 		delete(legacy.Explicit, key)
 	}
@@ -382,7 +382,7 @@ func TestTargetHealthFlagsAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !upgraded.health.enabled || upgraded.health.high != .75 || upgraded.health.low != .60 {
-		t.Fatal(upgraded.health)
+	if !upgraded.health.enabled || upgraded.health.high != .75 || upgraded.health.low != .60 || upgraded.cacheGuard != .75 {
+		t.Fatalf("health: %+v, cache threshold: %g", upgraded.health, upgraded.cacheGuard)
 	}
 }

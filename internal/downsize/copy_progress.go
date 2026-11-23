@@ -304,7 +304,14 @@ func (c *planFreeCopier) report(ctx context.Context, stall func(error)) {
 			fields["target_l0_sublevels"], fields["target_compaction_debt_bytes"], fields["target_write_stall"] = target.L0Sublevels, target.CompactionDebt, target.WriteStallActive
 		}
 		limiter := "headroom"
+		cacheGuard, paused := c.o.rate.limiter()
+		if paused {
+			// A deliberate cache pause is not a stall.
+			c.progress.success()
+		}
 		switch {
+		case cacheGuard != "":
+			limiter = cacheGuard
 		case len(waits) > 0:
 			limiter = waits[0]
 		case targetDelta.total() > 0:
