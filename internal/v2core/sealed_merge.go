@@ -711,6 +711,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			}
 		}
 		config = *chosen.config
+		lifecycle := compactMetadata(*metadata)
 		namePrefix := prefix
 		if len(excluded) > 0 && excluded[0] != nil {
 			name, e := names.definitionName(c.key, c.metricName()[4:])
@@ -795,7 +796,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if compactMetadata(*metadata).beforeReset(input.seq, item.Order) || rollupRecordExpiry(config, item) < expireAt {
+					if lifecycle.beforeReset(input.seq, item.Order) || rollupRecordExpiry(config, item) < expireAt {
 						untouched = false
 						break
 					}
@@ -814,7 +815,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && !compactMetadata(*metadata).beforeReset(input.seq, r.Order) && rollupRecordExpiry(config, r) >= expireAt {
+			} else if !metadata.Expired && !lifecycle.beforeReset(input.seq, r.Order) && rollupRecordExpiry(config, r) >= expireAt {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
@@ -1221,6 +1222,7 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 // first.
 func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
 	recs := m.records
+	lifecycle := compactMetadata(*metadata)
 	// Slot order: the inputs' records, stably merged by (archive, slot). Most
 	// names arrive already in order (one input, or inputs of disjoint slots).
 	m.order = m.order[:0]
@@ -1247,7 +1249,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		})
 	}
 	dead := func(i int) bool {
-		return metadata.Expired || compactMetadata(*metadata).beforeReset(recs[i].Sample.Sequence, recs[i].Order)
+		return metadata.Expired || lifecycle.beforeReset(recs[i].Sample.Sequence, recs[i].Order)
 	}
 	expired := func(r *sealrollup.Record) bool { return rollupRecordExpiry(config, *r) < retire }
 	// One pass over each slot's records: the per-slot winner, as the per-slot
@@ -1358,7 +1360,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		seq = max(seq, r.Sample.Sequence)
 	}
 	for _, v := range mats {
-		if r := v.Record(config); !metadata.Expired && !compactMetadata(*metadata).beforeReset(seq, r.Order) && !expired(&r) {
+		if r := v.Record(config); !metadata.Expired && !lifecycle.beforeReset(seq, r.Order) && !expired(&r) {
 			m.out = append(m.out, r)
 			m.last = append(m.last, false)
 		}

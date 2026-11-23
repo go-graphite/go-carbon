@@ -393,7 +393,7 @@ type metricMetadata struct {
 
 // beforeReset keeps legacy order masks readable. New lifecycle events use the
 // containing part's existing sequence; no point column participates.
-func (m metricMetadata) beforeReset(seq, order uint64) bool {
+func (m *metricMetadata) beforeReset(seq, order uint64) bool {
 	if m.Version < 4 {
 		return order <= m.ResetOrder
 	}
