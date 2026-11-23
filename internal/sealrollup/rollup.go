@@ -209,40 +209,28 @@ func (w *Workspace) replace(k key, d Record) {
 	w.positions[pos] = uint32(len(w.updates))
 }
 
-type windowClosure struct{ through, advance int64 }
-
 func reduce(c Config, view View, ranges RangeView, batches []Batch, w *Workspace) ([]Record, error) {
-	records, _, err := reduceMode(c, view, ranges, batches, w, nil, false)
-	return records, err
-}
-
-// reduceMode returns the winners sorted by (archive, slot) and, with keep,
-// the superseded versions sorted the same way, oldest first. Both alias w.
-func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Workspace, closing *windowClosure, keep bool) ([]Record, []Record, error) {
 	if w == nil {
 		// One-shot callers cannot amortize a direct retention-sized array.
 		w = &Workspace{sparseOnly: true}
 	}
-	w.keep, w.versions = keep, w.versions[:0]
+	w.keep, w.versions = false, w.versions[:0]
 	pointCount := 0
 	for i, b := range batches {
 		pointCount += len(b.Points)
 		if b.Now <= 0 || b.Now > math.MaxUint32 {
-			return nil, nil, fmt.Errorf("invalid batch clock")
+			return nil, fmt.Errorf("invalid batch clock")
 		}
 		if i > 0 && b.Order <= batches[i-1].Order {
-			return nil, nil, fmt.Errorf("batch order must increase")
+			return nil, fmt.Errorf("batch order must increase")
 		}
 		for _, p := range b.Points {
 			if p.Time <= 0 || p.Time > math.MaxUint32 {
-				return nil, nil, fmt.Errorf("timestamp outside storage range")
+				return nil, fmt.Errorf("timestamp outside storage range")
 			}
 		}
 	}
 	w.updates = w.updates[:0]
-	if closing != nil {
-		pointCount++
-	}
 	w.preparePositions(c, pointCount)
 	get := func(a int, t int64) (Sample, bool) {
 		k := key{a, slot(t, c.Archives[a])}
@@ -284,7 +272,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 			w.replace(k, Record{Delta: Delta{a, k.slot, b.Order, p}, Kind: kind})
 		}
 
-		aggregateAt := func(lower int, start int64, closingWindow bool) bool {
+		aggregateAt := func(lower int, start int64) bool {
 			higher, coarse := c.Archives[lower-1], c.Archives[lower]
 			neighbors = neighbors[:0]
 			if ranges == nil {
@@ -323,48 +311,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 				return false
 			}
 			set(lower, start, math.Float64bits(aggregateSamples(c.Method, neighbors)), KindMat)
-			if closingWindow {
-				var order uint64
-				for _, p := range neighbors {
-					order = max(order, p.Sequence)
-				}
-				k := key{lower, slot(start, coarse)}
-				d, _ := w.lookup(k)
-				d.Order, d.Sample.Sequence = order, order
-				w.replace(k, Record{Delta: d, Kind: KindMat})
-			}
 			return true
-		}
-		if closing != nil {
-			through := max(closing.through, closing.advance)
-			for _, point := range b.Points {
-				through = max(through, point.Time)
-				// A direct (retention-routed) write into the open coarse
-				// window closes that window first and then replaces the
-				// closure, so no later closure can supersede the write and a
-				// newer part always holds the newer version of a slot.
-				if closing.through == 0 {
-					continue
-				}
-				for j, r := range c.Archives {
-					if point.Time >= b.Now-r.Step*r.Count {
-						if start := align(closing.through, r.Step); j > 0 && align(point.Time, r.Step) == start {
-							through = max(through, start+r.Step)
-						}
-						break
-					}
-				}
-			}
-			// Flush source windows before any new epoch can replace their ring
-			// slots. Ascending archives make the last child available to its parent.
-			for lower := 1; lower < len(c.Archives); lower++ {
-				a := c.Archives[lower]
-				start := align(closing.through, a.Step)
-				if closing.through > 0 && start+a.Step <= through {
-					aggregateAt(lower, start, true)
-				}
-			}
-			closing.through = through
 		}
 		for archive, a := range c.Archives {
 			current := w.current[:0]
@@ -403,10 +350,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 						continue
 					}
 					previous = start
-					if closing != nil && start+coarse.Step > closing.through {
-						continue
-					}
-					if !aggregateAt(lower, start, false) {
+					if !aggregateAt(lower, start) {
 						continue
 					}
 					wrote = true
@@ -425,7 +369,7 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 	}
 	slices.SortFunc(w.updates, bySlot)
 	slices.SortStableFunc(w.versions, bySlot)
-	return w.updates, w.versions, nil
+	return w.updates, nil
 }
 func aggregateSamples(method Method, values []Sample) float64 {
 	switch method {

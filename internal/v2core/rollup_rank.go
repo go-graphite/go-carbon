@@ -145,7 +145,7 @@ func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
 
 // rollupTail is the unranked tail of the slot arrays: unranked[k] owns slot
 // len(dense)+k. It sorts the columns together; from keeps each entry's old
-// slot, so renumber can move the closure calendar.
+// slot, so renumber can move the expiry calendar.
 type rollupTail struct {
 	metrics []*rollupMetric
 	ids     []uint64
@@ -187,9 +187,9 @@ func (r *coreRollups) renumber() {
 	sort.Sort(tail)
 	fresh := rollupTail{slices.Clone(tail.metrics), slices.Clone(tail.ids), slices.Clone(tail.meta), slices.Clone(tail.ttl), slices.Clone(tail.expAt), tail.from}
 	// moved maps each old slot to its new one (gone for a dead slot); only
-	// the closure and expiry calendars hold slots across a renumber.
+	// the expiry calendar hold slots across a renumber.
 	var moved []uint32
-	if len(r.calendar.slots) > 0 || len(r.expiries.slots) > 0 {
+	if len(r.expiries.slots) > 0 {
 		moved = make([]uint32, d+f)
 	}
 	n := 0
@@ -229,7 +229,6 @@ func (r *coreRollups) renumber() {
 			j--
 		}
 	}
-	r.calendar.move(moved)
 	r.expiries.move(moved)
 	for s, m := range r.dense {
 		if m.ownerSlot.Load() != uint32(s)+1 {

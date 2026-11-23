@@ -1516,11 +1516,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if r.now != nil {
 				now = r.now()
 			}
-			if err := r.loadCheckpointDue(now.Unix()); err != nil {
-				failure = err
-				o.failure.CompareAndSwap(nil, &coreFailure{err: err})
-			}
-			due := failure == nil && (r.closureDue(now.Unix()) || (r.expire != nil && r.expiryDue(now)) || r.pendingMetadataDue(&pend, o.lookup))
+			due := failure == nil && ((r.expire != nil && r.expiryDue(now)) || r.pendingMetadataDue(&pend, o.lookup))
 			if due {
 				failure = flush()
 				if failure != nil {

@@ -153,7 +153,6 @@ func TestRollupStagesPreserveKeyOrderAfterCatalogGrowth(t *testing.T) {
 						t.Fatal(err)
 					}
 					meta.Version = 1
-					meta.ClosedThrough = 0
 					value = AppendRollupMetadata(nil, meta)
 				}
 				legacyDigest.Write(value)

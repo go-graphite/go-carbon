@@ -1,7 +1,6 @@
 package sealrollup
 
 import (
-	"math"
 	"slices"
 )
 
@@ -90,39 +89,6 @@ func (s *Slots) Install(d Delta) {
 	span.data = ps
 }
 
-// InstallRecent installs only source samples inside the resident horizon.
-// KeepRecent must establish the horizon before a committed batch is installed.
-func (s *Slots) InstallRecent(d Delta) {
-	if d.Archive == len(*s.archives)-1 {
-		return
-	}
-	if s.data != nil && d.Sample.Time < s.data[d.Archive].floor {
-		return
-	}
-	s.Install(d)
-}
-
-// AppendResident appends every resident sample as a Delta, in archive and slot
-// order. Reinstalling them with InstallRecent between two KeepRecent calls
-// rebuilds the same residency, which is what a state checkpoint stores.
-func (s *Slots) AppendResident(dst []Delta) []Delta {
-	if s == nil {
-		return dst
-	}
-	if s.data == nil {
-		if s.hasSingle {
-			dst = append(dst, Delta{Archive: s.singleArchive, Slot: s.single.slot, Sample: s.single.sample})
-		}
-		return dst
-	}
-	for a := range s.data {
-		for _, p := range s.data[a].data {
-			dst = append(dst, Delta{Archive: a, Slot: p.slot, Sample: p.sample})
-		}
-	}
-	return dst
-}
-
 // View, Range and RecentRange read a nil *Slots as empty: a caller that keeps
 // no residency needs no Slots value.
 func (s *Slots) View(a int, physical int64) (Sample, bool) {
@@ -177,82 +143,8 @@ func (s *Slots) Range(a int, start, end int64, dst []Sample) []Sample {
 	return dst
 }
 
-// RecentRange reports whether the complete window is still resident. A miss
-// must be resolved from durable physical-slot winners, never partial aggregates.
-func (s *Slots) RecentRange(a int, start, end int64, dst []Sample) ([]Sample, bool) {
-	if s != nil && s.data != nil && start < s.data[a].floor {
-		return dst, false
-	}
-	return s.Range(a, start, end, dst), true
-}
-
-// KeepRecent retains every fine sample of the current coarse window, plus
-// two preceding source intervals. The terminal archive is never a source.
-// A floor records completeness even when a window had no occupied samples.
-// Compact backing arrays as well as lengths: old retention capacity must die.
-func (s *Slots) KeepRecent(maxTime int64) {
-	ars := *s.archives
-	if len(ars) == 1 {
-		s.data, s.hasSingle = nil, false
-		return
-	}
-	// Every coarser step is a multiple of the first coarse step, so no
-	// resident floor can advance before its next boundary. The existing fine
-	// floor encodes that deadline; no per-name timer is needed.
-	if s.data != nil && s.data[len(ars)-1].floor == math.MaxInt64 && align(maxTime, ars[1].Step)-2*ars[0].Step <= s.data[0].floor {
-		return
-	}
-	if s.data == nil {
-		s.data = make([]slotSpan, len(ars))
-		if s.hasSingle {
-			s.data[s.singleArchive] = slotSpan{data: []slotSample{s.single}, first: s.single.slot, last: s.single.slot}
-			s.hasSingle = false
-		}
-	}
-	for a := range ars {
-		span := &s.data[a]
-		if a == len(ars)-1 {
-			if span.floor != math.MaxInt64 {
-				*span = slotSpan{floor: math.MaxInt64}
-			}
-			continue
-		}
-		step := ars[a+1].Step
-		floor := maxTime - maxTime%step - 2*ars[a].Step
-		// InstallRecent rejects samples below the established floor. Nothing
-		// can need eviction until the next coarse window opens.
-		if floor <= span.floor {
-			continue
-		}
-		span.floor = floor
-		kept := span.data[:0]
-		for _, p := range span.data {
-			if p.sample.Time >= span.floor {
-				kept = append(kept, p)
-			}
-		}
-		// Release old retention-sized arrays and unusually dense past windows.
-		// Normal appends reuse capacity within the current window.
-		if cap(kept) > 2*len(kept)+8 {
-			compact := make([]slotSample, len(kept), 2*len(kept)+8)
-			copy(compact, kept)
-			kept = compact
-		}
-		span.data = kept
-		if len(kept) > 0 {
-			span.first, span.last = kept[0].slot, kept[len(kept)-1].slot
-		}
-	}
-}
-
 // NewSlots borrows the archives already owned by this immutable prepared schema.
 // Slot values remain private to the caller; schema slices never escape.
 func (p *Prepared) NewSlots() *Slots {
 	return &Slots{archives: &p.config.Archives}
 }
-
-// Digest returns the immutable schema identity validated by Prepare.
-func (p *Prepared) Digest() [32]byte { return p.policy }
-
-// Config borrows this validated immutable schema; callers must not mutate Archives.
-func (p *Prepared) Config() Config { return p.config }

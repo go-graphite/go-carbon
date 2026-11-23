@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,4 +95,10 @@ func TestRollupHistoryDurableCost(t *testing.T) {
 			t.Logf("durable names=%d hours=%.1f points=%d CPU_ns_point=%.2f wall_ns_point=%.2f heap_B_name=%.2f loads=%d hits=%d", names, float64(epoch)*float64(tick)/3600, points, float64(historyCPUTime()-cpuStart)/float64(points), float64(time.Since(start).Nanoseconds())/float64(points), float64(stats.HeapAlloc)/float64(names), loads, hits)
 		}
 	}
+}
+
+func historyCPUTime() int64 {
+	var u syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &u)
+	return u.Utime.Nano() + u.Stime.Nano()
 }

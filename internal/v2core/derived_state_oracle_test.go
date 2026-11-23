@@ -28,19 +28,18 @@ func TestDerivedStateOracle(t *testing.T) {
 	}
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	type tally struct {
-		Checked, ExtraParts                                 int
-		MaxTimeExact, MaxTimeAligned, MaxTimeBad            int
-		ThroughExact, ThroughEquivalent, ThroughBad         int
-		OrderEqualsRecordMax, OrderDiffers                  int
-		AfterViolations                                     int
-		RevisionBad, LastUpdateBad, PolicyBad, ResetBad     int
-		EnvelopeOnly, EnvelopeOnlyExpired, EnvelopeOnlyIdle int
-		EnvelopeOnlyOther, EnvelopeOnlyNewName              int
-		Examples                                            map[string]string
+		Checked, ExtraParts                             int
+		MaxTimeExact, MaxTimeAligned, MaxTimeBad        int
+		OrderEqualsRecordMax, OrderDiffers              int
+		AfterViolations                                 int
+		RevisionBad, LastUpdateBad, PolicyBad, ResetBad int
+		EnvelopeOnly, EnvelopeOnlyExpired               int
+		EnvelopeOnlyOther, EnvelopeOnlyNewName          int
+		Examples                                        map[string]string
 	}
 	type scenario struct {
 		name    string
-		moving  bool // Hooks.Now follows the seal clock: idle closure and expiry run
+		moving  bool // Hooks.Now follows the seal clock so inactivity expiry runs
 		history bool // the TestRollupHistoryDifferential row pattern
 		schema  string
 		xff     float32
@@ -111,10 +110,10 @@ func TestDerivedStateOracle(t *testing.T) {
 			}()
 
 			type derived struct {
-				maxTime, through, lastUpdate int64
-				parts                        uint64
-				prev                         RollupMetadata
-				seen                         bool
+				maxTime, lastUpdate int64
+				parts               uint64
+				prev                RollupMetadata
+				seen                bool
 			}
 			state := map[string]*derived{}
 			seq := map[v2part.PartID]int{}
@@ -301,9 +300,6 @@ func TestDerivedStateOracle(t *testing.T) {
 							case m.Expired || m.ResetOrder != 0 && !d.prev.Expired && d.prev.ResetOrder != m.ResetOrder:
 								tl.EnvelopeOnlyExpired++
 								example("envelope-only/expired", "%s: Expired=%v ResetOrder=%d, no data runs", where, m.Expired, m.ResetOrder)
-							case d.seen && m.ClosedThrough > d.prev.ClosedThrough && m.Frontier.Order == d.prev.Frontier.Order:
-								tl.EnvelopeOnlyIdle++
-								example("envelope-only/idle-closure", "%s: ClosedThrough %d -> %d with no coarse record (xFF %.1f failed or nothing to close)", where, d.prev.ClosedThrough, m.ClosedThrough, stored.XFilesFactor)
 							case !d.seen:
 								tl.EnvelopeOnlyNewName++
 								example("envelope-only/new-name", "%s: name exists (Revision %d, LastUpdate %d) but no point landed in any archive", where, m.Revision, m.LastUpdate)
@@ -333,28 +329,6 @@ func TestDerivedStateOracle(t *testing.T) {
 						default:
 							tl.MaxTimeBad++
 							example("maxtime/bad", "%s: envelope %d, slots give %d", where, m.Frontier.MaxTime, d.maxTime)
-						}
-						// ClosedThrough by the input rule: max(previous, MaxTime).
-						if os.Getenv("DERIVED_ORACLE_MUTATE") != "through" {
-							d.through = max(d.through, d.maxTime)
-						}
-						equivalent := true
-						for _, a := range stored.Archives[1:] {
-							ew := m.Frontier.MaxTime - m.Frontier.MaxTime%a.Step + a.Step
-							dw := d.maxTime - d.maxTime%a.Step + a.Step
-							// Same open window and the same set of closed windows.
-							if (ew <= m.ClosedThrough) != (dw <= d.through) || ew != dw || m.ClosedThrough/a.Step != d.through/a.Step {
-								equivalent = false
-							}
-						}
-						switch {
-						case d.through == m.ClosedThrough:
-							tl.ThroughExact++
-						case equivalent:
-							tl.ThroughEquivalent++
-						default:
-							tl.ThroughBad++
-							example("closedthrough/bad", "%s: envelope %d (MaxTime %d), data+rules give %d", where, m.ClosedThrough, m.Frontier.MaxTime, d.through)
 						}
 						if len(en.records) > 0 {
 							if m.Frontier.Order == recOrder {
@@ -403,7 +377,7 @@ func TestDerivedStateOracle(t *testing.T) {
 			}
 			if sc.history {
 				// Aligned, single-clock corpus: everything but Revision derives.
-				if tl.MaxTimeBad+tl.MaxTimeAligned+tl.ThroughBad+tl.LastUpdateBad+tl.PolicyBad+tl.ResetBad+tl.EnvelopeOnly != 0 {
+				if tl.MaxTimeBad+tl.MaxTimeAligned+tl.LastUpdateBad+tl.PolicyBad+tl.ResetBad+tl.EnvelopeOnly != 0 {
 					t.Errorf("history corpus expected fully derivable except Revision: %+v", *tl)
 				}
 			}
@@ -443,7 +417,7 @@ func TestDerivedStateOracleMerged(t *testing.T) {
 	}()
 	now := int64(1794700800)
 	var order uint64
-	var exact, aligned, bad, throughBad, minParts, maxParts int
+	var exact, aligned, bad, minParts, maxParts int
 	minParts = math.MaxInt
 	for epoch := int64(0); epoch < 60; epoch++ {
 		now += 600
@@ -510,9 +484,6 @@ func TestDerivedStateOracleMerged(t *testing.T) {
 			bad++
 			t.Logf("epoch %d: newest envelope MaxTime %d, live runs give %d", epoch, newest.Frontier.MaxTime, recMax)
 		}
-		if newest.ClosedThrough != newest.Frontier.MaxTime {
-			throughBad++
-		}
 		if epoch == 23 || epoch == 41 {
 			if err = e.Close(); err != nil {
 				t.Fatal(err)
@@ -522,9 +493,9 @@ func TestDerivedStateOracleMerged(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("merged: seals 60, live parts %d..%d, MaxTime exact %d aligned %d bad %d, ClosedThrough != MaxTime %d", minParts, maxParts, exact, aligned, bad, throughBad)
-	if bad != 0 || throughBad != 0 {
-		t.Errorf("merged state not derivable: bad %d throughBad %d", bad, throughBad)
+	t.Logf("merged: seals 60, live parts %d..%d, MaxTime exact %d aligned %d bad %d", minParts, maxParts, exact, aligned, bad)
+	if bad != 0 {
+		t.Errorf("merged state not derivable: bad %d", bad)
 	}
 	if maxParts >= 60 {
 		t.Errorf("no merge happened: %d live parts", maxParts)

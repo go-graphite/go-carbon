@@ -119,13 +119,13 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	if r.now != nil {
 		now = r.now()
 	}
-	if r.expire != nil || r.db != nil {
+	if r.expire != nil {
 		for id, m := range r.metrics { // the full walk: single-archive names are never due
 			if _, seen := positions[id]; seen {
 				continue
 			}
 			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
+			if meta := r.meta[slot]; !meta.Expired && (r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) {
 				stages, metrics = append(stages, rollupStage{next: meta, slot: slot}), append(metrics, m)
 				r.stageKey(&stages[len(stages)-1], m, nil)
 			}

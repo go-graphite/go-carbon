@@ -49,7 +49,6 @@ func EncodeRollupPolicy(p RollupPolicy) ([]byte, error) {
 // LastUpdate is the original admission clock in nanoseconds, clamped against
 // backward clocks just as chunkstore activity is. Revision starts at creation.
 type RollupMetadata struct {
-	ClosedThrough int64 `json:",omitempty"`
 	// BaselineOrder certifies original classic slots installed before intake.
 	BaselineOrder uint64 `json:",omitempty"`
 
@@ -66,42 +65,10 @@ type RollupMetadata struct {
 	Revision   uint64
 }
 
-// rollupMetric holds what a name needs beyond its scalars: the shared
-// identity and, for coarse archives, KeepRecent residency. The committed
-// scalars live in coreRollups.meta, by owner slot. slots is nil while the
-// name keeps no residency, which is always for a durable single-archive name,
-// so such a name costs one 24-B object.
+// rollupMetric retains identity and routing; samples live in immutable parts.
 type rollupMetric struct {
 	*PolicyIdentity
-	slots  *sealrollup.Slots
 	vshard uint16
-}
-
-// residency returns m's slots, allocating them on the first install.
-func (m *rollupMetric) residency() *sealrollup.Slots {
-	if m.slots == nil {
-		m.slots = m.policy.prepared.NewSlots()
-	}
-	return m.slots
-}
-
-// keepRecent is Slots.KeepRecent. A single archive keeps nothing, so its
-// slots drop to nil.
-func (m *rollupMetric) keepRecent(maxTime int64) {
-	if len(m.schema().Archives) == 1 {
-		m.slots = nil
-		return
-	}
-	m.residency().KeepRecent(maxTime)
-}
-
-// installRecent is Slots.InstallRecent, which never keeps the terminal
-// archive (a single-archive name's only one).
-func (m *rollupMetric) installRecent(d sealrollup.Delta) {
-	if d.Archive == len(m.schema().Archives)-1 {
-		return
-	}
-	m.residency().InstallRecent(d)
 }
 
 type rollupCoverage struct {
@@ -130,17 +97,8 @@ type coreRollups struct {
 	expDrained []int64
 	expRefile  []uint32
 
-	stage   func(string)
-	metrics map[uint64]*rollupMetric
-	// calendar files each installed slot under the end of every coarse window
-	// it holds open (rollupOpenEnd). An idle pass drains only the ends at or
-	// before now; single-archive names are never filed. Entries are hints:
-	// a drained slot stages only if rollupClosureDue still holds. drained
-	// lists the ends this plan drained (deleted at commit); taken is the
-	// plan's bitset of slots staged from them, due those slots; planNow is the
-	// plan's clock.
-	calendar  calendar
-	drained   []int64
+	stage     func(string)
+	metrics   map[uint64]*rollupMetric
 	taken     []uint64
 	due       []uint32
 	planNow   int64
@@ -205,12 +163,11 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, calendar: calendar{slots: map[int64][]uint32{}}, expiries: calendar{slots: map[int64][]uint32{}}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, expiries: calendar{slots: map[int64][]uint32{}}}
 }
 
-// install is the only writer of metrics and names and files every open coarse
-// window, so the calendar can never miss one and every installed name is
-// indexed. meta becomes id's committed scalars.
+// install is the only writer of metrics and names. It indexes every installed
+// name and files its inactivity expiry, when enabled. meta becomes id's scalars.
 func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	old := r.metrics[id]
 	r.metrics[id] = m
@@ -238,7 +195,6 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 	if old != m {
 		r.names.Put(m.fingerprint(), 0) // a set: the slot is m's ownerSlot
 	}
-	r.file(s, m, meta, math.MaxUint16)
 	if r.expire != nil {
 		r.resolveTTL(s, m, r.clock())
 		r.fileExpiry(s)
@@ -346,40 +302,6 @@ func (r *coreRollups) commitExpiries() {
 	r.expRefile = refile
 }
 
-// file enters slot under the open window end of each coarse archive whose
-// bit (archive index - 1, the last bit also covering higher archives) is set.
-func (r *coreRollups) file(slot uint32, m *rollupMetric, meta metricMetadata, mask uint16) {
-	for i, a := range m.schema().Archives[1:] {
-		if end := rollupOpenEnd(meta, a); mask&(1<<min(i, 15)) != 0 && end != math.MaxInt64 {
-			r.calendar.file(end, slot)
-		}
-	}
-}
-
-// refile marks the coarse archives whose open window next files anew: a new
-// window end, a reopened window, or an end this plan drained. A window end
-// only moves forward per archive, so one entry per open window suffices.
-func (r *coreRollups) refile(m *rollupMetric, old, next metricMetadata) uint16 {
-	archives := m.schema().Archives
-	if len(archives) > 1 && old.Version == 3 && next.Version == 3 && old.Frontier.Order != 0 && !old.Expired && !next.Expired {
-		// No archive's window changes inside the smallest coarse window.
-		// Before its close, none of this name's entries can have drained.
-		step := archives[1].Step
-		start := old.Frontier.MaxTime - old.Frontier.MaxTime%step
-		if next.Frontier.MaxTime >= start && next.Frontier.MaxTime < start+step && r.planNow < start+step {
-			return 0
-		}
-	}
-	mask := uint16(0)
-	for i, a := range archives[1:] {
-		end, prior := rollupOpenEnd(next, a), rollupOpenEnd(old, a)
-		if end != math.MaxInt64 && (end != prior || prior <= r.planNow) {
-			mask |= 1 << min(i, 15)
-		}
-	}
-	return mask
-}
-
 // slotMetric is the metric installed in slot: dense below len(dense),
 // unranked above.
 func (r *coreRollups) slotMetric(slot uint32) *rollupMetric {
@@ -389,21 +311,13 @@ func (r *coreRollups) slotMetric(slot uint32) *rollupMetric {
 	return r.unranked[slot-uint32(len(r.dense))]
 }
 
-// dueSlots appends, once each, the closure-due slots filed under the drained
-// ends, except those whose ID skip reports (already staged by batches).
-func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
+// expirySlots appends, once each, the expiry-due slots filed under the drained
+// seconds, except those whose ID skip reports (already staged by batches).
+func (r *coreRollups) expirySlots(skip func(uint64) bool, dst []uint32) []uint32 {
 	words := (len(r.ids) + 63) / 64
 	taken := slices.Grow(r.taken[:0], words)[:words]
 	first := len(dst)
 	expiry := r.expire != nil
-	for _, end := range r.drained {
-		for _, slot := range r.calendar.slots[end] {
-			if id := r.ids[slot]; id != deadSlot && taken[slot>>6]&(1<<(slot&63)) == 0 && !skip(id) && (!expiry || !r.meta[slot].Expired) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], r.planNow) {
-				taken[slot>>6] |= 1 << (slot & 63)
-				dst = append(dst, slot)
-			}
-		}
-	}
 	if expiry {
 		ns := r.planClock.UnixNano()
 		for _, key := range r.expDrained {
@@ -423,19 +337,6 @@ func (r *coreRollups) dueSlots(skip func(uint64) bool, dst []uint32) []uint32 {
 	}
 	r.taken = taken
 	return dst
-}
-
-// closureDue reports whether any calendar end at or before now holds a
-// closure-due slot. Ends holding none are stale and dropped here.
-func (r *coreRollups) closureDue(now int64) bool {
-	for c := &r.calendar; len(c.heap) > 0 && c.heap[0] <= now; c.drop(c.heap[0]) {
-		for _, slot := range c.slots[c.heap[0]] {
-			if r.ids[slot] != deadSlot && (r.expire == nil || !r.meta[slot].Expired) && rollupClosureDue(r.slotMetric(slot), r.meta[slot], now) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // calendar files slots under a second. heap holds each filed second once,
@@ -580,12 +481,10 @@ type rollupStage struct {
 	versions uint32
 	slot     uint32
 	vshard   uint16
-	refile   uint16 // coarse archives to file at commit (coreRollups.refile)
 	fresh    bool
 }
 
 type rollupPlannerLane struct {
-	windows   rollupWindowCache
 	ranked    []rollupRankRef
 	spare     []rollupRankRef
 	counts    []int
@@ -627,11 +526,6 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.release()
 		}
 	}()
-	if r.checkpoint != nil {
-		if err := r.loadCheckpointDue(r.clock().Unix()); err != nil {
-			return coreSealPlan{}, err
-		}
-	}
 	view := in.Pending
 	if view.Len() == 0 {
 		view = PendingBatches(in.Batches)
@@ -789,18 +683,17 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		i = j
 	}
 	named := len(stages)
-	// Idle closure uses the existing seal maintenance pass; no separate scheduler.
+	// The existing maintenance pass stages inactivity expiry.
 	now := time.Now()
 	if r.now != nil {
 		now = r.now()
 	}
 	r.planNow = now.Unix()
-	r.drained = r.calendar.due(r.planNow, 0, r.drained[:0])
 	r.planClock = now
 	r.reresolve(now) // returns at once without expiry
 	r.expDrained = r.expiries.due(r.planNow, 0, r.expDrained[:0])
-	if r.db != nil || r.expire != nil {
-		r.due = r.dueSlots(func(id uint64) bool { return sealKeySeen(keys, seen, maxID, id, keyID) }, r.due[:0])
+	if r.expire != nil {
+		r.due = r.expirySlots(func(id uint64) bool { return sealKeySeen(keys, seen, maxID, id, keyID) }, r.due[:0])
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
 			stages, metrics = append(stages, rollupStage{next: r.meta[slot], slot: slot}), append(metrics, m)
@@ -870,11 +763,10 @@ func (r *coreRollups) expireIdleStages(now time.Time) error {
 }
 
 // commitPlan publishes the staged plan's owner-local state, drops the drained
-// calendar seconds, then installs the fresh names and refiles the staged ones.
+// expiry seconds, then installs fresh names and refiles inactivity deadlines.
 func (r *coreRollups) commitPlan() {
 	defer r.release()
 	r.commitStages()
-	r.calendar.drop(r.planNow)
 	expiry := r.expire != nil
 	if expiry {
 		r.commitExpiries()
@@ -884,9 +776,6 @@ func (r *coreRollups) commitPlan() {
 		if s.fresh {
 			r.install(m.id, m, s.next)
 			continue
-		}
-		if s.refile != 0 {
-			r.file(s.slot, m, r.meta[s.slot], s.refile)
 		}
 		if expiry {
 			r.fileExpiry(s.slot) // a revived name, or one drained this plan
@@ -1303,11 +1192,6 @@ func (r *coreRollups) installRecovered(policy RollupPolicy, meta RollupMetadata,
 	if r.metrics[meta.ID] != nil {
 		return errors.New("duplicate recovered rollup ID")
 	}
-	m.keepRecent(meta.Frontier.MaxTime)
-	for _, record := range records {
-		m.installRecent(record.Delta)
-	}
-	m.keepRecent(meta.Frontier.MaxTime)
 	r.install(meta.ID, m, compactMetadata(meta))
 	return nil
 }

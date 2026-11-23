@@ -342,24 +342,8 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		for _, record := range winning {
 			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
-			if slices.ContainsFunc(authority.Coarse, func(r sealrollup.Record) bool {
-				return r.Archive == record.Archive && r.Sample.Time == record.Sample.Time
-			}) {
-				continue
-			}
-			record.Order = local.Frontier.Order
-			record.Sample.Sequence = record.Order
-			m.residency().Install(record.Delta)
-		}
-		for _, r := range authority.Coarse {
-			if r.Kind != sealrollup.KindNone {
-				m.residency().Install(r.Delta)
-			}
 		}
 		authority.Meta = m.metadata(meta)
-		if next.db != nil {
-			m.keepRecent(meta.Frontier.MaxTime)
-		}
 		next.install(id, m, meta)
 		value, err := json.Marshal(authority)
 		if err != nil {

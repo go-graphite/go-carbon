@@ -14,14 +14,12 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/klauspost/compress/zstd"
 )
 
 // An owner's rollup checkpoint is derived state: one sequential file holding,
-// per installed name, its identity, committed scalars and KeepRecent
-// residency, stamped with the live part bindings the state reflects. Owners
+// per installed name, its identity and committed scalars, stamped with the live part bindings the state reflects. Owners
 // write it after seals and at close. Open loads it, folds in only the parts
 // published since (absent from the stamp) with the same rules scanRollups
 // uses, and rebuilds from parts when the file is missing, corrupt or torn.
@@ -153,13 +151,12 @@ func syncDir(dir string) error {
 // compressed indexes, index offset/count, CRC32-C. Decoded indexes hold ID,
 // block offset and packed record range (24 B), name-order ordinals (8 B),
 // and closure deadlines/IDs (16 B). Each block contains up to 128 records.
-// Each name: id, suffix index, the
-// name part of its canonical definition, scalars, resident samples.
+// Each name: id, suffix index, the name part of its canonical definition,
+// scalars, and a reserved zero residency count.
 func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	suffixes := map[string]uint64{}
 	var table [][]byte
 	var body []byte
-	var resident []sealrollup.Delta
 	names := uint64(0)
 	entries := make([]checkpointIndexEntry, 0, len(r.ids))
 	ids := slices.Clone(r.ids)
@@ -185,7 +182,7 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 		body = binary.AppendUvarint(body, uint64(len(name)))
 		nameOffset := uint64(len(body))
 		body = append(body, name...)
-		body = binary.AppendVarint(body, meta.ClosedThrough)
+		body = binary.AppendVarint(body, 0)
 		body = binary.AppendUvarint(body, meta.BaselineOrder)
 		body = binary.AppendUvarint(body, meta.ResetOrder)
 		body = binary.AppendVarint(body, meta.LastUpdate)
@@ -197,20 +194,8 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 			expired = 1
 		}
 		body = append(body, meta.Version, expired)
-		resident = m.slots.AppendResident(resident[:0])
-		body = binary.AppendUvarint(body, uint64(len(resident)))
-		for _, d := range resident {
-			body = binary.AppendUvarint(body, uint64(d.Archive))
-			body = binary.AppendVarint(body, d.Slot)
-			body = binary.AppendVarint(body, d.Sample.Time)
-			body = binary.LittleEndian.AppendUint64(body, d.Sample.Bits)
-			body = binary.AppendUvarint(body, d.Sample.Sequence)
-		}
-		end := int64(math.MaxInt64)
-		for _, a := range m.schema().Archives[1:] {
-			end = min(end, rollupOpenEnd(meta, a))
-		}
-		entries = append(entries, checkpointIndexEntry{id: id, offset: uint64(start), size: uint64(len(body) - start), due: end, nameOffset: nameOffset, nameSize: uint64(len(name))})
+		body = binary.AppendUvarint(body, 0) // retired residency count
+		entries = append(entries, checkpointIndexEntry{id: id, offset: uint64(start), size: uint64(len(body) - start), nameOffset: nameOffset, nameSize: uint64(len(name))})
 		names++
 	}
 	// Compress independently addressable groups. A single owner-local scratch
@@ -268,19 +253,9 @@ func (r *coreRollups) encodeCheckpoint(parts [][]byte) []byte {
 	for _, ordinal := range order {
 		indexes = binary.LittleEndian.AppendUint64(indexes, ordinal)
 	}
-	slices.SortFunc(order, func(i, j uint64) int {
-		a, b := &entries[i], &entries[j]
-		if a.due < b.due {
-			return -1
-		}
-		if a.due > b.due {
-			return 1
-		}
-		return 0
-	})
 	for _, ordinal := range order {
 		e := &entries[ordinal]
-		indexes = binary.LittleEndian.AppendUint64(indexes, uint64(e.due))
+		indexes = binary.LittleEndian.AppendUint64(indexes, uint64(math.MaxInt64)) // retired closure deadline
 		indexes = binary.LittleEndian.AppendUint64(indexes, e.id)
 	}
 	out = rollupCheckpointZstd.EncodeAll(indexes, out)
@@ -363,7 +338,7 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 			return nil, err
 		}
 	}
-	// New parts may introduce IDs, reset barriers and activity/closure changes.
+	// New parts may introduce IDs, reset barriers and activity changes.
 	// Their part inventory does not expose the latest per-name metadata. Fold
 	// those rows before publishing the owner so idle maintenance and duplicate
 	// checks cannot consult a stale checkpoint. Deferring this needs a separate
@@ -387,7 +362,7 @@ func loadCheckpoint(db *pebble.DB, snapshot *pebble.Snapshot, file []byte, ident
 	if d.err != nil || count != countIndex || uint64(len(buf)-4-len(d.buf)) > indexOffset {
 		return nil, errCheckpoint
 	}
-	r.checkpoint = &mappedRollupCheckpoint{buf: buf, table: table, index: indexes[:count*24], names: indexes[count*24 : count*32], due: indexes[count*32:]}
+	r.checkpoint = &mappedRollupCheckpoint{buf: buf, table: table, index: indexes[:count*24], names: indexes[count*24 : count*32]}
 	// A large delta already needs most names. Decode in file order instead
 	// of turning recovery into millions of random ID-index probes.
 	if count > 0 && uint64(len(series)) >= (count+1)/2 {
@@ -480,13 +455,11 @@ func (d *checkpointDecoder) bytes() []byte {
 }
 
 func (r *coreRollups) decodeCheckpointRecord(d *checkpointDecoder, table [][]byte, series map[v2part.ID]*rollupScanEntry) error {
-	var resident []sealrollup.Delta
-
 	id := d.uvarint()
 	index := d.uvarint()
 	name := d.bytes()
 	var meta metricMetadata
-	meta.ClosedThrough = d.varint()
+	_ = d.varint() // retired closure watermark
 	meta.BaselineOrder = d.uvarint()
 	meta.ResetOrder = d.uvarint()
 	meta.LastUpdate = d.varint()
@@ -495,15 +468,12 @@ func (r *coreRollups) decodeCheckpointRecord(d *checkpointDecoder, table [][]byt
 	meta.Frontier.MaxTime = d.varint()
 	meta.Version = d.byte()
 	meta.Expired = d.byte() == 1
-	resident = resident[:0]
-	for range d.uvarint() {
-		var x sealrollup.Delta
-		x.Archive = int(d.uvarint())
-		x.Slot = d.varint()
-		x.Sample.Time = d.varint()
-		x.Sample.Bits = d.uint64()
-		x.Sample.Sequence = d.uvarint()
-		resident = append(resident, x)
+	for range d.uvarint() { // consume legacy residency without retaining it
+		_ = d.uvarint()
+		_ = d.varint()
+		_ = d.varint()
+		_ = d.uint64()
+		_ = d.uvarint()
 	}
 	if d.err != nil || index >= uint64(len(table)) {
 		return errCheckpoint
@@ -526,12 +496,6 @@ func (r *coreRollups) decodeCheckpointRecord(d *checkpointDecoder, table [][]byt
 			}
 			e.identity, e.meta = h, meta
 		}
-		for _, x := range resident {
-			// A record's Sequence is its Order.
-			if err := e.addRecord(sealrollup.Record{Delta: sealrollup.Delta{Archive: x.Archive, Slot: x.Slot, Order: x.Sample.Sequence, Sample: x.Sample}}); err != nil {
-				return errCheckpoint
-			}
-		}
 		policy, m, records, err := e.finish(v2part.ID(name))
 		if err != nil || m.ID != id {
 			return errCheckpoint
@@ -545,15 +509,6 @@ func (r *coreRollups) decodeCheckpointRecord(d *checkpointDecoder, table [][]byt
 	if err != nil || r.metrics[id] != nil {
 		return errCheckpoint
 	}
-	archives := len(m.schema().Archives)
-	m.keepRecent(meta.Frontier.MaxTime)
-	for _, x := range resident {
-		if x.Archive >= archives {
-			return errCheckpoint
-		}
-		m.installRecent(x)
-	}
-	m.keepRecent(meta.Frontier.MaxTime)
 	r.install(id, m, meta)
 	return d.err
 }

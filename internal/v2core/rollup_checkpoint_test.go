@@ -29,19 +29,10 @@ func rollupStateDigest(r *coreRollups) string {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
-	filed := map[uint64][]int64{}
-	for end, slots := range r.calendar.slots {
-		for _, s := range slots {
-			if id := r.ids[s]; id != deadSlot && !slices.Contains(filed[id], end) {
-				filed[id] = append(filed[id], end)
-			}
-		}
-	}
 	var b strings.Builder
 	for _, id := range ids {
 		m := r.metrics[id]
-		slices.Sort(filed[id])
-		fmt.Fprintf(&b, "%d %s %+v %v calendar=%v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], m.slots.AppendResident(nil), filed[id], nameIndexed(r, m))
+		fmt.Fprintf(&b, "%d %s %+v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], nameIndexed(r, m))
 	}
 	fmt.Fprintf(&b, "names=%d metrics=%d\n", r.names.Len(), len(r.metrics))
 	return b.String()
@@ -133,9 +124,6 @@ func TestRollupCheckpointMatchesScan(t *testing.T) {
 			t.Fatalf("%s: fromCheckpoint=%v want %v", dir, o.rollups.fromCheckpoint, wantCheckpoint)
 		}
 		state := ownerStateDigest(t, e)
-		if len(o.rollups.calendar.slots) == 0 {
-			t.Fatalf("%s: no open coarse window on the closure calendar", dir)
-		}
 		return e, state
 	}
 	damage := map[string]func(string){
@@ -592,49 +580,6 @@ func TestLazyCheckpointFirstSealMatchesEager(t *testing.T) {
 	// The at-seal checkpoint may serialize remaining names. Verify all state too.
 	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
 		t.Fatalf("lazy first seal differs from eager state:\n%s\n---\n%s", x, y)
-	}
-}
-
-func TestLazyCheckpointIdleClosureMatchesEager(t *testing.T) {
-	cfg, policies := checkpointTestSetup(t)
-	hooks := Hooks{Now: func() time.Time { return time.Unix(1794700800, 0) }}
-	root := t.TempDir()
-	e, err := Open(root, cfg, hooks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpointFixture(t, e, policies, 0, 23)
-	if err = e.Close(); err != nil {
-		t.Fatal(err)
-	}
-	lazyDir, eagerDir := copyTree(t, root), copyTree(t, root)
-	if err = os.Remove(filepath.Join(eagerDir, "owner-000", rollupCheckpointFile)); err != nil {
-		t.Fatal(err)
-	}
-	a, err := Open(lazyDir, cfg, hooks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.Close()
-	b, err := Open(eagerDir, cfg, hooks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-	if len(a.owners[0].rollups.metrics) != 0 {
-		t.Fatal("idle names loaded at open")
-	}
-	for _, engine := range []*Engine{a, b} {
-		engine.owners[0].rollups.now = func() time.Time { return time.Unix(1794787200, 0) }
-		if err = engine.AppendBatches(0, nil, 23, true); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if x, y := rollupScanDigest(t, a), rollupScanDigest(t, b); x != y {
-		t.Fatal("lazy idle closure differs from eager parts")
-	}
-	if x, y := ownerStateDigest(t, a), ownerStateDigest(t, b); x != y {
-		t.Fatal("lazy idle closure differs from eager state")
 	}
 }
 
