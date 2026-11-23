@@ -561,6 +561,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
 				o.plan = r.planParts
+				r.rankMu = &o.sealPubMu
 				o.rollups = r
 			}
 			// Only uncommitted staging files remain after successful atomic ingestion.

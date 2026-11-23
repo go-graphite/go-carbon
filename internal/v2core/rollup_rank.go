@@ -172,6 +172,10 @@ func (x rollupTail) Swap(i, j int) {
 // every hint, which also restores the fast path after another planner
 // overwrote one.
 func (r *coreRollups) renumber() {
+	if r.rankMu != nil {
+		r.rankMu.Lock()
+		defer r.rankMu.Unlock()
+	}
 	d, f := len(r.dense), len(r.unranked)
 	if d+f >= math.MaxUint32 {
 		return // every new name stays unranked; plans stay exact on the search path

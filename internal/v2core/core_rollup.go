@@ -12,6 +12,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -96,6 +97,7 @@ type coreRollups struct {
 	expDrained []int64
 	expRefile  []uint32
 
+	rankMu *sync.Mutex // existing owner publication lock; legacy renumber only
 	stage     func(string)
 	metrics   map[uint64]uint32 // NumericID -> owner slot; no shared pointer or hint
 	taken     []uint64

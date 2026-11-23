@@ -279,6 +279,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	}
 	next := newCoreRollups()
 	next.db = o.rollups.db
+	next.rankMu = o.rollups.rankMu
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
 	next.stage, next.expire, next.now, next.expiryTTL = o.rollups.stage, o.rollups.expire, o.rollups.now, o.rollups.expiryTTL
