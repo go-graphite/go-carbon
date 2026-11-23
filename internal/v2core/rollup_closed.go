@@ -41,12 +41,14 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 			}
 		}
 	}
-	return windowRecords(c, meta, archive, first, last, stored, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
-		var out []sealrollup.Record
+	return windowRecords(c, meta, archive, first, last, stored, func(l int, first, last int64, from uint64) ([]sealrollup.Version, error) {
+		var out []sealrollup.Version
 		err := s.eachPartRecord(ctx, m, s.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
 			return s.moves[m] == nil && from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
-		}, func(r sealrollup.Record, _ partOrigin) error {
-			out = append(out, r)
+		}, func(r sealrollup.Record, origin partOrigin) error {
+			v := r.Version()
+			v.Seq, v.Class = origin.Seq, origin.Class
+			out = append(out, v)
 			return nil
 		})
 		if move := s.moves[m]; move != nil && move.authority != nil && moveAuthorityVisible(meta, move.authority) {
@@ -58,7 +60,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 				// classes. Original Mats describe only their source stream.
 				kept := out[:0]
 				for _, old := range out {
-					if old.Sample.Time != r.Sample.Time || old.Kind == sealrollup.KindRaw || old.Kind == sealrollup.KindGhost {
+					if old.Time != r.Sample.Time || !old.Mat && !old.None {
 						kept = append(kept, old)
 					}
 				}
@@ -67,7 +69,9 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 				if e != nil {
 					return nil, e
 				}
-				out = append(out, mapped)
+				v := mapped.Version()
+				v.Seq, v.Class = move.authority.AtSeq, LivePart
+				out = append(out, v)
 			}
 		}
 		return out, err
@@ -87,7 +91,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 // range is read once. A slot keeps its stored per-slot winner (stored, the
 // winners of the range) when that equals the computed value (its order then
 // stays the stored one) or when its window has no value (an older epoch).
-func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first, last int64, stored []sealrollup.Record, load func(l int, first, last int64, from uint64) ([]sealrollup.Record, error), yield func(sealrollup.Record) error, timeFirst ...bool) error {
+func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first, last int64, stored []sealrollup.Record, load func(l int, first, last int64, from uint64) ([]sealrollup.Version, error), yield func(sealrollup.Record) error, timeFirst ...bool) error {
 	a := c.Archives[archive]
 	open := meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step
 	phys := (open / a.Step) % a.Count

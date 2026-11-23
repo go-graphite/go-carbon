@@ -46,7 +46,7 @@ func TestPartSequenceReadMergeHistoryRecovery(t *testing.T) {
 			e := mergeFixture(t, t.TempDir(), nil)
 			defer e.close()
 			o := e.owners[0]
-			policy, raw := rollupTestPolicy(t, "sequence.metric", "1s:1h", sealrollup.Last, .5)
+			policy, raw := rollupTestPolicy(t, "sequence.metric", "1s:1h,10s:2h", sealrollup.Last, 0)
 			digest, _ := sealrollup.PolicyDigest(policy.Config)
 			for i, order := range []uint64{90, 10, 100} {
 				seq := uint64(i + 1)

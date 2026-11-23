@@ -2,6 +2,7 @@ package v2core
 
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"crypto/rand"
@@ -877,48 +878,33 @@ func (e *rollupScanEntry) finish(name partsformat.ID) (RollupPolicy, RollupMetad
 	if (meta.Version < 1 || meta.Version > 4) || policy.Group != e.group || !e.identity.matchesName(string(name)) || meta.ID == 0 || meta.Frontier.Order == 0 {
 		return policy, meta, nil, fmt.Errorf("missing rollup metadata for %s", name)
 	}
-	if meta.BaselineOrder > meta.Frontier.Order {
-		return policy, meta, nil, errors.New("baseline exceeds rollup frontier")
-	}
-	if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.Version < 4 && meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.Version < 4 && meta.ResetOrder != meta.Frontier.Order) {
+	if meta.Version < 4 && meta.BaselineOrder > meta.Frontier.Order || (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.Version < 4 && meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.Version < 4 && meta.ResetOrder != meta.Frontier.Order) {
 		return policy, meta, nil, errors.New("invalid rollup reset frontier")
 	}
 	var records []sealrollup.Record
-	if e.records == nil {
-		records = nil
-		if e.hasSingle {
-			candidate := e.single[0]
-			r := candidate.record
-			if r.Archive >= len(policy.Config.Archives) || r.Slot >= policy.Config.Archives[r.Archive].Count || r.Order > meta.Frontier.Order {
-				return policy, meta, nil, errors.New("invalid rollup slot/frontier")
-			}
-			if !compactMetadata(meta).beforeReset(candidate.origin.Seq, r.Order) {
-				records = append(records, r)
-			}
-		}
-	} else {
+	if e.records != nil {
 		records = make([]sealrollup.Record, 0, len(e.records))
 	}
-	for slot, candidate := range e.records {
-		record := candidate.record
-		if slot[0] >= int64(len(policy.Config.Archives)) || slot[1] >= policy.Config.Archives[slot[0]].Count || record.Order > meta.Frontier.Order {
-			return policy, meta, nil, errors.New("invalid rollup slot/frontier")
+	add := func(candidate slotCandidate) error {
+		r := candidate.record
+		if r.Archive >= len(policy.Config.Archives) || r.Slot >= policy.Config.Archives[r.Archive].Count || r.Order > meta.Frontier.Order {
+			return errors.New("invalid rollup slot/frontier")
 		}
-		if !compactMetadata(meta).beforeReset(candidate.origin.Seq, record.Order) {
-			records = append(records, record)
+		records = append(records, r)
+		return nil
+	}
+	if e.records == nil && e.hasSingle {
+		if err := add(e.single[0]); err != nil {
+			return policy, meta, nil, err
+		}
+	}
+	for _, candidate := range e.records {
+		if err := add(candidate); err != nil {
+			return policy, meta, nil, err
 		}
 	}
 	slices.SortFunc(records, func(a, b sealrollup.Record) int {
-		if a.Archive != b.Archive {
-			return a.Archive - b.Archive
-		}
-		if a.Slot < b.Slot {
-			return -1
-		}
-		if a.Slot > b.Slot {
-			return 1
-		}
-		return 0
+		return cmp.Or(cmp.Compare(a.Archive, b.Archive), cmp.Compare(a.Slot, b.Slot))
 	})
 	return policy, meta, records, nil
 }

@@ -334,11 +334,11 @@ func TestMoveCrossBoundaryRollupRebuild(t *testing.T) {
 			var got []sealrollup.Record
 			meta := metricMetadata{Version: 3}
 			meta.Frontier.Order, meta.Frontier.MaxTime = 1, 1009
-			err := windowRecords(policy.Config, meta, 1, 0, 100, nil, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
-				var out []sealrollup.Record
+			err := windowRecords(policy.Config, meta, 1, 0, 100, nil, func(l int, first, last int64, from uint64) ([]sealrollup.Version, error) {
+				var out []sealrollup.Version
 				for _, r := range versions {
 					if r.Archive == l && r.Slot >= first && r.Slot < last {
-						out = append(out, r)
+						out = append(out, r.Version())
 					}
 				}
 				return out, nil

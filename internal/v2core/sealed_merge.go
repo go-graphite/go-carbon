@@ -1321,7 +1321,9 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		m.versions, m.view, m.gone = m.versions[:0], m.view[:0], m.gone[:0]
 		for i := range recs {
 			if r := &recs[i]; !dead(i) {
-				m.versions = append(m.versions, r.Version())
+				v := r.Version()
+				v.Seq, v.Class = origin(i).Seq, LivePart
+				m.versions = append(m.versions, v)
 				m.view = append(m.view, i)
 				m.gone = append(m.gone, expired(r))
 			}
