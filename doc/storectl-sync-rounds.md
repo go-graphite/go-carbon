@@ -68,3 +68,51 @@ requests retain the previous ten-minute HTTP allowance. An exhausted data read
 uses the existing split-and-skip path; timed-out proof/metadata batches remain
 skipped residuals without a clean proof. Parent cancellation still stops the pass.
 Copy/import retries retain their existing receipt and restart handling.
+
+## Automatic ingest fill
+
+`--fill-path=auto` selects the repair transport per name during fill. Names
+already present on the target can replay just their missing finite values to
+`--fill-ingest` (default `127.0.0.1:2003`). Run the controller on the target or
+set that address to the target's plaintext receiver. Missing names continue
+through transfer. `--fill-path=transfer` retains the previous transport for all
+names; these operational flags can also override `--resume`.
+
+Eligibility is deliberately conservative. Normal `UpdateMany` routes a past
+point to the first archive whose retention covers its age, then propagates to
+coarser archives. Replay therefore requires every observed hole for a name to
+belong to its last archive, and to be older than the preceding archive's
+retention. Single-archive names satisfy the latter condition automatically.
+There is a two-minute margin at age boundaries; ineligible names, unknown grids,
+and nonliteral plaintext names use the existing transfer/window engine. This
+protects independently stored coarse values from propagation. It also means a
+multi-archive campaign can remain entirely on transfer.
+
+Replay compares fresh donor and target series over the saved hole ranges,
+keeps existing finite target values, and formats floats with round-trip exact
+precision. It requires target health monitoring: pause at 75% cache occupancy,
+resume below 60%, wait on missing health data, and abort the invocation on an
+observed overflow increase. Disabling target health selects transfer.
+
+A socket write alone is insufficient for completion. Before fsyncing a done
+range, the controller reads every sent value back through carbonserver and
+compares IEEE-754 bits. Coarser archives currently require persistence before
+read-back because carbonserver only overlays the cache at the finest step.
+Round two retains the normal verification scope. Window repair counts include
+confirmed replay batches; an interrupted write keeps an uncertain count.
+
+Full-history replay uses the existing copy journal identity and done ranges, so
+an interrupted fill from an older binary skips completed work and can replay
+unfinished eligible names. An already-entered native window transaction keeps
+its original recovery protocol; a new window fill uses separate ingest receipts
+and keeps its fallback inside the selected windows. Neither option changes the
+data identity or requires a new state directory.
+
+To roll back the transport, keep this binary and resume with
+`--fill-path=transfer`. An older binary may not recognize the new flags saved in
+`config.json` after the first upgraded invocation.
+
+Plaintext ingest does not provide an atomic missing-only condition. Comparing
+before sending and confirming afterwards cannot fence a concurrent historical
+writer. Qualification of that assumption is required before enabling replay on
+a live target; transfer remains the path with an atomic target-wins merge.

@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/ingestreplay"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"golang.org/x/time/rate"
 )
@@ -21,21 +21,7 @@ const contentTypeV3 = "application/x-carbonapi-v3-pb"
 
 // series is one metric's values at its first-archive step, as carbonserver
 // returns them: Values[i] belongs to Start + i*Step, NaN when absent.
-type series struct {
-	Start, Step int64
-	Values      []float64
-}
-
-func (s series) at(ts int64) (float64, bool) {
-	if s.Step <= 0 || ts < s.Start || (ts-s.Start)%s.Step != 0 {
-		return math.NaN(), false
-	}
-	i := (ts - s.Start) / s.Step
-	if i >= int64(len(s.Values)) {
-		return math.NaN(), false
-	}
-	return s.Values[i], true
-}
+type series = ingestreplay.Series
 
 type clientStats struct {
 	requests, retries, failures, bytesOut, bytesIn atomic.Int64

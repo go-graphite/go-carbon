@@ -111,6 +111,8 @@ type syncOptions struct {
 	fullHistory      bool
 	progress         time.Duration
 	now              func() time.Time
+
+	fillPath, fillIngest string
 }
 
 func (o *syncOptions) normalize() error {
@@ -380,6 +382,7 @@ type syncer struct {
 	windowRetryCopyError error // selection waits must not hide rejected repairs
 	legacyCopyReceipts   bool  // keep the selection and transport of old window campaigns
 	verificationBase     int   // append fresh rounds after a terminal residual verdict
+	fillHoles            map[string][]syncHole
 	o                    syncOptions
 	b                    syncBackend
 	j                    *syncJournal
@@ -830,7 +833,16 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	}
 	event("sync_copy", map[string]any{"phase": phase, "round": round, "source": source, "names": len(names), "journal": journal})
 	var res syncCopyResult
-	if s.windowOnly() && !s.legacyCopyReceipts {
+	if backend, ok := s.b.(syncIngestBackend); phase == "fill" && s.o.fillPath != "transfer" && ok && s.fillHoles != nil {
+		ctx = context.WithValue(ctx, syncCopyProgressKey{}, s.prog.copyCommitted)
+		if s.windowOnly() && !s.legacyCopyReceipts {
+			ctx = syncWindowProgressContext(ctx, s.prog.windowCommitted)
+			if live, ok := s.b.(interface{ beginWindowCopy() func() }); ok {
+				defer live.beginWindowCopy()()
+			}
+		}
+		res, err = backend.Fill(ctx, source, s.o.to, names, journal, syncIngestOptions{addr: s.o.fillIngest, holes: s.fillHoles, windows: s.copyWindows(), windowOnly: s.windowOnly() && !s.legacyCopyReceipts, now: s.o.now})
+	} else if s.windowOnly() && !s.legacyCopyReceipts {
 		backend, ok := s.b.(syncWindowBackend)
 		if !ok {
 			return res, errors.New("backend does not support window-only copy")
@@ -1079,6 +1091,7 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 			s.prog.planVerification(nextVerifyNames)
 		}
 		work := 0
+		s.fillHoles = latest
 		for src := range s.o.from {
 			names := bySource[src]
 			if len(names) == 0 {

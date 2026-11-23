@@ -66,6 +66,8 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	flags := flag.NewFlagSet("storectl sync", flag.ContinueOnError)
 	registerCopyFlags(flags, &c.copy)
+	flags.StringVar(&c.sync.fillPath, "fill-path", "auto", "fill holes through ingest when archive routing is safe; auto or transfer")
+	flags.StringVar(&c.sync.fillIngest, "fill-ingest", "127.0.0.1:2003", "target plaintext receiver for automatic fill (run sync on the target, or override)")
 	flags.BoolVar(&c.health.enabled, "target-health", true, "pause new sync batches while the target ingest cache is overloaded; monitoring failures log and continue")
 	flags.Float64Var(&c.health.high, "target-health-high", 0.75, "pause at or above this fraction of the target cache limit")
 	flags.Float64Var(&c.health.low, "target-health-low", 0.60, "resume below this fraction of the target cache limit")
@@ -122,6 +124,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	if math.IsNaN(c.health.low) || math.IsNaN(c.health.high) || c.health.low <= 0 || c.health.low >= c.health.high || c.health.high > 1 {
 		return c, errors.New("target health thresholds must satisfy 0 < --target-health-low < --target-health-high <= 1")
+	}
+	if c.sync.fillPath != "auto" && c.sync.fillPath != "transfer" {
+		return c, errors.New("--fill-path must be auto or transfer")
 	}
 	if c.timeout < 0 {
 		return c, errors.New("--timeout must be nonnegative")

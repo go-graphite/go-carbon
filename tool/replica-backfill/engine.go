@@ -10,10 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/ingestreplay"
 )
 
 type engineConfig struct {
@@ -159,7 +160,7 @@ func compactStrings(s []string) []string {
 // validName rejects names the plaintext protocol cannot carry and names
 // carbonserver would expand as globs.
 func validName(n string) bool {
-	return n != "" && !strings.ContainsAny(n, " \t\r\n*?[]{}")
+	return ingestreplay.ValidName(n)
 }
 
 // localGaps finds the window slots the local host lacks. A metric without any
@@ -224,10 +225,8 @@ func (e *engine) fill(name string, g gap, s series) (pts []point, ok, mismatch b
 			break
 		}
 	}
-	for _, ts := range g.slots {
-		if v, in := s.at(ts); in && !math.IsNaN(v) {
-			pts = append(pts, point{name, v, ts})
-		}
+	for _, p := range ingestreplay.Select(ingestreplay.Series(s), g.slots) {
+		pts = append(pts, point{name, p.Value, p.Timestamp})
 	}
 	return pts, hasData, false
 }

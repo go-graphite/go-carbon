@@ -34,6 +34,8 @@ type targetHealthGate struct {
 	changed      chan struct{}
 	previous     float64
 	havePrevious bool
+	healthy      bool
+	ingestStop   error
 }
 
 func newTargetHealthGate(target string, high, low float64) *targetHealthGate {
@@ -44,6 +46,13 @@ func (g *targetHealthGate) update(sample targetHealthSample, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	paused := !g.pausedAt.IsZero()
+	g.healthy = err == nil
+	if err == nil && g.havePrevious && sample.dropped > g.previous {
+		g.ingestStop = fmt.Errorf("target ingest overflow increased from %g to %g; stop and inspect before resuming", g.previous, sample.dropped)
+	}
+	// Ingest waiters also need notification when health recovers without an
+	// occupancy transition. Transfer retains its existing fail-open policy.
+	defer func() { close(g.changed); g.changed = make(chan struct{}) }()
 	next := paused
 	occupancy := float64(0)
 	reason := "cache_occupancy"
@@ -75,13 +84,35 @@ func (g *targetHealthGate) update(sample targetHealthSample, err error) {
 		g.seconds += time.Since(g.pausedAt).Seconds()
 		g.pausedAt = time.Time{}
 	}
-	close(g.changed)
-	g.changed = make(chan struct{})
 	fields := map[string]any{"target": g.target, "reason": reason, "high": g.high, "low": g.low}
 	if err == nil {
 		fields["occupancy"], fields["cache_points"], fields["cache_limit_points"], fields["overflow_dropped_points_total"] = occupancy, sample.points, sample.limit, sample.dropped
 	}
 	event(kind, fields)
+}
+
+// Replay must not write with unknown cache health, or continue after observed
+// drops. Unlike transfer admission, overflow is fatal for this invocation.
+func (g *targetHealthGate) waitIngest(ctx context.Context) error {
+	if g == nil {
+		return fmt.Errorf("ingest fill requires target health monitoring")
+	}
+	for {
+		g.mu.Lock()
+		err, ready, changed := g.ingestStop, g.healthy && g.pausedAt.IsZero(), g.changed
+		g.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		if ready {
+			return ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
 }
 
 func (g *targetHealthGate) wait(ctx context.Context) error {

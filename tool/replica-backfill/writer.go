@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/go-graphite/go-carbon/helper/heartbeat"
+	"github.com/go-graphite/go-carbon/internal/ingestreplay"
 )
 
 type point struct {
@@ -116,12 +116,7 @@ func (w *writer) run(ctx context.Context) error {
 			return fail(ctx.Err())
 		case req := <-w.in:
 			for _, p := range req.pts {
-				w.buf = append(w.buf, p.name...)
-				w.buf = append(w.buf, ' ')
-				w.buf = strconv.AppendFloat(w.buf, p.value, 'g', -1, 64)
-				w.buf = append(w.buf, ' ')
-				w.buf = strconv.AppendInt(w.buf, p.ts, 10)
-				w.buf = append(w.buf, '\n')
+				w.buf = ingestreplay.AppendPoint(w.buf, p.name, p.value, p.ts)
 				w.bufPts++
 				if w.bufPts >= w.flushPts {
 					if err := w.flush(ctx); err != nil {
@@ -215,11 +210,7 @@ func (w *writer) send() error {
 		}
 		w.conn = c
 	}
-	if err := w.conn.SetWriteDeadline(time.Now().Add(w.timeout)); err != nil {
-		return err
-	}
-	_, err := w.conn.Write(w.buf)
-	return err
+	return ingestreplay.Send(w.conn, w.buf, w.timeout)
 }
 
 // cacheGate pauses writes while the local cache is above a fraction of its
