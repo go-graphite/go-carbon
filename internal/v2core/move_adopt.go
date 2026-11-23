@@ -282,7 +282,8 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
 	next.stage, next.expire, next.now, next.expiryTTL = o.rollups.stage, o.rollups.expire, o.rollups.now, o.rollups.expiryTTL
-	for id, m := range o.rollups.metrics {
+	for id := range o.rollups.metrics {
+		m := o.rollups.installed(id)
 		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
 	}
 	for name, donor := range prepared.index.metrics {
@@ -309,7 +310,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.definitionBytes()), Revision: 1, LastUpdate: now * 1e9}
 		local.Frontier.Policy = donor.latest.policy.prepared.Digest()
-		if old := o.rollups.metrics[id]; old != nil {
+		if old := o.rollups.installed(id); old != nil {
 			if !bytes.Equal(old.definitionBytes(), local.Policy) {
 				return errors.New("receiving ID belongs to another name")
 			}

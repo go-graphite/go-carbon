@@ -97,7 +97,7 @@ type coreRollups struct {
 	expRefile  []uint32
 
 	stage     func(string)
-	metrics   map[uint64]*rollupMetric
+	metrics   map[uint64]uint32 // NumericID -> owner slot; no shared pointer or hint
 	taken     []uint64
 	due       []uint32
 	planNow   int64
@@ -125,7 +125,10 @@ type coreRollups struct {
 	pending    bool
 	coverage   map[string]*rollupCoverage
 
-	// Owner-local slots, in rank order. dense holds every ranked installed
+	// Owner-local slots. Dictionary-backed owners keep all metrics in
+	// unranked arrival slots and replace them in place, so no dead slot is
+	// created and no lexical compaction is needed. Name-keyed owners use
+	// rank order: dense holds every ranked installed
 	// metric in canonical (group, vshard, length, name) order, so a seal
 	// sorts stages by uint32 rank instead of name bytes; unranked holds those
 	// installed since the last renumber, in arrival order. Slot s < len(dense)
@@ -158,14 +161,13 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]*rollupMetric{}, expiries: calendar{slots: map[int64][]uint32{}}}
+	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]uint32{}, expiries: calendar{slots: map[int64][]uint32{}}}
 }
 
 // install is the only writer of metrics and names. It indexes every installed
 // name and files its inactivity expiry, when enabled. meta becomes id's scalars.
 func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
-	old := r.metrics[id]
-	r.metrics[id] = m
+	old := r.installed(id)
 	s := uint32(len(r.ids))
 	if old != nil {
 		s = r.slotOf(id, old)
@@ -186,6 +188,7 @@ func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
 		r.ttl, r.expAt = append(r.ttl, 0), append(r.expAt, 0)
 	}
 	r.meta[s] = meta
+	r.metrics[id] = s
 	m.ownerSlot.Store(s + 1)
 	if old != m {
 		r.names.Put(m.fingerprint(), 0) // a set: the slot is m's ownerSlot
@@ -390,7 +393,7 @@ func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
 func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *ApplicationPolicy) bool {
 	due := false
 	h.rawView(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
-		if r.metrics[id] != nil {
+		if r.installed(id) != nil {
 			return true
 		}
 		b := coreBatch{ID: id}
@@ -416,7 +419,7 @@ func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *Ap
 // nil r (no rollups) has nothing installed.
 func (r *coreRollups) noteNewNames(h *pendingHead, lookup func(uint64) *ApplicationPolicy) {
 	h.rawView(lookup).IDs(h.freshScanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
-		if cold != nil || (r != nil && r.metrics[id] != nil) {
+		if cold != nil || (r != nil && r.installed(id) != nil) {
 			return true
 		}
 		if _, ok := h.freshIDs[id]; ok {
@@ -531,7 +534,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	stages, metrics := r.stages[:0], r.stageMetrics[:0]
 
-	if len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
+	if dict == nil && len(r.unranked) > 0 && len(r.unranked)*rankSlack >= len(r.dense) {
 		r.renumber()
 	}
 	// One stable sort of the frozen view's applications by ID makes each
@@ -584,15 +587,17 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		if first.cold != nil {
 			firstRegistered, firstPolicy = first.cold.Registered, first.cold.Policy
 		}
-		// A ranked name whose identity carries this planner's slot reaches
-		// its metric through dense. Fresh and unranked names, policy-bytes
-		// batches and hints another planner overwrote probe the metrics map.
+		// A valid identity hint reaches either kind of owner slot directly.
+		// Missing or overwritten hints use the owner's numeric slot map.
 		var m *rollupMetric
 		slot, hinted := r.hintSlot(firstRegistered, id)
 		rk := uint32(0)
-		if hinted && int(slot) < len(r.dense) {
-			m, rk = r.dense[slot], slot+1
-		} else if m = r.metrics[id]; m != nil && !hinted {
+		if hinted {
+			m = r.slotMetric(slot)
+			if int(slot) < len(r.dense) {
+				rk = slot + 1
+			}
+		} else if m = r.installed(id); m != nil && !hinted {
 			slot = r.slotOf(id, m)
 		}
 		fresh := m == nil
@@ -1155,7 +1160,7 @@ func (r *coreRollups) installRecovered(policy RollupPolicy, meta RollupMetadata,
 	if err != nil {
 		return err
 	}
-	if r.metrics[meta.ID] != nil {
+	if r.installed(meta.ID) != nil {
 		return errors.New("duplicate recovered rollup ID")
 	}
 	r.install(meta.ID, m, compactMetadata(meta))

@@ -390,7 +390,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 			due := false
 			h.view(find).Each(func(a *PendingApplication) bool {
 				b := coreBatch{ID: a.ID, Registered: a.Registered(), Policy: a.Policy}
-				due = r.metrics[a.ID] == nil && r.needsMetadataSeal(&b)
+				due = r.installed(a.ID) == nil && r.needsMetadataSeal(&b)
 				return !due
 			})
 			return due
@@ -411,7 +411,8 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 			// packet carries a never-seen name (some wide), often the packet's
 			// first, so a pass that skips one position diverges.
 			for _, b := range packet {
-				r.metrics[b.ID] = &rollupMetric{}
+				r.metrics[b.ID] = uint32(len(r.unranked))
+				r.unranked = append(r.unranked, &rollupMetric{})
 			}
 			if rng.IntN(2) == 0 {
 				fresh := 0
@@ -444,7 +445,8 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 				// A due pass seals: install every pending name, as the seal
 				// would, and start a fresh head.
 				h.view(find).IDs(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
-					r.metrics[id] = &rollupMetric{}
+					r.metrics[id] = uint32(len(r.unranked))
+					r.unranked = append(r.unranked, &rollupMetric{})
 					return true
 				})
 				h = pendingHead{}
@@ -476,7 +478,8 @@ func BenchmarkPendingScan(b *testing.B) {
 	lookup := func(id uint64) *ApplicationPolicy { lookups++; return pols[id-1] }
 	r := newCoreRollups()
 	for id := range pols {
-		r.metrics[uint64(id)+1] = &rollupMetric{}
+		r.metrics[uint64(id)+1] = uint32(len(r.unranked))
+		r.unranked = append(r.unranked, &rollupMetric{})
 	}
 	encoded := make([]pendingRows, len(packets))
 	for i, packet := range packets {
@@ -511,7 +514,7 @@ func BenchmarkPendingScan(b *testing.B) {
 					due = r.pendingMetadataDue(h, lookup)
 				} else {
 					h.view(lookup).Each(func(a *PendingApplication) bool {
-						if r.metrics[a.ID] != nil {
+						if r.installed(a.ID) != nil {
 							return true
 						}
 						c := coreBatch{ID: a.ID, Registered: a.Registered(), Policy: a.Policy}
@@ -561,7 +564,7 @@ func BenchmarkPendingScan(b *testing.B) {
 				}
 				t0 = time.Now()
 				for j := range batches {
-					if c := &batches[j]; r.metrics[c.ID] == nil && r.needsMetadataSeal(c) {
+					if c := &batches[j]; r.installed(c.ID) == nil && r.needsMetadataSeal(c) {
 						b.Fatal("due")
 					}
 				}

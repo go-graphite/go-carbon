@@ -34,20 +34,21 @@ func checkRankArray(t *testing.T, r *coreRollups, seal int) {
 	for s, id := range r.ids {
 		m := slotMetric(s)
 		if id == deadSlot {
-			if s >= len(r.dense) || r.metrics[m.id] == m {
+			if s >= len(r.dense) || r.installed(m.id) == m {
 				t.Fatalf("seal %d: dead slot %d holds a live or unranked metric", seal, s)
 			}
 			continue
 		}
-		if m.id != id || r.metrics[id] != m {
-			t.Fatalf("seal %d: slot %d id %d holds metric %d (installed %v)", seal, s, id, m.id, r.metrics[id] == m)
+		if m.id != id || r.installed(id) != m {
+			t.Fatalf("seal %d: slot %d id %d holds metric %d (installed %v)", seal, s, id, m.id, r.installed(id) == m)
 		}
 		if prior, dup := owner[id]; dup {
 			t.Fatalf("seal %d: id %d owns slots %d and %d", seal, id, prior, s)
 		}
 		owner[id] = s
 	}
-	for id, m := range r.metrics {
+	for id := range r.metrics {
+		m := r.installed(id)
 		s, ok := owner[id]
 		if h, hinted := r.hintSlot(m.PolicyIdentity, id); !ok || hinted && h != uint32(s) {
 			t.Fatalf("seal %d: id %d has no slot or a hint to another slot", seal, id)
@@ -75,7 +76,9 @@ func unrankAll(r *coreRollups) {
 			continue
 		}
 		moved[s] = uint32(len(ids))
-		ms = append(ms, r.slotMetric(uint32(s)))
+		m := r.slotMetric(uint32(s))
+		r.metrics[id] = uint32(len(ms))
+		ms = append(ms, m)
 		ids, meta = append(ids, id), append(meta, r.meta[s])
 		ttl, expAt = append(ttl, r.ttl[s]), append(expAt, r.expAt[s])
 	}
@@ -177,7 +180,8 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 						mod = 97
 					}
 					for _, p := range []*coreRollups{ranked, ref} {
-						for id, m := range p.metrics {
+						for id := range p.metrics {
+							m := p.installed(id)
 							if id%mod == 1 {
 								p.install(id, newRollupMetric(m.PolicyIdentity), freshMetadata)
 							}
@@ -223,7 +227,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					slices.Sort(adopted)
 					rng.Shuffle(len(adopted), func(i, j int) { adopted[i], adopted[j] = adopted[j], adopted[i] })
 					for _, id := range adopted {
-						m := ranked.metrics[id]
+						m := ranked.installed(id)
 						next.install(id, m, ranked.metaOf(id))
 					}
 					plan, err := next.plan(coreSealInput{Batches: batches})
@@ -328,7 +332,8 @@ func TestRollupSlotArraysScaleWithNames(t *testing.T) {
 		r.install(m.id, m, metricMetadata{})
 	}
 	r.renumber()
-	for id, m := range r.metrics {
+	for id := range r.metrics {
+		m := r.installed(id)
 		if id%5 == 0 {
 			c := *m
 			r.install(id, &c, r.metaOf(id))

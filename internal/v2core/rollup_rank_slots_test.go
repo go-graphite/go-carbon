@@ -34,7 +34,7 @@ func TestRollupRenumberMovesSlotColumns(t *testing.T) {
 				model[m.id] = md
 			case op < 6: // adoption replaces the metric under an ID
 				id := uint64(rng.IntN(next) + 1)
-				if old := r.metrics[id]; old != nil {
+				if old := r.installed(id); old != nil {
 					c := *old
 					md := meta()
 					r.install(id, &c, md)
@@ -42,14 +42,14 @@ func TestRollupRenumberMovesSlotColumns(t *testing.T) {
 				}
 			case op < 7: // a seal commits new scalars for the same metric
 				id := uint64(rng.IntN(next) + 1)
-				if m := r.metrics[id]; m != nil {
+				if m := r.installed(id); m != nil {
 					md := meta()
 					r.install(id, m, md)
 					model[id] = md
 				}
 			case op < 8: // another planner overwrites a hint
 				id := uint64(rng.IntN(next) + 1)
-				if m := r.metrics[id]; m != nil {
+				if m := r.installed(id); m != nil {
 					m.ownerSlot.Store(uint32(rng.IntN(len(r.ids) + 2)))
 				}
 			default:
@@ -67,7 +67,7 @@ func TestRollupRenumberMovesSlotColumns(t *testing.T) {
 			}
 			checkRankArray(t, r, step)
 			for id, want := range model {
-				if got := r.meta[r.slotOf(id, r.metrics[id])]; got != want {
+				if got := r.meta[r.slotOf(id, r.installed(id))]; got != want {
 					t.Fatalf("seed %d step %d: id %d scalars %+v, want %+v", seed, step, id, got, want)
 				}
 			}

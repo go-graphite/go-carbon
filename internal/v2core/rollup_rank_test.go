@@ -48,7 +48,7 @@ func checkDense(t *testing.T, r *coreRollups) {
 		t.Fatalf("dense %d != metrics %d", len(r.dense), len(r.metrics))
 	}
 	for i, m := range r.dense {
-		if r.ids[i] != m.id || r.metrics[m.id] != m {
+		if r.ids[i] != m.id || r.installed(m.id) != m {
 			t.Fatalf("dense[%d] stale", i)
 		}
 		if i > 0 && compareRollupMetrics(r.dense[i-1], m) >= 0 {
@@ -77,7 +77,8 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 			// Replace a few installed metrics with struct copies (stale rank),
 			// then reinstall some originals over their copies.
 			origs := map[uint64]*rollupMetric{}
-			for id, m := range r.metrics {
+			for id := range r.metrics {
+				m := r.installed(id)
 				if id%7 == 0 {
 					c := *m
 					origs[id] = m
@@ -93,7 +94,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 			}
 			// Unranked installs stay below the renumber threshold.
 			for i := range all {
-				if r.metrics[all[i].id] == nil && i%13 == 0 {
+				if r.installed(all[i].id) == nil && i%13 == 0 {
 					r.install(all[i].id, all[i], metricMetadata{})
 				}
 			}
@@ -102,7 +103,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				stages := make([]rollupStage, 0, n)
 				var metrics []*rollupMetric
 				for _, m := range all {
-					if r.metrics[m.id] == m || rng.IntN(4) == 0 {
+					if r.installed(m.id) == m || rng.IntN(4) == 0 {
 						stages, metrics = append(stages, rollupStage{}), append(metrics, m)
 						r.stageKey(&stages[len(stages)-1], m, nil)
 					}
@@ -202,7 +203,8 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 					for _, p := range []**coreRollups{&ranked, &ref} {
 						next := newPlanner()
 						next.identities = (*p).identities
-						for id, m := range (*p).metrics {
+						for id := range (*p).metrics {
+							m := (*p).installed(id)
 							next.install(id, m, (*p).metaOf(id))
 						}
 						*p = next
@@ -210,7 +212,8 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 				case 45, 75:
 					// A move replaces every 7th installed metric in place.
 					for _, p := range []*coreRollups{ranked, ref} {
-						for id, m := range p.metrics {
+						for id := range p.metrics {
+							m := p.installed(id)
 							if id%7 == uint64(seal%7) {
 								c := *m
 								p.install(id, &c, p.metaOf(id))

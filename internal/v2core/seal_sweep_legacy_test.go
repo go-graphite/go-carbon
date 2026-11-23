@@ -43,7 +43,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	for bi, b := range in.Batches {
 		i, ok := positions[b.ID]
 		if !ok {
-			m := r.metrics[b.ID]
+			m := r.installed(b.ID)
 			fresh := m == nil
 			if fresh {
 				if h := b.Registered; h != nil && h.catalog == r.identities && h.id == b.ID {
@@ -120,7 +120,8 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		now = r.now()
 	}
 	if r.expire != nil {
-		for id, m := range r.metrics { // the full walk: single-archive names are never due
+		for id := range r.metrics { // the full walk: single-archive names are never due
+			m := r.installed(id)
 			if _, seen := positions[id]; seen {
 				continue
 			}

@@ -116,27 +116,23 @@ func (r *coreRollups) metricRank(m *rollupMetric) uint32 {
 // passes ids[s] == id there, and the next renumber drops the slot.
 const deadSlot = math.MaxUint64
 
-// slotOf returns the slot of m, installed under id. Its identity hint answers
-// in O(1). When another planner overwrote the hint, a binary search of dense
-// finds a ranked m and a scan of unranked (at most 1/rankSlack of dense) an
-// unranked one; the hint is then restored, so each lost hint costs one search.
+// installed resolves this owner's numeric ID through its slot map.
+func (r *coreRollups) installed(id uint64) *rollupMetric {
+	s, ok := r.metrics[id]
+	if !ok {
+		return nil
+	}
+	return r.slotMetric(s)
+}
+
+// slotOf uses the owner's numeric map, so move adoption can share metrics
+// and overwrite identity hints without a name comparison or an unranked scan.
 func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
-	if s, ok := r.hintSlot(m.PolicyIdentity, id); ok {
+	if s, ok := r.hintSlot(m.PolicyIdentity, id); ok && r.slotMetric(s) == m {
 		return s
 	}
-	s, found := uint32(0), false
-	for p, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics); p < len(r.dense) && compareRollupMetrics(r.dense[p], m) == 0; p++ {
-		if r.dense[p] == m && r.ids[p] == id {
-			s, found = uint32(p), true
-			break
-		}
-	}
-	for k := len(r.unranked) - 1; !found && k >= 0; k-- {
-		if r.unranked[k] == m {
-			s, found = uint32(len(r.dense)+k), true
-		}
-	}
-	if !found {
+	s, ok := r.metrics[id]
+	if !ok || r.slotMetric(s) != m {
 		panic("v2core: installed rollup metric has no owner slot")
 	}
 	m.ownerSlot.Store(s + 1)
@@ -231,6 +227,7 @@ func (r *coreRollups) renumber() {
 	}
 	r.expiries.move(moved)
 	for s, m := range r.dense {
+		r.metrics[r.ids[s]] = uint32(s)
 		if m.ownerSlot.Load() != uint32(s)+1 {
 			m.ownerSlot.Store(uint32(s) + 1)
 		}

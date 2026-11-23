@@ -235,7 +235,7 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
-		m := w.r.metrics[id]
+		m := w.r.installed(id)
 		next.install(id, m, w.r.metaOf(id))
 	}
 	return next
@@ -244,7 +244,8 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 // move replaces every 7th installed metric with a struct copy in place, so
 // the stale dense entry must drop at the next renumber.
 func (w *sealSweepWorld) move(seal int) {
-	for id, m := range w.r.metrics {
+	for id := range w.r.metrics {
+		m := w.r.installed(id)
 		if id%7 == uint64(seal%7) {
 			c := *m
 			w.r.install(id, &c, w.r.metaOf(id))
@@ -258,7 +259,7 @@ func (w *sealSweepWorld) input(s *sealSweepScript, seal int) (coreSealInput, int
 	for _, b := range s.seals[seal].batches {
 		n := &s.names[b.id-1]
 		cb := coreBatch{ID: b.id, Order: b.order, Clock: b.clock, Policy: n.policy, Points: slices.Clone(b.points)}
-		installed := w.r.metrics[b.id] != nil
+		installed := w.r.installed(b.id) != nil
 		if !installed {
 			fresh++
 		}
@@ -392,7 +393,7 @@ func sealSweepState(r *coreRollups) sealSweepPlannerState {
 	}
 	slices.Sort(st.IDs)
 	for _, id := range st.IDs {
-		st.Meta = append(st.Meta, r.metadataOf(id, r.metrics[id]))
+		st.Meta = append(st.Meta, r.metadataOf(id, r.installed(id)))
 	}
 	for _, m := range r.dense {
 		st.Dense = append(st.Dense, m.metricName())
