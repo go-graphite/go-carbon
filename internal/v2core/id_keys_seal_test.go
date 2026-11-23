@@ -27,7 +27,14 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 	v2part.IDKeys.Store(true)
 	t.Cleanup(func() { v2part.IDKeys.Store(false) })
 	t.Setenv("CORE_MERGE_WORKERS", "0")
-	const names = 24
+	names := int64(24)
+	if raceEnabled {
+		// Pebble records a leak-detection stack on each table iterator open
+		// under -race. Scale only the independent names; keep every epoch,
+		// schema, method, merge, restart and assertion in the race run.
+		const raceNames = 4
+		names = raceNames
+	}
 	for method := sealrollup.Average; method <= sealrollup.First; method += 3 {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {
