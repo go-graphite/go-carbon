@@ -26,7 +26,7 @@ var v2GCDescs = struct{ pending, removed, unlinked *prometheus.Desc }{
 
 var v2Descs = struct {
 	ingest, committed, buffered, dispatch, seals, sealTime, sealLag                   *prometheus.Desc
-	durableSeals, sealNames, sealPoints, ckptBytes, ckptFailures                      *prometheus.Desc
+	durableSeals, sealNames, sealPoints                                               *prometheus.Desc
 	parts, debt, compacted, obsolete, live, dual, reads, names, rollupLag, readStages *prometheus.Desc
 }{
 	ingest:       prometheus.NewDesc("v2_ingest_points_total", "Points accepted by the v2 TCP receiver; use rate() for points per second.", nil, nil),
@@ -37,8 +37,6 @@ var v2Descs = struct {
 	durableSeals: prometheus.NewDesc("v2_durable_seals_total", "Owner seals that became durable; the denominator for names and points per seal.", nil, nil),
 	sealNames:    prometheus.NewDesc("v2_seal_names_total", "Names with points in durable owner seals, excluding idle rollup closures; divide by v2_durable_seals_total for names per seal.", nil, nil),
 	sealPoints:   prometheus.NewDesc("v2_seal_points_total", "Points in durable owner seals; divide by v2_durable_seals_total for points per seal, or by v2_seal_names_total for points per name.", nil, nil),
-	ckptBytes:    prometheus.NewDesc("v2_rollup_checkpoint_bytes_total", "Bytes of owner rollup checkpoints written; rate() gives checkpoint write bandwidth.", nil, nil),
-	ckptFailures: prometheus.NewDesc("v2_rollup_checkpoint_failures_total", "Failed owner rollup checkpoint writes; the next open folds more parts.", nil, nil),
 	sealTime:     prometheus.NewDesc("v2_seal_seconds_total", "Time spent sorting, reducing and durably writing owner seals, summed across owners.", nil, nil),
 	sealLag:      prometheus.NewDesc("v2_seal_lag_seconds", "Maximum age of an unsealed owner head; excludes time in receiver and dispatch queues. Rollups share this seal boundary.", nil, nil),
 	rollupLag:    prometheus.NewDesc("v2_rollup_lag_seconds", "Age of the oldest unsealed owner head. Rollups are committed in that same seal; excludes upstream queues.", nil, nil),
@@ -72,7 +70,7 @@ func (*v2Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{v2GCDescs.pending, v2GCDescs.removed, v2GCDescs.unlinked, v2MergeDescs.live, v2MergeDescs.pressure, v2MergeDescs.runs, v2CatalogDescs.baseErrors, v2CatalogDescs.baseHeap} {
 		ch <- d
 	}
-	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.durableSeals, v2Descs.sealNames, v2Descs.sealPoints, v2Descs.ckptBytes, v2Descs.ckptFailures, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.readStages, v2Descs.names, v2Descs.rollupLag} {
+	for _, d := range []*prometheus.Desc{v2Descs.ingest, v2Descs.committed, v2Descs.buffered, v2Descs.dispatch, v2Descs.seals, v2Descs.durableSeals, v2Descs.sealNames, v2Descs.sealPoints, v2Descs.sealTime, v2Descs.sealLag, v2Descs.parts, v2Descs.debt, v2Descs.compacted, v2Descs.obsolete, v2Descs.live, v2Descs.dual, v2Descs.reads, v2Descs.readStages, v2Descs.names, v2Descs.rollupLag} {
 		ch <- d
 	}
 }
@@ -112,8 +110,6 @@ func (c *v2Collector) Collect(ch chan<- prometheus.Metric) {
 	emit(v2Descs.durableSeals, prometheus.CounterValue, float64(s.DurableSeals))
 	emit(v2Descs.sealNames, prometheus.CounterValue, float64(s.SealNames))
 	emit(v2Descs.sealPoints, prometheus.CounterValue, float64(s.SealPoints))
-	emit(v2Descs.ckptBytes, prometheus.CounterValue, float64(s.CheckpointBytes))
-	emit(v2Descs.ckptFailures, prometheus.CounterValue, float64(s.CheckpointFailures))
 	emit(v2Descs.sealTime, prometheus.CounterValue, float64(s.SealNanoseconds)/1e9)
 	emit(v2Descs.sealLag, prometheus.GaugeValue, s.SealLagSeconds)
 	emit(v2Descs.rollupLag, prometheus.GaugeValue, s.SealLagSeconds)

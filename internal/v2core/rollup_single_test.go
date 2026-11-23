@@ -56,9 +56,6 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 		t.Fatal(err)
 	}
 	closable := func() []int {
-		if err := e.owners[0].rollups.loadAllCheckpoint(); err != nil {
-			t.Fatal(err)
-		}
 		return nil // seals have no closure work, regardless of archive count
 	}
 	before := closable()

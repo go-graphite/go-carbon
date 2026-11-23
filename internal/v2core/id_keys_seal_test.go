@@ -55,16 +55,10 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 				roots := []string{t.TempDir(), t.TempDir()}
 				hooks := []coreHooks{{}, {IDKeys: true}}
 				engines := make([]*coreEngine, 2)
-				// reopen closes and reopens store i; scan drops the owner
-				// checkpoint first, so the open rebuilds every name from parts.
-				reopen := func(i int, scan ...bool) {
+				// Every reopen rebuilds owner scalars from durable envelopes.
+				reopen := func(i int) {
 					if engines[i] != nil {
 						if err := engines[i].close(); err != nil {
-							t.Fatal(err)
-						}
-					}
-					if len(scan) > 0 && scan[0] {
-						if err := os.Remove(filepath.Join(roots[i], "owner-000", rollupCheckpointFile)); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -216,7 +210,7 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 						}
 						compare(epoch)
 						reopen(0)
-						reopen(1, epoch == 23)
+						reopen(1)
 						o = engines[1].owners[0]
 						gcAdvance(o.gc)
 						if _, err := o.gc.sweep(); err != nil {

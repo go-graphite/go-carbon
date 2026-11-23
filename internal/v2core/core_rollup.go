@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path/filepath"
 	"slices"
 	"sort"
 	"time"
@@ -140,10 +139,6 @@ type coreRollups struct {
 	unranked []*rollupMetric
 	ids      []uint64
 	meta     []metricMetadata
-	// fromCheckpoint reports that open loaded this state from the owner's
-	// checkpoint instead of scanning parts.
-	fromCheckpoint bool
-	checkpoint     *mappedRollupCheckpoint
 	// dictDirty reports a dictionary append no successful seal Sync covers
 	// yet; generation is this plan's dictionary generation (0: name keys).
 	dictDirty  bool
@@ -551,18 +546,6 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		}
 		return k >> 32
 	}
-	// Restore the required mapped IDs before the ordinary planner. Fresh
-	// stores and fully materialized checkpoints skip this extra sweep.
-	if r.checkpoint != nil {
-		for i, k := range keys {
-			id := keyID(k)
-			if i == 0 || id != keyID(keys[i-1]) {
-				if err := r.loadCheckpointID(id, nil); err != nil {
-					return coreSealPlan{}, err
-				}
-			}
-		}
-	}
 	runs := 0
 	for i := range keys {
 		if i == 0 || keyID(keys[i]) != keyID(keys[i-1]) {
@@ -633,13 +616,6 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			}
 			// A fresh ID is not installed, and the sweep stages each ID once,
 			// so any holder of this fingerprint is another ID for the name.
-			if r.checkpoint != nil {
-				encodedName := m.definitionBytes()
-				encodedName = encodedName[len(`{"Name":"`) : len(encodedName)-len(m.policy.suffix)]
-				if err := r.loadCheckpointName(encodedName); err != nil {
-					return coreSealPlan{}, err
-				}
-			}
 			fp := m.fingerprint()
 			if _, ok := r.names.Get(fp); ok {
 				return coreSealPlan{}, errors.New("canonical name has multiple producer IDs")
@@ -924,46 +900,12 @@ func (e *rollupScanEntry) addRecord(record sealrollup.Record) error {
 }
 
 // foldRollupKeys folds every rollup row of iter into series.
-func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, reducerOnly, versions bool) error {
+func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[partsformat.ID]*rollupScanEntry, versions bool) error {
 	// Reuse key decoding and temporary slim definitions while folding rows.
 	// Catalog identities own their name and suffix before the next row.
 	var keys partsformat.KeyDecoder
 	names := keyNames{dict: identities.partDict()}
 	var definition []byte
-	// A writable reducer never uses terminal-archive samples. Resolve the
-	// envelopes first so recovery can validate those runs without retaining
-	// and sorting their entire history in per-name slot maps.
-	if reducerOnly {
-		for iter.First(); iter.Valid(); iter.Next() {
-			k, err := keys.Decode(iter.Key())
-			if err == nil {
-				err = names.resolve(&k)
-			}
-			if err != nil {
-				return err
-			}
-			if k.Archive != rollupMetadataArchive {
-				continue
-			}
-			e := series[k.Metric]
-			if e == nil {
-				e = &rollupScanEntry{group: k.Group}
-				series[k.Metric] = e
-			}
-			if k.Ordinal != 0 || e.group != k.Group {
-				return errors.New("unexpected rollup partition")
-			}
-			if err := e.addMetadata(identities, k, iter.Value(), &definition); err != nil {
-				return err
-			}
-			if k.ByID && e.identity != nil {
-				e.identity.dictID.Store(k.Local + 1)
-			}
-		}
-		if err := iter.Error(); err != nil {
-			return err
-		}
-	}
 	var scratch []sealrollup.Record
 	for iter.First(); iter.Valid(); iter.Next() {
 		k, err := keys.Decode(iter.Key())
@@ -982,15 +924,12 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 			return errors.New("unexpected rollup partition")
 		}
 		if k.Archive == rollupMetadataArchive {
-			if !reducerOnly {
-				err = e.addMetadata(identities, k, iter.Value(), &definition)
-			}
+			err = e.addMetadata(identities, k, iter.Value(), &definition)
 			if err != nil {
 				return err
 			}
 			continue
 		}
-		terminal := reducerOnly && e.identity != nil && int(k.Archive) == len(e.identity.schema().Archives)-1
 		value := iter.Value()
 		if versions {
 			all, err := partsformat.DecodeRecordsInto(nil, k.Archive, k.BlockStart, value)
@@ -1005,12 +944,6 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 		}
 		scratch = decoded[:0]
 		for _, record := range decoded {
-			if terminal {
-				if record.Slot >= e.identity.schema().Archives[k.Archive].Count || record.Order > e.meta.Frontier.Order {
-					return errors.New("invalid rollup slot/frontier")
-				}
-				continue
-			}
 			if err = e.addRecord(record); err != nil {
 				return err
 			}
@@ -1091,7 +1024,7 @@ func scanRollupsWith(snapshot *pebble.Snapshot, identities *PolicyCatalog, open 
 		return err
 	}
 	defer iter.Close()
-	if err = foldRollupKeys(iter, identities, series, false, open); err != nil {
+	if err = foldRollupKeys(iter, identities, series, open); err != nil {
 		return err
 	}
 	for name, e := range series {
@@ -1144,11 +1077,10 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, vis
 	return nil
 }
 
-// recoverCoreRollups loads the owner's checkpoint from dir plus the parts
-// published after it, and otherwise rebuilds every name from the rollup keys
-// in parts. An empty dir (validation-only recoveries) always scans. The bool
+// recoverCoreRollups rebuilds identity and scalars from durable part envelopes.
+// Samples remain in parts; unsealed applications are replayed from L0. The bool
 // reports copied bindings already checked during recovery, for the merge fence.
-func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (*coreRollups, bool, error) {
+func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups, bool, error) {
 	r := newCoreRollups()
 	r.db = db
 	if len(catalogs) > 0 {
@@ -1170,16 +1102,50 @@ func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (
 				return nil, false, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
 			}
 		}
-	} else if dir != "" {
-		loaded, err := openMappedCheckpoint(db, snapshot, filepath.Join(dir, rollupCheckpointFile), r.identities)
-		if err == nil {
-			return loaded, false, nil
-		}
-		if !errors.Is(err, errCheckpoint) {
+	}
+	if copied {
+		err = scanCopiedRollups(snapshot, r.identities, r.installRecovered)
+		return r, true, err
+	}
+	iter, err := newArchiveIter(context.Background(), snapshot, rollupScanBounds())
+	if err != nil {
+		return nil, false, err
+	}
+	defer iter.Close()
+	var keys partsformat.KeyDecoder
+	names := keyNames{dict: r.identities.partDict()}
+	var definition []byte
+	for iter.First(); iter.Valid(); iter.Next() {
+		k, err := keys.Decode(iter.Key())
+		if err != nil {
 			return nil, false, err
 		}
+		if k.Archive != rollupMetadataArchive {
+			continue
+		}
+		if err = names.resolve(&k); err != nil {
+			return nil, false, err
+		}
+		entry := rollupScanEntry{group: k.Group}
+		if err = entry.addMetadata(r.identities, k, iter.Value(), &definition); err != nil {
+			return nil, false, err
+		}
+		_, meta, _, err := entry.finish(k.Metric)
+		if err != nil || k.Ordinal != 0 {
+			return nil, false, errors.Join(err, errors.New("invalid recovery envelope"))
+		}
+		m := r.metrics[meta.ID]
+		if m == nil {
+			m = newRollupMetric(entry.identity)
+		} else if !entry.meta.after(r.meta[r.slotOf(meta.ID, m)]) {
+			continue
+		}
+		if k.ByID {
+			m.dictID.Store(k.Local + 1)
+		}
+		r.install(meta.ID, m, entry.meta)
 	}
-	err = scanRollups(snapshot, r.identities, r.installRecovered)
+	err = iter.Error()
 	return r, copied, err
 }
 

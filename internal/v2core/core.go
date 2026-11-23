@@ -215,23 +215,17 @@ func coreWake(wake chan struct{}) {
 }
 
 type coreOwner struct {
-	// ckptAt and ckptWriting belong to the owner goroutine (then to close):
-	// the last at-seal checkpoint encode and its in-flight file write.
-	ckptAt      time.Time
-	ckptWriting chan struct{}
-	// Checkpoint bytes written and failed writes, on any goroutine.
-	ckptBytes, ckptFailures atomic.Uint64
-	ready                   []atomic.Uint64
-	work                    chan struct{}
-	nextPoll                time.Time // execution-owner local seal deadline
-	bufferedPoints          atomic.Int64
-	bufferedSince           atomic.Int64
-	rollups                 *coreRollups
-	gc                      *sealedPartGC
-	gcDirty                 atomic.Bool
-	mergeStop               <-chan struct{}
-	mergeMu                 sync.Mutex // one merge in flight per owner (background or ForceMerge)
-	readGeneration          uint64     // owner-local; includes manifest-only retirement publications
+	ready          []atomic.Uint64
+	work           chan struct{}
+	nextPoll       time.Time // execution-owner local seal deadline
+	bufferedPoints atomic.Int64
+	bufferedSince  atomic.Int64
+	rollups        *coreRollups
+	gc             *sealedPartGC
+	gcDirty        atomic.Bool
+	mergeStop      <-chan struct{}
+	mergeMu        sync.Mutex // one merge in flight per owner (background or ForceMerge)
+	readGeneration uint64     // owner-local; includes manifest-only retirement publications
 
 	partSource  v2part.Provenance
 	ttlNext     atomic.Int64 // wall seconds before the next TTL rewrite
@@ -542,7 +536,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
 					return err
 				}
-				r, copied, err := recoverCoreRollups(db, dir, identities)
+				r, copied, err := recoverCoreRollups(db, identities)
 				if err != nil {
 					return err
 				}
@@ -562,21 +556,13 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				}
 				r.now = hooks.Now
 				if r.expire != nil {
-					// ExpiryTTL can change by name across restart; the checkpoint
-					// cannot reuse its old deadlines without a configuration identity.
-					// Resolve every name under the current callback before intake.
+					// Resolve inactivity deadlines under the current callback before intake.
 					r.setExpiryTTL(hooks.ExpiryTTL)
-					if err := r.loadAllCheckpoint(); err != nil {
-						return err
-					}
 				}
 				o.retireNow = hooks.Now
 				o.maintenance = hooks.Expire != nil
 				o.plan = r.planParts
 				o.rollups = r
-				if r.fromCheckpoint {
-					o.ckptAt = time.Now()
-				}
 			}
 			// Only uncommitted staging files remain after successful atomic ingestion.
 			files, err := filepath.Glob(filepath.Join(dir, "stage-*.sst"))
@@ -1121,7 +1107,6 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		sealVisible(f.pending, f.reported, f.expiries)
-		o.checkpointAfterSeal()
 		return nil
 	}
 	awaitFlight := func() error {
@@ -1262,7 +1247,6 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			return err
 		}
 		sealVisible(sealedPending, reported, since)
-		o.checkpointAfterSeal()
 		if o.hook != nil {
 			return o.hook(o.db.NewSnapshot(), nil)
 		}
@@ -2019,32 +2003,8 @@ func (e *coreEngine) close() error {
 			err = errors.Join(err, q.push(&corePacket{stop: true}, o.dead))
 		}
 	}
-	// Owners write a final checkpoint in parallel, so a clean restart folds
-	// no parts. A failed write is loud and keeps the previous file.
-	errs := make([]error, len(e.owners))
-	var writing errgroup.Group
-	writing.SetLimit(min(16, runtime.GOMAXPROCS(0)))
-	for i, o := range e.owners {
-		errs[i] = <-o.done
-		if o.ckptWriting != nil {
-			<-o.ckptWriting // never leave an at-seal write behind a closed owner
-		}
-		if errs[i] == nil && o.rollups != nil && o.rollups.db != nil {
-			writing.Go(func() error {
-				buf, err := o.rollups.encodeOwnerCheckpoint()
-				if err == nil {
-					err = o.saveCheckpoint(buf)
-				} else {
-					o.checkpointFailed(err)
-				}
-				errs[i] = err
-				return nil
-			})
-		}
-	}
-	_ = writing.Wait()
-	for i, o := range e.owners {
-		err = errors.Join(err, errs[i])
+	for _, o := range e.owners {
+		err = errors.Join(err, <-o.done)
 		o.pub.clear()
 		err = errors.Join(err, o.db.Close())
 	}
