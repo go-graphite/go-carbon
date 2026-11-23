@@ -538,3 +538,43 @@ func TestMergeAdmissionBound(t *testing.T) {
 		t.Fatalf("merged clock %d: %v", d.Coverage.MinClock, err)
 	}
 }
+
+// Admission bounds inspect every live descriptor, including the ID-keyed
+// generation. The clock belongs to the part, independently of key encoding.
+func TestMergeAdmissionBoundIDKeys(t *testing.T) {
+	saved := v2part.IDKeys.Swap(true)
+	defer v2part.IDKeys.Store(saved)
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e, err := openCoreWithHooks(t.TempDir(), adoptConfig(), coreHooks{IDKeys: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	for n := uint64(1); n <= 3; n++ {
+		mergeAppend(t, e, n)
+	}
+	o := e.owners[0]
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	var parts []v2part.Descriptor
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !descriptorByID(d) {
+			t.Fatal("fixture did not write ID-keyed parts")
+		}
+		parts = append(parts, d)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("got %d parts, want 3", len(parts))
+	}
+	snapshot := o.db.NewSnapshot()
+	defer snapshot.Close()
+	got, err := o.mergeAdmissionBound(snapshot, parts[:1], 4000)
+	if err != nil || got != 1030 {
+		t.Fatalf("bound %d want 1030: %v", got, err)
+	}
+}

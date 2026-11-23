@@ -10,6 +10,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -128,10 +129,13 @@ func compareHistorySamples(a, b sealrollup.Sample) int {
 // and coarse repair authority, rather than duplicating those rules here.
 type rollupHistoryReader struct {
 	db       *pebble.DB
+	dict     *v2dict.Dict // the store dictionary of ID-keyed parts, or nil
 	snapshot *pebble.Snapshot
-	parts    map[string][]*rollupHistoryPart
-	opened   list.List
-	copied   *RollupSnapshot
+	// parts lists each (group, vshard)'s parts of both key generations,
+	// keyed by the scope prefix without its magic and partition.
+	parts  map[string][]*rollupHistoryPart
+	opened list.List
+	copied *RollupSnapshot
 }
 
 type rollupHistoryPart struct {
@@ -184,7 +188,8 @@ func (r *rollupHistoryReader) open() error {
 			part = &rollupHistoryPart{descriptor: d}
 			known[d.SHA256] = part
 		}
-		r.parts[scope[:n-8]] = append(r.parts[scope[:n-8]], part)
+		route := scope[len(partKeyMagic) : n-8]
+		r.parts[route] = append(r.parts[route], part)
 	}
 	return nil
 }
@@ -228,7 +233,8 @@ func (r *rollupHistoryReader) load(m *rollupMetric, meta metricMetadata, a int, 
 		if err != nil {
 			return err
 		}
-		for _, part := range r.parts[string(scope[:len(scope)-8])] {
+		ids := metricIDs{dict: r.dict, known: m.PolicyIdentity}
+		for _, part := range r.parts[string(scope[len(partKeyMagic):len(scope)-8])] {
 			// Older logical timestamps cannot mask a winner in this window. Newer
 			// parts remain eligible even outside end: resolve ring epochs first.
 			if part.descriptor.Coverage.MaxTime < start {
@@ -253,18 +259,26 @@ func (r *rollupHistoryReader) load(m *rollupMetric, meta metricMetadata, a int, 
 				r.opened.MoveToFront(part.age)
 			}
 			it := part.iterator
-			key := v2part.Key{Group: m.policy.Group, VShard: m.vshard, Partition: part.descriptor.Scope.Partition, Part: part.descriptor.Scope.Part, Metric: m.policy.Name, Archive: uint32(a), BlockStart: first}
+			key := v2part.Key{Group: m.policy.Group, VShard: m.vshard, Partition: part.descriptor.Scope.Partition, Part: part.descriptor.Scope.Part, ByID: descriptorByID(part.descriptor)}
+			key, ok, err := ids.key(key, m.policy.Name)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue // no ID: no ID-keyed part holds the name
+			}
+			key.Archive, key.BlockStart = uint32(a), first
 			lower, err := v2part.Encode(key)
 			if err != nil {
 				return err
 			}
-			prefix := lower[:len(lower)-12]
+			prefix := lower[:archivePrefixLen(lower, key.ByID)]
 			valid := it.SeekLT(lower)
 			if !valid || !bytes.HasPrefix(it.Key(), prefix) {
 				valid = it.SeekGE(lower)
 			}
 			for valid && bytes.HasPrefix(it.Key(), prefix) {
-				k, err := v2part.Decode(it.Key())
+				k, err := v2part.DecodeKey(it.Key())
 				if err != nil {
 					return err
 				}

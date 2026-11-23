@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
 
@@ -695,6 +696,17 @@ func (w *DenseWriter) LimitBytes(n uint64) { w.writer.out.limit = n }
 // only for parts a background merge rewrites; call before the first Set.
 func (w *DenseWriter) SealCompression() { w.writer.sst.(*denseSSTWriter).level = denseSealLevel }
 
+// IDKeyed makes this an ID-keyed part (GCI2 keys, descriptor schema 3) whose
+// IDs resolve at name dictionary generation (nonzero). Input then takes ID
+// keys or SetPlannedID* tuples. Requires IDKeys; call before the first Set.
+func (w *DenseWriter) IDKeyed(generation uint64) error {
+	if generation == 0 || !IDKeys.Load() || w.writer.records > 0 || w.havePrev || len(w.last) > 0 {
+		return errors.New("ID-keyed parts are switched off, or the writer has input")
+	}
+	w.writer.generation = generation
+	return nil
+}
+
 // SetExpiry records expiry bounds measured while streaming. Call before Close.
 func (w *DenseWriter) SetExpiry(minExpiry, maxExpiry int64) {
 	w.writer.spec.MinExpiry, w.writer.spec.MaxExpiry = minExpiry, maxExpiry
@@ -730,7 +742,7 @@ func (w *DenseWriter) releaseWorkspace() {
 		return
 	}
 	b.decoder.key, b.decoder.name, b.key = Key{}, "", Key{}
-	b.decoder.prefix = b.decoder.prefix[:0]
+	b.decoder.prefix, b.decoder.tail = b.decoder.prefix[:0], 0
 	b.first, b.encoded, b.records, b.last = b.first[:0], b.encoded[:0], b.records[:0], b.last[:0]
 	b.raw, b.rawPending = b.raw[:0], false
 	b.prev, b.prevRank, b.havePrev, b.group = Key{}, 0, false, b.group[:0]
@@ -781,7 +793,7 @@ func (w *DenseWriter) flushWith(envelope []byte) error {
 // setEnvelope writes metric's envelope k: folded into the pending run when
 // that run is the metric's last, else as its own KV at key.
 func (w *DenseWriter) setEnvelope(key []byte, k Key, value []byte) error {
-	if w.fold && len(value) > 0 && (len(w.records) > 0 || w.rawPending) && w.key.Metric == k.Metric {
+	if w.fold && len(value) > 0 && (len(w.records) > 0 || w.rawPending) && SameMetric(w.key, k) {
 		return w.flushWith(value)
 	}
 	if e := w.flush(); e != nil {
@@ -853,7 +865,11 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	}
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
-		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(w.records[len(w.records)-1].Slot)^(1<<63))
+		if !setKeySlot(w.last, w.records[len(w.records)-1].Slot) {
+			err = errors.New("dense run slot does not fit its key")
+		}
+	}
+	if err == nil {
 		// A re-encode for predicted orders keeps every version and kind.
 		if legacy || w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
 			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.predictOrders && len(w.records) > 1)
@@ -898,12 +914,15 @@ func (w *DenseWriter) AppendVersions(key []byte, records []sealrollup.Record) er
 			break
 		}
 		k.BlockStart = r.Slot
-		binary.BigEndian.PutUint64(w.slotKey[len(w.slotKey)-12:], uint64(r.Slot)^(1<<63))
+		if !setKeySlot(w.slotKey, r.Slot) {
+			err = errors.New("dense version slot does not fit its key")
+			break
+		}
 		err = w.appendRecord(w.slotKey, k, r)
 	}
-	if err == nil {
+	if err == nil && !setKeySlot(w.last, records[len(records)-1].Slot) {
 		// Future inputs must start after this run's last physical slot.
-		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(records[len(records)-1].Slot)^(1<<63))
+		err = errors.New("dense run slot does not fit its key")
 	}
 	w.err = err
 	return err
@@ -923,7 +942,8 @@ func (w *DenseWriter) AppendSlots(key, value []byte, records []sealrollup.Record
 	if w.err != nil {
 		return w.err
 	}
-	if len(records) == MaxDenseSlots && (len(w.records) == 0 || len(w.records) == MaxDenseSlots || w.records[0].Archive != records[0].Archive || !bytes.Equal(w.first[:len(w.first)-16], key[:max(len(key)-16, 0)])) {
+	t := keyTail(w.writer.generation != 0)
+	if len(records) == MaxDenseSlots && (len(w.records) == 0 || len(w.records) == MaxDenseSlots || w.records[0].Archive != records[0].Archive || !bytes.Equal(w.first[:len(w.first)-t], key[:max(len(key)-t, 0)])) {
 		return w.SetSlotsEncoded(key, value)
 	}
 	k, err := w.decodeInput(key)
@@ -940,7 +960,7 @@ func (w *DenseWriter) AppendSlots(key, value []byte, records []sealrollup.Record
 			err = errors.New("invalid dense run record")
 			break
 		}
-		if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
+		if len(w.records) > 0 && (!SameMetric(k, w.key) || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
 			if err = w.flush(); err != nil {
 				break
 			}
@@ -949,13 +969,18 @@ func (w *DenseWriter) AppendSlots(key, value []byte, records []sealrollup.Record
 			k.BlockStart = r.Slot
 			w.key = k
 			w.first = append(w.first[:0], key...)
-			binary.BigEndian.PutUint64(w.first[len(w.first)-12:], uint64(r.Slot)^(1<<63))
+			if !setKeySlot(w.first, r.Slot) {
+				err = errors.New("dense run slot does not fit its key")
+				break
+			}
 		}
 		w.records = append(w.records, r)
 	}
 	if err == nil {
 		// Future inputs must start after this run's last physical slot.
-		binary.BigEndian.PutUint64(w.last[len(w.last)-12:], uint64(records[len(records)-1].Slot)^(1<<63))
+		if !setKeySlot(w.last, records[len(records)-1].Slot) {
+			err = errors.New("dense run slot does not fit its key")
+		}
 	}
 	w.err = err
 	return err
@@ -1000,7 +1025,7 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 			return nil
 		}
 		r.Kind = sealrollup.KindRaw
-		if n := len(w.records); n > 0 && !w.rawPending && k.Metric == w.key.Metric && k.Archive == w.key.Archive && w.records[n-1].Slot == r.Slot {
+		if n := len(w.records); n > 0 && !w.rawPending && SameMetric(k, w.key) && k.Archive == w.key.Archive && w.records[n-1].Slot == r.Slot {
 			w.records[n-1] = r
 			return nil
 		}
@@ -1011,9 +1036,9 @@ func (w *DenseWriter) appendRecord(key []byte, k Key, r sealrollup.Record) error
 		}
 	}
 	var carry []sealrollup.Record
-	if len(w.records) > 0 && (k.Metric != w.key.Metric || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
+	if len(w.records) > 0 && (!SameMetric(k, w.key) || k.Archive != w.key.Archive || len(w.records) == MaxDenseSlots) {
 		// A full run never splits one slot's versions: they start the next run.
-		if g := len(w.records); g == MaxDenseSlots && k.Metric == w.key.Metric && k.Archive == w.key.Archive && w.records[g-1].Slot == r.Slot {
+		if g := len(w.records); g == MaxDenseSlots && SameMetric(k, w.key) && k.Archive == w.key.Archive && w.records[g-1].Slot == r.Slot {
 			for g > 0 && w.records[g-1].Slot == r.Slot {
 				g--
 			}
@@ -1082,7 +1107,11 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 		return w.err
 	}
 	k, err := w.plannedKey(vshard, rank, metric, MetadataArchive, 0)
-	if err == nil && w.fold && len(value) > 0 && len(w.records) > 0 && w.key.Metric == metric {
+	return w.setPlannedMetadata(k, err, value)
+}
+
+func (w *DenseWriter) setPlannedMetadata(k Key, err error, value []byte) error {
+	if err == nil && w.fold && len(value) > 0 && len(w.records) > 0 && SameMetric(w.key, k) {
 		err = w.flushWith(value)
 	} else if err == nil {
 		err = w.flush()
@@ -1093,6 +1122,87 @@ func (w *DenseWriter) SetPlannedMetadata(vshard uint16, rank uint32, metric ID, 
 	}
 	w.err = err
 	return err
+}
+
+// SetPlannedIDRecord is SetPlannedRecord for an ID-keyed writer (IDKeyed):
+// the metric is its vshard-local dictionary ID, and tuples sort by
+// (vshard, ID, archive, slot).
+func (w *DenseWriter) SetPlannedIDRecord(vshard uint16, id uint32, r *sealrollup.Record) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	var k Key
+	var err error
+	if r.Archive >= 0 && int64(r.Archive) < int64(MetadataArchive) && validSlotRecord(*r) {
+		k, err = w.plannedIDKey(vshard, id, uint32(r.Archive), r.Slot)
+	} else {
+		err = errors.New("dense scalar record does not match valid archive key")
+	}
+	if err == nil {
+		err = w.appendRecord(nil, k, *r)
+	}
+	w.err = err
+	return err
+}
+
+// SetPlannedIDMetadata is SetPlannedMetadata for an ID-keyed writer.
+func (w *DenseWriter) SetPlannedIDMetadata(vshard uint16, id uint32, value []byte) error {
+	if w.closed {
+		return io.ErrClosedPipe
+	}
+	if w.err != nil {
+		return w.err
+	}
+	k, err := w.plannedIDKey(vshard, id, MetadataArchive, 0)
+	return w.setPlannedMetadata(k, err, value)
+}
+
+// plannedIDKey is plannedKey for ID keys: tuples sort by vshard, ID, archive
+// and slot, and must fit GCI2 (archive below 255, slot below 2^32).
+func (w *DenseWriter) plannedIDKey(vshard uint16, id uint32, archive uint32, slot int64) (Key, error) {
+	s := w.writer.spec.Scope
+	if len(w.last) > 0 || w.writer.generation == 0 {
+		return Key{}, errors.New("planned ID input needs an ID-keyed writer without encoded input")
+	}
+	if _, err := partsformat.AppendIDTail(nil, archive, slot, 0); err != nil {
+		return Key{}, err
+	}
+	p := &w.prev
+	if w.havePrev {
+		c := cmp.Compare(vshard, p.VShard)
+		if c == 0 {
+			c = cmp.Compare(id, p.Local)
+		}
+		if c == 0 {
+			if c = cmp.Compare(archive, p.Archive); c == 0 {
+				c = cmp.Compare(slot, p.BlockStart)
+			}
+			if c < 0 || c == 0 && archive == MetadataArchive {
+				return Key{}, errors.New("unordered planned dense input")
+			}
+			p.Archive, p.BlockStart = archive, slot
+			return *p, nil
+		}
+		if c < 0 {
+			return Key{}, errors.New("unordered planned dense input")
+		}
+	}
+	if vshard >= VirtualShards || (s.VShard != GroupVShard && s.VShard != vshard) {
+		return Key{}, errors.New("invalid or foreign planned dense metric")
+	}
+	if len(w.group) == 0 {
+		group, _, err := partsformat.IDGroupRange(s.Group)
+		if err != nil {
+			return Key{}, err
+		}
+		w.group = append(w.group[:0], group...)
+	}
+	*p = Key{Group: s.Group, VShard: vshard, Partition: s.Partition, Part: s.Part, ByID: true, Local: id, Archive: archive, BlockStart: slot}
+	w.havePrev = true
+	return *p, nil
 }
 
 // plannedKey checks that a tuple sorts strictly after the previous one in GCP3
@@ -1146,11 +1256,17 @@ func (w *DenseWriter) plannedKey(vshard uint16, rank uint32, metric ID, archive 
 }
 
 // appendKey formats k exactly as Encode does, from the cached group prefix.
+// An ID key's archive and slot were checked by plannedIDKey.
 func (w *DenseWriter) appendKey(dst []byte, k Key) []byte {
 	dst = append(dst, w.group...)
 	dst = binary.BigEndian.AppendUint16(dst, k.VShard)
 	dst = binary.BigEndian.AppendUint64(dst, uint64(k.Partition)^(1<<63))
 	dst = append(dst, k.Part[:]...)
+	if k.ByID {
+		dst = binary.BigEndian.AppendUint32(dst, k.Local)
+		dst, _ = partsformat.AppendIDTail(dst, k.Archive, k.BlockStart, 0)
+		return dst
+	}
 	dst = binary.BigEndian.AppendUint32(dst, uint32(len(k.Metric)))
 	dst = append(dst, k.Metric...)
 	dst = binary.BigEndian.AppendUint32(dst, k.Archive)

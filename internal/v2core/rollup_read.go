@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -164,7 +163,8 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 			return nil, err
 		}
 		defer it.Close()
-		// Bare GCP3 fixtures have no core frontier or atomic inventory bindings.
+		// Bare GCP3 fixtures have no core frontier or atomic inventory
+		// bindings. ID-keyed parts are only ever published with descriptors.
 		for valid := it.First(); valid; {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -629,10 +629,15 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 		}
 		defer shared.Close()
 	}
+	// ID-keyed parts resolve the name to its dictionary ID once per routed
+	// (group, vshard), not per part.
+	ids := metricIDs{dict: s.identities.partDict(), known: m.latest.PolicyIdentity}
 	scan := func(it archiveCursor, part *readPartMetric) error {
 		if part.meta.Frontier.Order == 0 {
-			key := part.part.key
-			key.Metric = m.latest.policy.Name
+			key, ok, e := ids.key(part.part.key, m.latest.policy.Name)
+			if e != nil || !ok {
+				return e
+			}
 			key.Archive = v2part.MetadataArchive
 			key.BlockStart = 0
 			key.Ordinal = 0
@@ -654,15 +659,17 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
 			return nil
 		}
-		key := part.part.key
-		key.Metric = part.policy.Name
+		key, ok, err := ids.key(part.part.key, part.policy.Name)
+		if err != nil || !ok {
+			return err
+		}
 		key.Archive = uint32(archive)
 		key.BlockStart = first
 		lower, err := v2part.Encode(key)
 		if err != nil {
 			return err
 		}
-		prefix := lower[:len(lower)-12]
+		prefix := lower[:archivePrefixLen(lower, key.ByID)]
 		emit := func(record sealrollup.Record) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -686,7 +693,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			key, err = v2part.Decode(it.Key())
+			key, err = v2part.DecodeKey(it.Key())
 			if err != nil {
 				return err
 			}
@@ -785,33 +792,42 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 	// Per-row scratch, reused across the part: the metadata key and a slim
 	// row's definition only feed the seek and intern below.
 	var encoded, definition []byte
-	var metadataSuffix [16]byte // MetadataArchive, BlockStart 0, Ordinal 0
-	binary.BigEndian.PutUint32(metadataSuffix[:], v2part.MetadataArchive)
-	binary.BigEndian.PutUint64(metadataSuffix[4:], 1<<63)
+	names := keyNames{dict: identities.partDict()}
 	for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key, err := v2part.Decode(it.Key())
+		key, err := v2part.DecodeKey(it.Key())
 		if err != nil {
 			return nil, err
 		}
 		key.Archive = v2part.MetadataArchive
 		key.BlockStart = 0
 		key.Ordinal = 0
-		// A decoded key re-encodes to itself; only the last 16 bytes (archive,
-		// physical slot, ordinal) differ in the metadata key.
+		// A decoded key re-encodes to itself; only the tail (archive,
+		// physical slot, ordinal) differs in the metadata key.
 		raw := it.Key()
-		encoded = append(append(encoded[:0], raw[:len(raw)-len(metadataSuffix)]...), metadataSuffix[:]...)
+		tail := partKeyTail(key.ByID)
+		encoded = appendEnvelopeKey(encoded[:0], raw, tail)
 		// Most new metrics have one archive row immediately before metadata.
 		// One Next avoids rebuilding the merging iterator for that common case.
 		if !bytes.Equal(it.Key(), encoded) {
 			it.Next()
 		}
 		if (!it.Valid() || !bytes.Equal(it.Key(), encoded)) && (!it.SeekGE(encoded) || !bytes.Equal(it.Key(), encoded)) {
-			return nil, fmt.Errorf("missing rollup metadata for %s", key.Metric)
+			return nil, fmt.Errorf("missing rollup metadata for %s (ID %d)", key.Metric, key.Local)
 		}
 		meta, slim, err := decodeRollupMetadataHeader(it.Value())
+		if err == nil && key.ByID {
+			// The catalog already holds every name recovery installed, by the
+			// numeric ID the envelope carries: the dictionary is read only
+			// for a name the catalog has not seen.
+			if h := identities.lookup(meta.ID); h != nil && h.dictID.Load() == key.Local+1 {
+				key.Metric = h.policy.Name
+			} else {
+				err = names.resolve(&key)
+			}
+		}
 		if err == nil && slim {
 			definition, err = appendRollupDefinition(definition[:0], key.Metric, key.Group, meta.Frontier.Policy)
 			meta.Policy = definition
@@ -822,6 +838,9 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		h, err := identities.intern(meta.ID, string(key.Metric), meta.Policy)
 		if err != nil {
 			return nil, err
+		}
+		if key.ByID {
+			h.dictID.Store(key.Local + 1)
 		}
 		policy := h.rollupPolicy()
 		if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
@@ -835,7 +854,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 		}
 		if len(part.metrics) == 0 {
 			part.key = key
-			part.key.Metric = ""
+			part.key.Metric, part.key.Local = "", 0
 		}
 		name := string(policy.Name)
 		if part.first == "" || name < part.first {
@@ -845,9 +864,9 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			part.last = name
 		}
 		part.metrics[name] = &readPartMetric{part: part, readMetricState: readMetricState{PolicyIdentity: h, meta: compactMetadata(meta)}}
-		// The last 16 bytes are archive, physical slot and ordinal.
+		// The tail is archive, physical slot and (GCP3) ordinal.
 		it.Next()
-		if it.Valid() && bytes.HasPrefix(it.Key(), encoded[:len(encoded)-16]) {
+		if it.Valid() && bytes.HasPrefix(it.Key(), encoded[:len(encoded)-tail]) {
 			return nil, errors.New("unexpected keys after rollup metadata")
 		}
 	}
@@ -866,6 +885,11 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 	out.hasCopied, err = snapshotHasCopiedParts(snapshot)
 	if err != nil {
 		return nil, err
+	}
+	// This reader walks name keys only: a store holding ID-keyed parts
+	// cannot also hold copied parts yet.
+	if byID, err := snapshotHasIDKeyedParts(snapshot); err != nil || byID {
+		return nil, errors.Join(err, errIDKeyedMove)
 	}
 	if prior != nil && prior.cache != nil && prior.cache.limit == limit {
 		out.cache = prior.cache

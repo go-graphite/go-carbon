@@ -36,9 +36,14 @@ type plannedKV struct {
 type plannedRollupPart struct {
 	Spec     partsformat.Spec
 	Segments [][]plannedKV
+	// Generation is the dictionary generation of an ID-keyed part (each
+	// tuple's rank is then its dictionary ID), 0 for a name-keyed part.
+	Generation uint64
 }
 
 type rollupOutput struct {
+	// byID files each tuple under its dictionary ID (ID-keyed parts).
+	byID        bool
 	files       map[string]*[]plannedKV
 	arena       []byte
 	definitions map[[32]byte][]partsformat.ArchivePolicy
@@ -106,7 +111,9 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 	group := string(m.policy.Group)
 	name, vshard := m.policy.Name, m.vshard
 	var rank uint32
-	if s.sortKey&1 == 0 {
+	if r.byID {
+		rank = uint32(s.sortKey) // (vshard, ID): the low half is the ID
+	} else if s.sortKey&1 == 0 {
 		rank = uint32(s.sortKey >> 1)
 	}
 	if stage != nil {
@@ -243,6 +250,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	r.takeLaneScratch()
 	for i := range r.lanes {
 		r.lanes[i].ranked = r.lanes[i].ranked[:0]
+		r.lanes[i].output.byID = r.generation != 0
 	}
 	// plan assigned rank keys while each metric was hot; lanes follow the
 	// vshard, and the canonical order within a lane is the key order.
@@ -255,7 +263,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	for i := 0; i < workers; i++ {
 		work := func() {
 			lane := &r.lanes[i]
-			history := rollupHistoryReader{db: r.db}
+			history := rollupHistoryReader{db: r.db, dict: r.identities.partDict()}
 			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
 			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts, metrics)
@@ -389,7 +397,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	slices.Sort(keys)
 	out := coreSealPlan{}
 	for _, group := range keys {
-		out.Parts = append(out.Parts, plannedRollupPart{Spec: r.coverage[group].spec, Segments: r.files[group]})
+		out.Parts = append(out.Parts, plannedRollupPart{Spec: r.coverage[group].spec, Segments: r.files[group], Generation: r.generation})
 	}
 	return out, nil
 }

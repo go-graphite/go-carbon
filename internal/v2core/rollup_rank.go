@@ -5,6 +5,8 @@ import (
 	"math"
 	"slices"
 	"sort"
+
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 )
 
 // stageKey assigns a stage its canonical sort key while the metric is hot.
@@ -14,8 +16,15 @@ import (
 // sharing a key tie-break by compareRollupMetrics, so the order is exact. A
 // ranked metric whose hint another planner overwrote takes the search key,
 // which sorts identically.
-func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric) {
+//
+// With the store dictionary (ID-keyed parts) the key is (vshard, ID), the
+// GCI2 key order, so no rank is consulted: dictKeys sets it once the seal's
+// new names are appended.
+func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dict) {
 	s.vshard = m.vshard
+	if dict != nil {
+		return
+	}
 	if rk := r.metricRank(m); rk != 0 {
 		s.sortKey = uint64(rk) << 1
 		return
@@ -23,6 +32,53 @@ func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric) {
 	l, _ := slices.BinarySearchFunc(r.dense, m, compareRollupMetrics)
 	s.sortKey = uint64(l)<<1 | 1
 }
+
+// dictKeys keys every stage by (vshard, ID). The names the dictionary does
+// not hold yet go to it in AppendBatch calls of at most dictChunk names from
+// one fixed scratch, each appended under the lock of this owner's own
+// dictionary shard, so a first seal of many new names allocates nothing per
+// name; the seal syncs the dictionary before it writes a part.
+func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
+	var scratch [dictChunk]v2dict.NewName
+	var metrics [dictChunk]*rollupMetric
+	n := 0
+	appendNames := func() error {
+		err := dict.AppendBatch(scratch[:n])
+		for i := range n {
+			r.dictDirty = r.dictDirty || scratch[i].Created // every unresolved name on error
+			if err == nil {
+				metrics[i].dictID.Store(scratch[i].Entry.ID + 1)
+			}
+		}
+		n = 0
+		return err
+	}
+	for _, m := range r.stageMetrics {
+		if m.dictID.Load() != 0 {
+			continue
+		}
+		scratch[n], metrics[n] = v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.policy.Name)}, m
+		if n++; n == dictChunk {
+			if err := appendNames(); err != nil {
+				return err
+			}
+		}
+	}
+	if n > 0 {
+		if err := appendNames(); err != nil {
+			return err
+		}
+	}
+	for i := range r.stages {
+		s, m := &r.stages[i], r.stageMetrics[i]
+		s.sortKey = uint64(m.vshard)<<32 | uint64(m.dictID.Load()-1)
+	}
+	return nil
+}
+
+// dictChunk is the most names one dictKeys AppendBatch call takes: one
+// dictionary shard-lock hold.
+const dictChunk = 256
 
 // hintSlot returns the slot identity h names in this planner, when that slot
 // holds id. A missing, foreign or stale hint fails the check.

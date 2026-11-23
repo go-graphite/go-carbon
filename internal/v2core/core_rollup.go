@@ -186,6 +186,10 @@ type coreRollups struct {
 	// checkpoint instead of scanning parts.
 	fromCheckpoint bool
 	checkpoint     *mappedRollupCheckpoint
+	// dictDirty reports a dictionary append no successful seal Sync covers
+	// yet; generation is this plan's dictionary generation (0: name keys).
+	dictDirty  bool
+	generation uint64
 }
 
 // rankSlack bounds how many installed-but-unranked metrics a planner carries
@@ -632,6 +636,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	if view.Len() == 0 {
 		view = PendingBatches(in.Batches)
 	}
+	dict := r.identities.partDict()
 	if uint64(view.Len()) > math.MaxUint32 {
 		return coreSealPlan{}, errors.New("too many seal batches")
 	}
@@ -680,9 +685,9 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	r.seen = seen
 	// Samples and application descriptors live in retained planner storage.
 	// Every original boundary/order/clock remains distinct.
-	r.samples = slices.Grow(r.samples[:0], sampleCount)[:sampleCount]
+	r.samples = sealScratch(r.samples, sampleCount)[:sampleCount]
 	samples := r.samples
-	r.batches = slices.Grow(r.batches[:0], len(keys))[:len(keys)]
+	r.batches = sealScratch(r.batches, len(keys))[:len(keys)]
 	batchStorage := r.batches
 	offset, batch := 0, 0
 	for i := 0; i < len(keys); {
@@ -754,10 +759,10 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		metrics = append(metrics, m)
 		s := &stages[len(stages)-1]
 		s.next.Expired = false
-		if rk != 0 {
+		if rk != 0 && dict == nil {
 			s.vshard, s.sortKey = m.vshard, uint64(rk)<<1
 		} else {
-			r.stageKey(s, m)
+			r.stageKey(s, m, dict)
 		}
 		if len(seen) != 0 {
 			seen[id>>6] |= 1 << (id & 63)
@@ -799,12 +804,28 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
 			stages, metrics = append(stages, rollupStage{next: r.meta[slot], slot: slot}), append(metrics, m)
-			r.stageKey(&stages[len(stages)-1], m)
+			r.stageKey(&stages[len(stages)-1], m, dict)
 		}
 	}
 	r.stages, r.stageMetrics = stages, metrics
 	if err := r.expireIdleStages(now); err != nil {
 		return coreSealPlan{}, err
+	}
+	// Every ID this seal's parts carry is durable before a part is written.
+	r.generation = 0
+	if dict != nil && len(stages) > 0 {
+		if err := r.dictKeys(dict); err != nil {
+			return coreSealPlan{}, err
+		}
+		if r.dictDirty {
+			if err := dict.Sync(); err != nil {
+				return coreSealPlan{}, err
+			}
+			r.dictDirty = false
+		}
+		if r.generation = dict.Generation(); r.generation == 0 {
+			return coreSealPlan{}, errors.New("ID-keyed seal without a durable dictionary generation")
+		}
 	}
 	var part partsformat.PartID
 	if len(stages) > 0 {
@@ -1018,6 +1039,7 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 	// Reuse key decoding and temporary slim definitions while folding rows.
 	// Catalog identities own their name and suffix before the next row.
 	var keys partsformat.KeyDecoder
+	names := keyNames{dict: identities.partDict()}
 	var definition []byte
 	// A writable reducer never uses terminal-archive samples. Resolve the
 	// envelopes first so recovery can validate those runs without retaining
@@ -1025,6 +1047,9 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 	if reducerOnly {
 		for iter.First(); iter.Valid(); iter.Next() {
 			k, err := keys.Decode(iter.Key())
+			if err == nil {
+				err = names.resolve(&k)
+			}
 			if err != nil {
 				return err
 			}
@@ -1042,6 +1067,9 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 			if err := e.addMetadata(identities, k, iter.Value(), &definition); err != nil {
 				return err
 			}
+			if k.ByID && e.identity != nil {
+				e.identity.dictID.Store(k.Local + 1)
+			}
 		}
 		if err := iter.Error(); err != nil {
 			return err
@@ -1050,6 +1078,9 @@ func foldRollupKeys(iter *archiveIter, identities *PolicyCatalog, series map[par
 	var scratch []sealrollup.Record
 	for iter.First(); iter.Valid(); iter.Next() {
 		k, err := keys.Decode(iter.Key())
+		if err == nil {
+			err = names.resolve(&k)
+		}
 		if err != nil {
 			return err
 		}
@@ -1192,7 +1223,8 @@ func scanRollupsWith(snapshot *pebble.Snapshot, identities *PolicyCatalog, open 
 }
 
 func rollupScanBounds() *pebble.IterOptions {
-	return &pebble.IterOptions{LowerBound: []byte{'G', 'C', 'P', 3}, UpperBound: partsformat.PrefixEnd([]byte{'G', 'C', 'P', 3})}
+	// GCI2 keys sort just below GCP3 and nothing lies between.
+	return &pebble.IterOptions{LowerBound: idKeyMagic, UpperBound: partsformat.PrefixEnd(partKeyMagic)}
 }
 func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
 	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, nil, nil, 0)

@@ -43,6 +43,9 @@ type v2Config struct {
 	Producers       int    `toml:"producers"`
 	Shards          int    `toml:"shards"`
 	ReadBudgetBytes int64  `toml:"read-budget-bytes"`
+	// IDKeys makes seals write ID-keyed parts through the store name
+	// dictionary. Vshard moves of ID-keyed parts are not supported yet.
+	IDKeys bool `toml:"id-keys"`
 }
 type v2Runtime struct {
 	mode    string
@@ -140,6 +143,10 @@ func (app *App) startV2() error {
 	}}
 	if app.v2Now != nil {
 		hooks.Now = app.v2Now
+	}
+	if c.V2.IDKeys {
+		v2part.IDKeys.Store(true)
+		hooks.IDKeys = true
 	}
 	if c.Whisper.StoreExpiration.Value() > 0 || len(c.Whisper.ExpirationRules) > 0 {
 		// v2core asks Expire only about names idle for their ExpiryTTL window.

@@ -204,12 +204,25 @@ func TestCrashPoints(t *testing.T) {
 	for _, point := range []string{"level-written", "flush-installed", "merge-installed"} {
 		t.Run(point, func(t *testing.T) {
 			dir := t.TempDir()
-			d, err := Open(dir, Options{BufferBytes: 8 << 10, NoMerge: true})
+			// Flushes run in the background: explicit ones (a buffer no fill
+			// reaches) leave a level, the append level the crashing flush
+			// writes or the second level a merge needs, and no flush still
+			// reading testHook.
+			d, err := Open(dir, Options{BufferBytes: 1 << 20, NoMerge: true})
 			if err != nil {
 				t.Fatal(err)
 			}
 			m := model{}
-			fill(t, d, 0, 2000, m)
+			fill(t, d, 0, 1000, m)
+			if err := d.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			fill(t, d, 1000, 2000, m)
+			if point == "merge-installed" {
+				if err := d.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := d.Sync(); err != nil {
 				t.Fatal(err)
 			}
@@ -557,4 +570,151 @@ func TestDictScale(t *testing.T) {
 	t.Logf("SCALE heap B/name: levels as settled %.2f, one level %.2f, after reopen %.2f; page cache B/name %.2f (%d MB) with %d levels, %.2f after MergeAll",
 		float64(heapLevels)/float64(n), float64(heapOne)/float64(n), float64(heapReopen)/float64(n), float64(st1.FileBytes)/float64(n), st1.FileBytes>>20, st1.Levels, float64(st.FileBytes)/float64(n))
 	t.Logf("SCALE MergeAll=%.2fs lookup hit=%.0f ns miss=%.0f ns byID=%.0f ns scan=%.0f ns/name reopen=%.1f ms", mergeAll.Seconds(), hit, miss, byID, scanNs, float64(reopen.Microseconds())/1000)
+}
+
+// TestGeneration checks that the generation moves only at Sync, flush and
+// open, grows on every durable change, and never goes back across a reopen.
+func TestGeneration(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferBytes: 16 << 10, NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g0 := d.Generation()
+	if _, _, err := d.Append("a", 1, []byte("x.one"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if g := d.Generation(); g != g0 {
+		t.Fatalf("generation moved before Sync: %d -> %d", g0, g)
+	}
+	if err := d.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	g1 := d.Generation()
+	if g1 <= g0 {
+		t.Fatalf("Sync did not grow the generation: %d -> %d", g0, g1)
+	}
+	if _, _, err := d.Append("a", 1, []byte("x.one"), 0); err != nil || d.Sync() != nil || d.Generation() != g1 {
+		t.Fatalf("an existing name changed the generation: %d -> %d (%v)", g1, d.Generation(), err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if d, err = Open(dir, Options{BufferBytes: 16 << 10, NoMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	if g := d.Generation(); g != g1 {
+		t.Fatalf("reopen changed the generation: %d -> %d", g1, g)
+	}
+	last := g1
+	for i := 0; i < 2000; i++ { // several flushes
+		if _, _, err := d.Append("a", uint16(i%8), synthName(i), 0); err != nil {
+			t.Fatal(err)
+		}
+		if i%97 == 0 {
+			if err := d.Sync(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if g := d.Generation(); g < last {
+			t.Fatalf("generation went back: %d -> %d", last, g)
+		} else {
+			last = g
+		}
+	}
+	if st := d.Stats(); st.Levels < 2 {
+		t.Fatalf("want flushes, got %+v", st)
+	}
+	d.Close()
+	if d, err = Open(dir, Options{NoMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if g := d.Generation(); g < last {
+		t.Fatalf("reopen went back: %d -> %d", last, g)
+	}
+}
+
+// TestAppendDuringFlush: the level file of a full append level is written in
+// the background, so appends, syncs and lookups go on while that write is
+// stalled, and the frozen append level stays readable until its file
+// replaces it.
+func TestAppendDuringFlush(t *testing.T) {
+	dir := t.TempDir()
+	release, blocked := make(chan struct{}), make(chan struct{}, 1)
+	testHook = func(p string) error {
+		if p == "level-written" {
+			select {
+			case blocked <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return nil
+	}
+	defer func() { testHook = nil }()
+	d, err := Open(dir, Options{BufferBytes: 4 << 10, NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for stalled := false; !stalled; n++ {
+		if _, _, err := d.Append("g", 3, synthName(n), 0); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-blocked:
+			stalled = true
+		default:
+		}
+	}
+	total := n + 1000
+	done := make(chan error, 1)
+	go func() {
+		for i := n; i < total; i++ {
+			if _, _, err := d.Append("g", 3, synthName(i), 0); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- d.Sync()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("appends waited on a stalled level file write")
+	}
+	check := func(d *Dict) {
+		t.Helper()
+		for i := range total {
+			if e, ok := d.Lookup("g", 3, synthName(i)); !ok || e.ID != uint32(i) {
+				t.Fatalf("Lookup(%d) = %+v %v", i, e, ok)
+			}
+			if name, _, ok := d.LookupID("g", 3, uint32(i), nil); !ok || !bytes.Equal(name, synthName(i)) {
+				t.Fatalf("LookupID(%d) = %q %v", i, name, ok)
+			}
+		}
+		c := 0
+		d.Scan("g", 3, nil, func([]byte, Entry) bool { c++; return true })
+		if c != total {
+			t.Fatalf("Scan saw %d names, want %d", c, total)
+		}
+	}
+	check(d)
+	if st := d.Stats(); st.Levels != 0 {
+		t.Fatalf("a level was installed while its write was stalled: %+v", st)
+	}
+	close(release)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if d, err = Open(dir, Options{BufferBytes: 4 << 10, NoMerge: true}); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	check(d)
 }

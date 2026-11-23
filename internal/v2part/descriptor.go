@@ -80,6 +80,9 @@ type Descriptor struct {
 	// VShards is the sorted, exact routed inventory recorded by the seal
 	// writer. Omitted by older producers; readers retain their scan fallback.
 	VShards []uint16 `json:",omitempty"`
+	// DictGeneration is the name dictionary generation an ID-keyed part (schema
+	// IDFileVersion) needs; zero for name-keyed parts.
+	DictGeneration uint64 `json:",omitempty"`
 }
 
 func validateSpec(s Spec) error {
@@ -120,11 +123,18 @@ func validateSpec(s Spec) error {
 }
 
 func (d Descriptor) Validate() error {
-	wantVersion := uint32(SchemaVersion)
+	wantVersion, wantKey := uint32(SchemaVersion), uint32(KeyVersion)
 	if d.Encoding == DenseEncoding {
 		wantVersion = GroupFileVersion
 	}
-	if d.Version != wantVersion || d.KeyVersion != KeyVersion {
+	byID := d.DictGeneration != 0
+	if byID {
+		if d.Encoding != DenseEncoding || !IDKeys.Load() {
+			return errors.New("ID-keyed parts are switched off or not dense")
+		}
+		wantVersion, wantKey = IDFileVersion, IDKeyVersion
+	}
+	if d.Version != wantVersion || d.KeyVersion != wantKey {
 		return errors.New("unsupported part schema/key version")
 	}
 	if err := validateSpec(d.spec()); err != nil {
@@ -133,13 +143,16 @@ func (d Descriptor) Validate() error {
 	if d.Bytes == 0 || d.SHA256 == (Digest{}) || d.Coverage.Names == 0 || d.Coverage.Records < d.Coverage.Names {
 		return errors.New("empty part descriptor")
 	}
-	first, err := Decode(d.FirstKey)
+	first, err := DecodeKey(d.FirstKey)
 	if err != nil {
 		return err
 	}
-	last, err := Decode(d.LastKey)
+	last, err := DecodeKey(d.LastKey)
 	if err != nil {
 		return err
+	}
+	if first.ByID != byID || last.ByID != byID {
+		return errors.New("part key generation does not match its schema")
 	}
 	if !d.Scope.contains(first) || !d.Scope.contains(last) || bytes.Compare(d.FirstKey, d.LastKey) > 0 {
 		return errors.New("part key range outside scope")

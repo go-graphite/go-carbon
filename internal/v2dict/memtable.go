@@ -8,14 +8,17 @@ import (
 )
 
 // memtable is the append level: the newest entries since the last flush, in
-// one byte arena (u16 key length, key, value) with two open-addressing
-// tables of record numbers, by key and by (scope, ID). It holds no per-name
-// Go objects; its size is bounded by Options.BufferBytes. A key appears
+// a byte arena (u16 key length, key, value) with two open-addressing tables
+// of record numbers, by key and by (scope, ID). It holds no per-name Go
+// objects; its size is bounded by Options.BufferBytes, except that it keeps
+// filling while the previous one is flushed. The arena is fixed 64 KiB
+// chunks that never move, so it grows without copying itself. A key appears
 // once: a later put of the same key (a flag change, a revival) rewrites the
 // value in place.
 type memtable struct {
-	arena  []byte
-	recs   []uint32 // arena offset of each record
+	chunks [][]byte
+	used   int      // record bytes in chunks
+	recs   []uint32 // chunk<<chunkBits | offset of each record
 	byKey  []uint32 // record number + 1; 0 is empty
 	byID   []uint32
 	idUsed int
@@ -30,21 +33,29 @@ func idHash(sk []byte, id uint32) uint64 {
 	return h ^ h>>29
 }
 
+// chunkBits sizes arena chunks; a record (at most 2+65535+7 bytes) never
+// spans two, and one longer than a chunk gets a chunk of its own.
+const chunkBits = 16
+
 func (t *memtable) rec(r uint32) (key, val []byte) {
 	off := t.recs[r]
-	kl := int(binary.LittleEndian.Uint16(t.arena[off:]))
-	key = t.arena[off+2 : int(off)+2+kl]
-	return key, t.arena[int(off)+2+kl : int(off)+2+kl+valueSize]
+	c := t.chunks[off>>chunkBits][off&(1<<chunkBits-1):]
+	kl := int(binary.LittleEndian.Uint16(c))
+	return c[2 : 2+kl], c[2+kl : 2+kl+valueSize]
 }
 
 // bytes is the heap the append level holds.
 func (t *memtable) bytes() int {
-	return cap(t.arena) + 4*(cap(t.recs)+len(t.byKey)+len(t.byID)+cap(t.sorted))
+	n := 4 * (cap(t.recs) + len(t.byKey) + len(t.byID) + cap(t.sorted))
+	for _, c := range t.chunks {
+		n += cap(c)
+	}
+	return n
 }
 
 // size is the flush measure: record bytes plus their share of the tables
 // (four table slots of 4 bytes at the 1/2 load bound, and the record offset).
-func (t *memtable) size() int { return len(t.arena) + 20*len(t.recs) }
+func (t *memtable) size() int { return t.used + 20*len(t.recs) }
 
 // slot returns the byKey slot of key: its record, or the empty slot to use.
 func (t *memtable) slot(key []byte) int {
@@ -90,6 +101,18 @@ func (t *memtable) getID(sk []byte, id uint32) (key, val []byte) {
 	}
 }
 
+// next returns an empty append level to follow t, with tables and record
+// offsets for as many records as t holds: one that fills as t did
+// allocates only its arena chunks. t itself is never refilled: lock-free
+// readers may still hold it once frozen.
+func (t *memtable) next() memtable {
+	slots := 1024
+	for slots < 2*(len(t.recs)+1) {
+		slots <<= 1
+	}
+	return memtable{chunks: make([][]byte, 0, len(t.chunks)), recs: make([]uint32, 0, len(t.recs)), byKey: make([]uint32, slots), byID: make([]uint32, slots)}
+}
+
 func (t *memtable) put(key, val []byte) {
 	if 2*(len(t.recs)+1) > len(t.byKey) {
 		t.byKey = t.rehash(t.byKey, 2*len(t.byKey), func(r uint32) uint64 { k, _ := t.rec(r); return maphash.Bytes(seed, k) })
@@ -113,10 +136,17 @@ func (t *memtable) put(key, val []byte) {
 		t.insertID(r)
 		return
 	}
-	t.recs = append(t.recs, uint32(len(t.arena)))
-	t.arena = binary.LittleEndian.AppendUint16(t.arena, uint16(len(key)))
-	t.arena = append(t.arena, key...)
-	t.arena = append(t.arena, val[:valueSize]...)
+	n, last := 2+len(key)+valueSize, len(t.chunks)-1
+	if last < 0 || len(t.chunks[last])+n > cap(t.chunks[last]) {
+		t.chunks = append(t.chunks, make([]byte, 0, max(1<<chunkBits, n)))
+		last++
+	}
+	c := t.chunks[last]
+	t.recs = append(t.recs, uint32(last)<<chunkBits|uint32(len(c)))
+	c = binary.LittleEndian.AppendUint16(c, uint16(len(key)))
+	c = append(c, key...)
+	t.chunks[last] = append(c, val[:valueSize]...)
+	t.used += n
 	r := uint32(len(t.recs))
 	t.byKey[i] = r
 	t.insertID(r)
@@ -166,9 +196,20 @@ func (t *memtable) order() []uint32 {
 	return t.sorted
 }
 
-func (t *memtable) reset() {
-	t.arena, t.recs, t.sorted = t.arena[:0], t.recs[:0], t.sorted[:0]
-	clear(t.byKey)
-	clear(t.byID)
-	t.idUsed, t.dirty = 0, false
+// sortedRecs returns, in key order, the records of a memtable no one writes
+// any more (a frozen append level) whose keys start with prefix, in a new
+// slice: concurrent readers never share its sort state.
+func (t *memtable) sortedRecs(prefix []byte) []uint32 {
+	var out []uint32
+	for r := range t.recs {
+		if k, _ := t.rec(uint32(r)); bytes.HasPrefix(k, prefix) {
+			out = append(out, uint32(r))
+		}
+	}
+	slices.SortFunc(out, func(a, b uint32) int {
+		ka, _ := t.rec(a)
+		kb, _ := t.rec(b)
+		return bytes.Compare(ka, kb)
+	})
+	return out
 }

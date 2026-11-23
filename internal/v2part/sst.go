@@ -28,8 +28,11 @@ type Writer struct {
 		Set([]byte, []byte) error
 		Close() error
 	}
+	// generation is the dictionary generation of an ID-keyed writer; 0 for
+	// name keys (see DenseWriter.IDKeyed).
+	generation     uint64
 	first, last    []byte
-	lastName       ID
+	lastName       Key
 	names, records uint64
 	err            error
 	closed         bool
@@ -146,6 +149,8 @@ func (w *Writer) setDecoded(key []byte, k Key, value []byte) error {
 	var err error
 	if !w.spec.Scope.contains(k) || (w.records > 0 && bytes.Compare(w.last, key) >= 0) {
 		err = errors.New("unsorted or foreign part key")
+	} else if k.ByID != (w.generation != 0) {
+		err = errors.New("part key generation does not match the writer")
 	}
 	if err == nil && !hasArchive(w.spec.Policies, k.Archive) {
 		err = errors.New("archive policy missing")
@@ -160,9 +165,9 @@ func (w *Writer) setDecoded(key []byte, k Key, value []byte) error {
 	if w.records == 0 {
 		w.first = bytes.Clone(key)
 	}
-	if w.records == 0 || w.lastName != k.Metric {
+	if w.records == 0 || !SameMetric(w.lastName, k) {
 		w.names++
-		w.lastName = k.Metric
+		w.lastName = k
 	}
 	w.last = append(w.last[:0], key...)
 	w.records++
@@ -207,6 +212,9 @@ func (w *Writer) Close() (Descriptor, error) {
 	d := Descriptor{Version: SchemaVersion, KeyVersion: KeyVersion, Scope: w.spec.Scope, Encoding: w.spec.Encoding, Source: w.spec.Source, Bytes: w.out.n, FirstKey: w.first, LastKey: w.last, Coverage: Coverage{MinClock: w.spec.MinClock, MinTime: w.spec.MinTime, MaxTime: w.spec.MaxTime, Names: w.names, Records: w.records, Policies: w.spec.Policies, MinExpiry: w.spec.MinExpiry, MaxExpiry: w.spec.MaxExpiry}}
 	if w.spec.Encoding == DenseEncoding {
 		d.Version = GroupFileVersion
+	}
+	if w.generation != 0 {
+		d.Version, d.KeyVersion, d.DictGeneration = IDFileVersion, IDKeyVersion, w.generation
 	}
 	copy(d.SHA256[:], w.out.h.Sum(nil))
 	return d, d.Validate()
@@ -291,7 +299,7 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 	defer func() { err = errors.Join(err, it.Close()) }()
 	var scope Scope
 	var first, last []byte
-	var lastName ID
+	var lastName Key
 	var names, records uint64
 	var shards []uint16
 	for ik, value := it.First(); ik != nil; ik, value = it.Next() {
@@ -301,9 +309,12 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 		if ik.Kind() != pebble.InternalKeyKindSet || ik.SeqNum() != 0 {
 			return errors.New("non-SET or nonzero-sequence part record")
 		}
-		k, e := Decode(ik.UserKey)
+		k, e := DecodeKey(ik.UserKey)
 		if e != nil {
 			return e
+		}
+		if records > 0 && k.ByID != lastName.ByID || expected != nil && k.ByID != (expected.DictGeneration != 0) || k.ByID && !IDKeys.Load() {
+			return errors.New("mixed part key generations")
 		}
 		if records == 0 {
 			scope = Scope{Group: k.Group, VShard: k.VShard, Partition: k.Partition, Part: k.Part}
@@ -318,9 +329,9 @@ func Read(ctx context.Context, path string, expected *Descriptor, visit func(Key
 		if expected != nil && (!expected.Scope.contains(k) || !hasArchive(expected.Coverage.Policies, k.Archive)) {
 			return errors.New("record outside descriptor")
 		}
-		if records == 0 || lastName != k.Metric {
+		if records == 0 || !SameMetric(lastName, k) {
 			names++
-			lastName = k.Metric
+			lastName = k
 		}
 		if expected != nil && len(expected.VShards) > 0 && (len(shards) == 0 || shards[len(shards)-1] != k.VShard) {
 			shards = append(shards, k.VShard)
