@@ -533,6 +533,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					return err
 				}
 			}
+			var moveEpoch uint64
 			if cfg.Rollups && !readOnly {
 				absolute, err := filepath.Abs(dir)
 				if err != nil {
@@ -541,9 +542,12 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
 					return err
 				}
-				r, err := recoverCoreRollups(db, dir, identities)
+				r, copied, err := recoverCoreRollups(db, dir, identities)
 				if err != nil {
 					return err
+				}
+				if copied {
+					moveEpoch = 1
 				}
 				r.parallelism = max(1, min(8, runtime.GOMAXPROCS(0)/max(1, cfg.Shards)))
 				r.stage = hooks.Stage
@@ -593,6 +597,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				if o.gc, err = openSealedPartGC(db, dir, hooks.Stage); err != nil {
 					return err
 				}
+				o.gc.moveEpoch = moveEpoch
 			}
 			for range cfg.Producers {
 				// The producer lease budget bounds total admitted bytes. Let each

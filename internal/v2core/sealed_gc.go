@@ -62,15 +62,6 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 	if db.Metrics().Snapshots.Count != 0 {
 		return nil, errors.New("part GC must open before readers")
 	}
-	pin := db.NewSnapshot()
-	copied, copyErr := snapshotHasCopiedParts(pin)
-	copyErr = errors.Join(copyErr, pin.Close())
-	if copyErr != nil {
-		return nil, copyErr
-	}
-	if copied {
-		g.moveEpoch = 1
-	}
 	var err error
 	if g.inventory, err = loadRollupInventory(db); err != nil {
 		return nil, err
