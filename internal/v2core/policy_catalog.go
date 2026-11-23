@@ -134,7 +134,19 @@ func (h *PolicyIdentity) definitionBytes() []byte {
 
 // appendDefinition writes the canonical definition directly into an owner arena.
 func (h *PolicyIdentity) appendDefinition(out []byte) []byte {
-	return h.appendDefinitionName(out, h.Name())
+	if p := h.name.Load(); p != nil {
+		return h.appendDefinitionName(out, unsafe.String(p, int(h.nameLen)))
+	}
+	if !h.plain {
+		return h.appendDefinitionName(out, h.Name())
+	}
+	// Decode into the caller's arena rather than allocating a temporary name.
+	out = append(out, `{"Name":"`...)
+	out, _, ok := h.catalog.partDict().LookupID(string(h.policy.Group), h.vshard, h.dictID.Load()-1, out)
+	if !ok {
+		panic("v2core: identity lost its dictionary name")
+	}
+	return append(out, h.policy.suffix...)
 }
 
 // appendDefinitionName reuses a name already validated by a directory or scan.
@@ -154,19 +166,23 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 	}
 	const prefix = `{"Name":"`
 	n := len(prefix) + int(h.nameLen)
-	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && h.matchesName(string(raw[len(prefix):n])) && bytes.Equal(raw[n:], h.policy.suffix)
+	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && h.matchesNameBytes(raw[len(prefix):n]) && bytes.Equal(raw[n:], h.policy.suffix)
 }
 
 // matchesName checks exact dictionary bytes through its forward index. Reverse
 // lookup would decompress and allocate the same name again during recovery.
 func (h *PolicyIdentity) matchesName(name string) bool {
+	return h.matchesNameBytes([]byte(name))
+}
+
+func (h *PolicyIdentity) matchesNameBytes(name []byte) bool {
 	if len(name) != int(h.nameLen) {
 		return false
 	}
 	if p := h.name.Load(); p != nil {
-		return name == unsafe.String(p, int(h.nameLen))
+		return bytes.Equal(name, unsafe.Slice(p, int(h.nameLen)))
 	}
-	e, ok := h.catalog.partDict().Lookup(string(h.policy.Group), h.vshard, []byte(name))
+	e, ok := h.catalog.partDict().Lookup(string(h.policy.Group), h.vshard, name)
 	return ok && !e.Deleted() && e.ID+1 == h.dictID.Load()
 }
 
@@ -177,8 +193,21 @@ func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
-	if (name != "" && !old.matchesName(name)) || !old.definitionEqual(definition) {
+	if !old.definitionEqual(definition) {
 		return nil, errors.New("stored rollup policy changed")
+	}
+	if name != "" {
+		// The canonical definition already checked these bytes against the
+		// dictionary. Compare the supplied name to them without a second lookup.
+		matches := false
+		if old.plain {
+			matches = bytes.Equal([]byte(name), definition[len(`{"Name":"`):len(`{"Name":"`)+int(old.nameLen)])
+		} else {
+			matches = old.matchesName(name)
+		}
+		if !matches {
+			return nil, errors.New("stored rollup policy changed")
+		}
 	}
 	return old, nil
 }
