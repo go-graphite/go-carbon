@@ -30,6 +30,43 @@ func TestRetainTransferSlotsSparseAliases(t *testing.T) {
 	}
 }
 
+func TestVerifyTransferCopyRequiresStableRevisionAcrossSync(t *testing.T) {
+	ctx := t.Context()
+	source, now := openTestStore(t, "/source", Options{fs: vfs.NewMem(), ExactBlocks: true})
+	defer closeTestStore(t, source)
+	target, _ := openTestStore(t, "/target", Options{fs: vfs.NewMem(), ExactBlocks: true})
+	defer closeTestStore(t, target)
+	const name = "transfer.recover"
+	createTestMetric(t, source, name)
+	if err := source.UpdateMany(ctx, name, []Point{{Timestamp: int64(now - 60), Value: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := source.ExportTransfer(ctx, []string{name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.transferReadTestHook = func() {
+		target.transferReadTestHook = nil
+		if _, err := target.ImportTransfer(ctx, records); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if copied, err := target.VerifyTransferCopy(ctx, records); err != nil || !slices.Equal(copied, []bool{false}) {
+		t.Fatalf("copy published after the sync: %v, %v", copied, err)
+	}
+	if copied, err := target.VerifyTransferCopy(ctx, records); err != nil || !slices.Equal(copied, []bool{true}) {
+		t.Fatalf("durable copy: %v, %v", copied, err)
+	}
+	target.transferReadTestHook = func() {
+		if err := target.UpdateMany(ctx, name, []Point{{Timestamp: int64(now - 60), Value: 2}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if copied, err := target.VerifyTransferCopy(ctx, records); err != nil || !slices.Equal(copied, []bool{false}) {
+		t.Fatalf("copy revised during verification: %v, %v", copied, err)
+	}
+}
+
 func TestTransferDurableAcrossUnsyncedForegroundCrash(t *testing.T) {
 	ctx := context.Background()
 	sourceFS, targetFS := vfs.NewStrictMem(), vfs.NewStrictMem()

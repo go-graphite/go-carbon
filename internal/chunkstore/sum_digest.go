@@ -70,6 +70,20 @@ func (io *digestCacheIO) CacheDigest(key, value []byte) {
 // SumDigest reads all archives, unlike Fetch's age-selected serving archive.
 // Zero bounds request full retained history. No source points are changed.
 func (s *Store) SumDigest(ctx context.Context, name string, from, until int, steps ...int) ([]SumArchive, error) {
+	result, _, err := s.SumDigestVersion(ctx, name, from, until, steps...)
+	return result, err
+}
+
+// SumDigestVersion also returns the metric version read from the same view as
+// the digested points, so the version is never newer than those points and
+// can fence a deletion that relies on the digest.
+func (s *Store) SumDigestVersion(ctx context.Context, name string, from, until int, steps ...int) ([]SumArchive, TransferVersion, error) {
+	var m Metadata
+	result, err := s.sumDigest(ctx, name, from, until, &m, steps...)
+	return result, transferVersion(m), err
+}
+
+func (s *Store) sumDigest(ctx context.Context, name string, from, until int, version *Metadata, steps ...int) ([]SumArchive, error) {
 	ctx, finish, err := s.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -100,6 +114,7 @@ func (s *Store) SumDigest(ctx context.Context, name string, from, until int, ste
 	if err := s.checkFileOwnership(m); err != nil {
 		return nil, err
 	}
+	*version = m
 	if !m.Continuation {
 		return s.sumOrdinary(ctx, view, m, from, until, steps...)
 	}

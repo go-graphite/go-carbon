@@ -4,6 +4,66 @@ Use [storectl](../../tool/storectl/README.md) for supported local inventories,
 maintenance and resumable synchronization. Fleet dashboards and host collectors
 belong to the deployment's monitoring and configuration management.
 
+## Moving metrics with bucky2
+
+`bucky2` (buckytools repo) is the bucky-style client for the embedded buckyd
+API: `list`, `stat`, `du`, `locate`, `servers`, `delete`, `inconsistent`,
+`rebalance`, `backfill` and `copy`. Its transfers use one endpoint:
+
+`POST /v1/transfer/sync` with `{Source, Names, From, Until, MaxBytes, Recover}`
+asks the target to compare `Names` with `Source` (`sum-v1` digests, as
+`/v1/transfer/digest`) and pull only the names that differ, through the same
+export and target-wins import as `/v1/transfer/pull`. The reply has one row
+per name: `equal`, `copied`, `merged` or `absent_on_source`. `From`/`Until`
+bound the comparison only; a differing name is merged whole.
+
+Only a `copied` row carries the source's `TransferVersion`, for a fenced
+`/v1/transfer/delete`: the name was absent on the target and its keys were
+copied verbatim, so the target durably holds every stored point of that
+version (the import commits with a synced WAL). `equal` and `merged` rows
+carry none. A digest ends at the daemon's clock while the store accepts
+future-dated points, and a merge can drop a source point into an occupied
+slot, so neither proves full coverage.
+
+The deletion version states one fact: at one instant the target durably held
+every stored point of that source version. The target checks this after its
+WAL sync: a copy written between publication and that sync is reported
+`copied` without a version, and stays on the source. Writes that reach the target copy
+afterwards, before or after the source is deleted, are the metric's ordinary
+history. Applied to the same keys they change it exactly as they would have on
+the source, including overwriting an archive slot that held a future-dated
+point. `VerifyTransfer` gives `storectl` the same contract, so the target
+holds no lock across the source delete.
+
+`Recover: true` lets an interrupted run finish. A copy whose reply was lost,
+or that committed before a later name failed its batch, compares `equal` on
+the next request. With `Recover` the target re-exports those names and checks
+the import receipt: a name it holds as a verbatim copy of the unchanged source
+export, and that was not written on the target since the copy, is reported
+`copied` again, with its version. Recovery checks that the copy exists at the
+same revision before and after the WAL sync, since an interrupted import can
+leave its copies visible before they are durable. A target write after the copy
+ends recoverability: it can displace a copied
+point from its archive slot, so the metric stays on the source. Recovery costs
+the export bytes of every equal name, so only callers that delete sources
+should set it. `/v1/transfer/status` reports `SyncRecover: true` on daemons
+that accept the field.
+
+Archive capacity is part of the equality check; a retention mismatch reaches
+the import and is rejected with 409. A source digest reply larger than
+`max_body_bytes` returns 413 so the caller can split its batch. Refusals that
+no smaller batch can pass carry the `X-Buckyd-Store-Fence` header: the
+whole-store copy fence (423 on this endpoint, 409 elsewhere) and a source
+whose store format the target cannot accept (409, with the source's
+diagnostic in the message).
+
+A sync whose source is the target itself under another name (a hostname alias)
+is refused with 421: the target sends its per-process identity in
+`X-Buckyd-Sync-Origin` and a daemon that sees its own identity rejects the
+request, so a store is never compared with itself and reported equal. Authorization, trusted
+sources, transfer slots and storage-pressure 429s are those of `pull`.
+`/v1/transfer/status` reports `Sync: true` on daemons that have it.
+
 ## Dashboard
 
 Import [operations-dashboard.json](operations-dashboard.json) into Grafana using

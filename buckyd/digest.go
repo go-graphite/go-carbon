@@ -55,6 +55,10 @@ type DigestResult struct {
 	Mode          string `json:",omitempty"`
 	Found         bool
 	Archives      []DigestArchive `json:",omitempty"`
+	// Version (sum-v1 only) comes from the same store view as the digested
+	// points, so it is never newer than them. It fences a later
+	// /v1/transfer/delete of a name whose digest matched elsewhere.
+	Version *chunkstore.TransferVersion `json:",omitempty"`
 }
 
 func (r DigestRequest) validate() error {
@@ -135,7 +139,7 @@ func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, 
 			return nil
 		}
 		if r.Mode == "sum-v1" {
-			archives, err := s.store.SumDigest(ctx, name, int(r.From), int(r.Until), r.Step)
+			archives, version, err := s.store.SumDigestVersion(ctx, name, int(r.From), int(r.Until), r.Step)
 			if errors.Is(err, chunkstore.ErrNotFound) {
 				return nil
 			}
@@ -143,6 +147,7 @@ func (s *Service) digest(ctx context.Context, r DigestRequest) ([]DigestResult, 
 				return fmt.Errorf("sum digest %s: %w", name, err)
 			}
 			out[i].Found = true
+			out[i].Version = &version
 			for _, a := range archives {
 				out[i].Archives = append(out[i].Archives, DigestArchive{Step: a.Step, Points: a.Points, Count: int(a.Count), Hash: a.Sum, From: a.From, Until: a.Until})
 			}

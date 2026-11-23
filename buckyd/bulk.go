@@ -17,13 +17,12 @@ import (
 	"github.com/go-graphite/go-carbon/internal/storehttp"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // Bulk requests use root namespace authorization once per batch. A scoped
 // token cannot turn a batch endpoint into an escape from its metric scope.
 func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
-	op := map[string]string{"/v1/transfer/export": "read", "/v1/transfer/import": "update", "/v1/transfer/pull": "update", "/v1/transfer/verify": "read", "/v1/transfer/delete": "delete", "/v1/transfer/stage-delete": "delete", "/v1/transfer/stage-copy": "update", "/v1/transfer/pending-delete": "read", "/v1/transfer/check-staged": "read", "/v1/transfer/retire": "delete", "/v1/transfer/status": "read", "/v1/transfer/list": "read", "/v1/transfer/digest": "read"}[r.URL.Path]
+	op := map[string]string{"/v1/transfer/export": "read", "/v1/transfer/import": "update", "/v1/transfer/pull": "update", "/v1/transfer/sync": "update", "/v1/transfer/verify": "read", "/v1/transfer/delete": "delete", "/v1/transfer/stage-delete": "delete", "/v1/transfer/stage-copy": "update", "/v1/transfer/pending-delete": "read", "/v1/transfer/check-staged": "read", "/v1/transfer/retire": "delete", "/v1/transfer/status": "read", "/v1/transfer/list": "read", "/v1/transfer/digest": "read"}[r.URL.Path]
 	if op == "" {
 		http.NotFound(w, r)
 		return
@@ -37,21 +36,36 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, 403)
 		return
 	}
+	// A sync whose source resolves back to this daemon (a hostname alias of
+	// the target) would compare the store with itself, report every name
+	// equal and authorize deleting the only copy.
+	if r.Header.Get(syncOriginHeader) == s.proofEpoch {
+		writeError(w, errSelfTransfer, http.StatusMisdirectedRequest)
+		return
+	}
 	if op != "read" {
 		s.copyMu.RLock()
 		defer s.copyMu.RUnlock()
 		if s.StoreCopyActive() {
-			writeError(w, errors.New("administrative metric mutations are fenced by whole-store copy"), http.StatusConflict)
+			// 409 on sync means one conflicting name the caller can isolate by
+			// splitting its batch; the store-wide fence is not that.
+			status := http.StatusConflict
+			if r.URL.Path == "/v1/transfer/sync" {
+				status = http.StatusLocked
+			}
+			w.Header().Set(storeFenceHeader, "store-copy")
+			writeError(w, errors.New("administrative metric mutations are fenced by whole-store copy"), status)
 			return
 		}
 	}
-	if r.URL.Path == "/v1/transfer/pull" {
+	pulls := r.URL.Path == "/v1/transfer/pull" || r.URL.Path == "/v1/transfer/sync"
+	if pulls {
 		if err := s.allowedRoot("read", r); err != nil {
 			writeError(w, err, 403)
 			return
 		}
 	}
-	if r.URL.Path == "/v1/transfer/import" || r.URL.Path == "/v1/transfer/pull" {
+	if r.URL.Path == "/v1/transfer/import" || pulls {
 		stats := s.store.Stats()
 		if transferPressure(stats, s.store.TransferL0StopWrites(), s.TransferMaxCompactionDebt(), transferDebtGuardOff(r)) {
 			writeError(w, errors.New("target storage pressure; import paused"), 429)
@@ -72,7 +86,9 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			CPULimit               int
 			PendingDeleteBatches   bool
 			StagedCopyVerification bool
-		}{s.store.Stats(), s.MaxTransfers(), s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true})
+			Sync                   bool
+			SyncRecover            bool // /v1/transfer/sync accepts Recover
+		}{s.store.Stats(), s.MaxTransfers(), s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true, true, true})
 		return
 	}
 	if !s.acquireTransfer() {
@@ -147,6 +163,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	case "/v1/transfer/export":
 		accepted, _ := strconv.Atoi(r.URL.Query().Get("store_format"))
 		if s.store.TransferFormat() > 7 && accepted < s.store.TransferFormat() {
+			w.Header().Set(storeFenceHeader, "store-format") // every name fails alike
 			writeError(w, fmt.Errorf("export requires a peer accepting store format %d", s.store.TransferFormat()), http.StatusConflict)
 			return
 		}
@@ -178,6 +195,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		// records precede this final capability check, so an old peer cannot receive
 		// new blocks through a request admitted before the marker upgrade.
 		if s.store.TransferFormat() > 7 && accepted < s.store.TransferFormat() {
+			w.Header().Set(storeFenceHeader, "store-format") // every name fails alike
 			writeError(w, fmt.Errorf("export requires a peer accepting store format %d", s.store.TransferFormat()), http.StatusConflict)
 			return
 		}
@@ -238,6 +256,9 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var upstream *transferUpstreamError
 			if errors.As(err, &upstream) {
+				if upstream.fence != "" {
+					w.Header().Set(storeFenceHeader, upstream.fence)
+				}
 				writeError(w, err, upstream.status)
 			} else {
 				fail(err)
@@ -252,6 +273,30 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		s.transferImported(records)
 		w.Header().Set("X-Transfer-Bytes", strconv.FormatInt(n, 10))
 		replyProofs(proofs)
+	case "/v1/transfer/sync":
+		var request SyncRequest
+		if !decode(&request) {
+			return
+		}
+		digest := DigestRequest{Names: request.Names, Mode: "sum-v1", From: request.From, Until: request.Until}
+		if err := digest.validate(); err != nil {
+			writeError(w, err, bodyErrorStatus(err))
+			return
+		}
+		result, err := s.syncTransfer(r.Context(), request, digest)
+		if err != nil {
+			var upstream *transferUpstreamError
+			if errors.As(err, &upstream) {
+				if upstream.fence != "" {
+					w.Header().Set(storeFenceHeader, upstream.fence)
+				}
+				writeError(w, err, upstream.status)
+			} else {
+				fail(err)
+			}
+			return
+		}
+		reply(result)
 	case "/v1/transfer/import":
 		buffer := s.transferBuffer()
 		defer s.transferPool.Put(buffer)
@@ -400,12 +445,8 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 		return nil, 0, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if len(s.secret) > 0 {
-		signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, ACL{RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute))}, Namespaces: []string{"*"}, Ops: []string{"read"}}).SignedString(s.secret)
-		if err != nil {
-			return nil, 0, err
-		}
-		request.Header.Set(authHeader, signed)
+	if err := s.signRead(request); err != nil {
+		return nil, 0, err
 	}
 	response, err := bulkTransferClient.Do(request)
 	if err != nil {
@@ -413,7 +454,15 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
-		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s", response.Status)}
+		// Keep the source's diagnostic and its store-wide marker: a format
+		// mismatch fails every name, so the caller must not split the batch.
+		text, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		fence := response.Header.Get(storeFenceHeader)
+		// Sources older than the marker send the same format refusal without it.
+		if fence == "" && response.StatusCode == http.StatusConflict && bytes.Contains(text, []byte("export requires a peer accepting store format")) {
+			fence = "store-format"
+		}
+		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s: %s", response.Status, bytes.TrimSpace(text)), fence}
 	}
 	required, _ := strconv.Atoi(response.Header.Get("X-Store-Format"))
 	if required > s.store.AcceptTransferFormat() {
@@ -430,6 +479,7 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 type transferUpstreamError struct {
 	status  int
 	message string
+	fence   string // storeFenceHeader value from the source, if any
 }
 
 func (e *transferUpstreamError) Error() string { return e.message }

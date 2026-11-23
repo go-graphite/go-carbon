@@ -1087,6 +1087,80 @@ func (s *Store) VerifyTransfer(ctx context.Context, proofs []TransferProof) erro
 	return nil
 }
 
+// VerifyTransferCopy reports, per record, whether this store's current metric
+// of that name was created by a verbatim copy of exactly that source export:
+// the import receipt matches the proof such a copy wrote, and the metric is
+// still at the revision the copy published. It lets a retry recover a copy
+// whose reply was lost, without trusting a point digest. Any mismatch (a
+// merge, another source version, rewritten source keys, a recreated target)
+// is false. So is any later write to the target: it keeps the receipt but can
+// displace a copied point from its archive slot. The copy must be visible
+// before the WAL sync and still at the same revision after it. An import can
+// publish a copy before its final sync. Records are not imported.
+func (s *Store) VerifyTransferCopy(ctx context.Context, records []TransferMetric) ([]bool, error) {
+	ctx, finish, err := s.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	before := s.db.NewSnapshot()
+	defer before.Close()
+	if err := s.Sync(); err != nil {
+		return nil, err
+	}
+	if s.transferReadTestHook != nil {
+		s.transferReadTestHook()
+	}
+	after := s.db.NewSnapshot()
+	defer after.Close()
+	copied := make([]bool, len(records))
+	var encoder transferProofEncoder
+	for i := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.checkContinuationIndexes(&records[i]) // as ImportTransfer, before the digest
+		r := records[i]
+		m, err := metadataFrom(before, r.Config.Name)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if m.Revision != 1 { // a copy publishes its target at revision 1
+			continue
+		}
+		proof := TransferProof{Source: r.Version, Target: transferVersion(m),
+			Digest: transferDigest(r), KeyCount: len(r.Keys), Counts: r.Counts, Sampled: r.PointDigest != ""}
+		want, err := encoder.digest(&proof)
+		if err != nil {
+			return nil, err
+		}
+		receipt, closer, err := before.Get(transferReceiptKey(m))
+		if errors.Is(err, pebble.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		matches := bytes.Equal(want[:], receipt)
+		_ = closer.Close()
+		if !matches {
+			continue
+		}
+		current, err := metadataFrom(after, r.Config.Name)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		copied[i] = transferVersion(current) == proof.Target
+	}
+	return copied, nil
+}
+
 // DeleteTransfer is an atomic, durable conditional delete of a bounded batch.
 // A changed source aborts the whole batch; no metric is silently skipped.
 func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) error {

@@ -58,7 +58,7 @@ func (s *Service) transferSourceOrigin(source string) (*url.URL, error) {
 			return origin(host), nil
 		}
 	}
-	return nil, &transferUpstreamError{403, "source is neither a ring node nor a configured transfer source"}
+	return nil, &transferUpstreamError{status: 403, message: "source is neither a ring node nor a configured transfer source"}
 }
 
 // SetTransferSources replaces the additional trusted origins for subsequent
