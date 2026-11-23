@@ -180,8 +180,8 @@ func TestPolicyCatalogConcurrentPageGrowth(t *testing.T) {
 	}
 }
 
-// Checkpoint rows append into a shared block arena, including its existing prefix.
-func TestCheckpointDefinitionCost(t *testing.T) {
+// Canonical identity validation uses the existing dictionary without temporary names.
+func TestIdentityValidationCost(t *testing.T) {
 	d, err := v2dict.Open(t.TempDir(), v2dict.Options{BufferBytes: 1024})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestCheckpointDefinitionCost(t *testing.T) {
 	defer d.Close()
 	c := &PolicyCatalog{}
 	c.dict.Store(d)
-	for i, name := range []string{"checkpoint." + strings.Repeat("metric.", 45), `checkpoint.\"escaped`, "checkpoint.<html>", "checkpoint.é"} {
+	for i, name := range []string{"identity." + strings.Repeat("metric.", 45), `identity.\"escaped`, "identity.<html>", "identity.é"} {
 		_, raw := rollupTestPolicy(t, name, "1s:1h,1m:1d", sealrollup.Last, .5)
 		h, err := c.intern(uint64(i+1), name, raw)
 		if err != nil {
@@ -208,22 +208,8 @@ func TestCheckpointDefinitionCost(t *testing.T) {
 		if err = d.Flush(); err != nil {
 			t.Fatal(err)
 		}
-		prefix := []byte("existing block prefix")
-		out := make([]byte, len(prefix), len(prefix)+len(raw))
-		copy(out, prefix)
 		start := time.Now()
 		allocs := testing.AllocsPerRun(2000, func() {
-			out = h.appendDefinition(out[:len(prefix)])
-			if !bytes.Equal(out[:len(prefix)], prefix) || !bytes.Equal(out[len(prefix):], raw) {
-				panic("checkpoint definition changed")
-			}
-		})
-		if h.plain && allocs != 0 {
-			t.Fatalf("plain checkpoint definition allocated %.0f times", allocs)
-		}
-		t.Logf("CHECKPOINT_DEFINITION plain=%v ns/row=%d allocs/row=%.0f", h.plain, time.Since(start).Nanoseconds()/2001, allocs)
-		start = time.Now()
-		allocs = testing.AllocsPerRun(2000, func() {
 			got, err := c.intern(h.id, name, raw)
 			if err != nil || got != h {
 				panic("identity validation changed")

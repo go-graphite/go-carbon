@@ -97,7 +97,7 @@ type coreRollups struct {
 	expDrained []int64
 	expRefile  []uint32
 
-	rankMu *sync.Mutex // existing owner publication lock; legacy renumber only
+	rankMu    *sync.Mutex // existing owner publication lock; legacy renumber only
 	stage     func(string)
 	metrics   map[uint64]uint32 // NumericID -> owner slot; no shared pointer or hint
 	taken     []uint64
@@ -1141,14 +1141,14 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		if err != nil || k.Ordinal != 0 {
 			return nil, false, errors.Join(err, errors.New("invalid recovery envelope"))
 		}
-		m := r.metrics[meta.ID]
+		m := r.installed(meta.ID)
 		if m == nil {
 			m = newRollupMetric(entry.identity)
 		} else if !entry.meta.after(r.meta[r.slotOf(meta.ID, m)]) {
 			continue
 		}
 		if k.ByID {
-			m.dictID.Store(k.Local + 1)
+			m.rememberDictID(k.Local)
 		}
 		r.install(meta.ID, m, entry.meta)
 	}

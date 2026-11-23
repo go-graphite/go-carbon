@@ -13,7 +13,7 @@ import (
 // name is published, poison its resolver: any rank comparison or reconstruction
 // during the next ID-keyed plan panics. Real dictionary IDs still key the parts.
 func TestIDKeyedSealNoNameRanks(t *testing.T) {
-	if n := unsafe.Sizeof(rollupMetric{}); n != 24 {
+	if n := unsafe.Sizeof(rollupMetric{}); n != 16 {
 		t.Fatalf("metric grew to %d bytes", n)
 	}
 	r := newCoreRollups()
