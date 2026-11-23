@@ -79,7 +79,6 @@ func unrankAll(r *coreRollups) {
 		ids, meta = append(ids, id), append(meta, r.meta[s])
 		ttl, expAt = append(ttl, r.ttl[s]), append(expAt, r.expAt[s])
 	}
-	r.calendar.move(moved)
 	r.expiries.move(moved)
 	r.dense, r.unranked, r.ids, r.meta, r.ttl, r.expAt = r.dense[:0], ms, ids, meta, ttl, expAt
 }
@@ -308,9 +307,9 @@ func TestPolicyIdentityFitsSizeClass(t *testing.T) {
 		t.Fatalf("PolicyIdentity is %d B, past the 64 B size class", got)
 	}
 	// The committed scalars live in the owner's pointer-free meta array and
-	// KeepRecent residency behind a pointer that only coarse archives fill.
-	if got := reflect.TypeFor[rollupMetric]().Size(); got != 24 {
-		t.Fatalf("rollupMetric is %d B, want 24", got)
+	// routing identity; sample residency is absent.
+	if got := reflect.TypeFor[rollupMetric]().Size(); got != 16 {
+		t.Fatalf("rollupMetric is %d B, want 16", got)
 	}
 }
 

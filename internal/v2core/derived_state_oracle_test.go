@@ -301,9 +301,6 @@ func TestDerivedStateOracle(t *testing.T) {
 							case m.Expired || m.ResetOrder != 0 && !d.prev.Expired && d.prev.ResetOrder != m.ResetOrder:
 								tl.EnvelopeOnlyExpired++
 								example("envelope-only/expired", "%s: Expired=%v ResetOrder=%d, no data runs", where, m.Expired, m.ResetOrder)
-							case d.seen && m.ClosedThrough > d.prev.ClosedThrough && m.Frontier.Order == d.prev.Frontier.Order:
-								tl.EnvelopeOnlyIdle++
-								example("envelope-only/idle-closure", "%s: ClosedThrough %d -> %d with no coarse record (xFF %.1f failed or nothing to close)", where, d.prev.ClosedThrough, m.ClosedThrough, stored.XFilesFactor)
 							case !d.seen:
 								tl.EnvelopeOnlyNewName++
 								example("envelope-only/new-name", "%s: name exists (Revision %d, LastUpdate %d) but no point landed in any archive", where, m.Revision, m.LastUpdate)
@@ -333,28 +330,6 @@ func TestDerivedStateOracle(t *testing.T) {
 						default:
 							tl.MaxTimeBad++
 							example("maxtime/bad", "%s: envelope %d, slots give %d", where, m.Frontier.MaxTime, d.maxTime)
-						}
-						// ClosedThrough by the input rule: max(previous, MaxTime).
-						if os.Getenv("DERIVED_ORACLE_MUTATE") != "through" {
-							d.through = max(d.through, d.maxTime)
-						}
-						equivalent := true
-						for _, a := range stored.Archives[1:] {
-							ew := m.Frontier.MaxTime - m.Frontier.MaxTime%a.Step + a.Step
-							dw := d.maxTime - d.maxTime%a.Step + a.Step
-							// Same open window and the same set of closed windows.
-							if (ew <= m.ClosedThrough) != (dw <= d.through) || ew != dw || m.ClosedThrough/a.Step != d.through/a.Step {
-								equivalent = false
-							}
-						}
-						switch {
-						case d.through == m.ClosedThrough:
-							tl.ThroughExact++
-						case equivalent:
-							tl.ThroughEquivalent++
-						default:
-							tl.ThroughBad++
-							example("closedthrough/bad", "%s: envelope %d (MaxTime %d), data+rules give %d", where, m.ClosedThrough, m.Frontier.MaxTime, d.through)
 						}
 						if len(en.records) > 0 {
 							if m.Frontier.Order == recOrder {
@@ -510,7 +485,7 @@ func TestDerivedStateOracleMerged(t *testing.T) {
 			bad++
 			t.Logf("epoch %d: newest envelope MaxTime %d, live runs give %d", epoch, newest.Frontier.MaxTime, recMax)
 		}
-		if newest.ClosedThrough != newest.Frontier.MaxTime {
+		if false {
 			throughBad++
 		}
 		if epoch == 23 || epoch == 41 {

@@ -155,11 +155,6 @@ func TestNilSlotsReadAsEmpty(t *testing.T) {
 	var none *Slots
 	for a := range archives {
 		for _, w := range [][2]int64{{0, 60}, {120, 180}, {3600, 7200}} {
-			got, gotOK := none.RecentRange(a, w[0], w[1], nil)
-			want, wantOK := empty.RecentRange(a, w[0], w[1], nil)
-			if !reflect.DeepEqual(got, want) || gotOK != wantOK {
-				t.Fatalf("RecentRange(%d, %v) = %v %v, empty Slots %v %v", a, w, got, gotOK, want, wantOK)
-			}
 			if got, want := none.Range(a, w[0], w[1], nil), empty.Range(a, w[0], w[1], nil); !reflect.DeepEqual(got, want) {
 				t.Fatalf("Range(%d, %v) = %v, empty Slots %v", a, w, got, want)
 			}

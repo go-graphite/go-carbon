@@ -251,7 +251,6 @@ func TestClassicArchiveBoundaries(t *testing.T) {
 					}
 					frontier := sealrollup.Frontier{}
 					var workspace sealrollup.Workspace
-					var recordScratch []sealrollup.Record
 					for bi, points := range [][]sealrollup.Sample{corrections, {{Time: corrections[0].Time, Bits: math.Float64bits(23), Sequence: 10000}}} {
 						b := sealrollup.Batch{Order: uint64(bi + 2), Now: now, Points: points}
 						view := func(a int, s int64) (sealrollup.Sample, bool) { p, ok := state[boundarySlot{a, s}]; return p, ok }
@@ -276,14 +275,13 @@ func TestClassicArchiveBoundaries(t *testing.T) {
 							})
 							return dst
 						}
-						sparse, err := prepared.PlanInto(recordScratch, frontier, view, ranges, []sealrollup.Batch{b}, &workspace)
+						sparse, err := prepared.PlanWithWorkspace(frontier, view, ranges, []sealrollup.Batch{b}, &workspace)
 						if err != nil {
 							t.Fatal(err)
 						}
 						if !reflect.DeepEqual(plan, sparse) {
 							t.Fatalf("seal%d sparse and point-view plans differ", bi)
 						}
-						recordScratch = sparse.Records[:0]
 						for _, r := range sparse.Records {
 							// Exercise the durable singleton codec across the seal boundary.
 							decoded, err := sealrollup.DecodeRecord(r.Archive, r.Slot, sealrollup.EncodeRecord(r))

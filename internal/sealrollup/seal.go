@@ -31,13 +31,11 @@ type Record struct {
 
 // Kind says what a stored record version is. Raw is a point at the archive
 // its batch's admission clock routed it to, aligned to that archive's step.
-// Mat is a window value written down: the seal writes its closed windows as
-// fallback-only Mat records; merges write windows down (WriteDown) before
+// Mat is a window value written down: merges write windows down (WriteDown) before
 // dropping superseded versions. Ghost is a point whose physical slot a later point of
 // the same batch (another epoch) took: an event, never a value. None is a
 // written-down absence: it bounds the event walk and never holds a value.
-// Readers that resolve one value per slot (every current reader) see only
-// Raw records and the seal's Mat records; see v2part.DecodeSlotsInto.
+// Version readers resolve windows from raw events and merge write-downs.
 type Kind uint8
 
 const (
@@ -51,8 +49,8 @@ const (
 // only after the transaction containing raw input, records and frontier commits.
 //
 // The last Versions entries of Records are superseded versions of this seal
-// (PlanClosedInto only): a Raw point of an earlier batch whose slot a later
-// batch or a closed window took, or a Ghost. They are sorted by (archive,
+// (RouteInto only): a Raw point of an earlier batch whose slot a later
+// batch took, or a Ghost. They are sorted by (archive,
 // slot), oldest first, and every one shares its (archive, slot) with exactly
 // one of the leading len(Records)-Versions records, the slot's winner. Part
 // writers store each slot's versions before its winner; state and per-slot
@@ -186,3 +184,9 @@ func DecodeRecord(archive int, physicalSlot int64, b []byte) (Record, error) {
 	return Record{Delta: Delta{Archive: archive, Slot: physicalSlot, Order: order,
 		Sample: Sample{Time: t, Bits: binary.BigEndian.Uint64(b[10:]), Sequence: order}}, Correction: b[1] == 1}, nil
 }
+
+// Digest returns the immutable schema identity validated by Prepare.
+func (p *Prepared) Digest() [32]byte { return p.policy }
+
+// Config borrows this validated immutable schema; callers must not mutate Archives.
+func (p *Prepared) Config() Config { return p.config }

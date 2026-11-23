@@ -3,7 +3,6 @@ package v2core
 import (
 	"fmt"
 	"math"
-	"math/rand"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -57,40 +56,10 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 		t.Fatal(err)
 	}
 	closable := func() []int {
-		r := e.owners[0].rollups
-		if err := r.loadAllCheckpoint(); err != nil {
+		if err := e.owners[0].rollups.loadAllCheckpoint(); err != nil {
 			t.Fatal(err)
 		}
-		filed := map[int]bool{}
-		for _, slots := range r.calendar.slots {
-			for _, slot := range slots {
-				filed[int(r.ids[slot])] = true
-			}
-		}
-		var ids []int
-		for id, m := range r.metrics {
-			open := false
-			for _, a := range m.schema().Archives[1:] {
-				open = open || rollupOpenEnd(r.meta[r.slotOf(id, m)], a) != math.MaxInt64
-			}
-			if open != filed[int(id)] {
-				t.Fatalf("name %d: open coarse window %v, filed %v", id, open, filed[int(id)])
-			}
-			if open {
-				ids = append(ids, int(id))
-			}
-		}
-		if len(e.owners[0].rollups.metrics) != len(batches) {
-			t.Fatalf("metrics %d", len(e.owners[0].rollups.metrics))
-		}
-		// A durable single-archive name keeps no residency, after a seal
-		// and after recovery alike.
-		for id, m := range e.owners[0].rollups.metrics {
-			if len(m.schema().Archives) == 1 && m.slots != nil {
-				t.Fatalf("single-archive metric %d holds slots %+v", id, *m.slots)
-			}
-		}
-		return ids
+		return nil // seals have no closure work, regardless of archive count
 	}
 	before := closable()
 	if err := e.Close(); err != nil {
@@ -105,9 +74,6 @@ func runMixedIdleStoreHooks(t *testing.T, hooks Hooks, arm func()) (singleArchiv
 	now += 3600
 	if err := e.AppendBatches(0, nil, uint64(len(batches)), true); err != nil {
 		t.Fatal(err)
-	}
-	if r := e.owners[0].rollups; r.closureDue(now) {
-		t.Fatal("a closed window is still due after the idle seal")
 	}
 	image := singleArchiveImage{}
 	pin := e.DBs()[0].NewSnapshot()
@@ -133,11 +99,11 @@ func TestSingleArchiveIdleIndexDifferential(t *testing.T) {
 	if len(indexed) != 5 || !reflect.DeepEqual(indexed, full) {
 		t.Fatalf("indexed %+v\nfull %+v", indexed, full)
 	}
-	if len(closable) != 2 {
-		t.Fatalf("filed %v, want the two coarse-archive names", closable)
+	if len(closable) != 0 {
+		t.Fatalf("filed %v, want no closure work", closable)
 	}
 	for name, m := range indexed {
-		if m.Meta.ClosedThrough == 0 && len(m.Records) == 0 {
+		if len(m.Records) == 0 {
 			t.Fatalf("%s lost data", name)
 		}
 	}
@@ -188,8 +154,8 @@ func TestExpireAskedOnlyWhenOverdue(t *testing.T) {
 		return true
 	}, ExpiryTTL: expiryWindow(0)}
 	image, closable := runMixedIdleStoreHooks(t, h, nil)
-	if len(closable) != 2 {
-		t.Fatalf("filed %v, want the two coarse-archive names", closable)
+	if len(closable) != 0 {
+		t.Fatalf("filed %v, want no closure work", closable)
 	}
 	for name, m := range image {
 		if m.Meta.Expired {
@@ -256,142 +222,4 @@ func closureTestStore(t testing.TB, n int, t0 int64) *coreRollups {
 		r.install(uint64(i+1), m, meta)
 	}
 	return r
-}
-
-// The calendar drain stages exactly the slots the full walk finds due, across
-// random writes (same window, new window, late), idle closes, expiry and
-// revival, with seal clocks landing on and between window ends.
-func TestClosureCalendarMatchesWalk(t *testing.T) {
-	const n = 400
-	t0 := int64(1794700800)
-	r := closureTestStore(t, n, t0)
-	rng := rand.New(rand.NewSource(7))
-	now := t0
-	for round := 0; round < 600; round++ {
-		if rng.Intn(3) == 0 {
-			now += 60 - now%60 // exactly on a minute end
-		} else {
-			now += int64(rng.Intn(25))
-		}
-		r.planNow = now
-		r.drained = r.calendar.due(now, 0, r.drained[:0])
-		written := map[uint64]bool{}
-		for k := rng.Intn(40); k > 0; k-- {
-			written[uint64(1+rng.Intn(n))] = true
-		}
-		want := map[uint32]bool{}
-		for id, m := range r.metrics {
-			if slot := r.slotOf(id, m); !written[id] && rollupClosureDue(m, r.meta[slot], now) {
-				want[slot] = true
-			}
-		}
-		if due := r.closureDue(now); due != (len(want) != 0 || func() bool {
-			for id, m := range r.metrics {
-				if written[id] && rollupClosureDue(m, r.meta[r.slotOf(id, m)], now) {
-					return true
-				}
-			}
-			return false
-		}()) {
-			t.Fatalf("round %d: closureDue %v, walk disagrees", round, due)
-		}
-		got := r.dueSlots(func(id uint64) bool { return written[id] }, nil)
-		if len(got) != len(want) {
-			t.Fatalf("round %d: calendar staged %d slots, walk %d", round, len(got), len(want))
-		}
-		for _, slot := range got {
-			if !want[slot] {
-				t.Fatalf("round %d: calendar staged slot %d the walk does not", round, slot)
-			}
-		}
-		// Commit, as planParts' Commit: masks from old/new scalars, then the
-		// drained ends go, then the masks file.
-		type change struct {
-			slot uint32
-			m    *rollupMetric
-			mask uint16
-		}
-		var changes []change
-		commit := func(slot uint32, next metricMetadata) {
-			m := r.slotMetric(slot)
-			changes = append(changes, change{slot, m, r.refile(m, r.meta[slot], next)})
-			r.meta[slot] = next
-		}
-		for _, slot := range got { // idle close through now
-			next := r.meta[slot]
-			next.ClosedThrough = now
-			commit(slot, next)
-		}
-		for id := range written {
-			m := r.metrics[id]
-			slot := r.slotOf(id, m)
-			next := r.meta[slot]
-			switch rng.Intn(8) {
-			case 0: // late point: frontier and closure unchanged
-			case 1: // expiry
-				next.Expired = true
-			default:
-				next.Expired = false
-				next.Frontier.MaxTime = max(next.Frontier.MaxTime, now-int64(rng.Intn(120)))
-				if a := m.schema().Archives[0]; rng.Intn(2) == 0 {
-					next.ClosedThrough = max(next.ClosedThrough, next.Frontier.MaxTime-next.Frontier.MaxTime%a.Step)
-				}
-			}
-			commit(slot, next)
-		}
-		r.calendar.drop(now)
-		for _, c := range changes {
-			if c.mask != 0 {
-				r.file(c.slot, c.m, r.meta[c.slot], c.mask)
-			}
-		}
-	}
-}
-
-// BenchmarkIdleClosureSelect is one idle selection (a seal's or the 1 s
-// maintenance pass's) on a mostly multi-archive store with no window due:
-// the full walk against the calendar; and the per-name filing a commit adds.
-func BenchmarkIdleClosureSelect(b *testing.B) {
-	const names = 200000
-	t0 := int64(1794700800) + 600
-	r := closureTestStore(b, names, t0)
-	now := t0 - 300 // before every open window's end
-	walk := func() bool {
-		for id, m := range r.metrics {
-			if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && rollupClosureDue(m, meta, now) {
-				return true
-			}
-		}
-		return false
-	}
-	b.Run("walk", func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			if walk() {
-				b.Fatal("due")
-			}
-		}
-		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/names, "ns/name")
-	})
-	b.Run("calendar", func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			if r.closureDue(now) {
-				b.Fatal("due")
-			}
-		}
-		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/names, "ns/name")
-	})
-	b.Run("refile", func(b *testing.B) {
-		b.ReportAllocs()
-		m := r.slotMetric(2)
-		old := r.meta[2]
-		next := old
-		next.Frontier.MaxTime += 10
-		mask := uint16(0)
-		for range b.N {
-			mask |= r.refile(m, old, next)
-		}
-		_ = mask
-	})
 }

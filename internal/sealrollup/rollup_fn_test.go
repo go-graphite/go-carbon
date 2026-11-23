@@ -653,7 +653,7 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 	eager, deferred := map[key]Sample{}, map[key]Sample{}
 	var old, frontier Frontier
 	var through int64
-	var store []Version
+	var store, routed []Version
 	merged := &Versions{c: c}
 	for si, seal := range m.seals {
 		if len(seal) == 0 {
@@ -663,7 +663,7 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, nextThrough, err := p.PlanClosedInto(nil, frontier, through, 0, view(deferred), nil, seal, nil)
+		got, err := p.RouteInto(nil, frontier, seal, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -680,8 +680,9 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 				deferred[k] = s
 			}
 		}
-		old, frontier, through = want.Next, got.Next, nextThrough
-		closed := logical(projectOpenImage(c, deferred, frontier.MaxTime, through))
+		old, frontier, through = want.Next, got.Next, max(through, got.Next.MaxTime)
+		routed = append(routed, recordVersions(c, got.Records)...)
+		closed := logical(NewVersions(c, routed).image())
 		whisperImg := logical(eager)
 
 		part := rawPart(c, seal)
@@ -813,7 +814,7 @@ func TestRollupAsFunctionCorpora(t *testing.T) {
 		corpus := gen()
 		t.Run(corpus.name, func(t *testing.T) {
 			t.Parallel()
-			if st := runFnCorpus(t, corpus); st.closedOK != st.coarse {
+			if st := runFnCorpus(t, corpus); st.closedOK != st.coarse || st.versionsWhisperOK != st.coarse || st.mergedWhisperOK != st.coarse {
 				t.Errorf("%s: current v2 path differs from eager Whisper; first: %.2000s", corpus.name, st.firstClosedMiss)
 			}
 		})
@@ -847,7 +848,7 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 	eager, deferred := map[key]Sample{}, map[key]Sample{}
 	var old, frontier Frontier
 	var through int64
-	var store []Version
+	var store, routed []Version
 	mg := &Versions{c: c}
 	for si, seal := range m.seals {
 		if len(seal) == 0 {
@@ -857,7 +858,7 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 		if err != nil {
 			panic(err)
 		}
-		got, nextThrough, err := p.PlanClosedInto(nil, frontier, through, 0, view(deferred), nil, seal, nil)
+		got, err := p.RouteInto(nil, frontier, seal, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -872,7 +873,7 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 				deferred[k] = s
 			}
 		}
-		old, frontier, through = want.Next, got.Next, nextThrough
+		old, frontier, through = want.Next, got.Next, max(through, got.Next.MaxTime)
 		part := rawPart(c, seal)
 		store = append(store, part...)
 		mg.recs = append(mg.recs, part...)
@@ -880,7 +881,8 @@ func fnImages(m fnMetric, mergeSeed uint64, check func(si int, whisperImg, close
 			mg.merge()
 		}
 		all := &Versions{c: c, recs: store}
-		if !check(si, logical(eager), logical(projectOpenImage(c, deferred, frontier.MaxTime, through)), logical(all.image()), logical(mg.image()), store) {
+		routed = append(routed, recordVersions(c, got.Records)...)
+		if !check(si, logical(eager), logical(NewVersions(c, routed).image()), logical(all.image()), logical(mg.image()), store) {
 			return
 		}
 	}
@@ -1174,7 +1176,7 @@ func openWindowRead(t *testing.T, m fnMetric, store string, loaded *[2]int64, ch
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, nextThrough, err := p.PlanClosedInto(nil, frontier, through, 0, view(deferred), nil, seal, nil)
+		got, err := p.RouteInto(nil, frontier, seal, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1249,7 +1251,7 @@ func openWindowRead(t *testing.T, m fnMetric, store string, loaded *[2]int64, ch
 			}
 			stored = append(stored, raw...)
 		}
-		old, frontier, through = want.Next, got.Next, nextThrough
+		old, frontier, through = want.Next, got.Next, max(through, got.Next.MaxTime)
 		projected := projectOpenImage(c, deferred, frontier.MaxTime, through)
 		for a := 1; a < len(c.Archives); a++ {
 			w := align(frontier.MaxTime, c.Archives[a].Step)

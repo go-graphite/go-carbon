@@ -692,54 +692,6 @@ func sealSweepDropLastWrite(r *coreRollups, in coreSealInput) (coreSealPlan, err
 	return r.planParts(in)
 }
 
-// sealSweepSkipIdleClosure hides idle, unexpired names whose coarsest
-// archive window is due from the idle pass: a due calendar that misses them.
-func sealSweepSkipIdleClosure(r *coreRollups, in coreSealInput) (coreSealPlan, error) {
-	now := r.now()
-	busy := map[uint64]bool{}
-	for _, b := range in.Batches {
-		busy[b.ID] = true
-	}
-	hidden := map[uint64]*rollupMetric{}
-	for id, m := range r.metrics {
-		archives := m.schema().Archives
-		if hasDeadSlot(r) || busy[id] || len(archives) < 2 {
-			continue
-		}
-		meta := r.metaOf(id)
-		if meta.Expired || meta.Version != 3 || meta.Frontier.Order == 0 || r.expire(m.rollupPolicy(), m.metadata(meta), now) {
-			continue
-		}
-		coarse := archives[len(archives)-1]
-		end := meta.Frontier.MaxTime - meta.Frontier.MaxTime%coarse.Step + coarse.Step
-		if meta.ClosedThrough < end && now.Unix() >= end {
-			hidden[id] = m
-		}
-	}
-	slots := map[uint32]bool{}
-	for id, m := range hidden {
-		slots[r.slotOf(id, m)] = true
-	}
-	saved := map[int64][]uint32{}
-	for end, filed := range r.calendar.slots {
-		var kept []uint32
-		for _, slot := range filed {
-			if !slots[slot] {
-				kept = append(kept, slot)
-			}
-		}
-		if len(kept) != len(filed) {
-			saved[end], r.calendar.slots[end] = filed, kept
-		}
-	}
-	defer func() {
-		for end, filed := range saved {
-			r.calendar.slots[end] = filed
-		}
-	}()
-	return r.planParts(in)
-}
-
 // TestSealSweepPlanDifferentialCatchesMutants proves the harness bites: each
 // deliberately broken planner behind the seam must be reported, by at least
 // the listed check, against the production planner.
@@ -751,7 +703,6 @@ func TestSealSweepPlanDifferentialCatchesMutants(t *testing.T) {
 	}{
 		{"unstable run order", sealSweepUnstableRun, "records"},
 		{"drop duplicate-slot last write", sealSweepDropLastWrite, "records"},
-		{"skip idle closure of the coarsest archive", sealSweepSkipIdleClosure, "records"},
 	}
 	s := newSealSweepScript(1)
 	for _, m := range mutants {

@@ -77,21 +77,20 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 		want, walkDue := map[uint32]bool{}, false
 		for id, m := range r.metrics {
 			slot := r.slotOf(id, m)
-			if meta := r.meta[slot]; !meta.Expired && (walkExpire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
+			if meta := r.meta[slot]; !meta.Expired && (walkExpire(m.rollupPolicy(), m.metadata(meta), now)) {
 				walkDue = true
 				if !written[id] {
 					want[slot] = true
 				}
 			}
 		}
-		if due := r.closureDue(now.Unix()) || r.expiryDue(now); due != walkDue {
+		if due := r.expiryDue(now); due != walkDue {
 			t.Fatalf("round %d: maintenance %v, walk %v", round, due, walkDue)
 		}
 		r.planNow, r.planClock = now.Unix(), now
 		r.reresolve(now)
-		r.drained = r.calendar.due(r.planNow, 0, r.drained[:0])
 		r.expDrained = r.expiries.due(r.planNow, 0, r.expDrained[:0])
-		got := r.dueSlots(func(id uint64) bool { return written[id] }, nil)
+		got := r.expirySlots(func(id uint64) bool { return written[id] }, nil)
 		if len(got) != len(want) {
 			t.Fatalf("round %d: calendar staged %d slots, walk %d", round, len(got), len(want))
 		}
@@ -104,11 +103,10 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 		// Commit, as planParts' Commit.
 		type change struct {
 			slot uint32
-			mask uint16
 		}
 		var changes []change
 		commit := func(slot uint32, next metricMetadata) {
-			changes = append(changes, change{slot, r.refile(r.slotMetric(slot), r.meta[slot], next)})
+			changes = append(changes, change{slot})
 			r.meta[slot] = next
 		}
 		for _, slot := range got {
@@ -116,8 +114,6 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 			next := r.meta[slot]
 			if walkExpire(m.rollupPolicy(), m.metadata(next), now) {
 				next.Expired = true
-			} else {
-				next.ClosedThrough = now.Unix()
 			}
 			commit(slot, next)
 		}
@@ -129,12 +125,8 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 			next.Frontier.MaxTime = max(next.Frontier.MaxTime, now.Unix()-int64(rng.Intn(120)))
 			commit(slot, next)
 		}
-		r.calendar.drop(r.planNow)
 		r.commitExpiries()
 		for _, c := range changes {
-			if c.mask != 0 {
-				r.file(c.slot, r.slotMetric(c.slot), r.meta[c.slot], c.mask)
-			}
 			r.fileExpiry(c.slot)
 		}
 	}
@@ -169,7 +161,7 @@ func BenchmarkExpirySelect(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
 				for id, m := range r.metrics {
-					if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now) || rollupClosureDue(m, meta, now.Unix())) {
+					if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now)) {
 						b.Fatal("due")
 					}
 				}
@@ -182,7 +174,7 @@ func BenchmarkExpirySelect(b *testing.B) {
 		b.Run("calendar/"+strconv.Itoa(names), func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				if r.closureDue(now.Unix()) || r.expiryDue(now) {
+				if r.expiryDue(now) {
 					b.Fatal("due")
 				}
 			}
@@ -218,7 +210,7 @@ func BenchmarkExpirySelectSpread(b *testing.B) {
 		b.Run("calendar/"+strconv.Itoa(names), func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				if r.closureDue(now.Unix()) || r.expiryDue(now) {
+				if r.expiryDue(now) {
 					b.Fatal("due")
 				}
 			}

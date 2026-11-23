@@ -3,33 +3,10 @@ package v2core
 import (
 	"cmp"
 	"context"
-	"math"
 	"slices"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
-
-func rollupClosureDue(m *rollupMetric, meta metricMetadata, now int64) bool {
-	for _, a := range m.schema().Archives[1:] {
-		if rollupOpenEnd(meta, a) <= now {
-			return true
-		}
-	}
-	return false
-}
-
-// rollupOpenEnd is the end of archive a's window holding the frontier while
-// that window is open, else math.MaxInt64.
-func rollupOpenEnd(meta metricMetadata, a sealrollup.Archive) int64 {
-	if meta.Version != 3 || meta.Frontier.Order == 0 || meta.Expired {
-		return math.MaxInt64
-	}
-	end := meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step + a.Step
-	if meta.ClosedThrough >= end {
-		return math.MaxInt64
-	}
-	return end
-}
 
 // scanWindows yields archive's physical slots [first, last), each as its
 // newest window at or before the frontier's, computed from stored versions

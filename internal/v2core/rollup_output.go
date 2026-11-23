@@ -263,47 +263,16 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	for i := 0; i < workers; i++ {
 		work := func() {
 			lane := &r.lanes[i]
-			history := rollupHistoryReader{db: r.db, dict: r.identities.partDict()}
-			defer history.close()
 			lane.records, lane.err = lane.records[:0], nil
 			lane.ranked, lane.spare = sortRollupRanks(lane.ranked, lane.spare, &lane.counts, metrics)
 			for _, ref := range lane.ranked {
 				s, m := &stages[ref.stage], metrics[ref.stage]
 				batches := r.batches[s.batch : s.batch+s.batches : s.batch+s.batches]
-				view, ranges := m.slots.View, m.slots.Range
-				var readErr error
-				if r.db != nil {
-					// Every installed sample is at/before Frontier.MaxTime; the
-					// correction bit already covers equal-time replacements.
-					view = nil
-					ranges = func(a int, start, end int64, dst []sealrollup.Sample) []sealrollup.Sample {
-						if readErr != nil {
-							return dst
-						}
-						if result, ok := m.slots.RecentRange(a, start, end, dst); ok {
-							return result
-						}
-						result, err := lane.windows.rangeSamples(&history, m, r.committed(s), a, start, end)
-						readErr = err
-						return append(dst, result...)
-					}
-				}
-				idleThrough := int64(0)
-				if s.batches == 0 && !s.next.Expired {
-					idleThrough = time.Now().Unix()
-					if r.now != nil {
-						idleThrough = r.now().Unix()
-					}
-				}
 				start := len(lane.records)
 				frontier := sealrollup.Frontier{Order: s.next.Frontier.Order, MaxTime: s.next.Frontier.MaxTime, Policy: m.policy.prepared.Digest()}
-				plan, through, err := m.policy.prepared.PlanClosedInto(lane.records[start:], frontier, s.next.ClosedThrough, idleThrough, view, ranges, batches, &lane.workspace)
+				s.next.Version = 3
+				plan, err := m.policy.prepared.RouteInto(lane.records[start:], frontier, batches, &lane.workspace)
 
-				s.next.Version, s.next.ClosedThrough = 3, through
-				if readErr != nil {
-					lane.err = readErr
-					return
-				}
 				if err != nil {
 					lane.err = err
 					return
@@ -438,28 +407,8 @@ func (r *coreRollups) commitStages() {
 		work := func() {
 			lane := &r.lanes[i]
 			for _, ref := range lane.ranked {
-				s, m := &r.stages[ref.stage], r.stageMetrics[ref.stage]
-				records := lane.stageRecords(s)
-				if r.db != nil {
-					m.keepRecent(s.next.Frontier.MaxTime)
-				}
-				for _, record := range records {
-					if r.db != nil {
-						m.installRecent(record.Delta)
-					} else {
-						m.residency().Install(record.Delta)
-					}
-				}
-				if r.db != nil {
-					if len(lane.windows.entries) != 0 {
-						lane.windows.commit(m, records, s.next.Expired)
-					}
-				}
-				if s.next.Expired {
-					m.slots = nil
-				}
+				s := &r.stages[ref.stage]
 				if !s.fresh { // a fresh metric gets its slot, and these scalars, at install
-					s.refile = r.refile(m, r.meta[s.slot], s.next)
 					r.meta[s.slot] = s.next
 				}
 			}

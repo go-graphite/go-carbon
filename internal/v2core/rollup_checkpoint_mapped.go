@@ -19,15 +19,13 @@ import (
 // The existing metrics map is the only materialized mutable name state.
 // File bytes never change, including while a replacement is renamed.
 type mappedRollupCheckpoint struct {
-	buf, index, names, due []byte
-	table                  [][]byte
-	nextDue                int
-	blockOffset            uint64
-	block                  []byte
+	buf, index, names []byte
+	table             [][]byte
+	blockOffset       uint64
+	block             []byte
 }
 type checkpointIndexEntry struct {
 	id, offset, size     uint64
-	due                  int64
 	nameOffset, nameSize uint64
 }
 
@@ -168,24 +166,4 @@ func (r *coreRollups) loadCheckpointName(name []byte) error {
 		}
 	}
 	return decodeErr
-}
-
-// A cold name joins the ordinary closure calendar only when its first open
-// window is due. Later windows use the same mutable calendar as written names.
-func (r *coreRollups) loadCheckpointDue(now int64) error {
-	c := r.checkpoint
-	if c == nil {
-		return nil
-	}
-	for c.nextDue < len(c.due)/16 {
-		e := c.due[c.nextDue*16:]
-		if int64(binary.LittleEndian.Uint64(e)) > now {
-			break
-		}
-		if err := r.loadCheckpointID(binary.LittleEndian.Uint64(e[8:]), nil); err != nil {
-			return err
-		}
-		c.nextDue++
-	}
-	return nil
 }

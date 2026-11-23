@@ -37,7 +37,7 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 		dst = binary.BigEndian.AppendUint64(dst, m.BaselineOrder)
 	}
 	if m.Version == 3 {
-		dst = binary.BigEndian.AppendUint64(dst, uint64(m.ClosedThrough))
+		dst = binary.BigEndian.AppendUint64(dst, 0)
 	}
 	dst = append(dst, m.Frontier.Policy[:]...)
 	dst = binary.BigEndian.AppendUint32(dst, uint32(len(m.Policy)))
@@ -78,11 +78,7 @@ func appendRollupMetadataSlim(dst []byte, m RollupMetadata) []byte {
 	for _, n := range []uint64{m.ID, m.Frontier.Order, uint64(m.Frontier.MaxTime), uint64(m.LastUpdate), m.Revision, m.ResetOrder, m.BaselineOrder} {
 		dst = binary.BigEndian.AppendUint64(dst, n)
 	}
-	closed := int64(0)
-	if m.Version == 3 {
-		closed = m.ClosedThrough
-	}
-	dst = binary.BigEndian.AppendUint64(dst, uint64(closed))
+	dst = binary.BigEndian.AppendUint64(dst, 0) // retired closure watermark
 	dst = append(dst, m.Frontier.Policy[:]...)
 	return binary.BigEndian.AppendUint32(dst, 0)
 }
@@ -146,7 +142,7 @@ func decodeRollupMetadataHeader(data []byte) (m RollupMetadata, slim bool, err e
 		offset = 62
 	}
 	if data[3] >= 3 {
-		m.ClosedThrough = int64(binary.BigEndian.Uint64(data[62:70]))
+		// Bytes 62:70 held the retired closure watermark.
 		offset = 70
 	}
 	copy(m.Frontier.Policy[:], data[offset:offset+32])

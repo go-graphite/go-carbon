@@ -181,3 +181,13 @@ func moveUnionWindows(ctx context.Context, donor, receiver *RollupSnapshot, name
 	})
 	return out, nil
 }
+
+func compareHistorySamples(a, b sealrollup.Sample) int {
+	if a.Time < b.Time {
+		return -1
+	}
+	if a.Time > b.Time {
+		return 1
+	}
+	return 0
+}
