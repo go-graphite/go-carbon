@@ -20,11 +20,27 @@ import (
 // Old images without the index remain readable and use the reference path.
 type classicWindowArchive struct{ base, high int64 }
 type classicWindowIndex struct {
-	archives []classicWindowArchive
-	revision uint64
+	archives   []classicWindowArchive
+	revision   uint64
+	repairSafe bool // canonical provenance: no NaNs, aliases or hidden cells
 }
 
 func classicWindowKey(id uint64) []byte { return append(continuationFilePrefix(id), 'w') }
+
+// A separate optional certificate preserves the v2 window index format. Old
+// writers leave it stale; its revision then prevents sparse repair admission.
+func classicRepairKey(id uint64) []byte { return append(continuationFilePrefix(id), 'R') }
+func encodeClassicRepairIndex(index *classicWindowIndex) []byte {
+	data := make([]byte, 10)
+	data[0] = 2
+	if index != nil {
+		binary.BigEndian.PutUint64(data[1:], index.revision)
+		if index.repairSafe {
+			data[9] = 1
+		}
+	}
+	return data
+}
 func encodeClassicWindowIndex(index *classicWindowIndex) []byte {
 	data := make([]byte, 9)
 	data[0] = 2
@@ -40,7 +56,7 @@ func encodeClassicWindowIndex(index *classicWindowIndex) []byte {
 }
 
 func (c *ContinuationCodec) BindIndex(key, value []byte, revision uint64) []byte {
-	if len(key) == 10 && key[0] == 'f' && key[9] == 'w' && len(value) >= 9 && value[0] == 2 {
+	if len(key) == 10 && key[0] == 'f' && (key[9] == 'w' || key[9] == 'R') && len(value) >= 9 && value[0] == 2 {
 		value = slices.Clone(value)
 		binary.BigEndian.PutUint64(value[1:], revision)
 	}
@@ -48,7 +64,7 @@ func (c *ContinuationCodec) BindIndex(key, value []byte, revision uint64) []byte
 }
 
 func (c *ContinuationCodec) CheckIndex(key, value []byte, revision uint64) []byte {
-	if len(key) == 10 && key[0] == 'f' && key[9] == 'w' && len(value) > 9 && value[0] == 2 && binary.BigEndian.Uint64(value[1:]) != revision {
+	if len(key) == 10 && key[0] == 'f' && (key[9] == 'w' || key[9] == 'R') && len(value) > 9 && value[0] == 2 && binary.BigEndian.Uint64(value[1:]) != revision {
 		return value[:9]
 	}
 	return value
@@ -81,6 +97,11 @@ func (f *continuationFile) loadClassicWindow() error {
 			return store.ErrFormat
 		}
 	}
+	certificate, err := f.fs.kv.Get(classicRepairKey(f.data.id))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	index.repairSafe = len(certificate) == 10 && certificate[0] == 2 && certificate[9] == 1 && binary.BigEndian.Uint64(certificate[1:]) == index.revision
 	f.data.windowIndex = index
 	return nil
 }
@@ -114,6 +135,9 @@ func (f *continuationFile) trackClassicWindow(key []byte, block *store.PointBloc
 		if a.base <= 0 || p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(r.Step) != 0 || slot != int64(group*128+i) {
 			f.data.windowIndex, f.data.windowDirty = nil, true
 			return nil
+		}
+		if math.IsNaN(p.Value) {
+			f.data.windowIndex.repairSafe = false
 		}
 		if p.Timestamp > a.high {
 			a.high = p.Timestamp
