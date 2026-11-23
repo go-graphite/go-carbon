@@ -378,7 +378,10 @@ func (s *RollupSnapshot) ScanArchive(ctx context.Context, name string, archive i
 
 	if m := s.metrics[name]; m != nil && !m.latest.meta.Expired && archive > 0 && archive < len(m.latest.schema().Archives) && first >= 0 && first < last && last <= m.latest.schema().Archives[archive].Count {
 		if move := s.moves[m]; move != nil && move.authority != nil && move.authority.Version < 3 {
-			return s.scanLegacyMoveArchive(ctx, name, archive, first, last, func(r sealrollup.Record, _ partOrigin) error { return yield(r) })
+			return s.scanLegacyMoveArchive(ctx, name, archive, first, last, func(r sealrollup.Record, _ partOrigin) error {
+				r.Sample.Sequence = r.Order
+				return yield(r)
+			})
 		}
 		return s.scanWindows(ctx, name, archive, first, last, yield)
 	}

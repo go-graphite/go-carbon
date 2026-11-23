@@ -129,6 +129,11 @@ func TestMoveAuthorityLegacyVersions(t *testing.T) {
 			check := func() {
 				_, rs := adoptedRecords(t, e)
 				for _, r := range rs {
+					if r.Sample.Sequence != r.Order {
+						t.Fatalf("decoded part sequence escaped the public scan: %+v", r)
+					}
+				}
+				for _, r := range rs {
 					if r.Archive == 1 && r.Sample.Time == 1000 && r.Sample.Bits == math.Float64bits(77) {
 						return
 					}
