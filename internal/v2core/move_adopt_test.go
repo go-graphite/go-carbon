@@ -45,7 +45,7 @@ func adoptDonor(t *testing.T, policy []byte, samples ...sealrollup.Sample) MoveP
 	if err != nil {
 		t.Fatal(err)
 	}
-	return MovePart{path, d}
+	return MovePart{Path: path, Descriptor: d}
 }
 
 func adoptLive(t *testing.T, e *Engine, policy []byte, order, cursor uint64, samples ...sealrollup.Sample) {
@@ -65,7 +65,7 @@ func adoptedRecords(t *testing.T, e *Engine) (RollupMetadata, []sealrollup.Recor
 	defer snapshot.Close()
 	var meta RollupMetadata
 	var records []sealrollup.Record
-	err := ScanRollups(snapshot, func(_ RollupPolicy, m RollupMetadata, r []sealrollup.Record) error { meta = m; records = r; return nil })
+	err := scanRollups(snapshot, e.identities, func(_ RollupPolicy, m RollupMetadata, r []sealrollup.Record) error { meta = m; records = r; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

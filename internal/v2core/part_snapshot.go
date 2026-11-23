@@ -17,10 +17,11 @@ import (
 // SnapshotPart identifies an immutable file by its complete encoded bytes.
 // Path is local input only and is removed from the published snapshot.
 type SnapshotPart struct {
-	ID     string
-	Bytes  int64
-	SHA256 string
-	Path   string `json:",omitempty"`
+	ID         string
+	Bytes      int64
+	SHA256     string
+	Path       string          `json:",omitempty"`
+	Dictionary *MoveDictionary `json:",omitempty"`
 }
 
 // PartSnapshot is a file inventory, not an installed or READY certificate.
@@ -115,7 +116,7 @@ func LinkPartSnapshot(ctx context.Context, dir string, reader PartSnapshotReader
 		if err = os.Rename(stage, filepath.Join(dir, id+".part")); err != nil {
 			return out, err
 		}
-		out.Parts = append(out.Parts, SnapshotPart{ID: id, Bytes: n, SHA256: id})
+		out.Parts = append(out.Parts, SnapshotPart{ID: id, Bytes: n, SHA256: id, Dictionary: p.Dictionary})
 	}
 	if err = out.Validate(); err != nil {
 		return out, err

@@ -32,9 +32,10 @@ type partImport struct {
 	Version    int
 	Origin     partOrigin
 	Descriptor v2part.Descriptor
-	Pending    bool `json:",omitempty"`
-	Owner      int  `json:",omitempty"`
-	Owners     int  `json:",omitempty"`
+	Dictionary *MoveDictionary `json:",omitempty"`
+	Pending    bool            `json:",omitempty"`
+	Owner      int             `json:",omitempty"`
+	Owners     int             `json:",omitempty"`
 }
 
 type partOrigin struct {
@@ -44,7 +45,7 @@ type partOrigin struct {
 }
 
 func partScopeKey(k v2part.Key) ([]byte, error) {
-	prefix, err := v2part.PartitionPrefixForGroup(k.Group, k.VShard, k.Partition)
+	prefix, err := scopePrefix(k.Group, k.VShard, k.Partition, k.ByID)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +53,8 @@ func partScopeKey(k v2part.Key) ([]byte, error) {
 }
 
 func moveCatalogKey(k v2part.Key) ([]byte, error) {
-	k.VShard = 0 // Dense files span vshards; precedence binds the whole immutable part.
+	k.ByID = false // The binding is independent of the record key generation.
+	k.VShard = 0   // Dense files span vshards; precedence binds the whole immutable part.
 	scope, err := partScopeKey(k)
 	if err != nil {
 		return nil, err
@@ -78,7 +80,7 @@ func readPartOrigin(snapshot *pebble.Snapshot, k v2part.Key) (partOrigin, error)
 		return partOrigin{}, err
 	}
 	origin := binding.Origin
-	if binding.Version != 1 || binding.Descriptor.Validate() != nil {
+	if binding.Version != 1 || binding.Descriptor.Validate() != nil || binding.Dictionary.validate(binding.Descriptor) != nil {
 		return origin, errors.New("invalid copied part binding")
 	}
 	if binding.Descriptor.Scope.Group != k.Group || binding.Descriptor.Scope.Partition != k.Partition || binding.Descriptor.Scope.Part != k.Part {
@@ -133,21 +135,25 @@ func installCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v
 }
 
 // VerifyMovePart certifies transport bytes and rollup semantics once before a durable receipt.
-func VerifyMovePart(ctx context.Context, path string, d v2part.Descriptor) error {
-	return validateCopiedRollupPart(ctx, path, d)
+func VerifyMovePart(ctx context.Context, path string, d v2part.Descriptor, dictionary ...*MoveDictionary) error {
+	return validateCopiedRollupPart(ctx, path, d, dictionary...)
 }
 
-func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending, verified bool) (bool, error) {
+func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending, verified bool, dictionary ...*MoveDictionary) (bool, error) {
 	if err := d.Validate(); err != nil {
 		return false, err
 	}
 	if d.Scope.VShard != v2part.GroupVShard || d.Encoding != v2part.DenseEncoding {
 		return false, errors.New("copied catalog requires a dense group rollup part")
 	}
-	if descriptorByID(d) {
-		return false, errIDKeyedMove
+	var names *MoveDictionary
+	if len(dictionary) > 0 {
+		names = dictionary[0]
 	}
-	k, err := v2part.Decode(d.FirstKey)
+	if err := names.validate(d); err != nil {
+		return false, err
+	}
+	k, err := v2part.DecodeKey(d.FirstKey)
 	if err != nil {
 		return false, err
 	}
@@ -156,7 +162,7 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 		return false, err
 	}
 	origin := partOrigin{Class: CopiedPart, Incarnation: d.Source.Incarnation, Stream: d.Source.Stream}
-	value, err := json.Marshal(partImport{Version: 1, Origin: origin, Descriptor: d, Pending: pending})
+	value, err := json.Marshal(partImport{Version: 1, Origin: origin, Descriptor: d, Dictionary: names, Pending: pending})
 	if err != nil {
 		return false, err
 	}
@@ -171,33 +177,34 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 	} else if !errors.Is(e, pebble.ErrNotFound) {
 		return false, e
 	}
-	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
-	if err != nil {
-		return false, err
-	}
-	exists := false
-	for ok := it.First(); ok; ok = it.Next() {
-		old, e := v2part.Decode(it.Key())
-		if e != nil {
-			_ = it.Close()
-			return false, e
+	for _, prefix := range partKeyRanges {
+		it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+		if err != nil {
+			return false, err
 		}
-		if old.Group == k.Group && old.Partition == k.Partition && old.Part == k.Part {
-			exists = true
-			break
+		exists := false
+		for ok := it.First(); ok; ok = it.Next() {
+			old, e := v2part.DecodeKey(it.Key())
+			if e != nil {
+				_ = it.Close()
+				return false, e
+			}
+			if old.Group == k.Group && old.Partition == k.Partition && old.Part == k.Part {
+				exists = true
+				break
+			}
 		}
-	}
-	err = errors.Join(it.Error(), it.Close())
-	if err != nil {
-		return false, err
-	}
-	if exists {
-		return false, errors.New("cannot reclassify an existing live part")
+		err = errors.Join(it.Error(), it.Close())
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return false, errors.New("cannot reclassify an existing live part")
+		}
 	}
 	// SHA256 and all interior keys are checked before any visible mutation.
 	if !verified {
-		if err = validateCopiedRollupPart(ctx, path, d); err != nil {
+		if err = validateCopiedRollupPart(ctx, path, d, names); err != nil {
 			return false, err
 		}
 	}
@@ -240,7 +247,14 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 
 // A valid transport checksum alone cannot certify archive/frontier semantics.
 // This bounded pass validates values without reconstructing a name digest.
-func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descriptor) error {
+func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descriptor, dictionary ...*MoveDictionary) error {
+	var dict *MoveDictionary
+	if len(dictionary) > 0 {
+		dict = dictionary[0]
+	}
+	if err := dict.validate(d); err != nil {
+		return err
+	}
 	v2part.RegisterPolicies(d.Coverage.Policies)
 	type limits struct {
 		order  uint64
@@ -250,6 +264,9 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 	}
 	names := map[v2part.ID]*limits{}
 	err := v2part.Read(ctx, path, &d, func(k v2part.Key, b []byte) error {
+		if err := dict.resolve(&k); err != nil {
+			return err
+		}
 		if k.Ordinal != 0 {
 			return errors.New("invalid copied rollup key")
 		}

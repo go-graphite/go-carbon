@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -154,8 +155,9 @@ func retainSealedPart(dir, path string, d v2part.Descriptor) (coreKV, []string, 
 // completes. Uncommitted files and Pebble compaction outputs are never exported.
 // This is archive coverage only; callers separately bind catalog and log roots.
 type SealedSnapshotReader struct {
-	Snapshot  *pebble.Snapshot
-	Directory string // owner directory, containing parts/
+	Snapshot   *pebble.Snapshot
+	Directory  string       // owner directory, containing parts/
+	Dictionary *v2dict.Dict // required when the snapshot contains ID-keyed parts
 }
 
 func (r SealedSnapshotReader) ReadPartFiles(ctx context.Context) ([]SnapshotPart, error) {
@@ -181,7 +183,11 @@ func (r SealedSnapshotReader) ReadPartFiles(ctx context.Context) ([]SnapshotPart
 		}
 		id := hex.EncodeToString(d.SHA256[:])
 		path := filepath.Join(r.Directory, "parts", id+".sst")
-		out = append(out, SnapshotPart{Path: path, ID: id, SHA256: id, Bytes: int64(d.Bytes)})
+		names, e := ExportMoveDictionary(d, r.Dictionary)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, SnapshotPart{Path: path, ID: id, SHA256: id, Bytes: int64(d.Bytes), Dictionary: names})
 		// Bind each descriptor too, so an opaque receiver can recover the one reader.
 		sum := sha256.Sum256(it.Value())
 		did := hex.EncodeToString(sum[:])

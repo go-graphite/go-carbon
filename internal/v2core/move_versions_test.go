@@ -25,11 +25,12 @@ func TestMoveAdoptVersionsAcrossMerge(t *testing.T) {
 	}
 }
 
-func testMoveAdoptVersionsAcrossMerge(t *testing.T, mergeBefore, donorMat, restart bool) {
+func testMoveAdoptVersionsAcrossMerge(t *testing.T, mergeBefore, donorMat, restart bool, modes ...bool) {
 	cfg := adoptConfig()
 	cfg.DeferMerges = true
+	hooks := Hooks{IDKeys: len(modes) > 0 && modes[0]}
 	root := t.TempDir()
-	e, err := Open(root, cfg, Hooks{})
+	e, err := Open(root, cfg, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func testMoveAdoptVersionsAcrossMerge(t *testing.T, mergeBefore, donorMat, resta
 		if err := e.Close(); err != nil {
 			t.Fatal(err)
 		}
-		e, err = Open(root, cfg, Hooks{})
+		e, err = Open(root, cfg, hooks)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,6 +80,9 @@ func testMoveAdoptVersionsAcrossMerge(t *testing.T, mergeBefore, donorMat, resta
 				t.Fatal(err)
 			}
 		}
+	}
+	if len(modes) > 1 && modes[1] {
+		part = idMovePart(t, part)
 	}
 	prepared, err := PrepareMove(context.Background(), t.TempDir(), []MovePart{part})
 	if err != nil {

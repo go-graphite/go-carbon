@@ -712,10 +712,14 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		config = *chosen.config
 		namePrefix := prefix
 		if len(excluded) > 0 && excluded[0] != nil {
-            name, e := names.definitionName(c.key, c.metricName()[4:])
-            if e != nil { return v2part.Descriptor{}, e }
-            if excluded[0][string(name)] { namePrefix = false }
-        }
+			name, e := names.definitionName(c.key, c.metricName()[4:])
+			if e != nil {
+				return v2part.Descriptor{}, e
+			}
+			if excluded[0][string(name)] {
+				namePrefix = false
+			}
+		}
 		// Only a prefix can write windows down before dropping their inputs.
 		// No later event can read a record expired before the oldest outside
 		// admission. Legacy parts retain the conservative per-name clock.
@@ -942,9 +946,7 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 		return false, err
 	}
 	var excluded map[string]bool
-	if copied, e := snapshotHasCopiedParts(snapshot); e != nil {
-		return false, e
-	} else if copied {
+	if moveEpoch != 0 {
 		index, e := NewRollupSnapshot(context.Background(), snapshot, nil, identities, nil, 0)
 		if e != nil {
 			return false, e

@@ -163,7 +163,9 @@ func (r *rollupHistoryReader) open() error {
 		return err
 	}
 	if found {
-		r.copied, err = NewRollupSnapshot(ctx, r.snapshot, nil, nil, nil, 0)
+		identities := &PolicyCatalog{}
+		identities.dict.Store(r.dict)
+		r.copied, err = NewRollupSnapshot(ctx, r.snapshot, nil, identities, nil, 0)
 		return err
 	}
 	selected := map[string]v2part.Descriptor{}

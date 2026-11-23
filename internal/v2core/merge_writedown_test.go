@@ -23,7 +23,7 @@ func partVersions(t *testing.T, o *coreOwner) []sealrollup.Version {
 			t.Fatal(err)
 		}
 		forEachPartKV(t, filepath.Join(o.dir, "parts", hex.EncodeToString(d.SHA256[:])+".sst"), func(key, value []byte) {
-			k, err := v2part.Decode(key)
+			k, err := v2part.DecodeKey(key)
 			if err != nil {
 				t.Fatal(err)
 			}

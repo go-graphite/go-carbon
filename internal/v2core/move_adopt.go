@@ -23,6 +23,7 @@ import (
 type MovePart struct {
 	Path       string
 	Descriptor v2part.Descriptor
+	Dictionary *MoveDictionary `json:",omitempty"`
 }
 
 // PreparedMove is an offline receiving catalog, independent of the live owner.
@@ -65,7 +66,7 @@ func prepareMove(ctx context.Context, dir string, parts []MovePart, trusted bool
 		if err = os.Link(part.Path, path); err != nil && !errors.Is(err, os.ErrExist) {
 			return fail(err)
 		}
-		if _, err = installCopiedPartVerified(ctx, db, dir, path, part.Descriptor, false, trusted); err != nil {
+		if _, err = installCopiedPartVerified(ctx, db, dir, path, part.Descriptor, false, trusted, part.Dictionary); err != nil {
 			return fail(err)
 		}
 		part.Path = path
@@ -220,10 +221,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if !wanted[archivePartIdentity{part.Descriptor.Scope.Group, part.Descriptor.Scope.Part}] {
 			continue
 		}
-		if descriptorByID(part.Descriptor) {
-			return errIDKeyedMove
-		}
-		k, err := v2part.Decode(part.Descriptor.FirstKey)
+		k, err := v2part.DecodeKey(part.Descriptor.FirstKey)
 		if err != nil {
 			return err
 		}
@@ -232,7 +230,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		d := part.Descriptor
-		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d, Owner: owner, Owners: owners, BaseOrder: bases[partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}] + d.Source.MinOrder})
+		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d, Dictionary: part.Dictionary, Owner: owner, Owners: owners, BaseOrder: bases[partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}] + d.Source.MinOrder})
 		if err != nil {
 			return err
 		}
@@ -264,13 +262,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	}
 	snapshot := o.db.NewSnapshot()
 	defer snapshot.Close()
-	current, err := NewRollupSnapshot(ctx, snapshot, nil, nil, nil, 0)
+	current, err := NewRollupSnapshot(ctx, snapshot, nil, o.rollups.identities, nil, 0)
 	if err != nil {
 		return err
 	}
 	// A UUID that is already live must never be reclassified as copied.
 	for _, part := range incoming {
-		key, _ := v2part.Decode(part.Descriptor.FirstKey)
+		key, _ := v2part.DecodeKey(part.Descriptor.FirstKey)
 		for _, physical := range current.parts {
 			for _, metric := range physical.metrics {
 				if metric.part.key.Part == key.Part && metric.part.key.Group == key.Group {
@@ -378,7 +376,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	// unchanged file with an atomic hidden binding, then activate every binding
 	// and reducer authority together. Interrupted staging remains invisible.
 	for _, part := range incoming {
-		if _, err = installCopiedPartVerified(ctx, o.db, o.dir, part.Path, part.Descriptor, true, prepared.trusted); err != nil {
+		if _, err = installCopiedPartVerified(ctx, o.db, o.dir, part.Path, part.Descriptor, true, prepared.trusted, part.Dictionary); err != nil {
 			return err
 		}
 		if prepared.Progress != nil {

@@ -60,7 +60,8 @@ type MoveStatus struct {
 	Parts                 []MoveFileStatus `json:",omitempty"`
 }
 type moveRecord struct {
-	Version int
+	Version  int
+	Snapshot *v2core.PartSnapshot `json:",omitempty"`
 	MoveStatus
 	Request           MoveRequest
 	Started, Finished int64
@@ -275,6 +276,7 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			var files []MoveFileStatus
 			var request MoveRequest
+			var snapshot *v2core.PartSnapshot
 			var b []byte
 			if action == "begin" {
 				var q MoveCopyRequest
@@ -287,6 +289,7 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if len(q.Snapshot.Parts) == 0 {
 					return errors.New("empty move inventory")
 				}
+				snapshot = &q.Snapshot
 				request.Now = q.Now
 				b, _ = json.Marshal(q.Snapshot)
 				for _, p := range q.Snapshot.Parts {
@@ -318,6 +321,12 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			m, e = a.create(id, request.Now, files)
 			if e != nil {
 				return e
+			}
+			if snapshot != nil && m.Snapshot == nil {
+				m.Snapshot = snapshot
+				if e = a.save(m); e != nil {
+					return e
+				}
 			}
 			if m.Done {
 				return a.cleanup(m)
@@ -355,7 +364,7 @@ func (a *MoveAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if e = a.save(m); e != nil {
 						return e
 					}
-					if e = v2core.VerifyMovePart(r.Context(), target, p.Descriptor); e != nil {
+					if e = v2core.VerifyMovePart(r.Context(), target, p.Descriptor, p.Dictionary); e != nil {
 						return e
 					}
 					m.VerifyCount++
@@ -622,7 +631,16 @@ func (a *MoveAdmin) verifyReceived(ctx context.Context, m *moveRecord) error {
 			}
 		}
 		if !known[name] {
-			m.Request.Parts = append(m.Request.Parts, v2core.MovePart{Path: filepath.Join(dir, name+".part"), Descriptor: d})
+			var dictionary *v2core.MoveDictionary
+			if m.Snapshot != nil {
+				for _, file := range m.Snapshot.Parts {
+					if file.ID == name {
+						dictionary = file.Dictionary
+						break
+					}
+				}
+			}
+			m.Request.Parts = append(m.Request.Parts, v2core.MovePart{Path: filepath.Join(dir, name+".part"), Descriptor: d, Dictionary: dictionary})
 			known[name] = true
 		}
 		m.VerifyCount++
@@ -636,7 +654,7 @@ func (a *MoveAdmin) verifyReceived(ctx context.Context, m *moveRecord) error {
 			if p.Name != name || p.State != "received" {
 				continue
 			}
-			if e := v2core.VerifyMovePart(ctx, part.Path, part.Descriptor); e != nil {
+			if e := v2core.VerifyMovePart(ctx, part.Path, part.Descriptor, part.Dictionary); e != nil {
 				return e
 			}
 			m.VerifyCount++
