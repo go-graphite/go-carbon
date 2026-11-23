@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
-	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"golang.org/x/sync/errgroup"
@@ -688,7 +687,7 @@ func (e *coreEngine) submitPacketMode(producer int, rows []row, batches []coreBa
 		if h == nil {
 			return 0, errors.New("rollup row requires original application policy")
 		}
-		return int(partsformat.Route(h.policy.Name)) % e.cfg.Shards, nil
+		return int(h.vshard) % e.cfg.Shards, nil
 	}
 	streamBytes := e.streamBytes
 	if streamBytes == 0 {

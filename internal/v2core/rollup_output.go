@@ -109,7 +109,11 @@ func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []se
 		r.coverage = map[string]*rollupCoverage{}
 	}
 	group := string(m.policy.Group)
-	name, vshard := m.policy.Name, m.vshard
+	var name partsformat.ID
+	if !r.byID {
+		name = m.metricName()
+	}
+	vshard := m.vshard
 	var rank uint32
 	if r.byID {
 		rank = uint32(s.sortKey) // (vshard, ID): the low half is the ID
@@ -387,13 +391,14 @@ func compareRollupMetrics(x, y *rollupMetric) int {
 	if x.vshard != y.vshard {
 		return int(x.vshard) - int(y.vshard)
 	}
-	if len(x.policy.Name) != len(y.policy.Name) {
-		return len(x.policy.Name) - len(y.policy.Name)
+	xn, yn := x.metricName(), y.metricName()
+	if len(xn) != len(yn) {
+		return len(xn) - len(yn)
 	}
-	if x.policy.Name < y.policy.Name {
+	if xn < yn {
 		return -1
 	}
-	if x.policy.Name > y.policy.Name {
+	if xn > yn {
 		return 1
 	}
 	return 0

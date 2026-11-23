@@ -36,7 +36,7 @@ func plannedOwners(r *coreRollups) func(plannedKV) *rollupMetric {
 			for j := range records {
 				byRecord[&records[j]] = m
 			}
-			byName[m.policy.Name] = m
+			byName[m.metricName()] = m
 		}
 	}
 	return func(kv plannedKV) *rollupMetric {
@@ -73,12 +73,12 @@ func expandPlannedParts(parts []plannedRollupPart, owner func(plannedKV) *rollup
 				key = binary.BigEndian.AppendUint16(key, m.vshard)
 				key = binary.BigEndian.AppendUint64(key, uint64(s.Partition)^(1<<63))
 				key = append(key, s.Part[:]...)
-				key = binary.BigEndian.AppendUint32(key, uint32(len(m.policy.Name)))
-				key = append(key, m.policy.Name...)
+				key = binary.BigEndian.AppendUint32(key, uint32(len(m.metricName())))
+				key = append(key, m.metricName()...)
 				key = binary.BigEndian.AppendUint32(key, archive)
 				key = binary.BigEndian.AppendUint64(key, uint64(slot)^(1<<63))
 				key = binary.BigEndian.AppendUint32(key, 0)
-				file = append(file, coreKV{Key: key, Value: kv.value, Record: kv.record, Name: m.policy.Name})
+				file = append(file, coreKV{Key: key, Value: kv.value, Record: kv.record, Name: m.metricName()})
 			}
 		}
 		files = append(files, file)

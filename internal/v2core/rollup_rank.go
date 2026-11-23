@@ -47,7 +47,7 @@ func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
 		for i := range n {
 			r.dictDirty = r.dictDirty || scratch[i].Created // every unresolved name on error
 			if err == nil {
-				metrics[i].dictID.Store(scratch[i].Entry.ID + 1)
+				metrics[i].rememberDictID(scratch[i].Entry.ID)
 			}
 		}
 		n = 0
@@ -57,7 +57,7 @@ func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
 		if m.dictID.Load() != 0 {
 			continue
 		}
-		scratch[n], metrics[n] = v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.policy.Name)}, m
+		scratch[n], metrics[n] = v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.metricName())}, m
 		if n++; n == dictChunk {
 			if err := appendNames(); err != nil {
 				return err

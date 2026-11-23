@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -13,12 +14,15 @@ import (
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// PolicyIdentity owns an immutable name and borrows one shared schema/key prefix.
+// PolicyIdentity references a dictionary name and one shared schema/key prefix.
+// Before its first dictionary append, it owns the immutable admission name.
 // Journal and part boundaries reconstruct the original canonical definition.
 type PolicyIdentity struct {
 	catalog *PolicyCatalog
 	id      uint64
 	policy  policyName
+	name    atomic.Pointer[byte]
+	nameLen uint32
 	vshard  uint16
 	plain   bool
 	// ownerSlot is a seal planner's hint: 1 + the owner-local slot install
@@ -33,8 +37,8 @@ type PolicyIdentity struct {
 	// dictID is 1 + the name's ID in the store dictionary (ID-keyed parts)
 	// once a seal or a read resolved it, 0 before. It fills the padding after
 	// route (0 B per name) and outlives the planner's per-owner state, so a
-	// name is appended to the dictionary once per process and later reads
-	// take the name from the catalog. Merges treat it as the name's live ID,
+	// name is appended to the dictionary once per process; cold reads
+	// resolve its bytes there. Merges treat it as the name's live ID,
 	// so a dictionary Delete of the name must clear it.
 	dictID atomic.Uint32
 	// nameHash is namefp.Hash(name), computed once at intern time while the name
@@ -92,22 +96,51 @@ func (h *PolicyIdentity) fingerprint() namefp.Fingerprint {
 }
 
 // Name returns the immutable registered metric name without encoding its policy.
-func (h *PolicyIdentity) Name() string { return string(h.policy.Name) }
+func (h *PolicyIdentity) Name() string {
+	if p := h.name.Load(); p != nil {
+		return unsafe.String(p, int(h.nameLen))
+	}
+	var buf [256]byte
+	name, _, ok := h.catalog.partDict().LookupID(string(h.policy.Group), h.vshard, h.dictID.Load()-1, buf[:0])
+	if !ok {
+		panic("v2core: identity lost its dictionary name")
+	}
+	return string(name)
+}
+
+func (h *PolicyIdentity) metricName() partsformat.ID { return partsformat.ID(h.Name()) }
+
+// withName retains immutable, owned bytes only until the dictionary owns them.
+func (h *PolicyIdentity) withName(name string) *PolicyIdentity {
+	h.nameLen = uint32(len(name))
+	h.name.Store(unsafe.StringData(name))
+	return h
+}
+
+// rememberDictID publishes the reference before releasing the admission bytes.
+// A reader that loaded the old pointer keeps those bytes alive on its stack.
+func (h *PolicyIdentity) rememberDictID(id uint32) {
+	h.dictID.Store(id + 1)
+	if h.catalog.partDict() != nil {
+		h.name.Store(nil)
+	}
+}
 
 // definitionBytes reconstructs the unchanged canonical journal/part encoding.
 // Ordinary routing and registered application lookup need only the handle.
 func (h *PolicyIdentity) definitionBytes() []byte {
-	return h.appendDefinition(make([]byte, 0, len(h.policy.Name)+len(h.policy.suffix)+16))
+	return h.appendDefinition(make([]byte, 0, int(h.nameLen)+len(h.policy.suffix)+16))
 }
 
 // appendDefinition writes the canonical definition directly into an owner arena.
 func (h *PolicyIdentity) appendDefinition(out []byte) []byte {
+	name := h.Name()
 	out = append(out, `{"Name":"`...)
 	if h.plain {
-		out = append(out, h.policy.Name...)
+		out = append(out, name...)
 	} else {
-		name, _ := json.Marshal(string(h.policy.Name))
-		out = append(out, name[1:len(name)-1]...)
+		encoded, _ := json.Marshal(name)
+		out = append(out, encoded[1:len(encoded)-1]...)
 	}
 	return append(out, h.policy.suffix...)
 }
@@ -116,17 +149,17 @@ func (h *PolicyIdentity) definitionEqual(raw []byte) bool {
 		return bytes.Equal(h.definitionBytes(), raw)
 	}
 	const prefix = `{"Name":"`
-	n := len(prefix) + len(h.policy.Name)
-	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && string(raw[len(prefix):n]) == string(h.policy.Name) && bytes.Equal(raw[n:], h.policy.suffix)
+	n := len(prefix) + int(h.nameLen)
+	return len(raw) == n+len(h.policy.suffix) && bytes.HasPrefix(raw, []byte(prefix)) && string(raw[len(prefix):n]) == string(h.metricName()) && bytes.Equal(raw[n:], h.policy.suffix)
 }
 func detachedPolicy(id uint64, p RollupPolicy, raw []byte, prepared *sealrollup.Prepared) *PolicyIdentity {
 	name, _ := json.Marshal(string(p.Name))
 	suffix := bytes.Clone(raw[len(`{"Name":`)+len(name)-1:])
-	return &PolicyIdentity{id: id, policy: policyName{Name: p.Name, policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: namefp.Hash(string(p.Name)), route: uint32(namefp.Route(p.Name) >> 32)}
+	return (&PolicyIdentity{id: id, policy: policyName{policyDefinition: &policyDefinition{suffix: suffix, prepared: prepared, Group: p.Group}}, plain: canonicalNameEnd(raw) > 0, vshard: partsformat.Route(p.Name), nameHash: namefp.Hash(string(p.Name)), route: uint32(namefp.Route(p.Name) >> 32)}).withName(string(p.Name))
 }
 
 func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) (*PolicyIdentity, error) {
-	if (name != "" && string(old.policy.Name) != name) || !old.definitionEqual(definition) {
+	if (name != "" && string(old.metricName()) != name) || !old.definitionEqual(definition) {
 		return nil, errors.New("stored rollup policy changed")
 	}
 	return old, nil
@@ -138,7 +171,7 @@ func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
 	if slot.CompareAndSwap(nil, h) {
 		return h, nil
 	}
-	return policyIdentityMatches(slot.Load(), string(h.policy.Name), h.definitionBytes())
+	return policyIdentityMatches(slot.Load(), string(h.metricName()), h.definitionBytes())
 }
 
 func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*PolicyIdentity, error) {
@@ -185,7 +218,7 @@ func (c *PolicyCatalog) intern(id uint64, name string, definition []byte) (*Poli
 				return nil, errors.New("noncanonical rollup policy")
 			}
 			ownedName := string(definition[start:nameEnd])
-			h := &PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{Name: partsformat.ID(ownedName), policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: namefp.Hash(ownedName), route: uint32(namefp.Route(ownedName) >> 32)}
+			h := (&PolicyIdentity{catalog: c, vshard: partsformat.Route(partsformat.ID(ownedName)), id: id, policy: policyName{policyDefinition: template.policy.policyDefinition}, plain: true, nameHash: namefp.Hash(ownedName), route: uint32(namefp.Route(ownedName) >> 32)}).withName(ownedName)
 			return c.publish(h)
 		}
 	}
@@ -341,13 +374,12 @@ func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {
 }
 
 type policyName struct {
-	Name partsformat.ID
 	*policyDefinition
 }
 
 func (h *PolicyIdentity) schema() sealrollup.Config { return h.policy.prepared.Config() }
 func (h *PolicyIdentity) rollupPolicy() RollupPolicy {
-	return RollupPolicy{Name: h.policy.Name, Group: h.policy.Group, Config: h.schema()}
+	return RollupPolicy{Name: h.metricName(), Group: h.policy.Group, Config: h.schema()}
 }
 
 // Only plain ASCII names take the suffix fast path. JSON escaping, UTF-8

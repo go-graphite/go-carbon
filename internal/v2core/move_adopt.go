@@ -436,13 +436,13 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 			if m.latest.meta.Frontier.Order <= a.AtOrder {
 				latest := m.latest
 				latest.meta = compactMetadata(a.Meta)
-				latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}
+				latest.PolicyIdentity = (&PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}).withName(latest.Name())
 				m.latest = latest
 			}
 		} else {
 			latest := m.latest
 			latest.meta = compactMetadata(a.Meta)
-			latest.PolicyIdentity = &PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}
+			latest.PolicyIdentity = (&PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}).withName(latest.Name())
 			m.latest = latest
 		}
 		s.moves[m].authority = &a

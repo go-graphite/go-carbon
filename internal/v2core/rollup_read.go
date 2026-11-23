@@ -306,7 +306,7 @@ func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
 	if parts, ok := s.partOverrides[m]; ok {
 		return parts
 	}
-	name := string(m.latest.policy.Name)
+	name := string(m.latest.metricName())
 	scoped := s.routes[partRoute{m.latest.policy.Group, m.latest.vshard}]
 	out := make([]*readPartMetric, 0, len(scoped))
 	for _, p := range scoped {
@@ -638,7 +638,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 			ids = &metricIDs{known: part.PolicyIdentity}
 		}
 		if part.meta.Frontier.Order == 0 {
-			key, ok, e := ids.key(part.part.key, m.latest.policy.Name)
+			key, ok, e := ids.key(part.part.key, "")
 			if e != nil || !ok {
 				return e
 			}
@@ -663,7 +663,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
 			return nil
 		}
-		key, ok, err := ids.key(part.part.key, part.policy.Name)
+		key, ok, err := ids.key(part.part.key, "")
 		if err != nil || !ok {
 			return err
 		}
@@ -834,7 +834,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			// numeric ID the envelope carries: the dictionary is read only
 			// for a name the catalog has not seen.
 			if h := identities.lookup(meta.ID); h != nil && h.dictID.Load() == key.Local+1 {
-				key.Metric = h.policy.Name
+				key.Metric = h.metricName()
 			} else {
 				err = names.resolve(&key)
 			}
@@ -851,7 +851,7 @@ func readRollupPart(ctx context.Context, it *archiveIter, scope []byte, identiti
 			return nil, err
 		}
 		if key.ByID {
-			h.dictID.Store(key.Local + 1)
+			h.rememberDictID(key.Local)
 		}
 		policy := h.rollupPolicy()
 		if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {

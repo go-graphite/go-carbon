@@ -315,7 +315,7 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 	return out, ctx.Err()
 }
 func validateReadMetadata(h *PolicyIdentity, meta RollupMetadata, key v2part.Key) error {
-	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || h.policy.Name != key.Metric || h.policy.Group != key.Group {
+	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || h.metricName() != key.Metric || h.policy.Group != key.Group {
 		return errors.New("invalid rollup metadata")
 	}
 	if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {

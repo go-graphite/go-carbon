@@ -5,7 +5,6 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/v2dict"
 )
 
@@ -16,7 +15,7 @@ func dictKeysPlanner(n int) *coreRollups {
 	r := &coreRollups{stages: make([]rollupStage, n), stageMetrics: make([]*rollupMetric, n)}
 	for i := range n {
 		vs := uint16(i % 3)
-		r.stageMetrics[i] = &rollupMetric{PolicyIdentity: &PolicyIdentity{policy: policyName{Name: partsformat.ID(fmt.Sprintf("dict.keys.%06d", n-i)), policyDefinition: def}}, vshard: vs}
+		r.stageMetrics[i] = &rollupMetric{PolicyIdentity: (&PolicyIdentity{policy: policyName{policyDefinition: def}}).withName(fmt.Sprintf("dict.keys.%06d", n-i)), vshard: vs}
 	}
 	return r
 }
@@ -45,7 +44,7 @@ func TestDictKeysChunks(t *testing.T) {
 	for i := range n {
 		if known[i] {
 			m := r.stageMetrics[i]
-			e, _, err := d.Append("g", m.vshard, []byte(m.policy.Name), 0)
+			e, _, err := d.Append("g", m.vshard, []byte(m.metricName()), 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -74,7 +73,7 @@ func TestDictKeysChunks(t *testing.T) {
 		if k := r.stages[i].sortKey; k != uint64(m.vshard)<<32|uint64(want[i]) {
 			t.Fatalf("stage %d: sort key %#x", i, k)
 		}
-		if e, ok := d.Lookup("g", m.vshard, []byte(m.policy.Name)); !ok || e.ID != want[i] {
+		if e, ok := d.Lookup("g", m.vshard, []byte(m.metricName())); !ok || e.ID != want[i] {
 			t.Fatalf("stage %d: dictionary has %v %v, want ID %d", i, e, ok, want[i])
 		}
 	}
@@ -97,7 +96,7 @@ func TestDictKeysAllocBytes(t *testing.T) {
 		r, ref := dictKeysPlanner(n), dictKeysPlanner(n)
 		names := make([]v2dict.NewName, n)
 		for i, m := range ref.stageMetrics {
-			names[i] = v2dict.NewName{Group: "g", VShard: m.vshard, Name: string(m.policy.Name)}
+			names[i] = v2dict.NewName{Group: "g", VShard: m.vshard, Name: string(m.metricName())}
 		}
 		d, dref := openTestDict(t), openTestDict(t)
 		base := alloc(func() {
