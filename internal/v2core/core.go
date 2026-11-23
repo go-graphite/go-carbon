@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/partsformat"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"golang.org/x/sync/errgroup"
 )
@@ -285,6 +286,8 @@ type coreOwner struct {
 type coreFailure struct{ err error }
 type coreEngine struct {
 	identities *PolicyCatalog
+	// dict is the store name dictionary of ID-keyed parts (nil: name keys).
+	dict *v2dict.Dict
 
 	gcStop    chan struct{}
 	gcDone    chan struct{}
@@ -377,7 +380,22 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 		identities = &PolicyCatalog{}
 	}
 	e := &coreEngine{identities: identities, readOnly: readOnly, cfg: cfg, routers: make([]coreRouter, cfg.Producers), streamBytes: streamBytes}
+	if hooks.IDKeys && cfg.Rollups && !readOnly {
+		if !v2part.IDKeys.Load() {
+			return nil, errors.New("ID-keyed seals need v2part.IDKeys on")
+		}
+		// Seals key parts by dictionary ID; recovery below already reads them.
+		// A seal owner owns the vshards v with v % Shards == owner, so one
+		// dictionary shard per owner gives each owner its own append lock.
+		d, err := v2dict.Open(storeDictDir(root), v2dict.Options{Shards: cfg.Shards})
+		if err != nil {
+			return nil, err
+		}
+		e.dict = d
+		identities.dict.Store(d)
+	}
 	fail := func(err error) (*coreEngine, error) {
+		e.closeDict()
 		for _, o := range e.owners {
 			if o == nil {
 				continue
@@ -1688,7 +1706,7 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 		}
 	}
 	planEnd = time.Now()
-	rollupWrites := o.startRollupPartWrites(plan)
+	rollupWrites := o.startRollupPartWrites(plan, next.NextPart)
 	defer rollupWrites.cleanup()
 	phaseStart := time.Now()
 	omitRaw := plan.ReplaceRaw || (o.cfg.Rollups && !o.cfg.KeepBaseRows)
@@ -2029,7 +2047,18 @@ func (e *coreEngine) close() error {
 		o.pub.clear()
 		err = errors.Join(err, o.db.Close())
 	}
-	return err
+	return errors.Join(err, e.closeDict())
+}
+
+// closeDict closes the store dictionary after the owners stopped sealing.
+func (e *coreEngine) closeDict() error {
+	if e.dict == nil {
+		return nil
+	}
+	e.identities.dict.CompareAndSwap(e.dict, nil)
+	d := e.dict
+	e.dict = nil
+	return d.Close()
 }
 
 func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {

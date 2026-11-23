@@ -339,6 +339,21 @@ func reduceMode(c Config, view View, ranges RangeView, batches []Batch, w *Works
 			through := max(closing.through, closing.advance)
 			for _, point := range b.Points {
 				through = max(through, point.Time)
+				// A direct (retention-routed) write into the open coarse
+				// window closes that window first and then replaces the
+				// closure, so no later closure can supersede the write and a
+				// newer part always holds the newer version of a slot.
+				if closing.through == 0 {
+					continue
+				}
+				for j, r := range c.Archives {
+					if point.Time >= b.Now-r.Step*r.Count {
+						if start := align(closing.through, r.Step); j > 0 && align(point.Time, r.Step) == start {
+							through = max(through, start+r.Step)
+						}
+						break
+					}
+				}
 			}
 			// Flush source windows before any new epoch can replace their ring
 			// slots. Ascending archives make the last child available to its parent.

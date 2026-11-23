@@ -31,21 +31,56 @@ type Iter struct {
 // NewIter returns an iterator over (group, vshard); position it with SeekGE.
 func (d *Dict) NewIter(group string, vshard uint16) *Iter {
 	it := &Iter{sk: scopeKey(nil, group, vshard)}
-	d.mu.Lock()
-	order := d.buf.order()
-	lo := sort.Search(len(order), func(j int) bool { k, _ := d.buf.rec(order[j]); return bytes.Compare(k, it.sk) >= 0 })
-	for _, r := range order[lo:] {
-		k, v := d.buf.rec(r)
-		if !bytes.HasPrefix(k, it.sk) {
+	sh := d.shard(vshard)
+	sh.mu.Lock()
+	s := d.snap.Load()
+	var frozen []uint32
+	ft := s.frozenTable(it.sk)
+	if ft != nil {
+		frozen = ft.sortedRecs(it.sk)
+	}
+	buf := &sh.buf
+	order := buf.order()
+	lo := sort.Search(len(order), func(j int) bool { k, _ := buf.rec(order[j]); return bytes.Compare(k, it.sk) >= 0 })
+	hi := lo
+	for hi < len(order) {
+		if k, _ := buf.rec(order[hi]); !bytes.HasPrefix(k, it.sk) {
 			break
+		}
+		hi++
+	}
+	order = order[lo:hi]
+	// The append level is newer than the frozen one: it wins on equal keys.
+	for len(order) > 0 || len(frozen) > 0 {
+		var k, v []byte
+		switch {
+		case len(frozen) == 0:
+			k, v = buf.rec(order[0])
+			order = order[1:]
+		case len(order) == 0:
+			k, v = ft.rec(frozen[0])
+			frozen = frozen[1:]
+		default:
+			bk, bv := buf.rec(order[0])
+			fk, fv := ft.rec(frozen[0])
+			switch c := bytes.Compare(bk, fk); {
+			case c < 0:
+				k, v = bk, bv
+				order = order[1:]
+			case c > 0:
+				k, v = fk, fv
+				frozen = frozen[1:]
+			default:
+				k, v = bk, bv
+				order, frozen = order[1:], frozen[1:]
+			}
 		}
 		it.recs = append(it.recs, uint32(len(it.arena)))
 		it.arena = binary.LittleEndian.AppendUint16(it.arena, uint16(len(k)))
 		it.arena = append(it.arena, k...)
 		it.arena = append(it.arena, v...)
 	}
-	s := d.snap.Load()
-	d.mu.Unlock()
+	sh.mu.Unlock()
 	it.lv = make([]levelIter, len(s.levels))
 	for i, l := range s.levels {
 		it.lv[i].l = l
@@ -164,11 +199,12 @@ func (d *Dict) Import(group string, vshard uint16, entries iter.Seq2[[]byte, Ent
 		seen[e.ID/64] |= 1 << (e.ID % 64)
 		prev = append(prev[:0], name...)
 		key = append(append(key[:0], sk...), name...)
-		d.mu.Lock()
-		if err = d.writable(); err == nil {
-			err = d.putLocked(key, e)
-		}
-		d.mu.Unlock()
+		sh := d.shard(vshard)
+		sh.mu.Lock()
+		d.put(sh, key, e)
+		err = d.commit(sh)
+		sh.mu.Unlock()
+		d.maybeFreeze()
 		return err == nil
 	})
 	return err
@@ -248,6 +284,7 @@ func (d *Dict) maybeMerge() {
 
 // Merge runs merges until none is due and waits for them (tests, benches).
 func (d *Dict) Merge() {
+	d.flushWG.Wait()
 	d.mergeWG.Wait()
 	for d.mergeOnce() {
 	}
@@ -255,6 +292,7 @@ func (d *Dict) Merge() {
 
 // MergeAll merges every level into one.
 func (d *Dict) MergeAll() error {
+	d.flushWG.Wait() // a running flush installs its level first
 	d.mergeWG.Wait()
 	levels := d.snap.Load().levels
 	if len(levels) < 2 {
@@ -326,7 +364,7 @@ func (d *Dict) merge(in []*level) error {
 		return fmt.Errorf("v2dict: merge inputs changed")
 	}
 	next := slices.Concat(cur2[:at], []*level{out}, cur2[at+len(in):])
-	d.snap.Store(&snapshot{levels: next})
+	d.snap.Store(&snapshot{frozen: d.snap.Load().frozen, levels: next})
 	d.mu.Unlock()
 	if err := hook("merge-installed"); err != nil {
 		return err

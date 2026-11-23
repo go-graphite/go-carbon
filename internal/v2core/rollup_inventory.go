@@ -93,7 +93,7 @@ func rollupInventory(ctx context.Context, snapshot *pebble.Snapshot, prior *Roll
 			shards = []uint16{d.Scope.VShard}
 		}
 		for _, v := range shards {
-			scope, err := v2part.PartitionPrefixForGroup(d.Scope.Group, v, d.Scope.Partition)
+			scope, err := scopePrefix(d.Scope.Group, v, d.Scope.Partition, descriptorByID(d))
 			if err != nil {
 				return err
 			}
@@ -193,6 +193,9 @@ func initialRollupInventory(ctx context.Context, snapshot *pebble.Snapshot) (map
 		}
 		if !bytes.Equal(it.Key()[len(sealedPartPrefix):], d.SHA256[:]) {
 			return nil, nil, errors.New("invalid sealed descriptor binding")
+		}
+		if descriptorByID(d) {
+			continue // ID-keyed descriptors always carry their vshards
 		}
 		id := string(it.Key())
 		k := identity{d.Scope.Group, d.Scope.Partition, d.Scope.Part}

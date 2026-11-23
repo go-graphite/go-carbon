@@ -77,7 +77,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			batchCounts = append(batchCounts, 0)
 			i = len(stages) - 1
 			stages[i].next.Expired = false
-			r.stageKey(&stages[i], m)
+			r.stageKey(&stages[i], m, nil)
 			positions[b.ID] = i
 		}
 		batchPositions[bi] = i
@@ -127,7 +127,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			slot := r.slotOf(id, m)
 			if meta := r.meta[slot]; !meta.Expired && ((r.expire != nil && r.expire(m.rollupPolicy(), m.metadata(meta), now)) || rollupClosureDue(m, meta, now.Unix())) {
 				stages, metrics = append(stages, rollupStage{next: meta, slot: slot}), append(metrics, m)
-				r.stageKey(&stages[len(stages)-1], m)
+				r.stageKey(&stages[len(stages)-1], m, nil)
 			}
 		}
 	}

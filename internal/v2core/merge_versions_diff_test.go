@@ -150,7 +150,13 @@ func TestMergeVersionsEncodedDifferential(t *testing.T) {
 		if trial%5 == 0 {
 			retire = int64(rng.IntN(200))
 		}
+		// The part bound mergeParts sets ttl from: the inputs' minimum data expiry.
+		expiring := false
+		for _, r := range recs {
+			expiring = expiring || rollupRecordExpiry(c, r) < retire
+		}
 		for _, prefix := range []bool{false, true} {
+			fast.ttl = prefix && expiring
 			got, err := fast.merge(members, c, &meta, retire, prefix)
 			reference.records, reference.from = recs, from
 			want, werr := reference.resolve(c, &meta, retire, prefix)
@@ -180,7 +186,8 @@ type referenceMergeVersions struct {
 }
 
 // merge returns the name's output records sorted by (archive, slot), or nil
-// when no input carries versions (the per-slot merge then runs unchanged).
+// when no input carries versions and a prefix merge drops no expired record
+// (the per-slot merge then runs unchanged).
 // resolve preserves the original map-based merge and unconditional prefix write-down.
 func (m *referenceMergeVersions) resolve(config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
 	m.seen = map[[2]int64]int{}
@@ -192,13 +199,17 @@ func (m *referenceMergeVersions) resolve(config sealrollup.Config, metadata *Rol
 		}
 		m.seen[k] = i
 	}
-
-	if !versioned {
-		return nil, nil
-	}
 	recs := m.records
 	dead := func(r sealrollup.Record) bool { return metadata.Expired || r.Order <= metadata.ResetOrder }
 	expired := func(r sealrollup.Record) bool { return rollupRecordExpiry(config, r) < retire }
+	// A prefix merge that drops an expired live record writes down (TTL).
+	expiring := false
+	for _, r := range recs {
+		expiring = expiring || !dead(r) && expired(r)
+	}
+	if !versioned && !(prefix && expiring) {
+		return nil, nil
+	}
 	// The per-slot winner, as the per-slot merge picks it: of each input's
 	// per-slot view (its last Raw or seal Mat record of a slot), the live
 	// record with the greatest time, then order.

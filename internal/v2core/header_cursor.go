@@ -2,13 +2,14 @@ package v2core
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 
+	"github.com/go-graphite/go-carbon/internal/partsformat"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// partKeyMagic prefixes every part record key. headerCursor passes other keys
+// partKeyMagic prefixes every name-keyed (GCP3) part record key; idKeyMagic
+// every ID-keyed (GCI2) one. headerCursor passes other keys
 // (raw rows, catalogs) through, so it can wrap the store's own Pebble keyspace,
 // where installed copied and portable parts keep their records.
 var partKeyMagic = []byte{'G', 'C', 'P', 3}
@@ -39,15 +40,13 @@ func (c *headerCursor) load(valid bool) bool {
 	}
 	k, v := c.archiveCursor.Key(), c.archiveCursor.Value()
 	c.run = v
-	if len(k) < 16 || !bytes.HasPrefix(k, partKeyMagic) || binary.BigEndian.Uint32(k[len(k)-16:]) == v2part.MetadataArchive {
+	tail := partKeyTailOf(k)
+	if tail == 0 || isEnvelopeKey(k, tail) {
 		return true
 	}
 	c.env, c.run, c.err = v2part.SplitHeader(v)
 	if c.env != nil {
-		c.key = append(c.key[:0], k[:len(k)-16]...)
-		c.key = binary.BigEndian.AppendUint32(c.key, v2part.MetadataArchive)
-		c.key = binary.BigEndian.AppendUint64(c.key, 1<<63)
-		c.key = binary.BigEndian.AppendUint32(c.key, 0)
+		c.key = appendEnvelopeKey(c.key[:0], k, tail)
 		if c.upper != nil && bytes.Compare(c.key, c.upper) >= 0 {
 			c.env = nil
 		}
@@ -62,7 +61,11 @@ func (c *headerCursor) First() bool { return c.load(c.archiveCursor.First()) }
 // answered by a run of the same metric needs one seek: that metric's envelope
 // sorts after it. An envelope key looks back first, where a folded part has it.
 func (c *headerCursor) SeekGE(key []byte) bool {
-	if n := len(key) - 16; n >= 0 && binary.BigEndian.Uint32(key[n:]) != v2part.MetadataArchive {
+	tail := partsformat.NameKeyTail
+	if bytes.HasPrefix(key, idKeyMagic) {
+		tail = partsformat.IDKeyTail
+	}
+	if n := len(key) - tail; n >= 0 && !isEnvelopeKey(key, tail) {
 		valid := c.load(c.archiveCursor.SeekGE(key))
 		if k := c.archiveCursor.Key(); c.err != nil || valid && len(k) == len(key) && bytes.Equal(k[:n], key[:n]) {
 			return valid

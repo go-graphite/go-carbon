@@ -7,7 +7,6 @@ import (
 	"os"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/sstable"
@@ -86,8 +85,14 @@ func writeDecodedPart(t *testing.T, w io.Writer, path string, d v2part.Descripto
 	if d.DictGeneration != 0 {
 		t.Fatal("decoded part digests cover name-keyed parts")
 	}
-	// The goldens predate DictGeneration (zero here): print d as they did.
-	_, _ = fmt.Fprintf(w, "%s}\n", strings.TrimSuffix(fmt.Sprintf("%+v", d), " DictGeneration:0}"))
+
+	// Keep the original descriptor surface of the decoded-content golden;
+	// admission coverage is checked separately by TestMergeAdmissionBound.
+	c := d.Coverage
+	_, _ = fmt.Fprint(w, withoutSeq(fmt.Sprintf("{Version:%d KeyVersion:%d Scope:%+v Encoding:%s Source:%+v Bytes:%d SHA256:%v FirstKey:%v LastKey:%v Coverage:{MinTime:%d MaxTime:%d Names:%d Records:%d Policies:%+v MinExpiry:%d MaxExpiry:%d} VShards:%v}\n",
+		d.Version, d.KeyVersion, d.Scope, d.Encoding, d.Source, d.Bytes, d.SHA256, d.FirstKey, d.LastKey,
+		c.MinTime, c.MaxTime, c.Names, c.Records, c.Policies, c.MinExpiry, c.MaxExpiry, d.VShards)))
+
 }
 
 // partRunLengths lists the slot count of every dense run in a part, per name

@@ -236,15 +236,25 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 	out.directoryBytes = s.cacheBytes + int64(len(s.parts))*256
 	for _, name := range names {
 		shard := v2part.Route(v2part.ID(name))
+		ids := metricIDs{dict: s.identities.partDict()}
 		for _, p := range s.routes[shard] {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			key := v2part.Key{Group: p.descriptor.Scope.Group, VShard: shard, Partition: p.descriptor.Scope.Partition, Part: p.descriptor.Scope.Part, Metric: v2part.ID(name), Archive: v2part.MetadataArchive}
+			key := v2part.Key{Group: p.descriptor.Scope.Group, VShard: shard, Partition: p.descriptor.Scope.Partition, Part: p.descriptor.Scope.Part, ByID: descriptorByID(p.descriptor)}
+			key, ok, err := ids.key(key, v2part.ID(name))
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue // no ID: no ID-keyed part holds the name
+			}
+			key.Archive = v2part.MetadataArchive
 			encoded, err := v2part.Encode(key)
 			if err != nil {
 				return nil, err
 			}
+			key.Metric = v2part.ID(name)
 			c, err := p.cursor(ctx, s.directory, s.blockCache)
 			if err != nil {
 				return nil, err
@@ -275,11 +285,11 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			if err = c.Close(); err != nil {
 				return nil, err
 			}
-			scope, _ := v2part.PartitionPrefixForGroup(key.Group, shard, key.Partition)
+			scope, _ := scopePrefix(key.Group, shard, key.Partition, key.ByID)
 			scope = append(scope, key.Part[:]...)
 			id := string(scope)
 			if out.parts[id] == nil {
-				key.Metric = ""
+				key.Metric, key.Local = "", 0
 				rp := &readPart{id: id, key: key, first: name, last: name, origin: partOrigin{Class: LivePart}}
 				out.parts[id] = rp
 				route := partRoute{key.Group, shard}

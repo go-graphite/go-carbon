@@ -83,6 +83,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				orderProofPlanned(r, &plan)
 				for _, s := range r.stages {
 					if s.batches == 0 {
 						idle++

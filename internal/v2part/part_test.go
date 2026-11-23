@@ -357,3 +357,37 @@ func TestManifestAndCoverageReceipts(t *testing.T) {
 		t.Fatal("unknown manifest field")
 	}
 }
+
+func TestPartAdmissionClock(t *testing.T) {
+	for _, clock := range []int64{0, 1700000000} {
+		s := fixtureSpec()
+		s.MinClock = clock
+		w, err := NewWriter(filepath.Join(t.TempDir(), "clock.sst"), s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Set(fixtureKey(s, 0), []byte{1}); err != nil {
+			t.Fatal(err)
+		}
+		d, err := w.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := d.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte(`"MinClock"`)) != (clock != 0) {
+			t.Fatalf("clock omission: %s", b)
+		}
+		got, err := ParseDescriptor(b)
+		if err != nil || got.Coverage.MinClock != clock {
+			t.Fatalf("clock %d: %+v %v", clock, got.Coverage, err)
+		}
+	}
+	s := fixtureSpec()
+	s.MinClock = -1
+	if err := validateSpec(s); err == nil {
+		t.Fatal("accepted negative admission clock")
+	}
+}

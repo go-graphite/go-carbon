@@ -1,14 +1,17 @@
 package v2core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -299,6 +302,13 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 	if got := o.frontier.Load().ArchiveClock; got != clock {
 		t.Fatalf("clock %d", got)
 	}
+	// The coarse windows the expiring raw records roll up to, read from the
+	// stored versions: the TTL rewrite writes them down before it drops the
+	// raw records, so the version read does not change.
+	windows := []int64{now - 7200, now - 3600}
+	s = o.db.NewSnapshot()
+	wantWindows := versionWindows(t, s, mixed, 1, windows)
+	_ = s.Close()
 	before := e.PartGCStats()[0]
 	changed, err := o.mergeSealedParts(nil, false)
 	if err != nil || !changed {
@@ -306,6 +316,9 @@ func TestMergeBoundTTLRewrite(t *testing.T) {
 	}
 	s = o.db.NewSnapshot()
 	defer s.Close()
+	if got := versionWindows(t, s, mixed, 1, windows); len(wantWindows) != len(windows) || !reflect.DeepEqual(got, wantWindows) {
+		t.Fatalf("coarse windows after ttl rewrite %v want %v", got, wantWindows)
+	}
 	var kept []sealrollup.Record
 	for _, r := range mergeRead(t, s) {
 		if r.Archive == 0 && r.Sample.Time < now {
@@ -413,5 +426,155 @@ func TestMergeDiskGuard(t *testing.T) {
 	}
 	if mergeInflight.Load() != 0 {
 		t.Fatalf("in-flight leaked: %d", mergeInflight.Load())
+	}
+}
+
+// versionWindows is the version read (sealrollup.OpenSlot) of archive's
+// windows at starts of the one metric whose stored policy is policy.
+func versionWindows(t *testing.T, s *pebble.Snapshot, policy []byte, archive int, starts []int64) map[int64]sealrollup.Sample {
+	t.Helper()
+	ctx := context.Background()
+	index, err := NewRollupSnapshot(ctx, s, nil, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	index.Metadata(func(n string, p RollupPolicy, _ RollupMetadata) {
+		if encoded, err := EncodeRollupPolicy(p); err == nil && bytes.Equal(encoded, policy) {
+			name = n
+		}
+	})
+	m := index.metrics[name]
+	if m == nil {
+		t.Fatalf("no metric with policy %q", policy)
+	}
+	out := map[int64]sealrollup.Sample{}
+	for _, start := range starts {
+		p, ok, err := sealrollup.OpenSlot(m.latest.schema(), archive, start, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
+			var recs []sealrollup.Record
+			err := index.eachPartRecord(ctx, m, index.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
+				return from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
+			}, func(r sealrollup.Record, _ partOrigin) error {
+				recs = append(recs, r)
+				return nil
+			})
+			return recs, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			out[start] = p
+		}
+	}
+	return out
+}
+
+// Outside admissions, including a quiet name's later neighbours, bound TTL
+// expiry. A legacy descriptor cannot certify that clock and must fall back.
+func TestMergeAdmissionBound(t *testing.T) {
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e := mergeFixture(t, t.TempDir(), nil)
+	defer e.close()
+	o := e.owners[0]
+	for n := uint64(1); n <= 3; n++ {
+		mergeAppend(t, e, n)
+	}
+	o.gc.mu.Lock()
+	original := o.gc.inventory
+	o.gc.mu.Unlock()
+	var parts []v2part.Descriptor
+	for _, value := range original.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Coverage.MinClock != 1030 {
+			t.Fatalf("seal clock %d", d.Coverage.MinClock)
+		}
+		parts = append(parts, d)
+	}
+	slices.SortFunc(parts, func(a, b v2part.Descriptor) int { return int(a.Source.MinOrder) - int(b.Source.MinOrder) })
+	snapshot := o.db.NewSnapshot()
+	defer snapshot.Close()
+	for _, tc := range []struct {
+		name   string
+		clocks []int64
+		inputs int
+		want   int64
+	}{
+		{"oldest outside", []int64{100, 200, 300}, 1, 200},
+		{"minimum outside", []int64{100, 300, 200}, 1, 200},
+		{"all inputs", []int64{100, 200, 300}, 3, 400},
+		{"legacy outside", []int64{100, 0, 300}, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inventory := &RollupInventory{bindings: map[string][]byte{}}
+			for i, d := range parts {
+				d.Coverage.MinClock = tc.clocks[i]
+				value, err := d.MarshalBinary()
+				if err != nil {
+					t.Fatal(err)
+				}
+				inventory.bindings[string(partBinding(sealedPartPrefix, d.SHA256))] = value
+			}
+			o.gc.mu.Lock()
+			o.gc.inventory = inventory
+			o.gc.mu.Unlock()
+			defer func() {
+				o.gc.mu.Lock()
+				o.gc.inventory = original
+				o.gc.mu.Unlock()
+			}()
+			got, err := o.mergeAdmissionBound(snapshot, parts[:tc.inputs], 400)
+			if err != nil || got != tc.want {
+				t.Fatalf("bound %d want %d: %v", got, tc.want, err)
+			}
+		})
+	}
+	// Rewrites preserve the oldest admission, rather than inventing a new one.
+	d, err := mergePartFiles(context.Background(), o.dir, t.TempDir()+"/merged.sst", parts, 1030, nil)
+	if err != nil || d.Coverage.MinClock != 1030 {
+		t.Fatalf("merged clock %d: %v", d.Coverage.MinClock, err)
+	}
+}
+
+// Admission bounds inspect every live descriptor, including the ID-keyed
+// generation. The clock belongs to the part, independently of key encoding.
+func TestMergeAdmissionBoundIDKeys(t *testing.T) {
+	saved := v2part.IDKeys.Swap(true)
+	defer v2part.IDKeys.Store(saved)
+	t.Setenv("CORE_MERGE_WORKERS", "0")
+	e, err := openCoreWithHooks(t.TempDir(), adoptConfig(), coreHooks{IDKeys: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	for n := uint64(1); n <= 3; n++ {
+		mergeAppend(t, e, n)
+	}
+	o := e.owners[0]
+	o.gc.mu.Lock()
+	inventory := o.gc.inventory
+	o.gc.mu.Unlock()
+	var parts []v2part.Descriptor
+	for _, value := range inventory.bindings {
+		d, err := v2part.ParseDescriptor(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !descriptorByID(d) {
+			t.Fatal("fixture did not write ID-keyed parts")
+		}
+		parts = append(parts, d)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("got %d parts, want 3", len(parts))
+	}
+	snapshot := o.db.NewSnapshot()
+	defer snapshot.Close()
+	got, err := o.mergeAdmissionBound(snapshot, parts[:1], 4000)
+	if err != nil || got != 1030 {
+		t.Fatalf("bound %d want 1030: %v", got, err)
 	}
 }

@@ -143,6 +143,9 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 	if d.Scope.VShard != v2part.GroupVShard || d.Encoding != v2part.DenseEncoding {
 		return false, errors.New("copied catalog requires a dense group rollup part")
 	}
+	if descriptorByID(d) {
+		return false, errIDKeyedMove
+	}
 	k, err := v2part.Decode(d.FirstKey)
 	if err != nil {
 		return false, err
