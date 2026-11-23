@@ -135,8 +135,7 @@ func snapshotHasIDKeyedParts(snapshot *pebble.Snapshot) (bool, error) {
 // parts in key order, which is vshard-major. On entering a (group, vshard)
 // it reads that vshard's dictionary entries in one sequential scan into a
 // table by ID, so each key resolves with one slice index instead of one
-// dictionary lookup per part and metric (recovery folds every part since
-// the checkpoint). The table holds one vshard at a time.
+// dictionary lookup per part and metric. The table holds one vshard at a time.
 type keyNames struct {
 	dict   *v2dict.Dict
 	group  v2part.Group

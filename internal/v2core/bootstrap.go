@@ -105,7 +105,7 @@ func BootstrapRollups(root string, cfg Config, rows []KV, source v2part.Provenan
 		}
 		_, err = o.sealBatches(nil, 0, 0, PendingView{}, next)
 		if err == nil {
-			_, _, err = recoverCoreRollups(db, "")
+			_, _, err = recoverCoreRollups(db)
 		}
 		err = errors.Join(err, db.Close())
 		if err != nil {

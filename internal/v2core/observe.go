@@ -10,8 +10,6 @@ type Observation struct {
 	CompactedBytes, ObsoleteBytes, LiveBytes, DispatchBytes      uint64
 	// DurableSeals, SealNames and SealPoints give names and points per seal.
 	DurableSeals, SealNames, SealPoints uint64
-	// Rollup checkpoint bytes written and failed checkpoint writes.
-	CheckpointBytes, CheckpointFailures uint64
 	BufferedPoints                      int64
 	SealLagSeconds                      float64
 	Parts                               [7]int64
@@ -29,8 +27,6 @@ func (e *coreEngine) Observe() Observation {
 		s.DurableSeals += o.durableSeals.Load()
 		s.SealNames += o.sealNames.Load()
 		s.SealPoints += o.sealPoints.Load()
-		s.CheckpointBytes += o.ckptBytes.Load()
-		s.CheckpointFailures += o.ckptFailures.Load()
 		s.SealNanoseconds += o.sealNS.Load()
 		s.BufferedPoints += o.bufferedPoints.Load()
 		if since := o.bufferedSince.Load(); since != 0 {
