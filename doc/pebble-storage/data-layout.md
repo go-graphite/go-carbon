@@ -3,10 +3,30 @@
 All keys live in one Pebble keyspace, sorted bytewise. Integers in keys are
 big-endian so they sort numerically.
 
+## Pebble engine format
+
+go-carbon vendors Pebble v1.1.5 and leaves `pebble.Options.FormatMajorVersion`
+unset. A new database uses Pebble `FormatMostCompatible` (major version 1),
+and its new SSTables use `TableFormatRocksDBv2`. Opening an existing database
+keeps its recorded Pebble major version if the vendored library supports it.
+The `CHUNKSTORE` layout upgrades below leave the Pebble major version unchanged.
+[Store open code](../../internal/chunkstore/store.go),
+[Pebble options](../../vendor/github.com/cockroachdb/pebble/options.go),
+[SSTable format mapping](../../vendor/github.com/cockroachdb/pebble/format_major_version.go).
+
+To inspect an existing database, use `pebble.Peek(storeDir, vfs.Default)` and
+read `DBDesc.FormatMajorVersion` when `DBDesc.Exists` is true. `Peek` reads the
+format metadata without opening the database. `OPTIONS-*` records the
+configured format option, which can differ from the active version.
+[Pebble inspection API](../../vendor/github.com/cockroachdb/pebble/open.go).
+
 ## Format marker
 
-The store directory holds a `CHUNKSTORE` file naming the format. `Open`
-refuses unknown or mismatched formats, and older binaries refuse newer ones.
+Read `CHUNKSTORE` in the store directory to identify go-carbon's data layout
+and minimum reader capability. `Open` refuses unknown or mismatched markers
+before opening Pebble. A `go-carbon-native-abandon-v1` first line additionally
+requires a reader that understands native transfer abandonment. The following
+line identifies the data layout.
 
 | Marker | Format | Meaning |
 |---|---|---|
@@ -15,13 +35,22 @@ refuses unknown or mismatched formats, and older binaries refuse newer ones.
 | `go-carbon-chunks-v5` | incremental | Exact blocks with per-metric file ownership. |
 | `go-carbon-chunks-v6` | continuation | Metrics as virtual CWhisper files (incremental conversion). |
 | `go-carbon-chunks-v7` | time buckets | v6 plus hourly time-partitioned point groups and paged headers. |
+| `go-carbon-chunks-v9` | cold packing | Sealed cold groups of up to 4,096 points. [Cold packing](../cold-pack.md#compatibility-transfers-and-downgrade). |
+| `go-carbon-chunks-v11` | float codec | Version 4 sealed float groups. [Float codec](../cold-pack-float-codec.md). |
+| `go-carbon-chunks-v12` | referenced history | Immutable encoded history references. [Native history combine](../native-combine.md#publication-and-reader-compatibility). |
 
-v6 → v7 is an in-place upgrade at open (`store-time-buckets = true`). It is
+Fresh continuation stores start at v6, or v7 with `store-time-buckets = true`.
+v6 → v7 is an in-place upgrade on writable open with that setting. It is
 one-way: v6 blocks remain readable and move to v7 as they are rewritten, but a
 v7 store keeps writing v7 blocks and v6 binaries refuse its marker. Paged
 headers (written by v7 binaries since paged-header support) are unreadable by
 earlier v7 binaries too, so roll back only to a build at least as new as the
 one that wrote the store.
+
+Enabling packing can raise the marker to v9. Publishing a new float group or
+referenced history requires the v11 or v12 marker, respectively, before the
+data is committed. The linked offline procedures cover v9 and v11 downgrades.
+A v12 store requires a reference-capable reader for rollback.
 
 The incremental marker `INCREMENTAL-FILE-MIGRATION` records the source
 directory's path and reboot-stable identity: inode plus birth time, or a random

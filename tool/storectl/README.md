@@ -6,6 +6,84 @@ resumable command. Build with
 `storectl --version` reports the release build revision (or the Go VCS stamp).
 The owning donor and receiver daemons must also contain the native engine.
 
+## How it works
+
+storectl keeps its progress in a local state directory. Native transfers
+move metric history directly between go-carbon daemons through their embedded
+buckyd API (`:4242`). The controller sends names and ranges and collects
+durable receipts.
+
+```
+storectl ──POST /v1/native/source──▶ donor buckyd    (pin an MVCC snapshot, 15 min idle TTL)
+storectl ──POST /v1/native/pull────▶ target buckyd
+                                       └─POST /v1/native/export──▶ donor (stored blocks, v2/v3 stream)
+                                       └─reserve IDs, build SSTs, ingest hidden, publish absent names
+storectl ◀──── NativeReceipt (copied bitmap, skips, SST identities) ── target
+```
+
+- **Snapshot, not files.** The donor exports encoded blocks from a pinned Pebble
+  snapshot while it keeps ingesting. Raw SSTs are never copied between hosts:
+  metric IDs are per store, so the receiver re-keys everything under fresh IDs.
+- **Target-wins.** Absent names are published whole. Present names (fill,
+  `--combine-existing`, `--window`) are merged natively; existing target points
+  win at equal timestamps. The first referenced combine raises the target to
+  `go-carbon-chunks-v12` (see [native combine](../../doc/native-combine.md)).
+- **Trust.** The target only pulls from its ring nodes plus `transfer-sources`
+  in its `[buckyd]` config; others return 403 and that source is skipped.
+  storectl signs its own JWT from `--jwt-secret`.
+- **Exactly once.** Each range (≤ 4,096 names) has an identity. The controller
+  fsyncs an intent before the pull; the target writes a durable receipt with the
+  publish. A lost response is resolved by `/v1/native/receipt`, never by a second
+  import. Names the target could not take (live in cache, revised since the pin,
+  too large) come back as deferred/skipped, not as copied.
+- **Admission.** The controller shares the `--streams` budget across the
+  hosts. Each daemon enforces its transfer limit and stops native bulk work
+  below 10% free disk.
+
+### `sync` phases
+
+`sync` (`internal/downsize/sync*.go`) runs these phases, each checkpointed in
+`STATE/sync.jsonl`, so `--resume` continues mid-phase:
+
+1. **discover** — page every source catalog (`/v1/transfer/list`), build the
+   selected metric names and identify the names missing on the target.
+   `--ring` keeps only names the target owns. `--names` restricts the selected
+   names to a fixed list.
+2. **copy** — native-pull missing names from a source that holds them, after
+   batched retention checks, in bounded waves (window-only exports with `--window --no-full-history`).
+3. **verify** — read source and target over every archive and window
+   (`/v1/transfer/digest` and `/render/` point reads) and list holes per
+   `(name, source)`. Later rounds re-read only names that were filled or changed.
+4. **fill** — target-wins pull of the holed names; then verify again. Rounds
+   repeat while the hole count shrinks (`--max-rounds` caps them).
+5. **ready** — with `--ready`, attest policy parity, cohort read-back through
+   `--carbonapi-url` and process restart fences in `STATE/ready.json`.
+
+Exit codes are `0` for success, `2` for unresolved gaps (`residual.json`),
+`3` for READY_EXCEPT (`quarantine.json`) and `1` for errors. Progress goes to
+`STATE/progress.json` and Graphite (below).
+
+### `plan` + `run` (ring changes)
+
+For resize/rebalance, `storectl plan --spec` (`internal/downsize/ringplan`)
+reads old/new ring members and their inventories and writes an immutable plan:
+which names move from which member to which. `storectl run --plan P --state J`
+executes it: `--engine bulk` for the native baseline, `--combine-existing` for
+names already present, `--engine metric` for deferred names, then optionally
+`--reconcile` (writer-drain barrier plus final verify) and `--delete`
+(remove retired source copies). `storectl status` reads the journal.
+
+### Which command for which job
+
+| Job | Command |
+| --- | --- |
+| Refill a host from a replica | `sync --source REPLICA --to HOST` |
+| Refill an outage window | `sync ... --window id:FROM:UNTIL --no-full-history` |
+| Copy a name list between clusters | `sync --names FILE --source SRC --to DST` |
+| Location to location, ring-aware | one `sync --ring RING --to NODE` per target node, all source nodes as `--source` |
+| Rebalance/resize with source deletion | `plan` → `run --engine bulk` → `--reconcile` → `--delete` |
+| Rename metrics | not supported; native transfers keep names |
+
 ## Source and target addresses
 
 `--source` and `--to` take a bare host name, `host:port` or a full URL. No

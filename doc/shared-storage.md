@@ -267,13 +267,14 @@ authentication, offload and revision-token protocol. go-carbon retains the root
 go-whisper library for classic files and transfer format helpers. Buckytools is a
 separate client executable; go-carbon does not import or require that module.
 
-The format marker is `CHUNKSTORE`, containing `go-carbon-chunks-v2`. Opening a
-legacy or unknown nonempty directory is rejected before opening Pebble. A v1
-store is upgraded in place before v2 records are written; older binaries reject
-the upgraded store, even when expiration is disabled. A migration from an
-unrelated legacy store must use separate stores and buckyd; there is no in-place
-conversion. New store directories, their newly created ancestors and the marker
+New stores with `store-encoding = "legacy"` use `go-carbon-chunks-v2` in
+`CHUNKSTORE`. A v1 store is upgraded in place before v2 records are written.
+Older binaries reject the upgraded store even when expiration is disabled.
+Unknown markers and nonempty directories without a marker are rejected before
+opening Pebble. Migrate an unrelated legacy store using separate stores and
+buckyd. New store directories, their newly created ancestors and the marker
 are synced.
+[Current layout markers and compatibility](pebble-storage/data-layout.md#format-marker).
 Pebble v1.1.5 terminates the process on WAL-sync failure. The test suite checks
 this fail-stop behavior for synchronous and periodic sync, plus recovery of
 previously synced writes. Periodic-sync tests also discard unsynced filesystem

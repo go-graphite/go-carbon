@@ -19,9 +19,9 @@ out, with how each was diagnosed and fixed.
 
 1. [architecture.md](architecture.md): components, data flow, who owns the
    database, open and close.
-2. [data-layout.md](data-layout.md): key spaces, store formats v6 and v7, the
-   continuation virtual files, descriptors, point groups, hourly buckets and
-   paged headers.
+2. [data-layout.md](data-layout.md): the Pebble engine format, go-carbon
+   layout markers through v12, key spaces, continuation virtual files,
+   descriptors, point groups, hourly buckets and paged headers.
 3. [lsm-levels.md](lsm-levels.md): how data moves from memtables through L0
    to L6, what compaction reads, writes and drops, and how it goes wrong.
 4. [write-path.md](write-path.md): one persister update step by step, with
@@ -44,9 +44,14 @@ out, with how each was diagnosed and fixed.
 
 ## Status
 
-Experimental and opt-in. The file backend remains the default. Format v7
-(`store-time-buckets`) is one-way: once a store is v7, older binaries refuse
-it.
+Stores using immutable encoded history references have a
+`go-carbon-chunks-v12` `CHUNKSTORE` marker and require a reader that
+supports references.
+[Format markers and compatibility](data-layout.md#format-marker).
+
+The backend is experimental and opt-in. The file backend is the go-carbon
+default. New Pebble databases use engine format 1.
+[Pebble engine format](data-layout.md#pebble-engine-format).
 
 ## Older notes
 
