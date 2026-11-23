@@ -53,7 +53,7 @@ func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.Contin
 	}
 	defer file.Close()
 	f := file.(*continuationFile)
-	f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(snapshot.Archives)), revision: snapshot.Metadata.Revision}
+	f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(snapshot.Archives)), revision: snapshot.Metadata.Revision, repairSafe: true}
 	f.data.windowLoaded, f.data.windowDirty = true, true
 	for ai, archive := range snapshot.Archives {
 		for _, p := range archive.Points {

@@ -219,8 +219,8 @@ func refineClassicMutation(baseline, current store.ContinuationIO, changes *cont
 		if len(k) < 10 || !bytes.Equal(k[:9], continuationFilePrefix(before.file)) {
 			return false
 		}
-		if len(k) == 10 && (k[9] == 'h' || k[9] == 'w') {
-			return true // Manifest checked above; optional window index is a cache.
+		if len(k) == 10 && (k[9] == 'h' || k[9] == 'w' || k[9] == 'R') {
+			return true // Manifest checked above; optional indexes/certificates are caches.
 		}
 		if len(k) != 20 || k[9] != 'p' || binary.BigEndian.Uint32(k[12:16]) != 0 {
 			return false // Includes alias retirement and sidecar/namespace changes.

@@ -17,7 +17,7 @@ import (
 // which this package rewrites only through its store io. These are file names
 // (continuationNameKey), manifests (continuationManifestKey), paged header
 // pages (continuationHeaderPrefix plus a 2-byte page) and the file identity
-// sequence, plus the digest cache revision fence. Block descriptors, digest
+// sequence, optional window index/repair certificate, and digest revision fence. Block descriptors, digest
 // bucket sums and point groups are not state.
 func (c *ContinuationCodec) StateKey(suffix []byte) bool {
 	switch {
@@ -25,7 +25,7 @@ func (c *ContinuationCodec) StateKey(suffix []byte) bool {
 		return true
 	case len(suffix) == continuationFileKeyLen && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'h':
 		return true
-	case len(suffix) == continuationFileKeyLen && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'w':
+	case len(suffix) == continuationFileKeyLen && suffix[0] == 'f' && (suffix[continuationFileKeyLen-1] == 'w' || suffix[continuationFileKeyLen-1] == 'R'):
 		return true
 	case len(suffix) == continuationFileKeyLen+2 && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'H':
 		return true

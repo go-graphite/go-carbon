@@ -544,6 +544,9 @@ func (fs *continuationFiles) flush() error {
 			if err := fs.kv.Set(classicWindowKey(id), encodeClassicWindowIndex(d.windowIndex)); err != nil {
 				return err
 			}
+			if err := fs.kv.Set(classicRepairKey(id), encodeClassicRepairIndex(d.windowIndex)); err != nil {
+				return err
+			}
 			d.windowDirty = false
 		}
 		if d.dirty {
@@ -611,7 +614,7 @@ func (f *continuationFile) ConfigureStorage(layout whisper.StorageFileLayout) er
 	f.data.header = make([]byte, layout.HeaderSize)
 	f.data.dirty = true
 	if !layout.Compressed {
-		f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(layout.Archives))}
+		f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(layout.Archives)), repairSafe: true}
 		if v, ok := f.fs.kv.(store.ContinuationRevision); ok {
 			f.data.windowIndex.revision = v.ContinuationRevision()
 		}

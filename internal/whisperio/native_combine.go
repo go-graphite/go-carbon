@@ -73,7 +73,7 @@ func (c *ContinuationCodec) NativeClassicBlocks(ctx context.Context, kv store.Co
 		if len(key) < 10 {
 			return store.ErrFormat
 		}
-		if key[9] == 'h' || key[9] == 'H' || key[9] == 'w' {
+		if key[9] == 'h' || key[9] == 'H' || key[9] == 'w' || key[9] == 'R' {
 			return nil
 		}
 		if len(key) != 20 || key[9] != 'p' || binary.BigEndian.Uint32(key[12:16]) != 0 {

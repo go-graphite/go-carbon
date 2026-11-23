@@ -21,7 +21,9 @@ import (
 )
 
 // This fixture also runs unmodified against the pre-change master binary.
-// It hashes every stored byte after every correction, including all archives.
+// It hashes every history/header byte after every correction, including all
+// archives. The optional sparse-repair certificate is independently tested and
+// excluded so this remains comparable with the pre-certificate master oracle.
 func TestLateReplayMasterDifferential(t *testing.T) {
 	h := sha256.New()
 	for _, method := range []store.AggregationMethod{store.Average, store.Sum, store.Min, store.Max, store.Last, store.First} {
@@ -42,6 +44,9 @@ func TestLateReplayMasterDifferential(t *testing.T) {
 				}
 				keys := make([]string, 0, len(kv))
 				for key := range kv {
+					if len(key) == 10 && key[0] == 'f' && key[9] == 'R' {
+						continue
+					}
 					keys = append(keys, key)
 				}
 				sort.Strings(keys)
@@ -91,6 +96,9 @@ func TestLateReplayMasterDifferential(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range out[0].Keys {
+		if len(item.Key) == 10 && item.Key[0] == 'f' && item.Key[9] == 'R' {
+			continue
+		}
 		h.Write(item.Key)
 		h.Write(item.Value)
 	}
