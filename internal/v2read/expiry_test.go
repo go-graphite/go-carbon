@@ -80,7 +80,7 @@ func TestExpiryResetReopenResume(t *testing.T) {
 		if metadata.Version < 2 {
 			t.Error("reset metadata is readable by an older reader that ignores expiry authority")
 		}
-		if !metadata.Expired || metadata.ResetOrder != metadata.Frontier.Order {
+		if metadata.Version != 4 || !metadata.Expired || metadata.ResetOrder != 2 {
 			t.Errorf("reset metadata lost expiry authority: %+v", metadata)
 		}
 		return nil

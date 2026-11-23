@@ -288,7 +288,7 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 			id := string(scope)
 			if out.parts[id] == nil {
 				key.Metric, key.Local = "", 0
-				rp := &readPart{id: id, key: key, first: name, last: name, origin: partOrigin{Class: LivePart}}
+				rp := &readPart{id: id, key: key, first: name, last: name, origin: partOrigin{Class: LivePart}, descriptor: &p.descriptor}
 				out.parts[id] = rp
 				route := partRoute{key.Group, shard}
 				out.routes[route] = append(out.routes[route], rp)
@@ -344,10 +344,10 @@ func (c *PolicyCatalog) readIdentity(meta RollupMetadata, slim bool, key v2part.
 }
 
 func validateReadMetadata(h *PolicyIdentity, meta RollupMetadata, key v2part.Key) error {
-	if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || h.policy.Group != key.Group || h.vshard != key.VShard || (!(key.ByID && h.dictID.Load() == key.Local+1) && !h.matchesName(string(key.Metric))) {
+	if (meta.Version < 1 || meta.Version > 4) || meta.ID == 0 || meta.Frontier.Order == 0 || h.policy.Group != key.Group || h.vshard != key.VShard || (!(key.ByID && h.dictID.Load() == key.Local+1) && !h.matchesName(string(key.Metric))) {
 		return errors.New("invalid rollup metadata")
 	}
-	if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
+	if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.Version < 4 && meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.Version < 4 && meta.ResetOrder != meta.Frontier.Order) {
 		return errors.New("invalid rollup reset frontier")
 	}
 	if h.policy.prepared.Digest() != meta.Frontier.Policy {
@@ -406,7 +406,7 @@ func (c *tableCursor) Value() []byte { return c.value }
 func (c *tableCursor) Error() error  { return errors.Join(c.err, c.it.Error()) }
 func (c *tableCursor) Close() error  { return c.it.Close() }
 func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Snapshot, selected map[archivePartIdentity]bool) (_ *archiveIter, err error) {
-	out := &archiveIter{selected: -1}
+	out := &archiveIter{selected: -1, descriptors: map[archivePartIdentity]v2part.Descriptor{}}
 	defer func() {
 		if err != nil {
 			_ = out.Close()
@@ -426,6 +426,7 @@ func (s *OpenedRollupParts) archiveIter(ctx context.Context, snapshot *pebble.Sn
 			continue
 		}
 		seen[p] = true
+		out.descriptors[archivePartIdentity{p.descriptor.Scope.Group, p.descriptor.Scope.Part}] = p.descriptor
 		c, e := p.cursor(ctx, s.directory, s.blockCache)
 		if e != nil {
 			return nil, e

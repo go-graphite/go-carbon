@@ -14,7 +14,7 @@ import (
 func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
 	m := s.metrics[name]
 	c, meta := m.latest.schema(), m.latest.meta
-	if meta.Version != 3 || meta.Frontier.Order == 0 && s.moves[m] == nil {
+	if meta.Version < 3 || meta.Frontier.Order == 0 && s.moves[m] == nil {
 		return s.scanStoredArchive(ctx, name, archive, first, last, yield)
 	}
 	var stored []sealrollup.Record
@@ -24,7 +24,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 	}); err != nil {
 		return err
 	}
-	if move := s.moves[m]; move != nil && move.authority != nil && meta.ResetOrder <= move.authority.AtOrder {
+	if move := s.moves[m]; move != nil && move.authority != nil && moveAuthorityVisible(meta, move.authority) {
 		for _, r := range move.authority.Coarse {
 			if r.Archive != archive || r.Slot < first || r.Slot >= last {
 				continue
@@ -49,7 +49,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 			out = append(out, r)
 			return nil
 		})
-		if move := s.moves[m]; move != nil && move.authority != nil && meta.ResetOrder <= move.authority.AtOrder {
+		if move := s.moves[m]; move != nil && move.authority != nil && moveAuthorityVisible(meta, move.authority) {
 			for _, r := range move.authority.Coarse {
 				if r.Archive != l || r.Slot < first || r.Slot >= last {
 					continue

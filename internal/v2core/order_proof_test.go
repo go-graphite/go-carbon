@@ -9,8 +9,8 @@ package v2core
 // per (name, archive, physical slot) and after every part:
 //
 //	current : visible = Order > ResetOrder; winner = max (Time, Order)  (newerOrigin, recordVisible)
-//	time+seq: visible = seq > ResetSeq;     winner = max (Time, part seq, order of a colliding name)
-//	pure seq: visible = seq > ResetSeq;     winner = max part seq      (ReplacingMergeTree)
+//	time+seq: visible = seq > ResetOrder;     winner = max (Time, part seq, order of a colliding name)
+//	pure seq: visible = seq > ResetOrder;     winner = max part seq      (ReplacingMergeTree)
 //
 // and appends one JSON line of counts and examples per collector.
 
@@ -272,13 +272,20 @@ func (p *orderProof) meta(name string, m RollupMetadata) {
 	s := p.name(name)
 	first := !s.metaSeen
 	s.metaSeen = true
-	if m.ResetOrder != s.resetOrder {
-		if m.ResetOrder < s.resetOrder {
+	reset := m.ResetOrder
+	if m.Version >= 4 {
+		reset = s.resetOrder
+		if m.Expired {
+			reset = m.Frontier.Order
+		}
+	}
+	if reset != s.resetOrder {
+		if reset < s.resetOrder {
 			p.example("reset order went back %q %d -> %d", name, s.resetOrder, m.ResetOrder)
 		}
-		// ResetSeq is the expiry seal. A collector that starts after it (a
+		// ResetOrder is the expiry seal. A collector that starts after it (a
 		// planner opened mid-history) places the reset before its first part.
-		s.resetOrder, s.resetSeq = m.ResetOrder, p.seq
+		s.resetOrder, s.resetSeq = reset, p.seq
 		if !m.Expired && first {
 			s.resetSeq = p.seq - 1
 		}

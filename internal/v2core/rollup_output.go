@@ -274,7 +274,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 				batches := r.batches[s.batch : s.batch+s.batches : s.batch+s.batches]
 				start := len(lane.records)
 				frontier := sealrollup.Frontier{Order: s.next.Frontier.Order, MaxTime: s.next.Frontier.MaxTime, Policy: m.policy.prepared.Digest()}
-				s.next.Version = 3
+				s.next.Version = max(3, s.next.Version)
 				plan, err := m.policy.prepared.RouteInto(lane.records[start:], frontier, batches, &lane.workspace)
 
 				if err != nil {

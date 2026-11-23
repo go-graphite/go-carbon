@@ -19,7 +19,9 @@ var rollupMetadataMagic = []byte{'R', 'U', 'M', 1}
 // The caller owns dst through durable publication. Old JSON rows remain readable.
 func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	dst = append(dst, rollupMetadataMagic...)
-	if m.Version == 3 {
+	if m.Version >= 4 {
+		dst[len(dst)-1] = 5
+	} else if m.Version >= 3 {
 		dst[len(dst)-1] = 3
 	} else if m.BaselineOrder > 0 {
 		dst[len(dst)-1] = 2
@@ -33,10 +35,10 @@ func AppendRollupMetadata(dst []byte, m RollupMetadata) []byte {
 	for _, n := range []uint64{m.ID, m.Frontier.Order, uint64(m.Frontier.MaxTime), uint64(m.LastUpdate), m.Revision, m.ResetOrder} {
 		dst = binary.BigEndian.AppendUint64(dst, n)
 	}
-	if m.BaselineOrder > 0 || m.Version == 3 {
+	if m.BaselineOrder > 0 || m.Version >= 3 {
 		dst = binary.BigEndian.AppendUint64(dst, m.BaselineOrder)
 	}
-	if m.Version == 3 {
+	if m.Version >= 3 {
 		dst = binary.BigEndian.AppendUint64(dst, 0)
 	}
 	dst = append(dst, m.Frontier.Policy[:]...)
@@ -74,7 +76,11 @@ func appendRollupMetadataSlim(dst []byte, m RollupMetadata) []byte {
 	if m.Expired {
 		flags = 1
 	}
-	dst = append(dst, 'R', 'U', 'M', rollupMetadataSlim, m.Version, flags)
+	encoding := byte(rollupMetadataSlim)
+	if m.Version >= 4 {
+		encoding = 6
+	}
+	dst = append(dst, 'R', 'U', 'M', encoding, m.Version, flags)
 	for _, n := range []uint64{m.ID, m.Frontier.Order, uint64(m.Frontier.MaxTime), uint64(m.LastUpdate), m.Revision, m.ResetOrder, m.BaselineOrder} {
 		dst = binary.BigEndian.AppendUint64(dst, n)
 	}
@@ -112,7 +118,7 @@ func decodeRollupMetadataView(name partsformat.ID, group partsformat.Group, data
 // decodeRollupMetadataHeader decodes every field except a slim row's
 // definition: slim rows return a nil Policy and slim true.
 func decodeRollupMetadataHeader(data []byte) (m RollupMetadata, slim bool, err error) {
-	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > rollupMetadataSlim) {
+	if len(data) < 4 || !bytes.Equal(data[:3], rollupMetadataMagic[:3]) || (data[3] < 1 || data[3] > 6) {
 		// A separate variable keeps m off the heap on the binary path.
 		var j RollupMetadata
 		err = json.Unmarshal(data, &j)
@@ -125,7 +131,7 @@ func decodeRollupMetadataHeader(data []byte) (m RollupMetadata, slim bool, err e
 	if data[3] >= 3 {
 		header = 106
 	}
-	slim = data[3] == rollupMetadataSlim
+	slim = data[3] == rollupMetadataSlim || data[3] == 6
 	if len(data) < header || data[5] > 1 || uint64(binary.BigEndian.Uint32(data[header-4:header])) != uint64(len(data)-header) || (slim && len(data) != header) {
 		return m, false, errors.New("invalid binary rollup metadata")
 	}

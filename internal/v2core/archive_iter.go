@@ -41,11 +41,12 @@ type archiveCursor interface {
 }
 
 type archiveIter struct {
-	iterators  []archiveCursor
-	selected   int
-	reverse    bool
-	err        error
-	keyScratch []byte
+	iterators   []archiveCursor
+	selected    int
+	reverse     bool
+	err         error
+	keyScratch  []byte
+	descriptors map[archivePartIdentity]v2part.Descriptor
 }
 
 // archiveFile also detects a failed table open in any external level. The
@@ -91,7 +92,7 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 			return parts.archiveIter(ctx, snapshot, selected)
 		}
 	}
-	out := &archiveIter{selected: -1}
+	out := &archiveIter{selected: -1, descriptors: map[archivePartIdentity]v2part.Descriptor{}}
 	defer func() {
 		if err != nil {
 			_ = out.Close()
@@ -177,6 +178,7 @@ func newArchiveIterSelected(ctx context.Context, snapshot *pebble.Snapshot, opts
 		if opts != nil && ((opts.LowerBound != nil && bytes.Compare(d.LastKey, opts.LowerBound) < 0) || (opts.UpperBound != nil && bytes.Compare(d.FirstKey, opts.UpperBound) >= 0)) {
 			continue
 		}
+		out.descriptors[archivePartIdentity{d.Scope.Group, d.Scope.Part}] = d
 		path := filepath.Join(directory, "parts", hex.EncodeToString(d.SHA256[:])+".sst")
 		original, e := os.Open(path)
 		if e != nil {

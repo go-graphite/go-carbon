@@ -13,7 +13,9 @@ import (
 )
 
 func TestMoveOrderRanges(t *testing.T) {
-	origin := func(stream string) partOrigin { return partOrigin{CopiedPart, v2part.PartID{1}, stream} }
+	origin := func(stream string) partOrigin {
+		return partOrigin{Class: CopiedPart, Incarnation: v2part.PartID{1}, Stream: stream}
+	}
 	part := func(stream string, lo, hi uint64) MovePart {
 		return MovePart{Descriptor: v2part.Descriptor{Source: v2part.Provenance{Incarnation: v2part.PartID{1}, Stream: stream, MinOrder: lo, MaxOrder: hi}}}
 	}
@@ -110,6 +112,7 @@ func TestMoveAuthorityLegacyVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			a.Version = version
+			a.AtSeq = a.Meta.Frontier.Order // legacy authorities used input order
 			a.Coarse = []sealrollup.Record{{Delta: sealrollup.Delta{Archive: 1, Slot: 4, Order: 1, Sample: moveSample(1000, 77)}}}
 			a.Origins = []partOrigin{{Class: LivePart}}
 			value, err = json.Marshal(a)

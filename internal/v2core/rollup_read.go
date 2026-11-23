@@ -69,6 +69,7 @@ type archiveRange struct {
 }
 type archiveResult struct {
 	records            []sealrollup.Record
+	seqs               []uint64
 	origins            map[int64]partOrigin
 	origin             partOrigin
 	parts              map[string]struct{}
@@ -249,9 +250,7 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 			if part, err = readRollupPart(ctx, partIt, []byte(id), identities); err != nil {
 				return nil, err
 			}
-			if opened == nil {
-				part.descriptor = &descriptor
-			}
+			part.descriptor = &descriptor
 		}
 		if part == nil {
 			if it == nil {
@@ -454,9 +453,9 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		}
 	}
 	if cached != nil && len(cached.parts) == len(parts) {
-		for _, record := range cached.records {
-			if s.recordVisible(m, cachedOrigin(cached.origins, record.Slot), record.Order) {
-				if err := yield(record, cachedOrigin(cached.origins, record.Slot)); err != nil {
+		for i, record := range cached.records {
+			if s.recordVisible(m, cachedRecordOrigin(cached, i), record.Order) {
+				if err := yield(record, cachedRecordOrigin(cached, i)); err != nil {
 					return err
 				}
 			}
@@ -467,16 +466,10 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	// part order. A stable sort by slot then reduces every slot in the same
 	// order a merged scan would, with no per-slot map.
 	copied := s.moves[m] != nil && s.moves[m].copied
-	stored := func(origin partOrigin) partOrigin {
-		if !copied {
-			return partOrigin{Class: LivePart}
-		}
-		return origin
-	}
 	var found []slotCandidate
 	if cached != nil {
-		for _, record := range cached.records {
-			if origin := cachedOrigin(cached.origins, record.Slot); s.recordVisible(m, origin, record.Order) {
+		for i, record := range cached.records {
+			if origin := cachedRecordOrigin(cached, i); s.recordVisible(m, origin, record.Order) {
 				found = append(found, slotCandidate{record, origin})
 			}
 		}
@@ -503,22 +496,23 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		winner := found[i]
 		for i++; i < len(found) && found[i].record.Slot == winner.record.Slot; i++ {
 			c := found[i]
-			newer, err := newerOrigin(c.origin, c.record, stored(winner.origin), winner.record)
+			newer, err := newerOrigin(c.origin, c.record, winner.origin, winner.record)
 			if err != nil {
 				return err
 			}
 			if newer {
 				winner = c
-			} else if c.origin == stored(winner.origin) && c.record.Sample.Time == winner.record.Sample.Time && c.record.Order == winner.record.Order && c.record.Delta != winner.record.Delta {
+			} else if c.origin == winner.origin && c.record.Sample.Time == winner.record.Sample.Time && c.record.Order == winner.record.Order && c.record.Delta != winner.record.Delta {
 				return errors.New("conflicting rollup replacement order")
 			}
 		}
 		result.records = append(result.records, winner.record)
+		result.seqs = append(result.seqs, winner.origin.Seq)
 		if origins != nil {
 			origins[winner.record.Slot] = winner.origin
 		}
 	}
-	result.bytes = int64(256+len(name)) + int64(len(result.records))*int64(unsafe.Sizeof(sealrollup.Record{}))
+	result.bytes = int64(256+len(name)) + int64(len(result.records))*int64(unsafe.Sizeof(sealrollup.Record{})+8)
 	for _, origin := range origins {
 		result.bytes += int64(unsafe.Sizeof(partOrigin{})) + 48 + int64(len(origin.Stream))
 	}
@@ -583,8 +577,8 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 		}
 	}
 	s.cache.mu.Unlock()
-	for _, record := range result.records {
-		if err := yield(record, cachedOrigin(result.origins, record.Slot)); err != nil {
+	for i, record := range result.records {
+		if err := yield(record, cachedRecordOrigin(result, i)); err != nil {
 			return err
 		}
 	}
@@ -635,6 +629,12 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 	// (group, vshard), not per part.
 	ids := metricIDs{dict: s.identities.partDict(), known: m.latest.PolicyIdentity}
 	scan := func(it archiveCursor, part *readPartMetric) error {
+		origin := part.part.origin
+		if b := part.part.imported; b != nil {
+			origin.Seq = b.Descriptor.Source.Seq
+		} else if d := part.part.descriptor; d != nil {
+			origin.Seq = d.Source.Seq
+		}
 		ids := &ids
 		if part.part.origin.Class == CopiedPart {
 			ids = &metricIDs{known: part.PolicyIdentity}
@@ -662,7 +662,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 			}
 			part.meta = compactMetadata(meta)
 		}
-		if !s.recordVisible(m, part.part.origin, part.meta.Frontier.Order) {
+		if !s.recordVisible(m, origin, part.meta.Frontier.Order) {
 			return nil
 		}
 		key, ok, err := ids.key(part.part.key, "")
@@ -683,7 +683,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 			if record.Slot >= archiveCount || record.Order > part.meta.Frontier.Order {
 				return errors.New("invalid rollup slot/frontier")
 			}
-			if record.Slot >= first && record.Slot < last && s.recordVisible(m, part.part.origin, record.Order) {
+			if record.Slot >= first && record.Slot < last && s.recordVisible(m, origin, record.Order) {
 				if versions && s.hasCopied {
 					var err error
 					record, err = moveVersionRecord(record, part.part.imported)
@@ -691,7 +691,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 						return err
 					}
 				}
-				if err := visit(record, part.part.origin); err != nil {
+				if err := visit(record, origin); err != nil {
 					return err
 				}
 			}
@@ -938,6 +938,9 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 					}
 					part.imported = &binding
 				}
+				if d, ok := it.descriptors[archivePartIdentity{key.Group, key.Part}]; ok {
+					part.descriptor = &d
+				}
 				part.origin = origin
 				end := v2part.PrefixEnd(scope)
 				for it.Valid() && bytes.Compare(it.Key(), end) < 0 {
@@ -996,10 +999,10 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 						h.dictID.Store(key.Local + 1)
 					}
 					policy := h.rollupPolicy()
-					if (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
+					if (meta.Version < 1 || meta.Version > 4) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 						return nil, errors.New("invalid rollup metadata")
 					}
-					if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.ResetOrder != meta.Frontier.Order) {
+					if (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.Version < 4 && meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.Version < 4 && meta.ResetOrder != meta.Frontier.Order) {
 						return nil, errors.New("invalid rollup reset frontier")
 					}
 					if h.policy.prepared.Digest() != meta.Frontier.Policy {
@@ -1066,13 +1069,21 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 // history, since every imported part precedes every local lifecycle event.
 func (s *RollupSnapshot) recordVisible(m *snapshotMetric, origin partOrigin, order uint64) bool {
 	if s.moves[m] == nil || !s.moves[m].copied {
-		return !m.latest.meta.Expired && order > m.latest.meta.ResetOrder
+		return !m.latest.meta.Expired && !m.latest.meta.beforeReset(origin.Seq, order)
 	}
 	if s.moves[m].origin.Class == LivePart && origin.Class == CopiedPart && m.latest.meta.ResetOrder != 0 {
 		return false
 	}
-	meta := s.moves[m].origins[origin]
-	return !meta.Expired && order > meta.ResetOrder
+	meta := s.moves[m].origins[origin.source()]
+	return !meta.Expired && !meta.metricMetadata.beforeReset(origin.Seq, order)
+}
+
+func cachedRecordOrigin(c *archiveResult, i int) partOrigin {
+	o := cachedOrigin(c.origins, c.records[i].Slot)
+	if i < len(c.seqs) {
+		o.Seq = c.seqs[i]
+	}
+	return o
 }
 
 // slotCandidate is one visible stored record with the origin it came from.
