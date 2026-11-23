@@ -5,11 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
-	"github.com/go-graphite/go-carbon/internal/v2part"
 	"math/rand"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // The corpus is the seal-plan digest corpus. The oracle is the unmodified
