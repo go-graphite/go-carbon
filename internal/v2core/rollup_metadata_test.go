@@ -218,7 +218,7 @@ func TestRollupIdentityMetadataEncoding(t *testing.T) {
 		}
 		config, _ := json.Marshal(policy.Config)
 		v2part.RegisterPolicies([]v2part.ArchivePolicy{{Digest: sha256.Sum256(config), Definition: config}})
-		for _, version := range []uint8{1, 2, 3} {
+		for _, version := range []uint8{1, 2, 3, 4} {
 			for _, baseline := range []uint64{0, 1} {
 				meta := RollupMetadata{Version: version, ID: 7, Policy: raw, BaselineOrder: baseline, LastUpdate: -1, Revision: 19, Frontier: sealrollup.Frontier{Order: 5, MaxTime: -123, Policy: h.policy.prepared.Digest()}}
 				if version > 1 {

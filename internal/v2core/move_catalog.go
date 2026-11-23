@@ -96,10 +96,13 @@ func readPartOrigin(snapshot *pebble.Snapshot, k v2part.Key) (partOrigin, error)
 }
 
 // newerOrigin resolves one physical slot: the newest logical timestamp wins.
-// Class breaks equal timestamps; orders are comparable only within one source.
+// Class, part sequence and finally in-part order break equal timestamps.
 func newerOrigin(a partOrigin, ar sealrollup.Record, b partOrigin, br sealrollup.Record) (bool, error) {
 	if ar.Sample.Time != br.Sample.Time {
 		return ar.Sample.Time > br.Sample.Time, nil
+	}
+	if a == b && ar.Sample.Sequence != br.Sample.Sequence {
+		return ar.Sample.Sequence > br.Sample.Sequence, nil
 	}
 	return newerSource(a, ar.Order, b, br.Order)
 }
@@ -280,7 +283,7 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 			if err := decodeErr; err != nil {
 				return err
 			}
-			if k.BlockStart != 0 || entry.meta != nil || (m.Version != 1 && m.Version != 2 && m.Version != 3) || m.ID == 0 || m.Frontier.Order == 0 || m.ResetOrder > m.Frontier.Order || (m.Version == 1 && (m.ResetOrder != 0 || m.Expired)) || (m.Expired && m.ResetOrder != m.Frontier.Order) {
+			if k.BlockStart != 0 || entry.meta != nil || (m.Version < 1 || m.Version > 4) || m.ID == 0 || m.Frontier.Order == 0 || m.Version < 4 && m.ResetOrder > m.Frontier.Order || (m.Version == 1 && (m.ResetOrder != 0 || m.Expired)) || (m.Expired && m.Version < 4 && m.ResetOrder != m.Frontier.Order) {
 				return errors.New("invalid copied rollup metadata")
 			}
 			if err := json.Unmarshal(m.Policy, &entry.policy); err != nil {
@@ -456,7 +459,7 @@ func moveOrderBases(db *pebble.DB, parts []MovePart) (map[partOrigin]uint64, err
 		if d.Source.MinOrder == 0 || d.Source.MaxOrder < d.Source.MinOrder {
 			return nil, errors.New("invalid copied order range")
 		}
-		remember(partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, d.Source.MaxOrder)
+		remember(partOrigin{Class: CopiedPart, Incarnation: d.Source.Incarnation, Stream: d.Source.Stream}, d.Source.MaxOrder)
 	}
 	next := uint64(0)
 	for o, offset := range bases {

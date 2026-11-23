@@ -160,7 +160,7 @@ func TestMoveAdoptMatureHistoryKeepsPartsAndSparseRepairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if authority.Version != 3 {
+	if authority.Version != 4 {
 		t.Fatalf("history duplicated into repair catalog: %+v", authority)
 	}
 	_, before := adoptedRecords(t, e)

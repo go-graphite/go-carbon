@@ -6,6 +6,9 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cockroachdb/pebble"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -17,7 +20,21 @@ import (
 // handle, comparing definition bytes only when the handle changes.
 func TestPendingPolicyCheckedAtAdmission(t *testing.T) {
 	r, _ := New(1, 1<<28, 1<<20)
-	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: r.PublishPending})
+	// Maintenance may seal a published view immediately. Capture the admitted
+	// batches at publication instead of polling a view with no minimum lifetime.
+	published := make(chan []v2core.Batch, 1)
+	e, err := v2core.Open(t.TempDir(), testConfig(), v2core.Hooks{PublishPending: func(owner int, pin *pebble.Snapshot, view v2core.PendingView, generation uint64, inventory *v2core.RollupInventory) error {
+		if err := r.PublishPending(owner, pin, view, generation, inventory); err != nil {
+			return err
+		}
+		if view.Len() == 3 {
+			select {
+			case published <- view.Batches():
+			default:
+			}
+		}
+		return nil
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,8 +54,12 @@ func TestPendingPolicyCheckedAtAdmission(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	await(t, func() bool { return r.owners[0].Load().view.Len() == 3 })
-	pending := r.owners[0].Load().view.Batches()
+	var pending []v2core.Batch
+	select {
+	case pending = <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("three admitted batches were never published")
+	}
 	for _, b := range pending {
 		if b.Registered == nil || len(b.Policy) != 0 {
 			t.Fatalf("published batch carries raw policy: registered=%v policy=%q", b.Registered != nil, b.Policy)

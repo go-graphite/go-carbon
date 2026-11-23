@@ -23,7 +23,16 @@ type Version struct {
 	Time             int64
 	Bits             uint64
 	Order, Upto      uint64
+	Seq              uint64 // descriptor precedence; transient, never encoded
+	Class            uint8
 	Mat, Ghost, None bool
+}
+
+func (r Version) newer(b Version) bool {
+	if r.Time == b.Time && (r.Class != b.Class || r.Seq != b.Seq) {
+		return r.Class > b.Class || r.Class == b.Class && r.Seq > b.Seq
+	}
+	return newer(r.Order, !r.Mat, r.Time, b.Order, !b.Mat, b.Time)
 }
 
 // Versions evaluates Whisper archives as a pure function of stored versions.
@@ -38,7 +47,7 @@ type Versions struct {
 	orders    []uint64                   // distinct stored orders, ascending
 	bySlot    []map[int64][]int          // level -> physical slot -> stored versions
 	wins      []map[int64]map[int64]bool // level -> physical slot -> window starts with events/versions
-	events    []map[int64][]uint64       // level -> window start -> distinct raw orders below the level inside it
+	events    []map[int64][]int          // level -> window start -> raw-version indices below the level, one per order
 	absent    map[[2]int64]uint64        // (level, window) -> newest absence marker
 	passes    map[uint64][]Version       // order -> raw versions (and ghosts) its pass wrote
 	memoC     map[[2]uint64]bool         // (order, level) -> the pass wrote at that level
@@ -51,6 +60,8 @@ type slotValue struct {
 	s      Sample // Sequence is the write order
 	stored bool
 	ok     bool
+	seq    uint64
+	class  uint8
 }
 
 // NewVersions indexes recs. It keeps recs; the caller must not modify them.
@@ -180,11 +191,11 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 			win := idx[0]
 			for _, i := range idx[1:] {
 				r, b := recs[i], recs[win]
-				if r.Time == b.Time && r.Order == b.Order {
+				if r.Class == b.Class && r.Seq == b.Seq && r.Time == b.Time && r.Order == b.Order {
 					if r.Mat && !b.Mat {
 						win = i
 					}
-				} else if newer(r.Order, !r.Mat, r.Time, b.Order, !b.Mat, b.Time) {
+				} else if r.newer(b) {
 					win = i
 				}
 			}
@@ -222,7 +233,7 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 			}
 		}
 		k := [2]int64{int64(r.Archive), r.Time}
-		if ev := f.events[r.Archive][r.Time]; len(ev) > 0 && ev[len(ev)-1] > have[k] {
+		if ev := f.events[r.Archive][r.Time]; len(ev) > 0 && f.recs[ev[len(ev)-1]].Order > have[k] {
 			need[k] = true
 		}
 	}
@@ -268,7 +279,7 @@ func WriteDown(c Config, recs []Version, gone func(int) bool) (keep []bool, mats
 		v := f.valueAt(a, w, top)
 		upto := uint64(0)
 		if ev := f.events[a][w]; len(ev) > 0 {
-			upto = ev[len(ev)-1]
+			upto = f.recs[ev[len(ev)-1]].Order
 		}
 		if d, ok := f.stored(a, w, top); ok {
 			upto = max(upto, d.Upto)
@@ -325,9 +336,9 @@ func (f *Versions) index() {
 	n := len(f.c.Archives)
 	f.bySlot = make([]map[int64][]int, n)
 	f.wins = make([]map[int64]map[int64]bool, n)
-	f.events = make([]map[int64][]uint64, n)
+	f.events = make([]map[int64][]int, n)
 	for l := range n {
-		f.bySlot[l], f.wins[l], f.events[l] = map[int64][]int{}, map[int64]map[int64]bool{}, map[int64][]uint64{}
+		f.bySlot[l], f.wins[l], f.events[l] = map[int64][]int{}, map[int64]map[int64]bool{}, map[int64][]int{}
 	}
 	addWin := func(l int, w int64) {
 		s := slot(w, f.c.Archives[l])
@@ -361,7 +372,7 @@ func (f *Versions) index() {
 			w := align(r.Time, f.c.Archives[a].Step)
 			addWin(a, w)
 			if !r.Mat {
-				f.events[a][w] = append(f.events[a][w], r.Order)
+				f.events[a][w] = append(f.events[a][w], i)
 			}
 		}
 	}
@@ -369,8 +380,11 @@ func (f *Versions) index() {
 	f.orders = slices.Compact(f.orders)
 	for a := range f.events {
 		for w, ev := range f.events[a] {
-			slices.Sort(ev)
-			f.events[a][w] = slices.Compact(ev)
+			slices.SortFunc(ev, func(i, j int) int {
+				x, y := f.recs[i], f.recs[j]
+				return cmp.Or(cmp.Compare(x.Order, y.Order), cmp.Compare(y.Class, x.Class), cmp.Compare(y.Seq, x.Seq))
+			})
+			f.events[a][w] = slices.CompactFunc(ev, func(i, j int) bool { return f.recs[i].Order == f.recs[j].Order })
 		}
 	}
 	f.memoV, f.memoS = map[[3]int64]slotValue{}, map[[3]int64]slotValue{}
@@ -396,7 +410,7 @@ func (f *Versions) stored(a int, w int64, asOf uint64) (Version, bool) {
 		if r.Time != w || r.Order > asOf {
 			continue
 		}
-		if !has || r.Order > best.Order || r.Order == best.Order && r.Mat {
+		if !has || r.newer(best) || r.Class == best.Class && r.Seq == best.Seq && r.Order == best.Order && r.Mat {
 			best, has = r, true
 		}
 	}
@@ -417,7 +431,7 @@ func (f *Versions) valueAt(a int, w int64, asOf uint64) slotValue {
 	result := slotValue{}
 	stop := uint64(0)
 	if hasD {
-		result = slotValue{Sample{d.Time, d.Bits, d.Order}, !d.Mat, true}
+		result = slotValue{Sample{d.Time, d.Bits, d.Order}, !d.Mat, true, d.Seq, d.Class}
 		stop = d.Upto
 	}
 	if u, ok := f.absent[[2]int64{int64(a), w}]; ok && u <= asOf {
@@ -425,7 +439,8 @@ func (f *Versions) valueAt(a int, w int64, asOf uint64) slotValue {
 	}
 	first := true
 	for j := len(ev) - 1; j >= 0; j-- {
-		o := ev[j]
+		event := f.recs[ev[j]]
+		o := event.Order
 		if o > asOf {
 			continue
 		}
@@ -443,7 +458,10 @@ func (f *Versions) valueAt(a int, w int64, asOf uint64) slotValue {
 		samples := f.inputsAt(a-1, w, f.c.Archives[a].Step, o)
 		if p, ok := AggregateWindow(f.c, a, w, samples); ok {
 			p.Sequence = o
-			result = slotValue{p, false, true}
+			candidate := slotValue{p, false, true, event.Seq, event.Class}
+			if !result.ok || candidate.class > result.class || candidate.class == result.class && candidate.seq >= result.seq {
+				result = candidate
+			}
 			break
 		}
 	}
@@ -500,6 +518,9 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 	best := slotValue{}
 	consider := func(v slotValue) {
 		isNewer := newer(v.s.Sequence, v.stored, v.s.Time, best.s.Sequence, best.stored, best.s.Time)
+		if v.s.Time == best.s.Time && (v.class != best.class || v.seq != best.seq) {
+			isNewer = v.class > best.class || v.class == best.class && v.seq > best.seq
+		}
 		if f.timeFirst && v.s.Time != best.s.Time {
 			isNewer = v.s.Time > best.s.Time
 		}
@@ -511,7 +532,7 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 		// A materialized value competes for its slot as the computed value it
 		// stands for; a raw direct write of the same batch was applied later.
 		if r := f.recs[i]; r.Order <= o {
-			consider(slotValue{Sample{r.Time, r.Bits, r.Order}, !r.Mat, true})
+			consider(slotValue{Sample{r.Time, r.Bits, r.Order}, !r.Mat, true, r.Seq, r.Class})
 		}
 	}
 	if l > 0 {
@@ -527,7 +548,14 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from uint64) ([]Record, error)) (Sample, bool, error) {
 	var out Sample
 	var found bool
-	err := OpenSlots(c, a, []int64{w}, load, func(_ int64, p Sample, ok bool) { out, found = p, ok })
+	err := OpenSlots(c, a, []int64{w}, func(l int, first, last int64, from uint64) ([]Version, error) {
+		rs, err := load(l, first, last, from)
+		out := make([]Version, len(rs))
+		for i, r := range rs {
+			out[i] = r.Version()
+		}
+		return out, err
+	}, func(_ int64, p Sample, ok bool) { out, found = p, ok })
 	return out, found, err
 }
 
@@ -545,7 +573,7 @@ func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from
 // contiguous run of slots), and once more for the settle check. Every window
 // is computed by Versions, the function the seal and merges use, so the read
 // equals Versions over every version under the window (WindowRanges).
-func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last int64, from uint64) ([]Record, error), visit func(w int64, p Sample, ok bool), timeFirst ...bool) error {
+func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last int64, from uint64) ([]Version, error), visit func(w int64, p Sample, ok bool), timeFirst ...bool) error {
 	// The descent tracks time spans still open, not windows: a long range
 	// has few spans but a huge number of finer windows.
 	type span struct{ lo, hi int64 }
@@ -554,7 +582,7 @@ func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last in
 		return i < len(spans) && spans[i].lo <= t
 	}
 	// read loads level l under spans, one load per contiguous slot run.
-	read := func(l int, spans []span, from uint64, each func(Record)) error {
+	read := func(l int, spans []span, from uint64, each func(Version)) error {
 		al := c.Archives[l]
 		var runs [][2]int64
 		for _, s := range spans {
@@ -598,11 +626,11 @@ func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last in
 	for l := a; l >= 0 && len(open) > 0; l-- {
 		al := c.Archives[l]
 		upto := map[int64]uint64{}
-		if err := read(l, open, 0, func(r Record) {
-			if r.Kind == KindMat && r.Upto > 0 && l > 0 && inside(open, r.Sample.Time) {
-				upto[r.Sample.Time] = max(upto[r.Sample.Time], r.Upto)
+		if err := read(l, open, 0, func(r Version) {
+			if r.Mat && r.Upto > 0 && l > 0 && inside(open, r.Time) {
+				upto[r.Time] = max(upto[r.Time], r.Upto)
 			}
-			recs = append(recs, r.Version())
+			recs = append(recs, r)
 		}); err != nil {
 			return err
 		}
@@ -618,9 +646,9 @@ func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last in
 			cand = append(cand, span{t, t + al.Step})
 		}
 		for j := l - 1; j >= 0 && len(upto) > 0; j-- {
-			if err := read(j, cand, from>>4, func(r Record) {
-				t := align(r.Sample.Time, al.Step)
-				if u, ok := upto[t]; ok && r.Version().Order > u {
+			if err := read(j, cand, from>>4, func(r Version) {
+				t := align(r.Time, al.Step)
+				if u, ok := upto[t]; ok && r.Order > u {
 					delete(upto, t)
 				}
 			}); err != nil {

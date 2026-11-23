@@ -134,6 +134,11 @@ func TestMergeVersionsEncodedDifferential(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The merge reuses decoded Sequence for descriptor provenance;
+				// these legacy cursors all have sequence zero.
+				for i := range decoded {
+					decoded[i].Sample.Sequence = cur.seq
+				}
 				recs = append(recs, decoded...)
 				for range decoded {
 					from = append(from, len(members))

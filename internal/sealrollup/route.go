@@ -80,9 +80,5 @@ func AggregateWindow(c Config, archive int, start int64, samples []Sample) (Samp
 	if len(samples) == 0 || float32(len(samples))/float32(c.Archives[archive].Step/c.Archives[archive-1].Step) < c.XFilesFactor {
 		return Sample{}, false
 	}
-	var order uint64
-	for _, p := range samples {
-		order = max(order, p.Sequence)
-	}
-	return Sample{Time: start, Bits: math.Float64bits(aggregateSamples(c.Method, samples)), Sequence: order}, true
+	return Sample{Time: start, Bits: math.Float64bits(aggregateSamples(c.Method, samples))}, true
 }

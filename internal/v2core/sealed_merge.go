@@ -392,6 +392,7 @@ type mergeCursor struct {
 	name        int
 	tail        int
 	part        v2part.PartID
+	seq         uint64
 	metadata    RollupMetadata
 	policyBytes []byte
 	// config is the metadata's policy: from the part policy table for slim
@@ -638,7 +639,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			return v2part.Descriptor{}, e
 		}
 
-		c := &mergeCursor{reader: reader, cursor: newHeaderCursor(&tableCursor{it: it}, nil), part: spec.Scope.Part}
+		c := &mergeCursor{reader: reader, cursor: newHeaderCursor(&tableCursor{it: it}, nil), part: spec.Scope.Part, seq: d.Source.Seq}
 		cursors = append(cursors, c)
 		valid, e := c.readMetric(true)
 		if e != nil {
@@ -710,6 +711,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			}
 		}
 		config = *chosen.config
+		lifecycle := compactMetadata(*metadata)
 		namePrefix := prefix
 		if len(excluded) > 0 && excluded[0] != nil {
 			name, e := names.definitionName(c.key, c.metricName()[4:])
@@ -794,7 +796,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 			untouched := input.next == 0 && len(input.records) >= 16 && !metadata.Expired && (!occupied || mergeSlotLess(winner, r)) && (len(records) == 0 || mergeSlotLess(last, records[0].record()))
 			if untouched {
 				for _, item := range input.records {
-					if item.Order <= metadata.ResetOrder || rollupRecordExpiry(config, item) < expireAt {
+					if lifecycle.beforeReset(input.seq, item.Order) || rollupRecordExpiry(config, item) < expireAt {
 						untouched = false
 						break
 					}
@@ -813,19 +815,20 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 					return v2part.Descriptor{}, err
 				}
 				input.next = len(input.records) - 1
-			} else if !metadata.Expired && r.Order > metadata.ResetOrder && rollupRecordExpiry(config, r) >= expireAt {
+			} else if !metadata.Expired && !lifecycle.beforeReset(input.seq, r.Order) && rollupRecordExpiry(config, r) >= expireAt {
 				if occupied && (winner.Archive != r.Archive || winner.Slot != r.Slot) {
 					if err = flush(); err != nil {
 						return v2part.Descriptor{}, err
 					}
 				}
+				r.Sample.Sequence = input.seq
 				newer := !occupied
 				if occupied {
 					newer, err = newerOrigin(partOrigin{Class: LivePart}, r, partOrigin{Class: LivePart}, winner)
 					if err != nil {
 						return v2part.Descriptor{}, err
 					}
-					if !newer && r.Sample.Time == winner.Sample.Time && r.Order == winner.Order && r.Delta != winner.Delta {
+					if !newer && input.seq == winner.Sample.Sequence && r.Sample.Time == winner.Sample.Time && r.Order == winner.Order && r.Delta != winner.Delta {
 						return v2part.Descriptor{}, errors.New("conflicting merge replacement order")
 					}
 				}
@@ -1205,6 +1208,7 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 				if m.block[i].Archive >= len(config.Archives) {
 					return nil, errors.New("merge archive outside policy")
 				}
+				m.block[i].Sample.Sequence = c.seq
 				m.from = append(m.from, mi)
 			}
 			m.records = append(m.records, m.block...)
@@ -1218,6 +1222,7 @@ func (m *mergeVersions) merge(members []*mergeCursor, config sealrollup.Config, 
 // first.
 func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetadata, retire int64, prefix bool) ([]sealrollup.Record, error) {
 	recs := m.records
+	lifecycle := compactMetadata(*metadata)
 	// Slot order: the inputs' records, stably merged by (archive, slot). Most
 	// names arrive already in order (one input, or inputs of disjoint slots).
 	m.order = m.order[:0]
@@ -1243,11 +1248,13 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 			return int(a - b)
 		})
 	}
-	dead := func(r *sealrollup.Record) bool { return metadata.Expired || r.Order <= metadata.ResetOrder }
+	dead := func(i int) bool {
+		return metadata.Expired || lifecycle.beforeReset(recs[i].Sample.Sequence, recs[i].Order)
+	}
 	expired := func(r *sealrollup.Record) bool { return rollupRecordExpiry(config, *r) < retire }
 	// One pass over each slot's records: the per-slot winner, as the per-slot
 	// merge picks it (of each input's per-slot view, its last Raw or seal Mat
-	// record of a slot, the live record with the greatest time, then order),
+	// record of a slot, the live record with the greatest time, sequence, then order),
 	// and whether a prefix merge drops a record, which needs the write-down.
 	m.win = append(m.win[:0], make([]bool, len(recs))...)
 	drops, expiring := false, false
@@ -1261,7 +1268,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		w, live := -1, 0
 		for _, i := range m.order[g:h] {
 			r := &recs[i]
-			if dead(r) {
+			if dead(int(i)) {
 				continue
 			}
 			live++
@@ -1282,7 +1289,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 			if err != nil {
 				return nil, err
 			}
-			if !newer && r.Sample.Time == b.Sample.Time && r.Order == b.Order && r.Delta != b.Delta {
+			if !newer && r.Sample.Sequence == b.Sample.Sequence && r.Sample.Time == b.Sample.Time && r.Order == b.Order && r.Delta != b.Delta {
 				return nil, errors.New("conflicting merge replacement order")
 			}
 			if newer {
@@ -1307,8 +1314,10 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		// The write-down sees the live incarnation; a reset deletes the rest.
 		m.versions, m.view, m.gone = m.versions[:0], m.view[:0], m.gone[:0]
 		for i := range recs {
-			if r := &recs[i]; !dead(r) {
-				m.versions = append(m.versions, r.Version())
+			if r := &recs[i]; !dead(i) {
+				v := r.Version()
+				v.Seq, v.Class = r.Sample.Sequence, LivePart
+				m.versions = append(m.versions, v)
 				m.view = append(m.view, i)
 				m.gone = append(m.gone, expired(r))
 			}
@@ -1322,7 +1331,7 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 		// Without a drop the write-down keeps every live version and writes
 		// nothing down.
 		for i := range recs {
-			m.keep[i] = !dead(&recs[i]) && !expired(&recs[i])
+			m.keep[i] = !dead(i) && !expired(&recs[i])
 		}
 	}
 	// Emit in slot order, each slot's winner last.
@@ -1346,8 +1355,12 @@ func (m *mergeVersions) resolve(config sealrollup.Config, metadata *RollupMetada
 	if len(mats) == 0 {
 		return m.out, nil
 	}
+	var seq uint64
+	for _, r := range recs {
+		seq = max(seq, r.Sample.Sequence)
+	}
 	for _, v := range mats {
-		if r := v.Record(config); !dead(&r) && !expired(&r) {
+		if r := v.Record(config); !metadata.Expired && !lifecycle.beforeReset(seq, r.Order) && !expired(&r) {
 			m.out = append(m.out, r)
 			m.last = append(m.last, false)
 		}

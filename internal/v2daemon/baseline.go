@@ -174,7 +174,7 @@ func installBaseline(root string, c Config) (uint64, error) {
 			return 0, err
 		}
 		m.ID = NumericID(id, producer, c.Producers)
-		m.BaselineOrder = receipt.Baseline.Order
+		m.BaselineOrder = 1
 		value := v2core.AppendRollupMetadata(nil, m)
 		for _, index := range indexes {
 			rows[index].Value = value

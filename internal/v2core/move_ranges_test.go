@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
@@ -13,7 +15,9 @@ import (
 )
 
 func TestMoveOrderRanges(t *testing.T) {
-	origin := func(stream string) partOrigin { return partOrigin{CopiedPart, v2part.PartID{1}, stream} }
+	origin := func(stream string) partOrigin {
+		return partOrigin{Class: CopiedPart, Incarnation: v2part.PartID{1}, Stream: stream}
+	}
 	part := func(stream string, lo, hi uint64) MovePart {
 		return MovePart{Descriptor: v2part.Descriptor{Source: v2part.Provenance{Incarnation: v2part.PartID{1}, Stream: stream, MinOrder: lo, MaxOrder: hi}}}
 	}
@@ -83,13 +87,15 @@ func TestMoveAuthorityLegacyVersions(t *testing.T) {
 			cfg := adoptConfig()
 			cfg.DeferMerges = true
 			root := t.TempDir()
-			e, err := Open(root, cfg, Hooks{})
+			var expire atomic.Bool
+			hooks := Hooks{Expire: func(RollupPolicy, RollupMetadata, time.Time) bool { return expire.Load() }, ExpiryTTL: expiryWindow(time.Nanosecond)}
+			e, err := Open(root, cfg, hooks)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { e.Close() }()
 			policy := adoptPolicy(t, sealrollup.Sum)
-			adoptLive(t, e, policy, 1, 1, moveSample(1005, 6), moveSample(1006, 7), moveSample(1007, 8), moveSample(1008, 9), moveSample(1009, 10))
+			adoptLive(t, e, policy, 100, 1, moveSample(1005, 6), moveSample(1006, 7), moveSample(1007, 8), moveSample(1008, 9), moveSample(1009, 10))
 			donor := adoptDonor(t, policy, moveSample(1000, 1), moveSample(1001, 2), moveSample(1002, 3), moveSample(1003, 4), moveSample(1004, 5))
 			prepared, err := PrepareMove(context.Background(), t.TempDir(), []MovePart{donor})
 			if err != nil {
@@ -110,6 +116,7 @@ func TestMoveAuthorityLegacyVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			a.Version = version
+			a.AtSeq = a.Meta.Frontier.Order // legacy authorities used input order
 			a.Coarse = []sealrollup.Record{{Delta: sealrollup.Delta{Archive: 1, Slot: 4, Order: 1, Sample: moveSample(1000, 77)}}}
 			a.Origins = []partOrigin{{Class: LivePart}}
 			value, err = json.Marshal(a)
@@ -122,6 +129,11 @@ func TestMoveAuthorityLegacyVersions(t *testing.T) {
 			check := func() {
 				_, rs := adoptedRecords(t, e)
 				for _, r := range rs {
+					if r.Sample.Sequence != r.Order {
+						t.Fatalf("decoded part sequence escaped the public scan: %+v", r)
+					}
+				}
+				for _, r := range rs {
 					if r.Archive == 1 && r.Sample.Time == 1000 && r.Sample.Bits == math.Float64bits(77) {
 						return
 					}
@@ -132,11 +144,28 @@ func TestMoveAuthorityLegacyVersions(t *testing.T) {
 			if err = e.Close(); err != nil {
 				t.Fatal(err)
 			}
-			e, err = Open(root, cfg, Hooks{})
+			e, err = Open(root, cfg, hooks)
 			if err != nil {
 				t.Fatal(err)
 			}
 			check()
+			// A new sequence reset must fence an old order-based authority,
+			// even when its input order is much larger than the part sequence.
+			expire.Store(true)
+			if err := e.AppendBatches(0, nil, 2, true); err != nil {
+				t.Fatal(err)
+			}
+			expire.Store(false)
+			adoptLive(t, e, policy, 101, 3, moveSample(1010, 11))
+			meta, records := adoptedRecords(t, e)
+			if meta.Version != 4 || meta.ResetOrder == 0 || meta.Expired {
+				t.Fatalf("reset/revival metadata: %+v", meta)
+			}
+			for _, r := range records {
+				if r.Sample.Time < 1010 {
+					t.Fatalf("legacy authority survived reset: %+v", r)
+				}
+			}
 		})
 	}
 }

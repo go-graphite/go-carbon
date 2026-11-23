@@ -198,7 +198,7 @@ func checkInstalledBaselineClassicInventory(t *testing.T, first, stride int) {
 		t.Helper()
 		for _, fixture := range fixtures {
 			baseline, err := reader.BaselineMetadata(ctx, fixture.name)
-			if err != nil || baseline.BaselineOrder != 100 {
+			if err != nil || baseline.BaselineOrder != 1 {
 				t.Fatalf("%s baseline %s: %+v %v", stage, fixture.name, baseline, err)
 			}
 			w, err := whisper.OpenWithOptions(fixture.path, &whisper.Options{Now: func() time.Time { return time.Unix(now, 0) }})

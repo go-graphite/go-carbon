@@ -1540,7 +1540,7 @@ func upgradeClosed(c Config, recs []Record) []Record {
 		v := f.valueAt(a, w, top)
 		upto := uint64(0)
 		if ev := f.events[a][w]; len(ev) > 0 {
-			upto = ev[len(ev)-1]
+			upto = f.recs[ev[len(ev)-1]].Order
 		}
 		if d, ok := f.stored(a, w, top); ok {
 			upto = max(upto, d.Upto)

@@ -110,9 +110,16 @@ var moveAuthorityPrefix = []byte{255, 'V', '2', 'A', 0}
 type moveAuthority struct {
 	Version int
 	Meta    RollupMetadata
-	AtOrder uint64
+	AtSeq   uint64              `json:"AtOrder"`
 	Coarse  []sealrollup.Record `json:",omitempty"`
 	Origins []partOrigin        `json:",omitempty"`
+}
+
+func moveAuthorityVisible(meta metricMetadata, a *moveAuthority) bool {
+	if meta.Version < 4 {
+		return meta.ResetOrder <= a.Meta.Frontier.Order
+	}
+	return meta.ResetOrder == 0 || a.Version >= 4 && meta.ResetOrder <= a.AtSeq
 }
 
 func moveAuthorityKey(name string) []byte { return append(bytes.Clone(moveAuthorityPrefix), name...) }
@@ -230,7 +237,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		d := part.Descriptor
-		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d, Dictionary: part.Dictionary, Owner: owner, Owners: owners, BaseOrder: bases[partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}] + d.Source.MinOrder})
+		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{Class: CopiedPart, Incarnation: d.Source.Incarnation, Stream: d.Source.Stream}, Descriptor: d, Dictionary: part.Dictionary, Owner: owner, Owners: owners, BaseOrder: bases[partOrigin{Class: CopiedPart, Incarnation: d.Source.Incarnation, Stream: d.Source.Stream}] + d.Source.MinOrder})
 		if err != nil {
 			return err
 		}
@@ -323,9 +330,9 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		if err != nil {
 			return err
 		}
-		local.Version = 3
+		local.Version = max(3, local.Version)
 		meta := compactMetadata(local)
-		authority := moveAuthority{Version: 3, AtOrder: local.Frontier.Order}
+		authority := moveAuthority{Version: 4, AtSeq: o.meta.NextPart}
 		authority.Coarse, err = moveUnionWindows(ctx, prepared.index, current, name, policy.Config, local.Frontier.Order, now)
 		if err != nil {
 			return err
@@ -428,14 +435,14 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if (a.Version < 1 || a.Version > 3) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || a.Meta.Frontier.Order != a.AtOrder {
+		if (a.Version < 1 || a.Version > 4) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || (a.Version < 4 && a.Meta.Frontier.Order != a.AtSeq) {
 			return errors.New("invalid move authority")
 		}
 		if s.moves[m].origin.Class == LivePart {
 			if m.latest.id != a.Meta.ID {
 				return errors.New("move receiving identity changed")
 			}
-			if m.latest.meta.Frontier.Order <= a.AtOrder {
+			if !m.latest.meta.after(compactMetadata(a.Meta)) {
 				latest := m.latest
 				latest.meta = compactMetadata(a.Meta)
 				latest.PolicyIdentity = (&PolicyIdentity{id: a.Meta.ID, policy: latest.policy, plain: latest.plain, vshard: latest.vshard}).withName(latest.Name())
@@ -472,14 +479,14 @@ func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string,
 		base = &RollupSnapshot{snapshot: s.snapshot, directory: s.directory, metrics: map[string]*snapshotMetric{name: &live}, partOverrides: map[*snapshotMetric][]*readPartMetric{&live: liveParts}, cache: &rollupRangeCache{entries: map[archiveRange][]*archiveResult{}}}
 	}
 	if err := base.scanArchiveParts(ctx, name, archive, first, last, func(record sealrollup.Record, origin partOrigin) error {
-		if a.Version != 1 || record.Order > a.AtOrder {
+		if a.Version != 1 || record.Sample.Sequence > a.AtSeq || a.Version < 4 && record.Order > a.AtSeq {
 			winners[record.Slot] = moveWinner{record, origin}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	if m.latest.meta.ResetOrder <= a.AtOrder {
+	if moveAuthorityVisible(m.latest.meta, a) {
 		for i, record := range a.Coarse {
 			if record.Archive != archive || record.Slot < first || record.Slot >= last {
 				continue
@@ -492,7 +499,11 @@ func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string,
 			if exists {
 				comparison := record
 				if origin.Class == LivePart {
-					comparison.Order = a.AtOrder
+					comparison.Order = a.AtSeq
+					comparison.Sample.Sequence = 0
+					if a.Version >= 4 {
+						comparison.Sample.Sequence = a.AtSeq
+					}
 				}
 				newer, err := newerOrigin(origin, comparison, old.origin, old.record)
 				if err != nil {

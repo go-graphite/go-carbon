@@ -58,7 +58,7 @@ func ScanCatalogNamesWithDict(ctx context.Context, snapshot *pebble.Snapshot, di
 		if err := json.Unmarshal(meta.Policy, &policy); err != nil {
 			return err
 		}
-		if key.Ordinal != 0 || key.BlockStart != 0 || (meta.Version != 1 && meta.Version != 2 && meta.Version != 3) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
+		if key.Ordinal != 0 || key.BlockStart != 0 || (meta.Version < 1 || meta.Version > 4) || meta.ID == 0 || meta.Frontier.Order == 0 || policy.Name != key.Metric || policy.Group != key.Group {
 			return errors.New("v2 index: invalid core catalog metadata")
 		}
 		if err := visit(string(policy.Name)); err != nil {

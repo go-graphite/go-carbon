@@ -191,7 +191,7 @@ func TestBaselineInstallReplayAndExpiry(t *testing.T) {
 		t.Fatalf("expired baseline resurrected: mask=%t err=%v", masked, err)
 	}
 	baseline, err := reader.BaselineMetadata(context.Background(), "baseline.metric")
-	if err != nil || baseline.BaselineOrder != 100 {
+	if err != nil || baseline.BaselineOrder != 1 {
 		t.Fatal("expired baseline lost cutover certificate", err)
 	}
 	p = store.Producers[v2recv.OwnerFor("baseline.metric", 2)]
@@ -378,7 +378,7 @@ func TestBaselineInstallAcrossMonthPartitions(t *testing.T) {
 		snap := db.NewSnapshot()
 		err := v2core.ScanRollups(snap, func(p v2core.RollupPolicy, m v2core.RollupMetadata, records []sealrollup.Record) error {
 			names++
-			if m.BaselineOrder != 100 || m.Frontier.MaxTime != now-60 {
+			if m.BaselineOrder != 1 || m.Frontier.MaxTime != now-60 {
 				return fmt.Errorf("baseline metadata %+v", m)
 			}
 			for _, r := range records {
