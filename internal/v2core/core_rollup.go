@@ -1194,7 +1194,7 @@ func scanRollupsWith(snapshot *pebble.Snapshot, identities *PolicyCatalog, open 
 	if copied, err := snapshotHasCopiedParts(snapshot); err != nil {
 		return err
 	} else if copied {
-		return scanCopiedRollups(snapshot, visit)
+		return scanCopiedRollups(snapshot, identities, visit)
 	}
 	series := map[partsformat.ID]*rollupScanEntry{}
 	iter, err := newArchiveIter(context.Background(), snapshot, rollupScanBounds())
@@ -1226,8 +1226,8 @@ func rollupScanBounds() *pebble.IterOptions {
 	// GCI2 keys sort just below GCP3 and nothing lies between.
 	return &pebble.IterOptions{LowerBound: idKeyMagic, UpperBound: partsformat.PrefixEnd(partKeyMagic)}
 }
-func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
-	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, nil, nil, 0)
+func scanCopiedRollups(snapshot *pebble.Snapshot, identities *PolicyCatalog, visit func(RollupPolicy, RollupMetadata, []sealrollup.Record) error) error {
+	index, err := NewRollupSnapshot(context.Background(), snapshot, nil, identities, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -1257,8 +1257,9 @@ func scanCopiedRollups(snapshot *pebble.Snapshot, visit func(RollupPolicy, Rollu
 
 // recoverCoreRollups loads the owner's checkpoint from dir plus the parts
 // published after it, and otherwise rebuilds every name from the rollup keys
-// in parts. An empty dir (validation-only recoveries) always scans.
-func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (*coreRollups, error) {
+// in parts. An empty dir (validation-only recoveries) always scans. The bool
+// reports copied bindings already checked during recovery, for the merge fence.
+func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (*coreRollups, bool, error) {
 	r := newCoreRollups()
 	r.db = db
 	if len(catalogs) > 0 {
@@ -1266,29 +1267,31 @@ func recoverCoreRollups(db *pebble.DB, dir string, catalogs ...*PolicyCatalog) (
 	}
 	snapshot := db.NewSnapshot()
 	defer snapshot.Close()
-	if found, err := snapshotHasCopiedParts(snapshot); err != nil {
-		return nil, err
-	} else if found {
-		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, nil, nil, 0)
+	copied, err := snapshotHasCopiedParts(snapshot)
+	if err != nil {
+		return nil, false, err
+	}
+	if copied {
+		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, r.identities, nil, 0)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, m := range index.metrics {
 			if index.moves[m] != nil && index.moves[m].copied && index.moves[m].authority == nil {
-				return nil, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
+				return nil, false, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
 			}
 		}
 	} else if dir != "" {
 		loaded, err := openMappedCheckpoint(db, snapshot, filepath.Join(dir, rollupCheckpointFile), r.identities)
 		if err == nil {
-			return loaded, nil
+			return loaded, false, nil
 		}
 		if !errors.Is(err, errCheckpoint) {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	err := scanRollups(snapshot, r.identities, r.installRecovered)
-	return r, err
+	err = scanRollups(snapshot, r.identities, r.installRecovered)
+	return r, copied, err
 }
 
 // installRecovered installs one name rebuilt from parts.

@@ -23,6 +23,7 @@ import (
 type MovePart struct {
 	Path       string
 	Descriptor v2part.Descriptor
+	Dictionary *MoveDictionary `json:",omitempty"`
 }
 
 // PreparedMove is an offline receiving catalog, independent of the live owner.
@@ -65,7 +66,7 @@ func prepareMove(ctx context.Context, dir string, parts []MovePart, trusted bool
 		if err = os.Link(part.Path, path); err != nil && !errors.Is(err, os.ErrExist) {
 			return fail(err)
 		}
-		if _, err = installCopiedPartVerified(ctx, db, dir, path, part.Descriptor, false, trusted); err != nil {
+		if _, err = installCopiedPartVerified(ctx, db, dir, path, part.Descriptor, false, trusted, part.Dictionary); err != nil {
 			return fail(err)
 		}
 		part.Path = path
@@ -103,17 +104,15 @@ func (p *PreparedMove) Policies() map[string][]byte {
 
 var moveAuthorityPrefix = []byte{255, 'V', '2', 'A', 0}
 
-// moveAuthority binds local identity and boundary repairs in the same manifest
-// edit as the imported parts. Version 1 stored a full coarse baseline; version 2
-// retains untouched history in the original parts. Raw bytes retain their
-// original class and order.
-// AtOrder is exclusively a receiving-stream counter; it never advances replay.
+// moveAuthority binds receiving identity and lifecycle metadata atomically with
+// the imported part bindings. Coarse holds only mixed-window Mats; untouched
+// history remains in the immutable parts. Versions 1/2 retain their old overlay.
 type moveAuthority struct {
 	Version int
 	Meta    RollupMetadata
 	AtOrder uint64
-	Coarse  []sealrollup.Record
-	Origins []partOrigin `json:",omitempty"`
+	Coarse  []sealrollup.Record `json:",omitempty"`
+	Origins []partOrigin        `json:",omitempty"`
 }
 
 func moveAuthorityKey(name string) []byte { return append(bytes.Clone(moveAuthorityPrefix), name...) }
@@ -194,8 +193,8 @@ func collectMoveArchive(ctx context.Context, index *RollupSnapshot, name string,
 		winners[record.Slot] = moveWinner{record, origin}
 		return nil
 	}
-	if archive > 0 && index.moves[m] != nil && index.moves[m].authority != nil {
-		return index.scanMoveArchive(ctx, name, archive, 0, m.latest.schema().Archives[archive].Count, yield)
+	if move := index.moves[m]; archive > 0 && move != nil && move.authority != nil && move.authority.Version < 3 {
+		return index.scanLegacyMoveArchive(ctx, name, archive, 0, m.latest.schema().Archives[archive].Count, yield)
 	}
 	return index.scanArchiveParts(ctx, name, archive, 0, m.latest.schema().Archives[archive].Count, yield)
 }
@@ -212,16 +211,17 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 		}
 	}
+	bases, err := moveOrderBases(o.db, prepared.parts)
+	if err != nil {
+		return err
+	}
 	var incoming []MovePart
 	var metadata []coreKV
 	for _, part := range prepared.parts {
 		if !wanted[archivePartIdentity{part.Descriptor.Scope.Group, part.Descriptor.Scope.Part}] {
 			continue
 		}
-		if descriptorByID(part.Descriptor) {
-			return errIDKeyedMove
-		}
-		k, err := v2part.Decode(part.Descriptor.FirstKey)
+		k, err := v2part.DecodeKey(part.Descriptor.FirstKey)
 		if err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return err
 		}
 		d := part.Descriptor
-		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d, Owner: owner, Owners: owners})
+		binding, err := json.Marshal(partImport{Version: 1, Origin: partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, Descriptor: d, Dictionary: part.Dictionary, Owner: owner, Owners: owners, BaseOrder: bases[partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}] + d.Source.MinOrder})
 		if err != nil {
 			return err
 		}
@@ -242,6 +242,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			old.Pending = false
 			if pending {
 				old.Owner, old.Owners = owner, owners
+				old.BaseOrder = bases[old.Origin] + old.Descriptor.Source.MinOrder
 			}
 			normalized, marshalErr := json.Marshal(old)
 			if decodeErr != nil || marshalErr != nil || !bytes.Equal(normalized, binding) {
@@ -261,13 +262,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	}
 	snapshot := o.db.NewSnapshot()
 	defer snapshot.Close()
-	current, err := NewRollupSnapshot(ctx, snapshot, nil, nil, nil, 0)
+	current, err := NewRollupSnapshot(ctx, snapshot, nil, o.rollups.identities, nil, 0)
 	if err != nil {
 		return err
 	}
 	// A UUID that is already live must never be reclassified as copied.
 	for _, part := range incoming {
-		key, _ := v2part.Decode(part.Descriptor.FirstKey)
+		key, _ := v2part.DecodeKey(part.Descriptor.FirstKey)
 		for _, physical := range current.parts {
 			for _, metric := range physical.metrics {
 				if metric.part.key.Part == key.Part && metric.part.key.Group == key.Group {
@@ -297,8 +298,6 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			return errors.New("move policy mismatch")
 		}
 		winning := []sealrollup.Record{}
-		targetRaw := []sealrollup.Record{}
-		original := map[[2]int64]moveWinner{}
 		for archive := range policy.Config.Archives {
 			winners := map[int64]moveWinner{}
 			if err = collectMoveArchive(ctx, prepared.index, name, archive, winners); err != nil {
@@ -309,18 +308,6 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 			}
 			for _, winner := range winners {
 				winning = append(winning, winner.record)
-				original[[2]int64{int64(archive), winner.record.Slot}] = winner
-			}
-			if archive == 0 {
-				localRaw := map[int64]moveWinner{}
-				if err = collectMoveArchive(ctx, current, name, 0, localRaw); err != nil {
-					return err
-				}
-				for _, winner := range localRaw {
-					if winner.origin.Class == LivePart {
-						targetRaw = append(targetRaw, winner.record)
-					}
-				}
 			}
 		}
 		local := RollupMetadata{Version: 1, ID: id, Policy: bytes.Clone(donor.latest.definitionBytes()), Revision: 1, LastUpdate: now * 1e9}
@@ -333,40 +320,40 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		local.LastUpdate = max(local.LastUpdate, donor.latest.meta.LastUpdate)
 		local.Revision++
-		rebuilt, err := PlanMoveRollupBoundary(policy, winning, targetRaw, now, max(uint64(1), local.Frontier.Order))
-		if err != nil {
-			return err
-		}
 		m, err := next.metric(id, local.Policy)
 		if err != nil {
 			return err
 		}
+		local.Version = 3
 		meta := compactMetadata(local)
-		// Version 2 stores only repaired windows. Mature history remains in
-		// its original immutable parts; version 1 full baselines remain readable.
-		authority := moveAuthority{Version: 2, Meta: local, AtOrder: local.Frontier.Order}
-		priorRepairs := map[[2]int64]sealrollup.Record{}
-		if existing := current.metrics[name]; existing != nil && current.moves[existing] != nil && current.moves[existing].authority != nil {
-			for _, r := range current.moves[existing].authority.Coarse {
-				priorRepairs[[2]int64{int64(r.Archive), r.Slot}] = r
+		authority := moveAuthority{Version: 3, AtOrder: local.Frontier.Order}
+		authority.Coarse, err = moveUnionWindows(ctx, prepared.index, current, name, policy.Config, local.Frontier.Order, now)
+		if err != nil {
+			return err
+		}
+		if old := current.metrics[name]; old != nil && current.moves[old] != nil && current.moves[old].authority != nil {
+			for _, prior := range current.moves[old].authority.Coarse {
+				if !slices.ContainsFunc(authority.Coarse, func(r sealrollup.Record) bool {
+					return r.Archive == prior.Archive && r.Sample.Time == prior.Sample.Time
+				}) {
+					authority.Coarse = append(authority.Coarse, prior)
+				}
 			}
 		}
-		for _, record := range rebuilt {
-			m.residency().Install(record.Delta)
+		for _, record := range winning {
 			meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, record.Sample.Time)
-			if record.Archive > 0 {
-				key := [2]int64{int64(record.Archive), record.Slot}
-				prior, exists := original[key]
-				oldRepair, hadRepair := priorRepairs[key]
-				if exists && prior.record == record && (!hadRepair || oldRepair != record) {
-					continue
-				}
-				authority.Coarse = append(authority.Coarse, record)
-				origin := partOrigin{Class: LivePart}
-				if exists && prior.record == record {
-					origin = prior.origin
-				}
-				authority.Origins = append(authority.Origins, origin)
+			if slices.ContainsFunc(authority.Coarse, func(r sealrollup.Record) bool {
+				return r.Archive == record.Archive && r.Sample.Time == record.Sample.Time
+			}) {
+				continue
+			}
+			record.Order = local.Frontier.Order
+			record.Sample.Sequence = record.Order
+			m.residency().Install(record.Delta)
+		}
+		for _, r := range authority.Coarse {
+			if r.Kind != sealrollup.KindNone {
+				m.residency().Install(r.Delta)
 			}
 		}
 		authority.Meta = m.metadata(meta)
@@ -389,7 +376,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	// unchanged file with an atomic hidden binding, then activate every binding
 	// and reducer authority together. Interrupted staging remains invisible.
 	for _, part := range incoming {
-		if _, err = installCopiedPartVerified(ctx, o.db, o.dir, part.Path, part.Descriptor, true, prepared.trusted); err != nil {
+		if _, err = installCopiedPartVerified(ctx, o.db, o.dir, part.Path, part.Descriptor, true, prepared.trusted, part.Dictionary); err != nil {
 			return err
 		}
 		if prepared.Progress != nil {
@@ -423,7 +410,13 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	if o.stage != nil {
 		o.stage("move-before-ingest")
 	}
-	if err = o.db.Ingest([]string{path}); err != nil {
+	o.gc.mu.Lock()
+	err = o.db.Ingest([]string{path})
+	if err == nil {
+		o.gc.moveEpoch++
+	}
+	o.gc.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	if o.stage != nil {
@@ -452,7 +445,7 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 		if err != nil {
 			return err
 		}
-		if (a.Version != 1 && a.Version != 2) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || a.Meta.Frontier.Order != a.AtOrder {
+		if (a.Version < 1 || a.Version > 3) || a.Meta.ID == 0 || !bytes.Equal(a.Meta.Policy, m.latest.definitionBytes()) || a.Meta.Frontier.Order != a.AtOrder {
 			return errors.New("invalid move authority")
 		}
 		if s.moves[m].origin.Class == LivePart {
@@ -476,11 +469,9 @@ func (s *RollupSnapshot) loadMoveAuthorities() error {
 	return nil
 }
 
-func (s *RollupSnapshot) scanAdoptedCoarse(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
-	return s.scanMoveArchive(ctx, name, archive, first, last, func(record sealrollup.Record, _ partOrigin) error { return yield(record) })
-}
-
-func (s *RollupSnapshot) scanMoveArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
+// scanLegacyMoveArchive preserves persisted v1 full baselines and v2 sparse
+// overlays. New adoptions store actual Mat/None versions in the common reader.
+func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record, partOrigin) error) error {
 	m := s.metrics[name]
 	a := s.moves[m].authority
 	winners := map[int64]moveWinner{}

@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -238,5 +240,34 @@ func TestMoveProgressImportsLegacyCertificate(t *testing.T) {
 				t.Fatalf("legacy cleanup: %v %v", entries, e)
 			}
 		})
+	}
+}
+
+// The begin receipt must bind donor dictionary ranges before any file arrives;
+// recreating the admin after interruption must recover that same namespace.
+func TestMoveBeginRetainsDictionary(t *testing.T) {
+	admin, store, _ := moveProgressFixture(t)
+	hash := strings.Repeat("d", 64)
+	snapshot := v2core.PartSnapshot{Version: 1, Parts: []v2core.SnapshotPart{{ID: hash, SHA256: hash, Bytes: 42, Dictionary: &v2core.MoveDictionary{Generation: 7, Names: []v2core.MoveDictionaryName{{VShard: v2part.Route("move.metric"), Name: "move.metric", Entry: v2dict.Entry{ID: 17}}}}}}}
+	body, err := json.Marshal(MoveCopyRequest{Snapshot: snapshot, Now: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	admin.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/admin/v2/move/begin", bytes.NewReader(body)))
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	var status MoveStatus
+	if err = json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewMoveAdmin(filepath.Dir(admin.root), store, func(_ int, run func() error) error { return run() })
+	record, err := reopened.load(status.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Snapshot == nil || !reflect.DeepEqual(*record.Snapshot, snapshot) {
+		t.Fatal("begin receipt lost donor dictionary")
 	}
 }

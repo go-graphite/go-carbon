@@ -245,11 +245,17 @@ func TestSealedMergeMoveDuringWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, want := adoptedRecords(t, e)
+	dependencies := partVersions(t, o)
+	partCount := mergeCount(o)
 	close(release)
 	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
+	if got := mergeCount(o); got != partCount {
+		t.Fatalf("merge proposal computed before attachment published: parts=%d want=%d", got, partCount)
+	}
 	mergeDrain(t, o)
+	assertMoveDependencies(t, dependencies, partVersions(t, o))
 	_, got := adoptedRecords(t, e)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("move authority changed\ngot=%v\nwant=%v", got, want)

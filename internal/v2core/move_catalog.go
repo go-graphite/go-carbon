@@ -28,12 +28,14 @@ const (
 var movePartPrefix = []byte{255, 'V', '2', 'M', 0}
 
 type partImport struct {
+	BaseOrder  uint64 `json:",omitempty"`
 	Version    int
 	Origin     partOrigin
 	Descriptor v2part.Descriptor
-	Pending    bool `json:",omitempty"`
-	Owner      int  `json:",omitempty"`
-	Owners     int  `json:",omitempty"`
+	Dictionary *MoveDictionary `json:",omitempty"`
+	Pending    bool            `json:",omitempty"`
+	Owner      int             `json:",omitempty"`
+	Owners     int             `json:",omitempty"`
 }
 
 type partOrigin struct {
@@ -43,7 +45,7 @@ type partOrigin struct {
 }
 
 func partScopeKey(k v2part.Key) ([]byte, error) {
-	prefix, err := v2part.PartitionPrefixForGroup(k.Group, k.VShard, k.Partition)
+	prefix, err := scopePrefix(k.Group, k.VShard, k.Partition, k.ByID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +53,8 @@ func partScopeKey(k v2part.Key) ([]byte, error) {
 }
 
 func moveCatalogKey(k v2part.Key) ([]byte, error) {
-	k.VShard = 0 // Dense files span vshards; precedence binds the whole immutable part.
+	k.ByID = false // The binding is independent of the record key generation.
+	k.VShard = 0   // Dense files span vshards; precedence binds the whole immutable part.
 	scope, err := partScopeKey(k)
 	if err != nil {
 		return nil, err
@@ -77,7 +80,7 @@ func readPartOrigin(snapshot *pebble.Snapshot, k v2part.Key) (partOrigin, error)
 		return partOrigin{}, err
 	}
 	origin := binding.Origin
-	if binding.Version != 1 || binding.Descriptor.Validate() != nil {
+	if binding.Version != 1 || binding.Descriptor.Validate() != nil || binding.Dictionary.validate(binding.Descriptor) != nil {
 		return origin, errors.New("invalid copied part binding")
 	}
 	if binding.Descriptor.Scope.Group != k.Group || binding.Descriptor.Scope.Partition != k.Partition || binding.Descriptor.Scope.Part != k.Part {
@@ -132,21 +135,25 @@ func installCopiedPart(ctx context.Context, db *pebble.DB, dir, path string, d v
 }
 
 // VerifyMovePart certifies transport bytes and rollup semantics once before a durable receipt.
-func VerifyMovePart(ctx context.Context, path string, d v2part.Descriptor) error {
-	return validateCopiedRollupPart(ctx, path, d)
+func VerifyMovePart(ctx context.Context, path string, d v2part.Descriptor, dictionary ...*MoveDictionary) error {
+	return validateCopiedRollupPart(ctx, path, d, dictionary...)
 }
 
-func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending, verified bool) (bool, error) {
+func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path string, d v2part.Descriptor, pending, verified bool, dictionary ...*MoveDictionary) (bool, error) {
 	if err := d.Validate(); err != nil {
 		return false, err
 	}
 	if d.Scope.VShard != v2part.GroupVShard || d.Encoding != v2part.DenseEncoding {
 		return false, errors.New("copied catalog requires a dense group rollup part")
 	}
-	if descriptorByID(d) {
-		return false, errIDKeyedMove
+	var names *MoveDictionary
+	if len(dictionary) > 0 {
+		names = dictionary[0]
 	}
-	k, err := v2part.Decode(d.FirstKey)
+	if err := names.validate(d); err != nil {
+		return false, err
+	}
+	k, err := v2part.DecodeKey(d.FirstKey)
 	if err != nil {
 		return false, err
 	}
@@ -155,7 +162,7 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 		return false, err
 	}
 	origin := partOrigin{Class: CopiedPart, Incarnation: d.Source.Incarnation, Stream: d.Source.Stream}
-	value, err := json.Marshal(partImport{Version: 1, Origin: origin, Descriptor: d, Pending: pending})
+	value, err := json.Marshal(partImport{Version: 1, Origin: origin, Descriptor: d, Dictionary: names, Pending: pending})
 	if err != nil {
 		return false, err
 	}
@@ -170,33 +177,34 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 	} else if !errors.Is(e, pebble.ErrNotFound) {
 		return false, e
 	}
-	prefix := []byte{'G', 'C', 'P', 3}
-	it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
-	if err != nil {
-		return false, err
-	}
-	exists := false
-	for ok := it.First(); ok; ok = it.Next() {
-		old, e := v2part.Decode(it.Key())
-		if e != nil {
-			_ = it.Close()
-			return false, e
+	for _, prefix := range partKeyRanges {
+		it, err := db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: v2part.PrefixEnd(prefix)})
+		if err != nil {
+			return false, err
 		}
-		if old.Group == k.Group && old.Partition == k.Partition && old.Part == k.Part {
-			exists = true
-			break
+		exists := false
+		for ok := it.First(); ok; ok = it.Next() {
+			old, e := v2part.DecodeKey(it.Key())
+			if e != nil {
+				_ = it.Close()
+				return false, e
+			}
+			if old.Group == k.Group && old.Partition == k.Partition && old.Part == k.Part {
+				exists = true
+				break
+			}
 		}
-	}
-	err = errors.Join(it.Error(), it.Close())
-	if err != nil {
-		return false, err
-	}
-	if exists {
-		return false, errors.New("cannot reclassify an existing live part")
+		err = errors.Join(it.Error(), it.Close())
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return false, errors.New("cannot reclassify an existing live part")
+		}
 	}
 	// SHA256 and all interior keys are checked before any visible mutation.
 	if !verified {
-		if err = validateCopiedRollupPart(ctx, path, d); err != nil {
+		if err = validateCopiedRollupPart(ctx, path, d, names); err != nil {
 			return false, err
 		}
 	}
@@ -239,7 +247,14 @@ func installCopiedPartVerified(ctx context.Context, db *pebble.DB, dir, path str
 
 // A valid transport checksum alone cannot certify archive/frontier semantics.
 // This bounded pass validates values without reconstructing a name digest.
-func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descriptor) error {
+func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descriptor, dictionary ...*MoveDictionary) error {
+	var dict *MoveDictionary
+	if len(dictionary) > 0 {
+		dict = dictionary[0]
+	}
+	if err := dict.validate(d); err != nil {
+		return err
+	}
 	v2part.RegisterPolicies(d.Coverage.Policies)
 	type limits struct {
 		order  uint64
@@ -249,6 +264,9 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 	}
 	names := map[v2part.ID]*limits{}
 	err := v2part.Read(ctx, path, &d, func(k v2part.Key, b []byte) error {
+		if err := dict.resolve(&k); err != nil {
+			return err
+		}
 		if k.Ordinal != 0 {
 			return errors.New("invalid copied rollup key")
 		}
@@ -346,4 +364,125 @@ func copiedNameVisible(snapshot *pebble.Snapshot, k v2part.Key) (bool, error) {
 		return false, errors.New("invalid copied owner placement")
 	}
 	return binding.Owners == 0 || int(v2part.Route(k.Metric))%binding.Owners == binding.Owner, nil
+}
+
+// The comparison class occupies one bit in the query's order space. This is
+// deliberately below Tick's four archive bits, and is never written into an SST.
+// Receiver writes, including pre-attach writes, win equal-time conflicts.
+const moveLiveOrder = uint64(1) << 58
+
+func moveVersionRecord(r sealrollup.Record, binding *partImport) (sealrollup.Record, error) {
+	mapOrder := func(order uint64) (uint64, error) {
+		if order == 0 {
+			return 0, nil
+		}
+		if order >= moveLiveOrder {
+			return 0, errors.New("move version order exhausted")
+		}
+		if binding == nil {
+			return moveLiveOrder + order, nil
+		}
+		base := binding.BaseOrder
+		if base == 0 {
+			base = binding.Descriptor.Source.MinOrder
+		}
+		minOrder := binding.Descriptor.Source.MinOrder
+		if base < minOrder || order >= moveLiveOrder-(base-minOrder) {
+			return 0, errors.New("copied version order exhausted")
+		}
+		return base + order - minOrder, nil
+	}
+	var err error
+	if r.Order, err = mapOrder(r.Order); err != nil {
+		return r, err
+	}
+	r.Sample.Sequence = r.Order
+	if r.Upto != 0 {
+		order, e := mapOrder(r.Upto >> 4)
+		if e != nil {
+			return r, e
+		}
+		r.Upto = sealrollup.Tick(order, int(r.Upto&15))
+	}
+	return r, nil
+}
+
+// Allocate one receiving range per donor stream, retaining holes so bounds on
+// older events (Upto) translate by the same offset as records. Bindings and the
+// receiving identity are published in the same manifest edit.
+func moveOrderBases(db *pebble.DB, parts []MovePart) (map[partOrigin]uint64, error) {
+	bases := map[partOrigin]uint64{}
+	maxima := map[partOrigin]uint64{}
+	var streams []partOrigin
+	remember := func(o partOrigin, maximum uint64) {
+		if _, ok := maxima[o]; !ok {
+			streams = append(streams, o)
+		}
+		maxima[o] = max(maxima[o], maximum)
+	}
+	it, err := db.NewIter(&pebble.IterOptions{LowerBound: movePartPrefix, UpperBound: v2part.PrefixEnd(movePartPrefix)})
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+	for valid := it.First(); valid; valid = it.Next() {
+		var b partImport
+		if err = json.Unmarshal(it.Value(), &b); err != nil {
+			return nil, err
+		}
+		if b.Pending {
+			continue
+		}
+		minimum, maximum := b.Descriptor.Source.MinOrder, b.Descriptor.Source.MaxOrder
+		base := b.BaseOrder
+		if base == 0 {
+			base = minimum
+		} // legacy identity mapping
+		if minimum == 0 || maximum < minimum || base < minimum {
+			return nil, errors.New("invalid copied order base")
+		}
+		offset := base - minimum
+		if old, ok := bases[b.Origin]; ok && old != offset {
+			return nil, errors.New("copied stream order range changed")
+		}
+		bases[b.Origin] = offset
+		remember(b.Origin, maximum)
+	}
+	if err = it.Error(); err != nil {
+		return nil, err
+	}
+	for _, part := range parts {
+		d := part.Descriptor
+		if d.Source.MinOrder == 0 || d.Source.MaxOrder < d.Source.MinOrder {
+			return nil, errors.New("invalid copied order range")
+		}
+		remember(partOrigin{CopiedPart, d.Source.Incarnation, d.Source.Stream}, d.Source.MaxOrder)
+	}
+	next := uint64(0)
+	for o, offset := range bases {
+		if offset >= moveLiveOrder || maxima[o] >= moveLiveOrder-offset {
+			return nil, errors.New("copied order range exhausted")
+		}
+		next = max(next, offset+maxima[o])
+	}
+	for _, o := range streams {
+		if _, ok := bases[o]; ok {
+			continue
+		}
+		if maxima[o] >= moveLiveOrder-next {
+			return nil, errors.New("copied order range exhausted")
+		}
+		bases[o] = next
+		next += maxima[o]
+	}
+	// Stream extensions keep their offset. They may not consume another
+	// stream's reserved prefix, including holes retained for old Upto bounds.
+	for i, o := range streams {
+		for _, other := range streams[:i] {
+			if bases[o] < bases[other]+maxima[other] && bases[other] < bases[o]+maxima[o] {
+				return nil, errors.New("copied stream order ranges overlap")
+			}
+		}
+	}
+	return bases, nil
 }

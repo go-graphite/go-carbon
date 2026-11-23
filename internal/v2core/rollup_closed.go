@@ -33,14 +33,11 @@ func rollupOpenEnd(meta metricMetadata, a sealrollup.Archive) int64 {
 
 // scanWindows yields archive's physical slots [first, last), each as its
 // newest window at or before the frontier's, computed from stored versions
-// (windowRecords). Names with copied parts keep the move-aware open window.
+// (windowRecords). Copied orders are translated by the part bindings.
 func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
 	m := s.metrics[name]
-	if s.moves[m] != nil {
-		return s.scanMovedOpenArchive(ctx, name, archive, first, last, yield)
-	}
 	c, meta := m.latest.schema(), m.latest.meta
-	if meta.Version != 3 || meta.Frontier.Order == 0 {
+	if meta.Version != 3 || meta.Frontier.Order == 0 && s.moves[m] == nil {
 		return s.scanStoredArchive(ctx, name, archive, first, last, yield)
 	}
 	var stored []sealrollup.Record
@@ -50,16 +47,60 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 	}); err != nil {
 		return err
 	}
+	if move := s.moves[m]; move != nil && move.authority != nil && meta.ResetOrder <= move.authority.AtOrder {
+		for _, r := range move.authority.Coarse {
+			if r.Archive != archive || r.Slot < first || r.Slot >= last {
+				continue
+			}
+			kept := stored[:0]
+			for _, old := range stored {
+				if old.Sample.Time != r.Sample.Time {
+					kept = append(kept, old)
+				}
+			}
+			stored = kept
+			if r.Kind != sealrollup.KindNone {
+				stored = append(stored, r)
+			}
+		}
+	}
 	return windowRecords(c, meta, archive, first, last, stored, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
 		var out []sealrollup.Record
 		err := s.eachPartRecord(ctx, m, s.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
-			return from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
+			return s.moves[m] == nil && from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
 		}, func(r sealrollup.Record, _ partOrigin) error {
 			out = append(out, r)
 			return nil
 		})
+		if move := s.moves[m]; move != nil && move.authority != nil && meta.ResetOrder <= move.authority.AtOrder {
+			for _, r := range move.authority.Coarse {
+				if r.Archive != l || r.Slot < first || r.Slot >= last {
+					continue
+				}
+				// This Mat is the union at adopt, so its bound covers both
+				// classes. Original Mats describe only their source stream.
+				kept := out[:0]
+				for _, old := range out {
+					if old.Sample.Time != r.Sample.Time || old.Kind == sealrollup.KindRaw || old.Kind == sealrollup.KindGhost {
+						kept = append(kept, old)
+					}
+				}
+				out = kept
+				mapped, e := moveVersionRecord(r, nil)
+				if e != nil {
+					return nil, e
+				}
+				out = append(out, mapped)
+			}
+		}
 		return out, err
-	}, yield)
+	}, func(r sealrollup.Record) error {
+		if s.moves[m] != nil && r.Order >= moveLiveOrder {
+			r.Order -= moveLiveOrder
+			r.Sample.Sequence = r.Order
+		}
+		return yield(r)
+	}, s.moves[m] != nil)
 }
 
 // windowRecords yields archive's physical slots [first, last) in slot order,
@@ -69,7 +110,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 // range is read once. A slot keeps its stored per-slot winner (stored, the
 // winners of the range) when that equals the computed value (its order then
 // stays the stored one) or when its window has no value (an older epoch).
-func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first, last int64, stored []sealrollup.Record, load func(l int, first, last int64, from uint64) ([]sealrollup.Record, error), yield func(sealrollup.Record) error) error {
+func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first, last int64, stored []sealrollup.Record, load func(l int, first, last int64, from uint64) ([]sealrollup.Record, error), yield func(sealrollup.Record) error, timeFirst ...bool) error {
 	a := c.Archives[archive]
 	open := meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step
 	phys := (open / a.Step) % a.Count
@@ -84,7 +125,7 @@ func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first,
 		if ok {
 			computed = append(computed, p)
 		}
-	}); err != nil {
+	}, timeFirst...); err != nil {
 		return err
 	}
 	if !slices.IsSortedFunc(stored, func(x, y sealrollup.Record) int { return cmp.Compare(x.Slot, y.Slot) }) {
@@ -118,61 +159,6 @@ func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first,
 		if err := yield(sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: p, Order: v.Sequence, Sample: v}}); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// scanMovedOpenArchive is the open window of a name with copied parts: their
-// source orders do not compare with the live ones, so the version read does
-// not apply, and the slot aggregates the finer per-slot winners (move-aware)
-// as before the version read. Moves carrying versions (C2c) delete it.
-func (s *RollupSnapshot) scanMovedOpenArchive(ctx context.Context, name string, archive int, first, last int64, yield func(sealrollup.Record) error) error {
-	m := s.metrics[name]
-	c := m.latest.schema()
-	a := c.Archives[archive]
-	start := m.latest.meta.Frontier.MaxTime
-	start -= start % a.Step
-	physical := (start / a.Step) % a.Count
-	if m.latest.meta.Version != 3 || start+a.Step <= m.latest.meta.ClosedThrough || physical < first || physical >= last {
-		return s.scanStoredArchive(ctx, name, archive, first, last, yield)
-	}
-	var old sealrollup.Record
-	hasOld := false
-	if err := s.scanStoredArchive(ctx, name, archive, first, last, func(r sealrollup.Record) error {
-		if r.Slot == physical {
-			old, hasOld = r, true
-			return nil
-		}
-		return yield(r)
-	}); err != nil {
-		return err
-	}
-	higher := c.Archives[archive-1]
-	lo := (start / higher.Step) % higher.Count
-	hi := lo + a.Step/higher.Step
-	var samples []sealrollup.Sample
-	scan := func(first, last int64) error {
-		return s.ScanArchive(ctx, name, archive-1, first, last, func(r sealrollup.Record) error {
-			if r.Sample.Time >= start && r.Sample.Time < start+a.Step {
-				samples = append(samples, r.Sample)
-			}
-			return nil
-		})
-	}
-	if err := scan(lo, min(hi, higher.Count)); err != nil {
-		return err
-	}
-	if hi > higher.Count {
-		if err := scan(0, hi-higher.Count); err != nil {
-			return err
-		}
-	}
-	slices.SortFunc(samples, compareHistorySamples)
-	if p, ok := sealrollup.AggregateWindow(c, archive, start, samples); ok && (!hasOld || p.Time > old.Sample.Time || p.Time == old.Sample.Time && p.Sequence >= old.Order) {
-		return yield(sealrollup.Record{Delta: sealrollup.Delta{Archive: archive, Slot: physical, Order: p.Sequence, Sample: p}})
-	}
-	if hasOld {
-		return yield(old)
 	}
 	return nil
 }

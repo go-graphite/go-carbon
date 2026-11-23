@@ -45,7 +45,7 @@ func adoptDonor(t *testing.T, policy []byte, samples ...sealrollup.Sample) MoveP
 	if err != nil {
 		t.Fatal(err)
 	}
-	return MovePart{path, d}
+	return MovePart{Path: path, Descriptor: d}
 }
 
 func adoptLive(t *testing.T, e *Engine, policy []byte, order, cursor uint64, samples ...sealrollup.Sample) {
@@ -65,7 +65,7 @@ func adoptedRecords(t *testing.T, e *Engine) (RollupMetadata, []sealrollup.Recor
 	defer snapshot.Close()
 	var meta RollupMetadata
 	var records []sealrollup.Record
-	err := ScanRollups(snapshot, func(_ RollupPolicy, m RollupMetadata, r []sealrollup.Record) error { meta = m; records = r; return nil })
+	err := scanRollups(snapshot, e.identities, func(_ RollupPolicy, m RollupMetadata, r []sealrollup.Record) error { meta = m; records = r; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,10 +151,17 @@ func TestMoveAdoptIdentityReducerRestart(t *testing.T) {
 					fine = append(fine, r)
 				}
 			}
-			expected, err := PlanMoveRollupRebuild(p, fine, 1010, 2)
-			if err != nil {
-				t.Fatal(err)
+			expected := slices.Clone(fine)
+			var samples []sealrollup.Sample
+			for _, r := range fine {
+				samples = append(samples, r.Sample)
 			}
+			slices.SortFunc(samples, compareHistorySamples)
+			sample, ok := sealrollup.AggregateWindow(p.Config, 1, 1000, samples)
+			if !ok {
+				t.Fatal("oracle did not pass XFF")
+			}
+			expected = append(expected, sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: 4, Sample: sample}})
 			values := func(rs []sealrollup.Record) map[[2]int64]sealrollup.Sample {
 				out := map[[2]int64]sealrollup.Sample{}
 				for _, r := range rs {
