@@ -21,9 +21,13 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 	if coreTestProcess(t) {
 		return
 	}
-	// This same fixture passed on the unchanged eager runtime. Its fixed
-	// resolved-value hashes prove that regenerating the physical golden does
-	// not alter timestamps or floating-point bits, including restart cuts.
+	closedHistoryLogicalDifferential(t)
+}
+
+// The eager reducer checks each epoch; the original fixed hashes independently
+// guard resolved timestamps and floating-point bits across restart cuts.
+func closedHistoryLogicalDifferential(t *testing.T) {
+	t.Helper()
 	t.Setenv("CORE_MERGE_WORKERS", "0")
 	for method := sealrollup.Average; method <= sealrollup.First; method++ {
 		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
@@ -86,6 +90,7 @@ func TestClosedHistoryLogicalDifferential(t *testing.T) {
 					if err = e.AppendBatches(0, []Batch{{ID: 1, Policy: policy, Order: order, Clock: now, Points: rows}}, order, true); err != nil {
 						t.Fatal(err)
 					}
+					orderProofObserve(t, t.Name(), e)
 					snap := e.DBs()[0].NewSnapshot()
 					index, err := NewRollupSnapshot(context.Background(), snap, nil, nil, nil, 0)
 					if err != nil {
