@@ -71,9 +71,9 @@ func (c *ContinuationCodec) NativeWindowSnapshot(ctx context.Context, kv store.C
 }
 
 // CombineNativeWindow reuses the encoded-group assembler when all timestamps
-// fit one ring and are canonical. This proves that owner selection cannot
-// evict a different timestamp outside the window. NaNs, OOO images and wider
-// histories go through the archive-preserving reference path.
+// are canonical. Wider histories additionally prove that every displaced
+// outside owner is stale. NaNs, OOO images and ambiguous slot ownership still
+// go through the archive-preserving reference path.
 func (c *ContinuationCodec) CombineNativeWindow(ctx context.Context, donor, survivor store.ContinuationIO, m store.Metadata, clock func() time.Time, window store.NativeWindow) ([]store.RelayoutKV, store.NativeCombineClass, bool, error) {
 	class := store.NativeCombineClass{Archives: len(m.Retentions)}
 	a, ok, err := c.nativeFragments(ctx, donor, m, clock, 0)
@@ -110,7 +110,11 @@ func (c *ContinuationCodec) CombineNativeWindow(ctx context.Context, donor, surv
 			}
 		}
 		if hi-lo >= int64(r.Step)*int64(r.Count) {
-			return nil, class, false, nil
+			stale, safe, err := spliceWindowAliases(ctx, a[ai], b[ai], r, window, clock().Unix())
+			if err != nil || !safe {
+				return nil, class, false, err
+			}
+			class.StaleEvictedPoints += stale
 		}
 		var intersects bool
 		selected[ai], bases[ai], intersects, err = selectSpliceOwnersAt(ctx, a[ai], b[ai], r, clock().Unix())
@@ -123,4 +127,78 @@ func (c *ContinuationCodec) CombineNativeWindow(ctx context.Context, donor, surv
 	}
 	keys, err := c.writeReferencedArchives(ctx, m, selected, bases, &class, clock)
 	return keys, class, err == nil, err
+}
+
+// Prove the reference window union's outside-history guard without decoding
+// values or rebuilding the survivor. Each input must have one timestamp per
+// slot. Equal timestamps retain the survivor's fragment and float bits. Future
+// epochs and multiple owners use the reference path rather than weakening its
+// retention or conflict rules.
+func spliceWindowAliases(ctx context.Context, donor, survivor []spliceFragment, r store.Retention, window store.NativeWindow, now int64) (int, bool, error) {
+	incoming := make(map[int64]int64)
+	for _, f := range donor {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		for i := f.ordinal; i < f.ordinal+f.count; i++ {
+			ts := spliceOrdinalTime(&f, i, r.Step)
+			if ts == 0 {
+				continue
+			}
+			if ts > now || !window.Contains(ts) {
+				return 0, false, nil
+			}
+			slot := ts / int64(r.Step) % int64(r.Count)
+			if old, ok := incoming[slot]; ok && old != ts {
+				return 0, false, nil
+			}
+			incoming[slot] = ts
+		}
+	}
+	// Bound allocation independently of sender-controlled retention capacity.
+	// Common rings need only a bitmap, not one map entry per historical point.
+	var bitmap []uint64
+	var sparse map[int64]bool
+	if r.Count <= 1<<20 {
+		bitmap = make([]uint64, (r.Count+63)/64)
+	} else {
+		sparse = make(map[int64]bool)
+	}
+	stale := 0
+	for _, f := range survivor {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		for i := f.ordinal; i < f.ordinal+f.count; i++ {
+			old := spliceOrdinalTime(&f, i, r.Step)
+			if old == 0 {
+				continue
+			}
+			if old > now {
+				return 0, false, nil
+			}
+			slot := old / int64(r.Step) % int64(r.Count)
+			if bitmap != nil {
+				bit := uint64(1) << uint(slot%64)
+				if bitmap[slot/64]&bit != 0 {
+					return 0, false, nil
+				}
+				bitmap[slot/64] |= bit
+			} else {
+				if sparse[slot] {
+					return 0, false, nil
+				}
+				sparse[slot] = true
+			}
+			ts, occupied := incoming[slot]
+			if !occupied || old == ts || window.Contains(old) {
+				continue
+			}
+			if !store.PreferArchiveTimestamp(ts, old, r, now) {
+				return 0, false, nil
+			}
+			stale++
+		}
+	}
+	return stale, true, nil
 }
