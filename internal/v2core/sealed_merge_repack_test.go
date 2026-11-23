@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/sstable"
@@ -235,3 +236,7 @@ func TestDenseWriterAppendSlotsCoalesces(t *testing.T) {
 		t.Fatalf("runs %v, want %v (records %d)", got, want, d.Coverage.Records)
 	}
 }
+
+// withoutSeq drops a zero Provenance.Seq from a %+v dump, so digests recorded
+// before the field existed still cover every other field byte for byte.
+func withoutSeq(s string) string { return strings.Replace(s, " Seq:0}", "}", 1) }
