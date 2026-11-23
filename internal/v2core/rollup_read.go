@@ -504,7 +504,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 			}
 			if newer {
 				winner = c
-			} else if c.origin == winner.origin && c.record.Sample.Time == winner.record.Sample.Time && c.record.Order == winner.record.Order && c.record.Delta != winner.record.Delta {
+			} else if c.origin == winner.origin && c.record.Sample.Sequence == winner.record.Sample.Sequence && c.record.Sample.Time == winner.record.Sample.Time && c.record.Order == winner.record.Order && c.record.Delta != winner.record.Delta {
 				return errors.New("conflicting rollup replacement order")
 			}
 		}

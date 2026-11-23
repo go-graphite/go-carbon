@@ -3,6 +3,7 @@ package v2core
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"path/filepath"
 	"testing"
@@ -41,14 +42,18 @@ func TestPartSequenceComparison(t *testing.T) {
 // all choose the same record. A reset then fences parts, regardless of order.
 func TestPartSequenceReadMergeHistoryRecovery(t *testing.T) {
 	t.Setenv("CORE_MERGE_WORKERS", "0")
-	for _, reset := range []uint64{0, 2} {
-		t.Run(string(rune('0'+reset)), func(t *testing.T) {
+	for _, tc := range []struct {
+		reset  uint64
+		orders []uint64
+	}{{0, []uint64{90, 10, 100}}, {2, []uint64{90, 10, 100}}, {0, []uint64{10, 10, 10}}, {2, []uint64{10, 10, 10}}} {
+		reset := tc.reset
+		t.Run(fmt.Sprint(reset, tc.orders), func(t *testing.T) {
 			e := mergeFixture(t, t.TempDir(), nil)
 			defer e.close()
 			o := e.owners[0]
 			policy, raw := rollupTestPolicy(t, "sequence.metric", "1s:1h,10s:2h", sealrollup.Last, 0)
 			digest, _ := sealrollup.PolicyDigest(policy.Config)
-			for i, order := range []uint64{90, 10, 100} {
+			for i, order := range tc.orders {
 				seq := uint64(i + 1)
 				stamp := int64(1000)
 				if i == 2 {
@@ -57,7 +62,9 @@ func TestPartSequenceReadMergeHistoryRecovery(t *testing.T) {
 				r := sealrollup.Record{Delta: sealrollup.Delta{Slot: stamp % 3600, Order: order, Sample: sealrollup.Sample{Time: stamp, Bits: math.Float64bits(float64(seq)), Sequence: order}}}
 				md := RollupMetadata{Version: 4, ID: 7, Policy: raw, Revision: seq, ResetOrder: min(reset, seq), Frontier: sealrollup.Frontier{Order: 100, MaxTime: 1000, Policy: digest}}
 				o.partSource.Seq = seq
-				installMergeRecords(t, o, byte(seq), []RollupMetadata{md}, [][]sealrollup.Record{{r}})
+				// Reverse physical identities so a lower sequence can be read
+				// after the winner, including an equal-time/equal-order tie.
+				installMergeRecords(t, o, byte(4-seq), []RollupMetadata{md}, [][]sealrollup.Record{{r}})
 			}
 			o.partSource.Seq = 0
 			snap := o.db.NewSnapshot()
