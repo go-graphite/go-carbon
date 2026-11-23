@@ -119,7 +119,7 @@ func moveAuthorityVisible(meta metricMetadata, a *moveAuthority) bool {
 	if meta.Version < 4 {
 		return meta.ResetOrder <= a.Meta.Frontier.Order
 	}
-	return meta.ResetOrder <= a.AtSeq
+	return meta.ResetOrder == 0 || a.Version >= 4 && meta.ResetOrder <= a.AtSeq
 }
 
 func moveAuthorityKey(name string) []byte { return append(bytes.Clone(moveAuthorityPrefix), name...) }
