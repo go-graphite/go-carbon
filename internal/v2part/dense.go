@@ -154,6 +154,10 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	if orders == SummaryOrders && kinds {
 		return nil, errors.New("order summary requires unique Raw slots")
 	}
+	// A singleton's exact order already is its maximum; omit the redundant tag.
+	if orders == SummaryOrders && len(records) == 1 {
+		orders = ExactOrders
+	}
 	out = append(out, denseMagic...)
 	mode := byte(denseTagged)
 	step := int64(0)
@@ -579,12 +583,9 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 	var order uint64
 	var pd int64
 	if summary {
-		maximum, ok := take()
-		if !ok || maximum == 0 {
+		order, ok = take()
+		if !ok || order == 0 {
 			return nil, bad
-		}
-		for i := range rs {
-			rs[i].Order, rs[i].Sample.Sequence = maximum, maximum
 		}
 	} else if mode&denseModeOrderLinear != 0 {
 		first, ok0 := take()
@@ -642,8 +643,16 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 	if n := uint(len(rs) % 8); n != 0 && flags[len(flags)-1]>>n != 0 {
 		return nil, bad
 	}
-	for i := range rs {
-		rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
+	if summary {
+		// Fill the compatibility clocks with flags in the same record pass.
+		for i := range rs {
+			rs[i].Order, rs[i].Sample.Sequence = order, order
+			rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
+		}
+	} else {
+		for i := range rs {
+			rs[i].Correction = flags[i/8]&(1<<uint(i%8)) != 0
+		}
 	}
 	if kinds {
 		nkinds := (len(rs) + 3) / 4

@@ -757,7 +757,7 @@ func mergeParts(ctx context.Context, dir, path string, inputs []v2part.Descripto
 		}
 		// The plain stream resolves one Raw winner per slot. Buffered versions
 		// must certify the complete name, including output run boundaries.
-		summary := namePrefix && len(config.Archives) == 1 && (metadata.Version >= 4 || metadata.ResetOrder == 0)
+		summary := namePrefix && summaryPolicy(config, metadata)
 		for _, member := range members {
 			summary = summary && member.seq != 0
 		}

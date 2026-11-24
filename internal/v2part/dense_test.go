@@ -438,6 +438,15 @@ func TestDenseOrderSummary(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if n == 1 {
+					exact, err := appendSlotsOrder(nil, rs, nil, ExactOrders)
+					if err != nil || !bytes.Equal(b, exact) {
+						t.Fatal("singleton maximum differs from exact encoding", err)
+					}
+					// Previously written tagged singletons must remain readable.
+					b = append(append(bytes.Clone(b[:5]), extOrderMaximum), b[5:]...)
+					b[4] |= denseExtended
+				}
 				if !HasOrderSummary(b) || (b[4]&denseAligned != 0) != (aligned && n > 1) {
 					t.Fatalf("mode %x", b[:6])
 				}

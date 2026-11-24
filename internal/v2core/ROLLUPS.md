@@ -141,8 +141,11 @@ sequence-adjacent prefix merge whose members all have nonzero descriptor Seq,
 whose policy has exactly one archive, and which has no copied dependencies or
 active legacy order reset (metadata v4, or ResetOrder=0). All resolved output must
 be Raw with Upto=0 and unique physical slots across every run. Every other name
-retains exact orders, including fine rows of multi-archive history. Fresh seals
-and generic converters continue writing exact orders.
+retains exact orders, including fine rows of multi-archive history. Native fresh
+seals apply the same policy/reset and complete-name record certificate at the
+planned-part handoff, after the owner assigns Seq. The reference and tuple
+writers select the same encoding; copied/repack and generic converter paths
+continue writing exact orders. No source clock is inferred from the maximum.
 
 Physical replacement uses timestamp, live/copied class, source-local part Seq
 and the established in-part winner. Multi-archive Whisper propagation instead
@@ -150,7 +153,7 @@ needs exact admission/pass clocks and Upto bounds; a run maximum cannot supply
 that history. Readers and portable import reject summaries under history policies
 or active legacy order resets. Old exact runs remain readable, including mixtures
 with summarized parts. Lossless conversion expands the representative and preserves
-that logical input and its receipt digest; only the owner merge certifies elision.
+that logical input and its receipt digest; only the owner merge and native seal handoff certify elision.
 
 Deploy capable readers, converters and move recipients before enabling these
 writes: older readers reject the new extension. After a summarized part exists,
